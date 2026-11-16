@@ -27,14 +27,20 @@
 //!
 //! # Restarts
 //!
-//! A new writer [`restore`](Leases::restore)s each agent's last logged state
-//! and gives it a fresh window rather than reading the downtime as silence:
-//! an `online` agent counts as active at restart (its bridge heartbeats
-//! within a minute), and a `disconnected` one keeps the time it already spent
-//! quiet, but turns `absent` no sooner than `disconnected` after the restart.
-//! So a restart writes no transitions of its own. An agent online but never
-//! written is restored from the store's record of its last heartbeat
-//! ([`Leases::restore_unlogged`]) when that is within the lease.
+//! A new writer [`restore`](Leases::restore)s each agent from the stored
+//! facts and the clock now: the later of its last logged contact
+//! ([`AgentPresence::last_seen`]) and its last stored heartbeat is when it was
+//! last heard, and the time the server was down counts as quiet like any
+//! other. The state machine then runs as usual (the writer decides once at
+//! start-up, not a tick later), so an agent last heard longer ago than
+//! `disconnected` is written `disconnected`, and longer ago than `lease`
+//! `absent`. Such a transition is dated to the moment it fell due (last
+//! contact plus the threshold), not to the restart, so its derived event id
+//! is the same however often the writer restarts and it is stored once. An
+//! agent heard within `disconnected` stays `online` and nothing is written.
+//! An agent online but never written is restored the same way
+//! ([`Leases::restore_unlogged`]), from the store's record of its last
+//! heartbeat.
 //!
 //! [`Presence::last_activity`]: super::presence::Presence::last_activity
 
@@ -71,6 +77,10 @@ struct Agent {
     last_seen_wall: Option<DateTime<Utc>>,
     cursor: Option<Seq>,
     new_owner: Option<SenatorPath>,
+    /// Restored from stored facts, with no activity seen since: a due
+    /// transition is dated to when it fell due, so it has the same event id
+    /// on every restart.
+    restored: bool,
 }
 
 impl Agent {
@@ -84,6 +94,7 @@ impl Agent {
             last_seen_wall: None,
             cursor: None,
             new_owner: None,
+            restored: false,
         }
     }
 }
@@ -91,6 +102,14 @@ impl Agent {
 pub(crate) struct Leases {
     timing: LeaseTiming,
     agents: BTreeMap<SenatorPath, Agent>,
+}
+
+/// The monotonic instant of the wall time `at`, as of `now`. A time before
+/// the monotonic clock's origin (a host booted since) is as old as it can be
+/// said to be.
+fn ago(now: Instant, wall: DateTime<Utc>, at: DateTime<Utc>) -> Instant {
+    let quiet = (wall - at).to_std().unwrap_or_default();
+    now.checked_sub(quiet).unwrap_or(now)
 }
 
 fn lag(head: Seq, cursor: Option<Seq>) -> Option<u64> {
@@ -110,18 +129,19 @@ impl Leases {
     }
 
     /// Take over the log's latest state per agent, at `now` (see the module
-    /// docs on restarts).
-    pub(crate) fn restore(&mut self, board: &PresenceBoard, now: Instant, wall: DateTime<Utc>) {
-        let room = self.timing.lease.saturating_sub(self.timing.disconnected);
+    /// docs on restarts). `beats` are the agents' last stored heartbeats.
+    pub(crate) fn restore(
+        &mut self,
+        board: &PresenceBoard,
+        beats: &BTreeMap<SenatorPath, DateTime<Utc>>,
+        now: Instant,
+        wall: DateTime<Utc>,
+    ) {
         for p in board.agents() {
-            let last_seen = match p.state {
-                PresenceState::Online => Some(now),
-                PresenceState::Disconnected => {
-                    let quiet = (wall - p.last_seen.unwrap_or(p.since))
-                        .to_std()
-                        .unwrap_or_default()
-                        .min(room);
-                    Some(now.checked_sub(quiet).unwrap_or(now))
+            let heard = match p.state {
+                PresenceState::Online | PresenceState::Disconnected => {
+                    let logged = p.last_seen.unwrap_or(p.since);
+                    Some(beats.get(&p.agent).map_or(logged, |b| logged.max(*b)))
                 }
                 // Only activity moves these.
                 PresenceState::Absent | PresenceState::TakenOver | PresenceState::Reassigned => {
@@ -135,17 +155,18 @@ impl Leases {
                     since: p.since,
                     since_seq: p.since_seq,
                     seq: p.seq,
-                    last_seen,
-                    last_seen_wall: p.last_seen,
+                    last_seen: heard.map(|at| ago(now, wall, at)),
+                    last_seen_wall: heard.or(p.last_seen),
                     cursor: p.cursor,
                     new_owner: p.new_owner.clone(),
+                    restored: heard.is_some(),
                 },
             );
         }
     }
 
-    /// An agent with no logged presence whose bridge heartbeated recently
-    /// (before a restart): online, unwritten, with a fresh window.
+    /// An agent with no logged presence whose bridge last heartbeated at
+    /// `last_beat` (before a restart): online, unwritten, quiet since then.
     pub(crate) fn restore_unlogged(
         &mut self,
         agent: &SenatorPath,
@@ -159,9 +180,10 @@ impl Leases {
         }
         let mut entry = Agent::new(wall);
         entry.state = Some(PresenceState::Online);
-        entry.last_seen = Some(now);
+        entry.last_seen = Some(ago(now, wall, last_beat));
         entry.last_seen_wall = Some(last_beat);
         entry.cursor = Some(cursor);
+        entry.restored = true;
         self.agents.insert(agent.clone(), entry);
     }
 
@@ -192,6 +214,7 @@ impl Leases {
             && entry.last_seen.is_none_or(|seen| at > seen)
         {
             entry.last_seen = Some(at);
+            entry.restored = false;
             let ago =
                 chrono::Duration::from_std(now.saturating_duration_since(at)).unwrap_or_default();
             entry.last_seen_wall = Some(wall - ago);
@@ -225,10 +248,21 @@ impl Leases {
                 _ => return None,
             }
         };
+        // A transition that fell due while the server was down is dated to
+        // then (see the module docs on restarts).
+        let since = match (entry.restored, entry.last_seen_wall, target) {
+            (true, Some(heard), PresenceState::Disconnected) => {
+                heard + chrono::Duration::from_std(self.timing.disconnected).unwrap_or_default()
+            }
+            (true, Some(heard), PresenceState::Absent) => {
+                heard + chrono::Duration::from_std(self.timing.lease).unwrap_or_default()
+            }
+            _ => wall,
+        };
         (current != Some(target)).then(|| PresencePayload {
             agent: agent.clone(),
             state: target,
-            since: wall,
+            since,
             since_seq: head,
             previous: current,
             last_seen: entry.last_seen_wall,
@@ -296,6 +330,7 @@ impl Leases {
         entry.since_seq = payload.since_seq;
         entry.seq = Some(seq);
         entry.new_owner = payload.new_owner.clone();
+        entry.restored = false;
     }
 
     /// Every agent with a state, lag measured against `head`.
@@ -453,7 +488,7 @@ mod tests {
     }
 
     #[test]
-    fn a_restart_gives_a_fresh_window_and_writes_nothing() {
+    fn a_restart_counts_the_downtime_and_dates_what_fell_due_then() {
         let c = Clock {
             start: Instant::now() + Duration::from_secs(10_000),
             wall: Utc::now(),
@@ -488,31 +523,52 @@ mod tests {
         }
         let mut l = Leases::new(T);
         let (start, wall) = c.at(0);
-        l.restore(&board, start, wall);
-        for who in [alice(), bob.clone(), carol.clone()] {
-            assert_eq!(
-                l.decide(&who, None, None, start, wall, Seq(3)),
-                None,
-                "{who}"
-            );
-        }
-        // Alice's window started at the restart.
-        let (now, wall) = c.at(119);
-        assert_eq!(l.decide(&alice(), None, None, now, wall, Seq(3)), None);
-        let (now, wall) = c.at(120);
+        // Alice's store heartbeat is newer than her logged contact: only
+        // that counts.
+        let beats = BTreeMap::from([(alice(), c.wall - chrono::Duration::seconds(30))]);
+        l.restore(&board, &beats, start, wall);
         assert_eq!(
-            l.decide(&alice(), None, None, now, wall, Seq(3))
-                .map(|p| p.state),
-            Some(PresenceState::Disconnected)
+            l.decide(&alice(), None, None, start, wall, Seq(3)),
+            None,
+            "heard 30 s ago"
         );
-        // Bob was quiet for 720 s already, but gets `disconnected` more.
-        let (now, wall) = c.at(119);
+        assert_eq!(l.decide(&carol, None, None, start, wall, Seq(3)), None);
+        // Bob was quiet for 720 s: still within the lease, nothing is due.
+        assert_eq!(l.decide(&bob, None, None, start, wall, Seq(3)), None);
+        // Alice goes quiet from her heartbeat on, as if the server had run.
+        let (now, wall) = c.at(89);
+        assert_eq!(l.decide(&alice(), None, None, now, wall, Seq(3)), None);
+        let (now, wall) = c.at(90);
+        let due = l.decide(&alice(), None, None, now, wall, Seq(3)).unwrap();
+        assert_eq!(due.state, PresenceState::Disconnected);
+        assert_eq!(due.since, c.wall - chrono::Duration::seconds(30 - 120));
+        // Bob's lease runs out 180 s after the restart, dated then.
+        let (now, wall) = c.at(179);
         assert_eq!(l.decide(&bob, None, None, now, wall, Seq(3)), None);
         let (now, wall) = c.at(181);
+        let due = l.decide(&bob, None, None, now, wall, Seq(3)).unwrap();
+        assert_eq!(due.state, PresenceState::Absent);
+        assert_eq!(due.since, c.wall + chrono::Duration::seconds(180));
+
+        // A restart long after: what is overdue is due at once, dated to
+        // when it fell due, so every restart derives the same event.
+        let mut late = Leases::new(T);
+        late.restore(&board, &BTreeMap::new(), start, wall);
+        let a = late
+            .decide(&alice(), None, None, start, wall, Seq(3))
+            .unwrap();
+        assert_eq!(a.state, PresenceState::Absent);
+        assert_eq!(a.since, c.wall - chrono::Duration::seconds(3_120 - 900));
+        let mut again = Leases::new(T);
+        again.restore(&board, &BTreeMap::new(), start, wall);
+        let (_, later) = c.at(60);
+        let b = again
+            .decide(&alice(), None, None, c.at(60).0, later, Seq(3))
+            .unwrap();
+        assert_eq!(a.since, b.since);
         assert_eq!(
-            l.decide(&bob, None, None, now, wall, Seq(3))
-                .map(|p| p.state),
-            Some(PresenceState::Absent)
+            senate_core::presence_event(committee.clone(), &a).id,
+            senate_core::presence_event(committee.clone(), &b).id
         );
     }
 }

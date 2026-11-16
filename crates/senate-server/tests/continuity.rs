@@ -322,6 +322,187 @@ async fn a_restart_restores_leases_without_writing_transitions() {
     second.running.shutdown().await.unwrap();
 }
 
+/// Default timings, real minutes: the clock is the store's, so the downtime
+/// is made by backdating what the first server stored.
+fn restart_config(config: &mut senate_server::ServerConfig) {
+    config.presence_disconnected_secs = 120;
+    config.lease_secs = 900;
+}
+
+/// A store holding one heartbeat of alice's, `age_secs` old: the server that
+/// took it went down and the time passed.
+async fn store_with_old_beat(age_secs: i64) -> (Arc<dyn LogStore>, chrono::DateTime<chrono::Utc>) {
+    let store: Arc<dyn LogStore> = Arc::new(MemoryStore::new());
+    // A committee exists once it has an event; its writer starts with the
+    // server.
+    store.append(note("hello")).await.unwrap();
+    let at = senate_log::now() - chrono::Duration::seconds(age_secs);
+    store
+        .record_heartbeat(
+            &committee(),
+            Heartbeat {
+                agent: path("alice/claude"),
+                sessions: 1,
+                cursor: Seq(0),
+            },
+            at,
+        )
+        .await
+        .unwrap();
+    (store, at)
+}
+
+async fn alice_now(hub: &dyn Hub) -> PresenceState {
+    hub.presence(&committee())
+        .await
+        .unwrap()
+        .agents
+        .iter()
+        .find(|a| a.agent == path("alice/claude"))
+        .map(|a| a.state)
+        .expect("alice has a presence")
+}
+
+#[tokio::test]
+async fn a_restart_within_the_grace_leaves_the_agent_online_and_writes_nothing() {
+    let (store, _) = store_with_old_beat(30).await;
+    let server = TestServer::start_configured(store, restart_config).await;
+    let hub = server.running.hub.clone();
+    assert_eq!(alice_now(hub.as_ref()).await, PresenceState::Online);
+    assert!(presence_events(hub.as_ref()).await.is_empty());
+    server.running.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_restart_between_the_grace_and_the_lease_finds_the_agent_disconnected() {
+    let (store, beat) = store_with_old_beat(300).await;
+    let server = TestServer::start_configured(store, restart_config).await;
+    let hub = server.running.hub.clone();
+    // At once: the downtime counts, nothing waits for a tick or a window.
+    assert_eq!(alice_now(hub.as_ref()).await, PresenceState::Disconnected);
+    let events = presence_events(hub.as_ref()).await;
+    assert_eq!(events.len(), 1);
+    let (p, _) = &events[0];
+    assert_eq!(p.state, PresenceState::Disconnected);
+    assert_eq!(p.previous, Some(PresenceState::Online));
+    assert_eq!(p.last_seen, Some(beat));
+    assert_eq!(p.since, beat + chrono::Duration::seconds(120));
+    server.running.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_restart_beyond_the_lease_finds_the_agent_absent() {
+    let (store, beat) = store_with_old_beat(14 * 60 + 600).await;
+    let server = TestServer::start_configured(store, restart_config).await;
+    let hub = server.running.hub.clone();
+    assert_eq!(alice_now(hub.as_ref()).await, PresenceState::Absent);
+    let events = presence_events(hub.as_ref()).await;
+    assert_eq!(states(hub.as_ref()).await, [PresenceState::Absent]);
+    assert_eq!(events[0].0.since, beat + chrono::Duration::seconds(900));
+    server.running.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_logged_disconnect_becomes_absent_once_the_downtime_passes_the_lease() {
+    let (store, beat) = store_with_old_beat(1000).await;
+    // The first server had already written the disconnect.
+    let disconnected = senate_core::PresencePayload {
+        agent: path("alice/claude"),
+        state: PresenceState::Disconnected,
+        since: beat + chrono::Duration::seconds(120),
+        since_seq: Seq(0),
+        previous: Some(PresenceState::Online),
+        last_seen: Some(beat),
+        cursor: Some(Seq(0)),
+        lag: Some(0),
+        new_owner: None,
+    };
+    store
+        .append(senate_core::presence_event(committee(), &disconnected))
+        .await
+        .unwrap();
+    let server = TestServer::start_configured(store, restart_config).await;
+    let hub = server.running.hub.clone();
+    assert_eq!(
+        states(hub.as_ref()).await,
+        [PresenceState::Disconnected, PresenceState::Absent]
+    );
+    assert_eq!(alice_now(hub.as_ref()).await, PresenceState::Absent);
+    server.running.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn restarting_again_writes_no_transition_twice() {
+    for age in [300, 2000] {
+        let (store, _) = store_with_old_beat(age).await;
+        let mut ids = Vec::new();
+        for _ in 0..3 {
+            let server = TestServer::start_configured(store.clone(), restart_config).await;
+            let hub = server.running.hub.clone();
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            ids = presence_events(hub.as_ref())
+                .await
+                .into_iter()
+                .map(|(_, e)| (e.seq, e.id))
+                .collect();
+            assert_eq!(ids.len(), 1, "age {age}: {ids:?}");
+            server.running.shutdown().await.unwrap();
+        }
+        assert_eq!(ids.len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn a_sqlite_store_restarts_into_what_the_clock_says() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("senate.db");
+    let beat = senate_log::now() - chrono::Duration::seconds(300);
+    {
+        let store = senate_log::SqliteStore::open(&file).await.unwrap();
+        store.append(note("hello")).await.unwrap();
+        store
+            .record_heartbeat(
+                &committee(),
+                Heartbeat {
+                    agent: path("alice/claude"),
+                    sessions: 1,
+                    cursor: Seq(0),
+                },
+                beat,
+            )
+            .await
+            .unwrap();
+    }
+    for _ in 0..2 {
+        let store: Arc<dyn LogStore> =
+            Arc::new(senate_log::SqliteStore::open(&file).await.unwrap());
+        let server = TestServer::start_configured(store, restart_config).await;
+        let hub = server.running.hub.clone();
+        assert_eq!(alice_now(hub.as_ref()).await, PresenceState::Disconnected);
+        assert_eq!(states(hub.as_ref()).await, [PresenceState::Disconnected]);
+        server.running.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn an_agent_that_reconnects_after_a_restart_is_online_again() {
+    let (store, _) = store_with_old_beat(1000).await;
+    let server = TestServer::start_configured(store, restart_config).await;
+    let hub = server.running.hub.clone();
+    assert_eq!(alice_now(hub.as_ref()).await, PresenceState::Absent);
+    let _stream = server
+        .stream_as(ALICE, Some("alice/claude"), None, None)
+        .await;
+    beat(&server, ALICE, "alice/claude", 0).await;
+    eventually("alice online again", || async {
+        states(hub.as_ref()).await == [PresenceState::Absent, PresenceState::Online]
+    })
+    .await;
+    let (online, _) = presence_events(hub.as_ref()).await.pop().unwrap();
+    assert_eq!(online.previous, Some(PresenceState::Absent));
+    server.running.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn a_reassignment_is_the_servers_and_stands_until_handed_back() {
     let store: Arc<dyn LogStore> = Arc::new(MemoryStore::new());
