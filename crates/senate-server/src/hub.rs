@@ -276,7 +276,15 @@ impl ServerHub {
             if thread.kind != Kind::Question || thread.answered {
                 continue;
             }
-            let agents: Vec<SenatorPath> = thread.agents().cloned().collect();
+            // Covering for an absent agent is the Speaker's duty toward
+            // other agents: what is addressed to the seat's holder is that
+            // agent's own question, delivered when its session opens.
+            let holder = self.speaker.as_ref().and_then(SpeakerSeat::senator);
+            let agents: Vec<SenatorPath> = thread
+                .agents()
+                .filter(|a| Some(*a) != holder)
+                .cloned()
+                .collect();
             let away = !agents.is_empty()
                 && agents
                     .iter()

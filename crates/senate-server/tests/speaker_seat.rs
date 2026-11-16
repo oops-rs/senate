@@ -392,6 +392,42 @@ async fn a_persons_message_for_one_of_several_agents_is_put_to_the_speaker() {
 }
 
 #[tokio::test]
+async fn a_question_to_the_seat_holder_is_never_for_the_speaker_to_cover() {
+    let Built { server } = start(false, |c| {
+        c.roster.speaker = Some(path("alice/claude"));
+        c.roster.agents = vec![path("alice/claude"), path("alice/codex")];
+    })
+    .await;
+    // Nobody is connected: both agents are away.
+    let to_holder = stored(
+        &server,
+        BOB,
+        &NewEvent::new(committee(), Kind::Question, person_addr("bob"), "status?")
+            .to(Address::Senator(path("alice/claude"))),
+    )
+    .await;
+    let to_other = stored(
+        &server,
+        BOB,
+        &NewEvent::new(committee(), Kind::Question, person_addr("bob"), "status?")
+            .to(Address::Senator(path("alice/codex"))),
+    )
+    .await;
+    let page = docket(&server).await;
+    // The other agent is covered for; the seat holder's own question is not.
+    assert!(
+        matches!(
+            &page.items[..],
+            [item] if item.event.seq == to_other.seq
+                && item.awaiting == Awaiting::Away { agents: vec![path("alice/codex")] }
+        ),
+        "{:?}",
+        page.items
+    );
+    assert!(page.items.iter().all(|i| i.event.seq != to_holder.seq));
+}
+
+#[tokio::test]
 async fn without_a_senator_in_the_seat_a_wildcard_is_still_refused() {
     for built_in in [true, false] {
         let Built { server } = start(built_in, |c| {

@@ -168,7 +168,7 @@ impl Shared {
     /// takeover word, pointing at the checkpoint's branch and commit.
     pub(crate) async fn on_cover(
         &self,
-        _speaker: &SenatorPath,
+        speaker: &SenatorPath,
         committee: CommitteeId,
         thread: Seq,
         body: String,
@@ -177,6 +177,12 @@ impl Shared {
     ) -> Result<Posted, IpcError> {
         if body.trim().is_empty() {
             return Err(IpcError::bad_request("`body` is empty"));
+        }
+        if agent.as_ref() == Some(speaker) {
+            return Err(IpcError::bad_request(preside_text::cover_for_the_speaker(
+                speaker,
+                self.locale,
+            )));
         }
         let (item, _) = self.docket_item(&committee, thread).await?;
         let Awaiting::Away { agents } = &item.awaiting else {
@@ -393,6 +399,19 @@ mod preside_text {
         }
     }
 
+    pub(super) fn cover_for_the_speaker(speaker: &SenatorPath, locale: Locale) -> String {
+        let speaker = Address::senator(speaker).in_text();
+        match locale {
+            Locale::Zh => format!(
+                "{speaker} 自己就是这个 Senate 的 Speaker，不能代它回答：写给它的问题等它的会话打开后由它自己回答。"
+            ),
+            Locale::En => format!(
+                "{speaker} holds the Speaker's seat of this Senate, so there is no one to answer \
+                 for: a question to it waits for its own session."
+            ),
+        }
+    }
+
     pub(super) fn not_away(locale: Locale) -> String {
         locale
             .pick(
@@ -445,5 +464,20 @@ mod preside_text {
                  from. Put it to the person with speaker_escalate."
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::preside_text;
+    use senate_core::{Locale, SenatorPath};
+
+    #[test]
+    fn covering_for_the_seat_holder_is_refused_in_both_languages() {
+        let holder: SenatorPath = "alice/claude".parse().unwrap();
+        let zh = preside_text::cover_for_the_speaker(&holder, Locale::Zh);
+        let en = preside_text::cover_for_the_speaker(&holder, Locale::En);
+        assert!(zh.starts_with("[senator::alice/claude] 自己就是这个 Senate 的 Speaker"));
+        assert!(en.starts_with("[senator::alice/claude] holds the Speaker's seat"));
     }
 }
