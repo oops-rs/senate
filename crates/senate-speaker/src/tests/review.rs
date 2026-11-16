@@ -67,7 +67,7 @@ async fn spin_until(mut done: impl FnMut() -> bool) -> bool {
 
 #[tokio::test]
 async fn h1_a_reset_log_never_reuses_an_operation_id() {
-    // botd remembers operation ids across our restart; the log does not.
+    // The gateway remembers operation ids across our restart; the log does not.
     let surface = FakeSurface::new();
     let first = bound_hub().await;
     first.connect(&refund(), &agent_path("bob"));
