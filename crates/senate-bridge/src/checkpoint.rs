@@ -156,9 +156,9 @@ pub fn write_files(root: &Path, files: &CheckpointFiles) -> std::io::Result<Vec<
         (open, &files.open),
     ] {
         if let Some(text) = text {
-            if let Some(dir) = path.parent() {
-                std::fs::create_dir_all(dir)?;
-            }
+            // The directory comes with its own `.gitignore`: nothing in
+            // it is ever committed.
+            crate::session::ensure_senate_dir(root)?;
             let mut text = text.clone();
             if !text.ends_with('\n') {
                 text.push('\n');

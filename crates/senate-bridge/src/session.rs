@@ -4,14 +4,19 @@
 //! Every session speaks as one agent ([`Session::agent`], chosen by
 //! [`crate::agent`]), and only that agent's messages reach it.
 //!
-//! A session's committee is, in order:
+//! A session's committee is, in order, the first that applies:
 //!
-//! 1. an explicit `join` (the agent or its user said so; it wins),
+//! 1. an explicit `join` (the agent or its user said so; this session only),
 //! 2. the git branch, when it is `<prefix>/<committee>/<person>`
 //!    ([`BranchNaming`], prefix `feature` unless `senate.toml` says
-//!    otherwise),
+//!    otherwise) **and** `senate.toml` turns the convention on with
+//!    `committee_from_branch = true`. It is off by default: a branch name is
+//!    other tools' business too, and `branch_prefix` alone does not enable
+//!    it,
 //! 3. the first non-comment line of `.senate/committee` at the git toplevel
-//!    (or the session's cwd outside git).
+//!    (or the session's cwd outside git): `senate join` writes it.
+//!
+//! [`CommitteeSource`] says which one decided.
 //!
 //! The branch is the person's, not an agent's: two agents of one person
 //! working on one committee share `feature/<committee>/<person>`, and both
@@ -25,13 +30,17 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use senate_core::{BranchNaming, CommitteeId, SenatorPath};
+use senate_core::{BranchNaming, CommitteeId, Locale, SenatorPath};
 use serde::{Deserialize, Serialize};
 
 use crate::agent::{AGENT_FILE, AgentSource};
 
-/// Relative path of the per-repo committee file.
+/// Relative path of the per-worktree committee file.
 pub const COMMITTEE_FILE: &str = ".senate/committee";
+/// The directory Senate keeps its files in, in a worktree: the committee
+/// and agent files and the checkpoint notes. The only directory Senate (or a
+/// layer built on it) adds to a repository, and never anything under `.git`.
+pub const SENATE_DIR: &str = ".senate";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -64,7 +73,8 @@ impl SessionState {
     }
 }
 
-/// Where an inferred committee came from.
+/// Where a session's committee came from. `Branch` is the branch-name
+/// convention (stored as `branch`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CommitteeSource {
@@ -78,6 +88,15 @@ impl CommitteeSource {
         match self {
             Self::Branch => "branch",
             Self::File => "file",
+            Self::Join => "join",
+        }
+    }
+
+    /// The words shown to people.
+    pub fn label(self, locale: Locale) -> &'static str {
+        match self {
+            Self::Branch => locale.pick("分支名", "branch name"),
+            Self::File => locale.pick("文件", "file"),
             Self::Join => "join",
         }
     }
@@ -226,20 +245,56 @@ pub fn committee_from_file(contents: &str) -> Option<CommitteeId> {
         .and_then(|line| CommitteeId::new(line).ok())
 }
 
-/// Branch first, then the committee file.
+/// The branch name first, only when `convention` is `Some`
+/// (`committee_from_branch` is on), then the committee file.
 pub fn infer_committee(
     branch: Option<&str>,
     committee_file: Option<&str>,
-    naming: &BranchNaming,
+    convention: Option<&BranchNaming>,
 ) -> Option<(CommitteeId, CommitteeSource)> {
-    branch
-        .and_then(|b| committee_from_branch(b, naming))
+    convention
+        .zip(branch)
+        .and_then(|(naming, b)| committee_from_branch(b, naming))
         .map(|f| (f, CommitteeSource::Branch))
         .or_else(|| {
             committee_file
                 .and_then(committee_from_file)
                 .map(|f| (f, CommitteeSource::File))
         })
+}
+
+/// Create `<base>/.senate/` if it is missing and make sure it holds a
+/// `.gitignore` of a single `*` line, so nothing in it is ever committed and
+/// no repository's own ignore rules are touched. An existing `.gitignore`
+/// is left as it is. Returns the `.senate` path.
+pub fn ensure_senate_dir(base: &Path) -> std::io::Result<PathBuf> {
+    let dir = base.join(SENATE_DIR);
+    std::fs::create_dir_all(&dir)?;
+    write_ignore(&dir)?;
+    Ok(dir)
+}
+
+/// [`ensure_senate_dir`] for a `.senate/` that may already be there: gives
+/// one found without a `.gitignore` its own. Creates nothing otherwise.
+pub fn heal_senate_dir(base: &Path) -> std::io::Result<()> {
+    let dir = base.join(SENATE_DIR);
+    if dir.is_dir() {
+        write_ignore(&dir)?;
+    }
+    Ok(())
+}
+
+fn write_ignore(dir: &Path) -> std::io::Result<()> {
+    use std::io::Write;
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dir.join(".gitignore"))
+    {
+        Ok(mut file) => file.write_all(b"*\n"),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 /// What a hook learns about a session's working directory.
@@ -263,6 +318,10 @@ pub async fn gather_git_facts(cwd: &Path, timeout: Duration) -> GitFacts {
     );
     let toplevel = toplevel.map(PathBuf::from);
     let base = toplevel.clone().unwrap_or_else(|| cwd.to_path_buf());
+    // A `.senate/` found without its `.gitignore` gets one.
+    if let Err(e) = heal_senate_dir(&base) {
+        tracing::debug!("{}: {e}", base.display());
+    }
     let (committee_path, agent_path) = (base.join(COMMITTEE_FILE), base.join(AGENT_FILE));
     let (committee_file, agent_file) =
         tokio::join!(read_small(&committee_path), read_small(&agent_path));
@@ -400,13 +459,63 @@ mod tests {
     }
 
     #[test]
-    fn branch_beats_file() {
+    fn the_branch_name_binds_only_when_the_convention_is_on_and_beats_the_file() {
         let n = BranchNaming::default();
-        let (f, src) = infer_committee(Some("feature/a/me"), Some("b"), &n).unwrap();
-        assert_eq!((f.as_str(), src), ("a", CommitteeSource::Branch));
-        let (f, src) = infer_committee(Some("main"), Some("b"), &n).unwrap();
-        assert_eq!((f.as_str(), src), ("b", CommitteeSource::File));
-        assert!(infer_committee(None, None, &n).is_none());
+        let of = |b: Option<&str>, f: Option<&str>, on: Option<&BranchNaming>| {
+            infer_committee(b, f, on).map(|(c, s)| (c.to_string(), s))
+        };
+        assert_eq!(
+            of(Some("feature/a/me"), Some("b"), Some(&n)),
+            Some(("a".into(), CommitteeSource::Branch))
+        );
+        // Off (the default): the file, or nothing.
+        assert_eq!(
+            of(Some("feature/a/me"), Some("b"), None),
+            Some(("b".into(), CommitteeSource::File))
+        );
+        assert_eq!(of(Some("feature/a/me"), None, None), None);
+        // On, but the branch is not the convention's shape.
+        assert_eq!(
+            of(Some("main"), Some("b"), Some(&n)),
+            Some(("b".into(), CommitteeSource::File))
+        );
+        assert_eq!(of(None, None, Some(&n)), None);
+    }
+
+    #[test]
+    fn sources_read_in_both_languages() {
+        assert_eq!(CommitteeSource::Branch.label(Locale::En), "branch name");
+        assert_eq!(CommitteeSource::Branch.label(Locale::Zh), "分支名");
+        assert_eq!(CommitteeSource::File.label(Locale::En), "file");
+        assert_eq!(CommitteeSource::File.label(Locale::Zh), "文件");
+        assert_eq!(CommitteeSource::Join.label(Locale::Zh), "join");
+        for s in [
+            CommitteeSource::Branch,
+            CommitteeSource::File,
+            CommitteeSource::Join,
+        ] {
+            assert_eq!(CommitteeSource::parse(s.as_str()), Some(s));
+        }
+    }
+
+    #[test]
+    fn the_senate_directory_ignores_itself_and_keeps_an_existing_ignore_file() {
+        let dir = tempfile::tempdir().unwrap();
+        // Healing creates nothing where there is no `.senate/`.
+        heal_senate_dir(dir.path()).unwrap();
+        assert!(!dir.path().join(".senate").exists());
+        let senate = ensure_senate_dir(dir.path()).unwrap();
+        assert_eq!(senate, dir.path().join(".senate"));
+        let ignore = senate.join(".gitignore");
+        assert_eq!(std::fs::read_to_string(&ignore).unwrap(), "*\n");
+        std::fs::write(&ignore, "mine\n").unwrap();
+        ensure_senate_dir(dir.path()).unwrap();
+        heal_senate_dir(dir.path()).unwrap();
+        assert_eq!(std::fs::read_to_string(&ignore).unwrap(), "mine\n");
+        // A directory found without one gets it.
+        std::fs::remove_file(&ignore).unwrap();
+        heal_senate_dir(dir.path()).unwrap();
+        assert_eq!(std::fs::read_to_string(&ignore).unwrap(), "*\n");
     }
 
     #[test]

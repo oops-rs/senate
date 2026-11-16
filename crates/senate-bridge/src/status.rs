@@ -331,7 +331,7 @@ fn render_senate(view: &StatusView, now: DateTime<Utc>, out: &mut String) {
             .iter()
             .map(|s| {
                 let committee = match (s.committee(), s.effective_source()) {
-                    (Some(f), Some(src)) => format!("{f} ({})", src.as_str()),
+                    (Some(f), Some(src)) => format!("{f} ({})", src.label(l)),
                     (Some(f), None) => f.to_string(),
                     (None, _) => l.pick("未加入", "unbound").into(),
                 };

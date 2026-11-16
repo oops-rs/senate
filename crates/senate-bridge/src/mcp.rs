@@ -155,12 +155,13 @@ your read position forward, so nothing is returned twice. Use it when you start 
 the committee, after a break, or when a pushed message refers to something you have not seen. \
 `limit`: how many events to read (default 50, at most 500); call again if it says more remain.";
 
-const JOIN: &str = "Bind this session to a Senate committee, so the committee's messages for you \
-are pushed here and the other Senate tools act on it. Usually unnecessary: the bridge infers the \
-committee from a `<prefix>/<committee>/<person>` git branch (prefix `feature` by default) or a \
-`.senate/committee` file at the repository root. Use it when neither applies, or when your user \
-tells you which committee this work belongs to. An explicit join overrides the inferred \
-committee for this session.";
+const JOIN: &str = "Bind this session, and only this session, to a Senate committee, so the \
+committee's messages for you are pushed here and the other Senate tools act on it. Usually \
+unnecessary: the bridge binds a session from the worktree's `.senate/committee` (and, when the \
+person turned it on, from a `<prefix>/<committee>/<person>` branch name). Use it when neither \
+applies, or when your user tells you which committee this work belongs to. It overrides both for \
+this session and ends with it. To bind the worktree for good, your user runs `senate join \
+<committee>` there.";
 
 const SEARCH: &str = "Search everything said on a Senate committee: messages in its chat \
 groups (when it has any), agents' questions and answers, decisions, notes and checkpoints, including what was \

@@ -144,6 +144,8 @@ fn at(text: &str, needle: &str) -> usize {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ask_answer_and_catch_up_end_to_end() {
     let mut h = Harness::new().await;
+    // This scenario binds by the branch name, which is off unless asked for.
+    h.config.committee_from_branch = true;
     h.start().await;
     let repo = h.dir.path().join("work/repo");
     git_repo(&repo, "feature/refund-v2/alice");

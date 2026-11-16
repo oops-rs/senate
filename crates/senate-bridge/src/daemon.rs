@@ -352,7 +352,9 @@ pub(crate) struct Shared {
     pub(crate) config: BridgeConfig,
     /// Everything written for people and agents is in this language.
     pub(crate) locale: Locale,
-    branches: BranchNaming,
+    /// Set when `committee_from_branch` is on: the naming a branch name is
+    /// read by to find a committee.
+    convention: Option<BranchNaming>,
     /// Where this bridge's agents sit, as `/v1/me` last said.
     seating: Mutex<Seating>,
     /// Whether a Speaker judges roots on this Senate, as `/v1/me` last said;
@@ -618,7 +620,7 @@ impl Shared {
         Ok(Arc::new(Shared {
             ladder: Ladder::new_default(common.timing.inbox_timeout, common.codex.clone()),
             locale: config.locale,
-            branches: config.branches(),
+            convention: config.branch_convention(),
             seating: Mutex::new(seating),
             triaged: AtomicBool::new(true),
             speaker: Mutex::new(None),
@@ -2421,7 +2423,7 @@ impl Shared {
         let inferred = session::infer_committee(
             report.branch.as_deref(),
             report.committee_file.as_deref(),
-            &self.branches,
+            self.convention.as_ref(),
         );
         let (agent, agent_source) = match placed {
             Some(placed) => placed,
@@ -2890,22 +2892,35 @@ impl Shared {
 
     fn bound(&self, session: &Session) -> Result<CommitteeId, IpcError> {
         session.committee().cloned().ok_or_else(|| {
-            let branch = self.branches.developer(
-                &CommitteeId::new("committee").unwrap_or_else(|_| unreachable!("a valid id")),
-                &self.config.person,
-            );
-            let branch = branch.replace("/committee/", "/<committee>/");
+            // The branch convention is a way to bind only when it is on.
+            let branch = self.convention.as_ref().map(|naming| {
+                naming
+                    .developer(
+                        &CommitteeId::new("committee")
+                            .unwrap_or_else(|_| unreachable!("a valid id")),
+                        &self.config.person,
+                    )
+                    .replace("/committee/", "/<committee>/")
+            });
             IpcError::new(
                 codes::NOT_JOINED,
                 match self.locale {
                     Locale::Zh => format!(
-                        "这个会话没有加入任何 Senate 委员会。在 `{branch}` 分支上工作，把委员会名写进\
-                         仓库根目录的 `.senate/committee`，或者调用 join(committee)。"
+                        "这个会话没有加入任何 Senate 委员会。请你的用户在这个工作区里运行 \
+                         `senate join <committee>`（写入 `.senate/committee`）{}，\
+                         或者调用 join(committee) 只为这个会话加入。",
+                        branch
+                            .map(|b| format!("，或者改在 `{b}` 分支上工作"))
+                            .unwrap_or_default()
                     ),
                     Locale::En => format!(
-                        "This session is not joined to a Senate committee. Work on a `{branch}` \
-                         branch, put the committee name in `.senate/committee` at the repository \
-                         root, or call join(committee)."
+                        "This session is not joined to a Senate committee. Ask your user to run \
+                         `senate join <committee>` in this worktree (it writes \
+                         `.senate/committee`){}, or call join(committee) to join for this \
+                         session only.",
+                        branch
+                            .map(|b| format!(", or to work on a `{b}` branch"))
+                            .unwrap_or_default()
                     ),
                 },
             )

@@ -12,7 +12,12 @@
 //! committees = ["refund-v2"]
 //! # Optional: characters of the committee brief a session start injects.
 //! brief_chars = 6000
-//! # Optional: the first segment of `<prefix>/<committee>/<person>` branches.
+//! # Optional: also bind a session to the committee a branch is named for,
+//! # `<prefix>/<committee>/<person>`. Off by default; `branch_prefix` alone
+//! # does not turn it on. When on, it is read before `.senate/committee`.
+//! committee_from_branch = true
+//! # Optional: the first segment of `<prefix>/<committee>/<person>` branches
+//! # (the convention above, and the Speaker's work branches).
 //! branch_prefix = "feature"
 //!
 //! # Optional: the agent each kind of coding session speaks as, under the
@@ -87,6 +92,12 @@ pub struct BridgeConfig {
     /// injects none.
     #[serde(default = "default_brief_chars")]
     pub brief_chars: usize,
+    /// Whether a `<prefix>/<committee>/<person>` branch name binds a
+    /// session to that committee ([`crate::session`]), ahead of
+    /// `.senate/committee`. Off unless set: `branch_prefix` alone does not
+    /// enable it.
+    #[serde(default)]
+    pub committee_from_branch: bool,
     /// First segment of a developer branch, `<prefix>/<committee>/<person>`.
     #[serde(default = "default_branch_prefix")]
     pub branch_prefix: String,
@@ -184,6 +195,7 @@ impl fmt::Debug for BridgeConfig {
             .field("locale", &self.locale)
             .field("committees", &self.committees)
             .field("brief_chars", &self.brief_chars)
+            .field("committee_from_branch", &self.committee_from_branch)
             .field("branch_prefix", &self.branch_prefix)
             .field("agents", &self.agents)
             .field("senates", &self.senates)
@@ -343,6 +355,7 @@ impl BridgeConfig {
             locale: Locale::default(),
             committees: Vec::new(),
             brief_chars: DEFAULT_BRIEF_CHARS,
+            committee_from_branch: false,
             branch_prefix: default_branch_prefix(),
             agents: AgentNames::default(),
             senates: Vec::new(),
@@ -459,6 +472,12 @@ impl BridgeConfig {
     /// How developer branches are named on this machine.
     pub fn branches(&self) -> BranchNaming {
         BranchNaming::new(&self.branch_prefix)
+    }
+
+    /// The naming a branch is read by to find its committee, when
+    /// `committee_from_branch` is on.
+    pub fn branch_convention(&self) -> Option<BranchNaming> {
+        self.committee_from_branch.then(|| self.branches())
     }
 }
 

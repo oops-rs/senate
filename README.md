@@ -323,9 +323,11 @@ Commands act on the committee of the current directory (`--committee <id>` to na
 ### Which Committee, Which Agent
 
 A coding session resolves its active **committee** using this precedence:
-1. Explicit join via the agent's `join` tool or `/senate join`.
-2. Git branch name matching `<branch_prefix>/<committee>/<person>` (e.g. `feature/refund-v2/alice`).
+1. Explicit join via the agent's `join` tool (this session only).
+2. Git branch name matching `<branch_prefix>/<committee>/<person>` (e.g. `feature/refund-v2/alice`), **only when** `senate.toml` sets `committee_from_branch = true`. Off by default; `branch_prefix` alone does not turn it on.
 3. A `.senate/committee` file in the root of the repository worktree.
+
+`senate status` says which one bound each session. `.senate/` is never tracked: wherever Senate creates it, or finds it without one, it writes `.senate/.gitignore` holding `*`, and it never edits your repository's `.gitignore`, `.git/info/exclude` or anything under `.git`.
 
 An agent resolves its **senator identity** using this precedence:
 1. `SENATE_AGENT` environment variable in the session environment.
