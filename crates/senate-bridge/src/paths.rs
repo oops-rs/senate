@@ -7,6 +7,7 @@
 //! | `senates/<senate>/` | `senated` | each Senate hosted on this machine: its log, its local token, its address |
 //! | `state.db` | the daemon | cursors, session registry, delivery queue ([`crate::state`]) |
 //! | `state.<presider>.db` | the daemon | the same, for each further Senate the machine serves |
+//! | `branches/<repository>/<branch>/` | `senate` and the daemon | the saved copy of a worktree's `.senate/` files for each branch ([`crate::follow`]) |
 //! | `bridge.sock` | the daemon | local IPC ([`crate::ipc`]), mode 0600 |
 //!
 //! The directory itself is created with mode 0700: it holds the person's token
@@ -111,6 +112,12 @@ impl Paths {
     /// Where `senated` keeps a Senate it hosts on this machine.
     pub fn hosted(&self, key: &str) -> PathBuf {
         self.home.join("senates").join(key)
+    }
+
+    /// The saved copies of each repository's branch-bound `.senate/` files
+    /// ([`crate::follow`]).
+    pub fn branches(&self) -> PathBuf {
+        self.home.join("branches")
     }
 
     pub fn state_db(&self) -> PathBuf {

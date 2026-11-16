@@ -7,8 +7,10 @@
 //! 1. **`SENATE_AGENT`** in the session's environment (Claude Code only: a
 //!    Codex hook runs inside the app-server, whose environment is shared by
 //!    every thread and describes none of them);
-//! 2. **`.senate/agent`** at the worktree root (or the cwd outside git): its
-//!    first line that is neither blank nor a `#` comment;
+//! 2. **`.senate/agent`** at the worktree root (or the cwd outside git; `senate
+//!    pin` writes it): its first line that is neither blank nor a `#`
+//!    comment. It is kept per branch, like the committee file
+//!    ([`crate::follow`]), and a worktree just added has none;
 //! 3. **`[agents]`** in `senate.toml`, by harness: `claude` for a Claude
 //!    Code session, `codex` for a Codex session (each a name or a path
 //!    relative to the person);

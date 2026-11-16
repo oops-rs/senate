@@ -46,6 +46,18 @@ impl LocalProfile {
 #   senate install --yes     # once: the MCP server and hooks for Claude Code / Codex
 #   senate status
 #
+# In each repository you work in (everything Senate keeps there is the
+# untracked .senate/ directory; it follows the branch):
+#   senate join <committee>  # bind this worktree, on this branch, to a committee
+#   senate where             # what a session here would get, and from where
+#   senate list / senate free  # the saved per-branch copies; forget what expired
+#
+# To keep the daemon running without a terminal (a launchd agent on macOS, a
+# systemd user unit on Linux; each is a dry run until you add --yes):
+#   senate service install --yes
+#   senate service status
+#   senate service uninstall --yes
+#
 # Everything senated keeps for this Senate is under senates/top/ here: its
 # log (SQLite), the token only this machine uses, the address it serves.
 

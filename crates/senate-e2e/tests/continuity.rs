@@ -453,3 +453,99 @@ async fn the_companion_answers() {
     bob.close().await;
     world.stop().await;
 }
+
+/// `.senate/` follows the branch: a session on branch A checkpoints; the
+/// worktree switches to B, which has another committee and its own notes;
+/// a session there is bound to B's committee and its checkpoint carries B's
+/// notes; switching back restores A and the next checkpoint matches A's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_checkpoint_carries_the_notes_and_committee_of_the_branch_checked_out() {
+    use senate_bridge::binding::{self, Settings};
+    let world = World::start(60).await;
+    let (mut alice, _inbox, head_a) = alice_at_work(&world).await;
+    let other = senate_core::CommitteeId::new("other-work").unwrap();
+    let settings = Settings::default();
+
+    // Branch A, bound to refund-v2 by its worktree file: a checkpoint.
+    let on_a = alice
+        .checkpoint(
+            "s-alice",
+            Some("## A\n- retry limit\n"),
+            Some("- A decided"),
+            Some("- A waits"),
+        )
+        .await;
+    assert_eq!(on_a.branch, BRANCH);
+    assert_eq!(on_a.posted.committee, committee());
+    let a_files = std::fs::read(alice.work.join(".senate/PROGRESS.md")).unwrap();
+
+    // The worktree moves to a new branch B, and B is bound to another
+    // committee (`senate join`, which swaps first).
+    git(&alice.work, &["switch", "-q", "-c", "other-work/alice"]);
+    binding::join(&alice.paths, &alice.work, &other, &settings)
+        .await
+        .unwrap();
+    assert!(
+        !alice.work.join(".senate/PROGRESS.md").exists(),
+        "A's notes are not on B"
+    );
+    // A session starting there is bound to B's committee at its first hook.
+    let inbox_b = alice.inbox("s-b");
+    alice.session_start("s-b", &inbox_b).await;
+    let on_b = alice
+        .checkpoint(
+            "s-b",
+            Some("## B\n- other work\n"),
+            Some("- B decided"),
+            Some("- B waits"),
+        )
+        .await;
+    assert_eq!(on_b.branch, "other-work/alice");
+    assert_eq!(on_b.posted.committee, other, "B's committee");
+    let b_event = world
+        .events_of(&other)
+        .await
+        .into_iter()
+        .find(|e| e.kind == Kind::Checkpoint)
+        .expect("a checkpoint on B's committee");
+    let b_payload = CheckpointPayload::of(&b_event).unwrap();
+    assert_eq!(b_payload.branch, "other-work/alice");
+    assert_eq!(
+        b_payload.files.progress.as_deref(),
+        Some("## B\n- other work\n")
+    );
+    assert_eq!(b_payload.files.open.as_deref(), Some("- B waits\n"));
+    assert_ne!(b_payload.commit, "", "a commit");
+
+    // Back to A with no command run: the first session's next checkpoint is
+    // A's, on A's committee, with A's notes exactly as they were.
+    git(&alice.work, &["switch", "-q", BRANCH]);
+    let again = alice.checkpoint("s-alice", None, None, None).await;
+    assert_eq!(again.branch, BRANCH);
+    assert_eq!(again.commit, head_a);
+    assert_eq!(again.posted.committee, committee());
+    assert_eq!(
+        std::fs::read(alice.work.join(".senate/PROGRESS.md")).unwrap(),
+        a_files
+    );
+    let event = world
+        .events()
+        .await
+        .into_iter()
+        .rfind(|e| e.kind == Kind::Checkpoint)
+        .unwrap();
+    let payload = CheckpointPayload::of(&event).unwrap();
+    assert_eq!(
+        payload.files.progress.as_deref(),
+        Some("## A\n- retry limit\n")
+    );
+    assert_eq!(payload.files.decisions.as_deref(), Some("- A decided\n"));
+    // And none of B's ever reached A's committee.
+    for e in world.events().await {
+        if let Some(p) = CheckpointPayload::of(&e) {
+            assert!(!p.files.progress.unwrap_or_default().contains("## B"));
+        }
+    }
+    alice.close().await;
+    world.stop().await;
+}

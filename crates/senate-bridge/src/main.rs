@@ -11,12 +11,13 @@ use std::time::Duration;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
+use senate_bridge::binding::{self, Settings};
 use senate_bridge::delivery::{codex, inbox};
 use senate_bridge::hook::{self, HookEnv, HookKind, HookTimeouts};
 use senate_bridge::ipc::SayKind;
 use senate_bridge::ipc::{self, DocketReply, InboxReply, Posted, Request, SessionSelector};
 use senate_bridge::session::Runtime;
-use senate_bridge::{BridgeConfig, Paths, init, install, mcp, preside, speak, status};
+use senate_bridge::{BridgeConfig, Paths, init, install, mcp, preside, service, speak, status};
 use senate_core::{CommitteeId, EventId, Locale, Name, Seq};
 
 #[derive(Parser)]
@@ -52,11 +53,56 @@ enum Cmd {
         #[arg(long, default_value = init::DEFAULT_LOCAL_LISTEN)]
         listen: String,
     },
+    /// Bind this worktree, on the branch it has now, to a committee: it
+    /// writes `.senate/committee` (untracked, kept per branch: switching
+    /// branches swaps in that branch's own copy). Live sessions here pick it
+    /// up at their next prompt. No daemon needed.
+    Join {
+        /// The committee.
+        committee: CommitteeId,
+    },
+    /// Remove this worktree's committee binding on the current branch.
+    Leave,
+    /// Pin the agent sessions in this worktree speak as, on the current
+    /// branch (`reviewer`, or a path relative to you: `claude/reviewer`):
+    /// it writes `.senate/agent`.
+    Pin {
+        /// An agent name or path, relative to you.
+        agent: String,
+    },
+    /// Remove this worktree's agent pin on the current branch.
+    Unpin,
+    /// Print the committee this directory resolves to and where it comes
+    /// from, the agent a session here would speak as, the branch `.senate/`
+    /// belongs to, and whether other branches have saved copies.
+    Where,
+    /// List every saved `.senate/` copy, by repository: its branch,
+    /// committee, when it was saved, and whether it has expired.
+    List {
+        /// Print JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Forget what has expired: saved copies whose repository, branch or
+    /// detached worktree is gone; session records of sessions that ended
+    /// long ago or whose process is gone; queued items and cursors of
+    /// agents with no session and no contact for `free_after_days`
+    /// (senate.toml, default 30). A hosted Senate's log is only listed.
+    /// Dry run without --yes.
+    Free {
+        /// Do it.
+        #[arg(long)]
+        yes: bool,
+        /// With --yes, also delete the data of hosted Senates that
+        /// `senate.toml` no longer lists: logs, which nothing else removes.
+        #[arg(long, requires = "yes")]
+        delete_logs: bool,
+    },
     /// What waits for you: open task threads on a committee for your agents
     /// or escalated to you, and what awaits the Speaker of every Senate one
     /// of your agents presides over here.
     Inbox {
-        /// The committee (default: `.senate/committee` in this repository).
+        /// The committee (default: the one `senate where` shows for this directory).
         #[arg(long)]
         committee: Option<CommitteeId>,
         /// Also list threads whose last word is an answer (left out by
@@ -75,7 +121,7 @@ enum Cmd {
         /// The question (`-`: read stdin).
         #[arg(required = true, num_args = 1..)]
         text: Vec<String>,
-        /// The committee (default: `.senate/committee` in this repository).
+        /// The committee (default: the one `senate where` shows for this directory).
         #[arg(long)]
         committee: Option<CommitteeId>,
         /// Stay until an answer arrives in the thread (default 120 seconds)
@@ -99,7 +145,7 @@ enum Cmd {
         /// The note (`-`: read stdin).
         #[arg(required = true, num_args = 1..)]
         text: Vec<String>,
-        /// The committee (default: `.senate/committee` in this repository).
+        /// The committee (default: the one `senate where` shows for this directory).
         #[arg(long)]
         committee: Option<CommitteeId>,
         /// Print the daemon's result as JSON.
@@ -113,7 +159,7 @@ enum Cmd {
         /// What to do (`-`: read stdin).
         #[arg(required = true, num_args = 1..)]
         text: Vec<String>,
-        /// The committee (default: `.senate/committee` in this repository).
+        /// The committee (default: the one `senate where` shows for this directory).
         #[arg(long)]
         committee: Option<CommitteeId>,
         /// Print the daemon's result as JSON.
@@ -128,7 +174,7 @@ enum Cmd {
         /// What to say (`-`: read stdin).
         #[arg(required = true, num_args = 1..)]
         text: Vec<String>,
-        /// The committee (default: `.senate/committee` in this repository).
+        /// The committee (default: the one `senate where` shows for this directory).
         #[arg(long)]
         committee: Option<CommitteeId>,
         /// Print the daemon's result as JSON.
@@ -139,7 +185,7 @@ enum Cmd {
     Thread {
         /// A seq in the thread.
         seq: u64,
-        /// The committee (default: `.senate/committee` in this repository).
+        /// The committee (default: the one `senate where` shows for this directory).
         #[arg(long)]
         committee: Option<CommitteeId>,
         /// Print the daemon's result as JSON.
@@ -150,7 +196,7 @@ enum Cmd {
     Take {
         /// The thread's root seq.
         thread: u64,
-        /// The committee (default: `.senate/committee` in this repository).
+        /// The committee (default: the one `senate where` shows for this directory).
         #[arg(long)]
         committee: Option<CommitteeId>,
     },
@@ -186,6 +232,12 @@ enum Cmd {
         #[arg(long, value_name = "PATH")]
         claude_bin: Option<PathBuf>,
     },
+    /// Keep `senated --machine` running without a terminal: a launchd user
+    /// agent on macOS, a systemd user unit on Linux.
+    Service {
+        #[command(subcommand)]
+        command: ServiceCmd,
+    },
     /// Show the daemon, the Senate it is connected to, each agent's committees, and registered sessions.
     Status,
     /// Smoke test of the Codex app-server adapter: connect, initialize, read
@@ -208,6 +260,31 @@ enum Cmd {
         #[command(subcommand)]
         command: DebugCmd,
     },
+}
+
+#[derive(Subcommand)]
+enum ServiceCmd {
+    /// Write the service file and load the service: it runs `senated
+    /// --machine` from login, restarts it if it dies and logs to
+    /// `senated.log` in the Senate home. Dry run without --yes.
+    Install {
+        /// Write the file and load the service.
+        #[arg(long)]
+        yes: bool,
+        /// The daemon binary (default: `senated` next to this `senate`, else
+        /// on PATH).
+        #[arg(long, value_name = "PATH")]
+        senated: Option<PathBuf>,
+    },
+    /// Stop the service and remove its file. Dry run without --yes.
+    Uninstall {
+        /// Stop it and remove the file.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Whether the service file exists, whether the service manager has the
+    /// service loaded and running, and where its log is.
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -341,24 +418,17 @@ async fn codex_smoke(
     Ok(())
 }
 
-/// The committee named, else the one in this repository's
-/// `.senate/committee`.
+/// The committee named, else the one this directory resolves to
+/// (`senate where`).
 async fn committee_here(named: Option<CommitteeId>) -> anyhow::Result<CommitteeId> {
-    if let Some(committee) = named {
-        return Ok(committee);
-    }
-    let cwd = std::env::current_dir()?;
-    let facts = senate_bridge::session::gather_git_facts(&cwd, Duration::from_secs(2)).await;
-    facts
-        .committee_file
-        .as_deref()
-        .and_then(|text| {
-            text.lines()
-                .map(str::trim)
-                .find(|l| !l.is_empty() && !l.starts_with('#'))
-        })
-        .and_then(|line| CommitteeId::new(line).ok())
-        .context("name the committee with --committee (no .senate/committee here)")
+    let (paths, settings) = settings_here();
+    binding::committee_here(&paths, named, &settings).await
+}
+
+fn settings_here() -> (Paths, Settings) {
+    let paths = Paths::from_env().unwrap_or_else(|_| Paths::new("."));
+    let settings = Settings::load(&paths.config());
+    (paths, settings)
 }
 
 async fn daemon_call<T: serde::de::DeserializeOwned>(
@@ -467,6 +537,61 @@ fn speak_new(
     })
 }
 
+fn service_spec() -> anyhow::Result<(service::Spec, Locale)> {
+    let platform = service::Platform::current()
+        .context("`senate service` supports macOS (launchd) and Linux (systemd)")?;
+    let user_home = dirs::home_dir().context("cannot find the home directory")?;
+    let paths = Paths::from_env()?;
+    let senate_home = std::path::absolute(paths.home()).context("resolving the Senate home")?;
+    let locale = BridgeConfig::locale_at(&paths.config());
+    Ok((
+        service::Spec {
+            platform,
+            user_home,
+            senate_home,
+            uid: service::current_uid(),
+        },
+        locale,
+    ))
+}
+
+fn run_service(command: ServiceCmd) -> anyhow::Result<()> {
+    let (spec, locale) = service_spec()?;
+    match command {
+        ServiceCmd::Install { yes, senated } => {
+            let senated = match senated {
+                Some(path) => std::path::absolute(path)?,
+                None => {
+                    let exe = std::env::current_exe().context("locating this binary")?;
+                    service::locate_senated(&exe, std::env::var_os("PATH").as_deref()).context(
+                        "`senated` is neither next to `senate` nor on PATH: pass it with --senated",
+                    )?
+                }
+            };
+            let plan = service::plan_install(&spec, &senated);
+            if yes {
+                service::apply_install(&plan, &senated, &service::SystemManager)?;
+            }
+            print!(
+                "{}",
+                service::render_install(&plan, spec.platform, yes, locale)
+            );
+        }
+        ServiceCmd::Uninstall { yes } => {
+            let plan = service::plan_uninstall(&spec);
+            if yes {
+                service::apply_uninstall(&plan, &service::SystemManager)?;
+            }
+            print!("{}", service::render_uninstall(&plan, yes, locale));
+        }
+        ServiceCmd::Status => {
+            let status = service::status(&spec, &service::SystemManager);
+            print!("{}", service::render_status(&status, locale));
+        }
+    }
+    Ok(())
+}
+
 fn run(command: Cmd) -> anyhow::Result<()> {
     match command {
         Cmd::Hook { .. } => Ok(()),
@@ -492,6 +617,77 @@ fn run(command: Cmd) -> anyhow::Result<()> {
             };
             let path = init::init_local(&paths, &profile)?;
             println!("{}", path.display());
+            Ok(())
+        }
+        Cmd::Join { committee } => {
+            let (paths, settings) = settings_here();
+            let cwd = std::env::current_dir()?;
+            let change =
+                runtime(false)?.block_on(binding::join(&paths, &cwd, &committee, &settings))?;
+            println!("{}", binding::render_join(&change, settings.locale));
+            Ok(())
+        }
+        Cmd::Leave => {
+            let (paths, settings) = settings_here();
+            let cwd = std::env::current_dir()?;
+            let change = runtime(false)?.block_on(binding::change(
+                &paths,
+                &cwd,
+                binding::Item::Committee,
+                None,
+                &settings,
+            ))?;
+            println!("{}", binding::render_leave(&change, settings.locale));
+            Ok(())
+        }
+        Cmd::Pin { agent } => {
+            let (paths, settings) = settings_here();
+            let agent = binding::parse_pin(&agent)?;
+            let cwd = std::env::current_dir()?;
+            let change = runtime(false)?.block_on(binding::change(
+                &paths,
+                &cwd,
+                binding::Item::Agent,
+                Some(agent.to_string()),
+                &settings,
+            ))?;
+            println!("{}", binding::render_pin(&change, settings.locale));
+            Ok(())
+        }
+        Cmd::Unpin => {
+            let (paths, settings) = settings_here();
+            let cwd = std::env::current_dir()?;
+            let change = runtime(false)?.block_on(binding::change(
+                &paths,
+                &cwd,
+                binding::Item::Agent,
+                None,
+                &settings,
+            ))?;
+            println!("{}", binding::render_unpin(&change, settings.locale));
+            Ok(())
+        }
+        Cmd::Where => {
+            let (paths, settings) = settings_here();
+            let cwd = std::env::current_dir()?;
+            let resolved = runtime(false)?.block_on(binding::resolve(&paths, &cwd, &settings));
+            print!("{}", binding::render_where(&resolved, settings.locale));
+            Ok(())
+        }
+        Cmd::List { json } => {
+            let (paths, settings) = settings_here();
+            let rows = binding::list(&paths);
+            if json {
+                print_json(&rows)
+            } else {
+                print!("{}", binding::render_list(&rows, settings.locale));
+                Ok(())
+            }
+        }
+        Cmd::Free { yes, delete_logs } => {
+            let (paths, settings) = settings_here();
+            let report = binding::free(&paths, &settings, yes, delete_logs)?;
+            print!("{}", binding::render_free(&report, settings.locale));
             Ok(())
         }
         Cmd::Inbox { committee, all } => {
@@ -646,6 +842,7 @@ fn run(command: Cmd) -> anyhow::Result<()> {
             let transport = config.transport().map_err(anyhow::Error::msg)?;
             runtime(false)?.block_on(codex_smoke(&transport, &thread, text.as_deref()))
         }
+        Cmd::Service { command } => run_service(command),
         Cmd::Status => {
             let paths = Paths::from_env()?;
             let view = runtime(false)?.block_on(status::collect(&paths))?;

@@ -50,7 +50,10 @@ Rules:
    beside it. It speaks for them and answers for them.
 4. **Agents are seated as they connect.** A person's machine authenticates
    as the person and names the agent it speaks as; the server seats that
-   agent on first contact if the roster's rules allow it. Seats are not
+   agent on first contact if the roster's rules allow it: any
+   authenticated act as that agent (a stream, a heartbeat, a cursor, an
+   append) seats it, the agent that holds this Senate's Speaker's seat
+   included when it could sit here too. Seats are not
    stored: a restarted server seats again every agent its log has seen (a
    presence, a recent heartbeat, or an event of its own) before it serves
    anything.
@@ -248,6 +251,72 @@ between them. With one Senate it behaves as it always did.
 
 Used alone on one machine, the top Senate is local and one of the person's
 agents is its Speaker (`senate init --local` writes the profile).
+
+## A developer machine's footprint
+
+Senate keeps two places on a developer machine and writes nothing else:
+
+- The Senate home, `~/.senate` (`$SENATE_HOME`): `senate.toml`, the daemon's
+  `state.db`, `senates/<key>/…` (the logs of the Senates it hosts) and
+  `branches/<repository>/<branch>/` (saved copies of a worktree's `.senate/`
+  files, below).
+- `.senate/` in a worktree, untracked: `committee`, `agent` (optional) and the
+  checkpoint notes `PROGRESS.md`, `DECISIONS.md`, `OPEN.md`.
+
+Senate writes nothing into a repository except that directory, and nothing
+under `.git`: it only asks git where the worktree root and the common git dir
+are and which branch is checked out. Wherever Senate creates `.senate/`, or
+finds it without one, it writes `.senate/.gitignore` holding `*`, so nothing
+in it is committed and no repository's own ignore rules are touched.
+
+**A layer built on Senate adds no directory or convention of its own on
+developer machines: `.senate/` is the only one.**
+
+A session's committee is, first match wins: its explicit `join` (this session
+only); the branch name `<prefix>/<committee>/<person>`, only when
+`committee_from_branch = true` in `senate.toml` (off by default; `branch_prefix`
+alone does not enable it); `.senate/committee`. Its agent is `SENATE_AGENT`,
+then `.senate/agent`, then `[agents]`, then the harness's name. A session with
+no committee is unbound.
+
+### `.senate/` follows the branch
+
+The contents of `.senate/` belong to a line of work, that is to a branch. Being
+untracked they would otherwise stay put through a `git switch`, so Senate keeps
+one saved copy of the five files it defines per (repository, branch), under
+`branches/<repository id>/<slot id>/` in the Senate home (with a `slot.json`:
+the repository's common git dir, the worktree, the branch, the HEAD commit and
+when it was saved), and swaps them when the branch changes.
+
+- The repository id is the real path of the common git dir; the slot id is the
+  branch name plus a hash of it (safe on case-insensitive file systems). A
+  detached HEAD is a slot per worktree.
+- Senate is not told about a switch and installs no git hook. The worktree
+  records which slot its `.senate/` belongs to in `.senate/.branch`. Every entry
+  point that reads or writes `.senate/` first runs the same function, "make
+  `.senate/` match the checked-out branch": the session hooks, the daemon before
+  a checkpoint reads the notes (the tool, and the commit, interval and
+  session-end triggers), the MCP shim's pin lookup, and the `senate` commands.
+- The swap saves before it removes and restores through a staging directory and
+  renames, with the target recorded as pending in the marker, so a crash at any
+  point is completed by the next run and loses nothing. A lock on the
+  repository keeps two processes from swapping at once.
+- A `.senate/` with no marker is adopted as the current branch's and nothing is
+  saved over an existing copy. A worktree with no `.senate/` gets the current
+  branch's copy back if there is one. A renamed branch keeps its files: when
+  the recorded branch no longer exists, the current one has no copy and either
+  HEAD's reflog says it was renamed or HEAD is still the recorded commit, the
+  copy is moved to the new name.
+- A checkpoint is about the branch checked out when it is taken: the daemon
+  swaps first, re-binds the session to what the worktree now says, and reads the
+  notes of that branch; it never attributes one branch's notes to another.
+
+Known limits: a brand-new worktree on a brand-new branch starts unbound until
+`senate join`; a repository that is moved leaves its saved copies stale until
+`senate free` removes them (a copy for a branch that still exists is never
+stale). `senate free` never deletes the data of a hosted Senate that
+`senate.toml` no longer names without an explicit `--delete-logs`: that is a
+log.
 
 ## Languages
 

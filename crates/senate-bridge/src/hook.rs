@@ -197,11 +197,20 @@ pub async fn run_as(
     let mut client = ipc::IpcClient::connect(daemon_socket, timeouts.connect)
         .await
         .ok()?;
+    // The Senate home is where the daemon's socket is.
+    let home = crate::paths::Paths::new(daemon_socket.parent().unwrap_or(Path::new(".")));
     let request = match kind {
-        HookKind::SessionEnd => Request::SessionEnd {
-            session_id,
-            reason: input.reason,
-        },
+        HookKind::SessionEnd => {
+            // The notes the daemon's last checkpoint reads belong to the
+            // branch now checked out.
+            if let Some(cwd) = input.cwd.clone() {
+                let _ = session::gather_synced(&home, &cwd, timeouts.git).await;
+            }
+            Request::SessionEnd {
+                session_id,
+                reason: input.reason,
+            }
+        }
         HookKind::SessionStart | HookKind::UserPromptSubmit => {
             let cwd = input.cwd.or_else(|| std::env::current_dir().ok())?;
             let ancestors = async {
@@ -213,8 +222,8 @@ pub async fn run_as(
                 let parent = std::os::unix::process::parent_id();
                 session::ancestor_pids(parent, ANCESTOR_DEPTH, timeouts.git).await
             };
-            let (facts, ancestor_pids) =
-                tokio::join!(session::gather_git_facts(&cwd, timeouts.git), ancestors);
+            let ((facts, _), ancestor_pids) =
+                tokio::join!(session::gather_synced(&home, &cwd, timeouts.git), ancestors);
             Request::Hook(HookReport {
                 event: if kind == HookKind::SessionStart {
                     HookEvent::SessionStart

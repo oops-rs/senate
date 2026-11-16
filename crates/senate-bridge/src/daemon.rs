@@ -347,12 +347,16 @@ enum Hold {
 /// One agent's stream on one committee: the unit everything the bridge
 /// keeps per stream is keyed by.
 type Seat = (SenatorPath, CommitteeId);
+/// The branch a session is on now and what it is bound to there.
+type Rebind = (Option<String>, Option<CommitteeId>);
 
 pub(crate) struct Shared {
     pub(crate) config: BridgeConfig,
     /// Everything written for people and agents is in this language.
     pub(crate) locale: Locale,
-    branches: BranchNaming,
+    /// Set when `committee_from_branch` is on: the naming a branch name is
+    /// read by to find a committee.
+    convention: Option<BranchNaming>,
     /// Where this bridge's agents sit, as `/v1/me` last said.
     seating: Mutex<Seating>,
     /// Whether a Speaker judges roots on this Senate, as `/v1/me` last said;
@@ -380,6 +384,10 @@ pub(crate) struct Shared {
     auto: Mutex<HashMap<(SenatorPath, PathBuf), AutoCheckpoint>>,
     /// The daemon's home, handed to companion sessions.
     home: PathBuf,
+    /// Sessions whose committee changed because their worktree's branch
+    /// did, not yet told: the branch they are on, and what they are bound
+    /// to now.
+    rebinds: Mutex<HashMap<String, Rebind>>,
     companion_config: CompanionConfig,
     /// The companion running now, if any (one at a time).
     companion: Mutex<Option<companion::Running>>,
@@ -618,7 +626,7 @@ impl Shared {
         Ok(Arc::new(Shared {
             ladder: Ladder::new_default(common.timing.inbox_timeout, common.codex.clone()),
             locale: config.locale,
-            branches: config.branches(),
+            convention: config.branch_convention(),
             seating: Mutex::new(seating),
             triaged: AtomicBool::new(true),
             speaker: Mutex::new(None),
@@ -634,6 +642,7 @@ impl Shared {
             pushes: Mutex::new(HashMap::new()),
             auto: Mutex::new(HashMap::new()),
             home: common.home.clone(),
+            rebinds: Mutex::new(HashMap::new()),
             companion_config: common.companion_config.clone(),
             companion: Mutex::new(None),
             companion_tried: Mutex::new(BTreeSet::new()),
@@ -2421,7 +2430,7 @@ impl Shared {
         let inferred = session::infer_committee(
             report.branch.as_deref(),
             report.committee_file.as_deref(),
-            &self.branches,
+            self.convention.as_ref(),
         );
         let (agent, agent_source) = match placed {
             Some(placed) => placed,
@@ -2468,6 +2477,17 @@ impl Shared {
                 "the session speaks as another agent now"
             );
         }
+        // The branch changed under the session and took its committee
+        // with it (an explicit join is not disturbed): tell it at this hook.
+        if before.as_ref().is_some_and(|b| {
+            b.branch != session.branch && b.inferred_committee != session.inferred_committee
+        }) && session.joined_committee.is_none()
+        {
+            lock(&self.rebinds).insert(
+                session.session_id.clone(),
+                (session.branch.clone(), session.inferred_committee.clone()),
+            );
+        }
         let was = before.map(|b| (b.agent.clone(), b.committee().cloned(), b.state));
         let now = (
             session.agent.clone(),
@@ -2489,6 +2509,19 @@ impl Shared {
             report.event
         };
         let (context, delivered) = self.hook_context(&session, event, brief.as_ref())?;
+        // The worktree's branch changed under this session since it last
+        // spoke: say what it is bound to now.
+        let rebound = lock(&self.rebinds).remove(&session.session_id);
+        let context = match rebound {
+            Some((branch, committee)) if session.joined_committee.is_none() => {
+                let note = rebind_note(self.locale, branch.as_deref(), committee.as_ref());
+                Some(match context {
+                    Some(text) => format!("{note}\n\n{text}"),
+                    None => note,
+                })
+            }
+            _ => context,
+        };
         // The user is active in the session: a held backlog may try its
         // inbox again right away.
         self.note_delivered(&session.session_id);
@@ -2654,6 +2687,51 @@ impl Shared {
 
     // ---- checkpoints -------------------------------------------------------
 
+    /// Make the session's worktree `.senate/` match the branch checked out
+    /// there now ([`crate::follow`]), and its committee what that says: a
+    /// checkpoint must carry the notes and committee of the branch it is
+    /// about, never the previous branch's. Returns the session as it is
+    /// now. An explicit `join` is not disturbed.
+    async fn follow_branch(&self, session: &Session) -> Session {
+        let paths = Paths::new(&self.home);
+        let (facts, _) = session::gather_synced(&paths, &session.cwd, Duration::from_secs(2)).await;
+        let inferred = session::infer_committee(
+            facts.branch.as_deref(),
+            facts.committee_file.as_deref(),
+            self.convention.as_ref(),
+        );
+        let known = session
+            .inferred_committee
+            .clone()
+            .zip(session.committee_source);
+        if facts.branch == session.branch && inferred == known {
+            return session.clone();
+        }
+        if let Err(e) = self.store.set_inferred(
+            &session.session_id,
+            facts.branch.as_deref(),
+            inferred.as_ref(),
+        ) {
+            tracing::warn!("recording the session's branch: {e}");
+            return session.clone();
+        }
+        if facts.branch != session.branch && session.joined_committee.is_none() {
+            lock(&self.rebinds).insert(
+                session.session_id.clone(),
+                (
+                    facts.branch.clone(),
+                    inferred.as_ref().map(|(c, _)| c.clone()),
+                ),
+            );
+        }
+        self.committees_changed.notify_one();
+        self.store
+            .session(&session.session_id)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| session.clone())
+    }
+
     /// Append a checkpoint of the worktree at `root` for `session`, as the
     /// session's agent: a checkpoint is one agent's handover note.
     async fn append_checkpoint(
@@ -2709,6 +2787,7 @@ impl Shared {
         id: Option<EventId>,
     ) -> Result<CheckpointReply, IpcError> {
         let session = self.resolve(selector)?;
+        let session = self.follow_branch(&session).await;
         let committee = self.bound(&session)?;
         let Some(root) = worktree(&session).await else {
             return Err(IpcError::bad_request(format!(
@@ -2768,6 +2847,7 @@ impl Shared {
     /// skipped when the log's latest one of the session's agent already says
     /// the same. Another agent's checkpoint does not count.
     async fn auto_checkpoint(&self, session: &Session, trigger: CheckpointTrigger) {
+        let session = &self.follow_branch(session).await;
         let Some(committee) = session.committee().cloned() else {
             return;
         };
@@ -2811,6 +2891,11 @@ impl Shared {
         };
         let mut seen = BTreeSet::new();
         for session in sessions.iter().filter(|s| s.committee().is_some()) {
+            let refreshed = self.follow_branch(session).await;
+            let session = &refreshed;
+            if session.committee().is_none() {
+                continue;
+            }
             let Some(root) = worktree(session).await else {
                 continue;
             };
@@ -2890,22 +2975,35 @@ impl Shared {
 
     fn bound(&self, session: &Session) -> Result<CommitteeId, IpcError> {
         session.committee().cloned().ok_or_else(|| {
-            let branch = self.branches.developer(
-                &CommitteeId::new("committee").unwrap_or_else(|_| unreachable!("a valid id")),
-                &self.config.person,
-            );
-            let branch = branch.replace("/committee/", "/<committee>/");
+            // The branch convention is a way to bind only when it is on.
+            let branch = self.convention.as_ref().map(|naming| {
+                naming
+                    .developer(
+                        &CommitteeId::new("committee")
+                            .unwrap_or_else(|_| unreachable!("a valid id")),
+                        &self.config.person,
+                    )
+                    .replace("/committee/", "/<committee>/")
+            });
             IpcError::new(
                 codes::NOT_JOINED,
                 match self.locale {
                     Locale::Zh => format!(
-                        "这个会话没有加入任何 Senate 委员会。在 `{branch}` 分支上工作，把委员会名写进\
-                         仓库根目录的 `.senate/committee`，或者调用 join(committee)。"
+                        "这个会话没有加入任何 Senate 委员会。请你的用户在这个工作区里运行 \
+                         `senate join <committee>`（写入 `.senate/committee`）{}，\
+                         或者调用 join(committee) 只为这个会话加入。",
+                        branch
+                            .map(|b| format!("，或者改在 `{b}` 分支上工作"))
+                            .unwrap_or_default()
                     ),
                     Locale::En => format!(
-                        "This session is not joined to a Senate committee. Work on a `{branch}` \
-                         branch, put the committee name in `.senate/committee` at the repository \
-                         root, or call join(committee)."
+                        "This session is not joined to a Senate committee. Ask your user to run \
+                         `senate join <committee>` in this worktree (it writes \
+                         `.senate/committee`){}, or call join(committee) to join for this \
+                         session only.",
+                        branch
+                            .map(|b| format!(", or to work on a `{b}` branch"))
+                            .unwrap_or_default()
                     ),
                 },
             )
@@ -3858,6 +3956,33 @@ async fn worktree(session: &Session) -> Option<PathBuf> {
     match &session.git_root {
         Some(root) => Some(root.clone()),
         None => checkpoint::toplevel(&session.cwd).await,
+    }
+}
+
+/// The one line a session is told when its worktree's branch changed under
+/// it: where it is bound now.
+fn rebind_note(locale: Locale, branch: Option<&str>, committee: Option<&CommitteeId>) -> String {
+    let (zh_at, en_at) = match branch {
+        Some(b) => (
+            format!("分支已切换到 `{b}`"),
+            format!("The branch changed to `{b}`"),
+        ),
+        None => (
+            "HEAD 已分离（detached）".to_string(),
+            "HEAD is now detached".to_string(),
+        ),
+    };
+    match (locale, committee) {
+        (Locale::Zh, Some(c)) => format!("{zh_at}：这个会话现在绑定到 {c}。"),
+        (Locale::En, Some(c)) => format!("{en_at}: this session is now bound to {c}."),
+        (Locale::Zh, None) => format!(
+            "{zh_at}：这个会话不再绑定任何委员会（这个分支没有保存的绑定；\
+             `senate join <committee>` 可以绑定）。"
+        ),
+        (Locale::En, None) => format!(
+            "{en_at}: this session is no longer bound to a committee (nothing is saved for \
+             this branch; `senate join <committee>` binds it)."
+        ),
     }
 }
 

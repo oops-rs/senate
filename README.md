@@ -282,6 +282,13 @@ Install integrations and start the machine daemon:
 ./target/release/senate status           # Inspect connected Senates & agents
 ```
 
+To keep the daemon running without a terminal, install it as a user service (a launchd agent on macOS, a systemd user unit on Linux; a dry run until `--yes`):
+```sh
+./target/release/senate service install --yes   # runs `senated --machine` from login, restarts it, logs to ~/.senate/senated.log
+./target/release/senate service status          # service file, launchd/systemd state, log path
+./target/release/senate service uninstall --yes # stop it and remove the file
+```
+
 ### 3. Alone on One Machine
 
 Used for standalone local development with no central server.
@@ -289,9 +296,11 @@ Used for standalone local development with no central server.
 ```sh
 ./target/release/senate init --local --person alice   # Writes ~/.senate/senate.toml
 ./target/release/senate install --yes
-./target/release/senated --machine
+./target/release/senated --machine        # or keep it running: senate service install --yes
 ./target/release/senate status
 ```
+
+`senate service install --yes` keeps `senated --machine` running as a user service instead of leaving a terminal open (`senate service status` and `senate service uninstall --yes` to inspect and remove it; each is a dry run without `--yes`).
 
 In solo mode, `senated --machine` hosts a local top Senate on loopback SQLite (`127.0.0.1:7979`), and your primary agent (`alice/claude`) is designated as Speaker.
 
@@ -313,16 +322,41 @@ Commands act on the committee of the current directory (`--committee <id>` to na
 
 ### Which Committee, Which Agent
 
-A coding session resolves its active **committee** using this precedence:
-1. Explicit join via the agent's `join` tool or `/senate join`.
-2. Git branch name matching `<branch_prefix>/<committee>/<person>` (e.g. `feature/refund-v2/alice`).
-3. A `.senate/committee` file in the root of the repository worktree.
+Senate keeps two places on a developer machine, and nothing else:
+
+| Place | Holds |
+| --- | --- |
+| `~/.senate` (`$SENATE_HOME`) | `senate.toml`, `state.db`, `senates/<key>/…` (hosted Senates' logs), and `branches/<repository>/<branch>/` (the saved `.senate/` copies below) |
+| `<worktree>/.senate/` | `committee`, optionally `agent`, and the checkpoint notes `PROGRESS.md`, `DECISIONS.md`, `OPEN.md` the agent keeps. Untracked. |
+
+Senate writes nothing into a repository except that untracked `.senate/` directory, and nothing under `.git` (it only reads from git: the worktree root, the common git dir, the checked-out branch). A layer built on Senate adds no directory or convention of its own on developer machines: `.senate/` is the only one.
+
+A coding session resolves its active **committee** from the first of these that applies:
+1. Its explicit `join` (the agent's `join` tool): this session only.
+2. The git branch name `<branch_prefix>/<committee>/<person>` (e.g. `feature/refund-v2/alice`), **only when** `senate.toml` sets `committee_from_branch = true`. Off by default; `branch_prefix` alone does not turn it on.
+3. The worktree's `.senate/committee`.
+
+`senate status` says which one bound each session (`join`, `branch name`, `file`).
+
+```sh
+senate join refund-v2   # bind this worktree, on this branch, to a committee (writes .senate/committee)
+senate leave            # remove that binding
+senate pin reviewer     # sessions here speak as alice/reviewer (writes .senate/agent); senate unpin removes it
+senate where            # the committee and agent a session here gets, from where, and which branch .senate/ belongs to
+senate list             # every saved .senate/ copy, by repository (--json for scripts)
+senate free             # forget what has expired; a dry run until --yes
+```
+None of them needs the daemon; a live session in that worktree reads a change at its next prompt.
+
+**`.senate/` follows the branch.** It is untracked, so `git switch` leaves it in place, and the next branch would inherit the old one's committee and notes (and overwrite them). So Senate keeps one saved copy per (repository, branch) under `~/.senate/branches/`, and swaps when the branch changes: the files of the branch you left are saved, those of the branch you arrive on come back. A branch with no saved copy is unbound, exactly like a fresh worktree. Only the five files Senate defines are swapped (`committee`, `agent`, `PROGRESS.md`, `DECISIONS.md`, `OPEN.md`); any other file in `.senate/` stays. A detached HEAD has a copy of its own per worktree. A renamed branch keeps its files (Senate recognises `git branch -m` from the reflog, or from HEAD being unchanged) and its copy follows the new name. Git is never told and no git hook is installed: every hook, every checkpoint (the tool and the commit, timer and session-end triggers) and every command above first makes `.senate/` match the checked-out branch, so a checkpoint right after a switch carries the notes and the committee of the branch it is about. A session already open in the worktree is re-bound at its next hook, and told so in one line; an explicit `join` is not disturbed. Wherever Senate creates `.senate/`, or finds it without one, it writes `.senate/.gitignore` holding `*`, so nothing in it is ever committed and no repository's own ignore file is touched.
 
 An agent resolves its **senator identity** using this precedence:
 1. `SENATE_AGENT` environment variable in the session environment.
-2. A `.senate/agent` file at the root of the worktree.
+2. The worktree's `.senate/agent` file (`senate pin`; kept per branch like the committee).
 3. `[agents]` mapping in `senate.toml`.
 4. Harness default name (`claude` or `codex`).
+
+Known limits: a brand-new worktree on a brand-new branch starts unbound until `senate join` (a new worktree on a branch that already has a saved copy gets it back); the saved copies are keyed by the repository's real path, so moving a repository leaves its copies stale until `senate free` removes them. `senate free` removes: copies whose repository, branch or detached-HEAD worktree no longer exists (a copy for a branch that still exists is never removed, however old); session records that ended more than 7 days ago or whose process is gone; and queued items and cursors of agents with no session and no contact for `free_after_days` (default 30, in `senate.toml`). It only *lists* the data directory of a hosted Senate that `senate.toml` no longer names, because that is a log: `senate free --yes --delete-logs` removes it.
 
 ### MCP Tools & Lifecycle Hooks
 

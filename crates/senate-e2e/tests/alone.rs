@@ -369,9 +369,6 @@ async fn the_person_asks_whichever_agent_from_the_command_line_and_waits_for_the
     desk.wait_connected(None, "alice/claude", true).await;
     desk.wait_connected(None, "alice/codex", true).await;
     let socket = desk.paths.socket();
-    // Both agents have spoken, so both are seated.
-    desk.post("s-claude", "presiding").await;
-    desk.post("thread-codex", "ready").await;
 
     // `senate ask '*' ... --wait`: alice has two agents here, so the server
     // puts it to the presiding session to pick.
