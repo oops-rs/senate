@@ -2230,6 +2230,18 @@ impl Shared {
                 agent_source,
             })
             .map_err(internal)?;
+        if before.as_ref().is_some_and(|b| b.agent != session.agent) {
+            let released = self
+                .store
+                .release_held_for_others(&session.session_id, &session.agent)
+                .map_err(internal)?;
+            tracing::info!(
+                session = %session.session_id,
+                agent = %session.agent,
+                released,
+                "the session speaks as another agent now"
+            );
+        }
         let was = before.map(|b| (b.agent.clone(), b.committee().cloned(), b.state));
         let now = (
             session.agent.clone(),

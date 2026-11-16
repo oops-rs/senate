@@ -883,6 +883,21 @@ impl Store {
         Ok(changed)
     }
 
+    /// Hand items held for `id`'s hooks that are not `agent`'s back to
+    /// routing: the session speaks as `agent` now (a pin changed it), and
+    /// what was held for its old agent goes to that agent's other sessions.
+    pub fn release_held_for_others(
+        &self,
+        id: &str,
+        agent: &SenatorPath,
+    ) -> Result<usize, StoreError> {
+        Ok(self.conn().execute(
+            "UPDATE queue SET status = 'pending', session_id = NULL
+             WHERE session_id = ?1 AND status = 'queued' AND agent != ?2",
+            params![id, agent_text(agent)],
+        )?)
+    }
+
     /// Forget ended and stale sessions and delivered items not touched for
     /// `older_than`, and hand items held for a session that is no longer
     /// live back to routing.
@@ -1635,6 +1650,20 @@ mod tests {
         s.claim_inflight(std::slice::from_ref(&key), "a").unwrap();
         s.hold_for_hooks(std::slice::from_ref(&key), "a").unwrap();
         assert!(s.set_session_state("a", SessionState::Stale).unwrap());
+        let item = s.item(&claude(), &committee(), Seq(1)).unwrap().unwrap();
+        assert_eq!((item.status, item.session_id), (ItemStatus::Pending, None));
+    }
+
+    #[test]
+    fn a_session_that_changes_agent_lets_go_of_the_old_agents_items() {
+        let s = Store::in_memory().unwrap();
+        s.upsert_session(&upsert("a")).unwrap();
+        s.ingest(&claude(), &event(1), true).unwrap();
+        let k = key(&claude(), 1);
+        s.claim_inflight(std::slice::from_ref(&k), "a").unwrap();
+        s.hold_for_hooks(std::slice::from_ref(&k), "a").unwrap();
+        assert_eq!(s.release_held_for_others("a", &claude()).unwrap(), 0);
+        assert_eq!(s.release_held_for_others("a", &codex()).unwrap(), 1);
         let item = s.item(&claude(), &committee(), Seq(1)).unwrap().unwrap();
         assert_eq!((item.status, item.session_id), (ItemStatus::Pending, None));
     }
