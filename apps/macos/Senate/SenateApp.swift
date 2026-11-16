@@ -1,0 +1,115 @@
+import AppKit
+import SwiftUI
+
+/// The Senate menu-bar app: a status item with the number waiting on you and
+/// a menu, and one window with the inbox, the approvals, the Codex threads,
+/// the docket of a Senate your agent presides over, and the Senates served.
+/// Everything shown comes from the Rust core (`CoreStore`).
+///
+/// Two `App`s only because a scene modifier cannot be chosen with
+/// `#available` inside a `SceneBuilder`: from macOS 15 the window waits to
+/// be opened from the menu; on 14 SwiftUI opens it at launch.
+@main
+enum Main {
+    static func main() {
+        if #available(macOS 15.0, *) {
+            SenateApp.main()
+        } else {
+            SenateAppLegacy.main()
+        }
+    }
+}
+
+@available(macOS 15.0, *)
+struct SenateApp: App {
+    @State private var store = CoreStore()
+
+    var body: some Scene {
+        menuBar(store)
+        mainWindow(store).defaultLaunchBehavior(.suppressed)
+    }
+}
+
+struct SenateAppLegacy: App {
+    @State private var store = CoreStore()
+
+    var body: some Scene {
+        menuBar(store)
+        mainWindow(store)
+    }
+}
+
+@MainActor
+private func menuBar(_ store: CoreStore) -> some Scene {
+    MenuBarExtra {
+        MenuContent(store: store)
+    } label: {
+        MenuBarLabel(store: store)
+    }
+}
+
+@MainActor
+private func mainWindow(_ store: CoreStore) -> some Scene {
+    Window("Senate", id: CoreStore.windowID) {
+        MainWindow(store: store)
+            .frame(minWidth: 600, minHeight: 440)
+    }
+    .defaultSize(width: 800, height: 620)
+}
+
+/// The status item: an icon, and the number waiting on you next to it.
+struct MenuBarLabel: View {
+    let store: CoreStore
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: store.state.online
+                ? "building.columns.fill"
+                : "building.columns")
+            if let badge = store.state.menu.badge {
+                Text(verbatim: badge)
+            }
+        }
+        .help(store.state.menu.tooltip)
+        .task {
+            // The label is the one view alive from launch: hand the store
+            // the window opener, for notifications and `SENATE_APP_SHOW`.
+            store.attach(openWindow: openWindow)
+        }
+    }
+}
+
+/// The status item's menu.
+struct MenuContent: View {
+    let store: CoreStore
+
+    var body: some View {
+        Text(verbatim: store.state.menu.title)
+        Text(verbatim: store.state.menu.pending)
+        if let docket = store.state.menu.docket {
+            Text(verbatim: docket)
+        }
+        if let setup = store.setupError {
+            Text(verbatim: L("menu.setup", setup))
+        }
+        if !store.state.menu.lines.isEmpty {
+            Divider()
+            ForEach(store.state.menu.lines, id: \.self) { line in
+                Text(verbatim: line)
+            }
+        }
+        Divider()
+        Button(L("menu.open_inbox")) { store.show(.inbox) }
+            .keyboardShortcut("i")
+        Button(L("menu.open_approvals")) { store.show(.approvals) }
+            .keyboardShortcut("a")
+        if store.state.menu.docket != nil {
+            Button(L("menu.open_docket")) { store.show(.docket) }
+                .keyboardShortcut("d")
+        }
+        Divider()
+        Button(L("menu.quit")) { NSApplication.shared.terminate(nil) }
+            .keyboardShortcut("q")
+    }
+}

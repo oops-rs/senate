@@ -1,0 +1,69 @@
+# The Senate macOS app. Generate the Xcode project with `xcodegen generate`
+# (Senate.xcodeproj is generated, not checked in). See README.md.
+name: Senate
+options:
+  bundleIdPrefix: dev.senate
+  developmentLanguage: en
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    # The pre-build phase writes into the source tree (Generated/).
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+    DEAD_CODE_STRIPPING: YES
+targets:
+  Senate:
+    type: application
+    platform: macOS
+    sources:
+      - path: Senate
+        excludes:
+          - Info.plist
+      # Written by scripts/build-core.sh (the pre-build phase), so it may
+      # be missing when the project is generated.
+      - path: Generated/senate_app_core.swift
+        optional: true
+        group: Generated
+    preBuildScripts:
+      - name: Build Rust core
+        script: |
+          "$PROJECT_DIR/scripts/build-core.sh"
+        basedOnDependencyAnalysis: false
+        outputFiles:
+          - $(PROJECT_DIR)/Generated/libsenate_app_core.a
+          - $(PROJECT_DIR)/Generated/senate_app_core.swift
+          - $(PROJECT_DIR)/Generated/senate_app_coreFFI.h
+    info:
+      path: Senate/Info.plist
+      properties:
+        CFBundleDisplayName: Senate
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        # The languages the app is written in; the system language picks one
+        # and English is the fallback.
+        CFBundleLocalizations:
+          - en
+          - zh-Hans
+        LSMinimumSystemVersion: "14.0"
+        # Menu bar only: no Dock icon, no app menu.
+        LSUIElement: true
+        NSAppleEventsUsageDescription: Senate opens Codex in Terminal.
+        NSHumanReadableCopyright: MIT
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.senate.app
+        PRODUCT_NAME: Senate
+        GENERATE_INFOPLIST_FILE: NO
+        SWIFT_OBJC_BRIDGING_HEADER: Senate/Senate-Bridging-Header.h
+        HEADER_SEARCH_PATHS: $(PROJECT_DIR)/Generated
+        LIBRARY_SEARCH_PATHS: $(PROJECT_DIR)/Generated
+        # What the Rust static library needs from the system
+        # (`cargo rustc --print native-static-libs`).
+        OTHER_LDFLAGS: -lsenate_app_core -liconv -framework CoreFoundation -framework Security -framework SystemConfiguration
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "-"
+        ENABLE_HARDENED_RUNTIME: NO
+        COMBINE_HIDPI_IMAGES: YES

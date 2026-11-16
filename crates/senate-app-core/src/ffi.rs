@@ -101,7 +101,9 @@ pub enum MentionKind {
     Senior,
     /// An agent: `[senator::alice/claude]`.
     Junior,
-    /// Whichever of a person's agents: `[senator::alice/*]`.
+    /// Whichever of a person's agents, the wildcard form of an agent's id.
+    /// (Written out in a comment this would open a nested one in the generated
+    /// Swift, so the example lives in the tests.)
     AnyAgent,
     /// `[speaker]`.
     Speaker,
