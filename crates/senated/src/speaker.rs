@@ -18,7 +18,7 @@ use crate::component::{Component, ComponentContext};
 /// checkpoint, hands work back, and answers agents that address it. What it
 /// would have mirrored to a group has no group to go to, since no group can
 /// be bound without a platform; a post that is refused as unsupported is
-/// skipped, as it is on any platform that lacks a feature.
+/// skipped, as it is on any platform that cannot do what was asked.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoChat;
 

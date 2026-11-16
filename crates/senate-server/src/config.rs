@@ -1,5 +1,7 @@
-//! `senate-server.toml`. Every key is documented in
-//! `config/senate-server.example.toml`.
+//! `senate-server.toml`. Every key is documented in this crate's
+//! `config/senate-server.example.toml`; `senated` reads the same keys at the
+//! top level of its own file (`config/senated.example.toml` at the
+//! repository root).
 //!
 //! Two separate things are configured about people. The **roster**
 //! (`[roster]`, a [`RosterConfig`]) says who exists: handles, names,
@@ -293,7 +295,7 @@ impl fmt::Debug for TokenConfig {
 }
 
 /// `postgres://user:secret@host/db` → `postgres://user:***@host/db`.
-pub(crate) fn redact_url(url: &str) -> String {
+pub fn redact_url(url: &str) -> String {
     let Some((scheme, rest)) = url.split_once("://") else {
         return url.to_string();
     };

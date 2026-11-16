@@ -40,8 +40,8 @@ data_dir = "data"
 # looking open, and must not look present. Default 150.
 # presence_grace_secs = 150
 
-# Presence, per agent: with no heartbeat for this many seconds an `online`
-# agent becomes `disconnected`... Default 120.
+# Presence is kept for each agent. With no heartbeat for this many seconds
+# an `online` agent becomes `disconnected`... Default 120.
 # presence_disconnected_secs = 120
 # ...and after this many its lease expires: `absent`, and the Speaker covers
 # for it from its own latest checkpoint. Must exceed

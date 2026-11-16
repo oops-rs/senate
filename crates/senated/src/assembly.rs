@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use senate_core::{ChatSurface, Hub, Roster};
 use senate_log::LogStore;
-use senate_server::{Authenticate, Running, Server, ServerError, ServerHub};
+use senate_server::{Authenticate, Running, Server, ServerError, ServerHub, redact_url};
 use senate_speaker::{BasisBrain, Brain, SpeakerArgs, SpeakerConfig, SpeakerMsg};
 use senate_work::{Forge, Runner};
 use tokio::sync::{mpsc, watch};
@@ -182,7 +182,7 @@ impl Assembly {
             None => senate_log::connect(&config.server.database_url)
                 .await
                 .map_err(|source| AssemblyError::Store {
-                    url: redact(&config.server.database_url),
+                    url: redact_url(&config.server.database_url),
                     source,
                 })?,
         };
@@ -237,20 +237,6 @@ impl Assembly {
             supervisor: Some(supervisor),
             speaker: config.speaker.is_some().then_some(slot),
         })
-    }
-}
-
-/// A `postgres://user:password@…` URL without its password, for errors.
-fn redact(url: &str) -> String {
-    match (url.find("://"), url.find('@')) {
-        (Some(scheme), Some(at)) if scheme < at => {
-            let userinfo = &url[scheme + 3..at];
-            match userinfo.split_once(':') {
-                Some((user, _)) => format!("{}{user}:***{}", &url[..scheme + 3], &url[at..]),
-                None => url.to_owned(),
-            }
-        }
-        _ => url.to_owned(),
     }
 }
 
@@ -353,19 +339,4 @@ async fn shutdown_signal() -> anyhow::Result<()> {
         .await
         .context("waiting for ctrl-c")?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_database_password_never_reaches_an_error() {
-        assert_eq!(
-            redact("postgres://senate:secret@127.0.0.1:5432/senate"),
-            "postgres://senate:***@127.0.0.1:5432/senate"
-        );
-        assert_eq!(redact("sqlite:/tmp/x.db"), "sqlite:/tmp/x.db");
-        assert_eq!(redact("memory:"), "memory:");
-    }
 }
