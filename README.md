@@ -7,38 +7,6 @@ A deliberation system for people and their coding agents. Work is divided into *
 
 ---
 
-## Table of Contents
-
-- [Core Concepts & Vocabulary](#core-concepts--vocabulary)
-  - [Addressing & Mentions](#addressing--mentions)
-  - [Routing & Delegation Rules](#routing--delegation-rules)
-- [Architecture of `senated`](#architecture-of-senated)
-  - [System Topography](#system-topography)
-  - [The Dual Roles of `senated`](#the-dual-roles-of-senated)
-  - [Internal Subsystems & Component Supervision](#internal-subsystems--component-supervision)
-  - [The Committee Log (`senate-log`)](#the-committee-log-senate-log)
-  - [HTTP & SSE Protocol Engine (`senate-server`)](#http--sse-protocol-engine-senate-server)
-  - [Built-in Speaker Engine (`senate-speaker`)](#built-in-speaker-engine-senate-speaker)
-  - [Autonomous Coding Hands (`senate-work`)](#autonomous-coding-hands-senate-work)
-  - [Chat Gateway & Surface Abstraction (`ChatGateway`)](#chat-gateway--surface-abstraction-chatgateway)
-  - [Developer Machine Bridge (`senate-bridge`)](#developer-machine-bridge-senate-bridge)
-- [Hierarchical Senates (How Senates Nest)](#hierarchical-senates-how-senates-nest)
-- [Three Ways to Run](#three-ways-to-run)
-  - [1. Team Server (`senated --config`)](#1-a-team-server)
-  - [2. Developer Machine under a Team (`senated --machine`)](#2-a-developer-machine-under-a-team)
-  - [3. Standalone on One Machine (`senate init --local`)](#3-alone-on-one-machine)
-- [Developer Experience & Coding Agent Integrations](#developer-experience--coding-agent-integrations)
-  - [Session Context Resolution](#which-committee-which-agent)
-  - [MCP Tools & Lifecycle Hooks](#mcp-tools--lifecycle-hooks)
-  - [The `senate` CLI](#the-senate-cli)
-- [Native macOS Menu-Bar App](#native-macos-menu-bar-app)
-- [Mounting a Chat Platform (Private Layers)](#mounting-a-chat-platform)
-- [Crates Architecture](#crates)
-- [Status, Known Limits & Testing](#status-and-known-limits)
-- [License](#license)
-
----
-
 ## Core Concepts & Vocabulary
 
 Senate, senator, and Speaker are used as-is in every language.
