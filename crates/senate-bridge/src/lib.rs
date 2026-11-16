@@ -1,8 +1,9 @@
 //! The developer-machine side of Senate: joining a person's coding-agent
 //! sessions to committee logs, across every Senate the machine serves. It
 //! runs inside `senated --machine` (`senated::machine`), and is the `senate`
-//! command (`install`, `status`, `inbox`, `take`, `init --local`, and the
-//! MCP server and hooks Claude Code and Codex run).
+//! command (`install`, `status`, `inbox`, `take`, `init --local`,
+//! `service` (keep the daemon running), and the MCP server and hooks
+//! Claude Code and Codex run).
 //!
 //! # Several Senates, one daemon
 //!
@@ -78,6 +79,7 @@ pub mod mcp;
 pub mod paths;
 pub mod preside;
 pub mod routing;
+pub mod service;
 pub mod session;
 pub mod speak;
 pub mod state;

@@ -16,7 +16,7 @@ use senate_bridge::hook::{self, HookEnv, HookKind, HookTimeouts};
 use senate_bridge::ipc::SayKind;
 use senate_bridge::ipc::{self, DocketReply, InboxReply, Posted, Request, SessionSelector};
 use senate_bridge::session::Runtime;
-use senate_bridge::{BridgeConfig, Paths, init, install, mcp, preside, speak, status};
+use senate_bridge::{BridgeConfig, Paths, init, install, mcp, preside, service, speak, status};
 use senate_core::{CommitteeId, EventId, Locale, Name, Seq};
 
 #[derive(Parser)]
@@ -186,6 +186,12 @@ enum Cmd {
         #[arg(long, value_name = "PATH")]
         claude_bin: Option<PathBuf>,
     },
+    /// Keep `senated --machine` running without a terminal: a launchd user
+    /// agent on macOS, a systemd user unit on Linux.
+    Service {
+        #[command(subcommand)]
+        command: ServiceCmd,
+    },
     /// Show the daemon, the Senate it is connected to, each agent's committees, and registered sessions.
     Status,
     /// Smoke test of the Codex app-server adapter: connect, initialize, read
@@ -208,6 +214,31 @@ enum Cmd {
         #[command(subcommand)]
         command: DebugCmd,
     },
+}
+
+#[derive(Subcommand)]
+enum ServiceCmd {
+    /// Write the service file and load the service: it runs `senated
+    /// --machine` from login, restarts it if it dies and logs to
+    /// `senated.log` in the Senate home. Dry run without --yes.
+    Install {
+        /// Write the file and load the service.
+        #[arg(long)]
+        yes: bool,
+        /// The daemon binary (default: `senated` next to this `senate`, else
+        /// on PATH).
+        #[arg(long, value_name = "PATH")]
+        senated: Option<PathBuf>,
+    },
+    /// Stop the service and remove its file. Dry run without --yes.
+    Uninstall {
+        /// Stop it and remove the file.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Whether the service file exists, whether the service manager has the
+    /// service loaded and running, and where its log is.
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -467,6 +498,61 @@ fn speak_new(
     })
 }
 
+fn service_spec() -> anyhow::Result<(service::Spec, Locale)> {
+    let platform = service::Platform::current()
+        .context("`senate service` supports macOS (launchd) and Linux (systemd)")?;
+    let user_home = dirs::home_dir().context("cannot find the home directory")?;
+    let paths = Paths::from_env()?;
+    let senate_home = std::path::absolute(paths.home()).context("resolving the Senate home")?;
+    let locale = BridgeConfig::locale_at(&paths.config());
+    Ok((
+        service::Spec {
+            platform,
+            user_home,
+            senate_home,
+            uid: service::current_uid(),
+        },
+        locale,
+    ))
+}
+
+fn run_service(command: ServiceCmd) -> anyhow::Result<()> {
+    let (spec, locale) = service_spec()?;
+    match command {
+        ServiceCmd::Install { yes, senated } => {
+            let senated = match senated {
+                Some(path) => std::path::absolute(path)?,
+                None => {
+                    let exe = std::env::current_exe().context("locating this binary")?;
+                    service::locate_senated(&exe, std::env::var_os("PATH").as_deref()).context(
+                        "`senated` is neither next to `senate` nor on PATH: pass it with --senated",
+                    )?
+                }
+            };
+            let plan = service::plan_install(&spec, &senated);
+            if yes {
+                service::apply_install(&plan, &senated, &service::SystemManager)?;
+            }
+            print!(
+                "{}",
+                service::render_install(&plan, spec.platform, yes, locale)
+            );
+        }
+        ServiceCmd::Uninstall { yes } => {
+            let plan = service::plan_uninstall(&spec);
+            if yes {
+                service::apply_uninstall(&plan, &service::SystemManager)?;
+            }
+            print!("{}", service::render_uninstall(&plan, yes, locale));
+        }
+        ServiceCmd::Status => {
+            let status = service::status(&spec, &service::SystemManager);
+            print!("{}", service::render_status(&status, locale));
+        }
+    }
+    Ok(())
+}
+
 fn run(command: Cmd) -> anyhow::Result<()> {
     match command {
         Cmd::Hook { .. } => Ok(()),
@@ -646,6 +732,7 @@ fn run(command: Cmd) -> anyhow::Result<()> {
             let transport = config.transport().map_err(anyhow::Error::msg)?;
             runtime(false)?.block_on(codex_smoke(&transport, &thread, text.as_deref()))
         }
+        Cmd::Service { command } => run_service(command),
         Cmd::Status => {
             let paths = Paths::from_env()?;
             let view = runtime(false)?.block_on(status::collect(&paths))?;

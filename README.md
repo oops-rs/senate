@@ -282,6 +282,13 @@ Install integrations and start the machine daemon:
 ./target/release/senate status           # Inspect connected Senates & agents
 ```
 
+To keep the daemon running without a terminal, install it as a user service (a launchd agent on macOS, a systemd user unit on Linux; a dry run until `--yes`):
+```sh
+./target/release/senate service install --yes   # runs `senated --machine` from login, restarts it, logs to ~/.senate/senated.log
+./target/release/senate service status          # service file, launchd/systemd state, log path
+./target/release/senate service uninstall --yes # stop it and remove the file
+```
+
 ### 3. Alone on One Machine
 
 Used for standalone local development with no central server.
@@ -289,9 +296,11 @@ Used for standalone local development with no central server.
 ```sh
 ./target/release/senate init --local --person alice   # Writes ~/.senate/senate.toml
 ./target/release/senate install --yes
-./target/release/senated --machine
+./target/release/senated --machine        # or keep it running: senate service install --yes
 ./target/release/senate status
 ```
+
+`senate service install --yes` keeps `senated --machine` running as a user service instead of leaving a terminal open (`senate service status` and `senate service uninstall --yes` to inspect and remove it; each is a dry run without `--yes`).
 
 In solo mode, `senated --machine` hosts a local top Senate on loopback SQLite (`127.0.0.1:7979`), and your primary agent (`alice/claude`) is designated as Speaker.
 
