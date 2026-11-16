@@ -218,7 +218,7 @@ impl FakeSurface {
                     .threads
                     .get(parent)
                     .cloned()
-                    .unwrap_or_else(|| format!("omt_{parent}"));
+                    .unwrap_or_else(|| format!("t_{parent}"));
                 state.threads.insert(parent.clone(), thread.clone());
                 Some(thread)
             }

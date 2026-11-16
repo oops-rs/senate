@@ -341,8 +341,7 @@ impl Engine {
             let text = render::choice_not_understood(l, &choice.candidates);
             return self.say(chat, &text).await;
         };
-        self.choices.retain(|c| c.ask_ref != choice.ask_ref);
-        match choice.waiting {
+        let flow = match choice.waiting {
             Waiting::Intent {
                 intent,
                 said,
@@ -353,18 +352,26 @@ impl Engine {
                     .await
             }
             Waiting::Handoff { root } => {
-                let Some(thread) = self
+                match self
                     .committees
                     .get(&chat.committee)
                     .and_then(|state| state.board.get(root))
                     .cloned()
-                else {
-                    return Ok(Flow::Done);
-                };
-                self.approve(chat, &thread, &agent).await?;
-                Ok(Flow::Done)
+                {
+                    Some(thread) => self
+                        .approve(chat, &thread, &agent)
+                        .await
+                        .map(|_| Flow::Done),
+                    None => Ok(Flow::Done),
+                }
             }
+        };
+        // The answer is processed again after a Brain call it waits on (a
+        // relayed question's triage) or a stall: the choice stays until then.
+        if matches!(flow, Ok(Flow::Done)) {
+            self.choices.retain(|c| c.ask_ref != choice.ask_ref);
         }
+        flow
     }
 }
 

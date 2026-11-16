@@ -102,7 +102,7 @@ pub(crate) fn root_mirror(l: Locale, event: &Event) -> String {
     let seq = seq_note(l, event.seq);
     let label = label(l, event);
     let body = body(l, event);
-    match quoted(&body) {
+    match quoted_for(event, &body) {
         None => format!("{label} {body}{seq}"),
         Some(quote) => format!("{label}{seq}\n{quote}"),
     }
@@ -113,7 +113,7 @@ pub(crate) fn root_mirror(l: Locale, event: &Event) -> String {
 pub(crate) fn thread_mirror(l: Locale, event: &Event) -> String {
     let label = label(l, event);
     let body = body(l, event);
-    match quoted(&body) {
+    match quoted_for(event, &body) {
         None => format!("{label} {body}"),
         Some(quote) => format!("{label}\n{quote}"),
     }
@@ -126,7 +126,7 @@ pub(crate) fn proposal_root(l: Locale, event: &Event) -> String {
     let author = author(l, event);
     let seq = event.seq;
     let body = body(l, event);
-    match (l, quoted(&body)) {
+    match (l, quoted_for(event, &body)) {
         (Locale::Zh, None) => format!("{author} 提议记为决策：{body}（seq {seq}）回复「对」确认"),
         (Locale::Zh, Some(quote)) => {
             format!("{author} 提议记为决策（seq {seq}）回复「对」确认\n{quote}")
@@ -146,6 +146,16 @@ pub(crate) fn decision_ack(l: Locale, seq: Seq) -> String {
         Locale::Zh => format!("已记录决策（seq {seq}）"),
         Locale::En => format!("Decision recorded (seq {seq})"),
     }
+}
+
+/// [`quoted`], except for the Speaker's own canned text: a provisional
+/// answer ("[senator::alice/claude] is not online …") names the agent
+/// first on purpose and is not anyone's words to guard against.
+pub(super) fn quoted_for(event: &Event, body: &str) -> Option<String> {
+    if senate_core::is_provisional(event) && event.from == Address::Speaker {
+        return None;
+    }
+    quoted(body)
 }
 
 /// An agent's body is posted as markdown, so one of its lines could pass

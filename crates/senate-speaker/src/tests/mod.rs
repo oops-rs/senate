@@ -6,15 +6,15 @@
 // the shared scaffolding have no caller.
 #![allow(dead_code)]
 
-// mod agent;
-// mod agents;
+mod agent;
+mod agents;
 mod basis_brain;
 // mod continuity;
-// mod decisions;
+mod decisions;
 mod flows;
 pub(crate) mod hub;
 mod review;
 mod rig;
 mod surface;
-// mod tasks;
+mod tasks;
 // mod work;

@@ -8,7 +8,7 @@ use senate_core::{
     WorkState,
 };
 
-use super::{author, body, cut, one_line, person, quoted, senator, signature_of};
+use super::{author, body, cut, one_line, person, quoted_for, senator, signature_of};
 use crate::syntax::usage;
 
 /// Characters of the instruction in a card's title and a one-line reason.
@@ -523,7 +523,7 @@ fn covering_label(l: Locale, event: &Event, old: &SenatorPath) -> String {
 pub(crate) fn thread_mirror_covering(l: Locale, event: &Event, old: &SenatorPath) -> String {
     let label = covering_label(l, event, old);
     let body = body(l, event);
-    match quoted(&body) {
+    match quoted_for(event, &body) {
         None => format!("{label} {body}"),
         Some(quote) => format!("{label}\n{quote}"),
     }
