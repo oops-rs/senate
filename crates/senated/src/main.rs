@@ -4,6 +4,7 @@
 //! also runs the built-in Speaker, with `[work]` its hands. No chat platform
 //! is mounted: that is a private layer's, built on the `senated` library.
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use anyhow::Context;
@@ -22,6 +23,8 @@ struct Cli {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
+        .with_ansi(std::io::stderr().is_terminal())
+        .with_writer(std::io::stderr)
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
