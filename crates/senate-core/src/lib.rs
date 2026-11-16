@@ -45,6 +45,7 @@ pub mod locale;
 pub mod mention;
 pub mod roster;
 pub mod senator;
+pub mod surface;
 pub mod task;
 pub mod work;
 
@@ -66,6 +67,10 @@ pub use roster::{
     Account, AgentOf, DelegationPresence, ResolveError, Roster, RosterConfig, RosterError, Senior,
 };
 pub use senator::{MAX_AGENT_DEPTH, SenatorPath, SenatorPathError};
+pub use surface::{
+    AdoptedGroup, Card, ChatSurface, CreatedGroup, NewGroup, PostTarget, Posted, SurfaceError,
+    UnboundMention,
+};
 pub use task::{
     Link, OutputLevel, StatusPayload, Step, TaskBoard, TaskOwner, ThreadSummary, TriagePayload,
     TriageVerdict, needs_triage,
