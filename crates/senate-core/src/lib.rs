@@ -36,6 +36,7 @@
 //! [`Address::Other`].
 
 pub mod address;
+pub mod brief;
 pub mod continuity;
 pub mod event;
 pub mod ids;
@@ -47,6 +48,7 @@ pub mod task;
 pub mod work;
 
 pub use address::{Address, AddressParseError, Guest, GuestError, MAX_GUEST_ID_LEN};
+pub use brief::{Brief, BriefBuilder};
 pub use continuity::{
     AgentPresence, CheckpointFiles, CheckpointPayload, CheckpointRecord, CheckpointTrigger,
     Checkpoints, PresenceBoard, PresencePayload, PresenceState, presence_event,
