@@ -166,8 +166,11 @@ impl ServerBuilder {
 
         // Every committee's writer runs its presence leases, so start them all
         // now: after a restart an agent that never comes back must still go
-        // `disconnected` and `absent`.
-        tokio::spawn(hub.clone().start_writers());
+        // `disconnected` and `absent`. Starting one also seats again the
+        // agents its log has seen, so this finishes before anything is
+        // served: the roster the hub hands the Speaker, and the agents
+        // `/v1/me` lists, are complete from the first request.
+        hub.clone().start_writers().await;
 
         let listener = match TcpListener::bind(&config.listen).await {
             Ok(listener) => listener,
