@@ -1,0 +1,36 @@
+# Postgres for senated.
+#
+#   docker compose -f deploy/docker-compose.yml up -d --wait
+#   database_url = "postgres://senate:senate@127.0.0.1:5432/senate"
+#
+# Plain Postgres 16 plus the `vector` extension, so a later embedding index
+# needs no infrastructure change. Set SENATE_PG_PORT to publish on another
+# host port. The log store's conformance suite and the server's Postgres
+# tests run against it with
+#
+#   SENATE_TEST_DATABASE_URL=postgres://senate:senate@127.0.0.1:5432/senate \
+#     cargo test -p senate-log -p senate-server
+
+name: senate
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: senate
+      POSTGRES_PASSWORD: senate
+      POSTGRES_DB: senate
+    ports:
+      - "127.0.0.1:${SENATE_PG_PORT:-5432}:5432"
+    volumes:
+      - senate-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U senate -d senate"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+volumes:
+  senate-pg:

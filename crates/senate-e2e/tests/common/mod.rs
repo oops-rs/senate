@@ -135,13 +135,17 @@ struct Hands {
 }
 
 type Tweak<T> = Box<dyn FnOnce(&mut T)>;
+/// How the chat platform is set up, on every start of the daemon.
+type Platform = Arc<dyn Fn(&FakeChat) + Send + Sync>;
 
 /// How a world is put together; [`World::start`] covers the common case.
 pub struct Setup {
     answer_fallback_secs: u64,
     locale: Locale,
     database_url: Option<String>,
+    sqlite: bool,
     chat: bool,
+    platform: Option<Platform>,
     hands: Option<Hands>,
     server: Vec<Tweak<senate_server::ServerConfig>>,
     speaker: Vec<Tweak<SpeakerConfig>>,
@@ -155,7 +159,9 @@ impl Setup {
             answer_fallback_secs: 60,
             locale: Locale::Zh,
             database_url: None,
+            sqlite: false,
             chat: true,
+            platform: None,
             hands: None,
             server: Vec::new(),
             speaker: Vec::new(),
@@ -178,6 +184,18 @@ impl Setup {
     /// Keep the log at `url` instead of `memory:`.
     pub fn database(mut self, url: String) -> Self {
         self.database_url = Some(url);
+        self
+    }
+
+    /// Keep the log in an SQLite file in the world's temp dir.
+    pub fn sqlite(mut self) -> Self {
+        self.sqlite = true;
+        self
+    }
+
+    /// Set the chat platform up with `f` before each start of the daemon.
+    pub fn platform(mut self, f: impl Fn(&FakeChat) + Send + Sync + 'static) -> Self {
+        self.platform = Some(Arc::new(f));
         self
     }
 
@@ -234,6 +252,7 @@ pub struct World {
     pub brain: Arc<ScriptedBrain>,
     pub locale: Locale,
     hands: Option<Hands>,
+    platform: Option<Platform>,
 }
 
 impl World {
@@ -249,10 +268,11 @@ impl World {
     async fn start_from(setup: Setup) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let data = dir.path().join("server");
-        let database_url = setup
-            .database_url
-            .clone()
-            .unwrap_or_else(|| "memory:".into());
+        let database_url = match (&setup.database_url, setup.sqlite) {
+            (Some(url), _) => url.clone(),
+            (None, true) => format!("sqlite:{}", dir.path().join("log.db").display()),
+            (None, false) => "memory:".into(),
+        };
         let mut people = String::new();
         for (handle, chat) in &setup.people {
             people.push_str(&format!(
@@ -343,6 +363,7 @@ token = "tok-carol"
             brain: ScriptedBrain::new(),
             locale: setup.locale,
             hands: setup.hands,
+            platform: setup.platform,
         };
         world.launch(setup.chat).await;
         world
@@ -357,6 +378,9 @@ token = "tok-carol"
         }
         if chat {
             let (fake, gateway) = FakeChat::new();
+            if let Some(platform) = &self.platform {
+                platform(&fake);
+            }
             assembly = assembly.chat_gateway(gateway.clone()).unwrap();
             self.chat = Some(fake);
             self.gateway = Some(gateway);
