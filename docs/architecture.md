@@ -248,6 +248,7 @@ Chinese and English are both first-class.
 | `senate-work` | The Speaker's hands: coding work on request, in a container, delivered as a branch or PR. |
 | `senate-bridge` | The developer-machine side: sessions, delivery, MCP tools (the presiding ones too), hooks, across every Senate a machine serves; and the `senate` command. |
 | `senated` | The daemon binary (`--config`, `--machine`), and the assembly library a private layer builds its own daemon from: `Assembly`, supervised `Component`s, `Machine`, the platform-neutral half of a chat gateway (`ChatGateway`), and, behind the `testing` feature, a fake chat platform. |
+| `senate-app-core` | The native apps' shared core: a client of `senated --machine` over `bridge.sock`, exposed to Swift with UniFFI. It folds the daemon's `watch` stream and reads (inbox per agent, approvals, docket) into one snapshot, writes the sentences built from data for the app's `Locale`, and maps the person's actions (reply, take, close, approve) to IPC requests. The macOS app (`apps/macos`) renders it. The docket is read-only: routing and covering are the presiding agent's own tools. |
 | `senate-e2e` | End-to-end tests: the real server, Speaker and bridges, assembled by `senated`, against the fake chat platform and the fake runner and forge. |
 
 Dependency direction: every crate depends on `senate-core`. The Speaker and

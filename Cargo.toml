@@ -19,6 +19,7 @@ senate-server = { path = "crates/senate-server" }
 senate-work = { path = "crates/senate-work" }
 senate-speaker = { path = "crates/senate-speaker" }
 senate-bridge = { path = "crates/senate-bridge" }
+senate-app-core = { path = "crates/senate-app-core" }
 senated = { path = "crates/senated" }
 senate-e2e = { path = "crates/senate-e2e" }
 
@@ -71,6 +72,11 @@ libc = "0.2"
 clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# The native apps' shared core (crates/senate-app-core): Swift bindings
+# over UniFFI. Pinned exactly: the generated Swift and the scaffolding must
+# come from the same version.
+uniffi = "=0.32.2"
 
 # Tests.
 tempfile = "3"

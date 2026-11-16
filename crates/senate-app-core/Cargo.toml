@@ -1,0 +1,41 @@
+[package]
+name = "senate-app-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The shared core of the native Senate apps: a client of the developer-machine daemon, exposed to Swift over UniFFI."
+
+[lib]
+name = "senate_app_core"
+# `lib` for the tests and the example, `staticlib` for the Xcode app.
+crate-type = ["lib", "staticlib"]
+
+[[bin]]
+# Generates the Swift bindings from the built library
+# (apps/macos/scripts/build-core.sh); not part of a normal build.
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["bindgen"]
+
+[features]
+bindgen = ["uniffi/cli"]
+
+[dependencies]
+senate-bridge = { workspace = true }
+senate-core = { workspace = true }
+uniffi = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
