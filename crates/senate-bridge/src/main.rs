@@ -550,6 +550,7 @@ fn service_spec() -> anyhow::Result<(service::Spec, Locale)> {
             user_home,
             senate_home,
             uid: service::current_uid(),
+            path: std::env::var("PATH").ok().filter(|p| !p.is_empty()),
         },
         locale,
     ))

@@ -72,6 +72,11 @@ pub struct Spec {
     pub senate_home: PathBuf,
     /// The user's numeric id, for launchd's `gui/<uid>` domain.
     pub uid: u32,
+    /// The `PATH` the daemon runs with. A service manager starts a program
+    /// with a minimal `PATH`, and the daemon runs `git` and the coding
+    /// agents' own programs, so the one in effect at install time is kept.
+    /// `None` leaves the service manager's default.
+    pub path: Option<String>,
 }
 
 impl Spec {
@@ -141,13 +146,23 @@ pub fn launchd_plist(spec: &Spec, senated: &Path) -> String {
         "  <key>StandardOutPath</key>\n  <string>{log}</string>\n  \
          <key>StandardErrorPath</key>\n  <string>{log}</string>"
     );
+    let mut env = Vec::new();
+    if let Some(path) = &spec.path {
+        env.push(("PATH", path.clone()));
+    }
     if let Some(home) = spec.home_override() {
-        let _ = writeln!(
-            out,
-            "  <key>EnvironmentVariables</key>\n  <dict>\n    <key>SENATE_HOME</key>\n    \
-             <string>{}</string>\n  </dict>",
-            xml(&text(home))
-        );
+        env.push(("SENATE_HOME", text(home)));
+    }
+    if !env.is_empty() {
+        out.push_str("  <key>EnvironmentVariables</key>\n  <dict>\n");
+        for (key, value) in env {
+            let _ = writeln!(
+                out,
+                "    <key>{key}</key>\n    <string>{}</string>",
+                xml(&value)
+            );
+        }
+        out.push_str("  </dict>\n");
     }
     out.push_str("</dict>\n</plist>\n");
     out
@@ -189,6 +204,13 @@ pub fn systemd_unit(spec: &Spec, senated: &Path) -> String {
         systemd_quoted(&text(senated))
     );
     out.push_str("Restart=always\nRestartSec=5\n");
+    if let Some(path) = &spec.path {
+        let _ = writeln!(
+            out,
+            "Environment={}",
+            systemd_quoted(&format!("PATH={path}"))
+        );
+    }
     if let Some(home) = spec.home_override() {
         let _ = writeln!(
             out,
@@ -699,6 +721,7 @@ mod tests {
             user_home: user.into(),
             senate_home: home.into(),
             uid: 501,
+            path: None,
         }
     }
 
@@ -937,12 +960,39 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_path_at_install_time_is_given_to_the_daemon() {
+        let mut mac = spec(Platform::Macos, "/Users/alice", "/Users/alice/.senate");
+        mac.path = Some("/Users/alice/.local/bin:/usr/bin & co".into());
+        let plist = launchd_plist(&mac, Path::new("/x/senated"));
+        assert!(
+            plist.contains(
+                "<key>PATH</key>\n    <string>/Users/alice/.local/bin:/usr/bin &amp; co</string>"
+            ),
+            "{plist}"
+        );
+        assert!(!plist.contains("SENATE_HOME"));
+
+        let mut linux = spec(Platform::Linux, "/home/alice", "/srv/sen");
+        linux.path = Some("/home/alice/.local/bin:/usr/bin".into());
+        let unit = systemd_unit(&linux, Path::new("/x/senated"));
+        assert!(
+            unit.contains("Environment=\"PATH=/home/alice/.local/bin:/usr/bin\"\n"),
+            "{unit}"
+        );
+        assert!(unit.contains("Environment=\"SENATE_HOME=/srv/sen\"\n"));
+
+        let none = spec(Platform::Macos, "/Users/alice", "/Users/alice/.senate");
+        assert!(!launchd_plist(&none, Path::new("/x/senated")).contains("EnvironmentVariables"));
+    }
+
     fn temp_spec(platform: Platform, dir: &Path) -> Spec {
         Spec {
             platform,
             user_home: dir.join("user home"),
             senate_home: dir.join("user home/.senate"),
             uid: 501,
+            path: None,
         }
     }
 
