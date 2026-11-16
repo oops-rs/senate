@@ -250,7 +250,12 @@ platform in memory for testing a layer's assembly end to end.
 | `senate-work` | The Speaker's hands: coding work in a container, delivered as a branch or a PR. |
 | `senate-bridge` | The developer-machine side (sessions, delivery, hooks and MCP tools for Claude Code and Codex, across every Senate the machine serves) and the `senate` command. |
 | `senated` | The daemon binary (`--config` for a server, `--machine` for a developer machine) and the assembly library. |
+| `senate-app-core` | The native apps' shared core: a client of `senated --machine` over its socket, exposed to Swift with UniFFI. The Senates a machine serves, the person's agents, an inbox per agent, Codex approvals, and the docket of a Senate an agent presides over (read-only). |
 | `senate-e2e` | End-to-end tests of all of the above together. |
+
+The macOS menu-bar app is in [`apps/macos`](apps/macos) (SwiftUI over
+`senate-app-core`; English and Simplified Chinese; build and run in its
+README). It is a client of `senated --machine`, not a crate.
 
 Configuration examples, one per way to run:
 [`config/senated.example.toml`](config/senated.example.toml) (team server),
@@ -283,6 +288,11 @@ ways to run have been started by hand with the built binaries (start,
   call them as an agent would, and whether Claude Code lists the presiding
   tools (the MCP shim asks the daemon at `tools/list`, which may come
   before the session's first hook) has not been seen in a real session.
+- **The macOS app.** `xcodebuild` builds it (the build is the only check the
+  Swift side has); it has not been launched or clicked through, in either
+  language, against a real daemon. The Rust core under it is tested against a
+  fake daemon speaking the bridge's own IPC types. A Senate below the primary
+  one has no inbox in the app: a client without a session cannot name it.
 - **`senated --machine` as a service.** It is a foreground process; no
   launchd or systemd unit is shipped or tested.
 - **Real Docker and `gh`.** Work runs use a fake runner and forge in the
