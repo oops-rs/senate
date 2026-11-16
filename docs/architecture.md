@@ -127,6 +127,10 @@ inbox pushes, hook pick-ups and `catch_up` alike.
 ## Presence and continuity
 
 - Presence, leases and checkpoints are kept per agent.
+- After a restart each agent's presence is what the stored facts and the clock
+  say: the time the server was down counts as quiet, so an agent last heard
+  longer ago than the disconnect grace is `disconnected` and longer ago than
+  the lease is `absent`, each written once, dated to when it fell due.
 - A delegation is present while any one of its agents is.
 - A message addressed to one specific agent that is absent is answered by the
   Speaker from that agent's checkpoint. It is not rerouted to another agent

@@ -32,7 +32,7 @@
 //!
 //! [`AgentProxy`]: super::proxy::AgentProxy
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -316,15 +316,14 @@ impl Actor for CommitteeActor {
         let mut leases = Leases::new(args.leases);
         let (board, authors) = presence_board(args.store.as_ref(), &args.committee).await?;
         let (now, wall) = (Instant::now(), chrono::Utc::now());
-        leases.restore(&board, now, wall);
+        let stored = args.store.heartbeats(&args.committee).await?;
+        let beats: BTreeMap<SenatorPath, chrono::DateTime<chrono::Utc>> =
+            stored.iter().map(|b| (b.agent.clone(), b.at)).collect();
+        leases.restore(&board, &beats, now, wall);
         // An agent online but never written is restored from its last stored
-        // heartbeat.
-        for beat in args.store.heartbeats(&args.committee).await? {
-            if board.get(&beat.agent).is_some() {
-                continue;
-            }
-            let quiet = (wall - beat.at).to_std().unwrap_or_default();
-            if quiet < args.leases.lease {
+        // heartbeat, and is as quiet as the clock says.
+        for beat in &stored {
+            if board.get(&beat.agent).is_none() {
                 leases.restore_unlogged(&beat.agent, beat.heartbeat.cursor, beat.at, now, wall);
             }
         }
@@ -362,6 +361,8 @@ impl Actor for CommitteeActor {
     ) -> Result<(), ActorProcessingErr> {
         let tick = state.leases.timing().tick();
         state.ticker = Some(myself.send_interval(tick, || CommitteeMsg::PresenceTick));
+        // What the downtime made due is written now, not a tick later.
+        state.check_leases().await;
         Ok(())
     }
 
