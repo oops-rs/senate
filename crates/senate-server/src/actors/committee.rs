@@ -32,7 +32,7 @@
 //!
 //! [`AgentProxy`]: super::proxy::AgentProxy
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -277,22 +277,29 @@ impl CommitteeState {
     }
 }
 
-/// The latest `presence` per agent in the committee's log.
+/// The latest `presence` per agent in the committee's log, and every agent
+/// that wrote in it.
 async fn presence_board(
     store: &dyn LogStore,
     committee: &CommitteeId,
-) -> Result<PresenceBoard, LogError> {
+) -> Result<(PresenceBoard, BTreeSet<SenatorPath>), LogError> {
     let mut board = PresenceBoard::new();
+    let mut authors = BTreeSet::new();
     let mut after = Seq::ZERO;
     loop {
         let page = store.read(committee, after, SCAN_PAGE).await?;
         let Some(last) = page.last() else { break };
         after = last.seq;
-        for event in page.iter().filter(|e| e.kind == Kind::Presence) {
-            board.observe(event);
+        for event in &page {
+            if event.kind == Kind::Presence {
+                board.observe(event);
+            }
+            if let Some(agent) = event.from.as_agent() {
+                authors.insert(agent.clone());
+            }
         }
     }
-    Ok(board)
+    Ok((board, authors))
 }
 
 impl Actor for CommitteeActor {
@@ -307,7 +314,7 @@ impl Actor for CommitteeActor {
     ) -> Result<CommitteeState, ActorProcessingErr> {
         let head = args.store.head(&args.committee).await?;
         let mut leases = Leases::new(args.leases);
-        let board = presence_board(args.store.as_ref(), &args.committee).await?;
+        let (board, authors) = presence_board(args.store.as_ref(), &args.committee).await?;
         let (now, wall) = (Instant::now(), chrono::Utc::now());
         leases.restore(&board, now, wall);
         // An agent online but never written is restored from its last stored
@@ -321,12 +328,17 @@ impl Actor for CommitteeActor {
                 leases.restore_unlogged(&beat.agent, beat.heartbeat.cursor, beat.at, now, wall);
             }
         }
-        // Seats are not stored, so the agents the log has seen sit again.
+        // Seats are not stored, so the agents the log has seen sit again:
+        // every agent with a presence, a recent heartbeat, or an event of
+        // its own. Each was seated once (nothing is written as an agent that
+        // is not), and `senator::<person>/*` must resolve after a restart as
+        // it did before.
         let seen = board
             .agents()
             .into_iter()
             .map(|p| p.agent)
-            .chain(leases.agents().cloned().collect::<Vec<_>>());
+            .chain(leases.agents().cloned().collect::<Vec<_>>())
+            .chain(authors);
         for agent in seen {
             if let Err(e) = args.seats.seat_again(agent.clone()) {
                 tracing::debug!(%agent, "not seated again: {e}");

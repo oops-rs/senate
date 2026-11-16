@@ -1,0 +1,184 @@
+# senated configuration.
+#
+#   senated --config config/senated.example.toml
+#
+# (or set SENATED_CONFIG). Logging follows RUST_LOG, default "info".
+# Copy this file somewhere private for real tokens: it holds secrets.
+
+# ---------------------------------------------------------------------------
+# The server
+# ---------------------------------------------------------------------------
+
+# Address the HTTP/SSE API binds. Bridges on developer machines connect
+# here; they only ever make outbound requests.
+listen = "127.0.0.1:7878"
+
+# Where the log is kept.
+#   "memory:"              in this process only; lost on restart (trying it out, tests)
+#   "sqlite:<path>"        one file on disk, for a single machine; created if missing
+#   "postgres://…"         Postgres, for a shared server; migrations apply at startup.
+#                          deploy/docker-compose.yml runs a matching database:
+#                          postgres://senate:senate@127.0.0.1:5432/senate
+database_url = "memory:"
+
+# The language text for people is written in, "en" or "zh". A committee has
+# one language, because a group message is read by everyone in it; this is
+# the default for every committee. Fixed commands and confirmation words are
+# understood in both languages regardless. Default "en".
+locale = "en"
+
+# Local state for server-side components (the Speaker keeps its model
+# workspaces under <data_dir>/speaker/). Created at startup. Default "data".
+data_dir = "data"
+
+# Seconds between SSE keepalive pings. Default 15.
+# sse_ping_secs = 15
+
+# Seconds an open stream alone counts as "this agent is connected". Past
+# that, its bridge must also have sent a heartbeat within this window (it
+# sends one every 60 s): a machine that went to sleep leaves its stream
+# looking open, and must not look present. Default 150.
+# presence_grace_secs = 150
+
+# Presence is kept for each agent. With no heartbeat for this many seconds
+# an `online` agent becomes `disconnected`... Default 120.
+# presence_disconnected_secs = 120
+# ...and after this many its lease expires: `absent`, and the Speaker covers
+# for it from its own latest checkpoint. Must exceed
+# presence_disconnected_secs. Default 900.
+# lease_secs = 900
+
+# ---------------------------------------------------------------------------
+# Who exists
+# ---------------------------------------------------------------------------
+
+# The roster: the people this Senate knows. Every agent is named under a
+# person (`alice/claude`, `alice/codex`) and is seated the first time its
+# bridge connects, so agents need not be listed. `names` are what people
+# call the person in chat, matched case-insensitively like the handle.
+# `accounts` are the person's ids on outside platforms; a chat layer uses
+# them to tell this person from a guest, and to mention or invite them.
+
+[[roster.seniors]]
+handle = "alice"
+names = ["Alice"]
+accounts = [{ platform = "chat", id = "u_alice" }]
+
+[[roster.seniors]]
+handle = "bob"
+names = ["Bob"]
+
+# Agents seated from the start, optional:
+# [roster]
+# agents = ["alice/claude"]
+
+# Bearer tokens. A token names a person; that person's bridge then acts as
+# the person and as any of their own agents. Set exactly one of:
+#   token        plaintext, for trying things out only;
+#   token_sha256 the hex SHA-256 of the token, for anything real:
+#                printf '%s' "$TOKEN" | shasum -a 256
+# One person may hold several tokens (a laptop and a desktop); two people
+# may not share one.
+
+[[tokens]]
+person = "alice"
+token = "dev-alice-token"
+
+[[tokens]]
+person = "bob"
+# sha256("dev-bob-token")
+token_sha256 = "5b88a3d16b92cd96dd5a2cf692e1c84fc3df64bbc2a56df44877f33b980b60ea"
+
+# ---------------------------------------------------------------------------
+# The Speaker
+# ---------------------------------------------------------------------------
+
+# Without [speaker], senated serves the log and the bridge API only. With
+# it, the built-in Speaker presides: it triages questions between agents,
+# answers for an agent that is away from that agent's own checkpoint, and
+# answers agents that address it. A chat platform, mounted by a private
+# layer built on the senated library, adds what people say in chat.
+#
+# [speaker]
+# # Default: data_dir above. The model's workspaces live in <data_dir>/speaker/.
+# # data_dir = "data"
+# # Default: locale above.
+# # locale = "en"
+# # The model. Its provider and credential come from basis's environment
+# # (ANTHROPIC_API_KEY, or BASIS_BASE_URL + BASIS_API_KEY for a gateway).
+# # Default: basis's provider default.
+# model = "claude-sonnet-4-5"
+# # How people address the bot in chat, as the chat layer names it.
+# bot_name = "Speaker"
+# # A question to an agent with no answer after this long is answered by the
+# # Speaker on the agent's behalf; at once when the agent has no live
+# # connection.
+# answer_fallback_secs = 60
+# # A checkpoint older than this is never answered from: the question goes
+# # to people instead.
+# takeover_stale_hours = 24
+# # How long a restatement waits for its "yes".
+# confirmation_ttl_secs = 600
+# # After a decision, wait this long before rewriting the brief's top three.
+# brief_top_debounce_secs = 30
+# # Triage of each question or request to an agent gets this long; past it
+# # the verdict is "unsure" and the agent asks its person first.
+# triage_deadline_secs = 5
+# # Task-card updates are coalesced over this window; the final state lands.
+# card_debounce_ms = 2000
+# # Bounds on each model run.
+# brain_deadline_secs = 45
+# brain_token_budget = 80000
+# # "intent": one message, one operation. "agent": a conversation in the
+# # thread; one message may plan several operations, confirmed together.
+# mode = "intent"
+# # Agent mode: the most operations one message may plan.
+# agent_max_actions = 5
+#
+# # Committees whose people read another language than `locale`.
+# [speaker.locales]
+# refund-v2 = "zh"
+#
+# # Coding work on request: who may ask, and within what. Only people who
+# # are developers of the committee (one of their agents has been active on
+# # it, or they are listed below) may ask; every request is restated and
+# # runs only after the asker says yes. Defaults to the runner's
+# # allowed_repos when [work] is set and this section is not.
+# [speaker.work]
+# allowed_repos = ["example/project"]
+# # Runs at once on this server (a committee never has more than one).
+# max_concurrent_runs = 1
+# # What a run's PR merges into.
+# pr_base = "main"
+# # Branches are <branch_prefix>/<committee>/speaker-<n>.
+# branch_prefix = "feature"
+# # Wall clock and turn cap for one run.
+# budget = { wall_secs = 1800, max_turns = 200 }
+# [speaker.work.developers]
+# refund-v2 = ["alice", "bob"]
+#
+# # What does the work. Needs [speaker]. The runner: Claude Code headless in
+# # a throwaway checkout inside a container, with no credentials but the
+# # repository's; work is pushed to the Speaker's own branch, never to a
+# # developer's.
+# [work.runner]
+# image = "senate-runner:latest"
+# # One directory per run, removed afterwards. When senated itself runs in a
+# # container, the docker daemon must see this at the same path.
+# work_root = "/var/lib/senate/runs"
+# allowed_repos = ["example/project"]
+# git_credential = { kind = "ssh_key", key_file = "/run/secrets/deploy-key" }
+# # model = "claude-sonnet-4-5"
+# # gateway_base_url = "http://model-gateway.internal:4000"
+# # gateway_key_file = "/run/secrets/runner-model-key"
+# # docker_args = ["--memory", "4g", "--cpus", "2"]
+# #
+# # The forge that opens the PR: kind = "github" (through `gh`, with a
+# # fine-grained token: contents and pull requests on the listed repos), or
+# # kind = "none" (the pushed branch is the deliverable; also when absent).
+# [work.forge]
+# kind = "github"
+# token_file = "/run/secrets/github-token"
+# repos = ["example/project"]
+# # Open every PR as a draft, finished runs too (failed runs always are).
+# always_draft = true

@@ -164,6 +164,8 @@ pub struct Inner {
     pub roster: Roster,
     /// What `/v1/me` names as the Senate's presider.
     pub presider: Option<SenatorPath>,
+    /// What `/v1/me` says about a Speaker judging roots here.
+    pub triaged: bool,
     pub offline: bool,
     /// Sent as `x-senate-epoch` on every `/v1` response; empty sends none.
     pub epoch: String,
@@ -306,6 +308,7 @@ async fn me(State(st): St, headers: HeaderMap) -> Response {
                     .collect(),
                 committees: st.committees.clone(),
                 epoch: inner.epoch.clone(),
+                triaged: inner.triaged,
             })
             .into_response()
         }
@@ -683,6 +686,7 @@ impl FakeServer {
                 active: HashMap::new(),
                 roster,
                 presider: None,
+                triaged: true,
                 offline: false,
                 epoch: "epoch-1".into(),
                 searches: Vec::new(),

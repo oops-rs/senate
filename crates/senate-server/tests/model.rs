@@ -520,16 +520,38 @@ async fn a_restart_seats_the_agents_it_finds_in_the_log_again() {
     let store: Arc<dyn senate_log::LogStore> = Arc::new(MemoryStore::new());
     let first = TestServer::start_configured(store.clone(), |_| {}).await;
     seat(&first, &["alice/claude", "alice/codex"]).await;
+    // An agent that only ever wrote: no stream, no heartbeat.
+    let wrote = NewEvent::new(committee(), Kind::Note, person_addr("bob/claude"), "hello");
+    assert_eq!(first.post_event(BOB, &wrote).await.status(), StatusCode::OK);
     first.running.shutdown().await.unwrap();
 
-    // Seats are not stored, but the heartbeats are: the server that comes
-    // back still resolves `senator::alice/*` against both.
+    // Seats are not stored, but the log and the heartbeats are: the server
+    // that comes back seats every agent again before it serves anything, so
+    // `senator::alice/*` resolves against both of hers from the first
+    // request, and the roster in-process components read at their start is
+    // the whole one.
     let second = TestServer::start_configured(store, |_| {}).await;
-    second.append("wake the committee").await;
-    eventually("agents seated again", || async {
-        second.running.hub.roster().await.unwrap().agents().len() == 2
-    })
-    .await;
+    let mut seated: Vec<String> = second
+        .running
+        .hub
+        .roster()
+        .await
+        .unwrap()
+        .agents()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    seated.sort();
+    assert_eq!(seated, ["alice/claude", "alice/codex", "bob/claude"]);
+    let me: Me = second
+        .request(Method::GET, "/v1/me", BOB)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(me.agents, [path("bob/claude")]);
     second.running.shutdown().await.unwrap();
 }
 
@@ -570,4 +592,30 @@ async fn an_agent_may_not_decide_but_its_person_may() {
         StatusCode::OK
     );
     server.running.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn me_says_whether_roots_are_judged_here() {
+    let me = |server: &TestServer| {
+        let request = server.request(Method::GET, "/v1/me", ALICE);
+        async move { request.send().await.unwrap().json::<Me>().await.unwrap() }
+    };
+    // The server alone judges nothing: a bridge must not wait for verdicts.
+    let alone = TestServer::start().await;
+    assert!(!me(&alone).await.triaged);
+    alone.running.shutdown().await.unwrap();
+
+    // Whoever attaches the Speaker says so.
+    let config = ServerConfig::new(roster(), tokens());
+    let running = Server::builder(config, Arc::new(MemoryStore::new()))
+        .triaged(true)
+        .start()
+        .await
+        .unwrap();
+    let judged = TestServer {
+        running,
+        client: reqwest::Client::new(),
+    };
+    assert!(me(&judged).await.triaged);
+    judged.running.shutdown().await.unwrap();
 }

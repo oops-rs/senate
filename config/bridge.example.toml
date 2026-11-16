@@ -1,0 +1,78 @@
+# senate-bridge configuration. Copy to ~/.senate/bridge.toml (or
+# $SENATE_HOME/bridge.toml) and keep it private: chmod 600.
+
+# The senated server. The bridge only makes outbound requests.
+server_url = "https://senate.example.com"
+
+# Your token, as issued by whoever runs the server. It names you, a person,
+# to the server; your coding agents then act under your name.
+token = "replace-me"
+
+# Your handle. Must be the person the token names; the daemon refuses to
+# start otherwise. Every agent this machine runs is seated under it:
+# a Claude Code session as <person>/claude, a Codex session as
+# <person>/codex (see [agents] below).
+person = "alice"
+
+# Optional: the language of everything the bridge writes for you and your
+# agents, "en" or "zh". Identifiers (addresses, kinds, tool names) are the
+# same in both. Default "en".
+# locale = "en"
+
+# Optional: committees whose stream stays open for this machine's agents
+# even with no session bound to them, so directed messages are queued for
+# your next session instead of waiting until one joins. A session binds
+# itself to a committee from a `<branch_prefix>/<committee>/<person>`
+# branch, a `.senate/committee` file at the repository root, or the
+# `join` tool.
+# committees = ["refund-v2"]
+
+# Optional: the most characters of the committee brief (decisions in force,
+# open questions, latest checkpoints, presence) injected when a session
+# starts, ahead of any messages waiting for it. 0 injects none. The brief is
+# also readable at any time as the MCP resource senate://<committee>/brief.
+# brief_chars = 6000
+
+# Optional: the first segment of a developer branch,
+# `<branch_prefix>/<committee>/<person>`. A git convention. Default
+# "feature".
+# branch_prefix = "feature"
+
+# Checkpoints need no configuration. The agent keeps
+# .senate/{PROGRESS,DECISIONS,OPEN}.md in the worktree with the `checkpoint`
+# tool; the bridge sends them with the branch and commit on that tool, on a
+# hand-off, on a new commit on a bound session's branch, at session end and
+# every 2 h of an open session. It never pushes your branch unless asked
+# (`checkpoint(push=true)` or a hand-off).
+
+# Optional: the agent each kind of coding session speaks as, under you.
+# A session can pin another name with SENATE_AGENT in its environment
+# (Claude Code only) or a `.senate/agent` file in its worktree. These are
+# the defaults.
+# [agents]
+# claude = "claude"
+# codex = "codex"
+
+# Optional: how the bridge reaches Codex sessions (`codex --remote unix://`
+# attached to the managed app-server, `codex app-server daemon start`). By
+# default it runs `codex app-server proxy`, which finds the managed daemon's
+# control socket itself; `listen` names an app-server socket directly, and
+# `bin` the codex CLI to run the proxy with. Claude Code sessions do not use
+# this.
+# [codex]
+# listen = "unix:///Users/alice/.codex/app-server-control/app-server-control.sock"
+# bin = "/opt/homebrew/bin/codex"
+
+# Optional, off by default: the companion session (it spends your own model
+# budget). When a question reaches your agent and you have no Claude Code
+# session open on its committee (or none active for idle_secs), the bridge
+# runs a headless fork of your latest session there
+# (`claude -p --resume <id> --fork-session`) with read-only tools plus the
+# answer, catch_up and search tools; it answers, labelled as the companion,
+# and exits. Requests are never given to it. One runs at a time and is
+# killed after max_secs.
+# [companion]
+# enabled = true
+# claude_bin = "/opt/homebrew/bin/claude"   # default: `claude` on PATH
+# max_secs = 300
+# idle_secs = 1800

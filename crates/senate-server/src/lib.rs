@@ -26,7 +26,7 @@
 //! let config = ServerConfig::load("senate-server.toml".as_ref())?;
 //! let store = senate_log::connect(&config.database_url).await?;
 //! let running = Server::start(config, store).await?;
-//! // Hand `running.hub.clone()` to the gateway and the Speaker here.
+//! // In-process components share `running.hub`; `senated::Assembly` wires them.
 //! running.shutdown().await?;
 //! # Ok(())
 //! # }
@@ -42,6 +42,6 @@ mod seats;
 mod server;
 
 pub use auth::{Authenticate, StaticTokens, bearer_token};
-pub use config::{ConfigError, DEFAULT_PRESENCE_GRACE_SECS, ServerConfig, TokenConfig};
+pub use config::{ConfigError, DEFAULT_PRESENCE_GRACE_SECS, ServerConfig, TokenConfig, redact_url};
 pub use hub::{BROADCAST_CAPACITY, LiveStream, STREAM_BUFFER, ServerHub};
 pub use server::{Running, Server, ServerBuilder, ServerError};

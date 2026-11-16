@@ -75,7 +75,9 @@
 //!
 //! A root that [`needs_triage`] waits for the Speaker's verdict, at most
 //! [`Timing::triage_wait`], and is then pushed with the verdict in its header
-//! (`unsure` when none came). While one waits, the rest of its session's
+//! (`unsure` when none came). It waits only on a Senate whose server says a
+//! Speaker judges roots there ([`Me::triaged`](senate_core::api::Me::triaged));
+//! elsewhere no verdict will ever come, and it is pushed at once. While one waits, the rest of its session's
 //! push waits with it, so a backlog stays one message in seq order. A
 //! `needs_human` verdict cancels it; a status
 //! with a `takeover` cancels everything of that thread not yet pushed, and
@@ -122,6 +124,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -347,6 +350,9 @@ pub(crate) struct Shared {
     branches: BranchNaming,
     /// Where this bridge's agents sit, as `/v1/me` last said.
     seating: Mutex<Seating>,
+    /// Whether a Speaker judges roots on this Senate, as `/v1/me` last said;
+    /// until it has said, as if it does.
+    triaged: AtomicBool,
     pub(crate) store: Store,
     pub(crate) api: ApiClient,
     pub(crate) ladder: Ladder,
@@ -502,6 +508,7 @@ pub async fn start(options: DaemonOptions) -> anyhow::Result<DaemonHandle> {
         locale: config.locale,
         branches: config.branches(),
         seating: Mutex::new(seating),
+        triaged: AtomicBool::new(true),
         config,
         store,
         api,
@@ -565,6 +572,7 @@ async fn verify_person(shared: &Shared) -> anyhow::Result<()> {
         ),
         Ok(Ok(me)) => {
             shared.note_epoch(Some(&me.epoch)).await;
+            shared.note_triaged(me.triaged);
             shared.note_seating(me.presider);
             Ok(())
         }
@@ -698,6 +706,13 @@ impl Shared {
     /// The Senate this bridge is connected to, for logs.
     fn senate_label(&self) -> String {
         senate_words(self.seating().presider(), Locale::En)
+    }
+
+    /// Record whether `/v1/me` said a Speaker judges roots here.
+    fn note_triaged(&self, triaged: bool) {
+        if self.triaged.swap(triaged, Ordering::Relaxed) != triaged {
+            tracing::info!(triaged, "whether roots wait for a triage verdict");
+        }
     }
 
     /// Record the Senate `/v1/me` named. Sessions take the new seating at
@@ -1374,7 +1389,7 @@ impl Shared {
     fn route<'a>(&self, item: &QueueItem, cands: &[&'a Session]) -> Result<Route<'a>, StoreError> {
         let event = &item.event;
         let target = self.recipient(&item.agent, event, cands)?;
-        if needs_triage(event) {
+        if needs_triage(event) && self.triaged.load(Ordering::Relaxed) {
             match self.store.verdict(&event.committee, event.seq)? {
                 Some(TriageVerdict::NeedsHuman) => {
                     self.store.cancel(
@@ -3110,6 +3125,7 @@ impl Shared {
         let session = self.resolve(selector)?;
         let warning = match tokio::time::timeout(Duration::from_secs(5), self.api.me()).await {
             Ok(Ok(me)) => {
+                self.note_triaged(me.triaged);
                 self.note_seating(me.presider.clone());
                 if !me.committees.is_empty() && !me.committees.contains(&committee) {
                     let known: Vec<&str> = me.committees.iter().map(CommitteeId::as_str).collect();

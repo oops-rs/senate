@@ -11,9 +11,10 @@ into **committees**. Each committee has one append-only log. People and agents
 read and write the same log, so context is not locked inside one machine.
 
 Senate is the public core. Layers that connect it to a company's own systems
-(a chat platform such as Feishu, an agent gateway such as Dial) are built on
-top of `senated` and live outside this repository. Senate must not depend on
-them, and must be usable without them.
+(its chat platform, its agent gateway) are built on top of `senated` and live
+outside this repository. Senate must not depend on them, and must be usable
+without them: `senated` alone serves agents and the Speaker through the log,
+with no chat platform at all.
 
 ## Vocabulary
 
@@ -47,6 +48,12 @@ Rules:
    exists without a person accountable for it.
 3. **A seat is not a process.** An agent's own subagents are not seated
    beside it. It speaks for them and answers for them.
+4. **Agents are seated as they connect.** A person's machine authenticates
+   as the person and names the agent it speaks as; the server seats that
+   agent on first contact if the roster's rules allow it. Seats are not
+   stored: a restarted server seats again every agent its log has seen (a
+   presence, a recent heartbeat, or an event of its own) before it serves
+   anything.
 
 ## Addresses and mentions
 
@@ -91,6 +98,15 @@ resolved before the event is appended.
 - A message addressed to one specific agent that is absent is answered by the
   Speaker from that agent's checkpoint. It is not rerouted to another agent
   of the same person.
+
+## Triage
+
+A question or request to an agent that starts a thread is judged by the
+Speaker (needs a person, the agent, or unsure) before the agent's bridge
+delivers it; the bridge holds it for the verdict, briefly. Only the built-in
+Speaker writes verdicts, so roots are judged only on a Senate that runs it.
+`GET /v1/me` says which (`triaged`), and elsewhere (no `[speaker]`, or a
+nested Senate) a bridge delivers at once.
 
 ## Guests
 
@@ -143,25 +159,40 @@ Chinese and English are both first-class.
 | `senate-speaker` | The built-in Speaker. |
 | `senate-work` | The Speaker's hands: coding work on request, in a container, delivered as a branch or PR. |
 | `senate-bridge` | The developer-machine side: sessions, delivery, MCP tools, hooks. |
-| `senated` | The daemon binary and the assembly library a private layer builds its own binary from. |
-| `senate-e2e` | End-to-end tests against a generic fake chat surface. |
+| `senated` | The daemon binary, and the assembly library a private layer builds its own daemon from: `Assembly`, supervised `Component`s, the platform-neutral half of a chat gateway (`ChatGateway`), and, behind the `testing` feature, a fake chat platform. |
+| `senate-e2e` | End-to-end tests: the real server, Speaker and bridges, assembled by `senated`, against the fake chat platform and the fake runner and forge. |
 
 Dependency direction: every crate depends on `senate-core`. The Speaker and
 any gateway reach the log only through the `Hub` seam in `senate-core`. Only
 `senated` assembles them.
 
+```text
+   developer machine                         senated
+ ┌───────────────────────┐        ┌─────────────────────────────────────┐
+ │ Claude Code ─┐        │  HTTP  │ senate-server ── Hub ──┬─ Speaker   │
+ │ Codex ───────┼ senate-├───SSE──┤   (auth, roster,       ├─ chat      │
+ │              │ bridge │        │    supervision)        │  gateway*  │
+ └──────────────┴────────┘        │        │               └─ other     │
+                                  │   senate-log                components*
+                                  │ (memory / SQLite / Postgres)        │
+                                  └─────────────────────────────────────┘
+                                         * mounted by a private layer
+```
+
 ## Seams a private layer uses
 
-| Seam | Purpose |
-| --- | --- |
-| `ChatSurface` | The Speaker speaking on a chat platform. |
-| `Hub` | Appending to and observing the log in process. |
-| `Brain` | The Speaker's model. |
-| `LogStore` | Where the log is kept. |
-| `Runner`, `Forge` | Doing coding work and opening a PR. |
-| Authentication | Who sent a request. Replaceable; the default is static tokens in configuration. |
-| Roster source | Which people exist, their accounts on outside platforms, which agents are seated. Replaceable; the default is configuration plus agents seated as they connect. |
-| Assembly | A builder that takes the surfaces and extensions to mount. |
+| Seam | Type | Purpose |
+| --- | --- | --- |
+| Chat surface | `senate_core::ChatSurface`, with `senate_core::UnboundMention` | The Speaker speaking on a chat platform, and mentions in groups bound to no committee. |
+| Chat gateway | `senated::ChatGateway` (`Inbound`, `deliver`) | The platform-neutral half of a gateway: senders to senators or guests, messages in bound groups to `chat` events, unbound mentions, bind = grant. A layer writes only the platform's transport. |
+| Hub | `senate_core::Hub` | Appending to and observing the log in process. |
+| Brain | `senate_speaker::Brain` | The Speaker's model. Default `BasisBrain`. |
+| Log store | `senate_log::LogStore` | Where the log is kept: `memory:`, `sqlite:<path>`, `postgres://…`. |
+| Runner, Forge | `senate_work::Runner`, `senate_work::Forge` | Doing coding work and opening a PR. Defaults from `[work]`: `DockerRunner`, `GhForge`. |
+| Authentication | `senate_server::Authenticate` | Bearer token to person. Default `StaticTokens` from `[[tokens]]`. |
+| Roster source | `senate_core::Roster`, given to `Assembly::roster`; `ServerHub::set_seniors` later | Which people exist and their accounts on outside platforms. Default `[roster]`; agents are seated as they connect either way. |
+| Components | `senated::Component` (`component_fn`) | Anything else that runs on the Hub (an agent gateway's entry point, say), supervised with the Speaker. |
+| Assembly | `senated::Assembly` | The builder that takes all of the above and starts a daemon: at most one chat surface, any number of components. |
 
 ## Lineage
 

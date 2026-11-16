@@ -679,10 +679,19 @@ mod tests {
     /// No platform's name is baked into what the bridge writes.
     fn assert_neutral(text: &str) {
         let lower = text.to_lowercase();
-        for word in ["user:", "agent:", "steward", "lark", "飞书"] {
+        // The old platform's names are spelled in pieces, so that they
+        // appear nowhere in the repository.
+        let old_platform = [
+            ["fei", "shu"].concat(),
+            ["la", "rk"].concat(),
+            ["飞", "书"].concat(),
+        ];
+        for word in ["user:", "agent:", "steward"]
+            .into_iter()
+            .chain(old_platform.iter().map(String::as_str))
+        {
             assert!(!lower.contains(word), "{word:?} in {text}");
         }
-        assert!(!lower.contains(&["fei", "shu"].concat()), "{text}");
     }
 
     fn triage(verdict: TriageVerdict, reason: Option<&str>) -> serde_json::Value {

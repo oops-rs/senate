@@ -306,6 +306,19 @@ pub struct Me {
     /// The log's epoch; see the module docs.
     #[serde(default)]
     pub epoch: String,
+    /// Whether a Speaker on this server judges task roots (writes the
+    /// `meta.triage` verdict a bridge holds a root for, see
+    /// [`crate::task`]). False where nothing does: a server with no built-in
+    /// Speaker, such as a nested Senate, whose Speaker is one of its
+    /// senators and may not write verdicts. A bridge then delivers a root at
+    /// once instead of waiting for a verdict that will not come. A server
+    /// that does not say is taken to judge, as every server once did.
+    #[serde(default = "judged_by_default")]
+    pub triaged: bool,
+}
+
+fn judged_by_default() -> bool {
+    true
 }
 
 /// The stable machine codes of [`ApiError::code`].
@@ -434,6 +447,10 @@ mod tests {
         assert_eq!(top.presider, None);
         assert!(top.agents.is_empty() && top.committees.is_empty());
         assert_eq!(top.epoch, "");
+        assert!(
+            top.triaged,
+            "a server that does not say judges, as all once did"
+        );
 
         let nested = Me {
             person: Name::new("wendell").unwrap(),
@@ -444,9 +461,11 @@ mod tests {
             ],
             committees: vec![c()],
             epoch: "e1".into(),
+            triaged: false,
         };
         let value = serde_json::to_value(&nested).unwrap();
         assert_eq!(value["presider"], "wendell/claude");
+        assert_eq!(value["triaged"], false);
         assert_eq!(serde_json::from_value::<Me>(value).unwrap(), nested);
     }
 
