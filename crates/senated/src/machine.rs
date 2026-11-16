@@ -121,6 +121,12 @@ impl Machine {
         timing: Timing,
     ) -> Result<Self, MachineError> {
         hosted.validate(&config).map_err(MachineError::Invalid)?;
+        // Before anything is hosted or spawned: a socket path that cannot
+        // bind would otherwise fail inside the supervised developer-machine
+        // side and be started again forever.
+        paths
+            .check_socket(config.locale)
+            .map_err(|e| MachineError::Invalid(e.to_string()))?;
         paths.ensure_home().map_err(|source| MachineError::Io {
             path: paths.home().to_path_buf(),
             source,
@@ -494,6 +500,25 @@ mod tests {
         assert_eq!(again.senate(None).unwrap().url, top_url);
         assert_eq!(again.senate(None).unwrap().token, top_token);
         again.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_home_too_long_for_the_socket_fails_once_and_hosts_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("h".repeat(120));
+        let config: BridgeConfig = toml::from_str("person = \"alice\"\nlocale = \"en\"\n").unwrap();
+        let hosted: Hosted = toml::from_str("[local]\n").unwrap();
+        let Err(MachineError::Invalid(message)) =
+            Machine::start_with(Paths::new(&home), config, hosted, quiet()).await
+        else {
+            panic!("a home this long cannot hold the socket");
+        };
+        assert!(
+            message.contains("SENATE_HOME") && message.contains("shorter"),
+            "{message}"
+        );
+        assert!(message.contains(&home.display().to_string()), "{message}");
+        assert!(!home.exists(), "nothing was created before the refusal");
     }
 
     #[tokio::test]

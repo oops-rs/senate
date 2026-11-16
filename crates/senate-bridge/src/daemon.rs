@@ -475,6 +475,7 @@ pub async fn start(options: DaemonOptions) -> anyhow::Result<DaemonHandle> {
         timing,
     } = options;
     config.validate().map_err(anyhow::Error::msg)?;
+    paths.check_socket(config.locale)?;
     paths
         .ensure_home()
         .with_context(|| format!("creating {}", paths.home().display()))?;
