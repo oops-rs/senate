@@ -2110,6 +2110,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "senate-e2e"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "ractor",
+ "reqwest",
+ "senate-bridge",
+ "senate-core",
+ "senate-log",
+ "senate-server",
+ "senate-speaker",
+ "senate-work",
+ "senated",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "senate-log"
 version = "0.1.0"
 dependencies = [
@@ -2186,6 +2206,31 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
+]
+
+[[package]]
+name = "senated"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "clap",
+ "futures",
+ "ractor",
+ "senate-core",
+ "senate-log",
+ "senate-server",
+ "senate-speaker",
+ "senate-work",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

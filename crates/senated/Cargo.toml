@@ -1,0 +1,43 @@
+[package]
+name = "senated"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The Senate daemon, and the assembly library a private layer builds its own daemon from: the log server, the built-in Speaker, chat surfaces and extra components on one Hub."
+
+[[bin]]
+name = "senated"
+path = "src/main.rs"
+
+[features]
+# A generic fake chat platform for end-to-end tests of an assembled daemon.
+testing = []
+
+[dependencies]
+senate-core = { workspace = true }
+senate-log = { workspace = true }
+senate-server = { workspace = true }
+senate-speaker = { workspace = true }
+senate-work = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+clap = { workspace = true }
+futures = { workspace = true }
+ractor = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
+tokio-util = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

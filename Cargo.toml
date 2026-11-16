@@ -20,6 +20,7 @@ senate-work = { path = "crates/senate-work" }
 senate-speaker = { path = "crates/senate-speaker" }
 senate-bridge = { path = "crates/senate-bridge" }
 senated = { path = "crates/senated" }
+senate-e2e = { path = "crates/senate-e2e" }
 
 # The agent harness behind the built-in Speaker. basis re-exports every
 # mentra type a host must name, so this is the only harness dependency.
