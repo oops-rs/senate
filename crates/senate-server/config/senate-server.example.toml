@@ -1,0 +1,58 @@
+# senate-server.toml: every key the server reads.
+
+# Address the HTTP API binds.
+listen = "0.0.0.0:7878"
+
+# Where the log is kept: "memory:" (lost on exit), "sqlite:<path>" (one file,
+# for a developer machine) or a postgres:// URL (for a server).
+database_url = "sqlite:data/senate.db"
+
+# The language text for people is rendered in ("zh" or "en").
+# locale = "zh"
+
+# Where server-side components keep local state.
+data_dir = "data"
+
+# Seconds between SSE keepalive pings.
+# sse_ping_secs = 15
+
+# How long an open stream counts as a connected agent without a fresh
+# heartbeat.
+# presence_grace_secs = 150
+
+# Seconds without a heartbeat before an online agent is "disconnected", and
+# before its lease expires and it is "absent". The lease must be longer.
+# presence_disconnected_secs = 120
+# lease_secs = 900
+
+# Who exists. People are global; agents are seated as they connect, so
+# `agents` is only for those that should sit from the start.
+[roster]
+# The senator presiding over this Senate. Leave it out for the top Senate.
+# presider = "alice/claude"
+agents = ["alice/claude"]
+
+[[roster.seniors]]
+handle = "alice"
+# Other names people use for alice in chat.
+names = ["Alice", "爱丽丝"]
+# Her accounts on outside platforms.
+accounts = [{ platform = "chat", id = "u_alice" }]
+
+[[roster.seniors]]
+handle = "bob"
+names = ["Bob"]
+
+# How a bearer token names a person. Set `token` (dev only) or `token_sha256`
+# (hex SHA-256 of the token). One person may hold several tokens.
+[[tokens]]
+person = "alice"
+token = "alice-dev-token"
+
+[[tokens]]
+person = "bob"
+token_sha256 = "8e0be5d0cef22cb3b0e8c1c4a0e7bd1e0fb9bd7b38f0f4f7f2e0c7b0c1a5d6f2"
+
+# Sections other crates own are kept as they are and handed on by the binary.
+[gateway]
+addr = "http://127.0.0.1:50051"
