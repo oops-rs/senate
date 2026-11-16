@@ -11,6 +11,7 @@
 //!   `[senator::wendell/claude]`, `[speaker::wendell/claude]`.
 //! - [`roster`]: who sits in one Senate, and the rules that hold for it.
 //! - [`locale`]: the language a text for people is rendered in.
+//! - [`continuity`]: checkpoints, presence and leases, kept per agent.
 //! - [`event`]: the single envelope of a committee's log.
 //!
 //! # The model
@@ -35,6 +36,7 @@
 //! [`Address::Other`].
 
 pub mod address;
+pub mod continuity;
 pub mod event;
 pub mod ids;
 pub mod locale;
@@ -43,6 +45,10 @@ pub mod roster;
 pub mod senator;
 
 pub use address::{Address, AddressParseError, Guest, GuestError, MAX_GUEST_ID_LEN};
+pub use continuity::{
+    AgentPresence, CheckpointFiles, CheckpointPayload, CheckpointRecord, CheckpointTrigger,
+    Checkpoints, PresenceBoard, PresencePayload, PresenceState, presence_event,
+};
 pub use event::{
     BindingAction, BindingPayload, Event, GroupRole, Kind, Mirror, NewEvent, PROPOSAL_DECISION,
     Refs, Source, StatusState, is_companion, is_provisional, is_takeover, meta,
