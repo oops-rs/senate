@@ -4,6 +4,7 @@
 //! | --- | --- | --- |
 //! | `bridge.toml` | the user | server URL, the person's token and handle, locale, agent names ([`crate::config`]) |
 //! | `state.db` | the daemon | cursors, session registry, delivery queue ([`crate::state`]) |
+//! | `state.<presider>.db` | the daemon | the same, for each further Senate the machine serves |
 //! | `bridge.sock` | the daemon | local IPC ([`crate::ipc`]), mode 0600 |
 //!
 //! The directory itself is created with mode 0700: it holds the person's token
@@ -53,6 +54,15 @@ impl Paths {
         self.home.join("state.db")
     }
 
+    /// The state of a Senate presided over by `presider` (relative to the
+    /// person, `claude`), when this machine serves several:
+    /// `state.<presider with / as ->.db`. The Senate where the person's
+    /// agents sit directly keeps `state.db`.
+    pub fn state_db_for(&self, presider: &str) -> PathBuf {
+        self.home
+            .join(format!("state.{}.db", presider.replace('/', "-")))
+    }
+
     pub fn socket(&self) -> PathBuf {
         self.home.join("bridge.sock")
     }
@@ -77,6 +87,10 @@ mod tests {
         assert_eq!(p.config(), PathBuf::from("/x/.senate/bridge.toml"));
         assert_eq!(p.state_db(), PathBuf::from("/x/.senate/state.db"));
         assert_eq!(p.socket(), PathBuf::from("/x/.senate/bridge.sock"));
+        assert_eq!(
+            p.state_db_for("claude/reviewer"),
+            PathBuf::from("/x/.senate/state.claude-reviewer.db")
+        );
     }
 
     #[test]

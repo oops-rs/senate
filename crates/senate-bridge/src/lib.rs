@@ -52,6 +52,7 @@ pub mod install;
 pub mod ipc;
 pub mod mcp;
 pub mod paths;
+pub mod preside;
 pub mod routing;
 pub mod session;
 pub mod state;

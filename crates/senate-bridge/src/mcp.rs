@@ -5,6 +5,14 @@
 //! `inbox`), plus one resource per committee,
 //! `senate://<committee>/brief`: the committee's brief as Markdown.
 //!
+//! A session whose agent holds a Senate's Speaker's seat also gets the
+//! presiding tools ([`PRESIDING_TOOLS`]: `speaker_docket`, `speaker_route`,
+//! `speaker_cover`, `speaker_escalate`; see [`crate::preside`]). The tool
+//! list asks the daemon whether the session presides (`presides`, with the
+//! session's own agent pins, so it works before the session's first hook)
+//! and leaves them out for every session that does not; the daemon refuses
+//! them from such a session anyway.
+//!
 //! Tool names, parameters and JSON fields are identifiers and the same in
 //! every language; tool descriptions are English. The text a tool returns
 //! for the agent to read is written in the bridge's locale (`locale` in
@@ -61,9 +69,10 @@ use serde::de::DeserializeOwned;
 use crate::catch_up;
 use crate::format;
 use crate::ipc::{
-    self, BoundReply, CatchUpReply, CheckpointReply, ClientError, InboxReply, JoinReply, Posted,
-    Request, SearchReply, SessionSelector,
+    self, BoundReply, CatchUpReply, CheckpointReply, ClientError, DocketReply, InboxReply,
+    JoinReply, Posted, PresidesReply, Request, SearchReply, SessionSelector,
 };
+use crate::session::Runtime;
 
 use crate::routing;
 
@@ -77,6 +86,22 @@ const POST_ATTEMPTS: u32 = 2;
 const BRIEF_SCHEME: &str = "senate://";
 const BRIEF_SUFFIX: &str = "/brief";
 const MARKDOWN: &str = "text/markdown";
+
+/// The tools only a presiding session is given.
+pub const PRESIDING_TOOLS: [&str; 4] = [
+    "speaker_docket",
+    "speaker_route",
+    "speaker_cover",
+    "speaker_escalate",
+];
+
+const SPEAKER_DOCKET: &str = "You preside over a Senate as its Speaker (this tool is only given to the session that does). List what awaits the Speaker there: messages written to one of a person's several agents without saying which (pick one with speaker_route), messages addressed to the Speaker, and questions to agents of that Senate that are away and unanswered (answer for them from their own checkpoint with speaker_cover). For each agent seated there it shows its presence, latest checkpoint and open threads, the facts to pick by; for each away agent an item names, its latest checkpoint in full. `committee`: one committee only; by default every committee of that Senate.";
+
+const SPEAKER_ROUTE: &str = "As Speaker of the Senate you preside over, route an item from speaker_docket to one agent seated there. The message is relayed to that agent in the original sender's name and the item leaves the docket. For a message written to one of a person's several agents, `to` must be one of its candidates; pick by the task and by what each agent is working on (presence, checkpoint, open threads), and escalate with speaker_escalate when unsure. A question to an away agent is never rerouted to a sibling: answer for it with speaker_cover. `committee` and `seq`: as speaker_docket lists the item. `to`: the agent, e.g. `senator::alice/claude/reviewer` or `alice/claude/reviewer`.";
+
+const SPEAKER_COVER: &str = "As Speaker of the Senate you preside over, answer a question to an away agent of that Senate on that agent's behalf, from that agent's own latest checkpoint (speaker_docket shows it in full). The answer is labelled as the Speaker answering for that agent, with the takeover word, and points at the checkpoint's branch and commit; the agent's own answer later still counts. Answer only from what the checkpoint says; when it does not cover the question, use speaker_escalate instead. `committee` and `thread`: the question's, as speaker_docket lists it. `body`: the answer, self-contained. `agent`: which of the agents the question went to, when it went to several.";
+
+const SPEAKER_ESCALATE: &str = "As Speaker of the Senate you preside over, put an item from speaker_docket that you cannot settle to the person: the one whose agent was meant, else your own person. A question to an agent is suspended on them; anything else becomes a question to them in its thread. The item leaves the docket. `committee` and `seq`: as speaker_docket lists the item. `reason`: one or two sentences the person reads: what is needed and why you could not settle it.";
 
 const INSTRUCTIONS: &str = "Senate connects this coding session to the team's shared log for \
 the committee you are working on. You are one senator there: an agent, named under your person \
@@ -336,6 +361,50 @@ pub struct InboxParams {}
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
+pub struct DocketParams {
+    /// One committee only; by default every committee of the Senate.
+    #[serde(default)]
+    pub committee: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct RouteParams {
+    /// The item's committee, as speaker_docket lists it.
+    pub committee: String,
+    /// The item's seq.
+    pub seq: u64,
+    /// The agent to route it to.
+    pub to: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct CoverParams {
+    /// The question's committee.
+    pub committee: String,
+    /// The question's seq (the thread's root).
+    pub thread: u64,
+    /// The answer, from the away agent's own checkpoint.
+    pub body: String,
+    /// Which agent you answer for, when the question went to several.
+    #[serde(default)]
+    pub agent: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct SpeakerEscalateParams {
+    /// The item's committee.
+    pub committee: String,
+    /// The item's seq.
+    pub seq: u64,
+    /// What the person needs to know, and why you could not settle it.
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
 pub struct CheckpointParams {
     /// One line for the log, e.g. "idempotency keys done; retries next".
     #[serde(default)]
@@ -533,7 +602,41 @@ pub struct SenateMcp {
     selector: SessionSelector,
     call_timeout: Duration,
     locale: Locale,
+    /// What this process knows of its session's agent before the session
+    /// registers: `SENATE_AGENT`, `.senate/agent`.
+    pins: Pins,
     tool_router: ToolRouter<Self>,
+}
+
+/// A session's agent pins as the MCP shim sees them ([`crate::agent`]).
+#[derive(Debug, Clone, Default)]
+pub struct Pins {
+    pub runtime: Runtime,
+    pub env: Option<String>,
+    pub file: Option<String>,
+}
+
+impl Pins {
+    /// `SENATE_AGENT` from this process's environment, and `.senate/agent`
+    /// from the working directory's repository.
+    pub async fn from_process() -> Self {
+        let env = std::env::var(crate::agent::AGENT_ENV)
+            .ok()
+            .filter(|v| !v.is_empty());
+        let file = match std::env::current_dir() {
+            Ok(cwd) => {
+                crate::session::gather_git_facts(&cwd, Duration::from_secs(2))
+                    .await
+                    .agent_file
+            }
+            Err(_) => None,
+        };
+        Self {
+            runtime: Runtime::Claude,
+            env,
+            file,
+        }
+    }
 }
 
 /// The calling session as this process's environment describes it. A
@@ -564,6 +667,7 @@ pub async fn serve_stdio(
 ) -> anyhow::Result<()> {
     let service = SenateMcp::new(daemon_socket, selector)
         .with_locale(locale)
+        .with_pins(Pins::from_process().await)
         .serve(rmcp::transport::stdio())
         .await?;
     service.waiting().await?;
@@ -830,8 +934,47 @@ impl SenateMcp {
             selector,
             call_timeout: CALL_TIMEOUT,
             locale: Locale::default(),
+            pins: Pins::default(),
             tool_router: Self::tool_router(),
         }
+    }
+
+    /// The session's agent pins, for deciding whether it presides before
+    /// it has registered.
+    pub fn with_pins(mut self, pins: Pins) -> Self {
+        self.pins = pins;
+        self
+    }
+
+    /// Whether this session presides over a Senate: whether it gets the
+    /// presiding tools. Anything the daemon cannot say is "no".
+    pub async fn presides(&self) -> bool {
+        let reply: Result<PresidesReply, _> = self
+            .call(&Request::Presides {
+                session: self.selector.clone(),
+                runtime: self.pins.runtime,
+                agent_env: self.pins.env.clone(),
+                agent_file: self.pins.file.clone(),
+            })
+            .await;
+        match reply {
+            Ok(reply) => reply.presiding.is_some(),
+            Err(e) => {
+                tracing::debug!("listing tools without the presiding ones: {e}");
+                false
+            }
+        }
+    }
+
+    /// The tools this session is given: all of them when it presides, all
+    /// but [`PRESIDING_TOOLS`] otherwise.
+    pub async fn tools(&self) -> Vec<rmcp::model::Tool> {
+        let presides = self.presides().await;
+        self.tool_router
+            .list_all()
+            .into_iter()
+            .filter(|t| presides || !PRESIDING_TOOLS.contains(&t.name.as_ref()))
+            .collect()
     }
 
     /// Bound each daemon call by `timeout` instead of the default.
@@ -1196,6 +1339,111 @@ impl SenateMcp {
         Ok(render_inbox(&reply, self.locale))
     }
 
+    #[tool(name = "speaker_docket", description = SPEAKER_DOCKET)]
+    async fn speaker_docket(&self, params: Parameters<DocketParams>) -> Result<String, String> {
+        let committee = committee_arg(params.0.committee)?;
+        let reply: DocketReply = self
+            .call(&Request::Docket {
+                session: self.selector.clone(),
+                committee,
+            })
+            .await
+            .map_err(|e| describe(e, self.locale))?;
+        Ok(crate::preside::render_docket(&reply, self.locale))
+    }
+
+    #[tool(name = "speaker_route", description = SPEAKER_ROUTE)]
+    async fn speaker_route(&self, params: Parameters<RouteParams>) -> Result<String, String> {
+        let p = params.0;
+        let l = self.locale;
+        let committee = committee_arg(Some(p.committee))?.ok_or("`committee` is empty")?;
+        let to = parse_address(&p.to)?;
+        let Some(to) = to.as_agent().cloned() else {
+            return Err(match l {
+                Locale::Zh => format!("{} 不是一个 agent；写出 agent 的完整路径。", to.in_text()),
+                Locale::En => format!("{} is not one agent; name the agent in full.", to.in_text()),
+            });
+        };
+        let posted = self
+            .append(Request::Route {
+                session: self.selector.clone(),
+                committee,
+                seq: Seq(p.seq),
+                to: to.clone(),
+                id: Some(EventId::new()),
+            })
+            .await?;
+        let (c, seq, again) = (&posted.committee, posted.seq, already(&posted, l));
+        let to = Address::senator(&to).in_text();
+        Ok(match l {
+            Locale::Zh => format!(
+                "已把 {c} 上的 seq {} 交给 {to}（seq {seq}）{again}。",
+                p.seq
+            ),
+            Locale::En => format!("Routed seq {} on {c} to {to} (seq {seq}){again}.", p.seq),
+        })
+    }
+
+    #[tool(name = "speaker_cover", description = SPEAKER_COVER)]
+    async fn speaker_cover(&self, params: Parameters<CoverParams>) -> Result<String, String> {
+        let p = params.0;
+        let l = self.locale;
+        let committee = committee_arg(Some(p.committee))?.ok_or("`committee` is empty")?;
+        let agent = match p.agent.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
+            Some(raw) => match parse_address(raw)?.as_agent() {
+                Some(agent) => Some(agent.clone()),
+                None => return Err(format!("`{raw}` is not one agent")),
+            },
+            None => None,
+        };
+        let posted = self
+            .append(Request::Cover {
+                session: self.selector.clone(),
+                committee,
+                thread: Seq(p.thread),
+                body: p.body,
+                agent,
+                id: Some(EventId::new()),
+            })
+            .await?;
+        let (c, seq, again) = (&posted.committee, posted.seq, already(&posted, l));
+        Ok(match l {
+            Locale::Zh => format!(
+                "已代那个 agent 回答 {c} 上的 thread {}（seq {seq}）{again}，标注为 Speaker 接管。",
+                p.thread
+            ),
+            Locale::En => format!(
+                "Answered thread {} on {c} on the agent's behalf (seq {seq}){again}, labelled as \
+                 the Speaker's takeover.",
+                p.thread
+            ),
+        })
+    }
+
+    #[tool(name = "speaker_escalate", description = SPEAKER_ESCALATE)]
+    async fn speaker_escalate(
+        &self,
+        params: Parameters<SpeakerEscalateParams>,
+    ) -> Result<String, String> {
+        let p = params.0;
+        let l = self.locale;
+        let committee = committee_arg(Some(p.committee))?.ok_or("`committee` is empty")?;
+        let posted = self
+            .append(Request::Refer {
+                session: self.selector.clone(),
+                committee,
+                seq: Seq(p.seq),
+                reason: p.reason,
+                id: Some(EventId::new()),
+            })
+            .await?;
+        let (c, seq, again) = (&posted.committee, posted.seq, already(&posted, l));
+        Ok(match l {
+            Locale::Zh => format!("已把 {c} 上的 seq {} 交给人（seq {seq}）{again}。", p.seq),
+            Locale::En => format!("Put seq {} on {c} to the person (seq {seq}){again}.", p.seq),
+        })
+    }
+
     #[tool(name = "checkpoint", description = CHECKPOINT)]
     async fn checkpoint(&self, params: Parameters<CheckpointParams>) -> Result<String, String> {
         let p = params.0;
@@ -1270,6 +1518,19 @@ impl ServerHandler for SenateMcp {
         let this = scoped.as_ref().unwrap_or(self);
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(this, request, context);
         this.tool_router.call(tcc).await
+    }
+
+    /// Every tool, but the presiding ones only for a presiding session.
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<rmcp::model::ListToolsResult, McpError> {
+        let scoped = self.for_request(&context);
+        let this = scoped.as_ref().unwrap_or(self);
+        Ok(rmcp::model::ListToolsResult::with_all_items(
+            this.tools().await,
+        ))
     }
 
     fn get_info(&self) -> ServerConfig {
@@ -1530,6 +1791,10 @@ mod tests {
                 "post",
                 "propose_decision",
                 "search",
+                "speaker_cover",
+                "speaker_docket",
+                "speaker_escalate",
+                "speaker_route",
                 "status",
                 "take"
             ]
@@ -1553,6 +1818,10 @@ mod tests {
             TAKE,
             INBOX,
             BRIEF_DESCRIPTION,
+            SPEAKER_DOCKET,
+            SPEAKER_ROUTE,
+            SPEAKER_COVER,
+            SPEAKER_ESCALATE,
         ] {
             let lower = text.to_lowercase();
             assert!(!lower.contains(&["fei", "shu"].concat()), "{text}");

@@ -365,6 +365,16 @@ impl ApiClient {
         Ok(Some(checked(resp).await?.json().await?))
     }
 
+    /// `GET .../docket`: what awaits the Speaker on the committee.
+    pub async fn docket(
+        &self,
+        committee: &CommitteeId,
+    ) -> Result<senate_core::DocketPage, ApiClientError> {
+        let url = self.url(&api::docket_path(committee));
+        let resp = self.authed(self.http.get(url)).send().await?;
+        Ok(checked(resp).await?.json().await?)
+    }
+
     /// `GET .../presence`: each agent's presence on the committee.
     pub async fn presence(&self, committee: &CommitteeId) -> Result<PresencePage, ApiClientError> {
         let url = self.url(&api::presence_path(committee));

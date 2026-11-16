@@ -1183,3 +1183,100 @@ async fn tool_results_follow_the_locale() {
         "{text}"
     );
 }
+
+/// The presiding tools are the presiding session's alone: listed for the
+/// session whose agent holds the Speaker's seat, left out for every other
+/// session, and refused if called anyway.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn only_the_presiding_session_is_given_the_presiding_tools() {
+    let mut h = Harness::new().await;
+    // A top Senate used alone: alice/claude is named its Speaker.
+    h.server.set_speaker("alice/claude");
+    h.start().await;
+    let wd = h.workdir("a", Some("refund-v2"));
+    let start = h
+        .hook(HookKind::SessionStart, "c1", &wd, None)
+        .await
+        .unwrap();
+    let context = start["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(
+        context.contains("[senator::alice/claude] is the Speaker of the top Senate"),
+        "{context}"
+    );
+    let mut env = h.env_for("x1", None);
+    env.agent = Some("codex".into());
+    let start = h
+        .hook_with(HookKind::SessionStart, "x1", &wd, &env)
+        .await
+        .unwrap();
+    let context = start["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(!context.contains("is the Speaker"), "{context}");
+
+    let names = |tools: &Value| -> Vec<String> {
+        tools["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let mut presiding = McpClient::start(h.socket(), selector("c1")).await;
+    let listed = names(&presiding.request("tools/list", json!({})).await);
+    for tool in senate_bridge::mcp::PRESIDING_TOOLS {
+        assert!(listed.iter().any(|n| n == tool), "{tool} in {listed:?}");
+    }
+    assert!(listed.iter().any(|n| n == "ask"));
+
+    let mut codex = McpClient::start(h.socket(), selector("x1")).await;
+    let listed = names(&codex.request("tools/list", json!({})).await);
+    assert!(listed.iter().any(|n| n == "ask"));
+    for tool in senate_bridge::mcp::PRESIDING_TOOLS {
+        assert!(!listed.iter().any(|n| n == tool), "{tool} in {listed:?}");
+    }
+    let (err, text) = codex
+        .call(
+            "speaker_route",
+            json!({"committee": "refund-v2", "seq": 1, "to": "alice/claude"}),
+        )
+        .await;
+    assert!(err);
+    assert!(
+        text.contains("[senator::alice/codex] holds no Senate's Speaker's seat"),
+        "{text}"
+    );
+    // The daemon refuses the request itself, whatever a client lists.
+    let refused = ipc::request::<Posted>(
+        &h.socket(),
+        &Request::Route {
+            session: selector("x1"),
+            committee: committee(),
+            seq: Seq(1),
+            to: path("alice/claude"),
+            id: None,
+        },
+        Duration::from_secs(1),
+        Duration::from_secs(5),
+    )
+    .await
+    .unwrap_err();
+    let ClientError::Remote(e) = refused else {
+        panic!("{refused}")
+    };
+    assert_eq!(e.code, "not_presiding");
+
+    // A session not registered yet is judged by its own pins.
+    let fresh = SenateMcp::new(h.socket(), selector("not-yet"));
+    assert!(fresh.presides().await, "harness default: claude");
+    let pinned =
+        SenateMcp::new(h.socket(), selector("not-yet")).with_pins(senate_bridge::mcp::Pins {
+            runtime: Runtime::Claude,
+            env: Some("codex".into()),
+            file: None,
+        });
+    assert!(!pinned.presides().await);
+    h.stop().await;
+}

@@ -1,0 +1,449 @@
+//! The presiding session's requests, served by the Senate whose Speaker's
+//! seat its agent holds ([`crate::preside`] says what they are for). Each
+//! writes as `speaker` with this Senate's token; the server checks that the
+//! person holds the seat, and this side checks that the item is on the
+//! docket and that the request fits it.
+
+use senate_core::{Awaiting, DocketItem, DocketPage, Refs};
+
+use super::*;
+use crate::ipc::SenateDocket;
+
+/// Bound on reading the docket while a hook waits.
+const HOOK_DOCKET_TIMEOUT: Duration = Duration::from_secs(1);
+
+impl Shared {
+    /// The agents seated in this Senate that this machine knows of: every
+    /// agent with a session here on record.
+    pub(crate) fn seated(&self) -> Vec<SenatorPath> {
+        self.served_agents()
+            .map(|agents| agents.into_iter().collect())
+            .unwrap_or_default()
+    }
+
+    /// End `session_id` here if it is live: it moved to another Senate.
+    pub(crate) fn retire(&self, session_id: &str) {
+        match self.store.session(session_id) {
+            Ok(Some(session)) if session.state != SessionState::Ended => {
+                if let Err(e) = self
+                    .store
+                    .set_session_state(session_id, SessionState::Ended)
+                {
+                    tracing::warn!(session = session_id, "ending a session that moved: {e}");
+                    return;
+                }
+                tracing::info!(
+                    session = session_id,
+                    agent = %session.agent,
+                    senate = %self.senate_label(),
+                    "the session moved to another Senate"
+                );
+                self.committees_changed.notify_one();
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(session = session_id, "reading a session: {e}"),
+        }
+    }
+
+    /// The committees of this Senate a docket covers: `committee`, or every
+    /// committee its log has.
+    async fn docket_committees(
+        &self,
+        committee: Option<CommitteeId>,
+    ) -> Result<Vec<CommitteeId>, IpcError> {
+        if let Some(committee) = committee {
+            return Ok(vec![committee]);
+        }
+        let me = self.api.me().await.map_err(server_error)?;
+        self.note_speaker(me.speaker.clone());
+        Ok(me.committees)
+    }
+
+    /// What awaits this Senate's Speaker, with the latest checkpoint of
+    /// every away agent an item names.
+    pub(crate) async fn docket(
+        &self,
+        committee: Option<CommitteeId>,
+    ) -> Result<SenateDocket, IpcError> {
+        let mut pages = Vec::new();
+        let mut checkpoints = Vec::new();
+        for committee in self.docket_committees(committee).await? {
+            let page = self.api.docket(&committee).await.map_err(server_error)?;
+            let mut away: BTreeSet<SenatorPath> = BTreeSet::new();
+            for item in &page.items {
+                if let Awaiting::Away { agents } = &item.awaiting {
+                    away.extend(agents.iter().cloned());
+                }
+            }
+            for agent in away {
+                if let Some(record) = self
+                    .api
+                    .latest_checkpoint(&committee, &agent)
+                    .await
+                    .map_err(server_error)?
+                {
+                    checkpoints.push(record);
+                }
+            }
+            pages.push(page);
+        }
+        Ok(SenateDocket {
+            senate: self.seating().presider().cloned(),
+            pages,
+            checkpoints,
+        })
+    }
+
+    /// One item on the committee's docket, and the page it is on.
+    async fn docket_item(
+        &self,
+        committee: &CommitteeId,
+        seq: Seq,
+    ) -> Result<(DocketItem, DocketPage), IpcError> {
+        let page = self.api.docket(committee).await.map_err(server_error)?;
+        let item = page
+            .items
+            .iter()
+            .find(|i| i.event.seq == seq)
+            .cloned()
+            .ok_or_else(|| {
+                IpcError::bad_request(preside_text::not_on_docket(committee, seq, self.locale))
+            })?;
+        Ok((item, page))
+    }
+
+    /// Relay an item to one agent seated here: a pick to one of its
+    /// candidates, or a message addressed to the Speaker to whichever agent
+    /// should have it. A question to an away agent is never rerouted.
+    pub(crate) async fn on_route(
+        &self,
+        speaker: &SenatorPath,
+        committee: CommitteeId,
+        seq: Seq,
+        to: SenatorPath,
+        id: Option<EventId>,
+    ) -> Result<Posted, IpcError> {
+        let (item, _) = self.docket_item(&committee, seq).await?;
+        match &item.awaiting {
+            Awaiting::Pick { candidates, .. } if !candidates.contains(&to) => {
+                return Err(IpcError::bad_request(preside_text::not_a_candidate(
+                    &to,
+                    candidates,
+                    self.locale,
+                )));
+            }
+            Awaiting::Away { .. } => {
+                return Err(IpcError::bad_request(preside_text::never_reroute(
+                    self.locale,
+                )));
+            }
+            _ if !to.is_junior() || &to == speaker => {
+                return Err(IpcError::bad_request(preside_text::route_to_an_agent(
+                    &to,
+                    self.locale,
+                )));
+            }
+            _ => {}
+        }
+        let root = item.event;
+        let behalf = root
+            .on_behalf_of
+            .clone()
+            .unwrap_or_else(|| root.from.clone());
+        let mut event = NewEvent::new(committee, root.kind.clone(), Address::Speaker, root.body)
+            .to(Address::senator(&to))
+            .on_behalf_of(behalf)
+            .with_meta(meta::RELAYED_FROM, serde_json::json!(seq.0));
+        if let Some(refs) = root.refs {
+            event = event.with_refs(refs);
+        }
+        if let Some(id) = id {
+            event = event.with_id(id);
+        }
+        self.post(event).await
+    }
+
+    /// Answer a question to an away agent on that agent's behalf, from its
+    /// own latest checkpoint: labelled `[speaker::<agent>]` with the
+    /// takeover word, pointing at the checkpoint's branch and commit.
+    pub(crate) async fn on_cover(
+        &self,
+        _speaker: &SenatorPath,
+        committee: CommitteeId,
+        thread: Seq,
+        body: String,
+        agent: Option<SenatorPath>,
+        id: Option<EventId>,
+    ) -> Result<Posted, IpcError> {
+        if body.trim().is_empty() {
+            return Err(IpcError::bad_request("`body` is empty"));
+        }
+        let (item, _) = self.docket_item(&committee, thread).await?;
+        let Awaiting::Away { agents } = &item.awaiting else {
+            return Err(IpcError::bad_request(preside_text::not_away(self.locale)));
+        };
+        let agent = match (agent, agents.as_slice()) {
+            (Some(agent), _) if agents.contains(&agent) => agent,
+            (Some(agent), _) => {
+                return Err(IpcError::bad_request(preside_text::not_its_question(
+                    &agent,
+                    agents,
+                    self.locale,
+                )));
+            }
+            (None, [one]) => one.clone(),
+            (None, several) => {
+                return Err(IpcError::bad_request(preside_text::name_which(
+                    several,
+                    self.locale,
+                )));
+            }
+        };
+        let Some(checkpoint) = self
+            .api
+            .latest_checkpoint(&committee, &agent)
+            .await
+            .map_err(server_error)?
+        else {
+            return Err(IpcError::bad_request(preside_text::no_checkpoint(
+                &agent,
+                self.locale,
+            )));
+        };
+        let root = item.event;
+        let asker = root
+            .on_behalf_of
+            .clone()
+            .unwrap_or_else(|| root.from.clone());
+        let mut event = NewEvent::new(committee, Kind::Answer, Address::Speaker, body)
+            .to(asker)
+            .in_thread(root.seq)
+            .on_behalf_of(Address::senator(&agent))
+            .with_refs(Refs {
+                commit: Some(checkpoint.checkpoint.commit.clone()),
+                path: None,
+                branch: Some(checkpoint.checkpoint.branch.clone()),
+            })
+            .with_meta(meta::TAKEOVER, serde_json::json!(true));
+        if let Some(id) = id {
+            event = event.with_id(id);
+        }
+        self.post(event).await
+    }
+
+    /// Put an item to the person: a task thread is suspended on them
+    /// (`escalated_to`); anything else gets a question to them in its
+    /// thread. The person is the one whose agent was meant (a pick, an away
+    /// agent), else the Speaker's own person.
+    pub(crate) async fn on_refer(
+        &self,
+        speaker: &SenatorPath,
+        committee: CommitteeId,
+        seq: Seq,
+        reason: String,
+        id: Option<EventId>,
+    ) -> Result<Posted, IpcError> {
+        if reason.trim().is_empty() {
+            return Err(IpcError::bad_request("`reason` is empty"));
+        }
+        let (item, _) = self.docket_item(&committee, seq).await?;
+        let person = match &item.awaiting {
+            Awaiting::Pick { owner, .. } => owner.clone(),
+            Awaiting::Away { agents } => agents
+                .first()
+                .map(|a| a.owner().clone())
+                .unwrap_or_else(|| speaker.owner().clone()),
+            Awaiting::Addressed => speaker.owner().clone(),
+        };
+        let root = item.event;
+        let task = root.thread.is_none()
+            && matches!(root.kind, Kind::Question | Kind::Request)
+            && root.to.iter().any(Address::is_junior);
+        let mut event = if task {
+            let mut status = StatusPayload::new(senate_core::StatusState::Suspended);
+            status.escalated_to = Some(person);
+            status.reason = Some(reason.clone());
+            NewEvent::new(committee, Kind::Status, Address::Speaker, reason)
+                .in_thread(root.seq)
+                .with_meta(meta::STATUS, status.value())
+        } else {
+            NewEvent::new(committee, Kind::Question, Address::Speaker, reason)
+                .to(Address::senior(&person))
+                .in_thread(root.seq)
+        };
+        if let Some(id) = id {
+            event = event.with_id(id);
+        }
+        self.post(event).await
+    }
+
+    /// What a presiding session is told by a hook: at session start that it
+    /// presides, over which Senate, who sits there and how much awaits it;
+    /// at a prompt, only items it has not been told of. `None` when there is
+    /// nothing to say or the docket is not read in time.
+    pub(crate) async fn presiding_context(
+        &self,
+        session: &Session,
+        event: HookEvent,
+    ) -> Option<String> {
+        let docket = match tokio::time::timeout(HOOK_DOCKET_TIMEOUT, self.docket(None)).await {
+            Ok(Ok(docket)) => Some(docket),
+            Ok(Err(e)) => {
+                tracing::debug!("presiding without the docket: {e}");
+                None
+            }
+            Err(_) => None,
+        };
+        let items: BTreeSet<(CommitteeId, Seq)> = docket
+            .iter()
+            .flat_map(|d| &d.pages)
+            .flat_map(|p| p.items.iter().map(|i| (p.committee.clone(), i.event.seq)))
+            .collect();
+        let new = {
+            let mut announced = lock(&self.announced);
+            let told = announced.entry(session.session_id.clone()).or_default();
+            let new = items.difference(told).count();
+            told.extend(items.iter().cloned());
+            new
+        };
+        let senate = self.seating().presider().cloned();
+        match event {
+            HookEvent::SessionStart => {
+                let mut seated: BTreeSet<SenatorPath> = self.seated().into_iter().collect();
+                if let Some(docket) = &docket {
+                    for page in &docket.pages {
+                        seated.extend(page.seats.iter().map(|s| s.agent.clone()));
+                    }
+                }
+                let seated: Vec<SenatorPath> = seated.into_iter().collect();
+                Some(crate::preside::orientation(
+                    &session.agent,
+                    senate.as_ref(),
+                    &seated,
+                    items.len(),
+                    self.locale,
+                ))
+            }
+            HookEvent::UserPromptSubmit if new > 0 => {
+                Some(crate::preside::nudge(new, senate.as_ref(), self.locale))
+            }
+            HookEvent::UserPromptSubmit => None,
+        }
+    }
+}
+
+/// Refusals of the presiding requests, in the bridge's locale.
+mod preside_text {
+    use senate_core::{Address, CommitteeId, Locale, SenatorPath, Seq};
+
+    fn mentions(paths: &[SenatorPath]) -> String {
+        paths
+            .iter()
+            .map(|p| Address::senator(p).in_text())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    pub(super) fn not_on_docket(committee: &CommitteeId, seq: Seq, locale: Locale) -> String {
+        match locale {
+            Locale::Zh => format!(
+                "`{committee}` 的 seq {seq} 不在 Speaker 的待办里（可能已处理）。先用 speaker_docket 看看。"
+            ),
+            Locale::En => format!(
+                "seq {seq} in `{committee}` does not await the Speaker (it may be dealt with). \
+                 Look with speaker_docket first."
+            ),
+        }
+    }
+
+    pub(super) fn not_a_candidate(
+        to: &SenatorPath,
+        candidates: &[SenatorPath],
+        locale: Locale,
+    ) -> String {
+        let to = Address::senator(to).in_text();
+        match locale {
+            Locale::Zh => format!("{to} 不是候选之一；从 {} 中选一个。", mentions(candidates)),
+            Locale::En => format!(
+                "{to} is not one of the candidates; pick one of {}.",
+                mentions(candidates)
+            ),
+        }
+    }
+
+    pub(super) fn never_reroute(locale: Locale) -> String {
+        locale
+            .pick(
+                "这是问某个不在的 agent 的问题：不转给它的兄弟 agent。用 speaker_cover 依据它自己的 \
+                 checkpoint 代答，或 speaker_escalate 交给人。",
+                "This is a question to an away agent: it is never rerouted to a sibling. Answer \
+                 for it from its own checkpoint with speaker_cover, or put it to the person with \
+                 speaker_escalate.",
+            )
+            .to_owned()
+    }
+
+    pub(super) fn route_to_an_agent(to: &SenatorPath, locale: Locale) -> String {
+        let to = Address::senator(to).in_text();
+        match locale {
+            Locale::Zh => format!("只能交给这个 Senate 里在席的另一个 agent，不能交给 {to}。"),
+            Locale::En => {
+                format!("Route it to another agent seated in this Senate, not to {to}.")
+            }
+        }
+    }
+
+    pub(super) fn not_away(locale: Locale) -> String {
+        locale
+            .pick(
+                "这件事不是问某个不在的 agent 的问题，不能代答。用 speaker_route 或 speaker_escalate。",
+                "This item is not a question to an away agent, so there is no one to answer for. \
+                 Use speaker_route or speaker_escalate.",
+            )
+            .to_owned()
+    }
+
+    pub(super) fn not_its_question(
+        agent: &SenatorPath,
+        agents: &[SenatorPath],
+        locale: Locale,
+    ) -> String {
+        let agent = Address::senator(agent).in_text();
+        match locale {
+            Locale::Zh => format!(
+                "这个问题不是问 {agent} 的；只能代 {} 回答。",
+                mentions(agents)
+            ),
+            Locale::En => format!(
+                "The question was not addressed to {agent}; answer only for {}.",
+                mentions(agents)
+            ),
+        }
+    }
+
+    pub(super) fn name_which(agents: &[SenatorPath], locale: Locale) -> String {
+        match locale {
+            Locale::Zh => format!(
+                "问题问的是几个 agent：用 `agent` 指定代谁回答：{}。",
+                mentions(agents)
+            ),
+            Locale::En => format!(
+                "The question went to several agents: name the one you answer for with `agent`: {}.",
+                mentions(agents)
+            ),
+        }
+    }
+
+    pub(super) fn no_checkpoint(agent: &SenatorPath, locale: Locale) -> String {
+        let agent = Address::senator(agent).in_text();
+        match locale {
+            Locale::Zh => format!(
+                "{agent} 在这个委员会没有 checkpoint，没有依据可以代它回答。用 speaker_escalate 交给人。"
+            ),
+            Locale::En => format!(
+                "{agent} has no checkpoint on this committee, so there is nothing to answer for it \
+                 from. Put it to the person with speaker_escalate."
+            ),
+        }
+    }
+}
