@@ -84,8 +84,9 @@ async fn the_branch_name_convention_is_off_by_default_and_on_when_enabled() {
     ] {
         let mut h = Harness::new().await;
         h.config.committee_from_branch = on;
+        h.config.branch_prefix = "team".into();
         h.start().await;
-        let wd = repo(h.dir.path(), "r", "feature/refund-v2/alice");
+        let wd = repo(h.dir.path(), "r", "team/refund-v2/alice");
         h.hook(HookKind::SessionStart, "s", &wd, None).await;
         assert_eq!(bound(&h, "s"), expected, "committee_from_branch = {on}");
         h.stop().await;
@@ -96,21 +97,21 @@ async fn the_branch_name_convention_is_off_by_default_and_on_when_enabled() {
 fn a_branch_prefix_alone_does_not_enable_the_convention() {
     let head = "server_url = \"http://x\"\ntoken = \"t\"\nperson = \"alice\"\n";
     let c: senate_bridge::BridgeConfig =
-        toml::from_str(&format!("{head}branch_prefix = \"feature\"\n")).unwrap();
+        toml::from_str(&format!("{head}branch_prefix = \"team\"\n")).unwrap();
     assert!(!c.committee_from_branch && c.branch_convention().is_none());
-    assert_eq!(c.branches().prefix(), "feature");
+    assert_eq!(c.branches().prefix(), "team");
     let c: senate_bridge::BridgeConfig = toml::from_str(&format!(
-        "{head}committee_from_branch = true\nbranch_prefix = \"team\"\n"
+        "{head}committee_from_branch = true\nbranch_prefix = \"crew\"\n"
     ))
     .unwrap();
-    assert_eq!(c.branch_convention().unwrap().prefix(), "team");
+    assert_eq!(c.branch_convention().unwrap().prefix(), "crew");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_file_binds_without_the_convention_and_the_name_wins_with_it() {
     let mut h = Harness::new().await;
     h.start().await;
-    let wd = repo(h.dir.path(), "r", "feature/other/alice");
+    let wd = repo(h.dir.path(), "r", "team/other/alice");
     std::fs::create_dir_all(wd.join(".senate")).unwrap();
     std::fs::write(wd.join(".senate/committee"), "refund-v2\n").unwrap();
     h.hook(HookKind::SessionStart, "s", &wd, None).await;
@@ -122,8 +123,9 @@ async fn the_file_binds_without_the_convention_and_the_name_wins_with_it() {
 
     let mut h = Harness::new().await;
     h.config.committee_from_branch = true;
+    h.config.branch_prefix = "team".into();
     h.start().await;
-    let wd = repo(h.dir.path(), "r", "feature/other/alice");
+    let wd = repo(h.dir.path(), "r", "team/other/alice");
     std::fs::create_dir_all(wd.join(".senate")).unwrap();
     std::fs::write(wd.join(".senate/committee"), "refund-v2\n").unwrap();
     h.hook(HookKind::SessionStart, "s", &wd, None).await;

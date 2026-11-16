@@ -32,7 +32,10 @@ person = "alice"
 # your next session instead of waiting until one joins. A session binds
 # itself to a committee from the `join` tool (this session only), a
 # `<branch_prefix>/<committee>/<person>` branch (only with
-# `committee_from_branch` below), or the worktree's `.senate/committee`.
+# `committee_from_branch` below), or the worktree's `.senate/committee`
+# (`senate join <committee>` writes it; it is untracked and kept per branch
+# under ~/.senate/branches/, so switching branches swaps in that branch's
+# own copy). `senate where` shows what a directory resolves to.
 # committees = ["refund-v2"]
 
 # Optional: the most characters of the committee brief (decisions in force,
@@ -46,6 +49,10 @@ person = "alice"
 # by default: a branch name is other tools' business too, and
 # `branch_prefix` alone does not turn this on.
 # committee_from_branch = true
+
+# Optional: `senate free` forgets the queued items and cursors of an agent
+# with no session and no contact for this many days. Default 30.
+# free_after_days = 30
 
 # Optional: the first segment of a developer branch,
 # `<branch_prefix>/<committee>/<person>`: what `committee_from_branch`

@@ -1,9 +1,10 @@
 //! The developer-machine side of Senate: joining a person's coding-agent
 //! sessions to committee logs, across every Senate the machine serves. It
 //! runs inside `senated --machine` (`senated::machine`), and is the `senate`
-//! command (`install`, `status`, `inbox`, `take`, `init --local`,
-//! `service` (keep the daemon running), and the MCP server and hooks
-//! Claude Code and Codex run).
+//! command (`install`, `status`, `inbox`, `take`, `join`, `leave`, `pin`,
+//! `unpin`, `where`, `list`, `free`, `init --local`, `service` (keep the
+//! daemon running), and the MCP server and hooks Claude Code and Codex
+//! run). A worktree's `.senate/` follows its branch ([`follow`]).
 //!
 //! # Several Senates, one daemon
 //!
@@ -63,6 +64,7 @@
 
 pub mod agent;
 pub mod approvals;
+pub mod binding;
 pub mod catch_up;
 pub mod checkpoint;
 pub mod client;
@@ -70,6 +72,7 @@ pub mod companion;
 pub mod config;
 pub mod daemon;
 pub mod delivery;
+pub mod follow;
 pub mod format;
 pub mod hook;
 pub mod init;

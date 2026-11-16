@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS cursors (
     committee TEXT NOT NULL,
     delivered INTEGER NOT NULL,
     reported  INTEGER NOT NULL DEFAULT 0,
+    touched   INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (agent, committee)
 );
 CREATE TABLE IF NOT EXISTS epochs (
@@ -245,6 +246,16 @@ pub struct ResetSummary {
     pub undelivered: usize,
 }
 
+/// An agent that no session has spoken for a long time, with what the
+/// state still holds for it ([`Store::idle_agents`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdleAgent {
+    pub agent: SenatorPath,
+    pub committees: Vec<CommitteeId>,
+    /// Queued items, of any status.
+    pub items: usize,
+}
+
 pub struct Store {
     conn: Mutex<Connection>,
 }
@@ -396,9 +407,10 @@ fn take(
         )?;
     }
     tx.execute(
-        "INSERT INTO cursors (agent, committee, delivered) VALUES (?1, ?2, ?3)
-         ON CONFLICT(agent, committee) DO UPDATE SET delivered = excluded.delivered",
-        params![agent, committee.as_str(), seq_sql(seq)],
+        "INSERT INTO cursors (agent, committee, delivered, touched) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(agent, committee) DO UPDATE SET
+             delivered = excluded.delivered, touched = excluded.touched",
+        params![agent, committee.as_str(), seq_sql(seq), now_ms()],
     )?;
     Ok(true)
 }
@@ -433,6 +445,16 @@ impl Store {
         let _mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))?;
         conn.pragma_update(None, "synchronous", "FULL")?;
         conn.execute_batch(SCHEMA)?;
+        // A database from before cursors were dated: they were seen now.
+        let dated = conn
+            .prepare("SELECT 1 FROM pragma_table_info('cursors') WHERE name = 'touched'")?
+            .exists([])?;
+        if !dated {
+            conn.execute_batch(
+                "ALTER TABLE cursors ADD COLUMN touched INTEGER NOT NULL DEFAULT 0",
+            )?;
+            conn.execute("UPDATE cursors SET touched = ?1", [now_ms()])?;
+        }
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -507,13 +529,15 @@ impl Store {
         reported: Seq,
     ) -> Result<bool, StoreError> {
         Ok(self.conn().execute(
-            "INSERT INTO cursors (agent, committee, delivered, reported) VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO cursors (agent, committee, delivered, reported, touched)
+             VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(agent, committee) DO NOTHING",
             params![
                 agent_text(agent),
                 committee.as_str(),
                 seq_sql(delivered),
-                seq_sql(reported)
+                seq_sql(reported),
+                now_ms()
             ],
         )? > 0)
     }
@@ -544,8 +568,14 @@ impl Store {
         seq: Seq,
     ) -> Result<(), StoreError> {
         self.conn().execute(
-            "UPDATE cursors SET reported = MAX(reported, ?3) WHERE agent = ?1 AND committee = ?2",
-            params![agent_text(agent), committee.as_str(), seq_sql(seq)],
+            "UPDATE cursors SET reported = MAX(reported, ?3), touched = ?4
+             WHERE agent = ?1 AND committee = ?2",
+            params![
+                agent_text(agent),
+                committee.as_str(),
+                seq_sql(seq),
+                now_ms()
+            ],
         )?;
         Ok(())
     }
@@ -855,6 +885,27 @@ impl Store {
         Ok(())
     }
 
+    /// The branch a session is on and the committee its worktree says,
+    /// when the worktree changed under it (the branch was switched).
+    pub fn set_inferred(
+        &self,
+        id: &str,
+        branch: Option<&str>,
+        inferred: Option<&(CommitteeId, CommitteeSource)>,
+    ) -> Result<(), StoreError> {
+        self.conn().execute(
+            "UPDATE sessions SET branch = ?2, inferred_committee = ?3, committee_source = ?4
+             WHERE session_id = ?1",
+            params![
+                id,
+                branch,
+                inferred.map(|(c, _)| c.as_str()),
+                inferred.map(|(_, s)| s.as_str())
+            ],
+        )?;
+        Ok(())
+    }
+
     pub fn set_socket_ok(&self, id: &str, ok: bool) -> Result<(), StoreError> {
         self.conn().execute(
             "UPDATE sessions SET socket_ok = ?2 WHERE session_id = ?1",
@@ -927,6 +978,154 @@ impl Store {
         )?;
         tx.commit()?;
         Ok(())
+    }
+
+    // ---- freeing what has expired -----------------------------------------
+
+    /// Forget these sessions (and their ancestor pids). How many were there.
+    pub fn delete_sessions(&self, ids: &[String]) -> Result<usize, StoreError> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let mut gone = 0;
+        for id in ids {
+            gone += tx.execute("DELETE FROM sessions WHERE session_id = ?1", [id])?;
+            tx.execute("DELETE FROM session_ancestors WHERE session_id = ?1", [id])?;
+        }
+        tx.commit()?;
+        Ok(gone)
+    }
+
+    /// Agents with queued items or cursors and no contact since `cutoff_ms`:
+    /// none of their sessions is registered (other than `ignoring`, which
+    /// is being forgotten), and no cursor, queue row or session of theirs
+    /// is newer. Committees in `keep` are left out.
+    pub fn idle_agents(
+        &self,
+        cutoff_ms: i64,
+        ignoring: &std::collections::BTreeSet<String>,
+        keep: &std::collections::BTreeSet<CommitteeId>,
+    ) -> Result<Vec<IdleAgent>, StoreError> {
+        let conn = self.conn();
+        let mut agents: std::collections::BTreeMap<String, IdleAgent> =
+            std::collections::BTreeMap::new();
+        let mut newest: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
+        let mut bump = |agent: &str, at: i64| {
+            let e = newest.entry(agent.to_string()).or_insert(0);
+            *e = (*e).max(at);
+        };
+        {
+            let mut stmt = conn.prepare("SELECT agent, committee, touched FROM cursors")?;
+            for row in stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            })? {
+                let (agent, committee, touched) = row?;
+                bump(&agent, touched);
+                let Ok(committee) = CommitteeId::new(committee) else {
+                    continue;
+                };
+                if let Ok(path) = agent.parse::<SenatorPath>() {
+                    agents
+                        .entry(agent.clone())
+                        .or_insert_with(|| IdleAgent {
+                            agent: path,
+                            committees: Vec::new(),
+                            items: 0,
+                        })
+                        .committees
+                        .push(committee);
+                }
+            }
+        }
+        {
+            let mut stmt = conn.prepare(
+                "SELECT agent, committee, enqueued_at, COALESCE(delivered_at, 0) FROM queue",
+            )?;
+            for row in stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            })? {
+                let (agent, committee, enqueued, delivered) = row?;
+                bump(&agent, enqueued.max(delivered));
+                if let (Ok(path), Ok(committee)) =
+                    (agent.parse::<SenatorPath>(), CommitteeId::new(committee))
+                {
+                    let entry = agents.entry(agent.clone()).or_insert_with(|| IdleAgent {
+                        agent: path,
+                        committees: Vec::new(),
+                        items: 0,
+                    });
+                    entry.items += 1;
+                    if !entry.committees.contains(&committee) {
+                        entry.committees.push(committee);
+                    }
+                }
+            }
+        }
+        let mut registered: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        {
+            let mut stmt = conn.prepare("SELECT session_id, agent, last_seen FROM sessions")?;
+            for row in stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            })? {
+                let (id, agent, seen) = row?;
+                bump(&agent, seen);
+                if !ignoring.contains(&id) {
+                    registered.insert(agent);
+                }
+            }
+        }
+        Ok(agents
+            .into_iter()
+            .filter(|(agent, _)| {
+                !registered.contains(agent) && newest.get(agent).copied().unwrap_or(0) < cutoff_ms
+            })
+            .map(|(_, mut idle)| {
+                idle.committees.retain(|c| !keep.contains(c));
+                idle
+            })
+            .filter(|idle| !idle.committees.is_empty())
+            .collect())
+    }
+
+    /// Forget an agent's cursors, queued items and dropped counts on
+    /// `committees`. Returns (cursors, items) removed.
+    pub fn forget_agent(
+        &self,
+        agent: &SenatorPath,
+        committees: &[CommitteeId],
+    ) -> Result<(usize, usize), StoreError> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let (mut cursors, mut items) = (0, 0);
+        for committee in committees {
+            let args = params![agent_text(agent), committee.as_str()];
+            cursors += tx.execute(
+                "DELETE FROM cursors WHERE agent = ?1 AND committee = ?2",
+                args,
+            )?;
+            items += tx.execute(
+                "DELETE FROM queue WHERE agent = ?1 AND committee = ?2",
+                args,
+            )?;
+            tx.execute(
+                "DELETE FROM dropped WHERE agent = ?1 AND committee = ?2",
+                args,
+            )?;
+        }
+        tx.commit()?;
+        Ok((cursors, items))
     }
 
     // ---- queue -----------------------------------------------------------

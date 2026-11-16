@@ -19,6 +19,9 @@
 //! # Optional: the first segment of `<prefix>/<committee>/<person>` branches
 //! # (the convention above, and the Speaker's work branches).
 //! branch_prefix = "feature"
+//! # Optional: `senate free` forgets the queued items and cursors of an
+//! # agent with no session and no contact for this many days.
+//! free_after_days = 30
 //!
 //! # Optional: the agent each kind of coding session speaks as, under the
 //! # person (`alice/claude`, `alice/codex`). These are the defaults.
@@ -98,6 +101,10 @@ pub struct BridgeConfig {
     /// enable it.
     #[serde(default)]
     pub committee_from_branch: bool,
+    /// `senate free` forgets what an agent with no session and no contact
+    /// for this many days left in the daemon's state.
+    #[serde(default = "default_free_after_days")]
+    pub free_after_days: u64,
     /// First segment of a developer branch, `<prefix>/<committee>/<person>`.
     #[serde(default = "default_branch_prefix")]
     pub branch_prefix: String,
@@ -182,6 +189,10 @@ fn default_brief_chars() -> usize {
     DEFAULT_BRIEF_CHARS
 }
 
+fn default_free_after_days() -> u64 {
+    crate::binding::DEFAULT_FREE_AFTER_DAYS
+}
+
 fn default_branch_prefix() -> String {
     DEFAULT_BRANCH_PREFIX.to_string()
 }
@@ -196,6 +207,7 @@ impl fmt::Debug for BridgeConfig {
             .field("committees", &self.committees)
             .field("brief_chars", &self.brief_chars)
             .field("committee_from_branch", &self.committee_from_branch)
+            .field("free_after_days", &self.free_after_days)
             .field("branch_prefix", &self.branch_prefix)
             .field("agents", &self.agents)
             .field("senates", &self.senates)
@@ -356,6 +368,7 @@ impl BridgeConfig {
             committees: Vec::new(),
             brief_chars: DEFAULT_BRIEF_CHARS,
             committee_from_branch: false,
+            free_after_days: default_free_after_days(),
             branch_prefix: default_branch_prefix(),
             agents: AgentNames::default(),
             senates: Vec::new(),

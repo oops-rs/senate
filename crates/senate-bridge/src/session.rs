@@ -303,21 +303,51 @@ pub struct GitFacts {
     /// Current branch; `None` when detached or not in a repository.
     pub branch: Option<String>,
     pub toplevel: Option<PathBuf>,
+    /// The repository's common git dir (a real path).
+    pub common_dir: Option<PathBuf>,
+    /// HEAD's commit.
+    pub head: Option<String>,
     /// Contents of `.senate/committee` at the toplevel (or cwd outside git).
     pub committee_file: Option<String>,
     /// Contents of `.senate/agent` there ([`crate::agent`]).
     pub agent_file: Option<String>,
 }
 
-/// Ask git about `cwd`. Each git call is bounded by `timeout`; anything that
-/// fails or times out is simply absent.
-pub async fn gather_git_facts(cwd: &Path, timeout: Duration) -> GitFacts {
-    let (toplevel, branch) = tokio::join!(
+impl GitFacts {
+    /// The worktree these facts describe, inside a git worktree.
+    pub fn tree(&self) -> Option<crate::follow::Tree> {
+        Some(crate::follow::Tree {
+            root: self.toplevel.clone()?,
+            common_dir: self.common_dir.clone()?,
+            branch: self.branch.clone(),
+            head: self.head.clone(),
+        })
+    }
+}
+
+/// What git says about `cwd`, with no file read. Each git call is bounded by
+/// `timeout`; anything that fails or times out is simply absent.
+async fn git_state(cwd: &Path, timeout: Duration) -> GitFacts {
+    let (toplevel, branch, common, head) = tokio::join!(
         git_line(cwd, &["rev-parse", "--show-toplevel"], timeout),
         git_line(cwd, &["symbolic-ref", "--short", "-q", "HEAD"], timeout),
+        git_line(cwd, &["rev-parse", "--git-common-dir"], timeout),
+        git_line(cwd, &["rev-parse", "-q", "--verify", "HEAD"], timeout),
     );
-    let toplevel = toplevel.map(PathBuf::from);
-    let base = toplevel.clone().unwrap_or_else(|| cwd.to_path_buf());
+    GitFacts {
+        branch,
+        toplevel: toplevel.map(|t| crate::follow::real(Path::new(&t))),
+        // Relative to the directory git was asked in.
+        common_dir: common.map(|c| crate::follow::real(&cwd.join(c))),
+        head,
+        committee_file: None,
+        agent_file: None,
+    }
+}
+
+/// Read the files of `.senate/` that bear on a session.
+async fn read_senate_files(cwd: &Path, facts: &mut GitFacts) {
+    let base = facts.toplevel.clone().unwrap_or_else(|| cwd.to_path_buf());
     // A `.senate/` found without its `.gitignore` gets one.
     if let Err(e) = heal_senate_dir(&base) {
         tracing::debug!("{}: {e}", base.display());
@@ -325,12 +355,43 @@ pub async fn gather_git_facts(cwd: &Path, timeout: Duration) -> GitFacts {
     let (committee_path, agent_path) = (base.join(COMMITTEE_FILE), base.join(AGENT_FILE));
     let (committee_file, agent_file) =
         tokio::join!(read_small(&committee_path), read_small(&agent_path));
-    GitFacts {
-        branch,
-        toplevel,
-        committee_file,
-        agent_file,
-    }
+    facts.committee_file = committee_file;
+    facts.agent_file = agent_file;
+}
+
+/// Ask git about `cwd` and read `.senate/` as it is, whatever branch it
+/// belongs to. Entry points use [`gather_synced`].
+pub async fn gather_git_facts(cwd: &Path, timeout: Duration) -> GitFacts {
+    let mut facts = git_state(cwd, timeout).await;
+    read_senate_files(cwd, &mut facts).await;
+    facts
+}
+
+/// [`gather_git_facts`], after making `.senate/` match the checked-out
+/// branch ([`crate::follow::sync`]), so what is read belongs to it. Also
+/// says what the sync did.
+pub async fn gather_synced(
+    paths: &crate::paths::Paths,
+    cwd: &Path,
+    timeout: Duration,
+) -> (GitFacts, Option<crate::follow::Outcome>) {
+    let mut facts = git_state(cwd, timeout).await;
+    let outcome = match facts.tree() {
+        Some(tree) => {
+            let paths = paths.clone();
+            match tokio::task::spawn_blocking(move || crate::follow::sync(&paths, &tree)).await {
+                Ok(Ok(outcome)) => Some(outcome),
+                Ok(Err(e)) => {
+                    tracing::warn!("keeping .senate/ in step with the branch: {e}");
+                    None
+                }
+                Err(_) => None,
+            }
+        }
+        None => None,
+    };
+    read_senate_files(cwd, &mut facts).await;
+    (facts, outcome)
 }
 
 async fn git_line(cwd: &Path, args: &[&str], timeout: Duration) -> Option<String> {

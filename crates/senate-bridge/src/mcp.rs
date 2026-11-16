@@ -687,9 +687,15 @@ impl Pins {
             .filter(|v| !v.is_empty());
         let file = match std::env::current_dir() {
             Ok(cwd) => {
-                crate::session::gather_git_facts(&cwd, Duration::from_secs(2))
-                    .await
-                    .agent_file
+                match crate::paths::Paths::from_env() {
+                    Ok(paths) => {
+                        crate::session::gather_synced(&paths, &cwd, Duration::from_secs(2))
+                            .await
+                            .0
+                    }
+                    Err(_) => crate::session::gather_git_facts(&cwd, Duration::from_secs(2)).await,
+                }
+                .agent_file
             }
             Err(_) => None,
         };
