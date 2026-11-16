@@ -320,3 +320,41 @@ async fn a_person_gets_there_first() {
     bob.close().await;
     world.stop().await;
 }
+
+/// People are invited into the Agent group by mentioning them: the gateway
+/// records whom a message mentions as their addresses, and the Speaker
+/// invites them by their accounts on the platform.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn people_are_invited_to_the_agent_group_by_mention() {
+    let world = World::start(60).await;
+    world.fake().set_caps(Caps::ALL);
+    world.bind().await;
+    let created = eventually("the Agent group to be created", || {
+        world.fake().groups().into_iter().next()
+    })
+    .await;
+
+    world
+        .say(Message::mention(GROUP, "u_pm", "m_invite", "/invite @Bob").mentioning("u_bob", "Bob"))
+        .await;
+    let invited =
+        eventually("bob invited", || {
+            world.fake().invites().into_iter().find(|(group, users)| {
+                *group == created.group_id && users.contains(&user_id("bob"))
+            })
+        })
+        .await;
+    assert_eq!(invited.1, [user_id("bob")]);
+    let chat = world
+        .events()
+        .await
+        .into_iter()
+        .find(|e| e.kind == Kind::Chat && e.body.starts_with("/invite"))
+        .unwrap();
+    assert_eq!(
+        chat.meta[meta::MENTIONS],
+        serde_json::json!([{ "address": "senator::bob", "name": "Bob" }]),
+        "platform ids stay out of the log"
+    );
+    world.stop().await;
+}
