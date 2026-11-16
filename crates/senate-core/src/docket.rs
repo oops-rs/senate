@@ -92,6 +92,9 @@ pub struct SeatFacts {
     /// Its presence on the committee, when it ever had one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presence: Option<PresenceState>,
+    /// When the server last heard from its bridge on the committee.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<DateTime<Utc>>,
     /// Its own latest checkpoint on the committee.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<CheckpointFacts>,
@@ -320,6 +323,7 @@ mod tests {
                 agent: "alice/codex".parse().unwrap(),
                 connected: false,
                 presence: Some(PresenceState::Absent),
+                last_seen: None,
                 checkpoint: None,
                 open_threads: 1,
             }],

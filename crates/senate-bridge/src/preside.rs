@@ -22,7 +22,7 @@
 //! function per message; ids are bracketed mentions; Senate, senator and
 //! Speaker are not translated.
 
-use senate_core::{Address, Awaiting, CheckpointRecord, Kind, Locale, SenatorPath};
+use senate_core::{Address, Awaiting, CheckpointRecord, Kind, Locale, SeatFacts, SenatorPath};
 
 use crate::daemon::senate_words;
 use crate::format;
@@ -216,6 +216,29 @@ fn render_checkpoint(record: &CheckpointRecord, locale: Locale) -> String {
     out
 }
 
+/// What is true of an agent's connection right now, in words a person can
+/// act on, then the presence state the server keeps. The state stays
+/// `online` until the disconnect grace passes, so it never stands alone:
+/// whether a session is open is the connection's own fact.
+fn seat_line(seat: &SeatFacts, locale: Locale) -> String {
+    let now = if seat.connected {
+        locale.pick("已连接", "connected").to_owned()
+    } else {
+        let last = seat.last_seen.map(|t| t.format("%Y-%m-%d %H:%M UTC"));
+        match (last, locale) {
+            (Some(t), Locale::Zh) => format!("没有打开的会话（最后一次联络 {t}）"),
+            (Some(t), Locale::En) => format!("no session open (last seen {t})"),
+            (None, Locale::Zh) => "没有打开的会话".to_owned(),
+            (None, Locale::En) => "no session open".to_owned(),
+        }
+    };
+    match (seat.presence, locale) {
+        (Some(p), Locale::Zh) => format!("{now}，presence：{}", p.label(locale)),
+        (Some(p), Locale::En) => format!("{now}, presence: {}", p.label(locale)),
+        (None, _) => now,
+    }
+}
+
 fn render_senate(docket: &SenateDocket, locale: Locale, out: &mut String) {
     out.push_str(&format!(
         "## {}\n",
@@ -259,14 +282,7 @@ fn render_senate(docket: &SenateDocket, locale: Locale, out: &mut String) {
             Locale::En => format!("Seated (`{}`):\n", page.committee),
         });
         for seat in &page.seats {
-            let presence = match (seat.connected, locale) {
-                (true, Locale::Zh) => "在线".to_owned(),
-                (true, Locale::En) => "connected".to_owned(),
-                (false, _) => seat
-                    .presence
-                    .map(|p| p.as_str().to_owned())
-                    .unwrap_or_else(|| locale.pick("未连接", "not connected").to_owned()),
-            };
+            let presence = seat_line(seat, locale);
             let checkpoint = match (&seat.checkpoint, locale) {
                 (Some(c), Locale::Zh) => format!("checkpoint seq {}：{}", c.seq, c.summary),
                 (Some(c), Locale::En) => format!("checkpoint seq {}: {}", c.seq, c.summary),
@@ -352,5 +368,48 @@ mod tests {
         assert!(alone.contains("the top Senate") && alone.contains("Nothing awaits"));
         assert!(nudge(1, None, Locale::Zh).contains("1 件"));
         assert!(not_presiding(&path("alice/codex"), Locale::En).contains("[senator::alice/codex]"));
+    }
+
+    #[test]
+    fn a_seat_says_whether_a_session_is_open_and_keeps_the_presence_state() {
+        use chrono::{TimeZone, Utc};
+        use senate_core::PresenceState;
+        let seat = |connected, presence, last_seen| SeatFacts {
+            agent: path("wendell/claude"),
+            connected,
+            presence,
+            last_seen,
+            checkpoint: None,
+            open_threads: 0,
+        };
+        let seen = Some(Utc.with_ymd_and_hms(2026, 11, 16, 10, 3, 0).unwrap());
+        let online = Some(PresenceState::Online);
+        // Its session just ended: the state is still online, the session is gone.
+        assert_eq!(
+            seat_line(&seat(false, online, seen), Locale::En),
+            "no session open (last seen 2026-11-16 10:03 UTC), presence: online"
+        );
+        assert_eq!(
+            seat_line(&seat(false, online, seen), Locale::Zh),
+            "没有打开的会话（最后一次联络 2026-11-16 10:03 UTC），presence：在线"
+        );
+        assert_eq!(
+            seat_line(&seat(true, online, seen), Locale::En),
+            "connected, presence: online"
+        );
+        assert_eq!(
+            seat_line(&seat(true, online, seen), Locale::Zh),
+            "已连接，presence：在线"
+        );
+        assert_eq!(
+            seat_line(&seat(false, None, None), Locale::En),
+            "no session open"
+        );
+        assert_eq!(
+            seat_line(&seat(false, None, None), Locale::Zh),
+            "没有打开的会话"
+        );
+        assert_eq!(seat_line(&seat(true, None, None), Locale::En), "connected");
+        assert_eq!(seat_line(&seat(true, None, None), Locale::Zh), "已连接");
     }
 }

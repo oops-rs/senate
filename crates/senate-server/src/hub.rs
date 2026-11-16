@@ -264,6 +264,10 @@ impl ServerHub {
                 agent: agent.clone(),
                 connected: self.presence.is_connected(committee, agent),
                 presence: presence.iter().find(|p| &p.agent == agent).map(|p| p.state),
+                last_seen: presence
+                    .iter()
+                    .find(|p| &p.agent == agent)
+                    .and_then(|p| p.last_seen),
                 checkpoint: latest.get(agent).cloned(),
                 open_threads: board
                     .threads_for(agent, None)
