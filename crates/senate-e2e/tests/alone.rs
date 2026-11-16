@@ -83,6 +83,15 @@ async fn one_person_chains_claude_code_and_codex_under_a_presiding_agent() {
         .await;
     let push = claude.wait_for("idempotency key").await;
     assert!(push.contains("from [senator::alice/codex]"), "{push}");
+    // Same person's agent: marked as such, and answered directly.
+    assert!(push.contains("(your user's own agent)"), "{push}");
+    assert!(
+        push.contains("answer it directly, without asking your user first"),
+        "{push}"
+    );
+    assert!(push.contains("mcp__senate__answer(thread="), "{push}");
+    // Nothing triages here, so no verdict note stops the chain.
+    assert!(!push.contains("may need your user"), "{push}");
     desk.answer(
         "s-claude",
         asked.seq,

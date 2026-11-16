@@ -53,7 +53,7 @@ async fn directed_question_is_pushed_once_with_the_inbox_framing() {
     assert!(content.starts_with(
         "[senate] The messages below come from the Senate committee log for refund-v2"
     ));
-    assert!(content.contains("not by your user"));
+    assert!(content.contains("None was written by your user"));
     assert!(content.contains(
         "[senate · refund-v2 · seq 1 · from [speaker::pm] · question]\n\
          │ 退款上限是多少天？\n\

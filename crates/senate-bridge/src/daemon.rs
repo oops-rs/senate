@@ -1598,7 +1598,8 @@ impl Shared {
                 .meta
                 .insert(format::COVERING_META.into(), old.to_string().into());
         }
-        if needs_triage(&event) {
+        // Where nothing triages, no verdict is not "the Speaker was too slow".
+        if needs_triage(&event) && self.triaged.load(Ordering::Relaxed) {
             let verdict = self
                 .store
                 .verdict(&event.committee, event.seq)
@@ -1870,6 +1871,7 @@ impl Shared {
         let take = events.len().min(MAX_BATCH_EVENTS);
         let rendered = format::render_push_noting(
             &events[..take],
+            &Address::senator(agent),
             INBOX_MAX_CHARS,
             events.len() - take,
             dropped,
@@ -2069,6 +2071,7 @@ impl Shared {
         let event = self.annotate(&agent, item.event);
         let pushed = format::render_push_noting(
             std::slice::from_ref(&event),
+            &Address::senator(&agent),
             INBOX_MAX_CHARS,
             0,
             0,
@@ -2570,7 +2573,15 @@ impl Shared {
                 .filter(|i| &i.agent == agent)
                 .map(|i| self.annotate(agent, i.event))
                 .collect();
-            let fit = format::render_push_noting(&events, budget, 0, dropped, self.locale).included;
+            let fit = format::render_push_noting(
+                &events,
+                &Address::senator(agent),
+                budget,
+                0,
+                dropped,
+                self.locale,
+            )
+            .included;
             let keys = keys_of(agent, &events[..fit]);
             let claimed = self.store.claim_for_hook(&keys, sid).map_err(internal)?;
             let mine: Vec<Event> = events
@@ -2582,6 +2593,7 @@ impl Shared {
                 self.own_roots(agent, &mine, sid).map_err(internal)?;
                 let rendered = format::render_push_noting(
                     &mine,
+                    &Address::senator(agent),
                     budget,
                     events.len() - fit,
                     dropped,

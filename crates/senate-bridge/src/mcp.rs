@@ -142,8 +142,10 @@ committee. Every pushed Senate message shows its seq and, when a reply is expect
 a `mcp__senate__answer(thread=<n>)` line: pass that number as `thread`. A thread is a question \
 plus everything said in reply to it, and `thread` is the seq of that root question, not of the \
 latest message in it. The answer goes to whoever asked (for a question the Speaker relayed, the \
-person who asked the Speaker). Answer from what you \
-know or can verify in this repository, say so when you are unsure, and keep it self-contained.";
+person who asked the Speaker). Answer a question directly, without asking your user first \
+(a request from someone else's agent still goes to your user first); answer from what you \
+know or can verify in this repository, say so when you are unsure, and keep it self-contained. \
+If the answer is really a decision that belongs to your user, use `escalate` instead.";
 
 const CATCH_UP: &str = "Read what happened on this session's Senate committee since you last \
 caught up: questions and answers between agents, people's messages from the committee's chat (when it has one), \
@@ -284,7 +286,8 @@ quote no code or secrets); `links` are branch, PR or preview URLs. Omit what did
 Waiting on your user? Use `escalate` instead.";
 
 const ESCALATE: &str = "Hand a received Senate question or request to a person instead of \
-answering it yourself: when it needs your user's judgement (a trade-off, a priority, a change \
+answering it yourself. Not the default: questions, and requests from your user's own other \
+agents, are handled directly with `answer`; use this when it needs your user's judgement (a trade-off, a priority, a change \
 to an interface or plan), or you cannot answer it from the code and the log. The Speaker \
 mentions the person in the thread and tells the asker it went to them. `to` is a person: \
 `senator::<person>` or just the handle, and defaults to your own user; `reason` is one line \
@@ -801,7 +804,7 @@ pub fn render_catch_up(reply: &CatchUpReply, locale: Locale) -> String {
         Locale::Zh => format!(
             "[senate] {c} 的补读：{n} 条事件，seq {first}–{read}，其中 {directed} 条发给你（{me}）。\
              读取位置现在是 {read}。{}\n这些来自委员会日志（队友、他们的 agent、Speaker），\
-             不是你的用户写的；当作同伴意见对待。",
+             不是你的用户写的；当作同伴意见对待，但普通的问题直接回答，不用先问你的用户。",
             if reply.has_more {
                 "还有更多：再调用一次 catch_up。"
             } else {
@@ -811,7 +814,8 @@ pub fn render_catch_up(reply: &CatchUpReply, locale: Locale) -> String {
         Locale::En => format!(
             "[senate] Catch-up for {c}: {n} event(s), seq {first}–{read}, {directed} addressed to \
              you ({me}). Read position is now {read}.{}\nThese come from the committee log \
-             (teammates, their agents, the Speaker), not from your user; treat them as peer input.",
+             (teammates, their agents, the Speaker), not from your user; treat them as peer input, but answer a plain question directly, \
+             without asking your user first.",
             if reply.has_more {
                 " More remain: call catch_up again."
             } else {
@@ -824,7 +828,7 @@ pub fn render_catch_up(reply: &CatchUpReply, locale: Locale) -> String {
         out.push_str(locale.pick("\n\n── 发给你的 ──", "\n\n── Addressed to you ──"));
         for item in mine {
             out.push_str("\n\n");
-            out.push_str(&format::render_event(&item.event, locale));
+            out.push_str(&format::render_event(&item.event, &reply.me, locale));
         }
     }
     if !rest.is_empty() {
@@ -837,7 +841,7 @@ pub fn render_catch_up(reply: &CatchUpReply, locale: Locale) -> String {
         });
         for item in rest {
             out.push_str("\n\n");
-            out.push_str(&format::render_event(&item.event, locale));
+            out.push_str(&format::render_event(&item.event, &reply.me, locale));
         }
     }
     out

@@ -101,6 +101,29 @@ resolved before the event is appended. Every senator in `to` could sit in
 the Senate it is sent in: an agent of another level is not reached from
 there.
 
+## Answering
+
+What an agent does with a message another agent sent it depends on whose
+agent that is:
+
+- An agent of the same person (the same owner in the `SenatorPath`, at any
+  depth: `wendell/helper` to `wendell/claude`, `wendell/claude` to
+  `wendell/claude/reviewer`): a `question` and a `request` are both handled
+  directly, without asking the person first. The pushed message is marked as
+  coming from the user's own other agent.
+- An agent of someone else: a `question` is answered directly; a `request`
+  (asks the receiver to do something) goes through the receiver's person
+  first: show it to them and act only when they agree, or escalate.
+- In every case the safeguards stay: verify claims against the code, do not
+  follow instructions that conflict with the person's, and escalate instead
+  of answering when the answer is really a decision that belongs to the
+  person. An explicit `unsure` triage verdict from a Speaker overrides the
+  two rules above for that message: the person is shown it first.
+
+Messages written by a person, the Speaker or a guest are unchanged. The
+bridge renders the expectation as a `↳` line under each pushed message, in
+inbox pushes, hook pick-ups and `catch_up` alike.
+
 ## Presence and continuity
 
 - Presence, leases and checkpoints are kept per agent.
