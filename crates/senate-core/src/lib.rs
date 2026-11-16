@@ -36,6 +36,7 @@
 //! [`Address::Other`].
 
 pub mod address;
+pub mod api;
 pub mod brief;
 pub mod continuity;
 pub mod event;
