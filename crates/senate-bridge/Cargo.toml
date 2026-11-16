@@ -5,10 +5,13 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "The developer-machine side of Senate: one daemon per machine seating a person's coding agents on committee logs."
+description = "The developer-machine side of Senate: sessions, delivery, MCP tools and hooks for a person's coding agents, across every Senate the machine serves; and the `senate` command."
 
+# The `senate` command for people and agents on a developer machine:
+# install, status, inbox, take, init, and the MCP server and hooks that
+# Claude Code and Codex run. The daemon is `senated`.
 [[bin]]
-name = "senate-bridge"
+name = "senate"
 path = "src/main.rs"
 
 [dependencies]

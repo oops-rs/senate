@@ -34,9 +34,36 @@
 //! | `bound` | `session` | [`BoundReply`] |
 //! | `checkpoint` | `session`, `summary?`, `progress?`, `decisions?`, `open?`, `push?`, `id?` | [`CheckpointReply`] |
 //!
+//! | `presides` | `session`, `runtime?`, `agent_env?`, `agent_file?` | [`PresidesReply`] |
+//! | `docket` | `session`, `committee?` | [`DocketReply`] |
+//! | `route` | `session`, `committee`, `seq`, `to`, `id?` | [`Posted`] |
+//! | `cover` | `session`, `committee`, `thread`, `body`, `agent?`, `id?` | [`Posted`] |
+//! | `refer` | `session`, `committee`, `seq`, `reason`, `id?` | [`Posted`] |
+//!
 //! | `approvals` | — | [`ApprovalsReply`] |
 //! | `approve` | `id`, `decision` | [`ApproveReply`] |
 //! | `watch` | — | `{"watching": true}`, then a stream of [`WatchEvent`] lines |
+//!
+//! # Presiding
+//!
+//! `presides` says whether the calling session's agent holds the Speaker's
+//! seat of a Senate this machine serves (the session need not be
+//! registered yet: the agent is then worked out from `runtime`,
+//! `agent_env` and `agent_file` as a hook would). The MCP shim lists the
+//! presiding tools only when it does.
+//!
+//! `docket`, `route`, `cover` and `refer` are the presiding session's: each
+//! acts on the Senate its agent presides over, writing as `speaker` with
+//! the person's token there, and is refused (`not_presiding`) for any other
+//! session. `docket` lists what awaits the Speaker ([`senate_core::docket`])
+//! on `committee`, or on every committee of that Senate. `route` relays an
+//! item to one agent seated there (one of the candidates of a pick);
+//! `cover` answers a question to an away agent on that agent's behalf from
+//! its own latest checkpoint (`agent` chooses among the agents the question
+//! was addressed to, never another); `refer` puts an item to the person.
+//! Without a session, `docket` is a person's read of every Senate on this
+//! machine one of their agents presides over: what waits for a Speaker that
+//! may be away.
 //!
 //! `approvals` / `approve` / `watch` are for a desktop app.
 //! `approvals` lists the Codex approval requests waiting
@@ -147,6 +174,8 @@ pub mod codes {
     pub const NO_SESSION: &str = "no_session";
     /// The session is not bound to any committee.
     pub const NOT_JOINED: &str = "not_joined";
+    /// A presiding op from a session whose agent holds no Speaker's seat.
+    pub const NOT_PRESIDING: &str = "not_presiding";
     /// The Senate server refused or could not be reached.
     pub const SERVER: &str = "server";
     /// `senator::<person>/*` named a person with several agents;
@@ -344,6 +373,51 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent: Option<Name>,
     },
+    /// Whether the session's agent presides over a Senate here.
+    Presides {
+        session: SessionSelector,
+        #[serde(default)]
+        runtime: Runtime,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_env: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_file: Option<String>,
+    },
+    /// What awaits the Speaker of the Senate the session presides over.
+    Docket {
+        session: SessionSelector,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        committee: Option<CommitteeId>,
+    },
+    /// Relay an item awaiting the Speaker to one agent.
+    Route {
+        session: SessionSelector,
+        committee: CommitteeId,
+        seq: Seq,
+        to: SenatorPath,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<EventId>,
+    },
+    /// Answer a question to an away agent on its behalf.
+    Cover {
+        session: SessionSelector,
+        committee: CommitteeId,
+        thread: Seq,
+        body: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<SenatorPath>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<EventId>,
+    },
+    /// Put an item awaiting the Speaker to the person.
+    Refer {
+        session: SessionSelector,
+        committee: CommitteeId,
+        seq: Seq,
+        reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<EventId>,
+    },
     /// Codex approval requests waiting for an answer.
     Approvals,
     /// Answer a Codex approval request; the first answer wins.
@@ -373,6 +447,51 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<EventId>,
     },
+}
+
+/// What `presides` found.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PresidesReply {
+    /// The session's agent, registered or worked out.
+    #[serde(default)]
+    pub agent: Option<SenatorPath>,
+    /// The Senate it presides over, if it does.
+    #[serde(default)]
+    pub presiding: Option<Presiding>,
+}
+
+/// A Senate a session presides over.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Presiding {
+    /// The presiding agent: the holder of the Speaker's seat.
+    pub speaker: SenatorPath,
+    /// That Senate, by its presider (`None`: a top Senate used alone).
+    #[serde(default)]
+    pub senate: Option<SenatorPath>,
+    /// The agents seated there.
+    #[serde(default)]
+    pub seated: Vec<SenatorPath>,
+}
+
+/// One Senate's docket on each of its committees.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SenateDocket {
+    /// The Senate, by its presider (`None`: a top Senate).
+    #[serde(default)]
+    pub senate: Option<SenatorPath>,
+    pub pages: Vec<senate_core::DocketPage>,
+    /// The latest checkpoint of every away agent an item names: what the
+    /// Speaker covers from.
+    #[serde(default)]
+    pub checkpoints: Vec<senate_core::CheckpointRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DocketReply {
+    /// The presiding agent reading it; `None` for a person's read.
+    #[serde(default)]
+    pub speaker: Option<SenatorPath>,
+    pub senates: Vec<SenateDocket>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -559,7 +678,7 @@ pub struct CommitteeStatus {
     /// committee is no longer joined).
     #[serde(default)]
     pub stream: Option<StreamState>,
-    /// Listed in `bridge.toml`.
+    /// Listed in `senate.toml`.
     pub configured: bool,
     /// Live sessions of the agent bound to it.
     pub sessions: usize,
@@ -579,6 +698,13 @@ pub struct StatusReply {
     pub committees: Vec<CommitteeStatus>,
     pub sessions: Vec<Session>,
     pub queue: QueueCounts,
+    /// Who holds the Speaker's seat of that Senate, as `/v1/me` said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<senate_core::SpeakerSeat>,
+    /// The other Senates this machine serves, each with its own streams,
+    /// sessions and queue.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub others: Vec<StatusReply>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]

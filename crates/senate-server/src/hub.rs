@@ -32,9 +32,10 @@ use ractor::{ActorRef, MessagingErr};
 use senate_core::api::{Heartbeat, PresencePage};
 use senate_core::hub::SCAN_PAGE;
 use senate_core::{
-    Appended, Brief, BriefBuilder, CheckpointRecord, Checkpoints, CommitteeId, Event, Hub,
-    HubError, Locale, MirrorRef, Name, NewEvent, Roster, RosterError, SenatorPath, Senior, Seq,
-    TaskBoard,
+    Appended, Awaiting, Brief, BriefBuilder, CheckpointFacts, CheckpointRecord, Checkpoints,
+    CommitteeId, DocketItem, DocketPage, Event, Hub, HubError, Kind, Locale, MirrorRef, Name,
+    NewEvent, Roster, RosterError, SeatFacts, SenatorPath, Senior, Seq, SpeakerDocket, SpeakerSeat,
+    StatusState, TaskBoard,
 };
 use senate_log::{CursorOwner, LogError, LogStore};
 use tokio::sync::{broadcast, mpsc};
@@ -74,6 +75,7 @@ pub(crate) struct HubParts {
     pub presence: Arc<Presence>,
     pub seats: Arc<Seats>,
     pub locale: Locale,
+    pub speaker: Option<SpeakerSeat>,
 }
 
 pub struct ServerHub {
@@ -85,10 +87,12 @@ pub struct ServerHub {
     presence: Arc<Presence>,
     seats: Arc<Seats>,
     locale: Locale,
+    speaker: Option<SpeakerSeat>,
     next_conn: AtomicU64,
     briefs: Caches<BriefBuilder>,
     tasks: Caches<TaskBoard>,
     checkpoints: Caches<Checkpoints>,
+    dockets: Caches<SpeakerDocket>,
 }
 
 /// Something folded from a committee's log, in seq order, that ignores what it
@@ -120,6 +124,18 @@ impl Fold for TaskBoard {
     }
     fn observe(&mut self, event: &Event) {
         TaskBoard::observe(self, event);
+    }
+}
+
+impl Fold for SpeakerDocket {
+    fn fresh(_: &CommitteeId) -> Self {
+        SpeakerDocket::new()
+    }
+    fn head(&self) -> Seq {
+        SpeakerDocket::head(self)
+    }
+    fn observe(&mut self, event: &Event) {
+        SpeakerDocket::observe(self, event);
     }
 }
 
@@ -180,6 +196,7 @@ impl ServerHub {
             presence,
             seats,
             locale,
+            speaker,
         } = parts;
         Self {
             store,
@@ -190,11 +207,98 @@ impl ServerHub {
             presence,
             seats,
             locale,
+            speaker,
             next_conn: AtomicU64::new(1),
             briefs: Mutex::default(),
             tasks: Mutex::default(),
             checkpoints: Mutex::default(),
+            dockets: Mutex::default(),
         }
+    }
+
+    /// Who holds this Senate's Speaker's seat (see
+    /// [`Roster::speaker_seat`]); `None`: nobody presides.
+    pub fn speaker_seat(&self) -> Option<&SpeakerSeat> {
+        self.speaker.as_ref()
+    }
+
+    /// What awaits the Speaker on `committee` ([`senate_core::docket`]):
+    /// the messages addressed to it that it has not dealt with, then every
+    /// root question to an agent of this Senate that is not connected and
+    /// has no answer, with the facts about every seated agent (connected,
+    /// presence, latest checkpoint, open threads).
+    pub async fn docket(&self, committee: &CommitteeId) -> Result<DocketPage, HubError> {
+        let mut items = self.folded(&self.dockets, committee).await?.fold.items();
+        let head = self.head(committee).await?;
+        let board = self.tasks(committee).await?;
+        let roster = self.seats.snapshot();
+        let latest: HashMap<SenatorPath, CheckpointFacts> = {
+            let cached = self.folded(&self.checkpoints, committee).await?;
+            roster
+                .agents()
+                .iter()
+                .filter_map(|agent| {
+                    let c = cached.fold.latest(agent)?;
+                    Some((
+                        agent.clone(),
+                        CheckpointFacts {
+                            seq: c.seq,
+                            ts: c.ts,
+                            summary: c.body.clone(),
+                            branch: c.checkpoint.branch.clone(),
+                        },
+                    ))
+                })
+                .collect()
+        };
+        let presence = match self.presence(committee).await {
+            Ok(page) => page.agents,
+            Err(e) => {
+                tracing::debug!(%committee, "docket without presence: {e}");
+                Vec::new()
+            }
+        };
+        let mut seats = Vec::new();
+        for agent in roster.agents() {
+            seats.push(SeatFacts {
+                agent: agent.clone(),
+                connected: self.presence.is_connected(committee, agent),
+                presence: presence.iter().find(|p| &p.agent == agent).map(|p| p.state),
+                checkpoint: latest.get(agent).cloned(),
+                open_threads: board
+                    .threads_for(agent, None)
+                    .into_iter()
+                    .filter(|t| t.state != StatusState::Archived)
+                    .count(),
+            });
+        }
+        for thread in board.threads(Some(StatusState::Processing)) {
+            if thread.kind != Kind::Question || thread.answered {
+                continue;
+            }
+            let agents: Vec<SenatorPath> = thread.agents().cloned().collect();
+            let away = !agents.is_empty()
+                && agents
+                    .iter()
+                    .all(|a| roster.knows(a) && !self.presence.is_connected(committee, a));
+            if !away {
+                continue;
+            }
+            if let Some(event) = self.get(committee, thread.root).await? {
+                items.push(DocketItem {
+                    event,
+                    awaiting: Awaiting::Away { agents },
+                });
+            }
+        }
+        items.sort_by_key(|item| item.event.seq);
+        Ok(DocketPage {
+            committee: committee.clone(),
+            speaker: self.speaker.clone(),
+            items,
+            seats,
+            head,
+        })
     }
 
     /// The committee's fold in `caches`, brought up to the log's head. A failed

@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use axum::http::HeaderValue;
 use ractor::{Actor, ActorCell};
-use senate_core::Roster;
+use senate_core::{Roster, SpeakerSeat};
 use senate_log::LogStore;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, oneshot};
@@ -66,6 +66,7 @@ impl Server {
             auth: None,
             roster: None,
             triaged: false,
+            built_in_speaker: false,
         }
     }
 }
@@ -85,6 +86,7 @@ pub struct ServerBuilder {
     auth: Option<Arc<dyn Authenticate>>,
     roster: Option<Roster>,
     triaged: bool,
+    built_in_speaker: bool,
 }
 
 impl ServerBuilder {
@@ -112,6 +114,17 @@ impl ServerBuilder {
         self
     }
 
+    /// Say that the built-in Speaker is attached to this server's hub: it
+    /// holds the Speaker's seat of this (top) Senate, and judges roots.
+    /// Without it, the seat is the roster's ([`Roster::speaker_seat`]): a
+    /// nested Senate's presider, a top Senate's named agent, or nobody.
+    /// Refused at start for a nested Senate, and for a top Senate whose
+    /// roster also names a Speaker.
+    pub fn built_in_speaker(mut self, built_in: bool) -> Self {
+        self.built_in_speaker = built_in;
+        self
+    }
+
     /// Spawn the supervision tree over the store, bind `config.listen`, and
     /// serve the HTTP API. The returned [`Running::hub`] is the same hub the
     /// HTTP layer uses; attach the gateway and the Speaker to it.
@@ -122,6 +135,7 @@ impl ServerBuilder {
             auth,
             roster,
             triaged,
+            built_in_speaker,
         } = self;
         config.validate_intervals()?;
         let (auth, roster): (Arc<dyn Authenticate>, Roster) = match (auth, roster) {
@@ -140,6 +154,15 @@ impl ServerBuilder {
                 (auth, roster)
             }
         };
+        let speaker = roster
+            .speaker_seat(built_in_speaker)
+            .map_err(|e| ConfigError::Invalid(format!("the Speaker: {e}")))?;
+        // Only the built-in Speaker judges roots; a senator-held seat never
+        // makes a bridge wait ([`SpeakerSeat::triages`]).
+        let triaged = triaged || speaker.as_ref().is_some_and(SpeakerSeat::triages);
+        if let Some(seat) = &speaker {
+            tracing::info!(speaker = ?seat, "the Speaker's seat");
+        }
         let seats = Arc::new(Seats::new(roster));
         let epoch = store
             .epoch()
@@ -175,6 +198,7 @@ impl ServerBuilder {
             presence,
             seats,
             locale: config.locale,
+            speaker,
         }));
 
         // Every committee's writer runs its presence leases, so start them all

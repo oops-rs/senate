@@ -1,6 +1,13 @@
 //! The Senate daemon, `senated`, and the library a private layer builds its
 //! own daemon from.
 //!
+//! The daemon is the same at every level. On a server (`senated --config`)
+//! it is one Senate: the assembly below. On a developer machine
+//! (`senated --machine`) it is a [`Machine`]: the Senates hosted there (a
+//! local top Senate for using Senate alone, a Senate one level down per
+//! presiding agent), each an assembly with no built-in Speaker, and the
+//! machine's side of every Senate it serves as a supervised component.
+//!
 //! Senate has no chat platform or agent gateway of its own. Layers that
 //! connect it to a company's systems are built on this crate instead of
 //! forking it: they hand [`Assembly`] what they bring, and get a daemon that
@@ -72,11 +79,11 @@ mod assembly;
 pub mod chat;
 pub mod component;
 pub mod config;
+mod empty_hub;
+pub mod machine;
 mod speaker;
 #[cfg(feature = "testing")]
 pub mod testing;
-#[cfg(test)]
-mod testing_hub;
 
 pub use assembly::{Assembly, AssemblyError, Senated};
 pub use chat::{
@@ -85,5 +92,6 @@ pub use chat::{
 };
 pub use component::{Component, ComponentContext, GaveUp, component_fn};
 pub use config::{ForgeSection, SenatedConfig, SenatedConfigError, WorkSection};
+pub use machine::{HostedSenate, Machine, MachineError};
 pub use senate_server::{Authenticate, StaticTokens};
 pub use speaker::{NO_CHAT_PLATFORM, NoChat};

@@ -1,0 +1,32 @@
+# Senate alone on one machine: one person, no Senate above. This is what
+# `senate init --local --person alice` writes to ~/.senate/senate.toml (or
+# $SENATE_HOME/senate.toml). Then:
+#
+#   senated --machine        # the daemon: this Senate, and your sessions' side
+#   senate install --yes     # once: the MCP server and hooks for Claude Code / Codex
+#   senate status
+#
+# Everything senated keeps for this Senate is under senates/top/ in the
+# Senate home: its log (SQLite), the token only this machine uses, the
+# address it serves.
+
+# You. Every agent on this machine is named under you.
+person = "alice"
+
+# The language of everything written for you and your agents: "en" or "zh".
+locale = "en"
+
+# A top Senate on this machine, with no Senate above.
+[local]
+# The agent that presides over it as its Speaker: its sessions pick which
+# of your agents gets a message you did not address to one, answer for an
+# agent that is away from that agent's own checkpoint, and bring you what
+# they cannot settle. Your other agents (codex, ...) sit beside it.
+speaker = "claude"
+# Loopback only.
+listen = "127.0.0.1:7979"
+
+# A Senate one level down for an agent's own subagents (sessions pinned to
+# SENATE_AGENT=claude/reviewer, say), presided over by that agent:
+# [[preside]]
+# agent = "claude"

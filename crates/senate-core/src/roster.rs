@@ -16,6 +16,22 @@
 //! A person and the agents under their name are their **delegation**: a
 //! grouping by path, not a Senate of its own.
 //!
+//! # Who holds the Speaker's seat
+//!
+//! Every Senate has one Speaker ([`SpeakerSeat`]), and a Speaker is always
+//! backed by a model:
+//!
+//! - **A nested Senate**: the senator presiding over it, unless the roster
+//!   names another agent of the presider's person at the presider's level
+//!   (a senator of the Senate above). The built-in Speaker never sits there.
+//! - **A top Senate**: the built-in Speaker when the daemon runs it; else
+//!   one of its people's agents seated in it, when the roster names one
+//!   (a Senate used alone on one machine); else nobody, and the server only
+//!   serves the log.
+//!
+//! [`Roster::speaker_seat`] applies these rules. A seat held by a senator is
+//! held by that senator's person: [`SpeakerSeat::held_by`].
+//!
 //! # Where a roster comes from
 //!
 //! People come from configuration ([`RosterConfig`], which is also how a
@@ -99,6 +115,66 @@ pub enum RosterError {
     UnknownSenior(Name),
     #[error("{person} may not act as {senator}: it is not under their name")]
     NotYours { person: Name, senator: SenatorPath },
+    #[error("the Speaker is always backed by a model, and {0} is a person")]
+    SpeakerIsAPerson(SenatorPath),
+    #[error("{speaker} cannot be this Senate's Speaker: {reason}")]
+    WrongSpeaker {
+        speaker: SenatorPath,
+        reason: &'static str,
+    },
+    #[error("only a top Senate may have the built-in Speaker")]
+    BuiltInSpeakerNested,
+    #[error("a Senate has one Speaker: {0} is named, and the built-in Speaker runs too")]
+    TwoSpeakers(SenatorPath),
+}
+
+/// Who holds the Speaker's seat of one Senate.
+///
+/// On the wire: `"built_in"`, or `{"senator": "alice/claude"}`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpeakerSeat {
+    /// The built-in Speaker (`senate-speaker`), in process with the server.
+    /// Only a top Senate has it.
+    BuiltIn,
+    /// A senator: the agent presiding over a nested Senate, or the agent a
+    /// top Senate used alone names. Its session does the Speaker's work and
+    /// writes as `speaker`.
+    Senator(SenatorPath),
+}
+
+impl SpeakerSeat {
+    /// The senator holding the seat; `None` for the built-in Speaker.
+    pub fn senator(&self) -> Option<&SenatorPath> {
+        match self {
+            Self::BuiltIn => None,
+            Self::Senator(path) => Some(path),
+        }
+    }
+
+    pub fn is_built_in(&self) -> bool {
+        matches!(self, Self::BuiltIn)
+    }
+
+    /// Whether the authenticated `person` may write as `speaker` in this
+    /// Senate: the seat is held by one of their own agents. Nobody holds
+    /// the built-in Speaker's seat; it writes in process, not over HTTP.
+    pub fn held_by(&self, person: &Name) -> bool {
+        self.senator().is_some_and(|p| p.owner() == person)
+    }
+
+    /// Whether this Speaker judges task roots, so a bridge holds a root for
+    /// its verdict ([`Me::triaged`](crate::api::Me::triaged)).
+    ///
+    /// Only the built-in Speaker does. A senator-held seat has no triage
+    /// duty (its duties are to pick, cover, escalate and speak upward), and
+    /// the session holding it may be closed at any moment: a bridge that
+    /// waited for its verdict would hold every question for nothing. So a
+    /// Senate presided over by a senator delivers every root at once, and
+    /// with nobody presiding nothing changes.
+    pub fn triages(&self) -> bool {
+        self.is_built_in()
+    }
 }
 
 /// Why `senator::<person>/*` could not be turned into one address.
@@ -141,6 +217,11 @@ pub struct RosterConfig {
     /// The senator presiding over this Senate. Absent for the top Senate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presider: Option<SenatorPath>,
+    /// The agent named Speaker of this Senate. Absent: a nested Senate's
+    /// Speaker is its presider, and a top Senate's is the built-in one when
+    /// it runs, else nobody. See [`Roster::speaker_seat`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<SenatorPath>,
     #[serde(default)]
     pub seniors: Vec<Senior>,
     /// Agents seated from the start. The rest are seated as they connect.
@@ -179,6 +260,7 @@ pub enum DelegationPresence {
 #[serde(try_from = "RosterConfig", into = "RosterConfig")]
 pub struct Roster {
     presider: Option<SenatorPath>,
+    speaker: Option<SenatorPath>,
     seniors: Vec<Senior>,
     agents: Vec<SenatorPath>,
 }
@@ -221,6 +303,7 @@ impl Roster {
         }
         let mut roster = Self {
             presider,
+            speaker: None,
             seniors,
             agents: Vec::with_capacity(agents.len()),
         };
@@ -230,6 +313,82 @@ impl Roster {
             }
         }
         Ok(roster)
+    }
+
+    /// Name `speaker` this Senate's Speaker, under [`Roster::name_speaker`]'s
+    /// rules.
+    pub fn with_speaker(mut self, speaker: SenatorPath) -> Result<Self, RosterError> {
+        self.name_speaker(Some(speaker))?;
+        Ok(self)
+    }
+
+    /// Name the agent that holds this Senate's Speaker's seat, or `None` for
+    /// the default. The named Speaker is an agent (a Speaker is backed by a
+    /// model) whose person is listed:
+    ///
+    /// - in a top Senate, one of its people's agents that could sit in it
+    ///   (directly under its person);
+    /// - in a nested Senate, an agent of the presider's own person at the
+    ///   presider's level, that is a senator of the Senate above (the
+    ///   presider itself is the default).
+    pub fn name_speaker(&mut self, speaker: Option<SenatorPath>) -> Result<(), RosterError> {
+        if let Some(speaker) = &speaker {
+            if speaker.is_senior() {
+                return Err(RosterError::SpeakerIsAPerson(speaker.clone()));
+            }
+            if self.senior(speaker.owner()).is_none() {
+                return Err(RosterError::NoSenior {
+                    agent: speaker.clone(),
+                    owner: speaker.owner().clone(),
+                });
+            }
+            match &self.presider {
+                None if speaker.level() != 1 => {
+                    return Err(RosterError::WrongSpeaker {
+                        speaker: speaker.clone(),
+                        reason: "a top Senate's Speaker is an agent directly under its person",
+                    });
+                }
+                Some(presider)
+                    if speaker.owner() != presider.owner()
+                        || speaker.presider() != presider.presider() =>
+                {
+                    return Err(RosterError::WrongSpeaker {
+                        speaker: speaker.clone(),
+                        reason: "a nested Senate's Speaker is its presider's person's agent at the presider's level",
+                    });
+                }
+                _ => {}
+            }
+        }
+        self.speaker = speaker;
+        Ok(())
+    }
+
+    /// The agent named Speaker, if the roster names one (not the default).
+    pub fn named_speaker(&self) -> Option<&SenatorPath> {
+        self.speaker.as_ref()
+    }
+
+    /// Who holds this Senate's Speaker's seat, `built_in` saying whether the
+    /// daemon runs the built-in Speaker:
+    ///
+    /// - nested: the named Speaker, else the presider; the built-in Speaker
+    ///   is refused ([`RosterError::BuiltInSpeakerNested`]);
+    /// - top: the named Speaker, or the built-in one, or nobody (`None`:
+    ///   the server serves the log only). Both at once is
+    ///   [`RosterError::TwoSpeakers`].
+    pub fn speaker_seat(&self, built_in: bool) -> Result<Option<SpeakerSeat>, RosterError> {
+        match (&self.presider, &self.speaker, built_in) {
+            (Some(_), _, true) => Err(RosterError::BuiltInSpeakerNested),
+            (Some(presider), named, false) => Ok(Some(SpeakerSeat::Senator(
+                named.clone().unwrap_or_else(|| presider.clone()),
+            ))),
+            (None, Some(named), true) => Err(RosterError::TwoSpeakers(named.clone())),
+            (None, Some(named), false) => Ok(Some(SpeakerSeat::Senator(named.clone()))),
+            (None, None, true) => Ok(Some(SpeakerSeat::BuiltIn)),
+            (None, None, false) => Ok(None),
+        }
     }
 
     /// Whether `agent` could sit in this Senate: it is an agent, its person
@@ -315,6 +474,7 @@ impl Roster {
     pub fn to_config(&self) -> RosterConfig {
         RosterConfig {
             presider: self.presider.clone(),
+            speaker: self.speaker.clone(),
             seniors: self.seniors.clone(),
             agents: self.agents.clone(),
         }
@@ -443,10 +603,12 @@ impl Roster {
 impl TryFrom<RosterConfig> for Roster {
     type Error = RosterError;
     fn try_from(config: RosterConfig) -> Result<Self, Self::Error> {
-        match config.presider {
-            None => Self::top(config.seniors, config.agents),
-            Some(presider) => Self::under(presider, config.seniors, config.agents),
-        }
+        let mut roster = match config.presider {
+            None => Self::top(config.seniors, config.agents)?,
+            Some(presider) => Self::under(presider, config.seniors, config.agents)?,
+        };
+        roster.name_speaker(config.speaker)?;
+        Ok(roster)
     }
 }
 
@@ -454,6 +616,7 @@ impl From<Roster> for RosterConfig {
     fn from(roster: Roster) -> Self {
         Self {
             presider: roster.presider,
+            speaker: roster.speaker,
             seniors: roster.seniors,
             agents: roster.agents,
         }
@@ -904,5 +1067,107 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    #[test]
+    fn a_nested_senate_is_presided_over_by_its_presider_unless_named_otherwise() {
+        let nested = Roster::under(path("wendell/claude"), seniors(&["wendell"]), vec![]).unwrap();
+        assert_eq!(
+            nested.speaker_seat(false),
+            Ok(Some(SpeakerSeat::Senator(path("wendell/claude"))))
+        );
+        assert_eq!(
+            nested.speaker_seat(true),
+            Err(RosterError::BuiltInSpeakerNested)
+        );
+        // Another senator of the Senate above, of the same person.
+        let other = nested.clone().with_speaker(path("wendell/codex")).unwrap();
+        assert_eq!(
+            other.speaker_seat(false),
+            Ok(Some(SpeakerSeat::Senator(path("wendell/codex"))))
+        );
+        for bad in ["wendell/claude/reviewer", "alice/claude", "wendell"] {
+            let mut roster = Roster::under(
+                path("wendell/claude"),
+                seniors(&["wendell", "alice"]),
+                vec![],
+            )
+            .unwrap();
+            assert!(roster.name_speaker(Some(path(bad))).is_err(), "{bad}");
+            assert_eq!(roster.named_speaker(), None);
+        }
+    }
+
+    #[test]
+    fn a_top_senate_has_the_built_in_speaker_a_named_agent_or_none() {
+        let plain = Roster::top(seniors(&["wendell"]), vec![]).unwrap();
+        assert_eq!(plain.speaker_seat(true), Ok(Some(SpeakerSeat::BuiltIn)));
+        assert_eq!(plain.speaker_seat(false), Ok(None));
+
+        let alone = plain.with_speaker(path("wendell/claude")).unwrap();
+        assert_eq!(
+            alone.speaker_seat(false),
+            Ok(Some(SpeakerSeat::Senator(path("wendell/claude"))))
+        );
+        assert_eq!(
+            alone.speaker_seat(true),
+            Err(RosterError::TwoSpeakers(path("wendell/claude")))
+        );
+        let top = Roster::top(seniors(&["wendell"]), vec![]).unwrap();
+        assert!(matches!(
+            top.clone().with_speaker(path("wendell/claude/reviewer")),
+            Err(RosterError::WrongSpeaker { .. })
+        ));
+        assert_eq!(
+            top.clone().with_speaker(path("wendell")),
+            Err(RosterError::SpeakerIsAPerson(path("wendell")))
+        );
+        assert!(matches!(
+            top.with_speaker(path("bob/claude")),
+            Err(RosterError::NoSenior { .. })
+        ));
+    }
+
+    #[test]
+    fn a_seat_held_by_a_senator_is_held_by_its_person() {
+        let seat = SpeakerSeat::Senator(path("wendell/claude"));
+        assert!(seat.held_by(&name("wendell")));
+        assert!(!seat.held_by(&name("alice")));
+        assert!(!seat.triages(), "a senator-held seat holds no root back");
+        assert!(!SpeakerSeat::BuiltIn.held_by(&name("wendell")));
+        assert!(SpeakerSeat::BuiltIn.triages());
+        assert_eq!(
+            serde_json::to_value(&seat).unwrap(),
+            serde_json::json!({ "senator": "wendell/claude" })
+        );
+        assert_eq!(
+            serde_json::to_value(SpeakerSeat::BuiltIn).unwrap(),
+            serde_json::json!("built_in")
+        );
+        let back: SpeakerSeat =
+            serde_json::from_value(serde_json::json!({ "senator": "wendell/claude" })).unwrap();
+        assert_eq!(back, seat);
+    }
+
+    #[test]
+    fn the_named_speaker_is_configured_and_checked_with_the_roster() {
+        let roster: Roster = serde_json::from_value(serde_json::json!({
+            "speaker": "wendell/claude",
+            "seniors": [{ "handle": "wendell" }],
+            "agents": ["wendell/codex"]
+        }))
+        .unwrap();
+        assert_eq!(roster.named_speaker(), Some(&path("wendell/claude")));
+        assert_eq!(
+            serde_json::to_value(&roster).unwrap()["speaker"],
+            "wendell/claude"
+        );
+        assert!(
+            serde_json::from_value::<Roster>(serde_json::json!({
+                "speaker": "wendell/claude/reviewer",
+                "seniors": [{ "handle": "wendell" }]
+            }))
+            .is_err()
+        );
     }
 }

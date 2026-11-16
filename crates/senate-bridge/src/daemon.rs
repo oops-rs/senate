@@ -16,7 +16,7 @@
 //! - **IPC server** on `bridge.sock` ([`crate::ipc`]): hooks, MCP, status.
 //! - **Supervisor**: keeps one stream worker per (agent, committee) — each
 //!   live bound session's agent on its committee, plus the committees in
-//!   `bridge.toml` for every agent this machine has a session of on record.
+//!   `senate.toml` for every agent this machine has a session of on record.
 //!   A configured committee opens nothing for an agent that has never had a
 //!   session here, so configuration alone never seats an agent.
 //! - **Stream workers** (`stream` module): seed the agent's cursor on first
@@ -34,7 +34,7 @@
 //!
 //! `GET /v1/me` names the person and the Senate the server serves, by its
 //! presider ([`senate_core::api::Me::presider`]). The daemon checks the
-//! person against `bridge.toml`, names its agents under the presider when
+//! person against `senate.toml`, names its agents under the presider when
 //! there is one ([`Seating`]), records it in `state.db` so a restart while
 //! the server is down names them the same way, and shows it wherever it says
 //! what it is connected to (`status`, the session-start orientation).
@@ -66,7 +66,7 @@
 //! [`Timing::retry_max`], [`INBOX_RETRIES`] times); while it is held, nothing
 //! newer is pushed to that session ahead of it. A Codex session is pushed
 //! the same way through its app-server instead of an inbox
-//! ([`crate::delivery::codex`], `[codex]` in `bridge.toml`), with the same
+//! ([`crate::delivery::codex`], `[codex]` in `senate.toml`), with the same
 //! spacing, hold and retries. Its hooks never carry items: what waits for a
 //! Codex session when it registers, or is held after a failed push, is
 //! pushed through the app-server once its hook has run.
@@ -134,8 +134,8 @@ use senate_core::continuity::{DECISIONS_FILE, OPEN_FILE, PROGRESS_FILE};
 use senate_core::{
     Address, BranchNaming, Brief, CheckpointFiles, CheckpointPayload, CheckpointTrigger,
     CommitteeId, Event, EventId, Kind, Locale, Name, NewEvent, PROPOSAL_DECISION, Refs,
-    SenatorPath, Seq, StatusPayload, TaskOwner, TriagePayload, TriageVerdict, is_provisional, meta,
-    needs_triage,
+    SenatorPath, Seq, SpeakerSeat, StatusPayload, TaskOwner, TriagePayload, TriageVerdict,
+    is_provisional, meta, needs_triage,
 };
 use serde::Serialize;
 use tokio::net::{UnixListener, UnixStream};
@@ -143,7 +143,7 @@ use tokio::sync::{Notify, RwLock, RwLockReadGuard, broadcast, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
-use crate::agent::{self, Seating};
+use crate::agent::{self, AgentSource, Seating};
 use crate::approvals::Relay;
 use crate::catch_up::{self, CatchUpItem};
 use crate::checkpoint;
@@ -164,6 +164,11 @@ use crate::routing;
 use crate::session::{self, Runtime, Session, SessionState};
 use crate::state::{ItemKey, ItemStatus, QueueItem, SessionUpsert, Store, StoreError};
 use crate::stream::{self, CommitteeWorker};
+
+mod front;
+mod preside;
+
+use front::Front;
 
 /// Largest single inbox message, in chars.
 pub const INBOX_MAX_CHARS: usize = 20_000;
@@ -353,6 +358,8 @@ pub(crate) struct Shared {
     /// Whether a Speaker judges roots on this Senate, as `/v1/me` last said;
     /// until it has said, as if it does.
     triaged: AtomicBool,
+    /// Who holds this Senate's Speaker's seat, as `/v1/me` last said.
+    speaker: Mutex<Option<SpeakerSeat>>,
     pub(crate) store: Store,
     pub(crate) api: ApiClient,
     pub(crate) ladder: Ladder,
@@ -385,6 +392,12 @@ pub(crate) struct Shared {
     /// Agents whose work on a committee is reassigned to one of mine
     /// ([`routing::Covering`]).
     covering: Mutex<routing::Covering>,
+    /// This Senate's place among those the machine serves.
+    index: usize,
+    /// Live Codex sessions of every Senate, for the shared approvals relay.
+    codex_sessions: Arc<Mutex<BTreeMap<usize, Vec<String>>>>,
+    /// Docket items each presiding session has been told of.
+    announced: Mutex<HashMap<String, BTreeSet<(CommitteeId, Seq)>>>,
 }
 
 /// What the automatic checkpoints know of one worktree.
@@ -399,7 +412,7 @@ struct AutoCheckpoint {
 
 /// A running daemon. Dropping it does not stop it; call [`DaemonHandle::shutdown`].
 pub struct DaemonHandle {
-    shared: Arc<Shared>,
+    front: Arc<Front>,
     shutdown: watch::Sender<bool>,
     tasks: Vec<JoinHandle<()>>,
     socket: PathBuf,
@@ -410,16 +423,27 @@ impl DaemonHandle {
         &self.socket
     }
 
-    /// The daemon's state database (tests and diagnostics).
+    /// The state database of the first Senate served (tests and
+    /// diagnostics).
     pub fn store(&self) -> &Store {
-        &self.shared.store
+        &self.front.senates()[0].store
+    }
+
+    /// The state database of the Senate presided over by `presider`
+    /// (`None`: the one where the person's agents sit directly).
+    pub fn store_of(&self, presider: Option<&SenatorPath>) -> Option<&Store> {
+        self.front
+            .senates()
+            .iter()
+            .find(|s| s.seating().presider() == presider)
+            .map(|s| &s.store)
     }
 
     /// Stop every task, report final cursors, remove the socket.
     pub async fn shutdown(self) {
         // An error means every receiver is already gone, which is the goal.
         let _ = self.shutdown.send(true);
-        self.shared.relay.stop_all();
+        self.front.relay().stop_all();
         for task in self.tasks {
             if let Err(e) = task.await {
                 tracing::warn!("daemon task ended abnormally: {e}");
@@ -464,25 +488,6 @@ pub async fn start(options: DaemonOptions) -> anyhow::Result<DaemonHandle> {
             .with_context(|| format!("removing stale {}", socket.display()))?;
     }
 
-    let store = Store::open(&paths.state_db())
-        .with_context(|| format!("opening {}", paths.state_db().display()))?;
-    let reset = store.reset_inflight()?;
-    if reset > 0 {
-        tracing::info!(
-            reset,
-            "re-queued items that were in flight at the last exit"
-        );
-    }
-    let api = ApiClient::new(&config.server_url, &config.token)?;
-    // Until `/v1/me` answers, agents sit where it last said they do.
-    let presider = match store.seating(api.base_url()) {
-        Ok(known) => known.flatten(),
-        Err(e) => {
-            tracing::warn!("reading the recorded Senate: {e}");
-            None
-        }
-    };
-    let seating = Seating::new(config.person.clone(), presider);
     let companion_config = CompanionConfig::load(&paths.config()).map_err(anyhow::Error::msg)?;
     if companion_config.enabled {
         tracing::info!(
@@ -502,61 +507,143 @@ pub async fn start(options: DaemonOptions) -> anyhow::Result<DaemonHandle> {
         watch.clone(),
     ));
     tracing::debug!(transport = %codex.transport, "Codex sessions are pushed through the app-server");
-    let (resyncs, _) = watch::channel(0);
-    let shared = Arc::new(Shared {
-        ladder: Ladder::new_default(timing.inbox_timeout, codex),
-        locale: config.locale,
-        branches: config.branches(),
-        seating: Mutex::new(seating),
-        triaged: AtomicBool::new(true),
-        config,
-        store,
-        api,
+    let common = Common {
         timing,
-        streams: Mutex::new(BTreeMap::new()),
-        work: Notify::new(),
-        committees_changed: Notify::new(),
-        generation: RwLock::new(0),
-        resyncs,
-        pushes: Mutex::new(HashMap::new()),
-        auto: Mutex::new(HashMap::new()),
-        home: paths.home().to_path_buf(),
+        codex,
+        relay: relay.clone(),
+        watch: watch.clone(),
         companion_config,
-        companion: Mutex::new(None),
-        companion_tried: Mutex::new(BTreeSet::new()),
-        relay,
-        watch,
-        covering: Mutex::new(routing::Covering::new()),
-    });
-    verify_person(&shared).await?;
+        home: paths.home().to_path_buf(),
+        codex_sessions: Arc::new(Mutex::new(BTreeMap::new())),
+    };
+    let links = config.links();
+    let several = links.len() > 1;
+    let mut senates = Vec::with_capacity(links.len());
+    for (index, link) in links.iter().enumerate() {
+        let db = match (&link.presider, several) {
+            (Some(presider), true) => paths.state_db_for(&presider.to_string()),
+            _ => paths.state_db(),
+        };
+        let fixed = link.presider.as_ref().map(|p| p.under(&config.person));
+        let shared = Shared::open(
+            config.for_link(link),
+            &db,
+            several.then_some(fixed),
+            index,
+            &common,
+        )?;
+        verify_person(&shared).await?;
+        senates.push(shared);
+    }
+    let front = Arc::new(Front::new(senates, relay, watch, several));
 
     let listener =
         UnixListener::bind(&socket).with_context(|| format!("binding {}", socket.display()))?;
     std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
-    shared.sweep_once();
 
     let (shutdown, rx) = watch::channel(false);
-    let tasks = vec![
-        tokio::spawn(serve_ipc(shared.clone(), listener, rx.clone())),
-        tokio::spawn(supervise(shared.clone(), rx.clone())),
-        tokio::spawn(batcher(shared.clone(), rx.clone())),
-        tokio::spawn(sweeper(shared.clone(), rx.clone())),
-        tokio::spawn(checkpointer(shared.clone(), rx)),
-    ];
-    shared.work.notify_one();
-    tracing::info!(
-        person = %shared.config.person,
-        senate = %shared.senate_label(),
-        server = shared.api.base_url(),
-        socket = %socket.display(),
-        "bridge daemon started"
-    );
+    let mut tasks = vec![tokio::spawn(serve_ipc(front.clone(), listener, rx.clone()))];
+    for shared in front.senates() {
+        shared.sweep_once();
+        tasks.push(tokio::spawn(supervise(shared.clone(), rx.clone())));
+        tasks.push(tokio::spawn(batcher(shared.clone(), rx.clone())));
+        tasks.push(tokio::spawn(sweeper(shared.clone(), rx.clone())));
+        tasks.push(tokio::spawn(checkpointer(shared.clone(), rx.clone())));
+        shared.work.notify_one();
+        tracing::info!(
+            person = %shared.config.person,
+            senate = %shared.senate_label(),
+            server = shared.api.base_url(),
+            socket = %socket.display(),
+            "bridge daemon serving a Senate"
+        );
+    }
     Ok(DaemonHandle {
-        shared,
+        front,
         shutdown,
         tasks,
         socket,
     })
+}
+
+/// What every Senate's half of the daemon shares: one Codex transport and
+/// approvals relay, one watch channel, one companion configuration.
+struct Common {
+    timing: Timing,
+    codex: CodexAppServerAdapter,
+    relay: Arc<Relay>,
+    watch: broadcast::Sender<WatchEvent>,
+    companion_config: CompanionConfig,
+    home: PathBuf,
+    /// Live Codex sessions per Senate, so the one relay watches all of them.
+    codex_sessions: Arc<Mutex<BTreeMap<usize, Vec<String>>>>,
+}
+
+impl Shared {
+    /// One Senate's half of the daemon, its state in `db`. `fixed` is where
+    /// its agents sit when the machine serves several Senates (the
+    /// configuration says, before `/v1/me` does); `None` with one Senate,
+    /// which learns it from `/v1/me` and the state it recorded.
+    fn open(
+        config: BridgeConfig,
+        db: &Path,
+        fixed: Option<Option<SenatorPath>>,
+        index: usize,
+        common: &Common,
+    ) -> anyhow::Result<Arc<Self>> {
+        let store = Store::open(db).with_context(|| format!("opening {}", db.display()))?;
+        let reset = store.reset_inflight()?;
+        if reset > 0 {
+            tracing::info!(
+                reset,
+                "re-queued items that were in flight at the last exit"
+            );
+        }
+        let api = ApiClient::new(&config.server_url, &config.token)?;
+        // Until `/v1/me` answers, agents sit where the configuration or the
+        // last answer said they do.
+        let presider = match fixed {
+            Some(presider) => presider,
+            None => match store.seating(api.base_url()) {
+                Ok(known) => known.flatten(),
+                Err(e) => {
+                    tracing::warn!("reading the recorded Senate: {e}");
+                    None
+                }
+            },
+        };
+        let seating = Seating::new(config.person.clone(), presider);
+        let (resyncs, _) = watch::channel(0);
+        Ok(Arc::new(Shared {
+            ladder: Ladder::new_default(common.timing.inbox_timeout, common.codex.clone()),
+            locale: config.locale,
+            branches: config.branches(),
+            seating: Mutex::new(seating),
+            triaged: AtomicBool::new(true),
+            speaker: Mutex::new(None),
+            config,
+            store,
+            api,
+            timing: common.timing,
+            streams: Mutex::new(BTreeMap::new()),
+            work: Notify::new(),
+            committees_changed: Notify::new(),
+            generation: RwLock::new(0),
+            resyncs,
+            pushes: Mutex::new(HashMap::new()),
+            auto: Mutex::new(HashMap::new()),
+            home: common.home.clone(),
+            companion_config: common.companion_config.clone(),
+            companion: Mutex::new(None),
+            companion_tried: Mutex::new(BTreeSet::new()),
+            relay: common.relay.clone(),
+            watch: common.watch.clone(),
+            covering: Mutex::new(routing::Covering::new()),
+            index,
+            codex_sessions: common.codex_sessions.clone(),
+            announced: Mutex::new(HashMap::new()),
+        }))
+    }
 }
 
 /// Refuse to start on a token that names someone else; tolerate an
@@ -566,7 +653,7 @@ async fn verify_person(shared: &Shared) -> anyhow::Result<()> {
     let config = &shared.config;
     match tokio::time::timeout(Duration::from_secs(5), shared.api.me()).await {
         Ok(Ok(me)) if me.person != config.person => bail!(
-            "bridge.toml says person {:?}, but the server says the token belongs to {:?}",
+            "senate.toml says person {:?}, but the server says the token belongs to {:?}",
             config.person.as_str(),
             me.person.as_str()
         ),
@@ -574,6 +661,7 @@ async fn verify_person(shared: &Shared) -> anyhow::Result<()> {
             shared.note_epoch(Some(&me.epoch)).await;
             shared.note_triaged(me.triaged);
             shared.note_seating(me.presider);
+            shared.note_speaker(me.speaker);
             Ok(())
         }
         Ok(Err(e)) if e.status() == Some(401) => bail!("the server rejected the token: {e}"),
@@ -730,6 +818,45 @@ impl Shared {
             tracing::info!(senate = %senate_words(seating.presider(), Locale::En), "connected");
             *current = seating;
         }
+    }
+
+    /// Record who holds this Senate's Speaker's seat, as `/v1/me` named it.
+    pub(crate) fn note_speaker(&self, speaker: Option<SpeakerSeat>) {
+        let mut current = lock(&self.speaker);
+        if *current != speaker {
+            tracing::info!(speaker = ?speaker, senate = %self.senate_label(), "the Speaker's seat");
+            *current = speaker;
+        }
+    }
+
+    /// The Speaker's seat of this Senate, as last heard.
+    pub(crate) fn speaker_seat(&self) -> Option<SpeakerSeat> {
+        lock(&self.speaker).clone()
+    }
+
+    /// Whether `agent`, one of this machine's person's agents, holds this
+    /// Senate's Speaker's seat.
+    pub(crate) fn presided_by(&self, agent: &SenatorPath) -> bool {
+        agent.owner() == &self.config.person
+            && self
+                .speaker_seat()
+                .is_some_and(|seat| seat.senator() == Some(agent))
+    }
+
+    /// Whether `event` is put to the Speaker of this Senate and `agent`
+    /// holds its seat: pushed to the presiding session like a message for
+    /// the agent itself. Not the Speaker's own words.
+    pub(crate) fn for_speaker(&self, agent: &SenatorPath, event: &Event) -> bool {
+        event.from != Address::Speaker
+            && event.is_directed_to(&Address::Speaker)
+            && self.presided_by(agent)
+    }
+
+    /// Whether `agent` holds this Senate's seat without sitting in it: the
+    /// presider of a nested Senate, whose session sits in the Senate above.
+    /// It speaks here only as `speaker`.
+    pub(crate) fn presides_from_above(&self, agent: &SenatorPath) -> bool {
+        self.presided_by(agent) && !self.seating().owns(agent)
     }
 
     /// `senator::<person>`: the person this bridge holds the token of.
@@ -1287,7 +1414,7 @@ impl Shared {
             let mut covering = lock(&self.covering);
             covering.observe(event, agent);
             routing::should_push_covering(event, agent, &covering)
-        };
+        } || self.for_speaker(agent, event);
         if self.store.ingest(agent, event, directed)? {
             dirty.notify_one();
             if matches!(
@@ -1443,6 +1570,16 @@ impl Shared {
     /// in time).
     fn annotate(&self, agent: &SenatorPath, mut event: Event) -> Event {
         event.meta.remove(format::COVERING_META);
+        event.meta.remove(format::SPEAKER_META);
+        if !event.is_directed_to(&Address::senator(agent)) && self.for_speaker(agent, &event) {
+            let senate = match self.seating().presider() {
+                Some(presider) => presider.to_string(),
+                None => String::new(),
+            };
+            event
+                .meta
+                .insert(format::SPEAKER_META.into(), senate.into());
+        }
         if !event.is_directed_to(&Address::senator(agent))
             && let Some(old) = lock(&self.covering).covered_for(&event, agent)
         {
@@ -1829,7 +1966,7 @@ impl Shared {
     // ---- the desktop app: approvals and watch -------------------------------
 
     /// One approvals subscriber per live Codex session.
-    fn reconcile_approvals(&self) {
+    pub(crate) fn reconcile_approvals(&self) {
         match self.store.live_sessions() {
             Ok(sessions) => {
                 let codex: Vec<String> = sessions
@@ -1837,7 +1974,13 @@ impl Shared {
                     .filter(|s| s.runtime == Runtime::Codex)
                     .map(|s| s.session_id)
                     .collect();
-                self.relay.reconcile(&codex);
+                // One relay watches the Codex sessions of every Senate.
+                let all: Vec<String> = {
+                    let mut by_senate = lock(&self.codex_sessions);
+                    by_senate.insert(self.index, codex);
+                    by_senate.values().flatten().cloned().collect()
+                };
+                self.relay.reconcile(&all);
             }
             Err(e) => tracing::warn!("reading sessions for the approvals relay: {e}"),
         }
@@ -2044,12 +2187,20 @@ impl Shared {
             Request::Status => wrap(self.on_status()),
             Request::Hook(report) => {
                 let codex = report.runtime == Runtime::Codex;
-                let reply = wrap(self.on_hook(report).await);
+                let reply = wrap(self.on_hook(report, None).await);
                 if codex {
                     self.reconcile_approvals();
                 }
                 reply
             }
+            // The front serves these: they span Senates.
+            Request::Presides { .. }
+            | Request::Docket { .. }
+            | Request::Route { .. }
+            | Request::Cover { .. }
+            | Request::Refer { .. } => Reply::err(IpcError::bad_request(
+                "a presiding request is served by the daemon's front",
+            )),
             Request::SessionEnd { session_id, .. } => wrap(self.on_session_end(&session_id)),
             Request::Checkpoint {
                 session,
@@ -2208,24 +2359,50 @@ impl Shared {
             committees,
             sessions,
             queue: self.store.counts().map_err(internal)?,
+            speaker: self.speaker_seat(),
+            others: Vec::new(),
         })
     }
 
-    async fn on_hook(&self, report: HookReport) -> Result<HookReply, IpcError> {
+    /// Register the session the hook reports. `placed` is its agent when
+    /// the front already worked it out (several Senates); else it is worked
+    /// out here, under this Senate's seating.
+    async fn on_hook(
+        &self,
+        report: HookReport,
+        placed: Option<(SenatorPath, AgentSource)>,
+    ) -> Result<HookReply, IpcError> {
+        self.on_hook_as(report, placed, false).await
+    }
+
+    /// [`Shared::on_hook`]; `as_speaker`: the session is attached here as
+    /// the Speaker of this Senate (it sits in another), so it is told
+    /// nothing at start but what is put to it.
+    pub(crate) async fn on_hook_as(
+        &self,
+        report: HookReport,
+        placed: Option<(SenatorPath, AgentSource)>,
+        as_speaker: bool,
+    ) -> Result<HookReply, IpcError> {
         let inferred = session::infer_committee(
             report.branch.as_deref(),
             report.committee_file.as_deref(),
             &self.branches,
         );
-        let (name, agent_source) = agent::choose(
-            &self.config.agents,
-            report.runtime,
-            agent::Pins {
-                env: report.agent_env.as_deref(),
-                file: report.agent_file.as_deref(),
-            },
-        );
-        let agent = self.seating().agent(&name);
+        let (agent, agent_source) = match placed {
+            Some(placed) => placed,
+            None => {
+                let (rel, source) = agent::choose(
+                    &self.config.agents,
+                    report.runtime,
+                    agent::Pins {
+                        env: report.agent_env.as_deref(),
+                        file: report.agent_file.as_deref(),
+                    },
+                );
+                (self.seating().place(&rel), source)
+            }
+        };
         let before = self.store.session(&report.session_id).map_err(internal)?;
         let session = self
             .store
@@ -2267,10 +2444,17 @@ impl Shared {
             self.committees_changed.notify_one();
         }
         let brief = match (report.event, session.committee()) {
-            (HookEvent::SessionStart, Some(committee)) => self.hook_brief(committee).await,
+            (HookEvent::SessionStart, Some(committee)) if !as_speaker => {
+                self.hook_brief(committee).await
+            }
             _ => None,
         };
-        let (context, delivered) = self.hook_context(&session, report.event, brief.as_ref())?;
+        let event = if as_speaker {
+            HookEvent::UserPromptSubmit
+        } else {
+            report.event
+        };
+        let (context, delivered) = self.hook_context(&session, event, brief.as_ref())?;
         // The user is active in the session: a held backlog may try its
         // inbox again right away.
         self.note_delivered(&session.session_id);
@@ -2640,11 +2824,11 @@ impl Shared {
                 codes::NO_SESSION,
                 self.locale.pick(
                     "这个会话还没有在 Senate bridge 登记。bridge 通过会话的 SessionStart / \
-                     UserPromptSubmit 钩子知道它：确认已运行过 `senate-bridge install` 且 daemon \
+                     UserPromptSubmit 钩子知道它：确认已运行过 `senate install` 且 daemon \
                      在运行，在这个会话里随便发一条消息，然后再试。",
                     "This session is not registered with the Senate bridge. The bridge learns \
                      about a session from its SessionStart / UserPromptSubmit hooks: make sure \
-                     `senate-bridge install` was run and the daemon is up, send any prompt in this \
+                     `senate install` was run and the daemon is up, send any prompt in this \
                      session, then try again.",
                 ),
             ));
@@ -2715,7 +2899,12 @@ impl Shared {
         let session = self.resolve(selector)?;
         let committee = self.bound(&session)?;
         routing::check_ask_recipients(&to, self.locale).map_err(IpcError::bad_request)?;
-        let me = Address::senator(&session.agent);
+        // The presider of a nested Senate asks its subagents as their Speaker.
+        let me = if self.presides_from_above(&session.agent) {
+            Address::Speaker
+        } else {
+            Address::senator(&session.agent)
+        };
         if to.contains(&me) {
             return Err(IpcError::bad_request(match self.locale {
                 Locale::Zh => format!("{} 就是这个会话自己；请问队友的 agent", me.in_text()),
@@ -3269,7 +3458,7 @@ impl Shared {
 // ---- tasks -----------------------------------------------------------------
 
 async fn serve_ipc(
-    shared: Arc<Shared>,
+    shared: Arc<Front>,
     listener: UnixListener,
     mut shutdown: watch::Receiver<bool>,
 ) {
@@ -3289,11 +3478,7 @@ async fn serve_ipc(
     }
 }
 
-async fn serve_connection(
-    shared: Arc<Shared>,
-    stream: UnixStream,
-    shutdown: watch::Receiver<bool>,
-) {
+async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watch::Receiver<bool>) {
     use tokio::io::AsyncWriteExt;
 
     let (read, mut write) = stream.into_split();
@@ -3332,7 +3517,7 @@ async fn serve_connection(
 /// approvals), then every [`WatchEvent`] until the client closes or the
 /// daemon stops. Anything the client sends is ignored.
 async fn serve_watch(
-    shared: &Shared,
+    shared: &Front,
     mut reader: tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
     mut write: tokio::net::unix::OwnedWriteHalf,
     mut shutdown: watch::Receiver<bool>,
@@ -3348,7 +3533,7 @@ async fn serve_watch(
     }
 
     // Subscribe before the snapshot, so nothing falls between the two.
-    let mut events = shared.watch.subscribe();
+    let mut events = shared.watch().subscribe();
     if !send(
         &mut write,
         &Reply::ok(&serde_json::json!({"watching": true})),
@@ -3358,13 +3543,13 @@ async fn serve_watch(
         return;
     }
     let mut snapshot = Vec::new();
-    match shared.on_status() {
+    match shared.status() {
         Ok(status) => snapshot.push(WatchEvent::Status(Box::new(status))),
         Err(e) => tracing::debug!("status for a new watcher: {e}"),
     }
     snapshot.extend(
         shared
-            .relay
+            .relay()
             .list()
             .into_iter()
             .map(|a| WatchEvent::ApprovalRequested(Box::new(a))),

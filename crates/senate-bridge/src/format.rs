@@ -218,6 +218,24 @@ fn label(event: &Event, locale: Locale) -> String {
 /// cannot plant it in a push.
 pub const COVERING_META: &str = "bridge_covering";
 
+/// Set by the daemon (never stored) on an event it pushes to a presiding
+/// session because it was put to the Speaker of the Senate that session
+/// presides over: that Senate's presider (empty for a top Senate). The
+/// daemon removes it from every event it annotates, so a writer cannot
+/// plant it.
+pub const SPEAKER_META: &str = "bridge_as_speaker";
+
+/// ` · for you as Speaker of …` for an event put to the Speaker.
+fn as_speaker(event: &Event, locale: Locale) -> Option<String> {
+    let senate = event.meta.get(SPEAKER_META)?.as_str()?;
+    let presider = senate.parse::<senate_core::SenatorPath>().ok();
+    let senate = crate::daemon::senate_words(presider.as_ref(), locale);
+    Some(match locale {
+        Locale::Zh => format!(" · 给作为 {senate} Speaker 的你"),
+        Locale::En => format!(" · for you as Speaker of {senate}"),
+    })
+}
+
 /// ` · for [senator::alice/claude] (its work is yours now)` for an event
 /// pushed for reassigned work.
 fn covering(event: &Event, locale: Locale) -> String {
@@ -247,14 +265,15 @@ fn from_word(locale: Locale) -> &'static str {
 /// `· for [senator::alice/claude] (its work is yours now)]`.
 pub fn header(event: &Event, locale: Locale) -> String {
     format!(
-        "[senate · {} · seq {} · {} {}{} · {}{}]",
+        "[senate · {} · seq {} · {} {}{} · {}{}{}]",
         event.committee,
         event.seq,
         from_word(locale),
         author(event, locale),
         origin(event, locale),
         label(event, locale),
-        covering(event, locale)
+        covering(event, locale),
+        as_speaker(event, locale).unwrap_or_default()
     )
 }
 
@@ -310,6 +329,21 @@ fn posted_back(event: &Event, locale: Locale) -> String {
 /// How to respond, when a response is expected: every question, every
 /// relay spoken on someone's behalf, every chat.
 pub fn footer(event: &Event, locale: Locale) -> Option<String> {
+    if event.meta.contains_key(SPEAKER_META) {
+        // Put to the Speaker: dealt with by the presiding tools, not by an
+        // answer in this session's own Senate.
+        return match event.kind {
+            Kind::Answer => None,
+            _ => Some(
+                locale
+                    .pick(
+                        "↳ 作为 Speaker 处理：mcp__senate__speaker_docket 列出它，然后 speaker_route、                         speaker_cover 或 speaker_escalate",
+                        "↳ deal with it as Speaker: mcp__senate__speaker_docket lists it, then                          speaker_route, speaker_cover or speaker_escalate",
+                    )
+                    .to_owned(),
+            ),
+        };
+    }
     let root = event.thread.unwrap_or(event.seq);
     let answer = format!("mcp__senate__answer(thread={root})");
     let back = posted_back(event, locale);
@@ -1194,5 +1228,45 @@ mod tests {
     fn truncation_is_char_safe() {
         assert_eq!(truncate_chars("退款上限", 2), ("退款…".to_string(), true));
         assert_eq!(truncate_chars("ab", 2), ("ab".to_string(), false));
+    }
+
+    #[test]
+    fn what_is_put_to_the_speaker_says_so_and_points_at_the_presiding_tools() {
+        let mut event = NewEvent::new(
+            committee(),
+            Kind::Question,
+            addr("senator::alice"),
+            "who looks at refunds?",
+        )
+        .to(Address::Speaker)
+        .into_event(Seq(7), Utc::now());
+        event
+            .meta
+            .insert(SPEAKER_META.into(), serde_json::json!("alice/claude"));
+        let en = render_event(&event, EN);
+        assert!(
+            en.contains(
+                "· for you as Speaker of the Senate presided over by [senator::alice/claude]]"
+            ),
+            "{en}"
+        );
+        assert!(en.contains("speaker_route"), "{en}");
+        assert!(!en.contains("mcp__senate__answer"), "{en}");
+        let zh = render_event(&event, ZH);
+        assert!(zh.contains("给作为 由 [senator::alice/claude] 主持的 Senate Speaker 的你"));
+        // A top Senate used alone.
+        event
+            .meta
+            .insert(SPEAKER_META.into(), serde_json::json!(""));
+        assert!(render_event(&event, EN).contains("for you as Speaker of the top Senate"));
+        // An answer put to the Speaker asks for nothing.
+        let mut answer = NewEvent::new(committee(), Kind::Answer, alice(), "3")
+            .to(Address::Speaker)
+            .in_thread(Seq(7))
+            .into_event(Seq(8), Utc::now());
+        answer
+            .meta
+            .insert(SPEAKER_META.into(), serde_json::json!(""));
+        assert_eq!(footer(&answer, EN), None);
     }
 }

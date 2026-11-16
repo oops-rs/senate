@@ -553,6 +553,8 @@ async fn streams_follow_sessions_and_configured_committees() {
             sessions: status.sessions.clone(),
             queue: status.queue,
             locale: status.locale,
+            speaker: status.speaker.clone(),
+            others: Vec::new(),
         },
         chrono::Utc::now(),
     );
@@ -1273,7 +1275,7 @@ async fn two_agents_of_one_person_have_their_own_streams_cursors_and_pushes() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_session_can_pin_its_agent_and_the_config_can_rename_one() {
     let mut h = Harness::new().await;
-    h.config.agents.claude = name("cc");
+    h.config.agents.claude = "cc".parse().unwrap();
     h.start().await;
     let plain = h.workdir("plain", Some("refund-v2"));
     let inbox_cc = h.inbox("cc");
@@ -1328,7 +1330,7 @@ async fn a_session_can_pin_its_agent_and_the_config_can_rename_one() {
 async fn agents_sit_under_the_presider_of_a_nested_senate() {
     let mut h = Harness::new().await;
     h.server.set_presider(Some("alice/claude"));
-    h.config.agents.claude = name("reviewer");
+    h.config.agents.claude = "reviewer".parse().unwrap();
     h.start().await;
     let wd = h.workdir("n", Some("refund-v2"));
     let inbox = h.inbox("n");
@@ -1391,4 +1393,173 @@ async fn pushes_and_hook_context_follow_the_locale() {
          ↳ 用 mcp__senate__answer(thread=1) 回复——会发回给 [senator::pm]"
     ));
     h.stop().await;
+}
+
+/// One daemon serving two Senates: the one above at `server_url`, and one
+/// presided over by alice/claude as a `[[senates]]` entry. Each session is
+/// attached to the Senate its agent's path selects, and everything kept per
+/// stream (streams, heartbeats, sessions, queue) stays with its Senate.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_daemon_serves_two_senates_and_keeps_them_apart() {
+    let mut h = Harness::new().await;
+    let nested = FakeServer::start(&[("tok-alice-local", "alice")], &["refund-v2"]).await;
+    nested.set_presider(Some("alice/claude"));
+    h.config.senates.push(senate_bridge::config::SenateLink {
+        server_url: nested.url.clone(),
+        token: "tok-alice-local".into(),
+        presider: Some("claude".parse().unwrap()),
+    });
+    h.start().await;
+    let wd = h.workdir("w", Some("refund-v2"));
+    let up = h.inbox("c1");
+    let down = h.inbox("r1");
+    let start = h
+        .hook(HookKind::SessionStart, "c1", &wd, Some(&up))
+        .await
+        .unwrap();
+    // It sits above and presides below.
+    assert!(context(&start).contains("as [senator::alice/claude]"));
+    assert!(
+        context(&start).contains(
+            "[senator::alice/claude] is the Speaker of the Senate presided over by [senator::alice/claude]"
+        ),
+        "{}",
+        context(&start)
+    );
+    let mut env = h.env_for("r1", Some(down.path.as_path()));
+    env.agent = Some("claude/reviewer".into());
+    let start = h
+        .hook_with(HookKind::SessionStart, "r1", &wd, &env)
+        .await
+        .unwrap();
+    assert!(
+        context(&start).contains(
+            "of the Senate presided over by [senator::alice/claude] as [senator::alice/claude/reviewer]"
+        ),
+        "{}",
+        context(&start)
+    );
+    assert!(!context(&start).contains("is the Speaker"));
+
+    // Each agent's stream and heartbeat goes to its own Senate's server.
+    eventually("both streams", WAIT, || {
+        (h.server.active_streams_of("refund-v2", "alice/claude") == 1
+            && nested.active_streams_of("refund-v2", "alice/claude/reviewer") == 1)
+            .then_some(())
+    })
+    .await;
+    eventually("heartbeats", WAIT, || {
+        (!h.server
+            .heartbeats_of("refund-v2", "alice/claude")
+            .is_empty()
+            && !nested
+                .heartbeats_of("refund-v2", "alice/claude/reviewer")
+                .is_empty())
+        .then_some(())
+    })
+    .await;
+    assert!(
+        h.server
+            .heartbeats()
+            .iter()
+            .all(|(_, _, hb)| hb.agent.to_string() == "alice/claude")
+    );
+    assert!(nested.heartbeats().iter().all(|(_, _, hb)| {
+        ["alice/claude/reviewer", "alice/claude"].contains(&hb.agent.to_string().as_str())
+    }));
+    let daemon = h.daemon.as_ref().unwrap();
+    let above = daemon.store_of(None).unwrap();
+    let below = daemon.store_of(Some(&path("alice/claude"))).unwrap();
+    assert!(above.session("c1").unwrap().is_some());
+    assert!(above.session("r1").unwrap().is_none());
+    assert!(below.session("r1").unwrap().is_some());
+    // The presiding session is attached below too, as the Speaker.
+    assert_eq!(
+        below.session("c1").unwrap().unwrap().agent,
+        path("alice/claude")
+    );
+
+    // A question below reaches the reviewer only; nothing goes above.
+    nested.append(
+        NewEvent::new(
+            committee(),
+            Kind::Question,
+            Address::Senator(path("alice/claude/codex")),
+            "回调覆盖了吗？",
+        )
+        .to(Address::Senator(path("alice/claude/reviewer"))),
+    );
+    let pushed = eventually("the reviewer's push", WAIT, || {
+        down.messages()
+            .into_iter()
+            .find(|m| m.contains("回调覆盖了吗"))
+    })
+    .await;
+    assert!(pushed.contains("seq 1"), "{pushed}");
+    assert!(up.messages().iter().all(|m| !m.contains("回调覆盖了吗")));
+    // The reviewer answers: it lands below.
+    let posted: ipc::Posted = call(
+        &h,
+        Request::Answer {
+            session: ipc::SessionSelector {
+                session_id: Some("r1".into()),
+                claude_pid: None,
+            },
+            thread: Seq(1),
+            body: "覆盖了".into(),
+            id: None,
+            committee: None,
+            agent: None,
+            as_person: false,
+        },
+    )
+    .await;
+    assert_eq!(posted.seq, Seq(2));
+    assert_eq!(nested.last_event("refund-v2").body, "覆盖了");
+    assert!(h.server.events("refund-v2").is_empty());
+
+    // Status shows both.
+    let status: StatusReply = call(&h, Request::Status).await;
+    assert_eq!(status.presider, None);
+    assert_eq!(status.others.len(), 1);
+    assert_eq!(status.others[0].presider, Some(path("alice/claude")));
+    assert_eq!(status.others[0].server_url, nested.url);
+
+    // A pin moved to the Senate above: the session leaves the one below.
+    env.agent = Some("codex".into());
+    h.hook_with(HookKind::UserPromptSubmit, "r1", &wd, &env)
+        .await;
+    let daemon = h.daemon.as_ref().unwrap();
+    assert_eq!(
+        daemon
+            .store_of(Some(&path("alice/claude")))
+            .unwrap()
+            .session("r1")
+            .unwrap()
+            .unwrap()
+            .state,
+        SessionState::Ended
+    );
+    assert_eq!(
+        daemon
+            .store_of(None)
+            .unwrap()
+            .session("r1")
+            .unwrap()
+            .unwrap()
+            .agent,
+        path("alice/codex")
+    );
+    h.stop().await;
+}
+
+async fn call<T: serde::de::DeserializeOwned>(h: &Harness, request: Request) -> T {
+    ipc::request(
+        &h.socket(),
+        &request,
+        Duration::from_secs(1),
+        Duration::from_secs(10),
+    )
+    .await
+    .unwrap()
 }

@@ -1,5 +1,6 @@
-//! An empty [`Hub`] for this crate's unit tests: nothing is stored, and
-//! nothing a test here reads.
+//! An empty [`Hub`]: nothing is stored. The context of components that run
+//! with no Senate of their own (a developer machine that hosts none, only
+//! its side of the Senate above), and of this crate's unit tests.
 
 use std::sync::Arc;
 

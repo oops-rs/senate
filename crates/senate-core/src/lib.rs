@@ -20,6 +20,8 @@
 //! - [`surface`]: the seam between the Speaker and a chat-platform gateway.
 //! - [`brief`]: the committee brief, derived from the log.
 //! - [`continuity`]: checkpoints, presence and leases, kept per agent.
+//! - [`docket`]: what awaits a Speaker held by a senator: picks, messages
+//!   addressed to it, questions to away agents.
 //! - [`task`]: task threads: status, triage, and the board derived from
 //!   them.
 //! - [`work`]: the Speaker's work runs, branch naming, and reassignment.
@@ -33,8 +35,9 @@
 //!
 //! Senates nest. An agent seated in one Senate may preside, as Speaker, over
 //! a Senate of its own subagents one level down, and speaks upward in its own
-//! name for what happens there. Only the top Senate's Speaker is not a
-//! senator.
+//! name for what happens there. Who holds a Senate's Speaker's seat is data
+//! ([`SpeakerSeat`]): the built-in Speaker (a top Senate only), or a senator,
+//! by default the one presiding over a nested Senate.
 //!
 //! Work is divided into **committees**, each with its own append-only log.
 //!
@@ -63,6 +66,7 @@ pub mod address;
 pub mod api;
 pub mod brief;
 pub mod continuity;
+pub mod docket;
 pub mod event;
 pub mod hub;
 pub mod ids;
@@ -80,6 +84,10 @@ pub use continuity::{
     AgentPresence, CheckpointFiles, CheckpointPayload, CheckpointRecord, CheckpointTrigger,
     Checkpoints, PresenceBoard, PresencePayload, PresenceState, presence_event,
 };
+pub use docket::{
+    Awaiting, CheckpointFacts, DocketItem, DocketPage, PickPayload, SeatFacts, SpeakerDocket,
+    awaits_speaker,
+};
 pub use event::{
     BindingAction, BindingPayload, Event, GroupRole, Kind, Mirror, NewEvent, PROPOSAL_DECISION,
     Refs, Source, StatusState, is_companion, is_provisional, is_takeover, meta,
@@ -93,6 +101,7 @@ pub use locale::{Locale, LocaleParseError};
 pub use mention::{Found, Mention, MentionParseError};
 pub use roster::{
     Account, AgentOf, DelegationPresence, ResolveError, Roster, RosterConfig, RosterError, Senior,
+    SpeakerSeat,
 };
 pub use senator::{MAX_AGENT_DEPTH, SenatorPath, SenatorPathError};
 pub use surface::{

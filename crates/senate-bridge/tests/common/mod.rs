@@ -164,6 +164,8 @@ pub struct Inner {
     pub roster: Roster,
     /// What `/v1/me` names as the Senate's presider.
     pub presider: Option<SenatorPath>,
+    /// Who `/v1/me` says holds the Speaker's seat; unset: the presider.
+    pub speaker: Option<senate_core::SpeakerSeat>,
     /// What `/v1/me` says about a Speaker judging roots here.
     pub triaged: bool,
     pub offline: bool,
@@ -300,6 +302,12 @@ async fn me(State(st): St, headers: HeaderMap) -> Response {
             Json(Me {
                 person: name(&h),
                 presider: inner.presider.clone(),
+                speaker: inner.speaker.clone().or_else(|| {
+                    inner
+                        .presider
+                        .clone()
+                        .map(senate_core::SpeakerSeat::Senator)
+                }),
                 agents: inner
                     .roster
                     .agents_of(&name(&h))
@@ -686,6 +694,7 @@ impl FakeServer {
                 active: HashMap::new(),
                 roster,
                 presider: None,
+                speaker: None,
                 triaged: true,
                 offline: false,
                 epoch: "epoch-1".into(),
@@ -878,6 +887,12 @@ impl FakeServer {
             .roster
             .seat(path(agent))
             .unwrap();
+    }
+
+    /// Make `/v1/me` name `speaker` as holding the Speaker's seat.
+    pub fn set_speaker(&self, speaker: &str) {
+        self.state.inner.lock().unwrap().speaker =
+            Some(senate_core::SpeakerSeat::Senator(path(speaker)));
     }
 
     /// Make `/v1/me` name `presider` as the Senate's presider.

@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 use senate_bridge::BridgeConfig;
 use senate_bridge::companion::CompanionConfig;
+use senate_bridge::config::Hosted;
 use senate_bridge::delivery::codex::CodexConfig;
 use senate_core::Locale;
 use senated::{ForgeSection, SenatedConfig};
@@ -75,25 +76,61 @@ fn the_senated_example_loads_as_shipped_and_in_full() {
     assert!(matches!(&work.forge, Some(ForgeSection::Github(gh)) if gh.always_draft));
 }
 
+/// A developer machine under a team: what `senated --machine` and the
+/// `senate` command read. (Replaces the test of `bridge.example.toml`, the
+/// same file under its old name.)
 #[test]
-fn the_bridge_example_parses_into_what_the_bridge_reads() {
-    let path = example("bridge.example.toml");
+fn the_machine_example_parses_into_what_the_machine_reads() {
+    let path = example("senate.example.toml");
     let shipped = BridgeConfig::load(&path).unwrap();
     assert_eq!(shipped.person.as_str(), "alice");
     assert_eq!(shipped.locale, Locale::En);
+    let hosted = Hosted::load(&path).unwrap();
+    assert_eq!(hosted.validate(&shipped), Ok(()));
+    assert!(hosted.local.is_none(), "under a team: the Senate above");
+    assert_eq!(hosted.preside.len(), 1);
+    assert_eq!(hosted.preside[0].agent.to_string(), "claude");
 
     let dir = tempfile::tempdir().unwrap();
-    let full = dir.path().join("bridge.toml");
+    let full = dir.path().join("senate.toml");
     std::fs::write(&full, uncommented(&std::fs::read_to_string(&path).unwrap())).unwrap();
     let config = BridgeConfig::load(&full).unwrap();
     assert_eq!(config.committees, ["refund-v2".parse().unwrap()]);
     assert_eq!(config.brief_chars, 6000);
     assert_eq!(config.branches().prefix(), "feature");
-    assert_eq!(config.agents.claude.as_str(), "claude");
-    assert_eq!(config.agents.codex.as_str(), "codex");
+    assert_eq!(config.agents.claude.to_string(), "claude");
+    assert_eq!(config.agents.codex.to_string(), "codex");
+    assert_eq!(
+        Hosted::load(&full).unwrap().preside[0].listen.as_deref(),
+        Some("127.0.0.1:7980")
+    );
     let codex = CodexConfig::load(&full).unwrap();
     assert!(codex.listen.is_some() && codex.bin.is_some());
     let companion = CompanionConfig::load(&full).unwrap();
     assert!(companion.enabled);
     assert_eq!(companion.max_secs, 300);
+}
+
+/// Alone on one machine: exactly what `senate init --local` writes.
+#[test]
+fn the_local_example_is_what_init_writes() {
+    let path = example("local.example.toml");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let config: BridgeConfig = toml::from_str(&text).unwrap();
+    let hosted = Hosted::load(&path).unwrap();
+    assert_eq!(hosted.validate(&config), Ok(()));
+    let local = hosted.local.clone().unwrap();
+    assert_eq!(local.speaker.unwrap().to_string(), "claude");
+    assert!(config.server_url.is_empty(), "no Senate above");
+
+    let written = senate_bridge::init::LocalProfile {
+        person: "alice".parse().unwrap(),
+        speaker: "claude".parse().unwrap(),
+        locale: Locale::En,
+        listen: senate_bridge::init::DEFAULT_LOCAL_LISTEN.into(),
+    }
+    .to_toml();
+    let as_written: BridgeConfig = toml::from_str(&written).unwrap();
+    assert_eq!(as_written, config);
+    assert_eq!(toml::from_str::<Hosted>(&written).unwrap(), hosted);
 }

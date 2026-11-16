@@ -1,4 +1,4 @@
-//! `senate-bridge hook <session-start|user-prompt-submit|session-end>`.
+//! `senate hook <session-start|user-prompt-submit|session-end>`.
 //!
 //! Claude Code runs this with the hook JSON on stdin (`session_id`, `cwd`,
 //! `transcript_path`, `hook_event_name`, `source`, `prompt`, `reason`, …) and

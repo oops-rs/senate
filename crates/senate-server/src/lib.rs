@@ -12,6 +12,16 @@
 //! on the roster is seated on its first contact. Presence, leases, cursors
 //! and heartbeats are all per agent path.
 //!
+//! # Who presides
+//!
+//! The Speaker's seat ([`SpeakerSeat`](senate_core::SpeakerSeat)) is the
+//! roster's, plus whether the built-in Speaker is attached
+//! ([`ServerBuilder::built_in_speaker`]). When a senator holds it, its
+//! person's session may write as `speaker` over HTTP: what only the Speaker
+//! writes, `on_behalf_of` answers, relays. A person's message for one of
+//! several agents is then put to the Speaker to route, and
+//! `GET .../docket` ([`ServerHub::docket`]) lists what awaits it.
+//!
 //! # Seams
 //!
 //! - [`Authenticate`]: bearer token to person. Default [`StaticTokens`].

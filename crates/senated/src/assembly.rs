@@ -186,10 +186,11 @@ impl Assembly {
                     source,
                 })?,
         };
-        // Bridges hold a question for its triage verdict only where the
-        // built-in Speaker will write one.
-        let mut server =
-            Server::builder(config.server.clone(), store).triaged(config.speaker.is_some());
+        // The built-in Speaker holds the seat of the (top) Senate it runs
+        // in, and only it judges roots; without it the roster says who
+        // presides (a nested Senate's presider, a named agent, or nobody).
+        let mut server = Server::builder(config.server.clone(), store)
+            .built_in_speaker(config.speaker.is_some());
         if let Some(auth) = auth {
             server = server.auth(auth);
         }
@@ -322,7 +323,7 @@ impl Senated {
     }
 }
 
-async fn shutdown_signal() -> anyhow::Result<()> {
+pub(crate) async fn shutdown_signal() -> anyhow::Result<()> {
     use anyhow::Context;
     #[cfg(unix)]
     {

@@ -49,6 +49,7 @@ pub fn committee() -> CommitteeId {
 pub fn roster() -> RosterConfig {
     RosterConfig {
         presider: None,
+        speaker: None,
         seniors: ["alice", "bob", "carol"]
             .into_iter()
             .map(|h| Senior::new(name(h)))

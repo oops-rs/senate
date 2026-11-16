@@ -1,4 +1,4 @@
-//! The `senate-bridge` binary itself. Every spawn gets a temp HOME and
+//! The `senate` binary itself. Every spawn gets a temp HOME and
 //! SENATE_HOME and has the CLAUDE_* session variables removed, so nothing
 //! can reach the real Claude Code configuration or a real inbox socket.
 
@@ -16,7 +16,7 @@ use common::*;
 use senate_bridge::state::ItemStatus;
 use serde_json::{Value, json};
 
-const BIN: &str = env!("CARGO_BIN_EXE_senate-bridge");
+const BIN: &str = env!("CARGO_BIN_EXE_senate");
 
 fn bridge(home: &Path, senate_home: &Path) -> Command {
     let mut cmd = Command::new(BIN);
@@ -346,7 +346,7 @@ fn install_reports_in_the_bridges_locale() {
     };
     let text = install(false);
     assert!(
-        text.starts_with("senate-bridge install（演练：不加 --yes 什么都不写）"),
+        text.starts_with("senate install（演练：不加 --yes 什么都不写）"),
         "{text}"
     );
     assert!(text.contains(&format!(
@@ -536,4 +536,43 @@ fn status_without_a_daemon_says_so() {
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(text.contains("daemon: not running"), "{text}");
     assert!(text.contains("none registered"));
+}
+
+#[test]
+fn init_local_writes_one_profile_and_never_overwrites_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("senate");
+    let out = bridge(dir.path(), &home)
+        .args(["init", "--local", "--person", "alice", "--locale", "zh"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let written = home.join("senate.toml");
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap().trim(),
+        written.display().to_string()
+    );
+    let text = std::fs::read_to_string(&written).unwrap();
+    assert!(text.contains("person = \"alice\""));
+    assert!(text.contains("speaker = \"claude\""));
+    assert!(text.contains("listen = \"127.0.0.1:7979\""));
+    assert!(text.contains("locale = \"zh\""));
+    // Only that file, under the Senate home; HOME is untouched.
+    assert_eq!(std::fs::read_dir(&home).unwrap().count(), 1);
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+
+    let again = bridge(dir.path(), &home)
+        .args(["init", "--local", "--person", "bob"])
+        .output()
+        .unwrap();
+    assert!(!again.status.success());
+    assert!(String::from_utf8_lossy(&again.stderr).contains("already exists"));
+    assert_eq!(std::fs::read_to_string(&written).unwrap(), text);
+
+    let no_flag = bridge(dir.path(), &dir.path().join("other"))
+        .args(["init", "--person", "alice"])
+        .output()
+        .unwrap();
+    assert!(!no_flag.status.success());
+    assert!(!dir.path().join("other").exists());
 }

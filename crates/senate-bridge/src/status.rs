@@ -1,4 +1,4 @@
-//! `senate-bridge status`: is the daemon up, which Senate it is connected
+//! `senate status`: is the daemon up, which Senate it is connected
 //! to and as which person, which agents are joined to which committees and
 //! how far each stream got, and which sessions are registered (as which
 //! agent).
@@ -37,12 +37,21 @@ pub struct StatusView {
     pub sessions: Vec<Session>,
     pub queue: QueueCounts,
     pub locale: Locale,
+    /// Who holds that Senate's Speaker's seat, as the daemon heard.
+    pub speaker: Option<senate_core::SpeakerSeat>,
+    /// The other Senates the daemon serves.
+    pub others: Vec<StatusView>,
 }
 
 impl StatusView {
     fn from_reply(reply: StatusReply, socket: PathBuf) -> Self {
         Self {
             daemon: Some(reply.pid),
+            others: reply
+                .others
+                .into_iter()
+                .map(|o| Self::from_reply(o, socket.clone()))
+                .collect(),
             socket,
             person: Some(Address::senior(&reply.person).in_text()),
             presider: reply.presider,
@@ -51,6 +60,7 @@ impl StatusView {
             sessions: reply.sessions,
             queue: reply.queue,
             locale: reply.locale,
+            speaker: reply.speaker,
         }
     }
 }
@@ -88,6 +98,8 @@ fn offline(paths: &Paths) -> anyhow::Result<StatusView> {
         locale: config
             .as_ref()
             .map_or_else(|| BridgeConfig::locale_at(&paths.config()), |c| c.locale),
+        speaker: None,
+        others: Vec::new(),
     };
     if !paths.state_db().exists() {
         return Ok(view);
@@ -217,18 +229,47 @@ pub fn render(view: &StatusView, now: DateTime<Utc>) -> String {
         (Some(pid), Locale::En) => writeln!(out, "daemon: running (pid {pid}) on {socket}"),
         (None, Locale::Zh) => writeln!(
             out,
-            "daemon：未运行（{socket} 没有应答）；用 `senate-bridge daemon` 启动"
+            "daemon：未运行（{socket} 没有应答）；用 `senated --machine` 启动"
         ),
         (None, Locale::En) => writeln!(
             out,
-            "daemon: not running (no answer on {socket}); start it with `senate-bridge daemon`"
+            "daemon: not running (no answer on {socket}); start it with `senated --machine`"
         ),
     };
+    render_senate(view, now, &mut out);
+    for other in &view.others {
+        let _ = writeln!(out);
+        render_senate(other, now, &mut out);
+    }
+    out
+}
+
+/// Who holds a Senate's Speaker's seat, in words.
+fn speaker_words(seat: Option<&senate_core::SpeakerSeat>, locale: Locale) -> String {
+    match (seat, locale) {
+        (Some(senate_core::SpeakerSeat::BuiltIn), Locale::Zh) => "内置 Speaker".into(),
+        (Some(senate_core::SpeakerSeat::BuiltIn), Locale::En) => "the built-in Speaker".into(),
+        (Some(senate_core::SpeakerSeat::Senator(p)), _) => Address::senator(p).in_text(),
+        (None, Locale::Zh) => "无人主持".into(),
+        (None, Locale::En) => "nobody presides".into(),
+    }
+}
+
+/// One Senate the daemon serves: its server, committees, sessions, queue.
+fn render_senate(view: &StatusView, now: DateTime<Utc>, out: &mut String) {
+    let l = view.locale;
     if let (Some(person), Some(url)) = (&view.person, &view.server_url) {
         let senate = senate_words(view.presider.as_ref(), l);
+        let speaker = speaker_words(view.speaker.as_ref(), l);
         let _ = match l {
-            Locale::Zh => writeln!(out, "server：{url}，{senate}，身份 {person}"),
-            Locale::En => writeln!(out, "server: {url}, {senate}, as {person}"),
+            Locale::Zh => writeln!(
+                out,
+                "server：{url}，{senate}，身份 {person}；Speaker：{speaker}"
+            ),
+            Locale::En => writeln!(
+                out,
+                "server: {url}, {senate}, as {person}; Speaker: {speaker}"
+            ),
         };
     }
 
@@ -267,8 +308,8 @@ pub fn render(view: &StatusView, now: DateTime<Utc>) -> String {
                 out,
                 "  {}",
                 l.pick(
-                    "* 列在 bridge.toml 里（没有会话时也保持打开）",
-                    "* listed in bridge.toml (kept open with no session)"
+                    "* 列在 senate.toml 里（没有会话时也保持打开）",
+                    "* listed in senate.toml (kept open with no session)"
                 )
             );
         }
@@ -280,8 +321,8 @@ pub fn render(view: &StatusView, now: DateTime<Utc>) -> String {
             out,
             "  {}",
             l.pick(
-                "没有登记的会话（会话由钩子上报；见 `senate-bridge install`）",
-                "none registered (hooks report sessions; see `senate-bridge install`)"
+                "没有登记的会话（会话由钩子上报；见 `senate install`）",
+                "none registered (hooks report sessions; see `senate install`)"
             )
         );
     } else {
@@ -358,7 +399,6 @@ pub fn render(view: &StatusView, now: DateTime<Utc>) -> String {
             q.pending, q.inflight, q.queued
         ),
     };
-    out
 }
 
 #[cfg(test)]
@@ -391,7 +431,31 @@ mod tests {
             sessions: Vec::new(),
             queue: QueueCounts::default(),
             locale,
+            speaker: None,
+            others: Vec::new(),
         }
+    }
+
+    #[test]
+    fn every_senate_served_is_shown_with_who_presides() {
+        let now = Utc::now();
+        let mut top = view(Locale::En);
+        top.speaker = Some(senate_core::SpeakerSeat::BuiltIn);
+        let mut below = view(Locale::En);
+        below.presider = Some("alice/claude".parse().unwrap());
+        below.server_url = Some("http://127.0.0.1:7980".into());
+        below.speaker = Some(senate_core::SpeakerSeat::Senator(
+            "alice/claude".parse().unwrap(),
+        ));
+        top.others.push(below);
+        let text = render(&top, now);
+        assert!(text.contains(
+            "server: http://x, the top Senate, as [senator::alice]; Speaker: the built-in Speaker"
+        ));
+        assert!(text.contains(
+            "server: http://127.0.0.1:7980, the Senate presided over by [senator::alice/claude], as [senator::alice]; Speaker: [senator::alice/claude]"
+        ), "{text}");
+        assert_eq!(text.matches("daemon:").count(), 1);
     }
 
     #[test]

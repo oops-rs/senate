@@ -2,7 +2,7 @@
 //!
 //! **Undocumented.** This framing was observed in Claude Code 2.1.310's own
 //! debug hint and nowhere else; everything that depends on it is in this
-//! module, and `senate-bridge debug push` exercises it by hand.
+//! module, and `senate debug push` exercises it by hand.
 //!
 //! A running session exports `CLAUDE_CODE_MESSAGING_SOCKET` (a Unix socket
 //! path) and `CLAUDE_CODE_MESSAGING_TOKEN`. To put a user-role message into
@@ -24,7 +24,7 @@
 //!
 //! Without `"crossSessionInbound": "accept"` in Claude's settings, a message
 //! from a process that is not a child of the session may be held for the
-//! user's approval and dropped after 5 minutes (see `senate-bridge install`).
+//! user's approval and dropped after 5 minutes (see `senate install`).
 
 use std::io;
 use std::path::{Path, PathBuf};

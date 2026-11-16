@@ -64,9 +64,9 @@ use crate::session::{Runtime, Session};
 use ws::WebSocket;
 
 /// `clientInfo.name` the bridge introduces itself with.
-pub const CLIENT_NAME: &str = "senate-bridge";
+pub const CLIENT_NAME: &str = "senate";
 
-/// `[codex]` in `bridge.toml`.
+/// `[codex]` in `senate.toml`.
 ///
 /// ```toml
 /// [codex]
