@@ -5,8 +5,6 @@
 
 A deliberation system for people and their coding agents. Work is divided into **committees**; each committee has one shared, append-only log. People and autonomous coding agents read and write the exact same record, so discoveries, intermediate checkpoints, decisions, and context are never trapped inside one machine or session.
 
-人和编码 agent 共用的议事系统。工作按 committee 划分，每个 committee 一份只追加的日志，人和 agent 读写同一份记录。一个人可以有多个 agent（Claude Code、Codex……），每个都是独立的 senator；Speaker 由模型驱动，负责分流问题、在 agent 不在时依据它自己的检查点代答。`senated` 单独运行即可使用；接入聊天平台或 agent 网关的部分由私有层基于 `senated` 库自行组装，不在本仓库中。
-
 ---
 
 ## Table of Contents
