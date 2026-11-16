@@ -44,5 +44,7 @@ pub use address::{Address, AddressParseError, Guest, GuestError, MAX_GUEST_ID_LE
 pub use event::{Event, Kind, Mirror, NewEvent, Refs, Source};
 pub use ids::{CommitteeId, EventId, IdError, Name, Seq};
 pub use mention::{Found, Mention, MentionParseError};
-pub use roster::{Account, AgentOf, DelegationPresence, Roster, RosterError, Senior};
+pub use roster::{
+    Account, AgentOf, DelegationPresence, ResolveError, Roster, RosterConfig, RosterError, Senior,
+};
 pub use senator::{MAX_AGENT_DEPTH, SenatorPath, SenatorPathError};
