@@ -690,8 +690,29 @@ impl Laptop {
         .map(|line| serde_json::from_str(&line).unwrap())
     }
 
+    /// A Claude Code session that pins its agent name (`SENATE_AGENT`).
+    pub async fn session_start_as(
+        &self,
+        session_id: &str,
+        inbox: &FakeInbox,
+        agent: &str,
+    ) -> Option<Value> {
+        self.hook_as(HookKind::SessionStart, session_id, inbox, Some(agent))
+            .await
+    }
+
     /// Run one of the session's hooks the way Claude Code does.
     pub async fn hook(&self, kind: HookKind, session_id: &str, inbox: &FakeInbox) -> Option<Value> {
+        self.hook_as(kind, session_id, inbox, None).await
+    }
+
+    async fn hook_as(
+        &self,
+        kind: HookKind,
+        session_id: &str,
+        inbox: &FakeInbox,
+        agent: Option<&str>,
+    ) -> Option<Value> {
         let stdin = serde_json::json!({
             "session_id": session_id,
             "cwd": self.work,
@@ -705,7 +726,7 @@ impl Laptop {
             token: Some(format!("tok-{session_id}")),
             claude_pid: Some(std::process::id()),
             session_id: None,
-            agent: None,
+            agent: agent.map(str::to_owned),
         };
         hook::run(
             kind,
