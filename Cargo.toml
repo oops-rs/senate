@@ -12,7 +12,20 @@ publish = false
 # Every version is chosen once, here. A member names what it uses with
 # `workspace = true`.
 [workspace.dependencies]
+# Members, bottom of the stack first.
 senate-core = { path = "crates/senate-core" }
+senate-log = { path = "crates/senate-log" }
+senate-server = { path = "crates/senate-server" }
+senate-work = { path = "crates/senate-work" }
+senate-speaker = { path = "crates/senate-speaker" }
+senate-bridge = { path = "crates/senate-bridge" }
+senated = { path = "crates/senated" }
+
+# The agent harness behind the built-in Speaker. basis re-exports every
+# mentra type a host must name, so this is the only harness dependency.
+basis = "0.22.1"
+# Scripted providers for Speaker tests, matching the mentra basis resolves.
+mentra = { version = "0.34.0", default-features = false }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -22,6 +35,44 @@ thiserror = "2"
 async-trait = "0.1"
 # Features are chosen by each member: the contracts need only `sync`.
 tokio = { version = "1", default-features = false }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-util = "0.7"
+futures = "0.3"
+bytes = "1"
+
+# The server's supervision tree.
+ractor = "0.16.5"
+
+toml = "0.8"
+# Bridge `install`: edits ~/.codex/config.toml keeping its comments and order.
+toml_edit = "0.22"
+anyhow = "1"
+sha2 = "0.10"
+hex = "0.4"
+
+# The log: Postgres on a server, SQLite on a developer machine.
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "chrono", "json", "migrate", "macros"] }
+rusqlite = { version = "0.39", features = ["bundled"] }
+
+# HTTP: server API + SSE, bridge client.
+axum = { version = "0.8", features = ["macros"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["trace"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+eventsource-stream = "0.2"
+
+# Bridge: MCP tools over stdio, local state.
+rmcp = { version = "3.5.1", features = ["server", "transport-io", "macros"] }
+dirs = "6"
+libc = "0.2"
+
+# CLI and logging.
+clap = { version = "4", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Tests.
+tempfile = "3"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
