@@ -157,7 +157,7 @@ use crate::format;
 use crate::ipc::{
     self, ApprovalsReply, ApproveReply, BoundReply, CatchUpReply, CheckpointReply, CommitteeStatus,
     HookEvent, HookReply, HookReport, InboxReply, IpcError, JoinReply, Pong, Posted, Reply,
-    Request, SearchReply, SessionSelector, StatusReply, WatchEvent, codes,
+    Request, SayKind, SearchReply, SessionSelector, StatusReply, ThreadReply, WatchEvent, codes,
 };
 use crate::paths::Paths;
 use crate::routing;
@@ -737,7 +737,8 @@ fn orientation(
              mcp__senate__catch_up（读你错过的），mcp__senate__search（搜索整个日志），\
              mcp__senate__post（给团队留言），mcp__senate__propose_decision（提议一个决定，由人确认），\
              mcp__senate__checkpoint（留交接记录：保持 .senate/PROGRESS.md、DECISIONS.md 和 \
-             OPEN.md 是最新的）。"
+             OPEN.md 是最新的）。你的用户也能在终端里用 `senate ask`、`senate tell`、\
+             `senate reply` 以本人的身份对你们说话。"
         ),
         Locale::En => format!(
             "[senate] This session is joined to the committee `{committee}` of {senate} as {me}. \
@@ -747,7 +748,8 @@ fn orientation(
              missed), mcp__senate__search (search the whole log), mcp__senate__post (leave a note \
              for the team), mcp__senate__propose_decision (propose a decision for a person to \
              confirm), mcp__senate__checkpoint (leave a handover note: keep .senate/PROGRESS.md, \
-             DECISIONS.md and OPEN.md current)."
+             DECISIONS.md and OPEN.md current). Your user can also speak to you in their own \
+             name from a terminal with `senate ask`, `senate tell` and `senate reply`."
         ),
     }
 }
@@ -2306,11 +2308,29 @@ impl Shared {
                 id,
                 committee,
             } => wrap(self.on_take(&session, thread, id, committee).await),
+            Request::Say {
+                session,
+                committee,
+                kind,
+                to,
+                body,
+                thread,
+                id,
+            } => wrap(
+                self.on_say(&session, committee, kind, to, body, thread, id)
+                    .await,
+            ),
+            Request::Thread {
+                session,
+                committee,
+                thread,
+            } => wrap(self.on_thread(&session, committee, thread).await),
             Request::Inbox {
                 session,
                 committee,
                 agent,
-            } => wrap(self.on_inbox(&session, committee, agent).await),
+                all,
+            } => wrap(self.on_inbox(&session, committee, agent, all).await),
             Request::Approvals => Reply::ok(&ApprovalsReply {
                 approvals: self.relay.list(),
             }),
@@ -3215,6 +3235,151 @@ impl Shared {
         Ok(posted)
     }
 
+    /// The events of the thread `seq` is in, root first, in seq order, and
+    /// the roots of the threads they are in. Pages the log from the root on
+    /// and keeps the thread's own events, and those of a thread the Speaker
+    /// relayed it into (`meta.relayed_from`: a question put to the Speaker
+    /// to pick an agent is answered in the relay's thread).
+    async fn thread_events(
+        &self,
+        committee: &CommitteeId,
+        seq: Seq,
+    ) -> Result<(Vec<Seq>, Vec<Event>), IpcError> {
+        let root = self.task_root(committee, seq).await?;
+        let mut roots = vec![root.seq];
+        let mut events = vec![root.clone()];
+        let mut after = root.seq;
+        loop {
+            let page = match self.api.events(committee, after, Some(api::MAX_PAGE)).await {
+                Ok(page) => page,
+                Err(e) => return Err(self.page_error(e).await),
+            };
+            self.note_epoch(page.epoch.as_deref()).await;
+            let Some(last) = page.events.iter().filter_map(client::seq_of).max() else {
+                break;
+            };
+            for value in page.events {
+                let Decoded::Event(e) = client::decode_event(value) else {
+                    continue;
+                };
+                let relayed = e.thread.is_none()
+                    && e.meta
+                        .get(meta::RELAYED_FROM)
+                        .and_then(serde_json::Value::as_u64)
+                        .is_some_and(|from| roots.contains(&Seq(from)));
+                if relayed {
+                    roots.push(e.seq);
+                    events.push(*e);
+                } else if e.thread.is_some_and(|t| roots.contains(&t)) {
+                    events.push(*e);
+                }
+            }
+            after = last;
+            if !page.has_more {
+                break;
+            }
+        }
+        Ok((roots, events))
+    }
+
+    /// Everyone but the person who took part in a thread, as recipients of
+    /// what the person says in it: its senators (the Speaker only when no
+    /// senator is left).
+    fn thread_participants(&self, events: &[Event]) -> Vec<Address> {
+        let me = self.person();
+        let mut out: Vec<Address> = Vec::new();
+        for e in events {
+            let named = std::iter::once(&e.from)
+                .chain(e.on_behalf_of.iter())
+                .chain(e.to.iter());
+            for a in named {
+                if matches!(a, Address::Senator(_)) && *a != me && !out.contains(a) {
+                    out.push(a.clone());
+                }
+            }
+        }
+        if out.is_empty()
+            && events
+                .iter()
+                .any(|e| e.from == Address::Speaker || e.to.contains(&Address::Speaker))
+        {
+            out.push(Address::Speaker);
+        }
+        out
+    }
+
+    /// The person speaks, as themself: a question, note or request, in a
+    /// thread of their choosing or a new one.
+    #[allow(clippy::too_many_arguments)]
+    async fn on_say(
+        &self,
+        selector: &SessionSelector,
+        committee: Option<CommitteeId>,
+        kind: SayKind,
+        mut to: Vec<Address>,
+        body: String,
+        thread: Option<Seq>,
+        id: Option<EventId>,
+    ) -> Result<Posted, IpcError> {
+        let (_, committee) = self.session_and_committee(selector, committee)?;
+        if body.trim().is_empty() {
+            return Err(IpcError::bad_request("`body` is empty"));
+        }
+        if let Some(bad) = to.iter().find(|a| {
+            !matches!(
+                a,
+                Address::Senator(_) | Address::AgentOf(_) | Address::Speaker
+            )
+        }) {
+            return Err(IpcError::bad_request(format!(
+                "a person writes to a senator, `senator::<person>/*` or `speaker`, not {}",
+                bad.in_text()
+            )));
+        }
+        let thread = match thread {
+            Some(seq) => {
+                let (roots, events) = self.thread_events(&committee, seq).await?;
+                if to.is_empty() {
+                    to = self.thread_participants(&events);
+                }
+                // Where the agent that took it works: the latest relay's
+                // thread when the Speaker relayed it, else its own.
+                roots.last().copied()
+            }
+            None => None,
+        };
+        if to.is_empty() && kind != SayKind::Note {
+            return Err(IpcError::bad_request(
+                "a question or request needs someone to ask",
+            ));
+        }
+        let mut event =
+            NewEvent::new(committee, kind.event_kind(), self.person(), body).with_to(to);
+        if let Some(root) = thread {
+            event = event.in_thread(root);
+        }
+        if let Some(id) = id {
+            event = event.with_id(id);
+        }
+        self.post(event).await
+    }
+
+    async fn on_thread(
+        &self,
+        selector: &SessionSelector,
+        committee: Option<CommitteeId>,
+        thread: Seq,
+    ) -> Result<ThreadReply, IpcError> {
+        let (_, committee) = self.session_and_committee(selector, committee)?;
+        let (roots, mut events) = self.thread_events(&committee, thread).await?;
+        events.sort_by_key(|e| e.seq);
+        Ok(ThreadReply {
+            committee,
+            root: roots[0],
+            events,
+        })
+    }
+
     /// Open threads that wait on the calling session's agent (or, without
     /// a session, the named agent or every agent on the committee) or are
     /// escalated to this bridge's person. Another agent's threads are not
@@ -3224,6 +3389,7 @@ impl Shared {
         selector: &SessionSelector,
         committee: Option<CommitteeId>,
         agent: Option<Name>,
+        all: bool,
     ) -> Result<InboxReply, IpcError> {
         let (session, committee) = self.session_and_committee(selector, committee)?;
         let agents = match (session, agent) {
@@ -3237,7 +3403,7 @@ impl Shared {
             .await
             .map_err(server_error)?;
         let person = &self.config.person;
-        let threads = page
+        let mut threads: Vec<_> = page
             .threads
             .into_iter()
             .filter(|t| t.state != senate_core::StatusState::Archived)
@@ -3245,11 +3411,21 @@ impl Shared {
                 agents.iter().any(|a| t.is_for(a)) || t.escalated_to.as_ref() == Some(person)
             })
             .collect();
+        // What waits on no one is left out and counted, unless asked for.
+        let mut settled = 0;
+        if !all {
+            threads.retain(|t| {
+                let waits = t.waits().is_some();
+                settled += usize::from(!waits);
+                waits
+            });
+        }
         Ok(InboxReply {
             committee,
             agents,
             person: person.clone(),
             threads,
+            settled,
         })
     }
 
@@ -3818,6 +3994,22 @@ mod tests {
         for text in [en, zh] {
             assert!(!text.to_lowercase().contains(&["fei", "shu"].concat()));
         }
+    }
+
+    #[test]
+    fn the_orientation_says_the_person_can_speak_from_a_terminal() {
+        let c = CommitteeId::new("refund-v2").unwrap();
+        let agent: SenatorPath = "alice/codex".parse().unwrap();
+        let en = orientation(&c, &agent, None, false, Locale::En);
+        assert!(
+            en.contains("`senate ask`, `senate tell` and `senate reply`"),
+            "{en}"
+        );
+        let zh = orientation(&c, &agent, None, false, Locale::Zh);
+        assert!(
+            zh.contains("`senate ask`、`senate tell`、`senate reply`"),
+            "{zh}"
+        );
     }
 
     #[test]

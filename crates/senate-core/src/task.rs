@@ -31,6 +31,14 @@
 //!   person (`suspended`), how an escalation and a person's takeover are
 //!   recorded, and how a thread is closed (`archived`).
 //!
+//! # What waits
+//!
+//! An inbox shows what waits on someone, not everything not archived:
+//! [`ThreadSummary::waits`] is the one rule. A thread whose last word is an
+//! answer is settled ([`ThreadSummary::is_settled`]) and left out of the
+//! default listing; a follow-up after the answer, an escalation or an
+//! explicit in-progress status brings it back. Nothing is stored for it.
+//!
 //! # Triage gating
 //!
 //! A root for which [`needs_triage`] is true is not pushed to the target
@@ -318,6 +326,24 @@ pub struct ThreadSummary {
     pub reason: Option<String>,
     /// Whether any `answer` has been posted in the thread.
     pub answered: bool,
+    /// Who wrote the latest (non-provisional) answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answered_by: Option<Address>,
+    /// Something was said in the thread after the latest answer by someone
+    /// other than its author (a follow-up, a correction): the answer does
+    /// not settle it any more. A new answer clears it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reopened: bool,
+}
+
+/// Who a thread that [waits](ThreadSummary::waits) waits on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitsOn {
+    /// The agents it was addressed to.
+    Agents,
+    /// A person: it was escalated or parked on them, or they took it over.
+    Person,
 }
 
 impl ThreadSummary {
@@ -330,6 +356,38 @@ impl ThreadSummary {
     /// of the same person does not count.
     pub fn is_for(&self, agent: &SenatorPath) -> bool {
         self.agents().any(|a| a == agent)
+    }
+
+    /// Whether the thread waits on someone, and on whom. This is the one
+    /// rule every inbox uses (the `senate inbox` command, the `inbox` tool,
+    /// the Speaker's per-agent count, the app's inbox); it is derived and
+    /// stores nothing.
+    ///
+    /// A thread waits when it is not archived and
+    ///
+    /// - it is `suspended`: parked on a person (an escalation or a
+    ///   takeover): [`WaitsOn::Person`];
+    /// - or its root has no answer yet, or its task status is explicitly in
+    ///   progress (`processing` after an answer, set by a `status`), or
+    ///   something was said in it after the latest answer by someone other
+    ///   than the answerer ([`ThreadSummary::reopened`]):
+    ///   [`WaitsOn::Agents`].
+    ///
+    /// Otherwise its last word is an answer and nothing asks for more: it
+    /// is [settled](ThreadSummary::is_settled).
+    pub fn waits(&self) -> Option<WaitsOn> {
+        match self.state {
+            StatusState::Archived => None,
+            StatusState::Suspended => Some(WaitsOn::Person),
+            StatusState::Processing => Some(WaitsOn::Agents),
+            StatusState::Active => (!self.answered || self.reopened).then_some(WaitsOn::Agents),
+        }
+    }
+
+    /// Open (not archived) and waiting on no one: its last word is an
+    /// answer.
+    pub fn is_settled(&self) -> bool {
+        self.state != StatusState::Archived && self.waits().is_none()
     }
 }
 
@@ -428,6 +486,8 @@ impl TaskBoard {
                 takeover: None,
                 reason: None,
                 answered: false,
+                answered_by: None,
+                reopened: false,
             },
         );
     }
@@ -455,6 +515,8 @@ impl TaskBoard {
             Kind::Answer if is_provisional(event) => {}
             Kind::Answer => {
                 thread.answered = true;
+                thread.answered_by = Some(event.from.clone());
+                thread.reopened = false;
                 if thread.state != StatusState::Archived {
                     enter(thread, StatusState::Active);
                 }
@@ -491,6 +553,15 @@ impl TaskBoard {
                     thread.takeover = status.takeover;
                 }
                 thread.reason = status.reason;
+            }
+            // Words after an answer, from anyone but its author and the
+            // Speaker's own bookkeeping, ask for more.
+            Kind::Question | Kind::Request | Kind::Note | Kind::Chat
+                if thread.answered
+                    && event.from != Address::Speaker
+                    && thread.answered_by.as_ref() != Some(&event.from) =>
+            {
+                thread.reopened = true;
             }
             _ => {}
         }
@@ -641,6 +712,117 @@ mod tests {
         assert_eq!(board.get(root).unwrap().state, StatusState::Archived);
         // Steps survive a status that leaves them unchanged.
         assert_eq!(board.get(root).unwrap().steps.len(), 1);
+    }
+
+    /// A question from bob to alice/claude; returns its root.
+    fn ask(log: &mut Log) -> Seq {
+        log.push(
+            NewEvent::new(c(), Kind::Question, addr("senator::bob/claude"), "?")
+                .to(addr("senator::alice/claude")),
+        )
+    }
+
+    fn say(log: &mut Log, kind: Kind, from: &str, root: Seq) -> Seq {
+        log.push(NewEvent::new(c(), kind, addr(from), "x").in_thread(root))
+    }
+
+    fn waits(log: &Log, root: Seq) -> Option<WaitsOn> {
+        log.board().get(root).unwrap().waits()
+    }
+
+    #[test]
+    fn a_thread_without_an_answer_waits_on_its_agents() {
+        let mut log = Log(Vec::new());
+        let root = ask(&mut log);
+        assert_eq!(waits(&log, root), Some(WaitsOn::Agents));
+        assert!(!log.board().get(root).unwrap().is_settled());
+        // A provisional answer does not settle it.
+        log.push(
+            NewEvent::new(c(), Kind::Answer, Address::Speaker, "")
+                .on_behalf_of(addr("senator::alice/claude"))
+                .in_thread(root)
+                .with_meta(meta::PROVISIONAL, true.into()),
+        );
+        assert_eq!(waits(&log, root), Some(WaitsOn::Agents));
+    }
+
+    #[test]
+    fn a_thread_whose_last_word_is_an_answer_is_settled() {
+        let mut log = Log(Vec::new());
+        let root = ask(&mut log);
+        say(&mut log, Kind::Answer, "senator::alice/claude", root);
+        // The answerer's own later words, status updates that keep it
+        // answered, and the Speaker's bookkeeping do not reopen it.
+        say(&mut log, Kind::Note, "senator::alice/claude", root);
+        say(&mut log, Kind::Note, "speaker", root);
+        let t = log.board().get(root).unwrap().clone();
+        assert_eq!(t.waits(), None);
+        assert!(t.is_settled());
+        assert_eq!(t.answered_by, Some(addr("senator::alice/claude")));
+    }
+
+    #[test]
+    fn a_follow_up_after_the_answer_reopens_it_until_the_next_answer() {
+        let mut log = Log(Vec::new());
+        let root = ask(&mut log);
+        say(&mut log, Kind::Answer, "senator::alice/claude", root);
+        for kind in [Kind::Question, Kind::Request, Kind::Note, Kind::Chat] {
+            let mut l = Log(log.0.clone());
+            say(&mut l, kind, "senator::bob/claude", root);
+            assert_eq!(waits(&l, root), Some(WaitsOn::Agents));
+        }
+        say(&mut log, Kind::Note, "senator::bob", root);
+        assert_eq!(waits(&log, root), Some(WaitsOn::Agents));
+        // A person's correction, then the agent answers again.
+        say(&mut log, Kind::Answer, "senator::alice/claude", root);
+        assert_eq!(waits(&log, root), None);
+        // The person answers after the agent: they are the answerer now, so
+        // the agent's words reopen it.
+        say(&mut log, Kind::Answer, "senator::alice", root);
+        assert_eq!(waits(&log, root), None);
+        say(&mut log, Kind::Note, "senator::alice/claude", root);
+        assert_eq!(waits(&log, root), Some(WaitsOn::Agents));
+    }
+
+    #[test]
+    fn a_thread_parked_on_a_person_waits_on_them_even_when_answered() {
+        let mut log = Log(Vec::new());
+        let root = ask(&mut log);
+        say(&mut log, Kind::Answer, "senator::alice/claude", root);
+        let mut s = StatusPayload::new(StatusState::Suspended);
+        s.escalated_to = Some(name("alice"));
+        log.push(status(root, addr("senator::alice/claude"), s));
+        assert_eq!(waits(&log, root), Some(WaitsOn::Person));
+        // Their answer settles it.
+        say(&mut log, Kind::Answer, "senator::alice", root);
+        assert_eq!(waits(&log, root), None);
+    }
+
+    #[test]
+    fn an_explicit_in_progress_status_after_an_answer_waits() {
+        let mut log = Log(Vec::new());
+        let root = ask(&mut log);
+        say(&mut log, Kind::Answer, "senator::alice/claude", root);
+        log.push(status(
+            root,
+            addr("senator::alice/claude"),
+            StatusPayload::new(StatusState::Processing),
+        ));
+        assert_eq!(waits(&log, root), Some(WaitsOn::Agents));
+    }
+
+    #[test]
+    fn an_archived_thread_neither_waits_nor_is_settled() {
+        let mut log = Log(Vec::new());
+        let root = ask(&mut log);
+        log.push(status(
+            root,
+            addr("senator::alice"),
+            StatusPayload::new(StatusState::Archived),
+        ));
+        let t = log.board().get(root).unwrap().clone();
+        assert_eq!(t.waits(), None);
+        assert!(!t.is_settled());
     }
 
     #[test]

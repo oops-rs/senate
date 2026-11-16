@@ -2282,6 +2282,8 @@ mod tests {
             takeover: None,
             reason: Some("needs a product call".into()),
             answered: false,
+            answered_by: None,
+            reopened: false,
         }
     }
 

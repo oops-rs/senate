@@ -295,10 +295,17 @@ Used for standalone local development with no central server.
 
 In solo mode, `senated --machine` hosts a local top Senate on loopback SQLite (`127.0.0.1:7979`), and your primary agent (`alice/claude`) is designated as Speaker.
 
-Inspect your inbox:
+Speak to your agents as yourself, and see what waits for you (no token, no `curl`):
 ```sh
-./target/release/senate inbox
+./target/release/senate ask '*' "Which header carries the idempotency key?" --wait   # whichever agent; waits for the answer
+./target/release/senate ask claude "Where is the retry limit set?"                   # one of your agents; returns at once
+./target/release/senate tell codex "The retry limit is 3 now."                       # a note: no answer expected
+./target/release/senate reply 12 "No: I meant the webhook retry."                   # a follow-up in thread 12
+./target/release/senate thread 12                                                    # who said what in thread 12
+./target/release/senate inbox                                                        # what waits on someone
+./target/release/senate inbox --all                                                  # and the answered threads, too
 ```
+Commands act on the committee of the current directory (`--committee <id>` to name one) and on the Senate where your agents sit directly. `<to>` is one of your agents (`claude`, `claude/reviewer`), a full path (`bob/claude`), a person (`bob`), whichever agent (`*`, `bob/*`) or `speaker`; text `-` is read from stdin.
 
 ---
 
@@ -340,7 +347,10 @@ When running `senate install --yes`, Senate registers an MCP server and session 
 
 - `senate install`: Dry-run configuration updates for Claude Code and Codex (`--yes` to apply).
 - `senate status`: Shows all served Senates, active sessions, and presiders.
-- `senate inbox`: Displays open threads, pending approvals, and docket items.
+- `senate inbox [--all]`: Displays the threads that wait on someone (a thread whose last word is an answer is settled: counted, and listed with `--all`), and docket items.
+- `senate ask|tell|request <to> <text…>`: Speaks as yourself: a question (`--wait[=<seconds>]` stays for the answer), a note, or a request. `--json` prints the raw result.
+- `senate reply <thread> <text…>`: Says something as yourself in an existing thread.
+- `senate thread <seq>`: Prints a thread, each event with its byline and time.
 - `senate take <thread>`: Claims an open thread.
 - `senate init --local --person <name>`: Initializes local configuration for standalone use.
 

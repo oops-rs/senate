@@ -424,6 +424,7 @@ impl Action {
                 session,
                 committee: Some(committee),
                 agent: Some(agent.name().clone()),
+                all: false,
             },
             Action::Answer {
                 committee,
@@ -480,14 +481,11 @@ impl Action {
     }
 }
 
-/// Whether a thread from `inbox` still waits on someone: not yet answered
-/// (`processing`) or parked on a person (`suspended`, which a takeover also
-/// sets). `active` means it was answered; `archived` means it is closed.
+/// Whether a thread from `inbox` still waits on someone: the rule every
+/// inbox shares ([`ThreadSummary::waits`]). A thread whose last word is an
+/// answer is settled, and one closed is neither.
 pub fn is_waiting(thread: &ThreadSummary) -> bool {
-    matches!(
-        thread.state,
-        StatusState::Processing | StatusState::Suspended
-    )
+    thread.waits().is_some()
 }
 
 /// An error as the user should read it: the daemon's message alone when it
@@ -622,6 +620,8 @@ mod tests {
             takeover: None,
             reason: None,
             answered: false,
+            answered_by: None,
+            reopened: false,
         }
     }
 
@@ -631,6 +631,7 @@ mod tests {
             agents: vec![path(agent)],
             person: Name::new("alice").unwrap(),
             threads: roots.iter().map(|r| thread(*r, agent)).collect(),
+            settled: 0,
         }
     }
 
@@ -674,6 +675,29 @@ mod tests {
         let roots: Vec<u64> = m.waiting().iter().map(|w| w.thread.root.0).collect();
         assert_eq!(roots, vec![5, 8]);
         assert_eq!(m.pending_threads(), 2);
+    }
+
+    #[test]
+    fn a_settled_thread_waits_on_no_one_until_something_is_said_after_the_answer() {
+        let mut m = Model::default();
+        m.connected();
+        m.apply(WatchEvent::Status(Box::new(status(&[(
+            "alice/claude",
+            "a",
+        )]))));
+        let mut reply = inbox("alice/claude", "a", &[3, 5]);
+        for t in &mut reply.threads {
+            t.state = StatusState::Active;
+            t.answered = true;
+        }
+        m.set_inbox(reply.clone());
+        // The daemon leaves settled threads out, and so does the model if
+        // one is handed to it anyway.
+        assert_eq!(m.pending_threads(), 0);
+        reply.threads[1].reopened = true;
+        m.set_inbox(reply);
+        let roots: Vec<u64> = m.waiting().iter().map(|w| w.thread.root.0).collect();
+        assert_eq!(roots, vec![5]);
     }
 
     #[test]

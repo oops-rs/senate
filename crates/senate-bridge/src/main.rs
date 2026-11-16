@@ -13,9 +13,10 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use senate_bridge::delivery::{codex, inbox};
 use senate_bridge::hook::{self, HookEnv, HookKind, HookTimeouts};
+use senate_bridge::ipc::SayKind;
 use senate_bridge::ipc::{self, DocketReply, InboxReply, Posted, Request, SessionSelector};
 use senate_bridge::session::Runtime;
-use senate_bridge::{BridgeConfig, Paths, init, install, mcp, preside, status};
+use senate_bridge::{BridgeConfig, Paths, init, install, mcp, preside, speak, status};
 use senate_core::{CommitteeId, EventId, Locale, Name, Seq};
 
 #[derive(Parser)]
@@ -58,6 +59,92 @@ enum Cmd {
         /// The committee (default: `.senate/committee` in this repository).
         #[arg(long)]
         committee: Option<CommitteeId>,
+        /// Also list threads whose last word is an answer (left out by
+        /// default: they wait on no one).
+        #[arg(long)]
+        all: bool,
+    },
+    /// Ask a question as yourself. `<to>` is one of your agents (`claude`,
+    /// `claude/reviewer`), a full path (`alice/claude`), a person (`alice`),
+    /// whichever agent (`*`, `alice/*`), `speaker`, or a `senator::…` address.
+    /// Text `-` is read from stdin; put `--` before text that starts with `-`.
+    /// Goes to the primary Senate of this machine.
+    Ask {
+        /// Who to ask.
+        to: String,
+        /// The question (`-`: read stdin).
+        #[arg(required = true, num_args = 1..)]
+        text: Vec<String>,
+        /// The committee (default: `.senate/committee` in this repository).
+        #[arg(long)]
+        committee: Option<CommitteeId>,
+        /// Stay until an answer arrives in the thread (default 120 seconds)
+        /// and print it; without it, return at once.
+        #[arg(
+            long,
+            num_args = 0..=1,
+            require_equals = true,
+            default_missing_value = "120",
+            value_name = "SECONDS"
+        )]
+        wait: Option<u64>,
+        /// Print the daemon's result as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Tell something as yourself (a note: no answer expected); `<to>` as for `ask`.
+    Tell {
+        /// Who to tell.
+        to: String,
+        /// The note (`-`: read stdin).
+        #[arg(required = true, num_args = 1..)]
+        text: Vec<String>,
+        /// The committee (default: `.senate/committee` in this repository).
+        #[arg(long)]
+        committee: Option<CommitteeId>,
+        /// Print the daemon's result as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Ask an agent to do something, as yourself (a request); `<to>` as for `ask`.
+    Request {
+        /// Who to ask.
+        to: String,
+        /// What to do (`-`: read stdin).
+        #[arg(required = true, num_args = 1..)]
+        text: Vec<String>,
+        /// The committee (default: `.senate/committee` in this repository).
+        #[arg(long)]
+        committee: Option<CommitteeId>,
+        /// Print the daemon's result as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Say something as yourself in an existing thread (a follow-up or a
+    /// correction), to whoever took part in it.
+    Reply {
+        /// A seq in the thread (its root's, as `inbox` lists).
+        thread: u64,
+        /// What to say (`-`: read stdin).
+        #[arg(required = true, num_args = 1..)]
+        text: Vec<String>,
+        /// The committee (default: `.senate/committee` in this repository).
+        #[arg(long)]
+        committee: Option<CommitteeId>,
+        /// Print the daemon's result as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print a thread: each event with who wrote it, when, and what.
+    Thread {
+        /// A seq in the thread.
+        seq: u64,
+        /// The committee (default: `.senate/committee` in this repository).
+        #[arg(long)]
+        committee: Option<CommitteeId>,
+        /// Print the daemon's result as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Take a thread over as yourself: nothing more of it goes to agents.
     Take {
@@ -290,6 +377,7 @@ async fn daemon_call<T: serde::de::DeserializeOwned>(
 async fn inbox(
     paths: &Paths,
     committee: Option<CommitteeId>,
+    all: bool,
     locale: Locale,
 ) -> anyhow::Result<String> {
     let committee = committee_here(committee).await?;
@@ -299,10 +387,11 @@ async fn inbox(
             session: SessionSelector::default(),
             committee: Some(committee),
             agent: None,
+            all,
         },
     )
     .await?;
-    let mut out = mcp::render_inbox(&threads, locale);
+    let mut out = mcp::render_inbox(&threads, locale, mcp::ShowAll::Flag);
     let docket: DocketReply = daemon_call(
         paths,
         &Request::Docket {
@@ -316,6 +405,66 @@ async fn inbox(
         out.push_str(&preside::render_docket(&docket, locale));
     }
     Ok(out)
+}
+
+/// The words of a message, or stdin when they are a lone `-`.
+fn message_text(words: Vec<String>) -> anyhow::Result<String> {
+    let text = if words == ["-"] {
+        let mut s = String::new();
+        std::io::stdin()
+            .read_to_string(&mut s)
+            .context("reading the text from stdin")?;
+        s.trim_end().to_string()
+    } else {
+        words.join(" ")
+    };
+    anyhow::ensure!(!text.trim().is_empty(), "there is no text to send");
+    Ok(text)
+}
+
+fn print_json(value: &impl serde::Serialize) -> anyhow::Result<()> {
+    println!("{}", serde_json::to_string_pretty(value)?);
+    Ok(())
+}
+
+/// `ask`, `tell` and `request`: speak as the person, and with `wait` stay
+/// for the answer.
+fn speak_new(
+    kind: SayKind,
+    to: String,
+    text: Vec<String>,
+    committee: Option<CommitteeId>,
+    wait: Option<u64>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let paths = Paths::from_env()?;
+    let text = message_text(text)?;
+    runtime(false)?.block_on(async {
+        let committee = committee_here(committee).await?;
+        let socket = paths.socket();
+        let sent = speak::send(&socket, committee, kind, &to, text).await?;
+        let Some(secs) = wait else {
+            if json {
+                return print_json(&sent.posted);
+            }
+            println!("{}", sent.render(false));
+            return Ok(());
+        };
+        if !json {
+            println!("{}", sent.render(true));
+            std::io::stdout().flush()?;
+        }
+        match speak::wait_answer(&socket, &sent, Duration::from_secs(secs)).await? {
+            Some(answer) if json => {
+                print_json(&serde_json::json!({ "posted": sent.posted, "answer": answer }))
+            }
+            Some(answer) => {
+                println!("{}", speak::render_answer(&answer, sent.locale));
+                Ok(())
+            }
+            None => anyhow::bail!(speak::render_timeout(sent.posted.seq, secs, sent.locale)),
+        }
+    })
 }
 
 fn run(command: Cmd) -> anyhow::Result<()> {
@@ -345,12 +494,68 @@ fn run(command: Cmd) -> anyhow::Result<()> {
             println!("{}", path.display());
             Ok(())
         }
-        Cmd::Inbox { committee } => {
+        Cmd::Inbox { committee, all } => {
             let paths = Paths::from_env()?;
             let locale = BridgeConfig::locale_at(&paths.config());
-            let text = runtime(false)?.block_on(inbox(&paths, committee, locale))?;
+            let text = runtime(false)?.block_on(inbox(&paths, committee, all, locale))?;
             println!("{text}");
             Ok(())
+        }
+        Cmd::Ask {
+            to,
+            text,
+            committee,
+            wait,
+            json,
+        } => speak_new(SayKind::Question, to, text, committee, wait, json),
+        Cmd::Tell {
+            to,
+            text,
+            committee,
+            json,
+        } => speak_new(SayKind::Note, to, text, committee, None, json),
+        Cmd::Request {
+            to,
+            text,
+            committee,
+            json,
+        } => speak_new(SayKind::Request, to, text, committee, None, json),
+        Cmd::Reply {
+            thread,
+            text,
+            committee,
+            json,
+        } => {
+            let paths = Paths::from_env()?;
+            let text = message_text(text)?;
+            runtime(false)?.block_on(async {
+                let committee = committee_here(committee).await?;
+                let (posted, locale) =
+                    speak::reply(&paths.socket(), committee, Seq(thread), text).await?;
+                if json {
+                    print_json(&posted)
+                } else {
+                    println!("{}", speak::render_replied(Seq(thread), &posted, locale));
+                    Ok(())
+                }
+            })
+        }
+        Cmd::Thread {
+            seq,
+            committee,
+            json,
+        } => {
+            let paths = Paths::from_env()?;
+            runtime(false)?.block_on(async {
+                let committee = committee_here(committee).await?;
+                let (reply, locale) = speak::thread(&paths.socket(), committee, Seq(seq)).await?;
+                if json {
+                    print_json(&reply)
+                } else {
+                    println!("{}", speak::render_thread(&reply, locale));
+                    Ok(())
+                }
+            })
         }
         Cmd::Take { thread, committee } => {
             let paths = Paths::from_env()?;

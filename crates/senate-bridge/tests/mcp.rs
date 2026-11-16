@@ -895,6 +895,65 @@ async fn status_escalate_take_and_inbox_end_to_end() {
     h.stop().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_answered_thread_leaves_the_inbox_until_someone_says_more() {
+    let mut h = Harness::new().await;
+    h.start().await;
+    let wd = h.workdir("s", Some("refund-v2"));
+    h.hook(HookKind::SessionStart, "s1", &wd, None).await;
+    let mut mcp = McpClient::start(h.socket(), selector("s1")).await;
+    let mut zh = McpClient::start_in(h.socket(), selector("s1"), Locale::Zh).await;
+    let q = h
+        .server
+        .append(question(claude("bob"), claude("alice"), "which header?"));
+
+    let (_, text) = mcp.call("inbox", json!({})).await;
+    assert!(text.contains("thread "), "{text}");
+    assert!(!text.contains("not shown"), "{text}");
+
+    let (err, text) = mcp
+        .call(
+            "answer",
+            json!({"thread": q.seq.0, "body": "Idempotency-Key"}),
+        )
+        .await;
+    assert!(!err, "{text}");
+    let (_, text) = mcp.call("inbox", json!({})).await;
+    assert!(text.starts_with("Nothing open waits on"), "{text}");
+    assert!(
+        text.ends_with("1 answered thread(s) not shown; all=true lists them."),
+        "{text}"
+    );
+    let (_, text) = zh.call("inbox", json!({})).await;
+    assert!(
+        text.ends_with("已答复的 1 个 thread 未显示；用 all=true 列出。"),
+        "{text}"
+    );
+    let (_, text) = mcp.call("inbox", json!({"all": true})).await;
+    assert!(
+        text.contains(&format!("thread {} ", q.seq.0)) && text.contains("settled"),
+        "{text}"
+    );
+
+    // A follow-up from bob puts it back.
+    h.server.append(
+        NewEvent::new(
+            committee(),
+            Kind::Note,
+            claude("bob"),
+            "and the retry header?",
+        )
+        .to(claude("alice"))
+        .in_thread(q.seq),
+    );
+    let (_, text) = mcp.call("inbox", json!({})).await;
+    assert!(
+        text.contains("said more after the answer") && !text.contains("not shown"),
+        "{text}"
+    );
+    h.stop().await;
+}
+
 /// A Codex thread's MCP server shares the app-server's environment with
 /// every other thread; each tool call's `_meta.threadId` names the session.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

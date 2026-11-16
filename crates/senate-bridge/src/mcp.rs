@@ -300,7 +300,9 @@ agent for that thread is cancelled, and the thread shows that a person is handli
 const INBOX: &str = "List the open Senate task threads on this session's committee that wait \
 on you (this agent; your person's other agents have their own) or on your user: questions and \
 requests addressed to you, and threads escalated to your user, with their state (processing, \
-active, suspended = waiting on a person), title, and who asked. Use it for `/senate inbox`.";
+active, suspended = waiting on a person), title, and who asked. A thread whose last word is an \
+answer and that nobody has said more in is settled: it is left out and counted in a closing line; \
+pass `all: true` to list those too. Use it for `/senate inbox`.";
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
@@ -359,7 +361,12 @@ pub struct ThreadParam {
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
-pub struct InboxParams {}
+pub struct InboxParams {
+    /// Also list threads whose last word is an answer (settled ones are
+    /// left out by default and counted in a closing line).
+    #[serde(default)]
+    pub all: bool,
+}
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
@@ -531,8 +538,35 @@ fn mentions(addrs: &[Address]) -> String {
         .join(", ")
 }
 
-/// The `inbox` tool's text.
-pub fn render_inbox(reply: &InboxReply, locale: Locale) -> String {
+/// How the reader asks for the settled threads an inbox leaves out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShowAll {
+    /// The `senate inbox` command: `--all`.
+    Flag,
+    /// The `inbox` tool: `all: true`.
+    Param,
+}
+
+/// The line that says how many settled threads were left out, if any.
+fn settled_line(settled: usize, how: ShowAll, locale: Locale) -> Option<String> {
+    if settled == 0 {
+        return None;
+    }
+    let flag = match how {
+        ShowAll::Flag => "--all",
+        ShowAll::Param => "all=true",
+    };
+    Some(match locale {
+        Locale::Zh => format!("已答复的 {settled} 个 thread 未显示；用 {flag} 列出。"),
+        Locale::En => format!("{settled} answered thread(s) not shown; {flag} lists them."),
+    })
+}
+
+/// The `inbox` tool's (and `senate inbox`'s) text: the threads that wait on
+/// someone ([`senate_core::ThreadSummary::waits`]) and a closing line for
+/// the settled ones left out; with `all` in the reply, every open thread,
+/// the settled ones marked.
+pub fn render_inbox(reply: &InboxReply, locale: Locale, how: ShowAll) -> String {
     let whose = reply
         .agents
         .iter()
@@ -541,16 +575,33 @@ pub fn render_inbox(reply: &InboxReply, locale: Locale) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     let c = &reply.committee;
+    let closing = settled_line(reply.settled, how, locale);
     if reply.threads.is_empty() {
-        return match locale {
+        let mut out = match locale {
             Locale::Zh => format!("{c} 上没有等着 {whose} 的未完成 thread。"),
             Locale::En => format!("Nothing open waits on {whose} in {c}."),
         };
+        if let Some(line) = closing {
+            out.push('\n');
+            out.push_str(&line);
+        }
+        return out;
     }
     let n = reply.threads.len();
-    let mut out = match locale {
-        Locale::Zh => format!("{c} 上有 {n} 个等着 {whose} 的任务 thread，等得最久的在前："),
-        Locale::En => format!("{n} open task thread(s) on {c} for {whose}, longest waiting first:"),
+    let shows_settled = reply.threads.iter().any(|t| t.is_settled());
+    let mut out = match (locale, shows_settled) {
+        (Locale::Zh, false) => {
+            format!("{c} 上有 {n} 个等着 {whose} 的任务 thread，等得最久的在前：")
+        }
+        (Locale::Zh, true) => {
+            format!("{c} 上有 {n} 个 {whose} 的任务 thread（含已答复的），等得最久的在前：")
+        }
+        (Locale::En, false) => {
+            format!("{n} open task thread(s) on {c} for {whose}, longest waiting first:")
+        }
+        (Locale::En, true) => format!(
+            "{n} task thread(s) on {c} for {whose}, settled ones included, longest waiting first:"
+        ),
     };
     for t in &reply.threads {
         let asker = format::mention(t.on_behalf_of.as_ref().unwrap_or(&t.from));
@@ -589,12 +640,20 @@ pub fn render_inbox(reply: &InboxReply, locale: Locale) -> String {
         }
         if !t.answered {
             out.push_str(locale.pick(" · 尚未回答", " · not answered yet"));
+        } else if t.reopened {
+            out.push_str(locale.pick(" · 答复之后又有新话", " · said more after the answer"));
+        } else if t.is_settled() {
+            out.push_str(locale.pick(" · 已答复，无人在等", " · settled: answered, nobody waits"));
         }
     }
     out.push_str(locale.pick(
         "\n用 answer(thread=<n>) 回答；用 take(thread=<n>) 以你的用户的身份接管。",
         "\nAnswer with answer(thread=<n>); take one over as your user with take(thread=<n>).",
     ));
+    if let Some(line) = closing {
+        out.push('\n');
+        out.push_str(&line);
+    }
     out
 }
 
@@ -1327,16 +1386,17 @@ impl SenateMcp {
     }
 
     #[tool(name = "inbox", description = INBOX)]
-    async fn inbox(&self, _params: Parameters<InboxParams>) -> Result<String, String> {
+    async fn inbox(&self, params: Parameters<InboxParams>) -> Result<String, String> {
         let reply: InboxReply = self
             .call(&Request::Inbox {
                 session: self.selector.clone(),
                 committee: None,
                 agent: None,
+                all: params.0.all,
             })
             .await
             .map_err(|e| describe(e, self.locale))?;
-        Ok(render_inbox(&reply, self.locale))
+        Ok(render_inbox(&reply, self.locale, ShowAll::Param))
     }
 
     #[tool(name = "speaker_docket", description = SPEAKER_DOCKET)]
@@ -1970,8 +2030,9 @@ mod tests {
             agents: vec!["alice/codex".parse().unwrap()],
             person: Name::new("alice").unwrap(),
             threads: board.threads(None).into_iter().cloned().collect(),
+            settled: 0,
         };
-        let en = render_inbox(&reply, Locale::En);
+        let en = render_inbox(&reply, Locale::En, ShowAll::Flag);
         assert!(
             en.starts_with(
                 "1 open task thread(s) on refund-v2 for [senator::alice/codex], [senator::alice]"
@@ -1979,7 +2040,7 @@ mod tests {
             "{en}"
         );
         assert!(en.contains("- thread 3 · processing in progress · which header? · question from [senator::bob/claude] · not answered yet"), "{en}");
-        let zh = render_inbox(&reply, Locale::Zh);
+        let zh = render_inbox(&reply, Locale::Zh, ShowAll::Flag);
         assert!(
             zh.contains("processing 进行中") && zh.contains("尚未回答"),
             "{zh}"
@@ -1989,8 +2050,106 @@ mod tests {
             ..reply
         };
         assert_eq!(
-            render_inbox(&empty, Locale::En),
+            render_inbox(&empty, Locale::En, ShowAll::Flag),
             "Nothing open waits on [senator::alice/codex], [senator::alice] in refund-v2."
+        );
+    }
+
+    #[test]
+    fn settled_threads_are_counted_in_a_closing_line_and_marked_with_all() {
+        use chrono::Utc;
+        use senate_core::{Kind, NewEvent, TaskBoard};
+
+        let f = CommitteeId::new("refund-v2").unwrap();
+        let ev = |kind, from: &str, to: Option<&str>, thread: Option<u64>, seq| {
+            let mut e = NewEvent::new(f.clone(), kind, from.parse().unwrap(), "which header?");
+            if let Some(to) = to {
+                e = e.to(to.parse().unwrap());
+            }
+            if let Some(t) = thread {
+                e = e.in_thread(Seq(t));
+            }
+            e.into_event(Seq(seq), Utc::now())
+        };
+        let mut board = TaskBoard::new();
+        for e in [
+            ev(
+                Kind::Question,
+                "senator::bob",
+                Some("senator::alice/codex"),
+                None,
+                1,
+            ),
+            ev(Kind::Answer, "senator::alice/codex", None, Some(1), 2),
+            ev(
+                Kind::Question,
+                "senator::bob",
+                Some("senator::alice/codex"),
+                None,
+                3,
+            ),
+        ] {
+            board.observe(&e);
+        }
+        let all: Vec<_> = board.threads(None).into_iter().cloned().collect();
+        let waiting: Vec<_> = all
+            .iter()
+            .filter(|t| t.waits().is_some())
+            .cloned()
+            .collect();
+        let base = InboxReply {
+            committee: f.clone(),
+            agents: vec!["alice/codex".parse().unwrap()],
+            person: Name::new("alice").unwrap(),
+            threads: waiting.clone(),
+            settled: 1,
+        };
+        let en = render_inbox(&base, Locale::En, ShowAll::Flag);
+        assert!(en.contains("thread 3") && !en.contains("thread 1"), "{en}");
+        assert!(
+            en.ends_with("1 answered thread(s) not shown; --all lists them."),
+            "{en}"
+        );
+        let zh = render_inbox(&base, Locale::Zh, ShowAll::Flag);
+        assert!(
+            zh.ends_with("已答复的 1 个 thread 未显示；用 --all 列出。"),
+            "{zh}"
+        );
+        let tool = render_inbox(&base, Locale::En, ShowAll::Param);
+        assert!(tool.ends_with("not shown; all=true lists them."), "{tool}");
+
+        // Nothing waits, one settled.
+        let none = InboxReply {
+            threads: Vec::new(),
+            ..base.clone()
+        };
+        assert_eq!(
+            render_inbox(&none, Locale::En, ShowAll::Flag),
+            "Nothing open waits on [senator::alice/codex], [senator::alice] in refund-v2.\n\
+             1 answered thread(s) not shown; --all lists them."
+        );
+        assert!(
+            render_inbox(&none, Locale::Zh, ShowAll::Flag)
+                .ends_with("已答复的 1 个 thread 未显示；用 --all 列出。")
+        );
+
+        // With --all: both, the settled one marked, no closing line.
+        let listed = InboxReply {
+            threads: all,
+            settled: 0,
+            ..base
+        };
+        let en = render_inbox(&listed, Locale::En, ShowAll::Flag);
+        assert!(en.contains("settled ones included"), "{en}");
+        assert!(
+            en.contains("thread 1") && en.contains("settled: answered, nobody waits"),
+            "{en}"
+        );
+        assert!(!en.contains("not shown"), "{en}");
+        let zh = render_inbox(&listed, Locale::Zh, ShowAll::Flag);
+        assert!(
+            zh.contains("含已答复的") && zh.contains("已答复，无人在等"),
+            "{zh}"
         );
     }
 

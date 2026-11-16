@@ -272,7 +272,7 @@ impl ServerHub {
                 open_threads: board
                     .threads_for(agent, None)
                     .into_iter()
-                    .filter(|t| t.state != StatusState::Archived)
+                    .filter(|t| t.waits().is_some())
                     .count(),
             });
         }
