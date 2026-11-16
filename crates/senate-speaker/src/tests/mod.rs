@@ -11,9 +11,9 @@
 mod basis_brain;
 // mod continuity;
 // mod decisions;
-// mod flows;
+mod flows;
 pub(crate) mod hub;
-// mod review;
+mod review;
 mod rig;
 mod surface;
 // mod tasks;

@@ -437,3 +437,110 @@ pub fn rule_pick(input: &PickInput) -> Pick {
         .or_else(|| only(&|c| c.owns_thread))
         .map_or(Pick::Ask, Pick::Agent)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candidate(agent: &str, present: bool, owns_thread: bool) -> AgentCandidate {
+        AgentCandidate {
+            agent: agent.parse().expect("path"),
+            present,
+            checkpoint: None,
+            open_threads: Vec::new(),
+            owns_thread,
+        }
+    }
+
+    fn input(candidates: Vec<AgentCandidate>) -> PickInput {
+        PickInput {
+            committee: CommitteeId::new("refund-v2").expect("committee"),
+            owner: Name::new("alice").expect("name"),
+            asker: Address::senior(&Name::new("bob").expect("name")),
+            task: "is the cap 3?".into(),
+            thread: None,
+            candidates,
+            locale: Locale::En,
+        }
+    }
+
+    fn agent(path: &str) -> Pick {
+        Pick::Agent(path.parse().expect("path"))
+    }
+
+    #[test]
+    fn the_only_present_agent_is_picked() {
+        let picked = rule_pick(&input(vec![
+            candidate("alice/claude", false, true),
+            candidate("alice/codex", true, false),
+        ]));
+        // Presence first: the connected one, even when the other owns the thread.
+        assert_eq!(picked, agent("alice/codex"));
+    }
+
+    #[test]
+    fn among_equally_reachable_agents_the_thread_decides() {
+        for present in [true, false] {
+            let picked = rule_pick(&input(vec![
+                candidate("alice/claude", present, false),
+                candidate("alice/codex", present, true),
+            ]));
+            assert_eq!(picked, agent("alice/codex"), "present: {present}");
+        }
+    }
+
+    #[test]
+    fn otherwise_the_speaker_asks() {
+        for candidates in [
+            // Neither present, neither owns the thread.
+            vec![
+                candidate("alice/claude", false, false),
+                candidate("alice/codex", false, false),
+            ],
+            // Both present, neither owns it.
+            vec![
+                candidate("alice/claude", true, false),
+                candidate("alice/codex", true, false),
+            ],
+            // Both present and both own it (a thread addressed to both).
+            vec![
+                candidate("alice/claude", true, true),
+                candidate("alice/codex", true, true),
+            ],
+            // Nobody to pick from.
+            Vec::new(),
+        ] {
+            assert_eq!(rule_pick(&input(candidates)), Pick::Ask);
+        }
+    }
+
+    #[test]
+    fn the_default_brain_pick_is_the_rule() {
+        struct Plain;
+        #[async_trait]
+        impl Brain for Plain {
+            async fn interpret(&self, _: Utterance) -> Result<Intent, BrainError> {
+                Err(BrainError::Unavailable("test".into()))
+            }
+            async fn answer_on_behalf(&self, _: Question) -> Result<Answer, BrainError> {
+                Err(BrainError::Unavailable("test".into()))
+            }
+        }
+        let input = input(vec![
+            candidate("alice/claude", true, false),
+            candidate("alice/codex", false, false),
+        ]);
+        let picked = futures_lite_block_on(Plain.pick_agent(input.clone()));
+        assert_eq!(picked, Ok(rule_pick(&input)));
+        assert_eq!(picked, Ok(agent("alice/claude")));
+    }
+
+    /// Run a future that never waits on anything (the default pick is
+    /// synchronous at heart).
+    fn futures_lite_block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(future)
+    }
+}

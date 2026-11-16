@@ -64,11 +64,8 @@ pub(crate) fn guest(id: &str) -> Address {
 /// What a sender is in the log: a handle on the roster is that person,
 /// anything else (like [`STRANGER`]) a guest, as the gateway records them.
 pub(crate) fn sender(from: &str) -> Address {
-    if roster().senior(&name(from)).is_some() {
-        user(from)
-    } else {
-        guest(from)
-    }
+    let known = Name::new(from).is_ok_and(|handle| roster().senior(&handle).is_some());
+    if known { user(from) } else { guest(from) }
 }
 
 /// pm, alice and bob, each with one agent `claude` seated, and each with an

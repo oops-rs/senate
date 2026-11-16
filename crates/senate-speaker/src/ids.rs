@@ -6,7 +6,8 @@ use sha2::{Digest, Sha256};
 
 const CROCKFORD: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
-/// botd's ceiling on an `operation_id`, in bytes.
+/// The longest `operation_id` a chat gateway is held to, in bytes. The
+/// strictest gateway in use caps it at 64.
 const OPERATION_ID_MAX: usize = 64;
 const OPERATION_PREFIX: &str = "senate:";
 /// Hex digits of the hashed form: 192 bits.
@@ -34,13 +35,13 @@ pub(crate) fn derived_event_id(parts: &[&str]) -> EventId {
     text.parse().unwrap_or_default()
 }
 
-/// botd's idempotency key for the copy of log event `seq` posted to `target`
+/// The gateway's idempotency key for the copy of log event `seq` posted to `target`
 /// (the group posted into; see [`senate_core::MirrorRef`]):
 /// `senate:<epoch>:<committee>:<seq>:<target>`.
 ///
 /// The epoch is what keeps a reset log (seq starting over at 1) from reusing
-/// a key botd already holds, which botd would refuse as `operation_conflict`.
-/// botd caps the key at 64 bytes, so a longer one is sent as `senate:` plus
+/// a key the gateway already holds, which it would refuse as a conflict.
+/// The key is capped at 64 bytes, so a longer one is sent as `senate:` plus
 /// 48 hex digits of its SHA-256; that form has no further `:`, so it never
 /// equals a verbatim one.
 pub(crate) fn operation_id(epoch: &str, committee: &CommitteeId, seq: Seq, target: &str) -> String {
@@ -76,7 +77,7 @@ mod tests {
     }
 
     #[test]
-    fn operation_ids_name_the_epoch_and_the_target_and_fit_botd() {
+    fn operation_ids_name_the_epoch_and_the_target_and_fit_the_gateway() {
         let committee = CommitteeId::new("refund-v2").expect("committee");
         assert_eq!(
             operation_id("e1", &committee, Seq(120), "backend"),
@@ -87,12 +88,12 @@ mod tests {
             operation_id("e1", &committee, Seq(1), "backend"),
             operation_id("e2", &committee, Seq(1), "backend")
         );
-        // A second copy of one event (phase 2) gets its own key.
+        // A second copy of one event gets its own key.
         assert_ne!(
             operation_id("e1", &committee, Seq(1), "backend"),
             operation_id("e1", &committee, Seq(1), "backend#ack")
         );
-        // Long parts are hashed down to botd's limit, still deterministic.
+        // Long parts are hashed down to the limit, still deterministic.
         let epoch = "01JBZ6V3K8X5Q2W9R7T4Y1M0N6";
         let alias = format!("oc_{}", "f".repeat(60));
         let long = operation_id(epoch, &committee, Seq(118), &alias);
