@@ -5,7 +5,7 @@
 //!
 //! A run's thread is rooted at a Speaker `note` with no `to` (nobody's
 //! session is pushed it), `on_behalf_of` the person who asked, and
-//! [`meta::WORK`](crate::meta::WORK) carrying a [`WorkRun`] in state
+//! [`meta::WORK`] carrying a [`WorkRun`] in state
 //! [`WorkState::Queued`]. [`TaskBoard`](crate::TaskBoard) treats such a root
 //! as a task, so the run gets a card and the server's `threads` route like
 //! any other task. Every later change is a Speaker `status` in the thread

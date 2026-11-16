@@ -34,7 +34,7 @@
 //! | GET  | `/v1/committees/{committee}/brief` | → [`Brief`](crate::Brief) |
 //! | GET  | `/v1/committees/{committee}/threads?state=&agent=` | → [`ThreadsPage`] |
 //! | GET  | `/v1/committees/{committee}/presence` | → [`PresencePage`] |
-//! | GET  | `/v1/committees/{committee}/checkpoints/latest?agent=` | → [`CheckpointRecord`] (404 `not_found` when none) |
+//! | GET  | `/v1/committees/{committee}/checkpoints/latest?agent=` | → [`CheckpointRecord`](crate::CheckpointRecord) (404 `not_found` when none) |
 //!
 //! A senator is named in a query, never in a path segment, because a
 //! senator path holds slashes: `?agent=wendell/claude`.

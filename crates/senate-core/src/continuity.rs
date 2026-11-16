@@ -13,7 +13,7 @@
 //!
 //! A `checkpoint` event is an agent's handover note, written by its bridge
 //! as the agent itself (the server refuses one from anyone else). Its
-//! [`CheckpointPayload`] rides in [`meta::CHECKPOINT`](crate::meta::CHECKPOINT):
+//! [`CheckpointPayload`] rides in [`meta::CHECKPOINT`]:
 //! the branch and commit, whether that commit is on the remote, and the
 //! three Markdown files the agent keeps in `<worktree>/`[`CHECKPOINT_DIR`]
 //! (`PROGRESS.md`, `DECISIONS.md`, `OPEN.md`), at most
@@ -39,7 +39,7 @@
 //! another agent; [`PresencePayload::new_owner`] names which. Each
 //! transition is one `presence` event from `committee` (the server speaking
 //! for itself) with a [`PresencePayload`] in
-//! [`meta::PRESENCE`](crate::meta::PRESENCE) and an id derived from
+//! [`meta::PRESENCE`] and an id derived from
 //! (committee, agent, state, since) ([`presence_event`]), so a transition
 //! written twice is stored once. An agent's first `online` is held by the
 //! server but not written (every connecting bridge would add an event); its

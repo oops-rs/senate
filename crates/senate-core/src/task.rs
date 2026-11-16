@@ -2,7 +2,7 @@
 //!
 //! A **task thread** is the thread rooted at a `question` or `request`
 //! addressed to an agent, or at a Speaker `note` carrying
-//! [`meta::WORK`](crate::meta::WORK) (a work run, [`crate::work`]). Its
+//! [`meta::WORK`] (a work run, [`crate::work`]). Its
 //! state is never stored: [`TaskBoard`] folds it from the log, the same way
 //! [`BriefBuilder`](crate::BriefBuilder) folds the brief, so a restarted
 //! Speaker, the server's `threads` route and the bridge's inbox all agree
@@ -36,7 +36,7 @@
 //! A root for which [`needs_triage`] is true is not pushed to the target
 //! agent's session until the Speaker has judged it. The verdict is a `note`
 //! from the Speaker with `thread` = the root's seq and
-//! [`meta::TRIAGE`](crate::meta::TRIAGE) = a [`TriagePayload`]. A relay the
+//! [`meta::TRIAGE`] = a [`TriagePayload`]. A relay the
 //! Speaker itself writes carries its verdict inline in `meta.triage`, and is
 //! pushed at once. The bridge acts on the verdict:
 //!
@@ -249,7 +249,7 @@ pub fn needs_triage(event: &Event) -> bool {
 }
 
 /// How much agent traffic the committee's agent group gets. Set by a Speaker
-/// `note` carrying [`meta::OUTPUT_LEVEL`](crate::meta::OUTPUT_LEVEL); the
+/// `note` carrying [`meta::OUTPUT_LEVEL`]; the
 /// latest one wins.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

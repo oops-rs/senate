@@ -29,9 +29,11 @@ behalf.
 
 ## Status
 
-Early. `crates/senate-core` holds the contracts: ids, senator paths,
-addresses, inline mentions, the roster of one Senate, and the event envelope.
-There is no server yet.
+Early. `crates/senate-core` holds the contracts every other crate is built
+on: ids, senator paths, addresses and inline mentions, the roster of one
+Senate, locales, the event envelope, the HTTP/SSE wire types, the in-process
+`Hub` and `ChatSurface` seams, briefs, continuity (checkpoints, presence,
+leases), task threads and work runs. There is no log store or server yet.
 
 ```sh
 cargo test --workspace

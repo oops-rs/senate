@@ -9,10 +9,20 @@
 //!   `committee`, `guest::<platform>/<id>`, as stored in an event's fields.
 //! - [`mention`]: the same ids as written in running text, in brackets:
 //!   `[senator::wendell/claude]`, `[speaker::wendell/claude]`.
-//! - [`roster`]: who sits in one Senate, and the rules that hold for it.
+//! - [`roster`]: who sits in one Senate, the rules that hold for it, who may
+//!   act as whom, and what "this person's agent" resolves to.
 //! - [`locale`]: the language a text for people is rendered in.
+//! - [`event`]: the single envelope of a committee's log, its payloads and
+//!   its shared `meta` keys.
+//! - [`api`]: the server's HTTP/SSE wire types, shared by server and bridge.
+//! - [`hub`]: the in-process seam server-side components (the Speaker, a
+//!   gateway) use to append to and observe the log without going over HTTP.
+//! - [`surface`]: the seam between the Speaker and a chat-platform gateway.
+//! - [`brief`]: the committee brief, derived from the log.
 //! - [`continuity`]: checkpoints, presence and leases, kept per agent.
-//! - [`event`]: the single envelope of a committee's log.
+//! - [`task`]: task threads: status, triage, and the board derived from
+//!   them.
+//! - [`work`]: the Speaker's work runs, branch naming, and reassignment.
 //!
 //! # The model
 //!
@@ -27,6 +37,20 @@
 //! senator.
 //!
 //! Work is divided into **committees**, each with its own append-only log.
+//!
+//! Two consequences run through every module here. An agent is a path, and
+//! a person may have several, so nothing is keyed by "a person's agent":
+//! presence, checkpoints, leases and tasks are keyed by [`SenatorPath`], and
+//! getting from a person to an agent is a roster lookup that may find one,
+//! several or none ([`Roster::agent_of`]). And a contract that describes a
+//! Senate says which one by its presider ([`Roster::presider`], `None` for
+//! the top), so nothing assumes there is only one level.
+//!
+//! # Languages
+//!
+//! Chinese and English are both first-class. Whatever is stored or sent is
+//! the same in every language; a function that writes text for people takes
+//! a [`Locale`]. See [`locale`].
 //!
 //! # Wire compatibility
 //!
