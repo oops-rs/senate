@@ -1,0 +1,300 @@
+//! The supervision tree: lazy writers, restart from the log, shutdown.
+
+#![allow(clippy::unwrap_used)]
+
+mod common;
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
+
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use common::*;
+use ractor::ActorId;
+use reqwest::{Method, StatusCode};
+use senate_core::api::{AppendResponse, Heartbeat, events_path};
+use senate_core::{Appended, CommitteeId, Event, Hub, MirrorRef, NewEvent, SenatorPath, Seq};
+use senate_log::{CursorOwner, HeartbeatRecord, LogError, LogStore, MemoryStore};
+use tokio::sync::broadcast::error::TryRecvError;
+
+const NO_FAULT: u8 = 0;
+/// The next append commits, then the writer panics: the worst moment for it
+/// to die, in the log but not fanned out.
+const CRASH_AFTER_COMMIT: u8 = 1;
+/// The next append commits, then reports a failure, as when the connection
+/// drops before the commit's acknowledgement arrives.
+const LOSE_ACK_AFTER_COMMIT: u8 = 2;
+
+/// A [`MemoryStore`] that injects one fault into the next append once armed.
+#[derive(Default)]
+struct Faulty {
+    inner: MemoryStore,
+    fault: AtomicU8,
+}
+
+impl Faulty {
+    fn arm(&self, fault: u8) {
+        self.fault.store(fault, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl LogStore for Faulty {
+    async fn append(&self, event: NewEvent) -> Result<Appended, LogError> {
+        let result = self.inner.append(event).await;
+        match self.fault.swap(NO_FAULT, Ordering::SeqCst) {
+            CRASH_AFTER_COMMIT => panic!("injected crash after commit"),
+            LOSE_ACK_AFTER_COMMIT => Err(LogError::Database(sqlx::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "injected lost ack",
+            )))),
+            _ => result,
+        }
+    }
+    async fn epoch(&self) -> Result<String, LogError> {
+        self.inner.epoch().await
+    }
+    async fn thread(&self, f: &CommitteeId, root: Seq) -> Result<Vec<Event>, LogError> {
+        self.inner.thread(f, root).await
+    }
+    async fn bindings(&self) -> Result<Vec<Event>, LogError> {
+        self.inner.bindings().await
+    }
+    async fn search(
+        &self,
+        f: &CommitteeId,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<Event>, LogError> {
+        self.inner.search(f, query, limit).await
+    }
+    async fn read(
+        &self,
+        f: &CommitteeId,
+        after: Seq,
+        limit: usize,
+    ) -> Result<Vec<Event>, LogError> {
+        self.inner.read(f, after, limit).await
+    }
+    async fn get(&self, f: &CommitteeId, seq: Seq) -> Result<Option<Event>, LogError> {
+        self.inner.get(f, seq).await
+    }
+    async fn head(&self, f: &CommitteeId) -> Result<Seq, LogError> {
+        self.inner.head(f).await
+    }
+    async fn committees(&self) -> Result<Vec<CommitteeId>, LogError> {
+        self.inner.committees().await
+    }
+    async fn cursor(
+        &self,
+        f: &CommitteeId,
+        owner: &CursorOwner,
+        name: &str,
+    ) -> Result<Option<Seq>, LogError> {
+        self.inner.cursor(f, owner, name).await
+    }
+    async fn set_cursor(
+        &self,
+        f: &CommitteeId,
+        owner: &CursorOwner,
+        name: &str,
+        seq: Seq,
+    ) -> Result<(), LogError> {
+        self.inner.set_cursor(f, owner, name, seq).await
+    }
+    async fn put_mirror(&self, mirror: MirrorRef) -> Result<(), LogError> {
+        self.inner.put_mirror(mirror).await
+    }
+    async fn mirrors_of_seq(
+        &self,
+        f: &CommitteeId,
+        seq: Seq,
+        platform: &str,
+    ) -> Result<Vec<MirrorRef>, LogError> {
+        self.inner.mirrors_of_seq(f, seq, platform).await
+    }
+    async fn mirror_of_message(
+        &self,
+        platform: &str,
+        message_ref: &str,
+    ) -> Result<Option<MirrorRef>, LogError> {
+        self.inner.mirror_of_message(platform, message_ref).await
+    }
+    async fn record_heartbeat(
+        &self,
+        f: &CommitteeId,
+        heartbeat: Heartbeat,
+        at: DateTime<Utc>,
+    ) -> Result<(), LogError> {
+        self.inner.record_heartbeat(f, heartbeat, at).await
+    }
+    async fn last_heartbeat(
+        &self,
+        f: &CommitteeId,
+        agent: &SenatorPath,
+    ) -> Result<Option<HeartbeatRecord>, LogError> {
+        self.inner.last_heartbeat(f, agent).await
+    }
+    async fn heartbeats(&self, f: &CommitteeId) -> Result<Vec<HeartbeatRecord>, LogError> {
+        self.inner.heartbeats(f).await
+    }
+}
+
+fn writer_ids(server: &TestServer) -> Vec<ActorId> {
+    server
+        .running
+        .supervisor
+        .get_children()
+        .iter()
+        .map(|c| c.get_id())
+        .collect()
+}
+
+#[tokio::test]
+async fn writers_spawn_lazily_one_per_committee() {
+    let server = TestServer::start().await;
+    assert!(writer_ids(&server).is_empty());
+    // Reads never need the writer.
+    let page = server
+        .request(Method::GET, &events_path(&committee()), ALICE)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(page.status(), StatusCode::OK);
+    assert!(writer_ids(&server).is_empty());
+
+    server.append("one").await;
+    server.append("two").await;
+    assert_eq!(writer_ids(&server).len(), 1, "one writer for the committee");
+    let other = CommitteeId::new("search").unwrap();
+    let mut elsewhere = note("elsewhere");
+    elsewhere.committee = other;
+    server.running.hub.append(elsewhere).await.unwrap();
+    assert_eq!(writer_ids(&server).len(), 2);
+    server.running.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_crashed_writer_restarts_and_rebuilds_from_the_log() {
+    let store = Arc::new(Faulty::default());
+    let server = TestServer::start_with(store.clone(), None).await;
+    let hub = server.running.hub.clone();
+    let f = committee();
+    let alice = path("alice/claude");
+
+    let mut stream = server
+        .stream_as(ALICE, Some("alice/claude"), None, None)
+        .await;
+    server.append("one").await;
+    server.append("two").await;
+    assert_eq!(stream.seqs(2).await, vec![1, 2]);
+    eventually("alice connected", || hub.is_agent_connected(&f, &alice)).await;
+    let before = writer_ids(&server);
+    assert_eq!(before.len(), 1);
+
+    store.arm(CRASH_AFTER_COMMIT);
+    let crashed = note("three");
+    let response = server.post_event(ALICE, &crashed).await;
+    api_error(response, StatusCode::SERVICE_UNAVAILABLE, "internal").await;
+
+    // The writer's proxies die with it, ending their streams; presence follows.
+    assert!(
+        stream.event().await.is_none(),
+        "stream ends on writer crash"
+    );
+    eventually("alice disconnected", || async {
+        !hub.is_agent_connected(&f, &alice).await
+    })
+    .await;
+    eventually("writer restarted", || async {
+        let now = writer_ids(&server);
+        now.len() == 1 && now != before
+    })
+    .await;
+
+    // Seq continues from the log, including the event committed by the
+    // append whose writer crashed.
+    let four = server.append("four").await;
+    assert_eq!(four.seq, Seq(4));
+    let retry: AppendResponse = server
+        .post_event(ALICE, &crashed)
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(retry.duplicate, "the crashed append had committed");
+    assert_eq!(retry.event.seq, Seq(3));
+
+    // Reconnecting replays what the dead stream missed, then goes live.
+    let mut resumed = server
+        .stream_as(ALICE, Some("alice/claude"), None, Some(2))
+        .await;
+    assert_eq!(resumed.seqs(2).await, vec![3, 4]);
+    server.append("five").await;
+    assert_eq!(resumed.seqs(1).await, vec![5]);
+    eventually("alice reconnected", || hub.is_agent_connected(&f, &alice)).await;
+    server.running.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_retry_after_a_lost_commit_ack_is_fanned_out_once() {
+    let store = Arc::new(Faulty::default());
+    let server = TestServer::start_with(store.clone(), None).await;
+    let mut subscriber = server.running.hub.subscribe();
+    let mut stream = server.stream(BOB, None, None).await;
+    server.append("one").await;
+    server.append("two").await;
+    assert_eq!(stream.seqs(2).await, vec![1, 2]);
+    for n in 1..=2 {
+        assert_eq!(subscriber.recv().await.unwrap().seq, Seq(n));
+    }
+
+    // The commit lands, but the writer only sees an error: nothing to fan
+    // out. (A writer fans out before it replies, so any fan-out would already
+    // be in the subscriber's queue.)
+    store.arm(LOSE_ACK_AFTER_COMMIT);
+    let lost = note("three");
+    api_error(
+        server.post_event(ALICE, &lost).await,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal",
+    )
+    .await;
+    assert!(matches!(subscriber.try_recv(), Err(TryRecvError::Empty)));
+
+    // The retry finds it stored, and that is when live consumers get it.
+    let retry: AppendResponse = server.post_event(ALICE, &lost).await.json().await.unwrap();
+    assert!(retry.duplicate);
+    assert_eq!(retry.event.seq, Seq(3));
+    assert_eq!(subscriber.try_recv().unwrap(), retry.event);
+    let live = stream.event().await.unwrap();
+    assert_eq!((live.seq, live.body.as_str()), (Seq(3), "three"));
+
+    // Never twice: another retry, then the next event, arrive once each.
+    let again: AppendResponse = server.post_event(ALICE, &lost).await.json().await.unwrap();
+    assert!(again.duplicate);
+    assert!(matches!(subscriber.try_recv(), Err(TryRecvError::Empty)));
+    server.append("four").await;
+    assert_eq!(subscriber.try_recv().unwrap().seq, Seq(4));
+    assert!(matches!(subscriber.try_recv(), Err(TryRecvError::Empty)));
+    assert_eq!(stream.seqs(1).await, vec![4]);
+    server.running.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn shutdown_ends_open_streams() {
+    let server = TestServer::start().await;
+    server.append("one").await;
+    let mut stream = server.stream(ALICE, None, None).await;
+    assert_eq!(stream.seqs(1).await, vec![1]);
+    let hub = server.running.hub.clone();
+    tokio::time::timeout(WAIT, server.running.shutdown())
+        .await
+        .expect("shutdown must not wait on open streams")
+        .unwrap();
+    assert!(stream.event().await.is_none());
+    assert!(matches!(
+        hub.append(note("after shutdown")).await,
+        Err(senate_core::HubError::Unavailable(_))
+    ));
+}
