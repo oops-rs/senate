@@ -5,8 +5,8 @@
 //! - [`ids`]: committee ids, name segments, `seq`, event ids.
 //! - [`senator`]: [`SenatorPath`], a person (`wendell`) or one of their
 //!   agents at any depth (`wendell/claude`, `wendell/claude/reviewer`).
-//! - [`address`]: `senator::<path>`, `speaker`, `committee`, as stored in an
-//!   event's fields.
+//! - [`address`]: `senator::<path>`, `senator::<person>/*`, `speaker`,
+//!   `committee`, `guest::<platform>/<id>`, as stored in an event's fields.
 //! - [`mention`]: the same ids as written in running text, in brackets:
 //!   `[senator::wendell/claude]`, `[speaker::wendell/claude]`.
 //! - [`roster`]: who sits in one Senate, and the rules that hold for it.
@@ -40,7 +40,7 @@ pub mod mention;
 pub mod roster;
 pub mod senator;
 
-pub use address::{Address, AddressParseError};
+pub use address::{Address, AddressParseError, Guest, GuestError, MAX_GUEST_ID_LEN};
 pub use event::{Event, Kind, Mirror, NewEvent, Refs, Source};
 pub use ids::{CommitteeId, EventId, IdError, Name, Seq};
 pub use mention::{Found, Mention, MentionParseError};
