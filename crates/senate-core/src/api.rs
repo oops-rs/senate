@@ -15,6 +15,12 @@
 //! person may run several agents this way, each with its own stream,
 //! cursors, presence and checkpoints.
 //!
+//! The senator holding the Speaker's seat ([`Me::speaker`]) is the one
+//! exception: its person may open a stream, read and write cursors and send
+//! heartbeats as it even where it cannot sit (the presider of a nested
+//! Senate sits in the Senate above). It is not seated, and it writes in
+//! that Senate only as `speaker`.
+//!
 //! Guests hold no token. They reach the log through a gateway inside the
 //! server, which writes for them as `guest::<platform>/<id>`.
 //!
@@ -42,7 +48,9 @@
 //!
 //! # Appends
 //!
-//! The `from` of an append is a senator the caller may act as. Its `to` may
+//! The `from` of an append is a senator the caller may act as. Every
+//! senator in its `to` could sit in this Senate (a listed person, or an
+//! agent at this Senate's level); else 400 `bad_request`. Its `to` may
 //! hold `senator::<person>/*`; the server resolves it against its roster
 //! before the event is stored
 //! ([`Roster::resolve_recipients`](crate::Roster::resolve_recipients)), so
