@@ -715,14 +715,24 @@ fn orientation(
     committee: &CommitteeId,
     agent: &SenatorPath,
     presider: Option<&SenatorPath>,
+    chat: bool,
     locale: Locale,
 ) -> String {
     let me = Address::senator(agent).in_text();
     let senate = senate_words(presider, locale);
+    let reach_zh = if chat {
+        "队友的 agent、Speaker 和委员会聊天群里的人"
+    } else {
+        "队友的 agent 和 Speaker "
+    };
+    let reach_en = if chat {
+        "Teammates' agents, the Speaker, and people in the committee's chat"
+    } else {
+        "Teammates' agents and the Speaker"
+    };
     match locale {
         Locale::Zh => format!(
-            "[senate] 这个会话已加入 {senate} 的委员会 `{committee}`，身份是 {me}。队友的 agent、\
-             Speaker 和委员会聊天群里的人会以 `[senate · …]` 消息在这里找到你。工具：\
+            "[senate] 这个会话已加入 {senate} 的委员会 `{committee}`，身份是 {me}。{reach_zh}会以 `[senate · …]` 消息在这里找到你。工具：\
              mcp__senate__ask（问队友的 agent），mcp__senate__answer（在 thread 里回复），\
              mcp__senate__catch_up（读你错过的），mcp__senate__search（搜索整个日志），\
              mcp__senate__post（给团队留言），mcp__senate__propose_decision（提议一个决定，由人确认），\
@@ -731,7 +741,7 @@ fn orientation(
         ),
         Locale::En => format!(
             "[senate] This session is joined to the committee `{committee}` of {senate} as {me}. \
-             Teammates' agents, the Speaker, and people in the committee's chat reach you here as \
+             {reach_en} reach you here as \
              `[senate · …]` messages. Tools: mcp__senate__ask (ask a teammate's agent), \
              mcp__senate__answer (reply in a thread), mcp__senate__catch_up (read what you \
              missed), mcp__senate__search (search the whole log), mcp__senate__post (leave a note \
@@ -2531,7 +2541,13 @@ impl Shared {
         let mut budget = HOOK_CONTEXT_MAX;
         if event == HookEvent::SessionStart {
             let seating = self.seating();
-            let line = orientation(&committee, agent, seating.presider(), self.locale);
+            let line = orientation(
+                &committee,
+                agent,
+                seating.presider(),
+                brief.is_some_and(|b| !b.groups.is_empty()),
+                self.locale,
+            );
             budget = budget.saturating_sub(format::char_len(&line) + 2);
             parts.push(line);
         }
@@ -3778,11 +3794,11 @@ mod tests {
     fn the_orientation_names_the_agent_and_the_senate() {
         let c = CommitteeId::new("refund-v2").unwrap();
         let agent: SenatorPath = "alice/codex".parse().unwrap();
-        let en = orientation(&c, &agent, None, Locale::En);
+        let en = orientation(&c, &agent, None, false, Locale::En);
         assert!(en.contains("committee `refund-v2` of the top Senate as [senator::alice/codex]"));
         let presider: SenatorPath = "alice/claude".parse().unwrap();
         let nested: SenatorPath = "alice/claude/reviewer".parse().unwrap();
-        let zh = orientation(&c, &nested, Some(&presider), Locale::Zh);
+        let zh = orientation(&c, &nested, Some(&presider), false, Locale::Zh);
         assert!(
             zh.contains("已加入 由 [senator::alice/claude] 主持的 Senate 的委员会 `refund-v2`，身份是 [senator::alice/claude/reviewer]"),
             "{zh}"
@@ -3790,6 +3806,24 @@ mod tests {
         for text in [en, zh] {
             assert!(!text.to_lowercase().contains(&["fei", "shu"].concat()));
         }
+    }
+
+    #[test]
+    fn the_orientation_mentions_the_chat_only_when_a_group_is_bound() {
+        let c = CommitteeId::new("refund-v2").unwrap();
+        let agent: SenatorPath = "alice/codex".parse().unwrap();
+        let line = |chat, l| orientation(&c, &agent, None, chat, l);
+        assert!(
+            line(true, Locale::En)
+                .contains("Speaker, and people in the committee's chat reach you")
+        );
+        assert!(
+            line(false, Locale::En).contains("Teammates' agents and the Speaker reach you here")
+        );
+        assert!(!line(false, Locale::En).contains("chat"));
+        assert!(line(true, Locale::Zh).contains("Speaker 和委员会聊天群里的人会以"));
+        assert!(line(false, Locale::Zh).contains("队友的 agent 和 Speaker 会以"));
+        assert!(!line(false, Locale::Zh).contains("聊天"));
     }
 
     #[test]

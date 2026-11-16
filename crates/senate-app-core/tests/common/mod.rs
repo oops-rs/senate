@@ -231,6 +231,7 @@ pub fn docket() -> DocketReply {
                     agent: reviewer,
                     connected: false,
                     presence: None,
+                    last_seen: None,
                     checkpoint: Some(CheckpointFacts {
                         seq: Seq(31),
                         ts: Utc::now(),

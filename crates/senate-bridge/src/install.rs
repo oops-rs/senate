@@ -92,7 +92,7 @@ Senate 命令：`$ARGUMENTS`
 
 - `inbox`，或什么都不写：调用 mcp__senate__inbox，原样显示它的列表。
 - `take <seq>`：用 thread=<seq> 调用 mcp__senate__take。然后告诉我这个 thread 现在归我了：\
-它不会再交给任何 agent，由我自己在这里或在委员会的聊天里回答。
+它不会再交给任何 agent，由我自己在这里回答。
 - `join <committee>`：用 committee=<committee> 调用 mcp__senate__join。
 - `handoff`：我要离开一阵。先根据这个会话把三个 checkpoint 文件更新到最新：\
 `.senate/PROGRESS.md`（已完成 / 进行中 / 下一步）、`.senate/DECISIONS.md`（本地的决定，\
@@ -112,7 +112,7 @@ Senate command: `$ARGUMENTS`
 
 - `inbox`, or nothing: call mcp__senate__inbox and show its list as it is.
 - `take <seq>`: call mcp__senate__take with thread=<seq>. Then tell me the thread is mine now: \
-nothing more of it goes to agents, and I answer it myself, here or in the committee's chat.
+nothing more of it goes to agents, and I answer it myself, here.
 - `join <committee>`: call mcp__senate__join with committee=<committee>.
 - `handoff`: I am about to step away. First bring the three checkpoint files up to date from \
 this session: `.senate/PROGRESS.md` (done / in progress / next), `.senate/DECISIONS.md` (local \

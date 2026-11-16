@@ -296,5 +296,46 @@ async fn one_person_chains_claude_code_and_codex_under_a_presiding_agent() {
     // Covered: off the docket. The relay Codex never answered before it
     // left is still there, now for covering too.
     assert_eq!(left, [routed.seq]);
+
+    // The presiding session ends. A question to its agent, the Speaker's own
+    // seat holder, is that agent's to answer when its session opens: it is
+    // never on the docket to cover, and covering for it is refused.
+    desk.session_end("s-claude", &claude).await;
+    desk.wait_connected(None, "alice/claude", false).await;
+    let own = speak(
+        &url,
+        &token,
+        &NewEvent::new(
+            committee(),
+            Kind::Question,
+            person("alice"),
+            "Where does the idempotency key live?",
+        )
+        .to(senator("alice/claude")),
+    )
+    .await
+    .unwrap();
+    let page = top.daemon.hub.docket(&committee()).await.unwrap();
+    assert!(
+        page.items.iter().all(|i| i.event.seq != own.seq),
+        "{:?}",
+        page.items
+    );
+    assert!(
+        page.items
+            .iter()
+            .all(|i| !matches!(&i.awaiting, Awaiting::Away { agents } if agents.contains(&path("alice/claude")))),
+    );
+    let refused = desk
+        .try_ipc::<Posted>(Request::Cover {
+            session: Laptop::session("s-claude"),
+            committee: committee(),
+            thread: own.seq,
+            body: "from nowhere".into(),
+            agent: Some(path("alice/claude")),
+            id: None,
+        })
+        .await;
+    assert!(refused.is_err(), "no covering for the seat holder");
     desk.stop().await;
 }
