@@ -34,7 +34,7 @@ use senate_speaker::{Brain, ScriptedBrain, SpeakerConfig, WorkConfig};
 use senate_work::testing::{FakeForge, FakeRunner};
 use senate_work::{Forge, RepoAllowlist, Runner};
 use senated::testing::{FakeChat, Message, Post};
-use senated::{Assembly, ChatGateway, Delivered, Senated, SenatedConfig};
+use senated::{Assembly, ChatGateway, Delivered, Machine, Senated, SenatedConfig};
 use serde_json::Value;
 use tokio::io::AsyncBufReadExt;
 use tokio::net::UnixListener;
@@ -706,7 +706,7 @@ impl Laptop {
         self.hook_as(kind, session_id, inbox, None).await
     }
 
-    async fn hook_as(
+    pub async fn hook_as(
         &self,
         kind: HookKind,
         session_id: &str,
@@ -1085,4 +1085,182 @@ pub fn context(output: &Value) -> &str {
 /// Every event of `kind` in `events`.
 pub fn of_kind(events: &[Event], kind: Kind) -> Vec<&Event> {
     events.iter().filter(|e| e.kind == kind).collect()
+}
+
+// ---- a developer machine running `senated --machine` ------------------------
+
+/// A developer machine whose daemon is `senated --machine`: its
+/// `senate.toml` is `person`, `locale`, a fake Codex app-server, and `body`
+/// (the Senate above, `[local]`, `[[preside]]`). The returned [`Laptop`]
+/// drives its sessions; [`Desk::start`] runs the machine.
+pub struct Desk {
+    pub laptop: Laptop,
+    pub machine: Option<Machine>,
+}
+
+impl Desk {
+    pub fn new(root: &Path, who: &str, locale: Locale, body: &str) -> Self {
+        let home = root.join(format!("desk-{who}"));
+        let work = home.join("work");
+        std::fs::create_dir_all(work.join(".senate")).unwrap();
+        std::fs::write(work.join(".senate/committee"), format!("{COMMITTEE}\n")).unwrap();
+        let paths = Paths::new(home.join("senate"));
+        std::fs::create_dir_all(paths.home()).unwrap();
+        std::fs::write(
+            paths.senate_toml(),
+            format!(
+                "person = \"{who}\"\nlocale = \"{locale}\"\n{body}\n[codex]\nlisten = \"unix://{}\"\n",
+                home.join("codex.sock").display()
+            ),
+        )
+        .unwrap();
+        // Only for the Laptop's own fields: the machine reads senate.toml.
+        let mut config = BridgeConfig::new("http://127.0.0.1:1", "unused", name(who));
+        config.locale = locale;
+        Self {
+            laptop: Laptop {
+                paths,
+                config,
+                work,
+                home,
+                daemon: None,
+            },
+            machine: None,
+        }
+    }
+
+    /// `senated --machine`, in process, with the tests' quick timing.
+    pub async fn start(&mut self) {
+        let machine = Machine::start(self.laptop.paths.clone(), fast_timing())
+            .await
+            .unwrap();
+        // The developer-machine side is up once its socket answers.
+        let socket = self.laptop.paths.socket();
+        eventually_async("the machine's socket", || {
+            let socket = socket.clone();
+            async move {
+                ipc::request::<serde_json::Value>(
+                    &socket,
+                    &Request::Ping,
+                    Duration::from_millis(200),
+                    Duration::from_secs(1),
+                )
+                .await
+                .ok()
+            }
+        })
+        .await;
+        self.machine = Some(machine);
+    }
+
+    pub async fn stop(&mut self) {
+        if let Some(machine) = self.machine.take() {
+            machine.shutdown().await;
+        }
+    }
+
+    pub fn machine(&self) -> &Machine {
+        self.machine.as_ref().expect("the machine is running")
+    }
+
+    /// The hosted Senate presided over by `presider` (`None`: the local top).
+    pub fn senate(&self, presider: Option<&str>) -> &senated::HostedSenate {
+        let presider = presider.map(path);
+        self.machine()
+            .senate(presider.as_ref())
+            .expect("a hosted Senate")
+    }
+
+    /// Wait until `agent` has a live connection to the hosted Senate.
+    pub async fn wait_connected(&self, presider: Option<&str>, agent: &str, connected: bool) {
+        let hub = self.senate(presider).daemon.hub.clone();
+        let agent = path(agent);
+        eventually_async(&format!("{agent} connected = {connected}"), || {
+            let hub = hub.clone();
+            let agent = agent.clone();
+            async move {
+                (hub.is_agent_connected(&committee(), &agent).await == connected).then_some(())
+            }
+        })
+        .await;
+    }
+}
+
+impl std::ops::Deref for Desk {
+    type Target = Laptop;
+    fn deref(&self) -> &Laptop {
+        &self.laptop
+    }
+}
+
+impl Laptop {
+    /// A Codex thread ends (`hook session-end --codex`).
+    pub async fn codex_end(&self, thread: &str) {
+        let stdin = serde_json::json!({
+            "session_id": thread,
+            "cwd": self.work,
+            "hook_event_name": HookKind::SessionEnd.event_name(),
+        })
+        .to_string();
+        hook::run_as(
+            HookKind::SessionEnd,
+            &self.paths.socket(),
+            &stdin,
+            &HookEnv::default(),
+            Some(Runtime::Codex),
+            HookTimeouts::default(),
+        )
+        .await;
+    }
+
+    /// A Claude Code session's prompt (`UserPromptSubmit`), pinned or not.
+    pub async fn prompt(
+        &self,
+        session_id: &str,
+        inbox: &FakeInbox,
+        agent: Option<&str>,
+    ) -> Option<Value> {
+        self.hook_as(HookKind::UserPromptSubmit, session_id, inbox, agent)
+            .await
+    }
+}
+
+/// A person speaking to a Senate over HTTP, as themselves: what a chat
+/// layer or a person's own client does. The stored event, or the refusal's
+/// status and body.
+pub async fn speak(
+    url: &str,
+    token: &str,
+    event: &senate_core::NewEvent,
+) -> Result<Event, (u16, senate_core::api::ApiError)> {
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{url}{}",
+            senate_core::api::events_path(&event.committee)
+        ))
+        .bearer_auth(token)
+        .json(event)
+        .send()
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    if response.status().is_success() {
+        let appended: senate_core::api::AppendResponse = response.json().await.unwrap();
+        Ok(appended.event)
+    } else {
+        Err((status, response.json().await.unwrap()))
+    }
+}
+
+/// `GET /v1/me` on `url`.
+pub async fn me_at(url: &str, token: &str) -> senate_core::api::Me {
+    reqwest::Client::new()
+        .get(format!("{url}/v1/me"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
 }

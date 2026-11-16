@@ -1462,19 +1462,20 @@ async fn one_daemon_serves_two_senates_and_keeps_them_apart() {
             .iter()
             .all(|(_, _, hb)| hb.agent.to_string() == "alice/claude")
     );
-    assert!(
-        nested
-            .heartbeats()
-            .iter()
-            .all(|(_, _, hb)| hb.agent.to_string() == "alice/claude/reviewer")
-    );
+    assert!(nested.heartbeats().iter().all(|(_, _, hb)| {
+        ["alice/claude/reviewer", "alice/claude"].contains(&hb.agent.to_string().as_str())
+    }));
     let daemon = h.daemon.as_ref().unwrap();
     let above = daemon.store_of(None).unwrap();
     let below = daemon.store_of(Some(&path("alice/claude"))).unwrap();
     assert!(above.session("c1").unwrap().is_some());
     assert!(above.session("r1").unwrap().is_none());
     assert!(below.session("r1").unwrap().is_some());
-    assert!(below.session("c1").unwrap().is_none());
+    // The presiding session is attached below too, as the Speaker.
+    assert_eq!(
+        below.session("c1").unwrap().unwrap().agent,
+        path("alice/claude")
+    );
 
     // A question below reaches the reviewer only; nothing goes above.
     nested.append(

@@ -843,6 +843,22 @@ impl Shared {
                 .is_some_and(|seat| seat.senator() == Some(agent))
     }
 
+    /// Whether `event` is put to the Speaker of this Senate and `agent`
+    /// holds its seat: pushed to the presiding session like a message for
+    /// the agent itself. Not the Speaker's own words.
+    pub(crate) fn for_speaker(&self, agent: &SenatorPath, event: &Event) -> bool {
+        event.from != Address::Speaker
+            && event.is_directed_to(&Address::Speaker)
+            && self.presided_by(agent)
+    }
+
+    /// Whether `agent` holds this Senate's seat without sitting in it: the
+    /// presider of a nested Senate, whose session sits in the Senate above.
+    /// It speaks here only as `speaker`.
+    pub(crate) fn presides_from_above(&self, agent: &SenatorPath) -> bool {
+        self.presided_by(agent) && !self.seating().owns(agent)
+    }
+
     /// `senator::<person>`: the person this bridge holds the token of.
     fn person(&self) -> Address {
         Address::senior(&self.config.person)
@@ -1398,7 +1414,7 @@ impl Shared {
             let mut covering = lock(&self.covering);
             covering.observe(event, agent);
             routing::should_push_covering(event, agent, &covering)
-        };
+        } || self.for_speaker(agent, event);
         if self.store.ingest(agent, event, directed)? {
             dirty.notify_one();
             if matches!(
@@ -1554,6 +1570,16 @@ impl Shared {
     /// in time).
     fn annotate(&self, agent: &SenatorPath, mut event: Event) -> Event {
         event.meta.remove(format::COVERING_META);
+        event.meta.remove(format::SPEAKER_META);
+        if !event.is_directed_to(&Address::senator(agent)) && self.for_speaker(agent, &event) {
+            let senate = match self.seating().presider() {
+                Some(presider) => presider.to_string(),
+                None => String::new(),
+            };
+            event
+                .meta
+                .insert(format::SPEAKER_META.into(), senate.into());
+        }
         if !event.is_directed_to(&Address::senator(agent))
             && let Some(old) = lock(&self.covering).covered_for(&event, agent)
         {
@@ -2346,6 +2372,18 @@ impl Shared {
         report: HookReport,
         placed: Option<(SenatorPath, AgentSource)>,
     ) -> Result<HookReply, IpcError> {
+        self.on_hook_as(report, placed, false).await
+    }
+
+    /// [`Shared::on_hook`]; `as_speaker`: the session is attached here as
+    /// the Speaker of this Senate (it sits in another), so it is told
+    /// nothing at start but what is put to it.
+    pub(crate) async fn on_hook_as(
+        &self,
+        report: HookReport,
+        placed: Option<(SenatorPath, AgentSource)>,
+        as_speaker: bool,
+    ) -> Result<HookReply, IpcError> {
         let inferred = session::infer_committee(
             report.branch.as_deref(),
             report.committee_file.as_deref(),
@@ -2406,10 +2444,17 @@ impl Shared {
             self.committees_changed.notify_one();
         }
         let brief = match (report.event, session.committee()) {
-            (HookEvent::SessionStart, Some(committee)) => self.hook_brief(committee).await,
+            (HookEvent::SessionStart, Some(committee)) if !as_speaker => {
+                self.hook_brief(committee).await
+            }
             _ => None,
         };
-        let (context, delivered) = self.hook_context(&session, report.event, brief.as_ref())?;
+        let event = if as_speaker {
+            HookEvent::UserPromptSubmit
+        } else {
+            report.event
+        };
+        let (context, delivered) = self.hook_context(&session, event, brief.as_ref())?;
         // The user is active in the session: a held backlog may try its
         // inbox again right away.
         self.note_delivered(&session.session_id);
@@ -2854,7 +2899,12 @@ impl Shared {
         let session = self.resolve(selector)?;
         let committee = self.bound(&session)?;
         routing::check_ask_recipients(&to, self.locale).map_err(IpcError::bad_request)?;
-        let me = Address::senator(&session.agent);
+        // The presider of a nested Senate asks its subagents as their Speaker.
+        let me = if self.presides_from_above(&session.agent) {
+            Address::Speaker
+        } else {
+            Address::senator(&session.agent)
+        };
         if to.contains(&me) {
             return Err(IpcError::bad_request(match self.locale {
                 Locale::Zh => format!("{} 就是这个会话自己；请问队友的 agent", me.in_text()),

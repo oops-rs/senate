@@ -134,15 +134,32 @@ impl AppState {
         }
     }
 
-    /// Like [`AppState::act_as`], for a request that may name no senator: it
-    /// is then the person's own.
+    /// Like [`AppState::act_as`], for a connection rather than a write: a
+    /// stream, a cursor, a heartbeat. Besides the senators `person` may act
+    /// as, the senator holding this Senate's Speaker's seat, when it is
+    /// `person`'s: the presiding session follows this Senate's log as its
+    /// Speaker, with its own cursors and presence, without being seated in
+    /// it (it sits in the Senate above, and writes here as `speaker`).
+    fn connect_as(&self, person: &Person, senator: &SenatorPath) -> Result<(), ApiFailure> {
+        let presides = self
+            .hub
+            .speaker_seat()
+            .is_some_and(|seat| seat.held_by(&person.0) && seat.senator() == Some(senator));
+        if presides {
+            return Ok(());
+        }
+        self.act_as(person, senator)
+    }
+
+    /// Like [`AppState::connect_as`], for a request that may name no
+    /// senator: it is then the person's own.
     fn act_as_or_self(
         &self,
         person: &Person,
         senator: Option<SenatorPath>,
     ) -> Result<SenatorPath, ApiFailure> {
         let senator = senator.unwrap_or_else(|| SenatorPath::senior(person.0.clone()));
-        self.act_as(person, &senator)?;
+        self.connect_as(person, &senator)?;
         Ok(senator)
     }
 }
@@ -257,6 +274,7 @@ async fn append(
         }
     };
     reject_server_provenance(&event, as_speaker)?;
+    check_recipients(&state, &event).await?;
     if as_speaker {
         check_speaker_write(&state, &event).await?;
     } else {
@@ -348,6 +366,23 @@ fn reject_speaker_keys(event: &NewEvent) -> Result<(), ApiFailure> {
         if event.meta.contains_key(key) {
             return Err(ApiFailure::forbidden(format!(
                 "meta.{key} is written by the Speaker, not by senators"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Every senator an event is addressed to could sit in this Senate: a
+/// listed person, or an agent at this Senate's level (seated or not yet).
+/// An agent one level down, or another Senate's agent, is not reached from
+/// here; a message for it would wait for nobody.
+async fn check_recipients(state: &AppState, event: &NewEvent) -> Result<(), ApiFailure> {
+    let roster = state.hub.roster().await?;
+    for senator in event.to.iter().filter_map(Address::as_senator) {
+        if let Err(e) = roster.may_act_as(senator.owner(), senator) {
+            return Err(ApiFailure::bad_request(format!(
+                "{} cannot be reached in this Senate: {e}",
+                Address::senator(senator)
             )));
         }
     }
@@ -596,7 +631,7 @@ async fn stream(
     // stream naming a person, or nobody, only reads.
     let agent = match params.senator {
         Some(senator) => {
-            state.act_as(&person, &senator)?;
+            state.connect_as(&person, &senator)?;
             Some(senator).filter(SenatorPath::is_junior)
         }
         None => None,
@@ -658,7 +693,7 @@ async fn heartbeat(
             beat.agent
         )));
     }
-    state.act_as(&person, &beat.agent)?;
+    state.connect_as(&person, &beat.agent)?;
     state.hub.record_heartbeat(&committee, beat).await?;
     Ok(StatusCode::NO_CONTENT)
 }

@@ -481,3 +481,103 @@ async fn the_docket_names_each_agents_latest_checkpoint() {
     .await;
     assert!(docket(&server).await.items.is_empty());
 }
+
+#[tokio::test]
+async fn the_presiding_agent_follows_the_senate_it_presides_over_without_sitting_in_it() {
+    let Built { server } = start(false, |c| {
+        c.roster.presider = Some(path("alice/claude"));
+    })
+    .await;
+    // Its stream and heartbeat, as the Speaker's connection.
+    let mut stream = server
+        .stream_as(ALICE, Some("alice/claude"), None, None)
+        .await;
+    let beat = server
+        .request(
+            Method::POST,
+            &senate_core::api::heartbeat_path(&committee()),
+            ALICE,
+        )
+        .json(&senate_core::api::Heartbeat {
+            agent: path("alice/claude"),
+            sessions: 1,
+            cursor: senate_core::Seq::ZERO,
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(beat.status(), StatusCode::NO_CONTENT);
+    // It is not seated, and does not write as itself here.
+    let me = me(&server, ALICE).await;
+    assert!(me.agents.is_empty(), "{:?}", me.agents);
+    api_error(
+        server
+            .post_event(
+                ALICE,
+                &NewEvent::new(
+                    committee(),
+                    Kind::Note,
+                    Address::Senator(path("alice/claude")),
+                    "x",
+                ),
+            )
+            .await,
+        StatusCode::FORBIDDEN,
+        "forbidden",
+    )
+    .await;
+    // What is said to the Speaker reaches it.
+    let asked = stored(
+        &server,
+        ALICE,
+        &from_speaker(Kind::Question, "callbacks covered?")
+            .to(Address::Senator(path("alice/claude/reviewer"))),
+    )
+    .await;
+    let answer = stored(
+        &server,
+        ALICE,
+        &NewEvent::new(
+            committee(),
+            Kind::Answer,
+            Address::Senator(path("alice/claude/reviewer")),
+            "yes",
+        )
+        .in_thread(asked.seq)
+        .to(Address::Speaker),
+    )
+    .await;
+    let mut seen = Vec::new();
+    while seen.len() < 2 {
+        seen.push(stream.event().await.unwrap().seq);
+    }
+    assert_eq!(seen, [asked.seq, answer.seq]);
+    // Bob cannot follow it as the Speaker.
+    assert_eq!(
+        server
+            .try_stream(BOB, Some("alice/claude"), None, None)
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[tokio::test]
+async fn an_agent_of_another_level_is_not_reached_from_here() {
+    let Built { server } = start(true, |_| {}).await;
+    for (to, status) in [
+        ("alice/claude/reviewer", StatusCode::BAD_REQUEST),
+        ("dave/claude", StatusCode::BAD_REQUEST),
+        ("alice/claude", StatusCode::OK),
+        ("alice", StatusCode::OK),
+    ] {
+        let response = server
+            .post_event(
+                BOB,
+                &NewEvent::new(committee(), Kind::Question, person_addr("bob"), "?")
+                    .to(Address::Senator(path(to))),
+            )
+            .await;
+        assert_eq!(response.status(), status, "{to}");
+    }
+}

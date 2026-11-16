@@ -13,9 +13,16 @@
 //!   ended in the one it left;
 //! - a request from a session to the Senate the session is registered in;
 //! - a presiding request (`docket`, `route`, `cover`, `refer`) to the
-//!   Senate whose Speaker's seat the session's agent holds. So a presiding
-//!   session is attached to two Senates: a senator in one, the Speaker of
-//!   the other (or both in one, for a top Senate used alone);
+//!   Senate whose Speaker's seat the session's agent holds, and so is the
+//!   presiding session's `ask` when every agent it asks sits there: it asks
+//!   them as their Speaker.
+//!
+//! So a presiding session is attached to two Senates: a senator in one,
+//! the Speaker of the other (or both in one, for a top Senate used alone).
+//! It is registered in both, under the same agent path: in the one it
+//! presides over, it holds the Speaker's connection (its own stream,
+//! cursors and heartbeat there, without a seat) and is pushed what is put
+//! to the Speaker, marked as such.
 //! - anything else (no session, the desktop app's requests) to the primary
 //!   Senate: the one where the person's agents sit directly.
 //!
@@ -81,7 +88,8 @@ impl Front {
         self.senates.iter().find(|s| s.presided_by(agent))
     }
 
-    /// The Senate a session is registered in, and the session: when it is
+    /// The Senate a session is registered in, and the session: the one its
+    /// agent sits in rather than one it only presides over; when it is
     /// registered in several (it moved), the most recently seen.
     fn locate(&self, selector: &SessionSelector) -> Option<(Arc<Shared>, Session)> {
         if selector.session_id.is_none() && selector.claude_pid.is_none() {
@@ -93,7 +101,7 @@ impl Front {
                 let session = s.resolve(selector).ok()?;
                 (session.state != SessionState::Ended).then(|| (s.clone(), session))
             })
-            .max_by_key(|(_, session)| session.last_seen)
+            .max_by_key(|(s, session)| (!s.presides_from_above(&session.agent), session.last_seen))
     }
 
     /// The daemon's status: the primary Senate's, with the others under it.
@@ -171,6 +179,32 @@ impl Front {
                 }
                 Err(e) => Reply::err(e),
             },
+            Request::Ask {
+                session,
+                to,
+                body,
+                refs,
+                id,
+                request,
+            } => {
+                let ask = Request::Ask {
+                    session: session.clone(),
+                    to: to.clone(),
+                    body,
+                    refs,
+                    id,
+                    request,
+                };
+                let target = match self.locate(&session) {
+                    Some((sits, found)) => self
+                        .seat_of(&found.agent)
+                        .filter(|seat| !Arc::ptr_eq(seat, &sits) && asks_below(seat, &to))
+                        .cloned()
+                        .unwrap_or(sits),
+                    None => self.primary().clone(),
+                };
+                target.dispatch(ask).await
+            }
             other => {
                 let target = selector_of(&other)
                     .and_then(|selector| self.locate(selector))
@@ -207,23 +241,41 @@ impl Front {
             (self.primary().clone(), None)
         };
         let event = report.event;
+        let attached = report.clone();
         let mut reply = target.on_hook(report, placed).await?;
         if codex {
             target.reconcile_approvals();
         }
+        let agent = reply.session.agent.clone();
+        let seat = self.seat_of(&agent).cloned();
         for other in &self.senates {
-            if !Arc::ptr_eq(other, &target) {
+            let presided = seat.as_ref().is_some_and(|s| Arc::ptr_eq(s, other));
+            if !Arc::ptr_eq(other, &target) && !presided {
                 other.retire(&reply.session.session_id);
             }
         }
-        if let Some(seat) = self.seat_of(&reply.session.agent)
-            && let Some(text) = seat.presiding_context(&reply.session, event).await
-        {
-            reply.context = Some(match reply.context.take() {
-                Some(context) => format!("{context}\n\n{text}"),
-                None => text,
-            });
+        let mut parts: Vec<String> = reply.context.take().into_iter().collect();
+        if let Some(seat) = &seat {
+            if !Arc::ptr_eq(seat, &target) {
+                // Attached below as the Speaker, under the same agent path:
+                // what is put to the Speaker there is pushed to it too.
+                let source = reply.session.agent_source;
+                match seat
+                    .on_hook_as(attached, Some((agent.clone(), source)), true)
+                    .await
+                {
+                    Ok(below) => {
+                        reply.delivered += below.delivered;
+                        parts.extend(below.context);
+                    }
+                    Err(e) => tracing::warn!(%agent, "attaching the Speaker's session: {e}"),
+                }
+            }
+            if let Some(text) = seat.presiding_context(&reply.session, event).await {
+                parts.push(text);
+            }
         }
+        reply.context = (!parts.is_empty()).then(|| parts.join("\n\n"));
         Ok(reply)
     }
 
@@ -337,6 +389,17 @@ fn selector_of(request: &Request) -> Option<&SessionSelector> {
         | Request::Checkpoint { session, .. } => Some(session),
         _ => None,
     }
+}
+
+/// Whether every recipient of an `ask` sits in `seat`'s Senate: an agent
+/// directly under its base.
+fn asks_below(seat: &Shared, to: &[Address]) -> bool {
+    let base = seat.seating().base();
+    !to.is_empty()
+        && to.iter().all(|a| {
+            a.as_agent()
+                .is_some_and(|agent| agent.presider().as_ref() == Some(&base))
+        })
 }
 
 /// No Senate on this machine seats `agent`.
