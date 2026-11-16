@@ -418,6 +418,12 @@ pub mod meta {
     /// anything in the body, that a reader shows as takeover
     /// ([`Event::byline`](super::Event::byline)).
     pub const TAKEOVER: &str = "takeover";
+    /// A message the server addressed to the Speaker because its sender
+    /// wrote `senator::<person>/*` and that person has several agents here:
+    /// the [`PickPayload`](crate::docket::PickPayload), whose candidates the
+    /// Speaker picks among. Written by the server only; the server refuses
+    /// the key from senators.
+    pub const PICK: &str = "pick";
 }
 
 fn flag(event: &Event, key: &str) -> bool {

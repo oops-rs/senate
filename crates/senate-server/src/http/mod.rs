@@ -20,8 +20,8 @@ use senate_core::api::{
     SearchQuery, SearchResults, StreamQuery, ThreadsPage, ThreadsQuery,
 };
 use senate_core::{
-    Address, Brief, CheckpointPayload, CheckpointRecord, CommitteeId, Hub, Kind, Name, NewEvent,
-    SenatorPath, Seq, StatusPayload, meta,
+    Address, Brief, CheckpointPayload, CheckpointRecord, CommitteeId, DocketPage, Hub, Kind, Name,
+    NewEvent, PickPayload, ResolveError, SenatorPath, Seq, StatusPayload, meta,
 };
 
 use crate::auth::{Authenticate, bearer_token};
@@ -63,6 +63,7 @@ pub(crate) fn router(state: AppState) -> Router {
             "/v1/committees/{committee}/checkpoints/latest",
             get(latest_checkpoint),
         )
+        .route("/v1/committees/{committee}/docket", get(docket))
         .fallback(|| async { ApiFailure::not_found("no such route") })
         .method_not_allowed_fallback(|| async { ApiFailure::method_not_allowed() })
         // Outermost, so errors and fallbacks carry it too.
@@ -111,6 +112,26 @@ impl AppState {
             .act_as(&person.0, senator)
             .map(|_| ())
             .map_err(|e| ApiFailure::forbidden(e.to_string()))
+    }
+
+    /// `person` writes as `speaker`: only when a senator holds this Senate's
+    /// Speaker's seat and it is one of `person`'s own agents. The built-in
+    /// Speaker writes in process; nobody writes as it over HTTP.
+    fn preside(&self, person: &Person) -> Result<(), ApiFailure> {
+        match self.hub.speaker_seat() {
+            Some(seat) if seat.held_by(&person.0) => Ok(()),
+            Some(seat) => Err(ApiFailure::forbidden(format!(
+                "{} does not hold the Speaker's seat here ({})",
+                person.0,
+                match seat.senator() {
+                    Some(senator) => format!("held by {}", Address::senator(senator)),
+                    None => "the built-in Speaker".to_owned(),
+                }
+            ))),
+            None => Err(ApiFailure::forbidden(
+                "nobody presides over this Senate; nobody writes as the Speaker",
+            )),
+        }
     }
 
     /// Like [`AppState::act_as`], for a request that may name no senator: it
@@ -177,6 +198,7 @@ async fn me(State(state): State<AppState>, person: Person) -> Result<Json<Me>, A
     Ok(Json(Me {
         agents: roster.agents_of(&person.0).into_iter().cloned().collect(),
         presider: roster.presider().cloned(),
+        speaker: state.hub.speaker_seat().cloned(),
         person: person.0,
         committees,
         epoch: state.hub.epoch().await?,
@@ -210,10 +232,18 @@ async fn append(
         )));
     }
     // A request writes as a senator it may act as: the person, or one of
-    // their own agents (seated now if this is its first contact). Not as the
-    // Speaker, the committee, a guest, or somebody else.
-    match &event.from {
-        Address::Senator(from) => state.act_as(&person, from)?,
+    // their own agents (seated now if this is its first contact); or as the
+    // Speaker when one of their agents holds its seat. Not as the
+    // committee, a guest, or somebody else.
+    let as_speaker = match &event.from {
+        Address::Senator(from) => {
+            state.act_as(&person, from)?;
+            false
+        }
+        Address::Speaker => {
+            state.preside(&person)?;
+            true
+        }
         Address::AgentOf(_) => {
             return Err(ApiFailure::bad_request(
                 "from names one senator; senator::<person>/* is only for recipients",
@@ -225,15 +255,20 @@ async fn append(
                 person.0
             )));
         }
+    };
+    reject_server_provenance(&event, as_speaker)?;
+    if as_speaker {
+        check_speaker_write(&state, &event).await?;
+    } else {
+        reject_brief_top_and_agent_decisions(&event)?;
+        reject_speaker_keys(&event)?;
     }
-    reject_server_provenance(&event)?;
-    reject_brief_top_and_agent_decisions(&event)?;
-    reject_speaker_keys(&event)?;
     check_checkpoint(&event)?;
     check_companion(&event)?;
     check_status(&state, &event).await?;
-    // `to` may hold `senator::<person>/*`: resolved against the roster, or
-    // refused with the candidates.
+    // `to` may hold `senator::<person>/*`: resolved against the roster, put
+    // to the Speaker to pick, or refused with the candidates.
+    let event = put_to_speaker(&state, event).await?;
     let appended = state.hub.resolve_and_append(event).await?;
     Ok(Json(AppendResponse {
         event: appended.event,
@@ -249,15 +284,26 @@ async fn append(
 /// someone else, and platform provenance (`source`, `mirror`). A person's
 /// bridge states none of them; an agent holding its person's token could
 /// otherwise forge a human's instructions.
-fn reject_server_provenance(event: &NewEvent) -> Result<(), ApiFailure> {
+///
+/// The Speaker speaks for others (`on_behalf_of`): when a senator holds its
+/// seat, its writes may carry it ([`check_speaker_write`] says for whom).
+/// [`meta::PICK`] is the server's own: it is set when a message is put to
+/// the Speaker, never by a writer.
+fn reject_server_provenance(event: &NewEvent, as_speaker: bool) -> Result<(), ApiFailure> {
     if matches!(event.kind, Kind::Binding | Kind::Presence | Kind::Chat) {
         return Err(ApiFailure::forbidden(format!(
             "{} events are written by the server, not by senators",
             event.kind
         )));
     }
+    if event.meta.contains_key(meta::PICK) {
+        return Err(ApiFailure::forbidden(format!(
+            "meta.{} is set by the server when it puts a message to the Speaker",
+            meta::PICK
+        )));
+    }
     let claimed = [
-        ("on_behalf_of", event.on_behalf_of.is_some()),
+        ("on_behalf_of", event.on_behalf_of.is_some() && !as_speaker),
         ("source", event.source.is_some()),
         ("mirror", event.mirror.is_some()),
     ];
@@ -306,6 +352,87 @@ fn reject_speaker_keys(event: &NewEvent) -> Result<(), ApiFailure> {
         }
     }
     Ok(())
+}
+
+/// What a senator holding the Speaker's seat may not write as `speaker`:
+/// work runs (the built-in Speaker's hands alone) and decisions (people
+/// decide). It speaks `on_behalf_of` a senator who could sit in this Senate
+/// (a listed person, or an agent at this Senate's level: the away agent it
+/// covers, which need not have connected yet; the person whose message it
+/// relays) or a guest.
+async fn check_speaker_write(state: &AppState, event: &NewEvent) -> Result<(), ApiFailure> {
+    if event.meta.contains_key(meta::WORK) {
+        return Err(ApiFailure::forbidden(format!(
+            "meta.{} is the built-in Speaker's: a senator presiding does no work runs",
+            meta::WORK
+        )));
+    }
+    if event.kind == Kind::Decision {
+        return Err(ApiFailure::forbidden(
+            "the Speaker does not decide; people decide",
+        ));
+    }
+    match &event.on_behalf_of {
+        None | Some(Address::Guest(_)) => Ok(()),
+        Some(Address::Senator(senator)) => {
+            if state
+                .hub
+                .roster()
+                .await?
+                .may_act_as(senator.owner(), senator)
+                .is_ok()
+            {
+                Ok(())
+            } else {
+                Err(ApiFailure::bad_request(format!(
+                    "{} does not sit in this Senate",
+                    Address::senator(senator)
+                )))
+            }
+        }
+        Some(other) => Err(ApiFailure::bad_request(format!(
+            "the Speaker speaks on behalf of a senator or a guest, not {other}"
+        ))),
+    }
+}
+
+/// A sender that cannot be expected to know a person's agents (a person,
+/// not an agent) wrote `senator::<owner>/*`, and `owner` has several agents
+/// here: with a senator in the Speaker's seat, the message is put to the
+/// Speaker instead (`to: speaker`, [`meta::PICK`] naming the candidates),
+/// which routes it. An agent sender, or a Senate whose Speaker cannot pick
+/// over HTTP (built in, or none), is refused with the candidates (409).
+/// Several ambiguous wildcards in one message are refused too: one pick
+/// per message.
+async fn put_to_speaker(state: &AppState, mut event: NewEvent) -> Result<NewEvent, ApiFailure> {
+    let senator_speaker = state
+        .hub
+        .speaker_seat()
+        .is_some_and(|seat| seat.senator().is_some());
+    if !senator_speaker || event.from.is_junior() || event.from == Address::Speaker {
+        return Ok(event);
+    }
+    let roster = state.hub.roster().await?;
+    let mut pick: Option<PickPayload> = None;
+    let mut to = Vec::with_capacity(event.to.len());
+    for address in &event.to {
+        match roster.resolve_address(address) {
+            Err(ResolveError::Ambiguous { owner, candidates }) if pick.is_none() => {
+                pick = Some(PickPayload { owner, candidates });
+                if !to.contains(&Address::Speaker) {
+                    to.push(Address::Speaker);
+                }
+            }
+            // Refused below, by the ordinary resolution.
+            Err(_) => return Ok(event),
+            Ok(_) => to.push(address.clone()),
+        }
+    }
+    if let Some(pick) = pick {
+        event.to = to;
+        event.meta.insert(meta::PICK.into(), pick.value());
+    }
+    Ok(event)
 }
 
 /// A checkpoint is one agent's own handover note, so only an agent writes
@@ -589,6 +716,15 @@ async fn latest_checkpoint(
                 Address::senator(&agent)
             ))
         })
+}
+
+async fn docket(
+    State(state): State<AppState>,
+    _person: Person,
+    path: Result<Path<String>, PathRejection>,
+) -> Result<Json<DocketPage>, ApiFailure> {
+    let committee = committee_path(path)?;
+    Ok(Json(state.hub.docket(&committee).await?))
 }
 
 async fn threads(

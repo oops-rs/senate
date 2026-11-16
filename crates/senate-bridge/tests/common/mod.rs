@@ -300,6 +300,10 @@ async fn me(State(st): St, headers: HeaderMap) -> Response {
             Json(Me {
                 person: name(&h),
                 presider: inner.presider.clone(),
+                speaker: inner
+                    .presider
+                    .clone()
+                    .map(senate_core::SpeakerSeat::Senator),
                 agents: inner
                     .roster
                     .agents_of(&name(&h))

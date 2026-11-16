@@ -35,6 +35,7 @@
 //! | GET  | `/v1/committees/{committee}/threads?state=&agent=` | → [`ThreadsPage`] |
 //! | GET  | `/v1/committees/{committee}/presence` | → [`PresencePage`] |
 //! | GET  | `/v1/committees/{committee}/checkpoints/latest?agent=` | → [`CheckpointRecord`](crate::CheckpointRecord) (404 `not_found` when none) |
+//! | GET  | `/v1/committees/{committee}/docket` | → [`DocketPage`](crate::DocketPage) |
 //!
 //! A senator is named in a query, never in a path segment, because a
 //! senator path holds slashes: `?agent=wendell/claude`.
@@ -49,6 +50,28 @@
 //! several agents the append is refused with 409
 //! [`code::AMBIGUOUS_RECIPIENT`] and the candidates in
 //! [`ApiError::candidates`]: the sender names one and tries again.
+//!
+//! # Writing as the Speaker
+//!
+//! An append `from: speaker` is accepted only when the Speaker's seat
+//! ([`Me::speaker`]) is held by a senator and the authenticated person is
+//! that senator's person ([`SpeakerSeat::held_by`](crate::SpeakerSeat::held_by)):
+//! the session presiding over the Senate does the Speaker's work over HTTP.
+//! It may then write what only the Speaker writes (triage verdicts, the
+//! output level, the brief's top, takeover, provisional answers) and speak
+//! `on_behalf_of` a senator of this Senate or a guest; not work runs (the
+//! built-in Speaker's alone), not a `decision` (people decide), and not
+//! what only the server writes. Anyone else is 403 `forbidden`. The event
+//! is stored `from: speaker`, exactly as the built-in Speaker's would be.
+//!
+//! # A message for a person's agent
+//!
+//! When `to` holds `senator::<person>/*`, the person has several agents
+//! here, the sender is not an agent (it cannot be expected to know their
+//! agents), and a senator holds the Speaker's seat, the message is stored
+//! addressed to `speaker` instead, with [`meta::PICK`](crate::meta::PICK)
+//! naming the candidates: the Speaker routes it (see [`crate::docket`]).
+//! An agent sender is refused with the candidates as below.
 //!
 //! Appends a senator may not make: `binding`, `presence` and `chat` (those
 //! are written by server components), any event carrying
@@ -114,7 +137,7 @@ use serde::{Deserialize, Serialize};
 use crate::continuity::AgentPresence;
 use crate::event::{Event, NewEvent, StatusState};
 use crate::ids::{CommitteeId, Name, Seq};
-use crate::roster::ResolveError;
+use crate::roster::{ResolveError, SpeakerSeat};
 use crate::senator::SenatorPath;
 use crate::task::ThreadSummary;
 
@@ -178,6 +201,10 @@ pub fn latest_checkpoint_path(committee: &CommitteeId) -> String {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckpointQuery {
     pub agent: SenatorPath,
+}
+
+pub fn docket_path(committee: &CommitteeId) -> String {
+    format!("/v1/committees/{committee}/docket")
 }
 
 /// `GET .../presence`: every agent with a presence on the committee, by path.
@@ -295,6 +322,12 @@ pub struct Me {
     /// the top Senate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presider: Option<SenatorPath>,
+    /// Who holds this Senate's Speaker's seat: the built-in Speaker, a
+    /// senator (a nested Senate's presider, or the agent a top Senate used
+    /// alone names), or nobody (absent). A bridge gives the session of an
+    /// agent holding the seat the presiding tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<SpeakerSeat>,
     /// The person's agents seated in this Senate now. May be none, one or
     /// several; an agent not listed is seated when it first connects.
     #[serde(default)]
@@ -308,11 +341,12 @@ pub struct Me {
     pub epoch: String,
     /// Whether a Speaker on this server judges task roots (writes the
     /// `meta.triage` verdict a bridge holds a root for, see
-    /// [`crate::task`]). False where nothing does: a server with no built-in
-    /// Speaker, such as a nested Senate, whose Speaker is one of its
-    /// senators and may not write verdicts. A bridge then delivers a root at
-    /// once instead of waiting for a verdict that will not come. A server
-    /// that does not say is taken to judge, as every server once did.
+    /// [`crate::task`]): only the built-in Speaker does
+    /// ([`SpeakerSeat::triages`]). False where nothing does: no Speaker, or
+    /// a Speaker held by a senator, whose session may be closed and has no
+    /// triage duty. A bridge then delivers a root at once instead of waiting
+    /// for a verdict that may never come. A server that does not say is
+    /// taken to judge, as every server once did.
     #[serde(default = "judged_by_default")]
     pub triaged: bool,
 }
@@ -455,6 +489,7 @@ mod tests {
         let nested = Me {
             person: Name::new("wendell").unwrap(),
             presider: Some(path("wendell/claude")),
+            speaker: Some(SpeakerSeat::Senator(path("wendell/claude"))),
             agents: vec![
                 path("wendell/claude/reviewer"),
                 path("wendell/claude/codex"),
@@ -465,6 +500,8 @@ mod tests {
         };
         let value = serde_json::to_value(&nested).unwrap();
         assert_eq!(value["presider"], "wendell/claude");
+        assert_eq!(value["speaker"], json!({ "senator": "wendell/claude" }));
+        assert_eq!(top.speaker, None, "an older server names no Speaker");
         assert_eq!(value["triaged"], false);
         assert_eq!(serde_json::from_value::<Me>(value).unwrap(), nested);
     }
