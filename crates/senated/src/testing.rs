@@ -214,6 +214,10 @@ struct State {
     /// When set, the groups configured on the platform: unmentioned chat
     /// from any other group without a grant is not delivered.
     configured: Option<BTreeSet<String>>,
+    /// Posts still to fail, each as the caller sees a bug in the surface.
+    panics: usize,
+    /// Posts still to refuse as unavailable.
+    outages: usize,
 }
 
 /// The fake platform. See the module docs.
@@ -247,6 +251,16 @@ impl FakeChat {
     /// bot holds a grant for.
     pub fn gate_ambient(&self, configured: &[&str]) {
         self.lock().configured = Some(configured.iter().map(|g| (*g).to_owned()).collect());
+    }
+
+    /// The next `n` posts panic, as a bug in a surface would.
+    pub fn panic_next_posts(&self, n: usize) {
+        self.lock().panics = n;
+    }
+
+    /// The next `n` posts are refused as unavailable, as during an outage.
+    pub fn fail_next_posts(&self, n: usize) {
+        self.lock().outages = n;
     }
 
     /// Every adopt takes this long to answer.
@@ -398,6 +412,15 @@ impl FakeChat {
         mention: Option<&str>,
     ) -> Result<Posted, SurfaceError> {
         let mut state = self.lock();
+        if state.panics > 0 {
+            state.panics -= 1;
+            drop(state);
+            panic!("fake chat: a post panics on request");
+        }
+        if state.outages > 0 {
+            state.outages -= 1;
+            return Err(SurfaceError::Unavailable("fake chat: an outage".into()));
+        }
         let content = format!("{}\0{markdown}", mention.unwrap_or_default());
         if let Some((first_target, first_content, first)) =
             state.operations.get(operation_id).cloned()
