@@ -43,6 +43,7 @@ pub mod locale;
 pub mod mention;
 pub mod roster;
 pub mod senator;
+pub mod task;
 pub mod work;
 
 pub use address::{Address, AddressParseError, Guest, GuestError, MAX_GUEST_ID_LEN};
@@ -62,6 +63,10 @@ pub use roster::{
     Account, AgentOf, DelegationPresence, ResolveError, Roster, RosterConfig, RosterError, Senior,
 };
 pub use senator::{MAX_AGENT_DEPTH, SenatorPath, SenatorPathError};
+pub use task::{
+    Link, OutputLevel, StatusPayload, Step, TaskBoard, TaskOwner, ThreadSummary, TriagePayload,
+    TriageVerdict, needs_triage,
+};
 pub use work::{BranchNaming, DEFAULT_BRANCH_PREFIX, WorkRun, WorkState, is_work_root};
 
 /// What every rendered text is held to in this crate's tests.
