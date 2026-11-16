@@ -301,6 +301,18 @@ impl LogStore for MemoryStore {
         Ok(())
     }
 
+    async fn heartbeats(&self, committee: &CommitteeId) -> Result<Vec<HeartbeatRecord>, LogError> {
+        let inner = self.lock();
+        let mut records: Vec<_> = inner
+            .heartbeats
+            .iter()
+            .filter(|((c, _), _)| c == committee)
+            .map(|(_, record)| record.clone())
+            .collect();
+        records.sort_by(|a, b| a.agent.cmp(&b.agent));
+        Ok(records)
+    }
+
     async fn last_heartbeat(
         &self,
         committee: &CommitteeId,

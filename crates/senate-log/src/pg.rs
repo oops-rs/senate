@@ -485,6 +485,36 @@ impl LogStore for PgStore {
         Ok(())
     }
 
+    async fn heartbeats(&self, committee: &CommitteeId) -> Result<Vec<HeartbeatRecord>, LogError> {
+        let rows = sqlx::query(
+            "SELECT agent, sessions, delivered_seq, seen_at FROM heartbeats \
+             WHERE committee = $1 ORDER BY agent COLLATE \"C\"",
+        )
+        .bind(committee.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|row| {
+                let agent: SenatorPath = row
+                    .try_get::<String, _>("agent")?
+                    .parse()
+                    .map_err(|e| LogError::Corrupt(format!("heartbeat agent: {e}")))?;
+                let sessions: i64 = row.try_get("sessions")?;
+                Ok(HeartbeatRecord {
+                    committee: committee.clone(),
+                    heartbeat: Heartbeat {
+                        agent: agent.clone(),
+                        sessions: u32::try_from(sessions)
+                            .map_err(|_| LogError::Corrupt(format!("sessions {sessions}")))?,
+                        cursor: seq_from_db(row.try_get("delivered_seq")?)?,
+                    },
+                    agent,
+                    at: row.try_get("seen_at")?,
+                })
+            })
+            .collect()
+    }
+
     async fn last_heartbeat(
         &self,
         committee: &CommitteeId,

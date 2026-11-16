@@ -175,6 +175,11 @@ pub trait LogStore: Send + Sync + 'static {
         at: DateTime<Utc>,
     ) -> Result<(), LogError>;
 
+    /// The latest heartbeat of every agent that has sent one for the
+    /// committee, by agent path. A restarted server restores presence from
+    /// these.
+    async fn heartbeats(&self, committee: &CommitteeId) -> Result<Vec<HeartbeatRecord>, LogError>;
+
     /// The latest heartbeat of exactly this agent.
     async fn last_heartbeat(
         &self,

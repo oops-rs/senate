@@ -499,6 +499,38 @@ impl LogStore for SqliteStore {
         .await
     }
 
+    async fn heartbeats(&self, committee: &CommitteeId) -> Result<Vec<HeartbeatRecord>, LogError> {
+        let committee = committee.clone();
+        self.run(move |conn| {
+            let mut stmt = conn.prepare_cached(
+                "SELECT agent, sessions, delivered_seq, seen_at FROM heartbeats \
+                 WHERE committee = ?1 ORDER BY agent",
+            )?;
+            let mut rows = stmt.query([committee.as_str()])?;
+            let mut out = Vec::new();
+            while let Some(row) = rows.next()? {
+                let agent: SenatorPath = row
+                    .get::<_, String>(0)?
+                    .parse()
+                    .map_err(|e| LogError::Corrupt(format!("heartbeat agent: {e}")))?;
+                let sessions: i64 = row.get(1)?;
+                out.push(HeartbeatRecord {
+                    committee: committee.clone(),
+                    heartbeat: Heartbeat {
+                        agent: agent.clone(),
+                        sessions: u32::try_from(sessions)
+                            .map_err(|_| LogError::Corrupt(format!("sessions {sessions}")))?,
+                        cursor: seq_from_db(row.get(2)?)?,
+                    },
+                    agent,
+                    at: time_from_db(&row.get::<_, String>(3)?)?,
+                });
+            }
+            Ok(out)
+        })
+        .await
+    }
+
     async fn last_heartbeat(
         &self,
         committee: &CommitteeId,

@@ -890,6 +890,21 @@ async fn heartbeats_keep_the_latest_per_agent(store: Arc<dyn LogStore>) {
             .unwrap()
             .is_none()
     );
+
+    // All of a committee's, by agent path.
+    let all = store.heartbeats(&f).await.unwrap();
+    assert_eq!(
+        all.iter().map(|r| r.agent.to_string()).collect::<Vec<_>>(),
+        ["alice/claude", "alice/codex"]
+    );
+    assert_eq!(all[0].heartbeat, beat);
+    assert!(
+        store
+            .heartbeats(&committee("search"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 macro_rules! conformance {
