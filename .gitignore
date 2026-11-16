@@ -1,0 +1,6 @@
+/target
+/data
+/.worktree
+*.log
+.env
+.DS_Store

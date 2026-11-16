@@ -1,0 +1,18 @@
+[package]
+name = "senate-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Senate contracts: ids, senator paths, addresses, inline mentions, the roster of one Senate, and the event envelope."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+ulid = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true
