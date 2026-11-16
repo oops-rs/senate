@@ -123,6 +123,8 @@ pub fn suspended(root: u64, title: &str, agent: &str) -> ThreadSummary {
         takeover: None,
         reason: Some("a product call".into()),
         answered: false,
+        answered_by: None,
+        reopened: false,
     }
 }
 
@@ -391,6 +393,7 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
             committee: Some(c),
             agent: Some(name),
             session,
+            ..
         } => {
             assert_eq!(session, Default::default(), "the app has no session");
             let agent = path(&format!("alice/{name}"));
@@ -407,6 +410,7 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
                 agents: vec![agent],
                 person: alice(),
                 threads,
+                settled: 0,
             })
         }
         Request::Answer {

@@ -26,6 +26,7 @@
 //! | `session_end` | `session_id`, `reason?` | `{}` |
 //! | `ask` | `session`, `to` (addresses), `body`, `refs?`, `id?`, `request?` | [`Posted`] |
 //! | `answer` | `session`, `thread` (root seq), `body`, `id?` | [`Posted`] |
+//! | `inbox` | `session`, `committee?`, `agent?`, `all?` | [`InboxReply`] |
 //! | `catch_up` | `session`, `limit?` | [`CatchUpReply`] |
 //! | `join` | `session`, `committee` | [`JoinReply`] |
 //! | `search` | `session`, `query`, `limit?`, `committee?` | [`SearchReply`] |
@@ -372,6 +373,9 @@ pub enum Request {
         committee: Option<CommitteeId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent: Option<Name>,
+        /// Also list settled threads (see [`senate_core::ThreadSummary::waits`]).
+        #[serde(default, skip_serializing_if = "is_false")]
+        all: bool,
     },
     /// Whether the session's agent presides over a Senate here.
     Presides {
@@ -568,8 +572,12 @@ pub struct InboxReply {
     pub agents: Vec<SenatorPath>,
     pub person: Name,
     /// Not archived, addressed to one of `agents` or escalated to `person`,
-    /// longest in their state first.
+    /// longest in their state first. Without `all` only those that wait on
+    /// someone ([`ThreadSummary::waits`]); with it settled ones too.
     pub threads: Vec<ThreadSummary>,
+    /// Settled threads left out of `threads` (always 0 with `all`).
+    #[serde(default)]
+    pub settled: usize,
 }
 
 fn is_false(b: &bool) -> bool {

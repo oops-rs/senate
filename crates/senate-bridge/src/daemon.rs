@@ -2310,7 +2310,8 @@ impl Shared {
                 session,
                 committee,
                 agent,
-            } => wrap(self.on_inbox(&session, committee, agent).await),
+                all,
+            } => wrap(self.on_inbox(&session, committee, agent, all).await),
             Request::Approvals => Reply::ok(&ApprovalsReply {
                 approvals: self.relay.list(),
             }),
@@ -3224,6 +3225,7 @@ impl Shared {
         selector: &SessionSelector,
         committee: Option<CommitteeId>,
         agent: Option<Name>,
+        all: bool,
     ) -> Result<InboxReply, IpcError> {
         let (session, committee) = self.session_and_committee(selector, committee)?;
         let agents = match (session, agent) {
@@ -3237,7 +3239,7 @@ impl Shared {
             .await
             .map_err(server_error)?;
         let person = &self.config.person;
-        let threads = page
+        let mut threads: Vec<_> = page
             .threads
             .into_iter()
             .filter(|t| t.state != senate_core::StatusState::Archived)
@@ -3245,11 +3247,21 @@ impl Shared {
                 agents.iter().any(|a| t.is_for(a)) || t.escalated_to.as_ref() == Some(person)
             })
             .collect();
+        // What waits on no one is left out and counted, unless asked for.
+        let mut settled = 0;
+        if !all {
+            threads.retain(|t| {
+                let waits = t.waits().is_some();
+                settled += usize::from(!waits);
+                waits
+            });
+        }
         Ok(InboxReply {
             committee,
             agents,
             person: person.clone(),
             threads,
+            settled,
         })
     }
 

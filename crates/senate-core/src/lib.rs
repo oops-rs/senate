@@ -110,7 +110,7 @@ pub use surface::{
 };
 pub use task::{
     Link, OutputLevel, StatusPayload, Step, TaskBoard, TaskOwner, ThreadSummary, TriagePayload,
-    TriageVerdict, needs_triage,
+    TriageVerdict, WaitsOn, needs_triage,
 };
 pub use work::{BranchNaming, DEFAULT_BRANCH_PREFIX, WorkRun, WorkState, is_work_root};
 

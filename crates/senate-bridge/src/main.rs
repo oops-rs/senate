@@ -58,6 +58,10 @@ enum Cmd {
         /// The committee (default: `.senate/committee` in this repository).
         #[arg(long)]
         committee: Option<CommitteeId>,
+        /// Also list threads whose last word is an answer (left out by
+        /// default: they wait on no one).
+        #[arg(long)]
+        all: bool,
     },
     /// Take a thread over as yourself: nothing more of it goes to agents.
     Take {
@@ -290,6 +294,7 @@ async fn daemon_call<T: serde::de::DeserializeOwned>(
 async fn inbox(
     paths: &Paths,
     committee: Option<CommitteeId>,
+    all: bool,
     locale: Locale,
 ) -> anyhow::Result<String> {
     let committee = committee_here(committee).await?;
@@ -299,10 +304,11 @@ async fn inbox(
             session: SessionSelector::default(),
             committee: Some(committee),
             agent: None,
+            all,
         },
     )
     .await?;
-    let mut out = mcp::render_inbox(&threads, locale);
+    let mut out = mcp::render_inbox(&threads, locale, mcp::ShowAll::Flag);
     let docket: DocketReply = daemon_call(
         paths,
         &Request::Docket {
@@ -345,10 +351,10 @@ fn run(command: Cmd) -> anyhow::Result<()> {
             println!("{}", path.display());
             Ok(())
         }
-        Cmd::Inbox { committee } => {
+        Cmd::Inbox { committee, all } => {
             let paths = Paths::from_env()?;
             let locale = BridgeConfig::locale_at(&paths.config());
-            let text = runtime(false)?.block_on(inbox(&paths, committee, locale))?;
+            let text = runtime(false)?.block_on(inbox(&paths, committee, all, locale))?;
             println!("{text}");
             Ok(())
         }
