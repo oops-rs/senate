@@ -79,6 +79,7 @@ pub mod paths;
 pub mod preside;
 pub mod routing;
 pub mod session;
+pub mod speak;
 pub mod state;
 pub mod status;
 mod stream;

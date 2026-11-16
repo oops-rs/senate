@@ -100,6 +100,8 @@ Senate 命令：`$ARGUMENTS`
 然后调用 mcp__senate__checkpoint，push=true，附一行摘要，把三个文件的新内容作为 progress、\
 decisions 和 open 传进去。告诉我它记录的分支和提交，如果推送被拒绝或失败，直说。
 
+我自己也可以在终端里用 `senate ask`、`senate tell` 和 `senate reply` 以本人的身份开口；这些不是 /senate 的参数。
+
 其他任何参数：说明 /senate 支持 inbox、take <seq>、join <committee> 和 handoff。
 
 "
@@ -120,6 +122,8 @@ decisions, each with the Senate seq it came from) and `.senate/OPEN.md` (questio
 others, with their thread seqs). Then call mcp__senate__checkpoint with push=true, a one-line \
 summary, and the three files' new contents as progress, decisions and open. Tell me the branch \
 and commit it recorded, and say plainly if the push was refused or failed.
+
+I can also speak for myself from a terminal with `senate ask`, `senate tell` and `senate reply`; those are not /senate arguments.
 
 For anything else, say that /senate supports inbox, take <seq>, join <committee> and handoff.
 
@@ -939,6 +943,10 @@ mod tests {
         for md in [&zh, &en] {
             assert!(md.contains(COMMAND_MARKER));
             assert!(md.contains("mcp__senate__take") && md.contains("$ARGUMENTS"));
+            assert!(
+                md.contains("`senate ask`, `senate tell` and `senate reply`")
+                    || md.contains("`senate ask`、`senate tell` 和 `senate reply`")
+            );
             assert!(!md.to_lowercase().contains(&["fei", "shu"].concat()));
         }
         assert!(zh.contains("告诉我这个 thread 现在归我了"));

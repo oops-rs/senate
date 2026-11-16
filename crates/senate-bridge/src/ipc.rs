@@ -27,6 +27,8 @@
 //! | `ask` | `session`, `to` (addresses), `body`, `refs?`, `id?`, `request?` | [`Posted`] |
 //! | `answer` | `session`, `thread` (root seq), `body`, `id?` | [`Posted`] |
 //! | `inbox` | `session`, `committee?`, `agent?`, `all?` | [`InboxReply`] |
+//! | `say` | `session`, `committee?`, `kind`, `to`, `body`, `thread?`, `id?` | [`Posted`] |
+//! | `thread` | `session`, `committee?`, `thread` | [`ThreadReply`] |
 //! | `catch_up` | `session`, `limit?` | [`CatchUpReply`] |
 //! | `join` | `session`, `committee` | [`JoinReply`] |
 //! | `search` | `session`, `query`, `limit?`, `committee?` | [`SearchReply`] |
@@ -65,6 +67,19 @@
 //! Without a session, `docket` is a person's read of every Senate on this
 //! machine one of their agents presides over: what waits for a Speaker that
 //! may be away.
+//!
+//! `say` and `thread` are the person's own (`senate ask`, `tell`, `request`,
+//! `reply`, `thread`): `say` appends a `question`, `note` or `request` as
+//! `senator::<person>`, never as an agent. `to` may hold an agent, a person,
+//! `speaker`, or `senator::<person>/*`, which the server resolves, or puts to
+//! the Speaker to pick where a senator presides; with several agents and
+//! nobody to pick it is refused with [`codes::AMBIGUOUS_RECIPIENT`]. With
+//! `thread` (any seq in it) the event is written in that thread, and an
+//! empty `to` addresses whoever took part in it other than the person. A
+//! person's `committee` is required without a session; which Senate the
+//! request goes to follows the other sessionless requests (the primary one:
+//! where the person's agents sit directly). `thread` reads one thread's events,
+//! and those of the thread a Speaker relayed it into (`meta.relayed_from`).
 //!
 //! `approvals` / `approve` / `watch` are for a desktop app.
 //! `approvals` lists the Codex approval requests waiting
@@ -364,6 +379,32 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         committee: Option<CommitteeId>,
     },
+    /// The person speaks (`senate ask`, `tell`, `request`, `reply`): a
+    /// `question`, `note` or `request` written as `senator::<person>`.
+    Say {
+        session: SessionSelector,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        committee: Option<CommitteeId>,
+        kind: SayKind,
+        /// Empty with `thread`: whoever took part in the thread.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        to: Vec<Address>,
+        body: String,
+        /// Any seq of the thread to speak in; the event goes in its root's
+        /// thread.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thread: Option<Seq>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<EventId>,
+    },
+    /// The events of one thread, root first.
+    Thread {
+        session: SessionSelector,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        committee: Option<CommitteeId>,
+        /// Any seq in the thread.
+        thread: Seq,
+    },
     /// Open task threads that wait on this agent or this person (`/senate
     /// inbox`). Without a session, those of `agent` when given, else of
     /// every agent this bridge holds a stream for on the committee.
@@ -451,6 +492,36 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<EventId>,
     },
+}
+
+/// What a person says with `say`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SayKind {
+    /// Asks for an answer.
+    Question,
+    /// Says something; no answer expected.
+    Note,
+    /// Asks the other side to do something.
+    Request,
+}
+
+impl SayKind {
+    pub fn event_kind(self) -> Kind {
+        match self {
+            Self::Question => Kind::Question,
+            Self::Note => Kind::Note,
+            Self::Request => Kind::Request,
+        }
+    }
+}
+
+/// One thread's events, root first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ThreadReply {
+    pub committee: CommitteeId,
+    pub root: Seq,
+    pub events: Vec<Event>,
 }
 
 /// What `presides` found.

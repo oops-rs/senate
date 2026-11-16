@@ -348,3 +348,148 @@ async fn one_person_chains_claude_code_and_codex_under_a_presiding_agent() {
     assert!(refused.is_err(), "no covering for the seat holder");
     desk.stop().await;
 }
+
+/// What the person types: `senate ask '*' --wait`, through the very requests
+/// the command sends (`senate_bridge::speak`), with the presiding session
+/// routing it and the chosen agent answering; then the inbox, which has
+/// nothing waiting but the settled thread, listed with `--all`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_person_asks_whichever_agent_from_the_command_line_and_waits_for_the_answer() {
+    use senate_bridge::ipc::{InboxReply, SayKind, SessionSelector};
+    use senate_bridge::mcp::{ShowAll, render_inbox};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut desk = Desk::new(dir.path(), "alice", Locale::En, ALONE);
+    let codex = desk.codex_app_server();
+    desk.start().await;
+    let claude = desk.inbox("s-claude");
+    desk.session_start("s-claude", &claude).await.unwrap();
+    desk.codex_start("thread-codex").await.unwrap();
+    codex.idle("thread-codex");
+    desk.wait_connected(None, "alice/claude", true).await;
+    desk.wait_connected(None, "alice/codex", true).await;
+    let socket = desk.paths.socket();
+    // Both agents have spoken, so both are seated.
+    desk.post("s-claude", "presiding").await;
+    desk.post("thread-codex", "ready").await;
+
+    // `senate ask '*' ... --wait`: alice has two agents here, so the server
+    // puts it to the presiding session to pick.
+    let sent = senate_bridge::speak::send(
+        &socket,
+        committee(),
+        SayKind::Question,
+        "*",
+        "Please check the refund retry limit.".into(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(sent.posted.to, [Address::Speaker]);
+    assert_eq!(sent.wrote.to_string(), "senator::alice/*");
+    assert!(
+        sent.render(true)
+            .contains("to [speaker] (you wrote [senator::alice/*]; the Speaker picks which agent)"),
+        "{}",
+        sent.render(true)
+    );
+    let waiting = tokio::spawn({
+        let (socket, sent) = (socket.clone(), sent.clone());
+        async move {
+            senate_bridge::speak::wait_answer(&socket, &sent, std::time::Duration::from_secs(30))
+                .await
+        }
+    });
+
+    // The presiding session routes it to Codex; Codex answers the relay.
+    claude.wait_for("refund retry limit").await;
+    let routed: Posted = desk
+        .ipc(Request::Route {
+            session: Laptop::session("s-claude"),
+            committee: committee(),
+            seq: sent.posted.seq,
+            to: path("alice/codex"),
+            id: None,
+        })
+        .await;
+    eventually("codex is relayed it", || {
+        codex_pushes(&codex)
+            .into_iter()
+            .find(|p| p.contains("refund retry limit"))
+    })
+    .await;
+    assert!(!waiting.is_finished(), "nothing answered yet");
+    desk.answer(
+        "thread-codex",
+        routed.seq,
+        "3 attempts, see refund/retry.rs",
+    )
+    .await;
+
+    // The waiting command returns the answer, with its byline.
+    let answer = waiting.await.unwrap().unwrap().expect("an answer");
+    assert_eq!(answer.from, senator("alice/codex"));
+    assert_eq!(
+        senate_bridge::speak::render_answer(&answer, Locale::En),
+        format!(
+            "[senator::alice/codex] answered in thread {}:\n3 attempts, see refund/retry.rs",
+            routed.seq
+        )
+    );
+    // `senate thread` reads it from the question's seq, relay included.
+    let (thread, _) = senate_bridge::speak::thread(&socket, committee(), sent.posted.seq)
+        .await
+        .unwrap();
+    let kinds: Vec<_> = thread.events.iter().map(|e| e.kind.clone()).collect();
+    assert_eq!(kinds, [Kind::Question, Kind::Question, Kind::Answer]);
+    assert_eq!(
+        thread.events[1].byline(Locale::En).unwrap(),
+        "[speaker::alice]"
+    );
+
+    // The default inbox: nothing waits, the settled thread is counted.
+    let inbox = |all: bool| {
+        let desk = &desk;
+        async move {
+            desk.ipc::<InboxReply>(Request::Inbox {
+                session: SessionSelector::default(),
+                committee: Some(committee()),
+                agent: None,
+                all,
+            })
+            .await
+        }
+    };
+    let waiting = inbox(false).await;
+    assert!(waiting.threads.is_empty(), "{:?}", waiting.threads);
+    assert_eq!(waiting.settled, 1);
+    let text = render_inbox(&waiting, Locale::En, ShowAll::Flag);
+    assert!(
+        text.starts_with("Nothing open waits on")
+            && text.ends_with("1 answered thread(s) not shown; --all lists them."),
+        "{text}"
+    );
+    let all = inbox(true).await;
+    assert_eq!(all.settled, 0);
+    assert_eq!(all.threads.len(), 1);
+    assert_eq!(all.threads[0].root, routed.seq);
+    assert!(all.threads[0].is_settled());
+    assert!(
+        render_inbox(&all, Locale::En, ShowAll::Flag).contains("settled: answered, nobody waits")
+    );
+
+    // Alice follows up: the thread waits again, on the agent that answered.
+    let (posted, _) = senate_bridge::speak::reply(
+        &socket,
+        committee(),
+        sent.posted.seq,
+        "No: I meant the retry limit of the refund webhook.".into(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(posted.to, [senator("alice/codex")]);
+    assert_eq!(posted.thread, Some(routed.seq));
+    let waiting = inbox(false).await;
+    assert_eq!(waiting.threads.len(), 1);
+    assert_eq!(waiting.settled, 0);
+    desk.stop().await;
+}
