@@ -1,0 +1,29 @@
+[package]
+name = "senate-e2e"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "End-to-end tests: the real server, Speaker and bridge daemons, assembled by senated, against a generic fake chat platform."
+
+[dependencies]
+
+[dev-dependencies]
+senate-core = { workspace = true }
+senate-log = { workspace = true }
+senate-server = { workspace = true }
+senate-speaker = { workspace = true }
+senate-work = { workspace = true, features = ["testing"] }
+senate-bridge = { workspace = true }
+senated = { workspace = true, features = ["testing"] }
+chrono = { workspace = true }
+ractor = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util"] }
+
+[lints]
+workspace = true
