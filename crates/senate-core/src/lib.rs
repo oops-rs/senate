@@ -43,7 +43,11 @@ pub mod roster;
 pub mod senator;
 
 pub use address::{Address, AddressParseError, Guest, GuestError, MAX_GUEST_ID_LEN};
-pub use event::{Event, Kind, Mirror, NewEvent, Refs, Source};
+pub use event::{
+    BindingAction, BindingPayload, Event, GroupRole, Kind, Mirror, NewEvent, PROPOSAL_DECISION,
+    Refs, Source, StatusState, is_companion, is_provisional, is_takeover, meta,
+    thread_participants,
+};
 pub use ids::{CommitteeId, EventId, IdError, Name, Seq};
 pub use locale::{Locale, LocaleParseError};
 pub use mention::{Found, Mention, MentionParseError};
