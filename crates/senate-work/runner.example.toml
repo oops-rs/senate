@@ -1,0 +1,27 @@
+# Every field of senate-work's DockerRunnerConfig and GhForgeConfig, for
+# reference (senate-work's tests parse this file). A daemon's configuration
+# nests these under its own work section.
+
+[runner]
+image = "senate-runner:dev"
+# One directory per run, removed afterwards. If the daemon runs in a
+# container and talks to the host's docker daemon, bind this directory at the
+# same path in both, so the daemon can mount <work_root>/<run>/work.
+work_root = "/var/lib/senate/runs"
+model = "claude-sonnet-4-5"
+gateway_base_url = "http://gateway.lan:4000"
+# Read at each run; reaches the container through docker's environment only.
+gateway_key_file = "/run/secrets/runner-model-key"
+gateway_key_env = "ANTHROPIC_API_KEY"   # or ANTHROPIC_AUTH_TOKEN for a bearer gateway
+allowed_repos = ["example/project"]
+# Host-side credential for clone and push; never mounted into the container.
+git_credential = { kind = "ssh_key", key_file = "/run/secrets/deploy-key", known_hosts_file = "/etc/senate/known_hosts" }
+# git_credential = { kind = "token", token_file = "/run/secrets/github-token" }
+docker_args = ["--memory", "4g", "--cpus", "2", "--pids-limit", "512"]
+# docker_user = "10001:10001"
+
+[forge]
+kind = "github"
+repos = ["example/project"]
+# Fine-grained token: contents read/write + pull requests read/write on the repos above.
+token_file = "/run/secrets/github-token"
