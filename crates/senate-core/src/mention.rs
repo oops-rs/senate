@@ -11,6 +11,8 @@
 //!   behalf. This is a label for who said something, not somewhere to send a
 //!   reply; the reply goes to the senator.
 //! - `[committee]`: everyone on the committee.
+//! - `[senator::wendell/*]`: whichever of wendell's agents should get it.
+//! - `[guest::chat/u_8f3a]`: someone who is not a senator.
 //!
 //! The words are the same in every language. Senate, senator and Speaker are
 //! not translated, so a label reads the same in a Chinese and an English
@@ -20,7 +22,10 @@ use std::fmt;
 use std::ops::Range;
 use std::str::FromStr;
 
-use crate::address::{Address, COMMITTEE, SENATOR_PREFIX, SPEAKER};
+use crate::address::{
+    ANY_AGENT_SUFFIX, Address, COMMITTEE, GUEST_PREFIX, Guest, GuestError, SENATOR_PREFIX, SPEAKER,
+};
+use crate::ids::Name;
 use crate::senator::{SenatorPath, SenatorPathError};
 
 const SPEAKER_FOR_PREFIX: &str = "speaker::";
@@ -28,10 +33,13 @@ const SPEAKER_FOR_PREFIX: &str = "speaker::";
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Mention {
     Senator(SenatorPath),
+    /// Whichever of that person's agents should get it.
+    AgentOf(Name),
     Speaker,
     /// The Speaker answering for a senator.
     SpeakerFor(SenatorPath),
     Committee,
+    Guest(Guest),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -39,11 +47,13 @@ pub enum MentionParseError {
     #[error("a mention is written in square brackets: {0:?}")]
     NoBrackets(String),
     #[error(
-        "unknown mention: {0:?} (expected [senator::<path>], [speaker], [speaker::<path>], or [committee])"
+        "unknown mention: {0:?} (expected [senator::<path>], [senator::<person>/*], [speaker], [speaker::<path>], [committee], or [guest::<platform>/<id>])"
     )]
     Unknown(String),
     #[error(transparent)]
     Senator(#[from] SenatorPathError),
+    #[error(transparent)]
+    Guest(#[from] GuestError),
 }
 
 /// A mention found in a text, with the bytes it covers, brackets included.
@@ -72,19 +82,25 @@ impl Mention {
     pub fn of(address: &Address) -> Option<Self> {
         match address {
             Address::Senator(path) => Some(Self::Senator(path.clone())),
+            Address::AgentOf(owner) => Some(Self::AgentOf(owner.clone())),
             Address::Speaker => Some(Self::Speaker),
             Address::Committee => Some(Self::Committee),
+            Address::Guest(guest) => Some(Self::Guest(guest.clone())),
             Address::Other(_) => None,
         }
     }
 
     /// Where a reply to this mention goes. The Speaker answering for a
-    /// senator is reached at that senator.
+    /// senator is reached at that senator. `[senator::wendell/*]` gives the
+    /// wildcard address, which is resolved against the roster before
+    /// anything is stored.
     pub fn address(&self) -> Address {
         match self {
             Self::Senator(path) | Self::SpeakerFor(path) => Address::Senator(path.clone()),
+            Self::AgentOf(owner) => Address::AgentOf(owner.clone()),
             Self::Speaker => Address::Speaker,
             Self::Committee => Address::Committee,
+            Self::Guest(guest) => Address::Guest(guest.clone()),
         }
     }
 
@@ -117,10 +133,17 @@ impl Mention {
             SPEAKER => Ok(Self::Speaker),
             COMMITTEE => Ok(Self::Committee),
             _ => {
-                if let Some(path) = inner.strip_prefix(SENATOR_PREFIX) {
-                    Ok(Self::Senator(path.parse()?))
+                if let Some(rest) = inner.strip_prefix(SENATOR_PREFIX) {
+                    match rest.strip_suffix(ANY_AGENT_SUFFIX) {
+                        Some(owner) => Ok(Self::AgentOf(
+                            Name::new(owner).map_err(SenatorPathError::from)?,
+                        )),
+                        None => Ok(Self::Senator(rest.parse()?)),
+                    }
                 } else if let Some(path) = inner.strip_prefix(SPEAKER_FOR_PREFIX) {
                     Ok(Self::SpeakerFor(path.parse()?))
+                } else if let Some(guest) = inner.strip_prefix(GUEST_PREFIX) {
+                    Ok(Self::Guest(guest.parse()?))
                 } else {
                     Err(MentionParseError::Unknown(inner.to_string()))
                 }
@@ -133,6 +156,8 @@ impl fmt::Display for Mention {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Senator(path) => write!(f, "[{SENATOR_PREFIX}{path}]"),
+            Self::AgentOf(owner) => write!(f, "[{SENATOR_PREFIX}{owner}{ANY_AGENT_SUFFIX}]"),
+            Self::Guest(guest) => write!(f, "[{GUEST_PREFIX}{guest}]"),
             Self::Speaker => write!(f, "[{SPEAKER}]"),
             Self::SpeakerFor(path) => write!(f, "[{SPEAKER_FOR_PREFIX}{path}]"),
             Self::Committee => write!(f, "[{COMMITTEE}]"),
@@ -167,9 +192,16 @@ mod tests {
             "[speaker]",
             "[speaker::wendell/claude]",
             "[committee]",
+            "[senator::wendell/*]",
+            "[guest::chat/u_8f3a]",
         ] {
             let m: Mention = s.parse().unwrap();
             assert_eq!(m.to_string(), s);
+            // A mention and the address it names are written the same way.
+            if !s.starts_with("[speaker::") {
+                assert_eq!(m.address().in_text(), s);
+                assert_eq!(Mention::of(&m.address()), Some(m));
+            }
         }
     }
 
@@ -184,6 +216,10 @@ mod tests {
             "[ speaker ]",
             "[议长]",
             "[元老::wendell]",
+            "[senator::wendell/claude/*]",
+            "[speaker::wendell/*]",
+            "[guest::chat]",
+            "[guest::chat/a b]",
         ] {
             assert!(s.parse::<Mention>().is_err(), "{s:?}");
         }
@@ -198,6 +234,24 @@ mod tests {
         assert_eq!(&text[found[0].range.clone()], "[senator::wendell/claude]");
         assert_eq!(found[1].mention, Mention::Speaker);
         assert_eq!(&text[found[1].range.clone()], "[speaker]");
+    }
+
+    #[test]
+    fn scan_finds_whichever_agent_and_guests() {
+        let text = "让[senator::alice/*]看看[guest::chat/u_8f3a]问的事 [guest::chat/a]b]";
+        let found = Mention::scan(text);
+        assert_eq!(found.len(), 3);
+        assert_eq!(
+            found[0].mention,
+            Mention::AgentOf(Name::new("alice").unwrap())
+        );
+        assert_eq!(found[0].mention.address().to_string(), "senator::alice/*");
+        assert_eq!(
+            found[1].mention,
+            Mention::Guest(Guest::new("chat", "u_8f3a").unwrap())
+        );
+        // A guest id cannot hold `]`, so the mention ends at the first one.
+        assert_eq!(&text[found[2].range.clone()], "[guest::chat/a]");
     }
 
     #[test]

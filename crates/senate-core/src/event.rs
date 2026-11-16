@@ -7,6 +7,10 @@
 //! The log assigns `seq` and `ts`; a writer supplies everything else as a
 //! [`NewEvent`], including the [`EventId`] that makes a retried append
 //! idempotent.
+//!
+//! Nothing in an event depends on a language. Who spoke for whom, takeover
+//! and state are fields and [`meta`] keys; the words for them are chosen
+//! when the event is shown ([`Event::byline`]).
 
 use std::fmt;
 
@@ -16,6 +20,7 @@ use serde_json::{Map, Value};
 
 use crate::address::Address;
 use crate::ids::{CommitteeId, EventId, Seq};
+use crate::locale::Locale;
 use crate::mention::Mention;
 
 /// What an event means. Serialized as its lowercase name; a name this build
@@ -25,17 +30,21 @@ use crate::mention::Mention;
 pub enum Kind {
     /// A person's message in a bound chat group, recorded as said.
     Chat,
-    /// A group bound to or unbound from the committee.
+    /// A group bound to or unbound from the committee. Payload in
+    /// `meta["binding"]` ([`BindingPayload`]).
     Binding,
     Question,
     /// `thread` points at the question's `seq`.
     Answer,
-    /// Asks the other side to *do* something.
+    /// Asks the other side to *do* something. Always goes to the person
+    /// first: triage parks it on them; once they approve, it is re-sent as
+    /// their own `request` to their own agent, in the same thread.
     Request,
     Note,
     Decision,
     Checkpoint,
-    /// A task thread's state change.
+    /// A task thread's state change. Payload in `meta["status"]`
+    /// ([`StatusPayload`](crate::task::StatusPayload)).
     Status,
     Presence,
     Other(String),
@@ -106,7 +115,9 @@ pub struct Source {
 }
 
 /// The platform identity of an event that began on a platform: which message
-/// it *is*.
+/// it *is*. Outbound copies of log events are recorded separately as
+/// [`crate::MirrorRef`] rows, because the platform id is only known after the
+/// event is already in the log.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Mirror {
     pub platform: String,
@@ -142,6 +153,8 @@ pub struct Event {
     pub kind: Kind,
     pub from: Address,
     /// Empty means undirected: recorded, never pushed, seen on catch-up.
+    /// Always concrete: `senator::<person>/*` is resolved before an event is
+    /// stored.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub to: Vec<Address>,
     /// The `seq` of the thread's root event (a question's seq for its answers).
@@ -178,6 +191,28 @@ impl Event {
     pub fn author(&self) -> Option<Mention> {
         Mention::author(&self.from, self.on_behalf_of.as_ref())
     }
+
+    /// [`Event::author`] as shown to people: the label, followed by one
+    /// localized word when the Speaker wrote it while taken over for an
+    /// away agent ([`is_takeover`]) or an agent's companion session wrote it
+    /// ([`is_companion`]). The label itself is the same in every language:
+    /// `[speaker::wendell/claude] 接管`, `[speaker::wendell/claude] takeover`.
+    pub fn byline(&self, locale: Locale) -> Option<String> {
+        let label = self.author()?;
+        Some(if is_takeover(self) {
+            format!("{label} {}", locale.pick("接管", "takeover"))
+        } else if is_companion(self) {
+            format!("{label} {}", locale.pick("伴随", "companion"))
+        } else {
+            label.to_string()
+        })
+    }
+
+    pub fn binding(&self) -> Option<BindingPayload> {
+        self.meta
+            .get(meta::BINDING)
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+    }
 }
 
 /// An event before the log has assigned it a `seq` and `ts`.
@@ -188,6 +223,10 @@ pub struct NewEvent {
     pub committee: CommitteeId,
     pub kind: Kind,
     pub from: Address,
+    /// A sender may write `senator::<person>/*` here. Whoever accepts the
+    /// event resolves it against the roster
+    /// ([`Roster::resolve_recipients`](crate::Roster::resolve_recipients))
+    /// before it reaches the log; see [`NewEvent::is_resolved`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub to: Vec<Address>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -268,6 +307,20 @@ impl NewEvent {
         self
     }
 
+    pub fn with_binding(self, binding: &BindingPayload) -> Self {
+        let value = serde_json::to_value(binding).unwrap_or(Value::Null);
+        self.with_meta(meta::BINDING, value)
+    }
+
+    /// True when the event can be stored as it is: no address in it is the
+    /// wildcard `senator::<person>/*`. In `to` a wildcard is waiting to be
+    /// resolved; in `from` or `on_behalf_of` it is simply wrong.
+    pub fn is_resolved(&self) -> bool {
+        !self.from.is_wildcard()
+            && !self.on_behalf_of.as_ref().is_some_and(Address::is_wildcard)
+            && !self.to.iter().any(Address::is_wildcard)
+    }
+
     /// The stored form, given what the log assigned.
     pub fn into_event(self, seq: Seq, ts: DateTime<Utc>) -> Event {
         Event {
@@ -289,10 +342,214 @@ impl NewEvent {
     }
 }
 
+/// Keys of [`Event::meta`] with a meaning shared across crates. A key is
+/// owned by the component that writes it; readers rely on these names.
+pub mod meta {
+    /// `binding` events: the [`BindingPayload`](super::BindingPayload).
+    pub const BINDING: &str = "binding";
+    /// `status` events: the [`StatusPayload`](crate::task::StatusPayload).
+    pub const STATUS: &str = "status";
+    /// The Speaker's triage verdict, a
+    /// [`TriagePayload`](crate::task::TriagePayload): on a Speaker `note` in
+    /// the root's thread, or inline on a Speaker relay. Speaker only; the
+    /// server refuses the key from senators. See [`crate::task`].
+    pub const TRIAGE: &str = "triage";
+    /// `note` from the Speaker: the committee's
+    /// [`OutputLevel`](crate::task::OutputLevel). Speaker only.
+    pub const OUTPUT_LEVEL: &str = "output_level";
+    /// `chat` in a task thread after an `answer`: the seq of the answer this
+    /// correction overrides. A person's reply overrides an earlier answer.
+    pub const OVERRIDES: &str = "overrides";
+    /// `chat` from a platform: why the platform delivered it, lowercase
+    /// (`direct`, `mention`, `reply`, `ambient`).
+    pub const ADDRESSING: &str = "addressing";
+    /// `chat` from a platform: the message it replies to, if any.
+    pub const REPLY_TO: &str = "reply_to_message_ref";
+    /// `chat` from a platform: the root of the platform thread holding it.
+    pub const THREAD_ROOT: &str = "thread_root_message_ref";
+    /// `chat` from a platform: people it mentions, `[{"address", "name"}]`,
+    /// where `address` is the person's address here (`senator::alice`, or
+    /// `guest::<platform>/<id>` for someone not on the roster). Platform ids
+    /// stay out of the log.
+    pub const MENTIONS: &str = "mentions";
+    /// A Speaker relay: the `seq` of the `chat` it relays.
+    pub const RELAYED_FROM: &str = "relayed_from";
+    /// `decision`: the seq (or list of seqs) of earlier decisions it replaces.
+    /// The brief drops a superseded decision.
+    pub const SUPERSEDES: &str = "supersedes";
+    /// `note` from the Speaker: `true` marks the brief's "top three things".
+    /// Never mirrored to a chat platform. Only the Speaker's notes count;
+    /// the server refuses the key from senators.
+    pub const BRIEF_TOP: &str = "brief_top";
+    /// `note` from an agent: `"decision"`
+    /// ([`PROPOSAL_DECISION`](super::PROPOSAL_DECISION)) makes it a proposal
+    /// the Speaker asks people to confirm: agents propose, people decide.
+    /// The resulting `decision` has `thread` = the proposal's seq.
+    pub const PROPOSAL: &str = "proposal";
+    /// `decision` confirming a proposal: the proposing agent's address.
+    pub const PROPOSED_BY: &str = "proposed_by";
+    /// `checkpoint`: the
+    /// [`CheckpointPayload`](crate::continuity::CheckpointPayload). Only from
+    /// the agent itself; the server checks it.
+    pub const CHECKPOINT: &str = "checkpoint";
+    /// `presence`: the [`PresencePayload`](crate::continuity::PresencePayload).
+    /// Server only.
+    pub const PRESENCE: &str = "presence";
+    /// `answer` from an agent: `true` when its bridge's companion session (a
+    /// headless fork of the developer's last session) wrote it rather than
+    /// an interactive session. Shown as a word after the author's label
+    /// ([`Event::byline`](super::Event::byline)).
+    pub const COMPANION: &str = "companion";
+    /// A work run: the [`WorkRun`](crate::work::WorkRun) on the Speaker
+    /// `note` that roots the run's thread and on each Speaker `status` in
+    /// it. Speaker only; the server refuses the key from senators.
+    pub const WORK: &str = "work";
+    /// `answer` from the Speaker on an agent's behalf: `true` when it is no
+    /// answer at all, only where the question stands ("still with the
+    /// agent", "the agent is away"). The asker is told, but the thread stays
+    /// open: a person replying next takes it over, and the agent's own
+    /// answer is the thread's answer. Speaker only; the server refuses the
+    /// key from senators.
+    pub const PROVISIONAL: &str = "provisional";
+    /// `true` on a Speaker answer written while it had taken over for an
+    /// away agent (`on_behalf_of` that agent, handed back to it when it
+    /// returns), and on the `status` that sends such a question to people
+    /// instead. Only the Speaker's events count. It is this flag, not
+    /// anything in the body, that a reader shows as takeover
+    /// ([`Event::byline`](super::Event::byline)).
+    pub const TAKEOVER: &str = "takeover";
+}
+
+fn flag(event: &Event, key: &str) -> bool {
+    event.meta.get(key).and_then(Value::as_bool) == Some(true)
+}
+
+/// True for a [`meta::PROVISIONAL`] answer: one that leaves the thread open.
+pub fn is_provisional(event: &Event) -> bool {
+    event.kind == Kind::Answer && flag(event, meta::PROVISIONAL)
+}
+
+/// True for an event the Speaker wrote while taken over for an away agent
+/// ([`meta::TAKEOVER`]). Anyone else's flag does not count.
+pub fn is_takeover(event: &Event) -> bool {
+    event.from == Address::Speaker && flag(event, meta::TAKEOVER)
+}
+
+/// True for an agent's answer written by its companion session
+/// ([`meta::COMPANION`]).
+pub fn is_companion(event: &Event) -> bool {
+    event.kind == Kind::Answer && event.from.is_junior() && flag(event, meta::COMPANION)
+}
+
+/// The [`meta::PROPOSAL`] value for a proposed decision.
+pub const PROPOSAL_DECISION: &str = "decision";
+
+/// Who takes part in the thread rooted at `root`: the root's `from`,
+/// `on_behalf_of` and `to`, and the `from` of every reply, keeping senators
+/// and guests (not `speaker`, `committee` or unknown forms), deduplicated in
+/// first-seen order. `replies` are the events whose `thread` is `root.seq`.
+pub fn thread_participants<'a>(
+    root: &'a Event,
+    replies: impl IntoIterator<Item = &'a Event>,
+) -> Vec<Address> {
+    let mut out: Vec<Address> = Vec::new();
+    let mut add = |a: &Address| {
+        if matches!(a, Address::Senator(_) | Address::Guest(_)) && !out.contains(a) {
+            out.push(a.clone());
+        }
+    };
+    add(&root.from);
+    if let Some(a) = &root.on_behalf_of {
+        add(a);
+    }
+    for a in &root.to {
+        add(a);
+    }
+    for reply in replies {
+        add(&reply.from);
+    }
+    out
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BindingAction {
+    Bind,
+    Unbind,
+}
+
+/// What a bound group is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GroupRole {
+    /// A people group: people talk here; only answers to people come back.
+    #[default]
+    People,
+    /// The committee's agent group: all agent traffic is mirrored here.
+    /// Created by the Speaker, or adopted from an existing group. Unbinding
+    /// it is archiving it.
+    Agents,
+}
+
+/// `meta["binding"]` of a [`Kind::Binding`] event. A gateway's group →
+/// committee table is rebuilt by replaying these, whatever the role; the
+/// mirror target is the latest bound `agents` group, else the first-bound
+/// still-bound people group.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BindingPayload {
+    pub action: BindingAction,
+    pub platform: String,
+    pub group_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_name: Option<String>,
+    /// Absent means a people group.
+    #[serde(default, skip_serializing_if = "is_people")]
+    pub role: GroupRole,
+}
+
+fn is_people(role: &GroupRole) -> bool {
+    *role == GroupRole::People
+}
+
+impl BindingPayload {
+    pub const META_KEY: &'static str = meta::BINDING;
+}
+
+/// Task-thread states. Carried in `meta["status"]` of a [`Kind::Status`]
+/// event as part of a [`StatusPayload`](crate::task::StatusPayload); see
+/// [`crate::task`] for how a thread moves between them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StatusState {
+    Processing,
+    Active,
+    Suspended,
+    Archived,
+}
+
+impl StatusState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Processing => "processing",
+            Self::Active => "active",
+            Self::Suspended => "suspended",
+            Self::Archived => "archived",
+        }
+    }
+}
+
+impl fmt::Display for StatusState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    use chrono::Utc;
 
     fn addr(s: &str) -> Address {
         s.parse().unwrap()
@@ -377,5 +634,185 @@ mod tests {
         let new =
             NewEvent::new(committee(), Kind::Note, Address::Speaker, "").with_refs(Refs::default());
         assert_eq!(new.refs, None);
+    }
+
+    #[test]
+    fn a_wire_event_with_every_optional_field_round_trips() {
+        let json = json!({
+            "seq": 118,
+            "committee": "refund-v2",
+            "id": "01JB0000000000000000000000",
+            "ts": "2026-11-16T01:14:03Z",
+            "kind": "question",
+            "from": "senator::alice/claude",
+            "to": ["senator::bob/claude", "guest::chat/u_8f3a"],
+            "thread": 112,
+            "source": { "platform": "chat", "group_id": "backend", "group_name": "退款 v2 · 后端群" },
+            "body": "网关的幂等键用哪个 header？",
+            "refs": { "commit": "a41f9c2", "path": "gateway/src/idem.rs" },
+            "mirror": { "platform": "chat", "message_ref": "mref_1" }
+        });
+        let event: Event = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(event.kind, Kind::Question);
+        assert!(event.is_directed_to(&addr("senator::bob/claude")));
+        assert_eq!(serde_json::to_value(&event).unwrap(), json);
+    }
+
+    #[test]
+    fn a_new_event_with_a_wildcard_is_not_ready_to_store() {
+        let new = NewEvent::new(
+            committee(),
+            Kind::Question,
+            addr("senator::alice/claude"),
+            "?",
+        );
+        assert!(new.clone().to(addr("senator::bob/claude")).is_resolved());
+        assert!(!new.clone().to(addr("senator::bob/*")).is_resolved());
+        assert!(
+            !new.clone()
+                .on_behalf_of(addr("senator::bob/*"))
+                .is_resolved()
+        );
+        let mut from_wildcard = new;
+        from_wildcard.from = addr("senator::bob/*");
+        assert!(!from_wildcard.is_resolved());
+    }
+
+    #[test]
+    fn thread_participants_are_the_senators_and_guests_in_it() {
+        let root = NewEvent::new(committee(), Kind::Question, Address::Speaker, "q")
+            .on_behalf_of(addr("senator::pm"))
+            .to(addr("senator::alice/claude"))
+            .into_event(Seq(5), Utc::now());
+        let reply = |from: Address| {
+            NewEvent::new(committee(), Kind::Answer, from, "a")
+                .in_thread(Seq(5))
+                .into_event(Seq(6), Utc::now())
+        };
+        let replies = [
+            reply(addr("senator::alice/claude")),
+            reply(Address::Speaker),
+            reply(addr("senator::carol")),
+            reply(addr("guest::chat/u_1")),
+            reply(Address::Committee),
+            reply(Address::Other("group:x".into())),
+        ];
+        assert_eq!(
+            thread_participants(&root, &replies),
+            vec![
+                addr("senator::pm"),
+                addr("senator::alice/claude"),
+                addr("senator::carol"),
+                addr("guest::chat/u_1"),
+            ]
+        );
+    }
+
+    #[test]
+    fn binding_payload_reads_back_and_a_people_group_is_the_default() {
+        let b = BindingPayload {
+            action: BindingAction::Bind,
+            platform: "chat".into(),
+            group_id: "backend".into(),
+            group_name: None,
+            role: GroupRole::People,
+        };
+        let e = NewEvent::new(committee(), Kind::Binding, Address::Speaker, "")
+            .with_binding(&b)
+            .into_event(Seq(1), Utc::now());
+        assert_eq!(e.binding(), Some(b));
+        assert_eq!(
+            e.meta[meta::BINDING],
+            json!({ "action": "bind", "platform": "chat", "group_id": "backend" })
+        );
+        let agents: BindingPayload = serde_json::from_value(json!({
+            "action": "unbind", "platform": "chat", "group_id": "g", "role": "agents"
+        }))
+        .unwrap();
+        assert_eq!(agents.role, GroupRole::Agents);
+    }
+
+    fn answer(from: Address) -> NewEvent {
+        NewEvent::new(committee(), Kind::Answer, from, "cap is 3").in_thread(Seq(1))
+    }
+
+    #[test]
+    fn takeover_is_a_flag_shown_as_a_localized_word_after_the_same_label() {
+        let covered = answer(Address::Speaker)
+            .on_behalf_of(addr("senator::wendell/claude"))
+            .with_meta(meta::TAKEOVER, json!(true))
+            .into_event(Seq(2), Utc::now());
+        assert!(is_takeover(&covered));
+        // Nothing about it is written into the body.
+        assert_eq!(covered.body, "cap is 3");
+        assert_eq!(
+            covered.byline(Locale::Zh).unwrap(),
+            "[speaker::wendell/claude] 接管"
+        );
+        assert_eq!(
+            covered.byline(Locale::En).unwrap(),
+            "[speaker::wendell/claude] takeover"
+        );
+        // The label is the one a plain answer on behalf of the agent carries.
+        let plain = answer(Address::Speaker)
+            .on_behalf_of(addr("senator::wendell/claude"))
+            .into_event(Seq(3), Utc::now());
+        for locale in Locale::ALL {
+            assert_eq!(plain.byline(locale).unwrap(), "[speaker::wendell/claude]");
+            assert!(
+                covered
+                    .byline(locale)
+                    .unwrap()
+                    .starts_with(&plain.author().unwrap().to_string())
+            );
+            crate::testing::assert_senate_vocabulary(&covered.byline(locale).unwrap());
+        }
+        // Only the Speaker's flag counts.
+        let forged = answer(addr("senator::eve/claude"))
+            .with_meta(meta::TAKEOVER, json!(true))
+            .into_event(Seq(4), Utc::now());
+        assert!(!is_takeover(&forged));
+        assert_eq!(forged.byline(Locale::En).unwrap(), "[senator::eve/claude]");
+    }
+
+    #[test]
+    fn a_companion_answer_is_a_flag_shown_as_a_localized_word() {
+        let companion = answer(addr("senator::bob/claude"))
+            .with_meta(meta::COMPANION, json!(true))
+            .into_event(Seq(2), Utc::now());
+        assert!(is_companion(&companion));
+        assert_eq!(
+            companion.byline(Locale::Zh).unwrap(),
+            "[senator::bob/claude] 伴随"
+        );
+        assert_eq!(
+            companion.byline(Locale::En).unwrap(),
+            "[senator::bob/claude] companion"
+        );
+        // A person has no companion session.
+        let person = answer(addr("senator::bob"))
+            .with_meta(meta::COMPANION, json!(true))
+            .into_event(Seq(3), Utc::now());
+        assert!(!is_companion(&person));
+        // An unknown author has no label, so no byline.
+        let unknown = answer(Address::Other("x:y".into())).into_event(Seq(4), Utc::now());
+        assert_eq!(unknown.byline(Locale::En), None);
+    }
+
+    #[test]
+    fn a_provisional_answer_is_an_answer_flagged_so() {
+        let stands = answer(Address::Speaker)
+            .with_meta(meta::PROVISIONAL, json!(true))
+            .into_event(Seq(2), Utc::now());
+        assert!(is_provisional(&stands));
+        let note = NewEvent::new(committee(), Kind::Note, Address::Speaker, "")
+            .with_meta(meta::PROVISIONAL, json!(true))
+            .into_event(Seq(3), Utc::now());
+        assert!(!is_provisional(&note));
+        assert_eq!(StatusState::Suspended.to_string(), "suspended");
+        assert_eq!(
+            serde_json::to_value(StatusState::Processing).unwrap(),
+            "processing"
+        );
     }
 }
