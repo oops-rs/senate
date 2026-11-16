@@ -145,6 +145,7 @@ pub struct Setup {
     database_url: Option<String>,
     sqlite: bool,
     chat: bool,
+    speaker_on: bool,
     platform: Option<Platform>,
     hands: Option<Hands>,
     server: Vec<Tweak<senate_server::ServerConfig>>,
@@ -161,6 +162,7 @@ impl Setup {
             database_url: None,
             sqlite: false,
             chat: true,
+            speaker_on: true,
             platform: None,
             hands: None,
             server: Vec::new(),
@@ -196,6 +198,13 @@ impl Setup {
     /// Set the chat platform up with `f` before each start of the daemon.
     pub fn platform(mut self, f: impl Fn(&FakeChat) + Send + Sync + 'static) -> Self {
         self.platform = Some(Arc::new(f));
+        self
+    }
+
+    /// No Speaker and no chat platform: `senated` with no `[speaker]`.
+    pub fn without_speaker(mut self) -> Self {
+        self.speaker_on = false;
+        self.chat = false;
         self
     }
 
@@ -353,6 +362,9 @@ token = "tok-carol"
         }
         for f in setup.speaker {
             f(speaker);
+        }
+        if !setup.speaker_on {
+            config.speaker = None;
         }
         let mut world = Self {
             dir,

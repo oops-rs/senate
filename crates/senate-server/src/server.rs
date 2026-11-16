@@ -65,6 +65,7 @@ impl Server {
             store,
             auth: None,
             roster: None,
+            triaged: false,
         }
     }
 }
@@ -83,6 +84,7 @@ pub struct ServerBuilder {
     store: Arc<dyn LogStore>,
     auth: Option<Arc<dyn Authenticate>>,
     roster: Option<Roster>,
+    triaged: bool,
 }
 
 impl ServerBuilder {
@@ -100,6 +102,16 @@ impl ServerBuilder {
         self
     }
 
+    /// Say that a Speaker attached to this server's hub judges task roots
+    /// (`/v1/me`'s [`triaged`](senate_core::api::Me::triaged)). Off by
+    /// default: the server alone judges nothing, and a bridge that waited
+    /// for a verdict would hold every question for nothing. Whoever attaches
+    /// the built-in Speaker turns it on.
+    pub fn triaged(mut self, triaged: bool) -> Self {
+        self.triaged = triaged;
+        self
+    }
+
     /// Spawn the supervision tree over the store, bind `config.listen`, and
     /// serve the HTTP API. The returned [`Running::hub`] is the same hub the
     /// HTTP layer uses; attach the gateway and the Speaker to it.
@@ -109,6 +121,7 @@ impl ServerBuilder {
             store,
             auth,
             roster,
+            triaged,
         } = self;
         config.validate_intervals()?;
         let (auth, roster): (Arc<dyn Authenticate>, Roster) = match (auth, roster) {
@@ -192,6 +205,7 @@ impl ServerBuilder {
             auth,
             epoch: epoch_header,
             ping_every: config.sse_ping_interval(),
+            triaged,
         });
         let (stop_http, stopped) = oneshot::channel::<()>();
         let http_task = tokio::spawn(async move {

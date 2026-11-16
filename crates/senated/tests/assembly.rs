@@ -77,6 +77,7 @@ async fn a_layer_brings_its_own_people_tokens_and_components() {
 
     let me = reqwest_get(&daemon.base_url(), "sso:dana").await;
     assert_eq!(me["person"], "dana");
+    assert_eq!(me["triaged"], true, "the built-in Speaker judges roots");
     assert_eq!(reqwest_status(&daemon.base_url(), "dev-token").await, 401);
 
     let committee = CommitteeId::new("intake").unwrap();

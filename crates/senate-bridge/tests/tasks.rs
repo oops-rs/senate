@@ -73,6 +73,20 @@ async fn a_root_waits_for_the_verdict_then_goes() {
     h.stop().await;
 }
 
+/// Where the server says no Speaker judges roots (a server with none, a
+/// nested Senate), a root is pushed at once: no verdict will ever come.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_root_does_not_wait_where_nothing_judges() {
+    let mut h = Harness::new().await;
+    h.server.state.inner.lock().unwrap().triaged = false;
+    let inbox = joined(&mut h, gated(Duration::from_secs(30))).await;
+    h.server
+        .append(question(claude("bob"), claude("alice"), "用哪个 header？"));
+    let msgs = inbox.wait_messages(1).await;
+    assert!(msgs[0].contains("用哪个 header"), "{}", msgs[0]);
+    h.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn no_verdict_in_time_goes_flagged() {
     let mut h = Harness::new().await;

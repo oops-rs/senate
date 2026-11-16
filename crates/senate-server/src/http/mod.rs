@@ -36,6 +36,8 @@ pub(crate) struct AppState {
     /// The log's epoch, stamped on every response.
     pub epoch: HeaderValue,
     pub ping_every: Duration,
+    /// Whether a Speaker judges task roots here.
+    pub triaged: bool,
 }
 
 pub(crate) fn router(state: AppState) -> Router {
@@ -178,6 +180,7 @@ async fn me(State(state): State<AppState>, person: Person) -> Result<Json<Me>, A
         person: person.0,
         committees,
         epoch: state.hub.epoch().await?,
+        triaged: state.triaged,
     }))
 }
 

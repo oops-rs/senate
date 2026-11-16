@@ -593,3 +593,29 @@ async fn an_agent_may_not_decide_but_its_person_may() {
     );
     server.running.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn me_says_whether_roots_are_judged_here() {
+    let me = |server: &TestServer| {
+        let request = server.request(Method::GET, "/v1/me", ALICE);
+        async move { request.send().await.unwrap().json::<Me>().await.unwrap() }
+    };
+    // The server alone judges nothing: a bridge must not wait for verdicts.
+    let alone = TestServer::start().await;
+    assert!(!me(&alone).await.triaged);
+    alone.running.shutdown().await.unwrap();
+
+    // Whoever attaches the Speaker says so.
+    let config = ServerConfig::new(roster(), tokens());
+    let running = Server::builder(config, Arc::new(MemoryStore::new()))
+        .triaged(true)
+        .start()
+        .await
+        .unwrap();
+    let judged = TestServer {
+        running,
+        client: reqwest::Client::new(),
+    };
+    assert!(me(&judged).await.triaged);
+    judged.running.shutdown().await.unwrap();
+}

@@ -186,7 +186,10 @@ impl Assembly {
                     source,
                 })?,
         };
-        let mut server = Server::builder(config.server.clone(), store);
+        // Bridges hold a question for its triage verdict only where the
+        // built-in Speaker will write one.
+        let mut server =
+            Server::builder(config.server.clone(), store).triaged(config.speaker.is_some());
         if let Some(auth) = auth {
             server = server.auth(auth);
         }

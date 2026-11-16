@@ -122,3 +122,35 @@ async fn an_absent_agent_is_covered_through_the_log() {
     bob.close().await;
     world.stop().await;
 }
+
+/// With no Speaker at all (no `[speaker]`, or a nested Senate, whose
+/// Speaker is one of its senators), no root is ever judged, so a bridge
+/// must not hold a question for a verdict that will not come.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn without_a_speaker_a_question_is_delivered_at_once() {
+    let world = Setup::new().without_speaker().start().await;
+    assert!(!world.daemon().has_speaker());
+    let mut alice = world.laptop("alice");
+    let mut bob = world.laptop("bob");
+    alice.open().await;
+    bob.open().await;
+    let alice_inbox = alice.inbox("s-alice");
+    let bob_inbox = bob.inbox("s-bob");
+    alice.session_start("s-alice", &alice_inbox).await;
+    bob.session_start("s-bob", &bob_inbox).await;
+    world.wait_connected("bob/claude", true).await;
+
+    let started = std::time::Instant::now();
+    alice
+        .ask("s-alice", claude("bob"), "网关幂等用哪个 header？")
+        .await;
+    bob_inbox.wait_for("网关幂等用哪个 header").await;
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "held for {:?}, as if waiting for a verdict",
+        started.elapsed()
+    );
+    alice.close().await;
+    bob.close().await;
+    world.stop().await;
+}
