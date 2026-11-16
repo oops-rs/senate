@@ -10,6 +10,7 @@
 //! - [`mention`]: the same ids as written in running text, in brackets:
 //!   `[senator::wendell/claude]`, `[speaker::wendell/claude]`.
 //! - [`roster`]: who sits in one Senate, and the rules that hold for it.
+//! - [`locale`]: the language a text for people is rendered in.
 //! - [`event`]: the single envelope of a committee's log.
 //!
 //! # The model
@@ -36,6 +37,7 @@
 pub mod address;
 pub mod event;
 pub mod ids;
+pub mod locale;
 pub mod mention;
 pub mod roster;
 pub mod senator;
@@ -43,8 +45,39 @@ pub mod senator;
 pub use address::{Address, AddressParseError, Guest, GuestError, MAX_GUEST_ID_LEN};
 pub use event::{Event, Kind, Mirror, NewEvent, Refs, Source};
 pub use ids::{CommitteeId, EventId, IdError, Name, Seq};
+pub use locale::{Locale, LocaleParseError};
 pub use mention::{Found, Mention, MentionParseError};
 pub use roster::{
     Account, AgentOf, DelegationPresence, ResolveError, Roster, RosterConfig, RosterError, Senior,
 };
 pub use senator::{MAX_AGENT_DEPTH, SenatorPath, SenatorPathError};
+
+/// What every rendered text is held to in this crate's tests.
+#[cfg(test)]
+pub(crate) mod testing {
+    /// Panics when `text` uses the predecessor's vocabulary: its address
+    /// prefixes, or its words for the Speaker and for a committee. A git
+    /// branch such as `feature/refund-v2/alice` is a developer's convention,
+    /// not that vocabulary, so `feature/` is let through.
+    pub(crate) fn assert_senate_vocabulary(text: &str) {
+        let lower = text.to_lowercase();
+        for word in ["user:", "agent:", "steward"] {
+            assert!(!lower.contains(word), "{word:?} in {text:?}");
+        }
+        assert!(
+            !lower.replace("feature/", "").contains("feature"),
+            "\"feature\" in {text:?}"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "feature")]
+    fn the_vocabulary_check_catches_the_old_word_for_a_committee() {
+        assert_senate_vocabulary("on feature/refund-v2/alice for this feature");
+    }
+
+    #[test]
+    fn the_vocabulary_check_lets_a_branch_name_through() {
+        assert_senate_vocabulary("[senator::alice/claude] on feature/refund-v2/alice");
+    }
+}
