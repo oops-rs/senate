@@ -1,0 +1,27 @@
+[package]
+name = "senate-log"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The committee log: one append-only log per committee, kept in memory, in Postgres or in an embedded SQLite file, with cursors, mirror refs and heartbeats."
+
+[dependencies]
+senate-core = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
