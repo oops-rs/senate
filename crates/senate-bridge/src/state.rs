@@ -685,18 +685,32 @@ impl Store {
         })
     }
 
-    /// One committee's log was reset: forget every cursor and queue row of
-    /// it, for every agent (the log is the same for all of them), and the
-    /// facts read from it. Returns how many undelivered items were dropped.
-    pub fn reset_committee(&self, committee: &CommitteeId) -> Result<usize, StoreError> {
+    /// `agent`'s stream found the committee's log reset: forget that
+    /// agent's cursor, queue rows and dropped count there, and the facts read
+    /// from the old log (verdicts, owners), which are the same for every
+    /// agent and are learned again. Another agent's cursor is its own stream's
+    /// to reset. Returns how many undelivered items were dropped.
+    pub fn reset_committee(
+        &self,
+        agent: &SenatorPath,
+        committee: &CommitteeId,
+    ) -> Result<usize, StoreError> {
+        let agent = agent_text(agent);
         let mut conn = self.conn();
         let tx = conn.transaction()?;
         let undelivered: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM queue WHERE committee = ?1 AND status NOT IN ('delivered', 'cancelled')",
-            [committee.as_str()],
+            "SELECT COUNT(*) FROM queue WHERE agent = ?1 AND committee = ?2
+               AND status NOT IN ('delivered', 'cancelled')",
+            params![agent, committee.as_str()],
             |r| r.get(0),
         )?;
-        for table in ["queue", "cursors", "dropped", "verdicts", "owners"] {
+        for table in ["queue", "cursors", "dropped"] {
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE agent = ?1 AND committee = ?2"),
+                params![agent, committee.as_str()],
+            )?;
+        }
+        for table in ["verdicts", "owners"] {
             tx.execute(
                 &format!("DELETE FROM {table} WHERE committee = ?1"),
                 [committee.as_str()],
@@ -1521,17 +1535,22 @@ mod tests {
     }
 
     #[test]
-    fn a_committee_reset_leaves_other_committees_alone() {
+    fn a_committee_reset_leaves_other_committees_and_agents_alone() {
         let s = Store::in_memory().unwrap();
         let other = CommitteeId::new("other").unwrap();
         s.ingest(&claude(), &event(1), true).unwrap();
         s.ingest(&codex(), &event(1), true).unwrap();
         s.advance(&claude(), &other, Seq(5)).unwrap();
-        // The committee's log is one for both agents: both lose it.
-        assert_eq!(s.reset_committee(&committee()).unwrap(), 2);
+        s.record_verdict(&committee(), Seq(1), TriageVerdict::Agent)
+            .unwrap();
+        assert_eq!(s.reset_committee(&claude(), &committee()).unwrap(), 1);
         assert!(!s.has_cursor(&claude(), &committee()).unwrap());
-        assert!(!s.has_cursor(&codex(), &committee()).unwrap());
+        // The other agent's stream resets its own cursor when it finds out.
+        assert!(s.has_cursor(&codex(), &committee()).unwrap());
+        assert!(s.item(&codex(), &committee(), Seq(1)).unwrap().is_some());
         assert_eq!(s.delivered_cursor(&claude(), &other).unwrap(), Seq(5));
+        // Facts of the old log go for everyone.
+        assert_eq!(s.verdict(&committee(), Seq(1)).unwrap(), None);
     }
 
     #[test]

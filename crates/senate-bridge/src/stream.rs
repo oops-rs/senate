@@ -146,7 +146,7 @@ async fn run_stream(
             Ended::Lost(e) => e,
             Ended::Resync(resync, generation) => {
                 let err = anyhow!("{resync}");
-                shared.resync(&committee, resync, generation).await;
+                shared.resync(&agent, &committee, resync, generation).await;
                 err
             }
         };

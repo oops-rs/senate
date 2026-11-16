@@ -132,7 +132,7 @@ impl fmt::Debug for BridgeConfig {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
-    #[error("no bridge config at {0}; write one (see `senate-bridge --help`) and fill it in")]
+    #[error("no bridge config at {0}; write one with server_url, token and person")]
     Missing(PathBuf),
     #[error("reading {path}: {source}")]
     Read {

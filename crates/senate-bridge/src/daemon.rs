@@ -946,10 +946,16 @@ impl Shared {
 
     /// Carry out what a stream worker found, `seen` being the generation
     /// its connection began in.
-    pub(crate) async fn resync(&self, committee: &CommitteeId, resync: Resync, seen: u64) {
+    pub(crate) async fn resync(
+        &self,
+        agent: &SenatorPath,
+        committee: &CommitteeId,
+        resync: Resync,
+        seen: u64,
+    ) {
         match resync {
             Resync::Epoch(new) => self.resync_epoch(&new).await,
-            Resync::CursorAhead => self.resync_committee(committee, seen).await,
+            Resync::CursorAhead => self.resync_committee(agent, committee, seen).await,
             Resync::Moved => {}
         }
     }
@@ -990,15 +996,19 @@ impl Shared {
         }
     }
 
-    /// The server says `committee`'s cursor is beyond its log: drop that
-    /// committee's cursor and queue rows so its stream re-seeds.
-    async fn resync_committee(&self, committee: &CommitteeId, seen: u64) {
+    /// The server says `agent`'s cursor on `committee` is beyond its log:
+    /// drop that agent's cursor and queue rows there so its stream re-seeds.
+    /// Another agent's stream on the same committee finds the same and
+    /// resets its own; until then its cursor is left alone, so a stream
+    /// still connected never sees its cursor vanish under it.
+    async fn resync_committee(&self, agent: &SenatorPath, committee: &CommitteeId, seen: u64) {
         let generation = self.generation.write().await;
         if *generation != seen {
             return; // A full resync already happened since.
         }
-        match self.store.reset_committee(committee) {
+        match self.store.reset_committee(agent, committee) {
             Ok(dropped) => tracing::warn!(
+                %agent,
                 %committee,
                 dropped,
                 "the server says this bridge's cursor is beyond the committee's log \
