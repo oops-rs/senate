@@ -429,7 +429,8 @@ token = "tok-carol"
     /// `@Speaker /bind refund-v2` in the group, from the PM, the way a group
     /// starts; returns once the gateway routes the group to the committee.
     pub async fn bind(&self) {
-        self.bind_group(GROUP, GROUP_NAME, "m_bind").await;
+        let title = self.locale.pick(GROUP_NAME, "Refund v2 backend");
+        self.bind_group(GROUP, title, "m_bind").await;
     }
 
     /// `/bind refund-v2` in the product group too.
