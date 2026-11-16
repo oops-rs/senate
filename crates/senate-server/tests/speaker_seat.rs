@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use common::*;
 use reqwest::{Method, StatusCode};
+use senate_core::Hub as _;
 use senate_core::api::{AppendResponse, Me};
 use senate_core::{
     Address, Awaiting, CheckpointFiles, CheckpointPayload, CheckpointTrigger, DocketPage, Kind,
@@ -596,6 +597,59 @@ async fn the_presiding_agent_follows_the_senate_it_presides_over_without_sitting
             .status(),
         StatusCode::FORBIDDEN
     );
+}
+
+/// The agent that holds the seat of a top Senate also sits in it, directly
+/// under its person. Its stream and heartbeat are the Speaker's connection
+/// (no seat needed) and its own (a seat), so contact as that agent seats it
+/// like any other agent: `senator::alice/*` must then count it.
+#[tokio::test]
+async fn the_seat_holder_of_the_top_senate_is_seated_by_its_first_contact_too() {
+    let seated = |server: &TestServer| {
+        let hub = server.running.hub.clone();
+        async move {
+            hub.roster()
+                .await
+                .unwrap()
+                .agents()
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        }
+    };
+
+    // A heartbeat.
+    let Built { server } = start(false, |c| c.roster.speaker = Some(path("alice/claude"))).await;
+    assert!(seated(&server).await.is_empty());
+    let beat = server
+        .request(
+            Method::POST,
+            &senate_core::api::heartbeat_path(&committee()),
+            ALICE,
+        )
+        .json(&senate_core::api::Heartbeat {
+            agent: path("alice/claude"),
+            sessions: 1,
+            cursor: senate_core::Seq::ZERO,
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(beat.status(), StatusCode::NO_CONTENT);
+    assert_eq!(seated(&server).await, ["alice/claude"]);
+
+    // A stream.
+    let Built { server } = start(false, |c| c.roster.speaker = Some(path("alice/claude"))).await;
+    let _stream = server
+        .stream_as(ALICE, Some("alice/claude"), None, None)
+        .await;
+    assert_eq!(seated(&server).await, ["alice/claude"]);
+
+    // Its sibling next to it, and the wildcard counts both.
+    let _codex = server
+        .stream_as(ALICE, Some("alice/codex"), None, None)
+        .await;
+    assert_eq!(seated(&server).await, ["alice/claude", "alice/codex"]);
 }
 
 #[tokio::test]

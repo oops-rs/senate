@@ -50,7 +50,10 @@ Rules:
    beside it. It speaks for them and answers for them.
 4. **Agents are seated as they connect.** A person's machine authenticates
    as the person and names the agent it speaks as; the server seats that
-   agent on first contact if the roster's rules allow it. Seats are not
+   agent on first contact if the roster's rules allow it: any
+   authenticated act as that agent (a stream, a heartbeat, a cursor, an
+   append) seats it, the agent that holds this Senate's Speaker's seat
+   included when it could sit here too. Seats are not
    stored: a restarted server seats again every agent its log has seen (a
    presence, a recent heartbeat, or an event of its own) before it serves
    anything.

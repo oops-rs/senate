@@ -138,17 +138,23 @@ impl AppState {
     /// stream, a cursor, a heartbeat. Besides the senators `person` may act
     /// as, the senator holding this Senate's Speaker's seat, when it is
     /// `person`'s: the presiding session follows this Senate's log as its
-    /// Speaker, with its own cursors and presence, without being seated in
-    /// it (it sits in the Senate above, and writes here as `speaker`).
+    /// Speaker, with its own cursors and presence.
+    ///
+    /// Where the holder could also sit in this Senate (the top Senate of a
+    /// machine used alone: the Speaker is one of the person's own agents,
+    /// directly under them) its contact seats it like any agent's, so that
+    /// `senator::<person>/*` counts it. Where it could not (a nested Senate,
+    /// presided over by an agent that sits in the Senate above) it is let
+    /// in without a seat.
     fn connect_as(&self, person: &Person, senator: &SenatorPath) -> Result<(), ApiFailure> {
         let presides = self
             .hub
             .speaker_seat()
             .is_some_and(|seat| seat.held_by(&person.0) && seat.senator() == Some(senator));
-        if presides {
-            return Ok(());
+        match self.act_as(person, senator) {
+            Err(_) if presides => Ok(()),
+            result => result,
         }
-        self.act_as(person, senator)
     }
 
     /// Like [`AppState::connect_as`], for a request that may name no
