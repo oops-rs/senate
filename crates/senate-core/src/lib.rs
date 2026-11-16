@@ -40,6 +40,7 @@ pub mod api;
 pub mod brief;
 pub mod continuity;
 pub mod event;
+pub mod hub;
 pub mod ids;
 pub mod locale;
 pub mod mention;
@@ -59,6 +60,9 @@ pub use event::{
     BindingAction, BindingPayload, Event, GroupRole, Kind, Mirror, NewEvent, PROPOSAL_DECISION,
     Refs, Source, StatusState, is_companion, is_provisional, is_takeover, meta,
     thread_participants,
+};
+pub use hub::{
+    Appended, Hub, HubError, MirrorRef, ReassignRefused, reassign_event, reassign_transition,
 };
 pub use ids::{CommitteeId, EventId, IdError, Name, Seq};
 pub use locale::{Locale, LocaleParseError};
