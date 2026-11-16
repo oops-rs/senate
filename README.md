@@ -34,88 +34,142 @@ changes nothing.
 ## How it fits together
 
 ```text
-   developer machine                         senated
- ┌───────────────────────┐        ┌─────────────────────────────────────┐
- │ Claude Code ─┐        │  HTTP  │ senate-server ── Hub ──┬─ Speaker   │
- │ Codex ───────┼ senate-├───SSE──┤   (auth, roster,       ├─ chat      │
- │              │ bridge │        │    supervision)        │  gateway*  │
- └──────────────┴────────┘        │        │               └─ other     │
-                                  │   senate-log                components*
-                                  │ (memory / SQLite / Postgres)        │
-                                  └─────────────────────────────────────┘
-                                         * mounted by a private layer
+   developer machine: senated --machine            team server: senated --config
+ ┌─────────────────────────────────────────┐      ┌──────────────────────────────┐
+ │ Claude Code ─┐   developer-machine side │ HTTP │ senate-server ── Hub ─ Speaker│
+ │ Codex ───────┼── (senate-bridge) ───────┼─SSE──┤  (auth, roster,   (built in) │
+ │              │        │                 │      │   supervision)    chat gw.*  │
+ │              │   hosted Senates:        │      │        │                     │
+ │              │   a local top Senate, or │      │   senate-log                 │
+ │              │   one per presiding agent│      │ (memory / SQLite / Postgres) │
+ │              │   (SQLite, loopback)     │      └──────────────────────────────┘
+ └─────────────────────────────────────────┘          * mounted by a private layer
 ```
 
-- **`senated`** keeps the log and serves it over HTTP/SSE. With `[speaker]`
-  it runs the built-in Speaker, which triages questions between agents,
-  answers for an agent that is away (from that agent's own latest
-  checkpoint), hands its mailbox back when it returns, and, with `[work]`,
-  does coding work on request in a container.
-- **`senate-bridge`**, one daemon per developer machine, authenticates as the
-  person and seats one agent per kind of coding session: a Claude Code
-  session speaks as `<person>/claude`, a Codex session as `<person>/codex`.
-  It delivers each agent's messages into that agent's own sessions and gives
-  them MCP tools (`ask`, `answer`, `catch_up`, `search`, `post`,
-  `propose_decision`, `checkpoint`, `join`, …).
+- **`senated`** is the daemon, the same at every level. As a team server
+  (`senated --config senated.toml`) it keeps the log and serves it over
+  HTTP/SSE; with `[speaker]` it runs the built-in Speaker, which triages
+  questions between agents, answers for an agent that is away (from that
+  agent's own latest checkpoint), hands its mailbox back when it returns,
+  and, with `[work]`, does coding work on request in a container. On a
+  developer machine (`senated --machine`) it runs that machine's side of
+  every Senate it serves, and hosts the Senates that live there.
+- **`senate`** is the command for people and agents on a developer machine:
+  `install` registers its MCP server and hooks with Claude Code and Codex,
+  `status`, `inbox`, `take`, `init --local`, and `mcp` / `hook` are what
+  Claude Code and Codex run. A Claude Code session speaks as
+  `<person>/claude`, a Codex session as `<person>/codex`; each gets its
+  messages pushed into its own sessions and MCP tools (`ask`, `answer`,
+  `catch_up`, `search`, `post`, `propose_decision`, `checkpoint`, `join`, …).
 - **A chat platform** is a private layer: it mounts a chat surface on
   `senated` through the assembly library, and people then bind groups to
   committees, talk to the Speaker, and see agents' threads as cards.
 
+### Senates nest
+
+An agent's own subagents can sit in a Senate one level down that the agent
+presides over: `senator::alice/claude` is an ordinary senator in the Senate
+above and the Speaker of its own Senate, where `alice/claude/reviewer`
+sits. The presiding session is attached to both: it answers upstairs in its
+own name, asks its subagents downstairs as their Speaker, and gets four
+presiding tools (`speaker_docket`, `speaker_route`, `speaker_cover`,
+`speaker_escalate`) to route messages meant for "one of alice's agents",
+answer for an away subagent from that subagent's own checkpoint, and bring
+the person what it cannot settle. Nothing is copied between the levels.
+Alone on one machine, the top Senate is local and one of your agents is
+its Speaker.
+
 The model and its rules are in [`docs/architecture.md`](docs/architecture.md).
 
-## Quick start
+## Three ways to run
 
 Requires Rust 1.95 or later.
 
-### 1. Run `senated`
+```sh
+cargo build --release -p senated -p senate-bridge   # target/release/senated, target/release/senate
+```
+
+### 1. A team server
+
+[`config/senated.example.toml`](config/senated.example.toml): people,
+tokens, the log, optionally `[speaker]`.
 
 ```sh
-cargo build --release -p senated -p senate-bridge
 cp config/senated.example.toml senated.toml   # edit people and tokens
 ./target/release/senated --config senated.toml
-```
-
-The example serves `127.0.0.1:7878` with the log in memory. For a log that
-survives a restart, on one machine:
-
-```toml
-database_url = "sqlite:/var/lib/senate/log.db"
-```
-
-or Postgres for a shared server (`deploy/docker-compose.yml` runs one):
-
-```toml
-database_url = "postgres://senate:senate@127.0.0.1:5432/senate"
-```
-
-Check it with a token from the config:
-
-```sh
 curl -H "Authorization: Bearer dev-alice-token" http://127.0.0.1:7878/v1/me
 # {"person":"alice","agents":[],"committees":[],"epoch":"…","triaged":false}
 ```
 
-Uncomment `[speaker]` to run the built-in Speaker. Its model comes from
-basis's environment (`ANTHROPIC_API_KEY`, or `BASIS_BASE_URL` and
-`BASIS_API_KEY` for a gateway); without `[speaker]`, agents still ask and
-answer each other through the log, and nothing is triaged or covered.
+The example keeps the log in memory. For a log that survives a restart:
+`database_url = "sqlite:/var/lib/senate/log.db"`, or Postgres for a shared
+server (`deploy/docker-compose.yml` runs one):
+`database_url = "postgres://senate:senate@127.0.0.1:5432/senate"`.
 
-### 2. Install and start the bridge on a developer machine
+Add `[speaker]` to run the built-in Speaker (`/v1/me` then says
+`"speaker":"built_in","triaged":true`). Its model comes from basis's
+environment (`ANTHROPIC_API_KEY`, or `BASIS_BASE_URL` and `BASIS_API_KEY`
+for a gateway); without `[speaker]`, agents still ask and answer each other
+through the log, and nothing is triaged or covered.
 
-```sh
-mkdir -p ~/.senate && cp config/bridge.example.toml ~/.senate/bridge.toml
-chmod 600 ~/.senate/bridge.toml       # set server_url, token, person
-./target/release/senate-bridge install          # dry run: prints what it would change
-./target/release/senate-bridge install --yes    # registers the MCP server and hooks
-./target/release/senate-bridge daemon           # keep it running (your own service manager)
-./target/release/senate-bridge status
+### 2. A developer machine under a team
+
+[`config/senate.example.toml`](config/senate.example.toml), as
+`~/.senate/senate.toml` (or `$SENATE_HOME/senate.toml`), mode 0600:
+
+```toml
+server_url = "https://senate.example.com"   # the team's senated
+token = "…"                                 # your token there
+person = "alice"
+
+[[preside]]
+agent = "claude"     # alice/claude presides over a Senate here, where alice/claude/* sit
 ```
 
-`install` registers the MCP server `senate` and the session hooks with Claude
-Code, and with Codex when `codex` is on `PATH`. The daemon is a plain
-foreground process; run it under whatever starts your other services.
+```sh
+./target/release/senate install          # dry run: prints what it would change
+./target/release/senate install --yes    # registers the MCP server and hooks
+./target/release/senated --machine       # keep it running (your own service manager)
+./target/release/senate status           # every Senate served, and who presides
+```
 
-### 3. Which committee, which agent
+`senated --machine` hosts the Senate one level down itself: its log in
+SQLite under `~/.senate/senates/under-claude/`, on loopback only, with a
+token generated there that never leaves the machine. A session pinned to
+`SENATE_AGENT=claude/reviewer` sits in it; an unpinned Claude Code session
+is `alice/claude`, which sits in the team's Senate and presides below.
+Without `[[preside]]` the machine is just its side of the team's Senate.
+
+### 3. Alone on one machine
+
+```sh
+./target/release/senate init --local --person alice   # writes ~/.senate/senate.toml, nothing else
+./target/release/senate install --yes
+./target/release/senated --machine
+./target/release/senate status
+```
+
+[`config/local.example.toml`](config/local.example.toml) is what it
+writes: a top Senate on this machine (`[local]`, SQLite, loopback
+`127.0.0.1:7979`), you alone on its roster, and `alice/claude` named its
+Speaker. A Codex session sits beside it as `alice/codex`; a message for
+"your agent" that does not say which is put to the presiding Claude Code
+session to route, and when Codex is away that session answers for it from
+Codex's own checkpoint. To talk to it yourself:
+
+```sh
+curl -H "Authorization: Bearer $(cat ~/.senate/senates/top/token)" http://127.0.0.1:7979/v1/me
+# {"person":"alice","speaker":{"senator":"alice/claude"},"agents":[],"committees":[],"epoch":"…","triaged":false}
+```
+
+`senate inbox` shows the open threads waiting for you and anything waiting
+for a Speaker held by one of your agents (a presiding session that is
+closed, say).
+
+The Senate home must have a short path: the daemon's socket lives there
+and a Unix socket path is limited to about 100 bytes.
+
+### Which committee, which agent
 
 A session's committee is, in this order of precedence:
 
@@ -127,19 +181,22 @@ A session's committee is, in this order of precedence:
 
 A session with no committee receives nothing.
 
-It speaks as one agent of the person the token names:
+It speaks as one agent of the person the token names, a path relative to
+the person (`claude`, or `claude/reviewer` for a subagent one level down):
 
 1. `SENATE_AGENT` in a Claude Code session's environment,
 2. a `.senate/agent` file at the root of the worktree,
-3. `[agents]` in `bridge.toml`, by harness,
+3. `[agents]` in `senate.toml`, by harness,
 4. the harness's own name: `claude` or `codex`.
 
-So one person running Claude Code and Codex side by side is two senators,
-`alice/claude` and `alice/codex`; each gets only what is addressed to it. A
-message for "Alice's agent" (`senator::alice/*`) reaches her only agent, or
-Alice herself when she has none; when she has several, an agent sender is
-refused with the candidates and must name one, and a person in chat is asked
-by the Speaker which one they mean.
+The path also selects the Senate it sits in. So one person running Claude
+Code and Codex side by side is two senators, `alice/claude` and
+`alice/codex`; each gets only what is addressed to it. A message for
+"Alice's agent" (`senator::alice/*`) reaches her only agent, or Alice
+herself when she has none; when she has several, an agent sender is refused
+with the candidates and must name one, and a person is answered by the
+Speaker, which picks (the built-in Speaker asks the person in chat; a
+presiding session routes it with `speaker_route`).
 
 ## Mounting a chat platform
 
@@ -191,12 +248,15 @@ platform in memory for testing a layer's assembly end to end.
 | `senate-server` | The supervision tree over the log, the HTTP/SSE API, authentication and roster seams. |
 | `senate-speaker` | The built-in Speaker, on basis. |
 | `senate-work` | The Speaker's hands: coding work in a container, delivered as a branch or a PR. |
-| `senate-bridge` | The developer-machine daemon, hooks and MCP tools for Claude Code and Codex. |
-| `senated` | The daemon binary and the assembly library. |
+| `senate-bridge` | The developer-machine side (sessions, delivery, hooks and MCP tools for Claude Code and Codex, across every Senate the machine serves) and the `senate` command. |
+| `senated` | The daemon binary (`--config` for a server, `--machine` for a developer machine) and the assembly library. |
 | `senate-e2e` | End-to-end tests of all of the above together. |
 
-Configuration examples: [`config/senated.example.toml`](config/senated.example.toml),
-[`config/bridge.example.toml`](config/bridge.example.toml).
+Configuration examples, one per way to run:
+[`config/senated.example.toml`](config/senated.example.toml) (team server),
+[`config/senate.example.toml`](config/senate.example.toml) (developer
+machine under a team; a `bridge.toml`, its old name, is still read),
+[`config/local.example.toml`](config/local.example.toml) (alone).
 
 ```sh
 cargo test --workspace
@@ -205,9 +265,11 @@ cargo test --workspace
 ## Status and known limits
 
 Early. Every crate is tested on its own and together: the end-to-end suite
-runs the real server, the real Speaker, real bridge daemons and the
-assembly, over the in-memory and SQLite stores, in Chinese and English.
-What has **not** run yet:
+runs the real server, the real Speaker, real bridge daemons, the assembly
+and `senated --machine` in process (alone, and two levels under a team),
+over the in-memory and SQLite stores, in Chinese and English. The three
+ways to run have been started by hand with the built binaries (start,
+`/v1/me` or `senate status`, stop). What has **not** run yet:
 
 - **A real model.** Every test drives the Speaker with a scripted brain.
   The basis brain's prompts, tool use and output parsing are tested against
@@ -215,7 +277,14 @@ What has **not** run yet:
 - **Real Claude Code and Codex.** Sessions are fake inbox sockets and a fake
   Codex app-server speaking the protocol as the bridge expects it;
   `install`'s edits are tested on temporary copies of the configuration.
-  The companion session runs a stand-in for `claude`.
+  The companion session runs a stand-in for `claude`. In particular, no
+  real model has presided: the presiding tools, the pushes marked for the
+  Speaker and the session-start orientation are exercised by tests that
+  call them as an agent would, and whether Claude Code lists the presiding
+  tools (the MCP shim asks the daemon at `tools/list`, which may come
+  before the session's first hook) has not been seen in a real session.
+- **`senated --machine` as a service.** It is a foreground process; no
+  launchd or systemd unit is shipped or tested.
 - **Real Docker and `gh`.** Work runs use a fake runner and forge in the
   end-to-end suite; the Docker runner and the `gh` forge are tested against
   stand-in binaries.
@@ -225,7 +294,7 @@ What has **not** run yet:
 - **A real chat platform.** None is in this repository; the gateway half is
   tested through the fake platform.
 - One chat platform per daemon. Nested Senates are built and tested two
-  levels deep.
+  levels deep; the protocol allows more, untested.
 
 ## License
 

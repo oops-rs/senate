@@ -553,6 +553,8 @@ async fn streams_follow_sessions_and_configured_committees() {
             sessions: status.sessions.clone(),
             queue: status.queue,
             locale: status.locale,
+            speaker: status.speaker.clone(),
+            others: Vec::new(),
         },
         chrono::Utc::now(),
     );

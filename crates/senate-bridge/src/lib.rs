@@ -1,5 +1,27 @@
-//! The developer-machine side of Senate: one daemon per machine joining
-//! coding-agent sessions to committee logs.
+//! The developer-machine side of Senate: joining a person's coding-agent
+//! sessions to committee logs, across every Senate the machine serves. It
+//! runs inside `senated --machine` (`senated::machine`), and is the `senate`
+//! command (`install`, `status`, `inbox`, `take`, `init --local`, and the
+//! MCP server and hooks Claude Code and Codex run).
+//!
+//! # Several Senates, one daemon
+//!
+//! A machine may serve the Senate above and any number of Senates one level
+//! down, each presided over by one of the person's agents ([`config`]:
+//! `[[senates]]`, filled in by `senated --machine` for the ones it hosts).
+//! The daemon keeps one half per Senate (server, token, state database,
+//! streams, cursors, heartbeats, queue, sessions) and nothing leaks between
+//! them; a front on the local socket sends each request to the Senate it
+//! concerns. An agent's path relative to the person selects its Senate
+//! ([`agent`]): `claude` sits above, `claude/reviewer` below.
+//!
+//! # Presiding
+//!
+//! The session of an agent that holds a Senate's Speaker's seat presides
+//! ([`preside`]): it is attached to that Senate as its Speaker as well as
+//! to the one it sits in, is pushed what is put to the Speaker, and gets
+//! the presiding tools (`speaker_docket`, `speaker_route`, `speaker_cover`,
+//! `speaker_escalate`). No other session sees them.
 //!
 //! # A machine is a person running agents
 //!
@@ -28,7 +50,8 @@
 //!   server gives the agent `ask` / `answer` / `catch_up` / `join` and the
 //!   rest.
 //! - [`install`] wires the hooks and the MCP server into Claude Code and
-//!   Codex; [`status`] renders what the daemon is doing.
+//!   Codex; [`status`] renders what the daemon is doing; [`init`] writes the
+//!   profile for using Senate alone on one machine.
 //!
 //! Everything written for a person or an agent to read is in the locale of
 //! `senate.toml` ([`senate_core::Locale`]); identifiers (addresses, kinds,

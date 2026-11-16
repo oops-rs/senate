@@ -1229,4 +1229,44 @@ mod tests {
         assert_eq!(truncate_chars("退款上限", 2), ("退款…".to_string(), true));
         assert_eq!(truncate_chars("ab", 2), ("ab".to_string(), false));
     }
+
+    #[test]
+    fn what_is_put_to_the_speaker_says_so_and_points_at_the_presiding_tools() {
+        let mut event = NewEvent::new(
+            committee(),
+            Kind::Question,
+            addr("senator::alice"),
+            "who looks at refunds?",
+        )
+        .to(Address::Speaker)
+        .into_event(Seq(7), Utc::now());
+        event
+            .meta
+            .insert(SPEAKER_META.into(), serde_json::json!("alice/claude"));
+        let en = render_event(&event, EN);
+        assert!(
+            en.contains(
+                "· for you as Speaker of the Senate presided over by [senator::alice/claude]]"
+            ),
+            "{en}"
+        );
+        assert!(en.contains("speaker_route"), "{en}");
+        assert!(!en.contains("mcp__senate__answer"), "{en}");
+        let zh = render_event(&event, ZH);
+        assert!(zh.contains("给作为 由 [senator::alice/claude] 主持的 Senate Speaker 的你"));
+        // A top Senate used alone.
+        event
+            .meta
+            .insert(SPEAKER_META.into(), serde_json::json!(""));
+        assert!(render_event(&event, EN).contains("for you as Speaker of the top Senate"));
+        // An answer put to the Speaker asks for nothing.
+        let mut answer = NewEvent::new(committee(), Kind::Answer, alice(), "3")
+            .to(Address::Speaker)
+            .in_thread(Seq(7))
+            .into_event(Seq(8), Utc::now());
+        answer
+            .meta
+            .insert(SPEAKER_META.into(), serde_json::json!(""));
+        assert_eq!(footer(&answer, EN), None);
+    }
 }
