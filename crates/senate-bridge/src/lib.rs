@@ -3,10 +3,10 @@
 //!
 //! # A machine is a person running agents
 //!
-//! The bridge authenticates as a **person** (`bridge.toml`'s token) and seats
+//! The bridge authenticates as a **person** (`senate.toml`'s token) and seats
 //! one junior senator per kind of coding agent it serves ([`agent`]): a
 //! Claude Code session speaks as `<person>/claude`, a Codex session as
-//! `<person>/codex`, unless `bridge.toml` renames them or a session pins its
+//! `<person>/codex`, unless `senate.toml` renames them or a session pins its
 //! own name. Each agent has its own stream, cursors, heartbeat, checkpoints
 //! and inbox; a message for one agent never reaches another agent's session.
 //!
@@ -31,7 +31,7 @@
 //!   Codex; [`status`] renders what the daemon is doing.
 //!
 //! Everything written for a person or an agent to read is in the locale of
-//! `bridge.toml` ([`senate_core::Locale`]); identifiers (addresses, kinds,
+//! `senate.toml` ([`senate_core::Locale`]); identifiers (addresses, kinds,
 //! tool names, JSON fields) are the same in every language.
 //!
 //! Every path the bridge touches lives under [`paths::Paths`]
@@ -48,6 +48,7 @@ pub mod daemon;
 pub mod delivery;
 pub mod format;
 pub mod hook;
+pub mod init;
 pub mod install;
 pub mod ipc;
 pub mod mcp;

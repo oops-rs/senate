@@ -61,7 +61,7 @@ pub const DISALLOWED_TOOLS: &str = "Bash,Edit,MultiEdit,Write,NotebookEdit,WebFe
 /// Prefix of companion session ids.
 pub const SESSION_PREFIX: &str = "companion-";
 
-/// `[companion]` in `bridge.toml`.
+/// `[companion]` in `senate.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct CompanionConfig {
     #[serde(default)]
@@ -283,7 +283,7 @@ mod tests {
             CompanionConfig::load(&dir.path().join("none.toml")).unwrap(),
             CompanionConfig::default()
         );
-        let path = dir.path().join("bridge.toml");
+        let path = dir.path().join("senate.toml");
         std::fs::write(
             &path,
             "server_url = \"x\"\n[companion]\nenabled = true\nmax_secs = 60\n",

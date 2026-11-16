@@ -1,4 +1,4 @@
-//! `senate-bridge mcp`: the stdio MCP server Claude Code starts for each
+//! `senate mcp`: the stdio MCP server Claude Code starts for each
 //! session (server name `senate`, so the tools are
 //! `mcp__senate__ask` / `answer` / `catch_up` / `join` / `search` / `post` /
 //! `propose_decision`, `checkpoint`, and for task threads `status` / `escalate` / `take` /
@@ -16,7 +16,7 @@
 //! Tool names, parameters and JSON fields are identifiers and the same in
 //! every language; tool descriptions are English. The text a tool returns
 //! for the agent to read is written in the bridge's locale (`locale` in
-//! `bridge.toml`, read once at start).
+//! `senate.toml`, read once at start).
 //!
 //! # Addresses
 //!
@@ -751,12 +751,12 @@ fn describe(e: ClientError, locale: Locale) -> String {
         ClientError::Connect { path, .. } => match locale {
             Locale::Zh => format!(
                 "Senate bridge daemon 没有运行（{} 上没有监听）。请你的用户用 \
-                 `senate-bridge daemon` 启动它。",
+                 `senated --machine` 启动它。",
                 path.display()
             ),
             Locale::En => format!(
                 "The Senate bridge daemon is not running (nothing listening on {}). Ask your user \
-                 to start it with `senate-bridge daemon`.",
+                 to start it with `senated --machine`.",
                 path.display()
             ),
         },

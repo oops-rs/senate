@@ -35,7 +35,7 @@ pub fn hook_command(exe: &str, subcommand: &str) -> String {
 }
 
 fn is_ours(command: &str, subcommand: &str) -> bool {
-    command.contains("senate-bridge")
+    super::runs_senate(command)
         && command
             .trim_end()
             .ends_with(&format!("hook {subcommand} --codex"))
@@ -308,9 +308,9 @@ pub fn render(plan: &CodexPlan, exe: &str, applied: bool, locale: Locale, out: &
         out,
         "   - {}",
         locale.pick(
-            "信任钩子：在 Codex 里打开 /hooks，信任三个 senate-bridge 钩子。Codex 在钩子被信任之前\
+            "信任钩子：在 Codex 里打开 /hooks，信任三个 senate 钩子。Codex 在钩子被信任之前\
              不会运行它，那样就没有 Codex 会话会加入 Senate。",
-            "Trust the hooks: in Codex, open /hooks and trust the three senate-bridge hooks. Codex \
+            "Trust the hooks: in Codex, open /hooks and trust the three senate hooks. Codex \
              skips a hook until it is trusted, and then no Codex session joins Senate."
         )
     );
@@ -344,9 +344,9 @@ pub fn render(plan: &CodexPlan, exe: &str, applied: bool, locale: Locale, out: &
         out,
         "   - {}",
         locale.pick(
-            "Codex 会话默认以 <person>/codex 的身份加入；bridge.toml 的 [agents] 可以改名，\
+            "Codex 会话默认以 <person>/codex 的身份加入；senate.toml 的 [agents] 可以改名，\
              工作区里的 .senate/agent 文件可以为该工作区固定一个名字。",
-            "Codex sessions join as <person>/codex by default; [agents] in bridge.toml renames \
+            "Codex sessions join as <person>/codex by default; [agents] in senate.toml renames \
              it, and a .senate/agent file pins a name for one worktree."
         )
     );
@@ -356,7 +356,7 @@ pub fn render(plan: &CodexPlan, exe: &str, applied: bool, locale: Locale, out: &
 mod tests {
     use super::*;
 
-    const EXE: &str = "/opt/bin/senate-bridge";
+    const EXE: &str = "/opt/bin/senate";
 
     #[test]
     fn merge_adds_once_and_keeps_the_rest() {
@@ -402,7 +402,7 @@ trusted_hash = "sha256:abc"
         assert_eq!(start[0]["hooks"][0]["command"].as_str(), Some("echo hi"));
         assert_eq!(
             start[1]["hooks"][0]["command"].as_str(),
-            Some("/opt/bin/senate-bridge hook session-start --codex")
+            Some("/opt/bin/senate hook session-start --codex")
         );
         assert_eq!(start[1]["hooks"][0]["timeout"].as_integer(), Some(10));
         for event in ["UserPromptSubmit", "SessionEnd"] {
@@ -424,7 +424,7 @@ trusted_hash = "sha256:abc"
         let mut doc = DocumentMut::new();
         merge(&mut doc, "/old/senate-bridge").unwrap();
         doc["mcp_servers"]["senate"]["default_tools_approval_mode"] = value("approve");
-        let changes = merge(&mut doc, "/new/senate-bridge").unwrap();
+        let changes = merge(&mut doc, "/new/senate").unwrap();
         assert_eq!(changes.len(), 4, "{changes:?}");
         assert!(changes.iter().all(|c| c.starts_with('~')), "{changes:?}");
         let parsed: toml::Value = toml::from_str(&doc.to_string()).unwrap();
@@ -435,14 +435,14 @@ trusted_hash = "sha256:abc"
         assert_eq!(parsed["hooks"]["SessionEnd"].as_array().unwrap().len(), 1);
         assert_eq!(
             parsed["hooks"]["SessionEnd"][0]["hooks"][0]["command"].as_str(),
-            Some("/new/senate-bridge hook session-end --codex")
+            Some("/new/senate hook session-end --codex")
         );
     }
 
     #[test]
     fn inline_hook_arrays_are_understood() {
         let mut doc: DocumentMut = "hooks.SessionStart = [{ hooks = [{ type = \"command\", \
-             command = \"/old/senate-bridge hook session-start --codex\" }] }]\n"
+             command = \"/old/senate hook session-start --codex\" }] }]\n"
             .parse()
             .unwrap();
         let changes = merge(&mut doc, EXE).unwrap();
@@ -455,7 +455,7 @@ trusted_hash = "sha256:abc"
         let parsed: toml::Value = toml::from_str(&doc.to_string()).unwrap();
         assert_eq!(
             parsed["hooks"]["SessionStart"][0]["hooks"][0]["command"].as_str(),
-            Some("/opt/bin/senate-bridge hook session-start --codex")
+            Some("/opt/bin/senate hook session-start --codex")
         );
         assert!(merge(&mut doc, EXE).unwrap().is_empty());
     }
@@ -474,12 +474,9 @@ trusted_hash = "sha256:abc"
 
     #[test]
     fn claude_hooks_are_not_mistaken_for_codex_ones() {
-        assert!(!is_ours(
-            "/x/senate-bridge hook session-start",
-            "session-start"
-        ));
+        assert!(!is_ours("/x/senate hook session-start", "session-start"));
         assert!(is_ours(
-            "/x/senate-bridge hook session-start --codex",
+            "/x/senate hook session-start --codex",
             "session-start"
         ));
     }

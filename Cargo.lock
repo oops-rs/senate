@@ -2127,6 +2127,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "toml",
 ]
 
 [[package]]
@@ -2217,6 +2218,7 @@ dependencies = [
  "clap",
  "futures",
  "ractor",
+ "senate-bridge",
  "senate-core",
  "senate-log",
  "senate-server",

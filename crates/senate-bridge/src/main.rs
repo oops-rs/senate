@@ -1,7 +1,8 @@
-//! `senate-bridge`: the developer-machine side of Senate. One daemon per
-//! machine holds a person's token and seats one agent per kind of coding
-//! session (`<person>/claude`, `<person>/codex`) on the committees they work
-//! on.
+//! `senate`: the command for people and their coding agents on a developer
+//! machine. It installs Senate into Claude Code and Codex, is the MCP server
+//! and the hooks they run, shows what the daemon is doing and what waits for
+//! the person, and writes the local profile (`senate init --local`). The
+//! daemon itself is `senated` (`senated --machine` on a developer machine).
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -12,14 +13,16 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use senate_bridge::delivery::{codex, inbox};
 use senate_bridge::hook::{self, HookEnv, HookKind, HookTimeouts};
+use senate_bridge::ipc::{self, DocketReply, InboxReply, Posted, Request, SessionSelector};
 use senate_bridge::session::Runtime;
-use senate_bridge::{BridgeConfig, DaemonOptions, Paths, Timing, daemon, install, mcp, status};
+use senate_bridge::{BridgeConfig, Paths, init, install, mcp, preside, status};
+use senate_core::{CommitteeId, EventId, Locale, Name, Seq};
 
 #[derive(Parser)]
 #[command(
-    name = "senate-bridge",
+    name = "senate",
     version,
-    about = "Seats this machine's coding-agent sessions, as their person's agents, on Senate committee logs."
+    about = "Senate on a developer machine: install, status, inbox, take, init, and the MCP server and hooks coding agents run. The daemon is `senated --machine`."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -28,8 +31,42 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Run the per-machine daemon: committee streams, delivery, local IPC.
-    Daemon,
+    /// Write the profile for using Senate alone on this machine:
+    /// `senate.toml` in the Senate home, with a local top Senate whose
+    /// Speaker is one of your agents. Writes nothing else; never overwrites.
+    Init {
+        /// The local profile (the only one `init` writes).
+        #[arg(long)]
+        local: bool,
+        /// Your handle (lowercase letters, digits, `-`).
+        #[arg(long)]
+        person: Name,
+        /// The agent that presides, relative to you.
+        #[arg(long, default_value = "claude")]
+        speaker: String,
+        /// `en` or `zh`.
+        #[arg(long, default_value = "en")]
+        locale: Locale,
+        /// The loopback address the local Senate serves on.
+        #[arg(long, default_value = init::DEFAULT_LOCAL_LISTEN)]
+        listen: String,
+    },
+    /// What waits for you: open task threads on a committee for your agents
+    /// or escalated to you, and what awaits the Speaker of every Senate one
+    /// of your agents presides over here.
+    Inbox {
+        /// The committee (default: `.senate/committee` in this repository).
+        #[arg(long)]
+        committee: Option<CommitteeId>,
+    },
+    /// Take a thread over as yourself: nothing more of it goes to agents.
+    Take {
+        /// The thread's root seq.
+        thread: u64,
+        /// The committee (default: `.senate/committee` in this repository).
+        #[arg(long)]
+        committee: Option<CommitteeId>,
+    },
     /// Stdio MCP server (name `senate`) that Claude Code and Codex start per session.
     Mcp,
     /// Claude Code / Codex hook entry point; reads the hook JSON on stdin. Always exits 0.
@@ -75,7 +112,7 @@ enum Cmd {
         #[arg(long)]
         text: Option<String>,
         /// The app-server socket, `unix:///path` (default: `[codex] listen`
-        /// in bridge.toml, else `codex app-server proxy`).
+        /// in senate.toml, else `codex app-server proxy`).
         #[arg(long, value_name = "URL")]
         listen: Option<String>,
     },
@@ -217,18 +254,134 @@ async fn codex_smoke(
     Ok(())
 }
 
+/// The committee named, else the one in this repository's
+/// `.senate/committee`.
+async fn committee_here(named: Option<CommitteeId>) -> anyhow::Result<CommitteeId> {
+    if let Some(committee) = named {
+        return Ok(committee);
+    }
+    let cwd = std::env::current_dir()?;
+    let facts = senate_bridge::session::gather_git_facts(&cwd, Duration::from_secs(2)).await;
+    facts
+        .committee_file
+        .as_deref()
+        .and_then(|text| {
+            text.lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty() && !l.starts_with('#'))
+        })
+        .and_then(|line| CommitteeId::new(line).ok())
+        .context("name the committee with --committee (no .senate/committee here)")
+}
+
+async fn daemon_call<T: serde::de::DeserializeOwned>(
+    paths: &Paths,
+    request: &Request,
+) -> anyhow::Result<T> {
+    Ok(ipc::request(
+        &paths.socket(),
+        request,
+        Duration::from_secs(1),
+        Duration::from_secs(20),
+    )
+    .await?)
+}
+
+async fn inbox(
+    paths: &Paths,
+    committee: Option<CommitteeId>,
+    locale: Locale,
+) -> anyhow::Result<String> {
+    let committee = committee_here(committee).await?;
+    let threads: InboxReply = daemon_call(
+        paths,
+        &Request::Inbox {
+            session: SessionSelector::default(),
+            committee: Some(committee),
+            agent: None,
+        },
+    )
+    .await?;
+    let mut out = mcp::render_inbox(&threads, locale);
+    let docket: DocketReply = daemon_call(
+        paths,
+        &Request::Docket {
+            session: SessionSelector::default(),
+            committee: None,
+        },
+    )
+    .await?;
+    if !docket.senates.is_empty() {
+        out.push_str("\n\n");
+        out.push_str(&preside::render_docket(&docket, locale));
+    }
+    Ok(out)
+}
+
 fn run(command: Cmd) -> anyhow::Result<()> {
     match command {
         Cmd::Hook { .. } => Ok(()),
-        Cmd::Daemon => {
-            init_logging("senate_bridge=info");
+        Cmd::Init {
+            local,
+            person,
+            speaker,
+            locale,
+            listen,
+        } => {
+            if !local {
+                anyhow::bail!(
+                    "`senate init` writes the local profile only: run `senate init --local`. \
+                     Under a team Senate, write senate.toml from config/senate.example.toml."
+                );
+            }
             let paths = Paths::from_env()?;
-            let config = BridgeConfig::load(&paths.config())?;
-            runtime(true)?.block_on(daemon::run(DaemonOptions {
-                paths,
-                config,
-                timing: Timing::default(),
-            }))
+            let profile = init::LocalProfile {
+                person,
+                speaker: speaker.parse().map_err(anyhow::Error::msg)?,
+                locale,
+                listen,
+            };
+            let path = init::init_local(&paths, &profile)?;
+            println!("{}", path.display());
+            Ok(())
+        }
+        Cmd::Inbox { committee } => {
+            let paths = Paths::from_env()?;
+            let locale = BridgeConfig::locale_at(&paths.config());
+            let text = runtime(false)?.block_on(inbox(&paths, committee, locale))?;
+            println!("{text}");
+            Ok(())
+        }
+        Cmd::Take { thread, committee } => {
+            let paths = Paths::from_env()?;
+            let locale = BridgeConfig::locale_at(&paths.config());
+            let posted: Posted = runtime(false)?.block_on(async {
+                let committee = committee_here(committee).await?;
+                daemon_call(
+                    &paths,
+                    &Request::Take {
+                        session: SessionSelector::default(),
+                        thread: Seq(thread),
+                        id: Some(EventId::new()),
+                        committee: Some(committee),
+                    },
+                )
+                .await
+            })?;
+            println!(
+                "{}",
+                match locale {
+                    Locale::Zh => format!(
+                        "你接管了 {} 上的 thread {thread}（seq {}）。",
+                        posted.committee, posted.seq
+                    ),
+                    Locale::En => format!(
+                        "You took thread {thread} on {} over (seq {}).",
+                        posted.committee, posted.seq
+                    ),
+                }
+            );
+            Ok(())
         }
         Cmd::Mcp => {
             init_logging("senate_bridge=warn");
@@ -258,7 +411,7 @@ fn run(command: Cmd) -> anyhow::Result<()> {
             } else {
                 install::CodexChoice::Auto
             };
-            // The report is in the bridge's language; before bridge.toml
+            // The report is in the bridge's language; before senate.toml
             // exists, the default.
             let locale = Paths::from_env()
                 .map(|p| BridgeConfig::locale_at(&p.config()))
@@ -335,7 +488,7 @@ fn main() -> ExitCode {
     match run(cli.command) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("senate-bridge: {e:#}");
+            eprintln!("senate: {e:#}");
             ExitCode::FAILURE
         }
     }

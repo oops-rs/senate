@@ -1,4 +1,4 @@
-//! `senate-bridge install [--yes]`: wire the bridge into Claude Code.
+//! `senate install [--yes]`: wire the bridge into Claude Code.
 //!
 //! 1. Register the MCP server `senate` at user scope through the `claude`
 //!    CLI (`claude mcp add --scope user senate -- <abs exe> mcp`).
@@ -16,7 +16,7 @@
 //!    managed app-server and `codex --remote`).
 //!
 //! What `install` prints, and the slash command it writes (which the agent
-//! reads), are in the locale of `bridge.toml` (English when there is none
+//! reads), are in the locale of `senate.toml` (English when there is none
 //! yet). The hooks and the MCP server are the same in every language.
 //!
 //! Without `--yes` it prints exactly what it would do and writes nothing.
@@ -76,13 +76,16 @@ fn why_cross_session(locale: Locale) -> &'static str {
 /// Marks a `commands/senate.md` as ours, so `install` may update it. The
 /// same in every language, so a file written in one language is still
 /// recognised and rewritten in another.
-const COMMAND_MARKER: &str = "installed by senate-bridge";
+const COMMAND_MARKER: &str = "installed by senate install";
+/// The marker an install by the old `senate-bridge` binary wrote; its file
+/// is still ours to update.
+const OLD_COMMAND_MARKER: &str = "installed by senate-bridge";
 
 /// The `/senate` slash command, for the agent to read, in `locale`.
 pub fn command_md(locale: Locale) -> String {
     match locale {
         Locale::Zh => "---
-description: Senate 收件箱、接管、加入和交接 (installed by senate-bridge)
+description: Senate 收件箱、接管、加入和交接 (installed by senate install)
 argument-hint: inbox | take <seq> | join <committee> | handoff
 ---
 Senate 命令：`$ARGUMENTS`
@@ -102,7 +105,7 @@ decisions 和 open 传进去。告诉我它记录的分支和提交，如果推�
 "
         .to_string(),
         Locale::En => "---
-description: Senate inbox, take, join and handoff (installed by senate-bridge)
+description: Senate inbox, take, join and handoff (installed by senate install)
 argument-hint: inbox | take <seq> | join <committee> | handoff
 ---
 Senate command: `$ARGUMENTS`
@@ -136,7 +139,7 @@ pub enum CommandPlan {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallOptions {
-    /// Absolute path of the `senate-bridge` binary to register.
+    /// Absolute path of the `senate` binary to register.
     pub exe: PathBuf,
     /// Holds `settings.json`.
     pub claude_dir: PathBuf,
@@ -274,9 +277,22 @@ pub fn hook_command(exe: &str, subcommand: &str) -> String {
     format!("{} hook {subcommand}", shell_quote(exe))
 }
 
-/// A hook command an earlier install wrote, perhaps for another path.
+/// Whether `command` runs one of our binaries: `senate`, or `senate-bridge`
+/// as an install before the rename wrote it, at any path.
+pub(crate) fn runs_senate(command: &str) -> bool {
+    let program = command
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .trim_matches(|c| c == '\'' || c == '"');
+    let name = program.rsplit('/').next().unwrap_or(program);
+    name == "senate" || name == "senate-bridge"
+}
+
+/// A hook command an earlier install wrote, perhaps for another path or by
+/// the binary's old name.
 fn is_ours(command: &str, subcommand: &str) -> bool {
-    command.contains("senate-bridge") && command.trim_end().ends_with(&format!("hook {subcommand}"))
+    runs_senate(command) && command.trim_end().ends_with(&format!("hook {subcommand}"))
 }
 
 /// Merge the bridge's hooks and `crossSessionInbound` into `settings`.
@@ -409,7 +425,9 @@ impl InstallPlan {
 fn command_plan(opts: &InstallOptions) -> CommandPlan {
     match std::fs::read_to_string(opts.command_path()) {
         Ok(text) if text == command_md(opts.locale) => CommandPlan::Present,
-        Ok(text) if text.contains(COMMAND_MARKER) => CommandPlan::Write,
+        Ok(text) if text.contains(COMMAND_MARKER) || text.contains(OLD_COMMAND_MARKER) => {
+            CommandPlan::Write
+        }
         Ok(_) => CommandPlan::Foreign,
         Err(_) => CommandPlan::Write,
     }
@@ -483,7 +501,7 @@ pub fn render(plan: &InstallPlan, opts: &InstallOptions, applied: bool) -> Strin
     };
     let _ = writeln!(
         out,
-        "senate-bridge install{}",
+        "senate install{}",
         match (applied, zh) {
             (true, _) => "",
             (false, true) => "（演练：不加 --yes 什么都不写）",
@@ -523,11 +541,11 @@ pub fn render(plan: &InstallPlan, opts: &InstallOptions, applied: bool) -> Strin
         out,
         "   {}",
         l.pick(
-            "Claude Code 为每个会话启动 `senate-bridge mcp`；工具显示为 \
+            "Claude Code 为每个会话启动 `senate mcp`；工具显示为 \
              mcp__senate__ask / answer / catch_up / join / search / post / status / escalate / …。\
              Claude Code 会话默认以 <person>/claude 的身份加入；SENATE_AGENT 环境变量或工作区里的 \
              .senate/agent 文件可以换一个名字。",
-            "Claude Code starts `senate-bridge mcp` for each session; its tools appear as \
+            "Claude Code starts `senate mcp` for each session; its tools appear as \
              mcp__senate__ask / answer / catch_up / join / search / post / status / escalate / …. \
              Claude Code sessions join as <person>/claude by default; SENATE_AGENT or a \
              .senate/agent file in the worktree picks another name."
@@ -590,11 +608,11 @@ pub fn render(plan: &InstallPlan, opts: &InstallOptions, applied: bool) -> Strin
         ),
         (CommandPlan::Foreign, true) => writeln!(
             out,
-            "   保持不动：它已存在且不是 senate-bridge 写的，所以 /senate 归你自己"
+            "   保持不动：它已存在且不是 senate install 写的，所以 /senate 归你自己"
         ),
         (CommandPlan::Foreign, false) => writeln!(
             out,
-            "   left alone: it exists and senate-bridge did not write it, so /senate is yours"
+            "   left alone: it exists and senate install did not write it, so /senate is yours"
         ),
     };
     match &plan.codex {
@@ -624,8 +642,8 @@ pub fn render(plan: &InstallPlan, opts: &InstallOptions, applied: bool) -> Strin
             )
         } else if applied {
             l.pick(
-                "完成。用 `senate-bridge daemon` 启动 daemon（它读取 ~/.senate/bridge.toml）。",
-                "Done. Start the daemon with `senate-bridge daemon` (it reads ~/.senate/bridge.toml).",
+                "完成。用 `senated --machine` 启动 daemon（它读取 ~/.senate/senate.toml）。",
+                "Done. Start the daemon with `senated --machine` (it reads ~/.senate/senate.toml).",
             )
         } else {
             l.pick(
@@ -804,7 +822,7 @@ mod tests {
                 "Stop": [{"hooks": [{"type": "command", "command": "say done"}]}]
             }
         });
-        let changes = merge_settings(&mut s, "/bin/senate-bridge").unwrap();
+        let changes = merge_settings(&mut s, "/bin/senate").unwrap();
         assert_eq!(changes.len(), 4);
         assert_eq!(s["model"], "opus");
         assert_eq!(s["hooks"]["Stop"][0]["hooks"][0]["command"], "say done");
@@ -814,10 +832,10 @@ mod tests {
         );
         assert_eq!(
             s["hooks"]["SessionStart"][1]["hooks"][0]["command"],
-            "/bin/senate-bridge hook session-start"
+            "/bin/senate hook session-start"
         );
         assert_eq!(s["crossSessionInbound"], "accept");
-        let again = merge_settings(&mut s, "/bin/senate-bridge").unwrap();
+        let again = merge_settings(&mut s, "/bin/senate").unwrap();
         assert!(again.is_empty(), "{again:?}");
     }
 
@@ -825,13 +843,13 @@ mod tests {
     fn merge_updates_a_moved_binary() {
         let mut s = json!({});
         merge_settings(&mut s, "/old/senate-bridge").unwrap();
-        let changes = merge_settings(&mut s, "/new/senate-bridge").unwrap();
+        let changes = merge_settings(&mut s, "/new/senate").unwrap();
         assert_eq!(changes.len(), 3);
         assert!(changes.iter().all(|c| c.starts_with('~')));
         assert_eq!(s["hooks"]["SessionEnd"].as_array().unwrap().len(), 1);
         assert_eq!(
             s["hooks"]["SessionEnd"][0]["hooks"][0]["command"],
-            "/new/senate-bridge hook session-end"
+            "/new/senate hook session-end"
         );
     }
 
@@ -851,7 +869,7 @@ mod tests {
         std::os::unix::fs::symlink("../dotfiles/claude-settings.json", &link).unwrap();
 
         let opts = InstallOptions {
-            exe: "/opt/senate-bridge".into(),
+            exe: "/opt/senate".into(),
             claude_dir: claude.clone(),
             config_dir_env: None,
             user_config: claude.join(".claude.json"),
@@ -908,7 +926,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let claude = dir.path().join("claude");
         let opts = InstallOptions {
-            exe: "/opt/senate-bridge".into(),
+            exe: "/opt/senate".into(),
             claude_dir: claude.clone(),
             config_dir_env: None,
             user_config: claude.join(".claude.json"),
@@ -934,7 +952,7 @@ mod tests {
         let p = plan(&opts).unwrap();
         let text = render(&p, &opts, false);
         assert!(
-            text.starts_with("senate-bridge install（演练：不加 --yes 什么都不写）"),
+            text.starts_with("senate install（演练：不加 --yes 什么都不写）"),
             "{text}"
         );
         assert!(

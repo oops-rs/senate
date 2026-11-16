@@ -1,4 +1,4 @@
-//! `bridge.toml`: who this machine is on the Senate server.
+//! `senate.toml` (formerly `bridge.toml`): who this machine is on the Senate server.
 //!
 //! ```toml
 //! server_url = "https://senate.example.com"
@@ -122,22 +122,27 @@ impl fmt::Debug for SenateLink {
     }
 }
 
-/// `[agents]`: the agent name a session of each harness speaks as, unless
-/// the session pins another ([`crate::agent`]).
+/// `[agents]`: the agent a session of each harness speaks as, unless the
+/// session pins another ([`crate::agent`]): a name, or a path relative to
+/// the person (`claude/codex`), which also selects the Senate it sits in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentNames {
     #[serde(default = "default_claude")]
-    pub claude: Name,
+    pub claude: RelPath,
     #[serde(default = "default_codex")]
-    pub codex: Name,
+    pub codex: RelPath,
 }
 
-fn default_claude() -> Name {
-    Name::new(Runtime::Claude.as_str()).unwrap_or_else(|_| unreachable!("a valid name"))
+fn default_claude() -> RelPath {
+    RelPath::name(
+        Name::new(Runtime::Claude.as_str()).unwrap_or_else(|_| unreachable!("a valid name")),
+    )
 }
 
-fn default_codex() -> Name {
-    Name::new(Runtime::Codex.as_str()).unwrap_or_else(|_| unreachable!("a valid name"))
+fn default_codex() -> RelPath {
+    RelPath::name(
+        Name::new(Runtime::Codex.as_str()).unwrap_or_else(|_| unreachable!("a valid name")),
+    )
 }
 
 impl Default for AgentNames {
@@ -150,8 +155,8 @@ impl Default for AgentNames {
 }
 
 impl AgentNames {
-    /// The agent name for a session of `runtime`.
-    pub fn for_runtime(&self, runtime: Runtime) -> &Name {
+    /// The agent for a session of `runtime`, relative to the person.
+    pub fn for_runtime(&self, runtime: Runtime) -> &RelPath {
         match runtime {
             Runtime::Claude => &self.claude,
             Runtime::Codex => &self.codex,
@@ -186,9 +191,133 @@ impl fmt::Debug for BridgeConfig {
     }
 }
 
+/// What `senated --machine` hosts on this machine, read from the same
+/// `senate.toml`: a local top Senate (`[local]`, for using Senate alone),
+/// and a Senate one level down for each presiding agent (`[[preside]]`).
+///
+/// ```toml
+/// [local]                 # alone: no Senate above, no server_url
+/// speaker = "claude"      # alice/claude presides over it
+/// listen = "127.0.0.1:7979"
+///
+/// [[preside]]
+/// agent = "claude"        # alice/claude/* sit in the Senate it presides over
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct Hosted {
+    #[serde(default)]
+    pub local: Option<LocalSenate>,
+    #[serde(default)]
+    pub preside: Vec<PresideSenate>,
+}
+
+/// `[local]`: a top Senate on this machine, with no Senate above.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct LocalSenate {
+    /// The agent named its Speaker, relative to the person. Absent: nobody
+    /// presides, and the Senate only keeps the log.
+    #[serde(default)]
+    pub speaker: Option<RelPath>,
+    /// A loopback address to serve it on. Default: a free port, kept for
+    /// the next start.
+    #[serde(default)]
+    pub listen: Option<String>,
+}
+
+/// `[[preside]]`: a Senate one level down, presided over by `agent`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PresideSenate {
+    /// The presiding agent, relative to the person (`claude`).
+    pub agent: RelPath,
+    /// A loopback address to serve it on. Default: a free port, kept.
+    #[serde(default)]
+    pub listen: Option<String>,
+}
+
+impl Hosted {
+    /// `[local]` and `[[preside]]` of the file at `path`; none when it has
+    /// neither.
+    pub fn load(path: &Path) -> Result<Self, ConfigError> {
+        let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let hosted: Self = toml::from_str(&text).map_err(|source| ConfigError::Parse {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        Ok(hosted)
+    }
+
+    /// The rules: a local top Senate has no Senate above (`server_url` is
+    /// empty); without one, the Senate above is configured; each presiding
+    /// agent hosts one Senate; every address is loopback.
+    pub fn validate(&self, config: &BridgeConfig) -> Result<(), String> {
+        match (&self.local, config.server_url.is_empty()) {
+            (Some(_), false) => {
+                return Err(
+                    "[local] is a top Senate on this machine, with no Senate above: drop \
+                     server_url and token, or [local]"
+                        .into(),
+                );
+            }
+            (None, true) if config.senates.is_empty() => {
+                return Err("set server_url and token (the Senate above), or [local]".into());
+            }
+            _ => {}
+        }
+        for (i, p) in self.preside.iter().enumerate() {
+            if self.preside[..i].iter().any(|q| q.agent == p.agent) {
+                return Err(format!("[[preside]] lists {} twice", p.agent));
+            }
+            if config
+                .senates
+                .iter()
+                .any(|l| l.presider.as_ref() == Some(&p.agent))
+            {
+                return Err(format!(
+                    "{} presides over a Senate in [[senates]] and in [[preside]]",
+                    p.agent
+                ));
+            }
+        }
+        let listens = self
+            .local
+            .iter()
+            .filter_map(|l| l.listen.as_deref())
+            .chain(self.preside.iter().filter_map(|p| p.listen.as_deref()));
+        for listen in listens {
+            check_loopback(listen)?;
+        }
+        Ok(())
+    }
+
+    /// Whether this machine hosts any Senate.
+    pub fn is_empty(&self) -> bool {
+        self.local.is_none() && self.preside.is_empty()
+    }
+}
+
+/// A hosted Senate listens on loopback only: its token never leaves the
+/// machine, and neither does its traffic.
+pub fn check_loopback(listen: &str) -> Result<(), String> {
+    let addr: std::net::SocketAddr = listen
+        .parse()
+        .map_err(|e| format!("listen = {listen:?} is not an address: {e}"))?;
+    if addr.ip().is_loopback() {
+        Ok(())
+    } else {
+        Err(format!(
+            "listen = {listen:?}: a Senate on this machine listens on loopback only"
+        ))
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
-    #[error("no bridge config at {0}; write one with server_url, token and person")]
+    #[error(
+        "no configuration at {0}; write one with server_url, token and person (under a team's Senate), or run `senate init --local` (alone)"
+    )]
     Missing(PathBuf),
     #[error("reading {path}: {source}")]
     Read {
@@ -247,6 +376,18 @@ impl BridgeConfig {
     }
 
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
+        let config = Self::load_unchecked(path)?;
+        config.validate().map_err(|message| ConfigError::Invalid {
+            path: path.to_path_buf(),
+            message,
+        })?;
+        Ok(config)
+    }
+
+    /// Read and parse, without [`BridgeConfig::validate`]: for `senated
+    /// --machine`, which fills in the Senates it hosts itself before the
+    /// configuration is complete.
+    pub fn load_unchecked(path: &Path) -> Result<Self, ConfigError> {
         let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -259,15 +400,10 @@ impl BridgeConfig {
                 });
             }
         };
-        let config: Self = toml::from_str(&text).map_err(|source| ConfigError::Parse {
+        toml::from_str(&text).map_err(|source| ConfigError::Parse {
             path: path.to_path_buf(),
             source,
-        })?;
-        config.validate().map_err(|message| ConfigError::Invalid {
-            path: path.to_path_buf(),
-            message,
-        })?;
-        Ok(config)
+        })
     }
 
     /// The `locale` of the file at `path`, for the thin clients (the MCP
@@ -373,12 +509,20 @@ mod tests {
         .unwrap();
         assert_eq!(c.locale, Locale::Zh);
         assert_eq!(c.branches().prefix(), "team/work");
-        assert_eq!(c.agents.for_runtime(Runtime::Claude).as_str(), "claude");
-        assert_eq!(c.agents.for_runtime(Runtime::Codex).as_str(), "reviewer");
+        assert_eq!(c.agents.for_runtime(Runtime::Claude).to_string(), "claude");
+        assert_eq!(c.agents.for_runtime(Runtime::Codex).to_string(), "reviewer");
+        let deep: BridgeConfig = toml::from_str(
+            "server_url = \"http://x\"\ntoken = \"t\"\nperson = \"alice\"\n[agents]\ncodex = \"claude/codex\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            deep.agents.for_runtime(Runtime::Codex).to_string(),
+            "claude/codex"
+        );
         // An agent name is a senator name: validated where it is written.
         for bad in [
             "[agents]\nclaude = \"Claude\"",
-            "[agents]\ncodex = \"a/b\"",
+            "[agents]\ncodex = \"a//b\"",
             "locale = \"fr\"",
             "person = \"Alice\"",
         ] {
@@ -456,6 +600,37 @@ mod tests {
         ] {
             let c: BridgeConfig = toml::from_str(bad).unwrap();
             assert!(c.validate().is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn what_a_machine_hosts_is_checked_against_the_rest() {
+        let parse = |text: &str| -> (BridgeConfig, Hosted) {
+            (toml::from_str(text).unwrap(), toml::from_str(text).unwrap())
+        };
+        let (config, hosted) = parse(
+            "person = \"alice\"\n[local]\nspeaker = \"claude\"\nlisten = \"127.0.0.1:7979\"\n",
+        );
+        assert_eq!(hosted.validate(&config), Ok(()));
+        assert_eq!(hosted.local.unwrap().speaker.unwrap().to_string(), "claude");
+        let (config, hosted) = parse(
+            "person = \"alice\"\nserver_url = \"https://s\"\ntoken = \"t\"\n[[preside]]\nagent = \"claude\"\n",
+        );
+        assert_eq!(hosted.validate(&config), Ok(()));
+        assert_eq!(hosted.preside[0].agent.to_string(), "claude");
+
+        for bad in [
+            // Alone, yet a Senate above.
+            "person = \"a\"\nserver_url = \"https://s\"\ntoken = \"t\"\n[local]\n",
+            // Neither.
+            "person = \"a\"\n[[preside]]\nagent = \"claude\"\n",
+            // Twice.
+            "person = \"a\"\n[local]\n[[preside]]\nagent = \"c\"\n[[preside]]\nagent = \"c\"\n",
+            // Off the machine.
+            "person = \"a\"\n[local]\nlisten = \"0.0.0.0:7979\"\n",
+        ] {
+            let (config, hosted) = parse(bad);
+            assert!(hosted.validate(&config).is_err(), "{bad}");
         }
     }
 

@@ -21,6 +21,7 @@ senate-log = { workspace = true }
 senate-server = { workspace = true }
 senate-speaker = { workspace = true }
 senate-work = { workspace = true }
+senate-bridge = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 clap = { workspace = true }

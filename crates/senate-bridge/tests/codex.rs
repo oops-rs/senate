@@ -46,7 +46,7 @@ async fn an_idle_thread_gets_a_new_turn() {
     assert_eq!(params["input"][0]["type"], "text");
     assert_eq!(input_text(params), "[senate · x] hi");
     let init = &codex.calls()[0].1;
-    assert_eq!(init["clientInfo"]["name"], "senate-bridge");
+    assert_eq!(init["clientInfo"]["name"], "senate");
 }
 
 #[tokio::test]
@@ -201,7 +201,7 @@ async fn codex_smoke_reads_then_starts_or_steers() {
     let smoke = |args: Vec<String>| {
         let home = dir.path().join("senate");
         async move {
-            let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_senate-bridge"))
+            let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_senate"))
                 .env("SENATE_HOME", home)
                 .arg("codex-smoke")
                 .args(args)

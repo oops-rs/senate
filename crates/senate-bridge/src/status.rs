@@ -1,4 +1,4 @@
-//! `senate-bridge status`: is the daemon up, which Senate it is connected
+//! `senate status`: is the daemon up, which Senate it is connected
 //! to and as which person, which agents are joined to which committees and
 //! how far each stream got, and which sessions are registered (as which
 //! agent).
@@ -217,11 +217,11 @@ pub fn render(view: &StatusView, now: DateTime<Utc>) -> String {
         (Some(pid), Locale::En) => writeln!(out, "daemon: running (pid {pid}) on {socket}"),
         (None, Locale::Zh) => writeln!(
             out,
-            "daemon：未运行（{socket} 没有应答）；用 `senate-bridge daemon` 启动"
+            "daemon：未运行（{socket} 没有应答）；用 `senated --machine` 启动"
         ),
         (None, Locale::En) => writeln!(
             out,
-            "daemon: not running (no answer on {socket}); start it with `senate-bridge daemon`"
+            "daemon: not running (no answer on {socket}); start it with `senated --machine`"
         ),
     };
     if let (Some(person), Some(url)) = (&view.person, &view.server_url) {
@@ -267,8 +267,8 @@ pub fn render(view: &StatusView, now: DateTime<Utc>) -> String {
                 out,
                 "  {}",
                 l.pick(
-                    "* 列在 bridge.toml 里（没有会话时也保持打开）",
-                    "* listed in bridge.toml (kept open with no session)"
+                    "* 列在 senate.toml 里（没有会话时也保持打开）",
+                    "* listed in senate.toml (kept open with no session)"
                 )
             );
         }
@@ -280,8 +280,8 @@ pub fn render(view: &StatusView, now: DateTime<Utc>) -> String {
             out,
             "  {}",
             l.pick(
-                "没有登记的会话（会话由钩子上报；见 `senate-bridge install`）",
-                "none registered (hooks report sessions; see `senate-bridge install`)"
+                "没有登记的会话（会话由钩子上报；见 `senate install`）",
+                "none registered (hooks report sessions; see `senate install`)"
             )
         );
     } else {

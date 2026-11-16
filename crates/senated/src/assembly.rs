@@ -323,7 +323,7 @@ impl Senated {
     }
 }
 
-async fn shutdown_signal() -> anyhow::Result<()> {
+pub(crate) async fn shutdown_signal() -> anyhow::Result<()> {
     use anyhow::Context;
     #[cfg(unix)]
     {

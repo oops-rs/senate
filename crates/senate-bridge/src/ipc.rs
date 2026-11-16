@@ -678,7 +678,7 @@ pub struct CommitteeStatus {
     /// committee is no longer joined).
     #[serde(default)]
     pub stream: Option<StreamState>,
-    /// Listed in `bridge.toml`.
+    /// Listed in `senate.toml`.
     pub configured: bool,
     /// Live sessions of the agent bound to it.
     pub sessions: usize,

@@ -16,7 +16,7 @@
 //! - **IPC server** on `bridge.sock` ([`crate::ipc`]): hooks, MCP, status.
 //! - **Supervisor**: keeps one stream worker per (agent, committee) — each
 //!   live bound session's agent on its committee, plus the committees in
-//!   `bridge.toml` for every agent this machine has a session of on record.
+//!   `senate.toml` for every agent this machine has a session of on record.
 //!   A configured committee opens nothing for an agent that has never had a
 //!   session here, so configuration alone never seats an agent.
 //! - **Stream workers** (`stream` module): seed the agent's cursor on first
@@ -34,7 +34,7 @@
 //!
 //! `GET /v1/me` names the person and the Senate the server serves, by its
 //! presider ([`senate_core::api::Me::presider`]). The daemon checks the
-//! person against `bridge.toml`, names its agents under the presider when
+//! person against `senate.toml`, names its agents under the presider when
 //! there is one ([`Seating`]), records it in `state.db` so a restart while
 //! the server is down names them the same way, and shows it wherever it says
 //! what it is connected to (`status`, the session-start orientation).
@@ -66,7 +66,7 @@
 //! [`Timing::retry_max`], [`INBOX_RETRIES`] times); while it is held, nothing
 //! newer is pushed to that session ahead of it. A Codex session is pushed
 //! the same way through its app-server instead of an inbox
-//! ([`crate::delivery::codex`], `[codex]` in `bridge.toml`), with the same
+//! ([`crate::delivery::codex`], `[codex]` in `senate.toml`), with the same
 //! spacing, hold and retries. Its hooks never carry items: what waits for a
 //! Codex session when it registers, or is held after a failed push, is
 //! pushed through the app-server once its hook has run.
@@ -653,7 +653,7 @@ async fn verify_person(shared: &Shared) -> anyhow::Result<()> {
     let config = &shared.config;
     match tokio::time::timeout(Duration::from_secs(5), shared.api.me()).await {
         Ok(Ok(me)) if me.person != config.person => bail!(
-            "bridge.toml says person {:?}, but the server says the token belongs to {:?}",
+            "senate.toml says person {:?}, but the server says the token belongs to {:?}",
             config.person.as_str(),
             me.person.as_str()
         ),
@@ -2779,11 +2779,11 @@ impl Shared {
                 codes::NO_SESSION,
                 self.locale.pick(
                     "这个会话还没有在 Senate bridge 登记。bridge 通过会话的 SessionStart / \
-                     UserPromptSubmit 钩子知道它：确认已运行过 `senate-bridge install` 且 daemon \
+                     UserPromptSubmit 钩子知道它：确认已运行过 `senate install` 且 daemon \
                      在运行，在这个会话里随便发一条消息，然后再试。",
                     "This session is not registered with the Senate bridge. The bridge learns \
                      about a session from its SessionStart / UserPromptSubmit hooks: make sure \
-                     `senate-bridge install` was run and the daemon is up, send any prompt in this \
+                     `senate install` was run and the daemon is up, send any prompt in this \
                      session, then try again.",
                 ),
             ));

@@ -8,7 +8,7 @@
 //!
 //! 1. an explicit `join` (the agent or its user said so; it wins),
 //! 2. the git branch, when it is `<prefix>/<committee>/<person>`
-//!    ([`BranchNaming`], prefix `feature` unless `bridge.toml` says
+//!    ([`BranchNaming`], prefix `feature` unless `senate.toml` says
 //!    otherwise),
 //! 3. the first non-comment line of `.senate/committee` at the git toplevel
 //!    (or the session's cwd outside git).

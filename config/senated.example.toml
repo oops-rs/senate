@@ -1,6 +1,11 @@
-# senated configuration.
+# senated as a team's Senate server: the top Senate, with the built-in
+# Speaker when [speaker] is set (below).
 #
 #   senated --config config/senated.example.toml
+#
+# A developer machine runs the same daemon as `senated --machine`, from
+# senate.toml in the Senate home: see senate.example.toml (under this
+# Senate) and local.example.toml (alone on one machine).
 #
 # (or set SENATED_CONFIG). Logging follows RUST_LOG, default "info".
 # Copy this file somewhere private for real tokens: it holds secrets.
@@ -9,8 +14,8 @@
 # The server
 # ---------------------------------------------------------------------------
 
-# Address the HTTP/SSE API binds. Bridges on developer machines connect
-# here; they only ever make outbound requests.
+# Address the HTTP/SSE API binds. Developer machines connect here; they
+# only ever make outbound requests.
 listen = "127.0.0.1:7878"
 
 # Where the log is kept.

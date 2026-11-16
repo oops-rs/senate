@@ -9,8 +9,9 @@
 //!    every thread and describes none of them);
 //! 2. **`.senate/agent`** at the worktree root (or the cwd outside git): its
 //!    first line that is neither blank nor a `#` comment;
-//! 3. **`[agents]`** in `bridge.toml`, by harness: `claude` for a Claude
-//!    Code session, `codex` for a Codex session;
+//! 3. **`[agents]`** in `senate.toml`, by harness: `claude` for a Claude
+//!    Code session, `codex` for a Codex session (each a name or a path
+//!    relative to the person);
 //! 4. the harness's own name, `claude` or `codex`.
 //!
 //! A pin is a path relative to the person ([`RelPath`]): one name
@@ -133,7 +134,7 @@ pub enum AgentSource {
     Env,
     /// `.senate/agent`.
     File,
-    /// `[agents]` in `bridge.toml`, or the harness's own name.
+    /// `[agents]` in `senate.toml`, or the harness's own name.
     Harness,
 }
 
@@ -280,10 +281,7 @@ pub fn choose(names: &AgentNames, runtime: Runtime, pins: Pins<'_>) -> (RelPath,
             ),
         }
     }
-    (
-        RelPath::name(names.for_runtime(runtime).clone()),
-        AgentSource::Harness,
-    )
+    (names.for_runtime(runtime).clone(), AgentSource::Harness)
 }
 
 #[cfg(test)]
@@ -315,8 +313,8 @@ mod tests {
             (rel("codex"), AgentSource::Harness)
         );
         let renamed = AgentNames {
-            claude: name("cc"),
-            codex: name("cx"),
+            claude: rel("cc"),
+            codex: rel("cx"),
         };
         assert_eq!(choose(&renamed, Runtime::Codex, none).0, rel("cx"));
     }

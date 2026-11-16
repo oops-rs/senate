@@ -1273,7 +1273,7 @@ async fn two_agents_of_one_person_have_their_own_streams_cursors_and_pushes() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_session_can_pin_its_agent_and_the_config_can_rename_one() {
     let mut h = Harness::new().await;
-    h.config.agents.claude = name("cc");
+    h.config.agents.claude = "cc".parse().unwrap();
     h.start().await;
     let plain = h.workdir("plain", Some("refund-v2"));
     let inbox_cc = h.inbox("cc");
@@ -1328,7 +1328,7 @@ async fn a_session_can_pin_its_agent_and_the_config_can_rename_one() {
 async fn agents_sit_under_the_presider_of_a_nested_senate() {
     let mut h = Harness::new().await;
     h.server.set_presider(Some("alice/claude"));
-    h.config.agents.claude = name("reviewer");
+    h.config.agents.claude = "reviewer".parse().unwrap();
     h.start().await;
     let wd = h.workdir("n", Some("refund-v2"));
     let inbox = h.inbox("n");

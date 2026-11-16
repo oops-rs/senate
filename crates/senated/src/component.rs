@@ -258,7 +258,7 @@ mod tests {
 
     /// A hub nobody reads: components here never touch it.
     fn hub() -> Arc<dyn Hub> {
-        crate::testing_hub::empty()
+        crate::empty_hub::empty()
     }
 
     #[tokio::test(start_paused = true)]
