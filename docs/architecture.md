@@ -516,8 +516,21 @@ platform follow, without ever holding the log or the Speaker up:
   chat the log holds from it (or by its first new message when nobody has
   spoken since), and every group once bound and now bound to nothing is
   released again. Both calls are idempotent.
-- A root post refused for want of a grant adopts the group and is tried once
-  more; posts otherwise never wait for an adopt.
+- A post refused (`SurfaceError::Rejected`) into a bound group whose grant is
+  not confirmed adopts the group (waiting for an adopt already under way) and
+  is tried once more; posts otherwise never wait for an adopt, and a post
+  whose group is already granted is never delayed. A root post names its
+  group. A reply names only the message it replies to, so the gateway finds
+  the group from what Senate records: the log's mirror refs for a message the
+  Speaker posted (the copy's `target` is the group, with an optional `#role`
+  suffix), and the messages the gateway delivered (each becomes a `chat`
+  event whose `source` is the group and whose `mirror` is the message; a
+  message from an unbound group, such as the bind message, is known too, and
+  so are the thread and reply refs it names). When the group cannot be found
+  (a message the Speaker did not post and the gateway has not been delivered
+  since it started) or is not bound, the refusal stands, as before. One heal
+  and one retry per post, never a loop. A platform surface therefore needs no
+  heal of its own, for roots or for replies.
 - A surface that answers `Unsupported` is not asked again.
 
 `GrantPolicy` (`ChatGateway::with_grant_policy`) holds the numbers.

@@ -45,10 +45,22 @@
 //!     the latest chat the log holds from the group, else by its first new
 //!     message), and every group it ever bound that is bound to nothing is
 //!     released again (idempotent) once the grace has passed.
-//!   - *Self-heal.* A root post into a bound group that the platform refuses
+//!   - *Self-heal.* A post into a bound group that the platform refuses
 //!     ([`SurfaceError::Rejected`]) while the group's grant is not confirmed
 //!     adopts the group (waiting for an adopt already under way) and is
-//!     tried once more. Posts do not otherwise wait for a grant.
+//!     tried once more. Posts do not otherwise wait for a grant, and a
+//!     platform layer needs no heal of its own. A *root* post names its
+//!     group. A *reply* names only the message it replies to, so the gateway
+//!     finds that message's group from what it records: the log's mirror
+//!     refs for a message the Speaker posted (the copy's target is the
+//!     group, with an optional `#role` suffix), and the messages it delivered
+//!     from the platform (each becomes a `chat` event whose `source` is the
+//!     group and whose `mirror` is the message, and so does a message in an
+//!     unbound group, so the bind message itself is known). When the group
+//!     cannot be found (a message the Speaker did not post and the gateway
+//!     has not been given since it started), or is not bound, nothing is
+//!     healed and the refusal stands. One heal and one retry per post, never
+//!     a loop.
 //!   - A platform without grants answers `Unsupported`, which is noted once
 //!     and never asked again: no retries, no work.
 //!
@@ -216,6 +228,37 @@ struct State {
     latest_ref: HashMap<String, String>,
     /// What the platform's grants should be, and what it has confirmed.
     grants: Grants,
+    /// The group of each message (and thread) the platform delivered, so a
+    /// reply to one can be healed. Bounded; lost on restart.
+    delivered: MessageGroups,
+}
+
+/// Platform message refs and the group they were delivered in.
+#[derive(Default)]
+struct MessageGroups {
+    groups: HashMap<String, String>,
+    order: VecDeque<String>,
+}
+
+impl MessageGroups {
+    fn insert(&mut self, message_ref: &str, group_id: &str) {
+        if self
+            .groups
+            .insert(message_ref.to_owned(), group_id.to_owned())
+            .is_none()
+        {
+            self.order.push_back(message_ref.to_owned());
+            while self.order.len() > REMEMBERED_REFS {
+                if let Some(old) = self.order.pop_front() {
+                    self.groups.remove(&old);
+                }
+            }
+        }
+    }
+
+    fn get(&self, message_ref: &str) -> Option<&String> {
+        self.groups.get(message_ref)
+    }
 }
 
 #[derive(Default)]
@@ -305,6 +348,9 @@ impl ChatGateway {
             state
                 .latest_ref
                 .insert(inbound.group_id.clone(), inbound.message_ref.clone());
+            for message in std::iter::once(inbound.message_ref.as_str()).chain(inbound.refs()) {
+                state.delivered.insert(message, &inbound.group_id);
+            }
             let committee = state.table.committee_of(&inbound.group_id).cloned();
             if committee.is_some() {
                 // A message from a bound group: if its grant is not
@@ -393,6 +439,34 @@ pub fn sender_address(roster: &Roster, platform: &str, user: &str) -> Address {
 }
 
 impl Inner {
+    /// The group a platform message belongs to, from what is recorded: a
+    /// message the platform delivered, else the log's mirror ref of a
+    /// message the Speaker posted. `None` when neither knows it, or the
+    /// log cannot be read now.
+    async fn group_of_message(&self, message_ref: &str) -> Option<String> {
+        if let Some(group) = lock(&self.state).delivered.get(message_ref) {
+            return Some(group.clone());
+        }
+        let hub = self.hub.borrow().clone()?;
+        let mirror = hub
+            .mirror_of_message(&self.platform, message_ref)
+            .await
+            .ok()??;
+        lock(&self.state)
+            .table
+            .group_named_by(&mirror.target)
+            .map(str::to_owned)
+    }
+
+    /// A reply to `message_ref` was refused: heal the group the message is
+    /// in, when it can be found ([`Inner::heal`] says when to retry).
+    async fn heal_reply(self: &Arc<Self>, message_ref: &str) -> bool {
+        match self.group_of_message(message_ref).await {
+            Some(group) => self.heal(&group).await,
+            None => false,
+        }
+    }
+
     async fn hub(&self) -> Result<Arc<dyn Hub>, GatewayError> {
         let mut hub = self.hub.subscribe();
         let ready = hub
@@ -725,6 +799,21 @@ impl BindingTable {
     fn committee_of(&self, group_id: &str) -> Option<&CommitteeId> {
         self.groups.get(group_id)
     }
+
+    /// The bound group a mirror's target names: the group itself, or the
+    /// group with a `#role` suffix (the longest match wins).
+    fn group_named_by(&self, target: &str) -> Option<&str> {
+        self.groups
+            .keys()
+            .filter(|g| {
+                target == g.as_str()
+                    || target
+                        .strip_prefix(g.as_str())
+                        .is_some_and(|rest| rest.starts_with('#'))
+            })
+            .max_by_key(|g| g.len())
+            .map(String::as_str)
+    }
 }
 
 /// A binding on this platform the table may act on. Only the Speaker binds
@@ -745,10 +834,11 @@ struct RecordingSurface {
 }
 
 impl RecordingSurface {
-    /// A root post into a bound group was refused and the platform has not
+    /// A post into a bound group was refused and the platform has not
     /// confirmed the group's grant (a bind and the Speaker's first posts
     /// there happen together, while the adopt is still under way): adopt it
-    /// now. True when the post should be tried once more.
+    /// now. A reply names a message, not a group: the group is found from
+    /// the message. True when the post should be tried once more.
     async fn refused_for_want_of_grant(
         &self,
         target: &PostTarget,
@@ -757,6 +847,9 @@ impl RecordingSurface {
         match (target, result) {
             (PostTarget::NewRoot { group_id }, Err(SurfaceError::Rejected(_))) => {
                 self.inner.heal(group_id).await
+            }
+            (PostTarget::Reply { message_ref, .. }, Err(SurfaceError::Rejected(_))) => {
+                self.inner.heal_reply(message_ref).await
             }
             _ => false,
         }

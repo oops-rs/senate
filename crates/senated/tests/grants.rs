@@ -27,6 +27,7 @@ const GROUP: &str = "g_backend";
 struct MemoryHub {
     logs: Mutex<BTreeMap<CommitteeId, Vec<Event>>>,
     cursors: Mutex<HashMap<(CommitteeId, String), Seq>>,
+    mirrors: Mutex<Vec<MirrorRef>>,
     tx: broadcast::Sender<Event>,
 }
 
@@ -35,6 +36,7 @@ impl MemoryHub {
         Arc::new(Self {
             logs: Mutex::default(),
             cursors: Mutex::default(),
+            mirrors: Mutex::default(),
             tx: broadcast::channel(1024).0,
         })
     }
@@ -146,7 +148,11 @@ impl Hub for MemoryHub {
         Ok("test".into())
     }
 
-    async fn put_mirror(&self, _mirror: MirrorRef) -> Result<(), HubError> {
+    async fn put_mirror(&self, mirror: MirrorRef) -> Result<(), HubError> {
+        self.mirrors
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(mirror);
         Ok(())
     }
 
@@ -161,10 +167,17 @@ impl Hub for MemoryHub {
 
     async fn mirror_of_message(
         &self,
-        _platform: &str,
-        _message_ref: &str,
+        platform: &str,
+        message_ref: &str,
     ) -> Result<Option<MirrorRef>, HubError> {
-        Ok(None)
+        Ok(self
+            .mirrors
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .filter(|m| m.platform == platform && m.message_ref == message_ref)
+            .min_by_key(|m| m.seq)
+            .cloned())
     }
 }
 
@@ -618,6 +631,170 @@ async fn a_root_post_refused_for_want_of_a_grant_adopts_and_goes_through() {
             "op-1",
         )
         .await;
+    assert_eq!(rig.adopts().len(), 1);
+    rig.stop().await;
+}
+
+// ---- a reply is healed too ---------------------------------------------------
+
+fn reply_to(message_ref: &str) -> PostTarget {
+    PostTarget::Reply {
+        message_ref: message_ref.into(),
+        in_thread: true,
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reply_refused_for_want_of_a_grant_adopts_its_group_and_goes_through() {
+    let rig = rig().await;
+    rig.fake.require_grants_to_reply(true);
+    rig.fake.delay_adopts(Duration::from_secs(2));
+    let mount = rig.gateway.mount().unwrap();
+    // The bind message, then the bind: the Speaker confirms in the thread of
+    // the bind message while the slow adopt is still under way.
+    rig.hear("m_bind").await;
+    rig.bind("alpha").await;
+    let started = Instant::now();
+    let posted = mount
+        .surface
+        .post(reply_to("m_bind"), "bound", "op-1")
+        .await
+        .unwrap();
+    assert!(!posted.message_ref.is_empty());
+    assert_eq!(rig.fake.posts().len(), 1);
+    assert_eq!(rig.fake.rejected_posts(), 1, "refused once, then it landed");
+    assert_eq!(rig.adopts().len(), 1, "the adopt under way is waited for");
+    assert!(
+        Instant::now() - started <= Duration::from_secs(2),
+        "it waited for that adopt and no longer"
+    );
+    rig.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reply_to_a_message_the_gateway_cannot_place_is_not_healed() {
+    let rig = rig().await;
+    rig.fake.require_grants_to_reply(true);
+    rig.fake.delay_adopts(Duration::from_secs(2));
+    let mount = rig.gateway.mount().unwrap();
+    // The platform knows the message, the gateway never saw it and the log
+    // holds no copy of it.
+    rig.fake.know_message("m_old", GROUP);
+    rig.hear("m_bind").await;
+    rig.bind("alpha").await;
+    let refused = mount.surface.post(reply_to("m_old"), "x", "op-1").await;
+    assert!(
+        matches!(refused, Err(senate_core::SurfaceError::Rejected(_))),
+        "{refused:?}"
+    );
+    assert_eq!(rig.fake.rejected_posts(), 1, "not tried again");
+    assert_eq!(rig.adopts().len(), 1, "only the bind's own adopt");
+    rig.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reply_into_a_group_that_is_not_bound_is_not_healed() {
+    let rig = rig().await;
+    rig.fake.require_grants_to_reply(true);
+    let mount = rig.gateway.mount().unwrap();
+    rig.hear("m1").await;
+    let refused = mount.surface.post(reply_to("m1"), "x", "op-1").await;
+    assert!(
+        matches!(refused, Err(senate_core::SurfaceError::Rejected(_))),
+        "{refused:?}"
+    );
+    assert_eq!(rig.fake.rejected_posts(), 1);
+    assert!(
+        rig.adopts().is_empty(),
+        "never an adopt for an unbound group"
+    );
+    // Bound, then unbound and released: refused again, and not adopted
+    // again by the refusal.
+    rig.bind("alpha").await;
+    pass(Duration::from_secs(1)).await;
+    rig.unbind("alpha").await;
+    pass(GRACE + Duration::from_secs(1)).await;
+    assert_eq!(rig.releases().len(), 1);
+    let adopts = rig.adopts().len();
+    let refused = mount.surface.post(reply_to("m1"), "y", "op-2").await;
+    assert!(refused.is_err());
+    assert_eq!(rig.adopts().len(), adopts);
+    rig.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reply_is_retried_once_and_never_in_a_loop() {
+    let rig = rig().await;
+    rig.fake.delay_adopts(Duration::from_secs(1));
+    let mount = rig.gateway.mount().unwrap();
+    rig.hear("m1").await;
+    rig.bind("alpha").await;
+    // The platform refuses for a reason no grant mends.
+    rig.fake.reject_next_posts(10);
+    let refused = mount.surface.post(reply_to("m1"), "x", "op-1").await;
+    assert!(refused.is_err());
+    assert_eq!(rig.fake.rejected_posts(), 2, "the post and its one retry");
+    assert_eq!(rig.adopts().len(), 1);
+    // Granted now: another refusal is not healed at all.
+    let refused = mount.surface.post(reply_to("m1"), "y", "op-2").await;
+    assert!(refused.is_err());
+    assert_eq!(rig.fake.rejected_posts(), 3);
+    assert_eq!(rig.adopts().len(), 1);
+    pass(Duration::from_secs(60)).await;
+    assert_eq!(rig.fake.rejected_posts(), 3, "nothing keeps trying");
+    rig.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reply_is_not_delayed_when_the_grant_is_already_confirmed() {
+    let rig = rig().await;
+    rig.fake.delay_adopts(Duration::from_secs(2));
+    let mount = rig.gateway.mount().unwrap();
+    rig.hear("m1").await;
+    rig.bind("alpha").await;
+    pass(Duration::from_secs(5)).await;
+    assert_eq!(rig.adopts()[0].outcome, GrantOutcome::Done);
+    rig.fake.require_grants_to_reply(true);
+    let started = Instant::now();
+    mount
+        .surface
+        .post(reply_to("m1"), "x", "op-1")
+        .await
+        .unwrap();
+    assert_eq!(Instant::now(), started, "no waiting");
+    assert_eq!(rig.fake.rejected_posts(), 0);
+    assert_eq!(rig.adopts().len(), 1);
+    rig.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reply_to_something_the_speaker_posted_finds_its_group_in_the_logs_mirrors() {
+    let rig = rig().await;
+    rig.fake.require_grants_to_reply(true);
+    rig.fake.delay_adopts(Duration::from_secs(2));
+    let mount = rig.gateway.mount().unwrap();
+    rig.hear("m_bind").await;
+    rig.bind("alpha").await;
+    // A copy the Speaker posted into the group earlier (another run of the
+    // daemon, say): the platform knows it, the gateway only has the log.
+    rig.fake.know_message("m_copy", GROUP);
+    rig.hub
+        .put_mirror(MirrorRef {
+            committee: committee("alpha"),
+            seq: Seq(1),
+            platform: "chat".into(),
+            target: format!("{GROUP}#ack"),
+            message_ref: "m_copy".into(),
+            thread_ref: None,
+        })
+        .await
+        .unwrap();
+    mount
+        .surface
+        .post(reply_to("m_copy"), "x", "op-1")
+        .await
+        .unwrap();
+    assert_eq!(rig.fake.rejected_posts(), 1);
     assert_eq!(rig.adopts().len(), 1);
     rig.stop().await;
 }
