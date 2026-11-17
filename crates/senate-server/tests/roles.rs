@@ -1117,3 +1117,50 @@ async fn a_registered_child_is_addressed_and_speaks_through_its_speaker() {
     .await;
     server.running.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn a_team_principal_runs_agents_but_only_a_person_decides() {
+    let server = start(None, |c| {
+        c.roster.principals.push(senate_core::Principal::of_kind(
+            name("acme"),
+            senate_core::PrincipalKind::Team,
+        ));
+        c.tokens.push(senate_server::TokenConfig::with_token(
+            name("acme"),
+            "acme-token",
+        ));
+    })
+    .await;
+    // The team runs an agent of its own, seated on first contact.
+    let note = NewEvent::new(
+        committee(),
+        Kind::Note,
+        "senator::acme-bot".parse().unwrap(),
+        "from the team's agent",
+    );
+    stored(&server, "acme-token", &note).await;
+    let roster = server.running.hub.roster().await.unwrap();
+    assert_eq!(roster.owner_of(&path("acme-bot")), Some(&name("acme")));
+    // A decision: refused for the team, accepted for a person.
+    let decision = |from: &str| {
+        NewEvent::new(
+            committee(),
+            Kind::Decision,
+            from.parse().unwrap(),
+            "ship it",
+        )
+    };
+    let refused = server
+        .request(
+            Method::POST,
+            &senate_core::api::events_path(&committee()),
+            "acme-token",
+        )
+        .json(&decision("senator::acme"))
+        .send()
+        .await
+        .unwrap();
+    api_error(refused, StatusCode::FORBIDDEN, "forbidden").await;
+    stored(&server, ALICE, &decision("senator::alice")).await;
+    server.running.shutdown().await.unwrap();
+}

@@ -153,7 +153,7 @@ pub struct Event {
     pub kind: Kind,
     pub from: Address,
     /// Empty means undirected: recorded, never pushed, seen on catch-up.
-    /// Always concrete: `senator::<person>/*` is resolved before an event is
+    /// Always concrete: `senator::*` is resolved before an event is
     /// stored.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub to: Vec<Address>,
@@ -257,7 +257,7 @@ pub struct NewEvent {
     pub committee: CommitteeId,
     pub kind: Kind,
     pub from: Address,
-    /// A sender may write `senator::<person>/*` here. Whoever accepts the
+    /// A sender may write `senator::*` here. Whoever accepts the
     /// event resolves it against the roster
     /// ([`Roster::resolve_recipients`](crate::Roster::resolve_recipients))
     /// before it reaches the log; see [`NewEvent::is_resolved`].
@@ -347,7 +347,7 @@ impl NewEvent {
     }
 
     /// True when the event can be stored as it is: no address in it is the
-    /// wildcard `senator::<person>/*`. In `to` a wildcard is waiting to be
+    /// wildcard `senator::*`. In `to` a wildcard is waiting to be
     /// resolved; in `from` or `on_behalf_of` it is simply wrong.
     pub fn is_resolved(&self) -> bool {
         !self.from.is_wildcard()

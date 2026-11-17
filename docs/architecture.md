@@ -122,8 +122,14 @@ out). Configuration names the Speaker, secretaries and chairs by id.
 
 Missing parts of a name come from where the writer stands. A committee
 name is looked for in the writer's Senate, then the Senate above, outward,
-nearest first; a Senate name likewise. Ambiguity is refused with the
-candidates; an unknown name is refused clearly. Each `senated` answers for
+nearest first; a Senate name likewise. An unknown name is refused
+clearly. The grammar leaves no ambiguity to resolve: one qualifier is a
+committee, two are a Senate path and a committee, and a child Senate may
+not take its parent's own name, so a relative Senate name is either this
+Senate or one of its registered children, never both. The resolve route
+keeps an `ambiguous` answer (with the candidates as qualified names) for
+when it can arise; today only `senator::*` with several agents is refused
+with candidates. Each `senated` answers for
 itself (`GET /v1/resolve`) and the caller asks the Senate above for the
 rest: there is no central registry. A parent knows its children's names
 and Speakers, not their agents.
@@ -196,7 +202,12 @@ register or remove one; anyone else is refused.
   question addressed to it from its own checkpoint and notes, stored
   `from` the secretary `on_behalf_of` the agent with `meta.takeover`; a
   request waits for the agent. The companion (a read-only fork of the
-  agent's own last session) is such a secretary, provided by the daemon.
+  agent's own last session) is such a secretary, provided by the daemon,
+  and the built-in session is one wherever it is listed. Not yet built: a
+  secretary that is itself an agent is not pushed the absent agent's
+  questions; it may answer one it is shown (the server accepts its answer
+  on the agent's behalf), but nothing brings the question to its session.
+  Until then the chain goes on to the chair and the Speaker's desk.
 
 The **built-in session** is the engine on a model (`senate-speaker`), a
 senator with a flat name (default `secretary`). Its role comes from
@@ -691,4 +702,4 @@ above differs from it in these ways, which matter when carrying code over:
 | `Member.feishu_ids` | `Principal.accounts` (platform, id) |
 | `Directory` | `Roster` |
 | text hard-coded in Chinese | rendered per locale |
-| `[steward 代 agent:x]` in text | `on_behalf_of` field, shown as `[speaker::<name>]` |
+| `[steward 代 agent:x]` in text | `on_behalf_of` field, shown as `[speaker::<name>]` (the desk), or `[senator::<name>] (answered by its secretary [senator::<secretary>])` |

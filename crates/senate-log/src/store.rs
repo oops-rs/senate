@@ -61,7 +61,7 @@ impl From<&SenatorName> for CursorOwner {
 }
 
 /// Refuse what the log cannot hold: an event whose `to`, `from` or
-/// `on_behalf_of` still names `senator::<person>/*`. A stored event always
+/// `on_behalf_of` still names `senator::*`. A stored event always
 /// names concrete senators, so whoever accepts the event resolves the
 /// wildcard first. Every store calls this before it writes.
 pub(crate) fn check_storable(event: &NewEvent) -> Result<(), LogError> {

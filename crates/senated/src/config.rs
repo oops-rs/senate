@@ -402,6 +402,30 @@ token = "t"
         assert_eq!(work.runner.image, "senate-runner:latest");
         assert!(matches!(work.forge, Some(ForgeSection::Github(_))));
         assert!(work.hands().1.is_some());
+
+        // `[model]` alone, uncommented, with the roster's optional keys.
+        let model_start = EXAMPLE.find("# [model]").expect("a [model] example");
+        let model_end = model_start
+            + EXAMPLE[model_start..]
+                .find("\n# ----")
+                .expect("the section ends");
+        let roster_start = EXAMPLE.find("# [roster]\n").expect("a [roster] example");
+        let roster_end = roster_start
+            + EXAMPLE[roster_start..]
+                .find("\n\n")
+                .expect("the block ends");
+        let with_model = format!(
+            "{}\n{}\n{}\n{}",
+            &EXAMPLE[..roster_start],
+            uncommented(&EXAMPLE[..roster_end], "# [roster]"),
+            &EXAMPLE[roster_end..model_start],
+            uncommented(&EXAMPLE[..model_end], "# [model]"),
+        );
+        let m = SenatedConfig::from_toml_str(&with_model).expect("[model], uncommented");
+        let model = m.model().expect("[model]");
+        assert_eq!(model.api_key_env.as_deref(), Some("ANTHROPIC_API_KEY"));
+        let roster = m.server.roster().unwrap();
+        assert!(roster.speaker().is_some());
     }
 
     #[test]

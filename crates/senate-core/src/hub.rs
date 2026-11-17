@@ -40,7 +40,7 @@ use crate::task::TaskBoard;
 pub enum HubError {
     #[error("event rejected: {0}")]
     Rejected(String),
-    /// A `senator::<person>/*` recipient could not be made concrete. For
+    /// A `senator::*` recipient could not be made concrete. For
     /// [`ResolveError::Ambiguous`] the candidates are in the error.
     #[error("recipient not resolved: {0}")]
     Unresolved(#[from] ResolveError),
@@ -84,7 +84,7 @@ pub trait Hub: Send + Sync + 'static {
     /// Idempotent on `event.id`.
     ///
     /// The event is stored as given, so it must be storable: an event that
-    /// still holds `senator::<person>/*` ([`NewEvent::is_resolved`] is
+    /// still holds `senator::*` ([`NewEvent::is_resolved`] is
     /// false) is [`HubError::Rejected`]. Use [`Hub::resolve_and_append`] for
     /// an event that may hold one.
     async fn append(&self, event: NewEvent) -> Result<Appended, HubError>;

@@ -457,6 +457,19 @@ fn reject_brief_top_and_agent_decisions(
             senate_core::PROPOSAL_DECISION
         )));
     }
+    // Only a person confirms a decision: a team or a service principal
+    // proposes, like an agent.
+    if event.kind == Kind::Decision
+        && let Some(from) = event.from.as_senator()
+        && roster
+            .principal(from.name())
+            .is_some_and(|p| !p.kind.is_person())
+    {
+        return Err(ApiFailure::forbidden(format!(
+            "{} is not a person: only a person confirms a decision",
+            event.from
+        )));
+    }
     Ok(())
 }
 

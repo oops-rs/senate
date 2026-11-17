@@ -5,7 +5,7 @@
 //! each one starts from an item on the docket:
 //!
 //! - **Pick.** A person (or anyone who is not an agent) wrote to
-//!   `senator::<person>/*` and that person has several agents here. The
+//!   `senator::*` and several agents are on the committee. The
 //!   server stores the message addressed to `speaker` with
 //!   [`meta::PICK`] = a [`PickPayload`] naming the candidates
 //!   ([`Awaiting::Pick`]). The Speaker routes it to one of them as a relay
