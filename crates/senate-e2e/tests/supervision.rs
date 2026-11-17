@@ -23,7 +23,7 @@ async fn a_failing_platform_neither_loses_nor_repeats_a_relay() {
     alice.open().await;
     let inbox = alice.inbox("s-alice");
     alice.session_start("s-alice", &inbox).await;
-    world.wait_connected("alice/claude", true).await;
+    world.wait_connected("claude", true).await;
 
     world.fake().fail_next_posts(2);
     world.fake().panic_next_posts(1);
@@ -43,7 +43,7 @@ async fn a_failing_platform_neither_loses_nor_repeats_a_relay() {
     inbox.wait_for("先别合并").await;
     world
         .wait_post("the acknowledgement, in the end", |p| {
-            p.replies_to("m_pm_1") && p.markdown.contains("[senator::alice/claude]")
+            p.replies_to("m_pm_1") && p.markdown.contains("[senator::claude]")
         })
         .await;
     world.settle().await;

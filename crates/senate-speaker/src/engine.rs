@@ -195,8 +195,8 @@ use ractor::concurrency::JoinHandle;
 use senate_core::{
     Address, BindingAction, BindingPayload, BriefBuilder, Card, ChatSurface, CommitteeId, Event,
     GroupRole, Hub, HubError, Kind, Locale, MirrorRef, Name, NewEvent, OutputLevel,
-    PROPOSAL_DECISION, PostTarget, Posted, PresencePayload, PresenceState, Roster, SenatorName,
-    Seq, Source, StatusPayload, SurfaceError, TaskBoard, TriagePayload, TriageVerdict,
+    PROPOSAL_DECISION, People, PostTarget, Posted, PresencePayload, PresenceState, Roster,
+    SenatorName, Seq, Source, StatusPayload, SurfaceError, TaskBoard, TriagePayload, TriageVerdict,
     UnboundMention, WorkRun, meta,
 };
 use senate_work::{Forge, NoForge, Runner};
@@ -346,6 +346,9 @@ struct CommitteeState {
     /// The committee's task threads, folded from the log like everything
     /// here.
     board: TaskBoard,
+    /// The Senate's people as the roster said when this state was loaded:
+    /// every other senator in the log is an agent.
+    people: People,
     brief: Option<BriefBuilder>,
     /// Task root → the start of its latest answer, for its card.
     answers: HashMap<Seq, String>,
@@ -359,7 +362,7 @@ struct CommitteeState {
     /// Agents the Speaker picked for a person while acting on a `chat`, by
     /// (chat seq, step key, person), so a step repeated after a stall or a
     /// triage wait acts on the same agent.
-    picks: HashMap<(Seq, String, Name), SenatorName>,
+    picks: HashMap<(Seq, String, Option<Name>), SenatorName>,
     /// Debounced card updates, per task root.
     cards: HashMap<Seq, Timer>,
     pinned: Pinned,
@@ -412,7 +415,7 @@ impl CommitteeState {
         self.brief
             .get_or_insert_with(|| BriefBuilder::new(event.committee.clone()))
             .observe(event);
-        if let Some(agent) = event.from.as_agent() {
+        if let Some(agent) = self.people.as_agent(&event.from) {
             self.activity.insert(
                 agent.clone(),
                 (event.seq, event.ts, render::activity(self.locale, event)),
@@ -451,7 +454,7 @@ impl CommitteeState {
                     // question, and a parked relay waits on its person.
                     return;
                 }
-                for agent in question_targets(event) {
+                for agent in question_targets(event, &self.people) {
                     self.open.entry((root, agent)).or_insert(Open {
                         question: event.seq,
                         ts: event.ts,
@@ -467,7 +470,9 @@ impl CommitteeState {
                 {
                     self.answers.insert(root, render::excerpt(&event.body));
                 }
-                let (Some(root), Some(agent)) = (event.thread, answering_agent(event)) else {
+                let (Some(root), Some(agent)) =
+                    (event.thread, answering_agent(event, &self.people))
+                else {
                     return;
                 };
                 // An answer by the agent an agent's work is reassigned to
@@ -611,23 +616,35 @@ impl CommitteeState {
     }
 }
 
+/// A person's agent: their one agent seated here, several of them, or none
+/// (the person, then, gets what was meant for it). Agents are seated under
+/// the person who runs them ([`Roster::owner_of`]).
+pub(crate) fn agent_of(roster: &Roster, owner: &Name) -> senate_core::AgentOf {
+    use senate_core::AgentOf;
+    match roster.agents_of(owner).as_slice() {
+        [] => AgentOf::None(SenatorName::new(owner.clone()).ok()),
+        [one] => AgentOf::One((*one).clone()),
+        several => AgentOf::Several(several.iter().map(|a| (*a).clone()).collect()),
+    }
+}
+
 /// The agents a question is put to (its `to`, minus the asker). A person in
 /// `to` is not here: nobody answers for a person.
-fn question_targets(event: &Event) -> Vec<SenatorName> {
+fn question_targets(event: &Event, people: &People) -> Vec<SenatorName> {
     event
         .to
         .iter()
         .filter(|address| event.from != **address)
-        .filter_map(Address::as_agent)
+        .filter_map(|address| people.as_agent(address))
         .cloned()
         .collect()
 }
 
 /// Whose answer this is: the agent itself, or the Speaker speaking for it.
-fn answering_agent(event: &Event) -> Option<SenatorName> {
+fn answering_agent(event: &Event, people: &People) -> Option<SenatorName> {
     match (&event.from, &event.on_behalf_of) {
-        (Address::Speaker, Some(behalf)) => behalf.as_agent().cloned(),
-        (from, _) => from.as_agent().cloned(),
+        (Address::Speaker, Some(behalf)) => people.as_agent(behalf).cloned(),
+        (from, _) => people.as_agent(from).cloned(),
     }
 }
 
@@ -1223,10 +1240,7 @@ impl Engine {
     /// so may a `senator::` address the roster does not list, which the
     /// Speaker cannot vouch for either.
     fn is_member(&self, who: &Address) -> bool {
-        who.may_change_state()
-            && who
-                .as_senator()
-                .is_some_and(|p| p.is_senior() && self.roster.senior(p.owner()).is_some())
+        who.may_change_state() && who.as_senator().is_some_and(|p| self.roster.is_person(p))
     }
 
     /// What people call a person: the first of their names on the roster,
@@ -1241,8 +1255,18 @@ impl Engine {
     /// The person behind `who`, if it is one on the roster.
     fn person_of(&self, who: &Address) -> Option<Name> {
         self.is_member(who)
-            .then(|| who.as_senator().map(|p| p.owner().clone()))
+            .then(|| who.as_senator().map(|p| p.name().clone()))
             .flatten()
+    }
+
+    /// The person behind `senator`: the person themselves, or the person
+    /// an agent's seat records as answering for it.
+    fn person_behind(&self, senator: &SenatorName) -> Option<Name> {
+        if self.roster.is_person(senator) {
+            Some(senator.name().clone())
+        } else {
+            self.roster.owner_of(senator).cloned()
+        }
     }
 
     fn op_id(&self, committee: &CommitteeId, seq: Seq, target: &str) -> Result<String, Stall> {
@@ -1291,6 +1315,8 @@ impl Engine {
         let mut state = CommitteeState {
             locale: self.locale(committee),
             cursor,
+            board: TaskBoard::new(self.roster.people()),
+            people: self.roster.people(),
             ..CommitteeState::default()
         };
         let mut after = Seq::ZERO;
@@ -1711,7 +1737,7 @@ impl Engine {
                 return Ok(self.card_plan(event, &group.group_id).into_iter().collect());
             }
             // A proposal's root is what a confirming reply maps back to.
-            let text = if is_proposal(event) {
+            let text = if is_proposal(event, &self.roster.people()) {
                 render::proposal_root(l, event)
             } else {
                 render::root_mirror(l, event)
@@ -1763,7 +1789,8 @@ impl Engine {
         platform: &str,
     ) -> Result<Vec<MirrorPlan>, Stall> {
         let l = self.locale(&event.committee);
-        let approval = event.from.is_senior() && event.meta.contains_key(meta::RELAYED_FROM);
+        let approval = self.roster.is_person_address(&event.from)
+            && event.meta.contains_key(meta::RELAYED_FROM);
         if event.kind == Kind::Status
             || (event.from == Address::Speaker && event.kind == Kind::Note)
             || approval
@@ -1861,7 +1888,7 @@ impl Engine {
                     message_ref: mirror.message_ref.clone(),
                     in_thread: true,
                 },
-                text: render::relay_ack_for(l, event),
+                text: render::relay_ack_for(l, event, &self.roster),
                 target: group,
                 record_as: Some(mirror.message_ref),
                 card: None,
@@ -1999,7 +2026,7 @@ impl Engine {
             return;
         }
         let root = event.thread.unwrap_or(event.seq);
-        for agent in question_targets(event) {
+        for agent in question_targets(event, &self.roster.people()) {
             let watching_this = self
                 .committees
                 .get(&event.committee)
@@ -2782,7 +2809,7 @@ impl Engine {
             .hub
             .get(&chat.committee, root)
             .await?
-            .filter(is_proposal)
+            .filter(|e| is_proposal(e, &self.roster.people()))
         else {
             return Ok(false);
         };
@@ -2934,7 +2961,7 @@ impl Engine {
             PendingAction::Relay { event } => {
                 let relayed = self.append_action((**event).clone(), strict).await?;
                 Ok(relayed
-                    .map(|event| render::relay_ack_for(l, &event))
+                    .map(|event| render::relay_ack_for(l, &event, &self.roster))
                     .unwrap_or_default())
             }
             PendingAction::Status { committee } => Ok(self.status_text(committee).await),
@@ -2999,10 +3026,10 @@ impl Engine {
         let mut online = Vec::new();
         let mut offline = Vec::new();
         for agent in self.roster.agents() {
-            if self.hub.is_agent_connected(committee, agent).await {
-                online.push(agent.clone());
+            if self.hub.is_agent_connected(committee, &agent).await {
+                online.push(agent);
             } else {
-                offline.push(agent.clone());
+                offline.push(agent);
             }
         }
         let presence = self.presence_lines(committee).await;
@@ -3411,9 +3438,9 @@ fn is_brief_top(event: &Event) -> bool {
 }
 
 /// An agent's root `note` proposing a decision.
-fn is_proposal(event: &Event) -> bool {
+fn is_proposal(event: &Event, people: &People) -> bool {
     event.kind == Kind::Note
-        && event.from.is_junior()
+        && people.is_agent_address(&event.from)
         && event.thread.is_none()
         && event.meta.get(meta::PROPOSAL).and_then(Value::as_str) == Some(PROPOSAL_DECISION)
 }

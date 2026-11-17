@@ -6,22 +6,19 @@
 //! daemon running), and the MCP server and hooks Claude Code and Codex
 //! run). A worktree's `.senate/` follows its branch ([`follow`]).
 //!
-//! # Several Senates, one daemon
+//! # One Senate, one daemon
 //!
-//! A machine may serve the Senate above and any number of Senates one level
-//! down, each presided over by one of the person's agents ([`config`]:
-//! `[[senates]]`, filled in by `senated --machine` for the ones it hosts).
-//! The daemon keeps one half per Senate (server, token, state database,
-//! streams, cursors, heartbeats, queue, sessions) and nothing leaks between
-//! them; a front on the local socket sends each request to the Senate it
-//! concerns. An agent's path relative to the person selects its Senate
-//! ([`agent`]): `claude` sits above, `claude/reviewer` below.
+//! A machine serves one Senate ([`config`]: `server_url` and `token`, or
+//! the one `senated --machine` hosts). Its agents are flat names in it
+//! ([`agent`]); a pinned path (`claude/reviewer`) is not a name and is
+//! ignored. A seat on another committee or in another Senate is reached by
+//! a qualified name (`ibot::codex`), which the server resolves.
 //!
 //! # Presiding
 //!
 //! The session of an agent that holds a Senate's Speaker's seat presides
-//! ([`preside`]): it is attached to that Senate as its Speaker as well as
-//! to the one it sits in, is pushed what is put to the Speaker, and gets
+//! ([`preside`]): it sits in that Senate and is its Speaker too, is pushed
+//! what is put to the Speaker, and gets
 //! the presiding tools (`speaker_docket`, `speaker_route`, `speaker_cover`,
 //! `speaker_escalate`). No other session sees them.
 //!

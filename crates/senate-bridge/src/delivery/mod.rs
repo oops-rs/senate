@@ -209,7 +209,7 @@ mod tests {
         Session {
             session_id: "s".into(),
             runtime: Default::default(),
-            agent: "alice/claude".parse().unwrap(),
+            agent: "claude".parse().unwrap(),
             agent_source: crate::agent::AgentSource::Harness,
             cwd: "/".into(),
             git_root: None,

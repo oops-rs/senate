@@ -23,11 +23,11 @@ async fn an_agent_asks_another_and_the_answer_returns() {
     let bob_inbox = bob.inbox("s-bob");
     alice.session_start("s-alice", &alice_inbox).await;
     bob.session_start("s-bob", &bob_inbox).await;
-    world.wait_connected("alice/claude", true).await;
-    world.wait_connected("bob/claude", true).await;
+    world.wait_connected("claude", true).await;
+    world.wait_connected("copilot", true).await;
 
     let asked = alice
-        .ask("s-alice", claude("bob"), "网关幂等用哪个 header？")
+        .ask("s-alice", senator(BOB_CLAUDE), "网关幂等用哪个 header？")
         .await;
     let push = bob_inbox.wait_for("网关幂等用哪个 header").await;
     assert_eq!(thread_of(&push, "网关幂等用哪个 header"), asked.seq);
@@ -80,13 +80,13 @@ async fn an_absent_agent_is_covered_through_the_log() {
         .posted
         .seq;
     alice.close().await;
-    eventually_async("alice/claude absent", || async {
+    eventually_async("claude absent", || async {
         world
             .events()
             .await
             .iter()
             .filter_map(senate_core::PresencePayload::of)
-            .any(|p| p.agent == path("alice/claude") && p.state == PresenceState::Absent)
+            .any(|p| p.agent == path("claude") && p.state == PresenceState::Absent)
             .then_some(())
     })
     .await;
@@ -99,10 +99,10 @@ async fn an_absent_agent_is_covered_through_the_log() {
         "用 Idempotency-Key header（检查点 seq {checkpoint}）"
     )));
     let asked = bob
-        .ask("s-bob", claude("alice"), "幂等键用哪个 header？")
+        .ask("s-bob", senator("claude"), "幂等键用哪个 header？")
         .await;
     let push = bob_inbox.wait_for("Idempotency-Key header（检查点").await;
-    assert!(push.contains("[speaker::alice/claude] 接管"), "{push}");
+    assert!(push.contains("[speaker::claude] 接管"), "{push}");
     let answer = world
         .events()
         .await
@@ -110,7 +110,7 @@ async fn an_absent_agent_is_covered_through_the_log() {
         .find(|e| e.kind == Kind::Answer && e.thread == Some(asked.seq))
         .expect("the answer in the log");
     assert_eq!(answer.from, Address::Speaker);
-    assert_eq!(answer.on_behalf_of, Some(claude("alice")));
+    assert_eq!(answer.on_behalf_of, Some(senator("claude")));
 
     alice.open().await;
     let handback = alice_inbox.wait_for("代你回答了").await;
@@ -138,11 +138,11 @@ async fn without_a_speaker_a_question_is_delivered_at_once() {
     let bob_inbox = bob.inbox("s-bob");
     alice.session_start("s-alice", &alice_inbox).await;
     bob.session_start("s-bob", &bob_inbox).await;
-    world.wait_connected("bob/claude", true).await;
+    world.wait_connected("copilot", true).await;
 
     let started = std::time::Instant::now();
     alice
-        .ask("s-alice", claude("bob"), "网关幂等用哪个 header？")
+        .ask("s-alice", senator(BOB_CLAUDE), "网关幂等用哪个 header？")
         .await;
     bob_inbox.wait_for("网关幂等用哪个 header").await;
     assert!(

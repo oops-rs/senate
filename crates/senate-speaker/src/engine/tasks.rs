@@ -62,7 +62,7 @@ impl Engine {
     /// or watch it so someone answers if the agent does not.
     pub(super) async fn on_task_root(&mut self, event: &Event) -> Result<Flow, Stall> {
         let l = self.locale(&event.committee);
-        let judged = needs_triage(event);
+        let judged = needs_triage(event, &self.roster.people());
         let triage = if judged {
             match self.root_verdict(event).await? {
                 Some(triage) => Some(triage),
@@ -125,12 +125,12 @@ impl Engine {
         if logged.is_some() {
             return Ok(logged);
         }
-        if let Some(asker) = event.from.as_senator().filter(|p| p.is_senior())
+        if let Some(asker) = event.from.as_senator().filter(|p| self.roster.is_person(p))
             && !event.to.is_empty()
-            && event
-                .to
-                .iter()
-                .all(|to| to.as_agent().is_some_and(|a| a.is_under(asker)))
+            && event.to.iter().all(|to| {
+                to.as_senator()
+                    .is_some_and(|a| self.roster.owner_of(a) == Some(asker.name()))
+            })
         {
             // A person's own task for their own agents: they are the person.
             return Ok(Some(ruled(
@@ -208,11 +208,12 @@ impl Engine {
     /// processed.
     async fn park_on_owner(&mut self, root: &Event, triage: &TriagePayload) -> Result<(), Stall> {
         let l = self.locale(&root.committee);
+        let people = self.roster.people();
         let Some(owner) = root
             .to
             .iter()
-            .find_map(Address::as_agent)
-            .map(|agent| agent.owner().clone())
+            .filter_map(|a| people.as_agent(a))
+            .find_map(|agent| self.roster.owner_of(agent).cloned())
         else {
             return Ok(());
         };
@@ -272,7 +273,7 @@ impl Engine {
             if event.from == Address::Speaker {
                 let text = render::needs_human(l, status.reason.as_deref().unwrap_or_default());
                 self.post_mention(event, root, person, &text).await?;
-            } else if event.from.is_junior() {
+            } else if self.roster.is_agent_address(&event.from) {
                 let text = render::escalated(l, &event.from, status.reason.as_deref());
                 self.post_mention(event, root, person, &text).await?;
                 self.ack_escalation(event, root, person).await?;
@@ -561,7 +562,13 @@ impl Engine {
             _ => {
                 let waiting = Waiting::Handoff { root: thread.root };
                 match self
-                    .settle_among(chat, person.clone(), candidates, &thread.title, waiting)
+                    .settle_among(
+                        chat,
+                        Some(person.clone()),
+                        candidates,
+                        &thread.title,
+                        waiting,
+                    )
                     .await?
                 {
                     Settled::To(agent) => self.approve(chat, thread, &agent).await,

@@ -65,7 +65,7 @@ pub fn path(p: &str) -> SenatorName {
     p.parse().unwrap()
 }
 
-/// `senator::<p>`: a person (`alice`) or an agent (`alice/claude`).
+/// `senator::<p>`: a person (`alice`) or an agent (`claude`).
 pub fn senator(p: &str) -> Address {
     Address::senator(&path(p))
 }
@@ -75,21 +75,15 @@ pub fn person(h: &str) -> Address {
     Address::senior(&name(h))
 }
 
-/// `senator::<person>/claude`: what a Claude Code session of that person
-/// speaks as.
-pub fn claude(h: &str) -> Address {
-    senator(&format!("{h}/claude"))
+/// `senator::*`: whichever agent on the committee should get it.
+pub fn any_agent() -> Address {
+    Address::any_agent()
 }
 
-/// `senator::<person>/codex`: what a Codex session of that person speaks as.
-pub fn codex(h: &str) -> Address {
-    senator(&format!("{h}/codex"))
-}
-
-/// `senator::<person>/*`: whichever of that person's agents should get it.
-pub fn agent_of(h: &str) -> Address {
-    Address::agent_of(&name(h))
-}
+/// The name bob's Claude Code session is seated under in these worlds:
+/// names are unique within a Senate and alice's runs as `claude`, so bob's
+/// bridge names its Claude Code agent `copilot` (`[agents] claude`).
+pub const BOB_CLAUDE: &str = "copilot";
 
 /// The chat platform's id for a person on the roster.
 pub fn user_id(h: &str) -> String {
@@ -500,7 +494,7 @@ token = "tok-carol"
         self.hub().read(committee, Seq::ZERO, 1000).await.unwrap()
     }
 
-    /// Wait until `agent` (`alice/claude`) is, or is not, connected.
+    /// Wait until `agent` (`claude`) is, or is not, connected.
     pub async fn wait_connected(&self, agent: &str, connected: bool) {
         let agent = path(agent);
         eventually_async(&format!("{agent} connected={connected}"), || async {
@@ -596,6 +590,9 @@ token = "tok-carol"
         .unwrap();
         let mut config = BridgeConfig::new(&self.server_url(), &format!("tok-{who}"), name(who));
         config.locale = self.locale;
+        if who == "bob" {
+            config.agents.claude = path(BOB_CLAUDE);
+        }
         Laptop {
             paths,
             config,
@@ -766,11 +763,7 @@ impl Laptop {
     pub async fn wait_stream_of(&self, session_id: &str) {
         eventually_async(&format!("{session_id}'s agent to be streaming"), || async {
             let status: ipc::StatusReply = self.try_ipc(Request::Status).await.ok()?;
-            // The Senate whose bridge holds the session: this machine's own,
-            // or one of the others it serves.
-            let senate = std::iter::once(&status)
-                .chain(&status.others)
-                .find(|s| s.sessions.iter().any(|x| x.session_id == session_id))?;
+            let senate = &status;
             let session = senate
                 .sessions
                 .iter()
@@ -1144,7 +1137,7 @@ pub fn of_kind(events: &[Event], kind: Kind) -> Vec<&Event> {
 
 /// A developer machine whose daemon is `senated --machine`: its
 /// `senate.toml` is `person`, `locale`, a fake Codex app-server, and `body`
-/// (the Senate above, `[local]`, `[[preside]]`). The returned [`Laptop`]
+/// (the team's Senate, or `[local]`). The returned [`Laptop`]
 /// drives its sessions; [`Desk::start`] runs the machine.
 pub struct Desk {
     pub laptop: Laptop,
@@ -1216,17 +1209,14 @@ impl Desk {
         self.machine.as_ref().expect("the machine is running")
     }
 
-    /// The hosted Senate presided over by `presider` (`None`: the local top).
-    pub fn senate(&self, presider: Option<&str>) -> &senated::HostedSenate {
-        let presider = presider.map(path);
-        self.machine()
-            .senate(presider.as_ref())
-            .expect("a hosted Senate")
+    /// The one Senate this machine hosts.
+    pub fn senate(&self) -> &senated::HostedSenate {
+        self.machine().senate().expect("a hosted Senate")
     }
 
     /// Wait until `agent` has a live connection to the hosted Senate.
-    pub async fn wait_connected(&self, presider: Option<&str>, agent: &str, connected: bool) {
-        let hub = self.senate(presider).daemon.hub.clone();
+    pub async fn wait_connected(&self, agent: &str, connected: bool) {
+        let hub = self.senate().daemon.hub.clone();
         let agent = path(agent);
         eventually_async(&format!("{agent} connected = {connected}"), || {
             let hub = hub.clone();

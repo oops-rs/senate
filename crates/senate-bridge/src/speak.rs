@@ -8,44 +8,40 @@
 //!
 //! # `<to>`
 //!
+//! A qualified name ([`Locator`]), in its short form: a bare last name is a
+//! senator.
+//!
 //! | Written | Means |
 //! | --- | --- |
-//! | `claude`, `claude/reviewer` | an agent of yours, relative to you |
-//! | `alice/claude` | that agent by its full path |
-//! | `alice` | that person |
-//! | `alice/*` | whichever of alice's agents should get it |
-//! | `*` | whichever of your own agents |
-//! | `speaker` | the Speaker of the Senate |
-//! | `senator::…`, `[senator::…]` | the full address forms, as stored |
+//! | `claude` | `senator::claude`: that senator, here (this committee) |
+//! | `*` | `senator::*`: whichever agent on this committee |
+//! | `speaker` | the Speaker |
+//! | `ibot::claude` | `senator::claude` on the committee `ibot` (the nearest Senate that has it) |
+//! | `ibot::speaker` | the Speaker of `ibot` |
+//! | `/acme::ibot::claude` | that seat in the Senate `/acme` |
+//! | `senator::…`, `[…]` | the full forms, as stored or bracketed |
 //!
-//! A name or path that is not spelled as a full address is told apart by
-//! whom it names: a first name that is your handle, or is not the name of an
-//! agent of yours, is a full path (`alice/claude`) or a person (`alice`);
-//! one that is an agent of yours (`claude`, `claude/reviewer`) is relative
-//! to you. Your agents are those seated on the committee here, and always
-//! `claude` and `codex`, the harnesses' default names. So an agent of yours wins over a person who shares its name;
-//! write `senator::<name>` for the person.
+//! A name is one flat senator name: a person's handle or an agent's name,
+//! the same namespace. A person's message is delivered directly, on the
+//! committee named, by the daemon ([`crate::ipc::Request::Say`]).
 
 use std::path::Path;
 use std::time::Duration;
 
 use senate_core::{
-    Address, CommitteeId, Event, Kind, Locale, Name, SenatorName, Seq, StatusPayload,
-    is_provisional,
+    Address, CommitteeId, Event, Kind, Locale, Locator, Name, Seq, StatusPayload, is_provisional,
 };
 
 use crate::format;
 use crate::ipc::{
-    self, ClientError, IpcError, Pong, Posted, Request, SayKind, SessionSelector, StatusReply,
-    ThreadReply, codes,
+    self, ClientError, IpcError, Pong, Posted, Request, SayKind, SessionSelector, ThreadReply,
+    codes,
 };
 
-/// Who is speaking and which agents of theirs are seated here.
+/// Who is speaking.
 #[derive(Debug, Clone)]
 pub struct Context<'a> {
     pub me: &'a Name,
-    /// The agents this machine seats for `me` (full paths).
-    pub mine: &'a [SenatorName],
 }
 
 /// Why a `<to>` was not accepted.
@@ -65,43 +61,44 @@ impl TargetError {
         match self {
             Self::Empty => locale
                 .pick(
-                    "没有写发给谁：写你的 agent（claude）、完整路径（alice/claude）、某个人（alice）、\
-                     alice/*、*、或 speaker。",
-                    "name who it is for: one of your agents (claude), a full path (alice/claude), \
-                     a person (alice), alice/*, *, or speaker.",
+                    "没有写发给谁：写某个 senator（claude、bob）、*、speaker，或带委员会的名字\
+                     （ibot::claude）。",
+                    "name who it is for: a senator (claude, bob), *, speaker, or a name on \
+                     another committee (ibot::claude).",
                 )
                 .to_string(),
             Self::NotReachable(what) => match locale {
-                Locale::Zh => format!(
-                    "{what} 不是你能从命令行直接写给的对象：写某个 agent、某个人、alice/*、* 或 speaker。"
-                ),
+                Locale::Zh => {
+                    format!("{what} 不是你能从命令行直接写给的对象：写某个 senator、* 或 speaker。")
+                }
                 Locale::En => format!(
-                    "{what} is not someone you can write to from the command line: name an \
-                     agent, a person, alice/*, * or speaker."
+                    "{what} is not someone you can write to from the command line: name a \
+                     senator, * or speaker."
                 ),
             },
             Self::Malformed(text) => match locale {
                 Locale::Zh => format!(
-                    "看不懂 `{text}`：写 claude、claude/reviewer、alice/claude、alice、alice/*、*、\
-                     speaker，或 senator::… 的完整地址。"
+                    "看不懂 `{text}`：写 claude、bob、*、speaker、ibot::claude，或 senator::… \
+                     的完整地址。名字里没有路径：一个 agent 自己的团队是一个子 Senate。"
                 ),
                 Locale::En => format!(
-                    "cannot read `{text}`: write claude, claude/reviewer, alice/claude, alice, \
-                     alice/*, *, speaker, or a full senator::… address."
+                    "cannot read `{text}`: write claude, bob, *, speaker, ibot::claude, or a \
+                     full senator::… address. A name holds no path: an agent's own team is a \
+                     child Senate."
                 ),
             },
             Self::Yourself => locale
                 .pick(
-                    "这是你自己；写给你的 agent（例如 claude），或别人。",
-                    "that is you; write to one of your agents (for example claude), or to someone else.",
+                    "这是你自己；写给某个 agent（例如 claude），或别人。",
+                    "that is you; write to an agent (for example claude), or to someone else.",
                 )
                 .to_string(),
         }
     }
 }
 
-/// Read `<to>` as the address it names ([module docs](self)).
-pub fn parse_target(input: &str, ctx: &Context<'_>) -> Result<Address, TargetError> {
+/// Read `<to>` as the qualified name it names ([module docs](self)).
+pub fn parse_target(input: &str, ctx: &Context<'_>) -> Result<Locator, TargetError> {
     let text = input.trim();
     let text = text
         .strip_prefix('[')
@@ -111,50 +108,15 @@ pub fn parse_target(input: &str, ctx: &Context<'_>) -> Result<Address, TargetErr
     if text.is_empty() {
         return Err(TargetError::Empty);
     }
-    let malformed = || TargetError::Malformed(input.trim().to_string());
-    let address = if text.contains("::") || text == "speaker" || text == "committee" {
-        text.parse::<Address>().map_err(|_| malformed())?
-    } else if text == "*" {
-        Address::agent_of(ctx.me)
-    } else if let Some(owner) = text.strip_suffix("/*") {
-        Address::agent_of(&Name::new(owner).map_err(|_| malformed())?)
-    } else {
-        let names = text
-            .split('/')
-            .map(|n| Name::new(n).map_err(|_| malformed()))
-            .collect::<Result<Vec<_>, _>>()?;
-        let path = path_of(names, ctx).map_err(|()| malformed())?;
-        Address::senator(&path)
-    };
-    match &address {
+    let locator =
+        Locator::parse_short(text).map_err(|_| TargetError::Malformed(input.trim().to_string()))?;
+    match locator.address() {
         Address::Committee | Address::Guest(_) | Address::Other(_) => {
-            Err(TargetError::NotReachable(address.in_text()))
+            Err(TargetError::NotReachable(locator.address().in_text()))
         }
-        a if a.is_senior() && a.as_senator().is_some_and(|p| p.owner() == ctx.me) => {
-            Err(TargetError::Yourself)
-        }
-        _ => Ok(address),
+        Address::Senator(name) if locator.is_here() && name == ctx.me => Err(TargetError::Yourself),
+        _ => Ok(locator),
     }
-}
-
-/// `names` as a path: relative to the speaker when it starts with one of
-/// their agents' names, else a full path (a person's handle first).
-fn path_of(names: Vec<Name>, ctx: &Context<'_>) -> Result<SenatorName, ()> {
-    let first = &names[0];
-    let relative = first != ctx.me
-        && ctx
-            .mine
-            .iter()
-            .any(|a| a.owner() == ctx.me && a.agents().first() == Some(first));
-    let (owner, agents) = if first == ctx.me || !relative && names.len() > 1 {
-        (names[0].clone(), names[1..].to_vec())
-    } else if relative {
-        (ctx.me.clone(), names)
-    } else {
-        // One name that is not an agent of yours: a person.
-        (names[0].clone(), Vec::new())
-    };
-    SenatorName::new(owner, agents).map_err(|_| ())
 }
 
 fn word(kind: SayKind) -> &'static str {
@@ -167,7 +129,7 @@ fn word(kind: SayKind) -> &'static str {
 
 /// Where a message went, set beside what the person wrote when the server
 /// resolved it (`*` to one agent, or to the Speaker to pick).
-fn to_phrase(wrote: &Address, posted: &Posted, locale: Locale) -> String {
+fn to_phrase(wrote: &Locator, posted: &Posted, locale: Locale) -> String {
     let went = if posted.to.is_empty() {
         locale.pick("所有人", "no one in particular").to_string()
     } else {
@@ -178,10 +140,14 @@ fn to_phrase(wrote: &Address, posted: &Posted, locale: Locale) -> String {
             .collect::<Vec<_>>()
             .join(", ")
     };
-    if posted.to.len() == 1 && &posted.to[0] == wrote {
+    let here = wrote.as_address();
+    if posted.to.len() == 1 && here.as_ref() == Some(&posted.to[0]) {
         return went;
     }
-    let wrote = format::mention(wrote);
+    if wrote.committee().is_some_and(|c| c == &posted.committee) && wrote.senate().is_none() {
+        return went;
+    }
+    let wrote = wrote.in_text();
     if posted.to == [Address::Speaker] && wrote != "[speaker]" {
         return match locale {
             Locale::Zh => format!("{went}（你写的是 {wrote}；由 Speaker 挑选哪个 agent）"),
@@ -199,7 +165,7 @@ fn to_phrase(wrote: &Address, posted: &Posted, locale: Locale) -> String {
 /// read it later.
 pub fn render_sent(
     kind: SayKind,
-    wrote: &Address,
+    wrote: &Locator,
     posted: &Posted,
     waiting: bool,
     locale: Locale,
@@ -331,7 +297,7 @@ pub fn render_timeout(thread: Seq, secs: u64, locale: Locale) -> String {
     }
 }
 
-/// The server refused `*` or `person/*` with the agents to choose from.
+/// The server refused `*` with the agents to choose from.
 pub fn render_ambiguous(error: &IpcError, locale: Locale) -> String {
     let list = error
         .candidates
@@ -339,23 +305,19 @@ pub fn render_ambiguous(error: &IpcError, locale: Locale) -> String {
         .map(|c| Address::senator(c).in_text())
         .collect::<Vec<_>>()
         .join(", ");
-    let owner = error
-        .candidates
-        .first()
-        .map(|c| Address::senior(c.owner()).in_text())
-        .unwrap_or_default();
     let example = error
         .candidates
         .first()
         .map(ToString::to_string)
-        .unwrap_or_else(|| "alice/claude".into());
+        .unwrap_or_else(|| "claude".into());
+    let any = Address::any_agent().in_text();
     match locale {
         Locale::Zh => format!(
-            "{owner} 在这里有好几个 agent：{list}。选一个再来，例如 `senate ask {example} …`。"
+            "{any} 在这个委员会上有好几个 agent：{list}。选一个再来，例如 `senate ask {example} …`。"
         ),
         Locale::En => format!(
-            "{owner} has several agents here: {list}. Name one and send it again, for example \
-             `senate ask {example} …`."
+            "{any} could reach several agents on this committee: {list}. Name one and send it \
+             again, for example `senate ask {example} …`."
         ),
     }
 }
@@ -436,9 +398,9 @@ async fn call<T: serde::de::DeserializeOwned>(
 #[derive(Debug, Clone, PartialEq)]
 pub struct Sent {
     pub kind: SayKind,
-    /// The recipient as resolved from what they wrote, before the server
-    /// resolved a wildcard.
-    pub wrote: Address,
+    /// The recipient as the person wrote it, before the daemon and the
+    /// server resolved it.
+    pub wrote: Locator,
     pub posted: Posted,
     /// The daemon's language: what everything printed is in.
     pub locale: Locale,
@@ -453,31 +415,10 @@ impl Sent {
     }
 }
 
-/// The daemon's person and language, and the agents of that person seated
-/// on `committee`.
-async fn who(
-    socket: &Path,
-    committee: &CommitteeId,
-) -> anyhow::Result<(Name, Locale, Vec<SenatorName>)> {
+/// The daemon's person and language.
+async fn who(socket: &Path) -> anyhow::Result<(Name, Locale)> {
     let pong: Pong = call(socket, &Request::Ping).await?;
-    let status: StatusReply = call(socket, &Request::Status).await?;
-    let mut mine: Vec<SenatorName> = Vec::new();
-    for s in std::iter::once(&status).chain(&status.others) {
-        for c in s.committees.iter().filter(|c| &c.committee == committee) {
-            if !mine.contains(&c.agent) {
-                mine.push(c.agent.clone());
-            }
-        }
-    }
-    // The two harnesses' default agents are yours even before a session of
-    // theirs has opened here.
-    for harness in ["claude", "codex"] {
-        let agent = SenatorName::new(pong.person.clone(), vec![Name::new(harness)?])?;
-        if !mine.contains(&agent) {
-            mine.push(agent);
-        }
-    }
-    Ok((pong.person, pong.locale, mine))
+    Ok((pong.person, pong.locale))
 }
 
 /// A refusal from the daemon, written for the person: `ambiguous_recipient`
@@ -501,22 +442,21 @@ pub async fn send(
     to: &str,
     text: String,
 ) -> anyhow::Result<Sent> {
-    let (me, locale, mine) = who(socket, &committee).await?;
-    let wrote = parse_target(
-        to,
-        &Context {
-            me: &me,
-            mine: &mine,
-        },
-    )
-    .map_err(|e| anyhow::anyhow!(e.message(locale)))?;
+    let (me, locale) = who(socket).await?;
+    let wrote =
+        parse_target(to, &Context { me: &me }).map_err(|e| anyhow::anyhow!(e.message(locale)))?;
+    let (to, at) = match wrote.as_address() {
+        Some(address) => (vec![address], None),
+        None => (Vec::new(), Some(wrote.clone())),
+    };
     let posted: Posted = call(
         socket,
         &Request::Say {
             session: SessionSelector::default(),
             committee: Some(committee),
             kind,
-            to: vec![wrote.clone()],
+            to,
+            at,
             body: text,
             thread: None,
             id: Some(senate_core::EventId::new()),
@@ -549,6 +489,7 @@ pub async fn reply(
             committee: Some(committee),
             kind: SayKind::Note,
             to: Vec::new(),
+            at: None,
             body: text,
             thread: Some(thread),
             id: Some(senate_core::EventId::new()),
@@ -658,20 +599,10 @@ mod tests {
     fn name(s: &str) -> Name {
         Name::new(s).unwrap()
     }
-    fn path(s: &str) -> SenatorName {
-        s.parse().unwrap()
-    }
 
-    fn parse(input: &str) -> Result<Address, TargetError> {
+    fn parse(input: &str) -> Result<Locator, TargetError> {
         let me = name("alice");
-        let mine = [path("alice/claude"), path("alice/codex")];
-        parse_target(
-            input,
-            &Context {
-                me: &me,
-                mine: &mine,
-            },
-        )
+        parse_target(input, &Context { me: &me })
     }
 
     fn ok(input: &str) -> String {
@@ -679,77 +610,57 @@ mod tests {
     }
 
     #[test]
-    fn an_agent_of_yours_is_named_relative_to_you() {
-        assert_eq!(ok("claude"), "senator::alice/claude");
-        assert_eq!(ok("codex"), "senator::alice/codex");
-        assert_eq!(ok("claude/reviewer"), "senator::alice/claude/reviewer");
-    }
-
-    #[test]
-    fn a_full_path_names_that_agent() {
-        assert_eq!(ok("alice/claude"), "senator::alice/claude");
-        assert_eq!(ok("bob/claude"), "senator::bob/claude");
-        assert_eq!(ok("bob/claude/reviewer"), "senator::bob/claude/reviewer");
-        // Your own handle first is a full path even for a name you also use
-        // for an agent.
-        assert_eq!(ok("alice/codex/x"), "senator::alice/codex/x");
-    }
-
-    #[test]
-    fn a_handle_that_is_not_one_of_your_agents_is_that_person() {
+    fn a_bare_name_is_a_senator_here() {
+        // Replaces "an agent of yours is named relative to you", "a handle
+        // that is not one of your agents is that person" and "an agent of
+        // yours wins over a person of the same name": a name is flat, and a
+        // person's handle and an agent's name share one namespace.
+        assert_eq!(ok("claude"), "senator::claude");
+        assert_eq!(ok("codex"), "senator::codex");
         assert_eq!(ok("bob"), "senator::bob");
         assert_eq!(ok("pm"), "senator::pm");
     }
 
     #[test]
+    fn a_path_in_a_name_is_refused() {
+        // Replaces "a full path names that agent": no owner prefix, no
+        // nesting.
+        for bad in ["alice/claude", "bob/claude", "claude/reviewer", "bob/*"] {
+            assert!(
+                matches!(parse(bad), Err(TargetError::Malformed(_))),
+                "{bad}"
+            );
+        }
+        let text = TargetError::Malformed("claude/reviewer".into()).message(Locale::En);
+        assert!(text.contains("child Senate"), "{text}");
+    }
+
+    #[test]
     fn whichever_agent_is_a_wildcard() {
-        assert_eq!(ok("*"), "senator::alice/*");
-        assert_eq!(ok("bob/*"), "senator::bob/*");
-        assert_eq!(ok("alice/*"), "senator::alice/*");
+        assert_eq!(ok("*"), "senator::*");
+        assert_eq!(ok("senator::*"), "senator::*");
+    }
+
+    #[test]
+    fn a_name_on_another_committee_is_qualified() {
+        assert_eq!(ok("ibot::claude"), "ibot::senator::claude");
+        assert_eq!(ok("ibot::speaker"), "ibot::speaker");
+        assert_eq!(ok("ibot::*"), "ibot::senator::*");
+        assert_eq!(ok("acme::ibot::codex"), "acme::ibot::senator::codex");
+        assert_eq!(ok("[ibot::senator::codex]"), "ibot::senator::codex");
+        assert!(parse("ibot::claude").unwrap().as_address().is_none());
+        // Yourself elsewhere is someone else's committee: not refused here.
+        assert_eq!(ok("ibot::alice"), "ibot::senator::alice");
     }
 
     #[test]
     fn the_speaker_and_the_full_forms_are_accepted() {
         assert_eq!(ok("speaker"), "speaker");
         assert_eq!(ok("[speaker]"), "speaker");
-        assert_eq!(ok("senator::bob/claude"), "senator::bob/claude");
-        assert_eq!(ok("[senator::bob/claude]"), "senator::bob/claude");
+        assert_eq!(ok("senator::codex"), "senator::codex");
+        assert_eq!(ok("[senator::codex]"), "senator::codex");
         assert_eq!(ok("senator::bob"), "senator::bob");
-        assert_eq!(ok("senator::bob/*"), "senator::bob/*");
-        assert_eq!(ok("  bob/claude "), "senator::bob/claude");
-    }
-
-    #[test]
-    fn an_agent_of_yours_wins_over_a_person_of_the_same_name() {
-        let me = name("alice");
-        let mine = [path("alice/bob")];
-        let ctx = Context {
-            me: &me,
-            mine: &mine,
-        };
-        assert_eq!(
-            parse_target("bob", &ctx).unwrap().to_string(),
-            "senator::alice/bob"
-        );
-        assert_eq!(
-            parse_target("senator::bob", &ctx).unwrap().to_string(),
-            "senator::bob"
-        );
-    }
-
-    #[test]
-    fn nothing_known_about_your_agents_reads_a_single_name_as_a_person() {
-        let me = name("alice");
-        let ctx = Context { me: &me, mine: &[] };
-        assert_eq!(
-            parse_target("claude", &ctx).unwrap().to_string(),
-            "senator::claude"
-        );
-        // A path is a full path.
-        assert_eq!(
-            parse_target("claude/reviewer", &ctx).unwrap().to_string(),
-            "senator::claude/reviewer"
-        );
+        assert_eq!(ok("  codex "), "senator::codex");
     }
 
     #[test]
@@ -771,12 +682,11 @@ mod tests {
             "bob/",
             "/claude",
             "bob//claude",
-            "bob/*/x",
             "*/x",
             "senator::",
             "senator::bob/claude/*",
             "has space",
-            "a::b",
+            "a::b::c::d",
         ] {
             assert!(
                 matches!(parse(bad), Err(TargetError::Malformed(_))),
@@ -799,12 +709,12 @@ mod tests {
             "senator::alice".parse().unwrap(),
             "a\nb",
         )
-        .to("senator::alice/claude".parse().unwrap())
+        .to("senator::claude".parse().unwrap())
         .into_event(Seq(4), at);
         let status = NewEvent::new(
             c.clone(),
             Kind::Status,
-            "senator::alice/claude".parse().unwrap(),
+            "senator::claude".parse().unwrap(),
             "",
         )
         .in_thread(Seq(4))
@@ -814,17 +724,17 @@ mod tests {
         )
         .into_event(Seq(5), at);
         let answer = NewEvent::new(c.clone(), Kind::Answer, Address::Speaker, "done\n")
-            .on_behalf_of("senator::alice/claude".parse().unwrap())
+            .on_behalf_of("senator::claude".parse().unwrap())
             .in_thread(Seq(4))
             .with_meta(meta::TAKEOVER, true.into())
             .into_event(Seq(6), at);
         assert_eq!(
             render_answer(&answer, Locale::En),
-            "[speaker::alice/claude] takeover answered in thread 4:\ndone"
+            "[speaker::claude] takeover answered in thread 4:\ndone"
         );
         assert_eq!(
             render_answer(&answer, Locale::Zh),
-            "[speaker::alice/claude] 接管 在 thread 4 里回答：\ndone"
+            "[speaker::claude] 接管 在 thread 4 里回答：\ndone"
         );
         let reply = ThreadReply {
             committee: c,
@@ -835,18 +745,18 @@ mod tests {
         assert_eq!(
             en,
             "Thread 4 on refund-v2, 3 event(s):\n\n\
-             [seq 4] [senator::alice] · 2026-11-17 10:02 UTC · question · to [senator::alice/claude]\n  a\n  b\n\n\
-             [seq 5] [senator::alice/claude] · 2026-11-17 10:02 UTC · status\n  status processing\n\n\
-             [seq 6] [speaker::alice/claude] takeover · 2026-11-17 10:02 UTC · answer\n  done"
+             [seq 4] [senator::alice] · 2026-11-17 10:02 UTC · question · to [senator::claude]\n  a\n  b\n\n\
+             [seq 5] [senator::claude] · 2026-11-17 10:02 UTC · status\n  status processing\n\n\
+             [seq 6] [speaker::claude] takeover · 2026-11-17 10:02 UTC · answer\n  done"
         );
         let zh = render_thread(&reply, Locale::Zh);
         assert!(zh.starts_with("refund-v2 的 thread 4，共 3 条："), "{zh}");
         assert!(
-            zh.contains("· question · 给 [senator::alice/claude]\n  a\n  b"),
+            zh.contains("· question · 给 [senator::claude]\n  a\n  b"),
             "{zh}"
         );
         assert!(zh.contains("\n  状态 processing"), "{zh}");
-        assert!(zh.contains("[speaker::alice/claude] 接管 · "), "{zh}");
+        assert!(zh.contains("[speaker::claude] 接管 · "), "{zh}");
     }
 
     #[test]

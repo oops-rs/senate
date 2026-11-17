@@ -35,6 +35,7 @@ use crate::address::Address;
 use crate::continuity::PresenceState;
 use crate::event::{Event, Kind, StatusState, meta};
 use crate::ids::{CommitteeId, Name, Seq};
+use crate::locator::Locator;
 use crate::roster::SpeakerSeat;
 use crate::senator::SenatorName;
 use crate::task::StatusPayload;
@@ -43,7 +44,10 @@ use crate::task::StatusPayload;
 /// its sender wrote `senator::<owner>/*` and `owner` has several agents.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PickPayload {
-    pub owner: Name,
+    /// The person whose agents these were, in a log written before names
+    /// were flat; absent since: `senator::*` names no person.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<Name>,
     pub candidates: Vec<SenatorName>,
 }
 
@@ -65,7 +69,8 @@ impl PickPayload {
 pub enum Awaiting {
     /// Route it to one of `candidates` ([`PickPayload`]).
     Pick {
-        owner: Name,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<Name>,
         candidates: Vec<SenatorName>,
     },
     /// It is addressed to the Speaker: answer it.
@@ -81,6 +86,10 @@ pub struct DocketItem {
     pub event: Event,
     #[serde(flatten)]
     pub awaiting: Awaiting,
+    /// The seat outside this committee the message was meant for
+    /// ([`meta::INTENDED`]), when it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intended: Option<Locator>,
 }
 
 /// The facts a Speaker picks and covers by, for one agent seated here.
@@ -193,6 +202,7 @@ impl SpeakerDocket {
                     },
                     None => Awaiting::Addressed,
                 },
+                intended: crate::locator::intended(event),
                 event: event.clone(),
             })
             .collect()
@@ -219,11 +229,8 @@ mod tests {
 
     fn pick(seq: u64) -> Event {
         let payload = PickPayload {
-            owner: Name::new("alice").unwrap(),
-            candidates: vec![
-                "alice/claude".parse().unwrap(),
-                "alice/codex".parse().unwrap(),
-            ],
+            owner: Some(Name::new("alice").unwrap()),
+            candidates: vec!["claude".parse().unwrap(), "codex".parse().unwrap()],
         };
         at(
             seq,
@@ -251,7 +258,7 @@ mod tests {
         // Someone else talking about it does not deal with it.
         docket.observe(&at(
             2,
-            NewEvent::new(c(), Kind::Note, addr("senator::alice/codex"), "hm").in_thread(Seq(1)),
+            NewEvent::new(c(), Kind::Note, addr("senator::codex"), "hm").in_thread(Seq(1)),
         ));
         assert_eq!(docket.items().len(), 1);
         docket.observe(&at(
@@ -262,7 +269,7 @@ mod tests {
                 Address::Speaker,
                 "who looks at refunds?",
             )
-            .to(addr("senator::alice/codex"))
+            .to(addr("senator::codex"))
             .on_behalf_of(addr("senator::alice"))
             .with_meta(meta::RELAYED_FROM, serde_json::json!(1)),
         ));
@@ -278,7 +285,7 @@ mod tests {
         let ask = |seq| {
             at(
                 seq,
-                NewEvent::new(c(), Kind::Question, addr("senator::alice/codex"), "status?")
+                NewEvent::new(c(), Kind::Question, addr("senator::codex"), "status?")
                     .to(Address::Speaker),
             )
         };
@@ -294,7 +301,7 @@ mod tests {
         docket.observe(&at(
             4,
             NewEvent::new(c(), Kind::Answer, Address::Speaker, "fine")
-                .to(addr("senator::alice/codex"))
+                .to(addr("senator::codex"))
                 .in_thread(Seq(1)),
         ));
         let mut archive = StatusPayload::new(StatusState::Archived);
@@ -312,15 +319,16 @@ mod tests {
     fn a_docket_page_reads_back() {
         let page = DocketPage {
             committee: c(),
-            speaker: Some(SpeakerSeat::Senator("alice/claude".parse().unwrap())),
+            speaker: Some(SpeakerSeat::Senator("claude".parse().unwrap())),
             items: vec![DocketItem {
                 event: pick(1),
                 awaiting: Awaiting::Away {
-                    agents: vec!["alice/codex".parse().unwrap()],
+                    agents: vec!["codex".parse().unwrap()],
                 },
+                intended: Some("ibot::senator::codex".parse().unwrap()),
             }],
             seats: vec![SeatFacts {
-                agent: "alice/codex".parse().unwrap(),
+                agent: "codex".parse().unwrap(),
                 connected: false,
                 presence: Some(PresenceState::Absent),
                 last_seen: None,

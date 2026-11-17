@@ -260,11 +260,11 @@ async fn the_daemon_starts_then_steers_a_codex_thread() {
         .await
         .expect("a Codex session gets orientation through its SessionStart hook");
     assert!(context(&start).contains(
-        "joined to the committee `refund-v2` of the top Senate as [senator::alice/codex]"
+        "joined to the committee `refund-v2` of the Senate [/senate] as [senator::codex]"
     ));
     let s = h.store().session("thread-1").unwrap().unwrap();
     assert_eq!(s.runtime, Runtime::Codex);
-    assert_eq!(s.agent, path("alice/codex"));
+    assert_eq!(s.agent, path("codex"));
     h.wait_stream("refund-v2").await;
     codex.idle("thread-1");
 
@@ -291,7 +291,7 @@ async fn the_daemon_starts_then_steers_a_codex_thread() {
     assert!(text.contains("[senate · refund-v2 · seq 1"), "{text}");
     assert!(text.contains("网关幂等用哪个 header？"), "{text}");
     eventually("seq 1 delivered", WAIT, || {
-        let i = h.item_of("alice/codex", 1)?;
+        let i = h.item_of("codex", 1)?;
         (i.status == ItemStatus::Delivered).then_some(())
     })
     .await;
@@ -347,7 +347,7 @@ async fn without_an_app_server_items_stay_held_until_a_push_lands() {
     h.server
         .append(relayed_to(common::codex("alice"), "anyone there?"));
     let held = || {
-        let i = h.item_of("alice/codex", 1)?;
+        let i = h.item_of("codex", 1)?;
         (i.status == ItemStatus::Queued).then_some(())
     };
     eventually("held", WAIT, held).await;
@@ -380,7 +380,7 @@ async fn without_an_app_server_items_stay_held_until_a_push_lands() {
     assert_eq!(pushes[0].0, "turn/steer");
     assert!(input_text(&pushes[0].1).contains("anyone there?"));
     eventually("delivered", WAIT, || {
-        let i = h.item_of("alice/codex", 1)?;
+        let i = h.item_of("codex", 1)?;
         (i.status == ItemStatus::Delivered).then_some(())
     })
     .await;
@@ -414,10 +414,7 @@ async fn an_unloaded_thread_goes_stale_until_it_is_resumed() {
         (s.state == SessionState::Stale).then_some(())
     })
     .await;
-    assert_eq!(
-        h.item_of("alice/codex", 1).unwrap().status,
-        ItemStatus::Pending
-    );
+    assert_eq!(h.item_of("codex", 1).unwrap().status, ItemStatus::Pending);
     assert!(codex.pushes().is_empty());
 
     codex.idle("thread-1");
@@ -446,18 +443,18 @@ async fn a_backlog_from_before_the_session_arrives_as_a_turn_not_hook_context() 
     let mut h = Harness::with_committees(&["refund-v2"]).await;
     let codex = h.codex();
     h.start().await;
-    // An earlier Codex session, now closed, puts alice/codex on record, so
+    // An earlier Codex session, now closed, puts codex on record, so
     // the configured committee stays open for it.
     let wd = h.workdir("cx", Some("refund-v2"));
     h.hook_codex(HookKind::SessionStart, "thread-0", &wd).await;
     h.hook_codex(HookKind::SessionEnd, "thread-0", &wd).await;
-    h.wait_stream_of("refund-v2", "alice/codex").await;
+    h.wait_stream_of("refund-v2", "codex").await;
     h.server.append(relayed_to(
         common::codex("alice"),
         "网关幂等用哪个 header？",
     ));
     eventually("pending with no session", WAIT, || {
-        let i = h.item_of("alice/codex", 1)?;
+        let i = h.item_of("codex", 1)?;
         (i.status == ItemStatus::Pending).then_some(())
     })
     .await;
@@ -485,7 +482,7 @@ async fn a_backlog_from_before_the_session_arrives_as_a_turn_not_hook_context() 
     assert!(text.contains("[senate · refund-v2 · seq 1"), "{text}");
     assert!(text.contains("网关幂等用哪个 header？"), "{text}");
     eventually("seq 1 delivered", WAIT, || {
-        let i = h.item_of("alice/codex", 1)?;
+        let i = h.item_of("codex", 1)?;
         (i.status == ItemStatus::Delivered && i.session_id.as_deref() == Some("thread-1"))
             .then_some(())
     })

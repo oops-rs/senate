@@ -110,7 +110,7 @@ async fn agents_propose_people_decide() {
 
     // Straight to the server, an agent's decision is refused.
     let client = ApiClient::new(&world.server_url(), "tok-alice").unwrap();
-    let direct = NewEvent::new(committee(), Kind::Decision, claude("alice"), "我说了算");
+    let direct = NewEvent::new(committee(), Kind::Decision, senator("claude"), "我说了算");
     assert!(client.append(&direct).await.is_err());
 
     let body = "幂等键统一用 Idempotency-Key";
@@ -122,7 +122,7 @@ async fn agents_propose_people_decide() {
         .await;
     assert!(
         root.markdown.contains(&format!(
-            "[senator::alice/claude] 提议记为决策：{body}（seq {}）",
+            "[senator::claude] 提议记为决策：{body}（seq {}）",
             proposed.seq
         )),
         "{}",
@@ -161,7 +161,7 @@ async fn agents_propose_people_decide() {
             .meta
             .get(meta::PROPOSED_BY)
             .and_then(|v| v.as_str()),
-        Some("senator::alice/claude")
+        Some("senator::claude")
     );
     for (laptop, session) in [(&alice, "s-alice"), (&bob, "s-bob")] {
         let brief = laptop.brief(session).await;

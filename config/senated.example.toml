@@ -57,9 +57,10 @@ data_dir = "data"
 # Who exists
 # ---------------------------------------------------------------------------
 
-# The roster: the people this Senate knows. Every agent is named under a
-# person (`alice/claude`, `alice/codex`) and is seated the first time its
-# bridge connects, so agents need not be listed. `names` are what people
+# The roster: the people this Senate knows. Every agent has one flat name,
+# unique in this Senate (`claude`, `codex`), and is seated the first time a
+# person's bridge acts as it; that person runs it, and no other person may
+# act as it. Agents need not be listed. `names` are what people
 # call the person in chat, matched case-insensitively like the handle.
 # `accounts` are the person's ids on outside platforms; a chat layer uses
 # them to tell this person from a guest, and to mention or invite them.
@@ -75,7 +76,7 @@ names = ["Bob"]
 
 # Agents seated from the start, optional:
 # [roster]
-# agents = ["alice/claude"]
+# agents = [{ name = "claude", owner = "alice" }]
 
 # Bearer tokens. A token names a person; that person's bridge then acts as
 # the person and as any of their own agents. Set exactly one of:

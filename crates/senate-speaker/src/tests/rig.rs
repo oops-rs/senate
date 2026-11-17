@@ -6,7 +6,7 @@ use std::sync::Arc;
 use ractor::ActorRef;
 use senate_core::{
     Account, Address, BindingAction, BindingPayload, CommitteeId, Event, Guest, Hub, Kind, Locale,
-    Mirror, Name, NewEvent, Roster, SenatorName, Senior, Seq, Source, UnboundMention,
+    Mirror, Name, NewEvent, Roster, SeatedAgent, SenatorName, Senior, Seq, Source, UnboundMention,
 };
 use serde_json::json;
 use tokio::sync::mpsc;
@@ -33,22 +33,52 @@ pub(crate) fn name(handle: &str) -> Name {
 }
 
 pub(crate) fn path(text: &str) -> SenatorName {
-    text.parse().expect("senator path")
+    text.parse().expect("senator name")
 }
 
-/// `<handle>/claude`: each person's one agent unless a test seats more.
+/// The agent each person runs, unless a test seats more: alice runs
+/// `claude`, bob `copilot`, pm `aider`. carol and mallory are not seated
+/// with one; theirs are `cline` and `devin` where a test needs a name.
+const AGENTS: [(&str, &str); 5] = [
+    ("alice", "claude"),
+    ("bob", "copilot"),
+    ("pm", "aider"),
+    ("carol", "cline"),
+    ("mallory", "devin"),
+];
+
+/// The one agent `handle` runs (see [`AGENTS`]).
 pub(crate) fn agent_path(handle: &str) -> SenatorName {
-    path(&format!("{handle}/claude"))
+    let (_, agent) = AGENTS
+        .iter()
+        .find(|(person, _)| *person == handle)
+        .unwrap_or_else(|| panic!("{handle} runs no agent in these tests"));
+    path(agent)
 }
 
-/// `senator::<handle>/claude`.
+/// The person who runs `agent`: the [`AGENTS`] table, and alice for the
+/// second agent (`codex`) tests seat for her.
+pub(crate) fn runner_of(agent: &SenatorName) -> Name {
+    if agent.as_str() == "codex" {
+        return name("alice");
+    }
+    let (person, _) = AGENTS
+        .iter()
+        .find(|(_, a)| *a == agent.as_str())
+        .unwrap_or_else(|| panic!("nobody runs {agent} in these tests"));
+    name(person)
+}
+
+/// `senator::<agent>` for the agent `handle` runs.
 pub(crate) fn agent(handle: &str) -> Address {
     Address::Senator(agent_path(handle))
 }
 
-/// `senator::<handle>/<agent>`: one of several agents of a person.
+/// `senator::<agent>`: one of several agents `handle` runs (the test seats
+/// it under them).
 pub(crate) fn agent_named(handle: &str, agent: &str) -> Address {
-    Address::Senator(path(&format!("{handle}/{agent}")))
+    let _ = handle;
+    Address::Senator(path(agent))
 }
 
 /// `senator::<handle>`: the person.
@@ -68,8 +98,8 @@ pub(crate) fn sender(from: &str) -> Address {
     if known { user(from) } else { guest(from) }
 }
 
-/// pm, alice and bob, each with one agent `claude` seated, and each with an
-/// account on the chat platform (`u_<handle>`).
+/// pm, alice and bob, each running one agent (see [`AGENTS`]) seated under
+/// them, and each with an account on the chat platform (`u_<handle>`).
 pub(crate) fn roster() -> Roster {
     let senior = |handle: &str, names: &[&str]| Senior {
         handle: name(handle),
@@ -79,13 +109,14 @@ pub(crate) fn roster() -> Roster {
             id: format!("u_{handle}"),
         }],
     };
-    Roster::top(
+    let seated = |handle: &str| SeatedAgent::new(agent_path(handle), name(handle));
+    Roster::new(
         vec![
             senior("pm", &["PM"]),
             senior("alice", &["Alice", "爱丽丝"]),
             senior("bob", &["Bob"]),
         ],
-        vec![agent_path("pm"), agent_path("alice"), agent_path("bob")],
+        vec![seated("pm"), seated("alice"), seated("bob")],
     )
     .expect("roster")
 }

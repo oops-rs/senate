@@ -80,11 +80,10 @@ fn plural<'a>(n: usize, one: &'a str, many: &'a str) -> &'a str {
 }
 
 /// One Senate's name: the top Senate, or the one a presiding agent holds.
-pub fn senate_title(locale: Locale, presider: Option<&str>) -> String {
-    match (presider, locale) {
+pub fn senate_title(locale: Locale, senate: Option<&str>) -> String {
+    match (senate, locale) {
         (None, _) => "Senate".to_string(),
-        (Some(p), Locale::Zh) => format!("{p} 主持的 Senate"),
-        (Some(p), Locale::En) => format!("Senate under {p}"),
+        (Some(p), _) => format!("Senate {p}"),
     }
 }
 
@@ -205,7 +204,7 @@ pub fn already_started(locale: Locale) -> String {
         .to_string()
 }
 
-/// A failed read, for the error bar: `inbox of [senator::alice/claude] on
+/// A failed read, for the error bar: `inbox of [senator::claude] on
 /// refund-v2: <the daemon's message>`.
 pub fn read_failed(locale: Locale, what: &str, message: &str) -> String {
     format!("{what}{}{message}", locale.pick("：", ": "))
@@ -241,14 +240,12 @@ mod tests {
     #[test]
     fn senate_is_never_translated() {
         assert_eq!(senate_title(Locale::Zh, None), "Senate");
-        assert_eq!(
-            senate_title(Locale::Zh, Some("alice/claude")),
-            "alice/claude 主持的 Senate"
-        );
-        assert_eq!(
-            senate_title(Locale::En, Some("alice/claude")),
-            "Senate under alice/claude"
-        );
+        for locale in [Locale::Zh, Locale::En] {
+            assert_eq!(
+                senate_title(locale, Some("acme/north-desk")),
+                "Senate acme/north-desk"
+            );
+        }
     }
 
     #[test]

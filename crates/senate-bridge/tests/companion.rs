@@ -136,7 +136,7 @@ async fn a_question_with_no_session_is_answered_by_a_companion() {
     .await
     .unwrap_err();
     assert!(refused.to_string().contains("companion"), "{refused}");
-    let read_before = h.server.cursor("refund-v2", "alice/claude", "read");
+    let read_before = h.server.cursor("refund-v2", "claude", "read");
     let caught: CatchUpReply = ipc::request(
         &h.socket(),
         &Request::CatchUp {
@@ -150,7 +150,7 @@ async fn a_question_with_no_session_is_answered_by_a_companion() {
     .unwrap();
     assert!(!caught.items.is_empty());
     assert_eq!(
-        h.server.cursor("refund-v2", "alice/claude", "read"),
+        h.server.cursor("refund-v2", "claude", "read"),
         read_before,
         "a companion does not move the read cursor"
     );

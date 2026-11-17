@@ -73,7 +73,7 @@ fn request() -> PrRequest {
         run_id: 7,
         requester: Name::new("bob").unwrap(),
         on_behalf_of: "Bob".into(),
-        target_agent: "alice/claude".parse().unwrap(),
+        target_agent: "claude".parse().unwrap(),
         instruction: "finish the retry path".into(),
         repo: RepoRef::from_url("git@github.com:o/refund.git").unwrap(),
         base_branch: "feature/refund-v2/alice".into(),

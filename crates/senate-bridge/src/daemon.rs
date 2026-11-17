@@ -33,11 +33,11 @@
 //! # Which Senate
 //!
 //! `GET /v1/me` names the person and the Senate the server serves, by its
-//! presider ([`senate_core::api::Me::presider`]). The daemon checks the
-//! person against `senate.toml`, names its agents under the presider when
-//! there is one ([`Seating`]), records it in `state.db` so a restart while
-//! the server is down names them the same way, and shows it wherever it says
-//! what it is connected to (`status`, the session-start orientation).
+//! name and the Senate above ([`senate_core::api::Me::senate`],
+//! [`senate_core::api::Me::parent`]), with its people: every other senator
+//! is an agent. The daemon checks the person against `senate.toml` and
+//! shows the Senate's path wherever it says what it is connected to
+//! (`status`, the session-start orientation).
 //!
 //! # First join
 //!
@@ -133,9 +133,9 @@ use senate_core::api::{self, Heartbeat};
 use senate_core::continuity::{DECISIONS_FILE, OPEN_FILE, PROGRESS_FILE};
 use senate_core::{
     Address, BranchNaming, Brief, CheckpointFiles, CheckpointPayload, CheckpointTrigger,
-    CommitteeId, Event, EventId, Kind, Locale, Name, NewEvent, PROPOSAL_DECISION, Refs,
-    SenatorName, Seq, SpeakerSeat, StatusPayload, TaskOwner, TriagePayload, TriageVerdict,
-    is_provisional, meta, needs_triage,
+    CommitteeId, Event, EventId, Kind, Locale, Locator, Name, NewEvent, PROPOSAL_DECISION, People,
+    Refs, SenatePath, SenatorName, Seq, SpeakerSeat, StatusPayload, TaskOwner, TriagePayload,
+    TriageVerdict, is_provisional, meta, needs_triage,
 };
 use serde::Serialize;
 use tokio::net::{UnixListener, UnixStream};
@@ -382,8 +382,10 @@ pub(crate) struct Shared {
     /// Set when `committee_from_branch` is on: the naming a branch name is
     /// read by to find a committee.
     convention: Option<BranchNaming>,
-    /// Where this bridge's agents sit, as `/v1/me` last said.
+    /// Who this bridge's agents are: the person runs them.
     seating: Mutex<Seating>,
+    /// The Senate served, as `/v1/me` last said: its path and its people.
+    senate: Mutex<Option<(SenatePath, People)>>,
     /// Whether a Speaker judges roots on this Senate, as `/v1/me` last said;
     /// until it has said, as if it does.
     triaged: AtomicBool,
@@ -461,20 +463,9 @@ impl DaemonHandle {
         &self.socket
     }
 
-    /// The state database of the first Senate served (tests and
-    /// diagnostics).
+    /// The state database of the Senate served (tests and diagnostics).
     pub fn store(&self) -> &Store {
         &self.front.senates()[0].store
-    }
-
-    /// The state database of the Senate presided over by `presider`
-    /// (`None`: the one where the person's agents sit directly).
-    pub fn store_of(&self, presider: Option<&SenatorName>) -> Option<&Store> {
-        self.front
-            .senates()
-            .iter()
-            .find(|s| s.seating().presider() == presider)
-            .map(|s| &s.store)
     }
 
     /// Stop every task, report final cursors, remove the socket.
@@ -573,26 +564,9 @@ pub async fn start(options: DaemonOptions) -> anyhow::Result<DaemonHandle> {
         home: paths.home().to_path_buf(),
         codex_sessions: Arc::new(Mutex::new(BTreeMap::new())),
     };
-    let links = config.links();
-    let several = links.len() > 1;
-    let mut senates = Vec::with_capacity(links.len());
-    for (index, link) in links.iter().enumerate() {
-        let db = match (&link.presider, several) {
-            (Some(presider), true) => paths.state_db_for(&presider.to_string()),
-            _ => paths.state_db(),
-        };
-        let fixed = link.presider.as_ref().map(|p| p.under(&config.person));
-        let shared = Shared::open(
-            config.for_link(link),
-            &db,
-            several.then_some(fixed),
-            index,
-            &common,
-        )?;
-        verify_person(&shared).await?;
-        senates.push(shared);
-    }
-    let front = Arc::new(Front::new(senates, relay, watch, app_clients, several));
+    let shared = Shared::open(config, &paths.state_db(), 0, &common)?;
+    verify_person(&shared).await?;
+    let front = Arc::new(Front::new(shared, relay, watch, app_clients));
 
     let listener =
         UnixListener::bind(&socket).with_context(|| format!("binding {}", socket.display()))?;
@@ -638,14 +612,10 @@ struct Common {
 }
 
 impl Shared {
-    /// One Senate's half of the daemon, its state in `db`. `fixed` is where
-    /// its agents sit when the machine serves several Senates (the
-    /// configuration says, before `/v1/me` does); `None` with one Senate,
-    /// which learns it from `/v1/me` and the state it recorded.
+    /// The Senate's half of the daemon, its state in `db`.
     fn open(
         config: BridgeConfig,
         db: &Path,
-        fixed: Option<Option<SenatorName>>,
         index: usize,
         common: &Common,
     ) -> anyhow::Result<Arc<Self>> {
@@ -658,25 +628,14 @@ impl Shared {
             );
         }
         let api = ApiClient::new(&config.server_url, &config.token)?;
-        // Until `/v1/me` answers, agents sit where the configuration or the
-        // last answer said they do.
-        let presider = match fixed {
-            Some(presider) => presider,
-            None => match store.seating(api.base_url()) {
-                Ok(known) => known.flatten(),
-                Err(e) => {
-                    tracing::warn!("reading the recorded Senate: {e}");
-                    None
-                }
-            },
-        };
-        let seating = Seating::new(config.person.clone(), presider);
+        let seating = Seating::new(config.person.clone());
         let (resyncs, _) = watch::channel(0);
         Ok(Arc::new(Shared {
             ladder: Ladder::new_default(common.timing.inbox_timeout, common.codex.clone()),
             locale: config.locale,
             convention: config.branch_convention(),
             seating: Mutex::new(seating),
+            senate: Mutex::new(None),
             triaged: AtomicBool::new(true),
             speaker: Mutex::new(None),
             config,
@@ -721,7 +680,7 @@ async fn verify_person(shared: &Shared) -> anyhow::Result<()> {
         Ok(Ok(me)) => {
             shared.note_epoch(Some(&me.epoch)).await;
             shared.note_triaged(me.triaged);
-            shared.note_seating(me.presider);
+            shared.note_senate(&me);
             shared.note_speaker(me.speaker);
             Ok(())
         }
@@ -764,15 +723,12 @@ fn wrap<T: Serialize>(result: Result<T, IpcError>) -> Reply {
 }
 
 /// Which Senate, in words: the top one, or the one a senator presides over.
-pub fn senate_words(presider: Option<&SenatorName>, locale: Locale) -> String {
-    match (presider, locale) {
-        (None, Locale::Zh) => "顶层 Senate".to_string(),
-        (None, Locale::En) => "the top Senate".to_string(),
-        (Some(p), Locale::Zh) => format!("由 {} 主持的 Senate", Address::senator(p).in_text()),
-        (Some(p), Locale::En) => format!(
-            "the Senate presided over by {}",
-            Address::senator(p).in_text()
-        ),
+pub fn senate_words(senate: Option<&SenatePath>, locale: Locale) -> String {
+    match (senate, locale) {
+        (None, Locale::Zh) => "这个 Senate".to_string(),
+        (None, Locale::En) => "this Senate".to_string(),
+        (Some(p), Locale::Zh) => format!("Senate [{p}]"),
+        (Some(p), Locale::En) => format!("the Senate [{p}]"),
     }
 }
 
@@ -781,12 +737,12 @@ pub fn senate_words(presider: Option<&SenatorName>, locale: Locale) -> String {
 fn orientation(
     committee: &CommitteeId,
     agent: &SenatorName,
-    presider: Option<&SenatorName>,
+    senate: Option<&SenatePath>,
     chat: bool,
     locale: Locale,
 ) -> String {
     let me = Address::senator(agent).in_text();
-    let senate = senate_words(presider, locale);
+    let senate = senate_words(senate, locale);
     let reach_zh = if chat {
         "队友的 agent、Speaker 和委员会聊天群里的人"
     } else {
@@ -878,7 +834,35 @@ impl Shared {
 
     /// The Senate this bridge is connected to, for logs.
     fn senate_label(&self) -> String {
-        senate_words(self.seating().presider(), Locale::En)
+        senate_words(self.senate_path().as_ref(), Locale::En)
+    }
+
+    /// The Senate served, by its path, once `/v1/me` has said.
+    pub(crate) fn senate_path(&self) -> Option<SenatePath> {
+        lock(&self.senate).as_ref().map(|(path, _)| path.clone())
+    }
+
+    /// The Senate served, by its name, once `/v1/me` has said.
+    pub(crate) fn senate_name(&self) -> Option<Name> {
+        self.senate_path().map(|p| p.name().clone())
+    }
+
+    /// How `agent` reads a pushed event: who the Senate's people are, and
+    /// which agents this machine's person runs.
+    pub(crate) fn reader(&self, agent: &SenatorName) -> format::Reader {
+        let mut own: BTreeSet<SenatorName> = self.served_agents().unwrap_or_default();
+        own.extend(self.seated());
+        own.insert(agent.clone());
+        format::Reader::new(Address::senator(agent), self.people(), own)
+    }
+
+    /// The Senate's people, as `/v1/me` last named them: every other
+    /// senator is an agent. Until it has, the person alone.
+    pub(crate) fn people(&self) -> People {
+        lock(&self.senate)
+            .as_ref()
+            .map(|(_, people)| people.clone())
+            .unwrap_or_else(|| People::new([self.config.person.clone()]))
     }
 
     /// Record whether `/v1/me` said a Speaker judges roots here.
@@ -888,20 +872,18 @@ impl Shared {
         }
     }
 
-    /// Record the Senate `/v1/me` named. Sessions take the new seating at
-    /// their next hook.
-    fn note_seating(&self, presider: Option<SenatorName>) {
-        let seating = Seating::new(self.config.person.clone(), presider);
-        if let Err(e) = self
-            .store
-            .set_seating(self.api.base_url(), seating.presider())
-        {
-            tracing::warn!("recording the Senate: {e}");
+    /// Record the Senate `/v1/me` named: its path and its people.
+    pub(crate) fn note_senate(&self, me: &senate_core::api::Me) {
+        let mut people = me.people.clone();
+        if people.handles().next().is_none() {
+            // An older server names no people: the person is one.
+            people = People::new([self.config.person.clone()]);
         }
-        let mut current = lock(&self.seating);
-        if *current != seating {
-            tracing::info!(senate = %senate_words(seating.presider(), Locale::En), "connected");
-            *current = seating;
+        let known = (me.senate_path(), people);
+        let mut current = lock(&self.senate);
+        if current.as_ref() != Some(&known) {
+            tracing::info!(senate = %known.0, "connected");
+            *current = Some(known);
         }
     }
 
@@ -919,10 +901,10 @@ impl Shared {
         lock(&self.speaker).clone()
     }
 
-    /// Whether `agent`, one of this machine's person's agents, holds this
-    /// Senate's Speaker's seat.
+    /// Whether `agent`, one this machine runs, holds this Senate's
+    /// Speaker's seat.
     pub(crate) fn presided_by(&self, agent: &SenatorName) -> bool {
-        agent.owner() == &self.config.person
+        self.seating().owns(agent)
             && self
                 .speaker_seat()
                 .is_some_and(|seat| seat.senator() == Some(agent))
@@ -935,13 +917,6 @@ impl Shared {
         event.from != Address::Speaker
             && event.is_directed_to(&Address::Speaker)
             && self.presided_by(agent)
-    }
-
-    /// Whether `agent` holds this Senate's seat without sitting in it: the
-    /// presider of a nested Senate, whose session sits in the Senate above.
-    /// It speaks here only as `speaker`.
-    pub(crate) fn presides_from_above(&self, agent: &SenatorName) -> bool {
-        self.presided_by(agent) && !self.seating().owns(agent)
     }
 
     /// `senator::<person>`: the person this bridge holds the token of.
@@ -978,7 +953,8 @@ impl Shared {
         named: Option<&Name>,
     ) -> Result<SenatorName, IpcError> {
         if let Some(name) = named {
-            return Ok(self.seating().agent(name));
+            return SenatorName::new(name.clone())
+                .map_err(|e| IpcError::bad_request(e.to_string()));
         }
         let mut agents = self.agents_on(committee);
         if agents.is_empty() {
@@ -1640,7 +1616,7 @@ impl Shared {
     fn route<'a>(&self, item: &QueueItem, cands: &[&'a Session]) -> Result<Route<'a>, StoreError> {
         let event = &item.event;
         let target = self.recipient(&item.agent, event, cands)?;
-        if needs_triage(event) && self.triaged.load(Ordering::Relaxed) {
+        if needs_triage(event, &self.people()) && self.triaged.load(Ordering::Relaxed) {
             match self.store.verdict(&event.committee, event.seq)? {
                 Some(TriageVerdict::NeedsHuman) => {
                     self.store.cancel(
@@ -1696,10 +1672,10 @@ impl Shared {
         event.meta.remove(format::COVERING_META);
         event.meta.remove(format::SPEAKER_META);
         if !event.is_directed_to(&Address::senator(agent)) && self.for_speaker(agent, &event) {
-            let senate = match self.seating().presider() {
-                Some(presider) => presider.to_string(),
-                None => String::new(),
-            };
+            let senate = self
+                .senate_path()
+                .map(|p| p.to_string())
+                .unwrap_or_default();
             event
                 .meta
                 .insert(format::SPEAKER_META.into(), senate.into());
@@ -1712,7 +1688,7 @@ impl Shared {
                 .insert(format::COVERING_META.into(), old.to_string().into());
         }
         // Where nothing triages, no verdict is not "the Speaker was too slow".
-        if needs_triage(&event) && self.triaged.load(Ordering::Relaxed) {
+        if needs_triage(&event, &self.people()) && self.triaged.load(Ordering::Relaxed) {
             let verdict = self
                 .store
                 .verdict(&event.committee, event.seq)
@@ -1994,7 +1970,7 @@ impl Shared {
         let take = events.len().min(MAX_BATCH_EVENTS);
         let rendered = format::render_push_noting(
             &events[..take],
-            &Address::senator(agent),
+            &self.reader(agent),
             INBOX_MAX_CHARS,
             events.len() - take,
             dropped,
@@ -2186,7 +2162,7 @@ impl Shared {
         let event = self.annotate(&agent, item.event);
         let pushed = format::render_push_noting(
             std::slice::from_ref(&event),
-            &Address::senator(&agent),
+            &self.reader(&agent),
             INBOX_MAX_CHARS,
             0,
             0,
@@ -2426,11 +2402,12 @@ impl Shared {
                 committee,
                 kind,
                 to,
+                at,
                 body,
                 thread,
                 id,
             } => wrap(
-                self.on_say(&session, committee, kind, to, body, thread, id)
+                self.on_say(&session, committee, kind, to, at, body, thread, id)
                     .await,
             ),
             Request::Thread {
@@ -2497,19 +2474,18 @@ impl Shared {
                 }
             })
             .collect();
-        let seating = self.seating();
         Ok(StatusReply {
             pid: std::process::id(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             person: self.config.person.clone(),
-            presider: seating.presider().cloned(),
+            senate: self.senate_path(),
+            people: self.people(),
             locale: self.locale,
             server_url: self.api.base_url().to_string(),
             committees,
             sessions,
             queue: self.store.counts().map_err(internal)?,
             speaker: self.speaker_seat(),
-            others: Vec::new(),
         })
     }
 
@@ -2702,11 +2678,10 @@ impl Shared {
         let mut parts = Vec::new();
         let mut budget = HOOK_CONTEXT_MAX;
         if event == HookEvent::SessionStart {
-            let seating = self.seating();
             let line = orientation(
                 &committee,
                 agent,
-                seating.presider(),
+                self.senate_path().as_ref(),
                 brief.is_some_and(|b| !b.groups.is_empty()),
                 self.locale,
             );
@@ -2734,7 +2709,7 @@ impl Shared {
                 .collect();
             let fit = format::render_push_noting(
                 &events,
-                &Address::senator(agent),
+                &self.reader(agent),
                 budget,
                 0,
                 dropped,
@@ -2752,7 +2727,7 @@ impl Shared {
                 self.own_roots(agent, &mine, sid).map_err(internal)?;
                 let rendered = format::render_push_noting(
                     &mine,
-                    &Address::senator(agent),
+                    &self.reader(agent),
                     budget,
                     events.len() - fit,
                     dropped,
@@ -3152,13 +3127,9 @@ impl Shared {
     ) -> Result<Posted, IpcError> {
         let session = self.resolve(selector)?;
         let committee = self.bound(&session)?;
-        routing::check_ask_recipients(&to, self.locale).map_err(IpcError::bad_request)?;
-        // The presider of a nested Senate asks its subagents as their Speaker.
-        let me = if self.presides_from_above(&session.agent) {
-            Address::Speaker
-        } else {
-            Address::senator(&session.agent)
-        };
+        routing::check_ask_recipients(&to, &self.people(), self.locale)
+            .map_err(IpcError::bad_request)?;
+        let me = Address::senator(&session.agent);
         if to.contains(&me) {
             return Err(IpcError::bad_request(match self.locale {
                 Locale::Zh => format!("{} 就是这个会话自己；请问队友的 agent", me.in_text()),
@@ -3409,6 +3380,14 @@ impl Shared {
         let session = self.resolve(selector)?;
         let committee = self.bound(&session)?;
         let to = to.unwrap_or_else(|| self.config.person.clone());
+        // A name is flat: whether it is a person is the Senate's people's
+        // to say (once `/v1/me` has named them).
+        let known = lock(&self.senate)
+            .as_ref()
+            .map(|(_, people)| people.handles().any(|h| h == &to));
+        if known == Some(false) {
+            return Err(IpcError::bad_request(not_a_person(&to, self.locale)));
+        }
         let root = self.task_root(&committee, thread).await?;
         let mut status = StatusPayload::new(senate_core::StatusState::Suspended);
         status.escalated_to = Some(to);
@@ -3532,22 +3511,35 @@ impl Shared {
         committee: Option<CommitteeId>,
         kind: SayKind,
         mut to: Vec<Address>,
+        at: Option<Locator>,
         body: String,
         thread: Option<Seq>,
         id: Option<EventId>,
     ) -> Result<Posted, IpcError> {
-        let (_, committee) = self.session_and_committee(selector, committee)?;
+        let (_, mut committee) = self.session_and_committee(selector, committee)?;
         if body.trim().is_empty() {
             return Err(IpcError::bad_request("`body` is empty"));
+        }
+        if let Some(at) = at {
+            // A person's message to a seat elsewhere is delivered directly,
+            // on the committee the name resolves to.
+            if thread.is_some() {
+                return Err(IpcError::bad_request(
+                    "a reply stays in its thread; a qualified name starts a new one",
+                ));
+            }
+            let (there, address) = self.resolve_seat(&at, &committee).await?;
+            committee = there;
+            to = vec![address];
         }
         if let Some(bad) = to.iter().find(|a| {
             !matches!(
                 a,
-                Address::Senator(_) | Address::AgentOf(_) | Address::Speaker
+                Address::Senator(_) | Address::AnyAgent | Address::Speaker
             )
         }) {
             return Err(IpcError::bad_request(format!(
-                "a person writes to a senator, `senator::<person>/*` or `speaker`, not {}",
+                "a person writes to a senator, `senator::*` or `speaker`, not {}",
                 bad.in_text()
             )));
         }
@@ -3588,6 +3580,54 @@ impl Shared {
         let mut posted = self.post(event).await?;
         posted.unseen_escalation = self.mark_after_speaking(&posted, &spoke_in, &seen).await?;
         Ok(posted)
+    }
+
+    /// Where a qualified name written from `committee` is: the committee
+    /// and the address there. Each Senate answers for itself, nearest
+    /// first ([`crate::client::resolve_outward`]); this daemon knows its
+    /// own Senate. Refused, in the person's language, when the name is in
+    /// none of them, names something that does not exist, or is ambiguous.
+    pub(crate) async fn resolve_seat(
+        &self,
+        at: &Locator,
+        committee: &CommitteeId,
+    ) -> Result<(CommitteeId, Address), IpcError> {
+        let (_, found) = crate::client::resolve_outward(&[&self.api], at, Some(committee))
+            .await
+            .map_err(server_error)?;
+        match found {
+            api::Resolved::Here {
+                committee, address, ..
+            } => Ok((committee, address)),
+            api::Resolved::Elsewhere => Err(IpcError::bad_request(match self.locale {
+                Locale::Zh => format!(
+                    "{} 不在这个 Senate，也不在它知道的任何上一级 Senate 里。",
+                    at.in_text()
+                ),
+                Locale::En => format!(
+                    "{} is not in this Senate, nor in any Senate above it knows of.",
+                    at.in_text()
+                ),
+            })),
+            api::Resolved::Unknown { reason } => Err(IpcError::bad_request(match self.locale {
+                Locale::Zh => format!("{} 无法送达：{reason}", at.in_text()),
+                Locale::En => format!("{} cannot be reached: {reason}", at.in_text()),
+            })),
+            api::Resolved::Ambiguous { candidates } => {
+                let list = candidates
+                    .iter()
+                    .map(Locator::in_text)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Err(IpcError::bad_request(match self.locale {
+                    Locale::Zh => format!("{} 指向不止一处：{list}。写明其中一个。", at.in_text()),
+                    Locale::En => format!(
+                        "{} names more than one place: {list}. Name one of them.",
+                        at.in_text()
+                    ),
+                }))
+            }
+        }
     }
 
     /// How far the person had seen each of `roots` before they spoke.
@@ -3717,7 +3757,9 @@ impl Shared {
         let for_person = session.is_none();
         let agents = match (session, agent) {
             (Some(s), _) => vec![s.agent],
-            (None, Some(name)) => vec![self.seating().agent(&name)],
+            (None, Some(name)) => {
+                vec![SenatorName::new(name).map_err(|e| IpcError::bad_request(e.to_string()))?]
+            }
             (None, None) => self.agents_on(&committee),
         };
         let page = self
@@ -3816,9 +3858,12 @@ impl Shared {
         // A companion reads without moving the agent's read position: what
         // it saw is still unread for the developer.
         if Self::is_companion(&session) {
+            let reader = self.reader(&agent);
             return Ok(CatchUpReply {
                 committee,
                 me,
+                people: reader.people,
+                own: reader.own.into_iter().collect(),
                 items,
                 has_more: page.has_more,
                 read_before,
@@ -3842,9 +3887,12 @@ impl Shared {
         self.store
             .mark_read(&seen, &session.session_id)
             .map_err(internal)?;
+        let reader = self.reader(&agent);
         Ok(CatchUpReply {
             committee,
             me,
+            people: reader.people,
+            own: reader.own.into_iter().collect(),
             items,
             has_more: page.has_more,
             read_before,
@@ -3861,7 +3909,7 @@ impl Shared {
         let warning = match tokio::time::timeout(Duration::from_secs(5), self.api.me()).await {
             Ok(Ok(me)) => {
                 self.note_triaged(me.triaged);
-                self.note_seating(me.presider.clone());
+                self.note_senate(&me);
                 if !me.committees.is_empty() && !me.committees.contains(&committee) {
                     let known: Vec<&str> = me.committees.iter().map(CommitteeId::as_str).collect();
                     return Err(IpcError::bad_request(format!(
@@ -4276,24 +4324,38 @@ struct Acting {
     as_person: bool,
 }
 
-/// The refusal an agent reads when `senator::<person>/*` names a person with
-/// several agents: the candidates as mentions, and what to do.
+/// `escalate` named a senator that is not one of the Senate's people.
+fn not_a_person(name: &Name, locale: Locale) -> String {
+    let who = Address::senior(name).in_text();
+    match locale {
+        Locale::Zh => format!(
+            "{who} 不是这个 Senate 的人；escalate 把 thread 交给一个人，写作 senator::<person>。"
+        ),
+        Locale::En => format!(
+            "{who} is not a person of this Senate; escalate hands a thread to a person, written \
+             senator::<person>."
+        ),
+    }
+}
+
+/// The refusal an agent reads when `senator::*` could reach several
+/// agents: the candidates as mentions, and what to do.
 pub fn ambiguous_message(candidates: &[SenatorName], locale: Locale) -> String {
     let list = candidates
         .iter()
         .map(|c| Address::senator(c).in_text())
         .collect::<Vec<_>>()
         .join(", ");
-    let owner = candidates
-        .first()
-        .map(|c| Address::senior(c.owner()).in_text())
-        .unwrap_or_default();
+    let any = Address::any_agent().in_text();
     match locale {
         Locale::Zh => {
-            format!("{owner} 在这里有好几个 agent：{list}。在 `to` 里写明其中一个，再问一次。")
+            format!(
+                "{any} 在这个委员会有好几个 agent 可以接：{list}。在 `to` 里写明其中一个，再问一次。"
+            )
         }
         Locale::En => format!(
-            "{owner} has several agents here: {list}. Name one of them in `to` and ask again."
+            "{any} could reach several agents on this committee: {list}. Name one of them in \
+             `to` and ask again."
         ),
     }
 }
@@ -4351,15 +4413,26 @@ mod tests {
 
     #[test]
     fn the_orientation_names_the_agent_and_the_senate() {
+        // The Senate is named by its path (no presider, no nesting): before
+        // `/v1/me` has answered it is "this Senate".
         let c = CommitteeId::new("refund-v2").unwrap();
-        let agent: SenatorName = "alice/codex".parse().unwrap();
+        let agent: SenatorName = "codex".parse().unwrap();
         let en = orientation(&c, &agent, None, false, Locale::En);
-        assert!(en.contains("committee `refund-v2` of the top Senate as [senator::alice/codex]"));
-        let presider: SenatorName = "alice/claude".parse().unwrap();
-        let nested: SenatorName = "alice/claude/reviewer".parse().unwrap();
-        let zh = orientation(&c, &nested, Some(&presider), false, Locale::Zh);
+        assert!(en.contains("committee `refund-v2` of this Senate as [senator::codex]"));
+        let path: SenatePath = "acme/north-desk".parse().unwrap();
+        let reviewer: SenatorName = "reviewer".parse().unwrap();
+        let en = orientation(&c, &reviewer, Some(&path), false, Locale::En);
         assert!(
-            zh.contains("已加入 由 [senator::alice/claude] 主持的 Senate 的委员会 `refund-v2`，身份是 [senator::alice/claude/reviewer]"),
+            en.contains(
+                "committee `refund-v2` of the Senate [acme/north-desk] as [senator::reviewer]"
+            ),
+            "{en}"
+        );
+        let zh = orientation(&c, &reviewer, Some(&path), false, Locale::Zh);
+        assert!(
+            zh.contains(
+                "已加入 Senate [acme/north-desk] 的委员会 `refund-v2`，身份是 [senator::reviewer]"
+            ),
             "{zh}"
         );
         for text in [en, zh] {
@@ -4370,7 +4443,7 @@ mod tests {
     #[test]
     fn the_orientation_says_the_person_can_speak_from_a_terminal() {
         let c = CommitteeId::new("refund-v2").unwrap();
-        let agent: SenatorName = "alice/codex".parse().unwrap();
+        let agent: SenatorName = "codex".parse().unwrap();
         let en = orientation(&c, &agent, None, false, Locale::En);
         assert!(
             en.contains("`senate ask`, `senate tell` and `senate reply`"),
@@ -4386,7 +4459,7 @@ mod tests {
     #[test]
     fn the_orientation_mentions_the_chat_only_when_a_group_is_bound() {
         let c = CommitteeId::new("refund-v2").unwrap();
-        let agent: SenatorName = "alice/codex".parse().unwrap();
+        let agent: SenatorName = "codex".parse().unwrap();
         let line = |chat, l| orientation(&c, &agent, None, chat, l);
         assert!(
             line(true, Locale::En)
@@ -4404,14 +4477,28 @@ mod tests {
     #[test]
     fn an_ambiguous_recipient_reads_as_a_choice() {
         let candidates: Vec<SenatorName> =
-            vec!["bob/claude".parse().unwrap(), "bob/codex".parse().unwrap()];
+            vec!["copilot".parse().unwrap(), "aider".parse().unwrap()];
         assert_eq!(
             ambiguous_message(&candidates, Locale::En),
-            "[senator::bob] has several agents here: [senator::bob/claude], \
-             [senator::bob/codex]. Name one of them in `to` and ask again."
+            "[senator::*] could reach several agents on this committee: [senator::copilot], \
+             [senator::aider]. Name one of them in `to` and ask again."
         );
         assert!(ambiguous_message(&candidates, Locale::Zh).starts_with(
-            "[senator::bob] 在这里有好几个 agent：[senator::bob/claude], [senator::bob/codex]"
+            "[senator::*] 在这个委员会有好几个 agent 可以接：[senator::copilot], [senator::aider]"
         ));
+    }
+
+    #[test]
+    fn escalating_to_an_agent_is_refused_in_either_language() {
+        let copilot = Name::new("copilot").unwrap();
+        assert_eq!(
+            not_a_person(&copilot, Locale::En),
+            "[senator::copilot] is not a person of this Senate; escalate hands a thread to a \
+             person, written senator::<person>."
+        );
+        assert!(
+            not_a_person(&copilot, Locale::Zh)
+                .starts_with("[senator::copilot] 不是这个 Senate 的人")
+        );
     }
 }

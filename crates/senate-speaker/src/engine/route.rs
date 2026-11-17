@@ -4,11 +4,15 @@
 //! derived from the handle. What a name said in chat resolves to
 //! ([`resolve_name`]):
 //!
-//! - one agent named outright (`alice/codex`, `[senator::alice/codex]`,
-//!   「alice 的 codex」, "alice's codex"): that agent, if it sits here;
+//! - one agent named outright (`codex`, `[senator::codex]`, 「alice 的
+//!   codex」, "alice's codex"): that agent, if it sits here (and, said as
+//!   a person's, is theirs);
 //! - a person with one agent here: that agent;
 //! - a person with none: the person;
-//! - a person with several: the one the Speaker settles on.
+//! - a person with several: the one the Speaker settles on;
+//! - whichever agent (`[senator::*]`): the same three ways, among the
+//!   agents on the committee ([`Hub::committee_agents`](senate_core::Hub::committee_agents)),
+//!   the Senate's only person when there is none.
 //!
 //! Settling ([`Engine::settle`]) asks the [`Brain`](crate::Brain) to pick
 //! ([`Brain::pick_agent`](crate::Brain::pick_agent)) with what the Speaker
@@ -18,7 +22,7 @@
 //! is restated naming the agent before it runs, so a wrong pick is caught at
 //! the yes. When the Brain cannot tell, the Speaker asks in the same thread
 //! which one ([`Choice`]); the person who asked (or the person whose agents
-//! they are) answers there with the agent's name, its number, or its path,
+//! they are) answers there with the agent's name, its number, or its mention,
 //! and the request carries on as if that agent had been named. A choice
 //! lives in memory for `confirmation_ttl_secs`, like a restatement, and is
 //! lost on restart.
@@ -49,6 +53,9 @@ pub(super) enum Resolved {
         owner: Name,
         candidates: Vec<SenatorName>,
     },
+    /// Whichever agent on the committee (`[senator::*]`): the committee's
+    /// agents settle it.
+    AnyAgent,
     /// Nobody this Senate knows, or an agent that does not sit here.
     Unknown,
 }
@@ -57,21 +64,27 @@ pub(super) enum Resolved {
 /// against `roster`.
 pub(super) fn resolve_name(roster: &Roster, raw: &str) -> Resolved {
     let raw = raw.trim().trim_start_matches('@');
-    // A full path, at whatever level this Senate seats agents.
-    let bare = match raw.parse::<Mention>() {
-        Ok(Mention::Senator(path)) => Some(path),
+    let mention = raw.parse::<Mention>().ok();
+    if matches!(mention, Some(Mention::AnyAgent)) || raw == "senator::*" {
+        return Resolved::AnyAgent;
+    }
+    // One senator named outright: when it is not a person, it is an agent,
+    // which must sit here.
+    let bare = match &mention {
+        Some(Mention::Senator(name) | Mention::SpeakerFor(name)) => Some(name.clone()),
         _ => raw
             .strip_prefix("senator::")
             .unwrap_or(raw)
             .parse::<SenatorName>()
             .ok(),
     };
-    if let Some(path) = bare.filter(SenatorName::is_junior) {
-        return if roster.knows(&path) {
-            Resolved::Agent(path)
-        } else {
-            Resolved::Unknown
-        };
+    if let Some(name) = bare.as_ref().filter(|n| !roster.is_person(n)) {
+        if roster.is_agent(name) {
+            return Resolved::Agent(name.clone());
+        }
+        if mention.is_some() {
+            return Resolved::Unknown;
+        }
     }
     if let Some((person, agent)) = syntax::agent_named(raw) {
         let Some(senior) = roster.resolve(&person) else {
@@ -83,22 +96,21 @@ pub(super) fn resolve_name(roster: &Roster, raw: &str) -> Resolved {
             .find(|a| a.name().as_str() == agent)
             .map_or(Resolved::Unknown, |a| Resolved::Agent(a.clone()));
     }
-    let person = match raw.parse::<Mention>() {
-        Ok(Mention::Senator(path)) | Ok(Mention::SpeakerFor(path)) => path.owner().to_string(),
-        Ok(Mention::AgentOf(owner)) => owner.to_string(),
-        _ => raw.strip_prefix("senator::").unwrap_or(raw).to_owned(),
+    let person = match bare {
+        Some(name) => name.to_string(),
+        None => raw.strip_prefix("senator::").unwrap_or(raw).to_owned(),
     };
     let Some(senior) = roster.resolve(&person) else {
         return Resolved::Unknown;
     };
-    match roster.agent_of(&senior.handle) {
-        Ok(AgentOf::One(agent)) => Resolved::Agent(agent),
-        Ok(AgentOf::None(person)) => Resolved::Person(person),
-        Ok(AgentOf::Several(candidates)) => Resolved::Several {
+    match super::agent_of(roster, &senior.handle) {
+        AgentOf::One(agent) => Resolved::Agent(agent),
+        AgentOf::None(Some(person)) => Resolved::Person(person),
+        AgentOf::None(None) => Resolved::Unknown,
+        AgentOf::Several(candidates) => Resolved::Several {
             owner: senior.handle.clone(),
             candidates,
         },
-        Err(_) => Resolved::Unknown,
     }
 }
 
@@ -118,7 +130,7 @@ pub(super) enum Settled {
 #[derive(Debug, Clone)]
 pub(super) enum Waiting {
     /// An intent with `said` among its names; the answer replaces it with
-    /// the agent's path, and the intent runs as if that had been said.
+    /// the agent's name, and the intent runs as if that had been said.
     Intent {
         intent: Intent,
         said: String,
@@ -223,17 +235,31 @@ impl Engine {
             Resolved::Agent(path) | Resolved::Person(path) => Ok(Settled::To(path)),
             Resolved::Unknown => Ok(Settled::Unknown),
             Resolved::Several { owner, candidates } => {
-                self.settle_among(chat, owner, candidates, task, waiting)
+                self.settle_among(chat, Some(owner), candidates, task, waiting)
                     .await
+            }
+            Resolved::AnyAgent => {
+                let committee = self.acting_committee(chat);
+                let on_committee = self.hub.committee_agents(&committee).await?;
+                match self.roster.any_agent_among(&on_committee) {
+                    AgentOf::One(agent) => Ok(Settled::To(agent)),
+                    AgentOf::None(Some(person)) => Ok(Settled::To(person)),
+                    AgentOf::None(None) => Ok(Settled::Unknown),
+                    AgentOf::Several(candidates) => {
+                        self.settle_among(chat, None, candidates, task, waiting)
+                            .await
+                    }
+                }
             }
         }
     }
 
-    /// Pick one of `owner`'s `candidates`, or ask which.
+    /// Pick one of `candidates`, or ask which: `owner`'s agents, or (with
+    /// no owner) the agents on the committee.
     pub(super) async fn settle_among(
         &mut self,
         chat: &Event,
-        owner: Name,
+        owner: Option<Name>,
         candidates: Vec<SenatorName>,
         task: &str,
         waiting: Waiting,
@@ -268,21 +294,23 @@ impl Engine {
             // A step after a Bind in an agent plan acts on another committee
             // than the thread's: no question can carry it there, so the
             // person names one and asks again.
-            let text = render::name_one_of(l, &owner, &candidates);
+            let text = render::name_one_of(l, owner.as_ref(), &candidates);
             self.reply_to_chat(chat, &text).await?;
             return Ok(Settled::Asked);
         }
         let Some(group) = chat.source.as_ref().map(super::group_ref) else {
             return Ok(Settled::Unknown);
         };
-        let text = render::which_agent(l, &owner, &info);
+        let text = render::which_agent(l, owner.as_ref(), &info);
         let Some(posted) = self.reply_to_chat(chat, &text).await? else {
             return Ok(Settled::Asked);
         };
         let mut answerers = vec![chat.from.clone()];
-        let owner_address = Address::senior(&owner);
-        if !answerers.contains(&owner_address) {
-            answerers.push(owner_address);
+        if let Some(owner) = &owner {
+            let owner_address = Address::senior(owner);
+            if !answerers.contains(&owner_address) {
+                answerers.push(owner_address);
+            }
         }
         self.choices.retain(|c| c.ask_ref != posted.message_ref);
         self.choices.push(Choice {
@@ -408,7 +436,7 @@ fn named(intent: Intent, said: &str, agent: &SenatorName) -> Intent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use senate_core::Senior;
+    use senate_core::{SeatedAgent, Senior};
 
     fn path(s: &str) -> SenatorName {
         s.parse().expect("path")
@@ -417,16 +445,19 @@ mod tests {
     fn roster() -> Roster {
         let mut alice = Senior::new(Name::new("alice").expect("name"));
         alice.names = vec!["Alice".into(), "爱丽丝".into()];
-        Roster::top(
+        let seated = |agent: &str, owner: &str| {
+            SeatedAgent::new(path(agent), Name::new(owner).expect("name"))
+        };
+        Roster::new(
             vec![
                 alice,
                 Senior::new(Name::new("bob").expect("name")),
                 Senior::new(Name::new("carol").expect("name")),
             ],
             vec![
-                path("alice/claude"),
-                path("alice/codex"),
-                path("bob/claude"),
+                seated("claude", "alice"),
+                seated("codex", "alice"),
+                seated("copilot", "bob"),
             ],
         )
         .expect("roster")
@@ -437,7 +468,7 @@ mod tests {
         let roster = roster();
         assert_eq!(
             resolve_name(&roster, "bob"),
-            Resolved::Agent(path("bob/claude"))
+            Resolved::Agent(path("copilot"))
         );
         assert_eq!(
             resolve_name(&roster, "@carol"),
@@ -447,7 +478,7 @@ mod tests {
             resolve_name(&roster, "爱丽丝"),
             Resolved::Several {
                 owner: Name::new("alice").expect("name"),
-                candidates: vec![path("alice/claude"), path("alice/codex")],
+                candidates: vec![path("claude"), path("codex")],
             }
         );
         assert_eq!(resolve_name(&roster, "dave"), Resolved::Unknown);
@@ -457,31 +488,74 @@ mod tests {
     fn an_agent_named_outright_is_that_agent_or_nobody() {
         let roster = roster();
         for raw in [
-            "alice/codex",
-            "[senator::alice/codex]",
-            "senator::alice/codex",
+            "codex",
+            "[senator::codex]",
+            "senator::codex",
             "alice 的 codex",
             "Alice's codex",
         ] {
             assert_eq!(
                 resolve_name(&roster, raw),
-                Resolved::Agent(path("alice/codex")),
+                Resolved::Agent(path("codex")),
                 "{raw}"
             );
         }
-        // Never another agent of the same person.
-        assert_eq!(resolve_name(&roster, "alice/gemini"), Resolved::Unknown);
+        // An agent that does not sit here is nobody, and a person's agent
+        // is never another person's.
+        assert_eq!(resolve_name(&roster, "gemini"), Resolved::Unknown);
+        assert_eq!(
+            resolve_name(&roster, "[senator::gemini]"),
+            Resolved::Unknown
+        );
         assert_eq!(resolve_name(&roster, "bob 的 codex"), Resolved::Unknown);
         // The person's mention is the person.
         assert_eq!(
             resolve_name(&roster, "[senator::bob]"),
-            Resolved::Agent(path("bob/claude"))
+            Resolved::Agent(path("copilot"))
+        );
+    }
+
+    #[test]
+    fn an_owner_prefixed_name_is_nobody() {
+        let roster = roster();
+        for raw in [
+            "alice/codex",
+            "senator::alice/codex",
+            "[senator::alice/codex]",
+        ] {
+            assert_eq!(resolve_name(&roster, raw), Resolved::Unknown, "{raw}");
+        }
+    }
+
+    #[test]
+    fn whichever_agent_is_settled_among_the_committee() {
+        let roster = roster();
+        for raw in ["[senator::*]", "senator::*"] {
+            assert_eq!(resolve_name(&roster, raw), Resolved::AnyAgent, "{raw}");
+        }
+    }
+
+    #[test]
+    fn a_persons_agent_is_looked_up_by_who_runs_it() {
+        let roster = roster();
+        let name = |s: &str| Name::new(s).expect("name");
+        assert_eq!(
+            super::super::agent_of(&roster, &name("bob")),
+            AgentOf::One(path("copilot"))
+        );
+        assert_eq!(
+            super::super::agent_of(&roster, &name("alice")),
+            AgentOf::Several(vec![path("claude"), path("codex")])
+        );
+        assert_eq!(
+            super::super::agent_of(&roster, &name("carol")),
+            AgentOf::None(Some(path("carol")))
         );
     }
 
     #[test]
     fn a_choice_answered_names_the_agent_in_the_intent() {
-        let agent = path("alice/codex");
+        let agent = path("codex");
         let relay = Intent::Relay {
             targets: vec!["alice".into(), "bob".into()],
             kind: crate::brain::RelayKind::Note,
@@ -490,7 +564,7 @@ mod tests {
         assert_eq!(
             named(relay, "alice", &agent),
             Intent::Relay {
-                targets: vec!["alice/codex".into(), "bob".into()],
+                targets: vec!["codex".into(), "bob".into()],
                 kind: crate::brain::RelayKind::Note,
                 body: "x".into(),
             }
@@ -505,8 +579,8 @@ mod tests {
                 &agent
             ),
             Intent::Reassign {
-                from: "alice/codex".into(),
-                to: "alice/codex".into()
+                from: "codex".into(),
+                to: "codex".into()
             }
         );
     }

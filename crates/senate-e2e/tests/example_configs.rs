@@ -87,9 +87,8 @@ fn the_machine_example_parses_into_what_the_machine_reads() {
     assert_eq!(shipped.locale, Locale::En);
     let hosted = Hosted::load(&path).unwrap();
     assert_eq!(hosted.validate(&shipped), Ok(()));
-    assert!(hosted.local.is_none(), "under a team: the Senate above");
-    assert_eq!(hosted.preside.len(), 1);
-    assert_eq!(hosted.preside[0].agent.to_string(), "claude");
+    assert!(hosted.local.is_none(), "under a team: the team's Senate");
+    assert!(hosted.preside.is_empty(), "no Senate nests under an agent");
 
     let dir = tempfile::tempdir().unwrap();
     let full = dir.path().join("senate.toml");
@@ -100,10 +99,7 @@ fn the_machine_example_parses_into_what_the_machine_reads() {
     assert_eq!(config.branches().prefix(), "feature");
     assert_eq!(config.agents.claude.to_string(), "claude");
     assert_eq!(config.agents.codex.to_string(), "codex");
-    assert_eq!(
-        Hosted::load(&full).unwrap().preside[0].listen.as_deref(),
-        Some("127.0.0.1:7980")
-    );
+    assert!(Hosted::load(&full).unwrap().preside.is_empty());
     let codex = CodexConfig::load(&full).unwrap();
     assert!(codex.listen.is_some() && codex.bin.is_some());
     let companion = CompanionConfig::load(&full).unwrap();
@@ -121,6 +117,7 @@ fn the_local_example_is_what_init_writes() {
     assert_eq!(hosted.validate(&config), Ok(()));
     let local = hosted.local.clone().unwrap();
     assert_eq!(local.speaker.unwrap().to_string(), "claude");
+    assert_eq!(local.name.unwrap().as_str(), "alice-desk");
     assert!(config.server_url.is_empty(), "no Senate above");
 
     let written = senate_bridge::init::LocalProfile {

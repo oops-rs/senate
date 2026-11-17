@@ -23,7 +23,7 @@
 //! (`catch_up` without moving the `read` cursor, `search`, the brief) and
 //! nothing else; its answer carries
 //! [`meta::COMPANION`](senate_core::meta::COMPANION), shown after the
-//! author's label (`[senator::bob/claude] companion`,
+//! author's label (`[senator::claude] companion`,
 //! [`Event::byline`](senate_core::Event::byline)). One runs at a time,
 //! killed after
 //! [`CompanionConfig::max_secs`]. Requests and notes are never given to it.
@@ -260,19 +260,19 @@ mod tests {
     #[test]
     fn the_prompt_names_the_agent_in_either_language() {
         use senate_core::{Kind, NewEvent};
-        let agent: SenatorName = "bob/claude".parse().unwrap();
+        let agent: SenatorName = "claude".parse().unwrap();
         let q = NewEvent::new(
             CommitteeId::new("refund-v2").unwrap(),
             Kind::Question,
-            "senator::alice/claude".parse().unwrap(),
+            "senator::copilot".parse().unwrap(),
             "which header?",
         )
         .into_event(Seq(9), chrono::Utc::now());
         let en = prompt(&agent, &q, "PUSHED", Locale::En);
-        assert!(en.contains("companion of [senator::bob/claude]'s last Claude Code session"));
+        assert!(en.contains("companion of [senator::claude]'s last Claude Code session"));
         assert!(en.contains("mcp__senate__answer(thread=9)") && en.ends_with("\n\nPUSHED"));
         let zh = prompt(&agent, &q, "PUSHED", Locale::Zh);
-        assert!(zh.contains("你是 [senator::bob/claude] 上一个 Claude Code 会话"));
+        assert!(zh.contains("你是 [senator::claude] 上一个 Claude Code 会话"));
         assert!(zh.contains("mcp__senate__answer(thread=9)") && zh.ends_with("\n\nPUSHED"));
     }
 

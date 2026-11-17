@@ -15,6 +15,15 @@
 //!
 //! All three pass the same conformance suite (`tests/conformance.rs`).
 //!
+//! # Logs written when senators were paths
+//!
+//! A log from before senators were flat names ([`flatten`]) is converted
+//! once: the embedded store does it on open, as schema version 2, after
+//! copying the file to `<file>.pre-flat-names` beside it (that copy is never
+//! removed); Postgres only when asked ([`PgStore::flatten_names`], `senated
+//! flatten-log`). A log that cannot be converted (a nested agent, one name
+//! under two people) is refused and left as it was.
+//!
 //! # A database Senate did not make
 //!
 //! [`PgStore::migrate`] and [`SqliteStore::open`] look at what a database
@@ -68,6 +77,7 @@
 //!   by its full [`senate_core::SenatorName`].
 
 mod error;
+pub use senate_core::flatten;
 mod foreign;
 mod memory;
 mod pg;
@@ -76,6 +86,6 @@ mod store;
 
 pub use error::LogError;
 pub use memory::MemoryStore;
-pub use pg::{NEAR_MATCH_SIMILARITY, PgStore};
+pub use pg::{FLAT_NAMES_FORMAT, FlattenOutcome, NEAR_MATCH_SIMILARITY, PgStore};
 pub use sqlite::SqliteStore;
 pub use store::{CursorOwner, HeartbeatRecord, LogStore, MEMORY_URL, SQLITE_PREFIX, connect, now};

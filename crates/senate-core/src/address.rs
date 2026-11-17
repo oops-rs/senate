@@ -1,13 +1,20 @@
 //! Addresses: who an event is from and who it is to.
 //!
-//! - `senator::wendell` is a person; `senator::wendell/claude` is one of
-//!   their agents. One prefix for both: the path says which.
-//! - `senator::wendell/*` is whichever of wendell's agents should get it. A
+//! - `senator::wendell` is a person, `senator::codex` an agent: one flat
+//!   name ([`SenatorName`]), scoped to the Senate whose log this is. Which
+//!   of the two a name is, the roster says.
+//! - `senator::*` is whichever agent on this committee should get it. A
 //!   sender may write it; a stored event never carries it, because it is
 //!   resolved against the roster before the event is appended
 //!   ([`Roster::resolve_address`](crate::Roster::resolve_address)).
-//! - `speaker` is the Speaker of the Senate whose log the event is in. In a
-//!   nested Senate that is the senator presiding over it.
+//! - `speaker` is the Speaker of the committee whose log the event is in: a
+//!   link, resolved to the senator who holds the Speaker's seat there (or
+//!   the built-in Speaker). What is said in the Speaker's capacity is stored
+//!   `from: speaker`, whoever held the seat.
+//!
+//! How a parent Senate's log names a child Senate is not settled yet; no
+//! address form for it exists. A qualified name ([`crate::Locator`]) names
+//! a seat elsewhere, but it is not stored as an address.
 //! - `committee` means everyone on the committee.
 //! - `guest::<platform>/<id>` is someone who is not a senator: a chat
 //!   participant who is not on the roster, a caller arriving through an agent
@@ -33,8 +40,11 @@ pub(crate) const SENATOR_PREFIX: &str = "senator::";
 pub(crate) const GUEST_PREFIX: &str = "guest::";
 pub(crate) const SPEAKER: &str = "speaker";
 pub(crate) const COMMITTEE: &str = "committee";
-/// What follows a person's handle in `senator::wendell/*`.
-pub(crate) const ANY_AGENT_SUFFIX: &str = "/*";
+/// `senator::*`: whichever agent.
+pub(crate) const ANY_AGENT: &str = "*";
+/// What separates the parts of a qualified name and of the child-Senate
+/// address.
+pub(crate) const SEPARATOR: &str = "::";
 
 /// Longest [`Guest`] id, in bytes.
 pub const MAX_GUEST_ID_LEN: usize = 128;
@@ -128,10 +138,9 @@ impl FromStr for Guest {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Address {
     Senator(SenatorName),
-    /// `senator::<person>/*`: whichever of that person's agents should get
-    /// it. Only ever a recipient a sender wrote. It names the person, not a
-    /// level: in a nested Senate it means that person's agents seated there.
-    AgentOf(Name),
+    /// `senator::*`: whichever agent on this committee should get it. Only
+    /// ever a recipient a sender wrote.
+    AnyAgent,
     Speaker,
     Committee,
     Guest(Guest),
@@ -142,7 +151,7 @@ pub enum Address {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AddressParseError {
     #[error(
-        "unknown address form: {0:?} (expected senator::<path>, senator::<person>/*, speaker, committee, or guest::<platform>/<id>)"
+        "unknown address form: {0:?} (expected senator::<name>, senator::*, speaker, committee, or guest::<platform>/<id>)"
     )]
     Unknown(String),
     #[error(transparent)]
@@ -152,32 +161,32 @@ pub enum AddressParseError {
 }
 
 impl Address {
-    pub fn senator(path: &SenatorName) -> Self {
-        Self::Senator(path.clone())
+    pub fn senator(name: &SenatorName) -> Self {
+        Self::Senator(name.clone())
     }
 
-    /// The person `handle`.
+    /// The person with `handle`: `senator::<handle>`. A handle that is an
+    /// address keyword (never a listed person's) is kept verbatim as
+    /// [`Address::Other`].
     pub fn senior(handle: &Name) -> Self {
-        Self::Senator(SenatorName::senior(handle.clone()))
+        match SenatorName::new(handle.clone()) {
+            Ok(name) => Self::Senator(name),
+            Err(_) => Self::Other(format!("{SENATOR_PREFIX}{handle}")),
+        }
     }
 
-    /// Whichever of `owner`'s agents should get it: `senator::<owner>/*`.
-    pub fn agent_of(owner: &Name) -> Self {
-        Self::AgentOf(owner.clone())
+    /// Whichever agent should get it: `senator::*`.
+    pub fn any_agent() -> Self {
+        Self::AnyAgent
     }
 
     /// The senator behind a `senator::` address that names one. The wildcard
     /// names none.
     pub fn as_senator(&self) -> Option<&SenatorName> {
         match self {
-            Self::Senator(path) => Some(path),
+            Self::Senator(name) => Some(name),
             _ => None,
         }
-    }
-
-    /// The agent behind a `senator::` address that names an agent.
-    pub fn as_agent(&self) -> Option<&SenatorName> {
-        self.as_senator().filter(|path| path.is_junior())
     }
 
     pub fn as_guest(&self) -> Option<&Guest> {
@@ -187,48 +196,36 @@ impl Address {
         }
     }
 
-    /// A person.
-    pub fn is_senior(&self) -> bool {
-        self.as_senator().is_some_and(SenatorName::is_senior)
-    }
-
-    /// An agent.
-    pub fn is_junior(&self) -> bool {
-        self.as_senator().is_some_and(SenatorName::is_junior)
-    }
-
-    /// `senator::<person>/*`, which must be resolved before an event is
-    /// stored.
+    /// `senator::*`, which must be resolved before an event is stored.
     pub fn is_wildcard(&self) -> bool {
-        matches!(self, Self::AgentOf(_))
+        matches!(self, Self::AnyAgent)
     }
 
     /// Whether an event from this address may change state: record a
     /// decision, bind a group, invite, order work, reassign.
     ///
-    /// Senators may, and so may the Speaker and the Senate itself
-    /// (`committee`, which the server writes presence as). A guest may not: a
-    /// guest asks and is answered. Neither may the wildcard, which is never
-    /// a sender, nor a form this build does not know, which it cannot vouch
-    /// for.
+    /// Senators may, and so may the Speaker and the Senate itself (`committee`, which the server writes presence
+    /// as). A guest may not: a guest asks and is answered. Neither may the
+    /// wildcard, which is never a sender, nor a form this build does not
+    /// know, which it cannot vouch for.
     pub fn may_change_state(&self) -> bool {
         match self {
             Self::Senator(_) | Self::Speaker | Self::Committee => true,
-            Self::AgentOf(_) | Self::Guest(_) | Self::Other(_) => false,
+            Self::AnyAgent | Self::Guest(_) | Self::Other(_) => false,
         }
     }
 
     /// The address as it is written in running text: in square brackets
-    /// (`[senator::wendell/claude]`), the form [`crate::Mention`] reads back.
-    /// An unknown form is bracketed verbatim, so it still has edges.
+    /// (`[senator::codex]`), the form [`crate::Mention`] reads back. An
+    /// unknown form is bracketed verbatim, so it still has edges.
     pub fn in_text(&self) -> String {
         format!("[{self}]")
     }
 }
 
 impl From<SenatorName> for Address {
-    fn from(path: SenatorName) -> Self {
-        Self::Senator(path)
+    fn from(name: SenatorName) -> Self {
+        Self::Senator(name)
     }
 }
 
@@ -241,8 +238,8 @@ impl From<Guest> for Address {
 impl fmt::Display for Address {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Senator(path) => write!(f, "{SENATOR_PREFIX}{path}"),
-            Self::AgentOf(owner) => write!(f, "{SENATOR_PREFIX}{owner}{ANY_AGENT_SUFFIX}"),
+            Self::Senator(name) => write!(f, "{SENATOR_PREFIX}{name}"),
+            Self::AnyAgent => write!(f, "{SENATOR_PREFIX}{ANY_AGENT}"),
             Self::Speaker => f.write_str(SPEAKER),
             Self::Committee => f.write_str(COMMITTEE),
             Self::Guest(guest) => write!(f, "{GUEST_PREFIX}{guest}"),
@@ -259,13 +256,10 @@ impl FromStr for Address {
             COMMITTEE => Ok(Self::Committee),
             _ => {
                 if let Some(rest) = s.strip_prefix(SENATOR_PREFIX) {
-                    // Only a person has "whichever agent": `wendell/claude/*`
-                    // is not a form, and fails here as a bad name.
-                    match rest.strip_suffix(ANY_AGENT_SUFFIX) {
-                        Some(owner) => Ok(Self::AgentOf(
-                            Name::new(owner).map_err(SenatorNameError::from)?,
-                        )),
-                        None => Ok(Self::Senator(rest.parse()?)),
+                    if rest == ANY_AGENT {
+                        Ok(Self::AnyAgent)
+                    } else {
+                        Ok(Self::Senator(rest.parse()?))
                     }
                 } else if let Some(rest) = s.strip_prefix(GUEST_PREFIX) {
                     Ok(Self::Guest(rest.parse()?))
@@ -302,9 +296,8 @@ mod tests {
     fn round_trips() {
         for s in [
             "senator::wendell",
-            "senator::wendell/claude",
-            "senator::wendell/claude/reviewer",
-            "senator::wendell/*",
+            "senator::codex",
+            "senator::*",
             "speaker",
             "committee",
             "guest::chat/u_8f3a",
@@ -322,6 +315,9 @@ mod tests {
             "senator:wendell",
             "senator::",
             "senator::Wendell",
+            "senator::wendell/claude",
+            "senator::wendell/*",
+            "senator::speaker",
             "user:wendell",
             "agent:wendell",
             "steward",
@@ -329,40 +325,36 @@ mod tests {
             "[speaker]",
             "guest:chat/u_1",
             "guest::chat",
+            // A qualified name is a locator, not a stored address.
+            "north-desk::ibot::speaker",
+            "ibot::senator::codex",
         ] {
             assert!(s.parse::<Address>().is_err(), "{s:?}");
         }
     }
 
     #[test]
-    fn one_prefix_and_the_path_says_person_or_agent() {
+    fn a_senator_is_one_flat_name_and_the_roster_says_person_or_agent() {
         let person = addr("senator::wendell");
-        let agent = addr("senator::wendell/claude");
-        assert!(person.is_senior() && !person.is_junior());
-        assert!(agent.is_junior() && !agent.is_senior());
-        assert_eq!(person.as_agent(), None);
-        assert_eq!(agent.as_agent(), agent.as_senator());
-        assert!(!Address::Speaker.is_senior() && !Address::Speaker.is_junior());
+        let agent = addr("senator::codex");
+        assert_eq!(person.as_senator().unwrap().as_str(), "wendell");
+        assert_eq!(agent.as_senator().unwrap().as_str(), "codex");
+        assert_eq!(Address::Speaker.as_senator(), None);
         assert_eq!(Address::Committee.as_senator(), None);
     }
 
     #[test]
-    fn whichever_agent_names_a_person_and_no_senator() {
-        let any = addr("senator::wendell/*");
-        assert_eq!(any, Address::agent_of(&Name::new("wendell").unwrap()));
+    fn whichever_agent_names_no_senator() {
+        let any = addr("senator::*");
+        assert_eq!(any, Address::any_agent());
         assert!(any.is_wildcard());
         assert_eq!(any.as_senator(), None);
-        assert!(!any.is_senior() && !any.is_junior());
-        assert!(!addr("senator::wendell/claude").is_wildcard());
-
-        // Only directly under a person, and only as the whole last segment.
+        assert!(!addr("senator::codex").is_wildcard());
         for s in [
-            "senator::*",
             "senator::/*",
-            "senator::wendell/claude/*",
-            "senator::wendell/*/claude",
-            "senator::wendell/c*",
-            "senator::Wendell/*",
+            "senator::codex/*",
+            "senator::c*",
+            "senator::**",
         ] {
             assert!(s.parse::<Address>().is_err(), "{s:?}");
         }
@@ -399,17 +391,12 @@ mod tests {
 
     #[test]
     fn guests_wildcards_and_unknown_forms_may_not_change_state() {
-        for s in [
-            "senator::wendell",
-            "senator::wendell/claude",
-            "speaker",
-            "committee",
-        ] {
+        for s in ["senator::wendell", "senator::codex", "speaker", "committee"] {
             assert!(addr(s).may_change_state(), "{s}");
         }
         for a in [
             addr("guest::chat/u_1"),
-            addr("senator::wendell/*"),
+            addr("senator::*"),
             Address::Other("role:reviewer".into()),
         ] {
             assert!(!a.may_change_state(), "{a}");
@@ -423,7 +410,9 @@ mod tests {
             "senator::Not-A-Slug",
             "role:reviewer",
             "guest::chat/has space",
-            "senator::wendell/claude/*",
+            // The old owner-prefixed forms: an unconverted log still reads.
+            "senator::wendell/claude",
+            "senator::wendell/*",
         ] {
             let a: Address = serde_json::from_value(serde_json::json!(s)).unwrap();
             assert_eq!(a, Address::Other(s.to_string()));

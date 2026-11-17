@@ -220,9 +220,11 @@ pub struct CheckpointRecord {
 }
 
 impl CheckpointRecord {
-    /// The record of a checkpoint event from an agent with a readable payload.
+    /// The record of a checkpoint event from an agent with a readable
+    /// payload. The server takes a checkpoint from an agent only, so its
+    /// `from` is one.
     pub fn of(event: &Event) -> Option<Self> {
-        let agent = event.from.as_agent()?;
+        let agent = event.from.as_senator()?;
         Some(Self {
             seq: event.seq,
             ts: event.ts,
@@ -368,8 +370,8 @@ impl PresencePayload {
         serde_json::to_value(self).unwrap_or(Value::Null)
     }
 
-    /// The transition in one line, e.g. `[senator::alice/claude] 失联` or
-    /// `[senator::bob/claude] online · 14 events behind`. Rendered when the
+    /// The transition in one line, e.g. `[senator::claude] 失联` or
+    /// `[senator::copilot] online · 14 events behind`. Rendered when the
     /// event is shown; it is not what the event stores.
     pub fn line(&self, locale: Locale) -> String {
         presence_line(
@@ -528,7 +530,7 @@ impl PresenceBoard {
 mod tests {
     use super::*;
     use crate::ids::Name;
-    use crate::roster::{DelegationPresence, Roster, Senior};
+    use crate::roster::{DelegationPresence, Roster, SeatedAgent, Senior};
     use crate::testing::assert_senate_vocabulary;
 
     fn path(s: &str) -> SenatorName {
@@ -576,12 +578,12 @@ mod tests {
         let json = p.value();
         assert_eq!(json["trigger"], "tool");
         assert!(json["files"].get("decisions").is_none());
-        let e = NewEvent::new(c(), Kind::Checkpoint, agent("alice/claude"), "s")
+        let e = NewEvent::new(c(), Kind::Checkpoint, agent("claude"), "s")
             .with_meta(meta::CHECKPOINT, json)
             .into_event(Seq(3), Utc::now());
         assert_eq!(CheckpointPayload::of(&e), Some(p.clone()));
         let record = CheckpointRecord::of(&e).unwrap();
-        assert_eq!(record.agent, path("alice/claude"));
+        assert_eq!(record.agent, path("claude"));
 
         let big = payload(CheckpointFiles {
             progress: Some("x".repeat(MAX_CHECKPOINT_BYTES)),
@@ -594,30 +596,29 @@ mod tests {
     }
 
     #[test]
-    fn a_checkpoint_is_an_agents_and_never_a_persons() {
-        assert!(CheckpointRecord::of(&checkpoint(1, agent("alice"), "x")).is_none());
+    fn a_checkpoint_is_a_senators_and_never_the_speakers_or_a_guests() {
+        // Whether the senator is an agent is the server's to check: it takes
+        // a checkpoint from an agent only.
         assert!(CheckpointRecord::of(&checkpoint(1, Address::Speaker, "x")).is_none());
         assert!(
             CheckpointRecord::of(&checkpoint(1, "guest::chat/u_1".parse().unwrap(), "x")).is_none()
         );
-        assert!(
-            CheckpointRecord::of(&checkpoint(1, agent("alice/claude/reviewer"), "x")).is_some()
-        );
+        assert!(CheckpointRecord::of(&checkpoint(1, agent("reviewer"), "x")).is_some());
     }
 
     #[test]
     fn checkpoints_keep_each_agents_latest_and_one_persons_agents_apart() {
         let mut all = Checkpoints::new();
-        all.observe(&checkpoint(1, agent("alice/claude"), "one"));
-        all.observe(&checkpoint(2, agent("bob/claude"), "two"));
-        all.observe(&checkpoint(3, agent("alice/claude"), "three"));
-        all.observe(&checkpoint(4, agent("alice/codex"), "four"));
-        all.observe(&checkpoint(2, agent("alice/claude"), "stale page"));
-        assert_eq!(all.latest(&path("alice/claude")).unwrap().body, "three");
-        assert_eq!(all.latest(&path("alice/codex")).unwrap().body, "four");
+        all.observe(&checkpoint(1, agent("claude"), "one"));
+        all.observe(&checkpoint(2, agent("copilot"), "two"));
+        all.observe(&checkpoint(3, agent("claude"), "three"));
+        all.observe(&checkpoint(4, agent("codex"), "four"));
+        all.observe(&checkpoint(2, agent("claude"), "stale page"));
+        assert_eq!(all.latest(&path("claude")).unwrap().body, "three");
+        assert_eq!(all.latest(&path("codex")).unwrap().body, "four");
         // The person has no checkpoint; neither does an agent that wrote none.
         assert!(all.latest(&path("alice")).is_none());
-        assert!(all.latest(&path("alice/gemini")).is_none());
+        assert!(all.latest(&path("gemini")).is_none());
         assert_eq!(all.all().count(), 3);
         assert_eq!(all.head(), Seq(4));
     }
@@ -639,24 +640,24 @@ mod tests {
     #[test]
     fn presence_events_are_idempotent_and_fold() {
         let since = Utc::now();
-        let p = transition("alice/claude", PresenceState::Disconnected, since);
+        let p = transition("claude", PresenceState::Disconnected, since);
         let a = presence_event(c(), &p);
         let b = presence_event(c(), &p);
         assert_eq!(a.id, b.id, "derived ids");
         assert_eq!(a.from, Address::Committee);
-        let online = transition("alice/claude", PresenceState::Online, since);
+        let online = transition("claude", PresenceState::Online, since);
         assert_ne!(presence_event(c(), &online).id, a.id);
         // Another agent of the same person is another transition.
-        let codex = transition("alice/codex", PresenceState::Disconnected, since);
+        let codex = transition("codex", PresenceState::Disconnected, since);
         assert_ne!(presence_event(c(), &codex).id, a.id);
 
         let mut board = PresenceBoard::new();
         board.observe(&a.clone().into_event(Seq(41), since));
         // A senator could never write one, but a non-server presence is ignored.
         let mut forged = presence_event(c(), &online);
-        forged.from = agent("alice/claude");
+        forged.from = agent("claude");
         board.observe(&forged.into_event(Seq(42), since));
-        let got = board.get(&path("alice/claude")).unwrap();
+        let got = board.get(&path("claude")).unwrap();
         assert_eq!(got.state, PresenceState::Disconnected);
         assert_eq!(got.seq, Some(Seq(41)));
         assert_eq!(board.agents().len(), 1);
@@ -664,7 +665,7 @@ mod tests {
         let back: PresencePayload =
             serde_json::from_value(serde_json::to_value(&p).unwrap()).unwrap();
         assert_eq!(back, p);
-        assert_eq!(serde_json::to_value(&p).unwrap()["agent"], "alice/claude");
+        assert_eq!(serde_json::to_value(&p).unwrap()["agent"], "claude");
         assert_eq!(
             serde_json::to_value(PresenceState::TakenOver).unwrap(),
             "taken_over"
@@ -674,8 +675,8 @@ mod tests {
     #[test]
     fn a_presence_event_stores_fields_and_no_words() {
         let since = Utc::now();
-        let mut p = transition("alice/claude", PresenceState::Reassigned, since);
-        p.new_owner = Some(path("bob/claude"));
+        let mut p = transition("claude", PresenceState::Reassigned, since);
+        p.new_owner = Some(path("copilot"));
         let event = presence_event(c(), &p);
         assert_eq!(event.body, "");
         // The same stored event reads in either language.
@@ -687,34 +688,34 @@ mod tests {
     #[test]
     fn a_presence_line_is_written_in_each_language() {
         let since = Utc::now();
-        let mut p = transition("alice/claude", PresenceState::Disconnected, since);
+        let mut p = transition("claude", PresenceState::Disconnected, since);
         assert_eq!(
             p.line(Locale::Zh),
-            "[senator::alice/claude] 失联 · 落后 14 条事件"
+            "[senator::claude] 失联 · 落后 14 条事件"
         );
         assert_eq!(
             p.line(Locale::En),
-            "[senator::alice/claude] disconnected · 14 events behind"
+            "[senator::claude] disconnected · 14 events behind"
         );
         p.lag = Some(1);
         assert_eq!(
             p.line(Locale::En),
-            "[senator::alice/claude] disconnected · 1 event behind"
+            "[senator::claude] disconnected · 1 event behind"
         );
         p.lag = Some(0);
         p.state = PresenceState::Online;
-        assert_eq!(p.line(Locale::Zh), "[senator::alice/claude] 在线");
-        assert_eq!(p.line(Locale::En), "[senator::alice/claude] online");
+        assert_eq!(p.line(Locale::Zh), "[senator::claude] 在线");
+        assert_eq!(p.line(Locale::En), "[senator::claude] online");
 
         p.state = PresenceState::Reassigned;
-        p.new_owner = Some(path("bob/claude"));
+        p.new_owner = Some(path("copilot"));
         assert_eq!(
             p.line(Locale::Zh),
-            "[senator::alice/claude] 已改派 → [senator::bob/claude]"
+            "[senator::claude] 已改派 → [senator::copilot]"
         );
         assert_eq!(
             p.line(Locale::En),
-            "[senator::alice/claude] reassigned → [senator::bob/claude]"
+            "[senator::claude] reassigned → [senator::copilot]"
         );
         assert_eq!(
             AgentPresence::from_payload(&p, None).line(Locale::En),
@@ -749,16 +750,16 @@ mod tests {
     #[test]
     fn a_delegation_is_present_while_any_one_agent_is_online() {
         let name = |s: &str| Name::new(s).unwrap();
-        let roster = Roster::top(
+        let roster = Roster::new(
             vec![
                 Senior::new(name("alice")),
                 Senior::new(name("bob")),
                 Senior::new(name("carol")),
             ],
             vec![
-                path("alice/claude"),
-                path("alice/codex"),
-                path("bob/claude"),
+                SeatedAgent::new(path("claude"), name("alice")),
+                SeatedAgent::new(path("codex"), name("alice")),
+                SeatedAgent::new(path("copilot"), name("bob")),
             ],
         )
         .unwrap();
@@ -771,9 +772,9 @@ mod tests {
                 &presence_event(c(), &transition(agent, state, since)).into_event(Seq(seq), since),
             );
         };
-        put(&mut board, "alice/claude", PresenceState::Absent);
-        put(&mut board, "alice/codex", PresenceState::Online);
-        put(&mut board, "bob/claude", PresenceState::Disconnected);
+        put(&mut board, "claude", PresenceState::Absent);
+        put(&mut board, "codex", PresenceState::Online);
+        put(&mut board, "copilot", PresenceState::Disconnected);
 
         let present = |a: &SenatorName| board.is_present(a);
         assert_eq!(
@@ -789,6 +790,6 @@ mod tests {
             DelegationPresence::NoAgents
         );
         // The delegation being present says nothing about the one agent.
-        assert!(!board.is_present(&path("alice/claude")));
+        assert!(!board.is_present(&path("claude")));
     }
 }

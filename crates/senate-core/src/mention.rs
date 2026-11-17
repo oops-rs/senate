@@ -2,17 +2,19 @@
 //!
 //! In an event's fields an address stands alone. Inside a sentence it needs
 //! edges, because not every language puts spaces between words:
-//! `请wendell/claude看一下` cannot be split, `请[senator::wendell/claude]看一下`
-//! can. So in text an id is always written in square brackets:
+//! `请codex看一下` cannot be split, `请[senator::codex]看一下` can. So in
+//! text an id is always written in square brackets:
 //!
-//! - `[senator::wendell/claude]`: a senator.
+//! - `[senator::codex]`: a senator of this Senate.
 //! - `[speaker]`: the Speaker.
-//! - `[speaker::wendell/claude]`: the Speaker speaking on that senator's
-//!   behalf. This is a label for who said something, not somewhere to send a
-//!   reply; the reply goes to the senator.
+//! - `[speaker::codex]`: the Speaker speaking on that senator's behalf. This
+//!   is a label for who said something, not somewhere to send a reply; the
+//!   reply goes to the senator.
 //! - `[committee]`: everyone on the committee.
-//! - `[senator::wendell/*]`: whichever of wendell's agents should get it.
+//! - `[senator::*]`: whichever agent should get it.
 //! - `[guest::chat/u_8f3a]`: someone who is not a senator.
+//! - `[ibot::senator::codex]`, `[acme/north-desk::ibot::speaker]`: a
+//!   qualified name ([`Locator`]), naming a seat or a Speaker elsewhere.
 //!
 //! The words are the same in every language. Senate, senator and Speaker are
 //! not translated, so a label reads the same in a Chinese and an English
@@ -23,9 +25,9 @@ use std::ops::Range;
 use std::str::FromStr;
 
 use crate::address::{
-    ANY_AGENT_SUFFIX, Address, COMMITTEE, GUEST_PREFIX, Guest, GuestError, SENATOR_PREFIX, SPEAKER,
+    ANY_AGENT, Address, COMMITTEE, GUEST_PREFIX, Guest, GuestError, SENATOR_PREFIX, SPEAKER,
 };
-use crate::ids::Name;
+use crate::locator::{Locator, LocatorParseError};
 use crate::senator::{SenatorName, SenatorNameError};
 
 const SPEAKER_FOR_PREFIX: &str = "speaker::";
@@ -33,13 +35,16 @@ const SPEAKER_FOR_PREFIX: &str = "speaker::";
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Mention {
     Senator(SenatorName),
-    /// Whichever of that person's agents should get it.
-    AgentOf(Name),
+    /// Whichever agent should get it.
+    AnyAgent,
     Speaker,
     /// The Speaker answering for a senator.
     SpeakerFor(SenatorName),
     Committee,
     Guest(Guest),
+    /// A qualified name: a seat or a Speaker named with its committee, or
+    /// its Senate and committee.
+    Locator(Locator),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -47,13 +52,15 @@ pub enum MentionParseError {
     #[error("a mention is written in square brackets: {0:?}")]
     NoBrackets(String),
     #[error(
-        "unknown mention: {0:?} (expected [senator::<path>], [senator::<person>/*], [speaker], [speaker::<path>], [committee], or [guest::<platform>/<id>])"
+        "unknown mention: {0:?} (expected [senator::<name>], [senator::*], [speaker], [speaker::<name>], [committee], [guest::<platform>/<id>], or a qualified name such as [ibot::senator::<name>])"
     )]
     Unknown(String),
     #[error(transparent)]
     Senator(#[from] SenatorNameError),
     #[error(transparent)]
     Guest(#[from] GuestError),
+    #[error(transparent)]
+    Locator(#[from] LocatorParseError),
 }
 
 /// A mention found in a text, with the bytes it covers, brackets included.
@@ -70,8 +77,8 @@ impl Mention {
     /// which has no label of its own.
     pub fn author(from: &Address, on_behalf_of: Option<&Address>) -> Option<Self> {
         match (from, on_behalf_of) {
-            (Address::Speaker, Some(Address::Senator(path))) => {
-                Some(Self::SpeakerFor(path.clone()))
+            (Address::Speaker, Some(Address::Senator(name))) => {
+                Some(Self::SpeakerFor(name.clone()))
             }
             (_, Some(_)) => None,
             (from, None) => Self::of(from),
@@ -81,8 +88,8 @@ impl Mention {
     /// The mention naming `address`.
     pub fn of(address: &Address) -> Option<Self> {
         match address {
-            Address::Senator(path) => Some(Self::Senator(path.clone())),
-            Address::AgentOf(owner) => Some(Self::AgentOf(owner.clone())),
+            Address::Senator(name) => Some(Self::Senator(name.clone())),
+            Address::AnyAgent => Some(Self::AnyAgent),
             Address::Speaker => Some(Self::Speaker),
             Address::Committee => Some(Self::Committee),
             Address::Guest(guest) => Some(Self::Guest(guest.clone())),
@@ -90,17 +97,32 @@ impl Mention {
         }
     }
 
-    /// Where a reply to this mention goes. The Speaker answering for a
-    /// senator is reached at that senator. `[senator::wendell/*]` gives the
-    /// wildcard address, which is resolved against the roster before
-    /// anything is stored.
-    pub fn address(&self) -> Address {
-        match self {
-            Self::Senator(path) | Self::SpeakerFor(path) => Address::Senator(path.clone()),
-            Self::AgentOf(owner) => Address::AgentOf(owner.clone()),
+    /// Where a reply to this mention goes, as an address of this log. The
+    /// Speaker answering for a senator is reached at that senator.
+    /// `[senator::*]` gives the wildcard address, which is resolved against
+    /// the roster before anything is stored. A qualified name that is not
+    /// an address here (another committee, a Senate other than a child) is
+    /// `None`: see [`Mention::locator`].
+    pub fn address(&self) -> Option<Address> {
+        Some(match self {
+            Self::Senator(name) | Self::SpeakerFor(name) => Address::Senator(name.clone()),
+            Self::AnyAgent => Address::AnyAgent,
             Self::Speaker => Address::Speaker,
             Self::Committee => Address::Committee,
             Self::Guest(guest) => Address::Guest(guest.clone()),
+            Self::Locator(locator) => return locator.as_address(),
+        })
+    }
+
+    /// Where a reply to this mention goes, qualified or not.
+    pub fn locator(&self) -> Locator {
+        match self {
+            Self::Locator(locator) => locator.clone(),
+            other => Locator::here(
+                other
+                    .address()
+                    .unwrap_or_else(|| unreachable!("only a locator lacks an address")),
+            ),
         }
     }
 
@@ -134,16 +156,21 @@ impl Mention {
             COMMITTEE => Ok(Self::Committee),
             _ => {
                 if let Some(rest) = inner.strip_prefix(SENATOR_PREFIX) {
-                    match rest.strip_suffix(ANY_AGENT_SUFFIX) {
-                        Some(owner) => Ok(Self::AgentOf(
-                            Name::new(owner).map_err(SenatorNameError::from)?,
-                        )),
-                        None => Ok(Self::Senator(rest.parse()?)),
+                    if rest == ANY_AGENT {
+                        Ok(Self::AnyAgent)
+                    } else {
+                        Ok(Self::Senator(rest.parse()?))
                     }
-                } else if let Some(path) = inner.strip_prefix(SPEAKER_FOR_PREFIX) {
-                    Ok(Self::SpeakerFor(path.parse()?))
+                } else if let Some(name) = inner.strip_prefix(SPEAKER_FOR_PREFIX) {
+                    Ok(Self::SpeakerFor(name.parse()?))
                 } else if let Some(guest) = inner.strip_prefix(GUEST_PREFIX) {
                     Ok(Self::Guest(guest.parse()?))
+                } else if inner.contains("::") {
+                    let locator: Locator = inner.parse()?;
+                    if locator.is_here() {
+                        return Err(MentionParseError::Unknown(inner.to_string()));
+                    }
+                    Ok(Self::Locator(locator))
                 } else {
                     Err(MentionParseError::Unknown(inner.to_string()))
                 }
@@ -155,12 +182,13 @@ impl Mention {
 impl fmt::Display for Mention {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Senator(path) => write!(f, "[{SENATOR_PREFIX}{path}]"),
-            Self::AgentOf(owner) => write!(f, "[{SENATOR_PREFIX}{owner}{ANY_AGENT_SUFFIX}]"),
+            Self::Senator(name) => write!(f, "[{SENATOR_PREFIX}{name}]"),
+            Self::AnyAgent => write!(f, "[{SENATOR_PREFIX}{ANY_AGENT}]"),
             Self::Guest(guest) => write!(f, "[{GUEST_PREFIX}{guest}]"),
             Self::Speaker => write!(f, "[{SPEAKER}]"),
-            Self::SpeakerFor(path) => write!(f, "[{SPEAKER_FOR_PREFIX}{path}]"),
+            Self::SpeakerFor(name) => write!(f, "[{SPEAKER_FOR_PREFIX}{name}]"),
             Self::Committee => write!(f, "[{COMMITTEE}]"),
+            Self::Locator(locator) => write!(f, "[{locator}]"),
         }
     }
 }
@@ -180,7 +208,7 @@ impl FromStr for Mention {
 mod tests {
     use super::*;
 
-    fn path(s: &str) -> SenatorName {
+    fn name(s: &str) -> SenatorName {
         s.parse().unwrap()
     }
 
@@ -188,19 +216,26 @@ mod tests {
     fn round_trips() {
         for s in [
             "[senator::wendell]",
-            "[senator::wendell/claude]",
+            "[senator::codex]",
             "[speaker]",
-            "[speaker::wendell/claude]",
+            "[speaker::codex]",
             "[committee]",
-            "[senator::wendell/*]",
+            "[senator::*]",
             "[guest::chat/u_8f3a]",
+            "[ibot::senator::codex]",
+            "[acme/north-desk::ibot::speaker]",
         ] {
             let m: Mention = s.parse().unwrap();
             assert_eq!(m.to_string(), s);
             // A mention and the address it names are written the same way.
             if !s.starts_with("[speaker::") {
-                assert_eq!(m.address().in_text(), s);
-                assert_eq!(Mention::of(&m.address()), Some(m));
+                assert_eq!(m.locator().in_text(), s);
+            }
+            if let Some(address) = m.address()
+                && !s.starts_with("[speaker::")
+            {
+                assert_eq!(address.in_text(), s);
+                assert_eq!(Mention::of(&address), Some(m));
             }
         }
     }
@@ -216,10 +251,12 @@ mod tests {
             "[ speaker ]",
             "[议长]",
             "[元老::wendell]",
-            "[senator::wendell/claude/*]",
-            "[speaker::wendell/*]",
+            "[senator::wendell/claude]",
+            "[senator::wendell/*]",
+            "[speaker::wendell/claude]",
             "[guest::chat]",
             "[guest::chat/a b]",
+            "[ibot::codex]",
         ] {
             assert!(s.parse::<Mention>().is_err(), "{s:?}");
         }
@@ -227,31 +264,37 @@ mod tests {
 
     #[test]
     fn brackets_give_an_id_edges_where_there_are_no_spaces() {
-        let text = "请[senator::wendell/claude]看一下，[speaker]已经记下了";
+        let text = "请[senator::claude]看一下，[speaker]已经记下了";
         let found = Mention::scan(text);
         assert_eq!(found.len(), 2);
-        assert_eq!(found[0].mention, Mention::Senator(path("wendell/claude")));
-        assert_eq!(&text[found[0].range.clone()], "[senator::wendell/claude]");
+        assert_eq!(found[0].mention, Mention::Senator(name("claude")));
+        assert_eq!(&text[found[0].range.clone()], "[senator::claude]");
         assert_eq!(found[1].mention, Mention::Speaker);
         assert_eq!(&text[found[1].range.clone()], "[speaker]");
     }
 
     #[test]
-    fn scan_finds_whichever_agent_and_guests() {
-        let text = "让[senator::alice/*]看看[guest::chat/u_8f3a]问的事 [guest::chat/a]b]";
+    fn scan_finds_whichever_agent_guests_and_qualified_names() {
+        let text = "让[senator::*]看看[guest::chat/u_8f3a]问的事，再问[ibot::senator::codex] [guest::chat/a]b]";
         let found = Mention::scan(text);
-        assert_eq!(found.len(), 3);
+        assert_eq!(found.len(), 4);
+        assert_eq!(found[0].mention, Mention::AnyAgent);
         assert_eq!(
-            found[0].mention,
-            Mention::AgentOf(Name::new("alice").unwrap())
+            found[0].mention.address().unwrap().to_string(),
+            "senator::*"
         );
-        assert_eq!(found[0].mention.address().to_string(), "senator::alice/*");
         assert_eq!(
             found[1].mention,
             Mention::Guest(Guest::new("chat", "u_8f3a").unwrap())
         );
+        assert_eq!(
+            found[2].mention.locator().to_string(),
+            "ibot::senator::codex"
+        );
+        // Another committee is not an address of this log.
+        assert_eq!(found[2].mention.address(), None);
         // A guest id cannot hold `]`, so the mention ends at the first one.
-        assert_eq!(&text[found[2].range.clone()], "[guest::chat/a]");
+        assert_eq!(&text[found[3].range.clone()], "[guest::chat/a]");
     }
 
     #[test]
@@ -259,23 +302,23 @@ mod tests {
         let text = "see [1] and [the plan](https://example.com), [[senator::alice] ] []";
         let found = Mention::scan(text);
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].mention, Mention::Senator(path("alice")));
+        assert_eq!(found[0].mention, Mention::Senator(name("alice")));
         assert_eq!(&text[found[0].range.clone()], "[senator::alice]");
         assert!(Mention::scan("no mentions here ] [").is_empty());
     }
 
     #[test]
     fn the_speaker_answering_for_a_senator_has_its_own_label() {
-        let claude = Address::Senator(path("wendell/claude"));
+        let claude = Address::Senator(name("claude"));
         assert_eq!(
             Mention::author(&Address::Speaker, Some(&claude))
                 .unwrap()
                 .to_string(),
-            "[speaker::wendell/claude]"
+            "[speaker::claude]"
         );
         assert_eq!(
             Mention::author(&claude, None).unwrap().to_string(),
-            "[senator::wendell/claude]"
+            "[senator::claude]"
         );
         assert_eq!(
             Mention::author(&Address::Speaker, None)
@@ -284,15 +327,15 @@ mod tests {
             "[speaker]"
         );
         // Only the Speaker speaks for others under a label.
-        let alice = Address::Senator(path("alice"));
+        let alice = Address::Senator(name("alice"));
         assert_eq!(Mention::author(&alice, Some(&claude)), None);
         assert_eq!(Mention::author(&Address::Other("x:y".into()), None), None);
     }
 
     #[test]
     fn a_reply_to_the_speaker_answering_for_a_senator_goes_to_the_senator() {
-        let label: Mention = "[speaker::wendell/claude]".parse().unwrap();
-        assert_eq!(label.address().to_string(), "senator::wendell/claude");
-        assert_eq!(Mention::Speaker.address(), Address::Speaker);
+        let label: Mention = "[speaker::claude]".parse().unwrap();
+        assert_eq!(label.address().unwrap().to_string(), "senator::claude");
+        assert_eq!(Mention::Speaker.address(), Some(Address::Speaker));
     }
 }

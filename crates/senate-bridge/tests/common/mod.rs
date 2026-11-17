@@ -6,9 +6,11 @@
 //! The fake server authenticates people, not agents: a token names a person,
 //! and everything done as an agent names it in the query (`?senator=`,
 //! `?agent=`) or in the body (`from`, `Heartbeat::agent`). It seats an agent
-//! on first contact and resolves `senator::<person>/*` against the agents it
-//! has seated, refusing an ambiguous one with the candidates, as
-//! `senate_core::api` says the real server does.
+//! on first contact, owned by the person who first acts as it, and resolves
+//! `senator::*` against the agents it has seated, refusing an ambiguous one
+//! with the candidates, as `senate_core::api` says the real server does. It
+//! answers `GET /v1/resolve` for itself: a Senate named `senate` (or
+//! [`FakeServer::set_senate`]) with no Senate above.
 
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used)]
 // Handlers return a ready `Response` as their error, as axum handlers do.
@@ -32,12 +34,13 @@ use senate_bridge::state::Store;
 use senate_bridge::{BridgeConfig, DaemonHandle, DaemonOptions, Paths, Timing, daemon};
 use senate_core::api::{
     ApiError, AppendResponse, CheckpointQuery, Cursor, CursorQuery, DEFAULT_SEARCH, EPOCH_HEADER,
-    EventsQuery, Heartbeat, MAX_SEARCH, Me, SearchQuery, SearchResults, StreamQuery, ThreadsQuery,
+    EventsQuery, Heartbeat, MAX_SEARCH, Me, ResolveQuery, Resolved, SearchQuery, SearchResults,
+    StreamQuery, ThreadsQuery,
 };
 use senate_core::hub::{matches_terms, search_terms};
 use senate_core::{
-    Address, Brief, CommitteeId, Event, Kind, Locale, Name, NewEvent, Roster, SenatorName, Senior,
-    Seq, Source,
+    Address, Brief, CommitteeId, Event, Kind, Locale, Locator, Name, NewEvent, Roster, SenatePath,
+    SenatorName, Senior, Seq, Source,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
@@ -63,20 +66,27 @@ pub fn path(p: &str) -> SenatorName {
     p.parse().unwrap()
 }
 
-/// `senator::<p>`: a person (`alice`) or an agent (`alice/claude`).
+/// `senator::<p>`: a person (`alice`) or an agent (`claude`).
 pub fn senator(p: &str) -> Address {
     Address::senator(&path(p))
 }
 
-/// `senator::<person>/claude`: the agent a Claude Code session of that
-/// person speaks as by default.
+/// The Claude Code agent `person` runs: alice's (whose machine the harness
+/// is) is `senator::claude`, the name her sessions speak as by default;
+/// another person's is `senator::copilot`, since an agent's name is one
+/// flat name and one person runs it.
 pub fn claude(person: &str) -> Address {
-    senator(&format!("{person}/claude"))
+    senator(if person == "alice" {
+        "claude"
+    } else {
+        "copilot"
+    })
 }
 
-/// `senator::<person>/codex`: the agent a Codex session speaks as by default.
+/// The Codex agent `person` runs: alice's is `senator::codex`; another
+/// person's is `senator::aider`.
 pub fn codex(person: &str) -> Address {
-    senator(&format!("{person}/codex"))
+    senator(if person == "alice" { "codex" } else { "aider" })
 }
 
 /// The person `senator::<person>`.
@@ -162,9 +172,11 @@ pub struct Inner {
     pub active: HashMap<(String, String), usize>,
     /// Who sits here; agents are seated on first contact.
     pub roster: Roster,
-    /// What `/v1/me` names as the Senate's presider.
-    pub presider: Option<SenatorName>,
-    /// Who `/v1/me` says holds the Speaker's seat; unset: the presider.
+    /// The Senate's name `/v1/me` gives.
+    pub senate: Name,
+    /// The Senate above, as `/v1/me` gives it.
+    pub parent: Option<SenatePath>,
+    /// Who `/v1/me` says holds the Speaker's seat; unset: nobody.
     pub speaker: Option<senate_core::SpeakerSeat>,
     /// What `/v1/me` says about a Speaker judging roots here.
     pub triaged: bool,
@@ -177,9 +189,19 @@ pub struct Inner {
     pub brief_broken: bool,
     /// `GET .../brief` answers only after this long.
     pub brief_delay: Duration,
+    /// Every `GET /v1/resolve`: `(name, committee)`.
+    pub resolves: Vec<(String, Option<String>)>,
 }
 
 impl Inner {
+    /// This Senate's path.
+    fn senate_path(&self) -> SenatePath {
+        match &self.parent {
+            Some(p) => p.clone().absolute().child(self.senate.clone()).unwrap(),
+            None => SenatePath::top(self.senate.clone()).unwrap(),
+        }
+    }
+
     fn json_of(&self, committee: &str, e: &Event) -> String {
         self.raw
             .get(&(committee.to_string(), e.seq.0))
@@ -254,15 +276,16 @@ fn api_error(status: StatusCode, code: &str, message: &str) -> Response {
     (status, Json(ApiError::new(code, message))).into_response()
 }
 
-/// May `person` act as `senator` here? Seats an agent on first contact.
+/// May `person` act as `senator` here? Seats an agent on first contact,
+/// owned by `person`.
 fn act_as(st: &FakeState, person: &str, senator: &SenatorName) -> Result<(), Response> {
     let mut inner = st.inner.lock().unwrap();
     inner
         .roster
         .may_act_as(&name(person), senator)
         .map_err(|e| api_error(StatusCode::FORBIDDEN, "forbidden", &e.to_string()))?;
-    if senator.is_junior() {
-        let _ = inner.roster.seat(senator.clone());
+    if !inner.roster.is_person(senator) {
+        let _ = inner.roster.seat(senator.clone(), &name(person));
     }
     Ok(())
 }
@@ -301,13 +324,10 @@ async fn me(State(st): St, headers: HeaderMap) -> Response {
             let inner = st.inner.lock().unwrap();
             Json(Me {
                 person: name(&h),
-                presider: inner.presider.clone(),
-                speaker: inner.speaker.clone().or_else(|| {
-                    inner
-                        .presider
-                        .clone()
-                        .map(senate_core::SpeakerSeat::Senator)
-                }),
+                senate: inner.senate.clone(),
+                parent: inner.parent.clone(),
+                speaker: inner.speaker.clone(),
+                people: inner.roster.people(),
                 agents: inner
                     .roster
                     .agents_of(&name(&h))
@@ -523,7 +543,7 @@ async fn threads(
         return r;
     }
     let inner = st.inner.lock().unwrap();
-    let mut board = senate_core::TaskBoard::new();
+    let mut board = senate_core::TaskBoard::new(inner.roster.people());
     for e in inner.events.get(&committee).cloned().unwrap_or_default() {
         board.observe(&e);
     }
@@ -556,6 +576,61 @@ async fn latest_checkpoint(
         Some(record) => Json(record.clone()).into_response(),
         None => api_error(StatusCode::NOT_FOUND, "not_found", "no checkpoint"),
     }
+}
+
+/// `GET /v1/resolve`, as the real server answers it, for this one
+/// Senate: a Senate path that is not this one's is elsewhere; a committee
+/// it does not list is elsewhere unless the name says this Senate; a
+/// senator nobody here knows is unknown.
+async fn resolve(State(st): St, Query(q): Query<ResolveQuery>, headers: HeaderMap) -> Response {
+    if let Err(r) = auth(&st, &headers) {
+        return r;
+    }
+    let mut inner = st.inner.lock().unwrap();
+    inner.resolves.push((
+        q.name.to_string(),
+        q.committee.as_ref().map(ToString::to_string),
+    ));
+    let path = inner.senate_path();
+    let named_here = match q.name.senate() {
+        None => false,
+        Some(senate) if path.ends_with(senate) => true,
+        Some(_) => return Json(Resolved::Elsewhere).into_response(),
+    };
+    let Some(target) = q.name.committee().or(q.committee.as_ref()).cloned() else {
+        return Json(Resolved::Unknown {
+            reason: format!("{} names no committee", q.name),
+        })
+        .into_response();
+    };
+    let exists = Some(&target) == q.committee.as_ref()
+        || st.committees.contains(&target)
+        || inner.events.contains_key(target.as_str());
+    if !exists {
+        return Json(if named_here {
+            Resolved::Unknown {
+                reason: format!("{path} has no committee {target}"),
+            }
+        } else {
+            Resolved::Elsewhere
+        })
+        .into_response();
+    }
+    let address = q.name.address().clone();
+    if let Some(senator) = address.as_senator()
+        && !inner.roster.knows(senator)
+    {
+        return Json(Resolved::Unknown {
+            reason: format!("{path}::{target} has no senator {senator}"),
+        })
+        .into_response();
+    }
+    Json(Resolved::Here {
+        locator: Locator::at(path, target.clone(), address.clone()),
+        committee: target,
+        address,
+    })
+    .into_response()
 }
 
 fn frame(seq: Seq, data: &str) -> Bytes {
@@ -672,14 +747,14 @@ async fn stream(
 
 impl FakeServer {
     /// `people`: `(token, person)`. `committees`: what `/v1/me` lists. The
-    /// people listed, plus `pm`, are the top Senate's roster; no agent is
+    /// people listed, plus `pm`, are the Senate's people; no agent is
     /// seated until it first connects.
     pub async fn start(people: &[(&str, &str)], committees: &[&str]) -> Self {
         let mut seniors: Vec<Senior> = people.iter().map(|(_, p)| Senior::new(name(p))).collect();
         if !people.iter().any(|(_, p)| *p == "pm") {
             seniors.push(Senior::new(name("pm")));
         }
-        let roster = Roster::top(seniors, Vec::new()).unwrap();
+        let roster = Roster::new(seniors, Vec::new()).unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (live, _) = broadcast::channel(4096);
@@ -693,7 +768,8 @@ impl FakeServer {
                 stream_opens: Vec::new(),
                 active: HashMap::new(),
                 roster,
-                presider: None,
+                senate: name("senate"),
+                parent: None,
                 speaker: None,
                 triaged: true,
                 offline: false,
@@ -701,6 +777,7 @@ impl FakeServer {
                 searches: Vec::new(),
                 brief_broken: false,
                 brief_delay: Duration::ZERO,
+                resolves: Vec::new(),
             }),
             live,
             kill,
@@ -716,6 +793,7 @@ impl FakeServer {
         let app = Router::new()
             .route("/healthz", get(|| async { "ok" }))
             .route("/v1/me", get(me))
+            .route(senate_core::api::RESOLVE_PATH, get(resolve))
             .route(
                 "/v1/committees/{committee}/events",
                 post(append).get(events),
@@ -878,14 +956,14 @@ impl FakeServer {
             .unwrap_or(0)
     }
 
-    /// Seat `agent` as if it had connected before.
-    pub fn seat(&self, agent: &str) {
+    /// Seat `agent`, run by `owner`, as if it had connected before.
+    pub fn seat(&self, agent: &str, owner: &str) {
         self.state
             .inner
             .lock()
             .unwrap()
             .roster
-            .seat(path(agent))
+            .seat(path(agent), &name(owner))
             .unwrap();
     }
 
@@ -895,20 +973,16 @@ impl FakeServer {
             Some(senate_core::SpeakerSeat::Senator(path(speaker)));
     }
 
-    /// Make `/v1/me` name `presider` as the Senate's presider.
-    pub fn set_presider(&self, presider: Option<&str>) {
+    /// Make `/v1/me` name this Senate `senate`, under `parent`.
+    pub fn set_senate(&self, senate: &str, parent: Option<&str>) {
         let mut inner = self.state.inner.lock().unwrap();
-        let presider = presider.map(path);
-        let config = senate_core::RosterConfig {
-            presider: presider.clone(),
-            ..inner.roster.to_config()
-        };
-        inner.roster = Roster::try_from(senate_core::RosterConfig {
-            agents: Vec::new(),
-            ..config
-        })
-        .unwrap();
-        inner.presider = presider;
+        inner.senate = name(senate);
+        inner.parent = parent.map(|p| p.parse().unwrap());
+    }
+
+    /// Every `GET /v1/resolve` so far: `(name, committee)`.
+    pub fn resolves(&self) -> Vec<(String, Option<String>)> {
+        self.state.inner.lock().unwrap().resolves.clone()
     }
 }
 
@@ -1121,9 +1195,9 @@ impl Harness {
         self.daemon.as_ref().expect("daemon not running").store()
     }
 
-    /// alice/claude's queue item for `seq` on refund-v2.
+    /// claude's queue item for `seq` on refund-v2.
     pub fn item(&self, seq: u64) -> Option<senate_bridge::state::QueueItem> {
-        self.item_of("alice/claude", seq)
+        self.item_of("claude", seq)
     }
 
     /// `agent`'s queue item for `seq` on refund-v2.
@@ -1241,9 +1315,9 @@ impl Harness {
         .await;
     }
 
-    /// alice/claude's delivered cursor on the server reaching `seq`.
+    /// claude's delivered cursor on the server reaching `seq`.
     pub async fn wait_delivered_cursor(&self, committee: &str, seq: u64) {
-        self.wait_delivered_cursor_of(committee, "alice/claude", seq)
+        self.wait_delivered_cursor_of(committee, "claude", seq)
             .await;
     }
 

@@ -207,7 +207,7 @@ mod tests {
     }
 
     fn ids() -> (CommitteeId, SenatorName) {
-        (CommitteeId::new("refund-v2").unwrap(), path("alice/claude"))
+        (CommitteeId::new("refund-v2").unwrap(), path("claude"))
     }
 
     #[test]
@@ -245,7 +245,7 @@ mod tests {
     fn an_open_stream_needs_heartbeats_once_the_grace_passes() {
         let presence = Presence::new(GRACE);
         let (committee, alice) = ids();
-        let bob = path("bob/claude");
+        let bob = path("copilot");
         let start = Instant::now();
         let at = |secs: u64| start + Duration::from_secs(secs);
         let connected = |f: &CommitteeId, who: &SenatorName, secs: u64| {
@@ -295,7 +295,7 @@ mod tests {
     fn two_agents_of_one_person_are_present_separately() {
         let presence = Presence::new(GRACE);
         let committee = CommitteeId::new("refund-v2").unwrap();
-        let (claude, codex) = (path("alice/claude"), path("alice/codex"));
+        let (claude, codex) = (path("claude"), path("codex"));
         let (tx, _rx) = mpsc::channel::<Arc<Event>>(1);
         presence.add(&committee, &claude, 1, tx.downgrade());
         assert!(presence.is_connected(&committee, &claude));

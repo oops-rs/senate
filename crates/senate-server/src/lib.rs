@@ -6,7 +6,7 @@
 //! # Who is calling, and as whom
 //!
 //! A bearer token names a **person**. The person then acts as themselves or
-//! as one of their own agents (`wendell/claude`); each request names which,
+//! as one of their own agents (`claude`); each request names which,
 //! and the server checks it with
 //! [`Roster::may_act_as`](senate_core::Roster::may_act_as). An agent not yet
 //! on the roster is seated on its first contact. Presence, leases, cursors

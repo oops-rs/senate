@@ -19,7 +19,7 @@ use chrono::{DateTime, Utc};
 use senate_core::{BranchNaming, CommitteeId, Locale, Name};
 use serde::{Deserialize, Serialize};
 
-use crate::agent::{self, AgentSource, Pins, RelPath, Seating};
+use crate::agent::{self, AgentSource, Pins, Seating};
 use crate::config::AgentNames;
 use crate::follow::{self, Slot, SlotKey, Stale};
 use crate::joinname::{self, BranchPart, Cannot, Choice, Derived, NameFrom};
@@ -57,13 +57,6 @@ pub struct Settings {
     pub free_after_days: u64,
     #[serde(default)]
     local: Option<toml::Table>,
-    #[serde(default)]
-    preside: Vec<Presides>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct Presides {
-    agent: RelPath,
 }
 
 fn default_free_after() -> u64 {
@@ -93,14 +86,14 @@ impl Settings {
         })
     }
 
-    /// The directories under `senates/` that `senate.toml` still hosts.
+    /// The directories under `senates/` that `senate.toml` still hosts:
+    /// the machine's one Senate, kept under `top/`. A Senate once nested
+    /// under an agent (`under-<agent>/`) is no longer hosted, so its log is
+    /// listed by `senate free` and removed only with `--delete-logs`.
     fn hosted_keys(&self) -> BTreeSet<String> {
         let mut keys = BTreeSet::new();
         if self.local.is_some() {
             keys.insert("top".to_string());
-        }
-        for p in &self.preside {
-            keys.insert(format!("under-{}", p.agent.to_string().replace('/', "-")));
         }
         keys
     }
@@ -110,8 +103,8 @@ impl Settings {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentHere {
     pub runtime: Runtime,
-    pub rel: RelPath,
-    /// In full, when `senate.toml` names the person.
+    pub rel: senate_core::SenatorName,
+    /// The same name, when `senate.toml` names the person who runs it.
     pub path: Option<senate_core::SenatorName>,
     pub source: AgentSource,
 }
@@ -143,7 +136,7 @@ impl Resolved {
             facts.committee_file.as_deref(),
             convention.as_ref(),
         );
-        let seating = settings.person.clone().map(Seating::top);
+        let seating = settings.person.clone().map(Seating::new);
         let agents = [Runtime::Claude, Runtime::Codex]
             .into_iter()
             .map(|runtime| {
@@ -593,10 +586,11 @@ pub fn render_unpin(c: &Change, l: Locale) -> String {
     )
 }
 
-/// Check `text` is an agent path and give it back normalised.
-pub fn parse_pin(text: &str) -> anyhow::Result<RelPath> {
-    text.parse::<RelPath>()
-        .map_err(|e| anyhow::anyhow!("{text:?} is not an agent name or path: {e}"))
+/// Check `text` is one agent name and give it back normalised.
+pub fn parse_pin(text: &str) -> anyhow::Result<senate_core::SenatorName> {
+    text.trim()
+        .parse::<senate_core::SenatorName>()
+        .map_err(|e| anyhow::anyhow!("{text:?} is not an agent name: {e}"))
 }
 
 // ---- where ------------------------------------------------------------------

@@ -73,8 +73,8 @@ impl ApiClientError {
         }
     }
 
-    /// 409 `ambiguous_recipient`: a `senator::<person>/*` named a person
-    /// with several agents. The agents to choose from.
+    /// 409 `ambiguous_recipient`: `senator::*` could reach several agents
+    /// on the committee. The agents to choose from.
     pub fn ambiguous_candidates(&self) -> Option<&[SenatorName]> {
         match self {
             Self::Api {
@@ -375,6 +375,25 @@ impl ApiClient {
         Ok(checked(resp).await?.json().await?)
     }
 
+    /// `GET /v1/resolve`: whether `name` is in this Senate, written from
+    /// `committee` (the writer's own, when the writer stands here).
+    pub async fn resolve(
+        &self,
+        name: &senate_core::Locator,
+        committee: Option<&CommitteeId>,
+    ) -> Result<api::Resolved, ApiClientError> {
+        let query = api::ResolveQuery {
+            name: name.clone(),
+            committee: committee.cloned(),
+        };
+        let resp = self
+            .authed(self.http.get(self.url(api::RESOLVE_PATH)))
+            .query(&query)
+            .send()
+            .await?;
+        Ok(checked(resp).await?.json().await?)
+    }
+
     /// `GET .../presence`: each agent's presence on the committee.
     pub async fn presence(&self, committee: &CommitteeId) -> Result<PresencePage, ApiClientError> {
         let url = self.url(&api::presence_path(committee));
@@ -433,6 +452,28 @@ async fn checked(resp: Response) -> Result<Response, ApiClientError> {
     })
 }
 
+/// Resolve a qualified name nearest first: ask each Senate in `levels`
+/// (the writer's own first, then the one above, outward) until one answers
+/// for it. The writer stands on `committee` in the first Senate only. The
+/// answer is the index of the Senate that answered and what it said;
+/// [`Resolved::Elsewhere`](api::Resolved::Elsewhere) with the index past
+/// the last when none did. There is no central registry: each Senate
+/// answers for itself.
+pub async fn resolve_outward(
+    levels: &[&ApiClient],
+    name: &senate_core::Locator,
+    committee: Option<&CommitteeId>,
+) -> Result<(usize, api::Resolved), ApiClientError> {
+    for (i, level) in levels.iter().enumerate() {
+        let standing = if i == 0 { committee } else { None };
+        match level.resolve(name, standing).await? {
+            api::Resolved::Elsewhere => continue,
+            found => return Ok((i, found)),
+        }
+    }
+    Ok((levels.len(), api::Resolved::Elsewhere))
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -478,7 +519,7 @@ mod tests {
     #[test]
     fn an_ambiguous_recipient_carries_its_candidates() {
         let candidates: Vec<SenatorName> =
-            vec!["bob/claude".parse().unwrap(), "bob/codex".parse().unwrap()];
+            vec!["claude".parse().unwrap(), "codex".parse().unwrap()];
         let e = ApiClientError::Api {
             status: 409,
             code: api::code::AMBIGUOUS_RECIPIENT.into(),

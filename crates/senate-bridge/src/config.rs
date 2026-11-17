@@ -23,8 +23,8 @@
 //! # agent with no session and no contact for this many days.
 //! free_after_days = 30
 //!
-//! # Optional: the agent each kind of coding session speaks as, under the
-//! # person (`alice/claude`, `alice/codex`). These are the defaults.
+//! # Optional: the agent each kind of coding session speaks as. These are
+//! # the defaults.
 //! [agents]
 //! claude = "claude"
 //! codex = "codex"
@@ -33,35 +33,19 @@
 //! # A machine is a person running agents
 //!
 //! The token names a **person**. The bridge never speaks as "the person's
-//! agent" in the singular: each coding session is one junior senator,
-//! chosen per session ([`crate::agent`]). By default a Claude Code session
-//! is `<person>/claude` and a Codex session `<person>/codex`; `[agents]`
-//! renames them, and a session can pin its own name with `SENATE_AGENT` or a
-//! `.senate/agent` file.
+//! agent" in the singular: each coding session is one senator, chosen per
+//! session ([`crate::agent`]), a flat name the person runs. By default a
+//! Claude Code session is `claude` and a Codex session `codex`; `[agents]`
+//! renames them, and a session can pin its own name with `SENATE_AGENT` or
+//! a `.senate/agent` file.
 //!
-//! # Several Senates
+//! # One Senate
 //!
-//! One machine may serve several Senates at once: the Senate above (the
-//! top-level `server_url` and `token`) and any number of others, each a
-//! `[[senates]]` entry ([`SenateLink`]) naming the agent that presides over
-//! it, as a path relative to the person:
-//!
-//! ```toml
-//! server_url = "https://senate.example.com"
-//! token = "<the person's token>"
-//! person = "alice"
-//!
-//! [[senates]]
-//! presider = "claude"                 # alice/claude presides here
-//! server_url = "http://127.0.0.1:7979"
-//! token = "<a token for this Senate>"
-//! ```
-//!
-//! Each session is attached to the one Senate its agent's path selects
-//! ([`crate::agent`]): `claude` sits in the Senate above, `claude/reviewer`
-//! in the one `alice/claude` presides over. With a single Senate (the
-//! top-level keys alone) everything is as it always was. `senated` writes
-//! the entries for the Senates it hosts itself; nobody needs to.
+//! A machine serves one Senate: the one at `server_url` (a team's), or the
+//! one `senated --machine` hosts for it (`[local]`, which fills in the
+//! address and token itself). Senates nested under an agent
+//! (`[[preside]]`) are no longer hosted: an agent's own team is a child
+//! Senate.
 //!
 //! Unknown keys are ignored so a newer file still loads.
 
@@ -71,13 +55,15 @@ use std::path::{Path, PathBuf};
 use senate_core::{BranchNaming, CommitteeId, DEFAULT_BRANCH_PREFIX, Locale, Name};
 use serde::{Deserialize, Serialize};
 
-use crate::agent::RelPath;
+use senate_core::SenatorName;
+
 use crate::session::Runtime;
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BridgeConfig {
     /// Base URL of the Senate server, e.g. `https://senate.example.com`.
-    /// May be empty when `senates` lists every Senate.
+    /// Empty in a file for a machine used alone: `senated --machine` fills
+    /// it in for the Senate it hosts.
     #[serde(default)]
     pub server_url: String,
     /// The person's bearer token. It names the person to the server.
@@ -111,56 +97,30 @@ pub struct BridgeConfig {
     /// The agent name each kind of session speaks as.
     #[serde(default)]
     pub agents: AgentNames,
-    /// Other Senates this machine serves, besides the one at `server_url`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub senates: Vec<SenateLink>,
-}
-
-/// One Senate a machine serves (`[[senates]]`).
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SenateLink {
-    /// Base URL of the Senate's server.
-    pub server_url: String,
-    /// The person's token on that server.
-    pub token: String,
-    /// The agent presiding over this Senate, relative to the person
-    /// (`claude` for `alice/claude`). Absent: the Senate in which the
-    /// person's agents sit directly (the top Senate, or the one above).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub presider: Option<RelPath>,
-}
-
-impl fmt::Debug for SenateLink {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SenateLink")
-            .field("server_url", &self.server_url)
-            .field("token", &"<redacted>")
-            .field("presider", &self.presider)
-            .finish()
-    }
 }
 
 /// `[agents]`: the agent a session of each harness speaks as, unless the
-/// session pins another ([`crate::agent`]): a name, or a path relative to
-/// the person (`claude/codex`), which also selects the Senate it sits in.
+/// session pins another ([`crate::agent`]): one flat senator name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentNames {
     #[serde(default = "default_claude")]
-    pub claude: RelPath,
+    pub claude: SenatorName,
     #[serde(default = "default_codex")]
-    pub codex: RelPath,
+    pub codex: SenatorName,
 }
 
-fn default_claude() -> RelPath {
-    RelPath::name(
-        Name::new(Runtime::Claude.as_str()).unwrap_or_else(|_| unreachable!("a valid name")),
-    )
+fn default_claude() -> SenatorName {
+    Runtime::Claude
+        .as_str()
+        .parse()
+        .unwrap_or_else(|_| unreachable!("a valid name"))
 }
 
-fn default_codex() -> RelPath {
-    RelPath::name(
-        Name::new(Runtime::Codex.as_str()).unwrap_or_else(|_| unreachable!("a valid name")),
-    )
+fn default_codex() -> SenatorName {
+    Runtime::Codex
+        .as_str()
+        .parse()
+        .unwrap_or_else(|_| unreachable!("a valid name"))
 }
 
 impl Default for AgentNames {
@@ -173,8 +133,8 @@ impl Default for AgentNames {
 }
 
 impl AgentNames {
-    /// The agent for a session of `runtime`, relative to the person.
-    pub fn for_runtime(&self, runtime: Runtime) -> &RelPath {
+    /// The agent for a session of `runtime`.
+    pub fn for_runtime(&self, runtime: Runtime) -> &SenatorName {
         match runtime {
             Runtime::Claude => &self.claude,
             Runtime::Codex => &self.codex,
@@ -210,23 +170,24 @@ impl fmt::Debug for BridgeConfig {
             .field("free_after_days", &self.free_after_days)
             .field("branch_prefix", &self.branch_prefix)
             .field("agents", &self.agents)
-            .field("senates", &self.senates)
             .finish()
     }
 }
 
 /// What `senated --machine` hosts on this machine, read from the same
-/// `senate.toml`: a local top Senate (`[local]`, for using Senate alone),
-/// and a Senate one level down for each presiding agent (`[[preside]]`).
+/// `senate.toml`: the machine's one Senate (`[local]`, for using Senate
+/// alone).
 ///
 /// ```toml
 /// [local]                 # alone: no Senate above, no server_url
-/// speaker = "claude"      # alice/claude presides over it
+/// name = "alice-desk"     # default: <person>-desk
+/// speaker = "claude"      # the agent named its Speaker
 /// listen = "127.0.0.1:7979"
-///
-/// [[preside]]
-/// agent = "claude"        # alice/claude/* sit in the Senate it presides over
 /// ```
+///
+/// `[[preside]]` (a Senate nested under an agent) is still read, only so
+/// the machine can say once that such Senates are no longer hosted and
+/// where their logs stay.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct Hosted {
     #[serde(default)]
@@ -235,27 +196,43 @@ pub struct Hosted {
     pub preside: Vec<PresideSenate>,
 }
 
-/// `[local]`: a top Senate on this machine, with no Senate above.
+/// `[local]`: this machine's Senate, with no Senate above.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct LocalSenate {
-    /// The agent named its Speaker, relative to the person. Absent: nobody
-    /// presides, and the Senate only keeps the log.
+    /// The Senate's name. Absent: [`default_desk_name`] of the person.
     #[serde(default)]
-    pub speaker: Option<RelPath>,
+    pub name: Option<Name>,
+    /// The agent named its Speaker. Absent: nobody presides, and the Senate
+    /// only keeps the log.
+    #[serde(default)]
+    pub speaker: Option<SenatorName>,
     /// A loopback address to serve it on. Default: a free port, kept for
     /// the next start.
     #[serde(default)]
     pub listen: Option<String>,
 }
 
-/// `[[preside]]`: a Senate one level down, presided over by `agent`.
+/// `[[preside]]`, as an older file wrote it: a Senate one level down,
+/// presided over by `agent`. No longer hosted.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct PresideSenate {
-    /// The presiding agent, relative to the person (`claude`).
-    pub agent: RelPath,
-    /// A loopback address to serve it on. Default: a free port, kept.
+    /// The presiding agent, as written (a name or a path).
+    pub agent: String,
     #[serde(default)]
     pub listen: Option<String>,
+}
+
+/// The name of a Senate hosted on a person's machine when `[local]` gives
+/// none: the person's handle followed by `-desk` (`alice-desk`). Not the
+/// bare handle: the Senate's name must not be taken for a person's handle
+/// in the Senate above. A handle too long for the suffix is cut to fit.
+pub fn default_desk_name(person: &Name) -> Name {
+    const SUFFIX: &str = "-desk";
+    let mut stem = person.as_str().to_owned();
+    stem.truncate(63 - SUFFIX.len());
+    let stem = stem.trim_end_matches('-');
+    Name::new(format!("{stem}{SUFFIX}"))
+        .unwrap_or_else(|_| Name::new("desk").unwrap_or_else(|_| unreachable!("a valid name")))
 }
 
 impl Hosted {
@@ -273,52 +250,44 @@ impl Hosted {
         Ok(hosted)
     }
 
-    /// The rules: a local top Senate has no Senate above (`server_url` is
-    /// empty); without one, the Senate above is configured; each presiding
-    /// agent hosts one Senate; every address is loopback.
+    /// The rules: the machine's Senate has no Senate above (`server_url` is
+    /// empty); without it, the Senate above is configured; its address is
+    /// loopback; its name is not an address keyword.
     pub fn validate(&self, config: &BridgeConfig) -> Result<(), String> {
         match (&self.local, config.server_url.is_empty()) {
             (Some(_), false) => {
                 return Err(
-                    "[local] is a top Senate on this machine, with no Senate above: drop \
+                    "[local] is this machine's own Senate, with no Senate above: drop \
                      server_url and token, or [local]"
                         .into(),
                 );
             }
-            (None, true) if config.senates.is_empty() => {
+            (None, true) => {
                 return Err("set server_url and token (the Senate above), or [local]".into());
             }
             _ => {}
         }
-        for (i, p) in self.preside.iter().enumerate() {
-            if self.preside[..i].iter().any(|q| q.agent == p.agent) {
-                return Err(format!("[[preside]] lists {} twice", p.agent));
+        if let Some(local) = &self.local {
+            if let Some(listen) = &local.listen {
+                check_loopback(listen)?;
             }
-            if config
-                .senates
-                .iter()
-                .any(|l| l.presider.as_ref() == Some(&p.agent))
-            {
-                return Err(format!(
-                    "{} presides over a Senate in [[senates]] and in [[preside]]",
-                    p.agent
-                ));
-            }
-        }
-        let listens = self
-            .local
-            .iter()
-            .filter_map(|l| l.listen.as_deref())
-            .chain(self.preside.iter().filter_map(|p| p.listen.as_deref()));
-        for listen in listens {
-            check_loopback(listen)?;
+            senate_core::check_not_keyword(self.name(&config.person).as_str(), "a Senate")
+                .map_err(|e| e.to_string())?;
         }
         Ok(())
     }
 
-    /// Whether this machine hosts any Senate.
+    /// The name of the Senate this machine hosts.
+    pub fn name(&self, person: &Name) -> Name {
+        self.local
+            .as_ref()
+            .and_then(|l| l.name.clone())
+            .unwrap_or_else(|| default_desk_name(person))
+    }
+
+    /// Whether this machine hosts a Senate.
     pub fn is_empty(&self) -> bool {
-        self.local.is_none() && self.preside.is_empty()
+        self.local.is_none()
     }
 }
 
@@ -371,33 +340,6 @@ impl BridgeConfig {
             free_after_days: default_free_after_days(),
             branch_prefix: default_branch_prefix(),
             agents: AgentNames::default(),
-            senates: Vec::new(),
-        }
-    }
-
-    /// Every Senate this machine serves: the one at the top-level
-    /// `server_url` first (when set), then each `[[senates]]` entry.
-    pub fn links(&self) -> Vec<SenateLink> {
-        let mut links = Vec::with_capacity(1 + self.senates.len());
-        if !self.server_url.is_empty() {
-            links.push(SenateLink {
-                server_url: self.server_url.clone(),
-                token: self.token.clone(),
-                presider: None,
-            });
-        }
-        links.extend(self.senates.iter().cloned());
-        links
-    }
-
-    /// This configuration narrowed to one of its Senates: `link`'s server
-    /// and token at the top level, no other Senates.
-    pub fn for_link(&self, link: &SenateLink) -> Self {
-        Self {
-            server_url: link.server_url.clone(),
-            token: link.token.clone(),
-            senates: Vec::new(),
-            ..self.clone()
         }
     }
 
@@ -411,7 +353,7 @@ impl BridgeConfig {
     }
 
     /// Read and parse, without [`BridgeConfig::validate`]: for `senated
-    /// --machine`, which fills in the Senates it hosts itself before the
+    /// --machine`, which fills in the Senate it hosts itself before the
     /// configuration is complete.
     pub fn load_unchecked(path: &Path) -> Result<Self, ConfigError> {
         let text = match std::fs::read_to_string(path) {
@@ -449,35 +391,19 @@ impl BridgeConfig {
             .unwrap_or_default()
     }
 
-    /// At least one Senate; each with an http(s) URL and a token; no two
-    /// presided over by the same agent (the path of an agent selects one
-    /// Senate).
+    /// The Senate's address is an http(s) URL, and the token is set.
     pub fn validate(&self) -> Result<(), String> {
-        if self.server_url.is_empty() && self.senates.is_empty() {
-            return Err("server_url is empty and no [[senates]] are listed".into());
+        if self.server_url.is_empty() {
+            return Err("server_url is empty".into());
         }
-        let links = self.links();
-        for link in &links {
-            if !(link.server_url.starts_with("http://") || link.server_url.starts_with("https://"))
-            {
-                return Err(format!(
-                    "server_url must start with http:// or https://, got {:?}",
-                    link.server_url
-                ));
-            }
-            if link.token.trim().is_empty() {
-                return Err(format!("the token for {} is empty", link.server_url));
-            }
+        if !(self.server_url.starts_with("http://") || self.server_url.starts_with("https://")) {
+            return Err(format!(
+                "server_url must start with http:// or https://, got {:?}",
+                self.server_url
+            ));
         }
-        for (i, link) in links.iter().enumerate() {
-            if links[..i].iter().any(|l| l.presider == link.presider) {
-                return Err(match &link.presider {
-                    Some(p) => format!("two Senates are presided over by {p}"),
-                    None => "two Senates seat the person's agents directly; give each \
-                             [[senates]] entry its presider"
-                        .into(),
-                });
-            }
+        if self.token.trim().is_empty() {
+            return Err(format!("the token for {} is empty", self.server_url));
         }
         Ok(())
     }
@@ -543,18 +469,13 @@ mod tests {
         assert_eq!(c.branches().prefix(), "team/work");
         assert_eq!(c.agents.for_runtime(Runtime::Claude).to_string(), "claude");
         assert_eq!(c.agents.for_runtime(Runtime::Codex).to_string(), "reviewer");
-        let deep: BridgeConfig = toml::from_str(
-            "server_url = \"http://x\"\ntoken = \"t\"\nperson = \"alice\"\n[agents]\ncodex = \"claude/codex\"\n",
-        )
-        .unwrap();
-        assert_eq!(
-            deep.agents.for_runtime(Runtime::Codex).to_string(),
-            "claude/codex"
-        );
-        // An agent name is a senator name: validated where it is written.
+        // An agent name is one flat senator name: validated where it is
+        // written. A path (an owner, or a nested agent) is not one.
         for bad in [
             "[agents]\nclaude = \"Claude\"",
             "[agents]\ncodex = \"a//b\"",
+            "[agents]\ncodex = \"claude/codex\"",
+            "[agents]\ncodex = \"alice/codex\"",
             "locale = \"fr\"",
             "person = \"Alice\"",
         ] {
@@ -586,7 +507,10 @@ mod tests {
     }
 
     #[test]
-    fn several_senates_are_listed_with_their_presiders() {
+    fn a_machine_serves_one_senate() {
+        // Replaces "several Senates are listed with their presiders": no
+        // Senate is nested under an agent, so `[[senates]]` is gone; an
+        // older file that still has it loads, and the entries are ignored.
         let c: BridgeConfig = toml::from_str(
             r#"
             server_url = "https://senate.example.com"
@@ -600,35 +524,11 @@ mod tests {
         )
         .unwrap();
         assert!(c.validate().is_ok());
-        let links = c.links();
-        assert_eq!(links.len(), 2);
-        assert_eq!(links[0].presider, None);
-        assert_eq!(
-            links[1]
-                .presider
-                .as_ref()
-                .map(ToString::to_string)
-                .as_deref(),
-            Some("claude")
-        );
-        let nested = c.for_link(&links[1]);
-        assert_eq!(nested.server_url, "http://127.0.0.1:7979");
-        assert!(nested.senates.is_empty());
-        assert!(!format!("{c:?}").contains("nested-secret"));
-
-        // Only [[senates]], no Senate above.
-        let alone: BridgeConfig = toml::from_str(
-            "person = \"alice\"\n[[senates]]\nserver_url = \"http://127.0.0.1:1\"\ntoken = \"x\"\n",
-        )
-        .unwrap();
-        assert!(alone.validate().is_ok());
-        assert_eq!(alone.links().len(), 1);
-
+        assert_eq!(c.server_url, "https://senate.example.com");
         for bad in [
             "person = \"a\"\n",
-            "server_url = \"http://x\"\ntoken = \"t\"\nperson = \"a\"\n[[senates]]\nserver_url = \"http://y\"\ntoken = \"u\"\n",
-            "person = \"a\"\n[[senates]]\npresider = \"c\"\nserver_url = \"http://y\"\ntoken = \"u\"\n[[senates]]\npresider = \"c\"\nserver_url = \"http://z\"\ntoken = \"u\"\n",
-            "person = \"a\"\n[[senates]]\nserver_url = \"ftp://y\"\ntoken = \"u\"\n",
+            "person = \"a\"\nserver_url = \"ftp://y\"\ntoken = \"u\"\n",
+            "person = \"a\"\nserver_url = \"http://y\"\ntoken = \" \"\n",
         ] {
             let c: BridgeConfig = toml::from_str(bad).unwrap();
             assert!(c.validate().is_err(), "{bad}");
@@ -644,26 +544,45 @@ mod tests {
             "person = \"alice\"\n[local]\nspeaker = \"claude\"\nlisten = \"127.0.0.1:7979\"\n",
         );
         assert_eq!(hosted.validate(&config), Ok(()));
-        assert_eq!(hosted.local.unwrap().speaker.unwrap().to_string(), "claude");
+        let local = hosted.local.clone().unwrap();
+        assert_eq!(local.speaker.unwrap().to_string(), "claude");
+        // The Senate's name: given, or the person's handle and `-desk`.
+        assert_eq!(hosted.name(&config.person).as_str(), "alice-desk");
+        let (config, hosted) = parse("person = \"alice\"\n[local]\nname = \"north-desk\"\n");
+        assert_eq!(hosted.validate(&config), Ok(()));
+        assert_eq!(hosted.name(&config.person).as_str(), "north-desk");
+        // An older file's nested Senates are read, to be named, not hosted.
         let (config, hosted) = parse(
-            "person = \"alice\"\nserver_url = \"https://s\"\ntoken = \"t\"\n[[preside]]\nagent = \"claude\"\n",
+            "person = \"alice\"\n[local]\nspeaker = \"claude\"\n[[preside]]\nagent = \"claude\"\n",
         );
         assert_eq!(hosted.validate(&config), Ok(()));
-        assert_eq!(hosted.preside[0].agent.to_string(), "claude");
+        assert_eq!(hosted.preside[0].agent, "claude");
 
         for bad in [
             // Alone, yet a Senate above.
             "person = \"a\"\nserver_url = \"https://s\"\ntoken = \"t\"\n[local]\n",
             // Neither.
             "person = \"a\"\n[[preside]]\nagent = \"claude\"\n",
-            // Twice.
-            "person = \"a\"\n[local]\n[[preside]]\nagent = \"c\"\n[[preside]]\nagent = \"c\"\n",
             // Off the machine.
             "person = \"a\"\n[local]\nlisten = \"0.0.0.0:7979\"\n",
+            // A keyword is not a Senate's name.
+            "person = \"a\"\n[local]\nname = \"speaker\"\n",
         ] {
             let (config, hosted) = parse(bad);
             assert!(hosted.validate(&config).is_err(), "{bad}");
         }
+        // The speaker is one flat name.
+        assert!(toml::from_str::<Hosted>("[local]\nspeaker = \"alice/claude\"\n").is_err());
+    }
+
+    #[test]
+    fn the_default_desk_name_is_never_the_bare_handle() {
+        let name = |s: &str| Name::new(s).unwrap();
+        assert_eq!(default_desk_name(&name("wendell")).as_str(), "wendell-desk");
+        let long = "a".repeat(63);
+        let desk = default_desk_name(&name(&long));
+        assert!(desk.as_str().ends_with("-desk") && desk.as_str().len() <= 63);
+        assert_ne!(default_desk_name(&name("bob")).as_str(), "bob");
     }
 
     #[test]

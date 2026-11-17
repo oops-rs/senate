@@ -40,6 +40,7 @@ struct Inner {
     /// message, lowest first.
     mirrors_by_message: HashMap<(String, String), BTreeSet<MirrorKey>>,
     heartbeats: HashMap<(CommitteeId, SenatorName), HeartbeatRecord>,
+    registry: BTreeMap<String, serde_json::Value>,
 }
 
 /// A [`LogStore`] over a mutex. Every call is a short critical section with
@@ -323,5 +324,32 @@ impl LogStore for MemoryStore {
             .heartbeats
             .get(&(committee.clone(), agent.clone()))
             .cloned())
+    }
+
+    async fn registry(&self, prefix: &str) -> Result<Vec<(String, serde_json::Value)>, LogError> {
+        let inner = self.lock();
+        Ok(inner
+            .registry
+            .range(prefix.to_string()..)
+            .take_while(|(k, _)| k.starts_with(prefix))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect())
+    }
+
+    async fn put_registry(
+        &self,
+        key: &str,
+        value: Option<serde_json::Value>,
+    ) -> Result<(), LogError> {
+        let mut inner = self.lock();
+        match value {
+            Some(value) => {
+                inner.registry.insert(key.to_string(), value);
+            }
+            None => {
+                inner.registry.remove(key);
+            }
+        }
+        Ok(())
     }
 }

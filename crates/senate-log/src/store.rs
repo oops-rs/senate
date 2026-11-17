@@ -32,7 +32,7 @@ pub struct HeartbeatRecord {
 pub enum CursorOwner {
     /// An in-process, server-side consumer (the Speaker, a gateway).
     Hub,
-    /// One senator, by full path: `wendell/claude` and `wendell/codex` have
+    /// One senator, by full path: `claude` and `codex` have
     /// separate cursors, and neither is `wendell`'s own.
     Senator(SenatorName),
 }
@@ -186,6 +186,32 @@ pub trait LogStore: Send + Sync + 'static {
         committee: &CommitteeId,
         agent: &SenatorName,
     ) -> Result<Option<HeartbeatRecord>, LogError>;
+
+    /// The registry: what the Senate keeps beside its log, facts that are
+    /// no committee's events (a child Senate registered from below, the
+    /// secretaries registered for a senator). Every entry whose key starts
+    /// with `prefix`, by key. Keys are namespaced (`child:<name>`); values
+    /// are JSON.
+    ///
+    /// The default keeps nothing (a store that wraps another for a test);
+    /// every store Senate ships keeps it.
+    async fn registry(&self, prefix: &str) -> Result<Vec<(String, serde_json::Value)>, LogError> {
+        let _ = prefix;
+        Ok(Vec::new())
+    }
+
+    /// Set (`Some`) or remove (`None`) one registry entry. The default
+    /// refuses: it keeps nothing.
+    async fn put_registry(
+        &self,
+        key: &str,
+        value: Option<serde_json::Value>,
+    ) -> Result<(), LogError> {
+        let _ = value;
+        Err(LogError::Invalid(format!(
+            "this store keeps no registry; cannot set {key}"
+        )))
+    }
 }
 
 /// The log's clock: now, truncated to the microsecond precision Postgres

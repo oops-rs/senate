@@ -67,8 +67,8 @@ mod tests {
     #[test]
     fn directed_first_decisions_whole_rest_cut() {
         let f = CommitteeId::new("refund-v2").unwrap();
-        let me: Address = "senator::alice/claude".parse().unwrap();
-        let sibling: Address = "senator::alice/codex".parse().unwrap();
+        let me: Address = "senator::claude".parse().unwrap();
+        let sibling: Address = "senator::codex".parse().unwrap();
         let long = "y".repeat(1000);
         let ev = |seq, kind, to: Option<&Address>| {
             let mut e = NewEvent::new(f.clone(), kind, Address::Speaker, long.clone());

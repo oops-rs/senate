@@ -76,7 +76,7 @@ async fn snapshots_and_actions_through_the_facade() {
     assert_eq!(s.menu.badge.as_deref(), Some("3"));
     assert_eq!(s.counts.pending, 3);
     assert_eq!(s.counts.docket, 2);
-    assert_eq!(s.senates.len(), 2);
+    assert_eq!(s.senates.len(), 1, "the daemon serves one Senate");
     assert_eq!(s.inbox[0].state, "suspended");
     assert_eq!(s.inbox[0].triage.as_deref(), Some("needs_human"));
     assert_eq!(s.codex.len(), 1);

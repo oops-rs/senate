@@ -42,6 +42,7 @@ required-features = ["testing"]
 
 [dev-dependencies]
 chrono = { workspace = true }
+rusqlite = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "net", "io-util"] }
 

@@ -3,10 +3,11 @@
 //! `docket`, `approvals` and `approve` for the app. Used by the tests and by
 //! `examples/fake_daemon.rs`.
 //!
-//! It serves the world the app has to handle: the person `alice`, a primary
-//! Senate where `alice/claude` and `alice/codex` sit, and a Senate one level
-//! down that `alice/claude` presides over, where `alice/claude/reviewer`
-//! sits. Nothing here touches a real Senate home.
+//! It serves the world the app has to handle: the person `alice`, the one
+//! Senate the daemon serves (`alice-desk`), where her `claude` and `codex`
+//! sit on this machine, `claude` presides, and the agents `reviewer` and
+//! `tester` sit without a stream here. Nothing here touches a real Senate
+//! home.
 
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used)]
 
@@ -24,7 +25,7 @@ use senate_bridge::session::{Runtime, Session, SessionState};
 use senate_bridge::state::QueueCounts;
 use senate_core::{
     Address, Awaiting, CheckpointFacts, CommitteeId, DocketItem, DocketPage, Event, EventId, Kind,
-    Locale, Name, SeatFacts, SenatorName, Seq, SpeakerSeat, StatusState, ThreadSummary,
+    Locale, Name, People, SeatFacts, SenatorName, Seq, SpeakerSeat, StatusState, ThreadSummary,
     TriageVerdict,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -56,48 +57,37 @@ fn stream(committee: &str, agent: &str, sessions: usize) -> CommitteeStatus {
     }
 }
 
-/// The daemon's status: the primary Senate, and the one `alice/claude`
-/// presides over under it.
+/// The Senate the daemon serves.
+pub const SENATE: &str = "alice-desk";
+
+/// The daemon's status: one Senate, `alice` its only person, her `claude`
+/// holding the Speaker's seat.
 pub fn status(sessions: Vec<Session>) -> StatusReply {
-    let below = StatusReply {
-        pid: 4242,
-        version: "0.1.0".into(),
-        person: alice(),
-        presider: Some(path("alice/claude")),
-        locale: Locale::En,
-        server_url: "http://127.0.0.1:7001".into(),
-        committees: vec![stream("refund-v2", "alice/claude/reviewer", 1)],
-        sessions: vec![claude_session("rev-1", "alice/claude/reviewer")],
-        queue: QueueCounts::default(),
-        speaker: Some(SpeakerSeat::Senator(path("alice/claude"))),
-        others: Vec::new(),
-    };
     StatusReply {
         pid: 4242,
         version: "0.1.0".into(),
         person: alice(),
-        presider: None,
+        senate: Some(SENATE.parse().unwrap()),
+        people: People::new([alice()]),
         locale: Locale::En,
-        server_url: "http://senate.test".into(),
+        server_url: "http://127.0.0.1:7001".into(),
         committees: vec![
-            stream("refund-v2", "alice/claude", 1),
-            stream("refund-v2", "alice/codex", sessions.len()),
+            stream("refund-v2", "claude", 1),
+            stream("refund-v2", "codex", sessions.len()),
         ],
         sessions: {
-            let mut all = vec![claude_session("cl-1", "alice/claude")];
+            let mut all = vec![claude_session("cl-1", "claude")];
             all.extend(sessions);
             all
         },
         queue: QueueCounts::default(),
-        speaker: Some(SpeakerSeat::BuiltIn),
-        others: vec![below],
+        speaker: Some(SpeakerSeat::Senator(path("claude"))),
     }
 }
 
-/// `status` without the nested Senate: one Senate, nobody presiding.
+/// `status` with nobody presiding: no agent holds the seat.
 pub fn status_alone(sessions: Vec<Session>) -> StatusReply {
     let mut s = status(sessions);
-    s.others.clear();
     s.speaker = None;
     s
 }
@@ -108,8 +98,9 @@ pub fn suspended(root: u64, title: &str, agent: &str) -> ThreadSummary {
         root: Seq(root),
         kind: Kind::Question,
         from: Address::Speaker,
-        on_behalf_of: Some(Address::senator(&path("bob/claude"))),
+        on_behalf_of: Some(Address::senator(&path("copilot"))),
         to: vec![Address::senator(&path(agent))],
+        agents: vec![path(agent)],
         title: title.into(),
         state: StatusState::Suspended,
         since: Seq(root),
@@ -173,13 +164,12 @@ pub fn claude_session(id: &str, agent: &str) -> Session {
     session(id, Runtime::Claude, agent)
 }
 
-/// A live Codex thread of `alice/codex` on [`committee`].
+/// A live Codex thread of `codex` on [`committee`].
 pub fn codex_session(thread: &str) -> Session {
-    session(thread, Runtime::Codex, "alice/codex")
+    session(thread, Runtime::Codex, "codex")
 }
 
-/// One item of each kind awaiting the Speaker `alice/claude` in the Senate
-/// below.
+/// One item of each kind awaiting the Speaker `claude`.
 pub fn docket() -> DocketReply {
     let event = |seq: u64, from: Address, to: Vec<Address>, body: &str| Event {
         seq: Seq(seq),
@@ -197,39 +187,41 @@ pub fn docket() -> DocketReply {
         mirror: None,
         meta: serde_json::Map::new(),
     };
-    let reviewer = path("alice/claude/reviewer");
+    let reviewer = path("reviewer");
     let items = vec![
         DocketItem {
             event: event(
                 40,
                 Address::senior(&alice()),
                 vec![Address::Speaker],
-                "谁来看一下 [senator::alice/claude/reviewer] 的补丁？",
+                "谁来看一下 [senator::reviewer] 的补丁？",
             ),
             awaiting: Awaiting::Pick {
-                owner: alice(),
-                candidates: vec![reviewer.clone(), path("alice/claude/tester")],
+                owner: None,
+                candidates: vec![reviewer.clone(), path("tester")],
             },
+            intended: None,
         },
         DocketItem {
             event: event(
                 44,
-                Address::senator(&path("alice/claude/tester")),
+                Address::senator(&path("tester")),
                 vec![Address::senator(&reviewer)],
                 "Is the lint config shared?",
             ),
             awaiting: Awaiting::Away {
                 agents: vec![reviewer.clone()],
             },
+            intended: None,
         },
     ];
     DocketReply {
         speaker: None,
         senates: vec![SenateDocket {
-            senate: Some(path("alice/claude")),
+            senate: Some(Name::new(SENATE).unwrap()),
             pages: vec![DocketPage {
                 committee: committee(),
-                speaker: Some(SpeakerSeat::Senator(path("alice/claude"))),
+                speaker: Some(SpeakerSeat::Senator(path("claude"))),
                 items,
                 seats: vec![SeatFacts {
                     agent: reviewer,
@@ -265,8 +257,8 @@ impl World {
         Self {
             status: status(vec![codex_session("019a-thread")]),
             threads: vec![
-                suspended(118, "退款要不要走审批？", "alice/claude"),
-                suspended(131, "which env?", "alice/codex"),
+                suspended(118, "退款要不要走审批？", "claude"),
+                suspended(131, "which env?", "codex"),
             ],
             approvals: vec![approval("019a-thread:7")],
             docket: docket(),
@@ -399,7 +391,7 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
             ..
         } => {
             assert_eq!(session, Default::default(), "the app has no session");
-            let agent = path(&format!("alice/{name}"));
+            let agent = SenatorName::new(name).unwrap();
             // As the daemon answers: what is addressed to this agent, and
             // what was put to the person.
             let threads = w
@@ -434,7 +426,7 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
                 t.updated = Seq(200);
             }
             let _ = events.send(WatchEvent::Inbox {
-                agent: path("alice/claude"),
+                agent: path("claude"),
                 committee: committee(),
                 seq: Seq(200),
                 kind: Kind::Answer,

@@ -410,7 +410,7 @@ mod tests {
         for want in [
             "代 [senator::bob]（Bob）开启",
             "> 把 alice 的重试路径做完\n> with tests\n",
-            "[senator::alice/claude] 的 `feature/refund-v2/alice@0123456789ab`",
+            "[senator::claude] 的 `feature/refund-v2/alice@0123456789ab`",
             "由 Senate 的 Speaker 开启",
             "- Review the cap",
         ] {
@@ -432,7 +432,7 @@ mod tests {
         );
         for want in [
             "Opened by the Senate Speaker for [senator::bob] (Bob).",
-            "`feature/refund-v2/alice@0123456789ab` of [senator::alice/claude]",
+            "`feature/refund-v2/alice@0123456789ab` of [senator::claude]",
             "hit its time limit, partial work",
             "opened by the Senate Speaker; the developer's branch was not changed.",
         ] {

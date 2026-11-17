@@ -41,8 +41,23 @@ use crate::error::LogError;
 use crate::foreign;
 use crate::store::{CursorOwner, HeartbeatRecord, LogStore, check_storable, mint_epoch, now};
 
+/// One schema step: SQL, or the conversion of a log written when senators
+/// were paths ([`crate::flatten`]).
+enum Step {
+    Sql(&'static str),
+    FlatNames,
+}
+
 /// Migrations, in order. Index `n` takes the file from version `n` to `n + 1`.
-const MIGRATIONS: &[&str] = &[include_str!("../migrations-sqlite/0001_init.sql")];
+const MIGRATIONS: &[Step] = &[
+    Step::Sql(include_str!("../migrations-sqlite/0001_init.sql")),
+    Step::FlatNames,
+    Step::Sql(include_str!("../migrations-sqlite/0003_registry.sql")),
+];
+
+/// The suffix of the copy a file is saved to before its names are
+/// converted: `log.db.pre-flat-names`.
+pub const PRE_FLAT_NAMES: &str = "pre-flat-names";
 
 /// A [`LogStore`] over one SQLite file.
 #[derive(Clone)]
@@ -53,8 +68,15 @@ pub struct SqliteStore {
 impl SqliteStore {
     /// Open (creating it when missing) the database at `path` and apply the
     /// embedded migrations. `":memory:"` gives a private in-memory database.
+    ///
+    /// A file at schema version 1 (written when senators were paths) is
+    /// converted to flat names once, in one transaction, after a copy of it
+    /// is written beside it (`<file>.pre-flat-names`, never removed). One
+    /// that cannot be converted is refused, unchanged
+    /// ([`LogError::Flatten`]).
     pub async fn open(path: impl AsRef<Path>) -> Result<Self, LogError> {
         let path = path.as_ref().to_path_buf();
+        let file = (path.as_os_str() != ":memory:").then(|| path.clone());
         let conn = tokio::task::spawn_blocking(move || -> Result<Connection, LogError> {
             let mut conn = Connection::open(path)?;
             conn.busy_timeout(Duration::from_secs(5))?;
@@ -63,7 +85,7 @@ impl SqliteStore {
             // Journal mode answers with a row, so it is read, not executed.
             let _mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))?;
             conn.pragma_update(None, "synchronous", "NORMAL")?;
-            migrate(&mut conn)?;
+            migrate(&mut conn, file.as_deref())?;
             Ok(conn)
         })
         .await
@@ -133,21 +155,23 @@ fn refuse_foreign(conn: &Connection) -> Result<(), LogError> {
     }
 }
 
-fn migrate(conn: &mut Connection) -> Result<(), LogError> {
+fn migrate(conn: &mut Connection, file: Option<&Path>) -> Result<(), LogError> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    for (n, sql) in MIGRATIONS
+    for (n, step) in MIGRATIONS
         .iter()
         .enumerate()
         .skip(usize::try_from(version).unwrap_or(0))
     {
-        let tx = conn.transaction()?;
-        tx.execute_batch(sql)?;
-        tx.pragma_update(
-            None,
-            "user_version",
-            i64::try_from(n + 1).unwrap_or(i64::MAX),
-        )?;
-        tx.commit()?;
+        let version = i64::try_from(n + 1).unwrap_or(i64::MAX);
+        match step {
+            Step::Sql(sql) => {
+                let tx = conn.transaction()?;
+                tx.execute_batch(sql)?;
+                tx.pragma_update(None, "user_version", version)?;
+                tx.commit()?;
+            }
+            Step::FlatNames => flatten_names(conn, file, version)?,
+        }
     }
     // The epoch is minted once, when the log is created.
     conn.execute(
@@ -155,6 +179,129 @@ fn migrate(conn: &mut Connection) -> Result<(), LogError> {
         [mint_epoch()],
     )?;
     Ok(())
+}
+
+/// Schema step 2: convert a log written when senators were paths to flat
+/// names ([`crate::flatten`]), once. Everything is read and checked first;
+/// a log that cannot be converted is refused with nothing changed. A log
+/// with something to convert is copied beside the file before the one
+/// transaction that rewrites it and records the version, so a crash leaves
+/// either the original or the converted file, and the copy.
+fn flatten_names(conn: &mut Connection, file: Option<&Path>, version: i64) -> Result<(), LogError> {
+    use crate::flatten::{Flattener, Place};
+    let mut scan = Flattener::new();
+    let events: Vec<(String, i64, String)> = {
+        let mut stmt = conn.prepare("SELECT committee, seq, envelope FROM events")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    let mut parsed = Vec::with_capacity(events.len());
+    for (committee, seq, envelope) in events {
+        let value: serde_json::Value = serde_json::from_str(&envelope)
+            .map_err(|e| LogError::Corrupt(format!("event envelope {committee} {seq}: {e}")))?;
+        scan.see_envelope(
+            &value,
+            &Place::Event {
+                committee: committee.clone(),
+                seq,
+            },
+        );
+        parsed.push((committee, seq, value));
+    }
+    let cursors: Vec<(String, String)> = {
+        let mut stmt = conn.prepare("SELECT DISTINCT committee, owner FROM cursors")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    for (committee, owner) in &cursors {
+        scan.see_address(
+            owner,
+            &Place::Cursor {
+                committee: committee.clone(),
+                owner: owner.clone(),
+            },
+        );
+    }
+    let beats: Vec<(String, String)> = {
+        let mut stmt = conn.prepare("SELECT committee, agent FROM heartbeats")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    for (committee, agent) in &beats {
+        scan.see_agent(
+            agent,
+            &Place::Heartbeat {
+                committee: committee.clone(),
+                agent: agent.clone(),
+            },
+        );
+    }
+    scan.check()?;
+    if scan.has_paths()
+        && let Some(file) = file
+    {
+        backup(conn, file)?;
+    }
+    let tx = conn.transaction()?;
+    if scan.has_paths() {
+        for (committee, seq, value) in &parsed {
+            let converted = Flattener::envelope(value);
+            if &converted == value {
+                continue;
+            }
+            let from = converted
+                .get("from")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            tx.execute(
+                "UPDATE events SET from_addr = ?1, envelope = ?2 WHERE committee = ?3 AND seq = ?4",
+                params![from, converted.to_string(), committee, seq],
+            )?;
+        }
+        for (committee, owner) in &cursors {
+            let flat = Flattener::address(owner);
+            if &flat != owner {
+                tx.execute(
+                    "UPDATE cursors SET owner = ?1 WHERE committee = ?2 AND owner = ?3",
+                    params![flat, committee, owner],
+                )?;
+            }
+        }
+        for (committee, agent) in &beats {
+            let flat = Flattener::agent(agent);
+            if &flat != agent {
+                tx.execute(
+                    "UPDATE heartbeats SET agent = ?1 WHERE committee = ?2 AND agent = ?3",
+                    params![flat, committee, agent],
+                )?;
+            }
+        }
+        tracing::info!(
+            agents = ?scan.owners(),
+            "converted the log to flat senator names"
+        );
+    }
+    tx.pragma_update(None, "user_version", version)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Copy the database at `file` to `<file>.pre-flat-names` (a free numbered
+/// name when that exists), consistently, before it is converted. The copy
+/// is never removed.
+fn backup(conn: &Connection, file: &Path) -> Result<std::path::PathBuf, LogError> {
+    let base = format!("{}.{PRE_FLAT_NAMES}", file.display());
+    let mut target = std::path::PathBuf::from(&base);
+    let mut n = 1;
+    while target.exists() {
+        target = std::path::PathBuf::from(format!("{base}.{n}"));
+        n += 1;
+    }
+    let to = target.to_string_lossy().into_owned();
+    conn.execute("VACUUM INTO ?1", [&to])?;
+    tracing::info!(copy = %target.display(), "saved the log before converting its names");
+    Ok(target)
 }
 
 fn seq_to_db(seq: Seq) -> Result<i64, LogError> {
@@ -604,6 +751,48 @@ impl LogStore for SqliteStore {
                 agent,
                 at: time_from_db(&seen_at)?,
             }))
+        })
+        .await
+    }
+
+    async fn registry(&self, prefix: &str) -> Result<Vec<(String, serde_json::Value)>, LogError> {
+        let prefix = prefix.to_string();
+        self.run(move |conn| {
+            let mut stmt = conn.prepare_cached(
+                "SELECT key, value FROM registry WHERE substr(key, 1, ?2) = ?1 ORDER BY key",
+            )?;
+            let len = i64::try_from(prefix.len()).unwrap_or(i64::MAX);
+            let rows = stmt.query_map(params![prefix, len], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                let (key, text) = row?;
+                let value = serde_json::from_str(&text)
+                    .map_err(|e| LogError::Corrupt(format!("registry {key}: {e}")))?;
+                out.push((key, value));
+            }
+            Ok(out)
+        })
+        .await
+    }
+
+    async fn put_registry(
+        &self,
+        key: &str,
+        value: Option<serde_json::Value>,
+    ) -> Result<(), LogError> {
+        let key = key.to_string();
+        self.run(move |conn| {
+            match value {
+                Some(value) => conn.execute(
+                    "INSERT INTO registry (key, value) VALUES (?1, ?2)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    params![key, value.to_string()],
+                )?,
+                None => conn.execute("DELETE FROM registry WHERE key = ?1", [key])?,
+            };
+            Ok(())
         })
         .await
     }

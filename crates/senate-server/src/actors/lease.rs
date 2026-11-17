@@ -310,12 +310,13 @@ impl Leases {
     /// refused ([`senate_core::reassign_transition`]).
     pub(crate) fn reassign(
         &self,
+        people: &senate_core::People,
         agent: &SenatorName,
         new_owner: &SenatorName,
         wall: DateTime<Utc>,
         head: Seq,
     ) -> Result<Option<PresencePayload>, String> {
-        senate_core::reassign_transition(&self.view(head), head, agent, new_owner, wall)
+        senate_core::reassign_transition(&self.view(head), people, head, agent, new_owner, wall)
             .map_err(|refused| refused.to_string())
     }
 
@@ -367,8 +368,13 @@ mod tests {
         s.parse().unwrap()
     }
 
+    /// The people of the Senate these leases are in: neither agent is one.
+    fn people() -> senate_core::People {
+        senate_core::People::new(["alice", "bob"].map(|h| senate_core::Name::new(h).unwrap()))
+    }
+
     fn alice() -> SenatorName {
-        path("alice/claude")
+        path("claude")
     }
 
     struct Clock {
@@ -463,18 +469,24 @@ mod tests {
         let mut l = Leases::new(T);
         let mut seq = 0;
         step(&mut l, &c, 0, Some(0), &mut seq);
-        let bob = path("bob/claude");
+        let bob = path("copilot");
         let (_, wall) = c.at(10);
-        let moved = l.reassign(&alice(), &bob, wall, Seq(10)).unwrap().unwrap();
+        let moved = l
+            .reassign(&people(), &alice(), &bob, wall, Seq(10))
+            .unwrap()
+            .unwrap();
         assert_eq!(moved.state, PresenceState::Reassigned);
         assert_eq!(moved.previous, Some(PresenceState::Online));
         l.apply(&moved, Seq(50));
-        assert_eq!(l.reassign(&alice(), &bob, wall, Seq(10)), Ok(None));
+        assert_eq!(
+            l.reassign(&people(), &alice(), &bob, wall, Seq(10)),
+            Ok(None)
+        );
         assert_eq!(step(&mut l, &c, 20, Some(20), &mut seq), None, "heartbeat");
         assert_eq!(step(&mut l, &c, 5_000, None, &mut seq), None, "silence");
         assert_eq!(l.view(Seq(60))[0].new_owner, Some(bob));
         let back = l
-            .reassign(&alice(), &alice(), wall, Seq(10))
+            .reassign(&people(), &alice(), &alice(), wall, Seq(10))
             .unwrap()
             .unwrap();
         assert_eq!(back.state, PresenceState::Online);
@@ -494,8 +506,8 @@ mod tests {
             wall: Utc::now(),
         };
         let mut board = PresenceBoard::new();
-        let bob = path("bob/claude");
-        let carol = path("carol/claude");
+        let bob = path("copilot");
+        let carol = path("aider");
         let committee = senate_core::CommitteeId::new("f").unwrap();
         let mk = |agent: &SenatorName, state, ago: i64| PresencePayload {
             agent: agent.clone(),

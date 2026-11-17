@@ -31,14 +31,15 @@ impl Seats {
     }
 
     /// Whether `person`, authenticated, may act as `senator`; if it is an
-    /// agent, seat it. `Ok(true)` when it was seated by this call.
+    /// agent, seat it under them. `Ok(true)` when it was seated by this
+    /// call.
     pub(crate) fn act_as(&self, person: &Name, senator: &SenatorName) -> Result<bool, RosterError> {
         let mut roster = self.roster.write().unwrap_or_else(PoisonError::into_inner);
         roster.may_act_as(person, senator)?;
-        if senator.is_senior() {
+        if senator == person {
             return Ok(false);
         }
-        roster.seat(senator.clone())
+        roster.seat(senator.clone(), person)
     }
 
     /// Seat an agent the log has already seen, with no person authenticating:
@@ -48,18 +49,19 @@ impl Seats {
         self.roster
             .write()
             .unwrap_or_else(PoisonError::into_inner)
-            .seat(agent)
+            .seat_again(agent)
     }
 
-    /// Replace the people, keeping the presider and the seated agents whose
-    /// person is still listed. Refused (and nothing changes) when the new
-    /// people break the roster's rules, e.g. the presider's person is gone.
+    /// Replace the people, keeping the named Speaker and the seated agents
+    /// whose person is still listed (or who have none yet). Refused (and
+    /// nothing changes) when the new people break the roster's rules.
     pub(crate) fn replace_seniors(&self, seniors: Vec<Senior>) -> Result<(), RosterError> {
         let mut roster = self.roster.write().unwrap_or_else(PoisonError::into_inner);
         let mut config: RosterConfig = roster.to_config();
-        config
-            .agents
-            .retain(|a| seniors.iter().any(|s| &s.handle == a.owner()));
+        config.agents.retain(|a| match &a.owner {
+            Some(owner) => seniors.iter().any(|s| &s.handle == owner),
+            None => true,
+        });
         config.seniors = seniors;
         *roster = Roster::try_from(config)?;
         Ok(())

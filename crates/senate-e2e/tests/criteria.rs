@@ -23,7 +23,7 @@ async fn chat_to_terminal_and_back_within_a_minute() {
     alice.open().await;
     let inbox = alice.inbox("s-alice");
     alice.session_start("s-alice", &inbox).await;
-    world.wait_connected("alice/claude", true).await;
+    world.wait_connected("claude", true).await;
 
     // A statement, so the Speaker relays it as a note; the push still
     // invites Alice's agent to reply.
@@ -60,13 +60,13 @@ async fn chat_to_terminal_and_back_within_a_minute() {
     assert!(chat.is_directed_to(&Address::Speaker));
     let relay = events.iter().find(|e| e.seq == thread).unwrap();
     assert_eq!(relay.kind, Kind::Note);
-    assert_eq!(relay.to, vec![claude("alice")]);
+    assert_eq!(relay.to, vec![senator("claude")]);
     assert_eq!(relay.on_behalf_of, Some(person("pm")));
 
     // The Speaker acknowledged in the PM's thread.
     world
         .wait_post("the relay ack", |p| {
-            p.replies_to("m_pm_1") && p.markdown.contains("[senator::alice/claude]")
+            p.replies_to("m_pm_1") && p.markdown.contains("[senator::claude]")
         })
         .await;
 
@@ -85,7 +85,7 @@ async fn chat_to_terminal_and_back_within_a_minute() {
         })
         .await;
     assert!(
-        reply.markdown.contains("[senator::alice/claude]"),
+        reply.markdown.contains("[senator::claude]"),
         "{}",
         reply.markdown
     );
@@ -113,11 +113,11 @@ async fn agent_to_agent_is_visible_and_correctable() {
     let bob_inbox = bob.inbox("s-bob");
     alice.session_start("s-alice", &alice_inbox).await;
     bob.session_start("s-bob", &bob_inbox).await;
-    world.wait_connected("alice/claude", true).await;
-    world.wait_connected("bob/claude", true).await;
+    world.wait_connected("claude", true).await;
+    world.wait_connected("copilot", true).await;
 
     let question = "网关的幂等键用哪个 header？仓库里 X-Idem-Key 和 Idempotency-Key 都有。";
-    let asked = alice.ask("s-alice", claude("bob"), question).await;
+    let asked = alice.ask("s-alice", senator(BOB_CLAUDE), question).await;
     let root = world
         .wait_post("the question as a new root in the group", |p| {
             p.is_root_in(GROUP) && p.markdown.contains("网关的幂等键")
@@ -130,7 +130,7 @@ async fn agent_to_agent_is_visible_and_correctable() {
         .expect("the root is a task card");
     let shown = format!("{}\n{}", card.title, card.markdown);
     assert!(
-        shown.contains("[senator::alice/claude]") && shown.contains("[senator::bob/claude]"),
+        shown.contains("[senator::claude]") && shown.contains("[senator::copilot]"),
         "{shown}"
     );
 
@@ -148,7 +148,7 @@ async fn agent_to_agent_is_visible_and_correctable() {
         })
         .await;
     assert!(
-        answer.markdown.contains("[senator::bob/claude]"),
+        answer.markdown.contains("[senator::copilot]"),
         "{}",
         answer.markdown
     );
@@ -190,7 +190,7 @@ async fn agent_to_agent_is_visible_and_correctable() {
         Some(asked.seq),
         "same log thread as the question"
     );
-    assert!(chat.is_directed_to(&claude("alice")) && chat.is_directed_to(&claude("bob")));
+    assert!(chat.is_directed_to(&senator("claude")) && chat.is_directed_to(&senator(BOB_CLAUDE)));
 
     alice.close().await;
     bob.close().await;
@@ -211,10 +211,10 @@ async fn a_closed_laptop_catches_up_in_order() {
     let bob_inbox = bob.inbox("s-bob");
     alice.session_start("s-alice", &alice_inbox).await;
     bob.session_start("s-bob", &bob_inbox).await;
-    world.wait_connected("alice/claude", true).await;
+    world.wait_connected("claude", true).await;
 
     alice.close().await;
-    world.wait_connected("alice/claude", false).await;
+    world.wait_connected("claude", false).await;
     let before = alice_inbox.messages().len();
 
     // Bob's agent asks; Alice is away, so the Speaker answers for her.
@@ -222,7 +222,7 @@ async fn a_closed_laptop_catches_up_in_order() {
         "根据日志 seq 3，退款上限是 30 天（Speaker 代答）。".into()
     ));
     let q1 = bob
-        .ask("s-bob", claude("alice"), "q1: 退款上限的常量叫什么？")
+        .ask("s-bob", senator("claude"), "q1: 退款上限的常量叫什么？")
         .await;
     let on_behalf = world
         .wait_post("the Speaker answering for alice", |p| {
@@ -230,7 +230,7 @@ async fn a_closed_laptop_catches_up_in_order() {
         })
         .await;
     assert!(
-        on_behalf.markdown.contains("[speaker::alice/claude]"),
+        on_behalf.markdown.contains("[speaker::claude]"),
         "{}",
         on_behalf.markdown
     );
@@ -273,7 +273,7 @@ async fn a_closed_laptop_catches_up_in_order() {
         .brain
         .answers(Ok("日志里没有答案，等 alice 回来确认。".into()));
     let q4 = bob
-        .ask("s-bob", claude("alice"), "q4: 回调签名用哪个密钥？")
+        .ask("s-bob", senator("claude"), "q4: 回调签名用哪个密钥？")
         .await;
     assert!(q1.seq < n2 && n2 < q4.seq);
     assert_eq!(
@@ -310,7 +310,7 @@ async fn a_closed_laptop_catches_up_in_order() {
         caught
             .items
             .iter()
-            .any(|i| i.event.on_behalf_of == Some(claude("alice"))),
+            .any(|i| i.event.on_behalf_of == Some(senator("claude"))),
         "and the Speaker's answers on her behalf"
     );
 

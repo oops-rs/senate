@@ -39,7 +39,7 @@ use std::time::Instant;
 use ractor::{Actor, ActorProcessingErr, ActorRef, MessagingErr, RpcReplyPort, SupervisionEvent};
 use senate_core::hub::SCAN_PAGE;
 use senate_core::{
-    AgentPresence, Appended, CommitteeId, Event, Kind, Name, NewEvent, PresenceBoard,
+    AgentPresence, Appended, CommitteeId, Event, Kind, Name, NewEvent, People, PresenceBoard,
     PresencePayload, SenatorName, Seq, presence_event, reassign_event,
 };
 use senate_log::{LogError, LogStore};
@@ -282,6 +282,7 @@ impl CommitteeState {
 async fn presence_board(
     store: &dyn LogStore,
     committee: &CommitteeId,
+    people: &People,
 ) -> Result<(PresenceBoard, BTreeSet<SenatorName>), LogError> {
     let mut board = PresenceBoard::new();
     let mut authors = BTreeSet::new();
@@ -294,7 +295,7 @@ async fn presence_board(
             if event.kind == Kind::Presence {
                 board.observe(event);
             }
-            if let Some(agent) = event.from.as_agent() {
+            if let Some(agent) = people.as_agent(&event.from) {
                 authors.insert(agent.clone());
             }
         }
@@ -314,7 +315,9 @@ impl Actor for CommitteeActor {
     ) -> Result<CommitteeState, ActorProcessingErr> {
         let head = args.store.head(&args.committee).await?;
         let mut leases = Leases::new(args.leases);
-        let (board, authors) = presence_board(args.store.as_ref(), &args.committee).await?;
+        let people = args.seats.snapshot().people();
+        let (board, authors) =
+            presence_board(args.store.as_ref(), &args.committee, &people).await?;
         let (now, wall) = (Instant::now(), chrono::Utc::now());
         let stored = args.store.heartbeats(&args.committee).await?;
         let beats: BTreeMap<SenatorName, chrono::DateTime<chrono::Utc>> =
@@ -330,8 +333,8 @@ impl Actor for CommitteeActor {
         // Seats are not stored, so the agents the log has seen sit again:
         // every agent with a presence, a recent heartbeat, or an event of
         // its own. Each was seated once (nothing is written as an agent that
-        // is not), and `senator::<person>/*` must resolve after a restart as
-        // it did before.
+        // is not), and `senator::*` must resolve after a restart as it did
+        // before.
         let seen = board
             .agents()
             .into_iter()
@@ -434,7 +437,9 @@ impl Actor for CommitteeActor {
                 by,
                 reply,
             } => {
+                let people = state.args.seats.snapshot().people();
                 let result = match state.leases.reassign(
+                    &people,
                     &agent,
                     &new_owner,
                     chrono::Utc::now(),

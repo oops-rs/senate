@@ -36,7 +36,7 @@ fn verdict(root: Seq, v: TriageVerdict) -> NewEvent {
         .with_meta(meta::TRIAGE, triage.value())
 }
 
-/// alice/claude's session, joined; pushes in Chinese, which these tests
+/// claude's session, joined; pushes in Chinese, which these tests
 /// read.
 async fn joined(h: &mut Harness, timing: senate_bridge::daemon::Timing) -> FakeInbox {
     h.config.locale = Locale::Zh;
@@ -226,7 +226,7 @@ async fn the_session_that_took_a_root_gets_its_thread() {
     let owner = h.store().owner(&committee(), q.seq).unwrap().unwrap();
     assert_eq!(
         (owner.agent.to_string(), owner.session.as_str()),
-        ("alice/claude".to_string(), "s1")
+        ("claude".to_string(), "s1")
     );
     h.stop().await;
 }
@@ -246,15 +246,15 @@ async fn a_thread_owner_does_not_take_another_agents_follow_ups() {
     let mut env = h.env_for("s2", Some(&reviewer_inbox.path));
     env.agent = Some("reviewer".into());
     h.hook_with(HookKind::SessionStart, "s2", &wd, &env).await;
-    h.wait_stream_of("refund-v2", "alice/claude").await;
-    h.wait_stream_of("refund-v2", "alice/reviewer").await;
+    h.wait_stream_of("refund-v2", "claude").await;
+    h.wait_stream_of("refund-v2", "reviewer").await;
 
     let q = h.server.append(relayed_question("退款上限？"));
     claude_inbox.wait_messages(1).await;
     h.server.append(
         NewEvent::new(committee(), Kind::Chat, person("pm"), "reviewer 也看一下")
             .in_thread(q.seq)
-            .to(senator("alice/reviewer")),
+            .to(senator("reviewer")),
     );
     let m = reviewer_inbox.wait_messages(1).await;
     assert!(pos(&m[0], 2).is_some(), "{}", m[0]);
@@ -286,13 +286,12 @@ fn reassigned(who: &str, owner: Option<&str>, ms: i64) -> NewEvent {
 async fn reassigned_work_reaches_the_new_owner_until_handed_back() {
     let mut h = Harness::new().await;
     let inbox = joined(&mut h, gated(Duration::from_millis(200))).await;
-    // bob/claude's work is handed to alice/claude (this machine).
-    h.server
-        .append(reassigned("bob/claude", Some("alice/claude"), 0));
+    // copilot's work is handed to claude (this machine).
+    h.server.append(reassigned("copilot", Some("claude"), 0));
     // bob's other agent was not reassigned: its messages stay its own.
     h.server.append(question(
         Address::Speaker,
-        senator("bob/codex"),
+        senator("aider"),
         "codex 那边呢？",
     ));
     let q = h.server.append(question(
@@ -304,15 +303,15 @@ async fn reassigned_work_reaches_the_new_owner_until_handed_back() {
     assert!(pos(&msgs[0], q.seq.0).is_some(), "{}", msgs[0]);
     assert!(pos(&msgs[0], 2).is_none(), "{}", msgs[0]);
     assert!(
-        msgs[0].contains("给 [senator::bob/claude] 的消息（你已接手）"),
+        msgs[0].contains("给 [senator::copilot] 的消息（你已接手）"),
         "{}",
         msgs[0]
     );
-    // Stored as it was: still to senator::bob/claude.
+    // Stored as it was: still to senator::copilot.
     assert_eq!(h.server.events("refund-v2")[2].to, vec![claude("bob")]);
 
     // Handed back: bob's messages are his again.
-    h.server.append(reassigned("bob/claude", None, 1));
+    h.server.append(reassigned("copilot", None, 1));
     h.server
         .append(question(Address::Speaker, claude("bob"), "还在吗？"));
     tokio::time::sleep(Duration::from_millis(800)).await;
@@ -320,7 +319,7 @@ async fn reassigned_work_reaches_the_new_owner_until_handed_back() {
     h.stop().await;
 }
 
-/// The Speaker's takeover answer for alice/claude (or a provisional one,
+/// The Speaker's takeover answer for claude (or a provisional one,
 /// which is no answer), in `q`'s thread.
 fn takeover_answer(q: Seq, provisional: bool) -> NewEvent {
     let answer = NewEvent::new(
@@ -340,14 +339,14 @@ fn takeover_answer(q: Seq, provisional: bool) -> NewEvent {
     }
 }
 
-/// While alice/claude was away the Speaker answered for it; when it comes
+/// While claude was away the Speaker answered for it; when it comes
 /// back the question is not pushed again (the hand-back note lists it). A
 /// provisional answer leaves it to the agent.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_question_the_speaker_answered_while_away_is_not_pushed_on_return() {
     let mut h = Harness::with_committees(&["refund-v2"]).await;
     h.start().await;
-    // An earlier session puts alice/claude on record; it is away now.
+    // An earlier session puts claude on record; it is away now.
     let wd = h.workdir("w1", Some("refund-v2"));
     h.hook(HookKind::SessionStart, "s0", &wd, None).await;
     h.hook(HookKind::SessionEnd, "s0", &wd, None).await;

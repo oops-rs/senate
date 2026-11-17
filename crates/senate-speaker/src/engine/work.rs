@@ -16,7 +16,7 @@
 //!
 //! A run starts from one agent's checkpoint. The target is settled to a
 //! concrete agent before anything is restated: named outright
-//! (`/work alice/codex …`), a person's only agent, or, for a person with
+//! (`/work codex …`), a person's only agent, or, for a person with
 //! several, the one the Speaker settles on (asking in the thread when it
 //! cannot tell). The restatement names the agent, so a wrong pick is caught
 //! at the yes. A reassignment names an agent on both sides the same way, and
@@ -244,7 +244,7 @@ impl Engine {
     /// it now (an agent's first `online` is not logged, so a bridge that has
     /// only joined leaves nothing in the log), or the config lists them.
     async fn is_developer(&self, committee: &CommitteeId, person: &Name) -> bool {
-        let mine = |agent: &SenatorName| agent.owner() == person;
+        let mine = |agent: &SenatorName| self.roster.owner_of(agent) == Some(person);
         let active = self.committees.get(committee).is_some_and(|state| {
             state.activity.keys().any(mine) || state.presence.keys().any(mine)
         });
@@ -308,11 +308,11 @@ impl Engine {
             confirm: true,
         };
         let agent = match self.settle(chat, target, instruction, waiting).await? {
-            Settled::To(senator) if senator.is_junior() => senator,
+            Settled::To(senator) if !self.roster.is_person(&senator) => senator,
             Settled::To(person) => {
                 // A person with no agent here has no checkpoint to start from.
                 return self
-                    .say(chat, &render::no_agent_to_work_from(l, person.owner()))
+                    .say(chat, &render::no_agent_to_work_from(l, person.name()))
                     .await;
             }
             Settled::Unknown => {
@@ -430,9 +430,9 @@ impl Engine {
                 confirm: true,
             };
             match self.settle(chat, raw, "", waiting).await? {
-                Settled::To(agent) if agent.is_junior() => sides.push(agent),
+                Settled::To(agent) if !self.roster.is_person(&agent) => sides.push(agent),
                 Settled::To(person) => {
-                    let text = render::no_agent_to_reassign(l, person.owner());
+                    let text = render::no_agent_to_reassign(l, person.name());
                     return self.say(chat, &text).await;
                 }
                 Settled::Unknown => {
@@ -478,7 +478,7 @@ impl Engine {
     /// Never run: only people may ask.
     pub(super) async fn refuse_agent_work(&mut self, event: &Event) -> Result<bool, Stall> {
         let l = self.locale(&event.committee);
-        if !event.from.is_junior()
+        if !self.roster.is_agent_address(&event.from)
             || !event.to.contains(&Address::Speaker)
             || !matches!(
                 parse_command(&event.body, l),
@@ -649,7 +649,7 @@ impl Engine {
             return Ok(Err(render::work_unconfigured(l)));
         };
         let requester = &run.requester;
-        if !run.target_agent.is_junior() {
+        if self.roster.is_person(&run.target_agent) {
             return Ok(Err(render::agents_cannot_work(l)));
         }
         let files = match run.checkpoint_seq {
@@ -1041,7 +1041,8 @@ impl Engine {
         event: &Event,
         root: Seq,
     ) -> Result<Option<SenatorName>, Stall> {
-        let Some(author) = event.from.as_agent() else {
+        let people = self.roster.people();
+        let Some(author) = people.as_agent(&event.from) else {
             return Ok(None);
         };
         let Some(state) = self.committees.get(&event.committee) else {
@@ -1061,7 +1062,7 @@ impl Engine {
         };
         Ok(to
             .iter()
-            .filter_map(Address::as_agent)
+            .filter_map(|a| people.as_agent(a))
             .find(|old| state.reassigned.get(*old) == Some(author))
             .cloned())
     }
@@ -1080,6 +1081,11 @@ impl Engine {
             .hub
             .latest_checkpoint(&event.committee, &payload.agent)
             .await?;
+        let by = event
+            .on_behalf_of
+            .as_ref()
+            .and_then(Address::as_senator)
+            .and_then(|s| self.person_behind(s));
         let note = NewEvent::new(
             event.committee.clone(),
             Kind::Note,
@@ -1088,12 +1094,8 @@ impl Engine {
                 l,
                 &event.committee,
                 &payload.agent,
-                owner,
-                event
-                    .on_behalf_of
-                    .as_ref()
-                    .and_then(Address::as_senator)
-                    .map(SenatorName::owner),
+                self.roster.owner_of(owner).unwrap_or(owner.name()),
+                by.as_ref(),
                 checkpoint.as_ref(),
                 &self.branch_naming(),
             ),

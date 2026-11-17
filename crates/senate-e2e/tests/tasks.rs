@@ -46,7 +46,7 @@ async fn task_threads_live_in_the_agent_group_as_cards() {
 
     world.brain.judges(TriageVerdict::Agent, "查代码就能答");
     let asked = alice
-        .ask("s-alice", claude("bob"), "网关幂等用哪个 header？")
+        .ask("s-alice", senator(BOB_CLAUDE), "网关幂等用哪个 header？")
         .await;
     let root = task_card(&world, "网关幂等").await;
     assert!(
@@ -106,7 +106,7 @@ async fn binding_creates_the_agent_group() {
     alice.open().await;
     let alice_inbox = alice.inbox("s-alice");
     alice.session_start("s-alice", &alice_inbox).await;
-    world.wait_connected("alice/claude", true).await;
+    world.wait_connected("claude", true).await;
     world.bind().await;
 
     let created = eventually("the Agent group to be created", || {
@@ -150,7 +150,7 @@ async fn binding_creates_the_agent_group() {
     let bob_inbox = bob.inbox("s-bob");
     bob.session_start("s-bob", &bob_inbox).await;
     alice
-        .ask("s-alice", claude("bob"), "网关幂等用哪个 header？")
+        .ask("s-alice", senator(BOB_CLAUDE), "网关幂等用哪个 header？")
         .await;
     world
         .wait_post("the task card in the created group", |p| {
@@ -185,7 +185,7 @@ async fn a_request_goes_to_the_person_first() {
     let request = bob
         .request(
             "s-bob",
-            claude("alice"),
+            senator("claude"),
             "把网关 header 改成 Idempotency-Key",
         )
         .await;
@@ -225,7 +225,7 @@ async fn a_request_goes_to_the_person_first() {
     let events = world.events().await;
     assert!(events.iter().any(|e| e.kind == Kind::Request
         && e.from == person("alice")
-        && e.to == [claude("alice")]
+        && e.to == [senator("claude")]
         && e.thread == Some(request.seq)));
     alice.close().await;
     bob.close().await;
@@ -248,7 +248,7 @@ async fn an_agent_escalates() {
 
     world.brain.judges(TriageVerdict::Agent, "事实");
     let asked = bob
-        .ask("s-bob", claude("alice"), "这个能延到下个迭代吗？")
+        .ask("s-bob", senator("claude"), "这个能延到下个迭代吗？")
         .await;
     alice_inbox.wait_for("下个迭代").await;
     alice
@@ -286,7 +286,7 @@ async fn a_person_gets_there_first() {
         Ok(senate_speaker::scripted_verdict(TriageVerdict::Agent, None)),
     );
     alice
-        .ask("s-alice", claude("bob"), "回调签名用哪个密钥？")
+        .ask("s-alice", senator(BOB_CLAUDE), "回调签名用哪个密钥？")
         .await;
     let root = task_card(&world, "回调签名").await;
     let thread = world.thread_of(&root.message_ref);

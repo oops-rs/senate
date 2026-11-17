@@ -14,8 +14,8 @@ use senate_core::Hub as _;
 use senate_core::api::{AppendResponse, Me};
 use senate_core::{
     Address, Awaiting, CheckpointFiles, CheckpointPayload, CheckpointTrigger, DocketPage, Kind,
-    NewEvent, OutputLevel, PickPayload, SpeakerSeat, StatusPayload, StatusState, TriagePayload,
-    TriageVerdict, meta,
+    NewEvent, OutputLevel, PickPayload, Senior, SpeakerSeat, StatusPayload, StatusState,
+    TriagePayload, TriageVerdict, meta,
 };
 use senate_log::MemoryStore;
 use senate_server::{Server, ServerConfig};
@@ -41,6 +41,13 @@ async fn start(built_in: bool, configure: impl FnOnce(&mut ServerConfig)) -> Bui
             client: reqwest::Client::new(),
         },
     }
+}
+
+/// claude, alice's agent, holds the Speaker's seat: with several people
+/// listed, a named Speaker is listed under its person.
+fn claude_presides(c: &mut ServerConfig) {
+    c.roster.speaker = Some(path("claude"));
+    c.roster.agents = vec![seated("claude", "alice")];
 }
 
 async fn me(server: &TestServer, token: &str) -> Me {
@@ -102,35 +109,36 @@ fn speaker_only_writes(root: senate_core::Seq) -> Vec<NewEvent> {
         from_speaker(Kind::Answer, "from its checkpoint")
             .in_thread(root)
             .to(person_addr("alice"))
-            .on_behalf_of(Address::Senator(path("alice/codex")))
+            .on_behalf_of(Address::Senator(path("codex")))
             .with_meta(meta::TAKEOVER, json!(true)),
     ]
 }
 
 #[tokio::test]
-async fn a_nested_senate_is_presided_over_by_its_presider() {
+async fn a_senate_of_one_person_seats_its_named_speaker_under_her() {
+    // Alice alone, and the Speaker named with no owner: it is hers.
     let Built { server } = start(false, |c| {
-        c.roster.presider = Some(path("alice/claude"));
+        c.roster.seniors = vec![Senior::new(name("alice"))];
+        c.roster.speaker = Some(path("claude"));
     })
     .await;
     let alice = me(&server, ALICE).await;
-    assert_eq!(
-        alice.speaker,
-        Some(SpeakerSeat::Senator(path("alice/claude")))
-    );
+    assert_eq!(alice.speaker, Some(SpeakerSeat::Senator(path("claude"))));
+    assert_eq!(alice.agents, [path("claude")], "seated from the start");
     assert!(!alice.triaged, "a senator-held seat holds no root back");
 
-    // A subagent asks another; alice's presiding session writes as the Speaker.
+    // One agent asks another; alice's presiding session covers as the
+    // Speaker for the one that is away.
     let asked = stored(
         &server,
         ALICE,
         &NewEvent::new(
             committee(),
             Kind::Question,
-            Address::Senator(path("alice/claude/reviewer")),
+            Address::Senator(path("reviewer")),
             "covered the edge cases?",
         )
-        .to(Address::Senator(path("alice/claude/codex"))),
+        .to(Address::Senator(path("codex"))),
     )
     .await;
     let covered = stored(
@@ -138,19 +146,16 @@ async fn a_nested_senate_is_presided_over_by_its_presider() {
         ALICE,
         &from_speaker(Kind::Answer, "yes, per its checkpoint")
             .in_thread(asked.seq)
-            .to(Address::Senator(path("alice/claude/reviewer")))
-            .on_behalf_of(Address::Senator(path("alice/claude/codex")))
+            .to(Address::Senator(path("reviewer")))
+            .on_behalf_of(Address::Senator(path("codex")))
             .with_meta(meta::TAKEOVER, json!(true)),
     )
     .await;
     assert_eq!(covered.from, Address::Speaker, "stored as the Speaker's");
     assert!(senate_core::is_takeover(&covered));
-    assert_eq!(
-        covered.author().unwrap().to_string(),
-        "[speaker::alice/claude/codex]"
-    );
+    assert_eq!(covered.author().unwrap().to_string(), "[speaker::codex]");
 
-    // Bob is known here and holds no seat.
+    // Bob is not of this Senate, and holds no seat.
     for event in speaker_only_writes(asked.seq) {
         api_error(
             server.post_event(BOB, &event).await,
@@ -163,13 +168,10 @@ async fn a_nested_senate_is_presided_over_by_its_presider() {
 
 #[tokio::test]
 async fn the_seat_holders_person_writes_what_only_the_speaker_writes() {
-    let Built { server } = start(false, |c| {
-        c.roster.speaker = Some(path("alice/claude"));
-    })
-    .await;
+    let Built { server } = start(false, claude_presides).await;
     assert_eq!(
         me(&server, BOB).await.speaker,
-        Some(SpeakerSeat::Senator(path("alice/claude"))),
+        Some(SpeakerSeat::Senator(path("claude"))),
         "everyone is told who presides"
     );
     let asked = stored(
@@ -178,10 +180,10 @@ async fn the_seat_holders_person_writes_what_only_the_speaker_writes() {
         &NewEvent::new(
             committee(),
             Kind::Question,
-            Address::Senator(path("alice/claude")),
+            Address::Senator(path("claude")),
             "is the migration done?",
         )
-        .to(Address::Senator(path("alice/codex"))),
+        .to(Address::Senator(path("codex"))),
     )
     .await;
     for event in speaker_only_writes(asked.seq) {
@@ -223,7 +225,7 @@ async fn the_seat_holders_person_writes_what_only_the_speaker_writes() {
         from_speaker(Kind::Note, "x").with_meta(
             meta::PICK,
             PickPayload {
-                owner: name("alice"),
+                owner: None,
                 candidates: vec![],
             }
             .value(),
@@ -236,16 +238,12 @@ async fn the_seat_holders_person_writes_what_only_the_speaker_writes() {
         )
         .await;
     }
-    // On behalf of someone who could not sit here.
+    // On behalf of no senator: a path inside a name is not one.
+    let mut nested =
+        serde_json::to_value(from_speaker(Kind::Answer, "x").in_thread(asked.seq)).unwrap();
+    nested["on_behalf_of"] = json!("senator::alice/claude");
     api_error(
-        server
-            .post_event(
-                ALICE,
-                &from_speaker(Kind::Answer, "x")
-                    .in_thread(asked.seq)
-                    .on_behalf_of(Address::Senator(path("dave/claude"))),
-            )
-            .await,
+        server.post_json(ALICE, &nested).await,
         StatusCode::BAD_REQUEST,
         "bad_request",
     )
@@ -276,10 +274,10 @@ async fn nobody_writes_as_the_built_in_speaker_or_where_nobody_presides() {
             &NewEvent::new(
                 committee(),
                 Kind::Question,
-                Address::Senator(path("alice/claude")),
+                Address::Senator(path("claude")),
                 "q",
             )
-            .to(Address::Senator(path("alice/codex"))),
+            .to(Address::Senator(path("codex"))),
         )
         .await;
         for event in speaker_only_writes(asked.seq) {
@@ -296,16 +294,22 @@ async fn nobody_writes_as_the_built_in_speaker_or_where_nobody_presides() {
 }
 
 #[tokio::test]
-async fn the_built_in_speaker_never_sits_in_a_nested_senate_nor_beside_a_named_one() {
-    for configure in [
-        (|c: &mut ServerConfig| c.roster.presider = Some(path("alice/claude")))
-            as fn(&mut ServerConfig),
-        |c: &mut ServerConfig| c.roster.speaker = Some(path("alice/claude")),
-    ] {
+async fn the_built_in_speaker_never_sits_beside_a_named_one() {
+    // A Senate has one Speaker.
+    let mut config = ServerConfig::new(roster(), tokens());
+    claude_presides(&mut config);
+    let refused = Server::builder(config, Arc::new(MemoryStore::new()))
+        .built_in_speaker(true)
+        .start()
+        .await;
+    assert!(refused.is_err());
+
+    // And a named Speaker nobody runs, among several people, is no Speaker.
+    for built_in in [true, false] {
         let mut config = ServerConfig::new(roster(), tokens());
-        configure(&mut config);
+        config.roster.speaker = Some(path("claude"));
         let refused = Server::builder(config, Arc::new(MemoryStore::new()))
-            .built_in_speaker(true)
+            .built_in_speaker(built_in)
             .start()
             .await;
         assert!(refused.is_err());
@@ -315,11 +319,19 @@ async fn the_built_in_speaker_never_sits_in_a_nested_senate_nor_beside_a_named_o
 #[tokio::test]
 async fn a_persons_message_for_one_of_several_agents_is_put_to_the_speaker() {
     let Built { server } = start(false, |c| {
-        c.roster.speaker = Some(path("alice/claude"));
-        c.roster.agents = vec![path("alice/claude"), path("alice/codex")];
+        c.roster.speaker = Some(path("claude"));
+        c.roster.agents = vec![seated("claude", "alice"), seated("codex", "alice")];
     })
     .await;
-    let wildcard = Address::AgentOf(name("alice"));
+    // Both are on the committee (a heartbeat, and no stream: neither is
+    // connected), so `senator::*` could be either.
+    for agent in ["claude", "codex"] {
+        assert_eq!(
+            server.heartbeat(ALICE, agent).await.status(),
+            StatusCode::NO_CONTENT
+        );
+    }
+    let wildcard = Address::any_agent();
     let picked = stored(
         &server,
         BOB,
@@ -334,8 +346,11 @@ async fn a_persons_message_for_one_of_several_agents_is_put_to_the_speaker() {
     .await;
     assert_eq!(picked.to, [Address::Speaker]);
     let pick = PickPayload::of(&picked).unwrap();
-    assert_eq!(pick.owner, name("alice"));
-    assert_eq!(pick.candidates, [path("alice/claude"), path("alice/codex")]);
+    assert_eq!(
+        pick.owner, None,
+        "the agents on the committee, not a person's"
+    );
+    assert_eq!(pick.candidates, [path("claude"), path("codex")]);
 
     // An agent is refused with the candidates, as everywhere.
     let refused = api_error(
@@ -345,7 +360,7 @@ async fn a_persons_message_for_one_of_several_agents_is_put_to_the_speaker() {
                 &NewEvent::new(
                     committee(),
                     Kind::Question,
-                    Address::Senator(path("bob/claude")),
+                    Address::Senator(path("aider")),
                     "who owns refunds?",
                 )
                 .to(wildcard.clone()),
@@ -361,7 +376,7 @@ async fn a_persons_message_for_one_of_several_agents_is_put_to_the_speaker() {
     let page = docket(&server).await;
     assert_eq!(page.items.len(), 1);
     assert!(matches!(page.items[0].awaiting, Awaiting::Pick { .. }));
-    for agent in ["alice/claude", "alice/codex"] {
+    for agent in ["claude", "codex"] {
         assert!(page.seats.iter().any(|s| s.agent == path(agent)));
     }
     assert!(page.seats.iter().all(|s| !s.connected));
@@ -371,7 +386,7 @@ async fn a_persons_message_for_one_of_several_agents_is_put_to_the_speaker() {
         &server,
         ALICE,
         &from_speaker(Kind::Question, "who owns refunds?")
-            .to(Address::Senator(path("alice/codex")))
+            .to(Address::Senator(path("codex")))
             .on_behalf_of(person_addr("bob"))
             .with_meta(meta::RELAYED_FROM, json!(picked.seq.0)),
     )
@@ -388,15 +403,15 @@ async fn a_persons_message_for_one_of_several_agents_is_put_to_the_speaker() {
     assert!(matches!(
         &page.items[..],
         [item] if item.event.seq == relay.seq
-            && item.awaiting == Awaiting::Away { agents: vec![path("alice/codex")] }
+            && item.awaiting == Awaiting::Away { agents: vec![path("codex")] }
     ));
 }
 
 #[tokio::test]
 async fn a_question_to_the_seat_holder_is_never_for_the_speaker_to_cover() {
     let Built { server } = start(false, |c| {
-        c.roster.speaker = Some(path("alice/claude"));
-        c.roster.agents = vec![path("alice/claude"), path("alice/codex")];
+        c.roster.speaker = Some(path("claude"));
+        c.roster.agents = vec![seated("claude", "alice"), seated("codex", "alice")];
     })
     .await;
     // Nobody is connected: both agents are away.
@@ -404,14 +419,14 @@ async fn a_question_to_the_seat_holder_is_never_for_the_speaker_to_cover() {
         &server,
         BOB,
         &NewEvent::new(committee(), Kind::Question, person_addr("bob"), "status?")
-            .to(Address::Senator(path("alice/claude"))),
+            .to(Address::Senator(path("claude"))),
     )
     .await;
     let to_other = stored(
         &server,
         BOB,
         &NewEvent::new(committee(), Kind::Question, person_addr("bob"), "status?")
-            .to(Address::Senator(path("alice/codex"))),
+            .to(Address::Senator(path("codex"))),
     )
     .await;
     let page = docket(&server).await;
@@ -420,7 +435,7 @@ async fn a_question_to_the_seat_holder_is_never_for_the_speaker_to_cover() {
         matches!(
             &page.items[..],
             [item] if item.event.seq == to_other.seq
-                && item.awaiting == Awaiting::Away { agents: vec![path("alice/codex")] }
+                && item.awaiting == Awaiting::Away { agents: vec![path("codex")] }
         ),
         "{:?}",
         page.items
@@ -432,30 +447,34 @@ async fn a_question_to_the_seat_holder_is_never_for_the_speaker_to_cover() {
 async fn without_a_senator_in_the_seat_a_wildcard_is_still_refused() {
     for built_in in [true, false] {
         let Built { server } = start(built_in, |c| {
-            c.roster.agents = vec![path("alice/claude"), path("alice/codex")];
+            c.roster.agents = vec![seated("claude", "alice"), seated("codex", "alice")];
         })
         .await;
-        api_error(
+        for agent in ["claude", "codex"] {
+            assert_eq!(
+                server.heartbeat(ALICE, agent).await.status(),
+                StatusCode::NO_CONTENT
+            );
+        }
+        let refused = api_error(
             server
                 .post_event(
                     BOB,
                     &NewEvent::new(committee(), Kind::Question, person_addr("bob"), "?")
-                        .to(Address::AgentOf(name("alice"))),
+                        .to(Address::any_agent()),
                 )
                 .await,
             StatusCode::CONFLICT,
             "ambiguous_recipient",
         )
         .await;
+        assert_eq!(refused.candidates, [path("claude"), path("codex")]);
     }
 }
 
 #[tokio::test]
 async fn the_docket_names_each_agents_latest_checkpoint() {
-    let Built { server } = start(false, |c| {
-        c.roster.presider = Some(path("alice/claude"));
-    })
-    .await;
+    let Built { server } = start(false, claude_presides).await;
     let payload = CheckpointPayload {
         branch: "feature/refund-v2/alice".into(),
         commit: "a41f9c2e00000000000000000000000000000000".into(),
@@ -474,7 +493,7 @@ async fn the_docket_names_each_agents_latest_checkpoint() {
         &NewEvent::new(
             committee(),
             Kind::Checkpoint,
-            Address::Senator(path("alice/claude/codex")),
+            Address::Senator(path("codex")),
             "callbacks done",
         )
         .with_meta(meta::CHECKPOINT, payload.value()),
@@ -486,17 +505,17 @@ async fn the_docket_names_each_agents_latest_checkpoint() {
         &NewEvent::new(
             committee(),
             Kind::Question,
-            Address::Senator(path("alice/claude/reviewer")),
+            Address::Senator(path("reviewer")),
             "done?",
         )
-        .to(Address::Senator(path("alice/claude/codex"))),
+        .to(Address::Senator(path("codex"))),
     )
     .await;
     let page = docket(&server).await;
     let codex = page
         .seats
         .iter()
-        .find(|s| s.agent == path("alice/claude/codex"))
+        .find(|s| s.agent == path("codex"))
         .unwrap();
     assert_eq!(codex.checkpoint.as_ref().unwrap().summary, "callbacks done");
     assert_eq!(codex.open_threads, 1);
@@ -509,66 +528,44 @@ async fn the_docket_names_each_agents_latest_checkpoint() {
         &NewEvent::new(
             committee(),
             Kind::Answer,
-            Address::Senator(path("alice/claude/codex")),
+            Address::Senator(path("codex")),
             "yes",
         )
         .in_thread(asked.seq)
-        .to(Address::Senator(path("alice/claude/reviewer"))),
+        .to(Address::Senator(path("reviewer"))),
     )
     .await;
     assert!(docket(&server).await.items.is_empty());
 }
 
 #[tokio::test]
-async fn the_presiding_agent_follows_the_senate_it_presides_over_without_sitting_in_it() {
-    let Built { server } = start(false, |c| {
-        c.roster.presider = Some(path("alice/claude"));
-    })
-    .await;
-    // Its stream and heartbeat, as the Speaker's connection.
-    let mut stream = server
-        .stream_as(ALICE, Some("alice/claude"), None, None)
-        .await;
-    let beat = server
-        .request(
-            Method::POST,
-            &senate_core::api::heartbeat_path(&committee()),
-            ALICE,
-        )
-        .json(&senate_core::api::Heartbeat {
-            agent: path("alice/claude"),
-            sessions: 1,
-            cursor: senate_core::Seq::ZERO,
-        })
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(beat.status(), StatusCode::NO_CONTENT);
-    // It is not seated, and does not write as itself here.
+async fn the_seat_holder_follows_the_senate_as_the_speaker_and_sits_in_it() {
+    let Built { server } = start(false, claude_presides).await;
+    // Its stream and heartbeat: the Speaker's connection, and its own.
+    let mut stream = server.stream_as(ALICE, Some("claude"), None, None).await;
+    assert_eq!(
+        server.heartbeat(ALICE, "claude").await.status(),
+        StatusCode::NO_CONTENT
+    );
+    // It sits here, under alice, and writes as itself too.
     let me = me(&server, ALICE).await;
-    assert!(me.agents.is_empty(), "{:?}", me.agents);
-    api_error(
-        server
-            .post_event(
-                ALICE,
-                &NewEvent::new(
-                    committee(),
-                    Kind::Note,
-                    Address::Senator(path("alice/claude")),
-                    "x",
-                ),
-            )
-            .await,
-        StatusCode::FORBIDDEN,
-        "forbidden",
+    assert_eq!(me.agents, [path("claude")]);
+    stored(
+        &server,
+        ALICE,
+        &NewEvent::new(
+            committee(),
+            Kind::Note,
+            Address::Senator(path("claude")),
+            "x",
+        ),
     )
     .await;
     // What is said to the Speaker reaches it.
     let asked = stored(
         &server,
         ALICE,
-        &from_speaker(Kind::Question, "callbacks covered?")
-            .to(Address::Senator(path("alice/claude/reviewer"))),
+        &from_speaker(Kind::Question, "callbacks covered?").to(Address::Senator(path("reviewer"))),
     )
     .await;
     let answer = stored(
@@ -577,7 +574,7 @@ async fn the_presiding_agent_follows_the_senate_it_presides_over_without_sitting
         &NewEvent::new(
             committee(),
             Kind::Answer,
-            Address::Senator(path("alice/claude/reviewer")),
+            Address::Senator(path("reviewer")),
             "yes",
         )
         .in_thread(asked.seq)
@@ -585,26 +582,31 @@ async fn the_presiding_agent_follows_the_senate_it_presides_over_without_sitting
     )
     .await;
     let mut seen = Vec::new();
-    while seen.len() < 2 {
-        seen.push(stream.event().await.unwrap().seq);
+    while let Some(event) = stream.event().await {
+        if event.seq >= asked.seq {
+            seen.push(event.seq);
+        }
+        if seen.len() == 2 {
+            break;
+        }
     }
     assert_eq!(seen, [asked.seq, answer.seq]);
     // Bob cannot follow it as the Speaker.
     assert_eq!(
         server
-            .try_stream(BOB, Some("alice/claude"), None, None)
+            .try_stream(BOB, Some("claude"), None, None)
             .await
             .status(),
         StatusCode::FORBIDDEN
     );
 }
 
-/// The agent that holds the seat of a top Senate also sits in it, directly
-/// under its person. Its stream and heartbeat are the Speaker's connection
-/// (no seat needed) and its own (a seat), so contact as that agent seats it
-/// like any other agent: `senator::alice/*` must then count it.
+/// The agent that holds the seat sits in the Senate under its person from
+/// the start. Its stream and heartbeat are the Speaker's connection and its
+/// own, so once it is on the committee `senator::*` counts it like any
+/// other agent.
 #[tokio::test]
-async fn the_seat_holder_of_the_top_senate_is_seated_by_its_first_contact_too() {
+async fn the_seat_holder_is_seated_from_the_start_and_counted_by_the_wildcard() {
     let seated = |server: &TestServer| {
         let hub = server.running.hub.clone();
         async move {
@@ -618,49 +620,40 @@ async fn the_seat_holder_of_the_top_senate_is_seated_by_its_first_contact_too() 
         }
     };
 
-    // A heartbeat.
-    let Built { server } = start(false, |c| c.roster.speaker = Some(path("alice/claude"))).await;
-    assert!(seated(&server).await.is_empty());
-    let beat = server
-        .request(
-            Method::POST,
-            &senate_core::api::heartbeat_path(&committee()),
-            ALICE,
-        )
-        .json(&senate_core::api::Heartbeat {
-            agent: path("alice/claude"),
-            sessions: 1,
-            cursor: senate_core::Seq::ZERO,
-        })
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(beat.status(), StatusCode::NO_CONTENT);
-    assert_eq!(seated(&server).await, ["alice/claude"]);
+    let Built { server } = start(false, claude_presides).await;
+    assert_eq!(seated(&server).await, ["claude"]);
+    // A heartbeat seats it once.
+    assert_eq!(
+        server.heartbeat(ALICE, "claude").await.status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(seated(&server).await, ["claude"]);
 
-    // A stream.
-    let Built { server } = start(false, |c| c.roster.speaker = Some(path("alice/claude"))).await;
-    let _stream = server
-        .stream_as(ALICE, Some("alice/claude"), None, None)
-        .await;
-    assert_eq!(seated(&server).await, ["alice/claude"]);
-
-    // Its sibling next to it, and the wildcard counts both.
-    let _codex = server
-        .stream_as(ALICE, Some("alice/codex"), None, None)
-        .await;
-    assert_eq!(seated(&server).await, ["alice/claude", "alice/codex"]);
+    // Its sibling next to it, and the wildcard counts both: bob's message
+    // for either is put to the Speaker to pick.
+    let _codex = server.stream_as(ALICE, Some("codex"), None, None).await;
+    assert_eq!(seated(&server).await, ["claude", "codex"]);
+    let picked = stored(
+        &server,
+        BOB,
+        &NewEvent::new(committee(), Kind::Question, person_addr("bob"), "?")
+            .to(Address::any_agent()),
+    )
+    .await;
+    assert_eq!(picked.to, [Address::Speaker]);
+    assert_eq!(
+        PickPayload::of(&picked).unwrap().candidates,
+        [path("claude"), path("codex")]
+    );
 }
 
 #[tokio::test]
-async fn an_agent_of_another_level_is_not_reached_from_here() {
+async fn a_recipient_is_a_flat_name_and_an_agent_need_not_have_connected() {
     let Built { server } = start(true, |_| {}).await;
-    for (to, status) in [
-        ("alice/claude/reviewer", StatusCode::BAD_REQUEST),
-        ("dave/claude", StatusCode::BAD_REQUEST),
-        ("alice/claude", StatusCode::OK),
-        ("alice", StatusCode::OK),
-    ] {
+    // A person, and agents seated or not yet: claude and copilot sit once
+    // they first connect.
+    assert_eq!(server.act_as(ALICE, "claude").await, StatusCode::OK);
+    for to in ["alice", "claude", "copilot"] {
         let response = server
             .post_event(
                 BOB,
@@ -668,6 +661,17 @@ async fn an_agent_of_another_level_is_not_reached_from_here() {
                     .to(Address::Senator(path(to))),
             )
             .await;
-        assert_eq!(response.status(), status, "{to}");
+        assert_eq!(response.status(), StatusCode::OK, "{to}");
+    }
+    // A path inside a name names nobody.
+    for to in ["senator::alice/claude", "senator::alice/claude/reviewer"] {
+        let body = json!({"committee": "refund-v2", "kind": "question",
+                          "from": "senator::bob", "to": [to], "body": "?"});
+        api_error(
+            server.post_json(BOB, &body).await,
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+        )
+        .await;
     }
 }

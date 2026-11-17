@@ -25,7 +25,7 @@ async fn a_guest_asks_and_is_answered() {
     bob.open().await;
     let inbox = bob.inbox("s-bob");
     bob.session_start("s-bob", &inbox).await;
-    world.wait_connected("bob/claude", true).await;
+    world.wait_connected(BOB_CLAUDE, true).await;
 
     world.brain.interprets(Ok(Intent::Relay {
         targets: vec!["bob".into()],

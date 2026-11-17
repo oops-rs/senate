@@ -232,10 +232,7 @@ async fn h3_a_brain_that_never_answers_is_given_up_on() {
     );
     let said = rig.surface.texts();
     assert_eq!(said.len(), 1);
-    assert!(
-        said[0].contains("/tell <handle>[/<agent>] <内容>"),
-        "{said:?}"
-    );
+    assert!(said[0].contains("/tell <name> <内容>"), "{said:?}");
 }
 
 #[tokio::test]
@@ -261,7 +258,7 @@ async fn m1_catching_up_does_not_answer_what_was_answered_further_down() {
     assert_eq!(events.len(), 4, "the triage note too: {events:#?}");
     let texts = rig.surface.texts();
     assert_eq!(texts.len(), 2, "the question and her answer: {texts:?}");
-    assert_eq!(texts[1], "[senator::alice/claude] 30 天");
+    assert_eq!(texts[1], "[senator::claude] 30 天");
 }
 
 #[tokio::test]
@@ -339,11 +336,8 @@ async fn m6_an_answer_to_a_note_is_mirrored_like_an_answer_to_a_question() {
     let (note_answer, question_answer) = (&posts[2], &posts[3]);
     assert_eq!(note_answer.target, reply_to("m_n"));
     assert_eq!(question_answer.target, reply_to("m_q"));
-    assert_eq!(
-        note_answer.markdown,
-        "[senator::alice/claude] 收到，已按 30 天"
-    );
-    assert_eq!(question_answer.markdown, "[senator::alice/claude] 已经改了");
+    assert_eq!(note_answer.markdown, "[senator::claude] 收到，已按 30 天");
+    assert_eq!(question_answer.markdown, "[senator::claude] 已经改了");
     assert_eq!(note_answer.thread_ref, note_ack.thread_ref);
     assert_eq!(question_answer.thread_ref, question_ack.thread_ref);
     assert!(
@@ -551,7 +545,7 @@ async fn m13_a_slow_interpretation_holds_up_only_its_own_committee() {
         "seq order kept: {texts:?}"
     );
     assert!(
-        texts[2].starts_with("已转给 [senator::alice/claude]"),
+        texts[2].starts_with("已转给 [senator::claude]"),
         "{texts:?}"
     );
 }

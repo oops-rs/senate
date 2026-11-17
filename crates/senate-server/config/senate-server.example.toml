@@ -1,5 +1,10 @@
 # senate-server.toml: every key the server reads.
 
+# This Senate's name: a slug, not an address keyword. Absent: "senate".
+# name = "north-desk"
+# The path of the Senate above, when there is one.
+# parent = "acme"
+
 # Address the HTTP API binds.
 listen = "0.0.0.0:7878"
 
@@ -28,9 +33,11 @@ data_dir = "data"
 # Who exists. People are global; agents are seated as they connect, so
 # `agents` is only for those that should sit from the start.
 [roster]
-# The senator presiding over this Senate. Leave it out for the top Senate.
-# presider = "alice/claude"
-agents = ["alice/claude"]
+# The agent holding this Senate's Speaker's seat. Absent: the built-in
+# Speaker when it runs, else nobody.
+# speaker = "claude"
+# Each agent with the person who runs it.
+agents = [{ name = "claude", owner = "alice" }]
 
 [[roster.seniors]]
 handle = "alice"

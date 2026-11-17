@@ -10,8 +10,8 @@
 //!
 //! Each `presence` transition (written by the server, `from: committee`) is
 //! one root line in the mirror group (the Agent group when there is one),
-//! e.g. `[senator::alice/claude] 失联` / `[senator::alice/claude] absent`,
-//! `… taken over by the Speaker`, `… reassigned → [senator::bob/claude]`.
+//! e.g. `[senator::claude] 失联` / `[senator::claude] absent`,
+//! `… taken over by the Speaker`, `… reassigned → [senator::copilot]`.
 //! At output level "answers only" just `absent`, `taken_over` and `online`
 //! are posted; otherwise every transition. Each hand-off `checkpoint`
 //! (trigger `handoff`) is one line too, at "status" and "everything"; other
@@ -192,7 +192,7 @@ impl Engine {
     /// interval, …) stay in the log and the brief only.
     pub(super) async fn on_checkpoint(&mut self, event: &Event) -> Result<(), Stall> {
         let l = self.locale(&event.committee);
-        if !event.from.is_junior() {
+        if !self.roster.is_agent_address(&event.from) {
             return Ok(());
         }
         let Some(payload) = CheckpointPayload::of(event) else {
@@ -437,9 +437,15 @@ impl Engine {
         root: Seq,
         status: &StatusPayload,
     ) -> Result<(), Stall> {
-        let Some(away) = event.on_behalf_of.as_ref().and_then(Address::as_agent) else {
+        let Some(away) = event
+            .on_behalf_of
+            .as_ref()
+            .filter(|a| self.roster.is_agent_address(a))
+            .and_then(Address::as_senator)
+        else {
             return Ok(());
         };
+        let away_owner = self.roster.owner_of(away);
         let platform = self.surface.platform().to_owned();
         let Some((message_ref, group)) = self
             .thread_target(&event.committee, root, &platform)
@@ -455,8 +461,8 @@ impl Engine {
                 state
                     .activity
                     .keys()
-                    .map(SenatorName::owner)
-                    .filter(|person| *person != away.owner())
+                    .filter_map(|agent| self.roster.owner_of(agent))
+                    .filter(|person| Some(*person) != away_owner)
                     .cloned()
                     .collect()
             })

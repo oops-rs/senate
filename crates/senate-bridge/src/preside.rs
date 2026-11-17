@@ -1,20 +1,20 @@
 //! What a presiding session reads: the session that holds a Senate's
 //! Speaker's seat, as a senator ([`senate_core::SpeakerSeat::Senator`]).
 //!
-//! Such a session is attached to two Senates (or to one Senate in two roles,
-//! for a top Senate used alone): it sits in one as a senator and presides
-//! over the other as its Speaker. Its duties as Speaker are few, and each
-//! starts from the docket ([`senate_core::docket`]):
+//! Such a session is in one Senate in two roles: it sits there as a
+//! senator and presides over it as its Speaker. Its duties as Speaker are
+//! few, and each starts from the docket ([`senate_core::docket`]):
 //!
-//! - **pick**: route a message for one of a person's several agents to one
-//!   of them (MCP `speaker_route`, IPC `route`);
+//! - **pick**: route a message for whichever agent (`senator::*`) that
+//!   several agents could get to one of them (MCP `speaker_route`, IPC
+//!   `route`);
 //! - **cover**: answer a question to an away agent of that Senate on its
 //!   behalf, from that agent's own latest checkpoint, never by rerouting it
 //!   to a sibling (`speaker_cover`, `cover`);
 //! - **escalate**: put what it cannot settle to the person
 //!   (`speaker_escalate`, `refer`);
-//! - **speak upward**: nothing of its own; the same session uses its seat
-//!   in the Senate above, in its own name.
+//! - **speak as itself**: nothing of its own; the same session uses its
+//!   other tools, in its own name.
 //!
 //! `speaker_docket` (`docket`) lists what awaits it. The session is told it
 //! presides when it starts, and is told of new items when its user next
@@ -22,7 +22,9 @@
 //! function per message; ids are bracketed mentions; Senate, senator and
 //! Speaker are not translated.
 
-use senate_core::{Address, Awaiting, CheckpointRecord, Kind, Locale, SeatFacts, SenatorName};
+use senate_core::{
+    Address, Awaiting, CheckpointRecord, Kind, Locale, Name, SeatFacts, SenatePath, SenatorName,
+};
 
 use crate::daemon::senate_words;
 use crate::format;
@@ -32,6 +34,14 @@ use crate::ipc::{DocketReply, SenateDocket};
 const ITEM_CHARS: usize = 400;
 /// Characters of each checkpoint file shown for an away agent.
 const CHECKPOINT_FILE_CHARS: usize = 1_500;
+
+/// A Senate named by its name alone, in words.
+/// The Senate by its own name: relative, since only its name is known
+/// here (`SenatePath::top` would print it as a root, `/north-desk`).
+fn senate_named(senate: Option<&Name>, locale: Locale) -> String {
+    let path = senate.and_then(|n| SenatePath::new(vec![n.clone()]).ok());
+    senate_words(path.as_ref(), locale)
+}
 
 fn mention(path: &SenatorName) -> String {
     Address::senator(path).in_text()
@@ -60,7 +70,7 @@ pub fn not_presiding(agent: &SenatorName, locale: Locale) -> String {
 /// sits there, and how much awaits it.
 pub fn orientation(
     speaker: &SenatorName,
-    senate: Option<&SenatorName>,
+    senate: Option<&SenatePath>,
     seated: &[SenatorName],
     waiting: usize,
     locale: Locale,
@@ -86,7 +96,7 @@ pub fn orientation(
                  某个 agent 不在时依据它自己的最新 checkpoint 代它回答，绝不转给它的兄弟 agent\
                  （mcp__senate__speaker_cover），解决不了的交给人（mcp__senate__speaker_escalate）。\
                  用 mcp__senate__speaker_docket 查看等你处理的事项和每个 agent 的在线状态、checkpoint、\
-                 未结 thread。你在上一级说的话仍以你自己的名义。{queue}"
+                 未结 thread。你用其他工具说的话仍以你自己的名义。{queue}"
             )
         }
         Locale::En => {
@@ -109,15 +119,15 @@ pub fn orientation(
                  agent's own latest checkpoint and never reroute it to a sibling \
                  (mcp__senate__speaker_cover), and put what you cannot settle to the person \
                  (mcp__senate__speaker_escalate). mcp__senate__speaker_docket lists what awaits \
-                 you, with each agent's presence, checkpoint and open threads. What you say in the \
-                 Senate above is still said in your own name. {queue}"
+                 you, with each agent's presence, checkpoint and open threads. What you say with \
+                 the other tools is still said in your own name. {queue}"
             )
         }
     }
 }
 
 /// Told at the user's next prompt: new items await the Speaker.
-pub fn nudge(new: usize, senate: Option<&SenatorName>, locale: Locale) -> String {
+pub fn nudge(new: usize, senate: Option<&SenatePath>, locale: Locale) -> String {
     let senate = senate_words(senate, locale);
     match locale {
         Locale::Zh => format!(
@@ -140,15 +150,15 @@ pub fn nudge(new: usize, senate: Option<&SenatorName>, locale: Locale) -> String
 
 fn why(awaiting: &Awaiting, locale: Locale) -> String {
     match (awaiting, locale) {
-        (Awaiting::Pick { owner, candidates }, Locale::Zh) => format!(
-            "写给 {} 的 agent 但没说哪一个；候选：{}。用 speaker_route 选一个，或 speaker_escalate 问人。",
-            Address::senior(owner).in_text(),
+        (Awaiting::Pick { candidates, .. }, Locale::Zh) => format!(
+            "写给 {} 但没说哪一个 agent；候选：{}。用 speaker_route 选一个，或 speaker_escalate 问人。",
+            Address::any_agent().in_text(),
             mentions(candidates)
         ),
-        (Awaiting::Pick { owner, candidates }, Locale::En) => format!(
-            "for one of {}'s agents, not saying which; candidates: {}. Pick one with \
-             speaker_route, or ask the person with speaker_escalate.",
-            Address::senior(owner).in_text(),
+        (Awaiting::Pick { candidates, .. }, Locale::En) => format!(
+            "for {}, not saying which agent; candidates: {}. Pick one with speaker_route, or \
+             ask the person with speaker_escalate.",
+            Address::any_agent().in_text(),
             mentions(candidates)
         ),
         (Awaiting::Addressed, Locale::Zh) => {
@@ -242,7 +252,7 @@ fn seat_line(seat: &SeatFacts, locale: Locale) -> String {
 fn render_senate(docket: &SenateDocket, locale: Locale, out: &mut String) {
     out.push_str(&format!(
         "## {}\n",
-        senate_words(docket.senate.as_ref(), locale)
+        senate_named(docket.senate.as_ref(), locale)
     ));
     let items: usize = docket.pages.iter().map(|p| p.items.len()).sum();
     if items == 0 {
@@ -339,19 +349,15 @@ mod tests {
 
     #[test]
     fn a_presiding_session_is_told_where_and_over_whom_in_either_language() {
-        let seated = [path("alice/claude/reviewer"), path("alice/claude/codex")];
+        let seated = [path("claude"), path("reviewer"), path("codex")];
+        let desk: SenatePath = "acme/north-desk".parse().unwrap();
         for locale in [Locale::Zh, Locale::En] {
-            let text = orientation(
-                &path("alice/claude"),
-                Some(&path("alice/claude")),
-                &seated,
-                2,
-                locale,
-            );
+            let text = orientation(&path("claude"), Some(&desk), &seated, 2, locale);
             for needle in [
-                "[senator::alice/claude]",
-                "[senator::alice/claude/reviewer]",
-                "[senator::alice/claude/codex]",
+                "[senator::claude]",
+                "[senator::reviewer]",
+                "[senator::codex]",
+                "Senate [acme/north-desk]",
                 "Speaker",
                 "Senate",
                 "mcp__senate__speaker_docket",
@@ -364,10 +370,11 @@ mod tests {
             }
             assert!(!text.to_lowercase().contains("steward"));
         }
-        let alone = orientation(&path("alice/claude"), None, &[], 0, Locale::En);
-        assert!(alone.contains("the top Senate") && alone.contains("Nothing awaits"));
+        let alone = orientation(&path("claude"), None, &[], 0, Locale::En);
+        assert!(alone.contains("this Senate") && alone.contains("Nothing awaits"));
+        assert!(alone.contains("no agent is seated there yet"), "{alone}");
         assert!(nudge(1, None, Locale::Zh).contains("1 件"));
-        assert!(not_presiding(&path("alice/codex"), Locale::En).contains("[senator::alice/codex]"));
+        assert!(not_presiding(&path("codex"), Locale::En).contains("[senator::codex]"));
     }
 
     #[test]
@@ -375,7 +382,7 @@ mod tests {
         use chrono::{TimeZone, Utc};
         use senate_core::PresenceState;
         let seat = |connected, presence, last_seen| SeatFacts {
-            agent: path("wendell/claude"),
+            agent: path("copilot"),
             connected,
             presence,
             last_seen,

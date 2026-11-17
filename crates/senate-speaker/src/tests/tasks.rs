@@ -126,7 +126,7 @@ async fn a_root_question_gets_one_triage_note_with_its_probabilities() {
     assert_eq!(inputs[0].to, vec![agent("bob")]);
     // Still mirrored as before (no cards on this surface).
     assert!(
-        rig.surface.texts()[0].starts_with("[senator::alice/claude] → [senator::bob/claude]"),
+        rig.surface.texts()[0].starts_with("[senator::claude] → [senator::copilot]"),
         "{:?}",
         rig.surface.texts()
     );
@@ -197,10 +197,10 @@ async fn a_persons_own_request_to_their_own_agent_is_not_parked() {
 #[tokio::test]
 async fn own_agent_holds_for_any_of_the_persons_agents_and_not_for_someone_elses() {
     let hub = bound_hub().await;
-    hub.seat(&path("alice/codex"));
+    hub.seat(&path("codex"), "alice");
     let rig = Rig::start(hub).await;
 
-    // alice → alice/codex: one of hers, though not `claude`.
+    // alice → codex: one of hers, though not `claude`.
     let own = rig
         .append(request(
             user("alice"),
@@ -216,7 +216,7 @@ async fn own_agent_holds_for_any_of_the_persons_agents_and_not_for_someone_elses
     assert_eq!(notes[0].rule.as_deref(), Some("own_agent"));
     assert!(statuses(&events, own.seq).is_empty());
 
-    // alice → bob/claude: someone else's agent, so the request rule.
+    // alice → copilot: someone else's agent, so the request rule.
     let other = rig
         .append(request(user("alice"), agent("bob"), "把 header 改了"))
         .await;
@@ -305,10 +305,7 @@ async fn a_relay_carries_its_verdict_inline() {
     assert_eq!(inputs[0].asker, user("pm"));
     assert_eq!(
         rig.surface.texts(),
-        vec![format!(
-            "已转给 [senator::alice/claude]（seq {}）",
-            relay.seq
-        )]
+        vec![format!("已转给 [senator::claude]（seq {}）", relay.seq)]
     );
 }
 
@@ -338,7 +335,7 @@ async fn a_relay_that_needs_its_person_is_still_relayed_and_says_so() {
     assert_eq!(
         texts[0],
         format!(
-            "已转给 [senator::alice/claude]（seq {}）。Speaker 判断这条需要 [senator::alice] 本人处理，已提醒 [senator::alice]",
+            "已转给 [senator::claude]（seq {}）。Speaker 判断这条需要 [senator::alice] 本人处理，已提醒 [senator::alice]",
             relay.seq
         )
     );
@@ -379,7 +376,7 @@ async fn the_mention_is_native_where_the_surface_has_mentions() {
 #[tokio::test]
 async fn parking_on_another_of_the_persons_agents_still_waits_on_the_person() {
     let hub = bound_hub().await;
-    hub.seat(&path("alice/codex"));
+    hub.seat(&path("codex"), "alice");
     let surface = FakeSurface::with(Caps {
         mentions: true,
         ..Caps::default()
@@ -460,7 +457,7 @@ async fn the_person_hands_a_parked_request_to_their_own_agent() {
     );
     assert_eq!(
         rig.surface.texts().last().map(String::as_str),
-        Some("好的，已交给 [senator::alice/claude]。")
+        Some("好的，已交给 [senator::claude]。")
     );
     // The approval is not echoed into the thread.
     assert!(
@@ -492,10 +489,10 @@ async fn the_person_hands_a_parked_request_to_their_own_agent() {
     }
 }
 
-/// A request put to `alice/codex` while alice also has `alice/claude`.
+/// A request put to `codex` while alice also has `claude`.
 async fn parked_on_codex() -> (Rig, Seq, String) {
     let hub = bound_hub().await;
-    hub.seat(&path("alice/codex"));
+    hub.seat(&path("codex"), "alice");
     // Her other agent is the one online: it still must not get the thread.
     hub.connect(&refund(), &agent_path("alice"));
     let rig = Rig::start(hub).await;
@@ -532,7 +529,7 @@ async fn hand_it_to_my_agent_goes_back_to_the_agent_the_root_was_put_to() {
     );
     assert_eq!(
         rig.surface.texts().last().map(String::as_str),
-        Some("好的，已交给 [senator::alice/codex]。")
+        Some("好的，已交给 [senator::codex]。")
     );
     assert!(rig.brain.pick_inputs().is_empty(), "nothing to pick");
 }
@@ -554,7 +551,7 @@ async fn hand_it_to_my_claude_goes_to_the_agent_named() {
     assert_eq!(task.to, vec![agent("alice")]);
     assert_eq!(
         rig.surface.texts().last().map(String::as_str),
-        Some("好的，已交给 [senator::alice/claude]。")
+        Some("好的，已交给 [senator::claude]。")
     );
 }
 
@@ -612,8 +609,8 @@ async fn escalated_to_alice(hub: Arc<MemoryHub>) -> (Rig, Seq, String) {
 #[tokio::test]
 async fn when_the_root_names_none_of_hers_the_speaker_picks_her_one_connected_agent() {
     let hub = bound_hub().await;
-    hub.seat(&path("alice/codex"));
-    hub.connect(&refund(), &path("alice/codex"));
+    hub.seat(&path("codex"), "alice");
+    hub.connect(&refund(), &path("codex"));
     let (rig, root, root_ref) = escalated_to_alice(hub).await;
     rig.append(in_thread(
         "alice",
@@ -630,17 +627,17 @@ async fn when_the_root_names_none_of_hers_the_speaker_picks_her_one_connected_ag
     assert_eq!(task.from, user("alice"));
     let picks = rig.brain.pick_inputs();
     assert_eq!(picks.len(), 1);
-    assert_eq!(picks[0].owner, name("alice"));
+    assert_eq!(picks[0].owner, Some(name("alice")));
     assert_eq!(
         rig.surface.texts().last().map(String::as_str),
-        Some("好的，已交给 [senator::alice/codex]。")
+        Some("好的，已交给 [senator::codex]。")
     );
 }
 
 #[tokio::test]
 async fn when_the_speaker_cannot_tell_it_asks_in_the_thread_and_her_answer_carries_the_hand_off() {
     let hub = bound_hub().await;
-    hub.seat(&path("alice/codex"));
+    hub.seat(&path("codex"), "alice");
     let (rig, root, root_ref) = escalated_to_alice(hub).await;
     rig.append(in_thread(
         "alice",
@@ -661,8 +658,8 @@ async fn when_the_speaker_cannot_tell_it_asks_in_the_thread_and_her_answer_carri
         "{}",
         ask.markdown
     );
-    assert!(ask.markdown.contains("[senator::alice/claude] 不在线"));
-    assert!(ask.markdown.contains("[senator::alice/codex] 不在线"));
+    assert!(ask.markdown.contains("[senator::claude] 不在线"));
+    assert!(ask.markdown.contains("[senator::codex] 不在线"));
     assert_senate_vocabulary(&ask.markdown);
 
     // Her answer, in the thread, is not a takeover: it carries the hand-off.
@@ -688,9 +685,7 @@ async fn when_the_speaker_cannot_tell_it_asks_in_the_thread_and_her_answer_carri
     // provisional answer for it may follow in the thread.
     let texts = rig.surface.texts();
     assert!(
-        texts
-            .iter()
-            .any(|t| t == "好的，已交给 [senator::alice/codex]。"),
+        texts.iter().any(|t| t == "好的，已交给 [senator::codex]。"),
         "{texts:#?}"
     );
 }
@@ -958,7 +953,7 @@ async fn an_escalation_mentions_the_person_and_tells_the_asking_agent() {
     assert_eq!(mention.target, reply_to(&root_ref));
     assert_eq!(
         mention.markdown,
-        "@bob [senator::bob/claude] 把这条交给你：要产品拍板"
+        "@bob [senator::copilot] 把这条交给你：要产品拍板"
     );
     let events = rig.hub.events(&refund());
     let ack = events
@@ -1000,7 +995,7 @@ async fn an_escalated_relay_is_acknowledged_in_the_askers_thread() {
     assert_eq!(
         texts[1..],
         [
-            "@alice [senator::alice/claude] 把这条交给你",
+            "@alice [senator::claude] 把这条交给你",
             "已转给 [senator::alice] 本人"
         ],
         "{posts:#?}"
@@ -1045,7 +1040,7 @@ async fn an_answer_back_in_a_people_group_is_signed_and_the_agent_group_has_the_
     assert!(
         card.first
             .markdown
-            .contains("[senator::pm]（经 Speaker） → [senator::alice/claude]（seq"),
+            .contains("[senator::pm]（经 Speaker） → [senator::claude]（seq"),
         "{}",
         card.first.markdown
     );
@@ -1060,13 +1055,13 @@ async fn an_answer_back_in_a_people_group_is_signed_and_the_agent_group_has_the_
         .expect("the answer in the asker's thread");
     assert_eq!(
         signed.markdown,
-        "[senator::alice/claude] 30 天\n\n由 [senator::alice/claude] 回答 · 来自 refund-v2 的 Agent 群"
+        "[senator::claude] 30 天\n\n由 [senator::claude] 回答 · 来自 refund-v2 的 Agent 群"
     );
     let plain = posts
         .iter()
         .find(|p| p.target == reply_to(&card.message_ref))
         .expect("the answer in the Agent group thread");
-    assert_eq!(plain.markdown, "[senator::alice/claude] 30 天");
+    assert_eq!(plain.markdown, "[senator::claude] 30 天");
 }
 
 #[tokio::test]
@@ -1115,7 +1110,7 @@ async fn someone_else_saying_hand_it_to_my_agent_is_told_whom_it_waits_on() {
 #[tokio::test]
 async fn in_english_a_parked_request_mentions_the_person_and_her_hand_off_names_its_agent() {
     let hub = bound_hub().await;
-    hub.seat(&path("alice/codex"));
+    hub.seat(&path("codex"), "alice");
     let rig = Rig::start_config(
         hub,
         FakeSurface::with(Caps {
@@ -1141,7 +1136,7 @@ async fn in_english_a_parked_request_mentions_the_person_and_her_hand_off_names_
     assert_eq!(
         posts[0].markdown,
         format!(
-            "[senator::bob/claude] → [senator::alice/codex] Rename the gateway header to Idempotency-Key (seq {})",
+            "[senator::copilot] → [senator::codex] Rename the gateway header to Idempotency-Key (seq {})",
             asked.seq
         )
     );
@@ -1201,7 +1196,7 @@ async fn in_english_a_parked_request_mentions_the_person_and_her_hand_off_names_
     assert_eq!(task.to, vec![agent("alice")]);
     assert_eq!(
         rig.surface.texts().last().map(String::as_str),
-        Some("OK, handed to [senator::alice/claude].")
+        Some("OK, handed to [senator::claude].")
     );
     rig.append(in_thread(
         "alice",
@@ -1226,7 +1221,7 @@ async fn in_english_a_parked_request_mentions_the_person_and_her_hand_off_names_
 async fn in_english_hand_it_to_my_agent_goes_to_the_roots_own_agent_and_an_escalation_is_acked() {
     let (rig, root, root_ref) = {
         let hub = bound_hub().await;
-        hub.seat(&path("alice/codex"));
+        hub.seat(&path("codex"), "alice");
         hub.connect(&refund(), &agent_path("alice"));
         let rig = Rig::start_config(
             hub,
@@ -1264,7 +1259,7 @@ async fn in_english_hand_it_to_my_agent_goes_to_the_roots_own_agent_and_an_escal
     assert_eq!(task.to, vec![agent_named("alice", "codex")]);
     assert_eq!(
         rig.surface.texts().last().map(String::as_str),
-        Some("OK, handed to [senator::alice/codex].")
+        Some("OK, handed to [senator::codex].")
     );
 
     // An agent's escalation, in English.
@@ -1283,7 +1278,7 @@ async fn in_english_hand_it_to_my_agent_goes_to_the_roots_own_agent_and_an_escal
     rig.settle().await;
     assert_eq!(
         rig.surface.texts().last().map(String::as_str),
-        Some("@bob [senator::bob/claude] handed this to you: needs a product call")
+        Some("@bob [senator::copilot] handed this to you: needs a product call")
     );
     let ack = rig
         .hub

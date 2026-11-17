@@ -245,10 +245,7 @@ async fn every_envelope_field_round_trips(store: Arc<dyn LogStore>) {
         Address::Speaker,
         "网关的幂等键用哪个 header？",
     )
-    .with_to(vec![
-        Address::Senator(path("bob/claude")),
-        Address::Committee,
-    ])
+    .with_to(vec![Address::Senator(path("claude")), Address::Committee])
     .in_thread(root.seq)
     .on_behalf_of(Address::Senator(path("pm")))
     .with_source(Source {
@@ -350,8 +347,8 @@ async fn concurrent_duplicates_store_once(store: Arc<dyn LogStore>) {
 async fn cursors_overwrite_and_are_scoped(store: Arc<dyn LogStore>) {
     let f = committee("refund-v2");
     let g = committee("search");
-    let alice = CursorOwner::from(path("alice/claude"));
-    let bob = CursorOwner::from(path("bob/claude"));
+    let alice = CursorOwner::from(path("copilot"));
+    let bob = CursorOwner::from(path("claude"));
     assert_eq!(store.cursor(&f, &alice, "delivered").await.unwrap(), None);
     store
         .set_cursor(&f, &alice, "delivered", Seq(5))
@@ -398,10 +395,10 @@ async fn cursors_overwrite_and_are_scoped(store: Arc<dyn LogStore>) {
     );
 }
 
-async fn two_agents_of_one_person_keep_separate_cursors(store: Arc<dyn LogStore>) {
+async fn two_agents_keep_separate_cursors(store: Arc<dyn LogStore>) {
     let f = committee("refund-v2");
-    let claude = CursorOwner::from(path("alice/claude"));
-    let codex = CursorOwner::from(path("alice/codex"));
+    let claude = CursorOwner::from(path("copilot"));
+    let codex = CursorOwner::from(path("codex"));
     let person = CursorOwner::from(path("alice"));
     store
         .set_cursor(&f, &claude, "delivered", Seq(7))
@@ -424,13 +421,14 @@ async fn two_agents_of_one_person_keep_separate_cursors(store: Arc<dyn LogStore>
         None,
         "the person's own cursor is a third one"
     );
-    let deeper = CursorOwner::from(path("alice/claude/reviewer"));
-    assert_eq!(store.cursor(&f, &deeper, "delivered").await.unwrap(), None);
+    // A third agent, never set, has none.
+    let third = CursorOwner::from(path("reviewer"));
+    assert_eq!(store.cursor(&f, &third, "delivered").await.unwrap(), None);
 }
 
 async fn unresolved_events_are_refused(store: Arc<dyn LogStore>) {
     let f = committee("refund-v2");
-    let wildcard: Address = "senator::bob/*".parse().unwrap();
+    let wildcard: Address = "senator::*".parse().unwrap();
     let to_wildcard = chat(&f, "to any").to(wildcard.clone());
     let from_wildcard = NewEvent::new(f.clone(), Kind::Chat, wildcard.clone(), "from any");
     let behalf = chat(&f, "behalf").on_behalf_of(wildcard);
@@ -442,7 +440,7 @@ async fn unresolved_events_are_refused(store: Arc<dyn LogStore>) {
     }
     assert_eq!(store.head(&f).await.unwrap(), Seq::ZERO, "nothing stored");
     assert!(store.committees().await.unwrap().is_empty());
-    let concrete = chat(&f, "to one").to("senator::bob/claude".parse().unwrap());
+    let concrete = chat(&f, "to one").to("senator::claude".parse().unwrap());
     assert_eq!(store.append(concrete).await.unwrap().event.seq, Seq(1));
 }
 
@@ -814,8 +812,8 @@ async fn search_matches_every_term_newest_first(store: Arc<dyn LogStore>) {
 
 async fn heartbeats_keep_the_latest_per_agent(store: Arc<dyn LogStore>) {
     let f = committee("refund-v2");
-    let claude = path("alice/claude");
-    let codex = path("alice/codex");
+    let claude = path("copilot");
+    let codex = path("codex");
     assert!(store.last_heartbeat(&f, &claude).await.unwrap().is_none());
     let first = senate_log::now();
     store
@@ -895,9 +893,9 @@ async fn heartbeats_keep_the_latest_per_agent(store: Arc<dyn LogStore>) {
     let all = store.heartbeats(&f).await.unwrap();
     assert_eq!(
         all.iter().map(|r| r.agent.to_string()).collect::<Vec<_>>(),
-        ["alice/claude", "alice/codex"]
+        ["codex", "copilot"]
     );
-    assert_eq!(all[0].heartbeat, beat);
+    assert_eq!(all[1].heartbeat, beat);
     assert!(
         store
             .heartbeats(&committee("search"))
@@ -955,7 +953,7 @@ conformance!(
     concurrent_appends_stay_gapless,
     concurrent_duplicates_store_once,
     cursors_overwrite_and_are_scoped,
-    two_agents_of_one_person_keep_separate_cursors,
+    two_agents_keep_separate_cursors,
     unresolved_events_are_refused,
     mirrors_are_first_write_wins_and_indexed_by_message,
     one_event_may_have_several_copies,

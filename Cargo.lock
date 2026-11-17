@@ -2393,6 +2393,7 @@ dependencies = [
  "clap",
  "futures",
  "ractor",
+ "rusqlite",
  "senate-bridge",
  "senate-core",
  "senate-log",

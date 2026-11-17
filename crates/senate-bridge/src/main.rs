@@ -126,9 +126,10 @@ enum Cmd {
         #[arg(long)]
         mark_read: bool,
     },
-    /// Ask a question as yourself. `<to>` is one of your agents (`claude`,
-    /// `claude/reviewer`), a full path (`alice/claude`), a person (`alice`),
-    /// whichever agent (`*`, `alice/*`), `speaker`, or a `senator::…` address.
+    /// Ask a question as yourself. `<to>` is a senator's name (an agent
+    /// such as `claude`, or a person such as `bob`), whichever agent (`*`),
+    /// `speaker`, a `senator::…` address, or a qualified name on another
+    /// committee (`ibot::codex`).
     /// Text `-` is read from stdin; put `--` before text that starts with `-`.
     /// Goes to the primary Senate of this machine.
     Ask {

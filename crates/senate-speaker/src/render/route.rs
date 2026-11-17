@@ -35,16 +35,28 @@ fn mentions(candidates: &[SenatorName], l: Locale) -> String {
 ///
 /// ```text
 /// [senator::alice] 有 2 个 agent，你指的是哪一个？回复编号或名字：
-/// 1. [senator::alice/claude] 在线 · 检查点 feature/refund-v2/alice@a41f9c2：重试路径做了一半 · 2 个进行中的任务
-/// 2. [senator::alice/codex] 不在线
+/// 1. [senator::claude] 在线 · 检查点 feature/refund-v2/alice@a41f9c2：重试路径做了一半 · 2 个进行中的任务
+/// 2. [senator::codex] 不在线
 /// ```
-pub(crate) fn which_agent(l: Locale, owner: &Name, candidates: &[AgentCandidate]) -> String {
-    let person = Address::senior(owner).in_text();
+///
+/// `owner` is `None` for "whichever agent on this committee"
+/// (`[senator::*]`): the agents here, nobody's in particular.
+pub(crate) fn which_agent(
+    l: Locale,
+    owner: Option<&Name>,
+    candidates: &[AgentCandidate],
+) -> String {
     let n = candidates.len();
-    let mut out = match l {
-        Locale::Zh => format!("{person} 有 {n} 个 agent，你指的是哪一个？回复编号或名字："),
-        Locale::En => format!(
+    let mut out = match (l, owner.map(|o| Address::senior(o).in_text())) {
+        (Locale::Zh, Some(person)) => {
+            format!("{person} 有 {n} 个 agent，你指的是哪一个？回复编号或名字：")
+        }
+        (Locale::Zh, None) => format!("这里有 {n} 个 agent，你指的是哪一个？回复编号或名字："),
+        (Locale::En, Some(person)) => format!(
             "{person} has {n} agents here. Which one do you mean? Reply with its number or name:"
+        ),
+        (Locale::En, None) => format!(
+            "There are {n} agents here. Which one do you mean? Reply with its number or name:"
         ),
     };
     for (i, c) in candidates.iter().enumerate() {
@@ -102,13 +114,18 @@ pub(crate) fn choice_not_understood(l: Locale, candidates: &[SenatorName]) -> St
 }
 
 /// The Speaker cannot ask here: the person names one and asks again.
-pub(crate) fn name_one_of(l: Locale, owner: &Name, candidates: &[SenatorName]) -> String {
-    let person = Address::senior(owner).in_text();
+pub(crate) fn name_one_of(l: Locale, owner: Option<&Name>, candidates: &[SenatorName]) -> String {
     let list = mentions(candidates, l);
-    match l {
-        Locale::Zh => format!("{person} 有几个 agent，请指明是哪一个再说一次：{list}"),
-        Locale::En => {
+    match (l, owner.map(|o| Address::senior(o).in_text())) {
+        (Locale::Zh, Some(person)) => {
+            format!("{person} 有几个 agent，请指明是哪一个再说一次：{list}")
+        }
+        (Locale::Zh, None) => format!("这里有几个 agent，请指明是哪一个再说一次：{list}"),
+        (Locale::En, Some(person)) => {
             format!("{person} has several agents here; say which one and ask again: {list}")
+        }
+        (Locale::En, None) => {
+            format!("There are several agents here; say which one and ask again: {list}")
         }
     }
 }
@@ -199,29 +216,41 @@ mod tests {
     #[test]
     fn the_question_lists_each_agent_with_what_it_is_doing() {
         let alice = Name::new("alice").expect("name");
-        let mut claude = candidate("alice/claude", true);
+        let mut claude = candidate("claude", true);
         claude.owns_thread = true;
-        let candidates = [claude, candidate("alice/codex", false)];
-        let zh = which_agent(Locale::Zh, &alice, &candidates);
+        let candidates = [claude, candidate("codex", false)];
+        let zh = which_agent(Locale::Zh, Some(&alice), &candidates);
         assert_eq!(
             zh,
             "[senator::alice] 有 2 个 agent，你指的是哪一个？回复编号或名字：\n\
-             1. [senator::alice/claude] 在线 · 这个线程是它的\n\
-             2. [senator::alice/codex] 不在线"
+             1. [senator::claude] 在线 · 这个线程是它的\n\
+             2. [senator::codex] 不在线"
         );
-        let en = which_agent(Locale::En, &alice, &candidates);
+        let en = which_agent(Locale::En, Some(&alice), &candidates);
         assert_eq!(
             en,
             "[senator::alice] has 2 agents here. Which one do you mean? Reply with its number or name:\n\
-             1. [senator::alice/claude] online · this thread is its\n\
-             2. [senator::alice/codex] not online"
+             1. [senator::claude] online · this thread is its\n\
+             2. [senator::codex] not online"
         );
-        let paths = [path("alice/claude"), path("alice/codex")];
+        assert_eq!(
+            which_agent(Locale::Zh, None, &candidates),
+            "这里有 2 个 agent，你指的是哪一个？回复编号或名字：\n\
+             1. [senator::claude] 在线 · 这个线程是它的\n\
+             2. [senator::codex] 不在线"
+        );
+        assert!(
+            which_agent(Locale::En, None, &candidates)
+                .starts_with("There are 2 agents here. Which one do you mean?")
+        );
+        let paths = [path("claude"), path("codex")];
         for l in Locale::ALL {
             for text in [
-                which_agent(l, &alice, &candidates),
+                which_agent(l, Some(&alice), &candidates),
+                which_agent(l, None, &candidates),
                 choice_not_understood(l, &paths),
-                name_one_of(l, &alice, &paths),
+                name_one_of(l, Some(&alice), &paths),
+                name_one_of(l, None, &paths),
                 no_agent_of_yours(l),
                 no_agent_named(l, &alice, "gemini"),
                 no_agent_to_work_from(l, &alice),
@@ -235,7 +264,7 @@ mod tests {
         }
         assert_eq!(
             choice_not_understood(Locale::En, &paths),
-            "I could not tell which one. Reply with a number or a name: [senator::alice/claude], [senator::alice/codex]"
+            "I could not tell which one. Reply with a number or a name: [senator::claude], [senator::codex]"
         );
     }
 }

@@ -70,7 +70,7 @@ pub struct PersonNote {
     pub thread: u64,
     /// `Senate · refund-v2`.
     pub title: String,
-    /// `[senator::alice/claude] answered: the first line`, in the app's
+    /// `[senator::claude] answered: the first line`, in the app's
     /// language.
     pub body: String,
 }
@@ -116,7 +116,7 @@ pub struct TerminalCommand {
 pub enum MentionKind {
     /// A person: `[senator::alice]`.
     Senior,
-    /// An agent: `[senator::alice/claude]`.
+    /// An agent: `[senator::claude]`.
     Junior,
     /// Whichever of a person's agents, the wildcard form of an agent's id.
     /// (Written out in a comment this would open a nested one in the generated
@@ -124,7 +124,7 @@ pub enum MentionKind {
     AnyAgent,
     /// `[speaker]`.
     Speaker,
-    /// The Speaker answering for a senator: `[speaker::alice/claude]`.
+    /// The Speaker answering for a senator: `[speaker::claude]`.
     SpeakerFor,
     /// `[committee]`.
     Committee,
@@ -156,7 +156,7 @@ pub fn split_mentions(text: String) -> Vec<TextPart> {
         }
         parts.push(TextPart {
             text: text[found.range.clone()].to_string(),
-            mention: Some(kind_of(&found.mention)),
+            mention: Some(kind_of(&found.mention, &known_people())),
         });
         at = found.range.end;
     }
@@ -169,15 +169,40 @@ pub fn split_mentions(text: String) -> Vec<TextPart> {
     parts
 }
 
-fn kind_of(mention: &Mention) -> MentionKind {
+/// The people of the Senate the daemon last reported: a name is flat, so
+/// whether `[senator::x]` is a person is what the daemon's status says
+/// (`StatusReply::people`). Set by the driver; empty until it reports.
+static PEOPLE: std::sync::RwLock<Option<senate_core::People>> = std::sync::RwLock::new(None);
+
+/// Remember who the Senate's people are, for [`split_mentions`].
+pub(crate) fn note_people(people: &senate_core::People) {
+    if let Ok(mut known) = PEOPLE.write() {
+        *known = Some(people.clone());
+    }
+}
+
+fn known_people() -> senate_core::People {
+    PEOPLE
+        .read()
+        .ok()
+        .and_then(|p| p.clone())
+        .unwrap_or_default()
+}
+
+fn kind_of(mention: &Mention, people: &senate_core::People) -> MentionKind {
     match mention {
-        Mention::Senator(p) if p.is_senior() => MentionKind::Senior,
+        Mention::Senator(p) if people.is_person(p) => MentionKind::Senior,
         Mention::Senator(_) => MentionKind::Junior,
-        Mention::AgentOf(_) => MentionKind::AnyAgent,
+        Mention::AnyAgent => MentionKind::AnyAgent,
         Mention::Speaker => MentionKind::Speaker,
         Mention::SpeakerFor(_) => MentionKind::SpeakerFor,
         Mention::Committee => MentionKind::Committee,
         Mention::Guest(_) => MentionKind::Guest,
+        // A qualified name looks like what it names.
+        Mention::Locator(l) => match Mention::of(l.address()) {
+            Some(inner) => kind_of(&inner, people),
+            None => MentionKind::Junior,
+        },
     }
 }
 
@@ -559,22 +584,27 @@ mod tests {
 
     #[test]
     fn mentions_are_split_out_of_running_text() {
-        let parts = split_mentions("请[senator::alice/claude]看一下 [1] 和 [speaker]".into());
+        // Names are flat: who is a person is what the daemon reported.
+        note_people(&senate_core::People::new([
+            senate_core::Name::new("alice").unwrap()
+        ]));
+        let parts = split_mentions("请[senator::claude]看一下 [1] 和 [speaker]".into());
         let shown: Vec<_> = parts.iter().map(|p| (p.text.as_str(), p.mention)).collect();
         assert_eq!(
             shown,
             vec![
                 ("请", None),
-                ("[senator::alice/claude]", Some(MentionKind::Junior)),
+                ("[senator::claude]", Some(MentionKind::Junior)),
                 ("看一下 [1] 和 ", None),
                 ("[speaker]", Some(MentionKind::Speaker)),
             ]
         );
         let joined: String = parts.iter().map(|p| p.text.as_str()).collect();
-        assert_eq!(joined, "请[senator::alice/claude]看一下 [1] 和 [speaker]");
+        assert_eq!(joined, "请[senator::claude]看一下 [1] 和 [speaker]");
         assert_eq!(split_mentions(String::new()), Vec::new());
         let kinds: Vec<_> = split_mentions(
-            "[senator::alice] [senator::alice/*] [speaker::alice/claude] [committee] [guest::chat/u1]"
+            "[senator::alice] [senator::*] [speaker::claude] [committee] [guest::chat/u1] \
+             [ibot::senator::codex]"
                 .into(),
         )
         .into_iter()
@@ -588,6 +618,7 @@ mod tests {
                 MentionKind::SpeakerFor,
                 MentionKind::Committee,
                 MentionKind::Guest,
+                MentionKind::Junior,
             ]
         );
     }

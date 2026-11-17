@@ -347,7 +347,7 @@ async fn the_last_people_group_going_archives_the_agent_group() {
 #[tokio::test]
 async fn a_person_is_invited_once_by_account_however_many_of_their_agents_show_up() {
     let hub = agents_hub().await;
-    hub.seat(&path("alice/codex"));
+    hub.seat(&path("codex"), "alice");
     let surface = FakeSurface::with(Caps::ADOPTED);
     let rig = Rig::start_with(hub, surface.clone(), ScriptedBrain::new()).await;
     surface.set_caps(Caps::ALL);
@@ -373,8 +373,7 @@ async fn naming_an_agent_invites_its_person() {
     let surface = FakeSurface::with(Caps::ADOPTED);
     let rig = Rig::start_with(agents_hub().await, surface.clone(), ScriptedBrain::new()).await;
     surface.set_caps(Caps::ALL);
-    rig.append(mention("pm", "/invite alice/claude", "m_h1"))
-        .await;
+    rig.append(mention("pm", "/invite claude", "m_h1")).await;
     rig.settle().await;
     assert_eq!(
         surface.invites(),
@@ -700,7 +699,7 @@ async fn output_levels_shape_the_agent_group() {
     );
     assert_eq!(
         reply.markdown,
-        "[senator::bob/claude] 处理中 · 第二个 · ✓ 读代码"
+        "[senator::copilot] 处理中 · 第二个 · ✓ 读代码"
     );
 }
 
@@ -753,7 +752,7 @@ async fn without_cards_the_task_is_a_plain_root_and_there_are_no_pinned_cards() 
     assert_eq!(
         rig.surface.texts(),
         vec![format!(
-            "[senator::alice/claude] → [senator::bob/claude] 哪个 header？（seq {}）",
+            "[senator::claude] → [senator::copilot] 哪个 header？（seq {}）",
             asked.seq
         )]
     );
@@ -802,7 +801,7 @@ async fn the_pinned_cards_follow_whats_waiting_and_today() {
         summary.contains(&format!("seq {} · 把网关 header", asked.seq)),
         "{summary}"
     );
-    assert!(summary.contains("[senator::bob/claude] · seq"), "{summary}");
+    assert!(summary.contains("[senator::copilot] · seq"), "{summary}");
 
     // A decision today shows up; the approval drops the thread from waiting.
     rig.append(NewEvent::new(

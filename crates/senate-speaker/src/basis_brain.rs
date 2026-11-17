@@ -23,7 +23,7 @@
 //!   `committee_status`, `presence`, `tasks`, `checkpoint`), registered on
 //!   every workspace but outside its roster: only a `converse` run is
 //!   offered them, through its [`RunProfile`] (roster and persona), so the
-//!   other runs never see them. They answer per agent path: a person may
+//!   other runs never see them. They answer per agent: a person may
 //!   have several agents, each with its own presence, checkpoints and tasks.
 //!
 //! `converse` (agent mode) is a typed turn like `interpret`

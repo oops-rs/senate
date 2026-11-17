@@ -117,9 +117,8 @@ impl ServerBuilder {
     /// Say that the built-in Speaker is attached to this server's hub: it
     /// holds the Speaker's seat of this (top) Senate, and judges roots.
     /// Without it, the seat is the roster's ([`Roster::speaker_seat`]): a
-    /// nested Senate's presider, a top Senate's named agent, or nobody.
-    /// Refused at start for a nested Senate, and for a top Senate whose
-    /// roster also names a Speaker.
+    /// named agent, or nobody. Refused at start when the roster also names
+    /// a Speaker.
     pub fn built_in_speaker(mut self, built_in: bool) -> Self {
         self.built_in_speaker = built_in;
         self
@@ -199,6 +198,8 @@ impl ServerBuilder {
             seats,
             locale: config.locale,
             speaker,
+            senate: config.senate_name(),
+            parent: config.parent.clone(),
         }));
 
         // Every committee's writer runs its presence leases, so start them all

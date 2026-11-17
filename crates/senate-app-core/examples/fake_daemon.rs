@@ -1,6 +1,7 @@
-//! A fake daemon with canned threads for `alice/claude` and `alice/codex`, a
-//! Codex thread, an approval, and a docket of the Senate `alice/claude`
-//! presides over, for working on the native app without a Senate server:
+//! A fake daemon with canned threads for `claude` and `codex`, a Codex
+//! thread, an approval, and the docket of the one Senate (`alice-desk`),
+//! where `claude` presides, for working on the native app without a Senate
+//! server:
 //!
 //! ```sh
 //! mkdir -p /tmp/sh && chmod 700 /tmp/sh

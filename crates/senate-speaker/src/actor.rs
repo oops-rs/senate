@@ -32,8 +32,8 @@ use crate::engine::{Engine, RunEvent, ThoughtKind};
 /// where the last one left it.
 ///
 /// There is no roster here: who sits in the Senate is the hub's
-/// ([`Hub::roster`]), which knows its presider and seats agents as they
-/// connect, so the Speaker asks it rather than hold a copy that goes stale.
+/// ([`Hub::roster`]), which seats agents (under the person who runs them) as
+/// they connect, so the Speaker asks it rather than hold a copy that goes stale.
 #[derive(Clone)]
 pub struct SpeakerArgs {
     pub hub: Arc<dyn Hub>,

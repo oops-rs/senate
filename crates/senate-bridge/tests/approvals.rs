@@ -242,7 +242,7 @@ async fn codex_approvals_reach_the_app_and_the_first_answer_wins() {
 async fn the_app_acts_on_a_committee_without_a_session() {
     let mut h = Harness::with_committees(&["refund-v2"]).await;
     h.start().await;
-    // alice/claude on record (its session ended): the configured committee
+    // claude on record (its session ended): the configured committee
     // stays open for it, and the app acts with no session at all.
     let wd = h.workdir("w", Some("refund-v2"));
     h.hook(HookKind::SessionStart, "s0", &wd, None).await;
@@ -287,7 +287,7 @@ async fn the_app_acts_on_a_committee_without_a_session() {
     let answer = h.server.last_event("refund-v2");
     assert_eq!(answer.seq, posted.seq);
     assert_eq!(answer.from, person("alice"), "the person answered");
-    assert_eq!(inbox.agents, [path("alice/claude")]);
+    assert_eq!(inbox.agents, [path("claude")]);
 
     // As an agent: the only one on the committee, or the one named.
     let as_agent = |agent: Option<&str>| Request::Post {

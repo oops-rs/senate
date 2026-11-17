@@ -32,7 +32,7 @@ use crate::continuity::{
 };
 use crate::event::{Event, Kind, NewEvent};
 use crate::ids::{CommitteeId, Name, Seq};
-use crate::roster::{DelegationPresence, ResolveError, Roster};
+use crate::roster::{DelegationPresence, People, ResolveError, Roster};
 use crate::senator::SenatorName;
 use crate::task::TaskBoard;
 
@@ -157,17 +157,33 @@ pub trait Hub: Send + Sync + 'static {
         message_ref: &str,
     ) -> Result<Option<MirrorRef>, HubError>;
 
-    /// Resolve every `senator::<person>/*` in `event.to` against
-    /// [`Hub::roster`], then [`Hub::append`].
+    /// The agents on `committee`: whom `senator::*` there may reach. The
+    /// default is every agent seated in the Senate; a hub that knows which
+    /// agents have a seat on the committee (the server: a presence there)
+    /// answers with those.
+    async fn committee_agents(
+        &self,
+        committee: &CommitteeId,
+    ) -> Result<Vec<SenatorName>, HubError> {
+        let _ = committee;
+        Ok(self.roster().await?.agents())
+    }
+
+    /// Resolve every `senator::*` in `event.to` against the agents on the
+    /// committee ([`Hub::committee_agents`]), then [`Hub::append`].
     ///
-    /// One agent: it goes to that agent. None: to the person. Several:
-    /// nothing is appended and the error is [`HubError::Unresolved`] with
-    /// the candidates; the caller names one (the Speaker picks by the task
-    /// and by what each agent is working on, and asks the person when
-    /// unsure) and appends again.
+    /// One agent: it goes to that agent. None: to the Senate's one person.
+    /// Several: nothing is appended and the error is
+    /// [`HubError::Unresolved`] with the candidates; the caller names one
+    /// (the Speaker picks by the task and by what each agent is working on,
+    /// and asks the person when unsure) and appends again.
     async fn resolve_and_append(&self, mut event: NewEvent) -> Result<Appended, HubError> {
         if event.to.iter().any(Address::is_wildcard) {
-            event.to = self.roster().await?.resolve_recipients(&event.to)?;
+            let candidates = self.committee_agents(&event.committee).await?;
+            event.to = self
+                .roster()
+                .await?
+                .resolve_recipients_among(&event.to, &candidates)?;
         }
         self.append(event).await
     }
@@ -269,7 +285,8 @@ pub trait Hub: Send + Sync + 'static {
     /// The committee's task threads over its whole log. The default scans;
     /// the server keeps a board per committee and folds only what is new.
     async fn tasks(&self, committee: &CommitteeId) -> Result<TaskBoard, HubError> {
-        scan(self, committee, TaskBoard::new(), TaskBoard::observe).await
+        let people = self.roster().await?.people();
+        scan(self, committee, TaskBoard::new(people), TaskBoard::observe).await
     }
 
     /// Each agent's presence on the committee. The default folds the log's
@@ -410,13 +427,14 @@ impl From<ReassignRefused> for HubError {
 /// both apply the same rules.
 pub fn reassign_transition(
     board: &[AgentPresence],
+    people: &People,
     head: Seq,
     agent: &SenatorName,
     new_owner: &SenatorName,
     now: DateTime<Utc>,
 ) -> Result<Option<PresencePayload>, ReassignRefused> {
     for senator in [agent, new_owner] {
-        if senator.is_senior() {
+        if people.is_person(senator) {
             return Err(ReassignRefused::NotAnAgent(senator.clone()));
         }
     }
@@ -511,7 +529,7 @@ mod tests {
     use super::*;
     use crate::continuity::{CheckpointFiles, CheckpointPayload, CheckpointTrigger};
     use crate::event::{BindingAction, BindingPayload, GroupRole, meta};
-    use crate::roster::Senior;
+    use crate::roster::{SeatedAgent, Senior};
 
     fn path(s: &str) -> SenatorName {
         s.parse().unwrap()
@@ -539,20 +557,26 @@ mod tests {
     }
 
     impl VecHub {
+        /// alice runs claude and codex, bob runs copilot, carol none.
         fn new() -> Self {
-            let roster = Roster::top(
-                vec![
-                    Senior::new(name("alice")),
-                    Senior::new(name("bob")),
-                    Senior::new(name("carol")),
-                ],
-                vec![
-                    path("alice/claude"),
-                    path("alice/codex"),
-                    path("bob/claude"),
-                ],
+            Self::with(
+                Roster::new(
+                    vec![
+                        Senior::new(name("alice")),
+                        Senior::new(name("bob")),
+                        Senior::new(name("carol")),
+                    ],
+                    vec![
+                        SeatedAgent::new(path("claude"), name("alice")),
+                        SeatedAgent::new(path("codex"), name("alice")),
+                        SeatedAgent::new(path("copilot"), name("bob")),
+                    ],
+                )
+                .unwrap(),
             )
-            .unwrap();
+        }
+
+        fn with(roster: Roster) -> Self {
             Self {
                 logs: Mutex::default(),
                 roster,
@@ -688,79 +712,69 @@ mod tests {
 
     #[test]
     fn reassignment_rules() {
+        let people = People::new([name("alice"), name("bob")]);
         let now = Utc::now();
-        let alice = path("alice/claude");
-        let bob = path("bob/claude");
+        let alice = path("claude");
+        let bob = path("copilot");
         // From any state, also with no presence known.
-        let p = reassign_transition(&[], Seq(9), &alice, &bob, now)
+        let p = reassign_transition(&[], &people, Seq(9), &alice, &bob, now)
             .unwrap()
             .unwrap();
         assert_eq!(p.state, PresenceState::Reassigned);
         assert_eq!(p.new_owner, Some(bob.clone()));
-        let online = [at("alice/claude", PresenceState::Online, None)];
-        let p = reassign_transition(&online, Seq(9), &alice, &bob, now)
+        let online = [at("claude", PresenceState::Online, None)];
+        let p = reassign_transition(&online, &people, Seq(9), &alice, &bob, now)
             .unwrap()
             .unwrap();
         assert_eq!(p.previous, Some(PresenceState::Online));
         assert_eq!(p.lag, Some(5));
         // Already so; undo; nothing to undo; no chains.
-        let moved = [at(
-            "alice/claude",
-            PresenceState::Reassigned,
-            Some("bob/claude"),
-        )];
+        let moved = [at("claude", PresenceState::Reassigned, Some("copilot"))];
         assert_eq!(
-            reassign_transition(&moved, Seq(9), &alice, &bob, now),
+            reassign_transition(&moved, &people, Seq(9), &alice, &bob, now),
             Ok(None)
         );
-        let back = reassign_transition(&moved, Seq(9), &alice, &alice, now)
+        let back = reassign_transition(&moved, &people, Seq(9), &alice, &alice, now)
             .unwrap()
             .unwrap();
         assert_eq!(back.state, PresenceState::Online);
         assert_eq!(back.new_owner, None);
         assert_eq!(
-            reassign_transition(&online, Seq(9), &alice, &alice, now),
+            reassign_transition(&online, &people, Seq(9), &alice, &alice, now),
             Err(ReassignRefused::NotReassigned(alice.clone()))
         );
-        let bob_moved = [at(
-            "bob/claude",
-            PresenceState::Reassigned,
-            Some("carol/claude"),
-        )];
+        let bob_moved = [at("copilot", PresenceState::Reassigned, Some("aider"))];
         assert_eq!(
-            reassign_transition(&bob_moved, Seq(9), &alice, &bob, now),
+            reassign_transition(&bob_moved, &people, Seq(9), &alice, &bob, now),
             Err(ReassignRefused::OwnerReassigned(bob.clone()))
         );
     }
 
     #[test]
     fn work_is_reassigned_between_agents_named_in_full() {
+        let people = People::new([name("alice"), name("bob")]);
         let now = Utc::now();
-        let alice = path("alice/claude");
+        let alice = path("claude");
         // A person is not an agent, on either side.
         assert_eq!(
-            reassign_transition(&[], Seq(9), &alice, &path("bob"), now),
+            reassign_transition(&[], &people, Seq(9), &alice, &path("bob"), now),
             Err(ReassignRefused::NotAnAgent(path("bob")))
         );
         assert_eq!(
-            reassign_transition(&[], Seq(9), &path("alice"), &path("bob/claude"), now),
+            reassign_transition(&[], &people, Seq(9), &path("alice"), &path("copilot"), now),
             Err(ReassignRefused::NotAnAgent(path("alice")))
         );
         // One of a person's agents may hand its work to another of theirs,
         // and that is not an undo.
-        let p = reassign_transition(&[], Seq(9), &alice, &path("alice/codex"), now)
+        let p = reassign_transition(&[], &people, Seq(9), &alice, &path("codex"), now)
             .unwrap()
             .unwrap();
         assert_eq!(p.state, PresenceState::Reassigned);
-        assert_eq!(p.new_owner, Some(path("alice/codex")));
+        assert_eq!(p.new_owner, Some(path("codex")));
         // A sibling being reassigned does not make this agent so.
-        let sibling = [at(
-            "alice/codex",
-            PresenceState::Reassigned,
-            Some("bob/claude"),
-        )];
+        let sibling = [at("codex", PresenceState::Reassigned, Some("copilot"))];
         assert_eq!(
-            reassign_transition(&sibling, Seq(9), &alice, &alice, now),
+            reassign_transition(&sibling, &people, Seq(9), &alice, &alice, now),
             Err(ReassignRefused::NotReassigned(alice.clone()))
         );
 
@@ -771,53 +785,54 @@ mod tests {
 
     #[tokio::test]
     async fn the_wildcard_is_resolved_before_anything_is_appended() {
-        let hub = VecHub::new();
         let question = || ev(Kind::Question, "senator::carol", "?");
 
-        // One agent: it goes to that agent.
-        let one = hub
-            .resolve_and_append(question().to(addr("senator::bob/*")))
+        // One agent on the committee: it goes to that agent.
+        let one = VecHub::with(
+            Roster::new(
+                vec![Senior::new(name("carol"))],
+                vec![SeatedAgent::new(path("copilot"), name("carol"))],
+            )
+            .unwrap(),
+        );
+        let appended = one
+            .resolve_and_append(question().to(addr("senator::*")))
             .await
             .unwrap();
-        assert_eq!(one.event.to, [addr("senator::bob/claude")]);
-        // None: to the person.
-        let none = hub
-            .resolve_and_append(question().to(addr("senator::carol/*")))
+        assert_eq!(appended.event.to, [addr("senator::copilot")]);
+        // None: to the Senate's person.
+        let none = VecHub::with(Roster::of_person(name("carol")));
+        let appended = none
+            .resolve_and_append(question().to(addr("senator::*")))
             .await
             .unwrap();
-        assert_eq!(none.event.to, [addr("senator::carol")]);
+        assert_eq!(appended.event.to, [addr("senator::carol")]);
         // Several: refused with the candidates, and nothing is stored.
+        let hub = VecHub::new();
         let err = hub
-            .resolve_and_append(question().to(addr("senator::alice/*")))
+            .resolve_and_append(question().to(addr("senator::*")))
             .await
             .unwrap_err();
         match err {
-            HubError::Unresolved(ResolveError::Ambiguous { owner, candidates }) => {
-                assert_eq!(owner, name("alice"));
-                assert_eq!(candidates, [path("alice/claude"), path("alice/codex")]);
+            HubError::Unresolved(ResolveError::Ambiguous { candidates }) => {
+                assert_eq!(candidates, [path("claude"), path("codex"), path("copilot")]);
             }
             other => panic!("{other}"),
         }
-        assert_eq!(hub.read(&c(), Seq::ZERO, 10).await.unwrap().len(), 2);
+        assert!(hub.read(&c(), Seq::ZERO, 10).await.unwrap().is_empty());
         // A plain append never stores a wildcard.
         assert!(matches!(
-            hub.append(question().to(addr("senator::bob/*"))).await,
+            hub.append(question().to(addr("senator::*"))).await,
             Err(HubError::Rejected(_))
         ));
-        assert!(
-            hub.read(&c(), Seq::ZERO, 10)
-                .await
-                .unwrap()
-                .iter()
-                .all(|e| e.to.iter().all(|a| !a.is_wildcard()))
-        );
+        assert!(hub.read(&c(), Seq::ZERO, 10).await.unwrap().is_empty());
     }
 
     #[tokio::test]
     async fn a_delegation_is_reachable_through_any_one_connected_agent() {
         let hub = VecHub::new();
-        hub.connect("alice/codex");
-        assert!(!hub.is_agent_connected(&c(), &path("alice/claude")).await);
+        hub.connect("codex");
+        assert!(!hub.is_agent_connected(&c(), &path("claude")).await);
         assert_eq!(
             hub.delegation_presence(&c(), &name("alice")).await.unwrap(),
             DelegationPresence::Present
@@ -837,30 +852,18 @@ mod tests {
         let hub = VecHub::new();
         let q = hub
             .append(
-                ev(Kind::Question, "senator::bob/claude", "Which HEADER?")
-                    .to(addr("senator::alice/claude")),
+                ev(Kind::Question, "senator::copilot", "Which HEADER?").to(addr("senator::claude")),
             )
             .await
             .unwrap()
             .event
             .seq;
-        hub.append(ev(
-            Kind::Note,
-            "senator::bob/claude",
-            "unrelated header note",
-        ))
-        .await
-        .unwrap();
-        hub.append(
-            ev(
-                Kind::Answer,
-                "senator::alice/claude",
-                "the idempotency header",
-            )
-            .in_thread(q),
-        )
-        .await
-        .unwrap();
+        hub.append(ev(Kind::Note, "senator::copilot", "unrelated header note"))
+            .await
+            .unwrap();
+        hub.append(ev(Kind::Answer, "senator::claude", "the idempotency header").in_thread(q))
+            .await
+            .unwrap();
 
         let thread = hub.thread(&c(), q).await.unwrap();
         assert_eq!(
@@ -927,9 +930,9 @@ mod tests {
             trigger: CheckpointTrigger::Commit,
         };
         for (from, body) in [
-            ("senator::alice/claude", "claude one"),
-            ("senator::alice/codex", "codex one"),
-            ("senator::alice/claude", "claude two"),
+            ("senator::claude", "claude one"),
+            ("senator::codex", "codex one"),
+            ("senator::claude", "claude two"),
         ] {
             hub.append(
                 ev(Kind::Checkpoint, from, body).with_meta(meta::CHECKPOINT, payload.value()),
@@ -942,17 +945,17 @@ mod tests {
             let hub = &hub;
             async move { hub.latest_checkpoint(&c(), &agent).await.unwrap() }
         };
-        assert_eq!(latest("alice/claude").await.unwrap().body, "claude two");
-        assert_eq!(latest("alice/codex").await.unwrap().body, "codex one");
+        assert_eq!(latest("claude").await.unwrap().body, "claude two");
+        assert_eq!(latest("codex").await.unwrap().body, "codex one");
         // An agent with none is not covered by its sibling's.
-        assert!(latest("bob/claude").await.is_none());
+        assert!(latest("copilot").await.is_none());
         assert!(latest("alice").await.is_none());
     }
 
     #[tokio::test]
     async fn only_an_away_agent_is_taken_over() {
         let hub = VecHub::new();
-        let alice = path("alice/claude");
+        let alice = path("claude");
         // No presence at all.
         assert!(matches!(
             hub.mark_taken_over(&c(), &alice).await,
@@ -971,13 +974,13 @@ mod tests {
         };
         hub.append(presence_event(
             c(),
-            &transition("alice/claude", PresenceState::Disconnected),
+            &transition("claude", PresenceState::Disconnected),
         ))
         .await
         .unwrap();
         hub.append(presence_event(
             c(),
-            &transition("alice/codex", PresenceState::Online),
+            &transition("codex", PresenceState::Online),
         ))
         .await
         .unwrap();
@@ -991,12 +994,9 @@ mod tests {
         // Already so.
         assert_eq!(hub.mark_taken_over(&c(), &alice).await.unwrap(), None);
         // The sibling is online, and stays its own.
-        let err = hub
-            .mark_taken_over(&c(), &path("alice/codex"))
-            .await
-            .unwrap_err();
+        let err = hub.mark_taken_over(&c(), &path("codex")).await.unwrap_err();
         assert!(
-            err.to_string().contains("senator::alice/codex is online"),
+            err.to_string().contains("senator::codex is online"),
             "{err}"
         );
         crate::testing::assert_senate_vocabulary(&err.to_string());
@@ -1009,8 +1009,8 @@ mod tests {
                 .map(|p| (p.agent.to_string(), p.state))
                 .collect::<Vec<_>>(),
             [
-                ("alice/claude".to_string(), PresenceState::TakenOver),
-                ("alice/codex".to_string(), PresenceState::Online)
+                ("claude".to_string(), PresenceState::TakenOver),
+                ("codex".to_string(), PresenceState::Online)
             ]
         );
     }
@@ -1019,16 +1019,11 @@ mod tests {
     async fn a_hub_that_does_not_keep_presence_refuses_to_reassign() {
         let hub = VecHub::new();
         let refused = hub
-            .reassign(
-                &c(),
-                &path("alice/claude"),
-                &path("bob/claude"),
-                &name("pm"),
-            )
+            .reassign(&c(), &path("claude"), &path("copilot"), &name("pm"))
             .await;
         assert!(matches!(refused, Err(HubError::Rejected(_))));
         assert_eq!(hub.epoch().await.unwrap(), "test");
-        assert_eq!(hub.roster().await.unwrap().presider(), None);
+        assert_eq!(hub.roster().await.unwrap().named_speaker(), None);
     }
 
     #[test]

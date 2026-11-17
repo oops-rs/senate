@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use senate_core::{Address, Locale, SenatorName};
+use senate_core::{Address, Locale, SenatePath};
 
 use crate::config::BridgeConfig;
 use crate::daemon::senate_words;
@@ -29,9 +29,8 @@ pub struct StatusView {
     pub socket: PathBuf,
     /// `senator::<person>`.
     pub person: Option<String>,
-    /// The Senate connected to, by its presider (`None`: the top one, or
-    /// not known).
-    pub presider: Option<SenatorName>,
+    /// The Senate served, by its path (`None`: not known yet).
+    pub senate: Option<SenatePath>,
     pub server_url: Option<String>,
     pub committees: Vec<CommitteeStatus>,
     pub sessions: Vec<Session>,
@@ -39,22 +38,15 @@ pub struct StatusView {
     pub locale: Locale,
     /// Who holds that Senate's Speaker's seat, as the daemon heard.
     pub speaker: Option<senate_core::SpeakerSeat>,
-    /// The other Senates the daemon serves.
-    pub others: Vec<StatusView>,
 }
 
 impl StatusView {
     fn from_reply(reply: StatusReply, socket: PathBuf) -> Self {
         Self {
             daemon: Some(reply.pid),
-            others: reply
-                .others
-                .into_iter()
-                .map(|o| Self::from_reply(o, socket.clone()))
-                .collect(),
             socket,
             person: Some(Address::senior(&reply.person).in_text()),
-            presider: reply.presider,
+            senate: reply.senate,
             server_url: Some(reply.server_url),
             committees: reply.committees,
             sessions: reply.sessions,
@@ -90,7 +82,11 @@ fn offline(paths: &Paths) -> anyhow::Result<StatusView> {
         person: config
             .as_ref()
             .map(|c| Address::senior(&c.person).in_text()),
-        presider: None,
+        senate: crate::config::Hosted::load(&paths.config())
+            .ok()
+            .filter(|h| !h.is_empty())
+            .zip(config.as_ref())
+            .and_then(|(h, c)| SenatePath::top(h.name(&c.person)).ok()),
         server_url: config.as_ref().map(|c| c.server_url.clone()),
         committees: Vec::new(),
         sessions: Vec::new(),
@@ -99,15 +95,11 @@ fn offline(paths: &Paths) -> anyhow::Result<StatusView> {
             .as_ref()
             .map_or_else(|| BridgeConfig::locale_at(&paths.config()), |c| c.locale),
         speaker: None,
-        others: Vec::new(),
     };
     if !paths.state_db().exists() {
         return Ok(view);
     }
     let store = Store::open_read_only(&paths.state_db())?;
-    if let Some(url) = &view.server_url {
-        view.presider = store.seating(url.trim_end_matches('/'))?.flatten();
-    }
     view.sessions = store.sessions()?;
     let configured: Vec<_> = config.map(|c| c.committees).unwrap_or_default();
     view.committees = store
@@ -237,10 +229,6 @@ pub fn render(view: &StatusView, now: DateTime<Utc>) -> String {
         ),
     };
     render_senate(view, now, &mut out);
-    for other in &view.others {
-        let _ = writeln!(out);
-        render_senate(other, now, &mut out);
-    }
     out
 }
 
@@ -259,7 +247,7 @@ fn speaker_words(seat: Option<&senate_core::SpeakerSeat>, locale: Locale) -> Str
 fn render_senate(view: &StatusView, now: DateTime<Utc>, out: &mut String) {
     let l = view.locale;
     if let (Some(person), Some(url)) = (&view.person, &view.server_url) {
-        let senate = senate_words(view.presider.as_ref(), l);
+        let senate = senate_words(view.senate.as_ref(), l);
         let speaker = speaker_words(view.speaker.as_ref(), l);
         let _ = match l {
             Locale::Zh => writeln!(
@@ -403,7 +391,7 @@ fn render_senate(view: &StatusView, now: DateTime<Utc>, out: &mut String) {
 
 #[cfg(test)]
 mod tests {
-    use senate_core::{CommitteeId, Seq};
+    use senate_core::{CommitteeId, SenatorName, Seq};
 
     use super::*;
 
@@ -425,36 +413,31 @@ mod tests {
             daemon: None,
             socket: "/h/bridge.sock".into(),
             person: Some("[senator::alice]".into()),
-            presider: None,
+            senate: None,
             server_url: Some("http://x".into()),
-            committees: vec![row("alice/claude", 1), row("alice/codex", 0)],
+            committees: vec![row("claude", 1), row("codex", 0)],
             sessions: Vec::new(),
             queue: QueueCounts::default(),
             locale,
             speaker: None,
-            others: Vec::new(),
         }
     }
 
     #[test]
-    fn every_senate_served_is_shown_with_who_presides() {
+    fn the_senate_served_is_shown_by_its_path_with_who_presides() {
+        // Replaces "every Senate served is shown with who presides": a
+        // machine serves one Senate; it is named by its path.
         let now = Utc::now();
-        let mut top = view(Locale::En);
-        top.speaker = Some(senate_core::SpeakerSeat::BuiltIn);
-        let mut below = view(Locale::En);
-        below.presider = Some("alice/claude".parse().unwrap());
-        below.server_url = Some("http://127.0.0.1:7980".into());
-        below.speaker = Some(senate_core::SpeakerSeat::Senator(
-            "alice/claude".parse().unwrap(),
-        ));
-        top.others.push(below);
-        let text = render(&top, now);
-        assert!(text.contains(
-            "server: http://x, the top Senate, as [senator::alice]; Speaker: the built-in Speaker"
-        ));
-        assert!(text.contains(
-            "server: http://127.0.0.1:7980, the Senate presided over by [senator::alice/claude], as [senator::alice]; Speaker: [senator::alice/claude]"
-        ), "{text}");
+        let mut v = view(Locale::En);
+        v.senate = Some("acme/north-desk".parse().unwrap());
+        v.speaker = Some(senate_core::SpeakerSeat::Senator("claude".parse().unwrap()));
+        let text = render(&v, now);
+        assert!(
+            text.contains(
+                "server: http://x, the Senate [acme/north-desk], as [senator::alice]; Speaker: [senator::claude]"
+            ),
+            "{text}"
+        );
         assert_eq!(text.matches("daemon:").count(), 1);
     }
 
@@ -463,23 +446,23 @@ mod tests {
         let now = Utc::now();
         let text = render(&view(Locale::En), now);
         assert!(text.contains("daemon: not running"));
-        assert!(text.contains("server: http://x, the top Senate, as [senator::alice]"));
+        assert!(text.contains("server: http://x, this Senate, as [senator::alice]"));
         assert!(text.contains("refund-v2 *"));
-        assert!(text.contains("[senator::alice/claude]"));
-        assert!(text.contains("[senator::alice/codex]"));
+        assert!(text.contains("[senator::claude]"));
+        assert!(text.contains("[senator::codex]"));
         assert!(text.contains("connected since 1m ago"));
         assert!(text.contains("none registered"));
     }
 
     #[test]
-    fn renders_in_chinese_and_names_a_nested_senate() {
+    fn renders_in_chinese_and_names_the_senate_by_its_path() {
         let now = Utc::now();
         let mut v = view(Locale::Zh);
-        v.presider = Some("alice/claude".parse().unwrap());
+        v.senate = Some("alice-desk".parse().unwrap());
         let text = render(&v, now);
         assert!(text.contains("daemon：未运行"), "{text}");
         assert!(
-            text.contains("由 [senator::alice/claude] 主持的 Senate，身份 [senator::alice]"),
+            text.contains("Senate [alice-desk]，身份 [senator::alice]"),
             "{text}"
         );
         assert!(text.contains("已连接，自 1 分钟前"), "{text}");

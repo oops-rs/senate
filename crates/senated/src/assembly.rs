@@ -186,9 +186,9 @@ impl Assembly {
                     source,
                 })?,
         };
-        // The built-in Speaker holds the seat of the (top) Senate it runs
-        // in, and only it judges roots; without it the roster says who
-        // presides (a nested Senate's presider, a named agent, or nobody).
+        // The built-in Speaker holds the seat of the Senate it runs in,
+        // and only it judges roots; without it the roster says who presides
+        // (a named agent, or nobody).
         let mut server = Server::builder(config.server.clone(), store)
             .built_in_speaker(config.speaker.is_some());
         if let Some(auth) = auth {

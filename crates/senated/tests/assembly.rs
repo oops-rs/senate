@@ -38,7 +38,7 @@ fn people() -> Roster {
         platform: "chat".into(),
         id: "u_dana".into(),
     });
-    Roster::top(vec![dana], Vec::new()).unwrap()
+    Roster::new(vec![dana], Vec::new()).unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

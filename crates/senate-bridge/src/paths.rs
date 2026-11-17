@@ -124,15 +124,6 @@ impl Paths {
         self.home.join("state.db")
     }
 
-    /// The state of a Senate presided over by `presider` (relative to the
-    /// person, `claude`), when this machine serves several:
-    /// `state.<presider with / as ->.db`. The Senate where the person's
-    /// agents sit directly keeps `state.db`.
-    pub fn state_db_for(&self, presider: &str) -> PathBuf {
-        self.home
-            .join(format!("state.{}.db", presider.replace('/', "-")))
-    }
-
     pub fn socket(&self) -> PathBuf {
         self.home.join("bridge.sock")
     }
@@ -175,10 +166,6 @@ mod tests {
         assert_eq!(p.hosted("top"), PathBuf::from("/x/.senate/senates/top"));
         assert_eq!(p.state_db(), PathBuf::from("/x/.senate/state.db"));
         assert_eq!(p.socket(), PathBuf::from("/x/.senate/bridge.sock"));
-        assert_eq!(
-            p.state_db_for("claude/reviewer"),
-            PathBuf::from("/x/.senate/state.claude-reviewer.db")
-        );
     }
 
     #[test]

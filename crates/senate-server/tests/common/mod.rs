@@ -10,9 +10,10 @@ use std::time::Duration;
 use eventsource_stream::Eventsource;
 use futures::{Stream, StreamExt};
 use reqwest::{Method, RequestBuilder, StatusCode};
-use senate_core::api::{ApiError, AppendResponse};
+use senate_core::api::{ApiError, AppendResponse, Heartbeat};
 use senate_core::{
-    Address, CommitteeId, Event, Kind, Name, NewEvent, RosterConfig, SenatorName, Senior, Seq,
+    Address, CommitteeId, Event, Kind, Name, NewEvent, RosterConfig, SeatedAgent, SenatorName,
+    Senior, Seq,
 };
 use senate_log::{LogStore, MemoryStore};
 use senate_server::{Running, Server, ServerConfig, TokenConfig};
@@ -30,14 +31,19 @@ pub fn path(p: &str) -> SenatorName {
     p.parse().unwrap()
 }
 
-/// `senator::<person>`.
+/// `senator::<name>`: a person, or any senator named by its name.
 pub fn person_addr(person: &str) -> Address {
     Address::Senator(path(person))
 }
 
-/// `senator::<person>/claude`: the person's agent.
-pub fn agent_addr(person: &str) -> Address {
-    Address::Senator(path(&format!("{person}/claude")))
+/// `senator::<agent>`: an agent, whose person is whoever first acts as it.
+pub fn agent_addr(agent: &str) -> Address {
+    Address::Senator(path(agent))
+}
+
+/// `agent`, seated in the roster under `owner` from the start.
+pub fn seated(agent: &str, owner: &str) -> SeatedAgent {
+    SeatedAgent::new(path(agent), name(owner))
 }
 
 pub fn committee() -> CommitteeId {
@@ -48,7 +54,6 @@ pub fn committee() -> CommitteeId {
 /// connect.
 pub fn roster() -> RosterConfig {
     RosterConfig {
-        presider: None,
         speaker: None,
         seniors: ["alice", "bob", "carol"]
             .into_iter()
@@ -120,6 +125,55 @@ impl TestServer {
         .unwrap()
     }
 
+    /// Heartbeat as `agent` on the committee with `token`'s person: it is
+    /// seated (under that person, when nobody answers for it yet) and is
+    /// then on the committee, so `senator::*` counts it. A heartbeat alone
+    /// does not make it connected.
+    pub async fn heartbeat(&self, token: &str, agent: &str) -> reqwest::Response {
+        self.request(
+            Method::POST,
+            &senate_core::api::heartbeat_path(&committee()),
+            token,
+        )
+        .json(&Heartbeat {
+            agent: path(agent),
+            sessions: 1,
+            cursor: Seq::ZERO,
+        })
+        .send()
+        .await
+        .unwrap()
+    }
+
+    /// Act as `senator` with `token`'s person by reading a cursor, which
+    /// seats an agent and writes nothing to the log.
+    pub async fn act_as(&self, token: &str, senator: &str) -> StatusCode {
+        self.request(
+            Method::GET,
+            &senate_core::api::cursor_path(&committee(), "read"),
+            token,
+        )
+        .query(&[("senator", senator)])
+        .send()
+        .await
+        .unwrap()
+        .status()
+    }
+
+    /// Append raw JSON (for what [`NewEvent`] cannot express, such as a
+    /// path inside a name).
+    pub async fn post_json(&self, token: &str, body: &serde_json::Value) -> reqwest::Response {
+        self.request(
+            Method::POST,
+            &senate_core::api::events_path(&committee()),
+            token,
+        )
+        .json(body)
+        .send()
+        .await
+        .unwrap()
+    }
+
     /// Append as alice over HTTP and return the stored event.
     pub async fn append(&self, body: &str) -> Event {
         let response = self.post_event(ALICE, &note(body)).await;
@@ -135,7 +189,7 @@ impl TestServer {
         self.stream_as(token, None, after, last_event_id).await
     }
 
-    /// Open the stream as the connection of `senator` (e.g. `alice/claude`).
+    /// Open the stream as the connection of `senator` (e.g. `claude`).
     pub async fn stream_as(
         &self,
         token: &str,

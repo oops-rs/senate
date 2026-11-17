@@ -72,9 +72,12 @@
 //! `say` and `thread` are the person's own (`senate ask`, `tell`, `request`,
 //! `reply`, `thread`): `say` appends a `question`, `note` or `request` as
 //! `senator::<person>`, never as an agent. `to` may hold an agent, a person,
-//! `speaker`, or `senator::<person>/*`, which the server resolves, or puts to
-//! the Speaker to pick where a senator presides; with several agents and
-//! nobody to pick it is refused with [`codes::AMBIGUOUS_RECIPIENT`]. With
+//! `speaker`, or `senator::*`, which the server resolves among the agents on
+//! the committee, or puts to the Speaker to pick where a senator presides;
+//! with several agents and nobody to pick it is refused with
+//! [`codes::AMBIGUOUS_RECIPIENT`]. `at` instead of `to` is a qualified name
+//! (`ibot::senator::codex`): the daemon resolves it through the server and
+//! posts on the committee it names. With
 //! `thread` (any seq in it) the event is written in that thread, and an
 //! empty `to` addresses whoever took part in it other than the person. A
 //! person's `committee` is required without a session; which Senate the
@@ -122,10 +125,10 @@
 //! `_meta.threadId`, and Codex hooks report no pids (every thread of an
 //! app-server shares the same ones).
 //!
-//! `ask` accepts an agent (`senator::bob/claude`) or whichever of a
-//! person's agents should get it (`senator::bob/*`); the Speaker, the
-//! committee, a person alone and guests are refused. When the server
-//! resolves `senator::bob/*` and bob has several agents, the reply is the
+//! `ask` accepts an agent (`senator::codex`) or whichever agent on the
+//! committee should get it (`senator::*`); the Speaker, the committee, a
+//! person and guests are refused. When the server resolves `senator::*`
+//! and several agents could get it, the reply is the
 //! error [`codes::AMBIGUOUS_RECIPIENT`] with the agents in
 //! [`IpcError::candidates`]: the asker names one and asks again.
 //!
@@ -195,7 +198,7 @@ pub mod codes {
     pub const NOT_PRESIDING: &str = "not_presiding";
     /// The Senate server refused or could not be reached.
     pub const SERVER: &str = "server";
-    /// `senator::<person>/*` named a person with several agents;
+    /// `senator::*` could reach several agents on the committee;
     /// [`IpcError::candidates`](super::IpcError::candidates) lists them.
     pub const AMBIGUOUS_RECIPIENT: &str = senate_core::api::code::AMBIGUOUS_RECIPIENT;
     pub const INTERNAL: &str = "internal";
@@ -390,6 +393,11 @@ pub enum Request {
         /// Empty with `thread`: whoever took part in the thread.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         to: Vec<Address>,
+        /// A qualified name instead of `to`: a seat on another committee
+        /// (or Senate). The daemon resolves it, nearest first, and the
+        /// person's message is delivered there directly.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<senate_core::Locator>,
         body: String,
         /// Any seq of the thread to speak in; the event goes in its root's
         /// thread.
@@ -566,9 +574,9 @@ pub struct PresidesReply {
 pub struct Presiding {
     /// The presiding agent: the holder of the Speaker's seat.
     pub speaker: SenatorName,
-    /// That Senate, by its presider (`None`: a top Senate used alone).
+    /// That Senate's name, as `/v1/me` gave it.
     #[serde(default)]
-    pub senate: Option<SenatorName>,
+    pub senate: Option<Name>,
     /// The agents seated there.
     #[serde(default)]
     pub seated: Vec<SenatorName>,
@@ -577,9 +585,9 @@ pub struct Presiding {
 /// One Senate's docket on each of its committees.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SenateDocket {
-    /// The Senate, by its presider (`None`: a top Senate).
+    /// The Senate's name, as `/v1/me` gave it.
     #[serde(default)]
-    pub senate: Option<SenatorName>,
+    pub senate: Option<Name>,
     pub pages: Vec<senate_core::DocketPage>,
     /// The latest checkpoint of every away agent an item names: what the
     /// Speaker covers from.
@@ -758,6 +766,12 @@ pub struct CatchUpReply {
     pub committee: CommitteeId,
     /// The agent that caught up: `senator::<agent>`.
     pub me: Address,
+    /// The Senate's people: every other senator is an agent.
+    #[serde(default)]
+    pub people: senate_core::People,
+    /// The agents run by the same person as `me`.
+    #[serde(default)]
+    pub own: Vec<SenatorName>,
     /// Directed first, then the rest, each group in seq order.
     pub items: Vec<CatchUpItem>,
     /// More events remain after this page.
@@ -765,6 +779,17 @@ pub struct CatchUpReply {
     /// The `read` cursor before and after this call.
     pub read_before: Seq,
     pub read: Seq,
+}
+
+impl CatchUpReply {
+    /// How `me` reads these events ([`crate::format::Reader`]).
+    pub fn reader(&self) -> crate::format::Reader {
+        crate::format::Reader::new(
+            self.me.clone(),
+            self.people.clone(),
+            self.own.iter().cloned().collect(),
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -836,10 +861,14 @@ pub struct StatusReply {
     pub pid: u32,
     pub version: String,
     pub person: Name,
-    /// The Senate this bridge is connected to, by its presider; `None` for
-    /// the top Senate.
+    /// The Senate this bridge serves, by its path (`acme/north-desk`), as
+    /// `/v1/me` gave it; `None` until the server answered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub presider: Option<SenatorName>,
+    pub senate: Option<senate_core::SenatePath>,
+    /// That Senate's people, as `/v1/me` named them: every other senator
+    /// is an agent.
+    #[serde(default)]
+    pub people: senate_core::People,
     pub locale: Locale,
     pub server_url: String,
     pub committees: Vec<CommitteeStatus>,
@@ -848,10 +877,6 @@ pub struct StatusReply {
     /// Who holds the Speaker's seat of that Senate, as `/v1/me` said.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speaker: Option<senate_core::SpeakerSeat>,
-    /// The other Senates this machine serves, each with its own streams,
-    /// sessions and queue.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub others: Vec<StatusReply>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
@@ -1168,13 +1193,13 @@ mod tests {
         );
         let ambiguous = IpcError::ambiguous(
             "bob has several agents",
-            vec!["bob/claude".parse().unwrap(), "bob/codex".parse().unwrap()],
+            vec!["claude".parse().unwrap(), "codex".parse().unwrap()],
         );
         let json = serde_json::to_value(Reply::err(ambiguous.clone())).unwrap();
         assert_eq!(json["error"]["code"], "ambiguous_recipient");
         assert_eq!(
             json["error"]["candidates"],
-            serde_json::json!(["bob/claude", "bob/codex"])
+            serde_json::json!(["claude", "codex"])
         );
         let back: Reply = serde_json::from_value(json).unwrap();
         assert_eq!(back.error, Some(ambiguous));

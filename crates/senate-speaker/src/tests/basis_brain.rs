@@ -27,7 +27,7 @@ use serde_json::{Value, json};
 use super::hub::MemoryHub;
 use super::rig::{
     GROUP, agent, agent_path, assert_senate_vocabulary, bind_event, config, name, path, refund,
-    roster, user,
+    roster, runner_of, user,
 };
 use crate::basis_brain::prompt::{
     AGENT_TURN_DESCRIPTION, INTENT_DESCRIPTION, PICK_DESCRIPTION, TRIAGE_DESCRIPTION,
@@ -325,7 +325,7 @@ async fn interpret_returns_a_typed_intent_with_only_the_log_tools_in_reach() {
     assert!(!search.1);
     assert!(search.0.contains("seq 2"), "{}", search.0);
     assert!(
-        search.0.contains("[senator::alice/claude]"),
+        search.0.contains("[senator::claude]"),
         "authors are mentions: {}",
         search.0
     );
@@ -384,7 +384,7 @@ async fn the_persona_states_the_rules_and_the_reply_language_follows_the_locale(
         "add nothing, drop nothing",
         "Identifiers are never translated",
         "A person may have several agents",
-        "<handle>/<agent>",
+        "an agent is written senator::<agent>, by its own name",
         "Never choose one of a person's agents yourself",
     ] {
         assert!(zh.contains(rule), "{rule} in {zh}");
@@ -422,12 +422,12 @@ async fn the_bot_name_comes_from_the_config() {
 async fn the_roster_lists_each_persons_seated_agents() {
     let fixture = fixture(vec![Round::Answer(json!({
         "action": "relay",
-        "targets": ["alice/codex"],
+        "targets": ["codex"],
         "kind": "note",
         "body": "先 rebase"
     }))])
     .await;
-    fixture.hub.seat(&path("alice/codex"));
+    fixture.hub.seat(&path("codex"), "alice");
     let seated: Roster = fixture.hub.roster().await.expect("roster");
     let intent = fixture
         .brain
@@ -440,15 +440,15 @@ async fn the_roster_lists_each_persons_seated_agents() {
     assert_eq!(
         intent,
         Intent::Relay {
-            targets: vec!["alice/codex".into()],
+            targets: vec!["codex".into()],
             kind: RelayKind::Note,
             body: "先 rebase".into(),
         }
     );
     let prompt = format!("{:?}", fixture.model.requests()[0].messages);
     for needle in [
-        "- alice (also called Alice, 爱丽丝): alice/claude, alice/codex",
-        "- bob (also called Bob): bob/claude",
+        "- alice (also called Alice, 爱丽丝): claude, codex",
+        "- bob (also called Bob): copilot",
         "[senator::pm] said to you",
     ] {
         assert!(prompt.contains(needle), "{needle} in {prompt}");
@@ -492,7 +492,7 @@ async fn answer_on_behalf_reads_the_log_and_returns_the_final_message() {
         BTreeSet::from([LOG_READ.to_owned(), LOG_SEARCH.to_owned()])
     );
     let prompt = format!("{:?}", requests[0].messages);
-    assert!(prompt.contains("[speaker::alice/claude]"), "{prompt}");
+    assert!(prompt.contains("[speaker::claude]"), "{prompt}");
     assert!(
         requests[0]
             .system
@@ -584,7 +584,7 @@ async fn a_takeover_answers_from_the_checkpoint_and_says_when_it_does_not_cover(
         "DECISIONS.md\\n(no such file)",
         "- seq 4 等 PM 定上限",
         "[NOT_COVERED]",
-        "[speaker::alice/claude] takeover",
+        "[speaker::claude] takeover",
         "退款上限定为 30 天",
         // Only that agent's own checkpoint, never a sibling's.
         "The checkpoint is this agent's own",
@@ -782,7 +782,7 @@ fn conversation(fixture: &Fixture, text: &str, turns: Vec<Turn>) -> Conversation
 }
 
 async fn add_checkpoint(hub: &MemoryHub, who: Address, progress: &str) {
-    let branch = who.as_agent().expect("an agent").owner().to_string();
+    let branch = runner_of(who.as_senator().expect("an agent")).to_string();
     let payload = CheckpointPayload {
         branch: format!("feature/refund-v2/{branch}"),
         commit: "a41f9c2e0000".into(),
@@ -924,7 +924,7 @@ async fn converse_plans_several_actions_with_the_read_only_tools() {
         "退款上限定为 30 天",
         "Bound groups",
         // A person with one agent: that agent's checkpoint.
-        "Latest checkpoint of [senator::alice/claude]",
+        "Latest checkpoint of [senator::claude]",
         "- 完成：重试路径的一半",
     ] {
         assert!(all.contains(needle), "{needle} in {all}");
@@ -1077,7 +1077,7 @@ async fn the_agent_tools_are_committee_scoped_and_polite_when_unbound() {
     let all = format!("{results:?}");
     assert!(!all.contains("账单"), "{all}");
     assert!(
-        all.contains("[senator::bob/claude] has no checkpoint on refund-v2 yet"),
+        all.contains("[senator::copilot] has no checkpoint on refund-v2 yet"),
         "{all}"
     );
 
@@ -1102,19 +1102,19 @@ async fn the_agent_tools_answer_per_agent_when_a_person_has_several() {
     let fixture = fixture(vec![
         Round::Call(vec![
             (CHECKPOINT, json!({ "agent": "alice" })),
-            (CHECKPOINT, json!({ "agent": "alice/codex" })),
-            (CHECKPOINT, json!({ "agent": "[senator::alice/claude]" })),
+            (CHECKPOINT, json!({ "agent": "codex" })),
+            (CHECKPOINT, json!({ "agent": "[senator::claude]" })),
             (COMMITTEE_STATUS, json!({ "agents": ["alice"] })),
             (
                 TASKS,
-                json!({ "state": null, "agent": "alice/codex", "limit": null }),
+                json!({ "state": null, "agent": "codex", "limit": null }),
             ),
         ]),
         Round::Answer(json!({ "reply": "", "actions": [], "awaiting_reply": false })),
     ])
     .await;
-    let codex = path("alice/codex");
-    fixture.hub.seat(&codex);
+    let codex = path("codex");
+    fixture.hub.seat(&codex, "alice");
     fixture.hub.connect(&refund(), &codex);
     add_checkpoint(&fixture.hub, agent("alice"), "- claude: 重试路径").await;
     fixture
@@ -1162,19 +1162,19 @@ async fn the_agent_tools_answer_per_agent_when_a_person_has_several() {
     let (several, is_error) = find("has several agents here");
     assert!(is_error, "{several}");
     assert!(
-        several.contains("[senator::alice/claude], [senator::alice/codex]"),
+        several.contains("[senator::claude], [senator::codex]"),
         "{several}"
     );
     // Each agent's own checkpoint, never its sibling's.
-    let (none_yet, _) = find("[senator::alice/codex] has no checkpoint");
+    let (none_yet, _) = find("[senator::codex] has no checkpoint");
     assert!(!none_yet.contains("重试路径"), "{none_yet}");
-    let (own, _) = find("Latest checkpoint of [senator::alice/claude]");
+    let (own, _) = find("Latest checkpoint of [senator::claude]");
     assert!(own.contains("- claude: 重试路径"), "{own}");
     // A person's handle checks every agent of theirs.
     let (status, _) = find("Online agents");
     assert!(
-        status.contains("Online agents: [senator::alice/codex]")
-            && status.contains("Offline agents: [senator::alice/claude]"),
+        status.contains("Online agents: [senator::codex]")
+            && status.contains("Offline agents: [senator::claude]"),
         "{status}"
     );
     // One agent's inbox, not its person's.
@@ -1217,7 +1217,7 @@ async fn interpret_cannot_reach_the_agent_tools() {
 
 fn pick_input(task: &str) -> PickInput {
     let thread = |root: u64, title: &str| {
-        let mut board = senate_core::TaskBoard::new();
+        let mut board = senate_core::TaskBoard::new(roster().people());
         let root_event = NewEvent::new(refund(), Kind::Request, agent("bob"), title)
             .to(agent("alice"))
             .into_event(Seq(root), chrono::Utc::now());
@@ -1226,7 +1226,7 @@ fn pick_input(task: &str) -> PickInput {
     };
     PickInput {
         committee: refund(),
-        owner: name("alice"),
+        owner: Some(name("alice")),
         asker: user("pm"),
         task: task.into(),
         thread: Some(Seq(12)),
@@ -1239,7 +1239,7 @@ fn pick_input(task: &str) -> PickInput {
                 owns_thread: true,
             },
             AgentCandidate {
-                agent: path("alice/codex"),
+                agent: path("codex"),
                 present: true,
                 checkpoint: None,
                 open_threads: Vec::new(),
@@ -1253,10 +1253,10 @@ fn pick_input(task: &str) -> PickInput {
 #[tokio::test]
 async fn pick_agent_is_one_typed_turn_that_names_a_candidate_or_asks() {
     let fixture = fixture(vec![
-        Round::Answer(json!({ "agent": "alice/claude", "reason": "its own thread" })),
+        Round::Answer(json!({ "agent": "claude", "reason": "its own thread" })),
         Round::Answer(json!({ "agent": null, "reason": "either could" })),
-        Round::Answer(json!({ "agent": "bob/claude", "reason": "not a candidate" })),
-        Round::Answer(json!({ "agent": "alice/gemini", "reason": "not seated" })),
+        Round::Answer(json!({ "agent": "copilot", "reason": "not a candidate" })),
+        Round::Answer(json!({ "agent": "gemini", "reason": "not seated" })),
     ])
     .await;
     let input = pick_input("把幂等键的重试做完");
@@ -1287,10 +1287,10 @@ async fn pick_agent_is_one_typed_turn_that_names_a_candidate_or_asks() {
         "[senator::pm]",
         "[senator::alice]",
         "seq 12",
-        "- alice/claude · away · the thread this was asked in is this agent's",
+        "- claude · away · the thread this was asked in is this agent's",
         "latest checkpoint: seq 7, 0 minutes ago, feature/refund-v2/alice@a41f9c2: 幂等键做完了",
         "open task threads: seq 12 \\\"幂等键的重试\\\"",
-        "- alice/codex · online",
+        "- codex · online",
         "latest checkpoint: none",
         "answer null",
         "Do not pick by an agent's name alone",

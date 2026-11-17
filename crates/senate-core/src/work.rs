@@ -291,7 +291,7 @@ mod tests {
         WorkRun {
             run_id: 7,
             requester: Name::new("bob").unwrap(),
-            target_agent: "alice/claude".parse().unwrap(),
+            target_agent: "claude".parse().unwrap(),
             instruction: "把重试路径做完".into(),
             branch: branches.speaker(&c(), 7),
             state,
@@ -315,7 +315,7 @@ mod tests {
         assert!(is_work_root(&root));
         assert_eq!(WorkRun::of(&root), Some(run(WorkState::Queued)));
         assert_eq!(root.meta[meta::WORK]["state"], "queued");
-        let forged = NewEvent::new(c(), Kind::Note, "senator::eve/claude".parse().unwrap(), "x")
+        let forged = NewEvent::new(c(), Kind::Note, "senator::forger".parse().unwrap(), "x")
             .with_meta(meta::WORK, run(WorkState::Succeeded).value())
             .into_event(Seq(9), Utc::now());
         assert!(!is_work_root(&forged));
@@ -335,13 +335,13 @@ mod tests {
     fn a_run_names_a_person_who_asked_and_one_agent_to_start_from() {
         let value = run(WorkState::Queued).value();
         assert_eq!(value["requester"], "bob");
-        assert_eq!(value["target_agent"], "alice/claude");
+        assert_eq!(value["target_agent"], "claude");
         // Neither field takes the other's shape, or a wildcard.
         for (field, bad) in [
             ("requester", "bob/claude"),
             ("requester", "senator::bob"),
-            ("target_agent", "alice/*"),
-            ("target_agent", "senator::alice/claude"),
+            ("target_agent", "*"),
+            ("target_agent", "senator::claude"),
         ] {
             let mut v = value.clone();
             v[field] = bad.into();

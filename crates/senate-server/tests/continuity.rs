@@ -38,8 +38,8 @@ fn checkpoint(from: Address, progress: &str) -> NewEvent {
 #[tokio::test]
 async fn checkpoints_are_an_agents_own_and_the_latest_is_served() {
     let server = TestServer::start().await;
-    let alice = agent_addr("alice");
-    let claude = path("alice/claude");
+    let alice = agent_addr("claude");
+    let claude = path("claude");
 
     let as_user = checkpoint(person_addr("alice"), "x");
     api_error(
@@ -68,7 +68,7 @@ async fn checkpoints_are_an_agents_own_and_the_latest_is_served() {
         server.request(Method::GET, &path, BOB).send()
     };
     api_error(
-        latest("alice/claude").await.unwrap(),
+        latest("claude").await.unwrap(),
         StatusCode::NOT_FOUND,
         "not_found",
     )
@@ -84,13 +84,13 @@ async fn checkpoints_are_an_agents_own_and_the_latest_is_served() {
         latest_checkpoint_path(&committee()),
         "/v1/committees/refund-v2/checkpoints/latest"
     );
-    let record: CheckpointRecord = latest("alice/claude").await.unwrap().json().await.unwrap();
+    let record: CheckpointRecord = latest("claude").await.unwrap().json().await.unwrap();
     assert_eq!(record.agent, claude);
     assert_eq!(record.checkpoint.files.progress.as_deref(), Some("second"));
 
     // A checkpoint is one agent's: its sibling has none, and neither does
     // the person.
-    for who in ["alice/codex", "alice"] {
+    for who in ["codex", "alice"] {
         api_error(
             latest(who).await.unwrap(),
             StatusCode::NOT_FOUND,
@@ -98,7 +98,7 @@ async fn checkpoints_are_an_agents_own_and_the_latest_is_served() {
         )
         .await;
     }
-    let sibling = Address::Senator(path("alice/codex"));
+    let sibling = Address::Senator(path("codex"));
     assert_eq!(
         server
             .post_event(ALICE, &checkpoint(sibling, "codex's"))
@@ -106,9 +106,9 @@ async fn checkpoints_are_an_agents_own_and_the_latest_is_served() {
             .status(),
         StatusCode::OK
     );
-    let record: CheckpointRecord = latest("alice/claude").await.unwrap().json().await.unwrap();
+    let record: CheckpointRecord = latest("claude").await.unwrap().json().await.unwrap();
     assert_eq!(record.checkpoint.files.progress.as_deref(), Some("second"));
-    let record: CheckpointRecord = latest("alice/codex").await.unwrap().json().await.unwrap();
+    let record: CheckpointRecord = latest("codex").await.unwrap().json().await.unwrap();
     assert_eq!(record.checkpoint.files.progress.as_deref(), Some("codex's"));
     let hub = server.running.hub.clone();
     assert_eq!(
@@ -184,14 +184,12 @@ async fn presence_goes_disconnected_absent_taken_over_and_back_online() {
     .await;
     let hub = server.running.hub.clone();
     let f = committee();
-    let alice = path("alice/claude");
+    let alice = path("claude");
     for i in 0..3 {
         server.append(&format!("note {i}")).await;
     }
-    let stream = server
-        .stream_as(ALICE, Some("alice/claude"), None, None)
-        .await;
-    beat(&server, ALICE, "alice/claude", 1).await;
+    let stream = server.stream_as(ALICE, Some("claude"), None, None).await;
+    beat(&server, ALICE, "claude", 1).await;
 
     // Online, but not written: every bridge connecting would be noise.
     let page: PresencePage = server
@@ -230,14 +228,14 @@ async fn presence_goes_disconnected_absent_taken_over_and_back_online() {
     assert!(
         disconnected
             .line(Locale::En)
-            .starts_with("[senator::alice/claude] disconnected"),
+            .starts_with("[senator::claude] disconnected"),
         "{}",
         disconnected.line(Locale::En)
     );
     assert_eq!(events[1].1.body, "");
     assert_eq!(
         events[1].0.line(Locale::Zh),
-        "[senator::alice/claude] 缺席 · 落后 3 条事件"
+        "[senator::claude] 缺席 · 落后 3 条事件"
     );
 
     let taken = hub.mark_taken_over(&f, &alice).await.unwrap().unwrap();
@@ -248,7 +246,7 @@ async fn presence_goes_disconnected_absent_taken_over_and_back_online() {
     assert_eq!(hub.mark_taken_over(&f, &alice).await.unwrap(), None);
 
     // She comes back: online is written now.
-    beat(&server, ALICE, "alice/claude", 6).await;
+    beat(&server, ALICE, "claude", 6).await;
     eventually("back online", || async {
         states(hub.as_ref()).await.last() == Some(&PresenceState::Online)
     })
@@ -282,10 +280,8 @@ async fn a_restart_restores_leases_without_writing_transitions() {
     };
     let first = TestServer::start_configured(store.clone(), configure).await;
     first.append("hello").await;
-    let stream = first
-        .stream_as(ALICE, Some("alice/claude"), None, None)
-        .await;
-    beat(&first, ALICE, "alice/claude", 1).await;
+    let stream = first.stream_as(ALICE, Some("claude"), None, None).await;
+    beat(&first, ALICE, "claude", 1).await;
     drop(stream);
     let hub = first.running.hub.clone();
     eventually("alice disconnected", || async {
@@ -293,7 +289,7 @@ async fn a_restart_restores_leases_without_writing_transitions() {
     })
     .await;
     // Bob is online, never written.
-    beat(&first, BOB, "bob/claude", 1).await;
+    beat(&first, BOB, "copilot", 1).await;
     first.running.shutdown().await.unwrap();
 
     let second = TestServer::start_configured(store, configure).await;
@@ -308,14 +304,14 @@ async fn a_restart_restores_leases_without_writing_transitions() {
         presence_events(hub.as_ref())
             .await
             .iter()
-            .any(|(p, _)| p.agent == path("bob/claude") && p.state == PresenceState::Disconnected)
+            .any(|(p, _)| p.agent == path("copilot") && p.state == PresenceState::Disconnected)
     })
     .await;
     let page = hub.presence(&committee()).await.unwrap();
     let alice = page
         .agents
         .iter()
-        .find(|a| a.agent == path("alice/claude"))
+        .find(|a| a.agent == path("claude"))
         .unwrap();
     assert_eq!(alice.state, PresenceState::Disconnected);
     assert_eq!(alice.seq, Some(Seq(2)));
@@ -341,7 +337,7 @@ async fn store_with_old_beat(age_secs: i64) -> (Arc<dyn LogStore>, chrono::DateT
         .record_heartbeat(
             &committee(),
             Heartbeat {
-                agent: path("alice/claude"),
+                agent: path("claude"),
                 sessions: 1,
                 cursor: Seq(0),
             },
@@ -358,7 +354,7 @@ async fn alice_now(hub: &dyn Hub) -> PresenceState {
         .unwrap()
         .agents
         .iter()
-        .find(|a| a.agent == path("alice/claude"))
+        .find(|a| a.agent == path("claude"))
         .map(|a| a.state)
         .expect("alice has a presence")
 }
@@ -407,7 +403,7 @@ async fn a_logged_disconnect_becomes_absent_once_the_downtime_passes_the_lease()
     let (store, beat) = store_with_old_beat(1000).await;
     // The first server had already written the disconnect.
     let disconnected = senate_core::PresencePayload {
-        agent: path("alice/claude"),
+        agent: path("claude"),
         state: PresenceState::Disconnected,
         since: beat + chrono::Duration::seconds(120),
         since_seq: Seq(0),
@@ -464,7 +460,7 @@ async fn a_sqlite_store_restarts_into_what_the_clock_says() {
             .record_heartbeat(
                 &committee(),
                 Heartbeat {
-                    agent: path("alice/claude"),
+                    agent: path("claude"),
                     sessions: 1,
                     cursor: Seq(0),
                 },
@@ -490,10 +486,8 @@ async fn an_agent_that_reconnects_after_a_restart_is_online_again() {
     let server = TestServer::start_configured(store, restart_config).await;
     let hub = server.running.hub.clone();
     assert_eq!(alice_now(hub.as_ref()).await, PresenceState::Absent);
-    let _stream = server
-        .stream_as(ALICE, Some("alice/claude"), None, None)
-        .await;
-    beat(&server, ALICE, "alice/claude", 0).await;
+    let _stream = server.stream_as(ALICE, Some("claude"), None, None).await;
+    beat(&server, ALICE, "claude", 0).await;
     eventually("alice online again", || async {
         states(hub.as_ref()).await == [PresenceState::Absent, PresenceState::Online]
     })
@@ -513,14 +507,12 @@ async fn a_reassignment_is_the_servers_and_stands_until_handed_back() {
     let server = TestServer::start_configured(store.clone(), configure).await;
     let hub = server.running.hub.clone();
     let f = committee();
-    let alice = path("alice/claude");
-    let bob = path("bob/claude");
+    let alice = path("claude");
+    let bob = path("copilot");
     let asker = name("bob");
     server.append("hello").await;
-    let stream = server
-        .stream_as(ALICE, Some("alice/claude"), None, None)
-        .await;
-    beat(&server, ALICE, "alice/claude", 1).await;
+    let stream = server.stream_as(ALICE, Some("claude"), None, None).await;
+    beat(&server, ALICE, "claude", 1).await;
 
     assert!(
         hub.reassign(&f, &alice, &path("bob"), &asker)
@@ -546,7 +538,7 @@ async fn a_reassignment_is_the_servers_and_stands_until_handed_back() {
     assert_eq!(hub.reassign(&f, &alice, &bob, &asker).await.unwrap(), None);
 
     // Her heartbeats and her silence leave it standing.
-    beat(&server, ALICE, "alice/claude", 2).await;
+    beat(&server, ALICE, "claude", 2).await;
     drop(stream);
     tokio::time::sleep(Duration::from_millis(1_500)).await;
     assert_eq!(states(hub.as_ref()).await, [PresenceState::Reassigned]);
@@ -557,7 +549,7 @@ async fn a_reassignment_is_the_servers_and_stands_until_handed_back() {
     // A restart too.
     let second = TestServer::start_configured(store, configure).await;
     let hub = second.running.hub.clone();
-    beat(&second, ALICE, "alice/claude", 2).await;
+    beat(&second, ALICE, "claude", 2).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(states(hub.as_ref()).await, [PresenceState::Reassigned]);
     let back = hub
@@ -575,7 +567,7 @@ async fn a_reassignment_is_the_servers_and_stands_until_handed_back() {
 #[tokio::test]
 async fn a_senator_cannot_write_a_work_run() {
     let server = TestServer::start().await;
-    let forged = NewEvent::new(committee(), Kind::Note, agent_addr("alice"), "PR")
+    let forged = NewEvent::new(committee(), Kind::Note, agent_addr("claude"), "PR")
         .with_meta(meta::WORK, json!({"state": "succeeded"}));
     api_error(
         server.post_event(ALICE, &forged).await,
@@ -589,7 +581,7 @@ async fn a_senator_cannot_write_a_work_run() {
 #[tokio::test]
 async fn a_senator_cannot_write_a_provisional_answer() {
     let server = TestServer::start().await;
-    let forged = NewEvent::new(committee(), Kind::Answer, agent_addr("alice"), "…")
+    let forged = NewEvent::new(committee(), Kind::Answer, agent_addr("claude"), "…")
         .with_meta(meta::PROVISIONAL, json!(true));
     api_error(
         server.post_event(ALICE, &forged).await,

@@ -21,30 +21,6 @@ impl Shared {
             .unwrap_or_default()
     }
 
-    /// End `session_id` here if it is live: it moved to another Senate.
-    pub(crate) fn retire(&self, session_id: &str) {
-        match self.store.session(session_id) {
-            Ok(Some(session)) if session.state != SessionState::Ended => {
-                if let Err(e) = self
-                    .store
-                    .set_session_state(session_id, SessionState::Ended)
-                {
-                    tracing::warn!(session = session_id, "ending a session that moved: {e}");
-                    return;
-                }
-                tracing::info!(
-                    session = session_id,
-                    agent = %session.agent,
-                    senate = %self.senate_label(),
-                    "the session moved to another Senate"
-                );
-                self.committees_changed.notify_one();
-            }
-            Ok(_) => {}
-            Err(e) => tracing::warn!(session = session_id, "reading a session: {e}"),
-        }
-    }
-
     /// The committees of this Senate a docket covers: `committee`, or every
     /// committee its log has.
     async fn docket_committees(
@@ -88,7 +64,7 @@ impl Shared {
             pages.push(page);
         }
         Ok(SenateDocket {
-            senate: self.seating().presider().cloned(),
+            senate: self.senate_name(),
             pages,
             checkpoints,
         })
@@ -137,7 +113,7 @@ impl Shared {
                     self.locale,
                 )));
             }
-            _ if !to.is_junior() || &to == speaker => {
+            _ if self.people().is_person(&to) || &to == speaker => {
                 return Err(IpcError::bad_request(preside_text::route_to_an_agent(
                     &to,
                     self.locale,
@@ -253,18 +229,20 @@ impl Shared {
             return Err(IpcError::bad_request("`reason` is empty"));
         }
         let (item, _) = self.docket_item(&committee, seq).await?;
+        // The person whose agent was meant, else the Speaker's own: on this
+        // machine, the person who runs its agents.
+        let _ = speaker;
         let person = match &item.awaiting {
-            Awaiting::Pick { owner, .. } => owner.clone(),
-            Awaiting::Away { agents } => agents
-                .first()
-                .map(|a| a.owner().clone())
-                .unwrap_or_else(|| speaker.owner().clone()),
-            Awaiting::Addressed => speaker.owner().clone(),
+            Awaiting::Pick {
+                owner: Some(owner), ..
+            } => owner.clone(),
+            _ => self.config.person.clone(),
         };
         let root = item.event;
+        let people = self.people();
         let task = root.thread.is_none()
             && matches!(root.kind, Kind::Question | Kind::Request)
-            && root.to.iter().any(Address::is_junior);
+            && root.to.iter().any(|a| people.is_agent_address(a));
         let mut event = if task {
             let mut status = StatusPayload::new(senate_core::StatusState::Suspended);
             status.escalated_to = Some(person);
@@ -312,7 +290,7 @@ impl Shared {
             told.extend(items.iter().cloned());
             new
         };
-        let senate = self.seating().presider().cloned();
+        let senate = self.senate_path();
         match event {
             HookEvent::SessionStart => {
                 let mut seated: BTreeSet<SenatorName> = self.seated().into_iter().collect();
@@ -474,10 +452,10 @@ mod tests {
 
     #[test]
     fn covering_for_the_seat_holder_is_refused_in_both_languages() {
-        let holder: SenatorName = "alice/claude".parse().unwrap();
+        let holder: SenatorName = "claude".parse().unwrap();
         let zh = preside_text::cover_for_the_speaker(&holder, Locale::Zh);
         let en = preside_text::cover_for_the_speaker(&holder, Locale::En);
-        assert!(zh.starts_with("[senator::alice/claude] 自己就是这个 Senate 的 Speaker"));
-        assert!(en.starts_with("[senator::alice/claude] holds the Speaker's seat"));
+        assert!(zh.starts_with("[senator::claude] 自己就是这个 Senate 的 Speaker"));
+        assert!(en.starts_with("[senator::claude] holds the Speaker's seat"));
     }
 }

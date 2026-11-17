@@ -17,7 +17,8 @@ use std::path::PathBuf;
 
 use senate_core::{Locale, Name};
 
-use crate::agent::RelPath;
+use senate_core::SenatorName;
+
 use crate::paths::Paths;
 
 /// Where the local Senate listens unless told otherwise.
@@ -27,8 +28,8 @@ pub const DEFAULT_LOCAL_LISTEN: &str = "127.0.0.1:7979";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalProfile {
     pub person: Name,
-    /// The agent named Speaker, relative to the person.
-    pub speaker: RelPath,
+    /// The agent named Speaker.
+    pub speaker: SenatorName,
     pub locale: Locale,
     /// A loopback address.
     pub listen: String,
@@ -61,14 +62,18 @@ impl LocalProfile {
 # Everything senated keeps for this Senate is under senates/top/ here: its
 # log (SQLite), the token only this machine uses, the address it serves.
 
-# You. Every agent on this machine is named under you.
+# You. Every agent on this machine is yours: each is one flat name
+# (claude, codex) in this machine's Senate.
 person = "{person}"
 
 # The language of everything written for you and your agents: "en" or "zh".
 locale = "{locale}"
 
-# A top Senate on this machine, with no Senate above.
+# This machine's Senate, with no Senate above.
 [local]
+# Its name: not your bare handle, so it is never taken for you in a Senate
+# above.
+name = "{name}"
 # The agent that presides over it as its Speaker: its sessions pick which
 # of your agents gets a message you did not address to one, answer for an
 # agent that is away from that agent's own checkpoint, and bring you what
@@ -76,12 +81,8 @@ locale = "{locale}"
 speaker = "{speaker}"
 # Loopback only.
 listen = "{listen}"
-
-# A Senate one level down for an agent's own subagents (sessions pinned to
-# SENATE_AGENT=claude/reviewer, say), presided over by that agent:
-# [[preside]]
-# agent = "claude"
 "#,
+            name = crate::config::default_desk_name(&self.person),
             person = self.person,
             locale = self.locale,
             speaker = self.speaker,

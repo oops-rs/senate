@@ -90,7 +90,7 @@ mod tests {
             "committee `refund-v2`",
             "on behalf of Bob ([senator::bob])",
             "example/refund at commit 0123456789abcdef0123456789abcdef01234567",
-            "checkpoint of [senator::alice/claude] on branch `feature/refund-v2/alice`",
+            "checkpoint of [senator::claude] on branch `feature/refund-v2/alice`",
             "new branch `feature/refund-v2/speaker-7`",
             ".senate/PROGRESS.md, .senate/OPEN.md",
             "<task>\n把 alice 的重试路径做完\nwith tests\n</task>",

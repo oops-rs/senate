@@ -50,7 +50,7 @@ fn mentions(l: Locale, to: &[Address]) -> String {
     join(l, to.iter().map(Address::in_text))
 }
 
-/// A senator (person or agent) as a mention: `[senator::alice/claude]`.
+/// A senator (person or agent) as a mention: `[senator::claude]`.
 fn senator(path: &SenatorName) -> String {
     Address::senator(path).in_text()
 }
@@ -87,8 +87,8 @@ fn more(l: Locale, n: usize) -> String {
 
 // ----- mirroring -------------------------------------------------------------
 
-/// `已转给 [senator::alice/claude]（seq 120）` /
-/// `Passed to [senator::alice/claude] (seq 120)`.
+/// `已转给 [senator::claude]（seq 120）` /
+/// `Passed to [senator::claude] (seq 120)`.
 pub(crate) fn relay_ack(l: Locale, targets: &[Address], seq: Seq) -> String {
     match l {
         Locale::Zh => format!("已转给 {}（seq {seq}）", mentions(l, targets)),
@@ -97,7 +97,7 @@ pub(crate) fn relay_ack(l: Locale, targets: &[Address], seq: Seq) -> String {
 }
 
 /// A new root in the mirror group:
-/// `[senator::alice/claude] → [senator::bob/claude] <body>（seq 118）`.
+/// `[senator::claude] → [senator::copilot] <body>（seq 118）`.
 pub(crate) fn root_mirror(l: Locale, event: &Event) -> String {
     let seq = seq_note(l, event.seq);
     let label = label(l, event);
@@ -108,8 +108,8 @@ pub(crate) fn root_mirror(l: Locale, event: &Event) -> String {
     }
 }
 
-/// A reply in a mirrored thread: `[senator::bob/claude] <body>`, or
-/// `[speaker::bob/claude] <body>` when the Speaker answered for it.
+/// A reply in a mirrored thread: `[senator::copilot] <body>`, or
+/// `[speaker::copilot] <body>` when the Speaker answered for it.
 pub(crate) fn thread_mirror(l: Locale, event: &Event) -> String {
     let label = label(l, event);
     let body = body(l, event);
@@ -120,8 +120,8 @@ pub(crate) fn thread_mirror(l: Locale, event: &Event) -> String {
 }
 
 /// An agent's proposed decision, as a new root in the mirror group:
-/// `[senator::alice/claude] 提议记为决策：<body>（seq 130）回复「对」确认` /
-/// `[senator::alice/claude] proposes a decision: <body> (seq 130). Reply "yes" to confirm.`
+/// `[senator::claude] 提议记为决策：<body>（seq 130）回复「对」确认` /
+/// `[senator::claude] proposes a decision: <body> (seq 130). Reply "yes" to confirm.`
 pub(crate) fn proposal_root(l: Locale, event: &Event) -> String {
     let author = author(l, event);
     let seq = event.seq;
@@ -149,7 +149,7 @@ pub(crate) fn decision_ack(l: Locale, seq: Seq) -> String {
 }
 
 /// [`quoted`], except for the Speaker's own canned text: a provisional
-/// answer ("[senator::alice/claude] is not online …") names the agent
+/// answer ("[senator::claude] is not online …") names the agent
 /// first on purpose and is not anyone's words to guard against.
 pub(super) fn quoted_for(event: &Event, body: &str) -> Option<String> {
     if senate_core::is_provisional(event) && event.from == Address::Speaker {
@@ -159,7 +159,7 @@ pub(super) fn quoted_for(event: &Event, body: &str) -> Option<String> {
 }
 
 /// An agent's body is posted as markdown, so one of its lines could pass
-/// for a byline of ours (`[speaker::alice/claude] …`) or a mention. When any
+/// for a byline of ours (`[speaker::claude] …`) or a mention. When any
 /// line looks like one, the whole body goes under the real byline as a
 /// blockquote, every line prefixed, so nothing in it can read as a line of
 /// the Speaker's own. Ordinary bodies stay inline.
@@ -193,8 +193,8 @@ pub(crate) fn is_takeover(event: &Event) -> bool {
     senate_core::is_takeover(event)
 }
 
-/// Who wrote `event`: its byline (`[senator::bob/claude]`,
-/// `[speaker::alice/claude] 接管`, `[senator::bob/claude] companion`); for
+/// Who wrote `event`: its byline (`[senator::copilot]`,
+/// `[speaker::claude] 接管`, `[senator::copilot] companion`); for
 /// the Speaker speaking for someone who is not a senator,
 /// `[speaker] [guest::chat/u_1]`; otherwise the bare sender.
 fn author(l: Locale, event: &Event) -> String {
@@ -210,7 +210,7 @@ fn author(l: Locale, event: &Event) -> String {
 }
 
 /// The author, with an arrow to the recipients on a directed root:
-/// `[senator::alice/claude] → [senator::bob/claude]`.
+/// `[senator::claude] → [senator::copilot]`.
 fn label(l: Locale, event: &Event) -> String {
     let author = author(l, event);
     let directed = matches!(event.kind, Kind::Question | Kind::Request) || event.thread.is_none();
@@ -513,8 +513,8 @@ pub(crate) fn presence_word(
 }
 
 /// The Agent group's line for a presence transition:
-/// `[senator::alice/claude] 失联` / `缺席（租约过期）` / `由 Speaker 接管` /
-/// `在线` / `已交给 [senator::bob/claude]`.
+/// `[senator::claude] 失联` / `缺席（租约过期）` / `由 Speaker 接管` /
+/// `在线` / `已交给 [senator::copilot]`.
 pub(crate) fn presence_line(l: Locale, payload: &PresencePayload) -> String {
     match (payload.state, &payload.new_owner, payload.previous) {
         (PresenceState::Reassigned, Some(owner), _) => {
@@ -550,8 +550,8 @@ pub(crate) fn age(l: Locale, age: chrono::Duration) -> String {
 }
 
 /// One agent in `/status`:
-/// `[senator::alice/claude] 缺席（租约过期） · 落后 14 条事件 · 检查点 3 小时前（seq 40）` /
-/// `[senator::alice/claude] absent (lease expired) · 14 events behind · checkpoint 3 hours ago (seq 40)`.
+/// `[senator::claude] 缺席（租约过期） · 落后 14 条事件 · 检查点 3 小时前（seq 40）` /
+/// `[senator::claude] absent (lease expired) · 14 events behind · checkpoint 3 hours ago (seq 40)`.
 pub(crate) fn presence_status(
     l: Locale,
     agent: &SenatorName,
@@ -581,8 +581,8 @@ pub(crate) fn presence_status(
 }
 
 /// The Agent group's line for a checkpoint:
-/// `[senator::alice/claude] 检查点 · feature/x@a41f9c2（已推送）· seq 40` /
-/// `[senator::alice/claude] checkpoint · feature/x@a41f9c2 (pushed) · seq 40`.
+/// `[senator::claude] 检查点 · feature/x@a41f9c2（已推送）· seq 40` /
+/// `[senator::claude] checkpoint · feature/x@a41f9c2 (pushed) · seq 40`.
 pub(crate) fn checkpoint_line(l: Locale, event: &Event, payload: &CheckpointPayload) -> String {
     let author = author(l, event);
     match l {
@@ -624,8 +624,8 @@ pub(crate) enum NoCover {
     Unavailable,
 }
 
-/// `[senator::alice/claude] 不在，检查点太旧，这条需要人：<question>` /
-/// `[senator::alice/claude] is away and its checkpoint is too old, so this needs a person: <question>`.
+/// `[senator::claude] 不在，检查点太旧，这条需要人：<question>` /
+/// `[senator::claude] is away and its checkpoint is too old, so this needs a person: <question>`.
 pub(crate) fn takeover_escalation(
     l: Locale,
     agent: &Address,
@@ -699,8 +699,8 @@ pub(crate) fn handback_note(l: Locale, since: Seq, answers: &[HandedBack]) -> St
     text
 }
 
-/// `[senator::alice/claude] 回来了，Speaker 交还 2 条代答` /
-/// `[senator::alice/claude] is back; the Speaker handed back 2 answers`.
+/// `[senator::claude] 回来了，Speaker 交还 2 条代答` /
+/// `[senator::claude] is back; the Speaker handed back 2 answers`.
 pub(crate) fn handback_line(l: Locale, agent: &Address, count: usize) -> String {
     let agent = agent.in_text();
     match l {
@@ -767,7 +767,7 @@ pub(crate) fn invalid_committee(l: Locale, raw: &str) -> String {
 
 /// Whom to relay to, when some names were not on the roster (or none was
 /// given): every person on the roster, by handle and first name, and how to
-/// name one of their agents.
+/// name one agent.
 pub(crate) fn unknown_targets(l: Locale, unknown: &[String], roster: &Roster) -> String {
     let known: Vec<String> = roster
         .seniors()
@@ -786,17 +786,17 @@ pub(crate) fn unknown_targets(l: Locale, unknown: &[String], roster: &Roster) ->
     };
     match (l, unknown.is_empty()) {
         (Locale::Zh, true) => {
-            format!("要转给谁？名册上的人：{known}。要指明某人的某个 agent，写 <handle>/<agent>。")
+            format!("要转给谁？名册上的人：{known}。要指明某个 agent，直接写它的名字。")
         }
         (Locale::Zh, false) => format!(
-            "我不认识 {}。名册上的人：{known}。要指明某人的某个 agent，写 <handle>/<agent>。",
+            "我不认识 {}。名册上的人：{known}。要指明某个 agent，直接写它的名字。",
             unknown.join("、")
         ),
         (Locale::En, true) => format!(
-            "Whom should I pass it to? People on the roster: {known}. To name one of someone's agents, write <handle>/<agent>."
+            "Whom should I pass it to? People on the roster: {known}. To name one agent, write its own name."
         ),
         (Locale::En, false) => format!(
-            "I don't know {}. People on the roster: {known}. To name one of someone's agents, write <handle>/<agent>.",
+            "I don't know {}. People on the roster: {known}. To name one agent, write its own name.",
             unknown.join(", ")
         ),
     }
@@ -1022,15 +1022,21 @@ pub(crate) fn excerpt(text: &str) -> String {
     cut(&one_line(text), CARD_ANSWER_CHARS)
 }
 
-/// `已转给 [senator::alice/claude]（seq 120）`, and when triage parked it on
+/// `已转给 [senator::claude]（seq 120）`, and when triage parked it on
 /// the person: `。Speaker 判断这条需要 [senator::alice] 本人处理，已提醒 [senator::alice]`.
-pub(crate) fn relay_ack_for(l: Locale, event: &Event) -> String {
+/// The person is the first recipient's: a person themselves, or the person
+/// the roster says answers for an agent.
+pub(crate) fn relay_ack_for(l: Locale, event: &Event, roster: &Roster) -> String {
     let ack = relay_ack(l, &event.to, event.seq);
     let parked = TriagePayload::of(event).is_some_and(|t| t.verdict == TriageVerdict::NeedsHuman);
-    let owner = event
-        .to
-        .iter()
-        .find_map(|a| a.as_senator().map(|path| person(path.owner())));
+    let owner = event.to.iter().find_map(|a| {
+        let senator = a.as_senator()?;
+        if roster.is_person(senator) {
+            Some(person(senator.name()))
+        } else {
+            roster.owner_of(senator).map(person)
+        }
+    });
     match (parked, owner, l) {
         (true, Some(owner), Locale::Zh) => {
             format!("{ack}。Speaker 判断这条需要 {owner} 本人处理，已提醒 {owner}")
@@ -1145,8 +1151,8 @@ pub(crate) fn needs_human(l: Locale, reason: &str) -> String {
     }
 }
 
-/// After the native mention: `[senator::bob/claude] 把这条交给你：<reason>` /
-/// `[senator::bob/claude] handed this to you: <reason>`.
+/// After the native mention: `[senator::copilot] 把这条交给你：<reason>` /
+/// `[senator::copilot] handed this to you: <reason>`.
 pub(crate) fn escalated(l: Locale, agent: &Address, reason: Option<&str>) -> String {
     let agent = agent.in_text();
     match (reason.map(one_line).filter(|r| !r.is_empty()), l) {
@@ -1384,7 +1390,7 @@ fn signature_of(l: Locale, who: &str, committee: &CommitteeId) -> String {
 }
 
 /// The last line of an answer mirrored back to a people group:
-/// `由 [senator::alice/claude] 回答 · 来自 refund-v2 的 Agent 群`.
+/// `由 [senator::claude] 回答 · 来自 refund-v2 的 Agent 群`.
 pub(crate) fn signature(l: Locale, event: &Event) -> String {
     signature_of(l, &author(l, event), &event.committee)
 }
@@ -1500,7 +1506,7 @@ pub(crate) fn task_card(
 }
 
 /// A status as a thread reply (output level "everything"):
-/// `[senator::alice/claude] 处理中 · ✓ 已读日志 · ☐ 起草回答`.
+/// `[senator::claude] 处理中 · ✓ 已读日志 · ☐ 起草回答`.
 pub(crate) fn status_reply(l: Locale, event: &Event, status: &StatusPayload) -> String {
     let mut line = format!("{} {}", author(l, event), state_label(l, status.state));
     if let Some(title) = &status.title {
@@ -1707,7 +1713,7 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use senate_core::brief::{BriefDecision, BriefQuestion};
-    use senate_core::{EventId, Senior, Step, TaskOwner, meta};
+    use senate_core::{EventId, SeatedAgent, Senior, Step, TaskOwner, meta};
     use serde_json::{Map, Value};
 
     use crate::tests_support::assert_senate_vocabulary;
@@ -1739,7 +1745,7 @@ mod tests {
         Name::new(s).expect("name")
     }
 
-    /// `senator::<s>`: `alice` is a person, `alice/claude` an agent.
+    /// `senator::<s>`: `alice` is a person, `claude` an agent.
     fn sen(s: &str) -> Address {
         Address::senator(&path(s))
     }
@@ -1751,36 +1757,31 @@ mod tests {
     #[test]
     fn labels_follow_the_mirroring_table() {
         let l = Locale::Zh;
-        let question = event(
-            Kind::Question,
-            sen("alice/claude"),
-            vec![sen("bob/claude")],
-            None,
-        );
+        let question = event(Kind::Question, sen("claude"), vec![sen("copilot")], None);
         assert_eq!(
             root_mirror(l, &question),
-            "[senator::alice/claude] → [senator::bob/claude] 网关的幂等键用哪个 header？（seq 118）"
+            "[senator::claude] → [senator::copilot] 网关的幂等键用哪个 header？（seq 118）"
         );
         let mut answer = event(
             Kind::Answer,
-            sen("bob/claude"),
-            vec![sen("alice/claude")],
+            sen("copilot"),
+            vec![sen("claude")],
             Some(Seq(118)),
         );
         answer.body = "Idempotency-Key".into();
         assert_eq!(
             thread_mirror(l, &answer),
-            "[senator::bob/claude] Idempotency-Key"
+            "[senator::copilot] Idempotency-Key"
         );
         answer.from = Address::Speaker;
-        answer.on_behalf_of = Some(sen("bob/claude"));
+        answer.on_behalf_of = Some(sen("copilot"));
         assert_eq!(
             thread_mirror(l, &answer),
-            "[speaker::bob/claude] Idempotency-Key"
+            "[speaker::copilot] Idempotency-Key"
         );
         assert_eq!(
-            relay_ack(l, &[sen("alice/claude")], Seq(120)),
-            "已转给 [senator::alice/claude]（seq 120）"
+            relay_ack(l, &[sen("claude")], Seq(120)),
+            "已转给 [senator::claude]（seq 120）"
         );
     }
 
@@ -1789,30 +1790,30 @@ mod tests {
         let l = Locale::En;
         let mut question = event(
             Kind::Question,
-            sen("alice/claude"),
-            vec![sen("bob/claude"), sen("carol/codex")],
+            sen("claude"),
+            vec![sen("copilot"), sen("codex")],
             None,
         );
         question.body = "Which header carries the idempotency key?".into();
         assert_eq!(
             root_mirror(l, &question),
-            "[senator::alice/claude] → [senator::bob/claude], [senator::carol/codex] Which header carries the idempotency key? (seq 118)"
+            "[senator::claude] → [senator::copilot], [senator::codex] Which header carries the idempotency key? (seq 118)"
         );
         let mut answer = event(
             Kind::Answer,
             Address::Speaker,
-            vec![sen("alice/claude")],
+            vec![sen("claude")],
             Some(Seq(118)),
         );
-        answer.on_behalf_of = Some(sen("bob/claude"));
+        answer.on_behalf_of = Some(sen("copilot"));
         answer.body = "Idempotency-Key".into();
         assert_eq!(
             thread_mirror(l, &answer),
-            "[speaker::bob/claude] Idempotency-Key"
+            "[speaker::copilot] Idempotency-Key"
         );
         assert_eq!(
-            relay_ack(l, &[sen("alice/claude"), sen("bob")], Seq(120)),
-            "Passed to [senator::alice/claude], [senator::bob] (seq 120)"
+            relay_ack(l, &[sen("claude"), sen("bob")], Seq(120)),
+            "Passed to [senator::claude], [senator::bob] (seq 120)"
         );
         assert_eq!(decision_ack(l, Seq(131)), "Decision recorded (seq 131)");
         assert_eq!(decision_ack(Locale::Zh, Seq(131)), "已记录决策（seq 131）");
@@ -1821,17 +1822,12 @@ mod tests {
     #[test]
     fn the_speaker_for_a_guest_or_an_unknown_form_still_has_a_label() {
         let guest: Address = "guest::chat/u_8f3a".parse().expect("guest");
-        let mut relayed = event(
-            Kind::Question,
-            Address::Speaker,
-            vec![sen("alice/claude")],
-            None,
-        );
+        let mut relayed = event(Kind::Question, Address::Speaker, vec![sen("claude")], None);
         relayed.on_behalf_of = Some(guest);
         relayed.body = "When does the refund land?".into();
         assert_eq!(
             root_mirror(Locale::En, &relayed),
-            "[speaker] [guest::chat/u_8f3a] → [senator::alice/claude] When does the refund land? (seq 118)"
+            "[speaker] [guest::chat/u_8f3a] → [senator::claude] When does the refund land? (seq 118)"
         );
         let mut other = event(
             Kind::Answer,
@@ -1848,35 +1844,35 @@ mod tests {
         let mut answer = event(
             Kind::Answer,
             Address::Speaker,
-            vec![sen("bob/claude")],
+            vec![sen("copilot")],
             Some(Seq(118)),
         );
-        answer.on_behalf_of = Some(sen("alice/claude"));
+        answer.on_behalf_of = Some(sen("claude"));
         answer.body = "用 Idempotency-Key（检查点 seq 7）".into();
         answer.meta.insert(meta::TAKEOVER.into(), Value::Bool(true));
         assert!(is_takeover(&answer));
         assert_eq!(
             thread_mirror(Locale::Zh, &answer),
-            "[speaker::alice/claude] 接管 用 Idempotency-Key（检查点 seq 7）"
+            "[speaker::claude] 接管 用 Idempotency-Key（检查点 seq 7）"
         );
         assert_eq!(
             signature(Locale::Zh, &answer),
-            "由 [speaker::alice/claude] 接管 回答 · 来自 refund-v2 的 Agent 群"
+            "由 [speaker::claude] 接管 回答 · 来自 refund-v2 的 Agent 群"
         );
         answer.body = "Use Idempotency-Key (checkpoint seq 7)".into();
         assert_eq!(
             thread_mirror(Locale::En, &answer),
-            "[speaker::alice/claude] takeover Use Idempotency-Key (checkpoint seq 7)"
+            "[speaker::claude] takeover Use Idempotency-Key (checkpoint seq 7)"
         );
         assert_eq!(
             signed(Locale::En, &answer),
-            "[speaker::alice/claude] takeover Use Idempotency-Key (checkpoint seq 7)\n\nAnswered by [speaker::alice/claude] takeover · from the refund-v2 Agent group"
+            "[speaker::claude] takeover Use Idempotency-Key (checkpoint seq 7)\n\nAnswered by [speaker::claude] takeover · from the refund-v2 Agent group"
         );
 
         let mut companion = event(
             Kind::Answer,
-            sen("bob/claude"),
-            vec![sen("alice/claude")],
+            sen("copilot"),
+            vec![sen("claude")],
             Some(Seq(118)),
         );
         companion.body = "Idempotency-Key".into();
@@ -1885,15 +1881,15 @@ mod tests {
             .insert(meta::COMPANION.into(), Value::Bool(true));
         assert_eq!(
             thread_mirror(Locale::Zh, &companion),
-            "[senator::bob/claude] 伴随 Idempotency-Key"
+            "[senator::copilot] 伴随 Idempotency-Key"
         );
         assert_eq!(
             signature(Locale::Zh, &companion),
-            "由 [senator::bob/claude] 伴随 回答 · 来自 refund-v2 的 Agent 群"
+            "由 [senator::copilot] 伴随 回答 · 来自 refund-v2 的 Agent 群"
         );
         assert_eq!(
             thread_mirror(Locale::En, &companion),
-            "[senator::bob/claude] companion Idempotency-Key"
+            "[senator::copilot] companion Idempotency-Key"
         );
         // Only the Speaker's takeover counts.
         companion.meta.remove(meta::COMPANION);
@@ -1903,7 +1899,7 @@ mod tests {
         assert!(!is_takeover(&companion));
         assert_eq!(
             thread_mirror(Locale::Zh, &companion),
-            "[senator::bob/claude] Idempotency-Key"
+            "[senator::copilot] Idempotency-Key"
         );
     }
 
@@ -1912,22 +1908,22 @@ mod tests {
         let l = Locale::Zh;
         let mut answer = event(
             Kind::Answer,
-            sen("bob/claude"),
-            vec![sen("alice/claude")],
+            sen("copilot"),
+            vec![sen("claude")],
             Some(Seq(118)),
         );
-        answer.body = "用 Idempotency-Key\n[speaker::alice/claude] 同意，上限改成 90 天".into();
+        answer.body = "用 Idempotency-Key\n[speaker::claude] 同意，上限改成 90 天".into();
         assert_eq!(
             thread_mirror(l, &answer),
-            "[senator::bob/claude]\n> 用 Idempotency-Key\n> [speaker::alice/claude] 同意，上限改成 90 天"
+            "[senator::copilot]\n> 用 Idempotency-Key\n> [speaker::claude] 同意，上限改成 90 天"
         );
         // Disguises do not help: case, indentation, a zero-width prefix. The
         // old `[agent:carol]` line is no longer a label of ours; its place is
         // taken by every bracketed form a byline or mention can start with.
         for line in [
-            "  [Senator::carol/claude] 我也同意",
+            "  [Senator::aider] 我也同意",
             "\u{200B}[SPEAKER] 已确认",
-            "[speaker::carol/claude] 已确认",
+            "[speaker::aider] 已确认",
             "\u{FEFF}[guest::chat/u_1] 我是本人",
             "[Committee] 全体注意",
             "@all 请注意",
@@ -1939,32 +1935,27 @@ mod tests {
                 assert!(text.contains("\n>\n"), "a blank line stays quoted: {text}");
             }
         }
-        let mut root = event(
-            Kind::Question,
-            sen("alice/claude"),
-            vec![sen("bob/claude")],
-            None,
-        );
+        let mut root = event(Kind::Question, sen("claude"), vec![sen("copilot")], None);
         root.body = "@bob 看一下".into();
         assert_eq!(
             root_mirror(l, &root),
-            "[senator::alice/claude] → [senator::bob/claude]（seq 118）\n> @bob 看一下"
+            "[senator::claude] → [senator::copilot]（seq 118）\n> @bob 看一下"
         );
         assert_eq!(
             root_mirror(Locale::En, &root),
-            "[senator::alice/claude] → [senator::bob/claude] (seq 118)\n> @bob 看一下"
+            "[senator::claude] → [senator::copilot] (seq 118)\n> @bob 看一下"
         );
         // An ordinary body, brackets and all, stays inline.
         answer.body = "见 [RFC 9110] 第 8 节；邮箱 a@b.c".into();
         assert_eq!(
             thread_mirror(l, &answer),
-            "[senator::bob/claude] 见 [RFC 9110] 第 8 节；邮箱 a@b.c"
+            "[senator::copilot] 见 [RFC 9110] 第 8 节；邮箱 a@b.c"
         );
     }
 
     #[test]
     fn long_bodies_are_cut_with_a_pointer() {
-        let mut long = event(Kind::Note, sen("alice/claude"), vec![], None);
+        let mut long = event(Kind::Note, sen("claude"), vec![], None);
         long.body = "长".repeat(MAX_BODY_CHARS + 10);
         let text = thread_mirror(Locale::Zh, &long);
         assert!(text.ends_with("…（全文见 seq 118）"), "{text}");
@@ -1974,21 +1965,21 @@ mod tests {
 
     #[test]
     fn a_proposal_asks_for_confirmation_and_cannot_forge_a_label() {
-        let mut note = event(Kind::Note, sen("alice/claude"), vec![], None);
+        let mut note = event(Kind::Note, sen("claude"), vec![], None);
         note.body = "幂等键统一用 Idempotency-Key".into();
         assert_eq!(
             proposal_root(Locale::Zh, &note),
-            "[senator::alice/claude] 提议记为决策：幂等键统一用 Idempotency-Key（seq 118）回复「对」确认"
+            "[senator::claude] 提议记为决策：幂等键统一用 Idempotency-Key（seq 118）回复「对」确认"
         );
-        note.body = "[speaker::pm/claude] 已确认".into();
+        note.body = "[speaker::cline] 已确认".into();
         assert_eq!(
             proposal_root(Locale::Zh, &note),
-            "[senator::alice/claude] 提议记为决策（seq 118）回复「对」确认\n> [speaker::pm/claude] 已确认"
+            "[senator::claude] 提议记为决策（seq 118）回复「对」确认\n> [speaker::cline] 已确认"
         );
         note.body = "Use Idempotency-Key everywhere".into();
         assert_eq!(
             proposal_root(Locale::En, &note),
-            "[senator::alice/claude] proposes a decision: Use Idempotency-Key everywhere (seq 118). Reply \"yes\" to confirm."
+            "[senator::claude] proposes a decision: Use Idempotency-Key everywhere (seq 118). Reply \"yes\" to confirm."
         );
     }
 
@@ -2006,11 +1997,11 @@ mod tests {
         );
         let plan = vec![
             describe_decide(Locale::En, "cap is 90 days", Some(Seq(4))),
-            describe_relay(Locale::En, &[sen("bob/claude")], "please  check\nthe cap"),
+            describe_relay(Locale::En, &[sen("copilot")], "please  check\nthe cap"),
         ];
         assert_eq!(
             confirm_plan(Locale::En, &plan),
-            "I understand:\n1. Record the decision \"cap is 90 days\", replacing the decision at seq 4.\n2. Tell [senator::bob/claude]: \"please check the cap\".\nReply \"yes\" to confirm."
+            "I understand:\n1. Record the decision \"cap is 90 days\", replacing the decision at seq 4.\n2. Tell [senator::copilot]: \"please check the cap\".\nReply \"yes\" to confirm."
         );
         assert_eq!(
             describe_decide(Locale::Zh, "上限 90 天", Some(Seq(4))),
@@ -2023,28 +2014,28 @@ mod tests {
         let text = status(
             Locale::Zh,
             &committee(),
-            &[path("alice/claude")],
+            &[path("claude")],
             &[],
-            &["[senator::alice/claude] 在线".to_owned()],
+            &["[senator::claude] 在线".to_owned()],
         );
         assert_eq!(
             text,
-            "本群绑定在委员会 refund-v2。\n在线 agent：[senator::alice/claude]\n离线 agent：无\n在场：\n- [senator::alice/claude] 在线"
+            "本群绑定在委员会 refund-v2。\n在线 agent：[senator::claude]\n离线 agent：无\n在场：\n- [senator::claude] 在线"
         );
         let text = status(
             Locale::En,
             &committee(),
-            &[path("alice/claude"), path("alice/codex")],
-            &[path("bob/claude")],
+            &[path("claude"), path("devin")],
+            &[path("copilot")],
             &[],
         );
         assert_eq!(
             text,
-            "This group is bound to committee refund-v2.\nAgents online: [senator::alice/claude], [senator::alice/codex]\nAgents offline: [senator::bob/claude]"
+            "This group is bound to committee refund-v2.\nAgents online: [senator::claude], [senator::devin]\nAgents offline: [senator::copilot]"
         );
 
         let presence = AgentPresence {
-            agent: path("alice/claude"),
+            agent: path("claude"),
             state: PresenceState::Absent,
             since: Utc::now(),
             since_seq: Seq(10),
@@ -2058,30 +2049,30 @@ mod tests {
         assert_eq!(
             presence_status(
                 Locale::Zh,
-                &path("alice/claude"),
+                &path("claude"),
                 Some(&presence),
                 Some((Seq(40), since))
             ),
-            "[senator::alice/claude] 缺席（租约过期） · 落后 14 条事件 · 检查点 3 小时前（seq 40）"
+            "[senator::claude] 缺席（租约过期） · 落后 14 条事件 · 检查点 3 小时前（seq 40）"
         );
         assert_eq!(
             presence_status(
                 Locale::En,
-                &path("alice/claude"),
+                &path("claude"),
                 Some(&presence),
                 Some((Seq(40), since))
             ),
-            "[senator::alice/claude] absent (lease expired) · 14 events behind · checkpoint 3 hours ago (seq 40)"
+            "[senator::claude] absent (lease expired) · 14 events behind · checkpoint 3 hours ago (seq 40)"
         );
         assert_eq!(
-            presence_status(Locale::En, &path("bob/claude"), None, None),
-            "[senator::bob/claude] presence unknown · no checkpoint"
+            presence_status(Locale::En, &path("copilot"), None, None),
+            "[senator::copilot] presence unknown · no checkpoint"
         );
         assert_eq!(age(Locale::En, chrono::Duration::minutes(1)), "1 minute");
         assert_eq!(age(Locale::Zh, chrono::Duration::days(3)), "3 天");
 
         let reassigned = PresencePayload {
-            agent: path("alice/claude"),
+            agent: path("claude"),
             state: PresenceState::Reassigned,
             since: Utc::now(),
             since_seq: Seq(10),
@@ -2089,11 +2080,11 @@ mod tests {
             last_seen: None,
             cursor: None,
             lag: None,
-            new_owner: Some(path("bob/claude")),
+            new_owner: Some(path("copilot")),
         };
         assert_eq!(
             presence_line(Locale::Zh, &reassigned),
-            "[senator::alice/claude] 的工作已交给 [senator::bob/claude]"
+            "[senator::claude] 的工作已交给 [senator::copilot]"
         );
         let back = PresencePayload {
             state: PresenceState::Online,
@@ -2103,7 +2094,7 @@ mod tests {
         };
         assert_eq!(
             presence_line(Locale::En, &back),
-            "[senator::alice/claude]'s work is back with [senator::alice/claude]"
+            "[senator::claude]'s work is back with [senator::claude]"
         );
         let lost = PresencePayload {
             state: PresenceState::Disconnected,
@@ -2111,26 +2102,23 @@ mod tests {
             new_owner: None,
             ..reassigned
         };
-        assert_eq!(
-            presence_line(Locale::Zh, &lost),
-            "[senator::alice/claude] 失联"
-        );
+        assert_eq!(presence_line(Locale::Zh, &lost), "[senator::claude] 失联");
         assert_eq!(
             presence_line(Locale::En, &lost),
-            "[senator::alice/claude] disconnected"
+            "[senator::claude] disconnected"
         );
     }
 
     #[test]
     fn takeover_escalation_and_hand_back() {
-        let agent = sen("alice/claude");
+        let agent = sen("claude");
         assert_eq!(
             takeover_escalation(Locale::Zh, &agent, NoCover::Stale, "上限\n是多少？"),
-            "[senator::alice/claude] 不在，检查点太旧，这条需要人：上限 是多少？"
+            "[senator::claude] 不在，检查点太旧，这条需要人：上限 是多少？"
         );
         assert_eq!(
             takeover_escalation(Locale::En, &agent, NoCover::Missing, "What is the cap?"),
-            "[senator::alice/claude] is away and it left no checkpoint, so this needs a person: What is the cap?"
+            "[senator::claude] is away and it left no checkpoint, so this needs a person: What is the cap?"
         );
         let answers = [HandedBack {
             question_seq: Seq(12),
@@ -2148,11 +2136,11 @@ mod tests {
         );
         assert_eq!(
             handback_line(Locale::Zh, &agent, 2),
-            "[senator::alice/claude] 回来了，Speaker 交还 2 条代答"
+            "[senator::claude] 回来了，Speaker 交还 2 条代答"
         );
         assert_eq!(
             handback_line(Locale::En, &agent, 2),
-            "[senator::alice/claude] is back; the Speaker handed back 2 answers"
+            "[senator::claude] is back; the Speaker handed back 2 answers"
         );
     }
 
@@ -2160,27 +2148,22 @@ mod tests {
     fn unknown_targets_list_people_and_how_to_name_an_agent() {
         let mut alice = Senior::new(name("alice"));
         alice.names = vec!["Alice".into(), "爱丽丝".into()];
-        let roster = Roster::top(vec![alice, Senior::new(name("bob"))], vec![]).expect("roster");
+        let roster = Roster::new(vec![alice, Senior::new(name("bob"))], vec![]).expect("roster");
         assert_eq!(
             unknown_targets(Locale::Zh, &["carol".into()], &roster),
-            "我不认识 carol。名册上的人：alice（Alice）、bob。要指明某人的某个 agent，写 <handle>/<agent>。"
+            "我不认识 carol。名册上的人：alice（Alice）、bob。要指明某个 agent，直接写它的名字。"
         );
         assert_eq!(
             unknown_targets(Locale::En, &[], &roster),
-            "Whom should I pass it to? People on the roster: alice (Alice), bob. To name one of someone's agents, write <handle>/<agent>."
+            "Whom should I pass it to? People on the roster: alice (Alice), bob. To name one agent, write its own name."
         );
-        let empty = Roster::top(vec![], vec![]).expect("roster");
+        let empty = Roster::new(vec![], vec![]).expect("roster");
         assert!(unknown_targets(Locale::En, &[], &empty).contains("no one is on the roster"));
     }
 
     #[test]
     fn a_parked_relay_names_the_person() {
-        let mut relay = event(
-            Kind::Question,
-            Address::Speaker,
-            vec![sen("alice/claude")],
-            None,
-        );
+        let mut relay = event(Kind::Question, Address::Speaker, vec![sen("claude")], None);
         relay.seq = Seq(120);
         relay.meta.insert(
             meta::TRIAGE.into(),
@@ -2194,13 +2177,18 @@ mod tests {
             }
             .value(),
         );
+        let roster = Roster::new(
+            vec![Senior::new(name("alice"))],
+            vec![SeatedAgent::new(path("claude"), name("alice"))],
+        )
+        .expect("roster");
         assert_eq!(
-            relay_ack_for(Locale::Zh, &relay),
-            "已转给 [senator::alice/claude]（seq 120）。Speaker 判断这条需要 [senator::alice] 本人处理，已提醒 [senator::alice]"
+            relay_ack_for(Locale::Zh, &relay, &roster),
+            "已转给 [senator::claude]（seq 120）。Speaker 判断这条需要 [senator::alice] 本人处理，已提醒 [senator::alice]"
         );
         assert_eq!(
-            relay_ack_for(Locale::En, &relay),
-            "Passed to [senator::alice/claude] (seq 120). The Speaker judged that this needs [senator::alice] in person and has let [senator::alice] know."
+            relay_ack_for(Locale::En, &relay, &roster),
+            "Passed to [senator::claude] (seq 120). The Speaker judged that this needs [senator::alice] in person and has let [senator::alice] know."
         );
     }
 
@@ -2261,7 +2249,8 @@ mod tests {
             kind: Kind::Question,
             from: Address::Speaker,
             on_behalf_of: Some(sen("bob")),
-            to: vec![sen("alice/claude")],
+            to: vec![sen("claude")],
+            agents: vec![path("claude")],
             title: "Which header?".into(),
             state: StatusState::Suspended,
             since: Seq(118),
@@ -2274,7 +2263,7 @@ mod tests {
             }],
             links: Vec::new(),
             owner: Some(TaskOwner {
-                agent: path("alice/claude"),
+                agent: path("claude"),
                 session: "s1".into(),
             }),
             triage: Some(TriageVerdict::NeedsHuman),
@@ -2295,12 +2284,12 @@ mod tests {
         let card = task_card(Locale::Zh, &t, None, Some("用 Idempotency-Key"));
         assert_eq!(
             card.markdown,
-            "**提问** [senator::bob]（经 Speaker） → [senator::alice/claude]（seq 118）\n**状态** 等人处理\n**分流** 需要本人\n**等** [senator::alice]\n**原因** needs a product call\n**最新回答** 用 Idempotency-Key"
+            "**提问** [senator::bob]（经 Speaker） → [senator::claude]（seq 118）\n**状态** 等人处理\n**分流** 需要本人\n**等** [senator::alice]\n**原因** needs a product call\n**最新回答** 用 Idempotency-Key"
         );
         let card = task_card(Locale::En, &t, Some(TriageVerdict::Agent), None);
         assert_eq!(
             card.markdown,
-            "**Question** [senator::bob] (via the Speaker) → [senator::alice/claude] (seq 118)\n**State** waiting on a person\n**Triage** for the agent\n**Waiting on** [senator::alice]\n**Reason** needs a product call"
+            "**Question** [senator::bob] (via the Speaker) → [senator::claude] (seq 118)\n**State** waiting on a person\n**Triage** for the agent\n**Waiting on** [senator::alice]\n**Reason** needs a product call"
         );
         assert_eq!(card.title, "Which header?");
 
@@ -2328,12 +2317,12 @@ mod tests {
         let question = BriefQuestion {
             seq: Seq(6),
             ts: Utc::now(),
-            from: sen("bob/claude"),
-            to: vec![sen("alice/claude")],
+            from: sen("copilot"),
+            to: vec![sen("claude")],
             body: "Which header?".into(),
         };
         let presence = AgentPresence {
-            agent: path("alice/claude"),
+            agent: path("claude"),
             state: PresenceState::Online,
             since: Utc::now(),
             since_seq: Seq(1),
@@ -2348,20 +2337,20 @@ mod tests {
             decisions: vec![&decision],
             questions: vec![&question],
             threads: vec![&t],
-            activity: vec![(path("bob/claude"), Seq(7), "answer: 90 days".into())],
+            activity: vec![(path("copilot"), Seq(7), "answer: 90 days".into())],
             presence: vec![&presence],
         };
         let card = today_card(Locale::En, &today);
         assert_eq!(card.title, "Today · 04-12");
         assert_eq!(
             card.markdown,
-            "**Today's decisions**\n- seq 5: cap is 90 days\n\n**Open questions**\n- seq 6 · [senator::bob/claude]: Which header?\n\n**Today's tasks**\n- seq 118 · Which header? · waiting on a person\n\n**What each agent did last**\n- [senator::bob/claude] · seq 7 · answer: 90 days\n\n**Agent presence**\n- [senator::alice/claude] online · 1 event behind"
+            "**Today's decisions**\n- seq 5: cap is 90 days\n\n**Open questions**\n- seq 6 · [senator::copilot]: Which header?\n\n**Today's tasks**\n- seq 118 · Which header? · waiting on a person\n\n**What each agent did last**\n- [senator::copilot] · seq 7 · answer: 90 days\n\n**Agent presence**\n- [senator::claude] online · 1 event behind"
         );
         let card = today_card(Locale::Zh, &today);
         assert_eq!(card.title, "今天的摘要 · 04-12");
         assert!(
             card.markdown
-                .contains("- [senator::alice/claude] 在线 · 落后 1 条事件"),
+                .contains("- [senator::claude] 在线 · 落后 1 条事件"),
             "{}",
             card.markdown
         );
@@ -2369,7 +2358,7 @@ mod tests {
 
     #[test]
     fn a_status_reply_is_headed_by_the_byline() {
-        let mut e = event(Kind::Status, sen("alice/claude"), vec![], Some(Seq(118)));
+        let mut e = event(Kind::Status, sen("claude"), vec![], Some(Seq(118)));
         e.body = String::new();
         let mut status = StatusPayload::new(StatusState::Processing);
         status.steps = Some(vec![
@@ -2386,28 +2375,28 @@ mod tests {
         ]);
         assert_eq!(
             status_reply(Locale::Zh, &e, &status),
-            "[senator::alice/claude] 处理中 · ✓ 已读日志 · ☐ 起草回答"
+            "[senator::claude] 处理中 · ✓ 已读日志 · ☐ 起草回答"
         );
         assert_eq!(
             status_reply(Locale::En, &e, &status),
-            "[senator::alice/claude] in progress · ✓ 已读日志 · ☐ 起草回答"
+            "[senator::claude] in progress · ✓ 已读日志 · ☐ 起草回答"
         );
     }
 
     #[test]
     fn no_text_uses_the_old_vocabulary() {
         let c = committee();
-        let agent = sen("alice/claude");
+        let agent = sen("claude");
         let mut answer = event(
             Kind::Answer,
             Address::Speaker,
-            vec![sen("bob/claude")],
+            vec![sen("copilot")],
             Some(Seq(118)),
         );
         answer.on_behalf_of = Some(agent.clone());
         answer.meta.insert(meta::TAKEOVER.into(), Value::Bool(true));
-        let question = event(Kind::Question, agent.clone(), vec![sen("bob/claude")], None);
-        let roster = Roster::top(vec![Senior::new(name("alice"))], vec![]).expect("roster");
+        let question = event(Kind::Question, agent.clone(), vec![sen("copilot")], None);
+        let roster = Roster::new(vec![Senior::new(name("alice"))], vec![]).expect("roster");
         let t = thread();
         let triage = TriagePayload {
             verdict: TriageVerdict::Unsure,
@@ -2448,7 +2437,7 @@ mod tests {
                 cancelled(l),
                 binding_body(l, true, "chat-room"),
                 binding_body(l, false, "chat-room"),
-                status(l, &c, &[path("alice/claude")], &[], &[]),
+                status(l, &c, &[path("claude")], &[], &[]),
                 takeover_escalation(l, &agent, NoCover::Unavailable, "q"),
                 handback_note(l, Seq(1), &[]),
                 handback_line(l, &agent, 1),
@@ -2466,7 +2455,7 @@ mod tests {
                 fallback_unavailable(l, &agent),
                 fallback_pending(l, &agent),
                 super::brief(l, &brief),
-                relay_ack_for(l, &question),
+                relay_ack_for(l, &question, &roster),
                 triage_note(l, &triage),
                 triage_reason(l, &triage),
                 request_rule_reason(l),

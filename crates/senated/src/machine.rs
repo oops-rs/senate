@@ -4,36 +4,34 @@
 //! the Senate home (`~/.senate`, or `$SENATE_HOME`) and runs, in one
 //! process:
 //!
-//! - **the Senates it hosts**: a local top Senate (`[local]`, for using
-//!   Senate alone: no Senate above, one of the person's agents named its
-//!   Speaker), and one Senate one level down per presiding agent
-//!   (`[[preside]]`: `alice/claude` presides, `alice/claude/*` sit there).
-//!   Each is a full assembly (server, roster, log) with no built-in
-//!   Speaker: its Speaker is the presiding agent's session. Its log is an
-//!   SQLite file under `senates/<senate>/` in the Senate home; it listens on
-//!   loopback only, on a port kept across restarts; it knows one person,
-//!   authenticated by a token generated here, kept in that directory (mode
-//!   0600) and never sent anywhere else;
+//! - **the machine's one Senate** (`[local]`, for using Senate alone: no
+//!   Senate above), named by `[local] name` (default `<person>-desk`). Every
+//!   session of the machine sits in it (`claude`, `codex`, and whatever
+//!   names sessions are pinned to). It is a full assembly (server, roster,
+//!   log) with no built-in Speaker; its log is an SQLite file under
+//!   `senates/top/` in the Senate home; it listens on loopback only, on a
+//!   port kept across restarts; it knows one person, authenticated by a
+//!   token generated here, kept in that directory (mode 0600) and never sent
+//!   anywhere else;
 //! - **the developer-machine side** (`senate_bridge::daemon`): sessions,
-//!   delivery, MCP and hooks, across every Senate the machine serves (the
-//!   one above at `server_url`, if any, and each hosted one), as a
-//!   supervised [`Component`] of the first hosted Senate's assembly; with
-//!   no hosted Senate, on its own under the same supervision.
+//!   delivery, MCP and hooks, over that Senate (or, with no `[local]`, over
+//!   the Senate at `server_url`), as a supervised [`Component`] of the
+//!   hosted Senate's assembly; with none hosted, on its own under the same
+//!   supervision.
 //!
-//! There is no synchronisation between the levels: the link between them is
-//! the presiding agent's session, which sits in one and presides over the
-//! other.
+//! Senates nested under an agent (`[[preside]]`, `senates/under-<agent>/`)
+//! are no longer hosted: an agent's own team is a child Senate. Their logs
+//! stay on disk untouched, and the machine says so once at start.
 //!
 //! Directory layout under the Senate home:
 //!
 //! | Path | What |
 //! | --- | --- |
 //! | `senate.toml` | the machine's configuration |
-//! | `senates/top/` | the local top Senate (`[local]`) |
-//! | `senates/under-<agent>/` | the Senate `<person>/<agent>` presides over |
-//! | `senates/*/log.db` | its log |
-//! | `senates/*/token` | the person's token there, generated here |
-//! | `senates/*/listen` | the loopback address it serves, kept for restarts |
+//! | `senates/top/` | the machine's Senate (`[local]`) |
+//! | `senates/top/log.db` | its log |
+//! | `senates/top/token` | the person's token there, generated here |
+//! | `senates/top/listen` | the loopback address it serves, kept for restarts |
 
 use std::io::Write;
 use std::net::{SocketAddr, TcpListener};
@@ -42,10 +40,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use senate_bridge::config::{Hosted, SenateLink};
+use senate_bridge::config::Hosted;
 use senate_bridge::daemon::{self, DaemonOptions, Timing};
 use senate_bridge::{BridgeConfig, Paths};
-use senate_core::{EventId, RosterConfig, SenatorName, Senior};
+use senate_core::{EventId, Locale, Name, RosterConfig, Senior};
 use senate_server::{ServerConfig, TokenConfig};
 
 use crate::assembly::{Assembly, AssemblyError, Senated};
@@ -63,7 +61,7 @@ pub enum MachineError {
         path: std::path::PathBuf,
         source: std::io::Error,
     },
-    #[error("the Senate under {key}: {source}")]
+    #[error("the Senate in {key}: {source}")]
     Senate {
         key: String,
         #[source]
@@ -71,12 +69,12 @@ pub enum MachineError {
     },
 }
 
-/// One Senate this machine hosts, running.
+/// The Senate this machine hosts, running.
 pub struct HostedSenate {
     /// Its directory under `senates/`.
     pub key: String,
-    /// Its presider; `None` for the local top Senate.
-    pub presider: Option<SenatorName>,
+    /// Its name.
+    pub name: Name,
     /// `http://127.0.0.1:<port>`.
     pub url: String,
     /// The person's token there.
@@ -84,8 +82,8 @@ pub struct HostedSenate {
     pub daemon: Senated,
 }
 
-/// A developer machine's `senated`: the Senates it hosts and its side of
-/// every Senate it serves.
+/// A developer machine's `senated`: the Senate it hosts and its side of the
+/// Senate it serves.
 pub struct Machine {
     senates: Vec<HostedSenate>,
     /// The developer-machine side when no hosted Senate carries it.
@@ -93,11 +91,11 @@ pub struct Machine {
     bridge: BridgeConfig,
 }
 
-/// What one hosted Senate is, before it starts.
+/// What the hosted Senate is, before it starts.
 struct Plan {
     key: String,
-    presider: Option<SenatorName>,
-    speaker: Option<SenatorName>,
+    name: Name,
+    speaker: Option<senate_core::SenatorName>,
     listen: String,
     token: String,
     dir: std::path::PathBuf,
@@ -156,44 +154,26 @@ impl Machine {
             path: paths.home().to_path_buf(),
             source,
         })?;
-        let person = config.person.clone();
+        if !hosted.preside.is_empty() {
+            notice_nested(&paths, &hosted, config.locale);
+        }
         let mut plans = Vec::new();
         if let Some(local) = &hosted.local {
             plans.push(plan(
                 &paths,
                 "top".into(),
-                None,
-                local.speaker.as_ref().map(|s| s.under(&person)),
+                hosted.name(&config.person),
+                local.speaker.clone(),
                 local.listen.as_deref(),
             )?);
         }
-        for preside in &hosted.preside {
-            let key = format!("under-{}", preside.agent.to_string().replace('/', "-"));
-            plans.push(plan(
-                &paths,
-                key,
-                Some(preside.agent.under(&person)),
-                None,
-                preside.listen.as_deref(),
-            )?);
-        }
 
-        // The developer-machine side serves the Senate above (or the local
-        // top one) and each Senate one level down.
+        // The developer-machine side serves the Senate this machine hosts,
+        // or the one at `server_url`.
         let mut bridge = config.clone();
-        for p in &plans {
-            let url = format!("http://{}", p.listen);
-            match &p.presider {
-                None => {
-                    bridge.server_url = url;
-                    bridge.token = p.token.clone();
-                }
-                Some(presider) => bridge.senates.push(SenateLink {
-                    server_url: url,
-                    token: p.token.clone(),
-                    presider: senate_bridge::agent::RelPath::of(presider),
-                }),
-            }
+        if let Some(p) = plans.first() {
+            bridge.server_url = format!("http://{}", p.listen);
+            bridge.token = p.token.clone();
         }
         bridge.validate().map_err(MachineError::Invalid)?;
         let side = Arc::new(DeveloperMachine {
@@ -228,24 +208,21 @@ impl Machine {
                     source,
                 })?;
             tracing::info!(
-                senate = %p.key,
+                senate = %p.name,
+                dir = %p.key,
                 url = %daemon.base_url(),
-                presider = ?p.presider,
                 speaker = ?p.speaker,
-                "hosting a Senate on this machine"
+                "hosting this machine's Senate"
             );
             senates.push(HostedSenate {
                 url: daemon.base_url(),
                 key: p.key,
-                presider: p.presider,
+                name: p.name,
                 token: p.token,
                 daemon,
             });
         }
-        // Back in configuration order: the local top Senate first.
-        if let Some(last) = senates.pop() {
-            senates.insert(0, last);
-        }
+
         let alone = senates
             .is_empty()
             .then(|| Supervisor::start(crate::empty_hub::empty(), vec![side]));
@@ -256,22 +233,18 @@ impl Machine {
         })
     }
 
-    /// The Senates this machine hosts: the local top one first, then one
-    /// per presiding agent.
+    /// The Senate this machine hosts, when it hosts one (`[local]`).
+    pub fn senate(&self) -> Option<&HostedSenate> {
+        self.senates.first()
+    }
+
+    /// The Senates this machine hosts: none or one.
     pub fn senates(&self) -> &[HostedSenate] {
         &self.senates
     }
 
-    /// The hosted Senate presided over by `presider` (`None`: the local top
-    /// Senate).
-    pub fn senate(&self, presider: Option<&SenatorName>) -> Option<&HostedSenate> {
-        self.senates
-            .iter()
-            .find(|s| s.presider.as_ref() == presider)
-    }
-
-    /// What the developer-machine side was started with: every Senate it
-    /// serves, with their addresses and tokens.
+    /// What the developer-machine side was started with: the Senate it
+    /// serves, its address and token.
     pub fn bridge_config(&self) -> &BridgeConfig {
         &self.bridge
     }
@@ -339,8 +312,8 @@ impl Machine {
 fn plan(
     paths: &Paths,
     key: String,
-    presider: Option<SenatorName>,
-    speaker: Option<SenatorName>,
+    name: Name,
+    speaker: Option<senate_core::SenatorName>,
     listen: Option<&str>,
 ) -> Result<Plan, MachineError> {
     let dir = paths.hosted(&key);
@@ -389,7 +362,7 @@ fn plan(
     write_private(&listen_file, &listen).map_err(io(&listen_file))?;
     Ok(Plan {
         key,
-        presider,
+        name,
         speaker,
         listen,
         token,
@@ -407,11 +380,10 @@ fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
     writeln!(file, "{text}")
 }
 
-/// A hosted Senate's `senated` configuration: one person, its token, its
-/// presider or named Speaker, SQLite under its directory, loopback.
+/// The hosted Senate's `senated` configuration: its name, one person, its
+/// token, its named Speaker, SQLite under its directory, loopback.
 fn senate_config(plan: &Plan, machine: &BridgeConfig) -> Result<SenatedConfig, MachineError> {
     let roster = RosterConfig {
-        presider: plan.presider.clone(),
         speaker: plan.speaker.clone(),
         seniors: vec![Senior::new(machine.person.clone())],
         agents: Vec::new(),
@@ -423,13 +395,14 @@ fn senate_config(plan: &Plan, machine: &BridgeConfig) -> Result<SenatedConfig, M
             plan.token.clone(),
         )],
     );
+    server.name = Some(plan.name.clone());
     server.listen = plan.listen.clone();
     server.database_url = format!("sqlite:{}", plan.dir.join("log.db").display());
     server.data_dir = plan.dir.join("data");
     server.locale = machine.locale;
     server
         .validate()
-        .map_err(|e| MachineError::Invalid(format!("the Senate under {}: {e}", plan.key)))?;
+        .map_err(|e| MachineError::Invalid(format!("the Senate {}: {e}", plan.name)))?;
     std::fs::create_dir_all(&server.data_dir).map_err(|source| MachineError::Io {
         path: server.data_dir.clone(),
         source,
@@ -439,6 +412,47 @@ fn senate_config(plan: &Plan, machine: &BridgeConfig) -> Result<SenatedConfig, M
         speaker: None,
         work: None,
     })
+}
+
+/// Say once, in the machine's language, that Senates nested under an agent
+/// are no longer hosted and where their logs are. Their directories are
+/// left as they are. "Once": a marker in each directory remembers it was
+/// said.
+fn notice_nested(paths: &Paths, hosted: &Hosted, locale: Locale) {
+    for preside in &hosted.preside {
+        let key = format!("under-{}", preside.agent.replace('/', "-"));
+        let dir = paths.hosted(&key);
+        let marker = dir.join("NOT-HOSTED");
+        if marker.exists() {
+            continue;
+        }
+        let text = nested_notice(&preside.agent, &dir, locale);
+        tracing::warn!("{text}");
+        eprintln!("{text}");
+        if dir.is_dir()
+            && let Err(e) = std::fs::write(&marker, format!("{text}\n"))
+        {
+            tracing::debug!("{}: {e}", marker.display());
+        }
+    }
+}
+
+/// The notice for one nested Senate.
+pub fn nested_notice(agent: &str, dir: &Path, locale: Locale) -> String {
+    let dir = dir.display();
+    match locale {
+        Locale::Zh => format!(
+            "[[preside]] agent = \"{agent}\"：嵌套在 agent 之下的 Senate 不再托管。一个 agent \
+             自己的团队是一个子 Senate。它的日志原样留在 {dir}，不会被改动；不再需要时用 \
+             `senate free --yes --delete-logs` 删除。把 [[preside]] 从 senate.toml 去掉，这条提示就不再出现。"
+        ),
+        Locale::En => format!(
+            "[[preside]] agent = \"{agent}\": Senates nested under an agent are no longer hosted. \
+             An agent's own team is a child Senate. Its log stays untouched in {dir}; remove it \
+             with `senate free --yes --delete-logs` when it is no longer needed. Drop [[preside]] \
+             from senate.toml and this notice stops."
+        ),
+    }
 }
 
 /// The developer-machine side as a supervised component: the bridge
@@ -467,7 +481,8 @@ impl Component for DeveloperMachine {
 mod tests {
     use std::os::unix::fs::PermissionsExt;
 
-    use senate_core::{Hub, Name, SpeakerSeat};
+    use senate_bridge::client::ApiClient;
+    use senate_core::{Hub, Name, SenatorName, SpeakerSeat};
 
     use super::*;
 
@@ -476,56 +491,164 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn alone_the_machine_hosts_a_top_senate_presided_over_by_an_agent() {
+    async fn alone_the_machine_hosts_one_senate_with_its_named_speaker_under_the_person() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::new(dir.path().join("senate"));
         let config: BridgeConfig = toml::from_str("person = \"alice\"\n").unwrap();
         let hosted: Hosted =
-            toml::from_str("[local]\nspeaker = \"claude\"\n[[preside]]\nagent = \"claude\"\n")
-                .unwrap();
+            toml::from_str("[local]\nname = \"north-desk\"\nspeaker = \"claude\"\n").unwrap();
         let machine = Machine::start_with(paths.clone(), config, hosted, quiet())
             .await
             .unwrap();
-        let top = machine.senate(None).unwrap();
-        let below = machine
-            .senate(Some(&"alice/claude".parse().unwrap()))
-            .unwrap();
+        assert_eq!(machine.senates().len(), 1, "one Senate per machine");
+        let top = machine.senate().unwrap();
+        assert_eq!(top.key, "top");
+        assert_eq!(top.name.as_str(), "north-desk");
         assert!(top.url.starts_with("http://127.0.0.1:"));
-        let roster = top.daemon.hub.roster().await.unwrap();
-        assert_eq!(roster.presider(), None);
+        // Its name is what the Senate says it is.
+        let me = ApiClient::new(&top.url, &top.token)
+            .unwrap()
+            .me()
+            .await
+            .unwrap();
+        assert_eq!(me.person.as_str(), "alice");
+        assert_eq!(me.senate.as_str(), "north-desk");
+        assert_eq!(me.parent, None);
+        // The named Speaker is seated, under the only person.
+        let claude: SenatorName = "claude".parse().unwrap();
+        let alice = Name::new("alice").unwrap();
         assert_eq!(
             top.daemon.hub.speaker_seat(),
-            Some(&SpeakerSeat::Senator("alice/claude".parse().unwrap()))
+            Some(&SpeakerSeat::Senator(claude.clone()))
         );
-        assert_eq!(
-            below.daemon.hub.speaker_seat(),
-            Some(&SpeakerSeat::Senator("alice/claude".parse().unwrap()))
-        );
+        let roster = top.daemon.hub.roster().await.unwrap();
+        assert_eq!(roster.owner_of(&claude), Some(&alice));
+        assert!(roster.is_agent(&claude));
         // The token is private, and the only person is alice.
         let token_file = paths.hosted("top").join("token");
         let mode = std::fs::metadata(&token_file).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
-        assert!(roster.senior(&Name::new("alice").unwrap()).is_some());
+        assert!(roster.senior(&alice).is_some());
         assert_eq!(roster.seniors().len(), 1);
-        // The developer-machine side serves both.
+        // The developer-machine side serves it.
         let bridge = machine.bridge_config();
         assert_eq!(bridge.server_url, top.url);
-        assert_eq!(bridge.senates.len(), 1);
-        assert_eq!(bridge.senates[0].server_url, below.url);
+        assert_eq!(bridge.token, top.token);
         let (top_url, top_token) = (top.url.clone(), top.token.clone());
         machine.shutdown().await;
 
-        // A restart finds the same addresses and tokens.
+        // A restart finds the same address and token.
         let config: BridgeConfig = toml::from_str("person = \"alice\"\n").unwrap();
         let hosted: Hosted =
-            toml::from_str("[local]\nspeaker = \"claude\"\n[[preside]]\nagent = \"claude\"\n")
-                .unwrap();
+            toml::from_str("[local]\nname = \"north-desk\"\nspeaker = \"claude\"\n").unwrap();
         let again = Machine::start_with(paths, config, hosted, quiet())
             .await
             .unwrap();
-        assert_eq!(again.senate(None).unwrap().url, top_url);
-        assert_eq!(again.senate(None).unwrap().token, top_token);
+        assert_eq!(again.senate().unwrap().url, top_url);
+        assert_eq!(again.senate().unwrap().token, top_token);
         again.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_unnamed_hosted_senate_is_the_persons_desk() {
+        let dir = tempfile::tempdir().unwrap();
+        let config: BridgeConfig = toml::from_str("person = \"alice\"\n").unwrap();
+        let hosted: Hosted = toml::from_str("[local]\n").unwrap();
+        let machine = Machine::start_with(Paths::new(dir.path()), config, hosted, quiet())
+            .await
+            .unwrap();
+        let top = machine.senate().unwrap();
+        assert_eq!(top.name.as_str(), "alice-desk");
+        let me = ApiClient::new(&top.url, &top.token)
+            .unwrap()
+            .me()
+            .await
+            .unwrap();
+        assert_eq!(me.senate.as_str(), "alice-desk");
+        assert_eq!(top.daemon.hub.speaker_seat(), None);
+        machine.shutdown().await;
+    }
+
+    /// Every file under `dir` with its bytes.
+    fn files(dir: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+        let mut out = std::collections::BTreeMap::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for entry in std::fs::read_dir(&d).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    let bytes = std::fs::read(&path).unwrap();
+                    out.insert(path, bytes);
+                }
+            }
+        }
+        out
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_old_nested_senate_is_left_untouched_and_said_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path().join("senate"));
+        // A home from before: a Senate nested under claude, with its log.
+        let under = paths.hosted("under-claude");
+        std::fs::create_dir_all(under.join("data")).unwrap();
+        std::fs::write(under.join("log.db"), b"SQLite format 3\0 not really").unwrap();
+        std::fs::write(under.join("token"), "local-old\n").unwrap();
+        std::fs::write(under.join("listen"), "127.0.0.1:1\n").unwrap();
+        std::fs::write(under.join("data").join("blob"), [0u8, 1, 2, 255]).unwrap();
+        let before = files(&under);
+        let toml_hosted = "[local]\nspeaker = \"claude\"\n[[preside]]\nagent = \"claude\"\n";
+
+        let config: BridgeConfig = toml::from_str("person = \"alice\"\nlocale = \"en\"\n").unwrap();
+        let hosted: Hosted = toml::from_str(toml_hosted).unwrap();
+        let machine = Machine::start_with(paths.clone(), config, hosted, quiet())
+            .await
+            .unwrap();
+        // Only the machine's Senate is hosted.
+        let keys: Vec<_> = machine.senates().iter().map(|s| s.key.as_str()).collect();
+        assert_eq!(keys, vec!["top"]);
+        assert_eq!(machine.senate().unwrap().name.as_str(), "alice-desk");
+        assert_eq!(
+            machine.bridge_config().server_url,
+            machine.senate().unwrap().url
+        );
+        machine.shutdown().await;
+
+        // The old files are as they were; the one new file says why.
+        let marker = under.join("NOT-HOSTED");
+        let mut after = files(&under);
+        let said = String::from_utf8(after.remove(&marker).expect("the notice is kept")).unwrap();
+        assert_eq!(after, before, "the nested Senate's files are untouched");
+        let en = nested_notice("claude", &under, Locale::En);
+        assert_eq!(said, format!("{en}\n"));
+        let zh = nested_notice("claude", &under, Locale::Zh);
+        for text in [&en, &zh] {
+            assert!(text.contains("[[preside]] agent = \"claude\""), "{text}");
+            assert!(text.contains(&under.display().to_string()), "{text}");
+            assert!(
+                text.contains("Senate"),
+                "Senate is never translated: {text}"
+            );
+        }
+        assert!(en.contains("no longer hosted"), "{en}");
+        assert!(zh.contains("不再托管"), "{zh}");
+
+        // Said once: a restart (in another language) does not say it again.
+        let config: BridgeConfig = toml::from_str("person = \"alice\"\nlocale = \"zh\"\n").unwrap();
+        let hosted: Hosted = toml::from_str(toml_hosted).unwrap();
+        let again = Machine::start_with(paths, config, hosted, quiet())
+            .await
+            .unwrap();
+        assert_eq!(again.senates().len(), 1);
+        again.shutdown().await;
+        let mut after = files(&under);
+        assert_eq!(
+            after.remove(&marker).map(String::from_utf8),
+            Some(Ok(format!("{en}\n")))
+        );
+        assert_eq!(after, before);
     }
 
     #[tokio::test]
