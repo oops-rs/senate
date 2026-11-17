@@ -93,9 +93,11 @@ async fn one_person_chains_claude_code_and_codex_under_a_presiding_agent() {
         .await;
     let push = claude.wait_for("idempotency key").await;
     assert!(push.contains("from [senator::codex]"), "{push}");
-    // Codex took the committee's first seat, so it chairs it: a question
-    // from the chair is answered directly (the answering rule).
-    assert!(push.contains("from your committee's chair"), "{push}");
+    // Claude connected first, so it holds the committee's first seat and
+    // chairs it; codex, its user's own other agent, is asking it. (Before
+    // a connection counted as a seat, codex's first write took the chair.)
+    assert!(push.contains("(your user's own agent)"), "{push}");
+    assert!(!push.contains("from your committee's chair"), "{push}");
     assert!(
         push.contains("answer it directly, without asking your user first"),
         "{push}"
@@ -116,8 +118,8 @@ async fn one_person_chains_claude_code_and_codex_under_a_presiding_agent() {
     })
     .await;
 
-    // Codex took the committee's first seat, so it chairs it; the Speaker's
-    // office (claude's session) makes claude the chair instead.
+    // Claude holds the first seat already; setting it explicitly is a
+    // choice that stands whoever sits next.
     let _: serde_json::Value = desk
         .ipc(Request::SetChair {
             session: Laptop::session("s-claude"),
@@ -356,6 +358,16 @@ async fn the_person_asks_whichever_agent_from_the_command_line_and_waits_for_the
     codex.idle("thread-codex");
     desk.wait_connected("claude", true).await;
     desk.wait_connected("codex", true).await;
+    // Claude sat first, so it chairs the committee, and a chair that is an
+    // agent picks for `senator::*`. This test is about the Speaker picking,
+    // so the person chairs (an explicit choice, which stands).
+    let _: serde_json::Value = desk
+        .ipc(Request::SetChair {
+            session: Laptop::session("s-claude"),
+            committee: Some(committee()),
+            senator: path("alice"),
+        })
+        .await;
     let socket = desk.paths.socket();
 
     // `senate ask '*' ... --wait`: two agents are on the committee, so the server

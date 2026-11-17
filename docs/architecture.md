@@ -222,7 +222,11 @@ Every committee has one chair, any senator of the Senate. The chair is a
 fact of the committee's log: set explicitly (`senate chair <senator>`,
 written by the server as a `note` from `committee` with `meta.chair`), else
 the first agent seated on the committee, else the principal who created
-it. `chair` is a link like `speaker`. The chair picks the agent for
+it. An agent takes its seat on first contact (a stream, a heartbeat, a
+cursor, or a write as the agent), not on its first write: when the log
+shows no agent yet, that contact is written as the agent's `online`
+`presence` (a write is its own seat), once, so every reader folds the same
+chair. `chair` is a link like `speaker`. The chair picks the agent for
 `senator::*`, covers for an absent member from that member's own notes,
 receives members' escalations, and does what the Speaker asks. A chairing
 agent's session gets chair tools scoped to its committee. A chair absent

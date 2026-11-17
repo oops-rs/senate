@@ -511,6 +511,181 @@ async fn a_committee_is_chaired_by_its_creator_then_its_first_agent_until_one_is
     server.running.shutdown().await.unwrap();
 }
 
+/// How many `presence` events the committee's log holds.
+async fn presences(server: &TestServer) -> usize {
+    server
+        .running
+        .hub
+        .read(&committee(), senate_core::Seq::ZERO, 100)
+        .await
+        .unwrap()
+        .iter()
+        .filter(|e| e.kind == Kind::Presence)
+        .count()
+}
+
+async fn chaired_by(
+    server: &TestServer,
+) -> (Option<senate_core::SenatorName>, Option<ChairSource>) {
+    let info = chair(server, &committee()).await;
+    (info.chair, info.source)
+}
+
+#[tokio::test]
+async fn connecting_takes_the_seat_before_the_agent_has_written() {
+    // Each first contact alone, none of them a write: a stream, a
+    // heartbeat, a cursor read, a cursor write.
+    for contact in ["stream", "heartbeat", "cursor read", "cursor write"] {
+        let server = TestServer::start().await;
+        server.append("created by alice").await;
+        assert_eq!(
+            chaired_by(&server).await,
+            (Some(path("alice")), Some(ChairSource::Creator)),
+            "{contact}: until an agent sits, its creator chairs"
+        );
+        let _stream;
+        match contact {
+            "stream" => _stream = Some(server.stream_as(BOB, Some("claude"), None, None).await),
+            "heartbeat" => {
+                _stream = None;
+                assert_eq!(
+                    server.heartbeat(BOB, "claude").await.status(),
+                    StatusCode::NO_CONTENT
+                );
+            }
+            "cursor read" => {
+                _stream = None;
+                assert_eq!(server.act_as(BOB, "claude").await, StatusCode::OK);
+            }
+            _ => {
+                _stream = None;
+                let response = server
+                    .request(
+                        reqwest::Method::PUT,
+                        &senate_core::api::cursor_path(&committee(), "read"),
+                        BOB,
+                    )
+                    .query(&[("senator", "claude")])
+                    .json(&senate_core::api::Cursor {
+                        seq: senate_core::Seq::ZERO,
+                    })
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+            }
+        }
+        assert_eq!(
+            chaired_by(&server).await,
+            (Some(path("claude")), Some(ChairSource::FirstAgent)),
+            "{contact}: the first contact takes the seat, written or not"
+        );
+        server.running.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn the_seat_is_taken_once_and_an_explicit_chair_is_never_overridden() {
+    let server = TestServer::start().await;
+    server.append("created by alice").await;
+    // A person's cursor is no seat.
+    assert_eq!(server.act_as(ALICE, "alice").await, StatusCode::OK);
+    assert_eq!(presences(&server).await, 0);
+
+    let _claude = server.stream_as(BOB, Some("claude"), None, None).await;
+    assert_eq!(presences(&server).await, 1, "the first agent's seat");
+    // Later contacts, of claude or of another agent, write no seat.
+    let _again = server.stream_as(BOB, Some("claude"), None, None).await;
+    assert_eq!(
+        server.heartbeat(ALICE, "codex").await.status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(server.act_as(ALICE, "codex").await, StatusCode::OK);
+    assert_eq!(presences(&server).await, 1, "once");
+    assert_eq!(
+        chaired_by(&server).await,
+        (Some(path("claude")), Some(ChairSource::FirstAgent))
+    );
+
+    // A chair set before any agent sits stays set when one does.
+    let server2 = TestServer::start().await;
+    server2.append("created by alice").await;
+    let route = senate_core::api::chair_path(&committee());
+    let response = put(
+        &server2,
+        CAROL,
+        &route,
+        &SetChair {
+            senator: path("bob"),
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let _codex = server2.stream_as(ALICE, Some("codex"), None, None).await;
+    assert_eq!(
+        chaired_by(&server2).await,
+        (Some(path("bob")), Some(ChairSource::Set))
+    );
+    server.running.shutdown().await.unwrap();
+    server2.running.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_first_write_is_the_seat_and_later_contacts_add_nothing() {
+    let server = TestServer::start().await;
+    server.append("created by alice").await;
+    stored(
+        &server,
+        BOB,
+        &NewEvent::new(committee(), Kind::Note, agent_addr("claude"), "here"),
+    )
+    .await;
+    assert_eq!(presences(&server).await, 0, "the write is its own seat");
+    assert_eq!(server.act_as(ALICE, "codex").await, StatusCode::OK);
+    assert_eq!(presences(&server).await, 0);
+    assert_eq!(
+        chaired_by(&server).await,
+        (Some(path("claude")), Some(ChairSource::FirstAgent))
+    );
+    server.running.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_committee_chaired_by_its_creator_hands_the_chair_to_the_first_agent_after_a_restart() {
+    // A log from before seats were written: the creator's events, and an
+    // agent's bridge that had only heartbeated.
+    let store: Arc<dyn LogStore> = Arc::new(MemoryStore::new());
+    let first = try_start(store.clone(), None, |_| {}).await.unwrap();
+    first.append("created by alice").await;
+    assert_eq!(
+        chaired_by(&first).await,
+        (Some(path("alice")), Some(ChairSource::Creator))
+    );
+    first.running.shutdown().await.unwrap();
+    let second = try_start(store, None, |_| {}).await.unwrap();
+    assert_eq!(
+        chaired_by(&second).await,
+        (Some(path("alice")), Some(ChairSource::Creator))
+    );
+    assert_eq!(
+        second.heartbeat(BOB, "claude").await.status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        chaired_by(&second).await,
+        (Some(path("claude")), Some(ChairSource::FirstAgent))
+    );
+    assert_eq!(
+        second.heartbeat(ALICE, "codex").await.status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        chaired_by(&second).await,
+        (Some(path("claude")), Some(ChairSource::FirstAgent))
+    );
+    second.running.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn whichever_agent_is_put_to_the_chair_then_the_desk_then_refused() {
     let server = start(None, |c| {

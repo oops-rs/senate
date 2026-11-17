@@ -80,6 +80,20 @@ async fn alices_machine(dir: &std::path::Path) -> (Desk, FakeInbox, FakeInbox, F
     desk.session_start_as("s-codex", &codex, "codex")
         .await
         .unwrap();
+    // A committee exists once it has an event, and an agent joins only
+    // those (refund-v2 does now: its first agent took a seat there on
+    // connecting), so alice opens ibot first.
+    desk.senate()
+        .daemon
+        .hub
+        .append(NewEvent::new(
+            ibot(),
+            Kind::Note,
+            person("alice"),
+            "ibot opens",
+        ))
+        .await
+        .unwrap();
     let _: serde_json::Value = desk
         .ipc(Request::Join {
             session: Laptop::session("s-codex"),

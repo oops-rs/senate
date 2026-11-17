@@ -709,6 +709,7 @@ async fn get_cursor(
     let owner = state
         .act_as_or_self(&person, query(params)?.senator)
         .await?;
+    state.hub.take_seat(&committee, &owner).await;
     let seq = state.hub.owned_cursor(&committee, &owner, &name).await?;
     Ok(Json(Cursor { seq }))
 }
@@ -725,6 +726,7 @@ async fn put_cursor(
         .act_as_or_self(&person, query(params)?.senator)
         .await?;
     let cursor = json_body(body)?;
+    state.hub.take_seat(&committee, &owner).await;
     state
         .hub
         .set_owned_cursor(&committee, &owner, &name, cursor.seq)

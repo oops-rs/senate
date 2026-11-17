@@ -204,9 +204,11 @@ async fn a_person_acts_as_themselves_and_their_own_agents_only() {
     .await;
     // A person who is not on the roster at all is nobody.
     let stored = server.running.hub.read(&f, Seq::ZERO, 100).await.unwrap();
+    // Seq 1 is claude's seat (its cursor was the first contact on the
+    // committee); the four appends that followed are 2 to 5.
     assert_eq!(
         seqs(&stored),
-        vec![1, 2, 3, 4],
+        vec![1, 2, 3, 4, 5],
         "rejected appends store nothing"
     );
 

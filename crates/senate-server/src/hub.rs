@@ -754,6 +754,25 @@ impl ServerHub {
         Ok(seated.new)
     }
 
+    /// An agent took a seat on `committee` (first contact there: a cursor;
+    /// a stream and a heartbeat do it themselves, and a write is its own seat).
+    /// The first agent's seat is written to the log, which makes it the
+    /// chair. A person has no seat to take. A seat that cannot be recorded
+    /// now is not the caller's failure: the agent's next contact records it.
+    pub async fn take_seat(&self, committee: &CommitteeId, senator: &SenatorName) {
+        if self.seats.snapshot().is_person(senator) {
+            return;
+        }
+        if let Err(e) = self
+            .ask_writer(committee, |reply| {
+                CommitteeMsg::Contact(senator.clone(), reply)
+            })
+            .await
+        {
+            tracing::warn!(%committee, agent = %senator, "a seat was not recorded: {e}");
+        }
+    }
+
     /// Replace the people this Senate knows, for a layer whose people come
     /// from somewhere other than configuration. Seated agents whose person
     /// is still listed stay seated; the named Speaker is kept. Refused,

@@ -185,7 +185,8 @@ async fn a_crashed_writer_restarts_and_rebuilds_from_the_log() {
     let mut stream = server.stream_as(ALICE, Some("claude"), None, None).await;
     server.append("one").await;
     server.append("two").await;
-    assert_eq!(stream.seqs(2).await, vec![1, 2]);
+    // Seq 1 is claude's seat, written when it connected first.
+    assert_eq!(stream.seqs(3).await, vec![1, 2, 3]);
     eventually("alice connected", || hub.is_agent_connected(&f, &alice)).await;
     let before = writer_ids(&server);
     assert_eq!(before.len(), 1);
@@ -213,7 +214,7 @@ async fn a_crashed_writer_restarts_and_rebuilds_from_the_log() {
     // Seq continues from the log, including the event committed by the
     // append whose writer crashed.
     let four = server.append("four").await;
-    assert_eq!(four.seq, Seq(4));
+    assert_eq!(four.seq, Seq(5));
     let retry: AppendResponse = server
         .post_event(ALICE, &crashed)
         .await
@@ -221,13 +222,13 @@ async fn a_crashed_writer_restarts_and_rebuilds_from_the_log() {
         .await
         .unwrap();
     assert!(retry.duplicate, "the crashed append had committed");
-    assert_eq!(retry.event.seq, Seq(3));
+    assert_eq!(retry.event.seq, Seq(4));
 
     // Reconnecting replays what the dead stream missed, then goes live.
-    let mut resumed = server.stream_as(ALICE, Some("claude"), None, Some(2)).await;
-    assert_eq!(resumed.seqs(2).await, vec![3, 4]);
+    let mut resumed = server.stream_as(ALICE, Some("claude"), None, Some(3)).await;
+    assert_eq!(resumed.seqs(2).await, vec![4, 5]);
     server.append("five").await;
-    assert_eq!(resumed.seqs(1).await, vec![5]);
+    assert_eq!(resumed.seqs(1).await, vec![6]);
     eventually("alice reconnected", || hub.is_agent_connected(&f, &alice)).await;
     server.running.shutdown().await.unwrap();
 }
