@@ -686,6 +686,104 @@ async fn a_committee_chaired_by_its_creator_hands_the_chair_to_the_first_agent_a
     second.running.shutdown().await.unwrap();
 }
 
+/// The roots a docket lists as awaiting cover, by seq.
+fn away_roots(page: &DocketPage) -> Vec<senate_core::Seq> {
+    page.items
+        .iter()
+        .filter(|i| matches!(i.awaiting, Awaiting::Away { .. }))
+        .map(|i| i.event.seq)
+        .collect()
+}
+
+#[tokio::test]
+async fn a_question_to_an_away_agent_is_its_present_agent_secretarys_before_the_chair_and_desk() {
+    let server = start(None, |c| {
+        c.roster.speaker = speaker_id("senator::alice");
+        c.roster.agents = vec![
+            seated("claude", "alice"),
+            seated("codex", "alice"),
+            seated("copilot", "alice"),
+        ];
+        c.roster.secretaries = [(path("codex"), vec![path("claude")])]
+            .into_iter()
+            .collect();
+    })
+    .await;
+    // copilot chairs; codex and claude are both away.
+    let _copilot = server.stream_as(ALICE, Some("copilot"), None, None).await;
+    let ask = |kind: Kind, body: &str| {
+        NewEvent::new(committee(), kind, person_addr("bob"), body).to(agent_addr("codex"))
+    };
+    let question = stored(&server, BOB, &ask(Kind::Question, "who owns refunds?")).await;
+    for role in ["speaker", "chair"] {
+        let page = docket(&server, &committee(), role).await;
+        assert_eq!(
+            away_roots(&page),
+            [question.seq],
+            "{role}: no secretary present"
+        );
+        assert!(page.covered.is_empty(), "{role}");
+    }
+
+    // Its secretary connects: the question is the secretary's, and the
+    // chain stops there (not on the chair's docket, nor the desk's).
+    let claude = server.stream_as(ALICE, Some("claude"), None, None).await;
+    for role in ["speaker", "chair"] {
+        let page = docket(&server, &committee(), role).await;
+        assert!(away_roots(&page).is_empty(), "{role}: {:?}", page.items);
+        assert_eq!(
+            page.covered.get(&question.seq),
+            Some(&path("claude")),
+            "{role}"
+        );
+    }
+    // A request is never listed to cover, by anyone.
+    let request = stored(&server, BOB, &ask(Kind::Request, "rename the flag")).await;
+    let page = docket(&server, &committee(), "speaker").await;
+    assert!(!page.covered.contains_key(&request.seq));
+    assert!(away_roots(&page).iter().all(|s| *s != request.seq));
+
+    // The secretary goes away: the chain goes on.
+    drop(claude);
+    eventually("the question is the chair's again", || async {
+        let page = docket(&server, &committee(), "chair").await;
+        away_roots(&page) == [question.seq] && page.covered.is_empty()
+    })
+    .await;
+    let page = docket(&server, &committee(), "speaker").await;
+    assert_eq!(away_roots(&page), [question.seq]);
+    server.running.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn the_built_in_session_listed_before_an_agent_secretary_covers_first() {
+    let server = start(Some("secretary"), |c| {
+        c.roster.speaker = speaker_id("senator::alice");
+        c.roster.agents = vec![seated("claude", "alice"), seated("codex", "alice")];
+        c.roster.secretaries = [(path("codex"), vec![path("secretary"), path("claude")])]
+            .into_iter()
+            .collect();
+    })
+    .await;
+    let _claude = server.stream_as(ALICE, Some("claude"), None, None).await;
+    let question = stored(
+        &server,
+        BOB,
+        &NewEvent::new(
+            committee(),
+            Kind::Question,
+            person_addr("bob"),
+            "who owns refunds?",
+        )
+        .to(agent_addr("codex")),
+    )
+    .await;
+    let page = docket(&server, &committee(), "speaker").await;
+    assert!(page.covered.is_empty(), "the built-in session is first");
+    assert!(page.items.iter().any(|i| i.event.seq == question.seq));
+    server.running.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn whichever_agent_is_put_to_the_chair_then_the_desk_then_refused() {
     let server = start(None, |c| {

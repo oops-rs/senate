@@ -50,6 +50,7 @@
 //! | `chair_route` | `session`, `seq`, `to`, `id?` | [`Posted`] |
 //! | `chair_cover` | `session`, `thread`, `body`, `agent?`, `id?` | [`Posted`] |
 //! | `chair_escalate` | `session`, `seq`, `reason`, `id?` | [`Posted`] |
+//! | `secretary_cover` | `session`, `thread`, `body`, `agent?`, `id?` | [`Posted`] |
 //! | `send` | `session`, `kind`, `to?`, `at?`, `body`, `refs?`, `id?` | [`SendReply`] |
 //! | `secretaries` | `session`, `action`, `for?`, `secretary?` | [`SecretariesReply`] |
 //! | `roles` | — | [`RolesReply`] |
@@ -576,6 +577,19 @@ pub enum Request {
         session: SessionSelector,
         thread: Seq,
         body: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<SenatorName>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<EventId>,
+    },
+    /// A secretary answers for the agent it is the secretary of, which is
+    /// away, from that agent's own checkpoint and notes: a question only,
+    /// in the agent's name (`on_behalf_of`), signed by the secretary.
+    SecretaryCover {
+        session: SessionSelector,
+        thread: Seq,
+        body: String,
+        /// Which agent it answers for, when the question went to several.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent: Option<SenatorName>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

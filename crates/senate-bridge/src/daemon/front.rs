@@ -368,6 +368,7 @@ fn selector_of(request: &Request) -> Option<&SessionSelector> {
         | Request::ChairDocket { session }
         | Request::ChairRoute { session, .. }
         | Request::ChairCover { session, .. }
+        | Request::SecretaryCover { session, .. }
         | Request::ChairEscalate { session, .. } => Some(session),
         _ => None,
     }

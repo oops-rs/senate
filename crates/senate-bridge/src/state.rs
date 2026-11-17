@@ -736,6 +736,27 @@ impl Store {
         Ok(moved)
     }
 
+    /// Queue `event` for `agent` without touching its cursor: an item the
+    /// agent is to see though it was not addressed to it (a question it
+    /// covers as its principal's secretary). `false` when the agent has the
+    /// item already, in whatever state: an item pushed, or withdrawn, is
+    /// never queued again.
+    pub fn enqueue(&self, agent: &SenatorName, event: &Event) -> Result<bool, StoreError> {
+        let json = serde_json::to_string(event).map_err(|e| StoreError::Corrupt(e.to_string()))?;
+        let added = self.conn().execute(
+            "INSERT OR IGNORE INTO queue (agent, committee, seq, event, status, enqueued_at)
+             VALUES (?1, ?2, ?3, ?4, 'pending', ?5)",
+            params![
+                agent_text(agent),
+                event.committee.as_str(),
+                seq_sql(event.seq),
+                json,
+                now_ms()
+            ],
+        )?;
+        Ok(added > 0)
+    }
+
     /// Move `agent`'s cursor past `seq` without keeping anything (an event
     /// this build cannot decode). `false` when `seq` is at or behind it.
     pub fn advance(
@@ -1242,6 +1263,14 @@ impl Store {
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(args, item_from_row)?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// What `agent` has waiting to be pushed (pending, or held for hooks).
+    pub fn waiting_for(&self, agent: &SenatorName) -> Result<Vec<QueueItem>, StoreError> {
+        self.items(
+            "agent = ?1 AND status IN ('pending', 'queued')",
+            &[&agent_text(agent)],
+        )
     }
 
     /// Items waiting for routing, by agent, committee, then seq.
@@ -2239,5 +2268,33 @@ mod tests {
         assert!(store.seen(&committee()).unwrap().is_empty());
         store.mark_seen(&committee(), Seq(1), Seq(4)).unwrap();
         assert_eq!(store.seen(&committee()).unwrap(), [(Seq(1), Seq(4))]);
+    }
+
+    #[test]
+    fn an_item_queued_for_a_secretary_leaves_the_cursor_alone_and_is_queued_once() {
+        let store = Store::in_memory().unwrap();
+        let (secretary, question) = (agent("claude"), event(7));
+        assert!(store.enqueue(&secretary, &question).unwrap());
+        assert!(
+            !store.enqueue(&secretary, &question).unwrap(),
+            "the same item is not queued twice"
+        );
+        assert_eq!(
+            store.cursor(&secretary, &committee()).unwrap().delivered,
+            Seq::ZERO,
+            "its cursor is its own stream's"
+        );
+        let waiting = store.waiting_for(&secretary).unwrap();
+        assert_eq!(waiting.len(), 1);
+        assert_eq!(waiting[0].event.seq, Seq(7));
+        assert!(store.waiting_for(&codex()).unwrap().is_empty());
+        // Withdrawn, it stays withdrawn: it is never queued again.
+        let gone = store
+            .cancel(Some(&secretary), &committee(), Seq(7), false, "withdrawn")
+            .unwrap();
+        assert_eq!(gone, vec![key(&secretary, 7)]);
+        assert!(store.waiting_for(&secretary).unwrap().is_empty());
+        assert!(!store.enqueue(&secretary, &question).unwrap());
+        assert!(store.waiting_for(&secretary).unwrap().is_empty());
     }
 }

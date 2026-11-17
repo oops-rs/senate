@@ -225,6 +225,7 @@ pub fn docket() -> DocketReply {
                 speaker: Some(SpeakerSeat::Senator(path("claude"))),
                 office: None,
                 items,
+                covered: Default::default(),
                 seats: vec![SeatFacts {
                     agent: reviewer,
                     connected: false,

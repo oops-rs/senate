@@ -467,6 +467,293 @@ impl Shared {
         self.post(event).await
     }
 
+    // ---- covering for a principal -----------------------------------------
+
+    /// Whether `event` is an answer one of `me`'s secretaries gave in its
+    /// name while it was away, to be pushed to `me` when it is back (not
+    /// the built-in session's, whose engine writes its own hand-back note,
+    /// nor this machine's companion's, whose question is settled where it
+    /// runs).
+    pub(crate) fn answered_in_my_name(&self, me: &SenatorName, event: &Event) -> bool {
+        let built_in = self.office().and_then(|o| o.built_in);
+        answered_for_me_by_a_secretary(event, me, &self.companion_config.name)
+            && format::secretary_answer(event)
+                .is_some_and(|(_, secretary)| Some(secretary) != built_in.as_ref())
+    }
+
+    /// Something happened that may change what a local agent covers as a
+    /// secretary on `event`'s committee: a question to another senator
+    /// (it may be away, and `agent` its secretary), or, while a covered
+    /// item is waiting there, an answer, a presence change or a status.
+    pub(crate) fn note_cover_change(&self, agent: &SenatorName, event: &Event) {
+        let people = self.people();
+        let asked = event.thread.is_none()
+            && event.kind == Kind::Question
+            && event.from != Address::senator(agent)
+            && event.to.iter().any(|a| {
+                a.as_senator()
+                    .is_some_and(|s| s != agent && !people.is_person(s))
+            });
+        let may_withdraw = matches!(event.kind, Kind::Answer | Kind::Presence | Kind::Status)
+            && lock(&self.cover_open)
+                .iter()
+                .any(|(_, committee, _)| committee == &event.committee);
+        if asked || may_withdraw {
+            lock(&self.cover_dirty).insert(event.committee.clone());
+            self.work.notify_one();
+        }
+    }
+
+    /// Bring to the session of each local agent the questions it covers as
+    /// its principal's secretary, and withdraw what no longer needs it.
+    /// The server says which: its docket lists, for a committee, the
+    /// questions to an away agent that an agent secretary with a live
+    /// connection covers ([`senate_core::DocketPage::covered`], the first
+    /// present secretary in the principal's order). The question is
+    /// queued for that secretary only when its session is here; it is
+    /// withdrawn when it is no longer covered (the principal is back, or
+    /// someone answered), unless already pushed.
+    ///
+    /// Returns when to look again: while an item queued for a secretary
+    /// is not yet pushed, the principal may come back without a word in
+    /// the log, so it is looked at again every heartbeat.
+    pub(crate) async fn cover_pass(&self) -> Option<Instant> {
+        let committees: Vec<CommitteeId> = std::mem::take(&mut *lock(&self.cover_dirty))
+            .into_iter()
+            .collect();
+        for committee in committees {
+            let page = match tokio::time::timeout(ROLE_TIMEOUT, self.api.docket(&committee)).await {
+                Ok(Ok(page)) => page,
+                Ok(Err(e)) => {
+                    tracing::debug!(%committee, "no docket to cover from: {e}");
+                    continue;
+                }
+                Err(_) => {
+                    tracing::debug!(%committee, "no docket to cover from: the server was slow");
+                    continue;
+                }
+            };
+            if let Err(e) = self.cover_committee(&committee, &page).await {
+                tracing::warn!(%committee, "covering for a principal: {e}");
+            }
+        }
+        let open: BTreeSet<CommitteeId> = lock(&self.cover_open)
+            .iter()
+            .map(|(_, committee, _)| committee.clone())
+            .collect();
+        if open.is_empty() {
+            return None;
+        }
+        lock(&self.cover_dirty).extend(open);
+        Some(Instant::now() + self.timing.heartbeat)
+    }
+
+    async fn cover_committee(
+        &self,
+        committee: &CommitteeId,
+        page: &senate_core::DocketPage,
+    ) -> anyhow::Result<()> {
+        let live: BTreeSet<SenatorName> = self
+            .store
+            .live_sessions()?
+            .into_iter()
+            .filter(|s| s.committee() == Some(committee))
+            .map(|s| s.agent)
+            .collect();
+        let mine = self.served_agents()?;
+        // What is covered and has not been queued: bring it in.
+        for (root, secretary) in &page.covered {
+            if !(mine.contains(secretary) && self.seating().owns(secretary))
+                || !live.contains(secretary)
+            {
+                continue;
+            }
+            let key = (secretary.clone(), committee.clone(), *root);
+            if self.store.item(secretary, committee, *root)?.is_some() {
+                continue;
+            }
+            let mut event = match self.fetch_event(committee, *root).await {
+                Ok(event) => event,
+                Err(e) => {
+                    tracing::debug!(%committee, %root, "cannot read the question to cover: {}", e.message);
+                    continue;
+                }
+            };
+            let Some(principal) = event
+                .to
+                .iter()
+                .filter_map(Address::as_senator)
+                .find(|s| *s != secretary)
+                .cloned()
+            else {
+                continue;
+            };
+            event
+                .meta
+                .insert(format::COVER_META.into(), principal.to_string().into());
+            if self.store.enqueue(secretary, &event)? {
+                tracing::info!(
+                    %committee,
+                    seq = %root,
+                    secretary = %secretary,
+                    %principal,
+                    "a question to an away agent is queued for its secretary"
+                );
+                lock(&self.cover_open).insert(key);
+                self.work.notify_one();
+            }
+        }
+        // What is queued for a secretary here but no longer covered, and
+        // not yet pushed: withdraw it.
+        let open: Vec<ItemKey> = lock(&self.cover_open)
+            .iter()
+            .filter(|(_, c, _)| c == committee)
+            .cloned()
+            .collect();
+        for key in open {
+            let (secretary, _, root) = &key;
+            let waiting = self
+                .store
+                .item(secretary, committee, *root)?
+                .is_some_and(|i| matches!(i.status, ItemStatus::Pending | ItemStatus::Queued));
+            if !waiting {
+                lock(&self.cover_open).remove(&key);
+            } else if page.covered.get(root) != Some(secretary) {
+                self.store
+                    .cancel(Some(secretary), committee, *root, false, "withdrawn")?;
+                lock(&self.cover_open).remove(&key);
+                tracing::info!(
+                    %committee,
+                    seq = %root,
+                    %secretary,
+                    "the question is no longer the secretary's to cover; withdrawn"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Put the absent principal's own latest checkpoint and notes on each
+    /// event queued for `agent` to cover, so the push carries what to
+    /// answer from ([`format::COVER_NOTES_META`]). None found: the push
+    /// says so.
+    pub(crate) async fn with_cover_notes(&self, events: &mut [Event]) {
+        for event in events {
+            let Some(principal) = format::cover_principal(event) else {
+                continue;
+            };
+            match tokio::time::timeout(
+                ROLE_TIMEOUT,
+                self.api.latest_checkpoint(&event.committee, &principal),
+            )
+            .await
+            {
+                Ok(Ok(Some(record))) => {
+                    if let Ok(value) = serde_json::to_value(&record) {
+                        event.meta.insert(format::COVER_NOTES_META.into(), value);
+                    }
+                }
+                Ok(Ok(None)) => {}
+                Ok(Err(e)) => {
+                    tracing::debug!(committee = %event.committee, %principal, "no checkpoint to cover from: {e}")
+                }
+                Err(_) => {
+                    tracing::debug!(committee = %event.committee, %principal, "no checkpoint to cover from: the server was slow")
+                }
+            }
+        }
+    }
+
+    /// A secretary answers a question to the agent it is the secretary of,
+    /// while that agent is away: in the agent's name (`on_behalf_of`,
+    /// marked as a takeover), signed by the secretary, from the agent's
+    /// own latest checkpoint. A question only, and only while the server
+    /// still says this session's agent is the one covering it (the agent
+    /// away, the question unanswered, no secretary before it present).
+    pub(crate) async fn on_secretary_cover(
+        &self,
+        selector: &SessionSelector,
+        thread: Seq,
+        body: String,
+        agent: Option<SenatorName>,
+        id: Option<EventId>,
+    ) -> Result<Posted, IpcError> {
+        if body.trim().is_empty() {
+            return Err(IpcError::bad_request("`body` is empty"));
+        }
+        let session = self.resolve(selector)?;
+        let committee = self.bound(&session)?;
+        let root = self.task_root(&committee, thread).await?;
+        if root.kind != Kind::Question {
+            return Err(IpcError::bad_request(roles_text::never_a_request(
+                self.locale,
+            )));
+        }
+        let people = self.people();
+        let targets: Vec<SenatorName> = root
+            .to
+            .iter()
+            .filter_map(Address::as_senator)
+            .filter(|s| **s != session.agent && !people.is_person(s))
+            .cloned()
+            .collect();
+        let principal = match (agent, targets.as_slice()) {
+            (Some(a), _) if targets.contains(&a) => a,
+            (Some(a), _) => {
+                return Err(IpcError::bad_request(roles_text::not_its_question(
+                    &a,
+                    &targets,
+                    self.locale,
+                )));
+            }
+            (None, [one]) => one.clone(),
+            (None, several) => {
+                return Err(IpcError::bad_request(roles_text::name_which(
+                    several,
+                    self.locale,
+                )));
+            }
+        };
+        let page = self.api.docket(&committee).await.map_err(server_error)?;
+        if page.covered.get(&root.seq) != Some(&session.agent) {
+            return Err(IpcError::bad_request(roles_text::not_yours_to_cover(
+                &principal,
+                self.locale,
+            )));
+        }
+        let Some(checkpoint) = self
+            .api
+            .latest_checkpoint(&committee, &principal)
+            .await
+            .map_err(server_error)?
+        else {
+            return Err(IpcError::bad_request(roles_text::no_checkpoint_to_cover(
+                &principal,
+                self.locale,
+            )));
+        };
+        let asker = root.on_behalf_of.clone().unwrap_or(root.from.clone());
+        let mut event = NewEvent::new(
+            committee,
+            Kind::Answer,
+            Address::senator(&session.agent),
+            body,
+        )
+        .to(asker)
+        .in_thread(root.seq)
+        .on_behalf_of(Address::senator(&principal))
+        .with_meta(meta::TAKEOVER, serde_json::json!(true))
+        .with_refs(Refs {
+            commit: Some(checkpoint.checkpoint.commit.clone()),
+            path: None,
+            branch: Some(checkpoint.checkpoint.branch.clone()),
+        });
+        if let Some(id) = id {
+            event = event.with_id(id);
+        }
+        self.post(event).await
+    }
+
     /// The chair puts an item one step up: to the Speaker's desk, with the
     /// asker as the origin.
     pub(crate) async fn on_chair_escalate(
@@ -1141,6 +1428,43 @@ pub(crate) mod roles_text {
         match locale {
             Locale::Zh => format!("只能交给这个委员会的另一个 agent，不能交给 {to}。"),
             Locale::En => format!("Route it to another agent of this committee, not to {to}."),
+        }
+    }
+
+    pub(crate) fn never_a_request(locale: Locale) -> String {
+        locale
+            .pick(
+                "secretary 只代答问题，不替它去做请求：留着，它回来后会自己收到。",
+                "A secretary answers questions for its principal and never performs a request: \
+                 leave it, the agent gets it itself when it returns.",
+            )
+            .to_owned()
+    }
+
+    pub(crate) fn not_yours_to_cover(principal: &SenatorName, locale: Locale) -> String {
+        let principal = mention(principal);
+        match locale {
+            Locale::Zh => format!(
+                "这个问题现在不归你代 {principal} 回答：它已经回来了，或已有人回答了，\
+                 或你不是它的第一个在线的 secretary。"
+            ),
+            Locale::En => format!(
+                "This question is not yours to answer for {principal} now: it is back, or \
+                 someone answered, or you are not its first present secretary."
+            ),
+        }
+    }
+
+    pub(crate) fn no_checkpoint_to_cover(principal: &SenatorName, locale: Locale) -> String {
+        let principal = mention(principal);
+        match locale {
+            Locale::Zh => format!(
+                "{principal} 在这个委员会没有 checkpoint，没有依据可以代它回答：留着，它回来后会自己收到。"
+            ),
+            Locale::En => format!(
+                "{principal} has no checkpoint on this committee, so there is nothing to answer \
+                 for it from: leave it, it gets it itself when it returns."
+            ),
         }
     }
 

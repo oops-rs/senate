@@ -451,6 +451,12 @@ pub(crate) struct Shared {
     chairs: Mutex<BTreeMap<CommitteeId, roles::ChairCache>>,
     /// Agents the companion is registered as a secretary of, this run.
     companion_registered: Mutex<BTreeSet<SenatorName>>,
+    /// Committees whose docket may have changed what a local agent covers
+    /// as its principal's secretary ([`roles`]).
+    cover_dirty: Mutex<BTreeSet<CommitteeId>>,
+    /// Items queued for a local secretary to cover that were not yet pushed
+    /// or withdrawn.
+    cover_open: Mutex<BTreeSet<ItemKey>>,
 }
 
 /// What the automatic checkpoints know of one worktree.
@@ -691,6 +697,8 @@ impl Shared {
             children: Mutex::new(Vec::new()),
             chairs: Mutex::new(BTreeMap::new()),
             companion_registered: Mutex::new(BTreeSet::new()),
+            cover_dirty: Mutex::new(BTreeSet::new()),
+            cover_open: Mutex::new(BTreeSet::new()),
         }))
     }
 }
@@ -1516,12 +1524,27 @@ impl Shared {
         dirty: &Notify,
     ) -> Result<(), StoreError> {
         self.observe_chair(event);
+        // Only the daemon marks a queued item as one to cover.
+        let planted;
+        let event = if event.meta.contains_key(format::COVER_META)
+            || event.meta.contains_key(format::COVER_NOTES_META)
+        {
+            let mut clean = event.clone();
+            clean.meta.remove(format::COVER_META);
+            clean.meta.remove(format::COVER_NOTES_META);
+            planted = clean;
+            &planted
+        } else {
+            event
+        };
+        self.note_cover_change(agent, event);
         let directed = {
             let mut covering = lock(&self.covering);
             covering.observe(event, agent);
             routing::should_push_covering(event, agent, &covering)
         } || self.for_speaker(agent, event)
-            || self.for_chair(agent, event);
+            || self.for_chair(agent, event)
+            || self.answered_in_my_name(agent, event);
         if self.store.ingest(agent, event, directed)? {
             dirty.notify_one();
             self.announce_to_person(event);
@@ -1627,9 +1650,17 @@ impl Shared {
             && (answered_for_me_in_takeover(event, agent)
                 || answered_for_me_by_a_secretary(event, agent, &self.companion_config.name))
         {
-            let answered =
-                self.store
-                    .cancel(Some(agent), &event.committee, root, true, "answered")?;
+            // The answer a secretary gave in the agent's name is itself
+            // pushed to it when it returns: only the question it answers
+            // is cancelled then, not the whole thread.
+            let whole_thread = !self.answered_in_my_name(agent, event);
+            let answered = self.store.cancel(
+                Some(agent),
+                &event.committee,
+                root,
+                whole_thread,
+                "answered",
+            )?;
             if !answered.is_empty() {
                 tracing::info!(
                     committee = %event.committee,
@@ -1665,7 +1696,12 @@ impl Shared {
     fn route<'a>(&self, item: &QueueItem, cands: &[&'a Session]) -> Result<Route<'a>, StoreError> {
         let event = &item.event;
         let target = self.recipient(&item.agent, event, cands)?;
-        if needs_triage(event, &self.people()) && self.triaged.load(Ordering::Relaxed) {
+        // A question covered for an away principal is not triaged: the
+        // principal's own copy is, when it returns.
+        if needs_triage(event, &self.people())
+            && self.triaged.load(Ordering::Relaxed)
+            && format::cover_principal(event).is_none()
+        {
             match self.store.verdict(&event.committee, event.seq)? {
                 Some(TriageVerdict::NeedsHuman) => {
                     self.store.cancel(
@@ -1721,6 +1757,13 @@ impl Shared {
         event.meta.remove(format::COVERING_META);
         event.meta.remove(format::SPEAKER_META);
         event.meta.remove(format::CHAIR_META);
+        // The daemon's own mark on a question queued for a secretary to
+        // cover stands; on anything addressed to the agent itself it is
+        // not ours.
+        if event.is_directed_to(&Address::senator(agent)) {
+            event.meta.remove(format::COVER_META);
+        }
+        event.meta.remove(format::COVER_NOTES_META);
         if !event.is_directed_to(&Address::senator(agent)) && self.for_chair(agent, &event) {
             event.meta.insert(
                 format::CHAIR_META.into(),
@@ -1744,7 +1787,10 @@ impl Shared {
                 .insert(format::COVERING_META.into(), old.to_string().into());
         }
         // Where nothing triages, no verdict is not "the Speaker was too slow".
-        if needs_triage(&event, &self.people()) && self.triaged.load(Ordering::Relaxed) {
+        if needs_triage(&event, &self.people())
+            && self.triaged.load(Ordering::Relaxed)
+            && format::cover_principal(&event).is_none()
+        {
             let verdict = self
                 .store
                 .verdict(&event.committee, event.seq)
@@ -1919,10 +1965,11 @@ impl Shared {
     /// inbox, and push each session's share. Returns when a held session
     /// becomes ready, if one is waiting.
     async fn delivery_pass(self: &Arc<Self>) -> anyhow::Result<Option<Instant>> {
+        let cover_due = self.cover_pass().await;
         let pending = self.store.pending()?;
         let sessions = self.checked_live_sessions()?;
         let mut plan: BTreeMap<String, Vec<QueueItem>> = BTreeMap::new();
-        let mut due: Option<Instant> = None;
+        let mut due: Option<Instant> = cover_due;
         let mut waiting: BTreeSet<String> = BTreeSet::new();
         let mut for_companion: Option<QueueItem> = None;
         for item in pending {
@@ -2019,6 +2066,7 @@ impl Shared {
             .map(|i| self.annotate(agent, i.event))
             .collect();
         events.sort_by(|a, b| (&a.committee, a.seq).cmp(&(&b.committee, b.seq)));
+        self.with_cover_notes(&mut events).await;
         let Some(committee) = events.first().map(|e| e.committee.clone()) else {
             return Ok(false);
         };
@@ -2328,6 +2376,7 @@ impl Shared {
             Request::ChairDocket { session } => ("chair_docket", session),
             Request::ChairRoute { session, .. } => ("chair_route", session),
             Request::ChairCover { session, .. } => ("chair_cover", session),
+            Request::SecretaryCover { session, .. } => ("secretary_cover", session),
             Request::ChairEscalate { session, .. } => ("chair_escalate", session),
             _ => return None,
         };
@@ -2390,6 +2439,16 @@ impl Shared {
                 agent,
                 id,
             } => wrap(self.on_chair_cover(&session, thread, body, agent, id).await),
+            Request::SecretaryCover {
+                session,
+                thread,
+                body,
+                agent,
+                id,
+            } => wrap(
+                self.on_secretary_cover(&session, thread, body, agent, id)
+                    .await,
+            ),
             Request::ChairEscalate {
                 session,
                 seq,

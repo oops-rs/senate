@@ -16,7 +16,9 @@
 //! - **Cover.** A root question to an agent of this Senate that has no live
 //!   connection and no answer yet ([`Awaiting::Away`]). The Speaker answers
 //!   on that agent's behalf from that agent's own latest checkpoint, never
-//!   another agent's, or escalates it to the person.
+//!   another agent's, or escalates it to the person. Not an item while an
+//!   agent that is the away agent's secretary has a live connection:
+//!   that one covers it first ([`DocketPage::covered`]).
 //!
 //! An item leaves the docket when the Speaker writes in its thread, relays
 //! it, or the thread is archived. Folding is pure ([`SpeakerDocket`]); which
@@ -133,6 +135,14 @@ pub struct DocketPage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub office: Option<crate::roster::Office>,
     pub items: Vec<DocketItem>,
+    /// Questions to an away agent that one of its secretaries, an agent
+    /// with a live session, covers (root seq → that secretary: the first
+    /// present one in the agent's order, an agent of this Senate). They
+    /// are not in `items`: the chain goes on to the chair and the desk only
+    /// when no secretary is present. The secretary's own bridge brings
+    /// them to its session.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub covered: BTreeMap<Seq, SenatorName>,
     pub seats: Vec<SeatFacts>,
     /// The last seq folded in.
     pub head: Seq,
@@ -331,6 +341,7 @@ mod tests {
                 },
                 intended: Some("ibot::senator::codex".parse().unwrap()),
             }],
+            covered: [(Seq(7), "claude".parse().unwrap())].into_iter().collect(),
             seats: vec![SeatFacts {
                 agent: "codex".parse().unwrap(),
                 connected: false,
@@ -343,6 +354,7 @@ mod tests {
         };
         let value = serde_json::to_value(&page).unwrap();
         assert_eq!(value["items"][0]["why"], "away");
+        assert_eq!(value["covered"]["7"], "claude");
         assert_eq!(serde_json::from_value::<DocketPage>(value).unwrap(), page);
     }
 }

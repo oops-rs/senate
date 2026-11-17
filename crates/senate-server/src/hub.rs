@@ -587,6 +587,7 @@ impl ServerHub {
                     .count(),
             });
         }
+        let mut covered = BTreeMap::new();
         for thread in board.threads(Some(StatusState::Processing)) {
             if thread.kind != Kind::Question || thread.answered {
                 continue;
@@ -603,6 +604,15 @@ impl ServerHub {
             if !away {
                 continue;
             }
+            // An agent secretary of the away agent with a live session
+            // covers it first: the chain reaches the chair and the desk
+            // only when none is present.
+            if let [only] = agents.as_slice()
+                && let Some(secretary) = self.present_secretary(&roster, committee, only)
+            {
+                covered.insert(thread.root, secretary);
+                continue;
+            }
             if let Some(event) = self.get(committee, thread.root).await? {
                 items.push(DocketItem {
                     event,
@@ -617,9 +627,32 @@ impl ServerHub {
             speaker: roster.speaker_seat(self.built_in.is_some()).ok().flatten(),
             office: roster.office(),
             items,
+            covered,
             seats,
             head,
         })
+    }
+
+    /// The agent secretary that covers for `agent` now: the first of its
+    /// secretaries, in order, that is an agent of this Senate with a live
+    /// connection on `committee`. The built-in session ends the search
+    /// (it covers by its own timers, after any agent listed before it has
+    /// had its turn), as does anyone who is no agent.
+    fn present_secretary(
+        &self,
+        roster: &Roster,
+        committee: &CommitteeId,
+        agent: &SenatorName,
+    ) -> Option<SenatorName> {
+        for secretary in roster.secretaries_of(agent) {
+            if self.built_in.as_ref() == Some(secretary) || !roster.is_agent(secretary) {
+                return None;
+            }
+            if self.presence.is_connected(committee, secretary) {
+                return Some(secretary.clone());
+            }
+        }
+        None
     }
 
     /// The committee's fold in `caches`, brought up to the log's head. A failed

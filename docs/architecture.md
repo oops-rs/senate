@@ -203,11 +203,21 @@ register or remove one; anyone else is refused.
   `from` the secretary `on_behalf_of` the agent with `meta.takeover`; a
   request waits for the agent. The companion (a read-only fork of the
   agent's own last session) is such a secretary, provided by the daemon,
-  and the built-in session is one wherever it is listed. Not yet built: a
-  secretary that is itself an agent is not pushed the absent agent's
-  questions; it may answer one it is shown (the server accepts its answer
-  on the agent's behalf), but nothing brings the question to its session.
-  Until then the chain goes on to the chair and the Speaker's desk.
+  and the built-in session is one wherever it is listed. So is an agent
+  of the Senate: when the agent is away, its first present secretary
+  that is an agent (a live session on the committee) is pushed the
+  question as an item to cover, with the absent agent's own latest
+  checkpoint and notes, and answers with `secretary_cover`: the answer is
+  stored `from` the secretary `on_behalf_of` the agent, one byline with the
+  others, from the checkpoint only. It never performs a request: that
+  waits for the agent. If the agent returns before the secretary has been
+  pushed the item, the item is withdrawn; either way the agent still gets
+  the question itself when it returns, or, when the secretary answered, an
+  item saying so, to check and correct. The built-in session listed before
+  the agent secretary covers first (by its own timers); one listed after it
+  defers. When no secretary is present the question goes on to the chair
+  and the Speaker's desk: the server's docket leaves a question an agent
+  secretary covers off both (it lists it in `covered`).
 
 The **built-in session** is the engine on a model (`senate-speaker`), a
 senator with a flat name (default `secretary`). Its role comes from
