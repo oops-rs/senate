@@ -17,7 +17,9 @@ use senate_bridge::hook::{self, HookEnv, HookKind, HookTimeouts};
 use senate_bridge::ipc::SayKind;
 use senate_bridge::ipc::{self, DocketReply, InboxReply, Posted, Request, SessionSelector};
 use senate_bridge::session::Runtime;
-use senate_bridge::{BridgeConfig, Paths, init, install, mcp, preside, service, speak, status};
+use senate_bridge::{
+    BridgeConfig, Paths, init, install, mcp, person, preside, service, speak, status,
+};
 use senate_core::{CommitteeId, EventId, Locale, Name, Seq};
 
 #[derive(Parser)]
@@ -106,9 +108,11 @@ enum Cmd {
         #[arg(long, requires = "yes")]
         delete_logs: bool,
     },
-    /// What waits for you: open task threads on a committee for your agents
-    /// or escalated to you, and what awaits the Speaker of every Senate one
-    /// of your agents presides over here.
+    /// What waits for you: first what was said to you that you have not
+    /// seen (an answer, a note, an escalation with its reason), then open
+    /// task threads on a committee for your agents or escalated to you, and
+    /// what awaits the Speaker of every Senate one of your agents presides
+    /// over here.
     Inbox {
         /// The committee (default: the one `senate where` shows for this directory).
         #[arg(long)]
@@ -117,6 +121,10 @@ enum Cmd {
         /// default: they wait on no one).
         #[arg(long)]
         all: bool,
+        /// Mark every thread listed as new for you as read, after listing
+        /// it. An escalation to you keeps waiting until you act on it.
+        #[arg(long)]
+        mark_read: bool,
     },
     /// Ask a question as yourself. `<to>` is one of your agents (`claude`,
     /// `claude/reviewer`), a full path (`alice/claude`), a person (`alice`),
@@ -456,9 +464,15 @@ async fn inbox(
     paths: &Paths,
     committee: Option<CommitteeId>,
     all: bool,
+    mark_read: bool,
     locale: Locale,
 ) -> anyhow::Result<String> {
     let committee = committee_here(committee).await?;
+    // The daemon's language, as every command that speaks as the person.
+    let locale = match daemon_call::<ipc::Pong>(paths, &Request::Ping).await {
+        Ok(pong) => pong.locale,
+        Err(_) => locale,
+    };
     let threads: InboxReply = daemon_call(
         paths,
         &Request::Inbox {
@@ -469,7 +483,22 @@ async fn inbox(
         },
     )
     .await?;
-    let mut out = mcp::render_inbox(&threads, locale, mcp::ShowAll::Flag);
+    let mut out = person::render_inbox(&threads, locale, mcp::ShowAll::Flag);
+    if mark_read {
+        let marks = person::unread_marks(&threads);
+        if !marks.is_empty() {
+            let _: serde_json::Value = daemon_call(
+                paths,
+                &Request::Seen {
+                    committee: threads.committee.clone(),
+                    marks: marks.clone(),
+                },
+            )
+            .await?;
+        }
+        out.push('\n');
+        out.push_str(&person::render_marked(marks.len(), locale));
+    }
     let docket: DocketReply = daemon_call(
         paths,
         &Request::Docket {
@@ -710,10 +739,15 @@ fn run(command: Cmd) -> anyhow::Result<()> {
             print!("{}", binding::render_free(&report, settings.locale));
             Ok(())
         }
-        Cmd::Inbox { committee, all } => {
+        Cmd::Inbox {
+            committee,
+            all,
+            mark_read,
+        } => {
             let paths = Paths::from_env()?;
             let locale = BridgeConfig::locale_at(&paths.config());
-            let text = runtime(false)?.block_on(inbox(&paths, committee, all, locale))?;
+            let text =
+                runtime(false)?.block_on(inbox(&paths, committee, all, mark_read, locale))?;
             println!("{text}");
             Ok(())
         }

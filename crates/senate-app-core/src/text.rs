@@ -135,6 +135,11 @@ pub fn kind(locale: Locale, kind: &Kind) -> String {
     }
 }
 
+/// An escalation to the person, as the kind of a thing that came back.
+pub fn escalated_word(locale: Locale) -> &'static str {
+    locale.pick("转给你", "escalated to you")
+}
+
 pub fn triage(locale: Locale, verdict: TriageVerdict) -> &'static str {
     match verdict {
         TriageVerdict::NeedsHuman => locale.pick("需要人决定", "needs a person"),

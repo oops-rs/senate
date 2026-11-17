@@ -81,6 +81,7 @@ pub mod ipc;
 pub mod joinname;
 pub mod mcp;
 pub mod paths;
+pub mod person;
 pub mod preside;
 pub mod routing;
 pub mod service;

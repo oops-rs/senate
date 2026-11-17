@@ -1341,3 +1341,33 @@ async fn only_the_presiding_session_is_given_the_presiding_tools() {
     assert!(!pinned.presides().await);
     h.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_answer_to_the_person_is_still_settled_in_the_agents_inbox() {
+    let mut h = Harness::new().await;
+    h.start().await;
+    let wd = h.workdir("s", Some("refund-v2"));
+    h.hook(HookKind::SessionStart, "s1", &wd, None).await;
+    let mut mcp = McpClient::start(h.socket(), selector("s1")).await;
+    let q = h
+        .server
+        .append(question(person("alice"), claude("alice"), "which header?"));
+    h.server.append(
+        NewEvent::new(
+            committee(),
+            Kind::Answer,
+            claude("alice"),
+            "Idempotency-Key",
+        )
+        .to(person("alice"))
+        .in_thread(q.seq),
+    );
+    // Unread for the person (their inbox lists it), settled for the agent:
+    // its inbox rule did not change.
+    let (_, text) = mcp.call("inbox", json!({})).await;
+    assert!(text.starts_with("Nothing open waits on"), "{text}");
+    assert!(
+        text.ends_with("1 answered thread(s) not shown; all=true lists them."),
+        "{text}"
+    );
+}

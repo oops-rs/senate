@@ -157,7 +157,8 @@ use crate::format;
 use crate::ipc::{
     self, ApprovalsReply, ApproveReply, BoundReply, CatchUpReply, CheckpointReply, CommitteeStatus,
     HookEvent, HookReply, HookReport, InboxReply, IpcError, JoinReply, Pong, Posted, Reply,
-    Request, SayKind, SearchReply, SessionSelector, StatusReply, ThreadReply, WatchEvent, codes,
+    Request, SayKind, SearchReply, SessionSelector, StatusReply, ThreadReply, ThreadSeen,
+    WatchEvent, codes,
 };
 use crate::paths::Paths;
 use crate::routing;
@@ -1441,7 +1442,7 @@ impl Shared {
             dirty.notify_one();
             if matches!(
                 event.kind,
-                Kind::Question | Kind::Request | Kind::Answer | Kind::Status
+                Kind::Question | Kind::Request | Kind::Answer | Kind::Status | Kind::Note
             ) {
                 self.publish(WatchEvent::Inbox {
                     agent: agent.clone(),
@@ -2333,7 +2334,9 @@ impl Shared {
                 session,
                 committee,
                 thread,
-            } => wrap(self.on_thread(&session, committee, thread).await),
+                mark_seen,
+            } => wrap(self.on_thread(&session, committee, thread, mark_seen).await),
+            Request::Seen { committee, marks } => wrap(self.on_seen(&committee, &marks)),
             Request::Inbox {
                 session,
                 committee,
@@ -3219,6 +3222,9 @@ impl Shared {
         if companion && let Some(c) = lock(&self.companion).as_mut() {
             c.answered = true;
         }
+        if acting.as_person {
+            self.mark_seen_all(&posted.committee, &[root.seq], posted.seq)?;
+        }
         Ok(posted)
     }
 
@@ -3330,6 +3336,7 @@ impl Shared {
         self.store
             .cancel(None, &committee, root.seq, true, "takeover")
             .map_err(internal)?;
+        self.mark_seen_all(&committee, &[root.seq], posted.seq)?;
         Ok(posted)
     }
 
@@ -3434,6 +3441,7 @@ impl Shared {
                 bad.in_text()
             )));
         }
+        let mut spoke_in = Vec::new();
         let thread = match thread {
             Some(seq) => {
                 let (roots, events) = self.thread_events(&committee, seq).await?;
@@ -3442,7 +3450,9 @@ impl Shared {
                 }
                 // Where the agent that took it works: the latest relay's
                 // thread when the Speaker relayed it, else its own.
-                roots.last().copied()
+                let last = roots.last().copied();
+                spoke_in = roots;
+                last
             }
             None => None,
         };
@@ -3459,7 +3469,38 @@ impl Shared {
         if let Some(id) = id {
             event = event.with_id(id);
         }
-        self.post(event).await
+        let posted = self.post(event).await?;
+        // Replying is reading: they have seen the thread up to their words.
+        self.mark_seen_all(&posted.committee, &spoke_in, posted.seq)?;
+        Ok(posted)
+    }
+
+    /// The person has seen each of `roots` up to `seq`.
+    fn mark_seen_all(
+        &self,
+        committee: &CommitteeId,
+        roots: &[Seq],
+        seq: Seq,
+    ) -> Result<(), IpcError> {
+        for root in roots {
+            self.store
+                .mark_seen(committee, *root, seq)
+                .map_err(internal)?;
+        }
+        Ok(())
+    }
+
+    fn on_seen(
+        &self,
+        committee: &CommitteeId,
+        marks: &[crate::ipc::ThreadSeen],
+    ) -> Result<serde_json::Value, IpcError> {
+        for m in marks {
+            self.store
+                .mark_seen(committee, m.thread, m.seen)
+                .map_err(internal)?;
+        }
+        Ok(serde_json::json!({}))
     }
 
     async fn on_thread(
@@ -3467,10 +3508,16 @@ impl Shared {
         selector: &SessionSelector,
         committee: Option<CommitteeId>,
         thread: Seq,
+        mark_seen: bool,
     ) -> Result<ThreadReply, IpcError> {
         let (_, committee) = self.session_and_committee(selector, committee)?;
         let (roots, mut events) = self.thread_events(&committee, thread).await?;
         events.sort_by_key(|e| e.seq);
+        if mark_seen && let Some(last) = events.last() {
+            // Showing a thread is reading it: the person has seen all of it
+            // (and of the thread it was relayed into).
+            self.mark_seen_all(&committee, &roots, last.seq)?;
+        }
         Ok(ThreadReply {
             committee,
             root: roots[0],
@@ -3482,6 +3529,12 @@ impl Shared {
     /// a session, the named agent or every agent on the committee) or are
     /// escalated to this bridge's person. Another agent's threads are not
     /// in a session's inbox.
+    ///
+    /// Without a session this is the person's own read: it also lists, and
+    /// keeps among the settled ones, the threads that wait on the person
+    /// ([`senate_core::ThreadSummary::waits_on_person`]: something said to
+    /// them they have not seen), with how far they have seen each. The rule
+    /// for an agent's inbox is unchanged.
     async fn on_inbox(
         &self,
         selector: &SessionSelector,
@@ -3490,6 +3543,7 @@ impl Shared {
         all: bool,
     ) -> Result<InboxReply, IpcError> {
         let (session, committee) = self.session_and_committee(selector, committee)?;
+        let for_person = session.is_none();
         let agents = match (session, agent) {
             (Some(s), _) => vec![s.agent],
             (None, Some(name)) => vec![self.seating().agent(&name)],
@@ -3501,30 +3555,48 @@ impl Shared {
             .await
             .map_err(server_error)?;
         let person = &self.config.person;
+        let seen: Vec<ThreadSeen> = if for_person {
+            self.store
+                .seen(&committee)
+                .map_err(internal)?
+                .into_iter()
+                .map(|(thread, seen)| ThreadSeen { thread, seen })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut reply = InboxReply {
+            committee,
+            agents,
+            person: person.clone(),
+            threads: Vec::new(),
+            settled: 0,
+            seen,
+        };
         let mut threads: Vec<_> = page
             .threads
             .into_iter()
             .filter(|t| t.state != senate_core::StatusState::Archived)
             .filter(|t| {
-                agents.iter().any(|a| t.is_for(a)) || t.escalated_to.as_ref() == Some(person)
+                reply.agents.iter().any(|a| t.is_for(a))
+                    || t.escalated_to.as_ref() == Some(person)
+                    || for_person && t.directed_to(person).is_some()
             })
             .collect();
         // What waits on no one is left out and counted, unless asked for.
+        // What waits on the person only because they have not seen it is
+        // not settled, whatever the agents' rule says.
         let mut settled = 0;
         if !all {
             threads.retain(|t| {
-                let waits = t.waits().is_some();
+                let waits = t.waits().is_some() || for_person && reply.waits_on_person(t).is_some();
                 settled += usize::from(!waits);
                 waits
             });
         }
-        Ok(InboxReply {
-            committee,
-            agents,
-            person: person.clone(),
-            threads,
-            settled,
-        })
+        reply.threads = threads;
+        reply.settled = settled;
+        Ok(reply)
     }
 
     async fn on_catch_up(

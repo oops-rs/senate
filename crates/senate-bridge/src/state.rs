@@ -25,6 +25,15 @@
 //!   person is two rows.
 //! - `dropped` — per (agent, committee), how many pending items were dropped
 //!   by the cap ([`Store::cap_pending`]) and not yet announced in a push.
+//! - `person_seen` — per (committee, thread root), the highest `seq` of the
+//!   thread the person has seen on this machine (`senate thread`, a reply,
+//!   a take, `senate inbox --mark-read`): this machine's view, not a fact of
+//!   the log, so nothing is appended for it. It only moves up
+//!   ([`Store::mark_seen`]), and is dropped with the cursors when the log's
+//!   epoch changes, since seqs of an old log mean nothing in the new one. A
+//!   database from before it gets the empty table when it is opened: nothing
+//!   is seen yet, so what was answered to the person and never opened shows
+//!   once as new.
 //! - `verdicts` and `owners` — facts of the log, the same for every agent:
 //!   the Speaker's triage verdict per thread root, and the
 //!   [`TaskOwner`] (agent and session) that took each thread.
@@ -116,6 +125,12 @@ CREATE TABLE IF NOT EXISTS verdicts (
     committee TEXT NOT NULL,
     root    INTEGER NOT NULL,
     verdict TEXT NOT NULL,
+    PRIMARY KEY (committee, root)
+);
+CREATE TABLE IF NOT EXISTS person_seen (
+    committee TEXT NOT NULL,
+    root      INTEGER NOT NULL,
+    seen      INTEGER NOT NULL,
     PRIMARY KEY (committee, root)
 );
 CREATE TABLE IF NOT EXISTS owners (
@@ -702,7 +717,7 @@ impl Store {
         )?;
         tx.execute_batch(
             "DELETE FROM cursors; DELETE FROM queue; DELETE FROM dropped; DELETE FROM epochs;
-             DELETE FROM verdicts; DELETE FROM owners;",
+             DELETE FROM verdicts; DELETE FROM owners; DELETE FROM person_seen;",
         )?;
         tx.execute(
             "INSERT INTO epochs (server, epoch, seen_at) VALUES (?1, ?2, ?3)",
@@ -740,7 +755,7 @@ impl Store {
                 params![agent, committee.as_str()],
             )?;
         }
-        for table in ["verdicts", "owners"] {
+        for table in ["verdicts", "owners", "person_seen"] {
             tx.execute(
                 &format!("DELETE FROM {table} WHERE committee = ?1"),
                 [committee.as_str()],
@@ -1478,6 +1493,33 @@ impl Store {
         Ok(())
     }
 
+    /// The person has seen `root`'s thread up to `seq`. Never lowers a mark.
+    pub fn mark_seen(
+        &self,
+        committee: &CommitteeId,
+        root: Seq,
+        seq: Seq,
+    ) -> Result<(), StoreError> {
+        self.conn().execute(
+            "INSERT INTO person_seen (committee, root, seen) VALUES (?1, ?2, ?3)
+             ON CONFLICT(committee, root) DO UPDATE SET seen = MAX(seen, excluded.seen)",
+            params![committee.as_str(), seq_sql(root), seq_sql(seq)],
+        )?;
+        Ok(())
+    }
+
+    /// Every thread of the committee the person has seen some of, with how
+    /// far.
+    pub fn seen(&self, committee: &CommitteeId) -> Result<Vec<(Seq, Seq)>, StoreError> {
+        let conn = self.conn();
+        let mut stmt =
+            conn.prepare("SELECT root, seen FROM person_seen WHERE committee = ?1 ORDER BY root")?;
+        let rows = stmt.query_map([committee.as_str()], |r| {
+            Ok((seq_from(r.get(0)?), seq_from(r.get(1)?)))
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     pub fn owner(
         &self,
         committee: &CommitteeId,
@@ -1970,5 +2012,54 @@ mod tests {
             .cancel(None, &committee(), Seq(1), true, "takeover")
             .unwrap();
         assert_eq!(rest, [key(&claude(), 1)]);
+    }
+
+    #[test]
+    fn what_the_person_has_seen_only_moves_up_and_goes_with_the_log() {
+        let store = Store::in_memory().unwrap();
+        let c = committee();
+        assert!(store.seen(&c).unwrap().is_empty());
+        store.mark_seen(&c, Seq(3), Seq(9)).unwrap();
+        store.mark_seen(&c, Seq(3), Seq(5)).unwrap();
+        store.mark_seen(&c, Seq(7), Seq(8)).unwrap();
+        assert_eq!(
+            store.seen(&c).unwrap(),
+            [(Seq(3), Seq(9)), (Seq(7), Seq(8))]
+        );
+        let other = CommitteeId::new("other").unwrap();
+        assert!(store.seen(&other).unwrap().is_empty());
+        // A reset of one committee's log forgets its marks only.
+        store.mark_seen(&other, Seq(1), Seq(2)).unwrap();
+        store.reset_committee(&claude(), &c).unwrap();
+        assert!(store.seen(&c).unwrap().is_empty());
+        assert_eq!(store.seen(&other).unwrap().len(), 1);
+        // A new epoch forgets all of them: seqs of the old log mean nothing.
+        store.reset_for_epoch("http://s", "e2").unwrap();
+        assert!(store.seen(&other).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_database_from_before_read_state_gets_the_table_and_keeps_its_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        {
+            // The schema as it was: no person_seen table.
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE cursors (agent TEXT NOT NULL, committee TEXT NOT NULL,
+                     delivered INTEGER NOT NULL, reported INTEGER NOT NULL DEFAULT 0,
+                     touched INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (agent, committee));
+                 INSERT INTO cursors (agent, committee, delivered) VALUES ('alice/claude', 'refund-v2', 7);",
+            )
+            .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store.delivered_cursor(&claude(), &committee()).unwrap(),
+            Seq(7)
+        );
+        assert!(store.seen(&committee()).unwrap().is_empty());
+        store.mark_seen(&committee(), Seq(1), Seq(4)).unwrap();
+        assert_eq!(store.seen(&committee()).unwrap(), [(Seq(1), Seq(4))]);
     }
 }

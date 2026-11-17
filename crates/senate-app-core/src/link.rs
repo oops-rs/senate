@@ -373,6 +373,7 @@ impl<S: Sink> Driver<S> {
             Action::Answer { .. } | Action::Take { .. } | Action::Close { .. } => {
                 self.link.call::<Posted>(&request).await.map(to_value)
             }
+            Action::MarkRead { .. } => self.link.call::<Value>(&request).await,
         };
         if let Some(committee) = action.committee() {
             let agents: Vec<SenatorPath> = self

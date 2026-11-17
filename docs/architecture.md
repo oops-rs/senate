@@ -172,6 +172,37 @@ threads and never takes one over).
   but the thread stays suspended and the escalation's reason stays.
 - The reason is shown wherever the thread is listed for the person.
 
+## What comes back to the person
+
+"The last word is an answer, so nobody waits" is the rule for an *agent's*
+inbox (`ThreadSummary::waits`; the `inbox` tool, the docket). It is wrong for
+a person's: an answer, a note or an escalation addressed to them that they
+have not seen is exactly what their inbox is for. The person's rule is
+`ThreadSummary::waits_on_person(person, seen)` in `senate-core`, and every
+reader of a person's inbox (`senate inbox`, the app core) uses it:
+
+- A thread waits on the person when an escalation to them is in force
+  (whatever they have seen), or when it holds an event directed to them
+  (`to` contains `senator::<person>`, or an escalation to them) with a seq
+  above `seen`. The board keeps, per person, the latest such event and the
+  latest escalation (`ThreadSummary::directed`); speaking in the thread
+  themselves answers them. A provisional answer is not addressed to them.
+- `seen` is read state, kept on the developer machine: per (Senate,
+  committee, thread root), the highest seq the person has seen, in the
+  `person_seen` table of that Senate's `state.db`. It is this machine's view,
+  never a log fact, and only moves up. `senate thread <n>` marks the thread
+  seen up to its last event; replying (`senate reply`, the app's answer) and
+  taking it mark it too; `senate inbox --mark-read` marks every thread it
+  lists as new; the app's `mark_read` action does the same for one thread.
+  An existing `state.db` gets the empty table when the daemon opens it, so
+  what was answered and never opened shows once as new; seqs belong to a log
+  epoch, so a new epoch drops the marks with the cursors.
+- `senate inbox` lists the threads that wait on the person first (news
+  marked, with who wrote, the kind and the first line, an escalation with its
+  reason, and the commands to read, reply and take over), then the threads
+  that wait for other reasons, then how many settled ones were left out. The
+  daemon's sessionless `inbox` carries `seen` so the reader can apply the rule.
+
 ## Guests
 
 A guest may ask questions and receive answers. A guest may not change state:

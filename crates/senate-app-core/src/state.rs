@@ -143,6 +143,8 @@ pub struct InboxThread {
     pub committee: String,
     /// The thread's root seq: what reply, take and close name.
     pub root: u64,
+    /// The thread's last seq: what `mark_read` takes to clear its news.
+    pub updated: u64,
     pub title: String,
     pub kind: String,
     pub kind_label: String,
@@ -170,6 +172,17 @@ pub struct InboxThread {
     pub for_agents: Vec<String>,
     /// It was put to the person: it waits on them whichever agent it was for.
     pub escalated: bool,
+    /// Something was said to the person in it that they have not seen:
+    /// `news_*` describe the latest such event. It may be listed for this
+    /// alone, with `state` `active` (answered).
+    pub unread: bool,
+    /// Who wrote it: `[senator::alice/claude]`.
+    pub news_from: Option<String>,
+    /// Its kind (`answer`, `note`, `status` for an escalation) and a label.
+    pub news_kind: Option<String>,
+    pub news_kind_label: Option<String>,
+    /// Its first line (an escalation's reason).
+    pub news_line: Option<String>,
 }
 
 /// A Codex app-server approval request the daemon relays.
@@ -467,6 +480,7 @@ fn inbox_thread(w: &Waiting, locale: Locale) -> InboxThread {
     InboxThread {
         committee: w.committee.to_string(),
         root: t.root.0,
+        updated: t.updated.0,
         title: t.title.clone(),
         kind: t.kind.as_str().to_string(),
         kind_label: text::kind(locale, &t.kind),
@@ -496,6 +510,26 @@ fn inbox_thread(w: &Waiting, locale: Locale) -> InboxThread {
         answered: t.answered,
         for_agents: w.for_agents.iter().map(ToString::to_string).collect(),
         escalated: w.escalated,
+        unread: w.unread.is_some(),
+        news_from: w.unread.as_ref().map(|d| {
+            Mention::author(&d.from, d.on_behalf_of.as_ref())
+                .map_or_else(|| d.from.in_text(), |m| m.to_string())
+        }),
+        news_kind: w.unread.as_ref().map(|d| {
+            if d.escalated {
+                "escalated".to_string()
+            } else {
+                d.kind.as_str().to_string()
+            }
+        }),
+        news_kind_label: w.unread.as_ref().map(|d| {
+            if d.escalated {
+                text::escalated_word(locale).to_string()
+            } else {
+                text::kind(locale, &d.kind)
+            }
+        }),
+        news_line: w.unread.as_ref().map(|d| d.line.clone()),
     }
 }
 

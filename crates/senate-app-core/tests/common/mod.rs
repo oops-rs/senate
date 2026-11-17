@@ -413,6 +413,7 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
                 person: alice(),
                 threads,
                 settled: 0,
+                seen: Vec::new(),
             })
         }
         Request::Answer {

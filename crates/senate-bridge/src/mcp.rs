@@ -558,7 +558,7 @@ pub enum ShowAll {
 }
 
 /// The line that says how many settled threads were left out, if any.
-fn settled_line(settled: usize, how: ShowAll, locale: Locale) -> Option<String> {
+pub(crate) fn settled_line(settled: usize, how: ShowAll, locale: Locale) -> Option<String> {
     if settled == 0 {
         return None;
     }
@@ -2087,6 +2087,7 @@ mod tests {
             person: Name::new("alice").unwrap(),
             threads: board.threads(None).into_iter().cloned().collect(),
             settled: 0,
+            seen: Vec::new(),
         };
         let en = render_inbox(&reply, Locale::En, ShowAll::Flag);
         assert!(
@@ -2159,6 +2160,7 @@ mod tests {
             person: Name::new("alice").unwrap(),
             threads: waiting.clone(),
             settled: 1,
+            seen: Vec::new(),
         };
         let en = render_inbox(&base, Locale::En, ShowAll::Flag);
         assert!(en.contains("thread 3") && !en.contains("thread 1"), "{en}");
@@ -2245,6 +2247,7 @@ mod tests {
             person: Name::new("alice").unwrap(),
             threads: board.threads(None).into_iter().cloned().collect(),
             settled: 0,
+            seen: Vec::new(),
         };
         let en = render_inbox(&reply, Locale::En, ShowAll::Flag);
         assert!(

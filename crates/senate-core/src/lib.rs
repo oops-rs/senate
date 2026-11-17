@@ -109,8 +109,8 @@ pub use surface::{
     UnboundMention,
 };
 pub use task::{
-    Link, OutputLevel, StatusPayload, Step, TaskBoard, TaskOwner, ThreadSummary, TriagePayload,
-    TriageVerdict, WaitsOn, needs_triage,
+    Directed, Escalation, Link, OutputLevel, PersonWait, StatusPayload, Step, TaskBoard, TaskOwner,
+    ThreadSummary, TriagePayload, TriageVerdict, WaitsOn, needs_triage,
 };
 pub use work::{BranchNaming, DEFAULT_BRANCH_PREFIX, WorkRun, WorkState, is_work_root};
 

@@ -516,6 +516,8 @@ pub async fn thread(
             session: SessionSelector::default(),
             committee: Some(committee),
             thread,
+            // Showing a thread is reading it.
+            mark_seen: true,
         },
     )
     .await
@@ -540,6 +542,7 @@ pub async fn wait_answer(
                 session: SessionSelector::default(),
                 committee: Some(sent.posted.committee.clone()),
                 thread: sent.posted.seq,
+                mark_seen: false,
             },
         )
         .await

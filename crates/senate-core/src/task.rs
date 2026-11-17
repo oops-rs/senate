@@ -502,6 +502,18 @@ impl ThreadSummary {
         (escalation.is_some() || unread.is_some()).then_some(PersonWait { escalation, unread })
     }
 
+    /// What was addressed to `person` in the thread above `seen`, oldest
+    /// first.
+    pub fn unread_for(&self, person: &Name, seen: Seq) -> Vec<&Directed> {
+        let mut out: Vec<&Directed> = self
+            .directed
+            .iter()
+            .filter(|d| &d.person == person && d.seq > seen)
+            .collect();
+        out.sort_by_key(|d| d.seq);
+        out
+    }
+
     /// The latest event in the thread addressed to `person` that they have
     /// not answered by speaking.
     pub fn directed_to(&self, person: &Name) -> Option<&Directed> {
