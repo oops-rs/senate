@@ -21,18 +21,7 @@ const BIN: &str = env!("CARGO_BIN_EXE_senate");
 /// `senate <args>` on `h`'s daemon, with `stdin` when given.
 async fn senate(h: &Harness, args: &[&str], stdin: Option<&str>, cwd: Option<&Path>) -> Output {
     let mut cmd = Command::new(BIN);
-    for var in [
-        "CLAUDE_CODE_MESSAGING_SOCKET",
-        "CLAUDE_CODE_MESSAGING_TOKEN",
-        "CLAUDE_CODE_SESSION_ID",
-        "CLAUDE_PID",
-        "CLAUDE_CONFIG_DIR",
-        "CODEX_HOME",
-        "RUST_LOG",
-        "SENATE_AGENT",
-    ] {
-        cmd.env_remove(var);
-    }
+    senate_bridge::testenv::isolate(&mut cmd, h.dir.path());
     cmd.env("HOME", h.dir.path())
         .env("SENATE_HOME", h.paths.home())
         .args(args)
@@ -1010,9 +999,9 @@ struct Watcher {
 impl Watcher {
     fn start(h: &Harness, args: &[&str]) -> Self {
         let mut cmd = Command::new(BIN);
+        senate_bridge::testenv::isolate(&mut cmd, h.dir.path());
         cmd.env("HOME", h.dir.path())
             .env("SENATE_HOME", h.paths.home())
-            .env_remove("SENATE_AGENT")
             .arg("watch")
             .args(args)
             .stdin(Stdio::null())

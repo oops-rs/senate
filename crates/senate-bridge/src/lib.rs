@@ -88,6 +88,7 @@ pub mod speak;
 pub mod state;
 pub mod status;
 mod stream;
+pub mod testenv;
 
 pub use config::BridgeConfig;
 pub use daemon::{DaemonHandle, DaemonOptions, Timing};

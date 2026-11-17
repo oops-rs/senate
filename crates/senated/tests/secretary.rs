@@ -196,6 +196,13 @@ async fn secretary_toml_wins_over_an_old_speaker_table_and_says_so() {
     daemon.shutdown().await.unwrap();
 }
 
+/// `senated`, isolated from the environment running the tests.
+fn senated(root: &std::path::Path) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_senated"));
+    senate_bridge::testenv::isolate(&mut cmd, root);
+    cmd
+}
+
 #[test]
 fn secretary_show_names_each_source_and_never_the_key() {
     let secret = std::env::var("HOME").expect("HOME is set");
@@ -211,11 +218,10 @@ fn secretary_show_names_each_source_and_never_the_key() {
             ),
         ],
     );
-    let output = Command::new(env!("CARGO_BIN_EXE_senated"))
+    let output = senated(config.parent().unwrap())
         .args(["secretary", "show", "--config"])
         .arg(&config)
         .args(["--committee", "refund-v2"])
-        .env_remove("SENATED_CONFIG")
         .output()
         .unwrap();
     assert!(output.status.success(), "{output:?}");
@@ -258,10 +264,9 @@ fn secretary_show_on_a_machine_home_reads_its_language_and_its_problems() {
     )
     .unwrap();
     std::fs::write(home.path().join("secretary.toml"), "# x\nmode = \"loud\"\n").unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_senated"))
+    let output = senated(home.path())
         .args(["secretary", "show", "--home"])
         .arg(home.path())
-        .env_remove("SENATED_CONFIG")
         .output()
         .unwrap();
     assert!(output.status.success(), "{output:?}");

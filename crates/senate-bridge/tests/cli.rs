@@ -20,18 +20,7 @@ const BIN: &str = env!("CARGO_BIN_EXE_senate");
 
 fn bridge(home: &Path, senate_home: &Path) -> Command {
     let mut cmd = Command::new(BIN);
-    for var in [
-        "CLAUDE_CODE_MESSAGING_SOCKET",
-        "CLAUDE_CODE_MESSAGING_TOKEN",
-        "CLAUDE_CODE_SESSION_ID",
-        "CLAUDE_PID",
-        "CLAUDE_CONFIG_DIR",
-        "CODEX_HOME",
-        "RUST_LOG",
-        "SENATE_AGENT",
-    ] {
-        cmd.env_remove(var);
-    }
+    senate_bridge::testenv::isolate(&mut cmd, home);
     cmd.env("HOME", home).env("SENATE_HOME", senate_home);
     cmd
 }

@@ -200,8 +200,11 @@ async fn codex_smoke_reads_then_starts_or_steers() {
     let listen = format!("unix://{}", codex.path.display());
     let smoke = |args: Vec<String>| {
         let home = dir.path().join("senate");
+        let root = dir.path();
         async move {
-            let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_senate"))
+            let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_senate"));
+            senate_bridge::testenv::isolate_async(&mut cmd, root);
+            let out = cmd
                 .env("SENATE_HOME", home)
                 .arg("codex-smoke")
                 .args(args)

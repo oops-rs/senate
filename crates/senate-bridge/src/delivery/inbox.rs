@@ -83,12 +83,19 @@ pub enum InboxError {
     Write { path: PathBuf, source: io::Error },
     #[error("inbox socket {0}: write timed out")]
     WriteTimeout(PathBuf),
+    /// This process was started confined to a test's directory
+    /// ([`crate::testenv`]) and the socket is outside it.
+    #[error("inbox socket {0} is outside the directory this process is confined to")]
+    Outside(PathBuf),
 }
 
 impl InboxError {
     /// The session is not listening: treat it as gone.
     pub fn is_unreachable(&self) -> bool {
-        matches!(self, Self::Connect { .. } | Self::ConnectTimeout(_))
+        matches!(
+            self,
+            Self::Connect { .. } | Self::ConnectTimeout(_) | Self::Outside(_)
+        )
     }
 }
 
@@ -101,6 +108,9 @@ pub async fn push(
     text: &str,
     options: &PushOptions,
 ) -> Result<Option<String>, InboxError> {
+    if !crate::testenv::confined(socket) {
+        return Err(InboxError::Outside(socket.to_path_buf()));
+    }
     // Build both frames before connecting (see the module docs on the 30 s rule).
     let mut payload = String::new();
     if let Some(token) = token {

@@ -11,8 +11,9 @@ use std::process::{Command, Output};
 const BIN: &str = env!("CARGO_BIN_EXE_senate");
 
 fn senate(home: &Path, senate_home: &Path, args: &[&str]) -> Output {
-    Command::new(BIN)
-        .env("HOME", home)
+    let mut cmd = Command::new(BIN);
+    senate_bridge::testenv::isolate(&mut cmd, home);
+    cmd.env("HOME", home)
         .env("SENATE_HOME", senate_home)
         .args(args)
         .output()
@@ -115,7 +116,9 @@ fn install_without_a_daemon_to_run_says_how_to_name_one() {
     // PATH holds no senated, and none is built next to this binary's own
     // directory unless the workspace built it: pass an empty PATH and accept
     // either outcome, but never a panic.
-    let out = Command::new(BIN)
+    let mut cmd = Command::new(BIN);
+    senate_bridge::testenv::isolate(&mut cmd, &home);
+    let out = cmd
         .env("HOME", &home)
         .env("SENATE_HOME", home.join(".senate"))
         .env("PATH", "")
