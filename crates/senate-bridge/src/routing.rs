@@ -132,6 +132,9 @@ impl Covering {
     /// The agent `me` covers that `event` is directed to (and did not
     /// write), if any.
     pub fn covered_for(&self, event: &Event, me: &SenatorName) -> Option<SenatorName> {
+        if event.is_chair_discussion() {
+            return None;
+        }
         let set = self.by_seat.get(&(me.clone(), event.committee.clone()))?;
         event.to.iter().find_map(|a| match a.as_senator() {
             Some(agent) if set.contains(agent) && event.from != *a => Some(agent.clone()),
@@ -385,6 +388,18 @@ mod tests {
         assert!(covering.covers(&bob, &committee(), &me()));
         assert!(should_push_covering(&to_alice(), &bob, &covering));
         assert_eq!(covering.covered_for(&to_alice(), &bob), Some(me()));
+        let origin = senate_core::Origin {
+            locator: "other::senator::author".parse().unwrap(),
+            thread: Seq(4),
+        };
+        let discussion = NewEvent::new(committee(), Kind::Question, Address::Committee, "q")
+            .on_behalf_of(addr("senator::author"))
+            .with_meta(senate_core::meta::ORIGIN, origin.value())
+            .to(Address::senator(&me()))
+            .with_meta(senate_core::meta::CHAIR_DISCUSSION, true.into())
+            .into_event(Seq(11), Utc::now());
+        assert!(should_push_covering(&discussion, &me(), &covering));
+        assert!(!should_push_covering(&discussion, &bob, &covering));
         // Keyed by agent on both sides: bob's other agent covers nothing,
         // and alice's other agent is not covered.
         assert!(!should_push_covering(

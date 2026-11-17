@@ -291,11 +291,12 @@ impl TriagePayload {
 /// Whether `event` is a root the bridge must hold for a triage verdict: a
 /// `question` or `request` that starts a thread, is addressed to at least one
 /// agent (a senator not among `people`), was not written by the Speaker,
-/// and carries no verdict of its own.
+/// belongs to no direct chair discussion, and carries no verdict of its own.
 pub fn needs_triage(event: &Event, people: &People) -> bool {
     matches!(event.kind, Kind::Question | Kind::Request)
         && event.thread.is_none()
         && event.from != Address::Speaker
+        && !event.is_chair_discussion()
         && event.to.iter().any(|a| people.is_agent_address(a))
         && !event.meta.contains_key(meta::TRIAGE)
 }

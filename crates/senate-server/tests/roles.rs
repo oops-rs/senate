@@ -18,7 +18,7 @@ use senate_core::api::{
 };
 use senate_core::{
     Address, Awaiting, ChairSource, CommitteeId, DocketPage, Event, Kind, NewEvent, Origin,
-    PickPayload, Principal, SenatorKind, SpeakerName, SpeakerSeat, meta,
+    PickPayload, Principal, Refs, SenatorKind, Seq, SpeakerName, SpeakerSeat, meta,
 };
 use senate_log::{LogStore, MemoryStore};
 use senate_server::{Running, Server, ServerConfig, ServerError};
@@ -1011,6 +1011,272 @@ async fn an_agents_message_with_no_speaker_to_hold_it_is_refused() {
         "conflict",
     )
     .await;
+    server.running.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_direct_chair_discussion_has_two_local_threads_and_two_participants() {
+    let server = TestServer::start().await;
+    let hub = &server.running.hub;
+    server.append("source opens").await;
+    server.append("source local note").await;
+    let target_open = stored(
+        &server,
+        BOB,
+        &NewEvent::new(ibot(), Kind::Note, agent_addr("codex"), "target opens"),
+    )
+    .await;
+    let question = meant_for("claude", "ibot::chair")
+        .to(Address::Speaker)
+        .with_refs(Refs {
+            branch: Some("feature/discussion".into()),
+            ..Refs::default()
+        });
+    let receipt = stored(&server, ALICE, &question).await;
+    assert_eq!(receipt.id, question.id);
+    assert_eq!(receipt.committee, committee());
+    assert_eq!(receipt.from, agent_addr("claude"));
+    assert_eq!(receipt.thread, None);
+    assert!(receipt.to.is_empty());
+    assert_eq!(intended(&receipt), Some("/senate::ibot::chair"));
+    assert_eq!(
+        receipt.meta[meta::CHAIR_DISCUSSION],
+        "/senate::ibot::senator::codex"
+    );
+
+    let events = hub.read(&ibot(), target_open.seq, 10).await.unwrap();
+    let [copy] = &events[..] else {
+        panic!("{events:?}")
+    };
+    assert_ne!(copy.seq, receipt.seq);
+    assert_eq!(copy.thread, None);
+    assert_eq!(copy.kind, Kind::Question);
+    assert_eq!(copy.from, Address::Committee);
+    assert_eq!(copy.on_behalf_of, Some(agent_addr("claude")));
+    assert_eq!(copy.to, [agent_addr("codex")]);
+    assert_eq!(copy.body, question.body);
+    assert_eq!(copy.refs, question.refs);
+    assert_eq!(copy.meta[meta::CHAIR_DISCUSSION], true);
+    assert_eq!(copy.meta.len(), 2);
+    assert_eq!(
+        Origin::of(copy),
+        Some(Origin {
+            locator: "/senate::refund-v2::senator::claude".parse().unwrap(),
+            thread: receipt.seq,
+        })
+    );
+    assert_eq!(hub.chair(&ibot()).await.unwrap().chair, Some(path("codex")));
+    assert!(!senate_core::needs_triage(copy, &hub.roster_now().people()));
+    let desk = docket(&server, &ibot(), "speaker").await;
+    assert!(desk.items.is_empty());
+    assert!(desk.covered.is_empty());
+
+    let retry = server.post_event(ALICE, &question).await;
+    let retry: AppendResponse = retry.json().await.unwrap();
+    assert!(retry.duplicate);
+    assert_eq!(retry.event, receipt);
+    assert_eq!(
+        hub.read(&ibot(), target_open.seq, 10).await.unwrap(),
+        events
+    );
+
+    let local = NewEvent::new(ibot(), Kind::Answer, agent_addr("observer"), "local answer")
+        .to(Address::Committee)
+        .in_thread(copy.seq);
+    let local = stored(&server, CAROL, &local).await;
+    assert!(!local.is_chair_discussion());
+    assert_eq!(
+        hub.thread(&committee(), receipt.seq).await.unwrap().len(),
+        1
+    );
+
+    let answer = NewEvent::new(ibot(), Kind::Answer, agent_addr("codex"), "frozen Monday")
+        .in_thread(copy.seq)
+        .to(agent_addr("claude"));
+    let local_answer = stored(&server, BOB, &answer).await;
+    assert_eq!(local_answer.thread, Some(copy.seq));
+    assert!(local_answer.to.is_empty());
+    let retry = server.post_event(BOB, &answer).await;
+    assert!(retry.json::<AppendResponse>().await.unwrap().duplicate);
+    let source_thread = hub.thread(&committee(), receipt.seq).await.unwrap();
+    let [_, back] = &source_thread[..] else {
+        panic!("{source_thread:?}")
+    };
+    assert_eq!(back.thread, Some(receipt.seq));
+    assert_eq!(back.from, Address::Committee);
+    assert_eq!(back.on_behalf_of, Some(agent_addr("codex")));
+    assert_eq!(back.to, [agent_addr("claude")]);
+    assert_eq!(back.body, answer.body);
+    assert_eq!(
+        Origin::of(back),
+        Some(Origin {
+            locator: "/senate::ibot::senator::codex".parse().unwrap(),
+            thread: copy.seq,
+        })
+    );
+
+    let follow_up = NewEvent::new(committee(), Kind::Note, agent_addr("claude"), "thanks")
+        .in_thread(receipt.seq)
+        .to(Address::Committee);
+    let local_follow_up = stored(&server, ALICE, &follow_up).await;
+    assert!(local_follow_up.to.is_empty());
+    let target_thread = hub.thread(&ibot(), copy.seq).await.unwrap();
+    let [_, _, _, follow_up_copy] = &target_thread[..] else {
+        panic!("{target_thread:?}")
+    };
+    assert_eq!(follow_up_copy.thread, Some(copy.seq));
+    assert_eq!(follow_up_copy.on_behalf_of, Some(agent_addr("claude")));
+    assert_eq!(follow_up_copy.to, [agent_addr("codex")]);
+    assert_eq!(follow_up_copy.body, follow_up.body);
+    assert_eq!(
+        hub.chair(&committee()).await.unwrap().chair,
+        Some(path("claude"))
+    );
+    server.running.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn only_plain_agent_questions_and_notes_open_direct_chair_discussions() {
+    let server = start(None, boundary).await;
+    open_ibot(&server).await;
+    let hub = &server.running.hub;
+
+    let mut request = meant_for("claude", "ibot::chair");
+    request.kind = Kind::Request;
+    let mut proposal = meant_for("claude", "ibot::chair")
+        .with_meta(meta::PROPOSAL, json!(senate_core::PROPOSAL_DECISION));
+    proposal.kind = Kind::Note;
+    let mut chair_note =
+        meant_for("claude", "ibot::chair").with_meta(meta::CHAIR, json!({"senator": "claude"}));
+    chair_note.kind = Kind::Note;
+    for other in [
+        request,
+        proposal,
+        chair_note,
+        meant_for("claude", "ibot::chair").with_meta(meta::RELAYED_FROM, json!(1)),
+        meant_for("claude", "ibot::chair").with_meta(meta::SEEN, json!(0)),
+        meant_for("claude", "/another::ibot::chair"),
+    ] {
+        let held = stored(&server, ALICE, &other).await;
+        assert_eq!(held.committee, committee());
+        assert_eq!(held.to, [Address::Speaker]);
+        assert!(!held.is_chair_discussion());
+    }
+    let local = stored(&server, ALICE, &meant_for("claude", "refund-v2::chair")).await;
+    assert_eq!(local.to, [Address::Chair]);
+    assert!(!local.is_chair_discussion());
+
+    let mut note = meant_for("claude", "/senate::ibot::chair");
+    note.kind = Kind::Note;
+    let sent = stored(&server, ALICE, &note).await;
+    assert!(sent.is_chair_discussion());
+    let events = hub.read(&ibot(), Seq(1), 10).await.unwrap();
+    let [copy] = &events[..] else {
+        panic!("{events:?}")
+    };
+    assert_eq!(copy.kind, Kind::Note);
+    assert_eq!(copy.to, [person_addr("alice")]);
+
+    for forged in [
+        meant_for("claude", "ibot::chair").with_meta(meta::CHAIR_DISCUSSION, json!(true)),
+        from_speaker(ibot(), Kind::Note, "office note").with_meta(
+            meta::CHAIR_DISCUSSION,
+            json!("/senate::ibot::senator::alice"),
+        ),
+    ] {
+        api_error(
+            server.post_event(ALICE, &forged).await,
+            StatusCode::FORBIDDEN,
+            "forbidden",
+        )
+        .await;
+    }
+
+    // Before this key was reserved, an intended message still had a
+    // recipient. Reopening a historical desk item cannot create a copy.
+    let historical = hub
+        .append(
+            meant_for("claude", "/senate::ibot::chair")
+                .to(Address::Speaker)
+                .with_meta(
+                    meta::CHAIR_DISCUSSION,
+                    json!("/senate::ibot::senator::alice"),
+                ),
+        )
+        .await
+        .unwrap()
+        .event;
+    assert!(!historical.is_chair_discussion());
+    let reply = NewEvent::new(
+        committee(),
+        Kind::Answer,
+        agent_addr("claude"),
+        "local follow-up",
+    )
+    .in_thread(historical.seq);
+    assert!(!stored(&server, ALICE, &reply).await.is_chair_discussion());
+    assert_eq!(hub.read(&ibot(), Seq(1), 10).await.unwrap(), events);
+    server.running.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_chair_discussion_validates_reply_metadata_before_relaying() {
+    let server = TestServer::start().await;
+    open_ibot(&server).await;
+    let hub = &server.running.hub;
+    let source = stored(&server, BOB, &meant_for("codex", "ibot::chair")).await;
+    let root = hub.get(&ibot(), Seq(2)).await.unwrap().unwrap();
+    assert_eq!(root.to, [person_addr("alice")]);
+    let answer = || {
+        NewEvent::new(ibot(), Kind::Answer, person_addr("alice"), "reply")
+            .in_thread(root.seq)
+            .to(Address::Committee)
+    };
+    let first = stored(&server, ALICE, &answer().with_meta(meta::SEEN, json!(0))).await;
+    assert!(first.is_chair_discussion());
+    for seen in [root.seq, first.seq] {
+        let receipt = stored(
+            &server,
+            ALICE,
+            &answer().with_meta(meta::SEEN, json!(seen.0)),
+        )
+        .await;
+        assert!(receipt.is_chair_discussion());
+        assert_eq!(receipt.meta[meta::SEEN], seen.0);
+    }
+    let mirrored = hub.thread(&committee(), source.seq).await.unwrap();
+    assert_eq!(mirrored.len(), 4);
+    for reply in &mirrored[1..] {
+        assert_eq!(reply.to, [agent_addr("codex")]);
+        assert!(!reply.meta.contains_key(meta::SEEN));
+    }
+
+    let unrelated = stored(
+        &server,
+        ALICE,
+        &NewEvent::new(ibot(), Kind::Note, person_addr("alice"), "unrelated"),
+    )
+    .await;
+    for event in [
+        answer().with_meta(meta::RELAYED_FROM, json!(1)),
+        answer()
+            .with_meta(meta::SEEN, json!(root.seq.0))
+            .with_meta(meta::CHAIR, json!({"senator": "alice"})),
+        answer().with_meta(meta::SEEN, json!(-1)),
+        answer().with_meta(meta::SEEN, json!("2")),
+        answer().with_meta(meta::SEEN, json!(1.5)),
+        answer().with_meta(meta::SEEN, json!(u64::MAX)),
+        answer().with_meta(meta::SEEN, json!(unrelated.seq.0)),
+        answer().with_meta(meta::SEEN, json!(unrelated.seq.0 + 100)),
+    ] {
+        let local = stored(&server, ALICE, &event).await;
+        assert!(!local.is_chair_discussion(), "{event:?}");
+        assert_eq!(local.to, [Address::Committee]);
+    }
+    assert_eq!(
+        hub.thread(&committee(), source.seq).await.unwrap(),
+        mirrored
+    );
     server.running.shutdown().await.unwrap();
 }
 

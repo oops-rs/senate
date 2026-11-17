@@ -1,5 +1,6 @@
 //! The HTTP/SSE API, exactly as `senate_core::api` documents it.
 
+mod chair_discussion;
 mod error;
 mod roles;
 mod sse;
@@ -396,15 +397,7 @@ async fn append(
     check_checkpoint(&roster, &event)?;
     check_companion(&roster, &event)?;
     check_status(&state, &roster, &event).await?;
-    // A message meant for a seat outside its committee crosses the
-    // boundary as the rule says: a person's directly, an agent's by way of
-    // the Speaker's desk.
-    let event = roles::cross_boundary(&state, &roster, sender, event).await?;
-    // `to` may hold `senator::*`: resolved against the agents on the
-    // committee, put to the chair or the desk to pick, or refused with the
-    // candidates.
-    let event = roles::put_to_pick(&state, &roster, event).await?;
-    let appended = state.hub.resolve_and_append(event).await?;
+    let appended = roles::append_routed(&state, &roster, sender, event).await?;
     Ok(Json(AppendResponse {
         event: appended.event,
         duplicate: appended.duplicate,
@@ -446,6 +439,12 @@ fn reject_server_provenance(event: &NewEvent, as_speaker: bool) -> Result<(), Ap
         return Err(ApiFailure::forbidden(format!(
             "meta.{} is set by the server when it puts a message to the Speaker",
             meta::PICK
+        )));
+    }
+    if event.meta.contains_key(meta::CHAIR_DISCUSSION) {
+        return Err(ApiFailure::forbidden(format!(
+            "meta.{} is set by the server for cross-committee chair discussions",
+            meta::CHAIR_DISCUSSION
         )));
     }
     let claimed = [

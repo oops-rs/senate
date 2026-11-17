@@ -507,3 +507,147 @@ async fn a_team_principals_agent_crosses_committees_by_way_of_the_desk() {
 
     world.stop().await;
 }
+
+/// Both native sessions stay in their original worktrees. No secretary is
+/// present to forward the discussion or its answers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn another_committees_chair_receives_discussion_but_requests_wait_on_the_desk() {
+    use senate_bridge::hook::{self, HookEnv, HookKind};
+    use senate_bridge::ipc::BoundReply;
+    use std::fs;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut desk = Desk::new(dir.path(), "alice", Locale::En, "[local]\n");
+    let sender = desk.inbox("sender");
+    let chair = desk.inbox("chair");
+    desk.start().await;
+    for (session, committee_name, inbox) in [
+        ("author", "client", &sender),
+        ("maintainer", "senate", &chair),
+    ] {
+        let cwd = dir.path().join(committee_name);
+        fs::create_dir_all(cwd.join(".senate")).unwrap();
+        fs::write(cwd.join(".senate/committee"), committee_name).unwrap();
+        let args =
+            serde_json::json!({"session_id":session,"cwd":cwd,"source":"startup"}).to_string();
+        let env = HookEnv {
+            socket: Some(inbox.path.clone()),
+            token: Some(format!("tok-{session}")),
+            claude_pid: Some(std::process::id()),
+            ..Default::default()
+        };
+        hook::run(
+            HookKind::SessionStart,
+            &desk.paths.socket(),
+            &args,
+            &env,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+        desk.wait_stream_of(session).await;
+    }
+    let target = CommitteeId::new("senate").unwrap();
+    let source = CommitteeId::new("client").unwrap();
+    let hub = desk.senate().daemon.hub.clone();
+    assert_eq!(
+        hub.chair(&target).await.unwrap().chair,
+        Some(path("claude-maintainer"))
+    );
+    let message = |kind: SayKind, body: &str| Request::Send {
+        session: Laptop::session("author"),
+        kind,
+        to: vec![],
+        at: Some(senate_core::Locator::parse_short("senate::chair").unwrap()),
+        body: body.into(),
+        refs: None,
+        id: Some(senate_core::EventId::new()),
+    };
+    let direct = message(SayKind::Question, "Which argument selects the destination?");
+    let receipt: SendReply = desk.ipc(direct.clone()).await;
+    let retry: SendReply = desk.ipc(direct).await;
+    assert!(retry.posted.duplicate);
+    assert_eq!(retry.posted.seq, receipt.posted.seq);
+    assert_eq!(receipt.posted.committee, source);
+    assert!(!receipt.on_the_desk());
+    let push = chair
+        .wait_for("Which argument selects the destination?")
+        .await;
+    assert!(push.contains("Send execution requests through the Speaker."));
+    let target_thread = thread_of(&push, "Which argument selects the destination?");
+    let original = hub.get(&target, target_thread).await.unwrap().unwrap();
+    assert_eq!(original.on_behalf_of, Some(senator("claude-author")));
+    assert_eq!(original.to, [senator("claude-maintainer")]);
+    assert_eq!(
+        desk.events_of(&target)
+            .await
+            .iter()
+            .filter(|e| e.body == original.body)
+            .count(),
+        1
+    );
+
+    desk.answer("maintainer", target_thread, "Use the qualified address.")
+        .await;
+    sender.wait_for("Use the qualified address.").await;
+    let back = desk
+        .events_of(&source)
+        .await
+        .into_iter()
+        .find(|e| e.body == "Use the qualified address.")
+        .unwrap();
+    assert_eq!(back.thread, Some(receipt.posted.seq));
+    assert_eq!(back.on_behalf_of, Some(senator("claude-maintainer")));
+    desk.answer("author", receipt.posted.seq, "That resolves my question.")
+        .await;
+    chair.wait_for("That resolves my question.").await;
+    let follow_up = desk
+        .events_of(&target)
+        .await
+        .into_iter()
+        .find(|e| e.body == "That resolves my question.")
+        .unwrap();
+    assert_eq!(follow_up.thread, Some(target_thread));
+
+    let note: SendReply = desk
+        .ipc(message(
+            SayKind::Note,
+            "The client now uses the qualified address.",
+        ))
+        .await;
+    assert!(!note.on_the_desk());
+    chair
+        .wait_for("The client now uses the qualified address.")
+        .await;
+    let request: SendReply = desk
+        .ipc(message(
+            SayKind::Request,
+            "Please edit the client configuration.",
+        ))
+        .await;
+    assert!(request.on_the_desk());
+    assert!(
+        !desk
+            .events_of(&target)
+            .await
+            .iter()
+            .any(|e| e.body == "Please edit the client configuration.")
+    );
+    for (id, expected) in [("author", source.clone()), ("maintainer", target.clone())] {
+        let bound: BoundReply = desk
+            .ipc(Request::Bound {
+                session: Laptop::session(id),
+            })
+            .await;
+        assert_eq!(bound.committee, Some(expected));
+    }
+    assert_eq!(
+        hub.committee_agents(&target).await.unwrap(),
+        [path("claude-maintainer")]
+    );
+    assert_eq!(
+        hub.committee_agents(&source).await.unwrap(),
+        [path("claude-author")]
+    );
+    desk.stop().await;
+}

@@ -5,8 +5,8 @@
 use std::time::Duration;
 
 use senate_core::{
-    Account, Address, BindingAction, Event, Hub, Kind, Locale, Mirror, NewEvent, PostTarget,
-    Principal, Roster, Seq, SurfaceError, UnboundMention,
+    Account, Address, BindingAction, Event, Hub, Kind, Locale, Mirror, NewEvent, Origin,
+    PostTarget, Principal, Roster, Seq, SurfaceError, UnboundMention, meta,
 };
 use serde_json::json;
 
@@ -539,6 +539,45 @@ async fn a_question_to_an_offline_agent_is_answered_on_its_behalf_at_once() {
         Some("[senator::claude] 对，30 天")
     );
     assert_eq!(rig.brain.questions().len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_direct_chair_question_stays_with_its_recipient_after_speaker_replay() {
+    let rig = Rig::start(bound_hub().await).await;
+    rig.brain
+        .answers(Ok("an answer for an ordinary question".into()));
+    let origin = Origin {
+        locator: "/senate::other::senator::copilot".parse().expect("locator"),
+        thread: Seq(3),
+    };
+    let direct = rig
+        .append(
+            question(Address::Committee, agent("alice"), "direct question")
+                .on_behalf_of(agent("bob"))
+                .with_meta(meta::ORIGIN, origin.value())
+                .with_meta(meta::CHAIR_DISCUSSION, json!(true)),
+        )
+        .await;
+    rig.settle().await;
+    assert_eq!(rig.cursor(&refund()).await, direct.seq);
+    assert!(rig.surface.posts().is_empty());
+    assert!(rig.brain.questions().is_empty());
+
+    let (hub, surface, brain) = (rig.hub.clone(), rig.surface.clone(), rig.brain.clone());
+    rig.stop().await;
+    let rig = Rig::start_with(hub, surface, brain).await;
+    tokio::time::advance(Duration::from_secs(120)).await;
+    rig.settle().await;
+    assert_eq!(rig.cursor(&refund()).await, direct.seq);
+    assert!(rig.surface.posts().is_empty());
+    assert!(rig.brain.questions().is_empty());
+
+    let normal = rig
+        .append(question(agent("bob"), agent("alice"), "ordinary question"))
+        .await;
+    rig.settle().await;
+    assert_eq!(rig.brain.questions()[0].event.seq, normal.seq);
+    assert_eq!(rig.surface.posts().len(), 2);
 }
 
 #[tokio::test(start_paused = true)]

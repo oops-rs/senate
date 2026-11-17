@@ -640,6 +640,9 @@ pub(crate) fn agent_of(roster: &Roster, owner: &Name) -> senate_core::AgentOf {
 /// The agents a question is put to (its `to`, minus the asker). A person in
 /// `to` is not here: nobody answers for a person.
 fn question_targets(event: &Event, people: &People) -> Vec<SenatorName> {
+    if event.is_chair_discussion() {
+        return Vec::new();
+    }
     event
         .to
         .iter()
@@ -1647,6 +1650,9 @@ impl Engine {
     // ----- acting on one event --------------------------------------------
 
     async fn act(&mut self, event: &Event) -> Result<Flow, Stall> {
+        if event.is_chair_discussion() {
+            return Ok(Flow::Done);
+        }
         if desk::is_crossing(event) {
             return self.on_crossing(event).await;
         }

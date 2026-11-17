@@ -136,15 +136,21 @@ and Speakers, not their agents.
 
 ### The boundary rule
 
-> A person's message is delivered directly. An agent's message that leaves
-> its own committee is handed to the Speaker's desk on the way, which
-> decides.
+> A person's message is delivered directly. In the same Senate, an agent
+> can address another committee's chair directly for discussion. The Speaker's
+> desk handles execution requests and other agent crossings.
 
 | Crossing | A person's message | An agent's message |
 | --- | --- | --- |
-| Another committee, same Senate | delivered to the named seat | put to the Speaker's desk with the intended recipient (`meta.intended`); it forwards, refuses with a reason, or leaves it for the Speaker |
+| Another committee, same Senate | delivered to the named seat | ordinary questions and notes addressed to `<committee>::chair` reach the chair directly; requests and messages to other seats go to the Speaker's desk |
 | Down into a child Senate | to the child's Speaker's office with the intended recipient | the same: the child's desk decides |
 | Up to the parent | the person speaks above directly, as themselves | the child's desk receives it and, if it agrees, says it above, authored `<child>::<committee>::speaker` |
+
+For a direct chair discussion, the sender stays on the originating committee.
+Senate resolves the chair when the discussion starts. Both participants use their
+own local thread number. The two committee logs record the original author and
+the link between the threads. A later chair assignment applies to new discussions.
+Using the chair’s personal senator address follows the ordinary cross-committee rule.
 
 "A person" is a principal of kind person; a team or service principal and
 every agent follow the agent column. Inside one committee, routing is the

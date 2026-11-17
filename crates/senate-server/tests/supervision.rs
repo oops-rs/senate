@@ -13,7 +13,9 @@ use common::*;
 use ractor::ActorId;
 use reqwest::{Method, StatusCode};
 use senate_core::api::{AppendResponse, Heartbeat, events_path};
-use senate_core::{Appended, CommitteeId, Event, Hub, MirrorRef, NewEvent, SenatorName, Seq};
+use senate_core::{
+    Address, Appended, CommitteeId, Event, Hub, Kind, MirrorRef, NewEvent, SenatorName, Seq, meta,
+};
 use senate_log::{CursorOwner, HeartbeatRecord, LogError, LogStore, MemoryStore};
 use tokio::sync::broadcast::error::TryRecvError;
 
@@ -275,6 +277,93 @@ async fn a_retry_after_a_lost_commit_ack_is_fanned_out_once() {
     assert_eq!(subscriber.try_recv().unwrap().seq, Seq(4));
     assert!(matches!(subscriber.try_recv(), Err(TryRecvError::Empty)));
     assert_eq!(stream.seqs(1).await, vec![4]);
+    server.running.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_chair_discussion_retry_repairs_delivery_after_a_restart_and_chair_change() {
+    let store = Arc::new(Faulty::default());
+    let server = TestServer::start_with(store.clone(), None).await;
+    let target = CommitteeId::new("ibot").unwrap();
+    let open = NewEvent::new(
+        target.clone(),
+        Kind::Note,
+        agent_addr("codex"),
+        "target opens",
+    );
+    assert_eq!(server.post_event(BOB, &open).await.status(), StatusCode::OK);
+    let question = NewEvent::new(
+        committee(),
+        Kind::Question,
+        agent_addr("claude"),
+        "question",
+    )
+    .with_meta(meta::INTENDED, "ibot::chair".into());
+    store.arm(LOSE_ACK_AFTER_COMMIT);
+    api_error(
+        server.post_event(ALICE, &question).await,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal",
+    )
+    .await;
+    let source = store.get(&committee(), Seq(1)).await.unwrap().unwrap();
+    assert!(source.is_chair_discussion());
+    assert_eq!(store.head(&target).await.unwrap(), Seq(1));
+    server.running.shutdown().await.unwrap();
+
+    let server = TestServer::start_with(store.clone(), None).await;
+    let hub = &server.running.hub;
+    hub.set_chair(&target, path("carol")).await.unwrap();
+    let (a, b) = tokio::join!(
+        server.post_event(ALICE, &question),
+        server.post_event(ALICE, &question)
+    );
+    for response in [a, b] {
+        let retried: AppendResponse = response.json().await.unwrap();
+        assert!(retried.duplicate);
+        assert_eq!(retried.event, source);
+    }
+    let copies = hub.read(&target, Seq(2), 10).await.unwrap();
+    let [copy] = &copies[..] else {
+        panic!("{copies:?}")
+    };
+    assert_eq!(copy.to, [agent_addr("codex")]);
+
+    let new_chair = NewEvent::new(
+        target.clone(),
+        Kind::Answer,
+        person_addr("carol"),
+        "a local note from the new chair",
+    )
+    .in_thread(copy.seq);
+    assert_eq!(
+        server.post_event(CAROL, &new_chair).await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(hub.head(&committee()).await.unwrap(), source.seq);
+
+    let answer =
+        NewEvent::new(target, Kind::Answer, agent_addr("codex"), "answer").in_thread(copy.seq);
+    store.arm(LOSE_ACK_AFTER_COMMIT);
+    api_error(
+        server.post_event(BOB, &answer).await,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal",
+    )
+    .await;
+    assert_eq!(hub.head(&committee()).await.unwrap(), source.seq);
+    for _ in 0..2 {
+        let retried: AppendResponse = server.post_event(BOB, &answer).await.json().await.unwrap();
+        assert!(retried.duplicate);
+    }
+    let replies = hub.thread(&committee(), source.seq).await.unwrap();
+    let [_, reply] = &replies[..] else {
+        panic!("{replies:?}")
+    };
+    assert_eq!(reply.from, Address::Committee);
+    assert_eq!(reply.to, [agent_addr("claude")]);
+    assert_eq!(reply.on_behalf_of, Some(agent_addr("codex")));
+    assert_eq!(reply.body, answer.body);
     server.running.shutdown().await.unwrap();
 }
 

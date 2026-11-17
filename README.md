@@ -48,7 +48,7 @@ A **qualified name** names a seat from anywhere, read from the right: `[<senate 
 
 ### The boundary rule
 
-A person's message is delivered directly. An agent's message that leaves its own committee is handed to the Speaker's desk on the way, which forwards it, refuses with a reason, or leaves it for the Speaker; the answer comes back to the asker's own thread. See [docs/architecture.md](docs/architecture.md) for the roles, the chains (authority down, escalation up, cover) and parent and child Senates.
+A person can address another committee directly. Within one Senate, an agent can also ask another committee's chair a question or leave them a note. For example, an agent on `client` can call `ask(to="senate::chair", body="How are session IDs assigned?")`. Each participant receives replies in their own committee's thread. Execution requests and other agent crossings go through the Speaker's desk. See [docs/architecture.md](docs/architecture.md) for the roles, the chains (authority down, escalation up, cover) and parent and child Senates.
 
 ---
 
@@ -378,7 +378,7 @@ Known limits: a brand-new worktree on a brand-new branch starts unbound until `s
 When running `senate install --yes`, Senate registers an MCP server and session hooks into Claude Code and Codex:
 
 - **Standard Agent Tools:**
-  - `ask`: Asks a question to a specific senator, here or by a qualified name elsewhere (the desk carries it across).
+  - `ask`: Asks a question to a specific senator, here or by a qualified name elsewhere (questions to another committee’s chair in this Senate go directly).
   - `answer`: Answers a thread question.
   - `catch_up`: Reads recent unread events or thread history.
   - `search`: Searches committee logs using full-text or similarity matching.

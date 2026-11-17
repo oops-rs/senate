@@ -708,6 +708,20 @@ pub fn footer(event: &Event, me: &Reader, locale: Locale) -> Option<String> {
     let root = event.thread.unwrap_or(event.seq);
     let answer = format!("mcp__senate__answer(thread={root})");
     let back = posted_back(event, locale);
+    if event.from == Address::Committee && event.is_chair_discussion() {
+        let action = match event.kind {
+            Kind::Question => locale.pick("请回答", "Answer"),
+            _ => locale.pick("需要继续讨论时可回复", "To continue the discussion, reply"),
+        };
+        return Some(match locale {
+            Locale::Zh => {
+                format!("↳ 跨委员会讨论。{action}：{answer}。执行请求请经 Speaker 转交。")
+            }
+            Locale::En => format!(
+                "↳ Cross-committee discussion. {action} with {answer}. Send execution requests through the Speaker."
+            ),
+        });
+    }
     let sender = if unsure(event) {
         // An explicit verdict from the Speaker wins: the triage note says
         // to show the user first.
