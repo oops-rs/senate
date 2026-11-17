@@ -38,8 +38,11 @@
 //! Senate as above and registers it with the Senate at `server_url` as a
 //! child ([`uplink`]). At start it asks that Senate's `GET /v1/me` (a short
 //! timeout) for its path, the hosted Senate's `parent`; a Senate above that
-//! does not answer leaves the hosted Senate with no parent (said at start;
-//! the next start fixes it). The Speaker is then the person as a senator of
+//! does not answer leaves the hosted Senate with no parent (said at start);
+//! the uplink then keeps trying to register, less often each time
+//! ([`uplink::next_backoff`]), and when it is answered the hosted Senate
+//! learns its parent (`/v1/me` and `senate status` name it from then on).
+//! With the parent known at start, the Speaker is the person as a senator of
 //! the Senate above (`/<parent>::senator::<person>`); a parent's agent as
 //! the Speaker is refused at start ("not supported yet"). The
 //! developer-machine side serves the hosted Senate and is given the Senate
@@ -524,11 +527,12 @@ pub fn parent_unreachable(url: &str, error: &str, locale: Locale) -> String {
     match locale {
         Locale::Zh => format!(
             "上一级 Senate（{url}）启动时没有应答（{error}）：这台机器的 Senate 先以没有上一级的方式启动，\
-             连上后再注册为子 Senate；下次启动时补上它的上一级。"
+             并不断重试（间隔逐渐拉长）；它一应答，这台 Senate 就注册为子 Senate 并得知自己的上一级。"
         ),
         Locale::En => format!(
             "The Senate above ({url}) did not answer at start ({error}): this machine's Senate starts \
-             with no parent and registers as a child once it answers; the next start sets its parent."
+             with no parent and keeps trying, less often each time; once it answers, this Senate \
+             registers as a child and learns its parent."
         ),
     }
 }

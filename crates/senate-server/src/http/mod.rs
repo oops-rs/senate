@@ -274,7 +274,7 @@ async fn me(State(state): State<AppState>, person: Person) -> Result<Json<Me>, A
     Ok(Json(Me {
         agents: roster.agents_of(&person.0).into_iter().cloned().collect(),
         senate: state.hub.senate_name().clone(),
-        parent: state.hub.parent().cloned(),
+        parent: state.hub.parent(),
         people: roster.people(),
         speaker: state.hub.desk_seat(),
         // Roots are judged where the built-in session works the desk.

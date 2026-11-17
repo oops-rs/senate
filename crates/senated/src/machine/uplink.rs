@@ -67,6 +67,9 @@ pub const POLL: Duration = Duration::from_secs(2);
 const TIMEOUT: Duration = Duration::from_secs(5);
 /// Events read per page.
 const PAGE: usize = 200;
+/// The longest the uplink waits between two tries to register: it starts
+/// at the poll period and doubles.
+pub const MAX_BACKOFF: Duration = Duration::from_secs(60);
 
 /// Registry key prefixes.
 const CURSOR: &str = "uplink:cursor:";
@@ -85,8 +88,8 @@ pub struct UplinkConfig {
     /// unless `[local] speaker` names another principal there).
     pub speaker: senate_core::SenatorName,
     /// The parent's path, when it answered at start (the hosted Senate's
-    /// `parent`). `None`: learned at the first answer, for registering;
-    /// the hosted Senate keeps no parent until the next start.
+    /// `parent`). `None`: learned at the first answer, which registers and
+    /// tells the hosted Senate ([`ServerHub::set_parent`]).
     pub parent: Option<SenatePath>,
     /// Where [`UplinkStatus`] is written.
     pub dir: std::path::PathBuf,
@@ -116,6 +119,7 @@ impl Uplink {
             config,
             registered: false,
             last: None,
+            backoff: Duration::ZERO,
         };
         let token = stop.clone();
         let task = tokio::spawn(async move { worker.run(token).await });
@@ -127,6 +131,13 @@ impl Uplink {
         self.stop.cancel();
         let _ = self.task.await;
     }
+}
+
+/// The wait after one more failed try to register: the poll period after
+/// the first, then doubling, never above [`MAX_BACKOFF`] (or the poll
+/// period, when that is longer).
+pub fn next_backoff(previous: Duration, poll: Duration) -> Duration {
+    (previous * 2).max(poll).min(MAX_BACKOFF.max(poll))
 }
 
 /// Where a thread above was brought to here.
@@ -145,6 +156,10 @@ struct Worker {
     registered: bool,
     /// The registration last written, to log a change once.
     last: Option<Registration>,
+    /// How long to wait before the next try to register: the poll period
+    /// after a first failure, doubled by each next one up to
+    /// [`MAX_BACKOFF`]; zero once registered.
+    backoff: Duration,
 }
 
 /// Why a pass stopped.
@@ -158,8 +173,17 @@ enum Pass {
 impl Worker {
     async fn run(&mut self, stop: CancellationToken) {
         loop {
+            let mut wait = self.config.poll;
             if !self.registered {
                 self.register().await;
+                if self.registered {
+                    self.backoff = Duration::ZERO;
+                } else {
+                    // The Senate above is not there (or will not have us):
+                    // ask less and less often, this Senate runs meanwhile.
+                    self.backoff = next_backoff(self.backoff, self.config.poll);
+                    wait = self.backoff;
+                }
             }
             if self.registered {
                 match self.pass().await {
@@ -174,7 +198,7 @@ impl Worker {
             }
             tokio::select! {
                 () = stop.cancelled() => return,
-                () = tokio::time::sleep(self.config.poll) => {}
+                () = tokio::time::sleep(wait) => {}
             }
         }
     }
@@ -245,7 +269,17 @@ impl Worker {
             }
         };
         if self.config.parent.is_none() {
-            self.config.parent = Some(me.senate_path());
+            let parent = me.senate_path();
+            self.config.parent = Some(parent.clone());
+            // This Senate started without it: what it reports (`Me`, and
+            // so `senate status`) names its parent from now on.
+            if self.hub.set_parent(parent.clone()) {
+                tracing::info!(
+                    senate = %self.hub.senate_path(),
+                    parent = %parent,
+                    "the Senate above answered; this Senate now knows its parent"
+                );
+            }
         }
         let speaker = self.speaker();
         match tokio::time::timeout(
