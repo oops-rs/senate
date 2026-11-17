@@ -35,9 +35,11 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
+use std::collections::BTreeMap;
+
 use senate_core::{
-    Address, CommitteeId, Event, Kind, Locale, PROPOSAL_DECISION, People, SenatorName,
-    TriagePayload, TriageVerdict, meta,
+    Address, CommitteeId, Event, Kind, Locale, Locator, Origin, PROPOSAL_DECISION, People,
+    SenatorName, TriagePayload, TriageVerdict, meta,
 };
 
 /// Starts every line of a pushed body.
@@ -126,8 +128,10 @@ fn guest_note(addr: &Address, locale: Locale) -> Option<String> {
 /// author with no label of its own (one senator writing for another, or an
 /// unknown form) is written out from its fields.
 pub fn author(event: &Event, locale: Locale) -> String {
-    let base = event
-        .byline(locale)
+    let secretary = secretary_answer(event)
+        .map(|(principal, secretary)| secretary_byline(principal, secretary, locale));
+    let base = secretary
+        .or_else(|| event.byline(locale))
         .map(|b| one_line(&b))
         .unwrap_or_else(|| match &event.on_behalf_of {
             Some(principal) => format!(
@@ -147,6 +151,31 @@ pub fn author(event: &Event, locale: Locale) -> String {
         })
         .unwrap_or_default();
     format!("{base}{guest}")
+}
+
+/// A secretary's answer for its principal ([`meta::TAKEOVER`] on an event
+/// written by a senator `on_behalf_of` another): the principal and the
+/// secretary.
+pub fn secretary_answer(event: &Event) -> Option<(&SenatorName, &SenatorName)> {
+    let secretary = event.from.as_senator()?;
+    let principal = event.on_behalf_of.as_ref()?.as_senator()?;
+    let takeover = event.meta.get(meta::TAKEOVER).and_then(|v| v.as_bool()) == Some(true);
+    takeover.then_some((principal, secretary))
+}
+
+/// The byline of an answer a secretary gave for its principal: the
+/// principal's answer given by its secretary.
+pub fn secretary_byline(
+    principal: &SenatorName,
+    secretary: &SenatorName,
+    locale: Locale,
+) -> String {
+    let principal = Address::senator(principal).in_text();
+    let secretary = Address::senator(secretary).in_text();
+    match locale {
+        Locale::Zh => format!("{principal}（由其 secretary {secretary} 代答）"),
+        Locale::En => format!("{principal} (answered by its secretary {secretary})"),
+    }
 }
 
 /// The platform the event came in from, as only the server can say.
@@ -237,6 +266,55 @@ fn as_speaker(event: &Event, locale: Locale) -> Option<String> {
     })
 }
 
+/// Set by the daemon (never stored) on an event it pushes to the session
+/// of a committee's chair because it was addressed to `chair` there: the
+/// committee. Removed from every event the daemon annotates, like
+/// [`SPEAKER_META`].
+pub const CHAIR_META: &str = "bridge_as_chair";
+
+/// ` · for you as chair of `ibot`` for an event addressed to `chair`.
+fn as_chair(event: &Event, locale: Locale) -> Option<String> {
+    let committee = one_line(event.meta.get(CHAIR_META)?.as_str()?);
+    Some(match locale {
+        Locale::Zh => format!(" · 给作为 `{committee}` 主席（chair）的你"),
+        Locale::En => format!(" · for you as chair of `{committee}`"),
+    })
+}
+
+/// Where a message came from when it started somewhere else
+/// ([`meta::ORIGIN`]), who answered a relayed answer
+/// ([`meta::ANSWERED_BY`]), and where a message on the desk was meant to
+/// go ([`meta::INTENDED`]): each a bracketed qualified name.
+fn crossing(event: &Event, locale: Locale) -> String {
+    let mut out = String::new();
+    if let Some(origin) = Origin::of(event) {
+        let from = one_line(&origin.locator.in_text());
+        out.push_str(&match locale {
+            Locale::Zh => format!(" · 转自 {from}"),
+            Locale::En => format!(" · forwarded from {from}"),
+        });
+    }
+    if let Some(by) = event.meta.get(meta::ANSWERED_BY).and_then(|v| v.as_str()) {
+        let by = by
+            .parse::<Locator>()
+            .map(|l| l.in_text())
+            .unwrap_or_else(|_| format!("[{by}]"));
+        let by = one_line(&by);
+        out.push_str(&match locale {
+            Locale::Zh => format!(" · 由 {by} 回答"),
+            Locale::En => format!(" · answered by {by}"),
+        });
+    }
+    if let Some(to) = senate_core::locator::intended(event) {
+        let to = one_line(&to.in_text());
+        out.push_str(&match locale {
+            Locale::Zh => format!(" · 原本发给 {to}"),
+            Locale::En => format!(" · meant for {to}"),
+        });
+    }
+    out
+}
+
 /// ` · for [senator::claude] (its work is yours now)` for an event
 /// pushed for reassigned work.
 fn covering(event: &Event, locale: Locale) -> String {
@@ -267,11 +345,25 @@ pub struct Reader {
     pub people: People,
     /// The agents run by the same person as the reader.
     pub own: BTreeSet<SenatorName>,
+    /// Each committee's chair, as far as the reader knows: a question or
+    /// request from the chair of its committee is handled directly.
+    pub chairs: BTreeMap<CommitteeId, SenatorName>,
 }
 
 impl Reader {
     pub fn new(me: Address, people: People, own: BTreeSet<SenatorName>) -> Self {
-        Self { me, people, own }
+        Self {
+            me,
+            people,
+            own,
+            chairs: BTreeMap::new(),
+        }
+    }
+
+    /// The same reader, knowing `committee`'s chair.
+    pub fn with_chair(mut self, committee: CommitteeId, chair: SenatorName) -> Self {
+        self.chairs.insert(committee, chair);
+        self
     }
 
     /// A reader that knows nothing of the Senate: no people, no own agents.
@@ -284,31 +376,68 @@ fn from_word(locale: Locale) -> &'static str {
     locale.pick("来自", "from")
 }
 
-/// How the sender of an event stands to the agent it is pushed to.
+/// How the sender of an event stands to the agent it is pushed to: the
+/// answering rule ([`footer`]). The agent handles directly a question or
+/// request from the Speaker's office, from its committee's chair and from
+/// another agent its own principal runs; from any other agent it answers a
+/// question directly and puts a request to its principal first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Sender {
+    /// The Speaker's office (`from: speaker`), speaking for itself.
+    Office,
+    /// The chair of the event's committee.
+    Chair,
     /// Another agent run by the same person.
     OwnAgent,
-    /// An agent of someone else.
+    /// Any other agent: someone else's, a child Senate's office, or a
+    /// message that started elsewhere ([`meta::ORIGIN`]).
     OtherAgent,
-    /// A person, the Speaker, a guest, or the receiver itself.
+    /// A person, a guest, or the receiver itself.
     Other,
 }
 
 /// The relation between `event.from` and the receiving `me`, from the log's
-/// own fields. A message written for someone (`on_behalf_of`) is the
-/// Speaker's, not an agent's.
+/// own fields. A message the Speaker's office relays for someone
+/// (`on_behalf_of`) stands as that someone: a person's is a person's, an
+/// agent's an agent's.
 fn sender_of(event: &Event, reader: &Reader) -> Sender {
-    let (Some(from), Some(me)) = (reader.people.as_agent(&event.from), reader.me.as_senator())
-    else {
+    let Some(me) = reader.me.as_senator() else {
         return Sender::Other;
     };
-    if event.on_behalf_of.is_some() || from == me {
-        Sender::Other
-    } else if reader.own.contains(from) {
-        Sender::OwnAgent
-    } else {
-        Sender::OtherAgent
+    let classify = |agent: &SenatorName| {
+        if agent == me {
+            Sender::Other
+        } else if reader.chairs.get(&event.committee) == Some(agent) {
+            Sender::Chair
+        } else if reader.own.contains(agent) {
+            Sender::OwnAgent
+        } else {
+            Sender::OtherAgent
+        }
+    };
+    if event.meta.contains_key(meta::ORIGIN) {
+        // It started elsewhere: whoever carried it here, it is someone
+        // else's agent's.
+        return match &event.from {
+            Address::Senator(s) if s == me => Sender::Other,
+            Address::Senator(s) if reader.people.is_person(s) => Sender::Other,
+            _ => Sender::OtherAgent,
+        };
+    }
+    match (&event.from, &event.on_behalf_of) {
+        (Address::Speaker, None) => Sender::Office,
+        (Address::Speaker, Some(behalf)) => match reader.people.as_agent(behalf) {
+            Some(agent) => classify(agent),
+            None => Sender::Other,
+        },
+        (Address::Chair, None) => Sender::Chair,
+        (Address::Child { .. }, _) => Sender::OtherAgent,
+        (from, None) => match reader.people.as_agent(from) {
+            Some(agent) => classify(agent),
+            None => Sender::Other,
+        },
+        // One senator writing for another (a secretary's answer).
+        (_, Some(_)) => Sender::Other,
     }
 }
 
@@ -339,16 +468,18 @@ pub fn header(event: &Event, locale: Locale) -> String {
 /// other agent says so.
 fn header_for(event: &Event, me: &Reader, locale: Locale) -> String {
     format!(
-        "[senate · {} · seq {} · {} {}{}{} · {}{}{}]",
+        "[senate · {} · seq {} · {} {}{}{}{} · {}{}{}{}]",
         event.committee,
         event.seq,
         from_word(locale),
         author(event, locale),
         own_agent_mark(event, me, locale),
         origin(event, locale),
+        crossing(event, locale),
         label(event, locale),
         covering(event, locale),
-        as_speaker(event, locale).unwrap_or_default()
+        as_speaker(event, locale).unwrap_or_default(),
+        as_chair(event, locale).unwrap_or_default()
     )
 }
 
@@ -409,6 +540,14 @@ pub fn footer(event: &Event, me: &Reader, locale: Locale) -> Option<String> {
         // answer in this session's own Senate.
         return match event.kind {
             Kind::Answer => None,
+            _ if event.meta.contains_key(meta::INTENDED) => Some(
+                locale
+                    .pick(
+                        "↳ 作为 Speaker 办公室处理：它要去另一个委员会，用 mcp__senate__speaker_forward 转过去，或 speaker_refuse 说明理由退回，或留给 Speaker",
+                        "↳ deal with it for the Speaker's office: it is meant for another committee; pass it on with mcp__senate__speaker_forward, send it back with a reason with speaker_refuse, or leave it for the Speaker",
+                    )
+                    .to_owned(),
+            ),
             _ => Some(
                 locale
                     .pick(
@@ -418,6 +557,16 @@ pub fn footer(event: &Event, me: &Reader, locale: Locale) -> Option<String> {
                     .to_owned(),
             ),
         };
+    }
+    if event.meta.contains_key(CHAIR_META) && event.kind != Kind::Answer {
+        return Some(
+            locale
+                .pick(
+                    "↳ 作为委员会主席（chair）处理：mcp__senate__chair_docket 列出它，然后 chair_route、chair_cover 或 chair_escalate",
+                    "↳ deal with it as the committee's chair: mcp__senate__chair_docket lists it, then chair_route, chair_cover or chair_escalate",
+                )
+                .to_owned(),
+        );
     }
     let root = event.thread.unwrap_or(event.seq);
     let answer = format!("mcp__senate__answer(thread={root})");
@@ -432,6 +581,34 @@ pub fn footer(event: &Event, me: &Reader, locale: Locale) -> Option<String> {
     let escalate = format!("mcp__senate__escalate(thread={root})");
     match &event.kind {
         Kind::Question | Kind::Request => Some(match (sender, &event.kind, locale) {
+            (Sender::Office, Kind::Question, Locale::Zh) => format!(
+                "↳ 这是 Speaker 办公室的问题：直接回答，不用先问你的用户，用 {answer} 回复{back}"
+            ),
+            (Sender::Office, Kind::Question, Locale::En) => format!(
+                "↳ a question from the Speaker's office: answer it directly, without asking your \
+                 user first, with {answer}{back}"
+            ),
+            (Sender::Office, _, Locale::Zh) => format!(
+                "↳ 这是 Speaker 办公室的请求：直接去做，不用先问你的用户，做完用 {answer} 回复{back}"
+            ),
+            (Sender::Office, _, Locale::En) => format!(
+                "↳ a request from the Speaker's office: do it directly, without asking your user \
+                 first, then report with {answer}{back}"
+            ),
+            (Sender::Chair, Kind::Question, Locale::Zh) => format!(
+                "↳ 这是你所在委员会的主席（chair）的问题：直接回答，不用先问你的用户，用 {answer} 回复{back}"
+            ),
+            (Sender::Chair, Kind::Question, Locale::En) => format!(
+                "↳ a question from your committee's chair: answer it directly, without asking \
+                 your user first, with {answer}{back}"
+            ),
+            (Sender::Chair, _, Locale::Zh) => format!(
+                "↳ 这是你所在委员会的主席（chair）的请求：直接去做，不用先问你的用户，做完用 {answer} 回复{back}"
+            ),
+            (Sender::Chair, _, Locale::En) => format!(
+                "↳ a request from your committee's chair: do it directly, without asking your \
+                 user first, then report with {answer}{back}"
+            ),
             (Sender::OwnAgent, Kind::Question, Locale::Zh) => format!(
                 "↳ 这是你的用户自己的另一个 agent 的问题：直接回答，不用先问你的用户，\
                  用 {answer} 回复{back}"

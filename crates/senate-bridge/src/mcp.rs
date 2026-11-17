@@ -5,13 +5,17 @@
 //! `inbox`), plus one resource per committee,
 //! `senate://<committee>/brief`: the committee's brief as Markdown.
 //!
-//! A session whose agent holds a Senate's Speaker's seat also gets the
+//! A session whose agent works the Speaker's desk (the Speaker itself when
+//! it is an agent, or one of the Speaker's secretaries) also gets the
 //! presiding tools ([`PRESIDING_TOOLS`]: `speaker_docket`, `speaker_route`,
-//! `speaker_cover`, `speaker_escalate`; see [`crate::preside`]). The tool
-//! list asks the daemon whether the session presides (`presides`, with the
-//! session's own agent pins, so it works before the session's first hook)
-//! and leaves them out for every session that does not; the daemon refuses
-//! them from such a session anyway.
+//! `speaker_cover`, `speaker_escalate`, `speaker_forward`, `speaker_refuse`,
+//! `speaker_chair`; see [`crate::preside`]): each acts for the Speaker's
+//! office, recorded with the agent that acted. A session whose agent chairs
+//! its committee gets the chair tools ([`CHAIR_TOOLS`]). The tool list asks
+//! the daemon (`presides`, with the session's own agent pins, so it works
+//! before the session's first hook) and leaves them out for every other
+//! session; the daemon refuses them from such a session anyway. Every
+//! session has `secretary` (its own agent's secretaries).
 //!
 //! Tool names, parameters and JSON fields are identifiers and the same in
 //! every language; tool descriptions are English. The text a tool returns
@@ -24,7 +28,11 @@
 //! `senator::codex` (that agent), `senator::*` (whichever agent on the
 //! committee should get it), or just `codex` (the same as
 //! `senator::codex`: a bare name is that senator); a bracketed mention
-//! copied from a message (`[senator::codex]`) works too. When several
+//! copied from a message (`[senator::codex]`) works too. `ask` and `post`
+//! (with `to`) also take one qualified name: `ibot::codex`,
+//! `/acme::ibot::codex`, `ibot::speaker`, `ibot::chair`. One on another
+//! committee is written on the session's own committee to the Speaker's
+//! desk (the boundary rule), and the tool says so. When several
 //! agents are on the committee the server refuses `senator::*` with the
 //! candidates, and the tool result lists them so the agent names one and
 //! asks again.
@@ -70,8 +78,9 @@ use serde::de::DeserializeOwned;
 use crate::catch_up;
 use crate::format;
 use crate::ipc::{
-    self, BoundReply, CatchUpReply, CheckpointReply, ClientError, DocketReply, InboxReply,
-    JoinReply, Posted, PresidesReply, Request, SearchReply, SessionSelector,
+    self, BoundReply, CatchUpReply, ChairDocketReply, CheckpointReply, ClientError, DocketReply,
+    EscalateReply, EscalatedTo, Forwarded, InboxReply, JoinReply, Posted, PresidesReply, Request,
+    SayKind, SearchReply, SecretariesReply, SecretaryOp, SendReply, SessionSelector,
 };
 use crate::session::Runtime;
 
@@ -88,13 +97,41 @@ const BRIEF_SCHEME: &str = "senate://";
 const BRIEF_SUFFIX: &str = "/brief";
 const MARKDOWN: &str = "text/markdown";
 
-/// The tools only a presiding session is given.
-pub const PRESIDING_TOOLS: [&str; 4] = [
+/// The tools only a session working the Speaker's desk is given: each acts
+/// for the Speaker's office.
+pub const PRESIDING_TOOLS: [&str; 7] = [
     "speaker_docket",
     "speaker_route",
     "speaker_cover",
     "speaker_escalate",
+    "speaker_forward",
+    "speaker_refuse",
+    "speaker_chair",
 ];
+
+/// The tools only the session of a committee's chair is given.
+pub const CHAIR_TOOLS: [&str; 4] = [
+    "chair_docket",
+    "chair_route",
+    "chair_cover",
+    "chair_escalate",
+];
+
+const SPEAKER_FORWARD: &str = "For the Speaker's office (only the session working the Speaker's desk has this tool): pass on an item from speaker_docket that an agent meant for another committee (it shows \"meant for <qualified name>\"; the boundary rule put it on the desk). A new message goes to that seat from the Speaker's office, naming where it came from, and a note in the asker's thread says where it went; the answer comes back to the asker's thread. Forward what is plainly fine to pass on; send back what should not cross with speaker_refuse, or leave it for the Speaker. Only a seat of this Senate. `committee` and `seq`: as speaker_docket lists the item.";
+
+const SPEAKER_REFUSE: &str = "For the Speaker's office (only the session working the Speaker's desk has this tool): send an item from speaker_docket back to its sender instead of passing it on: an answer in the asker's thread with your reason, recorded as the Speaker's office with you named. Use it for a message meant for another committee that should not cross (it belongs to the asker's own committee, it asks for what the other side should not give, it is unclear). `committee` and `seq`: as speaker_docket lists the item. `reason`: one or two sentences the asker reads.";
+
+const SPEAKER_CHAIR: &str = "For the Speaker's office (only the session working the Speaker's desk has this tool): make a senator the chair of a committee. The chair picks the agent for a message to whichever agent there, covers for an absent member from its own checkpoint, and receives the members' escalations. `senator`: the new chair, e.g. `claude` or `senator::alice`. `committee`: defaults to this session's committee.";
+
+const CHAIR_DOCKET: &str = "You chair this session's committee (only the chair's session has this tool). List what awaits the chair there: messages to whichever agent (`senator::*`) the sender could not pick, messages addressed to `chair`, and questions to absent members with no answer yet; with each member's presence, latest checkpoint and open threads, and the latest checkpoint of every absent member an item names.";
+
+const CHAIR_ROUTE: &str = "As chair of this session's committee, hand an item from chair_docket to one member: it is relayed to that agent in your name, with the asker as its origin, so the answer goes back to the asker's thread. For a message to whichever agent, `to` must be one of its candidates. A question to an absent member is never rerouted: use chair_cover. `seq`: as chair_docket lists the item. `to`: the agent.";
+
+const CHAIR_COVER: &str = "As chair of this session's committee, answer a question to an absent member from that member's own latest checkpoint (chair_docket shows it), in your name, saying for whom, pointing at the checkpoint's branch and commit. Answer only from what the checkpoint says; otherwise use chair_escalate. `thread`: the question's seq. `body`: the answer, self-contained. `agent`: which member, when the question went to several.";
+
+const CHAIR_ESCALATE: &str = "As chair of this session's committee, put an item from chair_docket you cannot settle one step up: to the Speaker's desk (a secretary, then the Speaker), with the asker as its origin. `seq`: as chair_docket lists the item. `reason`: what is needed and why you could not settle it.";
+
+const SECRETARY: &str = "List, add or remove the secretaries of this session's agent: senators (another agent of this Senate, or the built-in session) that act for it while it is away, in order, the first present acting. A secretary answers a question to your agent from your agent's own checkpoint and notes, labelled as your agent's answer given by its secretary; it never performs a request. `action`: `list`, `add` or `remove`. `secretary`: the agent to add or remove, e.g. `codex`. Only your agent itself, the principal that runs it, or the Speaker's office may change its secretaries; anyone else is refused.";
 
 const SPEAKER_DOCKET: &str = "You preside over a Senate as its Speaker (this tool is only given to the session that does). List what awaits the Speaker there: messages written to whichever agent (`senator::*`) when several agents could get them (pick one with speaker_route), messages addressed to the Speaker, and questions to agents of that Senate that are away and unanswered (answer for them from their own checkpoint with speaker_cover). For each agent seated there it shows its presence, latest checkpoint and open threads, the facts to pick by; for each away agent an item names, its latest checkpoint in full. `committee`: one committee only; by default every committee of that Senate.";
 
@@ -128,10 +165,13 @@ shared committee log and pushed into that agent's running session. Do not wait o
 `[senate · … · answer in thread <seq>]` message, and if the agent is away the Speaker may \
 answer from its checkpoint on its behalf. `to`: who to ask, several separated by commas. \
 Address forms: `senator::codex` or just `codex` (that agent), `senator::*` (whichever agent on \
-this committee should get it); a bracketed id copied from a message works too. If several \
-agents could get `senator::*`, the result lists them: pick one and ask again. Only agents can be asked: the Speaker \
-does not take questions and a person is not reached through `ask`, so for a person ask their \
-agent or tell your user. `body`: the whole question, self-contained; the reader has none of \
+this committee should get it), `chair` (your committee's chair), `speaker` (the Speaker's \
+desk); a bracketed id copied from a message works too. One qualified name reaches another \
+committee or Senate: `ibot::codex` (the agent codex on the committee ibot), \
+`/acme::ibot::codex` (in the Senate /acme), `ibot::speaker`, `ibot::chair`; it is put to the \
+Speaker's desk on the way (the boundary rule), and the result says so. If several \
+agents could get `senator::*`, the result lists them: pick one and ask again. A person is not \
+reached through `ask`, so for a person ask their agent or tell your user. `body`: the whole question, self-contained; the reader has none of \
 your context. `request`: set it when you ask them to change something (code, an interface, \
 a plan) rather than to answer; a request always goes to their person first, who may hand it to \
 their agent. `refs`: optional pointers into code (repo-relative `path`, `commit`); your branch \
@@ -176,7 +216,10 @@ const POST: &str = "Leave a note on a Senate committee for the team: a status up
 about a change others depend on, a finding worth keeping. It is addressed to no one: it is \
 recorded in the shared committee log, where every teammate's agent reads it through catch_up and \
 search, and nobody is interrupted. To get an answer from someone use ask instead; to settle \
-something for the team use propose_decision. `body`: self-contained; readers have none of your \
+something for the team use propose_decision. `to` (optional) tells someone instead: an \
+address on this committee (`codex`, `senator::alice`, `chair`, `speaker`) or one qualified name \
+(`ibot::codex`, `/acme::ibot::codex`, `ibot::speaker`, `ibot::chair`), which is put to the \
+Speaker's desk on the way. `body`: self-contained; readers have none of your \
 context. `committee`: defaults to this session's committee.";
 
 const PROPOSE_DECISION: &str = "Propose a decision for the team on a Senate committee: an API \
@@ -263,6 +306,90 @@ pub struct PostParams {
     /// Committee id; defaults to this session's committee.
     #[serde(default)]
     pub committee: Option<String>,
+    /// Tell someone instead of the whole committee: an address here, or
+    /// one qualified name (`ibot::codex`, `ibot::speaker`).
+    #[serde(default)]
+    pub to: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ProposeParams {
+    /// The text, self-contained.
+    pub body: String,
+    /// Committee id; defaults to this session's committee.
+    #[serde(default)]
+    pub committee: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ForwardParams {
+    /// The item's committee, as speaker_docket lists it.
+    pub committee: String,
+    /// The item's seq.
+    pub seq: u64,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct RefuseParams {
+    /// The item's committee.
+    pub committee: String,
+    /// The item's seq.
+    pub seq: u64,
+    /// Why it is sent back; the asker reads it.
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct SetChairParams {
+    /// The new chair: `claude`, `senator::alice`.
+    pub senator: String,
+    /// Committee id; defaults to this session's committee.
+    #[serde(default)]
+    pub committee: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ChairRouteParams {
+    /// The item's seq, as chair_docket lists it.
+    pub seq: u64,
+    /// The member to hand it to.
+    pub to: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ChairCoverParams {
+    /// The question's seq (the thread's root).
+    pub thread: u64,
+    /// The answer, from the absent member's own checkpoint.
+    pub body: String,
+    /// Which member you answer for, when the question went to several.
+    #[serde(default)]
+    pub agent: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ChairEscalateParams {
+    /// The item's seq.
+    pub seq: u64,
+    /// What is needed, and why you could not settle it.
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct SecretaryParams {
+    /// `list`, `add` or `remove`.
+    pub action: String,
+    /// The agent to add or remove.
+    #[serde(default)]
+    pub secretary: Option<String>,
 }
 
 const CHECKPOINT: &str = "Leave a checkpoint on this session's Senate committee: a handover note \
@@ -289,14 +416,14 @@ thread or takes it: a later `status` (ticking off steps, `active`) updates the c
 withdraw it. Only when it no longer needs them, pass `withdraw_escalation: true` with the `state` \
 to go back to.";
 
-const ESCALATE: &str = "Hand a received Senate question or request to a person instead of \
-answering it yourself. Not the default: questions, and requests from your user's own other \
-agents, are handled directly with `answer`; use this when it needs your user's judgement (a trade-off, a priority, a change \
-to an interface or plan), or you cannot answer it from the code and the log. The Speaker \
-mentions the person in the thread and tells the asker it went to them. `to` is a person: \
-`senator::<person>` or just the handle, and defaults to your own user; `reason` is one line \
-shown in the thread and in their inbox: put what you need from them in it. It stays with them \
-until they reply or take the thread, whatever `status` you report meanwhile.";
+const ESCALATE: &str = "Hand a received Senate question or request on instead of answering it \
+yourself. Not the default: questions, and requests from the Speaker's office, your committee's \
+chair or your user's own other agents, are handled directly with `answer`. With `to` (a person: \
+`senator::<person>` or just the handle; name your user for a decision that is theirs: a \
+trade-off, a priority, a change to an interface or plan) the thread waits on that person until \
+they reply or take it, whatever `status` you report meanwhile. Without `to` it goes one step up: \
+to your committee's chair; from the chair (or with no chair) to the Speaker's desk; from the \
+Speaker's desk to the Speaker. `reason` is shown with it: put what you need in it.";
 
 const TAKE: &str = "Take a Senate task thread over as your user, in their name: run this only \
 when your user asks for it (`/senate take <seq>`). Anything still waiting to be pushed to an \
@@ -822,6 +949,59 @@ pub fn parse_address(raw: &str) -> Result<Address, String> {
     })
 }
 
+/// Who a tool writes to: addresses on the session's own committee, or one
+/// qualified name elsewhere.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Targets {
+    Here(Vec<Address>),
+    At(Locator),
+}
+
+/// `to` as `ask` and `post` take it: addresses here in any form
+/// [`parse_address`] reads, or one qualified name (`ibot::codex`,
+/// `/acme::ibot::codex`, `ibot::speaker`, `ibot::chair`) on its own.
+pub fn parse_targets(to: &str) -> Result<Targets, String> {
+    let raws: Vec<&str> = to
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let mut here: Vec<Address> = Vec::new();
+    let mut at: Option<Locator> = None;
+    for raw in &raws {
+        let raw = raw.trim().trim_start_matches('@');
+        let locator = if raw.starts_with('[') {
+            raw.parse::<Mention>()
+                .map(|m| m.locator())
+                .map_err(|e| format!("`{raw}` is not an address ({e})"))?
+        } else {
+            Locator::parse_short(raw).map_err(|e| {
+                format!(
+                    "`{raw}` is not an address ({e}); write senator::<name> (or just the name), \
+                     * for whichever agent, or a qualified name such as ibot::codex"
+                )
+            })?
+        };
+        match locator.as_address() {
+            Some(addr) => {
+                if !here.contains(&addr) {
+                    here.push(addr);
+                }
+            }
+            None => at = Some(locator),
+        }
+    }
+    match (at, here.is_empty()) {
+        (Some(at), true) if raws.len() == 1 => Ok(Targets::At(at)),
+        (Some(_), _) => Err(
+            "a qualified name (another committee or Senate) goes alone in `to`: write to one seat \
+             elsewhere at a time"
+                .into(),
+        ),
+        (None, false) => Ok(Targets::Here(here)),
+        (None, true) => Err("`to` is empty; name who to write to, e.g. senator::codex".into()),
+    }
+}
+
 /// `senator::codex, gemini` → addresses, in order, without repeats.
 pub fn parse_recipients(to: &str) -> Result<Vec<Address>, String> {
     let mut out: Vec<Address> = Vec::new();
@@ -1057,9 +1237,10 @@ impl SenateMcp {
         self
     }
 
-    /// Whether this session presides over a Senate: whether it gets the
-    /// presiding tools. Anything the daemon cannot say is "no".
-    pub async fn presides(&self) -> bool {
+    /// What this session's agent is: whether it works the Speaker's desk,
+    /// and which committees it chairs. Anything the daemon cannot say is
+    /// "neither".
+    pub async fn roles(&self) -> (bool, bool) {
         let reply: Result<PresidesReply, _> = self
             .call(&Request::Presides {
                 session: self.selector.clone(),
@@ -1069,22 +1250,30 @@ impl SenateMcp {
             })
             .await;
         match reply {
-            Ok(reply) => reply.presiding.is_some(),
+            Ok(reply) => (reply.presiding.is_some(), !reply.chairs.is_empty()),
             Err(e) => {
-                tracing::debug!("listing tools without the presiding ones: {e}");
-                false
+                tracing::debug!("listing tools without the presiding or chair ones: {e}");
+                (false, false)
             }
         }
     }
 
-    /// The tools this session is given: all of them when it presides, all
-    /// but [`PRESIDING_TOOLS`] otherwise.
+    /// Whether this session works the Speaker's desk: whether it gets the
+    /// presiding tools.
+    pub async fn presides(&self) -> bool {
+        self.roles().await.0
+    }
+
+    /// The tools this session is given: [`PRESIDING_TOOLS`] only when it
+    /// works the Speaker's desk, [`CHAIR_TOOLS`] only when its agent chairs
+    /// its committee, every other tool always.
     pub async fn tools(&self) -> Vec<rmcp::model::Tool> {
-        let presides = self.presides().await;
+        let (presides, chairs) = self.roles().await;
         self.tool_router
             .list_all()
             .into_iter()
             .filter(|t| presides || !PRESIDING_TOOLS.contains(&t.name.as_ref()))
+            .filter(|t| chairs || !CHAIR_TOOLS.contains(&t.name.as_ref()))
             .collect()
     }
 
@@ -1145,12 +1334,29 @@ impl SenateMcp {
     async fn ask(&self, params: Parameters<AskParams>) -> Result<String, String> {
         let p = params.0;
         let l = self.locale;
-        let to = parse_ask_recipients(&p.to, l)?;
         let refs = p.refs.map(|r| Refs {
             path: r.path,
             commit: r.commit,
             branch: r.branch,
         });
+        let kind = if p.request {
+            SayKind::Request
+        } else {
+            SayKind::Question
+        };
+        let to = match parse_targets(&p.to)? {
+            Targets::At(at) => {
+                return self.send(kind, Vec::new(), Some(at), p.body, refs).await;
+            }
+            Targets::Here(to)
+                if to
+                    .iter()
+                    .any(|a| matches!(a, Address::Speaker | Address::Chair)) =>
+            {
+                return self.send(kind, to, None, p.body, refs).await;
+            }
+            Targets::Here(_) => parse_ask_recipients(&p.to, l)?,
+        };
         let posted = self
             .append(Request::Ask {
                 session: self.selector.clone(),
@@ -1278,6 +1484,22 @@ impl SenateMcp {
     async fn post_note(&self, params: Parameters<PostParams>) -> Result<String, String> {
         let p = params.0;
         let l = self.locale;
+        if let Some(to) = p.to.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+            if p.committee.is_some() {
+                return Err(
+                    "`to` writes on this session's committee (a qualified name reaches another); \
+                     leave `committee` out"
+                        .into(),
+                );
+            }
+            return match parse_targets(to)? {
+                Targets::At(at) => {
+                    self.send(SayKind::Note, Vec::new(), Some(at), p.body, None)
+                        .await
+                }
+                Targets::Here(to) => self.send(SayKind::Note, to, None, p.body, None).await,
+            };
+        }
         let posted = self
             .append(Request::Post {
                 session: self.selector.clone(),
@@ -1300,8 +1522,31 @@ impl SenateMcp {
         })
     }
 
+    /// An agent writes through `send`, and is told where it went.
+    async fn send(
+        &self,
+        kind: SayKind,
+        to: Vec<Address>,
+        at: Option<Locator>,
+        body: String,
+        refs: Option<Refs>,
+    ) -> Result<String, String> {
+        let reply: SendReply = self
+            .call_appending(&Request::Send {
+                session: self.selector.clone(),
+                kind,
+                to,
+                at,
+                body,
+                refs,
+                id: Some(EventId::new()),
+            })
+            .await?;
+        Ok(render_sent(&reply, kind, self.locale))
+    }
+
     #[tool(name = "propose_decision", description = PROPOSE_DECISION)]
-    async fn propose_decision(&self, params: Parameters<PostParams>) -> Result<String, String> {
+    async fn propose_decision(&self, params: Parameters<ProposeParams>) -> Result<String, String> {
         let p = params.0;
         let l = self.locale;
         let posted = self
@@ -1385,8 +1630,8 @@ impl SenateMcp {
                 .filter(|t| !t.is_empty())
                 .map(parse_person)
                 .transpose()?;
-        let posted = self
-            .append(Request::Escalate {
+        let reply: EscalateReply = self
+            .call_appending(&Request::Escalate {
                 session: self.selector.clone(),
                 thread: Seq(p.thread),
                 to,
@@ -1394,19 +1639,7 @@ impl SenateMcp {
                 id: Some(EventId::new()),
             })
             .await?;
-        let thread = posted.thread.unwrap_or(Seq(p.thread));
-        let (c, seq, again) = (&posted.committee, posted.seq, already(&posted, l));
-        Ok(match l {
-            Locale::Zh => format!(
-                "已把 {c} 上的 thread {thread} 交给一个人（seq {seq}）{again}。Speaker 会在 thread 里\
-                 提到他并告诉提问的人；除非他们让你答，不要自己回答。"
-            ),
-            Locale::En => format!(
-                "Handed thread {thread} on {c} to a person (seq {seq}){again}. The Speaker \
-                 mentions them in the thread and tells the asker; do not answer it yourself unless \
-                 they ask you to."
-            ),
-        })
+        Ok(render_escalated(&reply, Seq(p.thread), l))
     }
 
     #[tool(name = "take", description = TAKE)]
@@ -1554,6 +1787,201 @@ impl SenateMcp {
         })
     }
 
+    #[tool(name = "speaker_forward", description = SPEAKER_FORWARD)]
+    async fn speaker_forward(&self, params: Parameters<ForwardParams>) -> Result<String, String> {
+        let p = params.0;
+        let l = self.locale;
+        let committee = committee_arg(Some(p.committee))?.ok_or("`committee` is empty")?;
+        let reply: Forwarded = self
+            .call_appending(&Request::Forward {
+                session: self.selector.clone(),
+                committee,
+                seq: Seq(p.seq),
+                id: Some(EventId::new()),
+            })
+            .await?;
+        let to = reply.to.in_text();
+        let (c, seq) = (&reply.posted.committee, reply.posted.seq);
+        Ok(match l {
+            Locale::Zh => format!(
+                "已代表 Speaker 办公室把 seq {} 转给 {to}（{c} 上的 seq {seq}），并在提问者的 thread 里留了说明。",
+                p.seq
+            ),
+            Locale::En => format!(
+                "Forwarded seq {} for the Speaker's office to {to} (seq {seq} on {c}), with a note \
+                 in the asker's thread.",
+                p.seq
+            ),
+        })
+    }
+
+    #[tool(name = "speaker_refuse", description = SPEAKER_REFUSE)]
+    async fn speaker_refuse(&self, params: Parameters<RefuseParams>) -> Result<String, String> {
+        let p = params.0;
+        let l = self.locale;
+        let committee = committee_arg(Some(p.committee))?.ok_or("`committee` is empty")?;
+        let posted = self
+            .append(Request::Refuse {
+                session: self.selector.clone(),
+                committee,
+                seq: Seq(p.seq),
+                reason: p.reason,
+                id: Some(EventId::new()),
+            })
+            .await?;
+        let (c, seq, again) = (&posted.committee, posted.seq, already(&posted, l));
+        let to = mentions(&posted.to);
+        Ok(match l {
+            Locale::Zh => format!(
+                "已代表 Speaker 办公室把 {c} 上的 seq {} 退回给 {to}，附上理由（seq {seq}）{again}。",
+                p.seq
+            ),
+            Locale::En => format!(
+                "Sent seq {} on {c} back to {to} with the reason, for the Speaker's office (seq \
+                 {seq}){again}.",
+                p.seq
+            ),
+        })
+    }
+
+    #[tool(name = "speaker_chair", description = SPEAKER_CHAIR)]
+    async fn speaker_chair(&self, params: Parameters<SetChairParams>) -> Result<String, String> {
+        let p = params.0;
+        let senator = parse_senator(&p.senator)?;
+        let info: senate_core::api::ChairInfo = self
+            .call(&Request::SetChair {
+                session: self.selector.clone(),
+                committee: committee_arg(p.committee)?,
+                senator,
+            })
+            .await
+            .map_err(|e| describe(e, self.locale))?;
+        Ok(render_chair_set(&info, self.locale))
+    }
+
+    #[tool(name = "chair_docket", description = CHAIR_DOCKET)]
+    async fn chair_docket(&self) -> Result<String, String> {
+        let reply: ChairDocketReply = self
+            .call(&Request::ChairDocket {
+                session: self.selector.clone(),
+            })
+            .await
+            .map_err(|e| describe(e, self.locale))?;
+        Ok(crate::preside::render_chair_docket(&reply, self.locale))
+    }
+
+    #[tool(name = "chair_route", description = CHAIR_ROUTE)]
+    async fn chair_route(&self, params: Parameters<ChairRouteParams>) -> Result<String, String> {
+        let p = params.0;
+        let l = self.locale;
+        let to = parse_senator(&p.to)?;
+        let posted = self
+            .append(Request::ChairRoute {
+                session: self.selector.clone(),
+                seq: Seq(p.seq),
+                to: to.clone(),
+                id: Some(EventId::new()),
+            })
+            .await?;
+        let (c, seq, again) = (&posted.committee, posted.seq, already(&posted, l));
+        let to = Address::senator(&to).in_text();
+        Ok(match l {
+            Locale::Zh => format!(
+                "已作为主席（chair）把 {c} 上的 seq {} 交给 {to}（seq {seq}）{again}；回答会回到提问者的 thread。",
+                p.seq
+            ),
+            Locale::En => format!(
+                "As chair, handed seq {} on {c} to {to} (seq {seq}){again}; the answer goes back \
+                 to the asker's thread.",
+                p.seq
+            ),
+        })
+    }
+
+    #[tool(name = "chair_cover", description = CHAIR_COVER)]
+    async fn chair_cover(&self, params: Parameters<ChairCoverParams>) -> Result<String, String> {
+        let p = params.0;
+        let l = self.locale;
+        let agent = p
+            .agent
+            .as_deref()
+            .map(str::trim)
+            .filter(|a| !a.is_empty())
+            .map(parse_senator)
+            .transpose()?;
+        let posted = self
+            .append(Request::ChairCover {
+                session: self.selector.clone(),
+                thread: Seq(p.thread),
+                body: p.body,
+                agent,
+                id: Some(EventId::new()),
+            })
+            .await?;
+        let (c, seq, again) = (&posted.committee, posted.seq, already(&posted, l));
+        Ok(match l {
+            Locale::Zh => format!(
+                "已作为主席（chair）代那个成员回答 {c} 上的 thread {}（seq {seq}）{again}。",
+                p.thread
+            ),
+            Locale::En => format!(
+                "As chair, answered thread {} on {c} for the absent member (seq {seq}){again}.",
+                p.thread
+            ),
+        })
+    }
+
+    #[tool(name = "chair_escalate", description = CHAIR_ESCALATE)]
+    async fn chair_escalate(
+        &self,
+        params: Parameters<ChairEscalateParams>,
+    ) -> Result<String, String> {
+        let p = params.0;
+        let l = self.locale;
+        let posted = self
+            .append(Request::ChairEscalate {
+                session: self.selector.clone(),
+                seq: Seq(p.seq),
+                reason: p.reason,
+                id: Some(EventId::new()),
+            })
+            .await?;
+        let (c, seq, again) = (&posted.committee, posted.seq, already(&posted, l));
+        Ok(match l {
+            Locale::Zh => format!(
+                "已把 {c} 上的 seq {} 交给 Speaker 的办公桌（seq {seq}）{again}。",
+                p.seq
+            ),
+            Locale::En => format!(
+                "Put seq {} on {c} to the Speaker's desk (seq {seq}){again}.",
+                p.seq
+            ),
+        })
+    }
+
+    #[tool(name = "secretary", description = SECRETARY)]
+    async fn secretary(&self, params: Parameters<SecretaryParams>) -> Result<String, String> {
+        let p = params.0;
+        let action = parse_secretary_op(&p.action)?;
+        let secretary = p
+            .secretary
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(parse_senator)
+            .transpose()?;
+        let reply: SecretariesReply = self
+            .call(&Request::Secretaries {
+                session: self.selector.clone(),
+                action,
+                for_: None,
+                secretary,
+            })
+            .await
+            .map_err(|e| describe(e, self.locale))?;
+        Ok(render_secretaries(&reply, self.locale))
+    }
+
     #[tool(name = "checkpoint", description = CHECKPOINT)]
     async fn checkpoint(&self, params: Parameters<CheckpointParams>) -> Result<String, String> {
         let p = params.0;
@@ -1583,6 +2011,157 @@ impl SenateMcp {
             .await
             .map_err(|e| describe(e, self.locale))?;
         Ok(brief.to_markdown(self.locale, brief::DEFAULT_MARKDOWN_CHARS))
+    }
+}
+
+/// One senator, as a tool takes it: `claude`, `senator::claude`,
+/// `[senator::claude]`.
+pub fn parse_senator(raw: &str) -> Result<senate_core::SenatorName, String> {
+    match parse_address(raw)? {
+        Address::Senator(name) => Ok(name),
+        other => Err(format!("{} is not one senator; name one", other.in_text())),
+    }
+}
+
+/// `list`, `add`, `remove`.
+pub fn parse_secretary_op(raw: &str) -> Result<SecretaryOp, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "list" => Ok(SecretaryOp::List),
+        "add" => Ok(SecretaryOp::Add),
+        "remove" => Ok(SecretaryOp::Remove),
+        other => Err(format!("unknown action {other:?}: use list, add or remove")),
+    }
+}
+
+/// A senator's secretaries, in order.
+pub fn render_secretaries(reply: &SecretariesReply, locale: Locale) -> String {
+    let who = Address::senator(&reply.senator).in_text();
+    if reply.secretaries.is_empty() {
+        return match locale {
+            Locale::Zh => format!("{who} 没有 secretary。"),
+            Locale::En => format!("{who} has no secretary."),
+        };
+    }
+    let list = reply
+        .secretaries
+        .iter()
+        .map(|s| Address::senator(s).in_text())
+        .collect::<Vec<_>>()
+        .join(", ");
+    match locale {
+        Locale::Zh => format!("{who} 的 secretary，按顺序（第一个在场的代为处理）：{list}"),
+        Locale::En => {
+            format!("{who}'s secretaries, in order (the first present acts): {list}")
+        }
+    }
+}
+
+/// A committee's chair, after it was set.
+pub fn render_chair_set(info: &senate_core::api::ChairInfo, locale: Locale) -> String {
+    let c = &info.committee;
+    match (&info.chair, locale) {
+        (Some(chair), Locale::Zh) => format!(
+            "{} 现在是委员会 `{c}` 的主席（chair）。",
+            Address::senator(chair).in_text()
+        ),
+        (Some(chair), Locale::En) => format!(
+            "{} now chairs the committee `{c}`.",
+            Address::senator(chair).in_text()
+        ),
+        (None, Locale::Zh) => format!("委员会 `{c}` 还没有主席（chair）。"),
+        (None, Locale::En) => format!("The committee `{c}` has no chair yet."),
+    }
+}
+
+/// What `ask` or `post` with `to` tells: delivered, or put to which
+/// Speaker's desk on the way to a seat elsewhere.
+pub fn render_sent(reply: &SendReply, kind: SayKind, locale: Locale) -> String {
+    let posted = &reply.posted;
+    let (c, seq, again) = (&posted.committee, posted.seq, already(posted, locale));
+    let what = match (kind, locale) {
+        (SayKind::Question, Locale::Zh) => "问题",
+        (SayKind::Request, Locale::Zh) => "请求",
+        (SayKind::Note, Locale::Zh) => "留言",
+        (SayKind::Question, Locale::En) => "question",
+        (SayKind::Request, Locale::En) => "request",
+        (SayKind::Note, Locale::En) => "note",
+    };
+    if let Some(intended) = reply.intended.as_ref().filter(|_| reply.on_the_desk()) {
+        let to = intended.in_text();
+        let speaker = reply
+            .speaker
+            .as_ref()
+            .map(|s| s.in_text())
+            .unwrap_or_else(|| "[speaker]".into());
+        let senate = crate::daemon::senate_words(reply.senate.as_ref(), locale);
+        return match locale {
+            Locale::Zh => format!(
+                "{to} 在另一个委员会：你的{what}（{c} 上的 seq {seq}）{again}先放到了 {senate} 的 Speaker {speaker} 的办公桌上（边界规则），\
+                 由办公桌转过去，或说明理由退回。回答会回到 thread {seq}；不用等，也不用轮询。"
+            ),
+            Locale::En => format!(
+                "{to} is on another committee: your {what} (seq {seq} on {c}){again} was put to the \
+                 desk of {speaker}, the Speaker of {senate} (the boundary rule), which forwards it \
+                 or sends it back with a reason. The answer comes back in thread {seq}; no need to \
+                 wait or poll."
+            ),
+        };
+    }
+    let who = mentions(&posted.to);
+    match (kind, locale) {
+        (SayKind::Note, Locale::Zh) => format!("已在 {c} 上告诉 {who}（seq {seq}）{again}。"),
+        (SayKind::Note, Locale::En) => format!("Told {who} on {c} (seq {seq}){again}."),
+        (_, Locale::Zh) => format!(
+            "已在 {c} 上把{what}交给 {who}（seq {seq}）{again}。回答会以 \
+             `[senate · {c} · … · answer，thread {seq}]` 消息推到这个会话里；不用等，也不用轮询。"
+        ),
+        (_, Locale::En) => format!(
+            "Sent your {what} to {who} on {c} (seq {seq}){again}. The answer will be pushed into \
+             this session as a `[senate · {c} · … · answer in thread {seq}]` message; no need to \
+             wait or poll."
+        ),
+    }
+}
+
+/// What `escalate` tells: where the thread went.
+pub fn render_escalated(reply: &EscalateReply, thread: Seq, locale: Locale) -> String {
+    let posted = &reply.posted;
+    let (c, seq, again) = (&posted.committee, posted.seq, already(posted, locale));
+    match (&reply.went, locale) {
+        (Some(EscalatedTo::Chair { chair }), Locale::Zh) => format!(
+            "已把 {c} 上的 thread {thread} 往上交给委员会主席（chair）{}（seq {seq}）{again}。",
+            Address::senator(chair).in_text()
+        ),
+        (Some(EscalatedTo::Chair { chair }), Locale::En) => format!(
+            "Handed thread {thread} on {c} one step up, to the committee's chair {} (seq \
+             {seq}){again}.",
+            Address::senator(chair).in_text()
+        ),
+        (Some(EscalatedTo::Desk), Locale::Zh) => {
+            format!("已把 {c} 上的 thread {thread} 往上交给 Speaker 的办公桌（seq {seq}）{again}。")
+        }
+        (Some(EscalatedTo::Desk), Locale::En) => format!(
+            "Handed thread {thread} on {c} one step up, to the Speaker's desk (seq {seq}){again}."
+        ),
+        (Some(EscalatedTo::Person { person }), Locale::Zh) => format!(
+            "已把 {c} 上的 thread {thread} 交给 {}（seq {seq}）{again}。Speaker 会在 thread 里\
+             提到他并告诉提问的人；除非他们让你答，不要自己回答。",
+            Address::senior(person).in_text()
+        ),
+        (Some(EscalatedTo::Person { person }), Locale::En) => format!(
+            "Handed thread {thread} on {c} to {} (seq {seq}){again}. The Speaker mentions them \
+             in the thread and tells the asker; do not answer it yourself unless they ask you to.",
+            Address::senior(person).in_text()
+        ),
+        (None, Locale::Zh) => format!(
+            "已把 {c} 上的 thread {thread} 交给一个人（seq {seq}）{again}。Speaker 会在 thread 里\
+             提到他并告诉提问的人；除非他们让你答，不要自己回答。"
+        ),
+        (None, Locale::En) => format!(
+            "Handed thread {thread} on {c} to a person (seq {seq}){again}. The Speaker \
+             mentions them in the thread and tells the asker; do not answer it yourself unless \
+             they ask you to."
+        ),
     }
 }
 
@@ -1950,6 +2529,10 @@ mod tests {
                 "answer",
                 "ask",
                 "catch_up",
+                "chair_cover",
+                "chair_docket",
+                "chair_escalate",
+                "chair_route",
                 "checkpoint",
                 "escalate",
                 "inbox",
@@ -1957,9 +2540,13 @@ mod tests {
                 "post",
                 "propose_decision",
                 "search",
+                "secretary",
+                "speaker_chair",
                 "speaker_cover",
                 "speaker_docket",
                 "speaker_escalate",
+                "speaker_forward",
+                "speaker_refuse",
                 "speaker_route",
                 "status",
                 "take"

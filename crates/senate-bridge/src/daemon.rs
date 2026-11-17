@@ -156,8 +156,8 @@ use crate::delivery::{Batch, DeliveryOutcome, Ladder};
 use crate::format;
 use crate::ipc::{
     self, ApprovalsReply, ApproveReply, BoundReply, CatchUpReply, CheckpointReply, CommitteeStatus,
-    HookEvent, HookReply, HookReport, InboxReply, IpcError, JoinReply, Pong, Posted, Reply,
-    Request, SayKind, SearchReply, SessionSelector, StatusReply, ThreadReply, ThreadSeen,
+    EscalateReply, HookEvent, HookReply, HookReport, InboxReply, IpcError, JoinReply, Pong, Posted,
+    Reply, Request, SayKind, SearchReply, SessionSelector, StatusReply, ThreadReply, ThreadSeen,
     WatchEvent, codes,
 };
 use crate::notify::{News, Notifications, NotifyConfig};
@@ -169,6 +169,7 @@ use crate::stream::{self, CommitteeWorker};
 
 mod front;
 mod preside;
+mod roles;
 
 use front::Front;
 
@@ -438,6 +439,14 @@ pub(crate) struct Shared {
     codex_sessions: Arc<Mutex<BTreeMap<usize, Vec<String>>>>,
     /// Docket items each presiding session has been told of.
     announced: Mutex<HashMap<String, BTreeSet<(CommitteeId, Seq)>>>,
+    /// The Speaker's office, as `/v1/me` last said.
+    office: Mutex<Option<senate_core::Office>>,
+    /// The child Senates, as `/v1/me` last said.
+    children: Mutex<Vec<senate_core::api::ChildSenate>>,
+    /// Each committee's chair ([`roles`]).
+    chairs: Mutex<BTreeMap<CommitteeId, roles::ChairCache>>,
+    /// Agents the companion is registered as a secretary of, this run.
+    companion_registered: Mutex<BTreeSet<SenatorName>>,
 }
 
 /// What the automatic checkpoints know of one worktree.
@@ -520,6 +529,12 @@ pub async fn start(options: DaemonOptions) -> anyhow::Result<DaemonHandle> {
     }
 
     let companion_config = CompanionConfig::load(&paths.config()).map_err(anyhow::Error::msg)?;
+    if companion_config.enabled
+        && let Some(note) =
+            companion::note_once(paths.home(), &companion_config.name, config.locale)
+    {
+        tracing::warn!("{note}");
+    }
     if companion_config.enabled {
         tracing::info!(
             bin = %companion_config.claude_bin.display(),
@@ -662,6 +677,10 @@ impl Shared {
             index,
             codex_sessions: common.codex_sessions.clone(),
             announced: Mutex::new(HashMap::new()),
+            office: Mutex::new(None),
+            children: Mutex::new(Vec::new()),
+            chairs: Mutex::new(BTreeMap::new()),
+            companion_registered: Mutex::new(BTreeSet::new()),
         }))
     }
 }
@@ -681,6 +700,7 @@ async fn verify_person(shared: &Shared) -> anyhow::Result<()> {
             shared.note_epoch(Some(&me.epoch)).await;
             shared.note_triaged(me.triaged);
             shared.note_senate(&me);
+            shared.note_office(&me);
             shared.note_speaker(me.speaker);
             Ok(())
         }
@@ -853,7 +873,11 @@ impl Shared {
         let mut own: BTreeSet<SenatorName> = self.served_agents().unwrap_or_default();
         own.extend(self.seated());
         own.insert(agent.clone());
-        format::Reader::new(Address::senator(agent), self.people(), own)
+        let mut reader = format::Reader::new(Address::senator(agent), self.people(), own);
+        for (committee, chair) in self.known_chairs() {
+            reader = reader.with_chair(committee, chair);
+        }
+        reader
     }
 
     /// The Senate's people, as `/v1/me` last named them: every other
@@ -901,22 +925,22 @@ impl Shared {
         lock(&self.speaker).clone()
     }
 
-    /// Whether `agent`, one this machine runs, holds this Senate's
-    /// Speaker's seat.
+    /// Whether `agent`, one this machine runs, works this Senate's
+    /// Speaker's desk: the Speaker itself (an agent Speaker), or one of its
+    /// secretaries ([`roles`]).
     pub(crate) fn presided_by(&self, agent: &SenatorName) -> bool {
-        self.seating().owns(agent)
-            && self
-                .speaker_seat()
-                .is_some_and(|seat| seat.senator() == Some(agent))
+        self.desk_role(agent).is_some()
     }
 
-    /// Whether `event` is put to the Speaker of this Senate and `agent`
-    /// holds its seat: pushed to the presiding session like a message for
-    /// the agent itself. Not the Speaker's own words.
+    /// Whether `event` is put to the Speaker of this Senate and `agent` is
+    /// the desk worker it is pushed to here (the first present): pushed to
+    /// its session like a message for the agent itself. Not the Speaker's
+    /// own words.
     pub(crate) fn for_speaker(&self, agent: &SenatorName, event: &Event) -> bool {
         event.from != Address::Speaker
             && event.is_directed_to(&Address::Speaker)
             && self.presided_by(agent)
+            && self.desk_pusher().as_ref() == Some(agent)
     }
 
     /// `senator::<person>`: the person this bridge holds the token of.
@@ -1017,6 +1041,16 @@ impl Shared {
                 return;
             }
         };
+        if self.companion_config.enabled {
+            let agents: BTreeSet<SenatorName> = desired.iter().map(|(a, _)| a.clone()).collect();
+            for agent in agents {
+                if lock(&self.companion_registered).contains(&agent) {
+                    continue;
+                }
+                let shared = self.clone();
+                tokio::spawn(async move { shared.register_companion(&agent).await });
+            }
+        }
         let mut streams = lock(&self.streams);
         streams.retain(|(agent, committee), worker| {
             let keep = desired.contains(&(agent.clone(), committee.clone()));
@@ -1471,11 +1505,13 @@ impl Shared {
         event: &Event,
         dirty: &Notify,
     ) -> Result<(), StoreError> {
+        self.observe_chair(event);
         let directed = {
             let mut covering = lock(&self.covering);
             covering.observe(event, agent);
             routing::should_push_covering(event, agent, &covering)
-        } || self.for_speaker(agent, event);
+        } || self.for_speaker(agent, event)
+            || self.for_chair(agent, event);
         if self.store.ingest(agent, event, directed)? {
             dirty.notify_one();
             self.announce_to_person(event);
@@ -1516,7 +1552,9 @@ impl Shared {
     /// the desktop gets one notification (coalesced). Each event once,
     /// whichever agent's stream carried it.
     fn announce_to_person(&self, event: &Event) {
-        let Some(attention) = senate_core::attention(event, &self.config.person) else {
+        let Some(attention) = senate_core::attention(event, &self.config.person)
+            .or_else(|| self.role_attention(event))
+        else {
             return;
         };
         {
@@ -1576,7 +1614,8 @@ impl Shared {
             changed = true;
         }
         if let Some(root) = event.thread
-            && answered_for_me_in_takeover(event, agent)
+            && (answered_for_me_in_takeover(event, agent)
+                || answered_for_me_by_a_secretary(event, agent, &self.companion_config.name))
         {
             let answered =
                 self.store
@@ -1671,6 +1710,13 @@ impl Shared {
     fn annotate(&self, agent: &SenatorName, mut event: Event) -> Event {
         event.meta.remove(format::COVERING_META);
         event.meta.remove(format::SPEAKER_META);
+        event.meta.remove(format::CHAIR_META);
+        if !event.is_directed_to(&Address::senator(agent)) && self.for_chair(agent, &event) {
+            event.meta.insert(
+                format::CHAIR_META.into(),
+                event.committee.to_string().into(),
+            );
+        }
         if !event.is_directed_to(&Address::senator(agent)) && self.for_speaker(agent, &event) {
             let senate = self
                 .senate_path()
@@ -2266,6 +2312,13 @@ impl Shared {
             Request::Take { session, .. } => ("take", session),
             Request::Inbox { session, .. } => ("inbox", session),
             Request::Checkpoint { session, .. } => ("checkpoint", session),
+            Request::Send { session, .. } => ("send", session),
+            Request::Secretaries { session, .. } => ("secretaries", session),
+            Request::SetChair { session, .. } => ("set_chair", session),
+            Request::ChairDocket { session } => ("chair_docket", session),
+            Request::ChairRoute { session, .. } => ("chair_route", session),
+            Request::ChairCover { session, .. } => ("chair_cover", session),
+            Request::ChairEscalate { session, .. } => ("chair_escalate", session),
             _ => return None,
         };
         self.companion_session(session).map(|_| {
@@ -2303,9 +2356,52 @@ impl Shared {
             | Request::Docket { .. }
             | Request::Route { .. }
             | Request::Cover { .. }
-            | Request::Refer { .. } => Reply::err(IpcError::bad_request(
+            | Request::Refer { .. }
+            | Request::Forward { .. }
+            | Request::Refuse { .. } => Reply::err(IpcError::bad_request(
                 "a presiding request is served by the daemon's front",
             )),
+            Request::SetChair {
+                session,
+                committee,
+                senator,
+            } => wrap(self.on_set_chair(&session, committee, senator).await),
+            Request::ChairDocket { session } => wrap(self.on_chair_docket(&session).await),
+            Request::ChairRoute {
+                session,
+                seq,
+                to,
+                id,
+            } => wrap(self.on_chair_route(&session, seq, to, id).await),
+            Request::ChairCover {
+                session,
+                thread,
+                body,
+                agent,
+                id,
+            } => wrap(self.on_chair_cover(&session, thread, body, agent, id).await),
+            Request::ChairEscalate {
+                session,
+                seq,
+                reason,
+                id,
+            } => wrap(self.on_chair_escalate(&session, seq, reason, id).await),
+            Request::Send {
+                session,
+                kind,
+                to,
+                at,
+                body,
+                refs,
+                id,
+            } => wrap(self.on_send(&session, kind, to, at, body, refs, id).await),
+            Request::Secretaries {
+                session,
+                action,
+                for_,
+                secretary,
+            } => wrap(self.on_secretaries(&session, action, for_, secretary).await),
+            Request::Roles => wrap(self.on_roles().await),
             Request::SessionEnd { session_id, .. } => wrap(self.on_session_end(&session_id)),
             Request::Checkpoint {
                 session,
@@ -2579,6 +2675,7 @@ impl Shared {
         if was != Some(now) {
             self.committees_changed.notify_one();
         }
+
         let brief = match (report.event, session.committee()) {
             (HookEvent::SessionStart, Some(committee)) if !as_speaker => {
                 self.hook_brief(committee).await
@@ -3285,14 +3382,31 @@ impl Shared {
         }
         let from = self.speaker_for(session.as_ref(), &committee, &acting)?;
         let seen = self.seen_before(&committee, &[root.seq])?;
+        // The companion is a secretary of the agent: its answer is the
+        // agent's, given by its secretary.
+        let (from, behalf) = match (companion, from) {
+            (true, principal) => (
+                Address::senator(&self.companion_config.name),
+                Some(principal),
+            ),
+            (false, from) => (from, None),
+        };
         let mut event = NewEvent::new(committee, Kind::Answer, from, body)
             .to(to)
             .in_thread(root.seq);
         if acting.as_person {
             event = event.with_meta(meta::SEEN, serde_json::json!(seen_in(&seen, root.seq).0));
         }
-        if companion {
-            event = event.with_meta(meta::COMPANION, serde_json::json!(true));
+        if let Some(principal) = behalf {
+            // Registered before it speaks for the agent: the server takes
+            // an answer on an agent's behalf only from its secretary.
+            if let Address::Senator(agent) = &principal {
+                lock(&self.companion_registered).remove(agent);
+                self.register_companion(agent).await;
+            }
+            event = event
+                .on_behalf_of(principal)
+                .with_meta(meta::TAKEOVER, serde_json::json!(true));
         }
         if let Some(id) = id {
             event = event.with_id(id);
@@ -3367,8 +3481,8 @@ impl Shared {
         self.post(event).await
     }
 
-    /// The session's agent hands a thread to a person: `to`, a handle, or
-    /// this bridge's own person.
+    /// The session's agent hands a thread on: to `to`, a person, or with
+    /// no `to` one step up ([`Shared::escalate_up`]).
     async fn on_escalate(
         &self,
         selector: &SessionSelector,
@@ -3376,10 +3490,15 @@ impl Shared {
         to: Option<Name>,
         reason: Option<String>,
         id: Option<EventId>,
-    ) -> Result<Posted, IpcError> {
+    ) -> Result<EscalateReply, IpcError> {
         let session = self.resolve(selector)?;
         let committee = self.bound(&session)?;
-        let to = to.unwrap_or_else(|| self.config.person.clone());
+        let root = self.task_root(&committee, thread).await?;
+        let Some(to) = to else {
+            return self
+                .escalate_up(&session, committee, &root, reason, id)
+                .await;
+        };
         // A name is flat: whether it is a person is the Senate's people's
         // to say (once `/v1/me` has named them).
         let known = lock(&self.senate)
@@ -3388,21 +3507,8 @@ impl Shared {
         if known == Some(false) {
             return Err(IpcError::bad_request(not_a_person(&to, self.locale)));
         }
-        let root = self.task_root(&committee, thread).await?;
-        let mut status = StatusPayload::new(senate_core::StatusState::Suspended);
-        status.escalated_to = Some(to);
-        status.reason = reason
-            .map(|r| r.trim().to_string())
-            .filter(|r| !r.is_empty());
-        status.check().map_err(IpcError::bad_request)?;
-        let event = Self::status_event(
-            committee,
-            Address::senator(&session.agent),
-            root.seq,
-            &status,
-            id,
-        );
-        self.post(event).await
+        self.escalate_to_person(&session, committee, &root, to, reason, id)
+            .await
     }
 
     async fn on_take(
@@ -3768,6 +3874,10 @@ impl Shared {
             .await
             .map_err(server_error)?;
         let person = &self.config.person;
+        let chairs = for_person
+            && self
+                .chair_of(&committee)
+                .is_some_and(|c| c.name() == person);
         let seen: Vec<ThreadSeen> = if for_person {
             self.store
                 .seen(&committee)
@@ -3794,6 +3904,7 @@ impl Shared {
                 reply.agents.iter().any(|a| t.is_for(a))
                     || t.escalated_to.as_ref() == Some(person)
                     || for_person && t.directed_to(person).is_some()
+                    || chairs && t.to.contains(&Address::Chair)
             })
             .collect();
         // What waits on no one is left out and counted, unless asked for.
@@ -3860,6 +3971,7 @@ impl Shared {
         if Self::is_companion(&session) {
             let reader = self.reader(&agent);
             return Ok(CatchUpReply {
+                chair: self.chair_of(&committee),
                 committee,
                 me,
                 people: reader.people,
@@ -3889,6 +4001,7 @@ impl Shared {
             .map_err(internal)?;
         let reader = self.reader(&agent);
         Ok(CatchUpReply {
+            chair: self.chair_of(&committee),
             committee,
             me,
             people: reader.people,
@@ -4370,6 +4483,19 @@ fn answered_for_me_in_takeover(event: &Event, me: &SenatorName) -> bool {
         && event.on_behalf_of.as_ref() == Some(&Address::senator(me))
         && event.meta.get(meta::TAKEOVER).and_then(|v| v.as_bool()) == Some(true)
         && !is_provisional(event)
+}
+
+/// Whether `event` is an answer one of `me`'s secretaries gave for it
+/// while it was away (not this machine's own companion, whose question is
+/// settled where it runs): the hand-back lists it.
+fn answered_for_me_by_a_secretary(
+    event: &Event,
+    me: &SenatorName,
+    companion: &SenatorName,
+) -> bool {
+    event.kind == Kind::Answer
+        && format::secretary_answer(event)
+            .is_some_and(|(principal, secretary)| principal == me && secretary != companion)
 }
 
 #[cfg(test)]

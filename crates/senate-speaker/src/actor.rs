@@ -26,6 +26,7 @@ use tracing::warn;
 use crate::brain::Brain;
 use crate::config::SpeakerConfig;
 use crate::engine::{Engine, RunEvent, ThoughtKind};
+use crate::secretary::SecretaryConfigs;
 
 /// What the Speaker needs. Cloneable so a supervisor can respawn it: the
 /// unbound-mention receiver is shared, and a respawned Speaker picks it up
@@ -46,6 +47,10 @@ pub struct SpeakerArgs {
     /// What opens a run's PR. `None` with a runner: the branch is the
     /// deliverable ([`senate_work::NoForge`]).
     pub forge: Option<Arc<dyn Forge>>,
+    /// The built-in session's configuration, re-read before it acts on a
+    /// committee. [`SpeakerArgs::new`] makes a fixed one of `config`;
+    /// [`SpeakerArgs::with_secretary`] gives the files'.
+    pub secretary: Arc<SecretaryConfigs>,
     unbound: Arc<Mutex<mpsc::Receiver<UnboundMention>>>,
 }
 
@@ -57,6 +62,7 @@ impl SpeakerArgs {
         config: SpeakerConfig,
         unbound: mpsc::Receiver<UnboundMention>,
     ) -> Self {
+        let secretary = Arc::new(SecretaryConfigs::fixed(config.clone()));
         Self {
             hub,
             surface,
@@ -64,8 +70,18 @@ impl SpeakerArgs {
             config,
             runner: None,
             forge: None,
+            secretary,
             unbound: Arc::new(Mutex::new(unbound)),
         }
+    }
+
+    /// Run on `secretary`'s configuration (its files, re-read as they
+    /// change) instead of the fixed `config`. The Brain should read the same
+    /// one ([`BasisBrain::on_secretary`](crate::BasisBrain::on_secretary)).
+    pub fn with_secretary(mut self, secretary: Arc<SecretaryConfigs>) -> Self {
+        self.config = secretary.effective(None).speaker.clone();
+        self.secretary = secretary;
+        self
     }
 
     /// Give the Speaker hands: a runner for work runs, and the
@@ -200,6 +216,7 @@ impl Actor for Speaker {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         let engine = &mut state.engine;
+        engine.prepare(&message);
         match message {
             SpeakerMsg::Event(event) => engine.on_event(*event).await,
             SpeakerMsg::Resync => engine.resync_all().await,

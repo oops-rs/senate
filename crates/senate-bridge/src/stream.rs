@@ -211,6 +211,7 @@ async fn consume(
     *attempt = 0;
     // Whose work is mine, as of now; the stream's presence events keep it.
     shared.seed_covering(agent, committee).await;
+    shared.seed_chair(committee).await;
     set(state, StreamState::Connected { since: Utc::now() });
     tracing::info!(%agent, %committee, after = %cursor, "stream open");
     let mut messages = response.bytes_stream().eventsource();

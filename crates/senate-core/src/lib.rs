@@ -97,6 +97,7 @@ pub mod task;
 pub mod work;
 
 pub use address::{Address, AddressParseError, Guest, GuestError, MAX_GUEST_ID_LEN};
+pub use api::ChildSenate;
 pub use brief::{Brief, BriefBuilder};
 pub use chair::{ChairFold, ChairPayload, ChairSource};
 pub use continuity::{

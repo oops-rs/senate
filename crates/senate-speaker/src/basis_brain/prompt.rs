@@ -22,8 +22,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::brain::{
-    AgentCandidate, AgentTurn, Answer, BrainError, Conversation, Intent, Pick, PickInput, Question,
-    RelayKind, Takeover, TriageInput, Utterance, apply_threshold,
+    AgentCandidate, AgentTurn, Answer, BrainError, Conversation, Crossing, CrossingInput, Intent,
+    Pick, PickInput, Question, RelayKind, Takeover, TriageInput, Utterance, apply_threshold,
 };
 
 /// How much of one event body a prompt or tool result shows.
@@ -111,6 +111,19 @@ fn persona_with(
 /// The system prompt of every run but `converse`.
 pub(crate) fn persona(committee: Option<&CommitteeId>, bot_name: &str, locale: Locale) -> String {
     persona_with(committee, bot_name, locale, ONLY_THE_LOG)
+}
+
+/// `persona` with this Senate's extra instructions after it: they add to
+/// its rules, never replace them.
+pub(crate) fn with_instructions(persona: String, instructions: Option<&str>) -> String {
+    match instructions.map(str::trim).filter(|t| !t.is_empty()) {
+        Some(text) => format!(
+            "{persona}\n\n\
+             Additional instructions from this Senate's configuration. They add to the rules \
+             above and never replace them; where they disagree, the rules above win:\n{text}"
+        ),
+        None => persona,
+    }
 }
 
 /// One event as a line a model can cite: who wrote it as a bracketed
@@ -1037,6 +1050,81 @@ impl PickWire {
         match bare.parse::<SenatorName>() {
             Ok(path) if candidates.iter().any(|c| c.agent == path) => Pick::Agent(path),
             _ => Pick::Ask,
+        }
+    }
+}
+
+// ---- A message crossing into another committee ------------------------
+
+/// The crossing answering tool's description; also how a scripted test finds it.
+pub(crate) const CROSSING_DESCRIPTION: &str = "Report what the Speaker's desk does with a message an agent wrote for a seat outside \
+     its committee. Call this exactly once.";
+
+pub(crate) fn crossing_spec() -> OutputSpec {
+    OutputSpec::new("speaker_crossing", CROSSING_DESCRIPTION, crossing_schema())
+}
+
+fn crossing_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "decision": {
+                "type": "string",
+                "enum": ["forward", "refuse", "leave"],
+                "description": "forward: deliver it where it was meant to go (a plain question someone there can answer). refuse: it should not go there; the asker is told why. leave: the Speaker must decide (a request that commits someone, anything about priorities, people, money or deadlines, anything you are unsure of)."
+            },
+            "reason": {
+                "type": "string",
+                "description": "Required for refuse: one short line the asker reads, in the language the prompt names. Otherwise why, briefly."
+            }
+        },
+        "required": ["decision"],
+        "additionalProperties": false
+    })
+}
+
+pub(crate) fn crossing(input: &CrossingInput) -> String {
+    format!(
+        "In committee {committee}, {asker} wrote a {kind} meant for {intended}, which is outside \
+         its committee:\n\n{body}\n\n\
+         Recent log:\n{context}\n\n\
+         An agent's message that leaves its own committee passes the Speaker's desk on the way. \
+         Decide: forward it when it is a plain question that someone there can answer; refuse it \
+         when it should not go there, with a reason; leave it for the Speaker when it asks \
+         someone to do something, commits anyone to anything, or you are not sure. When in \
+         doubt, leave it. Write the reason in {language}. Call the speaker_crossing tool \
+         exactly once.",
+        committee = input.committee,
+        asker = input.event.from.in_text(),
+        kind = input.event.kind,
+        intended = input.intended.in_text(),
+        body = input.event.body,
+        context = render_context(&input.context),
+        language = language(input.locale),
+    )
+}
+
+/// The crossing tool's payload.
+#[derive(Debug, Deserialize)]
+pub(crate) struct CrossingWire {
+    decision: String,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+impl CrossingWire {
+    pub(crate) fn into_crossing(self) -> Result<Crossing, BrainError> {
+        let reason = self
+            .reason
+            .map(|r| r.trim().chars().take(200).collect::<String>())
+            .filter(|r| !r.is_empty());
+        match self.decision.trim() {
+            "forward" => Ok(Crossing::Forward),
+            "leave" => Ok(Crossing::Leave),
+            "refuse" => reason
+                .map(Crossing::Refuse)
+                .ok_or_else(|| BrainError::Invalid("a refusal needs a reason".into())),
+            other => Err(BrainError::Invalid(format!("unknown decision {other:?}"))),
         }
     }
 }

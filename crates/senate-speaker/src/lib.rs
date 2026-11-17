@@ -96,18 +96,24 @@ mod engine;
 mod ids;
 mod render;
 mod scripted;
+pub mod secretary;
 mod syntax;
 
 pub use actor::{RunReport, Speaker, SpeakerArgs, SpeakerMsg, SpeakerState, Thought};
-pub use basis_brain::{BasisBrain, LOG_READ, LOG_SEARCH, RuntimeRecipe};
+pub use basis_brain::{
+    BasisBrain, LOG_READ, LOG_SEARCH, ModelRecipe, RuntimeRecipe, basis_runtime,
+};
 pub use brain::{
-    AgentCandidate, AgentTurn, Answer, Brain, BrainError, Conversation, GroupRef, Intent, Pick,
-    PickInput, Question, RelayKind, Takeover, TriageInput, Turn, Utterance, apply_threshold,
-    rule_pick, triage_verdict,
+    AgentCandidate, AgentTurn, Answer, Brain, BrainError, Conversation, Crossing, CrossingInput,
+    GroupRef, Intent, Pick, PickInput, Question, RelayKind, Takeover, TriageInput, Turn, Utterance,
+    apply_threshold, rule_crossing, rule_pick, triage_verdict,
 };
 pub use config::{DEFAULT_BOT_NAME, SpeakerConfig, SpeakerMode, WorkConfig};
 pub use engine::{CURSOR, TAKEOVER_META};
 pub use scripted::{ScriptedBrain, scripted_verdict};
+pub use secretary::{
+    BaseLayer, DEFAULT_NAME, Duty, Effective, ModelCheck, ModelSettings, Problem, SecretaryConfigs,
+};
 
 #[cfg(test)]
 mod tests;

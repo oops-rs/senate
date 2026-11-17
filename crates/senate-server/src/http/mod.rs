@@ -1,6 +1,7 @@
 //! The HTTP/SSE API, exactly as `senate_core::api` documents it.
 
 mod error;
+mod roles;
 mod sse;
 
 use std::sync::Arc;
@@ -12,7 +13,7 @@ use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::map_response_with_state;
 use axum::response::{IntoResponse, Response, Sse};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use senate_core::api::{
     AppendResponse, CheckpointQuery, Cursor, CursorQuery, DEFAULT_PAGE, DEFAULT_SEARCH,
@@ -20,8 +21,8 @@ use senate_core::api::{
     ResolveQuery, Resolved, SearchQuery, SearchResults, StreamQuery, ThreadsPage, ThreadsQuery,
 };
 use senate_core::{
-    Address, Brief, CheckpointPayload, CheckpointRecord, CommitteeId, DocketPage, Hub, Kind, Name,
-    NewEvent, PickPayload, ResolveError, Roster, SenatorName, Seq, StatusPayload, meta,
+    Address, Brief, CheckpointPayload, CheckpointRecord, CommitteeId, Hub, Kind, Name, NewEvent,
+    Roster, SenatorName, Seq, StatusPayload, meta,
 };
 
 use crate::auth::{Authenticate, bearer_token};
@@ -63,7 +64,18 @@ pub(crate) fn router(state: AppState) -> Router {
             "/v1/committees/{committee}/checkpoints/latest",
             get(latest_checkpoint),
         )
-        .route("/v1/committees/{committee}/docket", get(docket))
+        .route("/v1/committees/{committee}/docket", get(roles::docket))
+        .route(
+            "/v1/committees/{committee}/chair",
+            get(roles::get_chair).put(roles::put_chair),
+        )
+        .route("/v1/secretaries", get(roles::secretaries))
+        .route("/v1/secretaries/{senator}", put(roles::put_secretaries))
+        .route("/v1/children", get(roles::children))
+        .route(
+            "/v1/children/{name}",
+            get(roles::get_child).put(roles::put_child),
+        )
         .route("/v1/resolve", get(resolve))
         .fallback(|| async { ApiFailure::not_found("no such route") })
         .method_not_allowed_fallback(|| async { ApiFailure::method_not_allowed() })
@@ -107,58 +119,95 @@ impl FromRequestParts<AppState> for Person {
 impl AppState {
     /// `person` acts as `senator`: themselves, or an agent under their own
     /// name that could sit in this Senate, which is seated if this is its
-    /// first contact. Anyone else's is 403.
-    fn act_as(&self, person: &Person, senator: &SenatorName) -> Result<(), ApiFailure> {
+    /// first contact. Anyone else's, and the built-in session, is 403.
+    async fn act_as(&self, person: &Person, senator: &SenatorName) -> Result<(), ApiFailure> {
         self.hub
             .act_as(&person.0, senator)
+            .await
             .map(|_| ())
             .map_err(|e| ApiFailure::forbidden(e.to_string()))
     }
 
-    /// `person` writes as `speaker`: only when a senator holds this Senate's
-    /// Speaker's seat and it is one of `person`'s own agents. The built-in
-    /// Speaker writes in process; nobody writes as it over HTTP.
-    fn preside(&self, person: &Person) -> Result<(), ApiFailure> {
+    /// `person` writes for the Speaker's office (`from: speaker`), naming
+    /// who acts in [`meta::ACTED_BY`]: the Speaker itself (a principal
+    /// Speaker, or an agent Speaker `person` runs) or one of the Speaker's
+    /// secretaries that `person` runs. With no `acted_by` and exactly one
+    /// desk worker run by `person`, it is that one, stamped on the event.
+    /// The built-in session writes in process; nobody acts as it here.
+    fn preside(&self, person: &Person, event: &mut NewEvent) -> Result<(), ApiFailure> {
         let roster = self.hub.roster_now();
-        match self.hub.speaker_seat() {
-            Some(seat) if roster.seat_held_by(seat, &person.0) => Ok(()),
-            Some(seat) => Err(ApiFailure::forbidden(format!(
-                "{} does not hold the Speaker's seat here ({})",
-                person.0,
-                match seat.senator() {
-                    Some(senator) => format!("held by {}", Address::senator(senator)),
-                    None => "the built-in Speaker".to_owned(),
+        let Some(office) = roster.office() else {
+            return Err(ApiFailure::forbidden(
+                "this Senate has no Speaker; nobody writes as the Speaker",
+            ));
+        };
+        let speaker = office.speaker.clone();
+        let acted_by = match event.meta.get(meta::ACTED_BY) {
+            Some(value) => value
+                .as_str()
+                .and_then(|s| s.parse::<SenatorName>().ok())
+                .ok_or_else(|| {
+                    ApiFailure::bad_request(format!(
+                        "meta.{} names the senator acting for the Speaker's office, as a name",
+                        meta::ACTED_BY
+                    ))
+                })?,
+            None => {
+                let mine: Vec<&SenatorName> = office
+                    .agent_workers()
+                    .filter(|w| roster.owner_of(w) == Some(&person.0))
+                    .collect();
+                match mine.as_slice() {
+                    [one] => (*one).clone(),
+                    _ => {
+                        return Err(ApiFailure::forbidden(format!(
+                            "{} writes for the office of the Speaker {speaker} only naming who acts in meta.{}: the Speaker, or one of the Speaker's secretaries {} runs",
+                            person.0,
+                            meta::ACTED_BY,
+                            person.0
+                        )));
+                    }
                 }
-            ))),
-            None => Err(ApiFailure::forbidden(
-                "nobody presides over this Senate; nobody writes as the Speaker",
-            )),
+            }
+        };
+        if office.built_in.as_ref() == Some(&acted_by)
+            || !roster.may_act_for_office(&person.0, &acted_by)
+        {
+            return Err(ApiFailure::forbidden(format!(
+                "{} may not act for the office of the Speaker {speaker} as {}: only the Speaker, or a secretary of the Speaker that {} runs",
+                person.0,
+                Address::senator(&acted_by),
+                person.0
+            )));
         }
+        event.meta.insert(
+            meta::ACTED_BY.into(),
+            serde_json::Value::String(acted_by.to_string()),
+        );
+        Ok(())
     }
 
     /// Like [`AppState::act_as`], for a connection rather than a write: a
     /// stream, a cursor, a heartbeat. Besides the senators `person` may act
-    /// as, the senator holding this Senate's Speaker's seat, when it is
-    /// `person`'s: the presiding session follows this Senate's log as its
-    /// Speaker, with its own cursors and presence.
-    ///
-    /// The holder is one of the person's own agents, so its contact seats
-    /// it like any agent's, and `senator::*` counts it. Should the roster
-    /// refuse it, the person holding the seat is still let in.
-    fn connect_as(&self, person: &Person, senator: &SenatorName) -> Result<(), ApiFailure> {
+    /// as, an agent working the Speaker's desk that `person` runs: the
+    /// session working the desk follows this Senate's log with its own
+    /// cursors and presence. Should the roster refuse it, it is still let
+    /// in.
+    async fn connect_as(&self, person: &Person, senator: &SenatorName) -> Result<(), ApiFailure> {
         let roster = self.hub.roster_now();
-        let presides = self.hub.speaker_seat().is_some_and(|seat| {
-            roster.seat_held_by(seat, &person.0) && seat.senator() == Some(senator)
+        let works_desk = roster.office().is_some_and(|office| {
+            office.agent_workers().any(|w| w == senator)
+                && roster.owner_of(senator) == Some(&person.0)
         });
-        match self.act_as(person, senator) {
-            Err(_) if presides => Ok(()),
+        match self.act_as(person, senator).await {
+            Err(_) if works_desk => Ok(()),
             result => result,
         }
     }
 
     /// Like [`AppState::connect_as`], for a request that may name no
     /// senator: it is then the person's own.
-    fn act_as_or_self(
+    async fn act_as_or_self(
         &self,
         person: &Person,
         senator: Option<SenatorName>,
@@ -168,7 +217,7 @@ impl AppState {
             None => SenatorName::new(person.0.clone())
                 .map_err(|e| ApiFailure::forbidden(e.to_string()))?,
         };
-        self.connect_as(person, &senator)?;
+        self.connect_as(person, &senator).await?;
         Ok(senator)
     }
 }
@@ -221,18 +270,20 @@ async fn me(State(state): State<AppState>, person: Person) -> Result<Json<Me>, A
     // Every person can join every committee in the log.
     let committees = state.hub.committees().await?;
     let roster = state.hub.roster().await?;
+    let office = roster.office();
     Ok(Json(Me {
         agents: roster.agents_of(&person.0).into_iter().cloned().collect(),
         senate: state.hub.senate_name().clone(),
         parent: state.hub.parent().cloned(),
         people: roster.people(),
-        speaker: state.hub.speaker_seat().cloned(),
-        office: roster.office(),
-        children: Vec::new(),
+        speaker: state.hub.desk_seat(),
+        // Roots are judged where the built-in session works the desk.
+        triaged: state.triaged || office.as_ref().is_some_and(|o| o.triages()),
+        office,
+        children: state.hub.children(),
         person: person.0,
         committees,
         epoch: state.hub.epoch().await?,
-        triaged: state.triaged,
     }))
 }
 
@@ -262,17 +313,23 @@ async fn append(
         )));
     }
     // A request writes as a senator it may act as: the person, or one of
-    // their own agents (seated now if this is its first contact); or as the
-    // Speaker when one of their agents holds its seat. Not as the
-    // committee, a guest, or somebody else.
-    let as_speaker = match &event.from {
+    // their own agents (seated now if this is its first contact); for the
+    // Speaker's office, naming who acts; or for a child Senate's office,
+    // as its registered Speaker. Not as the committee, a guest, or
+    // somebody else.
+    let mut event = event;
+    let sender = match &event.from {
         Address::Senator(from) => {
-            state.act_as(&person, from)?;
-            false
+            state.act_as(&person, from).await?;
+            Sender::Senator
         }
         Address::Speaker => {
-            state.preside(&person)?;
-            true
+            state.preside(&person, &mut event)?;
+            Sender::Speaker
+        }
+        Address::Child { senate, .. } => {
+            roles::speak_for_child(&state, &person, senate)?;
+            Sender::Child
         }
         Address::AnyAgent => {
             return Err(ApiFailure::bad_request(
@@ -286,26 +343,56 @@ async fn append(
             )));
         }
     };
-    reject_server_provenance(&event, as_speaker)?;
+    roles::check_children_addressed(&state, &event)?;
+    // A secretary answers on its principal's behalf: `from` itself (which
+    // the caller may act as), `on_behalf_of` a senator it is registered as
+    // a secretary of.
+    let as_secretary = matches!(
+        (&event.from, &event.on_behalf_of),
+        (Address::Senator(from), Some(Address::Senator(principal)))
+            if state.hub.roster_now().secretaries_of(principal).contains(from)
+    );
+    reject_server_provenance(&event, sender == Sender::Speaker || as_secretary)?;
+    roles::reject_office_keys(&event, sender)?;
     let roster = state.hub.roster().await?;
-    if as_speaker {
-        check_speaker_write(&event)?;
-    } else {
-        reject_brief_top_and_agent_decisions(&roster, &event)?;
-        reject_speaker_keys(&event)?;
+    match sender {
+        Sender::Speaker => check_speaker_write(&event)?,
+        Sender::Child => {
+            roles::check_child_write(&event)?;
+            reject_speaker_keys(&event)?;
+        }
+        Sender::Senator => {
+            reject_brief_top_and_agent_decisions(&roster, &event)?;
+            reject_speaker_keys(&event)?;
+        }
     }
     check_checkpoint(&roster, &event)?;
     check_companion(&roster, &event)?;
     check_status(&state, &roster, &event).await?;
+    // A message meant for a seat outside its committee crosses the
+    // boundary as the rule says: a person's directly, an agent's by way of
+    // the Speaker's desk.
+    let event = roles::cross_boundary(&state, &roster, sender, event).await?;
     // `to` may hold `senator::*`: resolved against the agents on the
-    // committee, put to the Speaker to pick, or refused with the
+    // committee, put to the chair or the desk to pick, or refused with the
     // candidates.
-    let event = put_to_speaker(&state, event).await?;
+    let event = roles::put_to_pick(&state, &roster, event).await?;
     let appended = state.hub.resolve_and_append(event).await?;
     Ok(Json(AppendResponse {
         event: appended.event,
         duplicate: appended.duplicate,
     }))
+}
+
+/// Who an append is written as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Sender {
+    /// A senator the caller may act as.
+    Senator,
+    /// The Speaker's office.
+    Speaker,
+    /// A child Senate's Speaker's office, as its registered Speaker.
+    Child,
 }
 
 /// Some facts only the server's own components may state: which group a
@@ -412,49 +499,6 @@ fn check_speaker_write(event: &NewEvent) -> Result<(), ApiFailure> {
             "the Speaker speaks on behalf of a senator or a guest, not {other}"
         ))),
     }
-}
-
-/// A sender that cannot be expected to know the agents (a person, not an
-/// agent) wrote `senator::*`, and several agents are on the committee: with
-/// a senator in the Speaker's seat, the message is put to the Speaker
-/// instead (`to: speaker`, [`meta::PICK`] naming the candidates), which
-/// routes it. An agent sender, or a Senate whose Speaker cannot pick
-/// over HTTP (built in, or none), is refused with the candidates (409).
-/// Several ambiguous wildcards in one message are refused too: one pick
-/// per message.
-async fn put_to_speaker(state: &AppState, mut event: NewEvent) -> Result<NewEvent, ApiFailure> {
-    let senator_speaker = state
-        .hub
-        .speaker_seat()
-        .is_some_and(|seat| seat.senator().is_some());
-    let roster = state.hub.roster().await?;
-    if !senator_speaker || roster.is_agent_address(&event.from) || event.from == Address::Speaker {
-        return Ok(event);
-    }
-    let candidates = state.hub.committee_agents(&event.committee).await?;
-    let mut pick: Option<PickPayload> = None;
-    let mut to = Vec::with_capacity(event.to.len());
-    for address in &event.to {
-        match roster.resolve_address_among(address, &candidates) {
-            Err(ResolveError::Ambiguous { candidates }) if pick.is_none() => {
-                pick = Some(PickPayload {
-                    owner: None,
-                    candidates,
-                });
-                if !to.contains(&Address::Speaker) {
-                    to.push(Address::Speaker);
-                }
-            }
-            // Refused below, by the ordinary resolution.
-            Err(_) => return Ok(event),
-            Ok(_) => to.push(address.clone()),
-        }
-    }
-    if let Some(pick) = pick {
-        event.to = to;
-        event.meta.insert(meta::PICK.into(), pick.value());
-    }
-    Ok(event)
 }
 
 /// A checkpoint is one agent's own handover note, so only an agent writes
@@ -622,7 +666,7 @@ async fn stream(
     // stream naming a person, or nobody, only reads.
     let agent = match params.senator {
         Some(senator) => {
-            state.connect_as(&person, &senator)?;
+            state.connect_as(&person, &senator).await?;
             let roster = state.hub.roster_now();
             Some(senator).filter(|s| !roster.is_person(s))
         }
@@ -649,7 +693,9 @@ async fn get_cursor(
     params: Result<Query<CursorQuery>, QueryRejection>,
 ) -> Result<Json<Cursor>, ApiFailure> {
     let (committee, name) = cursor_path(path)?;
-    let owner = state.act_as_or_self(&person, query(params)?.senator)?;
+    let owner = state
+        .act_as_or_self(&person, query(params)?.senator)
+        .await?;
     let seq = state.hub.owned_cursor(&committee, &owner, &name).await?;
     Ok(Json(Cursor { seq }))
 }
@@ -662,7 +708,9 @@ async fn put_cursor(
     body: Result<Json<Cursor>, JsonRejection>,
 ) -> Result<Json<Cursor>, ApiFailure> {
     let (committee, name) = cursor_path(path)?;
-    let owner = state.act_as_or_self(&person, query(params)?.senator)?;
+    let owner = state
+        .act_as_or_self(&person, query(params)?.senator)
+        .await?;
     let cursor = json_body(body)?;
     state
         .hub
@@ -685,7 +733,7 @@ async fn heartbeat(
             beat.agent
         )));
     }
-    state.connect_as(&person, &beat.agent)?;
+    state.connect_as(&person, &beat.agent).await?;
     state.hub.record_heartbeat(&committee, beat).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -743,15 +791,6 @@ async fn latest_checkpoint(
                 Address::senator(&agent)
             ))
         })
-}
-
-async fn docket(
-    State(state): State<AppState>,
-    _person: Person,
-    path: Result<Path<String>, PathRejection>,
-) -> Result<Json<DocketPage>, ApiFailure> {
-    let committee = committee_path(path)?;
-    Ok(Json(state.hub.docket(&committee).await?))
 }
 
 async fn threads(

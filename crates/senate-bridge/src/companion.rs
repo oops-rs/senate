@@ -19,12 +19,23 @@
 //! speaks as the companion, and [`ENV_COMPANION`] makes the fork's hooks do
 //! nothing (it must never register as an interactive session).
 //!
+//! # A secretary provided by the daemon
+//!
+//! The companion is a **secretary** of the agents it serves: a senator
+//! named [`CompanionConfig::name`] (`companion` unless `[companion] name`
+//! says otherwise), registered with the Senate as a secretary of each agent
+//! this machine runs (`PUT /v1/secretaries/{agent}`, keeping the
+//! secretaries the agent already has) while it is enabled. Its answer is
+//! the agent's answer given by its secretary: stored `from` the companion's
+//! name, `on_behalf_of` the agent, with
+//! [`meta::TAKEOVER`](senate_core::meta::TAKEOVER), and shown with one
+//! byline ([`crate::format::secretary_byline`]). `[companion]` is still
+//! read as before; the daemon says once that it is now a secretary
+//! ([`secretary_note`]).
+//!
 //! The daemon lets a companion only answer its own question's thread, read
 //! (`catch_up` without moving the `read` cursor, `search`, the brief) and
-//! nothing else; its answer carries
-//! [`meta::COMPANION`](senate_core::meta::COMPANION), shown after the
-//! author's label (`[senator::claude] companion`,
-//! [`Event::byline`](senate_core::Event::byline)). One runs at a time,
+//! nothing else: it is read-only. One runs at a time,
 //! killed after
 //! [`CompanionConfig::max_secs`]. Requests and notes are never given to it.
 //! A companion that exits without answering hands its question back to the
@@ -36,6 +47,7 @@
 //! ```toml
 //! [companion]
 //! enabled = true
+//! name = "companion"                        # its senator name, as a secretary
 //! claude_bin = "/opt/homebrew/bin/claude"   # default: `claude` on PATH
 //! max_secs = 300
 //! idle_secs = 1800
@@ -46,6 +58,9 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use senate_core::{Address, CommitteeId, Event, Locale, SenatorName, Seq};
+
+/// The companion's senator name unless `[companion] name` gives one.
+pub const DEFAULT_NAME: &str = "companion";
 use serde::Deserialize;
 use tokio::io::AsyncWriteExt;
 
@@ -66,6 +81,10 @@ pub const SESSION_PREFIX: &str = "companion-";
 pub struct CompanionConfig {
     #[serde(default)]
     pub enabled: bool,
+    /// Its name as a senator: the secretary the daemon registers for the
+    /// agents it serves.
+    #[serde(default = "default_name")]
+    pub name: SenatorName,
     #[serde(default = "default_bin")]
     pub claude_bin: PathBuf,
     /// Killed after this long.
@@ -74,6 +93,12 @@ pub struct CompanionConfig {
     /// A live session not seen for this long counts as inactive.
     #[serde(default = "default_idle_secs")]
     pub idle_secs: u64,
+}
+
+fn default_name() -> SenatorName {
+    DEFAULT_NAME
+        .parse()
+        .unwrap_or_else(|_| unreachable!("a valid name"))
 }
 
 fn default_bin() -> PathBuf {
@@ -92,6 +117,7 @@ impl Default for CompanionConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            name: default_name(),
             claude_bin: default_bin(),
             max_secs: default_max_secs(),
             idle_secs: default_idle_secs(),
@@ -131,6 +157,36 @@ impl CompanionConfig {
     }
 }
 
+/// Said once, where `[companion]` is on: it is now a secretary of the
+/// agents it serves.
+pub fn secretary_note(name: &SenatorName, locale: Locale) -> String {
+    let me = Address::senator(name).in_text();
+    match locale {
+        Locale::Zh => format!(
+            "[companion] 现在是一个 secretary：{me} 注册为这台机器上每个 agent 的 secretary，             在 agent 不在时依据它上一个会话只读地回答问题；回答记作该 agent 的回答，由其 secretary              代答。`[companion]` 照旧读取。"
+        ),
+        Locale::En => format!(
+            "[companion] is now a secretary: {me} is registered as a secretary of each agent on              this machine and answers, read-only, from the agent's last session while the agent is              away; its answer is recorded as the agent's answer given by its secretary.              `[companion]` is read as before."
+        ),
+    }
+}
+
+/// The file whose presence says the note was given.
+const NOTED: &str = "companion-secretary.noted";
+
+/// [`secretary_note`], the first time it is asked for in this home; `None`
+/// after.
+pub fn note_once(home: &Path, name: &SenatorName, locale: Locale) -> Option<String> {
+    let marker = home.join(NOTED);
+    if marker.exists() {
+        return None;
+    }
+    if let Err(e) = std::fs::write(&marker, "") {
+        tracing::debug!("recording the companion note: {e}");
+    }
+    Some(secretary_note(name, locale))
+}
+
 /// A companion the daemon is running.
 #[derive(Debug, Clone)]
 pub struct Running {
@@ -159,7 +215,7 @@ pub fn prompt(agent: &SenatorName, question: &Event, pushed: &str, locale: Local
              mcp__senate__answer(thread={seq}) 回答一次，依据这个会话已经知道的和仓库里能看到的。\
              你只有只读工具：什么都不要改，什么都不要运行。需要的话，mcp__senate__catch_up 和 \
              mcp__senate__search 可以读委员会的日志。不确定的地方直说；答不了，就回答 {me} 之后会跟进。\
-             你的回答会标为伴随会话写的。然后停止。\n\n{pushed}"
+             你的回答会记作 {me} 的回答，由其 secretary 代答。然后停止。\n\n{pushed}"
         ),
         Locale::En => format!(
             "[senate companion] You are a short-lived companion of {me}'s last Claude Code \
@@ -169,7 +225,8 @@ pub fn prompt(agent: &SenatorName, question: &Event, pushed: &str, locale: Local
              the repository shows. You have read-only tools: change nothing, run nothing. \
              mcp__senate__catch_up and mcp__senate__search read the committee's log if it helps. \
              Say plainly what you are unsure of; if you cannot answer, answer that {me} will \
-             follow up. Your answer is labelled as the companion's. Then stop.\n\n{pushed}"
+             follow up. Your answer is recorded as {me}'s answer given by its secretary. Then \
+             stop.\n\n{pushed}"
         ),
     }
 }

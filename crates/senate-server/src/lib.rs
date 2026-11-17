@@ -44,9 +44,12 @@
 
 mod actors;
 mod auth;
+mod chairs;
 mod config;
 mod http;
 mod hub;
+mod office;
+mod registry;
 mod rules;
 mod seats;
 mod server;
@@ -54,4 +57,5 @@ mod server;
 pub use auth::{Authenticate, StaticTokens, bearer_token};
 pub use config::{ConfigError, DEFAULT_PRESENCE_GRACE_SECS, ServerConfig, TokenConfig, redact_url};
 pub use hub::{BROADCAST_CAPACITY, LiveStream, STREAM_BUFFER, ServerHub};
+pub use office::{DEFAULT_BUILT_IN_NAME, default_built_in_name};
 pub use server::{Running, Server, ServerBuilder, ServerError};

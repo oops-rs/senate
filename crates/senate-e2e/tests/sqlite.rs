@@ -72,9 +72,9 @@ async fn a_restart_keeps_the_log_and_seats_the_agents_again() {
         "seated again from the log: {:?}",
         roster.agents()
     );
-    // Who runs it is not in the log: in a Senate of several people it is
-    // seated again with no one answering for it until a person acts as it.
-    assert_eq!(roster.owner_of(&path(BOB_CLAUDE)), None);
+    // Who runs it is kept in the Senate's store: bob still answers for it
+    // after the restart.
+    assert_eq!(roster.owner_of(&path(BOB_CLAUDE)), Some(&name("bob")));
     assert_eq!(
         me(&world, "tok-alice").await.committees,
         [committee()],

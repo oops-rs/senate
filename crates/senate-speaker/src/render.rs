@@ -1708,6 +1708,27 @@ pub(crate) fn activity(l: Locale, event: &Event) -> String {
     }
 }
 
+/// The desk's note in the asker's thread: where the message was forwarded.
+pub(crate) fn crossing_forwarded(l: Locale, to: &senate_core::Locator) -> String {
+    let to = to.in_text();
+    match l {
+        Locale::Zh => format!("Speaker 的办公室已把这条消息转给 {to}；回答会回到这个 thread。"),
+        Locale::En => format!(
+            "The Speaker's office forwarded this to {to}; the answer will come back to this thread."
+        ),
+    }
+}
+
+/// The desk's answer in the asker's thread: it will not go there, and why.
+pub(crate) fn crossing_refused(l: Locale, to: &senate_core::Locator, reason: &str) -> String {
+    let to = to.in_text();
+    let reason = reason.trim();
+    match l {
+        Locale::Zh => format!("Speaker 的办公室没有把这条消息转给 {to}：{reason}"),
+        Locale::En => format!("The Speaker's office did not forward this to {to}: {reason}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -450,8 +450,13 @@ async fn a_question_to_the_seat_holder_is_never_for_the_speaker_to_cover() {
     assert!(page.items.iter().all(|i| i.event.seq != to_holder.seq));
 }
 
+/// Replaces "without a senator in the seat a wildcard is still refused"
+/// (which held for the built-in Speaker too): a person's message for one of
+/// several agents is put to the chair when it is a connected agent, else to
+/// the desk when anyone works it, the built-in session included; refused
+/// with the candidates only when neither can pick.
 #[tokio::test]
-async fn without_a_senator_in_the_seat_a_wildcard_is_still_refused() {
+async fn a_wildcard_nobody_can_pick_is_refused_and_the_built_in_desk_picks() {
     for built_in in [true, false] {
         let Built { server } = start(built_in, |c| {
             c.roster.agents = vec![seated("claude", "alice"), seated("codex", "alice")];
@@ -463,19 +468,24 @@ async fn without_a_senator_in_the_seat_a_wildcard_is_still_refused() {
                 StatusCode::NO_CONTENT
             );
         }
-        let refused = api_error(
-            server
-                .post_event(
-                    BOB,
-                    &NewEvent::new(committee(), Kind::Question, person_addr("bob"), "?")
-                        .to(Address::any_agent()),
-                )
-                .await,
-            StatusCode::CONFLICT,
-            "ambiguous_recipient",
-        )
-        .await;
-        assert_eq!(refused.candidates, [path("claude"), path("codex")]);
+        let ask = NewEvent::new(committee(), Kind::Question, person_addr("bob"), "?")
+            .to(Address::any_agent());
+        if built_in {
+            let picked = stored(&server, BOB, &ask).await;
+            assert_eq!(picked.to, [Address::Speaker], "the built-in desk picks");
+            assert_eq!(
+                PickPayload::of(&picked).unwrap().candidates,
+                [path("claude"), path("codex")]
+            );
+        } else {
+            let refused = api_error(
+                server.post_event(BOB, &ask).await,
+                StatusCode::CONFLICT,
+                "ambiguous_recipient",
+            )
+            .await;
+            assert_eq!(refused.candidates, [path("claude"), path("codex")]);
+        }
     }
 }
 

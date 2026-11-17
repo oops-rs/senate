@@ -375,6 +375,65 @@ impl ApiClient {
         Ok(checked(resp).await?.json().await?)
     }
 
+    /// `GET .../docket?role=chair`: what awaits the committee's chair.
+    pub async fn chair_docket(
+        &self,
+        committee: &CommitteeId,
+    ) -> Result<senate_core::DocketPage, ApiClientError> {
+        let url = self.url(&api::docket_path(committee));
+        let resp = self
+            .authed(self.http.get(url))
+            .query(&[("role", "chair")])
+            .send()
+            .await?;
+        Ok(checked(resp).await?.json().await?)
+    }
+
+    /// `GET .../chair`: the committee's chair and how it was found.
+    pub async fn chair(&self, committee: &CommitteeId) -> Result<api::ChairInfo, ApiClientError> {
+        let url = self.url(&api::chair_path(committee));
+        let resp = self.authed(self.http.get(url)).send().await?;
+        Ok(checked(resp).await?.json().await?)
+    }
+
+    /// `PUT .../chair`: make `senator` the committee's chair.
+    pub async fn set_chair(
+        &self,
+        committee: &CommitteeId,
+        senator: &SenatorName,
+    ) -> Result<api::ChairInfo, ApiClientError> {
+        let url = self.url(&api::chair_path(committee));
+        let body = api::SetChair {
+            senator: senator.clone(),
+        };
+        let resp = self.authed(self.http.put(url)).json(&body).send().await?;
+        Ok(checked(resp).await?.json().await?)
+    }
+
+    /// `GET /v1/secretaries`: every secretary relation.
+    pub async fn secretaries(&self) -> Result<api::Secretaries, ApiClientError> {
+        let url = self.url(api::SECRETARIES_PATH);
+        let resp = self.authed(self.http.get(url)).send().await?;
+        Ok(checked(resp).await?.json().await?)
+    }
+
+    /// `PUT /v1/secretaries/{senator}`: `senator`'s secretaries, in order;
+    /// `acted_by` when writing for the Speaker's office.
+    pub async fn set_secretaries(
+        &self,
+        senator: &SenatorName,
+        secretaries: Vec<SenatorName>,
+        acted_by: Option<SenatorName>,
+    ) -> Result<api::Secretaries, ApiClientError> {
+        let url = self.url(&api::secretaries_of_path(senator));
+        let body = api::SetSecretaries {
+            secretaries,
+            acted_by,
+        };
+        let resp = self.authed(self.http.put(url)).json(&body).send().await?;
+        Ok(checked(resp).await?.json().await?)
+    }
+
     /// `GET /v1/resolve`: whether `name` is in this Senate, written from
     /// `committee` (the writer's own, when the writer stands here).
     pub async fn resolve(

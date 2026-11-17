@@ -6,8 +6,11 @@
 //!
 //! - a hook registers the session, and tells a presiding session what it
 //!   presides over;
-//! - a presiding request (`docket`, `route`, `cover`, `refer`) is served
-//!   only for a session whose agent holds the seat.
+//! - a presiding request (`docket`, `route`, `cover`, `refer`, `forward`,
+//!   `refuse`, and `set_chair` from a session) is served only for a
+//!   session whose agent works the Speaker's desk: the Speaker itself (an
+//!   agent Speaker) or one of its secretaries. It writes as `speaker` with
+//!   `meta.acted_by` naming that agent.
 //!
 //! A presiding session sits in the Senate it presides over: its agent is a
 //! senator there like any other, and is pushed what is put to the Speaker
@@ -109,7 +112,10 @@ impl Front {
                 runtime,
                 agent_env,
                 agent_file,
-            } => wrap(self.on_presides(&session, runtime, agent_env, agent_file)),
+            } => wrap(
+                self.on_presides(&session, runtime, agent_env, agent_file)
+                    .await,
+            ),
             Request::Docket { session, committee } => {
                 wrap(self.on_docket(&session, committee).await)
             }
@@ -149,6 +155,39 @@ impl Front {
                 }
                 Err(e) => Reply::err(e),
             },
+            Request::Forward {
+                session,
+                committee,
+                seq,
+                id,
+            } => match self.presiding(&session) {
+                Ok((seat, speaker)) => wrap(seat.on_forward(&speaker, committee, seq, id).await),
+                Err(e) => Reply::err(e),
+            },
+            Request::Refuse {
+                session,
+                committee,
+                seq,
+                reason,
+                id,
+            } => match self.presiding(&session) {
+                Ok((seat, speaker)) => {
+                    wrap(seat.on_refuse(&speaker, committee, seq, reason, id).await)
+                }
+                Err(e) => Reply::err(e),
+            },
+            // From a session: the Speaker's office's. Without one: the
+            // person's own.
+            Request::SetChair {
+                session,
+                committee,
+                senator,
+            } if session.session_id.is_some() || session.claude_pid.is_some() => {
+                match self.presiding(&session) {
+                    Ok((seat, _)) => wrap(seat.on_set_chair(&session, committee, senator).await),
+                    Err(e) => Reply::err(e),
+                }
+            }
             other => {
                 let target = selector_of(&other)
                     .and_then(|selector| self.locate(selector))
@@ -202,7 +241,7 @@ impl Front {
         }
     }
 
-    fn on_presides(
+    async fn on_presides(
         &self,
         selector: &SessionSelector,
         runtime: Runtime,
@@ -224,15 +263,35 @@ impl Front {
                 Some(primary.seating().place(&name))
             }
         };
+        // The desk may have changed since the daemon last asked.
+        self.primary().refresh_me().await;
         let presiding = agent.as_ref().and_then(|agent| {
             let seat = self.seat_of(agent)?;
             Some(Presiding {
                 speaker: agent.clone(),
+                role: seat.desk_role(agent).unwrap_or_default(),
+                office: seat.speaker_id(),
                 senate: seat.senate_name(),
                 seated: seat.seated(),
             })
         });
-        Ok(PresidesReply { agent, presiding })
+        let mut chairs = Vec::new();
+        if let Some(agent) = &agent {
+            let primary = self.primary();
+            let committee = self
+                .locate(selector)
+                .and_then(|(_, session)| session.committee().cloned());
+            if let Some(committee) = committee
+                && primary.current_chair(&committee).await.as_ref() == Some(agent)
+            {
+                chairs.push(committee);
+            }
+        }
+        Ok(PresidesReply {
+            agent,
+            presiding,
+            chairs,
+        })
     }
 
     /// A presiding session's docket of the Senate it presides over; without
@@ -253,10 +312,20 @@ impl Front {
         }
         let mut senates: Vec<SenateDocket> = Vec::new();
         for shared in &self.senates {
+            // One of the person's agents works the desk, or the person is
+            // the Speaker: the person sees the whole desk.
             let mine = shared
-                .speaker_seat()
-                .and_then(|seat| seat.senator().cloned())
-                .is_some_and(|s| shared.seating().owns(&s));
+                .office()
+                .map(|o| {
+                    o.speaker_here().map(|s| s.name()) == Some(&shared.config.person)
+                        || o.agent_workers().any(|w| shared.seating().owns(w))
+                })
+                .unwrap_or_else(|| {
+                    shared
+                        .speaker_seat()
+                        .and_then(|seat| seat.senator().cloned())
+                        .is_some_and(|s| shared.seating().owns(&s))
+                });
             if mine {
                 senates.push(shared.docket(committee.clone()).await?);
             }
@@ -283,7 +352,13 @@ fn selector_of(request: &Request) -> Option<&SessionSelector> {
         | Request::Escalate { session, .. }
         | Request::Take { session, .. }
         | Request::Inbox { session, .. }
-        | Request::Checkpoint { session, .. } => Some(session),
+        | Request::Checkpoint { session, .. }
+        | Request::Send { session, .. }
+        | Request::Secretaries { session, .. }
+        | Request::ChairDocket { session }
+        | Request::ChairRoute { session, .. }
+        | Request::ChairCover { session, .. }
+        | Request::ChairEscalate { session, .. } => Some(session),
         _ => None,
     }
 }

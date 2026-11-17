@@ -39,6 +39,9 @@ use serde::{Deserialize, Serialize};
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpeakerConfig {
+    /// Where the Brain keeps its workspaces. The daemon fills it in from
+    /// its own `data_dir`; a `secretary.toml` never needs to.
+    #[serde(default)]
     pub data_dir: PathBuf,
     #[serde(default)]
     pub model: Option<String>,
@@ -219,6 +222,12 @@ impl SpeakerConfig {
     /// The language `committee`'s people read.
     pub fn locale_of(&self, committee: &CommitteeId) -> Locale {
         self.locales.get(committee).copied().unwrap_or(self.locale)
+    }
+
+    /// The language of `committee`'s people; the configured one for the
+    /// groups bound to none.
+    pub fn locale_of_opt(&self, committee: Option<&CommitteeId>) -> Locale {
+        committee.map_or(self.locale, |c| self.locale_of(c))
     }
 
     /// `<data_dir>/speaker`, where the Brain keeps its per-committee

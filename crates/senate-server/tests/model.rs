@@ -632,8 +632,13 @@ async fn two_agents_of_one_person_have_separate_presence() {
     server.running.shutdown().await.unwrap();
 }
 
+/// Replaces "a restart seats the agents it finds in the log again" (which
+/// asserted that, with several people, who runs each agent was lost on
+/// restart and the first person to act as it again claimed it): seats are
+/// kept in the store's registry, so every agent sits again under the
+/// principal that ran it.
 #[tokio::test]
-async fn a_restart_seats_the_agents_it_finds_in_the_log_again() {
+async fn a_restart_seats_the_agents_again_under_the_principals_that_run_them() {
     let store: Arc<dyn senate_log::LogStore> = Arc::new(MemoryStore::new());
     let first = TestServer::start_configured(store.clone(), |_| {}).await;
     seat(&first, &["copilot", "codex"]).await;
@@ -642,26 +647,19 @@ async fn a_restart_seats_the_agents_it_finds_in_the_log_again() {
     assert_eq!(first.post_event(BOB, &wrote).await.status(), StatusCode::OK);
     first.running.shutdown().await.unwrap();
 
-    // Seats are not stored, but the log and the heartbeats are: the server
-    // that comes back seats every agent again before it serves anything, so
-    // `senator::*` resolves against the two on the committee from the first
-    // request, and the roster in-process components read at their start is
-    // the whole one.
+    // The server that comes back seats every agent again before it serves
+    // anything, so `senator::*` resolves against the two on the committee
+    // from the first request, and the roster in-process components read at
+    // their start is the whole one.
     let second = TestServer::start_configured(store, |_| {}).await;
-    let mut seated: Vec<String> = second
-        .running
-        .hub
-        .roster()
-        .await
-        .unwrap()
-        .agents()
-        .iter()
-        .map(ToString::to_string)
-        .collect();
+    let roster = second.running.hub.roster().await.unwrap();
+    let mut seated: Vec<String> = roster.agents().iter().map(ToString::to_string).collect();
     seated.sort();
     assert_eq!(seated, ["claude", "codex", "copilot"]);
-    // With several people, who runs each agent is not in the log: the
-    // first person to act as it again answers for it, as on first contact.
+    // Two principals, and each agent is still its own principal's.
+    assert_eq!(roster.owner_of(&path("claude")), Some(&name("bob")));
+    assert_eq!(roster.owner_of(&path("copilot")), Some(&name("alice")));
+    assert_eq!(roster.owner_of(&path("codex")), Some(&name("alice")));
     let agents_of = |token: &'static str| {
         let request = second.request(Method::GET, "/v1/me", token);
         async move {
@@ -675,7 +673,10 @@ async fn a_restart_seats_the_agents_it_finds_in_the_log_again() {
                 .agents
         }
     };
-    assert!(agents_of(BOB).await.is_empty());
+    assert_eq!(agents_of(BOB).await, [path("claude")]);
+    let mut alices = agents_of(ALICE).await;
+    alices.sort();
+    assert_eq!(alices, [path("codex"), path("copilot")]);
 
     let mut on = second
         .running
@@ -685,7 +686,6 @@ async fn a_restart_seats_the_agents_it_finds_in_the_log_again() {
         .unwrap();
     on.sort();
     assert_eq!(on, [path("codex"), path("copilot")]);
-    // Bob's claude asks again (and is his again by asking).
     let error = api_error(
         second.post_event(BOB, &question_to("senator::*")).await,
         StatusCode::CONFLICT,
@@ -693,8 +693,9 @@ async fn a_restart_seats_the_agents_it_finds_in_the_log_again() {
     )
     .await;
     assert_eq!(error.candidates.len(), 2, "{error:?}");
-    assert_eq!(agents_of(BOB).await, [path("claude")]);
+    // Nobody else acts as an agent kept as another principal's.
     assert_eq!(second.act_as(ALICE, "claude").await, StatusCode::FORBIDDEN);
+    assert_eq!(second.act_as(BOB, "codex").await, StatusCode::FORBIDDEN);
     second.running.shutdown().await.unwrap();
 }
 

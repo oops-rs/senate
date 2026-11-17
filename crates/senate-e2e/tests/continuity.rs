@@ -425,15 +425,20 @@ async fn the_companion_answers() {
         .into_iter()
         .find(|e| e.seq == posted.seq)
         .expect("the answer in the log");
-    assert_eq!(answer.from, senator("claude"));
+    // The companion is claude's secretary: the answer is claude's, given
+    // by its secretary.
+    assert_eq!(answer.from, senator("companion"));
+    assert_eq!(answer.on_behalf_of, Some(senator("claude")));
     assert_eq!(answer.thread, Some(asked.seq));
     assert_eq!(
-        answer.meta.get(meta::COMPANION),
+        answer.meta.get(meta::TAKEOVER),
         Some(&serde_json::json!(true))
     );
     world
         .wait_post("the companion's answer mirrored", |p| {
-            p.markdown.contains("[senator::claude] 伴随") && p.markdown.contains("Idempotency-Key")
+            p.markdown
+                .contains("[senator::claude]（由秘书 [senator::companion] 代答）")
+                && p.markdown.contains("Idempotency-Key")
         })
         .await;
     bob_inbox.wait_for("gateway/src/idem.rs").await;

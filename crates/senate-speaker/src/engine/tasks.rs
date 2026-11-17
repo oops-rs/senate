@@ -62,7 +62,7 @@ impl Engine {
     /// or watch it so someone answers if the agent does not.
     pub(super) async fn on_task_root(&mut self, event: &Event) -> Result<Flow, Stall> {
         let l = self.locale(&event.committee);
-        let judged = needs_triage(event, &self.roster.people());
+        let judged = needs_triage(event, &self.roster.people()) && self.judges(&event.committee);
         let triage = if judged {
             match self.root_verdict(event).await? {
                 Some(triage) => Some(triage),

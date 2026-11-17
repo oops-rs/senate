@@ -124,6 +124,18 @@ pub(crate) enum RunEvent {
 }
 
 /// A run in flight in this process.
+impl RunEvent {
+    /// The committee the run belongs to.
+    pub(crate) fn committee(&self) -> &CommitteeId {
+        match self {
+            Self::Started { committee, .. }
+            | Self::Progress { committee, .. }
+            | Self::Finished { committee, .. }
+            | Self::Flush { committee, .. } => committee,
+        }
+    }
+}
+
 pub(super) struct Run {
     run: WorkRun,
     order: WorkOrder,

@@ -20,7 +20,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use senate_core::api::SSE_PING_SECS;
-use senate_core::{DEFAULT_SENATE_NAME, Locale, Name, Roster, RosterConfig, SenatePath};
+use senate_core::{
+    DEFAULT_SENATE_NAME, Locale, Name, Roster, RosterConfig, SenatePath, SenatorName,
+};
 use serde::Deserialize;
 
 #[derive(Debug, thiserror::Error)]
@@ -218,10 +220,38 @@ impl ServerConfig {
 
     /// The configured roster, with the roster's own rules applied (people
     /// listed once, each agent run by one listed person, one name for one
-    /// senator).
+    /// senator) and the Speaker read against `parent` (see
+    /// [`ServerConfig::roster_with`]). A Speaker named like the built-in
+    /// session's default name (`secretary`) is taken to be the built-in
+    /// session: whether it runs is the daemon's to say, at start.
     pub fn roster(&self) -> Result<Roster, ConfigError> {
-        Roster::try_from(self.roster.clone())
-            .map_err(|e| ConfigError::Invalid(format!("roster: {e}")))
+        let default = crate::office::default_built_in_name();
+        let assumed = self
+            .roster
+            .speaker
+            .as_ref()
+            .filter(|s| s.id.senate().is_none() && s.id.name() == &default)
+            .map(|_| default);
+        self.roster_with(assumed)
+    }
+
+    /// The configured roster as it runs beside the built-in session
+    /// `built_in` (`None`: it does not run): the Speaker read against
+    /// `parent` (a Senate path must be the parent's; a bare name is the
+    /// parent's senator when there is a parent), and the built-in session
+    /// seated, the Speaker when nothing names one.
+    pub fn roster_with(&self, built_in: Option<SenatorName>) -> Result<Roster, ConfigError> {
+        crate::office::settle(
+            self.roster.clone(),
+            self.parent.as_ref(),
+            built_in,
+            self.locale,
+        )
+        .map(|(roster, _)| roster)
+        .map_err(|e| match e {
+            ConfigError::Invalid(message) => ConfigError::Invalid(format!("roster: {message}")),
+            other => other,
+        })
     }
 
     pub fn sse_ping_interval(&self) -> Duration {
@@ -388,10 +418,12 @@ mod tests {
             config.parent.as_ref().map(ToString::to_string).as_deref(),
             Some("acme")
         );
+        // A bare name in a Senate with a parent is the parent's senator.
         let roster = config.roster().unwrap();
+        assert_eq!(roster.named_speaker(), None);
         assert_eq!(
-            roster.named_speaker().map(ToString::to_string).as_deref(),
-            Some("claude")
+            roster.speaker().map(|s| s.id.to_string()).as_deref(),
+            Some("/acme::senator::claude")
         );
         assert_eq!(
             roster.owner_of(&"claude".parse().unwrap()),

@@ -168,8 +168,15 @@ async fn a_question_with_no_session_is_answered_by_a_companion() {
     let answer = h.server.last_event("refund-v2");
     assert_eq!(answer.seq, posted.seq);
     assert_eq!(answer.thread, Some(q.seq));
+    // The companion is the agent's secretary: its answer is its own,
+    // given on the agent's behalf, flagged as a cover.
+    assert_eq!(answer.from.to_string(), "senator::companion");
     assert_eq!(
-        answer.meta.get(meta::COMPANION),
+        answer.on_behalf_of.as_ref().map(ToString::to_string),
+        Some("senator::claude".to_string())
+    );
+    assert_eq!(
+        answer.meta.get(meta::TAKEOVER),
         Some(&serde_json::json!(true))
     );
 

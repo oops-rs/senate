@@ -529,6 +529,10 @@ pub mod code {
     /// A qualified name that several things answer to;
     /// [`ApiError::locators`](super::ApiError::locators) lists them.
     pub const AMBIGUOUS_NAME: &str = "ambiguous_name";
+    /// A person's message for a seat that is not in this Senate nor in a
+    /// child registered with it: the person's own machine posts it to the
+    /// Senate above.
+    pub const ELSEWHERE: &str = "elsewhere";
     pub const INTERNAL: &str = "internal";
 }
 

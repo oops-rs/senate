@@ -169,6 +169,20 @@ pub trait Hub: Send + Sync + 'static {
         Ok(self.roster().await?.agents())
     }
 
+    /// The child Senates registered with this one, each with its Speaker
+    /// (a principal here). The default is none: a hub that keeps children
+    /// (the server) answers with them.
+    async fn children(&self) -> Result<Vec<crate::api::ChildSenate>, HubError> {
+        Ok(Vec::new())
+    }
+
+    /// This Senate's path from the root, when the hub knows it. The
+    /// default is `None`: a caller then takes the Senate a complete
+    /// qualified name was resolved to as its own.
+    fn senate_path(&self) -> Option<crate::senate::SenatePath> {
+        None
+    }
+
     /// Resolve every `senator::*` in `event.to` against the agents on the
     /// committee ([`Hub::committee_agents`]), then [`Hub::append`].
     ///

@@ -198,6 +198,9 @@ impl Event {
     /// ([`is_companion`]). The label itself is the same in every language:
     /// `[speaker::claude] 接管`, `[speaker::claude] takeover`.
     pub fn byline(&self, locale: Locale) -> Option<String> {
+        if let Some((principal, secretary)) = self.by_secretary() {
+            return Some(secretary_byline(principal, secretary, locale));
+        }
         let label = self.author()?;
         Some(if is_takeover(self) {
             format!("{label} {}", locale.pick("接管", "takeover"))
@@ -208,10 +211,41 @@ impl Event {
         })
     }
 
+    /// An answer a secretary gave on its principal's behalf while the
+    /// principal was away: `from` the secretary, `on_behalf_of` the
+    /// principal, flagged [`meta::TAKEOVER`]. The principal and the
+    /// secretary.
+    pub fn by_secretary(&self) -> Option<(&crate::SenatorName, &crate::SenatorName)> {
+        match (&self.from, &self.on_behalf_of) {
+            (Address::Senator(secretary), Some(Address::Senator(principal)))
+                if flag(self, meta::TAKEOVER) =>
+            {
+                Some((principal, secretary))
+            }
+            _ => None,
+        }
+    }
+
     pub fn binding(&self) -> Option<BindingPayload> {
         self.meta
             .get(meta::BINDING)
             .and_then(|v| serde_json::from_value(v.clone()).ok())
+    }
+}
+
+/// The byline of an answer `secretary` gave for `principal`: the
+/// principal's answer, given by its secretary. One function, both
+/// languages.
+pub fn secretary_byline(
+    principal: &crate::SenatorName,
+    secretary: &crate::SenatorName,
+    locale: Locale,
+) -> String {
+    let principal = Address::senator(principal).in_text();
+    let secretary = Address::senator(secretary).in_text();
+    match locale {
+        Locale::Zh => format!("{principal}（由秘书 {secretary} 代答）"),
+        Locale::En => format!("{principal} (answered by its secretary {secretary})"),
     }
 }
 

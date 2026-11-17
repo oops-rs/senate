@@ -266,6 +266,19 @@ impl Engine {
         agent: SenatorName,
         question: Seq,
     ) {
+        // The cover chain: the agent's own secretaries, then the desk.
+        match self.cover_by(&committee, &agent).await {
+            super::desk::CoverBy::Secretary => {
+                self.cover_as_secretary(committee, root, agent, question)
+                    .await;
+                return;
+            }
+            super::desk::CoverBy::Nobody => {
+                self.forget_open(&committee, root, &agent);
+                return;
+            }
+            super::desk::CoverBy::Office => {}
+        }
         let checkpoint = match self.hub.latest_checkpoint(&committee, &agent).await {
             Ok(checkpoint) => checkpoint,
             Err(error) => {
@@ -373,7 +386,7 @@ impl Engine {
         }
     }
 
-    fn forget_open(&mut self, committee: &CommitteeId, root: Seq, agent: &SenatorName) {
+    pub(super) fn forget_open(&mut self, committee: &CommitteeId, root: Seq, agent: &SenatorName) {
         if let Some(open) = self
             .committees
             .get_mut(committee)
@@ -387,7 +400,7 @@ impl Engine {
     /// Not answered from the checkpoint: the question waits on people
     /// (`suspended`, with the reason). The mentions are posted when the
     /// status is processed.
-    async fn escalate_takeover(
+    pub(super) async fn escalate_takeover(
         &mut self,
         committee: &CommitteeId,
         root: Seq,

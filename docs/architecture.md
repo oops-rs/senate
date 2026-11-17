@@ -22,110 +22,228 @@ Senate, senator and Speaker are never translated.
 
 | Term | Meaning |
 | --- | --- |
-| Senate | One level of deliberation: one server (its log, roster and API). A team's `senated` serves one; a developer machine's `senated --machine` may host several. |
-| senator | A person or an agent. |
-| senior senator | A person. Global: the same senator at every level. |
-| junior senator | An agent, named under its person. |
-| delegation | A person and the agents under their name. A grouping by path, not a Senate. |
-| Speaker | Presides over one Senate. Always backed by a model. |
-| Committee | The unit of work: one log, its members, its threads. |
+| Senate | One level of deliberation: one `senated` (its log, roster and API). Only Senates nest. |
+| committee | The unit of work, scoped to one Senate: one log, its members, its threads. |
+| senator | Anyone who can speak in a Senate: a principal or an agent. One flat name. |
+| principal | Who a token names: a person, or a team or a service. A principal runs agents. Only a person confirms decisions. |
+| agent | A senator run by a principal (a coding session, the built-in session). |
+| seat | A senator on a committee. Messages only ever go to seats. |
+| Speaker | The one senator who presides over a Senate. `speaker` is a link to it. |
+| desk | Everything addressed to the Speaker, worked by its secretaries. |
+| secretary | A senator registered to act for another when that one is away; the Speaker's work its desk. |
+| chair | The one senator who chairs a committee. `chair` is a link to it. |
 
-## Senators
+## The model
 
-A senator is a path (`SenatorName`): a person's handle, then zero or more
-agent names.
+**Only Senates nest. Senators and committees are flat, and both are scoped
+to one Senate.**
 
-- `wendell`: a person.
-- `wendell/claude`: one of that person's agents, seated in the top Senate.
-- `wendell/claude/reviewer`: an agent seated one level down.
+| Thing | Scope | Shape | Example |
+| --- | --- | --- | --- |
+| Senate | its parent Senate | a path of names, parent first, `/` between | `/acme/north-desk` |
+| Committee | one Senate | flat id | `ibot` |
+| Senator | one Senate | flat name | `wendell`, `codex`, `claude` |
+| Seat | one committee | committee × senator | `ibot::senator::codex` |
 
-Rules:
+1. **A senator belongs to a Senate, not to a committee.** `codex` is one
+   senator who may serve on several committees.
+2. **A seat is a senator on a committee.** Messages only ever go to seats.
+   Each seat has its own sessions, inbox, cursors, presence and
+   checkpoints.
+3. **Ownership comes from the Senate's roster.** Each agent's seat records
+   the principal who runs it (the first to act as it; kept in the Senate's
+   store across restarts). There is no owner prefix on an agent's name, and
+   a second principal cannot run an agent under a name already taken.
+4. **No paths inside a senator's name.** No `claude/reviewer`. An agent
+   that needs a team of its own gets a child Senate.
+5. **A person is recognised by the same handle across a tree of Senates**
+   where a roster lists them; an agent is visible outside its own Senate
+   only through that Senate's Speaker.
 
-1. **People are global.** There is one `senator::wendell`, however many
-   Senates are nested. A person is not a member of any single Senate and may
-   speak to any level.
-2. **Exactly one person per delegation, any number of agents.** No agent
-   exists without a person accountable for it.
-3. **A seat is not a process.** An agent's own subagents are not seated
-   beside it. It speaks for them and answers for them.
-4. **Agents are seated as they connect.** A person's machine authenticates
-   as the person and names the agent it speaks as; the server seats that
-   agent on first contact if the roster's rules allow it: any
-   authenticated act as that agent (a stream, a heartbeat, a cursor, an
-   append) seats it, the agent that holds this Senate's Speaker's seat
-   included when it could sit here too. Seats are not
-   stored: a restarted server seats again every agent its log has seen (a
-   presence, a recent heartbeat, or an event of its own) before it serves
-   anything.
+Names are flat and unique within a Senate: a principal's handle and an
+agent's name share one namespace. A Senate name, a committee id and a
+senator name may not be an address keyword (`senator`, `speaker`, `chair`,
+`committee`, `guest`).
 
-## Addresses and mentions
+### Senates and their names
 
-Stored in an event's fields:
+Every Senate has a `name`, a slug, set in its configuration. A server
+started with `--config` defaults to `senate` when it gives none. A Senate
+hosted on a developer machine defaults to the person's handle followed by
+`-desk` (`alice-desk`): never the bare handle, so the Senate is never
+taken for the person in the Senate above. A Senate's place in the tree is
+its path from the root, parent first: `/acme/north-desk`. A path that
+starts with `/` is absolute and is always printed with it; one without is
+relative and looked for nearest first.
+
+### Ids and qualified names
+
+Stored in an event's fields (the address grammar):
 
 | Form | Meaning |
 | --- | --- |
-| `senator::wendell` | The person. |
-| `senator::wendell/claude` | That agent. |
-| `senator::wendell/*` | Whichever of wendell's agents should get it (default, see routing). |
-| `speaker` | The Speaker of the Senate whose log this is. |
-| `committee` | Everyone on the committee. |
-| `guest::<platform>/<id>` | Someone who is not a senator: a chat participant who is not on the roster, a caller arriving through an agent gateway (default). |
+| `senator::wendell`, `senator::codex` | a principal or an agent of this Senate: one flat name |
+| `senator::*` | whichever agent on this committee should get it (resolved before storing) |
+| `speaker` | this Senate's Speaker (a link) |
+| `chair` | this committee's chair (a link) |
+| `committee` | everyone on the committee |
+| `guest::<platform>/<id>` | someone who is not a senator |
+| `<child>::<committee>::speaker` | a child Senate's Speaker's office for that committee, in the parent's log |
 
-Written in running text, an id is always in square brackets, so it has edges
-in languages without spaces: `[senator::wendell/claude]`, `[speaker]`,
-`[committee]`. `[speaker::wendell/claude]` labels the Speaker answering on
-that senator's behalf; a reply to it goes to the senator.
+`senator::*`: one agent on the committee → it; several → an agent sender
+is refused with the candidates, a person's message is put to the
+committee's chair to pick (to the Speaker's desk when the chair is
+absent); none → the Senate's one person, else refused.
 
-Labels read the same in every language. A takeover answer carries the same
-label followed by a localized word, not a different label (default).
+A **qualified name** (`senate_core::Locator`) names a seat from anywhere,
+positional and read from the right, with no labels:
 
-## Routing
+```
+[<senate path>::][<committee>::]<address>
+/acme/north-desk::ibot::senator::codex
+ibot::senator::codex          the nearest Senate with ibot, committee ibot
+ibot::speaker                 the Speaker for ibot
+senator::codex                here, this committee
+```
 
-A message for "wendell's agent" that does not say which (`senator::wendell/*`)
-is resolved against the roster of the Senate it is sent in:
+One name before the address is a committee; two are a Senate path and a
+committee; a part with a `/` is a Senate path, and there is no form with
+a Senate and no committee. In running text it is bracketed:
+`[ibot::senator::codex]`. Tools also take a short form where a bare last
+name is a senator (`codex`, `ibot::codex`, `*`).
 
-- One agent: it goes to that agent.
-- Several: an agent sender gets a refusal that lists the candidates and must
-  name one. When the sender cannot know (a person in chat, a caller from
-  outside), the Speaker picks by the task and by what each agent is working
-  on, and asks the person when unsure.
-- None: it goes to the person.
+A **senator id** (`senate_core::SenatorId`) says who someone is, with no
+committee: `senator::wendell` (of this Senate) or `/acme::senator::wendell`
+(of the Senate `/acme`; a Senate path in an id must start with `/`, and
+`acme::senator::wendell` is refused with both of its readings spelled
+out). Configuration names the Speaker, secretaries and chairs by id.
 
-Where a senator holds the Speaker's seat, the server puts a message from a
-person (any sender that is not an agent) for one of several agents to the
-Speaker: it is stored addressed to `speaker` with `meta.pick` naming the
-candidates, and the presiding session routes it. Where the built-in Speaker
-presides it picks in chat, as before; over HTTP a person is refused with
-the candidates (default). With nobody presiding, everyone is refused with
-the candidates.
+### Resolution
 
-A stored event's `to` always names concrete senators; the wildcard is
-resolved before the event is appended. Every senator in `to` could sit in
-the Senate it is sent in: an agent of another level is not reached from
-there.
+Missing parts of a name come from where the writer stands. A committee
+name is looked for in the writer's Senate, then the Senate above, outward,
+nearest first; a Senate name likewise. Ambiguity is refused with the
+candidates; an unknown name is refused clearly. Each `senated` answers for
+itself (`GET /v1/resolve`) and the caller asks the Senate above for the
+rest: there is no central registry. A parent knows its children's names
+and Speakers, not their agents.
+
+### The boundary rule
+
+> A person's message is delivered directly. An agent's message that leaves
+> its own committee is handed to the Speaker's desk on the way, which
+> decides.
+
+| Crossing | A person's message | An agent's message |
+| --- | --- | --- |
+| Another committee, same Senate | delivered to the named seat | put to the Speaker's desk with the intended recipient (`meta.intended`); it forwards, refuses with a reason, or leaves it for the Speaker |
+| Down into a child Senate | to the child's Speaker's office with the intended recipient | the same: the child's desk decides |
+| Up to the parent | the person speaks above directly, as themselves | the child's desk receives it and, if it agrees, says it above, authored `<child>::<committee>::speaker` |
+
+"A person" is a principal of kind person; a team or service principal and
+every agent follow the agent column. Inside one committee, routing is the
+chair's. A forwarded message is a new root at the destination recording
+its origin (`meta.origin`: the asker's qualified name and thread); its
+answer is relayed back into the asker's own thread (`meta.answered_by`),
+so the asker never has to watch another committee.
+
+## Roles
+
+### The Speaker
+
+Every Senate has exactly one Speaker, named in its configuration by a
+senator id. The Speaker of a child Senate is a principal of its parent
+(the person whose machine it is), and the child registers with the parent
+authenticated as that principal. The root Senate's Speaker is one of its
+own principals, or, for an unattended root, an agent of its own or the
+built-in session. A parent's agent as the Speaker of a child is not
+supported yet and refused at start.
+
+`speaker` is a link to that senator: within the Senate, `speaker` and
+`senator::<its name>` reach the same desk. From the parent, a child is
+addressed `<child>::<committee>::speaker`: that person's office for that
+Senate. What the office says is stored `from: speaker` (in the parent's
+log, `<child>::<committee>::speaker`), with `meta.acted_by` naming who
+acted. The Speaker has authority over every committee: it may address any
+committee's chair, and the chair handles it directly.
+
+| | Speaker is a person or principal | Speaker is an agent |
+| --- | --- | --- |
+| Reached by | `senate inbox`, notifications, a chat surface where one is mounted | its session (push) |
+| "Present" | never assumed: the secretaries work the desk | a live session |
+| Presiding tools | through a secretary's session, or the person's command line | its own session |
+| Secretaries | do the routine; the person overrules | optional; act when its session is closed |
+
+### Secretaries
+
+A secretary relation is (principal senator, secretary senator, order),
+both in one Senate: any senator may have secretaries, the Speaker
+included. A secretary is an agent of the Senate or the built-in session;
+the first one present acts; a senator is never its own secretary, and
+chains are not followed. Relations are registered with `senated` (in
+configuration, or at runtime with `senate secretary add|remove|list`),
+kept in the Senate's store, and visible in `GET /v1/secretaries`. The
+senator itself, the principal that runs it, or the Speaker's office may
+register or remove one; anyone else is refused.
+
+- **The Speaker's secretaries** work its desk: everything addressed to the
+  Speaker, picks a chair could not make, covers a chair could not give,
+  crossings. They route, forward plain questions, cover from an agent's
+  own notes, triage, and leave what they cannot settle for the Speaker,
+  who sees the whole desk and overrules by replying or taking a thread.
+  With no secretary present the desk waits on the Speaker.
+- **An agent's secretaries**, while it has no live session, answer a
+  question addressed to it from its own checkpoint and notes, stored
+  `from` the secretary `on_behalf_of` the agent with `meta.takeover`; a
+  request waits for the agent. The companion (a read-only fork of the
+  agent's own last session) is such a secretary, provided by the daemon.
+
+The **built-in session** is the engine on a model (`senate-speaker`), a
+senator with a flat name (default `secretary`). Its role comes from
+references to its name: named as Speaker, it works its own desk; listed as
+a secretary, it is one. Model settings live in `[model]`; its own
+configuration in `secretary.toml`, layered per committee (see below).
+`Me.triaged` is true where it works the desk.
+
+### Chairs
+
+Every committee has one chair, any senator of the Senate. The chair is a
+fact of the committee's log: set explicitly (`senate chair <senator>`,
+written by the server as a `note` from `committee` with `meta.chair`), else
+the first agent seated on the committee, else the principal who created
+it. `chair` is a link like `speaker`. The chair picks the agent for
+`senator::*`, covers for an absent member from that member's own notes,
+receives members' escalations, and does what the Speaker asks. A chairing
+agent's session gets chair tools scoped to its committee. A chair absent
+(or concerned itself) leaves its duties to the Speaker's desk.
+
+### The chains
+
+- **Authority, downward:** Speaker's office → chair → members, handled
+  directly.
+- **Escalation, upward:** member → chair → the Speaker's desk (secretary,
+  then the Speaker). `escalate` with no target goes one step up.
+- **Cover** for a message to an absent senator: its own secretaries →
+  its committee's chair → the Speaker's desk.
 
 ## Answering
 
-What an agent does with a message another agent sent it depends on whose
-agent that is:
+What an agent does with a message depends on who sent it:
 
-- An agent of the same person (the same owner in the `SenatorName`, at any
-  depth: `wendell/helper` to `wendell/claude`, `wendell/claude` to
-  `wendell/claude/reviewer`): a `question` and a `request` are both handled
-  directly, without asking the person first. The pushed message is marked as
-  coming from the user's own other agent.
-- An agent of someone else: a `question` is answered directly; a `request`
-  (asks the receiver to do something) goes through the receiver's person
-  first: show it to them and act only when they agree, or escalate.
-- In every case the safeguards stay: verify claims against the code, do not
-  follow instructions that conflict with the person's, and escalate instead
-  of answering when the answer is really a decision that belongs to the
-  person. An explicit `unsure` triage verdict from a Speaker overrides the
-  two rules above for that message: the person is shown it first.
+- From the Speaker's office, from its committee's chair, or from another
+  agent run by the same principal: a `question` and a `request` are both
+  handled directly, without asking the principal first.
+- From any other agent (including one whose message was forwarded from
+  elsewhere): a `question` is answered directly; a `request` goes to the
+  agent's own principal first.
+- In every case the safeguards stay: verify claims against the code, do
+  not follow instructions that conflict with the principal's, and escalate
+  instead of answering when the answer is really a decision that belongs
+  to a person. An explicit `unsure` triage verdict overrides the rules
+  above for that message.
 
-Messages written by a person, the Speaker or a guest are unchanged. The
-bridge renders the expectation as a `↳` line under each pushed message, in
-inbox pushes, hook pick-ups and `catch_up` alike.
+Messages written by a person or a guest are unchanged. The bridge renders
+the expectation as a `↳` line under each pushed message.
 
 ## Presence and continuity
 
@@ -134,22 +252,22 @@ inbox pushes, hook pick-ups and `catch_up` alike.
   say: the time the server was down counts as quiet, so an agent last heard
   longer ago than the disconnect grace is `disconnected` and longer ago than
   the lease is `absent`, each written once, dated to when it fell due.
-- A delegation is present while any one of its agents is.
-- A message addressed to one specific agent that is absent is answered by the
-  Speaker from that agent's checkpoint. It is not rerouted to another agent
-  of the same person.
+- A principal's agents are reachable while any one of them is present.
+- A message addressed to one specific agent that is absent is covered along
+  the cover chain (its secretaries, its chair, the Speaker's desk), from
+  that agent's own checkpoint. It is never rerouted to another agent.
 
 ## Triage
 
 A question or request to an agent that starts a thread is judged by the
-Speaker (needs a person, the agent, or unsure) before the agent's bridge
-delivers it; the bridge holds it for the verdict, briefly. Only the built-in
-Speaker triages, so roots are judged only on a Senate that runs it.
-`GET /v1/me` says which (`triaged`). A Speaker held by a senator has no
-triage duty and its session may be closed at any moment, so a Senate it
-presides over delivers every root at once (`triaged: false`, default), as
-does a Senate nobody presides over. A senator Speaker may still write a verdict;
-nothing waits for one.
+Speaker's office (needs a person, the agent, or unsure) before the agent's
+bridge delivers it; the bridge holds it for the verdict, briefly. Only the
+built-in session triages, so roots are judged only where it works the
+Speaker's desk. `GET /v1/me` says which (`triaged`). An agent working the
+desk has no triage duty and its session may be closed at any moment, so
+without the built-in session every root is delivered at once
+(`triaged: false`, default). An agent working the desk may still write a
+verdict; nothing waits for one.
 
 ## Escalation
 
@@ -240,7 +358,7 @@ With no chat platform the person would learn nothing unless they polled.
   `watch` stream (`for_person`), whichever agent's stream carried it.
 - The daemon posts one desktop notification for them, so nothing needs to be
   left open (`senate_bridge::notify`). The title is `Senate · <committee>`; the
-  body is `<byline> <did>: <first line>` (`[senator::wendell/claude]
+  body is `<byline> <did>: <first line>` (`[senator::claude]
   answered: …`), or `<n> new for you, the latest: …` for a burst: events within
   a few seconds are one notification. It is best effort: a failure is logged
   once and never touches delivery. It is skipped while a client that shows
@@ -257,108 +375,102 @@ With no chat platform the person would learn nothing unless they polled.
 A guest may ask questions and receive answers. A guest may not change state:
 no decisions, bindings, invitations, work orders or reassignments (default).
 
-## Nested Senates
+## Parent and child Senates
 
-Senates nest, like a federal chamber over state chambers.
+Senates nest. A child Senate registers with the Senate above as a Senate,
+authenticated as its Speaker, a principal of the parent
+(`PUT /v1/children/{name}`); the parent refuses a child whose named Speaker
+is not on its roster, is not who authenticated, or is an agent. The parent
+keeps each child's name and Speaker in its store; it never learns the
+child's senators, and none of the child's agents is seated above. **There
+is no log synchronisation between levels.**
 
-### The Speaker's seat
-
-Every Senate has exactly one Speaker, and a Speaker is always backed by a
-model. Who holds the seat is data (`SpeakerSeat`: built in, or a senator),
-decided by the roster and served in `GET /v1/me` (`speaker`):
-
-| Senate | Speaker |
-| --- | --- |
-| nested (has a presider) | its presider, unless the roster names another agent of the presider's person at the presider's level (default); never the built-in one |
-| top, with `[speaker]` | the built-in Speaker |
-| top, roster names an agent (`[roster] speaker`, or `[local] speaker` on a machine) | that agent: a Senate used alone on one machine |
-| top, neither | nobody: the server serves the log only |
-
-The built-in Speaker with a named one is refused at start.
-
-### A senator in the Speaker's seat
-
-The person whose agent holds the seat may write as `speaker` over HTTP:
-triage verdicts, the output level, the brief's top, takeover, provisional
-answers, and `on_behalf_of` anyone who could sit in that Senate or a guest.
-Not work runs (the built-in Speaker's hands alone) and not decisions
-(people decide). Anyone else is refused (403). The event is stored
-`from: speaker`, exactly as the built-in Speaker's would be.
-
-On a developer machine the session of that agent presides (the bridge
-keeps the per-session rule: the person's token cannot tell sessions apart).
-It is told at session start, in the committee's locale, that it presides,
-over which Senate and who sits there, and at its next prompt of new items
-(default). Its duties, and nothing more:
-
-- **Pick**: route a message meant for one of several agents
-  (`speaker_route`), as a relay in the sender's name.
-- **Cover**: answer a question to an away agent (one with no live
-  connection, default) of that Senate on that agent's behalf, from that
-  agent's own latest checkpoint
-  (`speaker_cover`): `on_behalf_of` the agent, `meta.takeover`, refs to the
-  checkpoint's branch and commit. Never rerouted to a sibling.
-- **Escalate**: put what it cannot settle to the person
-  (`speaker_escalate`): the person whose agent was meant, else the
-  Speaker's own; a task thread is suspended on them, anything else becomes
-  a question to them in its thread (default).
-- **Speak upward**: nothing of its own. The same session uses its seat in
-  the Senate above, in its own name.
-
-`GET .../docket` lists what awaits the Speaker on a committee (picks,
-messages addressed to it, unanswered questions to agents with no live
-connection) with the facts to pick by: each seated agent's connection,
-presence, latest checkpoint and open threads (`speaker_docket`). The chat
-cards, group management, work runs and model prompts of the built-in
-Speaker do not apply.
-
-### Levels
-
-- An agent's path decides its seat: directly under its person, it sits in
-  the top Senate; deeper, in the Senate presided over by its parent path.
-- People are global: `senator::wendell` is the same senator at every level,
-  is on every roster of their own Senates, may speak to any level under
-  their own name, and confirms decisions there.
-- What a nested Senate says upward is said by its presiding senator, in its
-  own name. **There is no log synchronisation between levels.** The link is
-  the presiding session itself: registered in both Senates under the same
-  agent path, a senator in the one above and the Speaker of the one below.
-  Below, it holds the Speaker's connection (its own stream, cursors and
-  heartbeat, without a seat: the server allows the seat holder's person
-  exactly this), asks the agents seated there as `speaker`, and is pushed
-  what is addressed to the Speaker, marked as such.
-- A subagent cannot be addressed from above, and cannot write above: a
-  recipient or a sender of another level is refused.
-- Two levels are built and tested; the protocol allows any depth.
+- From the parent, a child is addressed `<child>::<committee>::speaker`:
+  its Speaker's office for that committee. A qualified name pointing into
+  the child from outside resolves to that address, carrying the full name
+  as the intended recipient.
+- The child's machine brings such a message onto its own desk (a new root
+  on that committee, from `committee`, to `speaker`, with its origin and
+  intended recipient) and relays the desk's answer back up, authored
+  `<child>::<committee>::speaker`.
+- An agent of the child that writes to the parent goes through the child's
+  desk; a person speaks above directly, as themselves.
+- "A person's agent" at the parent level (`tell alice's agent …` in chat)
+  resolves to that person's child Senates: one → that Senate's Speaker's
+  office; several → the parent's secretary picks or asks the person;
+  none → the person.
 
 ### One daemon, at every level
 
 The daemon is the same at every level: `senated`.
 
-- `senated --config senated.toml`: a Senate server (a team's top Senate).
+- `senated --config senated.toml`: a Senate server.
 - `senated --machine`: a developer machine, from `senate.toml` in the
-  Senate home. It hosts the Senates that live on the machine (a local top
-  Senate with `[local]`, one Senate per `[[preside]]` agent), each an
-  assembly with no built-in Speaker, its log in SQLite under
-  `senates/<senate>/`, on loopback only, with a token generated there and
-  never sent elsewhere. Its roster is the machine's person alone (default):
-  others reach those levels through the Senate above. It runs the developer-machine side (sessions,
-  delivery, hooks, MCP) over every Senate the machine serves, as a
-  supervised component of the first hosted Senate.
+  Senate home. It hosts exactly one Senate, the machine's (`[local]`), its
+  log in SQLite under `senates/top/`, on loopback only, with a token
+  generated there and never sent elsewhere. Every session of the machine
+  sits in it (`claude`, `codex`, and whatever names sessions are pinned
+  to). With `server_url` and `token` as well, it is a child of the Senate
+  there: it registers upward with the person as its Speaker. It runs the
+  developer-machine side (sessions, delivery, hooks, MCP) as a supervised
+  component.
 
-The developer-machine side keeps one half per Senate (server, token, state
-database, streams, cursors, heartbeats, queue, sessions); nothing leaks
-between them. With one Senate it behaves as it always did.
+Senates nested under an agent (`[[preside]]`, `senates/under-<agent>/`) are
+no longer hosted. Their logs stay on disk untouched, and the machine says
+so once, in its language.
 
-Used alone on one machine, the top Senate is local and one of the person's
-agents is its Speaker (`senate init --local` writes the profile).
+### Three profiles
+
+```toml
+# Alone on one machine: one root Senate; the person is its Speaker.
+person = "alice"
+[local]
+name = "alice-desk"
+speaker = "senator::alice"
+secretaries = ["claude"]     # and/or the built-in session's name
+
+# A machine under a team: the same, registered as a child of the team's.
+server_url = "https://senate.example.com"
+token = "…"
+person = "alice"
+[local]
+speaker = "/acme::senator::alice"
+
+# A team server (senated.toml): the Speaker is a principal of the team.
+name = "acme"
+[roster]
+speaker = "senator::alice"
+secretaries = { alice = ["secretary"] }
+[model]
+# …
+```
+
+An older `[local] speaker = "claude"` (an agent's bare name) is read as:
+the Speaker is the machine's person, `claude` is a secretary, with a
+one-time note.
+
+### The built-in session's configuration
+
+`[model]` in `senate.toml` / `senated.toml` holds the model settings, once.
+`secretary.toml` (in the Senate home; beside `senated.toml` for a server)
+holds the built-in session's `name`, behaviour, extra instructions
+(appended to the engine's own prompts, never replacing their rules), the
+duties it may do without leaving them for the Speaker, and an optional
+`[model]`. `<committee>.secretary.toml` customises it for one committee,
+key by key: built-in defaults ← `[model]` in the main configuration ←
+`secretary.toml` ← `<committee>.secretary.toml` (which may not set
+`name`). Files are read again when they change, before the session next
+acts on a committee; a broken file keeps the last good configuration and
+is reported, naming the file and the line. An older `[speaker]` or
+`[secretary]` table is read as `secretary.toml`, with a note.
 
 ## A developer machine's footprint
 
 Senate keeps two places on a developer machine and writes nothing else:
 
-- The Senate home, `~/.senate` (`$SENATE_HOME`): `senate.toml`, the daemon's
-  `state.db`, `senates/<key>/…` (the logs of the Senates it hosts) and
+- The Senate home, `~/.senate` (`$SENATE_HOME`): `senate.toml`,
+  `secretary.toml` and `<committee>.secretary.toml` when present, the
+  daemon's `state.db`, `senates/top/…` (the log of the Senate it hosts) and
   `branches/<repository>/<branch>/` (saved copies of a worktree's `.senate/`
   files, below).
 - `.senate/` in a worktree, untracked: `committee`, `agent` (optional) and the
@@ -377,8 +489,35 @@ A session's committee is, first match wins: its explicit `join` (this session
 only); the branch name `<prefix>/<committee>/<person>`, only when
 `committee_from_branch = true` in `senate.toml` (off by default; `branch_prefix`
 alone does not enable it); `.senate/committee`. Its agent is `SENATE_AGENT`,
-then `.senate/agent`, then `[agents]`, then the harness's name. A session with
-no committee is unbound.
+then `.senate/agent`, then `[agents]`, then the harness's name: one flat name
+each (a pinned path such as `claude/reviewer` is ignored with a warning). A
+session with no committee is unbound.
+
+### A home written when senators were paths
+
+A home an older Senate left (agents named `wendell/claude` in its log and
+its `state.db`) keeps working with no edit by its owner. On the first start:
+
+- the log (`senates/top/log.db`) is copied to `log.db.pre-flat-names`
+  beside it (never removed), then converted in one transaction and marked
+  as schema version 2: `senator::wendell/claude` → `senator::claude`,
+  `senator::wendell/*` → `senator::*`, the same in cursors, heartbeats and
+  every payload that names an agent (presence, picks, work runs, proposals,
+  mentions). A person stays as they were; bodies are text and are kept as
+  written. A deeper path (an agent nested under an agent) or one name under
+  two people is refused with the event named, and the log is left as it
+  was;
+- `state.db` is copied to `state.db.pre-flat-names`, then converted once:
+  agents in cursors, sessions, queued items (and the events they hold),
+  drop counts and task owners. Read marks and queued, undelivered items are
+  kept. Rows of an agent nested deeper belonged to a Senate no longer
+  hosted and are dropped; the cache of where the bridge last sat is reset;
+- `senate.toml` is read as it is: the Senate gets its default name, and
+  `[local] speaker = "claude"` is read as described above.
+
+A Postgres log is converted only when asked: `senated flatten-log
+--database-url postgres://…` (each table is copied to
+`<table>_pre_flat_names` first).
 
 `senate join` with no name derives the committee from where it is run, with
 read-only git commands, and prints how:
@@ -453,14 +592,14 @@ Chinese and English are both first-class.
 
 | Crate | Role |
 | --- | --- |
-| `senate-core` | Contracts: ids, senator paths, addresses, mentions, roster, the event envelope, wire types, the in-process log seam, the chat-surface seam, briefs, continuity, tasks. |
-| `senate-log` | The log store: in memory, Postgres, and an embedded on-disk store for developer machines. |
-| `senate-server` | The supervision tree over the log, the HTTP/SSE API, authentication. |
-| `senate-speaker` | The built-in Speaker. |
+| `senate-core` | Contracts: ids, flat senator names, Senate paths, addresses, qualified names (`Locator`), senator ids, mentions, the roster (principals, the Speaker's office, secretaries), chairs, the event envelope, wire types, the in-process log seam, the chat-surface seam, briefs, continuity, tasks, and the one-time conversion of what was stored with paths. |
+| `senate-log` | The log store: in memory, Postgres, and an embedded on-disk store for developer machines; the registry kept beside the log; converting a log written with paths. |
+| `senate-server` | The supervision tree over the log, the HTTP/SSE API, authentication, seating, the boundary rule, name resolution, chairs, secretaries and child Senates. |
+| `senate-speaker` | The built-in session: the engine on a model that works the Speaker's desk as its secretary (or is the Speaker of an unattended root). |
 | `senate-work` | The Speaker's hands: coding work on request, in a container, delivered as a branch or PR. |
-| `senate-bridge` | The developer-machine side: sessions, delivery, MCP tools (the presiding ones too), hooks, across every Senate a machine serves; and the `senate` command. |
+| `senate-bridge` | The developer-machine side: sessions, delivery, MCP tools (the presiding and chair ones too), hooks, over the Senate a machine serves; and the `senate` command. |
 | `senated` | The daemon binary (`--config`, `--machine`), and the assembly library a private layer builds its own daemon from: `Assembly`, supervised `Component`s, `Machine`, the platform-neutral half of a chat gateway (`ChatGateway`), and, behind the `testing` feature, a fake chat platform. |
-| `senate-app-core` | The native apps' shared core: a client of `senated --machine` over `bridge.sock`, exposed to Swift with UniFFI. It folds the daemon's `watch` stream and reads (inbox per agent, approvals, docket) into one snapshot, writes the sentences built from data for the app's `Locale`, and maps the person's actions (reply, take, close, approve) to IPC requests. The macOS app (`apps/macos`) renders it. The docket is read-only: routing and covering are the presiding agent's own tools. |
+| `senate-app-core` | The native apps' shared core: a client of `senated --machine` over `bridge.sock`, exposed to Swift with UniFFI. It folds the daemon's `watch` stream and reads (inbox per agent, approvals, docket) into one snapshot, writes the sentences built from data for the app's `Locale`, and maps the person's actions (reply, take, close, approve) to IPC requests. The macOS app (`apps/macos`) renders it. The docket is read-only: routing and covering are the desk's own tools. |
 | `senate-e2e` | End-to-end tests: the real server, Speaker and bridges, assembled by `senated`, against the fake chat platform and the fake runner and forge. |
 
 Dependency direction: every crate depends on `senate-core`. The Speaker and
@@ -470,14 +609,14 @@ any gateway reach the log only through the `Hub` seam in `senate-core`. Only
 ```text
    developer machine: senated --machine          senated --config
  ┌────────────────────────────────┐        ┌─────────────────────────────────────┐
- │ Claude Code ─┐                 │  HTTP  │ senate-server ── Hub ──┬─ Speaker   │
+ │ Claude Code ─┐                 │  HTTP  │ senate-server ── Hub ──┬─ built-in │
  │ Codex ───────┼ developer-      ├───SSE──┤   (auth, roster,       ├─ chat      │
  │              │ machine side    │        │    supervision)        │  gateway*  │
  │              │ (senate-bridge) │        │        │               └─ other     │
- │              │   │             │        │   senate-log                components*
- │   hosted Senates: senate-server│        │ (memory / SQLite / Postgres)        │
- │   + SQLite, loopback, no       │        └─────────────────────────────────────┘
- │   built-in Speaker             │               * mounted by a private layer
+ │              │   │             │        │   senate-log           session     │
+ │   the machine's Senate:        │        │ (memory / SQLite / Postgres)        │
+ │   senate-server + SQLite,      │        └─────────────────────────────────────┘
+ │   loopback                     │               * mounted by a private layer
  └────────────────────────────────┘
 ```
 
@@ -492,8 +631,10 @@ any gateway reach the log only through the `Hub` seam in `senate-core`. Only
 | Log store | `senate_log::LogStore` | Where the log is kept: `memory:`, `sqlite:<path>`, `postgres://…`. |
 | Runner, Forge | `senate_work::Runner`, `senate_work::Forge` | Doing coding work and opening a PR. Defaults from `[work]`: `DockerRunner`, `GhForge`. |
 | Authentication | `senate_server::Authenticate` | Bearer token to person. Default `StaticTokens` from `[[tokens]]`. |
-| Speaker's seat | `senate_core::SpeakerSeat`, from the roster (`presider`, `speaker`) and `ServerBuilder::built_in_speaker` | Who presides: the built-in Speaker, a senator, or nobody. A layer that runs its own Speaker on the Hub holds the built-in seat. |
-| Roster source | `senate_core::Roster`, given to `Assembly::roster`; `ServerHub::set_seniors` later | Which people exist and their accounts on outside platforms. Default `[roster]`; agents are seated as they connect either way. |
+| Speaker's office | `senate_core::Office`, from the roster (`speaker`, `secretaries`) and `ServerBuilder::built_in_session` | Who the Speaker is (a senator id, and its kind) and who works its desk, in order. A layer that runs its own engine on the Hub names it as the built-in session. |
+| Roster source | `senate_core::Roster`, given to `Assembly::roster`; `ServerHub::set_principals` later | Which principals exist (people, teams, services) and their accounts on outside platforms. Default `[roster]`; agents are seated as they connect either way. |
+| Name resolution | `GET /v1/resolve` (`senate_core::api::Resolved`) | Whether a qualified name is in this Senate; a caller walks outward, nearest first. |
+| Child Senates | `PUT /v1/children/{name}` | A Senate below registering, authenticated as its Speaker. |
 | Components | `senated::Component` (`component_fn`) | Anything else that runs on the Hub (an agent gateway's entry point, say), supervised with the Speaker. |
 | Assembly | `senated::Assembly` | The builder that takes all of the above and starts a daemon: at most one chat surface, any number of components. |
 | Machine | `senated::Machine` | A developer machine's daemon: its hosted Senates and its side of every Senate it serves. A layer embeds it to run that side within its own process. |
@@ -543,11 +684,11 @@ above differs from it in these ways, which matter when carrying code over:
 | Commons | Senate |
 | --- | --- |
 | feature | committee |
-| Steward, `steward` | Speaker, `speaker` |
+| Steward, `steward` | Speaker, `speaker` (its office's work: the secretary) |
 | `user:alice` | `senator::alice` |
-| `agent:alice`, one per person | `senator::alice/<name>`, any number per person |
+| `agent:alice`, one per person | `senator::<name>`, any number per principal, flat |
 | `user:feishu-<hash>` | `guest::<platform>/<id>` |
-| `Member.feishu_ids` | `Senior.accounts` (platform, id) |
+| `Member.feishu_ids` | `Principal.accounts` (platform, id) |
 | `Directory` | `Roster` |
 | text hard-coded in Chinese | rendered per locale |
-| `[steward 代 agent:x]` in text | `on_behalf_of` field, shown as `[speaker::x/<name>]` |
+| `[steward 代 agent:x]` in text | `on_behalf_of` field, shown as `[speaker::<name>]` |

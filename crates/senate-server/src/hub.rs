@@ -21,22 +21,22 @@
 //! a running server, and every response can then carry it without a store
 //! round trip.
 
-use std::collections::BTreeSet;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use ractor::rpc::CallResult;
 use ractor::{ActorRef, MessagingErr};
-use senate_core::api::{Heartbeat, PresencePage, Resolved};
+use senate_core::api::{ChairInfo, ChildSenate, Heartbeat, PresencePage, Resolved, Secretaries};
 use senate_core::hub::SCAN_PAGE;
 use senate_core::{
-    Appended, Awaiting, Brief, BriefBuilder, CheckpointFacts, CheckpointRecord, Checkpoints,
-    CommitteeId, DocketItem, DocketPage, Event, Hub, HubError, Kind, Locale, Locator, MirrorRef,
-    Name, NewEvent, People, Principal, Roster, RosterError, SeatFacts, SenatePath, SenatorName,
-    Seq, SpeakerDocket, SpeakerSeat, StatusState, TaskBoard,
+    Address, Appended, Awaiting, Brief, BriefBuilder, ChairPayload, CheckpointFacts,
+    CheckpointRecord, Checkpoints, CommitteeId, DocketItem, DocketPage, Event, EventId, Hub,
+    HubError, Kind, Locale, Locator, MirrorRef, Name, NewEvent, Office, Origin, People, Principal,
+    Roster, RosterError, SeatFacts, SenatePath, SenatorName, Seq, SpeakerDocket, SpeakerSeat,
+    StatusState, TaskBoard, meta,
 };
 use senate_log::{CursorOwner, LogError, LogStore};
 use tokio::sync::{broadcast, mpsc};
@@ -45,6 +45,8 @@ use crate::actors::committee::CommitteeMsg;
 use crate::actors::presence::{ConnId, Presence};
 use crate::actors::proxy::ProxyMsg;
 use crate::actors::supervisor::{Registry, SupervisorMsg};
+use crate::chairs::{ChairDocket, ChairView};
+use crate::registry;
 use crate::rules::check_may_change_state;
 use crate::seats::Seats;
 
@@ -77,6 +79,9 @@ pub(crate) struct HubParts {
     pub seats: Arc<Seats>,
     pub locale: Locale,
     pub speaker: Option<SpeakerSeat>,
+    pub built_in: Option<SenatorName>,
+    pub notes: Vec<String>,
+    pub children: BTreeMap<Name, ChildSenate>,
     pub senate: Name,
     pub parent: Option<SenatePath>,
 }
@@ -90,7 +95,12 @@ pub struct ServerHub {
     presence: Arc<Presence>,
     seats: Arc<Seats>,
     locale: Locale,
+    /// Who worked the desk first when the server started (the older
+    /// single seat; [`ServerHub::office`] is the live view).
     speaker: Option<SpeakerSeat>,
+    built_in: Option<SenatorName>,
+    notes: Vec<String>,
+    children: RwLock<BTreeMap<Name, ChildSenate>>,
     senate: Name,
     parent: Option<SenatePath>,
     next_conn: AtomicU64,
@@ -98,6 +108,8 @@ pub struct ServerHub {
     tasks: Caches<TaskBoard>,
     checkpoints: Caches<Checkpoints>,
     dockets: Caches<SpeakerDocket>,
+    chairs: Caches<ChairView>,
+    chair_dockets: Caches<ChairDocket>,
 }
 
 /// Something folded from a committee's log, in seq order, that ignores what it
@@ -141,6 +153,30 @@ impl Fold for SpeakerDocket {
     }
     fn observe(&mut self, event: &Event) {
         SpeakerDocket::observe(self, event);
+    }
+}
+
+impl Fold for ChairView {
+    fn fresh(_: &CommitteeId, people: &People) -> Self {
+        ChairView::new(people.clone())
+    }
+    fn head(&self) -> Seq {
+        ChairView::head(self)
+    }
+    fn observe(&mut self, event: &Event) {
+        ChairView::observe(self, event);
+    }
+}
+
+impl Fold for ChairDocket {
+    fn fresh(_: &CommitteeId, people: &People) -> Self {
+        ChairDocket::new(people.clone())
+    }
+    fn head(&self) -> Seq {
+        ChairDocket::head(self)
+    }
+    fn observe(&mut self, event: &Event) {
+        ChairDocket::observe(self, event);
     }
 }
 
@@ -202,6 +238,9 @@ impl ServerHub {
             seats,
             locale,
             speaker,
+            built_in,
+            notes,
+            children,
             senate,
             parent,
         } = parts;
@@ -215,6 +254,9 @@ impl ServerHub {
             seats,
             locale,
             speaker,
+            built_in,
+            notes,
+            children: RwLock::new(children),
             senate,
             parent,
             next_conn: AtomicU64::new(1),
@@ -222,13 +264,141 @@ impl ServerHub {
             tasks: Mutex::default(),
             checkpoints: Mutex::default(),
             dockets: Mutex::default(),
+            chairs: Mutex::default(),
+            chair_dockets: Mutex::default(),
         }
     }
 
-    /// Who holds this Senate's Speaker's seat (see
-    /// [`Roster::speaker_seat`]); `None`: nobody presides.
+    /// Who worked the Speaker's desk first when the server started, as the
+    /// older single seat (see [`Roster::speaker_seat`]); `None`: nobody
+    /// did. [`ServerHub::office`] and [`ServerHub::desk_seat`] are live.
     pub fn speaker_seat(&self) -> Option<&SpeakerSeat> {
         self.speaker.as_ref()
+    }
+
+    /// Who works the Speaker's desk first now, as the older single seat.
+    pub fn desk_seat(&self) -> Option<SpeakerSeat> {
+        self.seats
+            .snapshot()
+            .speaker_seat(self.built_in.is_some())
+            .ok()
+            .flatten()
+    }
+
+    /// The Speaker's office now: who the Speaker is and who works its desk.
+    pub fn office(&self) -> Option<Office> {
+        self.seats.snapshot().office()
+    }
+
+    /// The built-in session's name, when the daemon runs it.
+    pub fn built_in(&self) -> Option<&SenatorName> {
+        self.built_in.as_ref()
+    }
+
+    /// What this start assumed reading an older configuration, in the
+    /// server's language: for whoever shows the Senate's status.
+    pub fn notes(&self) -> &[String] {
+        &self.notes
+    }
+
+    /// The child Senates registered with this one.
+    pub fn children(&self) -> Vec<ChildSenate> {
+        self.children
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    /// One registered child Senate.
+    pub fn child(&self, name: &Name) -> Option<ChildSenate> {
+        self.children
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(name)
+            .cloned()
+    }
+
+    /// Register (or register again) a child Senate, kept in the store.
+    /// The caller has checked who may.
+    pub async fn register_child(&self, child: ChildSenate) -> Result<ChildSenate, HubError> {
+        registry::put_child(self.store.as_ref(), &child)
+            .await
+            .map_err(log_error)?;
+        self.children
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(child.name.clone(), child.clone());
+        tracing::info!(child = %child.name, speaker = %child.speaker, "child Senate registered");
+        Ok(child)
+    }
+
+    /// Every secretary relation of this Senate.
+    pub fn secretaries(&self) -> Secretaries {
+        self.seats.snapshot().secretaries().clone()
+    }
+
+    /// Register `principal`'s secretaries (empty: none), kept in the
+    /// store. The roster's rules apply ([`Roster::set_secretaries`]), and a
+    /// secretary is an agent seated here or the built-in session. The
+    /// caller has checked who may.
+    pub async fn set_secretaries(
+        &self,
+        principal: SenatorName,
+        secretaries: Vec<SenatorName>,
+    ) -> Result<Secretaries, HubError> {
+        let mut check = self.seats.snapshot();
+        for secretary in &secretaries {
+            if !check.is_agent(secretary) && !check.is_person(secretary) {
+                return Err(HubError::Rejected(format!(
+                    "{} is no agent seated in this Senate: a secretary is an agent of the Senate or the built-in session",
+                    Address::senator(secretary)
+                )));
+            }
+        }
+        check
+            .set_secretaries(principal.clone(), secretaries.clone())
+            .map_err(|e| HubError::Rejected(e.to_string()))?;
+        registry::put_secretaries(self.store.as_ref(), &principal, &secretaries)
+            .await
+            .map_err(log_error)?;
+        self.seats
+            .update(|roster| roster.set_secretaries(principal, secretaries))
+            .map_err(|e| HubError::Rejected(e.to_string()))?;
+        Ok(self.secretaries())
+    }
+
+    /// The committee's chair, and how it was found ([`senate_core::chair`];
+    /// an agent's first event of its own counts as its seat, see
+    /// [`ChairView`]).
+    pub async fn chair(&self, committee: &CommitteeId) -> Result<ChairInfo, HubError> {
+        let cached = self.folded(&self.chairs, committee).await?;
+        let found = cached.fold.chair();
+        Ok(ChairInfo {
+            committee: committee.clone(),
+            chair: found.map(|(s, _)| s.clone()),
+            source: found.map(|(_, how)| how),
+        })
+    }
+
+    /// Make `senator` the committee's chair: a `note` from `committee`
+    /// carrying [`meta::CHAIR`]. The caller has checked who may.
+    pub async fn set_chair(
+        &self,
+        committee: &CommitteeId,
+        senator: SenatorName,
+    ) -> Result<ChairInfo, HubError> {
+        if !self.seats.snapshot().knows(&senator) {
+            return Err(HubError::Rejected(format!(
+                "{} is not a senator of this Senate",
+                Address::senator(&senator)
+            )));
+        }
+        let note = NewEvent::new(committee.clone(), Kind::Note, Address::Committee, "")
+            .with_meta(meta::CHAIR, ChairPayload { senator }.value());
+        self.append(note).await?;
+        self.chair(committee).await
     }
 
     /// This Senate's name.
@@ -318,13 +488,41 @@ impl ServerHub {
         self.seats.snapshot()
     }
 
-    /// What awaits the Speaker on `committee` ([`senate_core::docket`]):
-    /// the messages addressed to it that it has not dealt with, then every
-    /// root question to an agent of this Senate that is not connected and
-    /// has no answer, with the facts about every seated agent (connected,
-    /// presence, latest checkpoint, open threads).
+    /// What awaits the Speaker's desk on `committee`
+    /// ([`senate_core::docket`]): the messages addressed to `speaker` that
+    /// the desk has not dealt with, then every root question to an agent of
+    /// this Senate that is not connected and has no answer, with the facts
+    /// about every seated agent (connected, presence, latest checkpoint,
+    /// open threads).
     pub async fn docket(&self, committee: &CommitteeId) -> Result<DocketPage, HubError> {
-        let mut items = self.folded(&self.dockets, committee).await?.fold.items();
+        let items = self.folded(&self.dockets, committee).await?.fold.items();
+        // Covering for an absent agent is the desk's duty toward other
+        // agents: what is addressed to the seat's holder is that agent's
+        // own question, delivered when its session opens.
+        let holder = self.desk_seat().and_then(|seat| seat.senator().cloned());
+        self.docket_page(committee, items, holder).await
+    }
+
+    /// What awaits the committee's chair: the roots addressed to `chair`
+    /// (picks the server put to it among them) that the chair has not
+    /// dealt with, then the unanswered questions to away members, as for
+    /// the desk ([`ServerHub::docket`]).
+    pub async fn chair_docket(&self, committee: &CommitteeId) -> Result<DocketPage, HubError> {
+        let items = self
+            .folded(&self.chair_dockets, committee)
+            .await?
+            .fold
+            .items();
+        let chair = self.chair(committee).await?.chair;
+        self.docket_page(committee, items, chair).await
+    }
+
+    async fn docket_page(
+        &self,
+        committee: &CommitteeId,
+        mut items: Vec<DocketItem>,
+        holder: Option<SenatorName>,
+    ) -> Result<DocketPage, HubError> {
         let head = self.head(committee).await?;
         let board = self.tasks(committee).await?;
         let roster = self.seats.snapshot();
@@ -376,13 +574,9 @@ impl ServerHub {
             if thread.kind != Kind::Question || thread.answered {
                 continue;
             }
-            // Covering for an absent agent is the Speaker's duty toward
-            // other agents: what is addressed to the seat's holder is that
-            // agent's own question, delivered when its session opens.
-            let holder = self.speaker.as_ref().and_then(SpeakerSeat::senator);
             let agents: Vec<SenatorName> = thread
                 .agents()
-                .filter(|a| Some(*a) != holder)
+                .filter(|a| Some(*a) != holder.as_ref())
                 .cloned()
                 .collect();
             let away = !agents.is_empty()
@@ -403,7 +597,7 @@ impl ServerHub {
         items.sort_by_key(|item| item.event.seq);
         Ok(DocketPage {
             committee: committee.clone(),
-            speaker: self.speaker.clone(),
+            speaker: roster.speaker_seat(self.built_in.is_some()).ok().flatten(),
             office: roster.office(),
             items,
             seats,
@@ -542,13 +736,22 @@ impl ServerHub {
     /// May `person`, authenticated, act as `senator` in this Senate? If it is
     /// an agent that is not yet seated, it is seated now: this is the first
     /// contact. `Ok(true)` when this call seated it. See
-    /// [`Roster::may_act_as`] and [`Roster::seat`].
-    pub fn act_as(&self, person: &Name, senator: &SenatorName) -> Result<bool, RosterError> {
+    /// [`Roster::may_act_as`] and [`Roster::seat`]. Nobody acts as the
+    /// built-in session.
+    ///
+    /// Who runs the agent is kept in the store's registry, so a restarted
+    /// server seats it again under the same principal.
+    pub async fn act_as(&self, person: &Name, senator: &SenatorName) -> Result<bool, RosterError> {
         let seated = self.seats.act_as(person, senator)?;
-        if seated {
+        if seated.new {
             tracing::info!(%person, agent = %senator, "agent seated on first contact");
         }
-        Ok(seated)
+        if seated.owner_set
+            && let Err(e) = registry::put_seat(self.store.as_ref(), senator, person).await
+        {
+            tracing::warn!(%person, agent = %senator, "who runs the agent is not kept: {e}");
+        }
+        Ok(seated.new)
     }
 
     /// Replace the people this Senate knows, for a layer whose people come
@@ -657,6 +860,83 @@ impl ServerHub {
             .map_err(log_error)
     }
 
+    /// Send `event` to its committee's writer.
+    async fn commit(&self, event: NewEvent) -> Result<Appended, HubError> {
+        let committee = event.committee.clone();
+        self.ask_writer(&committee, |reply| {
+            CommitteeMsg::Append(Box::new(event.clone()), reply)
+        })
+        .await?
+        .map_err(log_error)
+    }
+
+    /// An answer in a thread the Speaker's desk forwarded from another
+    /// committee of this Senate (its root is `from: speaker` with
+    /// [`meta::ORIGIN`]) goes back into the asker's thread: an `answer` from
+    /// `speaker` there, [`meta::ANSWERED_BY`] naming who answered and
+    /// [`meta::ACTED_BY`] the desk worker that forwarded it (else the
+    /// Speaker). Its id is derived from the answer's, so it is stored once.
+    /// A provisional answer leaves the question open, and is not relayed.
+    async fn relay_answer(&self, event: &Event) -> Result<(), HubError> {
+        if event.kind != Kind::Answer
+            || senate_core::is_provisional(event)
+            || event.meta.contains_key(meta::ANSWERED_BY)
+        {
+            return Ok(());
+        }
+        let Some(root) = event.thread else {
+            return Ok(());
+        };
+        let Some(root) = self.get(&event.committee, root).await? else {
+            return Ok(());
+        };
+        if root.from != Address::Speaker {
+            return Ok(());
+        }
+        let Some(origin) = Origin::of(&root) else {
+            return Ok(());
+        };
+        let path = self.senate_path();
+        if origin.locator.senate().is_some_and(|s| !path.ends_with(s)) {
+            // Another Senate's: the machine's uplink relays across levels.
+            return Ok(());
+        }
+        let Some(asked_on) = origin.locator.committee().cloned() else {
+            return Ok(());
+        };
+        let acted_by = root
+            .meta
+            .get(meta::ACTED_BY)
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+            .or_else(|| self.office().map(|o| o.speaker.name().to_string()));
+        let answered_by = Locator::at(path, event.committee.clone(), event.from.clone());
+        let mut relay = NewEvent::new(asked_on, Kind::Answer, Address::Speaker, &event.body)
+            .with_id(EventId::derived(
+                u64::try_from(event.ts.timestamp_millis()).unwrap_or_default(),
+                &format!("relay:{}", event.id),
+            ))
+            .in_thread(origin.thread)
+            .with_meta(
+                meta::ANSWERED_BY,
+                serde_json::Value::String(answered_by.to_string()),
+            );
+        relay.to = vec![origin.locator.address().clone()];
+        relay.refs = event.refs.clone();
+        if let Some(acted_by) = acted_by {
+            relay = relay.with_meta(meta::ACTED_BY, serde_json::Value::String(acted_by));
+        }
+        let relayed = self.commit(relay).await?;
+        tracing::info!(
+            from = %event.committee,
+            seq = %event.seq,
+            to = %relayed.event.committee,
+            thread = %origin.thread,
+            "answer relayed into the thread it was asked in"
+        );
+        Ok(())
+    }
+
     /// The agent's latest heartbeat for the committee.
     pub async fn last_heartbeat(
         &self,
@@ -683,12 +963,17 @@ impl Hub for ServerHub {
             ));
         }
         check_may_change_state(&event).map_err(HubError::Rejected)?;
-        let committee = event.committee.clone();
-        self.ask_writer(&committee, |reply| {
-            CommitteeMsg::Append(Box::new(event.clone()), reply)
-        })
-        .await?
-        .map_err(log_error)
+        let appended = self.commit(event).await?;
+        if !appended.duplicate
+            && let Err(e) = self.relay_answer(&appended.event).await
+        {
+            tracing::warn!(
+                committee = %appended.event.committee,
+                seq = %appended.event.seq,
+                "relaying the answer back to where it was asked: {e}"
+            );
+        }
+        Ok(appended)
     }
 
     async fn read(

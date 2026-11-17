@@ -237,6 +237,11 @@ impl Origin {
     pub fn value(&self) -> serde_json::Value {
         serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
     }
+
+    /// [`Origin::of`] for an event not stored yet.
+    pub fn of_new(event: &crate::event::NewEvent) -> Option<Self> {
+        serde_json::from_value(event.meta.get(crate::event::meta::ORIGIN)?.clone()).ok()
+    }
 }
 
 /// The qualified name a message is meant for, when it is not where it is

@@ -181,6 +181,7 @@ async fn ask_answer_and_catch_up_end_to_end() {
             "post",
             "propose_decision",
             "search",
+            "secretary",
             "status",
             "take"
         ]
@@ -466,7 +467,9 @@ async fn ask_refuses_recipients_that_would_never_answer() {
         .unwrap();
     let description = ask["description"].as_str().unwrap();
     assert!(
-        description.contains("Only agents can be asked") && description.contains("senator::*"),
+        description.contains("A person is not reached through `ask`")
+            && description.contains("senator::*")
+            && description.contains("ibot::codex"),
         "{description}"
     );
 
@@ -836,7 +839,7 @@ async fn status_escalate_take_and_inbox_end_to_end() {
     let (err, text) = mcp
         .call(
             "escalate",
-            json!({"thread": r.seq.0, "reason": "改接口要 alice 定"}),
+            json!({"thread": r.seq.0, "to": "alice", "reason": "改接口要 alice 定"}),
         )
         .await;
     assert!(!err, "{text}");
@@ -1298,7 +1301,7 @@ async fn only_the_presiding_session_is_given_the_presiding_tools() {
         .await;
     assert!(err);
     assert!(
-        text.contains("[senator::codex] holds no Senate's Speaker's seat"),
+        text.contains("[senator::codex] does not work the Speaker's desk"),
         "{text}"
     );
     // The daemon refuses the request itself, whatever a client lists.

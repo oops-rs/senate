@@ -31,6 +31,7 @@ impl Shared {
             return Ok(vec![committee]);
         }
         let me = self.api.me().await.map_err(server_error)?;
+        self.note_office(&me);
         self.note_speaker(me.speaker.clone());
         Ok(me.committees)
     }
@@ -71,7 +72,7 @@ impl Shared {
     }
 
     /// One item on the committee's docket, and the page it is on.
-    async fn docket_item(
+    pub(crate) async fn docket_item(
         &self,
         committee: &CommitteeId,
         seq: Seq,
@@ -129,7 +130,8 @@ impl Shared {
         let mut event = NewEvent::new(committee, root.kind.clone(), Address::Speaker, root.body)
             .to(Address::senator(&to))
             .on_behalf_of(behalf)
-            .with_meta(meta::RELAYED_FROM, serde_json::json!(seq.0));
+            .with_meta(meta::RELAYED_FROM, serde_json::json!(seq.0))
+            .with_meta(meta::ACTED_BY, serde_json::json!(speaker.to_string()));
         if let Some(refs) = root.refs {
             event = event.with_refs(refs);
         }
@@ -206,7 +208,8 @@ impl Shared {
                 path: None,
                 branch: Some(checkpoint.checkpoint.branch.clone()),
             })
-            .with_meta(meta::TAKEOVER, serde_json::json!(true));
+            .with_meta(meta::TAKEOVER, serde_json::json!(true))
+            .with_meta(meta::ACTED_BY, serde_json::json!(speaker.to_string()));
         if let Some(id) = id {
             event = event.with_id(id);
         }
@@ -229,17 +232,22 @@ impl Shared {
             return Err(IpcError::bad_request("`reason` is empty"));
         }
         let (item, _) = self.docket_item(&committee, seq).await?;
-        // The person whose agent was meant, else the Speaker's own: on this
-        // machine, the person who runs its agents.
-        let _ = speaker;
+        // The person whose agent was meant, else the Speaker when it is a
+        // person, else the person who runs this machine's agents.
+        let people = self.people();
         let person = match &item.awaiting {
             Awaiting::Pick {
                 owner: Some(owner), ..
             } => owner.clone(),
-            _ => self.config.person.clone(),
+            _ => self
+                .office()
+                .and_then(|o| o.speaker_here().cloned())
+                .filter(|s| people.is_person(s))
+                .map(|s| s.name().clone())
+                .unwrap_or_else(|| self.config.person.clone()),
         };
+        let acted = serde_json::json!(speaker.to_string());
         let root = item.event;
-        let people = self.people();
         let task = root.thread.is_none()
             && matches!(root.kind, Kind::Question | Kind::Request)
             && root.to.iter().any(|a| people.is_agent_address(a));
@@ -250,10 +258,12 @@ impl Shared {
             NewEvent::new(committee, Kind::Status, Address::Speaker, reason)
                 .in_thread(root.seq)
                 .with_meta(meta::STATUS, status.value())
+                .with_meta(meta::ACTED_BY, acted)
         } else {
             NewEvent::new(committee, Kind::Question, Address::Speaker, reason)
                 .to(Address::senior(&person))
                 .in_thread(root.seq)
+                .with_meta(meta::ACTED_BY, acted)
         };
         if let Some(id) = id {
             event = event.with_id(id);
@@ -300,7 +310,9 @@ impl Shared {
                     }
                 }
                 let seated: Vec<SenatorName> = seated.into_iter().collect();
-                Some(crate::preside::orientation(
+                Some(crate::preside::orientation_as(
+                    self.desk_role(&session.agent).unwrap_or_default(),
+                    self.speaker_id().as_ref(),
                     &session.agent,
                     senate.as_ref(),
                     &seated,

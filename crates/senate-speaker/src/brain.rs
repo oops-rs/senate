@@ -14,8 +14,8 @@ use async_trait::async_trait;
 use std::time::Duration;
 
 use senate_core::{
-    Address, Brief, CheckpointRecord, CommitteeId, Event, Kind, Locale, Name, OutputLevel, Roster,
-    SenatorName, Seq, ThreadSummary, TriagePayload, TriageVerdict,
+    Address, Brief, CheckpointRecord, CommitteeId, Event, Kind, Locale, Locator, Name, OutputLevel,
+    Roster, SenatorName, Seq, ThreadSummary, TriagePayload, TriageVerdict,
 };
 use serde::{Deserialize, Serialize};
 
@@ -375,6 +375,53 @@ pub trait Brain: Send + Sync + 'static {
     /// answer within the triage deadline, falls back to [`rule_pick`].
     async fn pick_agent(&self, input: PickInput) -> Result<Pick, BrainError> {
         Ok(rule_pick(&input))
+    }
+
+    /// An agent's message for a seat outside its own committee, put on the
+    /// Speaker's desk on the way ([`meta::INTENDED`](senate_core::meta::INTENDED)):
+    /// forward it, refuse it with a reason the asker reads, or leave it on
+    /// the desk for the Speaker. The default is [`rule_crossing`]; an error,
+    /// or no answer within the triage deadline, leaves it for the Speaker.
+    async fn decide_crossing(&self, input: CrossingInput) -> Result<Crossing, BrainError> {
+        Ok(rule_crossing(&input))
+    }
+}
+
+/// A message an agent wrote for a seat outside its committee, on the
+/// Speaker's desk.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CrossingInput {
+    /// The committee it was written in (the asker's).
+    pub committee: CommitteeId,
+    /// The message itself: a root addressed to `speaker`.
+    pub event: Event,
+    /// Where it was meant to go.
+    pub intended: Locator,
+    /// The committee's most recent events before it, oldest first.
+    pub context: Vec<Event>,
+    /// The language of a refusal's reason.
+    pub locale: Locale,
+}
+
+/// What the desk does with a crossing message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Crossing {
+    /// Deliver it where it was meant to go, as the Speaker's office.
+    Forward,
+    /// Tell the asker no, with this reason.
+    Refuse(String),
+    /// Leave it on the desk: the Speaker decides.
+    Leave,
+}
+
+/// The crossing decision without a model, conservative: a plain question
+/// is forwarded; anything else (a request, a note) is left for the
+/// Speaker.
+pub fn rule_crossing(input: &CrossingInput) -> Crossing {
+    if input.event.kind == Kind::Question {
+        Crossing::Forward
+    } else {
+        Crossing::Leave
     }
 }
 

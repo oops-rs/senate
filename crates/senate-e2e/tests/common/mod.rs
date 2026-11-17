@@ -860,7 +860,21 @@ impl Laptop {
     }
 
     /// What the agent's `escalate` tool does.
+    /// What the agent's `escalate` tool does when it names the person
+    /// (`to`): the thread is handed to its own user.
     pub async fn escalate(&self, session_id: &str, thread: Seq, reason: &str) -> Posted {
+        self.ipc(Request::Escalate {
+            session: Self::session(session_id),
+            thread,
+            to: Some(self.config.person.clone()),
+            reason: Some(reason.to_string()),
+            id: None,
+        })
+        .await
+    }
+
+    /// What `escalate` does with no target: one step up the chain.
+    pub async fn escalate_up(&self, session_id: &str, thread: Seq, reason: &str) -> Posted {
         self.ipc(Request::Escalate {
             session: Self::session(session_id),
             thread,

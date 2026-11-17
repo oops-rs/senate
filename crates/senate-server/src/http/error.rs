@@ -28,10 +28,6 @@ impl ApiFailure {
     }
 
     /// A qualified name several things answer to: 409 with them.
-    #[expect(
-        dead_code,
-        reason = "no route answers ambiguous_name yet: GET /v1/resolve answers for this Senate alone"
-    )]
     pub(crate) fn ambiguous_name(message: impl Into<String>, locators: Vec<Locator>) -> Self {
         Self {
             locators,
@@ -57,6 +53,16 @@ impl ApiFailure {
 
     pub(crate) fn not_found(message: impl Into<String>) -> Self {
         Self::new(StatusCode::NOT_FOUND, code::NOT_FOUND, message)
+    }
+
+    pub(crate) fn conflict(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::CONFLICT, code::CONFLICT, message)
+    }
+
+    /// A person's message for a seat outside this Senate and its children:
+    /// their own machine posts it above.
+    pub(crate) fn elsewhere(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::CONFLICT, code::ELSEWHERE, message)
     }
 
     /// The client's cursor is beyond the committee's head: it belongs to
