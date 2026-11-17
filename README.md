@@ -333,6 +333,8 @@ A coding session resolves its active **committee** from the first of these that 
 2. The git branch name `<branch_prefix>/<committee>/<person>` (e.g. `feature/refund-v2/alice`), **only when** `senate.toml` sets `committee_from_branch = true`. Off by default; `branch_prefix` alone does not turn it on.
 3. The worktree's `.senate/committee`.
 
+`senate status` and `senate watch` default to the directory's committee. Use `--global` for every committee or `--committee <id>` to select one. Outside a bound directory their default is global. Scoped status counts only that committee's queue. For deployment, check the machine-wide queue with `senate status --global`.
+
 `senate status` says which one bound each session (`join`, `branch name`, `file`).
 
 ```sh

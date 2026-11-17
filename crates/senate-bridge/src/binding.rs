@@ -186,6 +186,32 @@ pub async fn resolve(paths: &Paths, cwd: &Path, settings: &Settings) -> Resolved
     resolved
 }
 
+/// Resolve the directory binding without walking the saved-slot inventory. Outside
+/// Git a binding also covers subdirectories until a closer binding is encountered.
+pub async fn directory_committee(
+    paths: &Paths,
+    cwd: &Path,
+    settings: &Settings,
+) -> Option<CommitteeId> {
+    let (facts, _) = session::gather_synced(paths, cwd, GIT_TIMEOUT).await;
+    let here = session::infer_committee(
+        facts.branch.as_deref(),
+        facts.committee_file.as_deref(),
+        settings.convention().as_ref(),
+    )
+    .map(|(committee, _)| committee);
+    if here.is_some() || facts.toplevel.is_some() || facts.committee_file.is_some() {
+        return here;
+    }
+    for directory in cwd.ancestors().skip(1) {
+        if let Ok(file) = tokio::fs::read_to_string(directory.join(session::COMMITTEE_FILE)).await {
+            return session::infer_committee(None, Some(&file), None)
+                .map(|(committee, _)| committee);
+        }
+    }
+    None
+}
+
 /// The committee named, else the one this directory resolves to.
 pub async fn committee_here(
     paths: &Paths,
@@ -196,10 +222,8 @@ pub async fn committee_here(
         return Ok(committee);
     }
     let cwd = std::env::current_dir()?;
-    resolve(paths, &cwd, settings)
+    directory_committee(paths, &cwd, settings)
         .await
-        .committee
-        .map(|(c, _)| c)
         .context("name the committee with --committee (nothing here binds one: see `senate join`)")
 }
 
