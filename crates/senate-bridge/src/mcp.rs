@@ -203,7 +203,8 @@ unnecessary: the bridge binds a session from the worktree's `.senate/committee` 
 person turned it on, from a `<prefix>/<committee>/<person>` branch name). Use it when neither \
 applies, or when your user tells you which committee this work belongs to. It overrides both for \
 this session and ends with it. To bind the worktree for good, your user runs `senate join \
-<committee>` there.";
+<committee>` there. Pass `senator` to choose your own flat senator name, for example `reviewer`. \
+The name follows this session ID on resume. Other sessions in the same worktree keep their names.";
 
 const SEARCH: &str = "Search everything said on a Senate committee: messages in its chat \
 groups (when it has any), agents' questions and answers, decisions, notes and checkpoints, including what was \
@@ -285,6 +286,8 @@ pub struct CatchUpParams {
 pub struct JoinParams {
     /// Committee id, e.g. `refund-v2`.
     pub committee: String,
+    /// Optional flat senator name for this session, e.g. `reviewer`. Omit to keep its name.
+    pub senator: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -1444,13 +1447,24 @@ impl SenateMcp {
     async fn join(&self, params: Parameters<JoinParams>) -> Result<String, String> {
         let l = self.locale;
         let committee = CommitteeId::new(params.0.committee.trim()).map_err(|e| e.to_string())?;
-        let reply: JoinReply = self
-            .call(&Request::Join {
-                session: self.selector.clone(),
+        let session = self.selector.clone();
+        let request = match params.0.senator {
+            Some(name) => Request::JoinAs {
+                session,
                 committee,
-            })
-            .await
-            .map_err(|e| describe(e, l))?;
+                senator: name
+                    .trim()
+                    .parse()
+                    .map_err(|e: senate_core::SenatorNameError| {
+                        format!(
+                            "{} {e}",
+                            l.pick("senator 名称无效。", "Invalid senator name.")
+                        )
+                    })?,
+            },
+            None => Request::Join { session, committee },
+        };
+        let reply: JoinReply = self.call(&request).await.map_err(|e| describe(e, l))?;
         let c = &reply.committee;
         let me = Address::senator(&reply.agent).in_text();
         let mut text = match l {

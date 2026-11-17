@@ -411,6 +411,8 @@ pub(crate) struct Shared {
     generation: RwLock<u64>,
     /// Announces each new generation to the stream workers.
     resyncs: watch::Sender<u64>,
+    /// A manual rebind waits for pushes and hooks using the previous seat to finish.
+    session_bindings: RwLock<()>,
     pushes: Mutex<HashMap<String, PushState>>,
     /// Automatic checkpoints, per agent and worktree root.
     auto: Mutex<HashMap<(SenatorName, PathBuf), AutoCheckpoint>>,
@@ -678,6 +680,7 @@ impl Shared {
             committees_changed: Notify::new(),
             generation: RwLock::new(0),
             resyncs,
+            session_bindings: RwLock::new(()),
             pushes: Mutex::new(HashMap::new()),
             auto: Mutex::new(HashMap::new()),
             home: common.home.clone(),
@@ -794,7 +797,7 @@ fn orientation(
     match locale {
         Locale::Zh => format!(
             "[senate] 这个会话已加入 {senate} 的委员会 `{committee}`，身份是 {me}。{reach_zh}会以 `[senate · …]` 消息在这里找到你。工具：\
-             mcp__senate__ask（问队友的 agent），mcp__senate__answer（在 thread 里回复），\
+             mcp__senate__join（可用 senator 参数为当前会话选择名称），mcp__senate__ask（问队友的 agent），mcp__senate__answer（在 thread 里回复），\
              mcp__senate__catch_up（读你错过的），mcp__senate__search（搜索整个日志），\
              mcp__senate__post（给团队留言），mcp__senate__propose_decision（提议一个决定，由人确认），\
              mcp__senate__checkpoint（留交接记录：保持 .senate/PROGRESS.md、DECISIONS.md 和 \
@@ -806,7 +809,8 @@ fn orientation(
         Locale::En => format!(
             "[senate] This session is joined to the committee `{committee}` of {senate} as {me}. \
              {reach_en} reach you here as \
-             `[senate · …]` messages. Tools: mcp__senate__ask (ask a teammate's agent), \
+             `[senate · …]` messages. Tools: mcp__senate__join (pass senator to name this session), \
+             mcp__senate__ask (ask a teammate's agent), \
              mcp__senate__answer (reply in a thread), mcp__senate__catch_up (read what you \
              missed), mcp__senate__search (search the whole log), mcp__senate__post (leave a note \
              for the team), mcp__senate__propose_decision (propose a decision for a person to \
@@ -2037,8 +2041,15 @@ impl Shared {
     /// session is its agent's. Returns whether another pass is needed
     /// (items held back, or the session turned out gone).
     async fn deliver_to(&self, session: &Session, items: Vec<QueueItem>) -> anyhow::Result<bool> {
+        let _binding = self.session_bindings.read().await;
         let sid = session.session_id.as_str();
         let agent = &session.agent;
+        // The routing pass may have selected this session before a join committed.
+        if !self.store.session(sid)?.is_some_and(|s| {
+            s.is_live() && s.agent == *agent && s.committee() == session.committee()
+        }) {
+            return Ok(true);
+        }
         let keys: Vec<ItemKey> = items
             .iter()
             .filter(|i| &i.agent == agent)
@@ -2363,7 +2374,7 @@ impl Shared {
     fn companion_refusal(&self, request: &Request) -> Option<IpcError> {
         let (op, session) = match request {
             Request::Ask { session, .. } => ("ask", session),
-            Request::Join { session, .. } => ("join", session),
+            Request::Join { session, .. } | Request::JoinAs { session, .. } => ("join", session),
             Request::Post { session, .. } => ("post", session),
             Request::Task { session, .. } => ("status", session),
             Request::Escalate { session, .. } => ("escalate", session),
@@ -2513,7 +2524,14 @@ impl Shared {
                 wrap(self.on_answer(&session, thread, body, id, acting).await)
             }
             Request::CatchUp { session, limit } => wrap(self.on_catch_up(&session, limit).await),
-            Request::Join { session, committee } => wrap(self.on_join(&session, committee).await),
+            Request::Join { session, committee } => {
+                wrap(self.on_join(&session, committee, None).await)
+            }
+            Request::JoinAs {
+                session,
+                committee,
+                senator,
+            } => wrap(self.on_join(&session, committee, Some(senator)).await),
             Request::Search {
                 session,
                 query,
@@ -2675,6 +2693,7 @@ impl Shared {
         placed: Option<(SenatorName, AgentSource)>,
         as_speaker: bool,
     ) -> Result<HookReply, IpcError> {
+        let _binding = self.session_bindings.read().await;
         let inferred = session::infer_committee(
             report.branch.as_deref(),
             report.committee_file.as_deref(),
@@ -4125,10 +4144,21 @@ impl Shared {
         })
     }
 
+    fn join_name_timeout(&self) -> IpcError {
+        IpcError::new(
+            codes::SERVER,
+            self.locale.pick(
+                "确认 senator 名称时服务器超时。",
+                "The server timed out confirming the senator name.",
+            ),
+        )
+    }
+
     async fn on_join(
         &self,
         selector: &SessionSelector,
         committee: CommitteeId,
+        senator: Option<SenatorName>,
     ) -> Result<JoinReply, IpcError> {
         let session = self.resolve(selector)?;
         let warning = match tokio::time::timeout(Duration::from_secs(5), self.api.me()).await {
@@ -4143,17 +4173,47 @@ impl Shared {
                         known.join(", ")
                     )));
                 }
+                if let Some(name) = &senator {
+                    if name == &me.person
+                        || me.people.is_person(name)
+                        || me
+                            .office
+                            .as_ref()
+                            .and_then(|office| office.built_in.as_ref())
+                            == Some(name)
+                    {
+                        return Err(IpcError::bad_request(self.locale.pick(
+                            "请选择自己代理的 senator 名称。此名称属于主体或内置会话。",
+                            "Choose an agent name. This name belongs to a principal or the built-in session.",
+                        )));
+                    }
+                    // Reading the cursor as this senator seats a new name or rejects
+                    // an existing name owned by another principal. It never advances it.
+                    tokio::time::timeout(
+                        Duration::from_secs(5),
+                        self.api
+                            .read_cursor(&committee, api::CURSOR_DELIVERED, Some(name)),
+                    )
+                    .await
+                    .map_err(|_| self.join_name_timeout())?
+                    .map_err(server_error)?;
+                }
                 None
             }
+            Ok(Err(e)) if senator.is_some() => return Err(server_error(e)),
+            Err(_) if senator.is_some() => return Err(self.join_name_timeout()),
             Ok(Err(e)) => Some(format!(
                 "could not confirm the committee with the server ({e}); joined anyway"
             )),
             Err(_) => Some("the server did not answer in time; joined anyway".to_string()),
         };
+        let _binding = self.session_bindings.write().await;
         let previous = session.committee().cloned();
-        self.store
-            .set_joined_committee(&session.session_id, Some(&committee))
+        let session = self
+            .store
+            .join_session(&session.session_id, &committee, senator.as_ref())
             .map_err(internal)?;
+        self.note_delivered(&session.session_id);
         self.committees_changed.notify_one();
         self.work.notify_one();
         Ok(JoinReply {

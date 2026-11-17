@@ -518,7 +518,12 @@ developer machines: `.senate/` is the only one.**
 A session's committee is, first match wins: its explicit `join` (this session
 only); the branch name `<prefix>/<committee>/<person>`, only when
 `committee_from_branch = true` in `senate.toml` (off by default; `branch_prefix`
-alone does not enable it); `.senate/committee`. Its agent is `SENATE_AGENT`,
+alone does not enable it); `.senate/committee`. The optional `senator` on the session's MCP `join` selects its
+agent. The bridge stores that choice under the session ID (the thread ID for Codex).
+Hooks and committee-only joins preserve it until the session record is pruned.
+A new name takes its own seat with its own inbox and cursors. Earlier messages,
+task ownership and office assignments stay with the senator named in the log.
+Without a session choice the order is `SENATE_AGENT` (Claude Code only),
 then `.senate/agent`, then `[agents]`, then the harness's name: one flat name
 each (a pinned path such as `claude/reviewer` is ignored with a warning). A
 session with no committee is unbound.

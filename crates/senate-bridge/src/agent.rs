@@ -2,7 +2,8 @@
 //!
 //! A bridge holds one person's token and seats one senator per kind of
 //! coding agent it serves. Each session is one of them, chosen when its
-//! hooks register it, in this order:
+//! hooks register it. An explicit senator name from the session's `join` takes
+//! precedence over the hook's choice, which is made in this order:
 //!
 //! 1. **`SENATE_AGENT`** in the session's environment (Claude Code only: a
 //!    Codex hook runs inside the app-server, whose environment is shared by
@@ -39,6 +40,8 @@ pub const AGENT_FILE: &str = ".senate/agent";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentSource {
+    /// Chosen by this session with the join tool.
+    Join,
     /// `SENATE_AGENT`.
     Env,
     /// `.senate/agent`.
@@ -50,6 +53,7 @@ pub enum AgentSource {
 impl AgentSource {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Join => "join",
             Self::Env => "env",
             Self::File => "file",
             Self::Harness => "harness",
@@ -58,6 +62,7 @@ impl AgentSource {
 
     pub fn parse(s: &str) -> Option<Self> {
         match s {
+            "join" => Some(Self::Join),
             "env" => Some(Self::Env),
             "file" => Some(Self::File),
             "harness" => Some(Self::Harness),
@@ -248,7 +253,12 @@ mod tests {
 
     #[test]
     fn sources_round_trip() {
-        for s in [AgentSource::Env, AgentSource::File, AgentSource::Harness] {
+        for s in [
+            AgentSource::Join,
+            AgentSource::Env,
+            AgentSource::File,
+            AgentSource::Harness,
+        ] {
             assert_eq!(AgentSource::parse(s.as_str()), Some(s));
         }
         assert_eq!(AgentSource::parse("x"), None);
