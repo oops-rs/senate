@@ -745,6 +745,12 @@ pub struct Posted {
     #[serde(default)]
     pub thread: Option<Seq>,
     pub duplicate: bool,
+    /// The person spoke in a thread and an escalation to them is still in
+    /// force that they had not been shown when they spoke (the two crossed):
+    /// its seq. Only on `say` and a person's `answer`; the reply left it
+    /// new in their inbox.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unseen_escalation: Option<Seq>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

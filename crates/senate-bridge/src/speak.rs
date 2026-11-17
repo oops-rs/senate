@@ -252,9 +252,27 @@ pub fn render_replied(thread: Seq, posted: &Posted, locale: Locale) -> String {
             .collect::<Vec<_>>()
             .join(", ")
     };
-    match locale {
+    let mut out = match locale {
         Locale::Zh => format!("已在 {c} 的 thread {thread} 里回复（seq {seq}），给 {to}。"),
         Locale::En => format!("Replied in thread {thread} on {c} (seq {seq}), to {to}."),
+    };
+    if let Some(esc) = posted.unseen_escalation {
+        out.push('\n');
+        out.push_str(&unseen_escalation_line(thread, esc, locale));
+    }
+    out
+}
+
+/// The one line `reply` adds when what the person wrote crossed an
+/// escalation to them: it is still in force, and they have not read it.
+pub fn unseen_escalation_line(thread: Seq, escalation: Seq, locale: Locale) -> String {
+    match locale {
+        Locale::Zh => format!(
+            "thread {thread} 里有比你已读更新的内容：seq {escalation} 转给了你，仍然有效，你的回复在它之前写成；用 `senate thread {thread}` 阅读。"
+        ),
+        Locale::En => format!(
+            "There is something newer in thread {thread} that you have not read: it was escalated to you at seq {escalation} and still waits on you; read it with `senate thread {thread}`."
+        ),
     }
 }
 

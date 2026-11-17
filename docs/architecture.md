@@ -161,9 +161,24 @@ rule is needed beyond the existing ones (an agent reports only on its own
 threads and never takes one over).
 
 - It ends when the person says anything in the thread (a reply, a correction,
-  an answer, a decision) or takes the thread over, or when the thread is
-  archived. Words in a chat group are the Speaker's to read: its status that
-  follows (a hand-off, a takeover) ends it.
+  an answer, a decision) having seen it, or takes the thread over, or when the
+  thread is archived. Words in a chat group are the Speaker's to read: its
+  status that follows (a hand-off, a takeover) ends it.
+- "Having seen it" is a log fact, not a guess. A message the person writes
+  into an existing thread through a developer-machine tool (`senate reply`,
+  the app's answer, `ask`, `tell` and `request` into a thread) carries
+  `meta.seen`: the highest seq of that thread that had been shown to them,
+  from the same read state as `person_seen`. It ends the escalation only when
+  `seen` is at least the escalation's seq. A reply written before the
+  escalation was shown (the two crossed) leaves it in force: the thread keeps
+  waiting on the person and stays new in their inbox. A message with no
+  `seen` (a chat platform's reply, an older writer) ends it as it always did,
+  and `take` always does. The server refuses nothing new; the fold clamps a
+  `seen` above the event's own seq to it, which cannot change the outcome.
+  `senate reply` and the app's answer capture `seen` before appending, move
+  the read mark afterwards only when nothing crossed (otherwise the mark
+  stays where it was, so what was not shown stays new), and say in one line
+  that something newer is waiting.
 - It is withdrawn explicitly by whoever made it: a `status` from the same
   author with `withdraw` (the `status` tool's `withdraw_escalation`), naming
   the state the thread goes back to. Anyone else's withdrawal is ignored.

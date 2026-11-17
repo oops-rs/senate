@@ -968,6 +968,43 @@ mod tests {
     }
 
     #[test]
+    fn an_answer_that_crossed_an_escalation_leaves_it_new_in_the_app() {
+        let mut m = Model::default();
+        m.connected();
+        m.apply(WatchEvent::Status(Box::new(status(&[(
+            "alice/claude",
+            "a",
+        )]))));
+        let alice = Name::new("alice").unwrap();
+        // The escalation at 5 is still in force after the person's answer at
+        // 6, which carried `seen` 4; the daemon marked them seen up to 4.
+        let mut t = answered_to_alice(3, directed("alice", 5, Kind::Status, true, "nine things"));
+        t.state = StatusState::Suspended;
+        t.escalated_to = Some(alice.clone());
+        t.escalation = Some(senate_core::Escalation {
+            to: alice,
+            by: Address::senator(&path("alice/claude")),
+            seq: Seq(5),
+            ts: Utc::now(),
+            reason: Some("nine things".into()),
+        });
+        t.updated = Seq(6);
+        let mut reply = inbox("alice/claude", "a", &[]);
+        reply.threads = vec![t];
+        reply.seen = vec![senate_bridge::ipc::ThreadSeen {
+            thread: Seq(3),
+            seen: Seq(4),
+        }];
+        m.set_inbox(reply);
+        let w = m.waiting();
+        assert_eq!(w.len(), 1);
+        assert!(w[0].escalated, "it still waits on the person");
+        let news = w[0].unread.as_ref().unwrap();
+        assert!(news.escalated && news.seq == Seq(5), "and is still news");
+        assert_eq!(m.unread_threads(), 1);
+    }
+
+    #[test]
     fn marking_a_thread_read_is_a_seen_request() {
         let r = Action::MarkRead {
             committee: committee("a"),
