@@ -38,6 +38,7 @@ use senate_core::hub::{matches_terms, search_terms};
 use senate_core::{Appended, CommitteeId, Event, MirrorRef, NewEvent, SenatorPath, Seq};
 
 use crate::error::LogError;
+use crate::foreign;
 use crate::store::{CursorOwner, HeartbeatRecord, LogStore, check_storable, mint_epoch, now};
 
 /// Migrations, in order. Index `n` takes the file from version `n` to `n + 1`.
@@ -57,6 +58,8 @@ impl SqliteStore {
         let conn = tokio::task::spawn_blocking(move || -> Result<Connection, LogError> {
             let mut conn = Connection::open(path)?;
             conn.busy_timeout(Duration::from_secs(5))?;
+            // Before anything is written, not even the journal mode.
+            refuse_foreign(&conn)?;
             // Journal mode answers with a row, so it is read, not executed.
             let _mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))?;
             conn.pragma_update(None, "synchronous", "NORMAL")?;
@@ -88,6 +91,46 @@ impl SqliteStore {
 
 fn task_failed(error: tokio::task::JoinError) -> LogError {
     LogError::Task(error.to_string())
+}
+
+/// Refuse a file that is not a Senate log, reading only: a file that is not
+/// a SQLite database at all, one with tables of someone else's, or one at a
+/// schema Senate does not know.
+fn refuse_foreign(conn: &Connection) -> Result<(), LogError> {
+    let inspected = (|| -> rusqlite::Result<(i64, Vec<String>, Option<Vec<String>>)> {
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        let mut statement = conn.prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+        )?;
+        let tables = statement
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let events = if tables.iter().any(|t| t == "events") {
+            let mut statement = conn.prepare("SELECT name FROM pragma_table_info('events')")?;
+            Some(
+                statement
+                    .query_map([], |r| r.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?,
+            )
+        } else {
+            None
+        };
+        Ok((version, tables, events))
+    })();
+    let (version, tables, events) = match inspected {
+        Ok(found) => found,
+        // Not a database at all: the header is not SQLite's.
+        Err(rusqlite::Error::SqliteFailure(e, _))
+            if e.code == rusqlite::ErrorCode::NotADatabase =>
+        {
+            return Err(foreign::foreign("it is not a SQLite database"));
+        }
+        Err(other) => return Err(other.into()),
+    };
+    match foreign::sqlite_refusal(version, &tables, events.as_deref(), MIGRATIONS.len()) {
+        Some(detail) => Err(foreign::foreign(detail)),
+        None => Ok(()),
+    }
 }
 
 fn migrate(conn: &mut Connection) -> Result<(), LogError> {

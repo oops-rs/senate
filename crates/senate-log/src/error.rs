@@ -18,6 +18,13 @@ pub enum LogError {
     /// A blocking-pool task failed (panicked or was cancelled).
     #[error("blocking task: {0}")]
     Task(String),
+    /// The database is not one Senate made, or was made by an incompatible
+    /// version. Nothing was written to it. The text says what was found.
+    #[error(
+        "this database was not created by Senate (or was created by an incompatible version): \
+         {0}. Senate did not change it; use a new, empty database"
+    )]
+    ForeignDatabase(String),
     /// Applying the embedded migrations failed.
     #[error("migration: {0}")]
     Migrate(#[from] sqlx::migrate::MigrateError),
