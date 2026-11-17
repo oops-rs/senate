@@ -7,12 +7,15 @@
 
 mod common;
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use common::*;
 use senate_core::Kind;
 use senated::Delivered;
-use senated::testing::{Caps, Message};
+use senated::GrantPolicy;
+use senated::testing::{Caps, GrantKind, GrantOutcome, Message};
 
 /// A platform app that may adopt groups, configured for none: only
 /// mentions arrive from a group until it holds a grant.
@@ -161,5 +164,241 @@ async fn a_restart_releases_what_the_log_unbound() {
     })
     .await;
     assert_eq!(world.gateway.as_ref().unwrap().committee_of(GROUP), None);
+    world.stop().await;
+}
+
+/// A short grace and short pauses, for tests that wait in real time.
+fn quick(grace_ms: u64) -> GrantPolicy {
+    GrantPolicy {
+        release_grace: Duration::from_millis(grace_ms),
+        retry_initial: Duration::from_millis(20),
+        retry_max: Duration::from_millis(100),
+        call_timeout: Duration::from_secs(5),
+    }
+}
+
+/// A platform that fails twice before it takes an adopt, and twice before it
+/// takes a release: both are retried until they land.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_platform_that_fails_grants_is_asked_until_it_takes_them() {
+    let world = granting()
+        .grants(quick(200))
+        .platform(|chat| {
+            chat.set_caps(Caps {
+                grants: true,
+                ..Caps::PLAIN
+            });
+            chat.gate_ambient(&[]);
+            chat.fail_adopts(2);
+            chat.fail_releases(2);
+        })
+        .start()
+        .await;
+
+    world.bind().await;
+    eventually("the group to be adopted after two failures", || {
+        world
+            .fake()
+            .granted()
+            .contains(&GROUP.to_owned())
+            .then_some(())
+    })
+    .await;
+    let outcomes: Vec<_> = world
+        .fake()
+        .grant_calls_of(GrantKind::Adopt)
+        .iter()
+        .map(|c| c.outcome)
+        .collect();
+    assert_eq!(
+        outcomes,
+        [
+            GrantOutcome::Failed,
+            GrantOutcome::Failed,
+            GrantOutcome::Done
+        ]
+    );
+
+    let unbound = tokio::time::Instant::now();
+    world
+        .say(Message::mention(GROUP, "u_pm", "m_unbind", "/unbind"))
+        .await;
+    eventually("the group to be released after two failures", || {
+        world.fake().granted().is_empty().then_some(())
+    })
+    .await;
+    let releases = world.fake().grant_calls_of(GrantKind::Release);
+    assert_eq!(
+        releases.iter().map(|c| c.outcome).collect::<Vec<_>>(),
+        [
+            GrantOutcome::Failed,
+            GrantOutcome::Failed,
+            GrantOutcome::Done
+        ]
+    );
+    assert!(
+        releases[0].at - unbound >= Duration::from_millis(200),
+        "not before the grace"
+    );
+    world.stop().await;
+}
+
+/// A group moved from one committee to another (unbound, then bound again
+/// within the grace) keeps its grant: no release, no second adopt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_group_moved_to_another_committee_keeps_its_grant() {
+    let world = granting().grants(quick(3_000)).start().await;
+    world.bind().await;
+    eventually("the group to be adopted", || {
+        world
+            .fake()
+            .granted()
+            .contains(&GROUP.to_owned())
+            .then_some(())
+    })
+    .await;
+
+    world
+        .say(Message::mention(GROUP, "u_pm", "m_unbind", "/unbind"))
+        .await;
+    eventually("the group to be unbound", || {
+        (world.gateway.as_ref()?.committee_of(GROUP).is_none()).then_some(())
+    })
+    .await;
+    world
+        .say(Message::mention(
+            GROUP,
+            "u_pm",
+            "m_rebind",
+            "/bind refund-v3",
+        ))
+        .await;
+    eventually("the group to be bound to the other committee", || {
+        (world.gateway.as_ref()?.committee_of(GROUP)
+            == Some(senate_core::CommitteeId::new("refund-v3").unwrap()))
+        .then_some(())
+    })
+    .await;
+
+    tokio::time::sleep(Duration::from_millis(3_500)).await;
+    assert!(
+        world.fake().grant_calls_of(GrantKind::Release).is_empty(),
+        "never released"
+    );
+    assert_eq!(world.fake().adopt_calls().len(), 1, "never adopted twice");
+    assert!(world.fake().granted().contains(&GROUP.to_owned()));
+    world.stop().await;
+}
+
+/// A restarted daemon adopts a bound group again, by a message of its own
+/// log, without waiting for anyone to speak.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restart_adopts_a_bound_group_again_from_the_log() {
+    let mut world = granting()
+        .sqlite()
+        .platform(|chat| {
+            chat.set_caps(Caps {
+                grants: true,
+                ..Caps::PLAIN
+            });
+            chat.gate_ambient(&[]);
+            // What the platform delivered before the restart it still knows.
+            chat.know_message("m_after", GROUP);
+        })
+        .start()
+        .await;
+    world.bind().await;
+    eventually("the group to be adopted", || {
+        world
+            .fake()
+            .granted()
+            .contains(&GROUP.to_owned())
+            .then_some(())
+    })
+    .await;
+    world
+        .say(Message::ambient(GROUP, "u_pm", "m_after", "绑定之后"))
+        .await;
+
+    world.restart().await;
+    eventually("the group to be adopted again", || {
+        world
+            .fake()
+            .granted()
+            .contains(&GROUP.to_owned())
+            .then_some(())
+    })
+    .await;
+    assert_eq!(world.fake().adopt_calls(), ["m_after"]);
+    world.stop().await;
+}
+
+/// A release the platform kept refusing is still owed after a restart: the
+/// log says the group is bound to nothing, so the new run releases it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_release_the_platform_refused_is_performed_after_a_restart() {
+    let starts = Arc::new(AtomicUsize::new(0));
+    let seen = starts.clone();
+    let mut world = granting()
+        .sqlite()
+        .grants(quick(100))
+        .platform(move |chat| {
+            chat.set_caps(Caps {
+                grants: true,
+                ..Caps::PLAIN
+            });
+            chat.gate_ambient(&[]);
+            if seen.fetch_add(1, Ordering::SeqCst) == 0 {
+                chat.fail_releases(1_000_000);
+            }
+        })
+        .start()
+        .await;
+    world.bind().await;
+    world
+        .say(Message::mention(GROUP, "u_pm", "m_unbind", "/unbind"))
+        .await;
+    eventually("the release to be tried and refused", || {
+        (world.fake().grant_calls_of(GrantKind::Release).len() >= 2).then_some(())
+    })
+    .await;
+    assert!(world.fake().release_calls().is_empty(), "never taken");
+
+    world.restart().await;
+    eventually("the owed release to be made after the restart", || {
+        world
+            .fake()
+            .release_calls()
+            .contains(&GROUP.to_owned())
+            .then_some(())
+    })
+    .await;
+    world.stop().await;
+}
+
+/// The Speaker's first post into a group it has just bound is refused by a
+/// platform that has not granted the group yet: the gateway adopts it then
+/// and the post goes through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_post_refused_for_want_of_a_grant_heals_it_and_lands() {
+    let world = granting()
+        .platform(|chat| {
+            chat.set_caps(Caps {
+                grants: true,
+                ..Caps::PLAIN
+            });
+            chat.gate_ambient(&[]);
+            chat.delay_adopts(Duration::from_millis(300));
+            chat.require_grants_to_post(true);
+        })
+        .start()
+        .await;
+    world.bind().await;
+    world
+        .wait_post("the no-Agent-group hint in the people group", |p| {
+            p.is_root_in(GROUP)
+        })
+        .await;
+    assert!(world.fake().granted().contains(&GROUP.to_owned()));
     world.stop().await;
 }

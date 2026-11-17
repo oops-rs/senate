@@ -25,10 +25,32 @@
 //!   for its full use ([`ChatSurface::adopt_group`], named by the latest
 //!   message it delivered from that group); when the log leaves a group
 //!   bound to nothing, the grant is given back
-//!   ([`ChatSurface::release_group`]). The log decides, so after a restart
-//!   every group the log ever bound and binds no longer is released again,
-//!   and each bound group is adopted again on its first message. A platform
-//!   without grants answers `Unsupported`, which is ignored.
+//!   ([`ChatSurface::release_group`]). The log decides, and the gateway
+//!   keeps these guarantees ([`GrantPolicy`] sets the numbers):
+//!   - *Grace.* A release waits [`GrantPolicy::release_grace`] (3 seconds)
+//!     and is cancelled when the group is bound again within it, so a group
+//!     moved from one committee to another is neither released nor adopted
+//!     a second time.
+//!   - *Retry.* A failed or unanswered adopt or release is tried again with
+//!     a pause that doubles from 1 second to 30, with no end, until it
+//!     succeeds or the log's bindings no longer want it (an unbind stops the
+//!     retries of an adopt; a bind cancels a release). A failure is logged,
+//!     never fatal.
+//!   - *Never in the way.* Every call runs in a task of its own and is cut
+//!     off after [`GrantPolicy::call_timeout`]. A slow or hanging platform
+//!     delays no append, no delivery, and not the Speaker. Calls for one
+//!     group are made one at a time, in the order wanted.
+//!   - *After a restart* nothing is stored: the log's bindings are replayed,
+//!     every group it says is bound is adopted again (idempotent; named by
+//!     the latest chat the log holds from the group, else by its first new
+//!     message), and every group it ever bound that is bound to nothing is
+//!     released again (idempotent) once the grace has passed.
+//!   - *Self-heal.* A root post into a bound group that the platform refuses
+//!     ([`SurfaceError::Rejected`]) while the group's grant is not confirmed
+//!     adopts the group (waiting for an adopt already under way) and is
+//!     tried once more. Posts do not otherwise wait for a grant.
+//!   - A platform without grants answers `Unsupported`, which is noted once
+//!     and never asked again: no retries, no work.
 //!
 //! The gateway is a [`Component`]: mount it with
 //! [`Assembly::chat_gateway`](crate::Assembly::chat_gateway), which also
@@ -49,8 +71,14 @@ use senate_core::{
 };
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, mpsc, watch};
+use tokio_util::sync::CancellationToken;
 
 use crate::component::{Component, ComponentContext};
+
+mod grants;
+
+pub use grants::GrantPolicy;
+use grants::{Grants, Want};
 
 /// Capacity of the channel of mentions in unbound groups, gateway to
 /// Speaker.
@@ -173,6 +201,9 @@ struct Inner {
     /// A subscription of the delivering side, drained before each message so
     /// a binding the log just committed is never missed.
     fresh: Mutex<Option<broadcast::Receiver<Event>>>,
+    policy: Mutex<GrantPolicy>,
+    /// Cancelled when the daemon shuts down: grant tasks end.
+    stop: Mutex<CancellationToken>,
 }
 
 #[derive(Default)]
@@ -183,8 +214,8 @@ struct State {
     /// The latest message the platform delivered from each group: what names
     /// a group to adopt.
     latest_ref: HashMap<String, String>,
-    /// Bound groups adopted (or being adopted) in this run.
-    adopted: HashSet<String>,
+    /// What the platform's grants should be, and what it has confirmed.
+    grants: Grants,
 }
 
 #[derive(Default)]
@@ -210,12 +241,6 @@ impl Remembered {
     }
 }
 
-/// A grant to change on the platform.
-enum Grant {
-    Adopt { group: String, by: String },
-    Release { group: String },
-}
-
 impl ChatGateway {
     /// A gateway for the platform `surface` speaks to.
     pub fn new(surface: Arc<dyn ChatSurface>) -> Self {
@@ -230,8 +255,18 @@ impl ChatGateway {
                 unbound_rx: Mutex::new(Some(unbound_rx)),
                 state: Mutex::default(),
                 fresh: Mutex::new(None),
+                policy: Mutex::default(),
+                stop: Mutex::new(CancellationToken::new()),
             }),
         }
+    }
+
+    /// Pace the platform's grants differently from the default
+    /// ([`GrantPolicy::default`]). Set it before the gateway runs.
+    #[must_use]
+    pub fn with_grant_policy(self, policy: GrantPolicy) -> Self {
+        *lock(&self.inner.policy) = policy;
+        self
     }
 
     pub fn platform(&self) -> &str {
@@ -271,12 +306,12 @@ impl ChatGateway {
                 .latest_ref
                 .insert(inbound.group_id.clone(), inbound.message_ref.clone());
             let committee = state.table.committee_of(&inbound.group_id).cloned();
-            if committee.is_some() && state.adopted.insert(inbound.group_id.clone()) {
-                // The first message from a bound group in this run.
-                self.inner.spawn_grant(Grant::Adopt {
-                    group: inbound.group_id.clone(),
-                    by: inbound.message_ref.clone(),
-                });
+            if committee.is_some() {
+                // A message from a bound group: if its grant is not
+                // confirmed yet and nothing is working on it (a restart
+                // that found nothing to name the group by), this names it.
+                let State { grants, .. } = &mut *state;
+                self.inner.want_grant(grants, &inbound.group_id, Want::Held);
             }
             committee
         };
@@ -309,8 +344,9 @@ impl Component for ChatGateway {
         // Subscribe before reading, so no binding falls between the two.
         let mut log = ctx.hub.subscribe();
         *lock(&self.inner.fresh) = Some(ctx.hub.subscribe());
+        *lock(&self.inner.stop) = ctx.shutdown.clone();
         let table = BindingTable::rebuild(ctx.hub.as_ref(), &self.inner.platform).await?;
-        self.inner.replace_table(table, true);
+        self.inner.replace_table(table);
         self.inner.hub.send_replace(Some(ctx.hub.clone()));
         loop {
             let received = tokio::select! {
@@ -324,7 +360,7 @@ impl Component for ChatGateway {
                     tracing::warn!(skipped, "log subscription lagged; rebuilding bindings");
                     let table =
                         BindingTable::rebuild(ctx.hub.as_ref(), &self.inner.platform).await?;
-                    self.inner.replace_table(table, false);
+                    self.inner.replace_table(table);
                 }
                 Err(broadcast::error::RecvError::Closed) => {
                     anyhow::bail!("the log subscription closed")
@@ -367,7 +403,7 @@ impl Inner {
     }
 
     /// Apply every binding the delivering side's subscription holds.
-    fn drain_fresh(&self) {
+    fn drain_fresh(self: &Arc<Self>) {
         let mut fresh = lock(&self.fresh);
         let Some(rx) = fresh.as_mut() else { return };
         loop {
@@ -384,72 +420,42 @@ impl Inner {
     }
 
     /// A live binding event: apply it, then grant the group a bind leaves
-    /// bound, or release the one an unbind leaves bound to nothing.
-    fn observe(&self, event: &Event) {
+    /// bound, or (after the grace) release the one an unbind leaves bound to
+    /// nothing.
+    fn observe(self: &Arc<Self>, event: &Event) {
         let mut state = lock(&self.state);
         let Some(binding) = state.table.observe(event, &self.platform) else {
             return;
         };
         let group = binding.group_id;
         let bound = state.table.committee_of(&group).is_some();
-        match binding.action {
-            BindingAction::Bind if bound => {
-                // Asked again even if asked before: the grant may have been
-                // released in between (an unbind, then a bind).
-                state.adopted.remove(&group);
-                if let Some(by) = state.latest_ref.get(&group).cloned() {
-                    state.adopted.insert(group.clone());
-                    self.spawn_grant(Grant::Adopt { group, by });
-                }
-            }
-            BindingAction::Unbind if !bound => {
-                state.adopted.remove(&group);
-                self.spawn_grant(Grant::Release { group });
-            }
-            _ => {}
-        }
+        let want = match binding.action {
+            BindingAction::Bind if bound => Want::Held,
+            BindingAction::Unbind if !bound => Want::Released,
+            _ => return,
+        };
+        let State { grants, .. } = &mut *state;
+        self.want_grant(grants, &group, want);
     }
 
-    /// Replace the table with one rebuilt from the log. Every group the log
-    /// ever bound that is bound to nothing now is released (again); one
-    /// bound now that was not before is adopted, as a live bind would be.
-    fn replace_table(&self, table: BindingTable, at_start: bool) {
+    /// Replace the table with one rebuilt from the log, then bring the
+    /// grants in line with it: every group the log ever bound is adopted
+    /// while bound and released once bound to nothing. What the platform
+    /// already confirmed this run is not asked again; after a restart
+    /// nothing is confirmed, so every group is (idempotently).
+    fn replace_table(self: &Arc<Self>, table: BindingTable) {
         let mut state = lock(&self.state);
-        let previous = std::mem::replace(&mut state.table, table);
+        state.table = table;
         let groups: BTreeSet<String> = state.table.ever.iter().cloned().collect();
         for group in groups {
-            if state.table.committee_of(&group).is_some() {
-                let newly = !at_start && previous.committee_of(&group).is_none();
-                if newly && let Some(by) = state.latest_ref.get(&group).cloned() {
-                    state.adopted.insert(group.clone());
-                    self.spawn_grant(Grant::Adopt { group, by });
-                }
+            let want = if state.table.committee_of(&group).is_some() {
+                Want::Held
             } else {
-                state.adopted.remove(&group);
-                self.spawn_grant(Grant::Release { group });
-            }
+                Want::Released
+            };
+            let State { grants, .. } = &mut *state;
+            self.want_grant(grants, &group, want);
         }
-    }
-
-    /// Change a grant without holding anything up: a platform may take its
-    /// time, and the Speaker posts into the group meanwhile.
-    fn spawn_grant(&self, grant: Grant) {
-        let surface = self.surface.clone();
-        tokio::spawn(async move {
-            match grant {
-                Grant::Adopt { group, by } => match surface.adopt_group(&by).await {
-                    Ok(AdoptedGroup { group_id, .. }) => {
-                        tracing::debug!(%group_id, "group adopted");
-                    }
-                    Err(SurfaceError::Unsupported(_)) => {}
-                    Err(error) => tracing::warn!(%group, %error, "cannot adopt a bound group"),
-                },
-                Grant::Release { group } => match surface.release_group(&group).await {
-                    Ok(_) | Err(SurfaceError::Unsupported(_)) => {}
-                    Err(error) => tracing::warn!(%group, %error, "cannot release a group"),
-                },
-            }
-        });
     }
 
     async fn route_unbound(
@@ -739,6 +745,23 @@ struct RecordingSurface {
 }
 
 impl RecordingSurface {
+    /// A root post into a bound group was refused and the platform has not
+    /// confirmed the group's grant (a bind and the Speaker's first posts
+    /// there happen together, while the adopt is still under way): adopt it
+    /// now. True when the post should be tried once more.
+    async fn refused_for_want_of_grant(
+        &self,
+        target: &PostTarget,
+        result: &Result<Posted, SurfaceError>,
+    ) -> bool {
+        match (target, result) {
+            (PostTarget::NewRoot { group_id }, Err(SurfaceError::Rejected(_))) => {
+                self.inner.heal(group_id).await
+            }
+            _ => false,
+        }
+    }
+
     fn posted(&self, result: Result<Posted, SurfaceError>) -> Result<Posted, SurfaceError> {
         if let Ok(posted) = &result {
             let mut state = lock(&self.inner.state);
@@ -763,11 +786,18 @@ impl ChatSurface for RecordingSurface {
         markdown: &str,
         operation_id: &str,
     ) -> Result<Posted, SurfaceError> {
-        let posted = self
+        let mut posted = self
             .inner
             .surface
-            .post(target, markdown, operation_id)
+            .post(target.clone(), markdown, operation_id)
             .await;
+        if self.refused_for_want_of_grant(&target, &posted).await {
+            posted = self
+                .inner
+                .surface
+                .post(target, markdown, operation_id)
+                .await;
+        }
         self.posted(posted)
     }
 
@@ -778,11 +808,18 @@ impl ChatSurface for RecordingSurface {
         user: &str,
         operation_id: &str,
     ) -> Result<Posted, SurfaceError> {
-        let posted = self
+        let mut posted = self
             .inner
             .surface
-            .post_mentioning(target, markdown, user, operation_id)
+            .post_mentioning(target.clone(), markdown, user, operation_id)
             .await;
+        if self.refused_for_want_of_grant(&target, &posted).await {
+            posted = self
+                .inner
+                .surface
+                .post_mentioning(target, markdown, user, operation_id)
+                .await;
+        }
         self.posted(posted)
     }
 
@@ -792,11 +829,18 @@ impl ChatSurface for RecordingSurface {
         card: &Card,
         operation_id: &str,
     ) -> Result<Posted, SurfaceError> {
-        let posted = self
+        let mut posted = self
             .inner
             .surface
-            .post_card(target, card, operation_id)
+            .post_card(target.clone(), card, operation_id)
             .await;
+        if self.refused_for_want_of_grant(&target, &posted).await {
+            posted = self
+                .inner
+                .surface
+                .post_card(target, card, operation_id)
+                .await;
+        }
         self.posted(posted)
     }
 

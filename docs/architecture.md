@@ -467,7 +467,7 @@ any gateway reach the log only through the `Hub` seam in `senate-core`. Only
 | Seam | Type | Purpose |
 | --- | --- | --- |
 | Chat surface | `senate_core::ChatSurface`, with `senate_core::UnboundMention` | The Speaker speaking on a chat platform, and mentions in groups bound to no committee. |
-| Chat gateway | `senated::ChatGateway` (`Inbound`, `deliver`) | The platform-neutral half of a gateway: senders to senators or guests, messages in bound groups to `chat` events, unbound mentions, bind = grant. A layer writes only the platform's transport. |
+| Chat gateway | `senated::ChatGateway` (`Inbound`, `deliver`) | The platform-neutral half of a gateway: senders to senators or guests, messages in bound groups to `chat` events, unbound mentions, bind = grant (a 3-second grace before a release, bounded retries, reconciliation from the log after a restart; `GrantPolicy`). A layer writes only the platform's transport. |
 | Hub | `senate_core::Hub` | Appending to and observing the log in process. |
 | Brain | `senate_speaker::Brain` | The Speaker's model. Default `BasisBrain`. |
 | Log store | `senate_log::LogStore` | Where the log is kept: `memory:`, `sqlite:<path>`, `postgres://…`. |
@@ -478,6 +478,30 @@ any gateway reach the log only through the `Hub` seam in `senate-core`. Only
 | Components | `senated::Component` (`component_fn`) | Anything else that runs on the Hub (an agent gateway's entry point, say), supervised with the Speaker. |
 | Assembly | `senated::Assembly` | The builder that takes all of the above and starts a daemon: at most one chat surface, any number of components. |
 | Machine | `senated::Machine` | A developer machine's daemon: its hosted Senates and its side of every Senate it serves. A layer embeds it to run that side within its own process. |
+
+### Bind = grant in the chat gateway
+
+The log decides which groups the platform should have granted: bound groups
+are adopted, groups bound to nothing are released. `ChatGateway` makes the
+platform follow, without ever holding the log or the Speaker up:
+
+- A release is delayed by a grace (3 seconds by default) and cancelled when
+  the group is bound again within it, so moving a group between committees
+  does not drop and re-create its grant.
+- A failed or unanswered adopt or release is retried, pausing 1 second and
+  doubling to at most 30, until it succeeds or the bindings change so it is
+  no longer wanted. Each call is bounded by a timeout, runs in its own task,
+  and is serialised per group.
+- Nothing is stored for this. After a restart the gateway replays the log's
+  `binding` events: every bound group is adopted again, named by the latest
+  chat the log holds from it (or by its first new message when nobody has
+  spoken since), and every group once bound and now bound to nothing is
+  released again. Both calls are idempotent.
+- A root post refused for want of a grant adopts the group and is tried once
+  more; posts otherwise never wait for an adopt.
+- A surface that answers `Unsupported` is not asked again.
+
+`GrantPolicy` (`ChatGateway::with_grant_policy`) holds the numbers.
 
 ## Lineage
 
