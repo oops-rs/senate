@@ -49,6 +49,7 @@ use sqlx::postgres::{PgExecutor, PgPool, PgPoolOptions, PgRow};
 use sqlx::{AssertSqlSafe, Row};
 
 use crate::error::LogError;
+use crate::foreign;
 use crate::store::{CursorOwner, HeartbeatRecord, LogStore, check_storable, mint_epoch, now};
 
 static MIGRATOR: Migrator = sqlx::migrate!();
@@ -82,7 +83,14 @@ impl PgStore {
 
     /// Apply the embedded migrations and mint the log's epoch if it has
     /// none (idempotent).
+    ///
+    /// Before anything is written, the database is looked at (reading
+    /// only): one that Senate did not create, or that an incompatible
+    /// version did, is refused with [`LogError::ForeignDatabase`] and left
+    /// exactly as it was. A new, empty database and one Senate made both
+    /// pass.
     pub async fn migrate(&self) -> Result<(), LogError> {
+        self.refuse_foreign().await?;
         MIGRATOR.run(&self.pool).await?;
         sqlx::query("INSERT INTO log_meta (epoch) VALUES ($1) ON CONFLICT (singleton) DO NOTHING")
             .bind(mint_epoch())
@@ -93,6 +101,78 @@ impl PgStore {
 
     pub fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    async fn refuse_foreign(&self) -> Result<(), LogError> {
+        let found = self.inspect().await?;
+        let ours: Vec<(i64, Vec<u8>)> = MIGRATOR
+            .iter()
+            .filter(|m| !m.migration_type.is_down_migration())
+            .map(|m| (m.version, m.checksum.to_vec()))
+            .collect();
+        match foreign::pg_refusal(&found, &ours) {
+            Some(detail) => Err(foreign::foreign(detail)),
+            None => Ok(()),
+        }
+    }
+
+    /// What the database holds of Senate's schema. Only reads.
+    async fn inspect(&self) -> Result<foreign::PgFound, LogError> {
+        let recorded = if self.table_exists(foreign::MIGRATIONS_TABLE).await? {
+            let columns = self.columns_of(foreign::MIGRATIONS_TABLE).await?;
+            if ["version", "checksum"]
+                .iter()
+                .all(|c| columns.iter().any(|have| have == c))
+            {
+                let rows = sqlx::query("SELECT version, checksum FROM _sqlx_migrations")
+                    .fetch_all(&self.pool)
+                    .await?;
+                let mut recorded = Vec::with_capacity(rows.len());
+                for row in &rows {
+                    recorded.push((row.try_get("version")?, row.try_get("checksum")?));
+                }
+                foreign::Recorded::Rows(recorded)
+            } else {
+                foreign::Recorded::Odd
+            }
+        } else {
+            foreign::Recorded::Absent
+        };
+        let mut tables = Vec::new();
+        for table in foreign::SENATE_TABLES {
+            if self.table_exists(table).await? {
+                tables.push((*table).to_owned());
+            }
+        }
+        let events = if tables.iter().any(|t| t == "events") {
+            Some(self.columns_of("events").await?)
+        } else {
+            None
+        };
+        Ok(foreign::PgFound {
+            recorded,
+            events,
+            tables,
+        })
+    }
+
+    /// Whether `name` resolves on the connection's search path.
+    async fn table_exists(&self, name: &str) -> Result<bool, LogError> {
+        Ok(sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+            .bind(name)
+            .fetch_one(&self.pool)
+            .await?)
+    }
+
+    async fn columns_of(&self, name: &str) -> Result<Vec<String>, LogError> {
+        Ok(sqlx::query_scalar(
+            "SELECT attname::text FROM pg_attribute \
+             WHERE attrelid = to_regclass($1) AND attnum > 0 AND NOT attisdropped \
+             ORDER BY attnum",
+        )
+        .bind(name)
+        .fetch_all(&self.pool)
+        .await?)
     }
 }
 

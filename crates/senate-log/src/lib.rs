@@ -15,6 +15,19 @@
 //!
 //! All three pass the same conformance suite (`tests/conformance.rs`).
 //!
+//! # A database Senate did not make
+//!
+//! [`PgStore::migrate`] and [`SqliteStore::open`] look at what a database
+//! holds before writing anything. One that was not created by Senate (a
+//! migrations table recording a version Senate also has with other SQL, or
+//! versions it does not have; an `events` table without Senate's columns;
+//! Senate's tables with no record of its migrations; a SQLite file with
+//! tables of its own, or at a schema version Senate does not know) is
+//! refused with [`LogError::ForeignDatabase`] and left as it was. Senate's
+//! migration numbers are not changed to tell it apart: a database made by an
+//! earlier Senate records them, and renumbering would make that database
+//! look foreign.
+//!
 //! # Semantics every store keeps
 //!
 //! - **Sequence.** `seq` is per committee, starts at 1, and has no gaps: the
@@ -55,6 +68,7 @@
 //!   by its full [`senate_core::SenatorPath`].
 
 mod error;
+mod foreign;
 mod memory;
 mod pg;
 mod sqlite;

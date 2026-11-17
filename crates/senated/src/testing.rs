@@ -23,6 +23,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+use tokio::time::Instant;
+
 use async_trait::async_trait;
 use senate_core::{
     AdoptedGroup, Card, ChatSurface, CreatedGroup, NewGroup, PostTarget, Posted, SurfaceError,
@@ -211,6 +213,16 @@ struct State {
     adopt_calls: Vec<String>,
     release_calls: Vec<String>,
     adopt_delay: Duration,
+    release_delay: Duration,
+    /// Adopts (releases) still to fail as unavailable.
+    adopt_failures: usize,
+    release_failures: usize,
+    /// Adopts never return.
+    adopt_hangs: bool,
+    /// Root posts into a group with no grant (and not configured) are
+    /// refused, as a platform does for a chat it has not granted.
+    posts_need_grant: bool,
+    grant_calls: Vec<GrantCall>,
     /// When set, the groups configured on the platform: unmentioned chat
     /// from any other group without a grant is not delivered.
     configured: Option<BTreeSet<String>>,
@@ -218,6 +230,37 @@ struct State {
     panics: usize,
     /// Posts still to refuse as unavailable.
     outages: usize,
+}
+
+/// One call to [`ChatSurface::adopt_group`] or
+/// [`ChatSurface::release_group`], when it was made (the runtime's clock, so
+/// a test with a paused clock reads exact times) and how it ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantCall {
+    pub kind: GrantKind,
+    /// The message ref an adopt named its group by, or the group a release
+    /// named.
+    pub subject: String,
+    pub at: Instant,
+    pub outcome: GrantOutcome,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrantKind {
+    Adopt,
+    Release,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrantOutcome {
+    Done,
+    /// Refused as unavailable on request ([`FakeChat::fail_adopts`]).
+    Failed,
+    /// Made and never answered ([`FakeChat::hang_adopts`]), or not answered
+    /// yet.
+    Pending,
+    Unsupported,
+    Rejected,
 }
 
 /// The fake platform. See the module docs.
@@ -266,6 +309,42 @@ impl FakeChat {
     /// Every adopt takes this long to answer.
     pub fn delay_adopts(&self, delay: Duration) {
         self.lock().adopt_delay = delay;
+    }
+
+    /// Every release takes this long to answer.
+    pub fn delay_releases(&self, delay: Duration) {
+        self.lock().release_delay = delay;
+    }
+
+    /// The next `n` adopts are refused as unavailable.
+    pub fn fail_adopts(&self, n: usize) {
+        self.lock().adopt_failures = n;
+    }
+
+    /// The next `n` releases are refused as unavailable.
+    pub fn fail_releases(&self, n: usize) {
+        self.lock().release_failures = n;
+    }
+
+    /// Adopts never answer (or answer again, with `false`).
+    pub fn hang_adopts(&self, hang: bool) {
+        self.lock().adopt_hangs = hang;
+    }
+
+    /// Root posts into a group without a grant (and not configured with
+    /// [`gate_ambient`](Self::gate_ambient)) are refused, until the group is
+    /// adopted.
+    pub fn require_grants_to_post(&self, require: bool) {
+        self.lock().posts_need_grant = require;
+    }
+
+    /// The platform knows `message_ref` as a message of `group_id`, as one
+    /// it delivered before the daemon (re)started.
+    pub fn know_message(&self, message_ref: &str, group_id: &str) {
+        self.lock()
+            .messages
+            .entry(message_ref.to_owned())
+            .or_insert((Some(group_id.to_owned()), None));
     }
 
     /// Someone says something. Unmentioned chat from a group the platform
@@ -339,6 +418,38 @@ impl FakeChat {
 
     pub fn release_calls(&self) -> Vec<String> {
         self.lock().release_calls.clone()
+    }
+
+    /// Every adopt and release, in the order made, with when and how it
+    /// ended.
+    pub fn grant_calls(&self) -> Vec<GrantCall> {
+        self.lock().grant_calls.clone()
+    }
+
+    /// [`grant_calls`](Self::grant_calls) of one kind.
+    pub fn grant_calls_of(&self, kind: GrantKind) -> Vec<GrantCall> {
+        self.lock()
+            .grant_calls
+            .iter()
+            .filter(|c| c.kind == kind)
+            .cloned()
+            .collect()
+    }
+
+    fn refuse_ungranted(state: &State, target: &PostTarget) -> Result<(), SurfaceError> {
+        if let PostTarget::NewRoot { group_id } = target
+            && state.posts_need_grant
+            && !state.granted.contains(group_id)
+            && !state
+                .configured
+                .as_ref()
+                .is_some_and(|c| c.contains(group_id))
+        {
+            return Err(SurfaceError::Rejected(format!(
+                "unknown_channel: {group_id}"
+            )));
+        }
+        Ok(())
     }
 
     /// Replays answered as duplicates.
@@ -421,6 +532,7 @@ impl FakeChat {
             state.outages -= 1;
             return Err(SurfaceError::Unavailable("fake chat: an outage".into()));
         }
+        Self::refuse_ungranted(&state, &target)?;
         let content = format!("{}\0{markdown}", mention.unwrap_or_default());
         if let Some((first_target, first_content, first)) =
             state.operations.get(operation_id).cloned()
@@ -534,6 +646,7 @@ impl ChatSurface for FakeChat {
                 ..first
             });
         }
+        Self::refuse_ungranted(&state, &target)?;
         let (posted, group) = Self::mint(&mut state, &target);
         state.card_operations.insert(
             operation_id.to_owned(),
@@ -655,22 +768,52 @@ impl ChatSurface for FakeChat {
     }
 
     async fn adopt_group(&self, message_ref: &str) -> Result<AdoptedGroup, SurfaceError> {
-        let delay = {
+        let (delay, hang, call) = {
             let mut state = self.lock();
             if !state.caps.grants {
+                state.grant_calls.push(GrantCall {
+                    kind: GrantKind::Adopt,
+                    subject: message_ref.to_owned(),
+                    at: Instant::now(),
+                    outcome: GrantOutcome::Unsupported,
+                });
                 return unsupported("group grants");
             }
             state.adopt_calls.push(message_ref.to_owned());
-            state.adopt_delay
+            let outcome = if state.adopt_failures > 0 {
+                state.adopt_failures -= 1;
+                GrantOutcome::Failed
+            } else {
+                GrantOutcome::Pending
+            };
+            state.grant_calls.push(GrantCall {
+                kind: GrantKind::Adopt,
+                subject: message_ref.to_owned(),
+                at: Instant::now(),
+                outcome,
+            });
+            (
+                state.adopt_delay,
+                state.adopt_hangs,
+                state.grant_calls.len() - 1,
+            )
         };
+        if self.lock().grant_calls[call].outcome == GrantOutcome::Failed {
+            return Err(SurfaceError::Unavailable("fake chat: an outage".into()));
+        }
+        if hang {
+            std::future::pending::<()>().await;
+        }
         tokio::time::sleep(delay).await;
         let mut state = self.lock();
         let Some(group_id) = state.messages.get(message_ref).and_then(|(g, _)| g.clone()) else {
+            state.grant_calls[call].outcome = GrantOutcome::Rejected;
             return Err(SurfaceError::Rejected(format!(
                 "unknown message {message_ref}"
             )));
         };
         let already_granted = !state.granted.insert(group_id.clone());
+        state.grant_calls[call].outcome = GrantOutcome::Done;
         Ok(AdoptedGroup {
             group_id,
             already_granted,
@@ -678,11 +821,42 @@ impl ChatSurface for FakeChat {
     }
 
     async fn release_group(&self, group_id: &str) -> Result<bool, SurfaceError> {
+        let delay = {
+            let mut state = self.lock();
+            let outcome = if !state.caps.grants {
+                GrantOutcome::Unsupported
+            } else if state.release_failures > 0 {
+                state.release_failures -= 1;
+                GrantOutcome::Failed
+            } else {
+                GrantOutcome::Pending
+            };
+            state.grant_calls.push(GrantCall {
+                kind: GrantKind::Release,
+                subject: group_id.to_owned(),
+                at: Instant::now(),
+                outcome,
+            });
+            match outcome {
+                GrantOutcome::Unsupported => return unsupported("group grants"),
+                GrantOutcome::Failed => {
+                    return Err(SurfaceError::Unavailable("fake chat: an outage".into()));
+                }
+                _ => {}
+            }
+            state.release_calls.push(group_id.to_owned());
+            state.release_delay
+        };
+        tokio::time::sleep(delay).await;
         let mut state = self.lock();
-        if !state.caps.grants {
-            return unsupported("group grants");
+        if let Some(call) = state
+            .grant_calls
+            .iter_mut()
+            .rev()
+            .find(|c| c.kind == GrantKind::Release && c.subject == group_id)
+        {
+            call.outcome = GrantOutcome::Done;
         }
-        state.release_calls.push(group_id.to_owned());
         Ok(state.granted.remove(group_id))
     }
 }

@@ -34,7 +34,7 @@ use senate_speaker::{Brain, ScriptedBrain, SpeakerConfig, WorkConfig};
 use senate_work::testing::{FakeForge, FakeRunner};
 use senate_work::{Forge, RepoAllowlist, Runner};
 use senated::testing::{FakeChat, Message, Post};
-use senated::{Assembly, ChatGateway, Delivered, Machine, Senated, SenatedConfig};
+use senated::{Assembly, ChatGateway, Delivered, GrantPolicy, Machine, Senated, SenatedConfig};
 use serde_json::Value;
 use tokio::io::AsyncBufReadExt;
 use tokio::net::UnixListener;
@@ -147,6 +147,7 @@ pub struct Setup {
     chat: bool,
     speaker_on: bool,
     platform: Option<Platform>,
+    grants: Option<GrantPolicy>,
     hands: Option<Hands>,
     server: Vec<Tweak<senate_server::ServerConfig>>,
     speaker: Vec<Tweak<SpeakerConfig>>,
@@ -164,6 +165,7 @@ impl Setup {
             chat: true,
             speaker_on: true,
             platform: None,
+            grants: None,
             hands: None,
             server: Vec::new(),
             speaker: Vec::new(),
@@ -198,6 +200,13 @@ impl Setup {
     /// Set the chat platform up with `f` before each start of the daemon.
     pub fn platform(mut self, f: impl Fn(&FakeChat) + Send + Sync + 'static) -> Self {
         self.platform = Some(Arc::new(f));
+        self
+    }
+
+    /// Pace the gateway's grants (a short grace and retry, for a test that
+    /// waits in real time).
+    pub fn grants(mut self, policy: GrantPolicy) -> Self {
+        self.grants = Some(policy);
         self
     }
 
@@ -262,6 +271,7 @@ pub struct World {
     pub locale: Locale,
     hands: Option<Hands>,
     platform: Option<Platform>,
+    grants: Option<GrantPolicy>,
 }
 
 impl World {
@@ -376,6 +386,7 @@ token = "tok-carol"
             locale: setup.locale,
             hands: setup.hands,
             platform: setup.platform,
+            grants: setup.grants,
         };
         world.launch(setup.chat).await;
         world
@@ -390,6 +401,10 @@ token = "tok-carol"
         }
         if chat {
             let (fake, gateway) = FakeChat::new();
+            let gateway = match self.grants {
+                Some(policy) => gateway.with_grant_policy(policy),
+                None => gateway,
+            };
             if let Some(platform) = &self.platform {
                 platform(&fake);
             }
