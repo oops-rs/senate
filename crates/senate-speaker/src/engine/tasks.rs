@@ -349,7 +349,7 @@ impl Engine {
         let name = person.to_string();
         let platform_id = self
             .roster
-            .senior(person)
+            .principal(person)
             .and_then(|s| s.account_ids(self.surface.platform()).next())
             .map(str::to_owned);
         let posted = match platform_id {

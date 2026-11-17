@@ -151,7 +151,18 @@ impl Locator {
     /// The address this locator is in the log of wherever it is read: the
     /// address itself when nothing qualifies it; `None` otherwise.
     pub fn as_address(&self) -> Option<Address> {
-        self.is_here().then(|| self.address.clone())
+        match (&self.senate, &self.committee, &self.address) {
+            (None, None, address) => Some(address.clone()),
+            (Some(senate), Some(committee), Address::Speaker)
+                if senate.depth() == 1 && !senate.is_absolute() =>
+            {
+                Some(Address::Child {
+                    senate: senate.name().clone(),
+                    committee: committee.clone(),
+                })
+            }
+            _ => None,
+        }
     }
 
     /// Written in running text: `[ibot::senator::codex]`.
@@ -184,7 +195,7 @@ impl Locator {
         qualifiers: &[&str],
         address: Address,
     ) -> Result<Self, LocatorParseError> {
-        if matches!(address, Address::Other(_)) {
+        if matches!(address, Address::Other(_) | Address::Child { .. }) {
             return Err(LocatorParseError::NoAddress(whole.to_string()));
         }
         let committee = |raw: &str| -> Result<CommitteeId, LocatorParseError> {
@@ -240,9 +251,22 @@ pub fn intended(event: &crate::event::Event) -> Option<Locator> {
 }
 
 impl From<Address> for Locator {
-    /// An address as a locator: here.
+    /// An address as a locator: a child Senate's Speaker is qualified with
+    /// the child's name (relative to the log it is in) and committee;
+    /// anything else is here.
     fn from(address: Address) -> Self {
-        Self::here(address)
+        match address {
+            Address::Child { senate, committee } => {
+                Self {
+                    senate: Some(SenatePath::new(vec![senate]).unwrap_or_else(|_| {
+                        unreachable!("a child address holds a valid Senate name")
+                    })),
+                    committee: Some(committee),
+                    address: Address::Speaker,
+                }
+            }
+            other => Self::here(other),
+        }
     }
 }
 
@@ -427,6 +451,13 @@ mod tests {
             Some("senator::codex".parse().unwrap())
         );
         assert_eq!(loc("ibot::senator::codex").as_address(), None);
+        // A child Senate's Speaker, named relative to the parent's log.
+        assert_eq!(
+            loc("north-desk::ibot::speaker").as_address(),
+            Some("north-desk::ibot::speaker".parse().unwrap())
+        );
+        assert_eq!(loc("/north-desk::ibot::speaker").as_address(), None);
+        assert_eq!(loc("ibot::chair").address(), &Address::Chair);
         assert_eq!(
             Locator::from(Address::Speaker),
             Locator::here(Address::Speaker)

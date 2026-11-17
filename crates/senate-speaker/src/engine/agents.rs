@@ -3,7 +3,7 @@
 //! goes; inviting people into it and its output level.
 //!
 //! People are invited by their accounts on this surface's platform, as the
-//! roster lists them ([`Senior::account_ids`](senate_core::Senior::account_ids));
+//! roster lists them ([`Principal::account_ids`](senate_core::Principal::account_ids));
 //! a person is invited once however many of their agents show up.
 
 use senate_core::{Mention, Name, NewGroup, OutputLevel, SenatorName};
@@ -77,7 +77,7 @@ impl Engine {
         let platform = self.surface.platform().to_owned();
         let account = |person: &Name| {
             self.roster
-                .senior(person)
+                .principal(person)
                 .and_then(|s| s.account_ids(&platform).next())
                 .map(str::to_owned)
         };
@@ -362,7 +362,7 @@ impl Engine {
         }
         let Some(id) = self
             .roster
-            .senior(&handle)
+            .principal(&handle)
             .and_then(|s| s.account_ids(self.surface.platform()).next())
             .map(str::to_owned)
         else {

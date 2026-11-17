@@ -436,14 +436,14 @@ fn named(intent: Intent, said: &str, agent: &SenatorName) -> Intent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use senate_core::{SeatedAgent, Senior};
+    use senate_core::{Principal, SeatedAgent};
 
     fn path(s: &str) -> SenatorName {
         s.parse().expect("path")
     }
 
     fn roster() -> Roster {
-        let mut alice = Senior::new(Name::new("alice").expect("name"));
+        let mut alice = Principal::new(Name::new("alice").expect("name"));
         alice.names = vec!["Alice".into(), "爱丽丝".into()];
         let seated = |agent: &str, owner: &str| {
             SeatedAgent::new(path(agent), Name::new(owner).expect("name"))
@@ -451,8 +451,8 @@ mod tests {
         Roster::new(
             vec![
                 alice,
-                Senior::new(Name::new("bob").expect("name")),
-                Senior::new(Name::new("carol").expect("name")),
+                Principal::new(Name::new("bob").expect("name")),
+                Principal::new(Name::new("carol").expect("name")),
             ],
             vec![
                 seated("claude", "alice"),

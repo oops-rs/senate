@@ -14,8 +14,8 @@ use common::*;
 use reqwest::{Method, StatusCode};
 use senate_core::api::{AppendResponse, Me, PresencePage, presence_path};
 use senate_core::{
-    Address, CommitteeId, Hub, HubError, Kind, Locale, Name, NewEvent, PresenceState, ResolveError,
-    Roster, Senior, Seq, SpeakerSeat, meta,
+    Address, CommitteeId, Hub, HubError, Kind, Locale, Name, NewEvent, PresenceState, Principal,
+    ResolveError, Roster, Seq, SpeakerSeat, meta,
 };
 use senate_log::MemoryStore;
 use senate_server::{Authenticate, Server, ServerConfig};
@@ -144,7 +144,7 @@ async fn a_wildcard_reaches_only_the_agents_on_the_committee() {
 async fn a_wildcard_with_no_agent_on_the_committee_goes_to_the_only_person() {
     // A Senate of one person: what no agent can take goes to her.
     let server = TestServer::start_configured(Arc::new(MemoryStore::new()), |config| {
-        config.roster.seniors = vec![Senior::new(name("alice"))];
+        config.roster.principals = vec![Principal::new(name("alice"))];
         config.tokens.retain(|t| t.person == name("alice"));
     })
     .await;
@@ -382,7 +382,7 @@ async fn the_roster_seam_takes_a_roster() {
     // A roster from somewhere other than configuration: alice and bob, and
     // alice's reviewer seated from the start.
     let given = Roster::new(
-        vec![Senior::new(name("alice")), Senior::new(name("bob"))],
+        vec![Principal::new(name("alice")), Principal::new(name("bob"))],
         vec![seated("reviewer", "alice")],
     )
     .unwrap();
@@ -503,10 +503,10 @@ async fn the_senate_name_the_speaker_and_the_locale_come_from_configuration() {
         speaker = "copilot"
         agents = [{ name = "copilot", owner = "alice" }]
 
-        [[roster.seniors]]
+        [[roster.principals]]
         handle = "alice"
 
-        [[roster.seniors]]
+        [[roster.principals]]
         handle = "bob"
 
         [[tokens]]
@@ -548,11 +548,14 @@ async fn people_can_be_replaced_while_agents_stay_seated() {
     let server = TestServer::start().await;
     seat(&server, &["copilot"]).await;
     let hub = server.running.hub.clone();
-    hub.set_seniors(vec![Senior::new(name("alice")), Senior::new(name("dave"))])
-        .unwrap();
+    hub.set_principals(vec![
+        Principal::new(name("alice")),
+        Principal::new(name("dave")),
+    ])
+    .unwrap();
     let roster = hub.roster().await.unwrap();
-    assert!(roster.senior(&name("dave")).is_some());
-    assert!(roster.senior(&name("bob")).is_none());
+    assert!(roster.principal(&name("dave")).is_some());
+    assert!(roster.principal(&name("bob")).is_none());
     assert_eq!(roster.agents(), [path("copilot")]);
 
     // Bob's token still authenticates, but he is nobody here now.

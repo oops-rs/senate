@@ -159,11 +159,11 @@ fn render_context(events: &[Event]) -> String {
 /// The roster as people (handle, the names they go by) with their seated
 /// agents: `- alice (also called Alice, 爱丽丝): claude, codex`.
 pub(crate) fn render_roster(roster: &Roster) -> String {
-    if roster.seniors().is_empty() {
+    if roster.principals().is_empty() {
         return "(the roster is empty)".to_owned();
     }
     roster
-        .seniors()
+        .principals()
         .iter()
         .map(|senior| {
             let names = if senior.names.is_empty() {

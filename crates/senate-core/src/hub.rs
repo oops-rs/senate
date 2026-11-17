@@ -529,7 +529,7 @@ mod tests {
     use super::*;
     use crate::continuity::{CheckpointFiles, CheckpointPayload, CheckpointTrigger};
     use crate::event::{BindingAction, BindingPayload, GroupRole, meta};
-    use crate::roster::{SeatedAgent, Senior};
+    use crate::roster::{Principal, SeatedAgent};
 
     fn path(s: &str) -> SenatorName {
         s.parse().unwrap()
@@ -562,9 +562,9 @@ mod tests {
             Self::with(
                 Roster::new(
                     vec![
-                        Senior::new(name("alice")),
-                        Senior::new(name("bob")),
-                        Senior::new(name("carol")),
+                        Principal::new(name("alice")),
+                        Principal::new(name("bob")),
+                        Principal::new(name("carol")),
                     ],
                     vec![
                         SeatedAgent::new(path("claude"), name("alice")),
@@ -790,7 +790,7 @@ mod tests {
         // One agent on the committee: it goes to that agent.
         let one = VecHub::with(
             Roster::new(
-                vec![Senior::new(name("carol"))],
+                vec![Principal::new(name("carol"))],
                 vec![SeatedAgent::new(path("copilot"), name("carol"))],
             )
             .unwrap(),

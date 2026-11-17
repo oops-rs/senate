@@ -997,12 +997,12 @@ impl ChatSurface for RecordingSurface {
 
 #[cfg(test)]
 mod tests {
-    use senate_core::{Account, Name, Senior};
+    use senate_core::{Account, Name, Principal};
 
     use super::*;
 
     fn roster() -> Roster {
-        let mut alice = Senior::new(Name::new("alice").unwrap());
+        let mut alice = Principal::new(Name::new("alice").unwrap());
         alice.accounts.push(Account {
             platform: "chat".into(),
             id: "u_alice".into(),

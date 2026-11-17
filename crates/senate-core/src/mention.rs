@@ -25,7 +25,7 @@ use std::ops::Range;
 use std::str::FromStr;
 
 use crate::address::{
-    ANY_AGENT, Address, COMMITTEE, GUEST_PREFIX, Guest, GuestError, SENATOR_PREFIX, SPEAKER,
+    ANY_AGENT, Address, CHAIR, COMMITTEE, GUEST_PREFIX, Guest, GuestError, SENATOR_PREFIX, SPEAKER,
 };
 use crate::locator::{Locator, LocatorParseError};
 use crate::senator::{SenatorName, SenatorNameError};
@@ -40,6 +40,8 @@ pub enum Mention {
     Speaker,
     /// The Speaker answering for a senator.
     SpeakerFor(SenatorName),
+    /// The committee's chair.
+    Chair,
     Committee,
     Guest(Guest),
     /// A qualified name: a seat or a Speaker named with its committee, or
@@ -91,8 +93,10 @@ impl Mention {
             Address::Senator(name) => Some(Self::Senator(name.clone())),
             Address::AnyAgent => Some(Self::AnyAgent),
             Address::Speaker => Some(Self::Speaker),
+            Address::Chair => Some(Self::Chair),
             Address::Committee => Some(Self::Committee),
             Address::Guest(guest) => Some(Self::Guest(guest.clone())),
+            Address::Child { .. } => Some(Self::Locator(Locator::from(address.clone()))),
             Address::Other(_) => None,
         }
     }
@@ -108,6 +112,7 @@ impl Mention {
             Self::Senator(name) | Self::SpeakerFor(name) => Address::Senator(name.clone()),
             Self::AnyAgent => Address::AnyAgent,
             Self::Speaker => Address::Speaker,
+            Self::Chair => Address::Chair,
             Self::Committee => Address::Committee,
             Self::Guest(guest) => Address::Guest(guest.clone()),
             Self::Locator(locator) => return locator.as_address(),
@@ -153,6 +158,7 @@ impl Mention {
     fn parse_inner(inner: &str) -> Result<Self, MentionParseError> {
         match inner {
             SPEAKER => Ok(Self::Speaker),
+            CHAIR => Ok(Self::Chair),
             COMMITTEE => Ok(Self::Committee),
             _ => {
                 if let Some(rest) = inner.strip_prefix(SENATOR_PREFIX) {
@@ -186,6 +192,7 @@ impl fmt::Display for Mention {
             Self::AnyAgent => write!(f, "[{SENATOR_PREFIX}{ANY_AGENT}]"),
             Self::Guest(guest) => write!(f, "[{GUEST_PREFIX}{guest}]"),
             Self::Speaker => write!(f, "[{SPEAKER}]"),
+            Self::Chair => write!(f, "[{CHAIR}]"),
             Self::SpeakerFor(name) => write!(f, "[{SPEAKER_FOR_PREFIX}{name}]"),
             Self::Committee => write!(f, "[{COMMITTEE}]"),
             Self::Locator(locator) => write!(f, "[{locator}]"),
@@ -224,6 +231,8 @@ mod tests {
             "[guest::chat/u_8f3a]",
             "[ibot::senator::codex]",
             "[acme/north-desk::ibot::speaker]",
+            "[chair]",
+            "[ibot::chair]",
         ] {
             let m: Mention = s.parse().unwrap();
             assert_eq!(m.to_string(), s);

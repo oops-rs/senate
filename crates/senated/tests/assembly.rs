@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use senate_core::{
-    Account, Address, ChatSurface, CommitteeId, Kind, Name, NewEvent, Roster, Senior, Seq,
+    Account, Address, ChatSurface, CommitteeId, Kind, Name, NewEvent, Principal, Roster, Seq,
 };
 use senate_speaker::{ScriptedBrain, SpeakerConfig};
 use senated::{
@@ -33,7 +33,7 @@ impl Authenticate for Directory {
 }
 
 fn people() -> Roster {
-    let mut dana = Senior::new(Name::new("dana").unwrap());
+    let mut dana = Principal::new(Name::new("dana").unwrap());
     dana.accounts.push(Account {
         platform: "chat".into(),
         id: "u_dana".into(),

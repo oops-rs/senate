@@ -35,8 +35,8 @@ use senate_core::hub::SCAN_PAGE;
 use senate_core::{
     Appended, Awaiting, Brief, BriefBuilder, CheckpointFacts, CheckpointRecord, Checkpoints,
     CommitteeId, DocketItem, DocketPage, Event, Hub, HubError, Kind, Locale, Locator, MirrorRef,
-    Name, NewEvent, People, Roster, RosterError, SeatFacts, SenatePath, SenatorName, Senior, Seq,
-    SpeakerDocket, SpeakerSeat, StatusState, TaskBoard,
+    Name, NewEvent, People, Principal, Roster, RosterError, SeatFacts, SenatePath, SenatorName,
+    Seq, SpeakerDocket, SpeakerSeat, StatusState, TaskBoard,
 };
 use senate_log::{CursorOwner, LogError, LogStore};
 use tokio::sync::{broadcast, mpsc};
@@ -554,8 +554,8 @@ impl ServerHub {
     /// from somewhere other than configuration. Seated agents whose person
     /// is still listed stay seated; the named Speaker is kept. Refused,
     /// changing nothing, when the new people break the roster's rules.
-    pub fn set_seniors(&self, seniors: Vec<Senior>) -> Result<(), RosterError> {
-        self.seats.replace_seniors(seniors)
+    pub fn set_principals(&self, principals: Vec<Principal>) -> Result<(), RosterError> {
+        self.seats.replace_principals(principals)
     }
 
     /// Register a live stream of the committee's commits. With an `agent`,

@@ -1247,7 +1247,7 @@ impl Engine {
     /// else their handle.
     fn display_name(&self, person: &Name) -> String {
         self.roster
-            .senior(person)
+            .principal(person)
             .and_then(|s| s.names.first().cloned())
             .unwrap_or_else(|| person.to_string())
     }

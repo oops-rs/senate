@@ -530,7 +530,7 @@ impl PresenceBoard {
 mod tests {
     use super::*;
     use crate::ids::Name;
-    use crate::roster::{DelegationPresence, Roster, SeatedAgent, Senior};
+    use crate::roster::{DelegationPresence, Principal, Roster, SeatedAgent};
     use crate::testing::assert_senate_vocabulary;
 
     fn path(s: &str) -> SenatorName {
@@ -752,9 +752,9 @@ mod tests {
         let name = |s: &str| Name::new(s).unwrap();
         let roster = Roster::new(
             vec![
-                Senior::new(name("alice")),
-                Senior::new(name("bob")),
-                Senior::new(name("carol")),
+                Principal::new(name("alice")),
+                Principal::new(name("bob")),
+                Principal::new(name("carol")),
             ],
             vec![
                 SeatedAgent::new(path("claude"), name("alice")),

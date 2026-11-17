@@ -206,7 +206,7 @@ impl ServerConfig {
         let roster = self.roster()?;
         for token in &self.tokens {
             token.digest()?;
-            if roster.senior(&token.person).is_none() {
+            if roster.principal(&token.person).is_none() {
                 return Err(ConfigError::Invalid(format!(
                     "a token names {}, who is not in the roster",
                     token.person
@@ -347,7 +347,7 @@ mod tests {
         let alice = roster.resolve("Alice").unwrap();
         assert_eq!(alice.handle.as_str(), "alice");
         assert_eq!(alice.account_ids("chat").collect::<Vec<_>>(), ["u_alice"]);
-        assert!(roster.senior(&name("bob")).is_some());
+        assert!(roster.principal(&name("bob")).is_some());
         assert_eq!(roster.agents().len(), 1, "claude is seated from the start");
         let claude: senate_core::SenatorName = "claude".parse().unwrap();
         assert_eq!(roster.owner_of(&claude), Some(&name("alice")));
@@ -374,10 +374,10 @@ mod tests {
             speaker = "claude"
             agents = [{ name = "claude", owner = "alice" }]
 
-            [[roster.seniors]]
+            [[roster.principals]]
             handle = "alice"
 
-            [[roster.seniors]]
+            [[roster.principals]]
             handle = "bob"
             "#,
         )
@@ -484,7 +484,7 @@ mod tests {
 
     #[test]
     fn tokens_are_validated() {
-        let roster = "[roster]\n[[roster.seniors]]\nhandle = \"alice\"\n";
+        let roster = "[roster]\n[[roster.principals]]\nhandle = \"alice\"\n";
         let bad = [
             // neither
             "[[tokens]]\nperson = \"alice\"",
@@ -523,10 +523,10 @@ mod tests {
         // name run by two people; an agent named like a person; a named
         // Speaker nobody runs, with several people listed.
         let alice_and_bob =
-            "[[roster.seniors]]\nhandle = \"alice\"\n[[roster.seniors]]\nhandle = \"bob\"";
+            "[[roster.principals]]\nhandle = \"alice\"\n[[roster.principals]]\nhandle = \"bob\"";
         for roster in [
-            "[[roster.seniors]]\nhandle = \"alice\"\n[[roster.seniors]]\nhandle = \"alice\"".to_string(),
-            "agents = [{ name = \"copilot\", owner = \"bob\" }]\n[[roster.seniors]]\nhandle = \"alice\"".to_string(),
+            "[[roster.principals]]\nhandle = \"alice\"\n[[roster.principals]]\nhandle = \"alice\"".to_string(),
+            "agents = [{ name = \"copilot\", owner = \"bob\" }]\n[[roster.principals]]\nhandle = \"alice\"".to_string(),
             format!("agents = [{{ name = \"claude\", owner = \"alice\" }}, {{ name = \"claude\", owner = \"bob\" }}]\n{alice_and_bob}"),
             format!("agents = [{{ name = \"bob\", owner = \"alice\" }}]\n{alice_and_bob}"),
             format!("speaker = \"claude\"\n{alice_and_bob}"),
@@ -541,7 +541,7 @@ mod tests {
             );
         }
         // A path inside an agent's name is not a name at all.
-        let nested = "listen = 'x'\ndatabase_url = 'memory:'\n[roster]\nagents = [{ name = \"alice/claude\", owner = \"alice\" }]\n[[roster.seniors]]\nhandle = \"alice\"";
+        let nested = "listen = 'x'\ndatabase_url = 'memory:'\n[roster]\nagents = [{ name = \"alice/claude\", owner = \"alice\" }]\n[[roster.principals]]\nhandle = \"alice\"";
         assert!(matches!(
             ServerConfig::from_toml_str(nested),
             Err(ConfigError::Parse(_))

@@ -78,7 +78,7 @@ impl Server {
 /// - **Roster**: the people, and the agents seated from the start. Default:
 ///   `config.roster`. A layer whose people live elsewhere builds the
 ///   [`Roster`] itself and passes it here, and can change the people while
-///   the server runs with [`ServerHub::set_seniors`]. Agents are seated as
+///   the server runs with [`ServerHub::set_principals`]. Agents are seated as
 ///   they connect either way.
 pub struct ServerBuilder {
     config: ServerConfig,

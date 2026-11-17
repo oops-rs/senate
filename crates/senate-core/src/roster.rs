@@ -11,7 +11,7 @@
 //!   first acts as it, and that person answers for it ([`Roster::owner_of`]).
 //!   Nobody else acts as it.
 //!
-//! Who owns and answers for an agent, and how many seniors a Senate has,
+//! Who owns and answers for an agent, and how many principals a Senate has,
 //! are being revised; this module keeps the rule above (the person who
 //! seats an agent owns it) until then.
 //!
@@ -42,7 +42,7 @@
 //! message is put to the Speaker to pick. None: the Senate's person, when
 //! it has one; else it is refused.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -50,6 +50,7 @@ use crate::address::Address;
 use crate::ids::Name;
 use crate::senate::check_not_keyword;
 use crate::senator::SenatorName;
+use crate::senator_id::SenatorId;
 
 /// The name a Senate goes by when its configuration gives none.
 pub const DEFAULT_SENATE_NAME: &str = "senate";
@@ -99,10 +100,36 @@ impl People {
     }
 }
 
-/// A person the Senate knows: a senior senator.
+/// What kind of principal a principal is. Only a person confirms decisions
+/// and counts as "a person" wherever a rule says so; a team or a service
+/// authenticates and runs agents like a person does.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrincipalKind {
+    #[default]
+    Person,
+    Team,
+    Service,
+}
+
+impl PrincipalKind {
+    pub fn is_person(self) -> bool {
+        matches!(self, Self::Person)
+    }
+}
+
+fn is_default_kind(kind: &PrincipalKind) -> bool {
+    kind.is_person()
+}
+
+/// A principal of a Senate: who a token names. A person, or a team or a
+/// service ([`PrincipalKind`]). A principal may run agents; the agent's
+/// seat records which principal runs it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Senior {
+pub struct Principal {
     pub handle: Name,
+    #[serde(default, skip_serializing_if = "is_default_kind")]
+    pub kind: PrincipalKind,
     /// Other names people use for this person in chat ("Alice", "爱丽丝").
     /// Matched case-insensitively, as is the handle itself.
     #[serde(default)]
@@ -111,16 +138,26 @@ pub struct Senior {
     pub accounts: Vec<Account>,
 }
 
-impl Senior {
+impl Principal {
+    /// A person.
     pub fn new(handle: Name) -> Self {
         Self {
             handle,
+            kind: PrincipalKind::Person,
             names: Vec::new(),
             accounts: Vec::new(),
         }
     }
 
-    /// The person as a senator.
+    /// A principal of `kind`.
+    pub fn of_kind(handle: Name, kind: PrincipalKind) -> Self {
+        Self {
+            kind,
+            ..Self::new(handle)
+        }
+    }
+
+    /// The principal as a senator.
     pub fn path(&self) -> SenatorName {
         SenatorName::new(self.handle.clone())
             .unwrap_or_else(|_| unreachable!("a listed person's handle is checked"))
@@ -188,6 +225,10 @@ pub enum RosterError {
     TwoSpeakers(SenatorName),
     #[error("{0}")]
     Keyword(String),
+    #[error("{0} cannot be its own secretary")]
+    OwnSecretary(SenatorName),
+    #[error("{0} is a principal; a secretary is an agent or the built-in session")]
+    SecretaryIsAPrincipal(SenatorName),
 }
 
 /// Who holds the Speaker's seat of one Senate.
@@ -252,6 +293,147 @@ fn list(names: &[SenatorName]) -> String {
         .join(", ")
 }
 
+/// What kind of senator the Speaker (or any senator) is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SenatorKind {
+    Person,
+    Team,
+    Service,
+    Agent,
+    /// The daemon's built-in session (the engine on a model).
+    BuiltIn,
+}
+
+impl From<PrincipalKind> for SenatorKind {
+    fn from(kind: PrincipalKind) -> Self {
+        match kind {
+            PrincipalKind::Person => Self::Person,
+            PrincipalKind::Team => Self::Team,
+            PrincipalKind::Service => Self::Service,
+        }
+    }
+}
+
+/// The Speaker as configuration names it: a senator id
+/// (`senator::wendell`, `/acme::senator::wendell`), or, read for
+/// compatibility, a bare name (`wendell`), which is a senator of this
+/// Senate for a root and the parent's senator of that name for a child
+/// (the caller that knows the parent decides, and says which it assumed).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SpeakerName {
+    pub id: SenatorId,
+    /// Written as a bare name.
+    pub bare: bool,
+}
+
+impl SpeakerName {
+    /// The Speaker `id`, written in full.
+    pub fn id(id: SenatorId) -> Self {
+        Self { id, bare: false }
+    }
+}
+
+impl From<SenatorName> for SpeakerName {
+    /// A bare name, as an older configuration wrote it.
+    fn from(name: SenatorName) -> Self {
+        Self {
+            id: SenatorId::here(name),
+            bare: true,
+        }
+    }
+}
+
+impl std::fmt::Display for SpeakerName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.bare {
+            write!(f, "{}", self.id.name())
+        } else {
+            write!(f, "{}", self.id)
+        }
+    }
+}
+
+impl std::str::FromStr for SpeakerName {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.contains("::") {
+            return s
+                .parse::<SenatorId>()
+                .map(Self::id)
+                .map_err(|e| e.to_string());
+        }
+        s.parse::<SenatorName>()
+            .map(Self::from)
+            .map_err(|e| e.to_string())
+    }
+}
+
+impl Serialize for SpeakerName {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for SpeakerName {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+/// The Speaker's office of one Senate: who the Speaker is, and who works
+/// its desk.
+///
+/// The desk is everything addressed to `speaker`. Its workers, in order:
+/// the Speaker itself when it is an agent or the built-in session (it is
+/// "present" with a live session), then the Speaker's secretaries; the
+/// first present acts. A person Speaker is never assumed present: the
+/// secretaries work the desk and leave the rest for them. With no worker
+/// present the desk waits on the Speaker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Office {
+    /// The Speaker.
+    pub speaker: SenatorId,
+    /// What kind of senator the Speaker is.
+    pub kind: SenatorKind,
+    /// Who works the desk, in order.
+    #[serde(default)]
+    pub desk: Vec<SenatorName>,
+    /// The daemon's built-in session, by name, when it runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub built_in: Option<SenatorName>,
+}
+
+impl Office {
+    /// The Speaker's name, when it is a senator of this Senate.
+    pub fn speaker_here(&self) -> Option<&SenatorName> {
+        self.speaker.senate().is_none().then(|| self.speaker.name())
+    }
+
+    /// Whether `senator` works the desk (the Speaker itself when it is an
+    /// agent, or one of its secretaries).
+    pub fn works_desk(&self, senator: &SenatorName) -> bool {
+        self.desk.contains(senator)
+    }
+
+    /// Whether the built-in session works the desk: it judges task roots
+    /// (triage), so a bridge holds a root for its verdict.
+    pub fn triages(&self) -> bool {
+        self.built_in
+            .as_ref()
+            .is_some_and(|b| self.desk.contains(b))
+    }
+
+    /// The desk's agent workers: those a session can be (every worker but
+    /// the built-in session).
+    pub fn agent_workers(&self) -> impl Iterator<Item = &SenatorName> {
+        self.desk
+            .iter()
+            .filter(|w| Some(*w) != self.built_in.as_ref())
+    }
+}
+
 /// A roster as it is written in configuration and on the wire: the people,
 /// optionally agents already seated, and the agent named Speaker. It is
 /// unchecked; [`Roster::try_from`] applies the rules.
@@ -260,20 +442,24 @@ fn list(names: &[SenatorName]) -> String {
 /// speaker = "claude"
 /// agents = [{ name = "claude", owner = "wendell" }]
 ///
-/// [[seniors]]
+/// [[principals]]
 /// handle = "wendell"
 /// names = ["Wendell"]
 /// accounts = [{ platform = "chat", id = "u_1" }]
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RosterConfig {
-    /// The agent named this Senate's Speaker. Absent: the built-in one when
-    /// it runs, else nobody. See [`Roster::speaker_seat`]. It is seated
-    /// under its owner from `agents`, or under the only person listed.
+    /// The Speaker: a senator id (`senator::alice`, or for a child Senate
+    /// `/<parent>::senator::alice`), or a bare name read for compatibility.
+    /// See [`Roster::office`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub speaker: Option<SenatorName>,
-    #[serde(default)]
-    pub seniors: Vec<Senior>,
+    pub speaker: Option<SpeakerName>,
+    /// The secretaries registered for a senator, in order: principal →
+    /// secretaries. The Speaker's work its desk.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub secretaries: BTreeMap<SenatorName, Vec<SenatorName>>,
+    #[serde(default, alias = "seniors")]
+    pub principals: Vec<Principal>,
     /// Agents seated from the start, each with its person. The rest are
     /// seated as they connect.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -309,26 +495,33 @@ pub enum DelegationPresence {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "RosterConfig", into = "RosterConfig")]
 pub struct Roster {
-    speaker: Option<SenatorName>,
-    seniors: Vec<Senior>,
+    speaker: Option<SpeakerName>,
+    principals: Vec<Principal>,
     agents: Vec<SeatedAgent>,
+    secretaries: BTreeMap<SenatorName, Vec<SenatorName>>,
+    /// The daemon's built-in session, by name, when it runs. Not
+    /// configuration: the server says.
+    #[serde(skip)]
+    built_in: Option<SenatorName>,
 }
 
 impl Roster {
     /// The roster of a Senate: its people, and agents already seated.
-    pub fn new(seniors: Vec<Senior>, agents: Vec<SeatedAgent>) -> Result<Self, RosterError> {
+    pub fn new(principals: Vec<Principal>, agents: Vec<SeatedAgent>) -> Result<Self, RosterError> {
         let mut roster = Self {
             speaker: None,
-            seniors: Vec::with_capacity(seniors.len()),
+            principals: Vec::with_capacity(principals.len()),
             agents: Vec::with_capacity(agents.len()),
+            secretaries: BTreeMap::new(),
+            built_in: None,
         };
-        for senior in seniors {
+        for senior in principals {
             check_not_keyword(senior.handle.as_str(), "a person")
                 .map_err(|e| RosterError::Keyword(e.to_string()))?;
-            if roster.seniors.iter().any(|s| s.handle == senior.handle) {
+            if roster.principals.iter().any(|s| s.handle == senior.handle) {
                 return Err(RosterError::Duplicate(senior.handle));
             }
-            roster.seniors.push(senior);
+            roster.principals.push(senior);
         }
         for agent in agents {
             let name = agent.name.clone();
@@ -345,33 +538,37 @@ impl Roster {
 
     /// A Senate of one person and no agent yet.
     pub fn of_person(person: Name) -> Self {
-        Self::new(vec![Senior::new(person)], Vec::new())
+        Self::new(vec![Principal::new(person)], Vec::new())
             .unwrap_or_else(|_| unreachable!("one person is a valid roster"))
     }
 
     /// Name `speaker` this Senate's Speaker, under [`Roster::name_speaker`]'s
     /// rules.
-    pub fn with_speaker(mut self, speaker: SenatorName) -> Result<Self, RosterError> {
-        self.name_speaker(Some(speaker))?;
+    pub fn with_speaker(mut self, speaker: impl Into<SpeakerName>) -> Result<Self, RosterError> {
+        self.name_speaker(Some(speaker.into()))?;
         Ok(self)
     }
 
-    /// Name the agent that holds this Senate's Speaker's seat, or `None`.
-    /// The named Speaker is an agent (a Speaker is backed by a model): a
-    /// seated one, or, with only one person listed, an agent seated now
-    /// under that person.
-    pub fn name_speaker(&mut self, speaker: Option<SenatorName>) -> Result<(), RosterError> {
-        if let Some(speaker) = &speaker {
-            if self.is_person(speaker) {
-                return Err(RosterError::SpeakerIsAPerson(speaker.clone()));
-            }
-            if self.owner_of(speaker).is_none() {
-                match self.seniors.as_slice() {
+    /// Name this Senate's Speaker, or `None`. A Speaker of this Senate (no
+    /// Senate path) is a principal here, an agent of this Senate (an
+    /// unattended root: seated now under the only principal when it is not
+    /// seated), or the built-in session. A Speaker named with a Senate path
+    /// is the parent's senator: the Senate above checks it when this one
+    /// registers there.
+    pub fn name_speaker(&mut self, speaker: Option<SpeakerName>) -> Result<(), RosterError> {
+        if let Some(speaker) = &speaker
+            && speaker.id.senate().is_none()
+        {
+            let name = speaker.id.name();
+            let principal = self.principal(name.name()).is_some();
+            let built_in = self.built_in.as_ref() == Some(name);
+            if !principal && !built_in && self.owner_of(name).is_none() {
+                match self.principals.as_slice() {
                     [only] => {
                         let owner = only.handle.clone();
-                        self.seat(speaker.clone(), &owner)?;
+                        self.seat(name.clone(), &owner)?;
                     }
-                    _ => return Err(RosterError::SpeakerWithoutOwner(speaker.clone())),
+                    _ => return Err(RosterError::SpeakerWithoutOwner(name.clone())),
                 }
             }
         }
@@ -379,27 +576,172 @@ impl Roster {
         Ok(())
     }
 
-    /// The agent named Speaker, if the roster names one.
-    pub fn named_speaker(&self) -> Option<&SenatorName> {
+    /// The Speaker as configured.
+    pub fn speaker(&self) -> Option<&SpeakerName> {
         self.speaker.as_ref()
     }
 
-    /// Who holds this Senate's Speaker's seat, `built_in` saying whether the
-    /// daemon runs the built-in Speaker: the named Speaker, or the built-in
-    /// one, or nobody (`None`: the server serves the log only). Both at
-    /// once is [`RosterError::TwoSpeakers`].
-    pub fn speaker_seat(&self, built_in: bool) -> Result<Option<SpeakerSeat>, RosterError> {
-        match (&self.speaker, built_in) {
-            (Some(named), true) => Err(RosterError::TwoSpeakers(named.clone())),
-            (Some(named), false) => Ok(Some(SpeakerSeat::Senator(named.clone()))),
-            (None, true) => Ok(Some(SpeakerSeat::BuiltIn)),
-            (None, false) => Ok(None),
+    /// The Speaker's name, when the Speaker is a senator of this Senate.
+    pub fn named_speaker(&self) -> Option<&SenatorName> {
+        self.speaker
+            .as_ref()
+            .filter(|s| s.id.senate().is_none())
+            .map(|s| s.id.name())
+    }
+
+    /// Say that the daemon runs the built-in session under `name`: it is
+    /// seated as an agent, run by the Speaker's principal when it is one
+    /// here, else by the only principal.
+    pub fn with_built_in(mut self, name: SenatorName) -> Result<Self, RosterError> {
+        if self.principal(name.name()).is_some() {
+            return Err(RosterError::NameTaken {
+                name: name.name().clone(),
+                taken: "a person",
+            });
+        }
+        let owner = self
+            .named_speaker()
+            .filter(|s| self.principal(s.name()).is_some())
+            .map(|s| s.name().clone())
+            .or_else(|| self.only_person().map(|p| p.handle.clone()));
+        match owner {
+            Some(owner) => {
+                self.seat(name.clone(), &owner)?;
+            }
+            None => {
+                self.seat_again(name.clone())?;
+            }
+        }
+        self.built_in = Some(name);
+        Ok(self)
+    }
+
+    /// The built-in session's name, when the daemon runs it.
+    pub fn built_in(&self) -> Option<&SenatorName> {
+        self.built_in.as_ref()
+    }
+
+    /// What kind of senator `name` is here: a principal's kind, the
+    /// built-in session, or an agent.
+    pub fn kind_of(&self, name: &SenatorName) -> SenatorKind {
+        if self.built_in.as_ref() == Some(name) {
+            return SenatorKind::BuiltIn;
+        }
+        match self.principal(name.name()) {
+            Some(p) => p.kind.into(),
+            None => SenatorKind::Agent,
         }
     }
 
-    /// Whether the authenticated `person` holds `seat`: it is held by an
-    /// agent they answer for. Nobody holds the built-in Speaker's seat; it
-    /// writes in process, not over HTTP.
+    /// The secretaries registered for `principal`, in order.
+    pub fn secretaries_of(&self, principal: &SenatorName) -> &[SenatorName] {
+        self.secretaries
+            .get(principal)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    /// Every secretary relation: principal → its secretaries, in order.
+    pub fn secretaries(&self) -> &BTreeMap<SenatorName, Vec<SenatorName>> {
+        &self.secretaries
+    }
+
+    /// Register `principal`'s secretaries, in order (empty: none). A senator
+    /// is never its own secretary, a secretary is an agent of this Senate
+    /// or the built-in session (never a principal), and a name appears
+    /// once. Chains are not followed: a secretary's own secretaries do not
+    /// act for `principal`.
+    pub fn set_secretaries(
+        &mut self,
+        principal: SenatorName,
+        secretaries: Vec<SenatorName>,
+    ) -> Result<(), RosterError> {
+        for (i, secretary) in secretaries.iter().enumerate() {
+            if secretary == &principal {
+                return Err(RosterError::OwnSecretary(principal));
+            }
+            if self.principal(secretary.name()).is_some() {
+                return Err(RosterError::SecretaryIsAPrincipal(secretary.clone()));
+            }
+            if secretaries[..i].contains(secretary) {
+                return Err(RosterError::Duplicate(secretary.name().clone()));
+            }
+        }
+        if secretaries.is_empty() {
+            self.secretaries.remove(&principal);
+        } else {
+            self.secretaries.insert(principal, secretaries);
+        }
+        Ok(())
+    }
+
+    /// The Speaker's office: who the Speaker is and who works its desk.
+    /// `None` when no Speaker is named.
+    pub fn office(&self) -> Option<Office> {
+        let speaker = self.speaker.as_ref()?.id.clone();
+        let here = speaker.senate().is_none();
+        let name = speaker.name().clone();
+        let kind = if here {
+            self.kind_of(&name)
+        } else {
+            // A senator of the Senate above: a principal there, the person
+            // whose machine this is.
+            self.principal(name.name())
+                .map_or(SenatorKind::Person, |p| p.kind.into())
+        };
+        let mut desk = Vec::new();
+        if here && matches!(kind, SenatorKind::Agent | SenatorKind::BuiltIn) {
+            desk.push(name.clone());
+        }
+        for secretary in self.secretaries_of(&name) {
+            if !desk.contains(secretary) {
+                desk.push(secretary.clone());
+            }
+        }
+        Some(Office {
+            speaker,
+            kind,
+            desk,
+            built_in: self.built_in.clone(),
+        })
+    }
+
+    /// Whether `identity` (who a token names) may write for the Speaker's
+    /// office as `acted_by`: `acted_by` is the Speaker or works its desk,
+    /// and `identity` is it (a principal Speaker) or runs it.
+    pub fn may_act_for_office(&self, identity: &Name, acted_by: &SenatorName) -> bool {
+        let Some(office) = self.office() else {
+            return false;
+        };
+        let is_speaker = office.speaker.name() == acted_by
+            && (office.speaker.senate().is_none() || self.principal(acted_by.name()).is_some());
+        if !(is_speaker || office.works_desk(acted_by)) {
+            return false;
+        }
+        self.may_act_as(identity, acted_by).is_ok()
+    }
+
+    /// Who works the desk now, as the older single seat: the desk's first
+    /// worker (the built-in session as [`SpeakerSeat::BuiltIn`]), `None`
+    /// when no one works it. `built_in` says whether the daemon runs the
+    /// built-in session; with it and no Speaker named, the built-in session
+    /// is the Speaker of an unattended root, as a Senate configured before
+    /// Speakers were named had it.
+    pub fn speaker_seat(&self, built_in: bool) -> Result<Option<SpeakerSeat>, RosterError> {
+        let Some(office) = self.office() else {
+            return Ok(built_in.then_some(SpeakerSeat::BuiltIn));
+        };
+        Ok(office.desk.first().map(|first| {
+            if Some(first) == office.built_in.as_ref() {
+                SpeakerSeat::BuiltIn
+            } else {
+                SpeakerSeat::Senator(first.clone())
+            }
+        }))
+    }
+
+    /// Whether the authenticated `person` holds `seat`: it is a desk worker
+    /// they run. Nobody holds the built-in session's seat over HTTP.
     pub fn seat_held_by(&self, seat: &SpeakerSeat, person: &Name) -> bool {
         seat.senator()
             .is_some_and(|holder| self.owner_of(holder) == Some(person))
@@ -407,7 +749,7 @@ impl Roster {
 
     /// What `name` already is in this Senate, if anything.
     fn taken(&self, name: &Name) -> Option<&'static str> {
-        if self.seniors.iter().any(|s| &s.handle == name) {
+        if self.principals.iter().any(|s| &s.handle == name) {
             Some("a person")
         } else if self.agents.iter().any(|a| &a.name == name) {
             Some("an agent")
@@ -425,7 +767,7 @@ impl Roster {
         if self.is_person(&agent) {
             return Err(RosterError::NotAnAgent(agent));
         }
-        if self.senior(owner).is_none() {
+        if self.principal(owner).is_none() {
             return Err(RosterError::NoSenior {
                 agent,
                 owner: owner.clone(),
@@ -454,7 +796,7 @@ impl Roster {
     /// again the agents it finds. With one person listed, the agent is
     /// theirs; otherwise the first person to act as it answers for it.
     pub fn seat_again(&mut self, agent: SenatorName) -> Result<bool, RosterError> {
-        if let [only] = self.seniors.as_slice() {
+        if let [only] = self.principals.as_slice() {
             let owner = only.handle.clone();
             return self.seat(agent, &owner);
         }
@@ -487,7 +829,7 @@ impl Roster {
     ///
     /// Nobody acts as another person, or as another person's agent.
     pub fn may_act_as(&self, person: &Name, senator: &SenatorName) -> Result<(), RosterError> {
-        if self.senior(person).is_none() {
+        if self.principal(person).is_none() {
             return Err(RosterError::UnknownSenior(person.clone()));
         }
         if senator == person {
@@ -513,18 +855,19 @@ impl Roster {
     pub fn to_config(&self) -> RosterConfig {
         RosterConfig {
             speaker: self.speaker.clone(),
-            seniors: self.seniors.clone(),
+            secretaries: self.secretaries.clone(),
+            principals: self.principals.clone(),
             agents: self.agents.clone(),
         }
     }
 
-    pub fn seniors(&self) -> &[Senior] {
-        &self.seniors
+    pub fn principals(&self) -> &[Principal] {
+        &self.principals
     }
 
     /// The people's handles, for a fold that must tell people from agents.
     pub fn people(&self) -> People {
-        People::new(self.seniors.iter().map(|s| s.handle.clone()))
+        People::new(self.principals.iter().map(|s| s.handle.clone()))
     }
 
     /// The agents seated in this Senate, in the order seated.
@@ -546,14 +889,14 @@ impl Roster {
             .and_then(|a| a.owner.as_ref())
     }
 
-    pub fn senior(&self, handle: &Name) -> Option<&Senior> {
-        self.seniors.iter().find(|s| &s.handle == handle)
+    pub fn principal(&self, handle: &Name) -> Option<&Principal> {
+        self.principals.iter().find(|s| &s.handle == handle)
     }
 
     /// The only person listed, when there is exactly one: whom a message
     /// for "whichever agent" reaches when there is no agent.
-    pub fn only_person(&self) -> Option<&Senior> {
-        match self.seniors.as_slice() {
+    pub fn only_person(&self) -> Option<&Principal> {
+        match self.principals.as_slice() {
             [only] => Some(only),
             _ => None,
         }
@@ -561,7 +904,7 @@ impl Roster {
 
     /// Whether `senator` is a person here.
     pub fn is_person(&self, senator: &SenatorName) -> bool {
-        self.senior(senator.name()).is_some()
+        self.principal(senator.name()).is_some()
     }
 
     /// Whether `senator` is an agent seated here.
@@ -582,8 +925,8 @@ impl Roster {
     }
 
     /// The person behind an account on an outside platform.
-    pub fn by_account(&self, platform: &str, id: &str) -> Option<&Senior> {
-        self.seniors.iter().find(|s| {
+    pub fn by_account(&self, platform: &str, id: &str) -> Option<&Principal> {
+        self.principals.iter().find(|s| {
             s.accounts
                 .iter()
                 .any(|a| a.platform == platform && a.id == id)
@@ -591,9 +934,9 @@ impl Roster {
     }
 
     /// A person by handle or any of their names.
-    pub fn resolve(&self, name: &str) -> Option<&Senior> {
+    pub fn resolve(&self, name: &str) -> Option<&Principal> {
         let lower = name.trim().trim_start_matches('@').to_lowercase();
-        self.seniors.iter().find(|s| {
+        self.principals.iter().find(|s| {
             s.handle.as_str() == lower || s.names.iter().any(|n| n.to_lowercase() == lower)
         })
     }
@@ -617,7 +960,7 @@ impl Roster {
     /// committee), when the sender did not say which.
     pub fn any_agent_among(&self, candidates: &[SenatorName]) -> AgentOf {
         match candidates {
-            [] => AgentOf::None(self.only_person().map(Senior::path)),
+            [] => AgentOf::None(self.only_person().map(Principal::path)),
             [one] => AgentOf::One(one.clone()),
             several => AgentOf::Several(several.to_vec()),
         }
@@ -706,8 +1049,11 @@ impl Roster {
 impl TryFrom<RosterConfig> for Roster {
     type Error = RosterError;
     fn try_from(config: RosterConfig) -> Result<Self, Self::Error> {
-        let mut roster = Self::new(config.seniors, config.agents)?;
+        let mut roster = Self::new(config.principals, config.agents)?;
         roster.name_speaker(config.speaker)?;
+        for (principal, secretaries) in config.secretaries {
+            roster.set_secretaries(principal, secretaries)?;
+        }
         Ok(roster)
     }
 }
@@ -734,8 +1080,8 @@ mod tests {
         s.parse().unwrap()
     }
 
-    fn seniors(handles: &[&str]) -> Vec<Senior> {
-        handles.iter().map(|h| Senior::new(name(h))).collect()
+    fn principals(handles: &[&str]) -> Vec<Principal> {
+        handles.iter().map(|h| Principal::new(name(h))).collect()
     }
 
     fn agent(s: &str, owner: &str) -> SeatedAgent {
@@ -745,7 +1091,7 @@ mod tests {
     /// wendell runs claude and codex; alice runs gemini; carol runs none.
     fn team() -> Roster {
         Roster::new(
-            seniors(&["wendell", "alice", "carol"]),
+            principals(&["wendell", "alice", "carol"]),
             vec![
                 agent("claude", "wendell"),
                 agent("codex", "wendell"),
@@ -785,7 +1131,7 @@ mod tests {
         assert!(err.to_string().contains("one namespace"), "{err}");
         assert!(roster.name_is_free(&name("copilot")).is_ok());
         assert!(matches!(
-            Roster::new(seniors(&["alice"]), vec![agent("alice", "alice")]),
+            Roster::new(principals(&["alice"]), vec![agent("alice", "alice")]),
             Err(RosterError::NotAnAgent(_))
         ));
     }
@@ -793,22 +1139,22 @@ mod tests {
     #[test]
     fn no_agent_without_a_person_and_no_duplicates() {
         assert!(matches!(
-            Roster::new(seniors(&["alice"]), vec![agent("claude", "wendell")]),
+            Roster::new(principals(&["alice"]), vec![agent("claude", "wendell")]),
             Err(RosterError::NoSenior { .. })
         ));
         assert_eq!(
             Roster::new(
-                seniors(&["wendell"]),
+                principals(&["wendell"]),
                 vec![agent("claude", "wendell"), agent("claude", "wendell")]
             ),
             Err(RosterError::Duplicate(name("claude")))
         );
         assert_eq!(
-            Roster::new(seniors(&["wendell", "wendell"]), vec![]),
+            Roster::new(principals(&["wendell", "wendell"]), vec![]),
             Err(RosterError::Duplicate(name("wendell")))
         );
         assert!(matches!(
-            Roster::new(seniors(&["speaker"]), vec![]),
+            Roster::new(principals(&["speaker"]), vec![]),
             Err(RosterError::Keyword(_))
         ));
     }
@@ -840,7 +1186,7 @@ mod tests {
         assert_eq!(one.seat_again(senator("claude")), Ok(true));
         assert_eq!(one.owner_of(&senator("claude")), Some(&name("wendell")));
         // Several: nobody's until someone acts as it.
-        let mut several = Roster::new(seniors(&["wendell", "alice"]), vec![]).unwrap();
+        let mut several = Roster::new(principals(&["wendell", "alice"]), vec![]).unwrap();
         assert_eq!(several.seat_again(senator("claude")), Ok(true));
         assert_eq!(several.owner_of(&senator("claude")), None);
         assert_eq!(
@@ -973,13 +1319,13 @@ mod tests {
 
     #[test]
     fn people_are_found_by_name_and_by_account() {
-        let mut alice = Senior::new(name("alice"));
+        let mut alice = Principal::new(name("alice"));
         alice.names = vec!["Alice".into(), "爱丽丝".into()];
         alice.accounts = vec![Account {
             platform: "chat".into(),
             id: "u_1".into(),
         }];
-        let roster = Roster::new(vec![alice, Senior::new(name("wendell"))], vec![]).unwrap();
+        let roster = Roster::new(vec![alice, Principal::new(name("wendell"))], vec![]).unwrap();
         assert_eq!(roster.resolve("@ALICE").unwrap().handle, name("alice"));
         assert_eq!(roster.resolve("爱丽丝").unwrap().handle, name("alice"));
         assert!(roster.resolve("bob").is_none());
@@ -991,34 +1337,107 @@ mod tests {
     }
 
     #[test]
-    fn a_senate_has_the_built_in_speaker_a_named_agent_or_none() {
+    fn the_speaker_is_named_by_id_and_its_desk_is_worked_in_order() {
+        // Replaces "a Senate has the built-in Speaker, a named agent or
+        // none": the Speaker is any senator named by id; the built-in
+        // session and agents work its desk as secretaries.
+        let id = |s: &str| SpeakerName::id(s.parse().unwrap());
         let plain = Roster::of_person(name("wendell"));
-        assert_eq!(plain.speaker_seat(true), Ok(Some(SpeakerSeat::BuiltIn)));
-        assert_eq!(plain.speaker_seat(false), Ok(None));
+        assert_eq!(plain.office(), None);
 
-        // With one person, the named Speaker is seated under them.
-        let alone = plain.with_speaker(senator("claude")).unwrap();
+        // A person is the Speaker; claude and the built-in session work
+        // the desk, in order.
+        let mut desk = plain
+            .clone()
+            .with_built_in(senator("clerk"))
+            .unwrap()
+            .with_speaker(id("senator::wendell"))
+            .unwrap();
+        desk.set_secretaries(
+            senator("wendell"),
+            vec![senator("claude"), senator("clerk")],
+        )
+        .unwrap();
+        let office = desk.office().unwrap();
+        assert_eq!(office.kind, SenatorKind::Person);
+        assert_eq!(office.speaker_here(), Some(&senator("wendell")));
+        assert_eq!(office.desk, [senator("claude"), senator("clerk")]);
+        assert!(office.triages());
         assert_eq!(
-            alone.speaker_seat(false),
+            office.agent_workers().collect::<Vec<_>>(),
+            [&senator("claude")]
+        );
+        assert_eq!(desk.owner_of(&senator("clerk")), Some(&name("wendell")));
+        assert!(desk.may_act_for_office(&name("wendell"), &senator("wendell")));
+        assert!(desk.may_act_for_office(&name("wendell"), &senator("claude")));
+        assert!(!desk.may_act_for_office(&name("wendell"), &senator("codex")));
+
+        // An unattended root: an agent is the Speaker and works its own desk.
+        let agent = plain.clone().with_speaker(id("senator::claude")).unwrap();
+        let office = agent.office().unwrap();
+        assert_eq!(office.kind, SenatorKind::Agent);
+        assert_eq!(office.desk, [senator("claude")]);
+        assert!(!office.triages());
+        assert_eq!(
+            agent.speaker_seat(false),
             Ok(Some(SpeakerSeat::Senator(senator("claude"))))
         );
-        assert_eq!(alone.owner_of(&senator("claude")), Some(&name("wendell")));
+        // The built-in session as the Speaker itself.
+        let built_in = plain
+            .clone()
+            .with_built_in(senator("clerk"))
+            .unwrap()
+            .with_speaker(id("senator::clerk"))
+            .unwrap();
+        let office = built_in.office().unwrap();
+        assert_eq!(office.kind, SenatorKind::BuiltIn);
+        assert!(office.triages());
+        assert_eq!(built_in.speaker_seat(true), Ok(Some(SpeakerSeat::BuiltIn)));
+
+        // A child's Speaker: the parent's senator, the person of this
+        // machine.
+        let child = plain
+            .clone()
+            .with_speaker(id("/acme::senator::wendell"))
+            .unwrap();
+        let office = child.office().unwrap();
+        assert_eq!(office.kind, SenatorKind::Person);
+        assert_eq!(office.speaker_here(), None);
+        assert!(
+            office.desk.is_empty(),
+            "no secretary: the desk waits on the Speaker"
+        );
+
+        // A configuration written before Speakers were ids: a bare name.
+        let bare: SpeakerName = "claude".parse().unwrap();
+        assert!(bare.bare);
+        assert_eq!(bare.id, "senator::claude".parse().unwrap());
+        assert_eq!(bare.to_string(), "claude");
+        // One that names the built-in Speaker only by running it.
+        assert_eq!(plain.speaker_seat(true), Ok(Some(SpeakerSeat::BuiltIn)));
+        assert_eq!(plain.speaker_seat(false), Ok(None));
+    }
+
+    #[test]
+    fn a_secretary_is_an_agent_never_its_own_principal() {
+        let mut roster = Roster::of_person(name("wendell"));
         assert_eq!(
-            alone.speaker_seat(true),
-            Err(RosterError::TwoSpeakers(senator("claude")))
+            roster.set_secretaries(senator("claude"), vec![senator("claude")]),
+            Err(RosterError::OwnSecretary(senator("claude")))
         );
         assert_eq!(
-            Roster::of_person(name("wendell")).with_speaker(senator("wendell")),
-            Err(RosterError::SpeakerIsAPerson(senator("wendell")))
+            roster.set_secretaries(senator("claude"), vec![senator("wendell")]),
+            Err(RosterError::SecretaryIsAPrincipal(senator("wendell")))
         );
-        // With several, it must be seated with its person.
+        roster
+            .set_secretaries(senator("claude"), vec![senator("codex"), senator("gemini")])
+            .unwrap();
         assert_eq!(
-            Roster::new(seniors(&["wendell", "alice"]), vec![])
-                .unwrap()
-                .with_speaker(senator("claude")),
-            Err(RosterError::SpeakerWithoutOwner(senator("claude")))
+            roster.secretaries_of(&senator("claude")),
+            [senator("codex"), senator("gemini")]
         );
-        assert!(team().with_speaker(senator("claude")).is_ok());
+        roster.set_secretaries(senator("claude"), vec![]).unwrap();
+        assert!(roster.secretaries_of(&senator("claude")).is_empty());
     }
 
     #[test]
@@ -1047,7 +1466,7 @@ mod tests {
     fn a_roster_is_configured_and_serialized_in_one_checked_form() {
         let json = serde_json::json!({
             "speaker": "claude",
-            "seniors": [
+            "principals": [
                 {
                     "handle": "wendell",
                     "names": ["Wendell"],
@@ -1064,7 +1483,7 @@ mod tests {
         let roster: Roster = serde_json::from_value(json).unwrap();
         assert_eq!(roster.agents(), [senator("claude")]);
         assert_eq!(roster.named_speaker(), Some(&senator("claude")));
-        let wendell = roster.senior(&name("wendell")).unwrap();
+        let wendell = roster.principal(&name("wendell")).unwrap();
         assert_eq!(
             wendell.account_ids("chat").collect::<Vec<_>>(),
             ["u_1", "u_2"]
@@ -1077,7 +1496,7 @@ mod tests {
 
         // People alone are a roster; agents are seated as they connect.
         let people: Roster =
-            serde_json::from_value(serde_json::json!({ "seniors": [{ "handle": "alice" }] }))
+            serde_json::from_value(serde_json::json!({ "principals": [{ "handle": "alice" }] }))
                 .unwrap();
         assert!(people.agents().is_empty());
     }
@@ -1085,14 +1504,19 @@ mod tests {
     #[test]
     fn a_configured_roster_that_breaks_a_rule_does_not_decode() {
         for bad in [
-            serde_json::json!({ "seniors": [{ "handle": "alice" }], "agents": [{ "name": "claude", "owner": "wendell" }] }),
-            serde_json::json!({ "seniors": [{ "handle": "alice" }], "agents": [{ "name": "alice", "owner": "alice" }] }),
-            serde_json::json!({ "seniors": [{ "handle": "alice" }], "agents": [{ "name": "alice/claude", "owner": "alice" }] }),
-            serde_json::json!({ "seniors": [{ "handle": "alice" }], "agents": ["alice/claude"] }),
-            serde_json::json!({ "seniors": [{ "handle": "alice" }, { "handle": "alice" }] }),
-            serde_json::json!({ "seniors": [{ "handle": "alice" }], "speaker": "alice" }),
+            serde_json::json!({ "principals": [{ "handle": "alice" }], "agents": [{ "name": "claude", "owner": "wendell" }] }),
+            serde_json::json!({ "principals": [{ "handle": "alice" }], "agents": [{ "name": "alice", "owner": "alice" }] }),
+            serde_json::json!({ "principals": [{ "handle": "alice" }], "agents": [{ "name": "alice/claude", "owner": "alice" }] }),
+            serde_json::json!({ "principals": [{ "handle": "alice" }], "agents": ["alice/claude"] }),
+            serde_json::json!({ "principals": [{ "handle": "alice" }, { "handle": "alice" }] }),
+            serde_json::json!({ "principals": [{ "handle": "alice" }], "secretaries": { "alice": ["alice"] } }),
             serde_json::json!({
-                "seniors": [{ "handle": "alice" }],
+                "principals": [{ "handle": "alice" }, { "handle": "bob" }],
+                "secretaries": { "alice": ["bob"] }
+            }),
+            serde_json::json!({ "principals": [{ "handle": "alice" }], "speaker": "acme::senator::alice" }),
+            serde_json::json!({
+                "principals": [{ "handle": "alice" }],
                 "agents": [
                     { "name": "claude", "owner": "alice" },
                     { "name": "claude", "owner": "alice" }

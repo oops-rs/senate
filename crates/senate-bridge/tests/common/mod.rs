@@ -39,8 +39,8 @@ use senate_core::api::{
 };
 use senate_core::hub::{matches_terms, search_terms};
 use senate_core::{
-    Address, Brief, CommitteeId, Event, Kind, Locale, Locator, Name, NewEvent, Roster, SenatePath,
-    SenatorName, Senior, Seq, Source,
+    Address, Brief, CommitteeId, Event, Kind, Locale, Locator, Name, NewEvent, Principal, Roster,
+    SenatePath, SenatorName, Seq, Source,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
@@ -750,11 +750,14 @@ impl FakeServer {
     /// people listed, plus `pm`, are the Senate's people; no agent is
     /// seated until it first connects.
     pub async fn start(people: &[(&str, &str)], committees: &[&str]) -> Self {
-        let mut seniors: Vec<Senior> = people.iter().map(|(_, p)| Senior::new(name(p))).collect();
+        let mut principals: Vec<Principal> = people
+            .iter()
+            .map(|(_, p)| Principal::new(name(p)))
+            .collect();
         if !people.iter().any(|(_, p)| *p == "pm") {
-            seniors.push(Senior::new(name("pm")));
+            principals.push(Principal::new(name("pm")));
         }
-        let roster = Roster::new(seniors, Vec::new()).unwrap();
+        let roster = Roster::new(principals, Vec::new()).unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (live, _) = broadcast::channel(4096);

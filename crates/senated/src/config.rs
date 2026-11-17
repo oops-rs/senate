@@ -185,7 +185,7 @@ database_url = "memory:"
 data_dir = "/var/lib/senate"
 locale = "zh"
 
-[[roster.seniors]]
+[[roster.principals]]
 handle = "alice"
 
 [[tokens]]

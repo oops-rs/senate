@@ -770,7 +770,7 @@ pub(crate) fn invalid_committee(l: Locale, raw: &str) -> String {
 /// name one agent.
 pub(crate) fn unknown_targets(l: Locale, unknown: &[String], roster: &Roster) -> String {
     let known: Vec<String> = roster
-        .seniors()
+        .principals()
         .iter()
         .map(|s| match (l, s.names.first()) {
             (Locale::Zh, Some(name)) => format!("{}（{name}）", s.handle),
@@ -1713,7 +1713,7 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use senate_core::brief::{BriefDecision, BriefQuestion};
-    use senate_core::{EventId, SeatedAgent, Senior, Step, TaskOwner, meta};
+    use senate_core::{EventId, Principal, SeatedAgent, Step, TaskOwner, meta};
     use serde_json::{Map, Value};
 
     use crate::tests_support::assert_senate_vocabulary;
@@ -2146,9 +2146,9 @@ mod tests {
 
     #[test]
     fn unknown_targets_list_people_and_how_to_name_an_agent() {
-        let mut alice = Senior::new(name("alice"));
+        let mut alice = Principal::new(name("alice"));
         alice.names = vec!["Alice".into(), "爱丽丝".into()];
-        let roster = Roster::new(vec![alice, Senior::new(name("bob"))], vec![]).expect("roster");
+        let roster = Roster::new(vec![alice, Principal::new(name("bob"))], vec![]).expect("roster");
         assert_eq!(
             unknown_targets(Locale::Zh, &["carol".into()], &roster),
             "我不认识 carol。名册上的人：alice（Alice）、bob。要指明某个 agent，直接写它的名字。"
@@ -2178,7 +2178,7 @@ mod tests {
             .value(),
         );
         let roster = Roster::new(
-            vec![Senior::new(name("alice"))],
+            vec![Principal::new(name("alice"))],
             vec![SeatedAgent::new(path("claude"), name("alice"))],
         )
         .expect("roster");
@@ -2396,7 +2396,7 @@ mod tests {
         answer.on_behalf_of = Some(agent.clone());
         answer.meta.insert(meta::TAKEOVER.into(), Value::Bool(true));
         let question = event(Kind::Question, agent.clone(), vec![sen("copilot")], None);
-        let roster = Roster::new(vec![Senior::new(name("alice"))], vec![]).expect("roster");
+        let roster = Roster::new(vec![Principal::new(name("alice"))], vec![]).expect("roster");
         let t = thread();
         let triage = TriagePayload {
             verdict: TriageVerdict::Unsure,

@@ -8,7 +8,7 @@ use std::time::Duration;
 use chrono::Utc;
 use senate_core::{
     Address, CheckpointFiles, CheckpointPayload, CheckpointTrigger, Event, Hub, Kind, Locale,
-    NewEvent, PresencePayload, PresenceState, Roster, SeatedAgent, SenatorName, Senior, Seq,
+    NewEvent, PresencePayload, PresenceState, Principal, Roster, SeatedAgent, SenatorName, Seq,
     StatusPayload, StatusState, meta, presence_event,
 };
 use serde_json::json;
@@ -651,11 +651,11 @@ async fn a_stale_checkpoint_is_escalated_to_the_other_developers() {
     let hub = alice_away().await;
     // Carol's agent has been active on the committee too (she is on the
     // roster with no account on the platform); pm's has not.
-    let mut seniors = roster().seniors().to_vec();
-    seniors.push(Senior::new(name("carol")));
+    let mut principals = roster().principals().to_vec();
+    principals.push(Principal::new(name("carol")));
     let mut seated = roster().seated().to_vec();
     seated.push(SeatedAgent::new(agent_path("carol"), name("carol")));
-    hub.set_roster(Roster::new(seniors, seated).expect("roster"));
+    hub.set_roster(Roster::new(principals, seated).expect("roster"));
     hub.append(NewEvent::new(
         refund(),
         Kind::Note,

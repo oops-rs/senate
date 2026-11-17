@@ -9,7 +9,7 @@
 
 use std::sync::{PoisonError, RwLock};
 
-use senate_core::{Name, Roster, RosterConfig, RosterError, SenatorName, Senior};
+use senate_core::{Name, Principal, Roster, RosterConfig, RosterError, SenatorName};
 
 pub(crate) struct Seats {
     roster: RwLock<Roster>,
@@ -55,14 +55,14 @@ impl Seats {
     /// Replace the people, keeping the named Speaker and the seated agents
     /// whose person is still listed (or who have none yet). Refused (and
     /// nothing changes) when the new people break the roster's rules.
-    pub(crate) fn replace_seniors(&self, seniors: Vec<Senior>) -> Result<(), RosterError> {
+    pub(crate) fn replace_principals(&self, principals: Vec<Principal>) -> Result<(), RosterError> {
         let mut roster = self.roster.write().unwrap_or_else(PoisonError::into_inner);
         let mut config: RosterConfig = roster.to_config();
         config.agents.retain(|a| match &a.owner {
-            Some(owner) => seniors.iter().any(|s| &s.handle == owner),
+            Some(owner) => principals.iter().any(|s| &s.handle == owner),
             None => true,
         });
-        config.seniors = seniors;
+        config.principals = principals;
         *roster = Roster::try_from(config)?;
         Ok(())
     }

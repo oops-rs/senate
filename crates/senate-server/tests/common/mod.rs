@@ -12,8 +12,8 @@ use futures::{Stream, StreamExt};
 use reqwest::{Method, RequestBuilder, StatusCode};
 use senate_core::api::{ApiError, AppendResponse, Heartbeat};
 use senate_core::{
-    Address, CommitteeId, Event, Kind, Name, NewEvent, RosterConfig, SeatedAgent, SenatorName,
-    Senior, Seq,
+    Address, CommitteeId, Event, Kind, Name, NewEvent, Principal, RosterConfig, SeatedAgent,
+    SenatorName, Seq,
 };
 use senate_log::{LogStore, MemoryStore};
 use senate_server::{Running, Server, ServerConfig, TokenConfig};
@@ -55,9 +55,10 @@ pub fn committee() -> CommitteeId {
 pub fn roster() -> RosterConfig {
     RosterConfig {
         speaker: None,
-        seniors: ["alice", "bob", "carol"]
+        secretaries: Default::default(),
+        principals: ["alice", "bob", "carol"]
             .into_iter()
-            .map(|h| Senior::new(name(h)))
+            .map(|h| Principal::new(name(h)))
             .collect(),
         agents: Vec::new(),
     }

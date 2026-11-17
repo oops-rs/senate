@@ -24,7 +24,7 @@ use basis::tools::{
     ParallelToolContext, RuntimeToolDescriptor, ToolDefinition, ToolExecutor, ToolResult,
 };
 use senate_core::{
-    Address, AgentOf, CommitteeId, Hub, Locale, PresenceState, Roster, SenatorName, Senior,
+    Address, AgentOf, CommitteeId, Hub, Locale, PresenceState, Principal, Roster, SenatorName,
     StatusState,
 };
 use serde_json::{Value, json};
@@ -75,7 +75,7 @@ fn senator_of(raw: &str, roster: &Roster) -> Option<SenatorName> {
     let bare = raw.strip_prefix("senator::").unwrap_or(raw);
     roster
         .resolve(bare)
-        .map(Senior::path)
+        .map(Principal::path)
         .or_else(|| bare.trim_start_matches('@').parse().ok())
 }
 

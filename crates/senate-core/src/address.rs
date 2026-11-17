@@ -11,10 +11,16 @@
 //!   link, resolved to the senator who holds the Speaker's seat there (or
 //!   the built-in Speaker). What is said in the Speaker's capacity is stored
 //!   `from: speaker`, whoever held the seat.
+//! - `chair` is the chair of the committee whose log the event is in: a
+//!   link, like `speaker`, resolved to the committee's chair at delivery
+//!   ([`crate::chair`]).
+//! - `<child>::<committee>::speaker` is a child Senate of this one, reached
+//!   through its Speaker's office for that committee:
+//!   `north-desk::ibot::speaker`. A parent never needs to know a child's
+//!   senators; what the child's Speaker's office says above is authored so.
 //!
-//! How a parent Senate's log names a child Senate is not settled yet; no
-//! address form for it exists. A qualified name ([`crate::Locator`]) names
-//! a seat elsewhere, but it is not stored as an address.
+//! A qualified name ([`crate::Locator`]) names a seat anywhere; only the
+//! forms above are stored as addresses.
 //! - `committee` means everyone on the committee.
 //! - `guest::<platform>/<id>` is someone who is not a senator: a chat
 //!   participant who is not on the roster, a caller arriving through an agent
@@ -40,6 +46,7 @@ pub(crate) const SENATOR_PREFIX: &str = "senator::";
 pub(crate) const GUEST_PREFIX: &str = "guest::";
 pub(crate) const SPEAKER: &str = "speaker";
 pub(crate) const COMMITTEE: &str = "committee";
+pub(crate) const CHAIR: &str = "chair";
 /// `senator::*`: whichever agent.
 pub(crate) const ANY_AGENT: &str = "*";
 /// What separates the parts of a qualified name and of the child-Senate
@@ -142,8 +149,16 @@ pub enum Address {
     /// ever a recipient a sender wrote.
     AnyAgent,
     Speaker,
+    /// The committee's chair: a link resolved at delivery.
+    Chair,
     Committee,
     Guest(Guest),
+    /// `<senate>::<committee>::speaker`: the Speaker's office of the child
+    /// Senate `senate` for `committee`, as the parent's log names it.
+    Child {
+        senate: crate::ids::Name,
+        committee: crate::ids::CommitteeId,
+    },
     /// A form this build does not know, kept verbatim.
     Other(String),
 }
@@ -189,6 +204,20 @@ impl Address {
         }
     }
 
+    /// The Speaker's office of the child Senate `senate` for `committee`.
+    pub fn child(senate: crate::ids::Name, committee: crate::ids::CommitteeId) -> Self {
+        Self::Child { senate, committee }
+    }
+
+    /// The child Senate and committee a `<senate>::<committee>::speaker`
+    /// address names.
+    pub fn as_child(&self) -> Option<(&crate::ids::Name, &crate::ids::CommitteeId)> {
+        match self {
+            Self::Child { senate, committee } => Some((senate, committee)),
+            _ => None,
+        }
+    }
+
     pub fn as_guest(&self) -> Option<&Guest> {
         match self {
             Self::Guest(guest) => Some(guest),
@@ -210,7 +239,11 @@ impl Address {
     /// know, which it cannot vouch for.
     pub fn may_change_state(&self) -> bool {
         match self {
-            Self::Senator(_) | Self::Speaker | Self::Committee => true,
+            Self::Senator(_)
+            | Self::Speaker
+            | Self::Chair
+            | Self::Committee
+            | Self::Child { .. } => true,
             Self::AnyAgent | Self::Guest(_) | Self::Other(_) => false,
         }
     }
@@ -241,18 +274,44 @@ impl fmt::Display for Address {
             Self::Senator(name) => write!(f, "{SENATOR_PREFIX}{name}"),
             Self::AnyAgent => write!(f, "{SENATOR_PREFIX}{ANY_AGENT}"),
             Self::Speaker => f.write_str(SPEAKER),
+            Self::Chair => f.write_str(CHAIR),
             Self::Committee => f.write_str(COMMITTEE),
+            Self::Child { senate, committee } => {
+                write!(f, "{senate}{SEPARATOR}{committee}{SEPARATOR}{SPEAKER}")
+            }
             Self::Guest(guest) => write!(f, "{GUEST_PREFIX}{guest}"),
             Self::Other(s) => f.write_str(s),
         }
     }
 }
 
+/// `<senate>::<committee>::speaker`, when `s` is exactly that: two slugs
+/// that are no keyword, then `speaker`.
+fn parse_child(s: &str) -> Option<Address> {
+    let rest = s.strip_suffix(SPEAKER)?.strip_suffix(SEPARATOR)?;
+    let (senate, committee) = rest.split_once(SEPARATOR)?;
+    if senate.contains('/') {
+        return None;
+    }
+    let senate = crate::ids::Name::new(senate).ok()?;
+    let committee = crate::ids::CommitteeId::new(committee).ok()?;
+    if crate::senate::check_not_keyword(senate.as_str(), "a Senate").is_err()
+        || crate::senate::check_not_keyword(committee.as_str(), "a committee").is_err()
+    {
+        return None;
+    }
+    Some(Address::Child { senate, committee })
+}
+
 impl FromStr for Address {
     type Err = AddressParseError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Some(child) = parse_child(s) {
+            return Ok(child);
+        }
         match s {
             SPEAKER => Ok(Self::Speaker),
+            CHAIR => Ok(Self::Chair),
             COMMITTEE => Ok(Self::Committee),
             _ => {
                 if let Some(rest) = s.strip_prefix(SENATOR_PREFIX) {
@@ -302,6 +361,8 @@ mod tests {
             "committee",
             "guest::chat/u_8f3a",
             "guest::dial/Reviewer-7@example.com",
+            "chair",
+            "north-desk::ibot::speaker",
         ] {
             let a: Address = s.parse().unwrap();
             assert_eq!(a.to_string(), s);
@@ -326,8 +387,9 @@ mod tests {
             "guest:chat/u_1",
             "guest::chat",
             // A qualified name is a locator, not a stored address.
-            "north-desk::ibot::speaker",
+            "acme/north-desk::ibot::speaker",
             "ibot::senator::codex",
+            "ibot::chair",
         ] {
             assert!(s.parse::<Address>().is_err(), "{s:?}");
         }

@@ -500,7 +500,7 @@ impl From<&ResolveError> for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::roster::{Roster, SeatedAgent, Senior};
+    use crate::roster::{Principal, Roster, SeatedAgent};
     use serde_json::json;
 
     fn c() -> CommitteeId {
@@ -612,7 +612,7 @@ mod tests {
     fn an_ambiguous_recipient_is_refused_with_the_candidates() {
         let name = |s: &str| Name::new(s).unwrap();
         let roster = Roster::new(
-            vec![Senior::new(name("wendell"))],
+            vec![Principal::new(name("wendell"))],
             vec![
                 SeatedAgent::new(path("claude"), name("wendell")),
                 SeatedAgent::new(path("codex"), name("wendell")),

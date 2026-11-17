@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use senate_core::{
     Account, Address, BindingAction, Event, Hub, Kind, Locale, Mirror, NewEvent, PostTarget,
-    Roster, Senior, Seq, SurfaceError, UnboundMention,
+    Principal, Roster, Seq, SurfaceError, UnboundMention,
 };
 use serde_json::json;
 
@@ -56,8 +56,9 @@ fn last_relay(rig: &Rig) -> Event {
 /// The usual roster plus carol, who has no agent.
 fn roster_with_carol() -> Roster {
     let base = roster();
-    let mut seniors = base.seniors().to_vec();
-    seniors.push(Senior {
+    let mut principals = base.principals().to_vec();
+    principals.push(Principal {
+        kind: senate_core::PrincipalKind::Person,
         handle: name("carol"),
         names: vec!["Carol".into()],
         accounts: vec![Account {
@@ -65,7 +66,7 @@ fn roster_with_carol() -> Roster {
             id: "u_carol".into(),
         }],
     });
-    Roster::new(seniors, base.seated().to_vec()).expect("roster")
+    Roster::new(principals, base.seated().to_vec()).expect("roster")
 }
 
 /// A bound hub where alice has a second agent, `codex`, seated.
@@ -114,7 +115,7 @@ async fn criterion_1_a_relay_is_acknowledged_and_the_answer_lands_in_the_same_th
     assert_eq!(utterance.committee, Some(refund()));
     assert_eq!(utterance.group.group_id, GROUP);
     assert_eq!(utterance.context.len(), 1, "the binding event");
-    assert_eq!(utterance.roster.seniors().len(), 3);
+    assert_eq!(utterance.roster.principals().len(), 3);
 
     // The ack, in the human's thread, keyed to the relay's seq.
     let posts = rig.surface.posts();

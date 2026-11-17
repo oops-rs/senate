@@ -120,8 +120,9 @@ pub use locale::{Locale, LocaleParseError};
 pub use locator::{Locator, LocatorParseError, Origin};
 pub use mention::{Found, Mention, MentionParseError};
 pub use roster::{
-    Account, AgentOf, DEFAULT_SENATE_NAME, DelegationPresence, People, ResolveError, Roster,
-    RosterConfig, RosterError, SeatedAgent, Senior, SpeakerSeat,
+    Account, AgentOf, DEFAULT_SENATE_NAME, DelegationPresence, Office, People, Principal,
+    PrincipalKind, ResolveError, Roster, RosterConfig, RosterError, SeatedAgent, SenatorKind,
+    SpeakerName, SpeakerSeat,
 };
 pub use senate::{KEYWORDS, KeywordError, SenatePath, SenatePathError, check_not_keyword};
 pub use senator::{SenatorName, SenatorNameError};

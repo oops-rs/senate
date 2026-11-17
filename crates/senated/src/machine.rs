@@ -43,7 +43,7 @@ use async_trait::async_trait;
 use senate_bridge::config::Hosted;
 use senate_bridge::daemon::{self, DaemonOptions, Timing};
 use senate_bridge::{BridgeConfig, Paths};
-use senate_core::{EventId, Locale, Name, RosterConfig, Senior};
+use senate_core::{EventId, Locale, Name, Principal, RosterConfig};
 use senate_server::{ServerConfig, TokenConfig};
 
 use crate::assembly::{Assembly, AssemblyError, Senated};
@@ -384,9 +384,9 @@ fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
 /// token, its named Speaker, SQLite under its directory, loopback.
 fn senate_config(plan: &Plan, machine: &BridgeConfig) -> Result<SenatedConfig, MachineError> {
     let roster = RosterConfig {
-        speaker: plan.speaker.clone(),
-        seniors: vec![Senior::new(machine.person.clone())],
-        agents: Vec::new(),
+        speaker: plan.speaker.clone().map(Into::into),
+        principals: vec![Principal::new(machine.person.clone())],
+        ..RosterConfig::default()
     };
     let mut server = ServerConfig::new(
         roster,
@@ -528,8 +528,8 @@ mod tests {
         let token_file = paths.hosted("top").join("token");
         let mode = std::fs::metadata(&token_file).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
-        assert!(roster.senior(&alice).is_some());
-        assert_eq!(roster.seniors().len(), 1);
+        assert!(roster.principal(&alice).is_some());
+        assert_eq!(roster.principals().len(), 1);
         // The developer-machine side serves it.
         let bridge = machine.bridge_config();
         assert_eq!(bridge.server_url, top.url);

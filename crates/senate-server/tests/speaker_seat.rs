@@ -14,7 +14,7 @@ use senate_core::Hub as _;
 use senate_core::api::{AppendResponse, Me};
 use senate_core::{
     Address, Awaiting, CheckpointFiles, CheckpointPayload, CheckpointTrigger, DocketPage, Kind,
-    NewEvent, OutputLevel, PickPayload, Senior, SpeakerSeat, StatusPayload, StatusState,
+    NewEvent, OutputLevel, PickPayload, Principal, SpeakerSeat, StatusPayload, StatusState,
     TriagePayload, TriageVerdict, meta,
 };
 use senate_log::MemoryStore;
@@ -46,7 +46,7 @@ async fn start(built_in: bool, configure: impl FnOnce(&mut ServerConfig)) -> Bui
 /// claude, alice's agent, holds the Speaker's seat: with several people
 /// listed, a named Speaker is listed under its person.
 fn claude_presides(c: &mut ServerConfig) {
-    c.roster.speaker = Some(path("claude"));
+    c.roster.speaker = Some(path("claude").into());
     c.roster.agents = vec![seated("claude", "alice")];
 }
 
@@ -118,8 +118,8 @@ fn speaker_only_writes(root: senate_core::Seq) -> Vec<NewEvent> {
 async fn a_senate_of_one_person_seats_its_named_speaker_under_her() {
     // Alice alone, and the Speaker named with no owner: it is hers.
     let Built { server } = start(false, |c| {
-        c.roster.seniors = vec![Senior::new(name("alice"))];
-        c.roster.speaker = Some(path("claude"));
+        c.roster.principals = vec![Principal::new(name("alice"))];
+        c.roster.speaker = Some(path("claude").into());
     })
     .await;
     let alice = me(&server, ALICE).await;
@@ -294,20 +294,27 @@ async fn nobody_writes_as_the_built_in_speaker_or_where_nobody_presides() {
 }
 
 #[tokio::test]
-async fn the_built_in_speaker_never_sits_beside_a_named_one() {
-    // A Senate has one Speaker.
+async fn a_named_speaker_with_the_built_in_session_beside_it_is_one_speaker() {
+    // Replaces "the built-in Speaker never sits beside a named one": a
+    // Senate has one Speaker, and the built-in session may work its desk
+    // beside it; the named Speaker is the one who presides.
     let mut config = ServerConfig::new(roster(), tokens());
     claude_presides(&mut config);
-    let refused = Server::builder(config, Arc::new(MemoryStore::new()))
+    let running = Server::builder(config, Arc::new(MemoryStore::new()))
         .built_in_speaker(true)
         .start()
-        .await;
-    assert!(refused.is_err());
+        .await
+        .unwrap();
+    assert_eq!(
+        running.hub.speaker_seat(),
+        Some(&senate_core::SpeakerSeat::Senator(path("claude")))
+    );
+    running.shutdown().await.unwrap();
 
-    // And a named Speaker nobody runs, among several people, is no Speaker.
+    // A named Speaker nobody runs, among several people, is no Speaker.
     for built_in in [true, false] {
         let mut config = ServerConfig::new(roster(), tokens());
-        config.roster.speaker = Some(path("claude"));
+        config.roster.speaker = Some(path("claude").into());
         let refused = Server::builder(config, Arc::new(MemoryStore::new()))
             .built_in_speaker(built_in)
             .start()
@@ -319,7 +326,7 @@ async fn the_built_in_speaker_never_sits_beside_a_named_one() {
 #[tokio::test]
 async fn a_persons_message_for_one_of_several_agents_is_put_to_the_speaker() {
     let Built { server } = start(false, |c| {
-        c.roster.speaker = Some(path("claude"));
+        c.roster.speaker = Some(path("claude").into());
         c.roster.agents = vec![seated("claude", "alice"), seated("codex", "alice")];
     })
     .await;
@@ -410,7 +417,7 @@ async fn a_persons_message_for_one_of_several_agents_is_put_to_the_speaker() {
 #[tokio::test]
 async fn a_question_to_the_seat_holder_is_never_for_the_speaker_to_cover() {
     let Built { server } = start(false, |c| {
-        c.roster.speaker = Some(path("claude"));
+        c.roster.speaker = Some(path("claude").into());
         c.roster.agents = vec![seated("claude", "alice"), seated("codex", "alice")];
     })
     .await;

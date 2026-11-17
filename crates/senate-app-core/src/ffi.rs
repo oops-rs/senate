@@ -194,7 +194,8 @@ fn kind_of(mention: &Mention, people: &senate_core::People) -> MentionKind {
         Mention::Senator(p) if people.is_person(p) => MentionKind::Senior,
         Mention::Senator(_) => MentionKind::Junior,
         Mention::AnyAgent => MentionKind::AnyAgent,
-        Mention::Speaker => MentionKind::Speaker,
+        // The chair is a link to a role, as the Speaker is.
+        Mention::Speaker | Mention::Chair => MentionKind::Speaker,
         Mention::SpeakerFor(_) => MentionKind::SpeakerFor,
         Mention::Committee => MentionKind::Committee,
         Mention::Guest(_) => MentionKind::Guest,

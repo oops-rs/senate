@@ -289,7 +289,7 @@ impl World {
         let mut people = String::new();
         for (handle, chat) in &setup.people {
             people.push_str(&format!(
-                "\n[[roster.seniors]]\nhandle = \"{handle}\"\n{}\n[[tokens]]\nperson = \"{handle}\"\ntoken = \"tok-{handle}\"\n",
+                "\n[[roster.principals]]\nhandle = \"{handle}\"\n{}\n[[tokens]]\nperson = \"{handle}\"\ntoken = \"tok-{handle}\"\n",
                 if *chat {
                     format!("accounts = [{{ platform = \"chat\", id = \"u_{handle}\" }}]")
                 } else {
@@ -311,22 +311,22 @@ sse_ping_secs = 1
 answer_fallback_secs = {fallback}
 brief_top_debounce_secs = 1
 
-[[roster.seniors]]
+[[roster.principals]]
 handle = "alice"
 names = ["Alice", "爱丽丝"]
 accounts = [{{ platform = "chat", id = "u_alice" }}]
 
-[[roster.seniors]]
+[[roster.principals]]
 handle = "bob"
 names = ["Bob"]
 accounts = [{{ platform = "chat", id = "u_bob" }}]
 
-[[roster.seniors]]
+[[roster.principals]]
 handle = "pm"
 names = ["小王"]
 accounts = [{{ platform = "chat", id = "u_pm" }}]
 
-[[roster.seniors]]
+[[roster.principals]]
 handle = "carol"
 accounts = [{{ platform = "chat", id = "u_carol" }}]
 

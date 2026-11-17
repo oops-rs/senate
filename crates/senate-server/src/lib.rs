@@ -26,7 +26,7 @@
 //!
 //! - [`Authenticate`]: bearer token to person. Default [`StaticTokens`].
 //! - The roster: [`ServerBuilder::roster`] takes a ready
-//!   [`Roster`](senate_core::Roster); [`ServerHub::set_seniors`] changes the
+//!   [`Roster`](senate_core::Roster); [`ServerHub::set_principals`] changes the
 //!   people later. Default: the configuration's `[roster]`.
 //!
 //! ```no_run

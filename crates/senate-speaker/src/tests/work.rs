@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use senate_core::{
     Address, BranchNaming, CheckpointFiles, CheckpointPayload, CheckpointTrigger, Event, Hub, Kind,
-    Locale, NewEvent, PresencePayload, PresenceState, Roster, SenatorName, Senior, Seq,
+    Locale, NewEvent, PresencePayload, PresenceState, Principal, Roster, SenatorName, Seq,
     StatusPayload, StatusState, WorkRun, WorkState, meta,
 };
 use senate_work::testing::{FakeForge, FakeRun, FakeRunner};
@@ -100,9 +100,9 @@ async fn two_agents_hub() -> Arc<MemoryHub> {
 /// The rig's roster with carol, a person with no agent.
 fn roster_with_carol() -> Roster {
     let base = roster();
-    let mut seniors = base.seniors().to_vec();
-    seniors.push(Senior::new(name("carol")));
-    Roster::new(seniors, base.seated().to_vec()).expect("roster")
+    let mut principals = base.principals().to_vec();
+    principals.push(Principal::new(name("carol")));
+    Roster::new(principals, base.seated().to_vec()).expect("roster")
 }
 
 async fn start(hub: Arc<MemoryHub>, runner: Option<&FakeRunner>, forge: Option<&FakeForge>) -> Rig {

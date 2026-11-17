@@ -6,7 +6,8 @@ use std::sync::Arc;
 use ractor::ActorRef;
 use senate_core::{
     Account, Address, BindingAction, BindingPayload, CommitteeId, Event, Guest, Hub, Kind, Locale,
-    Mirror, Name, NewEvent, Roster, SeatedAgent, SenatorName, Senior, Seq, Source, UnboundMention,
+    Mirror, Name, NewEvent, Principal, Roster, SeatedAgent, SenatorName, Seq, Source,
+    UnboundMention,
 };
 use serde_json::json;
 use tokio::sync::mpsc;
@@ -94,14 +95,15 @@ pub(crate) fn guest(id: &str) -> Address {
 /// What a sender is in the log: a handle on the roster is that person,
 /// anything else (like [`STRANGER`]) a guest, as the gateway records them.
 pub(crate) fn sender(from: &str) -> Address {
-    let known = Name::new(from).is_ok_and(|handle| roster().senior(&handle).is_some());
+    let known = Name::new(from).is_ok_and(|handle| roster().principal(&handle).is_some());
     if known { user(from) } else { guest(from) }
 }
 
 /// pm, alice and bob, each running one agent (see [`AGENTS`]) seated under
 /// them, and each with an account on the chat platform (`u_<handle>`).
 pub(crate) fn roster() -> Roster {
-    let senior = |handle: &str, names: &[&str]| Senior {
+    let senior = |handle: &str, names: &[&str]| Principal {
+        kind: senate_core::PrincipalKind::Person,
         handle: name(handle),
         names: names.iter().map(|n| (*n).to_owned()).collect(),
         accounts: vec![Account {
