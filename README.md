@@ -280,6 +280,7 @@ Install integrations and start the machine daemon:
 ./target/release/senate install --yes    # Registers MCP servers and hooks
 ./target/release/senated --machine       # Run as a background service
 ./target/release/senate status           # Inspect connected Senates & agents
+senate join                              # in a repository: bind it to a committee named after the repository and branch (or `senate join <name>`)
 ```
 
 To keep the daemon running without a terminal, install it as a user service (a launchd agent on macOS, a systemd user unit on Linux; a dry run until `--yes`):
@@ -298,6 +299,7 @@ Used for standalone local development with no central server.
 ./target/release/senate install --yes
 ./target/release/senated --machine        # or keep it running: senate service install --yes
 ./target/release/senate status
+senate join                               # in a repository: bind it to a committee named after the repository and branch (or `senate join <name>`)
 ```
 
 `senate service install --yes` keeps `senated --machine` running as a user service instead of leaving a terminal open (`senate service status` and `senate service uninstall --yes` to inspect and remove it; each is a dry run without `--yes`).
@@ -340,6 +342,7 @@ A coding session resolves its active **committee** from the first of these that 
 
 ```sh
 senate join refund-v2   # bind this worktree, on this branch, to a committee (writes .senate/committee)
+senate join             # no name: derive it from the repository and branch, and print how (see below)
 senate leave            # remove that binding
 senate pin reviewer     # sessions here speak as alice/reviewer (writes .senate/agent); senate unpin removes it
 senate where            # the committee and agent a session here gets, from where, and which branch .senate/ belongs to
@@ -347,6 +350,11 @@ senate list             # every saved .senate/ copy, by repository (--json for s
 senate free             # forget what has expired; a dry run until --yes
 ```
 None of them needs the daemon; a live session in that worktree reads a change at its next prompt.
+
+**`senate join` with no name** derives the committee from where it is run, read-only, and prints what it chose and why (`senate where` says what it would choose for an unbound directory):
+1. The repository's name is the last segment of the `origin` URL without `.git` (so every clone and every worktree agrees, whatever the folder is called); with no `origin`, the main worktree's folder; outside git, the directory's name.
+2. On the default branch (what `refs/remotes/origin/HEAD` points at, else `main`, `master` or `trunk`) or with a detached HEAD, that is the committee; on any other branch it is `<repository>-<branch>`.
+3. Lowercased, each run of other characters becomes one `-`, at most 63 characters (a longer name is cut and ends in `-` and a short hash of the whole). If nothing usable remains (a name with no ASCII letter or digit), it refuses and asks for `senate join <name>`.
 
 **`.senate/` follows the branch.** It is untracked, so `git switch` leaves it in place, and the next branch would inherit the old one's committee and notes (and overwrite them). So Senate keeps one saved copy per (repository, branch) under `~/.senate/branches/`, and swaps when the branch changes: the files of the branch you left are saved, those of the branch you arrive on come back. A branch with no saved copy is unbound, exactly like a fresh worktree. Only the five files Senate defines are swapped (`committee`, `agent`, `PROGRESS.md`, `DECISIONS.md`, `OPEN.md`); any other file in `.senate/` stays. A detached HEAD has a copy of its own per worktree. A renamed branch keeps its files (Senate recognises `git branch -m` from the reflog, or from HEAD being unchanged) and its copy follows the new name. Git is never told and no git hook is installed: every hook, every checkpoint (the tool and the commit, timer and session-end triggers) and every command above first makes `.senate/` match the checked-out branch, so a checkpoint right after a switch carries the notes and the committee of the branch it is about. A session already open in the worktree is re-bound at its next hook, and told so in one line; an explicit `join` is not disturbed. Wherever Senate creates `.senate/`, or finds it without one, it writes `.senate/.gitignore` holding `*`, so nothing in it is ever committed and no repository's own ignore file is touched.
 

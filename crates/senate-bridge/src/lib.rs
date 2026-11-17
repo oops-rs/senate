@@ -78,6 +78,7 @@ pub mod hook;
 pub mod init;
 pub mod install;
 pub mod ipc;
+pub mod joinname;
 pub mod mcp;
 pub mod paths;
 pub mod preside;

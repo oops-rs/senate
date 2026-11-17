@@ -394,7 +394,7 @@ pub async fn gather_synced(
     (facts, outcome)
 }
 
-async fn git_line(cwd: &Path, args: &[&str], timeout: Duration) -> Option<String> {
+pub(crate) async fn git_line(cwd: &Path, args: &[&str], timeout: Duration) -> Option<String> {
     let child = tokio::process::Command::new("git")
         .arg("-C")
         .arg(cwd)
