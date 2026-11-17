@@ -100,10 +100,11 @@ async fn the_hook_binary_registers_and_returns_queued_items() {
     assert_eq!(s.claude_pid, Some(std::process::id()));
     assert_eq!(s.socket, None, "no inbox socket in this environment");
 
-    h.wait_stream("refund-v2").await;
-    h.server.append(relayed_question("via the real binary"));
+    h.wait_stream_of("refund-v2", "claude-b1").await;
+    h.server
+        .append(relayed_to(senator("claude-b1"), "via the real binary"));
     eventually("held for hooks", WAIT, || {
-        let i = h.item(1)?;
+        let i = h.item_of("claude-b1", 1)?;
         (i.status == ItemStatus::Queued).then_some(())
     })
     .await;

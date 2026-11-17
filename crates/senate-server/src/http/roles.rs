@@ -353,11 +353,15 @@ pub(super) async fn put_secretaries(
     let senator: SenatorName = raw
         .parse()
         .map_err(|e: senate_core::SenatorNameError| ApiFailure::bad_request(e.to_string()))?;
+    let senator = state.hub.primary_name(&senator).await;
     let SetSecretaries {
-        secretaries,
+        mut secretaries,
         acted_by,
     } = json_body(body)?;
     let roster = state.hub.roster_now();
+    for name in &mut secretaries {
+        *name = state.hub.primary_name(name).await;
+    }
     let itself = senator == person.0;
     let runs_it = roster.owner_of(&senator) == Some(&person.0);
     let office = acted_by.as_ref().is_some_and(|acted_by| {

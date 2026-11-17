@@ -82,6 +82,7 @@ pub(crate) struct HubParts {
     pub built_in: Option<SenatorName>,
     pub notes: Vec<String>,
     pub children: BTreeMap<Name, ChildSenate>,
+    pub aliases: senate_core::api::SenatorAliases,
     pub senate: Name,
     pub parent: Option<SenatePath>,
 }
@@ -101,6 +102,7 @@ pub struct ServerHub {
     built_in: Option<SenatorName>,
     notes: Vec<String>,
     children: RwLock<BTreeMap<Name, ChildSenate>>,
+    aliases: tokio::sync::RwLock<senate_core::api::SenatorAliases>,
     senate: Name,
     parent: RwLock<Option<SenatePath>>,
     next_conn: AtomicU64,
@@ -241,6 +243,7 @@ impl ServerHub {
             built_in,
             notes,
             children,
+            aliases,
             senate,
             parent,
         } = parts;
@@ -257,6 +260,7 @@ impl ServerHub {
             built_in,
             notes,
             children: RwLock::new(children),
+            aliases: tokio::sync::RwLock::new(aliases),
             senate,
             parent: RwLock::new(parent),
             next_conn: AtomicU64::new(1),
@@ -369,6 +373,56 @@ impl ServerHub {
         Ok(self.secretaries())
     }
 
+    pub(crate) async fn aliases(&self) -> senate_core::api::SenatorAliases {
+        self.aliases.read().await.clone()
+    }
+
+    pub(crate) async fn primary_name(&self, name: &SenatorName) -> SenatorName {
+        self.aliases.read().await.get(name).unwrap_or(name).clone()
+    }
+
+    pub(crate) async fn set_alias(
+        &self,
+        person: &Name,
+        primary: &SenatorName,
+        request: senate_core::api::SetAlias,
+    ) -> Result<SenatorName, HubError> {
+        let mut aliases = self.aliases.write().await;
+        let roster = self.seats.snapshot();
+        if roster.owner_of(primary) != Some(person)
+            || roster.built_in() == Some(primary)
+            || !roster.is_agent(primary)
+            || !primary.is_session_name()
+        {
+            return Err(HubError::Rejected(format!(
+                "{person} cannot set an alias for {primary}"
+            )));
+        }
+        let alias = request.alias;
+        if let Some((current, _)) = aliases.iter().find(|(_, target)| *target == primary)
+            && (request.initial || current == &alias)
+        {
+            return Ok(current.clone());
+        }
+        if roster.knows(&alias) || aliases.contains_key(&alias) || alias.is_session_name() {
+            return Err(HubError::Rejected(format!(
+                "senator name {alias} is already in use or reserved"
+            )));
+        }
+        let mut next = aliases.clone();
+        next.retain(|_, target| target != primary);
+        next.insert(alias.clone(), primary.clone());
+        // The server must keep the owner before publishing a durable alias.
+        registry::put_seat(self.store.as_ref(), primary, person)
+            .await
+            .map_err(log_error)?;
+        registry::put_aliases(self.store.as_ref(), &next)
+            .await
+            .map_err(log_error)?;
+        *aliases = next;
+        Ok(alias)
+    }
+
     /// The committee's chair, and how it was found ([`senate_core::chair`];
     /// an agent's first event of its own counts as its seat, see
     /// [`ChairView`]).
@@ -389,6 +443,7 @@ impl ServerHub {
         committee: &CommitteeId,
         senator: SenatorName,
     ) -> Result<ChairInfo, HubError> {
+        let senator = self.primary_name(&senator).await;
         if !self.seats.snapshot().knows(&senator) {
             return Err(HubError::Rejected(format!(
                 "{} is not a senator of this Senate",
@@ -485,7 +540,10 @@ impl ServerHub {
                 Resolved::Elsewhere
             });
         }
-        let address = name.address().clone();
+        let mut address = name.address().clone();
+        if let Address::Senator(senator) = &mut address {
+            *senator = self.primary_name(senator).await;
+        }
         if let Some(senator) = address.as_senator()
             && !self.seats.snapshot().knows(senator)
         {
@@ -792,6 +850,13 @@ impl ServerHub {
     /// Who runs the agent is kept in the store's registry, so a restarted
     /// server seats it again under the same principal.
     pub async fn act_as(&self, person: &Name, senator: &SenatorName) -> Result<bool, RosterError> {
+        let aliases = self.aliases.read().await;
+        if aliases.contains_key(senator) {
+            return Err(RosterError::NameTaken {
+                name: senator.name().clone(),
+                taken: "an alias",
+            });
+        }
         let seated = self.seats.act_as(person, senator)?;
         if seated.new {
             tracing::info!(%person, agent = %senator, "agent seated on first contact");
@@ -827,8 +892,30 @@ impl ServerHub {
     /// from somewhere other than configuration. Seated agents whose person
     /// is still listed stay seated; the named Speaker is kept. Refused,
     /// changing nothing, when the new people break the roster's rules.
-    pub fn set_principals(&self, principals: Vec<Principal>) -> Result<(), RosterError> {
-        self.seats.replace_principals(principals)
+    pub async fn set_principals(&self, principals: Vec<Principal>) -> Result<(), HubError> {
+        let mut aliases = self.aliases.write().await;
+        if let Some(p) = principals.iter().find(|p| aliases.contains_key(&p.path())) {
+            return Err(HubError::Rejected(format!(
+                "{} is already a senator alias",
+                p.handle
+            )));
+        }
+        let preview = Seats::new(self.seats.snapshot());
+        preview
+            .replace_principals(principals.clone())
+            .map_err(|e| HubError::Rejected(e.to_string()))?;
+        let next_roster = preview.snapshot();
+        let mut next = aliases.clone();
+        next.retain(|_, primary| next_roster.owner_of(primary).is_some());
+        if next != *aliases {
+            registry::put_aliases(self.store.as_ref(), &next)
+                .await
+                .map_err(log_error)?;
+            *aliases = next;
+        }
+        self.seats
+            .replace_principals(principals)
+            .map_err(|e| HubError::Rejected(e.to_string()))
     }
 
     /// Register a live stream of the committee's commits. With an `agent`,
@@ -1025,7 +1112,26 @@ impl Hub for ServerHub {
     /// `senator::*` is rejected (use [`Hub::resolve_and_append`]),
     /// and a sender that may not change state (a guest) cannot write a kind
     /// or a meta key that does.
-    async fn append(&self, event: NewEvent) -> Result<Appended, HubError> {
+    async fn append(&self, mut event: NewEvent) -> Result<Appended, HubError> {
+        {
+            let aliases = self.aliases.read().await;
+            if event
+                .to
+                .iter()
+                .filter_map(Address::as_senator)
+                .any(|s| aliases.contains_key(s))
+            {
+                for recipient in &mut event.to {
+                    if let Address::Senator(name) = recipient
+                        && let Some(primary) = aliases.get(name)
+                    {
+                        name.clone_from(primary);
+                    }
+                }
+                let mut seen = std::collections::BTreeSet::new();
+                event.to.retain(|address| seen.insert(address.clone()));
+            }
+        }
         if !event.is_resolved() {
             return Err(HubError::Rejected(
                 "an address is still senator::*; resolve it before appending".into(),

@@ -893,10 +893,8 @@ impl Store {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'live', ?11, ?11, ?12, ?13, ?14)
                  ON CONFLICT(session_id) DO UPDATE SET
                      runtime = excluded.runtime,
-                     agent = CASE WHEN sessions.agent_source = 'join'
-                         THEN sessions.agent ELSE excluded.agent END,
-                     agent_source = CASE WHEN sessions.agent_source = 'join'
-                         THEN sessions.agent_source ELSE excluded.agent_source END,
+                     agent = excluded.agent,
+                     agent_source = excluded.agent_source,
                      cwd = excluded.cwd,
                      git_root = excluded.git_root,
                      branch = excluded.branch,
@@ -1011,28 +1009,16 @@ impl Store {
 
     /// Commit the session's explicit choices and return anything held for its old seat
     /// to routing before another hook or delivery can see the new binding.
-    pub fn join_session(
-        &self,
-        id: &str,
-        committee: &CommitteeId,
-        senator: Option<&SenatorName>,
-    ) -> Result<Session, StoreError> {
+    pub fn join_session(&self, id: &str, committee: &CommitteeId) -> Result<Session, StoreError> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
         let sql = format!(
-            "UPDATE sessions SET joined_committee = ?2, last_seen = ?3,
-                 agent = COALESCE(?4, agent),
-                 agent_source = CASE WHEN ?4 IS NULL THEN agent_source ELSE 'join' END
+            "UPDATE sessions SET joined_committee = ?2, last_seen = ?3
              WHERE session_id = ?1 AND state != 'ended' RETURNING {SESSION_COLS}"
         );
         let session = tx.query_row(
             &sql,
-            params![
-                id,
-                committee.as_str(),
-                now_ms(),
-                senator.map(SenatorName::as_str)
-            ],
+            params![id, committee.as_str(), now_ms()],
             session_from_row,
         )?;
         tx.execute(

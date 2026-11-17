@@ -896,7 +896,10 @@ fn join_leave_pin_unpin_where_list_round_trip_and_touch_nothing_under_dot_git() 
     );
 
     let out = ok(&senate(dir.path(), &wd, &["pin", "reviewer"]));
-    assert!(out.contains("now speak as reviewer"), "{out}");
+    assert!(
+        out.contains("can claim the initial alias reviewer"),
+        "{out}"
+    );
     assert!(out.contains("(source: file)"), "{out}");
     assert_eq!(
         std::fs::read_to_string(wd.join(".senate/agent")).unwrap(),
@@ -986,7 +989,7 @@ fn the_commands_work_outside_git_and_speak_chinese_when_asked() {
     assert!(plain.join(".senate/.gitignore").exists());
     let out = ok(&senate(dir.path(), &plain, &["where"]));
     assert!(out.contains("委员会 refund-v2 (文件)"), "{out}");
-    assert!(out.contains("[senator::claude]"), "{out}");
+    assert!(out.contains("[senator::claude-<session-id>]"), "{out}");
     assert!(
         !out.contains(".senate/ 属于"),
         "no branch outside git: {out}"

@@ -971,12 +971,14 @@ async fn a_codex_tool_call_is_resolved_by_the_thread_in_its_meta() {
         agent: Some("reviewer".into()),
     };
     for thread in ["thread-a", "thread-b"] {
-        h.hook_as(
+        let input = json!({"session_id":thread,"cwd":wd,"source":"startup"}).to_string();
+        senate_bridge::hook::run_as(
             HookKind::SessionStart,
-            thread,
-            &wd,
+            &h.socket(),
+            &input,
             &leaky,
             Some(Runtime::Codex),
+            Default::default(),
         )
         .await
         .unwrap();
@@ -984,7 +986,7 @@ async fn a_codex_tool_call_is_resolved_by_the_thread_in_its_meta() {
         assert_eq!(s.runtime, Runtime::Codex);
         assert_eq!((s.socket, s.token, s.claude_pid), (None, None, None));
         // Nor does the Claude session's SENATE_AGENT: a Codex thread is codex.
-        assert_eq!(s.agent, path("codex"));
+        assert_eq!(s.agent, path(&format!("codex-{thread}")));
     }
     let above = std::os::unix::process::parent_id();
     assert!(h.store().sessions_below(above).unwrap().is_empty());
@@ -1025,8 +1027,6 @@ async fn a_codex_tool_call_is_resolved_by_the_thread_in_its_meta() {
     assert_eq!(joined("thread-a").as_deref(), Some("refund-v2"));
 
     // Two Codex threads share a worktree. The tool can name just its caller.
-    h.server
-        .set_cursor("refund-v2", "reviewer", "delivered", Seq::ZERO);
     let r = mcp
         .request(
             "tools/call",
@@ -1043,7 +1043,10 @@ async fn a_codex_tool_call_is_resolved_by_the_thread_in_its_meta() {
             .unwrap()
             .contains("[senator::reviewer]")
     );
-    for (id, expected) in [("thread-a", "codex"), ("thread-b", "reviewer")] {
+    for (id, expected) in [
+        ("thread-a", "codex-thread-a"),
+        ("thread-b", "codex-thread-b"),
+    ] {
         assert_eq!(
             h.store().session(id).unwrap().unwrap().agent,
             path(expected)
@@ -1064,7 +1067,7 @@ async fn a_codex_tool_call_is_resolved_by_the_thread_in_its_meta() {
         assert_eq!(joined("thread-b").as_deref(), Some("refund-v2"));
         assert_eq!(
             h.store().session("thread-b").unwrap().unwrap().agent,
-            path("reviewer")
+            path("codex-thread-b")
         );
     }
 
@@ -1369,9 +1372,9 @@ async fn only_the_presiding_session_is_given_the_presiding_tools() {
     };
     assert_eq!(e.code, "not_presiding");
 
-    // A session not registered yet is judged by its own pins.
+    // An unregistered session cannot acquire a role from the shared harness name or pin.
     let fresh = SenateMcp::new(h.socket(), selector("not-yet"));
-    assert!(fresh.presides().await, "harness default: claude");
+    assert!(!fresh.presides().await);
     let pinned =
         SenateMcp::new(h.socket(), selector("not-yet")).with_pins(senate_bridge::mcp::Pins {
             runtime: Runtime::Claude,

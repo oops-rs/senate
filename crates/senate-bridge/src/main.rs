@@ -56,7 +56,8 @@ enum Cmd {
         #[arg(long, default_value = init::DEFAULT_LOCAL_LISTEN)]
         listen: String,
     },
-    /// Bind this worktree, on the branch it has now, to a committee: it
+    /// Bind a worktree to a committee, or give one session a persistent alias with --alias.
+    /// The worktree form
     /// writes `.senate/committee` (untracked, kept per branch: switching
     /// branches swaps in that branch's own copy). Live sessions here pick it
     /// up at their next prompt. No daemon needed.
@@ -69,16 +70,22 @@ enum Cmd {
     /// detached; lowercased, other characters becoming `-`, at most 63
     /// characters (a longer one ends in `-` and a short hash). Read-only.
     Join {
-        /// The committee; omit to derive it from the repository and branch.
+        /// The committee. With --alias, omit to use the session's current committee.
         committee: Option<CommitteeId>,
+        /// Bind an alias to the primary ID of one coding session.
+        #[arg(long, visible_alias = "senator")]
+        alias: Option<senate_core::SenatorName>,
+        /// Full session ID. Defaults to the calling coding session.
+        #[arg(long, requires = "alias")]
+        session: Option<String>,
     },
+    /// List the registered aliases and their primary senator IDs.
+    Aliases,
     /// Remove this worktree's committee binding on the current branch.
     Leave,
-    /// Pin the agent sessions in this worktree speak as, on the current
-    /// branch (`reviewer`, or a path relative to you: `claude/reviewer`):
-    /// it writes `.senate/agent`.
+    /// Suggest a flat initial senator alias to sessions on this worktree's current branch.
     Pin {
-        /// An agent name or path, relative to you.
+        /// Initial alias, e.g. reviewer.
         agent: String,
     },
     /// Remove this worktree's agent pin on the current branch.
@@ -280,7 +287,11 @@ enum Cmd {
         command: ServiceCmd,
     },
     /// Show the daemon, the Senate it is connected to, each agent's committees, and registered sessions.
-    Status,
+    Status {
+        /// Print full session IDs for use with join --session.
+        #[arg(long)]
+        full_ids: bool,
+    },
     /// Smoke test of the Codex app-server adapter: connect, initialize, read
     /// a thread's status and, with --text, start or steer a turn with it.
     CodexSmoke {
@@ -736,7 +747,105 @@ fn run(command: Cmd) -> anyhow::Result<()> {
             println!("{}", path.display());
             Ok(())
         }
-        Cmd::Join { committee } => {
+        Cmd::Aliases => {
+            let paths = Paths::from_env()?;
+            let rows: senate_core::api::SenatorAliases =
+                runtime(false)?.block_on(daemon_call(&paths, &Request::Aliases))?;
+            if rows.is_empty() {
+                println!(
+                    "{}",
+                    BridgeConfig::locale_at(&paths.config())
+                        .pick("尚无 senator 别名。", "No senator aliases registered.")
+                );
+            }
+            for (alias, primary) in rows {
+                println!(
+                    "{} -> {}",
+                    senate_core::Address::senator(&alias).in_text(),
+                    senate_core::Address::senator(&primary).in_text()
+                );
+            }
+            Ok(())
+        }
+        Cmd::Join {
+            committee,
+            alias: Some(alias),
+            session,
+        } => {
+            let paths = Paths::from_env()?;
+            let locale = BridgeConfig::locale_at(&paths.config());
+            let env_id = |key| std::env::var(key).ok().filter(|id| !id.is_empty());
+            let id = match (
+                session,
+                env_id("CODEX_THREAD_ID"),
+                env_id("CLAUDE_CODE_SESSION_ID"),
+            ) {
+                (Some(id), _, _) => id,
+                (None, Some(id), None) | (None, None, Some(id)) => id,
+                _ => anyhow::bail!(
+                    "{}",
+                    locale.pick(
+                        "请用 --session 指定完整的会话 ID。",
+                        "Specify the full session ID with --session."
+                    )
+                ),
+            };
+            let session = SessionSelector {
+                session_id: Some(id),
+                claude_pid: None,
+            };
+            runtime(false)?.block_on(async {
+                let committee = match committee {
+                    Some(c) => c,
+                    None => daemon_call::<ipc::BoundReply>(
+                        &paths,
+                        &Request::Bound {
+                            session: session.clone(),
+                        },
+                    )
+                    .await?
+                    .committee
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "{}",
+                            locale.pick(
+                                "请指定这个会话要加入的委员会。",
+                                "Specify the committee this session should join."
+                            )
+                        )
+                    })?,
+                };
+                let reply: ipc::JoinReply = daemon_call(
+                    &paths,
+                    &Request::JoinAs {
+                        session,
+                        committee,
+                        senator: alias.clone(),
+                    },
+                )
+                .await?;
+                anyhow::ensure!(
+                    reply.alias.as_ref() == Some(&alias),
+                    "{}",
+                    locale.pick(
+                        "daemon 未确认此别名。",
+                        "The daemon did not confirm the alias."
+                    )
+                );
+                println!(
+                    "{} -> {} ({})",
+                    senate_core::Address::senator(&alias).in_text(),
+                    senate_core::Address::senator(&reply.agent).in_text(),
+                    reply.committee
+                );
+                Ok(())
+            })
+        }
+        Cmd::Join {
+            committee,
+            alias: None,
+            ..
+        } => {
             let (paths, settings) = settings_here();
             let cwd = std::env::current_dir()?;
             let (change, choice) = runtime(false)?
@@ -981,10 +1090,13 @@ fn run(command: Cmd) -> anyhow::Result<()> {
             runtime(false)?.block_on(codex_smoke(&transport, &thread, text.as_deref()))
         }
         Cmd::Service { command } => run_service(command),
-        Cmd::Status => {
+        Cmd::Status { full_ids } => {
             let paths = Paths::from_env()?;
             let view = runtime(false)?.block_on(status::collect(&paths))?;
-            print!("{}", status::render(&view, chrono::Utc::now()));
+            print!(
+                "{}",
+                status::render_with_ids(&view, chrono::Utc::now(), full_ids)
+            );
             Ok(())
         }
         Cmd::Debug {

@@ -286,6 +286,10 @@ fn table(headers: &[&str], rows: &[Vec<String>]) -> String {
 }
 
 pub fn render(view: &StatusView, now: DateTime<Utc>) -> String {
+    render_with_ids(view, now, false)
+}
+
+pub fn render_with_ids(view: &StatusView, now: DateTime<Utc>, full_ids: bool) -> String {
     let l = view.locale;
     let mut out = String::new();
     let socket = view.socket.display();
@@ -301,7 +305,7 @@ pub fn render(view: &StatusView, now: DateTime<Utc>) -> String {
             "daemon: not running (no answer on {socket}); start it with `senated --machine`"
         ),
     };
-    render_senate(view, now, &mut out);
+    render_senate(view, now, full_ids, &mut out);
     render_secretary_problems(&view.secretary_problems, l, &mut out);
     out
 }
@@ -514,7 +518,7 @@ fn render_roles(roles: &RolesReply, l: Locale, out: &mut String) {
 }
 
 /// One Senate the daemon serves: its server, committees, sessions, queue.
-fn render_senate(view: &StatusView, now: DateTime<Utc>, out: &mut String) {
+fn render_senate(view: &StatusView, now: DateTime<Utc>, full_ids: bool, out: &mut String) {
     let l = view.locale;
     if let (Some(person), Some(url)) = (&view.person, &view.server_url) {
         let senate = senate_words(
@@ -617,7 +621,11 @@ fn render_senate(view: &StatusView, now: DateTime<Utc>, out: &mut String) {
                     (Runtime::Claude, Some(_), Some(false)) => l.pick("失败", "failed").into(),
                 };
                 vec![
-                    s.session_id.chars().take(8).collect(),
+                    if full_ids {
+                        s.session_id.clone()
+                    } else {
+                        s.session_id.chars().take(8).collect()
+                    },
                     format!(
                         "{} ({})",
                         Address::senator(&s.agent).in_text(),

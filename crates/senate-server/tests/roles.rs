@@ -493,6 +493,7 @@ async fn a_committee_is_chaired_by_its_creator_then_its_first_agent_until_one_is
             Principal::new(name("alice")),
             Principal::new(name("bob")),
         ])
+        .await
         .unwrap();
     api_error(
         put(

@@ -16,6 +16,8 @@
 // Handlers return a ready `Response` as their error, as axum handlers do.
 #![allow(clippy::result_large_err)]
 
+mod fixed_seat;
+
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
@@ -29,7 +31,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
-use senate_bridge::hook::{self, HookEnv, HookKind, HookTimeouts};
+use senate_bridge::hook::{HookEnv, HookKind, HookTimeouts};
 use senate_bridge::state::Store;
 use senate_bridge::{BridgeConfig, DaemonHandle, DaemonOptions, Paths, Timing, daemon};
 use senate_core::api::{
@@ -172,6 +174,7 @@ pub struct Inner {
     pub active: HashMap<(String, String), usize>,
     /// Who sits here; agents are seated on first contact.
     pub roster: Roster,
+    pub aliases: senate_core::api::SenatorAliases,
     /// The Senate's name `/v1/me` gives.
     pub senate: Name,
     /// The Senate above, as `/v1/me` gives it.
@@ -316,6 +319,29 @@ async fn add_epoch(State(st): St, mut resp: Response) -> Response {
             .insert(EPOCH_HEADER, HeaderValue::from_str(&epoch).unwrap());
     }
     resp
+}
+
+async fn alias(
+    State(st): St,
+    UrlPath(primary): UrlPath<SenatorName>,
+    headers: HeaderMap,
+    Json(request): Json<senate_core::api::SetAlias>,
+) -> Response {
+    if let Err(error) = auth(&st, &headers).and_then(|person| act_as(&st, &person, &primary)) {
+        return error;
+    }
+    let mut inner = st.inner.lock().unwrap();
+    if inner.roster.knows(&request.alias)
+        || inner
+            .aliases
+            .get(&request.alias)
+            .is_some_and(|p| p != &primary)
+    {
+        return api_error(StatusCode::CONFLICT, "conflict", "name is already taken");
+    }
+    inner.aliases.retain(|_, p| p != &primary);
+    inner.aliases.insert(request.alias.clone(), primary);
+    Json(request.alias).into_response()
 }
 
 async fn me(State(st): St, headers: HeaderMap) -> Response {
@@ -768,6 +794,7 @@ impl FakeServer {
             inner: Mutex::new(Inner {
                 events: BTreeMap::new(),
                 raw: HashMap::new(),
+                aliases: BTreeMap::new(),
                 cursors: HashMap::new(),
                 heartbeats: Vec::new(),
                 stream_opens: Vec::new(),
@@ -798,6 +825,7 @@ impl FakeServer {
         let app = Router::new()
             .route("/healthz", get(|| async { "ok" }))
             .route("/v1/me", get(me))
+            .route("/v1/aliases/{primary}", axum::routing::put(alias))
             .route(senate_core::api::RESOLVE_PATH, get(resolve))
             .route(
                 "/v1/committees/{committee}/events",
@@ -1293,7 +1321,7 @@ impl Harness {
             "source": "startup",
         })
         .to_string();
-        hook::run_as(
+        fixed_seat::hook(
             kind,
             &self.socket(),
             &stdin,

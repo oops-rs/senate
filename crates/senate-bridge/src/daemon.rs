@@ -2412,10 +2412,12 @@ impl Shared {
                 locale: self.locale,
                 version: env!("CARGO_PKG_VERSION").to_string(),
             }),
+            Request::Aliases => wrap(self.api.aliases().await.map_err(server_error)),
             Request::Status => wrap(self.on_status()),
-            Request::Hook(report) => {
+            Request::Hook(report) => wrap(self.on_hook(report, false).await),
+            Request::SessionHook(report) => {
                 let codex = report.runtime == Runtime::Codex;
-                let reply = wrap(self.on_hook(report, None).await);
+                let reply = wrap(self.on_hook(report, true).await);
                 if codex {
                     self.reconcile_approvals();
                 }
@@ -2673,45 +2675,30 @@ impl Shared {
         })
     }
 
-    /// Register the session the hook reports. `placed` is its agent when
-    /// the front already worked it out (several Senates); else it is worked
-    /// out here, under this Senate's seating.
-    async fn on_hook(
-        &self,
-        report: HookReport,
-        placed: Option<(SenatorName, AgentSource)>,
-    ) -> Result<HookReply, IpcError> {
-        self.on_hook_as(report, placed, false).await
-    }
-
-    /// [`Shared::on_hook`]; `as_speaker`: the session is attached here as
-    /// the Speaker of this Senate (it sits in another), so it is told
-    /// nothing at start but what is put to it.
-    pub(crate) async fn on_hook_as(
-        &self,
-        report: HookReport,
-        placed: Option<(SenatorName, AgentSource)>,
-        as_speaker: bool,
-    ) -> Result<HookReply, IpcError> {
+    /// Native hooks bring their session ID. Older local bridge clients report
+    /// a fixed senator selected by their harness, file or environment.
+    async fn on_hook(&self, report: HookReport, native: bool) -> Result<HookReply, IpcError> {
         let _binding = self.session_bindings.read().await;
         let inferred = session::infer_committee(
             report.branch.as_deref(),
             report.committee_file.as_deref(),
             self.convention.as_ref(),
         );
-        let (agent, agent_source) = match placed {
-            Some(placed) => placed,
-            None => {
-                let (rel, source) = agent::choose(
-                    &self.config.agents,
-                    report.runtime,
-                    agent::Pins {
-                        env: report.agent_env.as_deref(),
-                        file: report.agent_file.as_deref(),
-                    },
-                );
-                (self.seating().place(&rel), source)
-            }
+        let (hint, source) = agent::choose(
+            &self.config.agents,
+            report.runtime,
+            agent::Pins {
+                env: report.agent_env.as_deref(),
+                file: report.agent_file.as_deref(),
+            },
+        );
+        let (agent, agent_source) = if native {
+            (
+                agent::session_name(report.runtime, &report.session_id),
+                AgentSource::Session,
+            )
+        } else {
+            (hint.clone(), source)
         };
         let before = self.store.session(&report.session_id).map_err(internal)?;
         let session = self
@@ -2766,17 +2753,54 @@ impl Shared {
         }
 
         let brief = match (report.event, session.committee()) {
-            (HookEvent::SessionStart, Some(committee)) if !as_speaker => {
-                self.hook_brief(committee).await
-            }
+            (HookEvent::SessionStart, Some(committee)) => self.hook_brief(committee).await,
             _ => None,
         };
-        let event = if as_speaker {
-            HookEvent::UserPromptSubmit
-        } else {
-            report.event
-        };
-        let (context, delivered) = self.hook_context(&session, event, brief.as_ref())?;
+        let (mut context, delivered) = self.hook_context(&session, report.event, brief.as_ref())?;
+        if native && (source != AgentSource::Harness || hint.as_str() != report.runtime.as_str()) {
+            let alias = tokio::time::timeout(
+                Duration::from_millis(600),
+                self.api.set_alias(&session.agent, &hint, true),
+            )
+            .await;
+            let note = match alias {
+                Ok(Ok(name)) if report.event == HookEvent::SessionStart => {
+                    Some(match self.locale {
+                        Locale::En => format!(
+                            "Your senator alias is {}.",
+                            Address::senator(&name).in_text()
+                        ),
+                        Locale::Zh => format!(
+                            "你的 senator 别名是 {}。",
+                            Address::senator(&name).in_text()
+                        ),
+                    })
+                }
+                Ok(Ok(_)) => None,
+                failure => {
+                    let reason = match failure {
+                        Ok(Err(e)) => e.to_string(),
+                        _ => self.locale.pick("服务器超时", "server timeout").into(),
+                    };
+                    Some(match self.locale {
+                        Locale::En => format!(
+                            "Could not register alias [{hint}] for {}: {reason}",
+                            Address::senator(&session.agent).in_text()
+                        ),
+                        Locale::Zh => format!(
+                            "无法为 {} 注册别名 [{hint}]：{reason}",
+                            Address::senator(&session.agent).in_text()
+                        ),
+                    })
+                }
+            };
+            if let Some(note) = note {
+                context = Some(match context {
+                    Some(text) => format!("{text}\n\n{note}"),
+                    None => note,
+                });
+            }
+        }
         // The worktree's branch changed under this session since it last
         // spoke: say what it is bound to now.
         let rebound = lock(&self.rebinds).remove(&session.session_id);
@@ -4173,31 +4197,6 @@ impl Shared {
                         known.join(", ")
                     )));
                 }
-                if let Some(name) = &senator {
-                    if name == &me.person
-                        || me.people.is_person(name)
-                        || me
-                            .office
-                            .as_ref()
-                            .and_then(|office| office.built_in.as_ref())
-                            == Some(name)
-                    {
-                        return Err(IpcError::bad_request(self.locale.pick(
-                            "请选择自己代理的 senator 名称。此名称属于主体或内置会话。",
-                            "Choose an agent name. This name belongs to a principal or the built-in session.",
-                        )));
-                    }
-                    // Reading the cursor as this senator seats a new name or rejects
-                    // an existing name owned by another principal. It never advances it.
-                    tokio::time::timeout(
-                        Duration::from_secs(5),
-                        self.api
-                            .read_cursor(&committee, api::CURSOR_DELIVERED, Some(name)),
-                    )
-                    .await
-                    .map_err(|_| self.join_name_timeout())?
-                    .map_err(server_error)?;
-                }
                 None
             }
             Ok(Err(e)) if senator.is_some() => return Err(server_error(e)),
@@ -4208,10 +4207,23 @@ impl Shared {
             Err(_) => Some("the server did not answer in time; joined anyway".to_string()),
         };
         let _binding = self.session_bindings.write().await;
+        let alias = if let Some(name) = &senator {
+            Some(
+                tokio::time::timeout(
+                    Duration::from_secs(5),
+                    self.api.set_alias(&session.agent, name, false),
+                )
+                .await
+                .map_err(|_| self.join_name_timeout())?
+                .map_err(server_error)?,
+            )
+        } else {
+            None
+        };
         let previous = session.committee().cloned();
         let session = self
             .store
-            .join_session(&session.session_id, &committee, senator.as_ref())
+            .join_session(&session.session_id, &committee)
             .map_err(internal)?;
         self.note_delivered(&session.session_id);
         self.committees_changed.notify_one();
@@ -4221,6 +4233,7 @@ impl Shared {
             agent: session.agent,
             committee,
             previous,
+            alias,
             warning,
         })
     }
