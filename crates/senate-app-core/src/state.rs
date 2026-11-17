@@ -16,7 +16,7 @@ use senate_core::{
 };
 use serde::Serialize;
 
-use crate::model::{Model, Waiting, presider_of};
+use crate::model::{Model, Waiting, escalated_to_now, presider_of};
 use crate::text;
 
 /// The app's whole picture of the daemon.
@@ -474,7 +474,7 @@ fn agents(model: &Model, waiting: &[Waiting]) -> Vec<AgentInfo> {
     out
 }
 
-fn inbox_thread(w: &Waiting, locale: Locale) -> InboxThread {
+pub(crate) fn inbox_thread(w: &Waiting, locale: Locale) -> InboxThread {
     let t: &ThreadSummary = &w.thread;
     let author = Mention::author(&t.from, t.on_behalf_of.as_ref());
     InboxThread {
@@ -502,10 +502,7 @@ fn inbox_thread(w: &Waiting, locale: Locale) -> InboxThread {
         triage: t.triage.as_ref().map(wire),
         triage_label: t.triage.map(|v| text::triage(locale, v).to_string()),
         reason: t.reason.clone(),
-        escalated_to: t
-            .escalated_to
-            .as_ref()
-            .map(|n| Address::senior(n).in_text()),
+        escalated_to: escalated_to_now(t).map(|n| Address::senior(n).in_text()),
         takeover: t.takeover.as_ref().map(|n| Address::senior(n).in_text()),
         answered: t.answered,
         for_agents: w.for_agents.iter().map(ToString::to_string).collect(),

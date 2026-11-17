@@ -447,6 +447,15 @@ impl ThreadSummary {
         self.agents().any(|a| a == agent)
     }
 
+    /// The person an escalation in force hands the thread to: what every
+    /// listing shows as "escalated to". It is the field [`waits`](Self::waits)
+    /// reads, so it is gone as soon as the escalation ends (the person acted,
+    /// it was withdrawn, the thread was taken over or archived), unlike
+    /// [`ThreadSummary::escalated_to`], which only remembers the latest one.
+    pub fn escalated_now(&self) -> Option<&Name> {
+        self.escalation.as_ref().map(|e| &e.to)
+    }
+
     /// Whether the thread waits on someone, and on whom. This is the one
     /// rule every inbox uses (the `senate inbox` command, the `inbox` tool,
     /// the Speaker's per-agent count, the app's inbox); it is derived and

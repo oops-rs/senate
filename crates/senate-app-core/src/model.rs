@@ -549,12 +549,20 @@ impl Action {
     }
 }
 
+/// The person the thread is escalated to now: the escalation in force, else
+/// (a server too old to send it) the one a suspended thread remembers. Gone
+/// once the escalation ended: a past one is not shown.
+pub(crate) fn escalated_to_now(t: &ThreadSummary) -> Option<&senate_core::Name> {
+    match &t.escalation {
+        Some(e) => Some(&e.to),
+        None if t.state == StatusState::Suspended => t.escalated_to.as_ref(),
+        None => None,
+    }
+}
+
 /// Whether the thread is (still) escalated to `person`.
 fn is_escalated_to(t: &ThreadSummary, person: &senate_core::Name) -> bool {
-    match &t.escalation {
-        Some(e) => &e.to == person,
-        None => t.state == StatusState::Suspended && t.escalated_to.as_ref() == Some(person),
-    }
+    escalated_to_now(t) == Some(person)
 }
 
 /// Whether a thread from `inbox` still waits on an agent or is parked on a
@@ -922,6 +930,41 @@ mod tests {
         assert_eq!(w.len(), 1, "it lasts until the person acts");
         assert!(w[0].escalated && w[0].unread.is_none());
         assert_eq!(m.unread_threads(), 0);
+    }
+
+    #[test]
+    fn a_thread_shows_who_it_is_escalated_to_only_while_the_escalation_is_in_force() {
+        let shown = |t: &ThreadSummary| {
+            let w = Waiting {
+                committee: committee("a"),
+                thread: t.clone(),
+                for_agents: Vec::new(),
+                escalated: false,
+                unread: None,
+            };
+            crate::state::inbox_thread(&w, Locale::En).escalated_to
+        };
+        let alice = Name::new("alice").unwrap();
+        // Before: nothing was escalated.
+        let mut t = answered_to_alice(3, directed("alice", 4, Kind::Answer, false, "x"));
+        assert_eq!(shown(&t), None);
+        // During: the escalation in force names the person.
+        t.state = StatusState::Suspended;
+        t.escalated_to = Some(alice.clone());
+        t.escalation = Some(senate_core::Escalation {
+            to: alice,
+            by: Address::senator(&path("alice/claude")),
+            seq: Seq(5),
+            ts: Utc::now(),
+            reason: None,
+        });
+        assert_eq!(shown(&t).as_deref(), Some("[senator::alice]"));
+        // After: the person answered and the agent is working again. The
+        // thread remembers the latest escalation, but it is not shown.
+        t.escalation = None;
+        t.state = StatusState::Processing;
+        assert!(t.escalated_to.is_some());
+        assert_eq!(shown(&t), None);
     }
 
     #[test]

@@ -170,7 +170,11 @@ threads and never takes one over).
 - An ordinary progress update never withdraws it. A later `status` from the
   agent (`active`, ticked-off steps) still updates the title, steps and links,
   but the thread stays suspended and the escalation's reason stays.
-- The reason is shown wherever the thread is listed for the person.
+- The reason is shown wherever the thread is listed for the person. So is
+  "escalated to", but only while the escalation is in force
+  (`ThreadSummary::escalated_now`, the field `waits()` reads): once it has
+  ended, a listing does not mention it (the thread's `escalated_to` field
+  remembers the latest one for the Speaker's own use).
 
 ## What comes back to the person
 
