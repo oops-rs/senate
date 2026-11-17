@@ -404,6 +404,7 @@ impl ServerHub {
         Ok(DocketPage {
             committee: committee.clone(),
             speaker: self.speaker.clone(),
+            office: roster.office(),
             items,
             seats,
             head,

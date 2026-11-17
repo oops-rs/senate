@@ -129,6 +129,9 @@ pub struct DocketPage {
     /// Who holds the Speaker's seat here; `None`: nobody presides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speaker: Option<SpeakerSeat>,
+    /// The Speaker's office: who the Speaker is and who works the desk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub office: Option<crate::roster::Office>,
     pub items: Vec<DocketItem>,
     pub seats: Vec<SeatFacts>,
     /// The last seq folded in.
@@ -320,6 +323,7 @@ mod tests {
         let page = DocketPage {
             committee: c(),
             speaker: Some(SpeakerSeat::Senator("claude".parse().unwrap())),
+            office: None,
             items: vec![DocketItem {
                 event: pick(1),
                 awaiting: Awaiting::Away {

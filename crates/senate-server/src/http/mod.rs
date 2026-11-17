@@ -227,6 +227,8 @@ async fn me(State(state): State<AppState>, person: Person) -> Result<Json<Me>, A
         parent: state.hub.parent().cloned(),
         people: roster.people(),
         speaker: state.hub.speaker_seat().cloned(),
+        office: roster.office(),
+        children: Vec::new(),
         person: person.0,
         committees,
         epoch: state.hub.epoch().await?,

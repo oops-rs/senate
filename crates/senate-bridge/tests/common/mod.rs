@@ -327,6 +327,8 @@ async fn me(State(st): St, headers: HeaderMap) -> Response {
                 senate: inner.senate.clone(),
                 parent: inner.parent.clone(),
                 speaker: inner.speaker.clone(),
+                office: inner.roster.office(),
+                children: Vec::new(),
                 people: inner.roster.people(),
                 agents: inner
                     .roster

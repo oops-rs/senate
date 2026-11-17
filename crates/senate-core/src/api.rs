@@ -37,6 +37,12 @@
 //! | GET  | `/v1/committees/{committee}/checkpoints/latest?agent=` | → [`CheckpointRecord`](crate::CheckpointRecord) (404 `not_found` when none) |
 //! | GET  | `/v1/committees/{committee}/docket` | → [`DocketPage`](crate::DocketPage) |
 //! | GET  | `/v1/resolve?name=&committee=` | → [`Resolved`] |
+//! | GET  | `/v1/committees/{committee}/chair` | → [`ChairInfo`] |
+//! | PUT  | `/v1/committees/{committee}/chair` | [`SetChair`] → [`ChairInfo`] |
+//! | GET  | `/v1/secretaries` | → [`Secretaries`] |
+//! | PUT  | `/v1/secretaries/{senator}` | [`SetSecretaries`] → [`Secretaries`] |
+//! | GET  | `/v1/children` | → [`Vec<ChildSenate>`](ChildSenate) |
+//! | PUT  | `/v1/children/{name}` | [`RegisterChild`] → [`ChildSenate`] |
 //!
 //! A senator is named in a query, never in a path segment: `?agent=claude`.
 //!
@@ -146,13 +152,15 @@
 use serde::{Deserialize, Serialize};
 
 use crate::address::Address;
+use crate::chair::ChairSource;
 use crate::continuity::AgentPresence;
 use crate::event::{Event, NewEvent, StatusState};
 use crate::ids::{CommitteeId, Name, Seq};
 use crate::locator::Locator;
-use crate::roster::{DEFAULT_SENATE_NAME, People, ResolveError, SpeakerSeat};
+use crate::roster::{DEFAULT_SENATE_NAME, Office, People, ResolveError, SpeakerSeat};
 use crate::senate::SenatePath;
 use crate::senator::SenatorName;
+use crate::senator_id::SenatorId;
 use crate::task::ThreadSummary;
 
 /// Response header naming the log's epoch (see the module docs).
@@ -222,6 +230,70 @@ pub fn docket_path(committee: &CommitteeId) -> String {
 }
 
 pub const RESOLVE_PATH: &str = "/v1/resolve";
+pub const SECRETARIES_PATH: &str = "/v1/secretaries";
+pub const CHILDREN_PATH: &str = "/v1/children";
+
+pub fn chair_path(committee: &CommitteeId) -> String {
+    format!("/v1/committees/{committee}/chair")
+}
+
+pub fn secretaries_of_path(senator: &SenatorName) -> String {
+    format!("{SECRETARIES_PATH}/{senator}")
+}
+
+pub fn child_path(name: &Name) -> String {
+    format!("{CHILDREN_PATH}/{name}")
+}
+
+/// `GET` / `PUT .../chair`: a committee's chair and how it was found
+/// ([`crate::chair`]). `chair` is `None` for a committee with no event yet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChairInfo {
+    pub committee: CommitteeId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chair: Option<SenatorName>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<ChairSource>,
+}
+
+/// `PUT .../chair`: make `senator` the committee's chair. Allowed for a
+/// principal of the Senate and for the Speaker's office.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetChair {
+    pub senator: SenatorName,
+}
+
+/// `GET /v1/secretaries`: every secretary relation, principal → its
+/// secretaries in order.
+pub type Secretaries = std::collections::BTreeMap<SenatorName, Vec<SenatorName>>;
+
+/// `PUT /v1/secretaries/{senator}`: `senator`'s secretaries, in order
+/// (empty removes them). Allowed for the senator itself, the principal
+/// that runs it, and the Speaker's office; refused for anyone else.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetSecretaries {
+    pub secretaries: Vec<SenatorName>,
+    /// Writing for the Speaker's office: who acts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acted_by: Option<SenatorName>,
+}
+
+/// A child Senate registered with this one: its name, and its Speaker (a
+/// principal of this Senate, who registered it).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChildSenate {
+    pub name: Name,
+    pub speaker: SenatorName,
+}
+
+/// `PUT /v1/children/{name}`: register a child Senate, authenticated as
+/// its Speaker. `speaker` is the child's Speaker as the child names it:
+/// `/<this Senate's path>::senator::<principal>`; the principal must be on
+/// this Senate's roster and be who authenticated.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisterChild {
+    pub speaker: SenatorId,
+}
 
 /// `GET /v1/resolve`: is `name` here?
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -373,12 +445,19 @@ pub struct Me {
     /// Senate above, or none it knows of.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<SenatePath>,
-    /// Who holds this Senate's Speaker's seat: the built-in Speaker, a
-    /// senator (the agent a Senate used alone names), or nobody (absent). A
-    /// bridge gives the session of an agent holding the seat the presiding
-    /// tools.
+    /// Who works the Speaker's desk first, as the older single seat (the
+    /// built-in session, or an agent); absent when nobody does. Kept for
+    /// older readers: [`Me::office`] says it all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speaker: Option<SpeakerSeat>,
+    /// The Speaker's office: who the Speaker is (a senator id, and what
+    /// kind of senator), and who works its desk, in order. A bridge gives
+    /// the session of an agent working the desk the presiding tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub office: Option<Office>,
+    /// The child Senates registered with this one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<ChildSenate>,
     /// The handles of this Senate's people: every senator not among them is
     /// an agent. A reader that folds the log (a bridge's task board) tells
     /// people from agents by it.
@@ -592,6 +671,8 @@ mod tests {
             parent: Some("acme".parse().unwrap()),
             people: People::new([Name::new("wendell").unwrap()]),
             speaker: Some(SpeakerSeat::Senator(path("claude"))),
+            office: None,
+            children: Vec::new(),
             agents: vec![path("claude"), path("codex")],
             committees: vec![c()],
             epoch: "e1".into(),

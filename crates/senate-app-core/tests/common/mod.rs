@@ -222,6 +222,7 @@ pub fn docket() -> DocketReply {
             pages: vec![DocketPage {
                 committee: committee(),
                 speaker: Some(SpeakerSeat::Senator(path("claude"))),
+                office: None,
                 items,
                 seats: vec![SeatFacts {
                     agent: reviewer,
