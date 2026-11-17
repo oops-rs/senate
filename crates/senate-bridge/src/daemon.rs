@@ -741,6 +741,13 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// How far `seen` says the person had seen `root`; nothing yet is `0`.
+fn seen_in(seen: &[(Seq, Seq)], root: Seq) -> Seq {
+    seen.iter()
+        .find(|(r, _)| *r == root)
+        .map_or(Seq::ZERO, |(_, s)| *s)
+}
+
 fn internal(e: StoreError) -> IpcError {
     IpcError::internal(e)
 }
@@ -1953,17 +1960,27 @@ impl Shared {
     async fn deliver_to(&self, session: &Session, items: Vec<QueueItem>) -> anyhow::Result<bool> {
         let sid = session.session_id.as_str();
         let agent = &session.agent;
-        let can_push = session.can_push();
         let keys: Vec<ItemKey> = items
             .iter()
             .filter(|i| &i.agent == agent)
             .map(QueueItem::key)
             .collect();
-        let claimed = if can_push {
-            self.store.claim_inflight_with_held(&keys, sid)?
-        } else {
-            self.store.claim_inflight(&keys, sid)?
-        };
+        if !session.can_push() {
+            // Nothing can be pushed to it, so what is routed to it waits for
+            // its next hook. Hold it straight from pending: were it in
+            // flight first, a hook running just then would find nothing and
+            // the backlog would wait for the hook after it.
+            let held = self.store.hold_pending_for_hooks(&keys, sid)?;
+            if !held.is_empty() {
+                tracing::info!(
+                    session = sid,
+                    count = held.len(),
+                    "held for the session's next hook"
+                );
+            }
+            return Ok(false);
+        }
+        let claimed = self.store.claim_inflight_with_held(&keys, sid)?;
         let mut events: Vec<Event> = items
             .into_iter()
             .filter(|i| claimed.contains(&i.key()))
@@ -1996,9 +2013,7 @@ impl Shared {
             events,
             text: rendered.text,
         };
-        if can_push {
-            self.note_attempt(sid);
-        }
+        self.note_attempt(sid);
         let report = self.ladder.deliver(session, &batch).await;
         tracing::debug!(session = sid, attempts = ?report.attempts, "delivery ladder");
         match report.outcome {
@@ -2027,13 +2042,7 @@ impl Shared {
             }
             DeliveryOutcome::Queued => {
                 self.store.hold_for_hooks(&now, sid)?;
-                if !can_push {
-                    tracing::info!(
-                        session = sid,
-                        count = now.len(),
-                        "held for the session's next hook"
-                    );
-                } else if let Some(delay) = self.note_refused(sid) {
+                if let Some(delay) = self.note_refused(sid) {
                     let why = report
                         .attempts
                         .iter()
@@ -3128,6 +3137,7 @@ impl Shared {
             to: r.event.to,
             thread: r.event.thread,
             duplicate: r.duplicate,
+            unseen_escalation: None,
         })
     }
 
@@ -3303,21 +3313,27 @@ impl Shared {
             ));
         }
         let from = self.speaker_for(session.as_ref(), &committee, &acting)?;
+        let seen = self.seen_before(&committee, &[root.seq])?;
         let mut event = NewEvent::new(committee, Kind::Answer, from, body)
             .to(to)
             .in_thread(root.seq);
+        if acting.as_person {
+            event = event.with_meta(meta::SEEN, serde_json::json!(seen_in(&seen, root.seq).0));
+        }
         if companion {
             event = event.with_meta(meta::COMPANION, serde_json::json!(true));
         }
         if let Some(id) = id {
             event = event.with_id(id);
         }
-        let posted = self.post(event).await?;
+        let mut posted = self.post(event).await?;
         if companion && let Some(c) = lock(&self.companion).as_mut() {
             c.answered = true;
         }
         if acting.as_person {
-            self.mark_seen_all(&posted.committee, &[root.seq], posted.seq)?;
+            posted.unseen_escalation = self
+                .mark_after_speaking(&posted, &[root.seq], &seen)
+                .await?;
         }
         Ok(posted)
     }
@@ -3555,18 +3571,79 @@ impl Shared {
                 "a question or request needs someone to ask",
             ));
         }
+        let seen = self.seen_before(&committee, &spoke_in)?;
         let mut event =
             NewEvent::new(committee, kind.event_kind(), self.person(), body).with_to(to);
         if let Some(root) = thread {
-            event = event.in_thread(root);
+            // What they had been shown of this thread when they spoke: a
+            // fact in the log, so an escalation they had not seen is not
+            // ended by words written before it.
+            event = event
+                .in_thread(root)
+                .with_meta(meta::SEEN, serde_json::json!(seen_in(&seen, root).0));
         }
         if let Some(id) = id {
             event = event.with_id(id);
         }
-        let posted = self.post(event).await?;
-        // Replying is reading: they have seen the thread up to their words.
-        self.mark_seen_all(&posted.committee, &spoke_in, posted.seq)?;
+        let mut posted = self.post(event).await?;
+        posted.unseen_escalation = self.mark_after_speaking(&posted, &spoke_in, &seen).await?;
         Ok(posted)
+    }
+
+    /// How far the person had seen each of `roots` before they spoke.
+    fn seen_before(
+        &self,
+        committee: &CommitteeId,
+        roots: &[Seq],
+    ) -> Result<Vec<(Seq, Seq)>, IpcError> {
+        Ok(self
+            .store
+            .seen(committee)
+            .map_err(internal)?
+            .into_iter()
+            .filter(|(root, _)| roots.contains(root))
+            .collect())
+    }
+
+    /// The person just spoke in `roots`: replying is reading, so they have
+    /// seen each thread up to their words, but when an escalation to them
+    /// arrived after what they had seen (`before`) that one was never shown:
+    /// the thread's mark stays where it was, so it stays new. Returns the earliest such escalation
+    /// still in force after their words, for the command to say so.
+    ///
+    /// When the server cannot say what is in force, nothing is marked: the
+    /// person sees a thread again rather than miss an escalation.
+    async fn mark_after_speaking(
+        &self,
+        posted: &Posted,
+        roots: &[Seq],
+        before: &[(Seq, Seq)],
+    ) -> Result<Option<Seq>, IpcError> {
+        let board = match self.api.threads(&posted.committee, None).await {
+            Ok(page) => page.threads,
+            Err(e) => {
+                tracing::debug!("could not tell what the reply left unseen: {e}");
+                return Ok(None);
+            }
+        };
+        let me = &self.config.person;
+        let mut unseen: Option<Seq> = None;
+        for root in roots {
+            let crossed = board
+                .iter()
+                .find(|t| t.root == *root)
+                .and_then(|t| t.escalation.as_ref())
+                .filter(|e| &e.to == me && e.seq > seen_in(before, *root))
+                .map(|e| e.seq);
+            match crossed {
+                // Only what was shown before they spoke counts as seen: the
+                // mark is one number, and anything above it that was not
+                // shown (the escalation, and what came with it) stays new.
+                Some(esc) => unseen = Some(unseen.map_or(esc, |u| u.min(esc))),
+                None => self.mark_seen_all(&posted.committee, &[*root], posted.seq)?,
+            }
+        }
+        Ok(unseen)
     }
 
     /// The person has seen each of `roots` up to `seq`.

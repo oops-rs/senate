@@ -73,11 +73,15 @@ async fn a_restart_keeps_the_log_and_seats_the_agents_again() {
         [committee()],
         "the committee is still there"
     );
-    // The gateway routes the group from the log's bindings.
-    assert_eq!(
-        world.gateway.as_ref().unwrap().committee_of(GROUP),
-        Some(committee())
-    );
+    // The gateway routes the group from the log's bindings. It reads them as
+    // a component after the daemon is up, so wait for it to have done so
+    // (a message delivered earlier would wait for it too).
+    let gateway = world.gateway.as_ref().unwrap().clone();
+    let routed = eventually("the gateway to read the bindings again", || {
+        gateway.committee_of(GROUP)
+    })
+    .await;
+    assert_eq!(routed, committee());
     // Alice's bridge finds the server again on its own.
     world.wait_connected("alice/claude", true).await;
 

@@ -612,6 +612,35 @@ async fn what_the_agent_hands_back_stays_in_the_persons_inbox_until_they_act() {
         "{zh}"
     );
 
+    // Before they have read any of it, the person's reply about something
+    // else arrives: it crossed the escalation. It does not end it, the
+    // command says so, and the thread is still new for them with its reason.
+    let (crossed, _) = senate_bridge::speak::reply(
+        &socket,
+        committee(),
+        root,
+        "Unrelated: use the staging database.".into(),
+    )
+    .await
+    .unwrap();
+    assert!(crossed.unseen_escalation.is_some(), "{crossed:?}");
+    let line = senate_bridge::speak::render_replied(root, &crossed, Locale::En);
+    assert!(
+        line.contains("There is something newer in thread") && line.contains("senate thread"),
+        "{line}"
+    );
+    let reply = inbox(false).await;
+    let t = &reply.threads[0];
+    assert!(t.escalation.is_some(), "still in force");
+    assert_eq!(t.state, StatusState::Suspended);
+    assert_eq!(t.waits(), Some(senate_core::WaitsOn::Person));
+    let text = shown(&reply, Locale::En);
+    assert!(text.contains("new for you"), "{text}");
+    assert!(
+        text.contains("escalated this to you:\n      1. which header?"),
+        "{text}"
+    );
+
     // Reading it clears the news, not the wait.
     let (_, _) = senate_bridge::speak::thread(&socket, committee(), root)
         .await
@@ -636,9 +665,11 @@ async fn what_the_agent_hands_back_stays_in_the_persons_inbox_until_they_act() {
 
     // The person replies: it is the agent's turn again, and nothing waits
     // on the person.
-    senate_bridge::speak::reply(&socket, committee(), root, "Use Idempotency-Key.".into())
-        .await
-        .unwrap();
+    let (answered, _) =
+        senate_bridge::speak::reply(&socket, committee(), root, "Use Idempotency-Key.".into())
+            .await
+            .unwrap();
+    assert_eq!(answered.unseen_escalation, None, "they had read it by now");
     let reply = inbox(false).await;
     assert!(reply.waits_on_person(&reply.threads[0]).is_none());
     assert_eq!(reply.threads[0].waits(), Some(senate_core::WaitsOn::Agents));

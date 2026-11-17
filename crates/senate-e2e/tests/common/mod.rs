@@ -744,7 +744,7 @@ impl Laptop {
             session_id: None,
             agent: agent.map(str::to_owned),
         };
-        hook::run(
+        let reply = hook::run(
             kind,
             &self.paths.socket(),
             &stdin,
@@ -752,7 +752,44 @@ impl Laptop {
             HookTimeouts::default(),
         )
         .await
-        .map(|line| serde_json::from_str(&line).unwrap())
+        .map(|line| serde_json::from_str(&line).unwrap());
+        if kind == HookKind::SessionStart {
+            self.wait_stream_of(session_id).await;
+        }
+        reply
+    }
+
+    /// Wait until the bridge holds an open stream for the session's agent
+    /// on its committee. A bridge that has no cursor yet starts at the head
+    /// of the log and replays nothing, so what a test sends to the agent
+    /// before its stream is open is never delivered to it.
+    pub async fn wait_stream_of(&self, session_id: &str) {
+        eventually_async(&format!("{session_id}'s agent to be streaming"), || async {
+            let status: ipc::StatusReply = self.try_ipc(Request::Status).await.ok()?;
+            // The Senate whose bridge holds the session: this machine's own,
+            // or one of the others it serves.
+            let senate = std::iter::once(&status)
+                .chain(&status.others)
+                .find(|s| s.sessions.iter().any(|x| x.session_id == session_id))?;
+            let session = senate
+                .sessions
+                .iter()
+                .find(|s| s.session_id == session_id)?;
+            let Some(committee) = session.committee() else {
+                // Bound to no committee: no stream to wait for.
+                return Some(());
+            };
+            senate
+                .committees
+                .iter()
+                .any(|c| {
+                    c.agent == session.agent
+                        && &c.committee == committee
+                        && matches!(c.stream, Some(ipc::StreamState::Connected { .. }))
+                })
+                .then_some(())
+        })
+        .await;
     }
 
     pub async fn ipc<T: serde::de::DeserializeOwned>(&self, request: Request) -> T {

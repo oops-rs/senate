@@ -51,7 +51,13 @@
 //! until
 //!
 //! - that person says anything in the thread (a reply, a correction, an
-//!   answer, a decision) or takes it over;
+//!   answer, a decision) having seen it, or takes it over. A message from a
+//!   developer-machine tool carries [`meta::SEEN`], the highest seq of the
+//!   thread shown to them; it ends the escalation only when `seen` is at
+//!   least the escalation's seq. A reply written before the escalation was
+//!   shown (they crossed) leaves it in force, and the thread keeps waiting on
+//!   the person. A message without `seen` (a chat platform's, an older
+//!   writer) ends it as it always did;
 //! - or whoever made it withdraws it with a `status` carrying
 //!   [`StatusPayload::withdraw`] (the `status` tool's `withdraw_escalation`);
 //! - or the thread is archived.
@@ -447,6 +453,15 @@ impl ThreadSummary {
         self.agents().any(|a| a == agent)
     }
 
+    /// The person an escalation in force hands the thread to: what every
+    /// listing shows as "escalated to". It is the field [`waits`](Self::waits)
+    /// reads, so it is gone as soon as the escalation ends (the person acted,
+    /// it was withdrawn, the thread was taken over or archived), unlike
+    /// [`ThreadSummary::escalated_to`], which only remembers the latest one.
+    pub fn escalated_now(&self) -> Option<&Name> {
+        self.escalation.as_ref().map(|e| &e.to)
+    }
+
     /// Whether the thread waits on someone, and on whom. This is the one
     /// rule every inbox uses (the `senate inbox` command, the `inbox` tool,
     /// the Speaker's per-agent count, the app's inbox); it is derived and
@@ -654,6 +669,7 @@ impl TaskBoard {
         // them before, and ends an escalation to them: it lasts until they
         // act. A provisional answer is the Speaker's, not theirs.
         let by_person = person_of(&event.from);
+        let seen = seen_by_author(event);
         let mut acted = false;
         //
         // A `chat` is the exception for the escalation: a person's words in
@@ -662,9 +678,16 @@ impl TaskBoard {
         if let Some(person) = &by_person
             && !is_provisional(event)
         {
-            thread.directed.retain(|d| &d.person != person);
+            // Only what they had seen is answered; a message that carries
+            // no `seen` answers everything before it.
+            thread
+                .directed
+                .retain(|d| &d.person != person || seen.is_some_and(|s| d.seq > s));
             if event.kind != Kind::Chat
-                && thread.escalation.as_ref().is_some_and(|e| &e.to == person)
+                && thread
+                    .escalation
+                    .as_ref()
+                    .is_some_and(|e| &e.to == person && seen.is_none_or(|s| s >= e.seq))
             {
                 thread.escalation = None;
                 acted = true;
@@ -852,6 +875,14 @@ fn person_of(address: &Address) -> Option<Name> {
         .is_senior()
         .then(|| address.as_senator().map(|p| p.owner().clone()))
         .flatten()
+}
+
+/// What the author of `event` had seen of its thread when they wrote it
+/// ([`meta::SEEN`]), or `None` when it carries no such number. Clamped to
+/// the event's own seq: nobody has seen beyond their own words.
+pub fn seen_by_author(event: &Event) -> Option<Seq> {
+    let seen = event.meta.get(meta::SEEN)?.as_u64()?;
+    Some(Seq(seen.min(event.seq.0)))
 }
 
 /// Record `event` as the latest one addressed to `person`.
@@ -1490,6 +1521,116 @@ mod tests {
         let (mut log, root) = the_real_sequence();
         say(&mut log, Kind::Note, "senator::bob", root);
         assert!(log.board().get(root).unwrap().escalation.is_some());
+    }
+
+    /// The person writes in the thread having seen it up to `seen`.
+    fn say_seen(log: &mut Log, kind: Kind, root: Seq, seen: Option<u64>) -> Seq {
+        let mut e = NewEvent::new(c(), kind, addr("senator::wendell"), "x").in_thread(root);
+        if let Some(seen) = seen {
+            e = e.with_meta(meta::SEEN, serde_json::json!(seen));
+        }
+        log.push(e)
+    }
+
+    /// The seq of the escalation in `the_real_sequence`.
+    fn escalation_seq(log: &Log, root: Seq) -> Seq {
+        log.board()
+            .get(root)
+            .unwrap()
+            .escalation
+            .as_ref()
+            .unwrap()
+            .seq
+    }
+
+    #[test]
+    fn a_reply_that_crossed_the_escalation_does_not_end_it() {
+        let (mut log, root) = the_real_sequence();
+        let esc = escalation_seq(&log, root);
+        // Written before the escalation was shown: seen is one short.
+        say_seen(&mut log, Kind::Note, root, Some(esc.0 - 1));
+        let t = log.board().get(root).unwrap().clone();
+        assert_eq!(t.escalation.as_ref().map(|e| e.seq), Some(esc));
+        assert_eq!(t.state, StatusState::Suspended);
+        assert_eq!(t.waits(), Some(WaitsOn::Person));
+        // Still new for the person, with its reason.
+        let w = t.waits_on_person(&name("wendell"), Seq(esc.0 - 1)).unwrap();
+        assert!(w.escalation.is_some());
+        let unread = w.unread.unwrap();
+        assert!(unread.escalated && unread.seq == esc);
+        assert_eq!(unread.line, "nine decisions");
+        // A message that never saw anything does not end it either.
+        say_seen(&mut log, Kind::Question, root, Some(0));
+        assert!(log.board().get(root).unwrap().escalation.is_some());
+    }
+
+    #[test]
+    fn a_reply_after_seeing_the_escalation_ends_it() {
+        for kind in [Kind::Note, Kind::Question, Kind::Request, Kind::Answer] {
+            let (mut log, root) = the_real_sequence();
+            let esc = escalation_seq(&log, root);
+            say_seen(&mut log, kind, root, Some(esc.0));
+            let t = log.board().get(root).unwrap().clone();
+            assert!(t.escalation.is_none());
+            assert!(t.waits_on_person(&name("wendell"), Seq(0)).is_none());
+        }
+        // A `seen` beyond the thread is clamped to the event's own seq: it
+        // still covers the escalation.
+        let (mut log, root) = the_real_sequence();
+        say_seen(&mut log, Kind::Note, root, Some(9_999));
+        assert!(log.board().get(root).unwrap().escalation.is_none());
+        assert_eq!(
+            seen_by_author(log.0.last().unwrap()),
+            Some(log.0.last().unwrap().seq)
+        );
+        // Not a number: no `seen` at all.
+        let (mut log, root) = the_real_sequence();
+        log.push(
+            NewEvent::new(c(), Kind::Note, addr("senator::wendell"), "x")
+                .in_thread(root)
+                .with_meta(meta::SEEN, serde_json::json!("lots")),
+        );
+        assert!(log.board().get(root).unwrap().escalation.is_none());
+    }
+
+    #[test]
+    fn a_reply_without_seen_ends_the_escalation_as_before() {
+        let (mut log, root) = the_real_sequence();
+        say_seen(&mut log, Kind::Note, root, None);
+        assert!(log.board().get(root).unwrap().escalation.is_none());
+    }
+
+    #[test]
+    fn taking_over_ends_an_escalation_whatever_was_seen() {
+        let (mut log, root) = the_real_sequence();
+        say_seen(&mut log, Kind::Note, root, Some(0));
+        assert!(log.board().get(root).unwrap().escalation.is_some());
+        let mut take = StatusPayload::new(StatusState::Suspended);
+        take.takeover = Some(name("wendell"));
+        log.push(
+            status(root, addr("senator::wendell"), take)
+                .with_meta(meta::SEEN, serde_json::json!(0)),
+        );
+        let t = log.board().get(root).unwrap().clone();
+        assert!(t.escalation.is_none());
+        assert_eq!(t.takeover, Some(name("wendell")));
+    }
+
+    #[test]
+    fn a_crossed_reply_keeps_what_it_did_not_see_unread() {
+        let (mut log, root) = the_real_sequence();
+        let esc = escalation_seq(&log, root);
+        say_seen(&mut log, Kind::Note, root, Some(esc.0 - 1));
+        // The answer before the escalation was seen; the escalation was not.
+        let t = log.board().get(root).unwrap().clone();
+        assert!(t.directed.iter().all(|d| d.seq > Seq(esc.0 - 1)));
+        // An agent's withdrawal still ends it, unchanged.
+        let mut back = StatusPayload::new(StatusState::Processing);
+        back.withdraw = true;
+        from_agent(&mut log, root, back);
+        let t = log.board().get(root).unwrap().clone();
+        assert!(t.escalation.is_none());
+        assert_eq!(t.waits(), Some(WaitsOn::Agents));
     }
 
     #[test]

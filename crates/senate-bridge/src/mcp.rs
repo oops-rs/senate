@@ -672,7 +672,7 @@ pub fn render_inbox(reply: &InboxReply, locale: Locale, how: ShowAll) -> String 
                 Locale::En => format!(" · to {}", mentions(&to)),
             });
         }
-        if let Some(to) = &t.escalated_to {
+        if let Some(to) = t.escalated_now() {
             let to = Address::senior(to).in_text();
             out.push_str(&match locale {
                 Locale::Zh => format!(" · 已转给 {to}"),
@@ -2260,6 +2260,79 @@ mod tests {
             zh.contains("尚未回答\n    原因：\n      1. which header?"),
             "{zh}"
         );
+    }
+
+    #[test]
+    fn a_thread_names_who_it_is_escalated_to_only_while_the_escalation_is_in_force() {
+        use chrono::Utc;
+        use senate_core::{Kind, NewEvent, StatusPayload, TaskBoard, meta};
+
+        let f = CommitteeId::new("refund-v2").unwrap();
+        let agent: senate_core::Address = "senator::alice/claude".parse().unwrap();
+        let alice: senate_core::Address = "senator::alice".parse().unwrap();
+        let mut board = TaskBoard::new();
+        let mut seq = 0;
+        let mut put = |board: &mut TaskBoard, e: NewEvent| {
+            seq += 1;
+            board.observe(&e.into_event(Seq(seq), Utc::now()));
+        };
+        let status = |p: StatusPayload| {
+            NewEvent::new(f.clone(), Kind::Status, agent.clone(), "")
+                .in_thread(Seq(1))
+                .with_meta(meta::STATUS, p.value())
+        };
+        let render = |board: &TaskBoard, locale| {
+            let reply = InboxReply {
+                committee: f.clone(),
+                agents: vec!["alice/claude".parse().unwrap()],
+                person: Name::new("alice").unwrap(),
+                threads: board.threads(None).into_iter().cloned().collect(),
+                settled: 0,
+                seen: Vec::new(),
+            };
+            render_inbox(&reply, locale, ShowAll::Flag)
+        };
+        let both = |board: &TaskBoard| (render(board, Locale::En), render(board, Locale::Zh));
+
+        // Before: nobody was handed anything.
+        put(
+            &mut board,
+            NewEvent::new(f.clone(), Kind::Request, alice.clone(), "do it").to(agent.clone()),
+        );
+        let (en, zh) = both(&board);
+        assert!(!en.contains("escalated to"), "{en}");
+        assert!(!zh.contains("已转给"), "{zh}");
+
+        // During: it is, and the line says so.
+        let mut esc = StatusPayload::new(StatusState::Suspended);
+        esc.escalated_to = Some(Name::new("alice").unwrap());
+        esc.reason = Some("which header?".into());
+        put(&mut board, status(esc));
+        let (en, zh) = both(&board);
+        assert!(en.contains(" · escalated to [senator::alice]"), "{en}");
+        assert!(zh.contains(" · 已转给 [senator::alice]"), "{zh}");
+
+        // After: the person answered, the agent went back to work and said
+        // more after the answer. The past escalation is not shown.
+        put(
+            &mut board,
+            NewEvent::new(f.clone(), Kind::Note, alice.clone(), "use the first").in_thread(Seq(1)),
+        );
+        put(
+            &mut board,
+            NewEvent::new(f.clone(), Kind::Answer, agent.clone(), "done")
+                .to(alice.clone())
+                .in_thread(Seq(1)),
+        );
+        put(
+            &mut board,
+            NewEvent::new(f.clone(), Kind::Note, alice, "and one more thing").in_thread(Seq(1)),
+        );
+        let (en, zh) = both(&board);
+        assert!(en.contains("said more after the answer"), "{en}");
+        assert!(!en.contains("escalated to"), "{en}");
+        assert!(!zh.contains("已转给"), "{zh}");
+        assert!(!en.contains("reason:"), "{en}");
     }
 
     #[test]

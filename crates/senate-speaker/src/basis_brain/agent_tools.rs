@@ -375,7 +375,7 @@ impl ToolExecutor for Tasks {
             } else {
                 " · not answered"
             });
-            if let Some(to) = &t.escalated_to {
+            if let Some(to) = t.escalated_now() {
                 let _ = write!(out, " · escalated to {}", Address::senior(to).in_text());
             }
             if let Some(by) = &t.takeover {

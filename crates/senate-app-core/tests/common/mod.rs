@@ -384,6 +384,7 @@ fn posted(thread: Seq) -> Posted {
         to: Vec::new(),
         thread: Some(thread),
         duplicate: false,
+        unseen_escalation: None,
     }
 }
 

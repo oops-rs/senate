@@ -161,16 +161,35 @@ rule is needed beyond the existing ones (an agent reports only on its own
 threads and never takes one over).
 
 - It ends when the person says anything in the thread (a reply, a correction,
-  an answer, a decision) or takes the thread over, or when the thread is
-  archived. Words in a chat group are the Speaker's to read: its status that
-  follows (a hand-off, a takeover) ends it.
+  an answer, a decision) having seen it, or takes the thread over, or when the
+  thread is archived. Words in a chat group are the Speaker's to read: its
+  status that follows (a hand-off, a takeover) ends it.
+- "Having seen it" is a log fact, not a guess. A message the person writes
+  into an existing thread through a developer-machine tool (`senate reply`,
+  the app's answer, `ask`, `tell` and `request` into a thread) carries
+  `meta.seen`: the highest seq of that thread that had been shown to them,
+  from the same read state as `person_seen`. It ends the escalation only when
+  `seen` is at least the escalation's seq. A reply written before the
+  escalation was shown (the two crossed) leaves it in force: the thread keeps
+  waiting on the person and stays new in their inbox. A message with no
+  `seen` (a chat platform's reply, an older writer) ends it as it always did,
+  and `take` always does. The server refuses nothing new; the fold clamps a
+  `seen` above the event's own seq to it, which cannot change the outcome.
+  `senate reply` and the app's answer capture `seen` before appending, move
+  the read mark afterwards only when nothing crossed (otherwise the mark
+  stays where it was, so what was not shown stays new), and say in one line
+  that something newer is waiting.
 - It is withdrawn explicitly by whoever made it: a `status` from the same
   author with `withdraw` (the `status` tool's `withdraw_escalation`), naming
   the state the thread goes back to. Anyone else's withdrawal is ignored.
 - An ordinary progress update never withdraws it. A later `status` from the
   agent (`active`, ticked-off steps) still updates the title, steps and links,
   but the thread stays suspended and the escalation's reason stays.
-- The reason is shown wherever the thread is listed for the person.
+- The reason is shown wherever the thread is listed for the person. So is
+  "escalated to", but only while the escalation is in force
+  (`ThreadSummary::escalated_now`, the field `waits()` reads): once it has
+  ended, a listing does not mention it (the thread's `escalated_to` field
+  remembers the latest one for the Speaker's own use).
 
 ## What comes back to the person
 
@@ -497,8 +516,21 @@ platform follow, without ever holding the log or the Speaker up:
   chat the log holds from it (or by its first new message when nobody has
   spoken since), and every group once bound and now bound to nothing is
   released again. Both calls are idempotent.
-- A root post refused for want of a grant adopts the group and is tried once
-  more; posts otherwise never wait for an adopt.
+- A post refused (`SurfaceError::Rejected`) into a bound group whose grant is
+  not confirmed adopts the group (waiting for an adopt already under way) and
+  is tried once more; posts otherwise never wait for an adopt, and a post
+  whose group is already granted is never delayed. A root post names its
+  group. A reply names only the message it replies to, so the gateway finds
+  the group from what Senate records: the log's mirror refs for a message the
+  Speaker posted (the copy's `target` is the group, with an optional `#role`
+  suffix), and the messages the gateway delivered (each becomes a `chat`
+  event whose `source` is the group and whose `mirror` is the message; a
+  message from an unbound group, such as the bind message, is known too, and
+  so are the thread and reply refs it names). When the group cannot be found
+  (a message the Speaker did not post and the gateway has not been delivered
+  since it started) or is not bound, the refusal stands, as before. One heal
+  and one retry per post, never a loop. A platform surface therefore needs no
+  heal of its own, for roots or for replies.
 - A surface that answers `Unsupported` is not asked again.
 
 `GrantPolicy` (`ChatGateway::with_grant_policy`) holds the numbers.

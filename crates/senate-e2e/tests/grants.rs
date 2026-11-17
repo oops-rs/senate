@@ -402,3 +402,47 @@ async fn a_post_refused_for_want_of_a_grant_heals_it_and_lands() {
     assert!(world.fake().granted().contains(&GROUP.to_owned()));
     world.stop().await;
 }
+
+/// The Speaker confirms a bind in the thread of the bind message, as a
+/// reply, which names a message and not a group. The platform refuses it
+/// until the group's (slow) grant has landed; the gateway finds the group
+/// from the bind message, adopts, and the confirmation lands, with no heal
+/// of the platform layer's own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_confirmation_in_the_bind_messages_thread_is_refused_once_and_then_lands() {
+    let world = granting()
+        .platform(|chat| {
+            chat.set_caps(Caps {
+                grants: true,
+                ..Caps::PLAIN
+            });
+            chat.gate_ambient(&[]);
+            chat.delay_adopts(Duration::from_secs(3));
+            chat.require_grants_to_reply(true);
+        })
+        .start()
+        .await;
+    world.bind().await;
+    let confirmation = world
+        .wait_post(
+            "the Speaker's confirmation in the bind message's thread",
+            |p| p.replies_to("m_bind"),
+        )
+        .await;
+    assert_eq!(confirmation.group.as_deref(), Some(GROUP));
+    assert!(
+        world.fake().granted().contains(&GROUP.to_owned()),
+        "the confirmation landed because the group had been adopted"
+    );
+    assert_eq!(
+        world.fake().rejected_posts(),
+        1,
+        "refused once, healed by the gateway, then accepted"
+    );
+    assert_eq!(
+        world.fake().adopt_calls(),
+        ["m_bind"],
+        "one adopt, however many posts waited for it"
+    );
+    world.stop().await;
+}

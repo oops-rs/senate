@@ -1004,6 +1004,7 @@ async fn without_wait_ask_and_request_say_how_the_person_will_hear_back() {
 struct Watcher {
     child: std::process::Child,
     lines: std::sync::mpsc::Receiver<String>,
+    subscribed: std::sync::mpsc::Receiver<()>,
 }
 
 impl Watcher {
@@ -1016,9 +1017,22 @@ impl Watcher {
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
         let mut child = cmd.spawn().unwrap();
         let stdout = child.stdout.take().unwrap();
+        // The command says "watching" on stderr once the daemon has
+        // subscribed it: that is the signal to wait for, not a delay.
+        let stderr = child.stderr.take().unwrap();
+        let (subscribed_tx, subscribed) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            let mut lines = std::io::BufReader::new(stderr).lines();
+            if lines.next().is_some() {
+                let _ = subscribed_tx.send(());
+            }
+            // Keep draining so the command never blocks on a full pipe.
+            for _ in lines {}
+        });
         let (tx, lines) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             use std::io::BufRead;
@@ -1029,7 +1043,19 @@ impl Watcher {
                 }
             }
         });
-        Self { child, lines }
+        Self {
+            child,
+            lines,
+            subscribed,
+        }
+    }
+
+    /// Wait until the daemon has subscribed this watcher: anything appended
+    /// after this is printed.
+    fn ready(&self) {
+        self.subscribed
+            .recv_timeout(Duration::from_secs(30))
+            .expect("senate watch never said it was watching");
     }
 
     /// Lines until `n` blocks (each ends at a blank line) or the timeout.
@@ -1078,7 +1104,7 @@ async fn watch_prints_each_kind_addressed_to_the_person_and_nothing_else() {
         let h = machine(zh).await;
         let w = Watcher::start(&h, &["--committee", "refund-v2"]);
         // The watcher must be subscribed before events arrive.
-        tokio::time::sleep(Duration::from_millis(800)).await;
+        w.ready();
         let root = h.server.append(
             NewEvent::new(committee(), Kind::Request, person("alice"), "do it").to(claude("alice")),
         );
@@ -1170,7 +1196,8 @@ async fn watch_json_is_one_object_per_line_and_a_named_committee_filters() {
     let h = machine(false).await;
     let w = Watcher::start(&h, &["--committee", "refund-v2", "--json"]);
     let other = Watcher::start(&h, &["--committee", "other"]);
-    tokio::time::sleep(Duration::from_millis(800)).await;
+    w.ready();
+    other.ready();
     let root = h.server.append(
         NewEvent::new(committee(), Kind::Request, person("alice"), "do it").to(claude("alice")),
     );
@@ -1317,7 +1344,7 @@ async fn a_failing_notifier_never_disturbs_delivery() {
         NewEvent::new(committee(), Kind::Request, person("alice"), "do it").to(claude("alice")),
     );
     let w = Watcher::start(&h, &["--committee", "refund-v2", "--json"]);
-    tokio::time::sleep(Duration::from_millis(800)).await;
+    w.ready();
     h.server.append(answer_to_alice(root.seq, "first"));
     eventually("an attempt", WAIT, || {
         (!rec.posted().is_empty()).then_some(())
@@ -1331,4 +1358,201 @@ async fn a_failing_notifier_never_disturbs_delivery() {
     })
     .await;
     assert!(inbox_text(&h, &[]).await.contains("second"));
+}
+
+// ---- a reply that crossed an escalation -----------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reply_written_before_the_escalation_was_read_does_not_end_it() {
+    for zh in [false, true] {
+        let h = machine(zh).await;
+        let root = h.server.append(
+            NewEvent::new(committee(), Kind::Request, person("alice"), "do the thing")
+                .to(claude("alice")),
+        );
+        let root = root.seq;
+        h.server.append(
+            NewEvent::new(
+                committee(),
+                Kind::Answer,
+                claude("alice"),
+                "First part done.",
+            )
+            .to(person("alice"))
+            .in_thread(root),
+        );
+        // The person reads the thread: they have seen up to the answer.
+        let shown = senate(
+            &h,
+            &["thread", &root.to_string(), "--committee", "refund-v2"],
+            None,
+            None,
+        )
+        .await;
+        assert!(shown.status.success(), "{}", err(&shown));
+        let answer_seq = last(&h).seq;
+
+        // The agent escalates; before the person has seen it, they reply
+        // about something else.
+        let esc = h.server.append(escalation_from_claude(
+            root,
+            "1. which header?\n2. which table?\n3. which key?",
+        ));
+        let r = senate(
+            &h,
+            &[
+                "reply",
+                &root.to_string(),
+                "unrelated:",
+                "use",
+                "the",
+                "staging",
+                "db",
+                "--committee",
+                "refund-v2",
+            ],
+            None,
+            None,
+        )
+        .await;
+        assert!(r.status.success(), "{}", err(&r));
+        let sent = last(&h);
+        assert_eq!(sent.from, person("alice"));
+        assert_eq!(
+            sent.meta.get(meta::SEEN),
+            Some(&serde_json::json!(answer_seq.0)),
+            "the reply says what had been shown to the person when it was written"
+        );
+        let text = out(&r);
+        let line = text.lines().nth(1).unwrap_or_default();
+        if zh {
+            assert!(
+                line.contains(&format!(
+                    "thread {root} 里有比你已读更新的内容：seq {} 转给了你",
+                    esc.seq
+                )) && line.contains(&format!("`senate thread {root}`")),
+                "{text}"
+            );
+        } else {
+            assert!(
+                line.contains(&format!(
+                    "There is something newer in thread {root} that you have not read"
+                )) && line.contains(&format!("escalated to you at seq {}", esc.seq))
+                    && line.contains(&format!("`senate thread {root}`")),
+                "{text}"
+            );
+        }
+        assert_eq!(text.lines().count(), 2, "one line, no more: {text}");
+
+        // The escalation is still in force, still new, with its reason.
+        let text = inbox_text(&h, &[]).await;
+        if zh {
+            assert!(text.contains("对你是新的"), "{text}");
+            assert!(text.contains("把它转给了你"), "{text}");
+        } else {
+            assert!(text.contains("new for you"), "{text}");
+            assert!(text.contains("escalated this to you"), "{text}");
+        }
+        assert!(text.contains("3. which key?"), "{text}");
+
+        // Reading it, then replying, ends it, and says nothing more.
+        let shown = senate(
+            &h,
+            &["thread", &root.to_string(), "--committee", "refund-v2"],
+            None,
+            None,
+        )
+        .await;
+        assert!(shown.status.success(), "{}", err(&shown));
+        let r = senate(
+            &h,
+            &[
+                "reply",
+                &root.to_string(),
+                "decided",
+                "--committee",
+                "refund-v2",
+            ],
+            None,
+            None,
+        )
+        .await;
+        assert!(r.status.success(), "{}", err(&r));
+        assert_eq!(out(&r).lines().count(), 1, "{}", out(&r));
+        assert!(
+            last(&h).meta.get(meta::SEEN).and_then(Value::as_u64) >= Some(esc.seq.0),
+            "{:?}",
+            last(&h).meta
+        );
+        let text = inbox_text(&h, &[]).await;
+        assert!(
+            !text.contains("wait on you")
+                && !text.contains("在等你")
+                && !text.contains("which key"),
+            "{text}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_apps_answer_says_what_the_person_had_seen_too() {
+    use senate_bridge::ipc::{self, Request};
+    let h = machine(false).await;
+    let root = h
+        .server
+        .append(
+            NewEvent::new(
+                committee(),
+                Kind::Question,
+                person("alice"),
+                "which header?",
+            )
+            .to(claude("alice")),
+        )
+        .seq;
+    let seen = h.server.append(
+        NewEvent::new(committee(), Kind::Note, claude("alice"), "looking")
+            .to(person("alice"))
+            .in_thread(root),
+    );
+    let o = senate(
+        &h,
+        &["thread", &root.to_string(), "--committee", "refund-v2"],
+        None,
+        None,
+    )
+    .await;
+    assert!(o.status.success(), "{}", err(&o));
+    let esc = h.server.append(escalation_from_claude(root, "which one?"));
+    let answer = |body: &str| Request::Answer {
+        session: ipc::SessionSelector::default(),
+        thread: root,
+        body: body.into(),
+        id: None,
+        committee: Some(committee()),
+        agent: None,
+        as_person: true,
+    };
+    let posted: ipc::Posted = ipc::request(&h.socket(), &answer("unrelated"), WAIT, WAIT)
+        .await
+        .unwrap();
+    assert_eq!(posted.unseen_escalation, Some(esc.seq));
+    assert_eq!(
+        last(&h).meta.get(meta::SEEN),
+        Some(&serde_json::json!(seen.seq.0))
+    );
+    // Read, then answer: it ends, and the reply says nothing about it.
+    let o = senate(
+        &h,
+        &["thread", &root.to_string(), "--committee", "refund-v2"],
+        None,
+        None,
+    )
+    .await;
+    assert!(o.status.success(), "{}", err(&o));
+    let posted: ipc::Posted = ipc::request(&h.socket(), &answer("chosen"), WAIT, WAIT)
+        .await
+        .unwrap();
+    assert_eq!(posted.unseen_escalation, None);
+    assert!(last(&h).meta.get(meta::SEEN).and_then(Value::as_u64) >= Some(esc.seq.0));
 }

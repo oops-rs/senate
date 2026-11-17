@@ -357,6 +357,16 @@ pub mod meta {
     /// `note` from the Speaker: the committee's
     /// [`OutputLevel`](crate::task::OutputLevel). Speaker only.
     pub const OUTPUT_LEVEL: &str = "output_level";
+    /// A person's message in an existing thread, written through a
+    /// developer-machine tool (`senate reply`, the app's answer, `ask`,
+    /// `tell` and `request` into a thread): the highest seq of that thread
+    /// the person had been shown when they spoke, a number, from the same
+    /// read state as `person_seen`. A person's message ends an escalation
+    /// in force only when `seen` is at least its seq, or when there is no
+    /// `seen` (a chat platform's reply, an older writer). Nobody has seen
+    /// beyond their own words, so the fold reads it as at most the event's
+    /// own seq. See [`crate::task`].
+    pub const SEEN: &str = "seen";
     /// `chat` in a task thread after an `answer`: the seq of the answer this
     /// correction overrides. A person's reply overrides an earlier answer.
     pub const OVERRIDES: &str = "overrides";

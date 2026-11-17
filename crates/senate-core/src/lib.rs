@@ -111,6 +111,7 @@ pub use surface::{
 pub use task::{
     Attention, Directed, Escalation, Link, OutputLevel, PersonWait, StatusPayload, Step, TaskBoard,
     TaskOwner, ThreadSummary, TriagePayload, TriageVerdict, WaitsOn, attention, needs_triage,
+    seen_by_author,
 };
 pub use work::{BranchNaming, DEFAULT_BRANCH_PREFIX, WorkRun, WorkState, is_work_root};
 

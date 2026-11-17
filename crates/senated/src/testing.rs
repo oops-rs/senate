@@ -222,6 +222,7 @@ struct State {
     /// Root posts into a group with no grant (and not configured) are
     /// refused, as a platform does for a chat it has not granted.
     posts_need_grant: bool,
+    replies_need_grant: bool,
     grant_calls: Vec<GrantCall>,
     /// When set, the groups configured on the platform: unmentioned chat
     /// from any other group without a grant is not delivered.
@@ -230,6 +231,10 @@ struct State {
     panics: usize,
     /// Posts still to refuse as unavailable.
     outages: usize,
+    /// Posts still to refuse outright, grant or no grant.
+    refusals: usize,
+    /// Every post refused for want of a grant, or on request.
+    rejected: usize,
 }
 
 /// One call to [`ChatSurface::adopt_group`] or
@@ -338,6 +343,26 @@ impl FakeChat {
         self.lock().posts_need_grant = require;
     }
 
+    /// The next `n` posts are refused outright ([`SurfaceError::Rejected`]),
+    /// whatever the group's grant.
+    pub fn reject_next_posts(&self, n: usize) {
+        self.lock().refusals = n;
+    }
+
+    /// How many posts the platform has refused, for want of a grant or on
+    /// request.
+    pub fn rejected_posts(&self) -> usize {
+        self.lock().rejected
+    }
+
+    /// Replies to a message of a group without a grant (and not configured
+    /// with [`gate_ambient`](Self::gate_ambient)) are refused, until the
+    /// group is adopted. A reply names a message, never the group: the
+    /// platform knows which.
+    pub fn require_grants_to_reply(&self, require: bool) {
+        self.lock().replies_need_grant = require;
+    }
+
     /// The platform knows `message_ref` as a message of `group_id`, as one
     /// it delivered before the daemon (re)started.
     pub fn know_message(&self, message_ref: &str, group_id: &str) {
@@ -436,9 +461,33 @@ impl FakeChat {
             .collect()
     }
 
-    fn refuse_ungranted(state: &State, target: &PostTarget) -> Result<(), SurfaceError> {
-        if let PostTarget::NewRoot { group_id } = target
-            && state.posts_need_grant
+    fn refuse_ungranted(state: &mut State, target: &PostTarget) -> Result<(), SurfaceError> {
+        let result = Self::ungranted(state, target);
+        if result.is_err() {
+            state.rejected += 1;
+        }
+        result
+    }
+
+    fn ungranted(state: &mut State, target: &PostTarget) -> Result<(), SurfaceError> {
+        if state.refusals > 0 {
+            state.refusals -= 1;
+            return Err(SurfaceError::Rejected(
+                "fake chat: refused on request".into(),
+            ));
+        }
+        let (group, required) = match target {
+            PostTarget::NewRoot { group_id } => (Some(group_id), state.posts_need_grant),
+            PostTarget::Reply { message_ref, .. } => (
+                state
+                    .messages
+                    .get(message_ref)
+                    .and_then(|(group, _)| group.as_ref()),
+                state.replies_need_grant,
+            ),
+        };
+        if let Some(group_id) = group
+            && required
             && !state.granted.contains(group_id)
             && !state
                 .configured
@@ -532,7 +581,7 @@ impl FakeChat {
             state.outages -= 1;
             return Err(SurfaceError::Unavailable("fake chat: an outage".into()));
         }
-        Self::refuse_ungranted(&state, &target)?;
+        Self::refuse_ungranted(&mut state, &target)?;
         let content = format!("{}\0{markdown}", mention.unwrap_or_default());
         if let Some((first_target, first_content, first)) =
             state.operations.get(operation_id).cloned()
@@ -646,7 +695,7 @@ impl ChatSurface for FakeChat {
                 ..first
             });
         }
-        Self::refuse_ungranted(&state, &target)?;
+        Self::refuse_ungranted(&mut state, &target)?;
         let (posted, group) = Self::mint(&mut state, &target);
         state.card_operations.insert(
             operation_id.to_owned(),

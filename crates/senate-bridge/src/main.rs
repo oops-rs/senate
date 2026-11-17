@@ -544,12 +544,14 @@ async fn watch(paths: &Paths, committee: Option<CommitteeId>, json: bool) -> any
         .await?
         .watch(false, Duration::from_secs(5))
         .await?;
-    if !json {
-        eprintln!(
-            "{}",
-            person::render_watching(committee.as_ref(), pong.locale)
-        );
-    }
+    // The daemon subscribes this connection before it answers, so from here
+    // on nothing addressed to the person is missed. Said on stderr, in
+    // `--json` too (stdout stays one object per line): a script that must
+    // not miss anything waits for it.
+    eprintln!(
+        "{}",
+        person::render_watching(committee.as_ref(), pong.locale)
+    );
     loop {
         let Some(event) = stream.next().await? else {
             anyhow::bail!("{}", person::render_watch_closed(pong.locale));
