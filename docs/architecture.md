@@ -151,6 +151,27 @@ presides over delivers every root at once (`triaged: false`, default), as
 does a Senate nobody presides over. A senator Speaker may still write a verdict;
 nothing waits for one.
 
+## Escalation
+
+An agent hands a task thread to a person with `escalate` (a `status`:
+`suspended`, `escalated_to` the person, a `reason`). The Speaker's own
+hand-offs are the same status. An escalation is a hand-off, so it lasts until
+the person acts; the board folds it ([`senate_core::task`]), and no server
+rule is needed beyond the existing ones (an agent reports only on its own
+threads and never takes one over).
+
+- It ends when the person says anything in the thread (a reply, a correction,
+  an answer, a decision) or takes the thread over, or when the thread is
+  archived. Words in a chat group are the Speaker's to read: its status that
+  follows (a hand-off, a takeover) ends it.
+- It is withdrawn explicitly by whoever made it: a `status` from the same
+  author with `withdraw` (the `status` tool's `withdraw_escalation`), naming
+  the state the thread goes back to. Anyone else's withdrawal is ignored.
+- An ordinary progress update never withdraws it. A later `status` from the
+  agent (`active`, ticked-off steps) still updates the title, steps and links,
+  but the thread stays suspended and the escalation's reason stays.
+- The reason is shown wherever the thread is listed for the person.
+
 ## Guests
 
 A guest may ask questions and receive answers. A guest may not change state:

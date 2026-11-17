@@ -416,7 +416,7 @@ pub fn render_derived(d: &Derived, l: Locale) -> String {
         derived_branch_words(d, l),
     );
     l.pick(
-        format!("没有给名字：由{source}{branch}推出 `{id}`。想用别的名字：`senate join <name>`。"),
+        format!("没有给名字：由{source}{branch} 推出 `{id}`。想用别的名字：`senate join <name>`。"),
         format!(
             "No name given: derived `{id}` from {source}{branch}. \
              Give a name to choose another: `senate join <name>`."

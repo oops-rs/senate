@@ -39,6 +39,26 @@
 //! default listing; a follow-up after the answer, an escalation or an
 //! explicit in-progress status brings it back. Nothing is stored for it.
 //!
+//! That rule is an *agent's*: "the last word is an answer, so nobody waits"
+//! is true of its inbox. A person's is [`ThreadSummary::waits_on_person`]:
+//! what was said to them that they have not seen, and what was escalated to
+//! them and not yet acted on.
+//!
+//! # An escalation lasts until the person acts
+//!
+//! A `status` with `escalated_to` is a hand-off to a person
+//! ([`Escalation`]). It stays in force, whatever state later statuses name,
+//! until
+//!
+//! - that person says anything in the thread (a reply, a correction, an
+//!   answer, a decision) or takes it over;
+//! - or whoever made it withdraws it with a `status` carrying
+//!   [`StatusPayload::withdraw`] (the `status` tool's `withdraw_escalation`);
+//! - or the thread is archived.
+//!
+//! Meanwhile the agent's own progress updates still change the title, steps
+//! and links, but not the state, and do not replace the reason.
+//!
 //! # Triage gating
 //!
 //! A root for which [`needs_triage`] is true is not pushed to the target
@@ -134,6 +154,10 @@ pub struct StatusPayload {
     /// escalation reason, who stopped it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Withdraws the escalation in force, when the author of this status is
+    /// the one who made it. An ordinary progress update never does.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub withdraw: bool,
 }
 
 impl StatusPayload {
@@ -149,6 +173,7 @@ impl StatusPayload {
             escalated_to: None,
             takeover: None,
             reason: None,
+            withdraw: false,
         }
     }
 
@@ -168,6 +193,17 @@ impl StatusPayload {
     /// What is wrong with it as a senator's append, if anything: limits on
     /// steps, links and labels.
     pub fn check(&self) -> Result<(), String> {
+        if self.withdraw
+            && (self.escalated_to.is_some()
+                || self.takeover.is_some()
+                || self.state == StatusState::Suspended)
+        {
+            return Err(
+                "a withdrawal names the state the thread goes back to (not suspended) and \
+                 neither escalates nor takes over"
+                    .to_string(),
+            );
+        }
         let long = |s: &str, max: usize| s.chars().count() > max;
         if self
             .title
@@ -334,6 +370,59 @@ pub struct ThreadSummary {
     /// not settle it any more. A new answer clears it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub reopened: bool,
+    /// The escalation in force: a hand-off to a person that nobody has
+    /// withdrawn and the person has not acted on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalation: Option<Escalation>,
+    /// For each person, the latest event in the thread addressed to them
+    /// (their `to`) and the latest escalation to them, that they have not
+    /// answered by speaking in the thread themselves.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub directed: Vec<Directed>,
+}
+
+/// Longest first line kept for [`Directed::line`], in characters.
+pub const DIRECTED_LINE_CHARS: usize = 200;
+
+/// A hand-off to a person that is still in force.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Escalation {
+    pub to: Name,
+    /// Who made it: the agent (or the Speaker) whose status it was.
+    pub by: Address,
+    /// The status event that made it.
+    pub seq: Seq,
+    pub ts: DateTime<Utc>,
+    /// Why, as its author wrote it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// An event in a task thread addressed to a person.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Directed {
+    pub person: Name,
+    pub seq: Seq,
+    pub ts: DateTime<Utc>,
+    pub from: Address,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_behalf_of: Option<Address>,
+    pub kind: Kind,
+    /// The event is an escalation to the person (a `status`); `line` is
+    /// then its reason.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub escalated: bool,
+    /// The first line of the body (the reason, for an escalation).
+    pub line: String,
+}
+
+/// Why a thread waits on a person ([`ThreadSummary::waits_on_person`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PersonWait<'a> {
+    /// An escalation to them is in force.
+    pub escalation: Option<&'a Escalation>,
+    /// The latest event addressed to them that they have not seen.
+    pub unread: Option<&'a Directed>,
 }
 
 /// Who a thread that [waits](ThreadSummary::waits) waits on.
@@ -378,10 +467,48 @@ impl ThreadSummary {
     pub fn waits(&self) -> Option<WaitsOn> {
         match self.state {
             StatusState::Archived => None,
+            _ if self.escalation.is_some() => Some(WaitsOn::Person),
             StatusState::Suspended => Some(WaitsOn::Person),
             StatusState::Processing => Some(WaitsOn::Agents),
             StatusState::Active => (!self.answered || self.reopened).then_some(WaitsOn::Agents),
         }
+    }
+
+    /// Whether the thread waits on `person`, and why: this is the person's
+    /// rule where [`ThreadSummary::waits`] is an agent's, and it is the one
+    /// every reader of a person's inbox uses (`senate inbox`, the app).
+    ///
+    /// It waits on them when it is not archived and
+    ///
+    /// - an [escalation](Escalation) to them is in force, whatever they have
+    ///   seen: it lasts until they act; or
+    /// - the thread holds an event addressed to them (`to` contains them, or
+    ///   an escalation to them) with a seq above `seen`, the highest seq of
+    ///   it they have seen. An answer or a note the person has not read is
+    ///   what their inbox is for, though the thread is settled for agents.
+    ///
+    /// Something the person said in the thread themselves answers
+    /// everything before it ([`ThreadSummary::directed`]).
+    pub fn waits_on_person(&self, person: &Name, seen: Seq) -> Option<PersonWait<'_>> {
+        if self.state == StatusState::Archived {
+            return None;
+        }
+        let escalation = self.escalation.as_ref().filter(|e| &e.to == person);
+        let unread = self
+            .directed
+            .iter()
+            .filter(|d| &d.person == person && d.seq > seen)
+            .max_by_key(|d| d.seq);
+        (escalation.is_some() || unread.is_some()).then_some(PersonWait { escalation, unread })
+    }
+
+    /// The latest event in the thread addressed to `person` that they have
+    /// not answered by speaking.
+    pub fn directed_to(&self, person: &Name) -> Option<&Directed> {
+        self.directed
+            .iter()
+            .filter(|d| &d.person == person)
+            .max_by_key(|d| d.seq)
     }
 
     /// Open (not archived) and waiting on no one: its last word is an
@@ -488,6 +615,8 @@ impl TaskBoard {
                 answered: false,
                 answered_by: None,
                 reopened: false,
+                escalation: None,
+                directed: Vec::new(),
             },
         );
     }
@@ -509,6 +638,26 @@ impl TaskBoard {
         {
             thread.triage = Some(triage.verdict);
         }
+        // A person speaking in the thread answers what was addressed to
+        // them before, and ends an escalation to them: it lasts until they
+        // act. A provisional answer is the Speaker's, not theirs.
+        let by_person = person_of(&event.from);
+        let mut acted = false;
+        //
+        // A `chat` is the exception for the escalation: a person's words in
+        // a chat group are the Speaker's to read (a hand-off, a takeover),
+        // and it writes the status that follows.
+        if let Some(person) = &by_person
+            && !is_provisional(event)
+        {
+            thread.directed.retain(|d| &d.person != person);
+            if event.kind != Kind::Chat
+                && thread.escalation.as_ref().is_some_and(|e| &e.to == person)
+            {
+                thread.escalation = None;
+                acted = true;
+            }
+        }
         match event.kind {
             // A provisional answer only says where the question stands: the
             // thread stays open for the agent or a person.
@@ -517,7 +666,9 @@ impl TaskBoard {
                 thread.answered = true;
                 thread.answered_by = Some(event.from.clone());
                 thread.reopened = false;
-                if thread.state != StatusState::Archived {
+                // An answer from the agent does not withdraw its own
+                // escalation.
+                if thread.state != StatusState::Archived && thread.escalation.is_none() {
                     enter(thread, StatusState::Active);
                 }
             }
@@ -525,7 +676,44 @@ impl TaskBoard {
                 let Some(status) = StatusPayload::of(event) else {
                     return;
                 };
-                enter(thread, status.state);
+                let archives = status.state == StatusState::Archived;
+                let takes = status.takeover.is_some();
+                let withdraws = status.withdraw
+                    && thread
+                        .escalation
+                        .as_ref()
+                        .is_some_and(|e| e.by == event.from);
+                if archives || takes {
+                    thread.escalation = None;
+                } else if withdraws && let Some(gone) = thread.escalation.take() {
+                    thread
+                        .directed
+                        .retain(|d| !(d.escalated && d.seq == gone.seq));
+                }
+                if let Some(to) = &status.escalated_to
+                    && !archives
+                    && !takes
+                {
+                    thread.escalation = Some(Escalation {
+                        to: to.clone(),
+                        by: event.from.clone(),
+                        seq: event.seq,
+                        ts: event.ts,
+                        reason: status.reason.clone(),
+                    });
+                }
+                // A progress update under an escalation keeps it: the
+                // thread stays parked on the person and the reason stays.
+                let under_escalation = thread.escalation.is_some()
+                    && !(status.escalated_to.is_some()
+                        && thread
+                            .escalation
+                            .as_ref()
+                            .is_some_and(|e| e.seq == event.seq));
+                if !under_escalation {
+                    enter(thread, status.state);
+                    thread.reason = status.reason.clone();
+                }
                 if let Some(title) = status.title {
                     thread.title = title;
                 }
@@ -547,12 +735,21 @@ impl TaskBoard {
                     });
                 }
                 if status.escalated_to.is_some() {
-                    thread.escalated_to = status.escalated_to;
+                    thread.escalated_to = status.escalated_to.clone();
                 }
                 if status.takeover.is_some() {
                     thread.takeover = status.takeover;
                 }
-                thread.reason = status.reason;
+                if let Some(to) = status.escalated_to.filter(|_| !archives && !takes) {
+                    note_directed(
+                        thread,
+                        event,
+                        &to,
+                        true,
+                        status.reason.as_deref().unwrap_or(""),
+                    );
+                }
+                return;
             }
             // Words after an answer, from anyone but its author and the
             // Speaker's own bookkeeping, ask for more.
@@ -565,7 +762,76 @@ impl TaskBoard {
             }
             _ => {}
         }
+        // The person's words leave an escalation's park: the agent's turn.
+        if acted
+            && event.kind != Kind::Answer
+            && thread.state == StatusState::Suspended
+            && thread.takeover.is_none()
+        {
+            enter(thread, StatusState::Processing);
+        }
+        if matches!(
+            event.kind,
+            Kind::Answer
+                | Kind::Question
+                | Kind::Request
+                | Kind::Note
+                | Kind::Chat
+                | Kind::Decision
+        ) && !is_provisional(event)
+        {
+            for to in event.to.iter().filter_map(person_of) {
+                if by_person.as_ref() != Some(&to) {
+                    note_directed(thread, event, &to, false, &event.body);
+                }
+            }
+        }
     }
+}
+
+/// The person an address names, when it is a person.
+fn person_of(address: &Address) -> Option<Name> {
+    address
+        .is_senior()
+        .then(|| address.as_senator().map(|p| p.owner().clone()))
+        .flatten()
+}
+
+/// Record `event` as the latest one addressed to `person`.
+fn note_directed(
+    thread: &mut ThreadSummary,
+    event: &Event,
+    person: &Name,
+    escalated: bool,
+    text: &str,
+) {
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty());
+    let mut line: String = line
+        .unwrap_or_default()
+        .chars()
+        .take(DIRECTED_LINE_CHARS)
+        .collect();
+    if text
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .is_some_and(|l| l.chars().count() > DIRECTED_LINE_CHARS)
+    {
+        line.push('…');
+    }
+    thread
+        .directed
+        .retain(|d| !(&d.person == person && d.escalated == escalated));
+    thread.directed.push(Directed {
+        person: person.clone(),
+        seq: event.seq,
+        ts: event.ts,
+        from: event.from.clone(),
+        on_behalf_of: event.on_behalf_of.clone(),
+        kind: event.kind.clone(),
+        escalated,
+        line,
+    });
 }
 
 fn untitled(body: &str) -> String {
@@ -1047,5 +1313,267 @@ mod tests {
                 "{field}={bad}"
             );
         }
+    }
+
+    // ---- back to the person ------------------------------------------------
+
+    /// The first real run: wendell asks his own agent for something.
+    fn request_to_own_agent(log: &mut Log) -> Seq {
+        log.push(
+            NewEvent::new(c(), Kind::Request, addr("senator::wendell"), "do the thing")
+                .to(addr("senator::wendell/claude")),
+        )
+    }
+
+    fn from_agent(log: &mut Log, root: Seq, s: StatusPayload) -> Seq {
+        log.push(status(root, addr("senator::wendell/claude"), s))
+    }
+
+    fn escalate(log: &mut Log, root: Seq, reason: &str) -> Seq {
+        let mut s = StatusPayload::new(StatusState::Suspended);
+        s.escalated_to = Some(name("wendell"));
+        s.reason = Some(reason.into());
+        from_agent(log, root, s)
+    }
+
+    /// processing, answer to the person, suspended + escalated, a
+    /// checkpoint, then the agent ticks off its steps with `active`.
+    fn the_real_sequence() -> (Log, Seq) {
+        let mut log = Log(Vec::new());
+        let root = request_to_own_agent(&mut log);
+        let mut s = StatusPayload::new(StatusState::Processing);
+        s.title = Some("Plan".into());
+        s.steps = Some(vec![Step {
+            id: "a".into(),
+            label: "read".into(),
+            done: false,
+        }]);
+        from_agent(&mut log, root, s);
+        log.push(
+            NewEvent::new(
+                c(),
+                Kind::Answer,
+                addr("senator::wendell/claude"),
+                "The result",
+            )
+            .to(addr("senator::wendell"))
+            .in_thread(root),
+        );
+        escalate(&mut log, root, "nine decisions\nneeded");
+        log.push(
+            NewEvent::new(c(), Kind::Checkpoint, addr("senator::wendell/claude"), "cp")
+                .in_thread(root),
+        );
+        let mut s = StatusPayload::new(StatusState::Active);
+        s.steps = Some(vec![Step {
+            id: "a".into(),
+            label: "read".into(),
+            done: true,
+        }]);
+        from_agent(&mut log, root, s);
+        (log, root)
+    }
+
+    #[test]
+    fn an_escalation_survives_the_agent_ticking_off_its_steps() {
+        let (log, root) = the_real_sequence();
+        let t = log.board().get(root).unwrap().clone();
+        assert_eq!(t.state, StatusState::Suspended);
+        assert_eq!(t.waits(), Some(WaitsOn::Person));
+        assert!(!t.is_settled());
+        // The progress update still landed.
+        assert_eq!(t.title, "Plan");
+        assert!(t.steps[0].done);
+        let w = t.waits_on_person(&name("wendell"), Seq(0)).unwrap();
+        let e = w.escalation.unwrap();
+        assert_eq!(e.reason.as_deref(), Some("nine decisions\nneeded"));
+        assert_eq!(e.by, addr("senator::wendell/claude"));
+        assert_eq!(t.reason.as_deref(), Some("nine decisions\nneeded"));
+        // Seen everything: the escalation still waits, it is not new.
+        let w = t.waits_on_person(&name("wendell"), Seq(99)).unwrap();
+        assert!(w.escalation.is_some() && w.unread.is_none());
+    }
+
+    #[test]
+    fn an_escalation_ends_when_the_person_acts() {
+        let words = |kind: Kind| {
+            let (mut log, root) = the_real_sequence();
+            say(&mut log, kind, "senator::wendell", root);
+            let t = log.board().get(root).unwrap().clone();
+            assert!(t.escalation.is_none());
+            assert!(t.waits_on_person(&name("wendell"), Seq(0)).is_none());
+            t
+        };
+        // A reply or a correction hands the thread back to the agent.
+        for kind in [Kind::Note, Kind::Question, Kind::Request] {
+            assert_eq!(words(kind).waits(), Some(WaitsOn::Agents));
+        }
+        // Their answer settles it.
+        assert_eq!(words(Kind::Answer).waits(), None);
+        // Words in a chat group are the Speaker's to read: they answer what
+        // was addressed to them, but only the Speaker's status that follows
+        // (a hand-off, a takeover) ends the escalation.
+        let (mut log, root) = the_real_sequence();
+        say(&mut log, Kind::Chat, "senator::wendell", root);
+        let t = log.board().get(root).unwrap().clone();
+        assert!(t.escalation.is_some() && t.state == StatusState::Suspended);
+        assert!(t.directed.is_empty());
+
+        // Taking it over: nothing waits on them as a hand-off any more.
+        let (mut log, root) = the_real_sequence();
+        let mut take = StatusPayload::new(StatusState::Suspended);
+        take.takeover = Some(name("wendell"));
+        log.push(status(root, addr("senator::wendell"), take));
+        let t = log.board().get(root).unwrap().clone();
+        assert!(t.escalation.is_none());
+        assert!(t.waits_on_person(&name("wendell"), Seq(0)).is_none());
+        assert_eq!(t.takeover, Some(name("wendell")));
+
+        // Somebody else's words do not end it.
+        let (mut log, root) = the_real_sequence();
+        say(&mut log, Kind::Note, "senator::bob", root);
+        assert!(log.board().get(root).unwrap().escalation.is_some());
+    }
+
+    #[test]
+    fn only_its_author_withdraws_an_escalation_and_a_progress_update_does_not() {
+        let (mut log, root) = the_real_sequence();
+        let mut back = StatusPayload::new(StatusState::Processing);
+        back.withdraw = true;
+        // The Speaker did not make it.
+        log.push(status(root, Address::Speaker, back.clone()));
+        assert!(log.board().get(root).unwrap().escalation.is_some());
+        // A plain update from its author does not withdraw it.
+        from_agent(&mut log, root, StatusPayload::new(StatusState::Processing));
+        assert!(log.board().get(root).unwrap().escalation.is_some());
+        // Its author's explicit withdrawal does.
+        from_agent(&mut log, root, back);
+        let t = log.board().get(root).unwrap().clone();
+        assert!(t.escalation.is_none());
+        assert_eq!(t.state, StatusState::Processing);
+        assert_eq!(t.waits(), Some(WaitsOn::Agents));
+        // The withdrawn escalation is no longer news for the person; the
+        // answer to them still is.
+        let w = t.waits_on_person(&name("wendell"), Seq(0)).unwrap();
+        assert!(w.escalation.is_none());
+        assert_eq!(w.unread.unwrap().kind, Kind::Answer);
+        // Archiving ends it too.
+        let (mut log, root) = the_real_sequence();
+        log.push(status(
+            root,
+            addr("senator::wendell"),
+            StatusPayload::new(StatusState::Archived),
+        ));
+        let t = log.board().get(root).unwrap().clone();
+        assert!(t.escalation.is_none());
+        assert!(t.waits_on_person(&name("wendell"), Seq(0)).is_none());
+    }
+
+    #[test]
+    fn a_withdrawal_must_name_where_the_thread_goes() {
+        let mut s = StatusPayload::new(StatusState::Suspended);
+        s.withdraw = true;
+        assert!(s.check().is_err());
+        let mut s = StatusPayload::new(StatusState::Active);
+        s.withdraw = true;
+        assert!(s.check().is_ok());
+        s.escalated_to = Some(name("wendell"));
+        assert!(s.check().is_err());
+    }
+
+    #[test]
+    fn what_the_person_has_not_seen_waits_on_them_though_it_is_settled() {
+        let wendell = name("wendell");
+        for kind in [Kind::Answer, Kind::Note] {
+            let mut log = Log(Vec::new());
+            let root = request_to_own_agent(&mut log);
+            let e = log.push(
+                NewEvent::new(
+                    c(),
+                    kind.clone(),
+                    addr("senator::wendell/claude"),
+                    "Done\nmore",
+                )
+                .to(addr("senator::wendell"))
+                .in_thread(root),
+            );
+            if kind == Kind::Note {
+                // A note is not an answer; make it settled for agents.
+                say(&mut log, Kind::Answer, "senator::wendell/claude", root);
+            }
+            let t = log.board().get(root).unwrap().clone();
+            // The agents' rule: nobody waits (or, for the note, the answer
+            // settles it).
+            assert_eq!(t.is_settled(), kind == Kind::Answer || t.answered);
+            let w = t.waits_on_person(&wendell, Seq(0)).expect("unread");
+            let d = w.unread.unwrap();
+            assert_eq!((d.seq, &d.kind, d.line.as_str()), (e, &kind, "Done"));
+            assert!(w.escalation.is_none());
+            // Seen up to it, or past it: nothing waits.
+            assert!(t.waits_on_person(&wendell, e).is_none());
+            assert!(t.waits_on_person(&wendell, Seq(e.0 + 5)).is_none());
+            // Somebody else's mark is not theirs.
+            assert!(t.waits_on_person(&name("bob"), Seq(0)).is_none());
+        }
+    }
+
+    #[test]
+    fn a_new_event_after_seen_waits_again_and_their_own_words_clear_it() {
+        let wendell = name("wendell");
+        let mut log = Log(Vec::new());
+        let root = request_to_own_agent(&mut log);
+        let first = log.push(
+            NewEvent::new(c(), Kind::Answer, addr("senator::wendell/claude"), "one")
+                .to(addr("senator::wendell"))
+                .in_thread(root),
+        );
+        let second = log.push(
+            NewEvent::new(c(), Kind::Note, addr("senator::wendell/claude"), "two")
+                .to(addr("senator::wendell"))
+                .in_thread(root),
+        );
+        let t = log.board().get(root).unwrap().clone();
+        assert!(t.waits_on_person(&wendell, first).is_some());
+        assert!(t.waits_on_person(&wendell, second).is_none());
+        let third = log.push(
+            NewEvent::new(c(), Kind::Note, addr("senator::wendell/claude"), "three")
+                .to(addr("senator::wendell"))
+                .in_thread(root),
+        );
+        let t = log.board().get(root).unwrap().clone();
+        let w = t.waits_on_person(&wendell, second).unwrap();
+        assert_eq!(w.unread.unwrap().seq, third);
+        // They speak in the thread (from anywhere): all of it is answered.
+        say(&mut log, Kind::Note, "senator::wendell", root);
+        let t = log.board().get(root).unwrap().clone();
+        assert!(t.waits_on_person(&wendell, Seq(0)).is_none());
+    }
+
+    #[test]
+    fn an_escalation_is_unread_news_until_seen_and_a_provisional_answer_is_not() {
+        let wendell = name("wendell");
+        let mut log = Log(Vec::new());
+        let root = request_to_own_agent(&mut log);
+        log.push(
+            NewEvent::new(c(), Kind::Answer, Address::Speaker, "where it stands")
+                .on_behalf_of(addr("senator::wendell/claude"))
+                .to(addr("senator::wendell"))
+                .in_thread(root)
+                .with_meta(meta::PROVISIONAL, true.into()),
+        );
+        assert!(
+            log.board()
+                .get(root)
+                .unwrap()
+                .waits_on_person(&wendell, Seq(0))
+                .is_none()
+        );
+        let esc = escalate(&mut log, root, "need a call");
+        let t = log.board().get(root).unwrap().clone();
+        let w = t.waits_on_person(&wendell, Seq(0)).unwrap();
+        let d = w.unread.unwrap();
+        assert!(d.escalated && d.seq == esc && d.line == "need a call");
+        // An escalation to someone else is theirs.
+        assert!(t.waits_on_person(&name("bob"), Seq(0)).is_none());
     }
 }

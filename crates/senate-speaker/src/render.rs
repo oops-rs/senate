@@ -2284,6 +2284,8 @@ mod tests {
             answered: false,
             answered_by: None,
             reopened: false,
+            escalation: None,
+            directed: Vec::new(),
         }
     }
 
