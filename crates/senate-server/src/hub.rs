@@ -29,14 +29,16 @@ use std::time::Duration;
 use async_trait::async_trait;
 use ractor::rpc::CallResult;
 use ractor::{ActorRef, MessagingErr};
-use senate_core::api::{ChairInfo, ChildSenate, Heartbeat, PresencePage, Resolved, Secretaries};
+use senate_core::api::{
+    ChairInfo, ChildSenate, CommitteeSeatInfo, Heartbeat, PresencePage, Resolved, Secretaries,
+};
 use senate_core::hub::SCAN_PAGE;
 use senate_core::{
     Address, Appended, Awaiting, Brief, BriefBuilder, ChairPayload, CheckpointFacts,
-    CheckpointRecord, Checkpoints, CommitteeId, DocketItem, DocketPage, Event, EventId, Hub,
-    HubError, Kind, Locale, Locator, MirrorRef, Name, NewEvent, Office, Origin, People, Principal,
-    Roster, RosterError, SeatFacts, SenatePath, SenatorName, Seq, SpeakerDocket, SpeakerSeat,
-    StatusState, TaskBoard, meta,
+    CheckpointRecord, Checkpoints, CommitteeId, CommitteeSeatChange, DocketItem, DocketPage, Event,
+    EventId, Hub, HubError, Kind, Locale, Locator, MirrorRef, Name, NewEvent, Office, Origin,
+    People, Principal, Roster, RosterError, SeatFacts, SenatePath, SenatorName, Seq, SpeakerDocket,
+    SpeakerSeat, StatusState, TaskBoard, meta,
 };
 use senate_log::{CursorOwner, LogError, LogStore};
 use tokio::sync::{broadcast, mpsc};
@@ -629,6 +631,9 @@ impl ServerHub {
         };
         let mut seats = Vec::new();
         for agent in &roster.agents() {
+            if self.presence.is_unseated(committee, agent) {
+                continue;
+            }
             seats.push(SeatFacts {
                 agent: agent.clone(),
                 connected: self.presence.is_connected(committee, agent),
@@ -652,7 +657,7 @@ impl ServerHub {
             }
             let agents: Vec<SenatorName> = thread
                 .agents()
-                .filter(|a| Some(*a) != holder.as_ref())
+                .filter(|a| Some(*a) != holder.as_ref() && !self.presence.is_unseated(committee, a))
                 .cloned()
                 .collect();
             let away = !agents.is_empty()
@@ -955,8 +960,7 @@ impl ServerHub {
                 sender: sender.clone(),
                 reply,
             })
-            .await?
-            .map_err(HubError::Unavailable)?;
+            .await??;
         // Only the proxy may hold a strong sender, or the stream never closes.
         drop(sender);
         Ok(LiveStream {
@@ -994,30 +998,32 @@ impl ServerHub {
             .map_err(log_error)
     }
 
-    /// Record an agent's bridge heartbeat ([`Heartbeat::agent`]), stamped
-    /// now. It keeps the agent's open stream counting as connected (see
-    /// [`Hub::is_agent_connected`]) even if storing it fails: the bridge is
-    /// alive either way.
+    /// Record activity in the committee writer's seat-change order.
     pub async fn record_heartbeat(
         &self,
         committee: &CommitteeId,
         heartbeat: Heartbeat,
     ) -> Result<(), HubError> {
-        let agent = heartbeat.agent.clone();
-        self.presence.heartbeat(committee, &agent, heartbeat.cursor);
-        // The lease may change now (a returning agent is `online` at once).
-        match self.writer(committee).await {
-            Ok(writer) => {
-                if writer.cast(CommitteeMsg::PresenceCheck(agent)).is_err() {
-                    tracing::debug!(%committee, "writer stopped; its next tick checks the lease");
-                }
-            }
-            Err(e) => tracing::warn!(%committee, "no writer to check the lease: {e}"),
-        }
-        self.store
-            .record_heartbeat(committee, heartbeat, senate_log::now())
-            .await
-            .map_err(log_error)
+        self.ask_writer(committee, |reply| {
+            CommitteeMsg::Heartbeat(heartbeat.clone(), reply)
+        })
+        .await?
+        .map_err(log_error)
+    }
+
+    pub(crate) async fn set_committee_seat(
+        &self,
+        committee: &CommitteeId,
+        change: CommitteeSeatChange,
+        id: EventId,
+    ) -> Result<CommitteeSeatInfo, HubError> {
+        self.ask_writer(committee, |reply| CommitteeMsg::SetSeat {
+            change: change.clone(),
+            id: id.clone(),
+            reply,
+        })
+        .await?
+        .map_err(log_error)
     }
 
     /// Send `event` to its committee's writer.
@@ -1204,7 +1210,7 @@ impl Hub for ServerHub {
             .snapshot()
             .agents()
             .into_iter()
-            .filter(|a| on.contains(a))
+            .filter(|a| on.contains(a) && !self.presence.is_unseated(committee, a))
             .collect())
     }
 

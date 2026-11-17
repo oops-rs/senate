@@ -436,6 +436,16 @@ impl ApiClient {
         Ok(checked(resp).await?.json().await?)
     }
 
+    pub async fn set_committee_seat(
+        &self,
+        committee: &CommitteeId,
+        request: &api::SetCommitteeSeat,
+    ) -> Result<api::CommitteeSeatInfo, ApiClientError> {
+        let url = self.url(&api::committee_seat_path(committee));
+        let resp = self.authed(self.http.put(url)).json(request).send().await?;
+        Ok(checked(resp).await?.json().await?)
+    }
+
     /// `GET /v1/secretaries`: every secretary relation.
     pub async fn secretaries(&self) -> Result<api::Secretaries, ApiClientError> {
         let url = self.url(api::SECRETARIES_PATH);

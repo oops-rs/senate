@@ -79,6 +79,7 @@ pub mod address;
 pub mod api;
 pub mod brief;
 pub mod chair;
+pub mod committee_seat;
 pub mod continuity;
 pub mod docket;
 pub mod event;
@@ -100,6 +101,7 @@ pub use address::{Address, AddressParseError, Guest, GuestError, MAX_GUEST_ID_LE
 pub use api::ChildSenate;
 pub use brief::{Brief, BriefBuilder};
 pub use chair::{ChairFold, ChairPayload, ChairSource};
+pub use committee_seat::{CommitteeSeatAction, CommitteeSeatChange, CommitteeSeats};
 pub use continuity::{
     AgentPresence, CheckpointFiles, CheckpointPayload, CheckpointRecord, CheckpointTrigger,
     Checkpoints, PresenceBoard, PresencePayload, PresenceState, presence_event,

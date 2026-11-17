@@ -1,6 +1,7 @@
 //! The HTTP/SSE API, exactly as `senate_core::api` documents it.
 
 mod chair_discussion;
+mod committee_seat;
 mod error;
 mod roles;
 mod sse;
@@ -59,6 +60,10 @@ pub(crate) fn router(state: AppState) -> Router {
             get(get_cursor).put(put_cursor),
         )
         .route("/v1/committees/{committee}/heartbeat", post(heartbeat))
+        .route(
+            "/v1/committees/{committee}/seat",
+            put(committee_seat::put_seat),
+        )
         .route("/v1/committees/{committee}/search", get(search))
         .route("/v1/committees/{committee}/brief", get(brief))
         .route("/v1/committees/{committee}/threads", get(threads))
@@ -429,6 +434,12 @@ pub(crate) enum Sender {
 /// [`meta::PICK`] is the server's own: it is set when a message is put to
 /// the Speaker, never by a writer.
 fn reject_server_provenance(event: &NewEvent, as_speaker: bool) -> Result<(), ApiFailure> {
+    if event.meta.contains_key(meta::COMMITTEE_SEAT) {
+        return Err(ApiFailure::forbidden(format!(
+            "meta.{} is set by the server for committee seat changes",
+            meta::COMMITTEE_SEAT
+        )));
+    }
     if matches!(event.kind, Kind::Binding | Kind::Presence | Kind::Chat) {
         return Err(ApiFailure::forbidden(format!(
             "{} events are written by the server, not by senators",

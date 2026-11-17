@@ -460,6 +460,8 @@ pub mod meta {
     /// `presence`: the [`PresencePayload`](crate::continuity::PresencePayload).
     /// Server only.
     pub const PRESENCE: &str = "presence";
+    /// `presence`: an explicit [`crate::CommitteeSeatChange`]. Server only.
+    pub const COMMITTEE_SEAT: &str = "committee_seat";
     /// `answer` from an agent: `true` when its bridge's companion session (a
     /// headless fork of the developer's last session) wrote it rather than
     /// an interactive session. Shown as a word after the author's label

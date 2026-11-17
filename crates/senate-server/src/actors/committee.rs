@@ -37,9 +37,11 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use ractor::{Actor, ActorProcessingErr, ActorRef, MessagingErr, RpcReplyPort, SupervisionEvent};
+use senate_core::api::{CommitteeSeatInfo, Heartbeat};
 use senate_core::hub::SCAN_PAGE;
 use senate_core::{
-    AgentPresence, Appended, CommitteeId, Event, Kind, Name, NewEvent, People, PresenceBoard,
+    AgentPresence, Appended, ChairPayload, CommitteeId, CommitteeSeatAction, CommitteeSeatChange,
+    CommitteeSeats, Event, EventId, HubError, Kind, Name, NewEvent, People, PresenceBoard,
     PresencePayload, SenatorName, Seq, presence_event, reassign_event,
 };
 use senate_log::{LogError, LogStore};
@@ -59,7 +61,7 @@ pub(crate) enum CommitteeMsg {
         agent: SenatorName,
         conn: ConnId,
         sender: mpsc::Sender<Arc<Event>>,
-        reply: RpcReplyPort<Result<ActorRef<ProxyMsg>, String>>,
+        reply: RpcReplyPort<Result<ActorRef<ProxyMsg>, HubError>>,
     },
     /// Register a live stream with no agent behind it: nothing in presence
     /// follows from it. Replies once every later commit reaches `sender`.
@@ -74,8 +76,13 @@ pub(crate) enum CommitteeMsg {
     Contact(SenatorName, RpcReplyPort<()>),
     /// Re-evaluate every lease.
     PresenceTick,
-    /// `agent` just heartbeated: re-evaluate its lease now.
-    PresenceCheck(SenatorName),
+    /// Record activity and re-evaluate the lease in seat-change order.
+    Heartbeat(Heartbeat, RpcReplyPort<Result<(), LogError>>),
+    SetSeat {
+        change: CommitteeSeatChange,
+        id: EventId,
+        reply: RpcReplyPort<Result<CommitteeSeatInfo, LogError>>,
+    },
     /// Each agent's presence, lag measured against the head.
     Presence(RpcReplyPort<(Seq, Vec<AgentPresence>)>),
     /// The Speaker picked up for an away agent.
@@ -111,6 +118,7 @@ pub(crate) struct CommitteeState {
     /// Streams of people who are only reading.
     watchers: Vec<(ConnId, mpsc::Sender<Arc<Event>>)>,
     leases: Leases,
+    seats: CommitteeSeats,
     ticker: Option<JoinHandle<()>>,
     /// Whether the log already shows an agent's seat (a `presence`, or an
     /// event written as an agent). The first agent's seat makes it the
@@ -193,6 +201,7 @@ impl CommitteeState {
         let result = self.args.store.append(event).await;
         if let Ok(appended) = &result {
             let seq = appended.event.seq;
+            self.observe_seat(&appended.event);
             if !appended.duplicate && seq != self.fanned.next() {
                 tracing::warn!(
                     committee = %self.args.committee,
@@ -217,6 +226,71 @@ impl CommitteeState {
             }
         }
         result
+    }
+
+    fn observe_seat(&mut self, event: &Event) {
+        let Some(change) = CommitteeSeatChange::of(event) else {
+            return;
+        };
+        if !self.seats.apply(&change, event.seq) {
+            return;
+        }
+        let unseated = change.action == CommitteeSeatAction::Unseat;
+        self.args
+            .presence
+            .set_unseated(&self.args.committee, &change.senator, unseated);
+        if unseated {
+            if let Some(proxy) = self.proxies.remove(&change.senator)
+                && proxy
+                    .cast(ProxyMsg::Retire(Arc::new(event.clone())))
+                    .is_err()
+            {
+                proxy.stop(None);
+            }
+            self.leases.unseat(&change.senator);
+            self.seat_logged = self.leases.agents().next().is_some();
+        } else {
+            self.leases.join(&change.joined_presence(event), event.seq);
+            self.seat_logged = true;
+        }
+    }
+
+    async fn heartbeat(&mut self, heartbeat: Heartbeat) -> Result<(), LogError> {
+        let agent = &heartbeat.agent;
+        if self.seats.is_unseated(agent) {
+            return Ok(());
+        }
+        self.args
+            .presence
+            .heartbeat(&self.args.committee, agent, heartbeat.cursor);
+        self.contact(agent).await;
+        self.check_lease(agent).await;
+        self.args
+            .store
+            .record_heartbeat(&self.args.committee, heartbeat, senate_log::now())
+            .await
+    }
+
+    fn seat_receipt(
+        &self,
+        change: CommitteeSeatChange,
+        appended: Appended,
+    ) -> Result<CommitteeSeatInfo, LogError> {
+        if CommitteeSeatChange::of(&appended.event).as_ref() != Some(&change) {
+            return Err(LogError::Invalid(
+                "event id belongs to a different operation".into(),
+            ));
+        }
+        let Some((seq, action)) = self.seats.status(&change.senator) else {
+            return Err(LogError::Invalid("missing committee seat state".into()));
+        };
+        Ok(CommitteeSeatInfo {
+            committee: self.args.committee.clone(),
+            senator: change.senator,
+            action,
+            seq,
+            duplicate: appended.duplicate,
+        })
     }
 
     /// Commit a presence transition and record it in the leases.
@@ -261,7 +335,7 @@ impl CommitteeState {
     /// chair (see `senate_core::chair`). A failed write is tried again by
     /// the agent's next contact.
     async fn contact(&mut self, agent: &SenatorName) {
-        if self.seat_logged {
+        if self.seat_logged || self.seats.is_unseated(agent) {
             return;
         }
         let payload =
@@ -273,6 +347,9 @@ impl CommitteeState {
 
     /// Commit whatever transition of `agent`'s lease is due.
     async fn check_lease(&mut self, agent: &SenatorName) {
+        if self.seats.is_unseated(agent) {
+            return;
+        }
         let (activity, cursor) = self
             .args
             .presence
@@ -343,7 +420,19 @@ impl Actor for CommitteeActor {
         let people = args.seats.snapshot().people();
         let (board, authors) =
             presence_board(args.store.as_ref(), &args.committee, &people).await?;
-        let seat_logged = !board.agents().is_empty() || !authors.is_empty();
+        let seats = board.seats().clone();
+        let active = board.agents();
+        for agent in seats.unseated() {
+            args.presence.set_unseated(&args.committee, agent, true);
+        }
+        for agent in &active {
+            if seats.status(&agent.agent).is_some() {
+                args.presence
+                    .set_unseated(&args.committee, &agent.agent, false);
+            }
+        }
+        let seat_logged =
+            !active.is_empty() || authors.iter().any(|agent| !seats.is_unseated(agent));
         let (now, wall) = (Instant::now(), chrono::Utc::now());
         let stored = args.store.heartbeats(&args.committee).await?;
         let beats: BTreeMap<SenatorName, chrono::DateTime<chrono::Utc>> =
@@ -352,7 +441,7 @@ impl Actor for CommitteeActor {
         // An agent online but never written is restored from its last stored
         // heartbeat, and is as quiet as the clock says.
         for beat in &stored {
-            if board.get(&beat.agent).is_none() {
+            if board.get(&beat.agent).is_none() && !seats.is_unseated(&beat.agent) {
                 leases.restore_unlogged(&beat.agent, beat.heartbeat.cursor, beat.at, now, wall);
             }
         }
@@ -379,6 +468,7 @@ impl Actor for CommitteeActor {
             proxies: HashMap::new(),
             watchers: Vec::new(),
             leases,
+            seats,
             ticker: None,
             seat_logged,
         })
@@ -415,6 +505,34 @@ impl Actor for CommitteeActor {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             CommitteeMsg::Append(event, reply) => {
+                if let Some(senator) = event.from.as_senator()
+                    && state.seats.is_unseated(senator)
+                {
+                    reply_or_log(
+                        reply,
+                        Err(LogError::Invalid(format!(
+                            "{senator} must explicitly join {} before writing",
+                            state.args.committee
+                        ))),
+                    );
+                    return Ok(());
+                }
+                if event.from == senate_core::Address::Committee
+                    && let Some(chair) =
+                        event.meta.get(senate_core::meta::CHAIR).and_then(|value| {
+                            serde_json::from_value::<ChairPayload>(value.clone()).ok()
+                        })
+                    && state.seats.is_unseated(&chair.senator)
+                {
+                    reply_or_log(
+                        reply,
+                        Err(LogError::Invalid(format!(
+                            "{} must explicitly join {} before chairing",
+                            chair.senator, state.args.committee
+                        ))),
+                    );
+                    return Ok(());
+                }
                 // An event written as an agent is its seat too: the first
                 // one needs no `presence` beside it.
                 let by_agent = !state.seat_logged
@@ -437,10 +555,20 @@ impl Actor for CommitteeActor {
                 sender,
                 reply,
             } => {
+                if state.seats.is_unseated(&agent) {
+                    reply_or_log(
+                        reply,
+                        Err(HubError::Rejected(format!(
+                            "{agent} must explicitly join {} before connecting",
+                            state.args.committee
+                        ))),
+                    );
+                    return Ok(());
+                }
                 let result = state
                     .attach(&myself, agent.clone(), conn, sender)
                     .await
-                    .map_err(|e| e.to_string());
+                    .map_err(|e| HubError::Unavailable(e.to_string()));
                 let attached = result.is_ok();
                 reply_or_log(reply, result);
                 if attached {
@@ -457,9 +585,20 @@ impl Actor for CommitteeActor {
                 reply_or_log(reply, ());
             }
             CommitteeMsg::PresenceTick => state.check_leases().await,
-            CommitteeMsg::PresenceCheck(agent) => {
-                state.contact(&agent).await;
-                state.check_lease(&agent).await;
+            CommitteeMsg::Heartbeat(heartbeat, reply) => {
+                reply_or_log(reply, state.heartbeat(heartbeat).await);
+            }
+            CommitteeMsg::SetSeat { change, id, reply } => {
+                let event = change.event(state.args.committee.clone(), id);
+                match state.commit(event).await {
+                    Ok(appended) => reply_or_log(reply, state.seat_receipt(change, appended)),
+                    Err(error) => {
+                        reply_or_log(reply, Err(error));
+                        // The store might have committed before losing its acknowledgement.
+                        // Rebuild the seat fence before processing more activity.
+                        return Err("committee seat commit did not return a result".into());
+                    }
+                }
             }
             CommitteeMsg::Contact(agent, reply) => {
                 state.contact(&agent).await;
@@ -485,6 +624,10 @@ impl Actor for CommitteeActor {
                 by,
                 reply,
             } => {
+                if state.seats.is_unseated(&agent) || state.seats.is_unseated(&new_owner) {
+                    reply_or_log(reply, Err("reassignment needs two seated agents".into()));
+                    return Ok(());
+                }
                 let people = state.args.seats.snapshot().people();
                 let result = match state.leases.reassign(
                     &people,

@@ -33,6 +33,7 @@
 //! | `catch_up` | `session`, `limit?` | [`CatchUpReply`] |
 //! | `join_as` | `session`, `committee`, `senator` | [`JoinReply`] |
 //! | `join` | `session`, `committee` | [`JoinReply`] |
+//! | `set_committee_seat` | `committee`, `senator`, `action`, `id`, `acted_by?` | [`CommitteeSeatInfo`](senate_core::api::CommitteeSeatInfo) |
 //! | `search` | `session`, `query`, `limit?`, `committee?` | [`SearchReply`] |
 //! | `post` | `session`, `body`, `proposal?`, `committee?`, `id?` | [`Posted`] |
 //! | `brief` | `session`, `committee?` | [`Brief`](senate_core::Brief) |
@@ -370,6 +371,11 @@ pub enum Request {
     },
     /// Separate operation so an older daemon cannot silently ignore the name.
     Aliases,
+    SetCommitteeSeat {
+        committee: CommitteeId,
+        #[serde(flatten)]
+        request: senate_core::api::SetCommitteeSeat,
+    },
     JoinAs {
         session: SessionSelector,
         committee: CommitteeId,

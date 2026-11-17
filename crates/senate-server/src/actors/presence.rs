@@ -22,7 +22,7 @@
 //! [`AgentProxy`]: super::proxy::AgentProxy
 //! [`CommitteeActor`]: super::committee::CommitteeActor
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -53,6 +53,7 @@ struct State {
     /// When each agent's bridge last heartbeated the committee, and the
     /// delivered cursor it reported.
     heartbeats: HashMap<Key, (Instant, Seq)>,
+    unseated: HashSet<Key>,
 }
 
 pub(crate) struct Presence {
@@ -93,10 +94,11 @@ impl Presence {
         now: Instant,
     ) {
         let mut state = self.lock();
-        let entry = state
-            .streams
-            .entry((committee.clone(), agent.clone()))
-            .or_default();
+        let key = (committee.clone(), agent.clone());
+        if state.unseated.contains(&key) {
+            return;
+        }
+        let entry = state.streams.entry(key).or_default();
         entry.retain(Stream::is_open);
         entry.push(Stream {
             conn,
@@ -132,6 +134,29 @@ impl Presence {
         self.lock()
             .heartbeats
             .insert((committee.clone(), agent.clone()), (now, cursor));
+    }
+
+    pub(crate) fn set_unseated(
+        &self,
+        committee: &CommitteeId,
+        agent: &SenatorName,
+        unseated: bool,
+    ) {
+        let mut state = self.lock();
+        let key = (committee.clone(), agent.clone());
+        if unseated {
+            state.streams.remove(&key);
+            state.heartbeats.remove(&key);
+            state.unseated.insert(key);
+        } else {
+            state.unseated.remove(&key);
+        }
+    }
+
+    pub(crate) fn is_unseated(&self, committee: &CommitteeId, agent: &SenatorName) -> bool {
+        self.lock()
+            .unseated
+            .contains(&(committee.clone(), agent.clone()))
     }
 
     /// The later of the agent's last heartbeat and the opening of its
