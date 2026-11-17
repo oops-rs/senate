@@ -8,12 +8,14 @@ use senate_core::api::{
     ChairInfo, ChildSenate, RegisterChild, Resolved, Secretaries, SetChair, SetSecretaries,
 };
 use senate_core::{
-    Address, CommitteeId, DocketPage, Hub, Kind, Locator, Name, NewEvent, PickPayload,
+    Address, Appended, CommitteeId, DocketPage, Hub, Kind, Locator, Name, NewEvent, PickPayload,
     ResolveError, Roster, SenatePath, SenatorName, check_not_keyword, meta,
 };
 use serde::Deserialize;
 
-use super::{ApiFailure, AppState, Person, Sender, committee_path, json_body, query};
+use super::{
+    ApiFailure, AppState, Person, Sender, chair_discussion, committee_path, json_body, query,
+};
 
 /// Keys only the Speaker's office (or a child's) writes: who acted for it,
 /// where a forwarded message started, where it was forwarded, who answered
@@ -121,6 +123,8 @@ fn child_named(state: &AppState, path: &SenatePath, locator: &Locator) -> Option
 ///   addressed to it; any other sender's (an agent's, a team's or a
 ///   service's) stays on its own committee addressed to the Speaker's
 ///   desk, which forwards it, refuses it, or leaves it for the Speaker.
+///   An agent's question or ordinary note to the other committee's chair
+///   opens a discussion directly in the two committees.
 /// - In a child Senate registered here: addressed to that child's
 ///   Speaker's office for the committee, `<child>::<committee>::speaker`.
 /// - Elsewhere (above, or a Senate unknown here): an agent's goes to the
@@ -128,14 +132,19 @@ fn child_named(state: &AppState, path: &SenatePath, locator: &Locator) -> Option
 ///   machine posts it to the Senate above.
 ///
 /// `meta.intended` is kept, completed to the qualified name it resolved to.
-pub(super) async fn cross_boundary(
+pub(super) async fn append_routed(
     state: &AppState,
     roster: &Roster,
     sender: Sender,
     mut event: NewEvent,
-) -> Result<NewEvent, ApiFailure> {
+) -> Result<Appended, ApiFailure> {
     let Some(raw) = event.meta.get(meta::INTENDED) else {
-        return Ok(event);
+        if sender == Sender::Senator
+            && let Some(peer) = chair_discussion::reply_peer(&state.hub, &event).await?
+        {
+            return chair_discussion::reply(&state.hub, event, peer).await;
+        }
+        return append_local(state, roster, event).await;
     };
     let intended: Locator = raw
         .as_str()
@@ -182,10 +191,10 @@ pub(super) async fn cross_boundary(
         let completed = Locator::at(child_path, committee.clone(), intended.address().clone());
         event.to = vec![Address::child(child.name, committee)];
         set_intended(&mut event, &completed);
-        return Ok(event);
+        return append_local(state, roster, event).await;
     }
 
-    match state.hub.resolve(&intended, Some(&event.committee)).await? {
+    let event = match state.hub.resolve(&intended, Some(&event.committee)).await? {
         Resolved::Here {
             locator,
             committee,
@@ -203,6 +212,9 @@ pub(super) async fn cross_boundary(
                 event.to = vec![address];
                 set_intended(&mut event, &locator);
                 Ok(event)
+            } else if address == Address::Chair && chair_discussion::can_start(roster, &event) {
+                set_intended(&mut event, &locator);
+                return chair_discussion::start(&state.hub, event, committee).await;
             } else {
                 to_desk(event, &locator)
             }
@@ -217,7 +229,17 @@ pub(super) async fn cross_boundary(
             candidates,
         )),
         Resolved::Unknown { reason } => Err(ApiFailure::bad_request(reason)),
-    }
+    }?;
+    append_local(state, roster, event).await
+}
+
+async fn append_local(
+    state: &AppState,
+    roster: &Roster,
+    event: NewEvent,
+) -> Result<Appended, ApiFailure> {
+    let event = put_to_pick(state, roster, event).await?;
+    Ok(state.hub.resolve_and_append(event).await?)
 }
 
 /// A sender that cannot be expected to know the agents (anyone but an
@@ -228,7 +250,7 @@ pub(super) async fn cross_boundary(
 /// Speaker's desk when anyone works it; else it is refused with the
 /// candidates (409), as an agent sender always is. One pick per message:
 /// several ambiguous wildcards in one are refused too.
-pub(super) async fn put_to_pick(
+async fn put_to_pick(
     state: &AppState,
     roster: &Roster,
     mut event: NewEvent,

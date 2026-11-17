@@ -170,8 +170,9 @@ Address forms: `senator::codex` or just `codex` (that agent), `senator::*` (whic
 this committee should get it), `chair` (your committee's chair), `speaker` (the Speaker's \
 desk); a bracketed id copied from a message works too. One qualified name reaches another \
 committee or Senate: `ibot::codex` (the agent codex on the committee ibot), \
-`/acme::ibot::codex` (in the Senate /acme), `ibot::speaker`, `ibot::chair`; it is put to the \
-Speaker's desk on the way (the boundary rule), and the result says so. If several \
+`/acme::ibot::codex` (in the Senate /acme), `ibot::speaker`, `ibot::chair`. A question to \
+another committee's chair in this Senate goes directly to that chair. Stay on your own committee \
+and use its thread number to continue the discussion. Requests and other crossings go to the Speaker's desk. If several \
 agents could get `senator::*`, the result lists them: pick one and ask again. A person is not \
 reached through `ask`, so for a person ask their agent or tell your user. `body`: the whole question, self-contained; the reader has none of \
 your context. `request`: set it when you ask them to change something (code, an interface, \
@@ -220,8 +221,8 @@ recorded in the shared committee log, where every teammate's agent reads it thro
 search, and nobody is interrupted. To get an answer from someone use ask instead; to settle \
 something for the team use propose_decision. `to` (optional) tells someone instead: an \
 address on this committee (`codex`, `senator::alice`, `chair`, `speaker`) or one qualified name \
-(`ibot::codex`, `/acme::ibot::codex`, `ibot::speaker`, `ibot::chair`), which is put to the \
-Speaker's desk on the way. `body`: self-contained; readers have none of your \
+(`ibot::codex`, `/acme::ibot::codex`, `ibot::speaker`, `ibot::chair`). A note to another \
+committee's chair in this Senate reaches that chair directly; other crossings go to the Speaker's desk. `body`: self-contained; readers have none of your \
 context. `committee`: defaults to this session's committee.";
 
 const PROPOSE_DECISION: &str = "Propose a decision for the team on a Senate committee: an API \
@@ -2175,6 +2176,20 @@ pub fn render_sent(reply: &SendReply, kind: SayKind, locale: Locale) -> String {
                  desk of {speaker}, the Speaker of {senate} (the boundary rule), which forwards it \
                  or sends it back with a reason. The answer comes back in thread {seq}; no need to \
                  wait or poll."
+            ),
+        };
+    }
+    if let Some(target) = reply.intended.as_ref()
+        && target.address() == &Address::Chair
+        && posted.to.is_empty()
+    {
+        let target = target.in_text();
+        return match locale {
+            Locale::Zh => {
+                format!("你的{what}已直达 {target}。回复会回到 {c} 的 thread {seq}{again}。")
+            }
+            Locale::En => format!(
+                "Sent your {what} directly to {target}. Replies return to thread {seq} on {c}{again}."
             ),
         };
     }

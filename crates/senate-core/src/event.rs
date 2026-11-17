@@ -186,6 +186,27 @@ impl Event {
         self.to.iter().any(|a| a == addr)
     }
 
+    /// The server filed this event in a direct discussion between committees.
+    pub fn is_chair_discussion(&self) -> bool {
+        match (&self.from, self.meta.get(meta::CHAIR_DISCUSSION)) {
+            (Address::Committee, Some(Value::Bool(true))) => {
+                self.on_behalf_of.is_some() && self.meta.contains_key(meta::ORIGIN)
+            }
+            (Address::Senator(_), Some(marker)) => {
+                // The HTTP boundary always gave intended messages a
+                // recipient before it started writing discussion receipts.
+                self.to.is_empty()
+                    && self.meta.contains_key(meta::INTENDED)
+                    && if self.thread.is_none() {
+                        marker.is_string()
+                    } else {
+                        marker.as_bool() == Some(true)
+                    }
+            }
+            _ => false,
+        }
+    }
+
     /// The label for who wrote this: `[senator::claude]`, or
     /// `[speaker::claude]` when the Speaker answered for that senator.
     pub fn author(&self) -> Option<Mention> {
@@ -478,6 +499,10 @@ pub mod meta {
     /// Senate): an [`Origin`](crate::locator::Origin), naming the seat that
     /// asked and the root of its thread, so an answer can go back there.
     pub const ORIGIN: &str = "origin";
+    /// A direct discussion between committees of this Senate. On the
+    /// source root, the qualified name of the chair selected at delivery.
+    /// On replies and copies, `true`. Written by the server only.
+    pub const CHAIR_DISCUSSION: &str = "chair_discussion";
     /// `note` from `committee`, written by the server: the committee's
     /// chair, set explicitly ([`ChairPayload`](crate::chair::ChairPayload)).
     pub const CHAIR: &str = "chair";

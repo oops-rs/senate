@@ -797,7 +797,7 @@ fn orientation(
     match locale {
         Locale::Zh => format!(
             "[senate] 这个会话已加入 {senate} 的委员会 `{committee}`，身份是 {me}。{reach_zh}会以 `[senate · …]` 消息在这里找到你。工具：\
-             mcp__senate__join（可用 senator 参数为当前会话选择名称），mcp__senate__ask（问队友的 agent），mcp__senate__answer（在 thread 里回复），\
+             mcp__senate__join（可用 senator 参数为当前会话选择名称），mcp__senate__ask（问队友，也可用 <委员会>::chair 直接咨询同一 Senate 的其他委员会），mcp__senate__answer（在 thread 里回复），\
              mcp__senate__catch_up（读你错过的），mcp__senate__search（搜索整个日志），\
              mcp__senate__post（给团队留言），mcp__senate__propose_decision（提议一个决定，由人确认），\
              mcp__senate__checkpoint（留交接记录：保持 .senate/PROGRESS.md、DECISIONS.md 和 \
@@ -810,7 +810,7 @@ fn orientation(
             "[senate] This session is joined to the committee `{committee}` of {senate} as {me}. \
              {reach_en} reach you here as \
              `[senate · …]` messages. Tools: mcp__senate__join (pass senator to name this session), \
-             mcp__senate__ask (ask a teammate's agent), \
+             mcp__senate__ask (ask a teammate or reach another chair in this Senate with <committee>::chair), \
              mcp__senate__answer (reply in a thread), mcp__senate__catch_up (read what you \
              missed), mcp__senate__search (search the whole log), mcp__senate__post (leave a note \
              for the team), mcp__senate__propose_decision (propose a decision for a person to \
@@ -2230,6 +2230,7 @@ impl Shared {
         let event = &item.event;
         let config = &self.companion_config;
         if !config.enabled
+            || event.is_chair_discussion()
             || event.kind != Kind::Question
             || event.thread.is_some()
             || !event.is_directed_to(&Address::senator(&item.agent))

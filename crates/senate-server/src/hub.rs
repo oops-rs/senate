@@ -662,6 +662,12 @@ impl ServerHub {
             if !away {
                 continue;
             }
+            let Some(event) = self.get(committee, thread.root).await? else {
+                continue;
+            };
+            if event.is_chair_discussion() {
+                continue;
+            }
             // An agent secretary of the away agent with a live session
             // covers it first: the chain reaches the chair and the desk
             // only when none is present.
@@ -671,13 +677,11 @@ impl ServerHub {
                 covered.insert(thread.root, secretary);
                 continue;
             }
-            if let Some(event) = self.get(committee, thread.root).await? {
-                items.push(DocketItem {
-                    event,
-                    awaiting: Awaiting::Away { agents },
-                    intended: None,
-                });
-            }
+            items.push(DocketItem {
+                event,
+                awaiting: Awaiting::Away { agents },
+                intended: None,
+            });
         }
         items.sort_by_key(|item| item.event.seq);
         Ok(DocketPage {

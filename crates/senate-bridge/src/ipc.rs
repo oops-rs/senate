@@ -735,8 +735,7 @@ pub struct SecretariesReply {
 pub struct SendReply {
     #[serde(flatten)]
     pub posted: Posted,
-    /// The qualified name it is meant for, when it left the committee: it
-    /// was put to the Speaker's desk on the way.
+    /// The qualified destination of a crossing, including direct chair discussions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intended: Option<senate_core::Locator>,
     /// The Speaker whose desk it was put to.
