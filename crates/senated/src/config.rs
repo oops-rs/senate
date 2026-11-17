@@ -62,7 +62,7 @@ use serde::Deserialize;
 
 /// The sections this crate reads; anything else in [`ServerConfig::extra`]
 /// belongs to someone else.
-pub const KNOWN_SECTIONS: [&str; 4] = ["model", "secretary", "speaker", "work"];
+pub const KNOWN_SECTIONS: [&str; 5] = ["model", "secretary", "speaker", "work", "chat_gateway"];
 
 #[derive(Debug, thiserror::Error)]
 pub enum SenatedConfigError {

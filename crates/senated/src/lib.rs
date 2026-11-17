@@ -84,6 +84,7 @@ pub mod chat;
 pub mod component;
 pub mod config;
 mod empty_hub;
+mod gateway_ipc;
 pub mod machine;
 mod speaker;
 #[cfg(feature = "testing")]

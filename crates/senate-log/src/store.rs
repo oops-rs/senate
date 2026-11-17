@@ -200,6 +200,16 @@ pub trait LogStore: Send + Sync + 'static {
         Ok(Vec::new())
     }
 
+    /// Read one exact registry key.
+    async fn registry_value(&self, key: &str) -> Result<Option<serde_json::Value>, LogError> {
+        Ok(self
+            .registry(key)
+            .await?
+            .into_iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, value)| value))
+    }
+
     /// Set (`Some`) or remove (`None`) one registry entry. The default
     /// refuses: it keeps nothing.
     async fn put_registry(

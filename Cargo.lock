@@ -2407,6 +2407,8 @@ dependencies = [
  "senate-work",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "subtle",
  "tempfile",
  "thiserror",
  "tokio",

@@ -336,6 +336,10 @@ impl LogStore for MemoryStore {
             .collect())
     }
 
+    async fn registry_value(&self, key: &str) -> Result<Option<serde_json::Value>, LogError> {
+        Ok(self.lock().registry.get(key).cloned())
+    }
+
     async fn put_registry(
         &self,
         key: &str,

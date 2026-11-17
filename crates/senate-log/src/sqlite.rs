@@ -777,6 +777,24 @@ impl LogStore for SqliteStore {
         .await
     }
 
+    async fn registry_value(&self, key: &str) -> Result<Option<serde_json::Value>, LogError> {
+        let key = key.to_owned();
+        self.run(move |conn| {
+            let value: Option<String> = conn
+                .query_row("SELECT value FROM registry WHERE key = ?1", [&key], |r| {
+                    r.get(0)
+                })
+                .optional()?;
+            value
+                .map(|v| {
+                    serde_json::from_str(&v)
+                        .map_err(|e| LogError::Corrupt(format!("registry {key}: {e}")))
+                })
+                .transpose()
+        })
+        .await
+    }
+
     async fn put_registry(
         &self,
         key: &str,

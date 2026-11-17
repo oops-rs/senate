@@ -50,6 +50,7 @@ toml = "0.8"
 toml_edit = "0.22"
 anyhow = "1"
 sha2 = "0.10"
+subtle = "2"
 hex = "0.4"
 
 # The log: Postgres on a server, SQLite on a developer machine.

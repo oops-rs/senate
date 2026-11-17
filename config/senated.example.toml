@@ -116,6 +116,15 @@ person = "bob"
 # sha256("dev-bob-token")
 token_sha256 = "5b88a3d16b92cd96dd5a2cf692e1c84fc3df64bbc2a56df44877f33b980b60ea"
 
+# Optional local chat adapter. The socket and the separately configured
+# credential are shared with the adapter; it keeps its platform credential.
+# In a model-free Senate, an explicit /bind from a roster person can bind
+# the group. See docs/chat-gateway-ipc.md for the protocol and recovery.
+# [chat_gateway]
+# platform = "chat"
+# socket = "/path/to/private-directory/chat.sock"
+# token_env = "SENATE_CHAT_GATEWAY_TOKEN"
+
 # ---------------------------------------------------------------------------
 # The model
 # ---------------------------------------------------------------------------

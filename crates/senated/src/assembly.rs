@@ -53,6 +53,8 @@ pub enum AssemblyError {
     SeveralSurfaces(usize),
     #[error("a chat surface is mounted with no Speaker to speak through it; add [speaker]")]
     SurfaceWithoutSpeaker,
+    #[error("[chat_gateway]: {0:#}")]
+    GatewayConfig(#[source] anyhow::Error),
     #[error("a gateway's surface can be mounted only once")]
     GatewayMountedTwice,
     /// The roster's `speaker` names the built-in session, and no complete
@@ -254,8 +256,11 @@ impl Assembly {
             model_check,
             without_session,
         } = self;
-        if chats.len() > 1 {
-            return Err(AssemblyError::SeveralSurfaces(chats.len()));
+        let remote = crate::gateway_ipc::RemoteGateway::from_config(&config)
+            .map_err(AssemblyError::GatewayConfig)?;
+        let surfaces = chats.len() + usize::from(remote.is_some());
+        if surfaces > 1 {
+            return Err(AssemblyError::SeveralSurfaces(surfaces));
         }
         let secretary = secretary.unwrap_or_else(|| {
             let base = config.secretary_base(config_file.as_deref());
@@ -292,6 +297,25 @@ impl Assembly {
         if !chats.is_empty() && session.is_none() {
             return Err(AssemblyError::SurfaceWithoutSpeaker);
         }
+        let adapter = if let Some(remote) = remote {
+            let mount = remote
+                .gateway
+                .mount()
+                .ok_or(AssemblyError::GatewayMountedTwice)?;
+            let surface = mount.surface.clone();
+            if session.is_some() {
+                chats.push(mount);
+            }
+            Some(crate::gateway_ipc::Adapter {
+                remote,
+                store: store.clone(),
+                surface,
+                locale,
+                builtin: session.is_some(),
+            })
+        } else {
+            None
+        };
         if session.is_some() {
             for note in secretary.notes() {
                 say_once(store.as_ref(), note).await;
@@ -338,6 +362,10 @@ impl Assembly {
                 args,
                 slot: slot.clone(),
             }));
+        }
+        if let Some(adapter) = adapter {
+            all.push(Arc::new(adapter.remote.gateway.clone()));
+            all.push(Arc::new(adapter));
         }
         all.extend(components);
         let names: Vec<String> = all.iter().map(|c| c.name().to_owned()).collect();

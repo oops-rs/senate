@@ -104,7 +104,8 @@ const APPEND_RETRY: Duration = Duration::from_millis(200);
 const REMEMBERED_REFS: usize = 4_096;
 
 /// Why the platform delivered a message, as `meta.addressing` spells it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Addressing {
     /// The bot was mentioned.
     Mention,
@@ -125,14 +126,14 @@ impl Addressing {
 }
 
 /// Someone a message mentions, by the platform's id.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PlatformMention {
     pub user: String,
     pub name: String,
 }
 
 /// One message a chat platform delivered from a group.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Inbound {
     /// The platform's stable id of the group.
     pub group_id: String,
@@ -338,29 +339,40 @@ impl ChatGateway {
             .cloned()
     }
 
+    /// Wait for the binding table, then remember the group references used for grants and reply healing.
+    pub(crate) async fn observe_inbound(
+        &self,
+        inbound: &Inbound,
+    ) -> Result<Option<CommitteeId>, GatewayError> {
+        self.inner.hub().await?;
+        Ok(self.remember_inbound(inbound))
+    }
+
+    fn remember_inbound(&self, inbound: &Inbound) -> Option<CommitteeId> {
+        self.inner.drain_fresh();
+        let mut state = lock(&self.inner.state);
+        state
+            .latest_ref
+            .insert(inbound.group_id.clone(), inbound.message_ref.clone());
+        for message in std::iter::once(inbound.message_ref.as_str()).chain(inbound.refs()) {
+            state.delivered.insert(message, &inbound.group_id);
+        }
+        let committee = state.table.committee_of(&inbound.group_id).cloned();
+        if committee.is_some() {
+            // A message from a bound group: if its grant is not
+            // confirmed yet and nothing is working on it (a restart
+            // that found nothing to name the group by), this names it.
+            let State { grants, .. } = &mut *state;
+            self.inner.want_grant(grants, &inbound.group_id, Want::Held);
+        }
+        committee
+    }
+
     /// Handle one message the platform delivered. Waits until the gateway
     /// runs (it needs the log).
     pub async fn deliver(&self, inbound: Inbound) -> Result<Delivered, GatewayError> {
         let hub = self.inner.hub().await?;
-        let committee = {
-            self.inner.drain_fresh();
-            let mut state = lock(&self.inner.state);
-            state
-                .latest_ref
-                .insert(inbound.group_id.clone(), inbound.message_ref.clone());
-            for message in std::iter::once(inbound.message_ref.as_str()).chain(inbound.refs()) {
-                state.delivered.insert(message, &inbound.group_id);
-            }
-            let committee = state.table.committee_of(&inbound.group_id).cloned();
-            if committee.is_some() {
-                // A message from a bound group: if its grant is not
-                // confirmed yet and nothing is working on it (a restart
-                // that found nothing to name the group by), this names it.
-                let State { grants, .. } = &mut *state;
-                self.inner.want_grant(grants, &inbound.group_id, Want::Held);
-            }
-            committee
-        };
+        let committee = self.remember_inbound(&inbound);
         if inbound.text.trim().is_empty() {
             return Ok(Delivered::Dropped);
         }

@@ -829,6 +829,15 @@ impl LogStore for PgStore {
         Ok(rows)
     }
 
+    async fn registry_value(&self, key: &str) -> Result<Option<serde_json::Value>, LogError> {
+        Ok(
+            sqlx::query_scalar("SELECT value FROM registry WHERE key = $1")
+                .bind(key)
+                .fetch_optional(&self.pool)
+                .await?,
+        )
+    }
+
     async fn put_registry(
         &self,
         key: &str,

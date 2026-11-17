@@ -905,6 +905,30 @@ async fn heartbeats_keep_the_latest_per_agent(store: Arc<dyn LogStore>) {
     );
 }
 
+async fn registry_reads_one_exact_key(store: Arc<dyn LogStore>) {
+    let key = "gateway:test:%_";
+    let other = format!("{key}:pending");
+    store
+        .put_registry(&other, Some(json!("other")))
+        .await
+        .unwrap();
+    assert_eq!(store.registry_value(key).await.unwrap(), None);
+    store
+        .put_registry(key, Some(json!({"state": "done"})))
+        .await
+        .unwrap();
+    assert_eq!(
+        store.registry_value(key).await.unwrap(),
+        Some(json!({"state": "done"}))
+    );
+    store.put_registry(key, None).await.unwrap();
+    assert_eq!(store.registry_value(key).await.unwrap(), None);
+    assert_eq!(
+        store.registry_value(&other).await.unwrap(),
+        Some(json!("other"))
+    );
+}
+
 macro_rules! conformance {
     ($($case:ident),* $(,)?) => {
         mod memory {
@@ -945,6 +969,7 @@ macro_rules! conformance {
 }
 
 conformance!(
+    registry_reads_one_exact_key,
     appends_assign_gapless_seq_per_committee,
     append_is_idempotent_on_committee_and_id,
     read_and_get_page_in_order,
