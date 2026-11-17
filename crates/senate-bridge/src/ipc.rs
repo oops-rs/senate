@@ -46,7 +46,7 @@
 //!
 //! | `approvals` | — | [`ApprovalsReply`] |
 //! | `approve` | `id`, `decision` | [`ApproveReply`] |
-//! | `watch` | — | `{"watching": true}`, then a stream of [`WatchEvent`] lines |
+//! | `watch` | `app?` | `{"watching": true}`, then a stream of [`WatchEvent`] lines |
 //!
 //! # Presiding
 //!
@@ -482,8 +482,13 @@ pub enum Request {
         id: String,
         decision: Decision,
     },
-    /// Stream [`WatchEvent`]s on this connection until it closes.
-    Watch,
+    /// Stream [`WatchEvent`]s on this connection until it closes. `app`:
+    /// the client shows notifications itself (the desktop app), so the
+    /// daemon posts no desktop notification while it is connected.
+    Watch {
+        #[serde(default, skip_serializing_if = "is_false")]
+        app: bool,
+    },
     /// Leave a checkpoint of the session's worktree (MCP `checkpoint`,
     /// `/senate handoff`).
     Checkpoint {
@@ -626,6 +631,18 @@ pub enum WatchEvent {
         committee: CommitteeId,
         seq: Seq,
         kind: Kind,
+    },
+    /// An event arrived that is news for the person: addressed to them
+    /// (an answer, a note, a question) or an escalation to them. What
+    /// `senate watch` prints. Each event is announced once, whichever
+    /// agent's stream carried it.
+    ForPerson {
+        /// The event itself.
+        news: Box<Event>,
+        /// An escalation (a `status`): `text` is its reason.
+        escalated: bool,
+        /// The body, or an escalation's reason.
+        text: String,
     },
     /// The watcher fell behind and missed `missed` events: read everything
     /// again.
@@ -967,6 +984,40 @@ impl IpcClient {
         tokio::time::timeout(timeout, exchange)
             .await
             .map_err(|_| ClientError::Timeout)?
+    }
+}
+
+/// An open `watch` connection: after its reply, [`WatchEvent`] lines.
+pub struct WatchStream {
+    reader: BufReader<OwnedReadHalf>,
+    // Kept open: closing it is how the client stops watching.
+    _writer: OwnedWriteHalf,
+}
+
+impl IpcClient {
+    /// Turn this connection into a `watch` stream (`app`: it shows
+    /// notifications itself).
+    pub async fn watch(mut self, app: bool, timeout: Duration) -> Result<WatchStream, ClientError> {
+        let _: Value = self.call(&Request::Watch { app }, timeout).await?;
+        Ok(WatchStream {
+            reader: self.reader,
+            _writer: self.writer,
+        })
+    }
+}
+
+impl WatchStream {
+    /// The next event; `None` when the daemon closed the stream. Lines this
+    /// build does not know are skipped.
+    pub async fn next(&mut self) -> Result<Option<WatchEvent>, ClientError> {
+        loop {
+            let Some(line) = read_line(&mut self.reader).await? else {
+                return Ok(None);
+            };
+            if let Ok(event) = serde_json::from_str::<WatchEvent>(&line) {
+                return Ok(Some(event));
+            }
+        }
     }
 }
 

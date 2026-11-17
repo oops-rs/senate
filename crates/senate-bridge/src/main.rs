@@ -140,8 +140,8 @@ enum Cmd {
         /// The committee (default: the one `senate where` shows for this directory).
         #[arg(long)]
         committee: Option<CommitteeId>,
-        /// Stay until an answer arrives in the thread (default 120 seconds)
-        /// and print it; without it, return at once.
+        /// Stay until an answer arrives in the thread, or it is escalated to
+        /// you (default 120 seconds), and print it; without it, return at once.
         #[arg(
             long,
             num_args = 0..=1,
@@ -178,6 +178,16 @@ enum Cmd {
         /// The committee (default: the one `senate where` shows for this directory).
         #[arg(long)]
         committee: Option<CommitteeId>,
+        /// Stay until the agent answers or escalates to you in that thread
+        /// (default 120 seconds) and print it; without it, return at once.
+        #[arg(
+            long,
+            num_args = 0..=1,
+            require_equals = true,
+            default_missing_value = "120",
+            value_name = "SECONDS"
+        )]
+        wait: Option<u64>,
         /// Print the daemon's result as JSON.
         #[arg(long)]
         json: bool,
@@ -205,6 +215,19 @@ enum Cmd {
         #[arg(long)]
         committee: Option<CommitteeId>,
         /// Print the daemon's result as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Stay in the foreground and print, as they arrive, the events addressed
+    /// to you (answers, notes, questions, escalations with their reason) on
+    /// the committees this machine's sessions are on, or the one named. Not
+    /// what is put to the Speaker: that is the agent's docket. It marks
+    /// nothing as read.
+    Watch {
+        /// Only this committee.
+        #[arg(long)]
+        committee: Option<CommitteeId>,
+        /// One JSON object per line.
         #[arg(long)]
         json: bool,
     },
@@ -514,6 +537,48 @@ async fn inbox(
     Ok(out)
 }
 
+/// `senate watch`: what is addressed to the person, as it arrives.
+async fn watch(paths: &Paths, committee: Option<CommitteeId>, json: bool) -> anyhow::Result<()> {
+    let pong: ipc::Pong = daemon_call(paths, &Request::Ping).await?;
+    let mut stream = ipc::IpcClient::connect(&paths.socket(), Duration::from_secs(1))
+        .await?
+        .watch(false, Duration::from_secs(5))
+        .await?;
+    if !json {
+        eprintln!(
+            "{}",
+            person::render_watching(committee.as_ref(), pong.locale)
+        );
+    }
+    loop {
+        let Some(event) = stream.next().await? else {
+            anyhow::bail!("{}", person::render_watch_closed(pong.locale));
+        };
+        let ipc::WatchEvent::ForPerson {
+            news,
+            escalated,
+            text,
+        } = &event
+        else {
+            continue;
+        };
+        if committee.as_ref().is_some_and(|c| c != &news.committee) {
+            continue;
+        }
+        let mut out = std::io::stdout().lock();
+        if json {
+            writeln!(out, "{}", serde_json::to_string(&event)?)?;
+        } else {
+            writeln!(
+                out,
+                "{}\n",
+                person::render_news(news, *escalated, text, pong.locale)
+            )?;
+        }
+        out.flush()?;
+    }
+}
+
 /// The words of a message, or stdin when they are a lone `-`.
 fn message_text(words: Vec<String>) -> anyhow::Result<String> {
     let text = if words == ["-"] {
@@ -566,7 +631,7 @@ fn speak_new(
                 print_json(&serde_json::json!({ "posted": sent.posted, "answer": answer }))
             }
             Some(answer) => {
-                println!("{}", speak::render_answer(&answer, sent.locale));
+                println!("{}", speak::render_arrival(&answer, sent.locale));
                 Ok(())
             }
             None => anyhow::bail!(speak::render_timeout(sent.posted.seq, secs, sent.locale)),
@@ -768,8 +833,9 @@ fn run(command: Cmd) -> anyhow::Result<()> {
             to,
             text,
             committee,
+            wait,
             json,
-        } => speak_new(SayKind::Request, to, text, committee, None, json),
+        } => speak_new(SayKind::Request, to, text, committee, wait, json),
         Cmd::Reply {
             thread,
             text,
@@ -806,6 +872,10 @@ fn run(command: Cmd) -> anyhow::Result<()> {
                     Ok(())
                 }
             })
+        }
+        Cmd::Watch { committee, json } => {
+            let paths = Paths::from_env()?;
+            runtime(false)?.block_on(watch(&paths, committee, json))
         }
         Cmd::Take { thread, committee } => {
             let paths = Paths::from_env()?;

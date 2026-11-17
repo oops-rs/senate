@@ -584,6 +584,7 @@ async fn a_second_daemon_refuses_to_start() {
         paths: h.paths.clone(),
         config: h.config.clone(),
         timing: fast_timing(),
+        desktop: None,
     })
     .await;
     assert!(second.is_err());

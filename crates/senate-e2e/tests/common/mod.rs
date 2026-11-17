@@ -635,6 +635,7 @@ impl Laptop {
             paths: self.paths.clone(),
             config: self.config.clone(),
             timing: fast_timing(),
+            desktop: None,
         })
         .await
         .unwrap();

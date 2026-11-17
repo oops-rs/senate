@@ -160,6 +160,7 @@ use crate::ipc::{
     Request, SayKind, SearchReply, SessionSelector, StatusReply, ThreadReply, ThreadSeen,
     WatchEvent, codes,
 };
+use crate::notify::{News, Notifications, NotifyConfig};
 use crate::paths::Paths;
 use crate::routing;
 use crate::session::{self, Runtime, Session, SessionState};
@@ -196,6 +197,8 @@ const CODEX_PUSH_TIMEOUT: Duration = Duration::from_secs(10);
 /// Events a `watch` connection may fall behind by before it is told it
 /// lagged.
 const WATCH_CAPACITY: usize = 256;
+/// Events remembered as announced to the person.
+const ANNOUNCED_CAP: usize = 1024;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Timing {
@@ -258,6 +261,27 @@ pub struct DaemonOptions {
     pub paths: Paths,
     pub config: BridgeConfig,
     pub timing: Timing,
+    /// How to post desktop notifications for what is addressed to the
+    /// person ([`crate::notify`]); `None` posts none. `[notify] desktop =
+    /// false` in `senate.toml` turns it off too.
+    pub desktop: Option<crate::notify::Desktop>,
+}
+
+/// A connected client that shows notifications itself: while one is, the
+/// daemon posts no desktop notification.
+pub(crate) struct AppClient(Arc<std::sync::atomic::AtomicUsize>);
+
+impl AppClient {
+    pub(crate) fn enter(count: &Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        count.fetch_add(1, Ordering::SeqCst);
+        Self(count.clone())
+    }
+}
+
+impl Drop for AppClient {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// One event off an agent's stream on a committee.
@@ -398,6 +422,11 @@ pub(crate) struct Shared {
     relay: Arc<Relay>,
     /// Everything `watch` connections are told.
     watch: broadcast::Sender<WatchEvent>,
+    /// Desktop notifications for what is addressed to the person.
+    notifications: Option<Notifications>,
+    /// Events already announced to the person (every agent's stream carries
+    /// each one): the newest [`ANNOUNCED_CAP`].
+    announced_to_person: Mutex<BTreeSet<(CommitteeId, Seq)>>,
     /// Agents whose work on a committee is reassigned to one of mine
     /// ([`routing::Covering`]).
     covering: Mutex<routing::Covering>,
@@ -482,6 +511,7 @@ pub async fn start(options: DaemonOptions) -> anyhow::Result<DaemonHandle> {
         paths,
         config,
         timing,
+        desktop,
     } = options;
     config.validate().map_err(anyhow::Error::msg)?;
     paths.check_socket(config.locale)?;
@@ -511,6 +541,22 @@ pub async fn start(options: DaemonOptions) -> anyhow::Result<DaemonHandle> {
         timeout: CODEX_PUSH_TIMEOUT,
     };
     let (watch, _) = broadcast::channel(WATCH_CAPACITY);
+    let app_clients = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let notifications = match desktop {
+        Some(d)
+            if NotifyConfig::load(&paths.config())
+                .map_err(anyhow::Error::msg)?
+                .desktop =>
+        {
+            Some(Notifications::spawn(
+                d.notifier,
+                d.window,
+                app_clients.clone(),
+                config.locale,
+            ))
+        }
+        _ => None,
+    };
     let relay = Arc::new(Relay::new(
         codex.transport.clone(),
         (timing.backoff_base, timing.backoff_max),
@@ -522,6 +568,7 @@ pub async fn start(options: DaemonOptions) -> anyhow::Result<DaemonHandle> {
         codex,
         relay: relay.clone(),
         watch: watch.clone(),
+        notifications,
         companion_config,
         home: paths.home().to_path_buf(),
         codex_sessions: Arc::new(Mutex::new(BTreeMap::new())),
@@ -545,7 +592,7 @@ pub async fn start(options: DaemonOptions) -> anyhow::Result<DaemonHandle> {
         verify_person(&shared).await?;
         senates.push(shared);
     }
-    let front = Arc::new(Front::new(senates, relay, watch, several));
+    let front = Arc::new(Front::new(senates, relay, watch, app_clients, several));
 
     let listener =
         UnixListener::bind(&socket).with_context(|| format!("binding {}", socket.display()))?;
@@ -583,6 +630,7 @@ struct Common {
     codex: CodexAppServerAdapter,
     relay: Arc<Relay>,
     watch: broadcast::Sender<WatchEvent>,
+    notifications: Option<Notifications>,
     companion_config: CompanionConfig,
     home: PathBuf,
     /// Live Codex sessions per Senate, so the one relay watches all of them.
@@ -649,6 +697,8 @@ impl Shared {
             companion_tried: Mutex::new(BTreeSet::new()),
             relay: common.relay.clone(),
             watch: common.watch.clone(),
+            notifications: common.notifications.clone(),
+            announced_to_person: Mutex::new(BTreeSet::new()),
             covering: Mutex::new(routing::Covering::new()),
             index,
             codex_sessions: common.codex_sessions.clone(),
@@ -748,7 +798,9 @@ fn orientation(
              mcp__senate__post（给团队留言），mcp__senate__propose_decision（提议一个决定，由人确认），\
              mcp__senate__checkpoint（留交接记录：保持 .senate/PROGRESS.md、DECISIONS.md 和 \
              OPEN.md 是最新的）。你的用户也能在终端里用 `senate ask`、`senate tell`、\
-             `senate reply` 以本人的身份对你们说话。"
+             `senate reply` 以本人的身份对你们说话。你回答或转给你的用户的内容，会以桌面通知、`senate inbox` \
+             和实时的 `senate watch` 送到他们面前；转给他们的事项会一直留在他们那里，直到他们回复或接管，\
+             所以把你需要他们决定的写进 reason。"
         ),
         Locale::En => format!(
             "[senate] This session is joined to the committee `{committee}` of {senate} as {me}. \
@@ -759,7 +811,10 @@ fn orientation(
              for the team), mcp__senate__propose_decision (propose a decision for a person to \
              confirm), mcp__senate__checkpoint (leave a handover note: keep .senate/PROGRESS.md, \
              DECISIONS.md and OPEN.md current). Your user can also speak to you in their own \
-             name from a terminal with `senate ask`, `senate tell` and `senate reply`."
+             name from a terminal with `senate ask`, `senate tell` and `senate reply`. What you answer \
+             or escalate to your user reaches them as a desktop notification, in `senate inbox` and \
+             live in `senate watch`; an escalation stays with them until they reply or take the \
+             thread, so put what you need from them in its reason."
         ),
     }
 }
@@ -1440,6 +1495,7 @@ impl Shared {
         } || self.for_speaker(agent, event);
         if self.store.ingest(agent, event, directed)? {
             dirty.notify_one();
+            self.announce_to_person(event);
             if matches!(
                 event.kind,
                 Kind::Question | Kind::Request | Kind::Answer | Kind::Status | Kind::Note
@@ -1470,6 +1526,44 @@ impl Shared {
             }
         }
         Ok(())
+    }
+
+    /// Tell the person what is addressed to them: `watch` clients get a
+    /// `for_person` line and, with no client showing notifications itself,
+    /// the desktop gets one notification (coalesced). Each event once,
+    /// whichever agent's stream carried it.
+    fn announce_to_person(&self, event: &Event) {
+        let Some(attention) = senate_core::attention(event, &self.config.person) else {
+            return;
+        };
+        {
+            let mut seen = lock(&self.announced_to_person);
+            if !seen.insert((event.committee.clone(), event.seq)) {
+                return;
+            }
+            while seen.len() > ANNOUNCED_CAP {
+                seen.pop_first();
+            }
+        }
+        if let Some(notifications) = &self.notifications {
+            let by = crate::person::byline(&event.from, event.on_behalf_of.as_ref());
+            let verb = crate::person::did(&event.kind, attention.escalated, self.locale);
+            let line = format::one_line(attention.text.lines().next().unwrap_or_default().trim());
+            let sep = self.locale.pick("：", ": ");
+            notifications.push(News {
+                committee: event.committee.clone(),
+                line: if line.is_empty() {
+                    format!("{by} {verb}")
+                } else {
+                    format!("{by} {verb}{sep}{line}")
+                },
+            });
+        }
+        self.publish(WatchEvent::ForPerson {
+            news: Box::new(event.clone()),
+            escalated: attention.escalated,
+            text: attention.text,
+        });
     }
 
     /// Triage verdicts and takeovers off `agent`'s stream (see the module
@@ -2354,7 +2448,7 @@ impl Shared {
                     .map_err(IpcError::bad_request),
             ),
             // Served by the connection itself (`serve_connection`).
-            Request::Watch => Reply::err(IpcError::bad_request(
+            Request::Watch { .. } => Reply::err(IpcError::bad_request(
                 "watch turns a connection into a stream; send it as the connection's request",
             )),
         }
@@ -3862,7 +3956,10 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
         let (reply, last) = match ipc::read_line(&mut reader).await {
             Ok(None) => return,
             Ok(Some(line)) => match serde_json::from_str::<Request>(&line) {
-                Ok(Request::Watch) => {
+                Ok(Request::Watch { app }) => {
+                    // An app that shows notifications itself keeps the
+                    // daemon quiet while it is connected.
+                    let _guard = app.then(|| AppClient::enter(shared.app_clients()));
                     serve_watch(&shared, reader, write, shutdown).await;
                     return;
                 }

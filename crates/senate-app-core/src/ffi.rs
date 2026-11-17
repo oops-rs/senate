@@ -56,6 +56,23 @@ pub trait CoreListener: Send + Sync {
     /// A Codex approval request seen for the first time (for a notification);
     /// it is in the next [`AppState::approvals`] too.
     fn on_approval_requested(&self, approval: ApprovalRequest);
+    /// Something came back to the person (an answer, a note, an escalation
+    /// addressed to them): post a notification. The daemon posts none while
+    /// the app is connected, so this is the only one.
+    fn on_for_person(&self, note: PersonNote);
+}
+
+/// What to notify when something comes back to the person.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct PersonNote {
+    pub committee: String,
+    /// The thread's root seq.
+    pub thread: u64,
+    /// `Senate · refund-v2`.
+    pub title: String,
+    /// `[senator::alice/claude] answered: the first line`, in the app's
+    /// language.
+    pub body: String,
 }
 
 /// An answer to an approval request.
@@ -426,6 +443,15 @@ impl Sink for ListenerSink {
 
     fn approval_arrived(&self, approval: &Approval) {
         self.listener.on_approval_requested(approval.into());
+    }
+
+    fn for_person(&self, committee: &str, thread: u64, title: &str, body: &str) {
+        self.listener.on_for_person(PersonNote {
+            committee: committee.to_string(),
+            thread,
+            title: title.to_string(),
+            body: body.to_string(),
+        });
     }
 }
 

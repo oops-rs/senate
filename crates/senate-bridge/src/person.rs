@@ -218,3 +218,77 @@ pub fn render_marked(n: usize, locale: Locale) -> String {
         }
     }
 }
+
+/// Most lines of an event's text a `watch` block shows.
+const NEWS_LINES: usize = 6;
+
+/// One event addressed to the person, as `senate watch` prints it: the
+/// byline, what it did, when, where; the first lines of what it says; the
+/// commands to read and reply.
+pub fn render_news(
+    event: &senate_core::Event,
+    escalated: bool,
+    text: &str,
+    locale: Locale,
+) -> String {
+    let root = event.thread.unwrap_or(event.seq);
+    let by = format::author(event, locale);
+    let verb = did(&event.kind, escalated, locale);
+    let c = &event.committee;
+    let mut out = match locale {
+        Locale::Zh => format!(
+            "{by} {verb} · {} · {c} · thread {root}",
+            event.ts.format("%Y-%m-%d %H:%M UTC")
+        ),
+        Locale::En => format!(
+            "{by} {verb} · {} · {c} · thread {root}",
+            event.ts.format("%Y-%m-%d %H:%M UTC")
+        ),
+    };
+    let lines: Vec<&str> = text.trim().lines().collect();
+    if lines.is_empty() {
+        out.push_str(&format!(
+            "\n  {}",
+            locale.pick("（没有写原因）", "(nothing written)")
+        ));
+    }
+    for line in lines.iter().take(NEWS_LINES) {
+        out.push_str("\n  ");
+        out.push_str(&format::one_line(line));
+    }
+    if lines.len() > NEWS_LINES {
+        out.push_str("\n  …");
+    }
+    out.push_str(&match locale {
+        Locale::Zh => format!(
+            "\n  读：`senate thread {root} --committee {c}` · 回复：`senate reply {root} --committee {c} <文字>`"
+        ),
+        Locale::En => format!(
+            "\n  read: `senate thread {root} --committee {c}` · reply: `senate reply {root} --committee {c} <text>`"
+        ),
+    });
+    out
+}
+
+/// What `senate watch` says on stderr when it starts.
+pub fn render_watching(committee: Option<&senate_core::CommitteeId>, locale: Locale) -> String {
+    match (committee, locale) {
+        (Some(c), Locale::Zh) => format!("正在看 {c} 上给你的消息（Ctrl-C 结束）……"),
+        (Some(c), Locale::En) => {
+            format!("Watching what is addressed to you on {c} (Ctrl-C to stop)…")
+        }
+        (None, Locale::Zh) => "正在看这台机器上各委员会里给你的消息（Ctrl-C 结束）……".to_string(),
+        (None, Locale::En) => {
+            "Watching what is addressed to you on this machine's committees (Ctrl-C to stop)…"
+                .to_string()
+        }
+    }
+}
+
+/// `senate watch` lost the daemon.
+pub fn render_watch_closed(locale: Locale) -> &'static str {
+    locale.pick(
+        "守护进程关闭了连接；重新运行 `senate watch`。",
+        "the daemon closed the connection; run `senate watch` again.",
+    )
+}

@@ -54,6 +54,18 @@ pub enum Refresh {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Notice {
     ApprovalArrived(Approval),
+    /// Something came back to the person: an answer, a note, an escalation
+    /// addressed to them. The app posts the notification itself, and the
+    /// daemon stays quiet while the app is connected.
+    ForPerson {
+        committee: CommitteeId,
+        /// The thread's root seq.
+        thread: Seq,
+        /// `Senate · refund-v2`.
+        title: String,
+        /// `[senator::alice/claude] answered: the first line`.
+        body: String,
+    },
 }
 
 /// What [`Model::apply`] asks of the backend.
@@ -247,6 +259,27 @@ impl Model {
                 }
                 // The event may have been put to a Speaker, in any Senate.
                 fx.refresh.push(Refresh::Docket);
+            }
+            WatchEvent::ForPerson {
+                news,
+                escalated,
+                text,
+            } => {
+                let by = senate_bridge::person::byline(&news.from, news.on_behalf_of.as_ref());
+                let verb = senate_bridge::person::did(&news.kind, escalated, self.locale);
+                let line = text.lines().next().unwrap_or_default().trim().to_string();
+                let sep = self.locale.pick("：", ": ");
+                fx.notices.push(Notice::ForPerson {
+                    committee: news.committee.clone(),
+                    thread: news.thread.unwrap_or(news.seq),
+                    title: format!("Senate · {}", news.committee),
+                    body: if line.is_empty() {
+                        format!("{by} {verb}")
+                    } else {
+                        format!("{by} {verb}{sep}{line}")
+                    },
+                });
+                fx.refresh.push(Refresh::AllInboxes);
             }
             WatchEvent::Lagged { .. } => {
                 fx.refresh.push(Refresh::Approvals);
@@ -905,6 +938,46 @@ mod tests {
             Request::Seen { committee: c, marks } if c == committee("a")
                 && marks == vec![senate_bridge::ipc::ThreadSeen { thread: Seq(3), seen: Seq(9) }]
         ));
+    }
+
+    #[test]
+    fn something_for_the_person_is_a_notice_in_the_apps_language_and_a_refresh() {
+        for (locale, body) in [
+            (
+                Locale::En,
+                "[senator::alice/claude] answered: Idempotency-Key",
+            ),
+            (
+                Locale::Zh,
+                "[senator::alice/claude] 回答了：Idempotency-Key",
+            ),
+        ] {
+            let mut m = Model::new(locale);
+            let event = senate_core::NewEvent::new(
+                committee("a"),
+                Kind::Answer,
+                Address::senator(&path("alice/claude")),
+                "Idempotency-Key\nmore",
+            )
+            .to(Address::senior(&Name::new("alice").unwrap()))
+            .in_thread(Seq(3))
+            .into_event(Seq(9), Utc::now());
+            let fx = m.apply(WatchEvent::ForPerson {
+                news: Box::new(event),
+                escalated: false,
+                text: "Idempotency-Key\nmore".into(),
+            });
+            assert_eq!(
+                fx.notices,
+                vec![Notice::ForPerson {
+                    committee: committee("a"),
+                    thread: Seq(3),
+                    title: "Senate · a".into(),
+                    body: body.into(),
+                }]
+            );
+            assert!(fx.refresh.contains(&Refresh::AllInboxes));
+        }
     }
 
     #[test]

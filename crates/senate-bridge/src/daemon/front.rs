@@ -36,6 +36,8 @@ pub(crate) struct Front {
     senates: Vec<Arc<Shared>>,
     relay: Arc<Relay>,
     watch: broadcast::Sender<WatchEvent>,
+    /// Watch clients that show notifications themselves, connected now.
+    app_clients: Arc<std::sync::atomic::AtomicUsize>,
     /// Several Senates: agent paths are placed under the person, and
     /// select the Senate.
     several: bool,
@@ -46,12 +48,14 @@ impl Front {
         senates: Vec<Arc<Shared>>,
         relay: Arc<Relay>,
         watch: broadcast::Sender<WatchEvent>,
+        app_clients: Arc<std::sync::atomic::AtomicUsize>,
         several: bool,
     ) -> Self {
         Self {
             senates,
             relay,
             watch,
+            app_clients,
             several,
         }
     }
@@ -62,6 +66,10 @@ impl Front {
 
     pub(crate) fn relay(&self) -> &Arc<Relay> {
         &self.relay
+    }
+
+    pub(crate) fn app_clients(&self) -> &Arc<std::sync::atomic::AtomicUsize> {
+        &self.app_clients
     }
 
     pub(crate) fn watch(&self) -> &broadcast::Sender<WatchEvent> {

@@ -99,6 +99,11 @@ person = "alice"
 # max_secs = 300
 # idle_secs = 1800
 
+# Desktop notification when something is addressed to you (an answer, a note,
+# an escalation): one per burst, skipped while the desktop app is open.
+# [notify]
+# desktop = false   # default true
+
 # A Senate one level down for each agent that presides over its own
 # subagents. senated --machine hosts it here: its log in SQLite under
 # senates/under-<agent>/, on loopback only, with a token generated on this

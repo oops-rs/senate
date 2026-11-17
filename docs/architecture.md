@@ -203,6 +203,36 @@ reader of a person's inbox (`senate inbox`, the app core) uses it:
   that wait for other reasons, then how many settled ones were left out. The
   daemon's sessionless `inbox` carries `seen` so the reader can apply the rule.
 
+### Being told
+
+With no chat platform the person would learn nothing unless they polled.
+
+- `senate ask|request … --wait[=SECONDS]` stays until the agent answers in the
+  thread or escalates it to the asker (printed with its reason), then marks
+  what it showed as read. Without `--wait`, the output says how they will
+  hear back.
+- `senate watch [--committee ID] [--json]` stays in the foreground and prints,
+  as they arrive, the events addressed to the person on the committees the
+  machine's sessions are on (`senate_core::attention`: answers, notes,
+  questions, requests, escalations; not what is put to the Speaker, which is
+  the agent's docket). One block per event: byline, what it did, time,
+  committee, thread, the first lines and the commands to read and reply. It
+  marks nothing as read. The daemon announces each such event once on its
+  `watch` stream (`for_person`), whichever agent's stream carried it.
+- The daemon posts one desktop notification for them, so nothing needs to be
+  left open (`senate_bridge::notify`). The title is `Senate · <committee>`; the
+  body is `<byline> <did>: <first line>` (`[senator::wendell/claude]
+  answered: …`), or `<n> new for you, the latest: …` for a burst: events within
+  a few seconds are one notification. It is best effort: a failure is logged
+  once and never touches delivery. It is skipped while a client that shows
+  notifications itself is connected (the desktop app's `watch` stream, which
+  says `app: true`; the app core notifies through `on_for_person`). Only
+  `senated --machine` installs the system notifier; a daemon built any other
+  way posts nothing. `[notify] desktop = false` in `senate.toml` turns it off.
+  macOS runs `osascript -e 'display notification "<body>" with title
+  "<title>"'` (text escaped for an AppleScript string); Linux runs
+  `notify-send --app-name Senate -- <title> <body>` when it is on `PATH`.
+
 ## Guests
 
 A guest may ask questions and receive answers. A guest may not change state:

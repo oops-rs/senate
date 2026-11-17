@@ -801,6 +801,51 @@ impl TaskBoard {
     }
 }
 
+/// Something an event says to a person: what `senate watch` prints and the
+/// desktop notification announces. The same rule as
+/// [`ThreadSummary::directed`] uses, for one event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attention {
+    /// An escalation to the person (a `status`): `text` is its reason.
+    pub escalated: bool,
+    /// The event's body, or an escalation's reason.
+    pub text: String,
+}
+
+/// Whether `event` is addressed to `person` in a way that is news for them:
+/// not written by them, not a provisional answer, and either an escalation
+/// to them or an answer, note, question, request, decision or chat naming
+/// them in `to`. What is put to the Speaker is not: that is an agent's
+/// docket.
+pub fn attention(event: &Event, person: &Name) -> Option<Attention> {
+    if person_of(&event.from).as_ref() == Some(person) || is_provisional(event) {
+        return None;
+    }
+    if event.kind == Kind::Status {
+        let status = StatusPayload::of(event)?;
+        return (status.escalated_to.as_ref() == Some(person)
+            && status.takeover.is_none()
+            && status.state != StatusState::Archived)
+            .then(|| Attention {
+                escalated: true,
+                text: status.reason.unwrap_or_default(),
+            });
+    }
+    let kinds = matches!(
+        event.kind,
+        Kind::Answer | Kind::Question | Kind::Request | Kind::Note | Kind::Chat | Kind::Decision
+    );
+    (kinds
+        && event
+            .to
+            .iter()
+            .any(|a| person_of(a).as_ref() == Some(person)))
+    .then(|| Attention {
+        escalated: false,
+        text: event.body.clone(),
+    })
+}
+
 /// The person an address names, when it is a person.
 fn person_of(address: &Address) -> Option<Name> {
     address
@@ -1587,5 +1632,41 @@ mod tests {
         assert!(d.escalated && d.seq == esc && d.line == "need a call");
         // An escalation to someone else is theirs.
         assert!(t.waits_on_person(&name("bob"), Seq(0)).is_none());
+    }
+
+    #[test]
+    fn what_is_news_for_a_person_is_what_the_board_records_for_them() {
+        let wendell = name("wendell");
+        let (log, root) = the_real_sequence();
+        let news: Vec<(Seq, bool, String)> = log
+            .0
+            .iter()
+            .filter_map(|e| attention(e, &wendell).map(|a| (e.seq, a.escalated, a.text)))
+            .collect();
+        // The answer (3) and the escalation (4): not the root, not statuses
+        // of progress, not the checkpoint.
+        assert_eq!(
+            news,
+            [
+                (Seq(3), false, "The result".to_string()),
+                (Seq(4), true, "nine decisions\nneeded".to_string())
+            ]
+        );
+        let t = log.board().get(root).unwrap().clone();
+        let recorded: Vec<Seq> = t
+            .unread_for(&wendell, Seq(0))
+            .iter()
+            .map(|d| d.seq)
+            .collect();
+        assert_eq!(recorded, [Seq(3), Seq(4)]);
+        // Their own words, provisional answers and other people's mail are not.
+        let own = NewEvent::new(c(), Kind::Note, addr("senator::wendell"), "x")
+            .to(addr("senator::wendell"))
+            .into_event(Seq(9), Utc::now());
+        assert!(attention(&own, &wendell).is_none());
+        let to_speaker = NewEvent::new(c(), Kind::Question, addr("senator::wendell/claude"), "x")
+            .to(Address::Speaker)
+            .into_event(Seq(9), Utc::now());
+        assert!(attention(&to_speaker, &wendell).is_none());
     }
 }

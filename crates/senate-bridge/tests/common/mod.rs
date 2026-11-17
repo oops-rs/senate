@@ -1042,6 +1042,9 @@ pub struct Harness {
     pub server: FakeServer,
     pub config: BridgeConfig,
     pub daemon: Option<DaemonHandle>,
+    /// A recording notifier for the daemon to post through; none by default,
+    /// so a test never posts a real notification.
+    pub desktop: Option<senate_bridge::notify::Desktop>,
 }
 
 impl Harness {
@@ -1084,6 +1087,7 @@ impl Harness {
             server,
             config,
             daemon: None,
+            desktop: None,
         }
     }
 
@@ -1096,6 +1100,7 @@ impl Harness {
             paths: self.paths.clone(),
             config: self.config.clone(),
             timing,
+            desktop: self.desktop.clone(),
         })
         .await
         .unwrap();

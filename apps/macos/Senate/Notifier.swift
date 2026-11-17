@@ -39,6 +39,26 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         }
     }
 
+    /// Something came back to the person. The daemon posts no notification
+    /// while this app is connected, so this is the one they get.
+    func forPerson(_ note: PersonNote) {
+        guard enabled else { return }
+        let content = UNMutableNotificationContent()
+        content.title = note.title
+        content.body = note.body
+        content.sound = .default
+        let request = UNNotificationRequest(
+            identifier: "person:\(note.committee):\(note.thread):\(UUID().uuidString)",
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error {
+                NSLog("Senate: notification: \(error.localizedDescription)")
+            }
+        }
+    }
+
     // Shown even while the app is frontmost.
     nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter,
