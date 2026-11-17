@@ -178,7 +178,10 @@ impl ServerBuilder {
         let mut said = Vec::with_capacity(notes.len());
         for note in notes {
             if registry::first_time(store.as_ref(), &note.key).await {
-                tracing::warn!("{}", note.text);
+                match note.level {
+                    office::Level::Info => tracing::info!("{}", note.text),
+                    office::Level::Warn => tracing::warn!("{}", note.text),
+                }
             } else {
                 tracing::debug!("{}", note.text);
             }

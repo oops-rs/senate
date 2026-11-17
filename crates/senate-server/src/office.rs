@@ -31,11 +31,21 @@ pub fn default_built_in_name() -> SenatorName {
         .unwrap_or_else(|_| unreachable!("a valid flat name, not a keyword"))
 }
 
-/// Something a start assumed, to say once.
+/// How loudly a [`Note`] is logged the first time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Level {
+    /// A correct configuration, said in plain words.
+    Info,
+    /// A configuration read from an older form, or assumed: worth fixing.
+    Warn,
+}
+
+/// Something a start assumed or settled, to say once.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Note {
     /// What the registry remembers it by.
     pub key: String,
+    pub level: Level,
     pub text: String,
 }
 
@@ -82,15 +92,15 @@ fn bare_speaker_here(locale: Locale, bare: &SenatorName) -> String {
     }
 }
 
-/// A child's Speaker: the parent says whether it may be.
-fn parent_checks_speaker(locale: Locale, id: &SenatorId) -> String {
+/// A child's Speaker, a person of the parent: correct as written.
+fn speaker_of_parent(locale: Locale, id: &SenatorId) -> String {
     let id = id.in_text();
     match locale {
         Locale::Zh => format!(
-            "Speaker {id} 是上级 Senate 的 senator。它须是上级的成员（一个人，而非 agent）：上级会在本 Senate 注册时核对；上级的 agent 担任 Speaker 暂不支持。"
+            "本 Senate 的 Speaker 是上级 Senate 的成员 {id}。上级会在本 Senate 向它注册时确认这是一个人（而不是 agent）。"
         ),
         Locale::En => format!(
-            "The Speaker {id} is a senator of the parent Senate. It must be a principal there (a person, not an agent): the parent checks when this Senate registers with it; a parent's agent as Speaker is not supported yet."
+            "This Senate's Speaker is {id}, a person of the parent Senate. The parent confirms that it is a person (not an agent) when this Senate registers with it."
         ),
     }
 }
@@ -115,12 +125,14 @@ pub(crate) fn settle(
                 let id = SenatorId::of(parent.clone(), bare.clone());
                 notes.push(Note {
                     key: format!("speaker-bare-parent:{bare}"),
+                    level: Level::Warn,
                     text: bare_speaker_of_parent(locale, &bare, &id),
                 });
                 speaker = Some(SpeakerName::id(id));
             }
             None => notes.push(Note {
                 key: format!("speaker-bare-here:{bare}"),
+                level: Level::Warn,
                 text: bare_speaker_here(locale, &bare),
             }),
         }
@@ -141,7 +153,8 @@ pub(crate) fn settle(
         match parent {
             Some(parent) if parent.same_names(senate) => notes.push(Note {
                 key: format!("speaker-of-parent:{}", named.id),
-                text: parent_checks_speaker(locale, &named.id),
+                level: Level::Info,
+                text: speaker_of_parent(locale, &named.id),
             }),
             Some(parent) => {
                 return Err(ConfigError::Invalid(format!(
@@ -169,6 +182,7 @@ pub(crate) fn settle(
     {
         notes.push(Note {
             key: format!("built-in-speaker:{built_in}"),
+            level: Level::Warn,
             text: built_in_is_speaker(locale, built_in),
         });
         speaker = Some(SpeakerName::id(SenatorId::here(built_in.clone())));
@@ -197,7 +211,7 @@ mod tests {
                 built_in_is_speaker(locale, &default_built_in_name()),
                 bare_speaker_of_parent(locale, &name, &id),
                 bare_speaker_here(locale, &name),
-                parent_checks_speaker(locale, &id),
+                speaker_of_parent(locale, &id),
             ] {
                 assert!(
                     text.contains("Senate") || text.contains("Speaker"),
@@ -211,6 +225,32 @@ mod tests {
             bare_speaker_here(Locale::En, &name)
         );
         assert!(built_in_is_speaker(Locale::Zh, &default_built_in_name()).contains("内置会话"));
+    }
+
+    #[test]
+    fn a_person_of_the_parent_as_speaker_is_said_at_info_and_in_plain_words() {
+        let parent: SenatePath = "acme".parse().unwrap();
+        let mut config = alice();
+        config.speaker = Some(SpeakerName::id(SenatorId::of(
+            parent.clone(),
+            "wendell".parse().unwrap(),
+        )));
+        let (_, notes) = settle(config, Some(&parent), None, Locale::En).unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].level, Level::Info);
+        assert!(!notes[0].text.contains("must"), "{}", notes[0].text);
+        assert!(
+            !notes[0].text.contains("not supported"),
+            "{}",
+            notes[0].text
+        );
+        // Older forms and assumptions stay warnings.
+        let mut bare = alice();
+        bare.speaker = Some(SpeakerName::from("wendell".parse::<SenatorName>().unwrap()));
+        let (_, notes) = settle(bare, Some(&parent), None, Locale::En).unwrap();
+        assert_eq!(notes[0].level, Level::Warn);
+        let (_, notes) = settle(alice(), None, Some(default_built_in_name()), Locale::En).unwrap();
+        assert_eq!(notes[0].level, Level::Warn);
     }
 
     #[test]
