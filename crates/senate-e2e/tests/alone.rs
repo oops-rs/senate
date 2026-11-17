@@ -688,10 +688,10 @@ async fn two_codex_threads_in_one_worktree_choose_separate_seats() {
     desk.start().await;
     for id in ["author-thread", "review-thread"] {
         codex.idle(id);
-        let start = desk.codex_start(id).await.unwrap();
-        assert!(context(&start).contains("[senator::codex]"));
+        let start = desk.codex_start_with_identity(id, true).await.unwrap();
+        assert!(context(&start).contains(&format!("[senator::codex-{id}]")));
     }
-    desk.wait_connected("codex", true).await;
+    desk.wait_connected("codex-author-thread", true).await;
     let named = Request::JoinAs {
         session: Laptop::session("review-thread"),
         committee: committee(),
@@ -699,23 +699,27 @@ async fn two_codex_threads_in_one_worktree_choose_separate_seats() {
     };
     for _ in 0..2 {
         let reply: JoinReply = desk.ipc(named.clone()).await;
-        assert_eq!(reply.agent, path("reviewer"));
+        assert_eq!(reply.agent, path("codex-review-thread"));
+        assert_eq!(reply.alias, Some(path("reviewer")));
     }
     // Closing and resuming the thread across a machine restart keeps the choice.
     desk.codex_end("review-thread").await;
     desk.stop().await;
     desk.start().await;
-    let start = desk.codex_start("review-thread").await.unwrap();
-    assert!(context(&start).contains("[senator::reviewer]"));
+    let start = desk
+        .codex_start_with_identity("review-thread", true)
+        .await
+        .unwrap();
+    assert!(context(&start).contains("[senator::codex-review-thread]"));
     let joined: JoinReply = desk
         .ipc(Request::Join {
             session: Laptop::session("review-thread"),
             committee: committee(),
         })
         .await;
-    assert_eq!(joined.agent, path("reviewer"));
-    desk.wait_connected("reviewer", true).await;
-    desk.wait_connected("codex", true).await;
+    assert_eq!(joined.agent, path("codex-review-thread"));
+    desk.wait_connected("codex-review-thread", true).await;
+    desk.wait_connected("codex-author-thread", true).await;
 
     for (sender, to, body, intended) in [
         (
@@ -726,7 +730,7 @@ async fn two_codex_threads_in_one_worktree_choose_separate_seats() {
         ),
         (
             "review-thread",
-            "codex",
+            "codex-author-thread",
             "Which revision should I review?",
             "author-thread",
         ),
@@ -740,14 +744,8 @@ async fn two_codex_threads_in_one_worktree_choose_separate_seats() {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(
-            event.from,
-            senator(if sender == "author-thread" {
-                "codex"
-            } else {
-                "reviewer"
-            })
-        );
+        assert_eq!(event.from, senator(&format!("codex-{sender}")));
+        assert_eq!(event.to, [senator(&format!("codex-{intended}"))]);
         eventually("directed question pushed to its own Codex thread", || {
             let threads: Vec<_> = codex
                 .pushes()
@@ -759,5 +757,24 @@ async fn two_codex_threads_in_one_worktree_choose_separate_seats() {
         })
         .await;
     }
+    let conflict = Request::JoinAs {
+        session: Laptop::session("author-thread"),
+        committee: committee(),
+        senator: path("reviewer"),
+    };
+    assert!(desk.try_ipc::<JoinReply>(conflict.clone()).await.is_err());
+    let renamed: JoinReply = desk
+        .ipc(Request::JoinAs {
+            session: Laptop::session("review-thread"),
+            committee: committee(),
+            senator: path("editor"),
+        })
+        .await;
+    assert_eq!(renamed.agent, path("codex-review-thread"));
+    let reused: JoinReply = desk.ipc(conflict).await;
+    assert_eq!(reused.agent, path("codex-author-thread"));
+    let aliases: senate_core::api::SenatorAliases = desk.ipc(Request::Aliases).await;
+    assert_eq!(aliases[&path("editor")], path("codex-review-thread"));
+    assert_eq!(aliases[&path("reviewer")], path("codex-author-thread"));
     desk.stop().await;
 }

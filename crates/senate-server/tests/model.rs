@@ -571,6 +571,7 @@ async fn people_can_be_replaced_while_agents_stay_seated() {
         Principal::new(name("alice")),
         Principal::new(name("dave")),
     ])
+    .await
     .unwrap();
     let roster = hub.roster().await.unwrap();
     assert!(roster.principal(&name("dave")).is_some());

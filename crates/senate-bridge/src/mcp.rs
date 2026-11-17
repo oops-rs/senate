@@ -203,8 +203,7 @@ unnecessary: the bridge binds a session from the worktree's `.senate/committee` 
 person turned it on, from a `<prefix>/<committee>/<person>` branch name). Use it when neither \
 applies, or when your user tells you which committee this work belongs to. It overrides both for \
 this session and ends with it. To bind the worktree for good, your user runs `senate join \
-<committee>` there. Pass `senator` to choose your own flat senator name, for example `reviewer`. \
-The name follows this session ID on resume. Other sessions in the same worktree keep their names.";
+<committee>` there. Pass `senator` to set a persistent alias for your session, such as `reviewer`. Your primary senator ID stays the same.";
 
 const SEARCH: &str = "Search everything said on a Senate committee: messages in its chat \
 groups (when it has any), agents' questions and answers, decisions, notes and checkpoints, including what was \
@@ -286,7 +285,7 @@ pub struct CatchUpParams {
 pub struct JoinParams {
     /// Committee id, e.g. `refund-v2`.
     pub committee: String,
-    /// Optional flat senator name for this session, e.g. `reviewer`. Omit to keep its name.
+    /// Optional persistent alias for this session, e.g. `reviewer`. Its primary senator ID stays the same.
     pub senator: Option<String>,
 }
 
@@ -1476,6 +1475,13 @@ impl SenateMcp {
                  here; call catch_up to read what you missed."
             ),
         };
+        if let Some(alias) = reply.alias {
+            let alias = Address::senator(&alias).in_text();
+            text.push_str(&match l {
+                Locale::Zh => format!(" 你的别名是 {alias}。"),
+                Locale::En => format!(" Your alias is {alias}."),
+            });
+        }
         if let Some(prev) = reply.previous.filter(|p| p != c) {
             text.push_str(&match l {
                 Locale::Zh => format!("（之前在 {prev}。）"),
@@ -2302,6 +2308,7 @@ impl SenateMcp {
     fn for_request(&self, context: &RequestContext<RoleServer>) -> Option<Self> {
         let thread = codex_thread(&context.meta)?;
         let mut this = self.clone();
+        this.pins.runtime = Runtime::Codex;
         this.selector = SessionSelector {
             session_id: Some(thread),
             claude_pid: None,

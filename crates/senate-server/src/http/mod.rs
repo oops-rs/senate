@@ -46,6 +46,8 @@ pub(crate) fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/v1/me", get(me))
+        .route("/v1/aliases", get(list_aliases))
+        .route("/v1/aliases/{primary}", put(set_alias))
         .route(
             "/v1/committees/{committee}/events",
             post(append).get(events),
@@ -264,6 +266,31 @@ fn query<T>(query: Result<Query<T>, QueryRejection>) -> Result<T, ApiFailure> {
     query
         .map(|Query(value)| value)
         .map_err(|e| ApiFailure::bad_request(e.body_text()))
+}
+
+async fn list_aliases(
+    State(state): State<AppState>,
+    _person: Person,
+) -> Json<senate_core::api::SenatorAliases> {
+    Json(state.hub.aliases().await)
+}
+
+async fn set_alias(
+    State(state): State<AppState>,
+    person: Person,
+    Path(primary): Path<SenatorName>,
+    body: Result<Json<senate_core::api::SetAlias>, JsonRejection>,
+) -> Result<Json<SenatorName>, ApiFailure> {
+    let request = json_body(body)?;
+    if !primary.is_session_name() || primary == person.0 {
+        return Err(ApiFailure::bad_request(
+            "an alias needs a coding session's primary senator ID",
+        ));
+    }
+    state.act_as(&person, &primary).await?;
+    Ok(Json(
+        state.hub.set_alias(&person.0, &primary, request).await?,
+    ))
 }
 
 async fn me(State(state): State<AppState>, person: Person) -> Result<Json<Me>, ApiFailure> {
@@ -794,7 +821,7 @@ async fn latest_checkpoint(
     params: Result<Query<CheckpointQuery>, QueryRejection>,
 ) -> Result<Json<CheckpointRecord>, ApiFailure> {
     let committee = committee_path(path)?;
-    let agent = query(params)?.agent;
+    let agent = state.hub.primary_name(&query(params)?.agent).await;
     state
         .hub
         .latest_checkpoint(&committee, &agent)
@@ -818,7 +845,7 @@ async fn threads(
     let params = query(params)?;
     let board = state.hub.tasks(&committee).await?;
     let threads = match &params.agent {
-        Some(agent) => board.threads_for(agent, params.state),
+        Some(agent) => board.threads_for(&state.hub.primary_name(agent).await, params.state),
         None => board.threads(params.state),
     };
     Ok(Json(ThreadsPage {

@@ -15,6 +15,9 @@
 
 pub mod fake_codex;
 
+#[path = "../../../senate-bridge/tests/common/fixed_seat.rs"]
+mod fixed_seat;
+
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -683,6 +686,10 @@ impl Laptop {
     /// A Codex thread starting in this machine's checkout (`hook
     /// session-start --codex`).
     pub async fn codex_start(&self, thread: &str) -> Option<Value> {
+        self.codex_start_with_identity(thread, false).await
+    }
+
+    pub async fn codex_start_with_identity(&self, thread: &str, native: bool) -> Option<Value> {
         let stdin = serde_json::json!({
             "session_id": thread,
             "cwd": self.work,
@@ -691,16 +698,30 @@ impl Laptop {
             "source": "startup",
         })
         .to_string();
-        hook::run_as(
-            HookKind::SessionStart,
-            &self.paths.socket(),
-            &stdin,
-            &HookEnv::default(),
-            Some(Runtime::Codex),
-            HookTimeouts::default(),
-        )
-        .await
-        .map(|line| serde_json::from_str(&line).unwrap())
+        let socket = self.paths.socket();
+        let env = HookEnv::default();
+        let out = if native {
+            hook::run_as(
+                HookKind::SessionStart,
+                &socket,
+                &stdin,
+                &env,
+                Some(Runtime::Codex),
+                HookTimeouts::default(),
+            )
+            .await
+        } else {
+            fixed_seat::hook(
+                HookKind::SessionStart,
+                &socket,
+                &stdin,
+                &env,
+                Some(Runtime::Codex),
+                HookTimeouts::default(),
+            )
+            .await
+        };
+        out.map(|line| serde_json::from_str(&line).unwrap())
     }
 
     /// A Claude Code session that pins its agent name (`SENATE_AGENT`).
@@ -741,11 +762,12 @@ impl Laptop {
             session_id: None,
             agent: agent.map(str::to_owned),
         };
-        let reply = hook::run(
+        let reply = fixed_seat::hook(
             kind,
             &self.paths.socket(),
             &stdin,
             &env,
+            None,
             HookTimeouts::default(),
         )
         .await
@@ -1259,7 +1281,7 @@ impl Laptop {
             "hook_event_name": HookKind::SessionEnd.event_name(),
         })
         .to_string();
-        hook::run_as(
+        fixed_seat::hook(
             HookKind::SessionEnd,
             &self.paths.socket(),
             &stdin,

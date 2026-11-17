@@ -1,27 +1,8 @@
 //! Which agent a coding session speaks as.
 //!
-//! A bridge holds one person's token and seats one senator per kind of
-//! coding agent it serves. Each session is one of them, chosen when its
-//! hooks register it. An explicit senator name from the session's `join` takes
-//! precedence over the hook's choice, which is made in this order:
-//!
-//! 1. **`SENATE_AGENT`** in the session's environment (Claude Code only: a
-//!    Codex hook runs inside the app-server, whose environment is shared by
-//!    every thread and describes none of them);
-//! 2. **`.senate/agent`** at the worktree root (or the cwd outside git; `senate
-//!    pin` writes it): its first line that is neither blank nor a `#`
-//!    comment. It is kept per branch, like the committee file
-//!    ([`crate::follow`]), and a worktree just added has none;
-//! 3. **`[agents]`** in `senate.toml`, by harness: `claude` for a Claude
-//!    Code session, `codex` for a Codex session;
-//! 4. the harness's own name, `claude` or `codex`.
-//!
-//! A pin is one flat senator name ([`SenatorName`]): `claude`, `reviewer`.
-//! There is no owner in it and no path: the agent belongs to the person
-//! whose machine runs it, and an agent that needs a team of its own gets a
-//! child Senate. A pin that is not a valid name (a path such as
-//! `claude/reviewer` included) is ignored with a warning and the next rule
-//! applies, so a typo never leaves a session unregistered.
+//! Native interactive sessions have a primary derived from their harness and native ID.
+//! A Claude environment pin, a worktree pin, or a custom harness setting may suggest
+//! an initial alias. Explicit alias changes are registered in the Senate.
 
 use std::fmt;
 
@@ -30,6 +11,23 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::AgentNames;
 use crate::session::Runtime;
+
+/// Use the native ID verbatim whenever it fits the Senate address grammar. Reserve
+/// the hash marker so an opaque ID cannot collide with a literal digest-shaped ID.
+pub fn session_name(runtime: Runtime, id: &str) -> SenatorName {
+    let name = format!("{}-{id}", runtime.as_str());
+    if !id.is_empty()
+        && !id.starts_with("h-")
+        && let Ok(name) = name.parse()
+    {
+        return name;
+    }
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(id.as_bytes());
+    format!("{}-h-{}", runtime.as_str(), hex::encode(&digest[..26]))
+        .parse()
+        .unwrap_or_else(|_| unreachable!("the encoded session ID is a valid name"))
+}
 
 /// The environment variable that pins a Claude Code session's agent name.
 pub const AGENT_ENV: &str = "SENATE_AGENT";
@@ -40,6 +38,8 @@ pub const AGENT_FILE: &str = ".senate/agent";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentSource {
+    /// The harness and full native session ID.
+    Session,
     /// Chosen by this session with the join tool.
     Join,
     /// `SENATE_AGENT`.
@@ -53,6 +53,7 @@ pub enum AgentSource {
 impl AgentSource {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Session => "session",
             Self::Join => "join",
             Self::Env => "env",
             Self::File => "file",
@@ -62,6 +63,7 @@ impl AgentSource {
 
     pub fn parse(s: &str) -> Option<Self> {
         match s {
+            "session" => Some(Self::Session),
             "join" => Some(Self::Join),
             "env" => Some(Self::Env),
             "file" => Some(Self::File),
@@ -159,6 +161,33 @@ mod tests {
 
     fn agent(s: &str) -> SenatorName {
         s.parse().unwrap()
+    }
+
+    #[test]
+    fn session_addresses_are_stable_and_distinct_across_runtimes_and_opaque_ids() {
+        let id = "01a1eaf7-21d8-7461-aa03-9d4b057ead19";
+        assert_eq!(
+            session_name(Runtime::Codex, id).as_str(),
+            format!("codex-{id}")
+        );
+        assert_ne!(
+            session_name(Runtime::Codex, id),
+            session_name(Runtime::Claude, id)
+        );
+        let opaque = "with/slash";
+        let hashed = session_name(Runtime::Claude, opaque);
+        assert_eq!(hashed, session_name(Runtime::Claude, opaque));
+        assert_ne!(
+            hashed,
+            session_name(
+                Runtime::Claude,
+                hashed.as_str().strip_prefix("claude-").unwrap()
+            )
+        );
+        assert_ne!(
+            session_name(Runtime::Codex, &"z".repeat(90)),
+            session_name(Runtime::Codex, &"z".repeat(91))
+        );
     }
 
     #[test]

@@ -50,6 +50,11 @@ impl SenatorName {
         Ok(Self(name))
     }
 
+    /// Namespace reserved for primary identities of interactive coding sessions.
+    pub fn is_session_name(&self) -> bool {
+        self.as_str().starts_with("codex-") || self.as_str().starts_with("claude-")
+    }
+
     /// The name itself.
     pub fn name(&self) -> &Name {
         &self.0

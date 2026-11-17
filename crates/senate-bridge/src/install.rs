@@ -547,12 +547,12 @@ pub fn render(plan: &InstallPlan, opts: &InstallOptions, applied: bool) -> Strin
         l.pick(
             "Claude Code 为每个会话启动 `senate mcp`；工具显示为 \
              mcp__senate__ask / answer / catch_up / join / search / post / status / escalate / …。\
-             Claude Code 会话默认以 <person>/claude 的身份加入；SENATE_AGENT 环境变量或工作区里的 \
-             .senate/agent 文件可以换一个名字。",
+             Claude Code 会话以 [senator::claude-<session-id>] 的身份加入；SENATE_AGENT 或工作区里的 \
+             .senate/agent 可以建议初始别名。",
             "Claude Code starts `senate mcp` for each session; its tools appear as \
              mcp__senate__ask / answer / catch_up / join / search / post / status / escalate / …. \
-             Claude Code sessions join as <person>/claude by default; SENATE_AGENT or a \
-             .senate/agent file in the worktree picks another name."
+             Claude Code sessions join as [senator::claude-<session-id>]. SENATE_AGENT or a \
+             .senate/agent file in the worktree suggests an initial alias."
         )
     );
     let _ = writeln!(out, "\n2. {}", plan.settings_path.display());

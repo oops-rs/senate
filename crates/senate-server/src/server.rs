@@ -36,6 +36,8 @@ pub enum ServerError {
     },
     #[error("starting the supervision tree: {0}")]
     Spawn(String),
+    #[error("loading senator aliases: {0}")]
+    Aliases(String),
     #[error("reading the log's epoch: {0}")]
     Epoch(String),
     #[error("HTTP server: {0}")]
@@ -187,6 +189,16 @@ impl ServerBuilder {
             }
             said.push(note.text);
         }
+        let aliases = registry::aliases(store.as_ref())
+            .await
+            .map_err(|e| ServerError::Aliases(e.to_string()))?;
+        for (alias, primary) in &aliases {
+            if roster.knows(alias) || !roster.is_agent(primary) {
+                return Err(ServerError::Aliases(format!(
+                    "invalid stored alias {alias} for {primary}"
+                )));
+            }
+        }
         let seats = Arc::new(Seats::new(roster));
         let epoch = store
             .epoch()
@@ -226,6 +238,7 @@ impl ServerBuilder {
             built_in,
             notes: said,
             children: loaded,
+            aliases,
             senate: config.senate_name(),
             parent: config.parent.clone(),
         }));

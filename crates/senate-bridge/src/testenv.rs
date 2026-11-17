@@ -27,13 +27,14 @@ pub const CONFINE_ENV: &str = "SENATE_CONFINE_TO";
 
 /// What a spawned binary must never inherit from the process running the
 /// tests.
-pub const INHERITED: [&str; 11] = [
+pub const INHERITED: [&str; 12] = [
     "CLAUDE_CODE_MESSAGING_SOCKET",
     "CLAUDE_CODE_MESSAGING_TOKEN",
     "CLAUDE_CODE_SESSION_ID",
     "CLAUDE_PID",
     "CLAUDE_CONFIG_DIR",
     "CODEX_HOME",
+    "CODEX_THREAD_ID",
     "SENATE_HOME",
     "SENATE_AGENT",
     "SENATED_CONFIG",

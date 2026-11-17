@@ -101,7 +101,8 @@ impl Front {
                 .await;
                 wrap(self.status())
             }
-            Request::Hook(report) => wrap(self.on_hook(report).await),
+            Request::Hook(report) => wrap(self.on_hook(report, false).await),
+            Request::SessionHook(report) => wrap(self.on_hook(report, true).await),
             Request::SessionEnd { session_id, reason } => {
                 let mut reply = Reply::ok(&serde_json::json!({}));
                 for shared in &self.senates {
@@ -118,14 +119,8 @@ impl Front {
                 reply
             }
             Request::Presides {
-                session,
-                runtime,
-                agent_env,
-                agent_file,
-            } => wrap(
-                self.on_presides(&session, runtime, agent_env, agent_file)
-                    .await,
-            ),
+                session, runtime, ..
+            } => wrap(self.on_presides(&session, runtime).await),
             Request::Docket { session, committee } => {
                 wrap(self.on_docket(&session, committee).await)
             }
@@ -210,11 +205,11 @@ impl Front {
 
     /// Register the session, and tell a presiding session what it presides
     /// over.
-    async fn on_hook(&self, report: HookReport) -> Result<HookReply, IpcError> {
+    async fn on_hook(&self, report: HookReport, native: bool) -> Result<HookReply, IpcError> {
         let codex = report.runtime == Runtime::Codex;
         let target = self.primary().clone();
         let event = report.event;
-        let mut reply = target.on_hook(report, None).await?;
+        let mut reply = target.on_hook(report, native).await?;
         if codex {
             target.reconcile_approvals();
         }
@@ -255,23 +250,13 @@ impl Front {
         &self,
         selector: &SessionSelector,
         runtime: Runtime,
-        agent_env: Option<String>,
-        agent_file: Option<String>,
     ) -> Result<PresidesReply, IpcError> {
         let agent = match self.locate(selector) {
             Some((_, session)) => Some(session.agent),
-            None => {
-                let primary = self.primary();
-                let (name, _) = agent::choose(
-                    &primary.config.agents,
-                    runtime,
-                    agent::Pins {
-                        env: agent_env.as_deref(),
-                        file: agent_file.as_deref(),
-                    },
-                );
-                Some(primary.seating().place(&name))
-            }
+            None => selector
+                .session_id
+                .as_deref()
+                .map(|id| agent::session_name(runtime, id)),
         };
         // The desk may have changed since the daemon last asked.
         self.primary().refresh_me().await;

@@ -353,12 +353,23 @@ None of them needs the daemon; a live session in that worktree reads a change at
 
 **`.senate/` follows the branch.** It is untracked, so `git switch` leaves it in place, and the next branch would inherit the old one's committee and notes (and overwrite them). So Senate keeps one saved copy per (repository, branch) under `~/.senate/branches/`, and swaps when the branch changes: the files of the branch you left are saved, those of the branch you arrive on come back. A branch with no saved copy is unbound, exactly like a fresh worktree. Only the five files Senate defines are swapped (`committee`, `agent`, `PROGRESS.md`, `DECISIONS.md`, `OPEN.md`); any other file in `.senate/` stays. A detached HEAD has a copy of its own per worktree. A renamed branch keeps its files (Senate recognises `git branch -m` from the reflog, or from HEAD being unchanged) and its copy follows the new name. Git is never told and no git hook is installed: every hook, every checkpoint (the tool and the commit, timer and session-end triggers) and every command above first makes `.senate/` match the checked-out branch, so a checkpoint right after a switch carries the notes and the committee of the branch it is about. A session already open in the worktree is re-bound at its next hook, and told so in one line; an explicit `join` is not disturbed. Wherever Senate creates `.senate/`, or finds it without one, it writes `.senate/.gitignore` holding `*`, so nothing in it is ever committed and no repository's own ignore file is touched.
 
-An agent resolves its **senator name** (one flat name; a path is ignored) using this precedence:
-1. A name chosen for this session with the MCP tool, for example `join(committee="senate", senator="reviewer")`. Two sessions in one worktree can use different names. The choice survives a restart while the session record is retained. Call `join` again with a new name to switch.
-2. `SENATE_AGENT` in a Claude Code session. Codex threads share an app-server environment and ignore this variable.
-3. The worktree's `.senate/agent` file (`senate pin`; kept per branch like the committee).
-4. `[agents]` mapping in `senate.toml`.
-5. Harness default name (`claude` or `codex`).
+### Session senator IDs and aliases
+
+Codex and Claude Code hooks use a primary address derived from the native thread or session ID, such as `[senator::codex-<thread-id>]`. Two sessions in the same checkout have independent inboxes immediately. Resuming the same session restores its primary ID. Native IDs outside the senator name grammar use a deterministic hash.
+
+Give a session an alias through MCP with `join(committee="senate", senator="reviewer")`, or use the CLI:
+
+```sh
+senate join senate --alias reviewer                  # inside the coding session
+senate status --full-ids                             # find a session from another terminal
+senate join senate --alias reviewer --session <id>   # name that session
+senate aliases                                      # list alias → primary ID
+senate ask reviewer "Which change needs review?"
+```
+
+The Senate stores aliases in its own registry. An alias is unique within its Senate and stays registered while its session is offline. Setting a new alias releases the old one. Messages, inbox cursors, and role assignments use the primary ID. The prefixes `codex-` and `claude-` are reserved for session IDs. Existing committee logs keep their recorded addresses.
+
+A worktree pin, Claude Code's `SENATE_AGENT`, or a custom `[agents]` setting can suggest an initial alias. An explicit alias takes precedence. A conflicting pin produces a warning and the session remains reachable through its primary ID.
 
 Known limits: a brand-new worktree on a brand-new branch starts unbound until `senate join` (a new worktree on a branch that already has a saved copy gets it back); the saved copies are keyed by the repository's real path, so moving a repository leaves its copies stale until `senate free` removes them. `senate free` removes: copies whose repository, branch or detached-HEAD worktree no longer exists (a copy for a branch that still exists is never removed, however old); session records that ended more than 7 days ago or whose process is gone; and queued items and cursors of agents with no session and no contact for `free_after_days` (default 30, in `senate.toml`). It only *lists* the data directory of a hosted Senate that `senate.toml` no longer names, because that is a log: `senate free --yes --delete-logs` removes it.
 

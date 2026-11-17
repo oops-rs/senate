@@ -518,15 +518,18 @@ developer machines: `.senate/` is the only one.**
 A session's committee is, first match wins: its explicit `join` (this session
 only); the branch name `<prefix>/<committee>/<person>`, only when
 `committee_from_branch = true` in `senate.toml` (off by default; `branch_prefix`
-alone does not enable it); `.senate/committee`. The optional `senator` on the session's MCP `join` selects its
-agent. The bridge stores that choice under the session ID (the thread ID for Codex).
-Hooks and committee-only joins preserve it until the session record is pruned.
-A new name takes its own seat with its own inbox and cursors. Earlier messages,
-task ownership and office assignments stay with the senator named in the log.
-Without a session choice the order is `SENATE_AGENT` (Claude Code only),
-then `.senate/agent`, then `[agents]`, then the harness's name: one flat name
-each (a pinned path such as `claude/reviewer` is ignored with a warning). A
-session with no committee is unbound.
+alone does not enable it); `.senate/committee`. The native session's primary address is `senator::<harness>-<session-id>`.
+The bridge computes it from the full ID. Opaque IDs that exceed the 63-character
+address limit or contain unsupported characters use a deterministic SHA-256-derived
+suffix. Session records can expire without changing a resumed session's identity.
+
+The session's MCP `join` accepts a `senator` alias. The CLI equivalent is
+`senate join <committee> --alias <name>`. A pin (Claude environment, then worktree
+file, then a custom harness setting) can suggest an initial alias. The server
+records the Senate-wide alias → primary map in the log store's registry. It
+serializes competing claims, checks the principal that owns the primary, and
+resolves recipients before storing events. Changing an alias keeps the same
+inbox, byline, and roles. Use `senate aliases` to inspect the current map.
 
 ### A home written when senators were paths
 

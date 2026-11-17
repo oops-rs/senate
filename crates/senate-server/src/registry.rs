@@ -129,3 +129,26 @@ pub(crate) async fn first_time(store: &dyn LogStore, key: &str) -> bool {
         }
     }
 }
+
+/// One registry write replaces the complete mapping, including release of the previous alias.
+pub(crate) async fn aliases(
+    store: &dyn LogStore,
+) -> Result<senate_core::api::SenatorAliases, LogError> {
+    let Some((_, value)) = store
+        .registry("senator-aliases")
+        .await?
+        .into_iter()
+        .find(|(key, _)| key == "senator-aliases")
+    else {
+        return Ok(BTreeMap::new());
+    };
+    serde_json::from_value(value).map_err(|e| LogError::Invalid(e.to_string()))
+}
+
+pub(crate) async fn put_aliases(
+    store: &dyn LogStore,
+    aliases: &senate_core::api::SenatorAliases,
+) -> Result<(), LogError> {
+    let value = serde_json::to_value(aliases).map_err(|e| LogError::Invalid(e.to_string()))?;
+    store.put_registry("senator-aliases", Some(value)).await
+}

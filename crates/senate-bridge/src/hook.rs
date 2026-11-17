@@ -193,6 +193,32 @@ pub async fn run_as(
     runtime: Option<Runtime>,
     timeouts: HookTimeouts,
 ) -> Option<String> {
+    // Connect before asking git anything: a down daemon costs milliseconds.
+    let mut client = ipc::IpcClient::connect(daemon_socket, timeouts.connect)
+        .await
+        .ok()?;
+    let request = prepare(kind, daemon_socket, stdin, env, runtime, timeouts.git).await?;
+    match kind {
+        HookKind::SessionEnd => {
+            let _: serde_json::Value = client.call(&request, timeouts.request).await.ok()?;
+            None
+        }
+        _ => {
+            let reply: HookReply = client.call(&request, timeouts.request).await.ok()?;
+            reply.context.map(|c| output_for(kind, &c))
+        }
+    }
+}
+
+/// Build a hook's IPC report without sending it.
+pub async fn prepare(
+    kind: HookKind,
+    daemon_socket: &Path,
+    stdin: &str,
+    env: &HookEnv,
+    runtime: Option<Runtime>,
+    git_timeout: Duration,
+) -> Option<Request> {
     // A companion session (a headless fork the daemon runs) is not an
     // interactive session: it must not register, nor take pushes.
     if std::env::var_os(crate::companion::ENV_COMPANION).is_some() {
@@ -208,10 +234,6 @@ pub async fn run_as(
         Runtime::Codex => HookEnv::default(),
     };
     let session_id = input.session_id.or_else(|| env.session_id.clone())?;
-    // Connect before asking git anything, so a down daemon costs milliseconds.
-    let mut client = ipc::IpcClient::connect(daemon_socket, timeouts.connect)
-        .await
-        .ok()?;
     // The Senate home is where the daemon's socket is.
     let home = crate::paths::Paths::new(daemon_socket.parent().unwrap_or(Path::new(".")));
     let request = match kind {
@@ -219,7 +241,7 @@ pub async fn run_as(
             // The notes the daemon's last checkpoint reads belong to the
             // branch now checked out.
             if let Some(cwd) = input.cwd.clone() {
-                let _ = session::gather_synced(&home, &cwd, timeouts.git).await;
+                let _ = session::gather_synced(&home, &cwd, git_timeout).await;
             }
             Request::SessionEnd {
                 session_id,
@@ -235,11 +257,11 @@ pub async fn run_as(
                     return Vec::new();
                 }
                 let parent = std::os::unix::process::parent_id();
-                session::ancestor_pids(parent, ANCESTOR_DEPTH, timeouts.git).await
+                session::ancestor_pids(parent, ANCESTOR_DEPTH, git_timeout).await
             };
             let ((facts, _), ancestor_pids) =
-                tokio::join!(session::gather_synced(&home, &cwd, timeouts.git), ancestors);
-            Request::Hook(HookReport {
+                tokio::join!(session::gather_synced(&home, &cwd, git_timeout), ancestors);
+            Request::SessionHook(HookReport {
                 event: if kind == HookKind::SessionStart {
                     HookEvent::SessionStart
                 } else {
@@ -262,16 +284,7 @@ pub async fn run_as(
             })
         }
     };
-    match kind {
-        HookKind::SessionEnd => {
-            let _: serde_json::Value = client.call(&request, timeouts.request).await.ok()?;
-            None
-        }
-        _ => {
-            let reply: HookReply = client.call(&request, timeouts.request).await.ok()?;
-            reply.context.map(|c| output_for(kind, &c))
-        }
-    }
+    Some(request)
 }
 
 #[cfg(test)]

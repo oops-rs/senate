@@ -189,6 +189,32 @@ impl ApiClient {
         req.bearer_auth(&self.token)
     }
 
+    pub async fn set_alias(
+        &self,
+        primary: &SenatorName,
+        alias: &SenatorName,
+        initial: bool,
+    ) -> Result<SenatorName, ApiClientError> {
+        let request = senate_core::api::SetAlias {
+            alias: alias.clone(),
+            initial,
+        };
+        let response = self
+            .authed(self.http.put(self.url(&format!("/v1/aliases/{primary}"))))
+            .json(&request)
+            .send()
+            .await?;
+        Ok(checked(response).await?.json().await?)
+    }
+
+    pub async fn aliases(&self) -> Result<senate_core::api::SenatorAliases, ApiClientError> {
+        let response = self
+            .authed(self.http.get(self.url("/v1/aliases")))
+            .send()
+            .await?;
+        Ok(checked(response).await?.json().await?)
+    }
+
     pub async fn me(&self) -> Result<Me, ApiClientError> {
         let resp = self
             .authed(self.http.get(self.url(api::ME_PATH)))
@@ -246,25 +272,14 @@ impl ApiClient {
         name: &str,
         senator: Option<&SenatorName>,
     ) -> Result<Seq, ApiClientError> {
-        match self.read_cursor(committee, name, senator).await {
-            Err(e) if e.status() == Some(404) => Ok(Seq::ZERO),
-            other => other,
-        }
-    }
-
-    /// A named join requires a successful authenticated first contact. An absent
-    /// cursor from a legacy server is sufficient for replay but cannot confirm a seat.
-    pub(crate) async fn read_cursor(
-        &self,
-        committee: &CommitteeId,
-        name: &str,
-        senator: Option<&SenatorName>,
-    ) -> Result<Seq, ApiClientError> {
         let url = self.url(&api::cursor_path(committee, name));
         let query = CursorQuery {
             senator: senator.cloned(),
         };
         let resp = self.authed(self.http.get(url)).query(&query).send().await?;
+        if resp.status() == StatusCode::NOT_FOUND {
+            return Ok(Seq::ZERO);
+        }
         let cursor: Cursor = checked(resp).await?.json().await?;
         Ok(cursor.seq)
     }

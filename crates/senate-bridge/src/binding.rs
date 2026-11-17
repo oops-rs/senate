@@ -538,13 +538,18 @@ fn agent_here_line(c: &Change, l: Locale) -> String {
                 || a.rel.to_string(),
                 |p| senate_core::Address::senator(p).in_text(),
             );
+            if a.source == AgentSource::Harness && a.rel.as_str() == a.runtime.as_str() {
+                return l
+                    .pick(
+                        "主 ID 由会话 ID 决定。",
+                        "The primary ID comes from the session ID.",
+                    )
+                    .to_owned();
+            }
             l.pick(
+                format!("Claude Code 的初始别名建议为 {who}（来源：{}）。", a.source),
                 format!(
-                    "这里的 Claude Code 会话现在是 {who}（来源：{}）。",
-                    a.source
-                ),
-                format!(
-                    "A Claude Code session here is now {who} (source: {}).",
+                    "Suggested initial Claude Code alias: {who} (source: {}).",
                     a.source
                 ),
             )
@@ -559,8 +564,11 @@ pub fn render_pin(c: &Change, l: Locale) -> String {
     format!(
         "{}\n{}\n{}",
         l.pick(
-            format!("已让{}的会话以 {value} 的身份发言。", place_words(c, l)),
-            format!("Sessions on {} now speak as {value}.", place_words(c, l)),
+            format!("已为{}设置初始别名建议 {value}。", place_words(c, l)),
+            format!(
+                "Sessions on {} can claim the initial alias {value}.",
+                place_words(c, l)
+            ),
         ),
         follows_words(c, l),
         agent_here_line(c, l)
@@ -629,12 +637,23 @@ pub fn render_where(
             Runtime::Claude => "Claude Code",
             Runtime::Codex => "Codex",
         };
-        let _ = writeln!(
-            out,
-            "{} {who} ({})",
-            l.pick(format!("{harness} 会话"), format!("{harness} session")),
-            a.source
-        );
+        if a.source == AgentSource::Harness && a.rel.as_str() == a.runtime.as_str() {
+            let _ = writeln!(
+                out,
+                "{harness}: [senator::{}-<session-id>]",
+                a.runtime.as_str()
+            );
+        } else {
+            let _ = writeln!(
+                out,
+                "{} {who} ({})",
+                l.pick(
+                    format!("{harness} 初始别名建议"),
+                    format!("{harness} initial alias")
+                ),
+                a.source
+            );
+        }
     }
     if r.facts.toplevel.is_some() {
         let owner = match &r.belongs_to {

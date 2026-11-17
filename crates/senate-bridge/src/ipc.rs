@@ -319,7 +319,10 @@ pub struct HookReport {
 pub enum Request {
     Ping,
     Status,
+    /// Fixed-seat registrations from previous bridge clients.
     Hook(HookReport),
+    /// Native coding session. Its immutable senator ID is derived on the daemon.
+    SessionHook(HookReport),
     SessionEnd {
         session_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -366,6 +369,7 @@ pub enum Request {
         committee: CommitteeId,
     },
     /// Separate operation so an older daemon cannot silently ignore the name.
+    Aliases,
     JoinAs {
         session: SessionSelector,
         committee: CommitteeId,
@@ -1213,6 +1217,8 @@ impl CatchUpReply {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JoinReply {
     pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<SenatorName>,
     /// The agent the session speaks as.
     pub agent: SenatorName,
     pub committee: CommitteeId,

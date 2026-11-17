@@ -432,6 +432,17 @@ pub struct SearchResults {
     pub events: Vec<Event>,
 }
 
+/// Senate-wide human-readable addresses, keyed by alias with the primary senator as value.
+pub type SenatorAliases = std::collections::BTreeMap<SenatorName, SenatorName>;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetAlias {
+    pub alias: SenatorName,
+    /// A configured pin supplies an initial alias. An explicit choice takes precedence.
+    #[serde(default)]
+    pub initial: bool,
+}
+
 /// `GET /v1/me`: who the token is, and which Senate answered.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Me {
