@@ -744,6 +744,34 @@ impl SecretaryConfigs {
         &self.notes
     }
 
+    /// Read again whatever changed, in every file the built-in session's
+    /// configuration can come from (`secretary.toml` and each
+    /// `<committee>.secretary.toml` in the directory), and return every
+    /// error in force. The engine re-reads a committee's files only when it
+    /// acts there; this is for whoever shows the errors without waiting
+    /// for that.
+    pub fn check_all(&self) -> Vec<Problem> {
+        self.refresh(None);
+        // The committees with a file now, and those read before (their
+        // file may be gone, which ends its errors).
+        let mut committees: BTreeSet<CommitteeId> = self
+            .lock()
+            .effective
+            .keys()
+            .filter_map(Clone::clone)
+            .collect();
+        if let Some(entries) = self.dir.as_ref().and_then(|d| std::fs::read_dir(d).ok()) {
+            committees.extend(entries.filter_map(Result::ok).filter_map(|e| {
+                let name = e.file_name().into_string().ok()?;
+                CommitteeId::new(name.strip_suffix(COMMITTEE_FILE_SUFFIX)?).ok()
+            }));
+        }
+        for committee in committees {
+            self.refresh(Some(&committee));
+        }
+        self.problems()
+    }
+
     /// Every error in force: unreadable files, models that fell back,
     /// instructions that could not be read.
     pub fn problems(&self) -> Vec<Problem> {

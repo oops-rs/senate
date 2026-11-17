@@ -438,3 +438,103 @@ async fn a_connected_secretary_earlier_in_the_list_covers_first() {
     assert!(by_secretary(&rig.hub.events(&refund())).is_empty());
     rig.stop().await;
 }
+
+// ----- configuration errors, told to the Speaker ----------------------------------
+
+fn notes_to_the_speaker(events: &[Event]) -> Vec<&Event> {
+    events
+        .iter()
+        .filter(|e| {
+            e.kind == Kind::Note
+                && e.from == Address::Speaker
+                && e.to == [Address::senator(&path("pm"))]
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn the_speaker_is_told_once_per_change_of_the_configuration_errors() {
+    let hub = hub_with(office(&["secretary"], &[])).await;
+    let dir = tempfile::tempdir().expect("dir");
+    let file = dir.path().join("secretary.toml");
+    std::fs::write(&file, "mode = \"loud\"\n").expect("write");
+    let mut config = super::rig::config();
+    config.locale = senate_core::Locale::En;
+    let secretary = Arc::new(crate::SecretaryConfigs::new(
+        Some(dir.path().into()),
+        crate::BaseLayer::of_config(&config),
+    ));
+    let (unbound, rx) = tokio::sync::mpsc::channel(4);
+    let surface = super::surface::FakeSurface::new();
+    let brain = crate::ScriptedBrain::new();
+    let args = crate::SpeakerArgs::new(hub.clone(), surface.clone(), brain.clone(), config, rx)
+        .with_secretary(secretary);
+    let rig = Rig::spawn(hub, surface, brain, args, unbound).await;
+    let say = |body: &'static str| NewEvent::new(refund(), Kind::Note, agent("alice"), body);
+
+    rig.append(say("one")).await;
+    rig.settle().await;
+    let events = rig.hub.events(&refund());
+    let told = notes_to_the_speaker(&events);
+    assert_eq!(told.len(), 1, "{events:#?}");
+    assert!(
+        told[0].body.contains("secretary.toml:1"),
+        "{}",
+        told[0].body
+    );
+    assert!(
+        told[0]
+            .body
+            .starts_with("The built-in session's configuration files have errors"),
+        "{}",
+        told[0].body
+    );
+    assert_eq!(acted_by(told[0]), Some("secretary"));
+
+    // The same errors again: nothing more.
+    rig.append(say("two")).await;
+    rig.settle().await;
+    assert_eq!(notes_to_the_speaker(&rig.hub.events(&refund())).len(), 1);
+
+    // A different error is a change.
+    std::fs::write(
+        &file,
+        "# edited\nmode = \"loud\"\nanswer_fallback_secs = \"x\"\n",
+    )
+    .expect("write");
+    rig.append(say("three")).await;
+    rig.settle().await;
+    let events = rig.hub.events(&refund());
+    assert_eq!(notes_to_the_speaker(&events).len(), 2, "{events:#?}");
+
+    // Fixed: nothing is told.
+    std::fs::write(&file, "answer_fallback_secs = 30\n").expect("write");
+    rig.append(say("four")).await;
+    rig.settle().await;
+    assert_eq!(notes_to_the_speaker(&rig.hub.events(&refund())).len(), 2);
+    rig.stop().await;
+}
+
+#[test]
+fn the_configuration_notice_reads_in_both_languages() {
+    use senate_core::Locale;
+    let problems = [crate::Problem {
+        file: "/h/secretary.toml".into(),
+        line: Some(3),
+        message: "mode must be one of".into(),
+    }];
+    let zh = crate::render::config_problems_note(Locale::Zh, &problems);
+    let en = crate::render::config_problems_note(Locale::En, &problems);
+    assert_ne!(zh, en);
+    assert!(zh.starts_with("内置会话的配置文件有错误"), "{zh}");
+    assert!(
+        en.starts_with("The built-in session's configuration files"),
+        "{en}"
+    );
+    for text in [&zh, &en] {
+        assert!(
+            text.contains("/h/secretary.toml:3: mode must be one of"),
+            "{text}"
+        );
+    }
+}

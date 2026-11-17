@@ -120,6 +120,9 @@ pub struct Machine {
     bridge: BridgeConfig,
     /// The hosted Senate's link to the Senate above, when it is a child.
     uplink: Option<uplink::Uplink>,
+    /// What keeps `senate status` told of the built-in session's
+    /// configuration errors.
+    watches: Vec<SecretaryWatch>,
 }
 
 /// What the hosted Senate is, before it starts.
@@ -273,6 +276,7 @@ impl Machine {
         // starts last, so every Senate it serves is up when it starts.
         let mut senates = Vec::with_capacity(plans.len());
         let mut stores = Vec::with_capacity(plans.len());
+        let mut watches = Vec::new();
         let carrier = plans.first().map(|p| p.key.clone());
         let mut ordered: Vec<Plan> = plans;
         if !ordered.is_empty() {
@@ -291,11 +295,23 @@ impl Machine {
                 .await
                 .map_err(|e| MachineError::Invalid(format!("the Senate {}: {e}", p.name)))?;
             stores.push(store.clone());
-            let mut assembly = match built_in_session(&paths, &p) {
-                Some(secretary) => Assembly::new(config).secretary(Arc::new(secretary)),
-                None => Assembly::new(config).without_speaker(),
+            let secretary = secretary_home(&paths, &p);
+            let mut assembly = match &secretary {
+                Some(secretary) if secretary.model_configured() => {
+                    Assembly::new(config).secretary(secretary.clone())
+                }
+                _ => Assembly::new(config).without_speaker(),
             }
             .store(store);
+            // The files are looked at whether or not a model runs them:
+            // `senate status` lists what is wrong with them either way.
+            if let Some(secretary) = secretary {
+                watches.push(SecretaryWatch::spawn(
+                    secretary,
+                    p.dir.clone(),
+                    SECRETARY_WATCH.min(timing.sweep),
+                ));
+            }
             if carries {
                 assembly = assembly.component_arc(side.clone());
             }
@@ -337,6 +353,7 @@ impl Machine {
             alone,
             bridge,
             uplink,
+            watches,
         })
     }
 
@@ -386,6 +403,9 @@ impl Machine {
     pub async fn shutdown(mut self) {
         if let Some(uplink) = self.uplink.take() {
             uplink.shutdown().await;
+        }
+        for watch in self.watches.drain(..) {
+            watch.shutdown().await;
         }
         if let Some(alone) = self.alone.take() {
             alone.stop().await;
@@ -515,19 +535,87 @@ pub fn parent_unreachable(url: &str, error: &str, locale: Locale) -> String {
 
 /// The built-in session's configuration for the hosted Senate, read from
 /// the Senate home (`[model]` in `senate.toml`, `secretary.toml`,
-/// `<committee>.secretary.toml`), when a model is configured there. The
-/// assembly runs it only when the roster names it (as the Speaker, or as
-/// a secretary). `None`: no model, or the files could not be read (said
-/// once in the log).
-fn built_in_session(paths: &Paths, plan: &Plan) -> Option<senate_speaker::SecretaryConfigs> {
+/// `<committee>.secretary.toml`). The assembly runs the session only when
+/// a model is configured there and the roster names it (as the Speaker, or
+/// as a secretary). `None`: the files could not be read (said once in the
+/// log).
+fn secretary_home(paths: &Paths, plan: &Plan) -> Option<Arc<senate_speaker::SecretaryConfigs>> {
     match crate::config::load_secretary_home(paths.home(), &plan.dir.join("data")) {
-        Ok(secretary) if secretary.model_configured() => Some(secretary),
-        Ok(_) => None,
+        Ok(secretary) => Some(Arc::new(secretary)),
         Err(e) => {
             tracing::warn!("the built-in session's configuration: {e}");
             None
         }
     }
+}
+
+/// How often the machine looks at the built-in session's configuration
+/// files (a few `stat` calls), or the bridge's sweep period when shorter.
+pub const SECRETARY_WATCH: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Keeps [`senate_bridge::ipc::SecretaryProblems::FILE`] in the hosted
+/// Senate's directory what is wrong with the built-in session's
+/// configuration files now: for `senate status`, with the daemon up or
+/// down. The Speaker is told of a change by the engine, when the session
+/// runs.
+struct SecretaryWatch {
+    stop: tokio_util::sync::CancellationToken,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl SecretaryWatch {
+    /// Look once now (so a status right after start is right), then again
+    /// every `period`.
+    fn spawn(
+        secretary: Arc<senate_speaker::SecretaryConfigs>,
+        dir: std::path::PathBuf,
+        period: std::time::Duration,
+    ) -> Self {
+        let mut last = write_secretary_problems(&secretary, &dir, None);
+        let stop = tokio_util::sync::CancellationToken::new();
+        let task = tokio::spawn({
+            let stop = stop.clone();
+            async move {
+                loop {
+                    tokio::select! {
+                        () = stop.cancelled() => return,
+                        () = tokio::time::sleep(period) => {}
+                    }
+                    last = write_secretary_problems(&secretary, &dir, last);
+                }
+            }
+        });
+        Self { stop, task }
+    }
+
+    async fn shutdown(self) {
+        self.stop.cancel();
+        let _ = self.task.await;
+    }
+}
+
+/// Look at every configuration file and, when what is wrong with them is
+/// not what `last` was, write it to `dir`. Returns what is wrong now.
+fn write_secretary_problems(
+    secretary: &senate_speaker::SecretaryConfigs,
+    dir: &Path,
+    last: Option<senate_bridge::ipc::SecretaryProblems>,
+) -> Option<senate_bridge::ipc::SecretaryProblems> {
+    let now = senate_bridge::ipc::SecretaryProblems {
+        problems: secretary
+            .check_all()
+            .into_iter()
+            .map(|p| senate_bridge::ipc::SecretaryProblem {
+                file: p.file,
+                line: p.line,
+                message: p.message,
+            })
+            .collect(),
+    };
+    if last.as_ref() != Some(&now) {
+        now.write(dir);
+    }
+    Some(now)
 }
 
 /// Say once, in the machine's language, how `[local] speaker` was read.

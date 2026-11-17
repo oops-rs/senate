@@ -21,8 +21,8 @@ use senate_core::{Address, Locale, SenatePath};
 use crate::config::BridgeConfig;
 use crate::daemon::senate_words;
 use crate::ipc::{
-    self, ClientError, CommitteeStatus, Registration, Request, RolesReply, StatusReply,
-    StreamState, UplinkStatus,
+    self, ClientError, CommitteeStatus, Registration, Request, RolesReply, SecretaryProblem,
+    SecretaryProblems, StatusReply, StreamState, UplinkStatus,
 };
 use crate::paths::Paths;
 use crate::session::{Runtime, Session};
@@ -47,6 +47,9 @@ pub struct StatusView {
     pub speaker: Option<senate_core::SpeakerSeat>,
     /// The office, the chairs, the children and the Senate above.
     pub roles: Option<RolesReply>,
+    /// Errors in the built-in session's configuration files, one per
+    /// broken file and line.
+    pub secretary_problems: Vec<SecretaryProblem>,
 }
 
 impl StatusView {
@@ -63,8 +66,15 @@ impl StatusView {
             locale: reply.locale,
             speaker: reply.speaker,
             roles: reply.roles,
+            secretary_problems: Vec::new(),
         }
     }
+}
+
+/// The errors the machine's Senate last wrote for its built-in session's
+/// configuration (they are there with the daemon up or down).
+fn secretary_problems(paths: &Paths) -> Vec<SecretaryProblem> {
+    SecretaryProblems::read(&paths.hosted(crate::paths::HOSTED_KEY)).problems
 }
 
 /// Ask the daemon; fall back to the database.
@@ -78,7 +88,11 @@ pub async fn collect(paths: &Paths) -> anyhow::Result<StatusView> {
     )
     .await
     {
-        Ok(reply) => Ok(StatusView::from_reply(reply, socket)),
+        Ok(reply) => {
+            let mut view = StatusView::from_reply(reply, socket);
+            view.secretary_problems = secretary_problems(paths);
+            Ok(view)
+        }
         Err(ClientError::Connect { .. } | ClientError::Timeout) => offline(paths),
         Err(e) => Err(e.into()),
     }
@@ -153,6 +167,7 @@ fn offline(paths: &Paths) -> anyhow::Result<StatusView> {
             .map_or_else(|| BridgeConfig::locale_at(&paths.config()), |c| c.locale),
         speaker: None,
         roles,
+        secretary_problems: secretary_problems(paths),
     };
     if !paths.state_db().exists() {
         return Ok(view);
@@ -287,7 +302,37 @@ pub fn render(view: &StatusView, now: DateTime<Utc>) -> String {
         ),
     };
     render_senate(view, now, &mut out);
+    render_secretary_problems(&view.secretary_problems, l, &mut out);
     out
+}
+
+/// The built-in session's broken configuration files: one line each, the
+/// file, the line and what is wrong. Nothing when none is.
+fn render_secretary_problems(problems: &[SecretaryProblem], l: Locale, out: &mut String) {
+    if problems.is_empty() {
+        return;
+    }
+    let _ = writeln!(
+        out,
+        "\n{}",
+        l.pick(
+            "内置会话的配置有错误（上一份可用的配置仍在生效）",
+            "the built-in session's configuration has errors (the last good one stays in force)"
+        )
+    );
+    for problem in problems {
+        let file = home_relative(&problem.file);
+        // One line each, whatever the parser's message spans.
+        let message = problem
+            .message
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let _ = match problem.line {
+            Some(line) => writeln!(out, "  {file}:{line}: {message}"),
+            None => writeln!(out, "  {file}: {message}"),
+        };
+    }
 }
 
 /// Who holds a Senate's Speaker's seat, in words.
@@ -658,6 +703,7 @@ mod tests {
             locale,
             speaker: None,
             roles: None,
+            secretary_problems: Vec::new(),
         }
     }
 
@@ -677,6 +723,67 @@ mod tests {
             "{text}"
         );
         assert_eq!(text.matches("daemon:").count(), 1);
+    }
+
+    #[test]
+    fn broken_secretary_files_are_one_line_each_in_both_languages() {
+        let now = Utc::now();
+        let problems = vec![
+            SecretaryProblem {
+                file: "/h/secretary.toml".into(),
+                line: Some(3),
+                message: "mode must be one of".into(),
+            },
+            SecretaryProblem {
+                file: "/h/refund-v2.secretary.toml".into(),
+                line: None,
+                message: "cannot be\nread".into(),
+            },
+        ];
+        for locale in Locale::ALL {
+            let mut v = view(locale);
+            assert!(
+                !render(&v, now).contains("secretary.toml"),
+                "none when fine"
+            );
+            v.secretary_problems = problems.clone();
+            let text = render(&v, now);
+            assert!(
+                text.contains("/h/secretary.toml:3: mode must be one of"),
+                "{text}"
+            );
+            assert!(
+                text.contains("/h/refund-v2.secretary.toml: cannot be read"),
+                "{text}"
+            );
+            assert_eq!(text.matches("secretary.toml").count(), 2, "{text}");
+        }
+        let (mut zh, mut en) = (view(Locale::Zh), view(Locale::En));
+        zh.secretary_problems = problems.clone();
+        en.secretary_problems = problems;
+        assert!(render(&zh, now).contains("内置会话的配置有错误"));
+        assert!(render(&en, now).contains("the built-in session's configuration has errors"));
+    }
+
+    #[test]
+    fn the_problems_file_round_trips_and_is_removed_when_there_are_none() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(SecretaryProblems::read(dir.path()).problems.is_empty());
+        let broken = SecretaryProblems {
+            problems: vec![SecretaryProblem {
+                file: "secretary.toml".into(),
+                line: Some(2),
+                message: "bad".into(),
+            }],
+        };
+        broken.write(dir.path());
+        assert_eq!(SecretaryProblems::read(dir.path()), broken);
+        SecretaryProblems::default().write(dir.path());
+        assert!(!dir.path().join(SecretaryProblems::FILE).exists());
+        assert_eq!(
+            SecretaryProblems::read(dir.path()),
+            SecretaryProblems::default()
+        );
     }
 
     #[test]

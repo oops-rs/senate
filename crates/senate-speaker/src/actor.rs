@@ -216,7 +216,10 @@ impl Actor for Speaker {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         let engine = &mut state.engine;
-        engine.prepare(&message);
+        let about = engine.prepare(&message);
+        if let Some(committee) = &about {
+            engine.tell_speaker_of_config_problems(committee).await;
+        }
         match message {
             SpeakerMsg::Event(event) => engine.on_event(*event).await,
             SpeakerMsg::Resync => engine.resync_all().await,

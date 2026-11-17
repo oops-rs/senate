@@ -664,6 +664,27 @@ pub(crate) struct HandedBack {
     pub(crate) answer: String,
 }
 
+/// The note to the Speaker when the built-in session's configuration files
+/// have new errors: where each is, and that the last good configuration
+/// stays in force. `problems` are rendered in the deployment's language
+/// already.
+pub(crate) fn config_problems_note(l: Locale, problems: &[crate::Problem]) -> String {
+    let mut text = l
+        .pick(
+            "内置会话的配置文件有错误，上一份可用的配置仍在生效：",
+            "The built-in session's configuration files have errors; the last good configuration stays in force:",
+        )
+        .to_owned();
+    for problem in problems {
+        let _ = write!(text, "\n- {problem}");
+    }
+    text.push_str(l.pick(
+        "\n改好后会自动重新读取；`senate status` 也列出这些错误。",
+        "\nFix the file and it is read again by itself; `senate status` lists these errors too.",
+    ));
+    text
+}
+
 /// The note pushed to an agent that came back: every answer given for it.
 pub(crate) fn handback_note(l: Locale, since: Seq, answers: &[HandedBack]) -> String {
     let n = answers.len();

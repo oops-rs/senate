@@ -476,7 +476,12 @@ key by key: built-in defaults ← `[model]` in the main configuration ←
 `secretary.toml` ← `<committee>.secretary.toml` (which may not set
 `name`). Files are read again when they change, before the session next
 acts on a committee; a broken file keeps the last good configuration and
-is reported, naming the file and the line. An older `[speaker]` or
+is reported, naming the file and the line: in `senate secretary show`, as
+one line per broken file in `senate status` (a developer machine looks at
+every file every couple of seconds, whether or not a model runs), and as
+one note to the Speaker per change of the errors, in the deployment's
+language, written on the committee the built-in session was handling when
+it saw the change. An older `[speaker]` or
 `[secretary]` table is read as `secretary.toml`, with a note.
 
 ## A developer machine's footprint

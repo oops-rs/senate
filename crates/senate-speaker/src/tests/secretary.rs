@@ -515,3 +515,20 @@ fn a_base_url_is_shown_without_its_credentials() {
         Some("\"https://***@models.example/v1\"")
     );
 }
+
+#[test]
+fn check_all_finds_a_broken_committee_file_nobody_has_acted_on() {
+    let home = Home::new();
+    home.write("secretary.toml", "confirmation_ttl_secs = 120\n");
+    let broken = home.write("refund-v2.secretary.toml", "mode = \"loud\"\n");
+    home.write("notes.toml", "mode = \"loud\"\n");
+    let configs = configs(&home, base(&home));
+    assert!(configs.problems().is_empty(), "nothing read yet");
+    let problems = configs.check_all();
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert_eq!(problems[0].file, broken);
+    assert_eq!(problems[0].line, Some(1));
+    // Fixed: gone at the next look.
+    home.write("refund-v2.secretary.toml", "answer_fallback_secs = 10\n");
+    assert!(configs.check_all().is_empty());
+}

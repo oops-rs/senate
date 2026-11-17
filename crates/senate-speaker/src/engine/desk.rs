@@ -131,7 +131,7 @@ impl Engine {
     // ----- configuration ----------------------------------------------------
 
     /// Apply the configuration of the committee `message` is about.
-    pub(crate) fn prepare(&mut self, message: &SpeakerMsg) {
+    pub(crate) fn prepare(&mut self, message: &SpeakerMsg) -> Option<CommitteeId> {
         let committee = match message {
             SpeakerMsg::Event(event) => Some(event.committee.clone()),
             SpeakerMsg::Retry(committee)
@@ -142,9 +142,62 @@ impl Engine {
             SpeakerMsg::Thought(thought) => thought.0.committee().cloned(),
             SpeakerMsg::Run(report) => Some(report.0.committee().clone()),
             SpeakerMsg::Unbound(_) => None,
-            SpeakerMsg::Resync | SpeakerMsg::Settle(_) => return,
+            SpeakerMsg::Resync | SpeakerMsg::Settle(_) => return None,
         };
         self.use_config(committee.as_ref());
+        committee
+    }
+
+    /// Tell the Speaker, once per change, that the built-in session's
+    /// configuration files have errors: a `note` from the office on
+    /// `committee` (the one being handled when the change was noticed),
+    /// addressed to the Speaker's seat when it is a senator of this Senate
+    /// other than the built-in session itself. A change is a different set
+    /// of errors than the last told; none, then the same again, is a change
+    /// too. The note's id is derived from the errors, so a restart that
+    /// finds the same ones tells nothing twice.
+    pub(crate) async fn tell_speaker_of_config_problems(&mut self, committee: &CommitteeId) {
+        let problems = self.secretary.problems();
+        let key = problems
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if problems.is_empty() {
+            self.told_problems = None;
+            return;
+        }
+        if self.told_problems.as_deref() == Some(key.as_str()) {
+            return;
+        }
+        let speaker = self
+            .roster
+            .office()
+            .and_then(|office| office.speaker_here().cloned())
+            .filter(|speaker| *speaker != self.me);
+        let Some(speaker) = speaker else {
+            // Nobody to tell but the built-in session itself.
+            self.told_problems = Some(key);
+            return;
+        };
+        let note = NewEvent::new(
+            committee.clone(),
+            Kind::Note,
+            Address::Speaker,
+            crate::render::config_problems_note(self.secretary.locale(), &problems),
+        )
+        .with_id(derived_event_id(&[
+            "config-problems",
+            committee.as_str(),
+            &key,
+        ]))
+        .to(Address::senator(&speaker));
+        match self.append(note).await {
+            Ok(_) => self.told_problems = Some(key),
+            Err(stall) => {
+                warn!(%committee, error = %stall, "cannot tell the Speaker of the configuration errors; trying again");
+            }
+        }
     }
 
     /// Re-read the configuration of `committee` (`None`: the groups bound
