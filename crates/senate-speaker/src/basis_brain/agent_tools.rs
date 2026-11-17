@@ -24,7 +24,7 @@ use basis::tools::{
     ParallelToolContext, RuntimeToolDescriptor, ToolDefinition, ToolExecutor, ToolResult,
 };
 use senate_core::{
-    Address, AgentOf, CommitteeId, Hub, Locale, PresenceState, Roster, SenatorPath, Senior,
+    Address, AgentOf, CommitteeId, Hub, Locale, PresenceState, Roster, SenatorName, Senior,
     StatusState,
 };
 use serde_json::{Value, json};
@@ -66,7 +66,7 @@ fn cut(text: &str, max: usize) -> String {
 /// go by (`alice`, `Alice`, `@alice`), an agent path (`alice/claude`), or
 /// either as an address or mention (`senator::alice/claude`,
 /// `[senator::alice/claude]`, `senator::alice/*` for the person).
-fn senator_of(raw: &str, roster: &Roster) -> Option<SenatorPath> {
+fn senator_of(raw: &str, roster: &Roster) -> Option<SenatorName> {
     let raw = raw
         .trim()
         .trim_start_matches('[')
@@ -83,11 +83,11 @@ fn senator_of(raw: &str, roster: &Roster) -> Option<SenatorPath> {
         .or_else(|| bare.trim_start_matches('@').parse().ok())
 }
 
-fn mention(path: &SenatorPath) -> String {
+fn mention(path: &SenatorName) -> String {
     Address::senator(path).in_text()
 }
 
-fn mentions<'a>(paths: impl IntoIterator<Item = &'a SenatorPath>) -> String {
+fn mentions<'a>(paths: impl IntoIterator<Item = &'a SenatorName>) -> String {
     paths
         .into_iter()
         .map(mention)
@@ -188,8 +188,8 @@ impl ToolExecutor for CommitteeStatus {
             .and_then(Value::as_array)
             .map(|list| list.iter().filter_map(Value::as_str).collect())
             .unwrap_or_default();
-        let mut agents: BTreeSet<SenatorPath> = BTreeSet::new();
-        let mut agentless: Vec<SenatorPath> = Vec::new();
+        let mut agents: BTreeSet<SenatorName> = BTreeSet::new();
+        let mut agentless: Vec<SenatorName> = Vec::new();
         let mut unknown: Vec<&str> = Vec::new();
         if asked.is_empty() {
             let present = brief.presence.iter().map(|p| p.agent.clone());
@@ -234,7 +234,7 @@ impl ToolExecutor for CommitteeStatus {
                 offline.push(agent);
             }
         }
-        let list = |paths: &[&SenatorPath]| {
+        let list = |paths: &[&SenatorName]| {
             if paths.is_empty() {
                 "none".to_owned()
             } else {

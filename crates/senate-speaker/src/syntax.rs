@@ -17,7 +17,7 @@
 //! have to remember which language a group is set to. Only what the Speaker
 //! writes back follows the locale.
 
-use senate_core::{Locale, Mention, OutputLevel, SenatorPath};
+use senate_core::{Locale, Mention, OutputLevel, SenatorName};
 
 use crate::brain::{Intent, RelayKind};
 
@@ -266,7 +266,7 @@ pub(crate) fn agent_named(raw: &str) -> Option<(String, String)> {
         return path_parts(&path);
     }
     let bare = text.strip_prefix("senator::").unwrap_or(text);
-    if let Ok(path) = bare.parse::<SenatorPath>() {
+    if let Ok(path) = bare.parse::<SenatorName>() {
         return path_parts(&path);
     }
     for joint in ["'s ", "’s ", " 的 ", "的"] {
@@ -284,7 +284,7 @@ pub(crate) fn agent_named(raw: &str) -> Option<(String, String)> {
     None
 }
 
-fn path_parts(path: &SenatorPath) -> Option<(String, String)> {
+fn path_parts(path: &SenatorName) -> Option<(String, String)> {
     match path.agents() {
         [agent] => Some((path.owner().to_string(), agent.to_string())),
         _ => None,
@@ -294,7 +294,7 @@ fn path_parts(path: &SenatorPath) -> Option<(String, String)> {
 /// Which of `candidates` a reply to "which agent?" names: its number in the
 /// list (1-based), its own name (`codex`), its path (`alice/codex`) or its
 /// mention. `None` unless exactly one matches.
-pub(crate) fn choice(text: &str, candidates: &[SenatorPath]) -> Option<SenatorPath> {
+pub(crate) fn choice(text: &str, candidates: &[SenatorName]) -> Option<SenatorName> {
     let lower = normalize(text);
     if let Ok(n) = lower
         .trim_start_matches('#')
@@ -324,7 +324,7 @@ pub(crate) fn choice(text: &str, candidates: &[SenatorPath]) -> Option<SenatorPa
 mod tests {
     use super::*;
 
-    fn path(s: &str) -> SenatorPath {
+    fn path(s: &str) -> SenatorName {
         s.parse().expect("path")
     }
 

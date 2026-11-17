@@ -65,7 +65,7 @@
 //!   search appends near matches (`pg_trgm` word similarity ≥
 //!   [`NEAR_MATCH_SIMILARITY`]) after the exact ones when there is room.
 //! - **Heartbeats** keep only the latest per `(committee, agent)`, the agent
-//!   by its full [`senate_core::SenatorPath`].
+//!   by its full [`senate_core::SenatorName`].
 
 mod error;
 mod foreign;

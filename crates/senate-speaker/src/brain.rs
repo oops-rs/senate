@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use senate_core::{
     Address, Brief, CheckpointRecord, CommitteeId, Event, Kind, Locale, Name, OutputLevel, Roster,
-    SenatorPath, Seq, ThreadSummary, TriagePayload, TriageVerdict,
+    SenatorName, Seq, ThreadSummary, TriagePayload, TriageVerdict,
 };
 use serde::{Deserialize, Serialize};
 
@@ -56,7 +56,7 @@ pub struct Question {
     pub event: Event,
     /// The agent it was put to. Answered from that agent's own checkpoint,
     /// never another agent's of the same person.
-    pub agent: SenatorPath,
+    pub agent: SenatorName,
     pub committee: CommitteeId,
     /// The committee's most recent events up to the question, oldest first.
     pub context: Vec<Event>,
@@ -382,7 +382,7 @@ pub trait Brain: Send + Sync + 'static {
 /// one of them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentCandidate {
-    pub agent: SenatorPath,
+    pub agent: SenatorName,
     /// This agent's own connection: it can be reached now.
     pub present: bool,
     /// Its own latest checkpoint on the committee.
@@ -416,7 +416,7 @@ pub struct PickInput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pick {
     /// This one (it must be one of the candidates; anything else is asked).
-    Agent(SenatorPath),
+    Agent(SenatorName),
     /// It cannot be told: ask in the thread which one.
     Ask,
 }

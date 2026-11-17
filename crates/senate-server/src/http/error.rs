@@ -2,7 +2,7 @@ use axum::Json;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use senate_core::api::{ApiError, code};
-use senate_core::{HubError, SenatorPath, Seq};
+use senate_core::{HubError, SenatorName, Seq};
 
 /// A non-2xx response with an [`ApiError`] body.
 #[derive(Debug)]
@@ -11,7 +11,7 @@ pub(crate) struct ApiFailure {
     code: &'static str,
     message: String,
     /// With `ambiguous_recipient`: the agents to choose from.
-    candidates: Vec<SenatorPath>,
+    candidates: Vec<SenatorName>,
 }
 
 impl ApiFailure {

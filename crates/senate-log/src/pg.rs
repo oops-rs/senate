@@ -43,7 +43,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, SubsecRound, Utc};
 use senate_core::api::Heartbeat;
 use senate_core::hub::search_terms;
-use senate_core::{Appended, CommitteeId, Event, MirrorRef, NewEvent, SenatorPath, Seq};
+use senate_core::{Appended, CommitteeId, Event, MirrorRef, NewEvent, SenatorName, Seq};
 use sqlx::migrate::Migrator;
 use sqlx::postgres::{PgExecutor, PgPool, PgPoolOptions, PgRow};
 use sqlx::{AssertSqlSafe, Row};
@@ -575,7 +575,7 @@ impl LogStore for PgStore {
         .await?;
         rows.iter()
             .map(|row| {
-                let agent: SenatorPath = row
+                let agent: SenatorName = row
                     .try_get::<String, _>("agent")?
                     .parse()
                     .map_err(|e| LogError::Corrupt(format!("heartbeat agent: {e}")))?;
@@ -598,7 +598,7 @@ impl LogStore for PgStore {
     async fn last_heartbeat(
         &self,
         committee: &CommitteeId,
-        agent: &SenatorPath,
+        agent: &SenatorName,
     ) -> Result<Option<HeartbeatRecord>, LogError> {
         let row = sqlx::query(
             "SELECT sessions, delivered_seq, seen_at FROM heartbeats \

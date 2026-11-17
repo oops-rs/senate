@@ -39,7 +39,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use senate_core::{MAX_AGENT_DEPTH, Name, SenatorPath};
+use senate_core::{MAX_AGENT_DEPTH, Name, SenatorName};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::config::AgentNames;
@@ -84,13 +84,13 @@ impl RelPath {
     }
 
     /// The agent this path names under `person`.
-    pub fn under(&self, person: &Name) -> SenatorPath {
-        SenatorPath::new(person.clone(), self.0.clone())
+    pub fn under(&self, person: &Name) -> SenatorName {
+        SenatorName::new(person.clone(), self.0.clone())
             .unwrap_or_else(|_| unreachable!("a RelPath is never deeper than an agent path"))
     }
 
     /// `agent` relative to its person; `None` for a person.
-    pub fn of(agent: &SenatorPath) -> Option<Self> {
+    pub fn of(agent: &SenatorName) -> Option<Self> {
         agent.is_junior().then(|| Self(agent.agents().to_vec()))
     }
 }
@@ -170,7 +170,7 @@ impl fmt::Display for AgentSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Seating {
     person: Name,
-    presider: Option<SenatorPath>,
+    presider: Option<SenatorName>,
 }
 
 impl Seating {
@@ -188,7 +188,7 @@ impl Seating {
     /// ([`Roster::may_act_as`](senate_core::Roster::may_act_as)); the bridge
     /// then seats under the person and lets the server refuse, so the
     /// refusal is visible rather than guessed around.
-    pub fn new(person: Name, presider: Option<SenatorPath>) -> Self {
+    pub fn new(person: Name, presider: Option<SenatorName>) -> Self {
         Self { person, presider }
     }
 
@@ -198,25 +198,25 @@ impl Seating {
 
     /// The Senate this bridge is connected to, by its presider (`None`: the
     /// top Senate).
-    pub fn presider(&self) -> Option<&SenatorPath> {
+    pub fn presider(&self) -> Option<&SenatorName> {
         self.presider.as_ref()
     }
 
     /// The senator agents are named under.
-    pub fn base(&self) -> SenatorPath {
+    pub fn base(&self) -> SenatorName {
         match &self.presider {
             Some(p) if p.owner() == &self.person && p.is_junior() => p.clone(),
-            _ => SenatorPath::senior(self.person.clone()),
+            _ => SenatorName::senior(self.person.clone()),
         }
     }
 
     /// The agent called `name`.
-    pub fn agent(&self, name: &Name) -> SenatorPath {
+    pub fn agent(&self, name: &Name) -> SenatorName {
         let base = self.base();
         // A path is at most MAX_AGENT_DEPTH deep; a presider already at the
         // bottom leaves the person's own level as the only one to use.
         base.child(name.clone()).unwrap_or_else(|_| {
-            SenatorPath::senior(self.person.clone())
+            SenatorName::senior(self.person.clone())
                 .child(name.clone())
                 .unwrap_or_else(|_| unreachable!("one agent segment is always allowed"))
         })
@@ -225,7 +225,7 @@ impl Seating {
     /// Where a session pinned to `rel` sits: a single name under
     /// [`Seating::base`] (one Senate, see the module docs), a longer path
     /// under the person.
-    pub fn place(&self, rel: &RelPath) -> SenatorPath {
+    pub fn place(&self, rel: &RelPath) -> SenatorName {
         match rel.single() {
             Some(name) => self.agent(name),
             None => rel.under(&self.person),
@@ -235,7 +235,7 @@ impl Seating {
     /// Whether `agent` is one this bridge may speak as: an agent under its
     /// base. Anything else in a request is refused before it reaches the
     /// server.
-    pub fn owns(&self, agent: &SenatorPath) -> bool {
+    pub fn owns(&self, agent: &SenatorName) -> bool {
         let parent = agent.presider().unwrap_or_else(|| agent.senior_path());
         agent.is_junior() && parent == self.base()
     }
@@ -294,7 +294,7 @@ mod tests {
         Name::new(s).unwrap()
     }
 
-    fn path(s: &str) -> SenatorPath {
+    fn path(s: &str) -> SenatorName {
         s.parse().unwrap()
     }
 

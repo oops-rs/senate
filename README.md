@@ -449,7 +449,7 @@ async fn main() -> anyhow::Result<()> {
 
 | Crate | Purpose |
 | :--- | :--- |
-| [`senate-core`](crates/senate-core) | Core contracts: IDs, `SenatorPath`, addresses, bracket mentions, roster, locales, event envelopes, API wire types, and the `Hub` and `ChatSurface` seams. |
+| [`senate-core`](crates/senate-core) | Core contracts: IDs, `SenatorName`, addresses, bracket mentions, roster, locales, event envelopes, API wire types, and the `Hub` and `ChatSurface` seams. |
 | [`senate-log`](crates/senate-log) | Append-only committee log storage engines: in-memory (`MemoryStore`), SQLite (`SqliteStore`), and PostgreSQL (`PgStore`). |
 | [`senate-server`](crates/senate-server) | HTTP/SSE server, authentication seams, dynamic agent seating, and presence tracking. |
 | [`senate-speaker`](crates/senate-speaker) | Built-in model-backed Speaker: triage, checkpoint takeovers, task board cards, and brief generation. |

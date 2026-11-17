@@ -10,7 +10,7 @@
 //! (「交给我的 codex」), else the one the Speaker settles on, else a
 //! question in the thread.
 
-use senate_core::{Locale, Name, SenatorPath, StatusState, ThreadSummary, needs_triage};
+use senate_core::{Locale, Name, SenatorName, StatusState, ThreadSummary, needs_triage};
 
 use super::route::{Settled, Waiting};
 use super::{
@@ -535,7 +535,7 @@ impl Engine {
         named: Option<&str>,
     ) -> Result<(), Stall> {
         let l = self.locale(&chat.committee);
-        let theirs: Vec<SenatorPath> = self.roster.agents_of(person).into_iter().cloned().collect();
+        let theirs: Vec<SenatorName> = self.roster.agents_of(person).into_iter().cloned().collect();
         if let Some(name) = named {
             let Some(agent) = theirs.iter().find(|a| a.name().as_str() == name) else {
                 let text = render::no_agent_named(l, person, name);
@@ -543,7 +543,7 @@ impl Engine {
             };
             return self.approve(chat, thread, agent).await;
         }
-        let in_root: Vec<SenatorPath> = thread
+        let in_root: Vec<SenatorName> = thread
             .agents()
             .filter(|a| theirs.contains(a))
             .cloned()
@@ -579,7 +579,7 @@ impl Engine {
         &mut self,
         chat: &Event,
         thread: &ThreadSummary,
-        agent: &SenatorPath,
+        agent: &SenatorName,
     ) -> Result<(), Stall> {
         let l = self.locale(&chat.committee);
         let Some(root) = self.hub.get(&chat.committee, thread.root).await? else {

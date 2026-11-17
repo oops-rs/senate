@@ -36,7 +36,7 @@ use senate_core::api::{
 };
 use senate_core::hub::{matches_terms, search_terms};
 use senate_core::{
-    Address, Brief, CommitteeId, Event, Kind, Locale, Name, NewEvent, Roster, SenatorPath, Senior,
+    Address, Brief, CommitteeId, Event, Kind, Locale, Name, NewEvent, Roster, SenatorName, Senior,
     Seq, Source,
 };
 use serde_json::{Value, json};
@@ -59,7 +59,7 @@ pub fn name(h: &str) -> Name {
     Name::new(h).unwrap()
 }
 
-pub fn path(p: &str) -> SenatorPath {
+pub fn path(p: &str) -> SenatorName {
     p.parse().unwrap()
 }
 
@@ -163,7 +163,7 @@ pub struct Inner {
     /// Who sits here; agents are seated on first contact.
     pub roster: Roster,
     /// What `/v1/me` names as the Senate's presider.
-    pub presider: Option<SenatorPath>,
+    pub presider: Option<SenatorName>,
     /// Who `/v1/me` says holds the Speaker's seat; unset: the presider.
     pub speaker: Option<senate_core::SpeakerSeat>,
     /// What `/v1/me` says about a Speaker judging roots here.
@@ -255,7 +255,7 @@ fn api_error(status: StatusCode, code: &str, message: &str) -> Response {
 }
 
 /// May `person` act as `senator` here? Seats an agent on first contact.
-fn act_as(st: &FakeState, person: &str, senator: &SenatorPath) -> Result<(), Response> {
+fn act_as(st: &FakeState, person: &str, senator: &SenatorName) -> Result<(), Response> {
     let mut inner = st.inner.lock().unwrap();
     inner
         .roster

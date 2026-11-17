@@ -13,7 +13,7 @@ use common::*;
 use ractor::ActorId;
 use reqwest::{Method, StatusCode};
 use senate_core::api::{AppendResponse, Heartbeat, events_path};
-use senate_core::{Appended, CommitteeId, Event, Hub, MirrorRef, NewEvent, SenatorPath, Seq};
+use senate_core::{Appended, CommitteeId, Event, Hub, MirrorRef, NewEvent, SenatorName, Seq};
 use senate_log::{CursorOwner, HeartbeatRecord, LogError, LogStore, MemoryStore};
 use tokio::sync::broadcast::error::TryRecvError;
 
@@ -131,7 +131,7 @@ impl LogStore for Faulty {
     async fn last_heartbeat(
         &self,
         f: &CommitteeId,
-        agent: &SenatorPath,
+        agent: &SenatorName,
     ) -> Result<Option<HeartbeatRecord>, LogError> {
         self.inner.last_heartbeat(f, agent).await
     }

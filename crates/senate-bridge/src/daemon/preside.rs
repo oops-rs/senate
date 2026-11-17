@@ -15,7 +15,7 @@ const HOOK_DOCKET_TIMEOUT: Duration = Duration::from_secs(1);
 impl Shared {
     /// The agents seated in this Senate that this machine knows of: every
     /// agent with a session here on record.
-    pub(crate) fn seated(&self) -> Vec<SenatorPath> {
+    pub(crate) fn seated(&self) -> Vec<SenatorName> {
         self.served_agents()
             .map(|agents| agents.into_iter().collect())
             .unwrap_or_default()
@@ -69,7 +69,7 @@ impl Shared {
         let mut checkpoints = Vec::new();
         for committee in self.docket_committees(committee).await? {
             let page = self.api.docket(&committee).await.map_err(server_error)?;
-            let mut away: BTreeSet<SenatorPath> = BTreeSet::new();
+            let mut away: BTreeSet<SenatorName> = BTreeSet::new();
             for item in &page.items {
                 if let Awaiting::Away { agents } = &item.awaiting {
                     away.extend(agents.iter().cloned());
@@ -117,10 +117,10 @@ impl Shared {
     /// should have it. A question to an away agent is never rerouted.
     pub(crate) async fn on_route(
         &self,
-        speaker: &SenatorPath,
+        speaker: &SenatorName,
         committee: CommitteeId,
         seq: Seq,
-        to: SenatorPath,
+        to: SenatorName,
         id: Option<EventId>,
     ) -> Result<Posted, IpcError> {
         let (item, _) = self.docket_item(&committee, seq).await?;
@@ -168,11 +168,11 @@ impl Shared {
     /// takeover word, pointing at the checkpoint's branch and commit.
     pub(crate) async fn on_cover(
         &self,
-        speaker: &SenatorPath,
+        speaker: &SenatorName,
         committee: CommitteeId,
         thread: Seq,
         body: String,
-        agent: Option<SenatorPath>,
+        agent: Option<SenatorName>,
         id: Option<EventId>,
     ) -> Result<Posted, IpcError> {
         if body.trim().is_empty() {
@@ -243,7 +243,7 @@ impl Shared {
     /// agent), else the Speaker's own person.
     pub(crate) async fn on_refer(
         &self,
-        speaker: &SenatorPath,
+        speaker: &SenatorName,
         committee: CommitteeId,
         seq: Seq,
         reason: String,
@@ -315,13 +315,13 @@ impl Shared {
         let senate = self.seating().presider().cloned();
         match event {
             HookEvent::SessionStart => {
-                let mut seated: BTreeSet<SenatorPath> = self.seated().into_iter().collect();
+                let mut seated: BTreeSet<SenatorName> = self.seated().into_iter().collect();
                 if let Some(docket) = &docket {
                     for page in &docket.pages {
                         seated.extend(page.seats.iter().map(|s| s.agent.clone()));
                     }
                 }
-                let seated: Vec<SenatorPath> = seated.into_iter().collect();
+                let seated: Vec<SenatorName> = seated.into_iter().collect();
                 Some(crate::preside::orientation(
                     &session.agent,
                     senate.as_ref(),
@@ -340,9 +340,9 @@ impl Shared {
 
 /// Refusals of the presiding requests, in the bridge's locale.
 mod preside_text {
-    use senate_core::{Address, CommitteeId, Locale, SenatorPath, Seq};
+    use senate_core::{Address, CommitteeId, Locale, SenatorName, Seq};
 
-    fn mentions(paths: &[SenatorPath]) -> String {
+    fn mentions(paths: &[SenatorName]) -> String {
         paths
             .iter()
             .map(|p| Address::senator(p).in_text())
@@ -363,8 +363,8 @@ mod preside_text {
     }
 
     pub(super) fn not_a_candidate(
-        to: &SenatorPath,
-        candidates: &[SenatorPath],
+        to: &SenatorName,
+        candidates: &[SenatorName],
         locale: Locale,
     ) -> String {
         let to = Address::senator(to).in_text();
@@ -389,7 +389,7 @@ mod preside_text {
             .to_owned()
     }
 
-    pub(super) fn route_to_an_agent(to: &SenatorPath, locale: Locale) -> String {
+    pub(super) fn route_to_an_agent(to: &SenatorName, locale: Locale) -> String {
         let to = Address::senator(to).in_text();
         match locale {
             Locale::Zh => format!("只能交给这个 Senate 里在席的另一个 agent，不能交给 {to}。"),
@@ -399,7 +399,7 @@ mod preside_text {
         }
     }
 
-    pub(super) fn cover_for_the_speaker(speaker: &SenatorPath, locale: Locale) -> String {
+    pub(super) fn cover_for_the_speaker(speaker: &SenatorName, locale: Locale) -> String {
         let speaker = Address::senator(speaker).in_text();
         match locale {
             Locale::Zh => format!(
@@ -423,8 +423,8 @@ mod preside_text {
     }
 
     pub(super) fn not_its_question(
-        agent: &SenatorPath,
-        agents: &[SenatorPath],
+        agent: &SenatorName,
+        agents: &[SenatorName],
         locale: Locale,
     ) -> String {
         let agent = Address::senator(agent).in_text();
@@ -440,7 +440,7 @@ mod preside_text {
         }
     }
 
-    pub(super) fn name_which(agents: &[SenatorPath], locale: Locale) -> String {
+    pub(super) fn name_which(agents: &[SenatorName], locale: Locale) -> String {
         match locale {
             Locale::Zh => format!(
                 "问题问的是几个 agent：用 `agent` 指定代谁回答：{}。",
@@ -453,7 +453,7 @@ mod preside_text {
         }
     }
 
-    pub(super) fn no_checkpoint(agent: &SenatorPath, locale: Locale) -> String {
+    pub(super) fn no_checkpoint(agent: &SenatorName, locale: Locale) -> String {
         let agent = Address::senator(agent).in_text();
         match locale {
             Locale::Zh => format!(
@@ -470,11 +470,11 @@ mod preside_text {
 #[cfg(test)]
 mod tests {
     use super::preside_text;
-    use senate_core::{Locale, SenatorPath};
+    use senate_core::{Locale, SenatorName};
 
     #[test]
     fn covering_for_the_seat_holder_is_refused_in_both_languages() {
-        let holder: SenatorPath = "alice/claude".parse().unwrap();
+        let holder: SenatorName = "alice/claude".parse().unwrap();
         let zh = preside_text::cover_for_the_speaker(&holder, Locale::Zh);
         let en = preside_text::cover_for_the_speaker(&holder, Locale::En);
         assert!(zh.starts_with("[senator::alice/claude] 自己就是这个 Senate 的 Speaker"));

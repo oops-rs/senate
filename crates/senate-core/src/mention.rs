@@ -26,18 +26,18 @@ use crate::address::{
     ANY_AGENT_SUFFIX, Address, COMMITTEE, GUEST_PREFIX, Guest, GuestError, SENATOR_PREFIX, SPEAKER,
 };
 use crate::ids::Name;
-use crate::senator::{SenatorPath, SenatorPathError};
+use crate::senator::{SenatorName, SenatorNameError};
 
 const SPEAKER_FOR_PREFIX: &str = "speaker::";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Mention {
-    Senator(SenatorPath),
+    Senator(SenatorName),
     /// Whichever of that person's agents should get it.
     AgentOf(Name),
     Speaker,
     /// The Speaker answering for a senator.
-    SpeakerFor(SenatorPath),
+    SpeakerFor(SenatorName),
     Committee,
     Guest(Guest),
 }
@@ -51,7 +51,7 @@ pub enum MentionParseError {
     )]
     Unknown(String),
     #[error(transparent)]
-    Senator(#[from] SenatorPathError),
+    Senator(#[from] SenatorNameError),
     #[error(transparent)]
     Guest(#[from] GuestError),
 }
@@ -136,7 +136,7 @@ impl Mention {
                 if let Some(rest) = inner.strip_prefix(SENATOR_PREFIX) {
                     match rest.strip_suffix(ANY_AGENT_SUFFIX) {
                         Some(owner) => Ok(Self::AgentOf(
-                            Name::new(owner).map_err(SenatorPathError::from)?,
+                            Name::new(owner).map_err(SenatorNameError::from)?,
                         )),
                         None => Ok(Self::Senator(rest.parse()?)),
                     }
@@ -180,7 +180,7 @@ impl FromStr for Mention {
 mod tests {
     use super::*;
 
-    fn path(s: &str) -> SenatorPath {
+    fn path(s: &str) -> SenatorName {
         s.parse().unwrap()
     }
 

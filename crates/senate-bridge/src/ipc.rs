@@ -163,7 +163,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use senate_core::{
-    Address, CommitteeId, Event, EventId, Kind, Locale, Name, Refs, SenatorPath, Seq,
+    Address, CommitteeId, Event, EventId, Kind, Locale, Name, Refs, SenatorName, Seq,
     StatusPayload, ThreadSummary,
 };
 
@@ -451,7 +451,7 @@ pub enum Request {
         session: SessionSelector,
         committee: CommitteeId,
         seq: Seq,
-        to: SenatorPath,
+        to: SenatorName,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<EventId>,
     },
@@ -462,7 +462,7 @@ pub enum Request {
         thread: Seq,
         body: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        agent: Option<SenatorPath>,
+        agent: Option<SenatorName>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<EventId>,
     },
@@ -555,7 +555,7 @@ pub struct ThreadReply {
 pub struct PresidesReply {
     /// The session's agent, registered or worked out.
     #[serde(default)]
-    pub agent: Option<SenatorPath>,
+    pub agent: Option<SenatorName>,
     /// The Senate it presides over, if it does.
     #[serde(default)]
     pub presiding: Option<Presiding>,
@@ -565,13 +565,13 @@ pub struct PresidesReply {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Presiding {
     /// The presiding agent: the holder of the Speaker's seat.
-    pub speaker: SenatorPath,
+    pub speaker: SenatorName,
     /// That Senate, by its presider (`None`: a top Senate used alone).
     #[serde(default)]
-    pub senate: Option<SenatorPath>,
+    pub senate: Option<SenatorName>,
     /// The agents seated there.
     #[serde(default)]
-    pub seated: Vec<SenatorPath>,
+    pub seated: Vec<SenatorName>,
 }
 
 /// One Senate's docket on each of its committees.
@@ -579,7 +579,7 @@ pub struct Presiding {
 pub struct SenateDocket {
     /// The Senate, by its presider (`None`: a top Senate).
     #[serde(default)]
-    pub senate: Option<SenatorPath>,
+    pub senate: Option<SenatorName>,
     pub pages: Vec<senate_core::DocketPage>,
     /// The latest checkpoint of every away agent an item names: what the
     /// Speaker covers from.
@@ -591,7 +591,7 @@ pub struct SenateDocket {
 pub struct DocketReply {
     /// The presiding agent reading it; `None` for a person's read.
     #[serde(default)]
-    pub speaker: Option<SenatorPath>,
+    pub speaker: Option<SenatorName>,
     pub senates: Vec<SenateDocket>,
 }
 
@@ -627,7 +627,7 @@ pub enum WatchEvent {
     /// answer or status): read the inbox again.
     Inbox {
         /// The agent whose stream carried it.
-        agent: SenatorPath,
+        agent: SenatorName,
         committee: CommitteeId,
         seq: Seq,
         kind: Kind,
@@ -678,7 +678,7 @@ pub struct CheckpointReply {
 pub struct InboxReply {
     pub committee: CommitteeId,
     /// The agents whose inbox this is: the calling session's one.
-    pub agents: Vec<SenatorPath>,
+    pub agents: Vec<SenatorName>,
     pub person: Name,
     /// Not archived, addressed to one of `agents` or escalated to `person`,
     /// longest in their state first. Without `all` only those that wait on
@@ -771,7 +771,7 @@ pub struct CatchUpReply {
 pub struct JoinReply {
     pub session_id: String,
     /// The agent the session speaks as.
-    pub agent: SenatorPath,
+    pub agent: SenatorName,
     pub committee: CommitteeId,
     #[serde(default)]
     pub previous: Option<CommitteeId>,
@@ -817,7 +817,7 @@ pub enum StreamState {
 /// One agent's stream on one committee.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommitteeStatus {
-    pub agent: SenatorPath,
+    pub agent: SenatorName,
     pub committee: CommitteeId,
     pub delivered: Seq,
     pub reported: Seq,
@@ -839,7 +839,7 @@ pub struct StatusReply {
     /// The Senate this bridge is connected to, by its presider; `None` for
     /// the top Senate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub presider: Option<SenatorPath>,
+    pub presider: Option<SenatorName>,
     pub locale: Locale,
     pub server_url: String,
     pub committees: Vec<CommitteeStatus>,
@@ -861,7 +861,7 @@ pub struct IpcError {
     pub message: String,
     /// With [`codes::AMBIGUOUS_RECIPIENT`]: the agents to choose from.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub candidates: Vec<SenatorPath>,
+    pub candidates: Vec<SenatorName>,
 }
 
 impl IpcError {
@@ -875,7 +875,7 @@ impl IpcError {
 
     /// The server refused a wildcard that names a person with several
     /// agents; the asker must name one of `candidates`.
-    pub fn ambiguous(message: impl Into<String>, candidates: Vec<SenatorPath>) -> Self {
+    pub fn ambiguous(message: impl Into<String>, candidates: Vec<SenatorName>) -> Self {
         Self {
             code: codes::AMBIGUOUS_RECIPIENT.to_string(),
             message: message.into(),

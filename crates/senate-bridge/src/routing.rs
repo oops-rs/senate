@@ -40,20 +40,20 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use senate_core::{
-    Address, AgentPresence, CommitteeId, Event, Locale, PresencePayload, PresenceState, SenatorPath,
+    Address, AgentPresence, CommitteeId, Event, Locale, PresencePayload, PresenceState, SenatorName,
 };
 
 use crate::session::Session;
 
 /// Rule 1, for `me`, one of this bridge's agents.
-pub fn should_push(event: &Event, me: &SenatorPath) -> bool {
+pub fn should_push(event: &Event, me: &SenatorName) -> bool {
     let addr = Address::senator(me);
     event.is_directed_to(&addr) && event.from != addr && !names_unknown_address(event)
 }
 
 /// Rule 1 with reassigned work: also an event directed to an agent whose
 /// work on the committee is `me`'s now, unless `me` or that agent wrote it.
-pub fn should_push_covering(event: &Event, me: &SenatorPath, covering: &Covering) -> bool {
+pub fn should_push_covering(event: &Event, me: &SenatorName, covering: &Covering) -> bool {
     should_push(event, me)
         || (event.from != Address::senator(me)
             && !names_unknown_address(event)
@@ -65,7 +65,7 @@ pub fn should_push_covering(event: &Event, me: &SenatorPath, covering: &Covering
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Covering {
     /// (my agent, committee) → the agents whose work it has.
-    by_seat: BTreeMap<(SenatorPath, CommitteeId), BTreeSet<SenatorPath>>,
+    by_seat: BTreeMap<(SenatorName, CommitteeId), BTreeSet<SenatorName>>,
 }
 
 impl Covering {
@@ -76,7 +76,7 @@ impl Covering {
     /// Fold one event off `me`'s stream: a server `presence` reassigning
     /// work to `me` adds its agent; any later presence of that agent (a
     /// hand-back, or a reassignment to someone else) removes it.
-    pub fn observe(&mut self, event: &Event, me: &SenatorPath) {
+    pub fn observe(&mut self, event: &Event, me: &SenatorName) {
         if event.from != Address::Committee {
             return;
         }
@@ -94,7 +94,7 @@ impl Covering {
 
     /// Replace `me`'s view of a committee with the server's presence (a
     /// stream opened).
-    pub fn seed(&mut self, me: &SenatorPath, committee: &CommitteeId, agents: &[AgentPresence]) {
+    pub fn seed(&mut self, me: &SenatorName, committee: &CommitteeId, agents: &[AgentPresence]) {
         self.by_seat.remove(&(me.clone(), committee.clone()));
         for p in agents {
             self.set(me, committee, &p.agent, p.state, p.new_owner.as_ref());
@@ -103,11 +103,11 @@ impl Covering {
 
     fn set(
         &mut self,
-        me: &SenatorPath,
+        me: &SenatorName,
         committee: &CommitteeId,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         state: PresenceState,
-        new_owner: Option<&SenatorPath>,
+        new_owner: Option<&SenatorName>,
     ) {
         let seat = (me.clone(), committee.clone());
         let mine = state == PresenceState::Reassigned && new_owner == Some(me) && agent != me;
@@ -122,7 +122,7 @@ impl Covering {
     }
 
     /// Whether `me` covers `agent`'s work on `committee`.
-    pub fn covers(&self, me: &SenatorPath, committee: &CommitteeId, agent: &SenatorPath) -> bool {
+    pub fn covers(&self, me: &SenatorName, committee: &CommitteeId, agent: &SenatorName) -> bool {
         self.by_seat
             .get(&(me.clone(), committee.clone()))
             .is_some_and(|set| set.contains(agent))
@@ -130,7 +130,7 @@ impl Covering {
 
     /// The agent `me` covers that `event` is directed to (and did not
     /// write), if any.
-    pub fn covered_for(&self, event: &Event, me: &SenatorPath) -> Option<SenatorPath> {
+    pub fn covered_for(&self, event: &Event, me: &SenatorName) -> Option<SenatorName> {
         let set = self.by_seat.get(&(me.clone(), event.committee.clone()))?;
         event.to.iter().find_map(|a| match a.as_agent() {
             Some(agent) if set.contains(agent) && event.from != *a => Some(agent.clone()),
@@ -188,7 +188,7 @@ pub fn check_ask_recipients(to: &[Address], locale: Locale) -> Result<(), String
 /// Rule 2: live sessions of `agent` whose committee is `committee`.
 pub fn candidates<'a>(
     sessions: &'a [Session],
-    agent: &SenatorPath,
+    agent: &SenatorName,
     committee: &CommitteeId,
 ) -> Vec<&'a Session> {
     sessions
@@ -255,7 +255,7 @@ mod tests {
         CommitteeId::new("refund-v2").unwrap()
     }
 
-    fn path(s: &str) -> SenatorPath {
+    fn path(s: &str) -> SenatorName {
         s.parse().unwrap()
     }
 
@@ -263,7 +263,7 @@ mod tests {
         s.parse().unwrap()
     }
 
-    fn me() -> SenatorPath {
+    fn me() -> SenatorName {
         path("alice/claude")
     }
 

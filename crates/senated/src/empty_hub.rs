@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use senate_core::{
-    Appended, CommitteeId, Event, Hub, HubError, MirrorRef, NewEvent, Roster, SenatorPath, Seq,
+    Appended, CommitteeId, Event, Hub, HubError, MirrorRef, NewEvent, Roster, SenatorName, Seq,
 };
 use tokio::sync::broadcast;
 
@@ -47,7 +47,7 @@ impl Hub for Empty {
         Ok(Roster::default())
     }
 
-    async fn is_agent_connected(&self, _committee: &CommitteeId, _agent: &SenatorPath) -> bool {
+    async fn is_agent_connected(&self, _committee: &CommitteeId, _agent: &SenatorName) -> bool {
         false
     }
 

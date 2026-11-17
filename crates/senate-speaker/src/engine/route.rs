@@ -27,7 +27,7 @@
 //! mailbox: the rule-based default answers at once, and a model-backed one
 //! is cut off at the deadline and falls back to the rules.
 
-use senate_core::{AgentOf, Mention, Name, Roster, SenatorPath, StatusState};
+use senate_core::{AgentOf, Mention, Name, Roster, SenatorName, StatusState};
 
 use super::{
     Address, Engine, Event, Flow, GroupRef, Instant, Intent, Origin, Seq, Stall, Value, meta, warn,
@@ -40,14 +40,14 @@ use crate::syntax;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Resolved {
     /// One agent: named outright, or its person's only one here.
-    Agent(SenatorPath),
+    Agent(SenatorName),
     /// A person with no agent here: whatever was meant for their agent goes
     /// to them.
-    Person(SenatorPath),
+    Person(SenatorName),
     /// A person with several agents here, none of them named.
     Several {
         owner: Name,
-        candidates: Vec<SenatorPath>,
+        candidates: Vec<SenatorName>,
     },
     /// Nobody this Senate knows, or an agent that does not sit here.
     Unknown,
@@ -63,10 +63,10 @@ pub(super) fn resolve_name(roster: &Roster, raw: &str) -> Resolved {
         _ => raw
             .strip_prefix("senator::")
             .unwrap_or(raw)
-            .parse::<SenatorPath>()
+            .parse::<SenatorName>()
             .ok(),
     };
-    if let Some(path) = bare.filter(SenatorPath::is_junior) {
+    if let Some(path) = bare.filter(SenatorName::is_junior) {
         return if roster.knows(&path) {
             Resolved::Agent(path)
         } else {
@@ -106,7 +106,7 @@ pub(super) fn resolve_name(roster: &Roster, raw: &str) -> Resolved {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Settled {
     /// This senator: an agent, or a person with none.
-    To(SenatorPath),
+    To(SenatorName),
     /// Nobody here by that name.
     Unknown,
     /// The Speaker asked in the thread which agent; the request waits for
@@ -132,7 +132,7 @@ pub(super) enum Waiting {
 #[derive(Debug, Clone)]
 pub(super) struct Choice {
     pub(super) waiting: Waiting,
-    pub(super) candidates: Vec<SenatorPath>,
+    pub(super) candidates: Vec<SenatorName>,
     /// The question the Speaker posted, and the thread it is in.
     pub(super) ask_ref: String,
     pub(super) thread_ref: Option<String>,
@@ -151,7 +151,7 @@ impl Engine {
     async fn candidates(
         &self,
         chat: &Event,
-        candidates: &[SenatorPath],
+        candidates: &[SenatorName],
     ) -> Result<Vec<AgentCandidate>, Stall> {
         let committee = self.acting_committee(chat);
         let board = self.committees.get(&committee).map(|state| &state.board);
@@ -234,7 +234,7 @@ impl Engine {
         &mut self,
         chat: &Event,
         owner: Name,
-        candidates: Vec<SenatorPath>,
+        candidates: Vec<SenatorName>,
         task: &str,
         waiting: Waiting,
     ) -> Result<Settled, Stall> {
@@ -377,7 +377,7 @@ impl Engine {
 
 /// `intent` with the name `said` replaced by `agent`'s path wherever it
 /// stands for a senator, so running it again settles at once.
-fn named(intent: Intent, said: &str, agent: &SenatorPath) -> Intent {
+fn named(intent: Intent, said: &str, agent: &SenatorName) -> Intent {
     let path = agent.to_string();
     let swap = |name: String| if name == said { path.clone() } else { name };
     match intent {
@@ -410,7 +410,7 @@ mod tests {
     use super::*;
     use senate_core::Senior;
 
-    fn path(s: &str) -> SenatorPath {
+    fn path(s: &str) -> SenatorName {
         s.parse().expect("path")
     }
 

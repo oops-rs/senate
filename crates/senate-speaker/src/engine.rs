@@ -195,7 +195,7 @@ use ractor::concurrency::JoinHandle;
 use senate_core::{
     Address, BindingAction, BindingPayload, BriefBuilder, Card, ChatSurface, CommitteeId, Event,
     GroupRole, Hub, HubError, Kind, Locale, MirrorRef, Name, NewEvent, OutputLevel,
-    PROPOSAL_DECISION, PostTarget, Posted, PresencePayload, PresenceState, Roster, SenatorPath,
+    PROPOSAL_DECISION, PostTarget, Posted, PresencePayload, PresenceState, Roster, SenatorName,
     Seq, Source, StatusPayload, SurfaceError, TaskBoard, TriagePayload, TriageVerdict,
     UnboundMention, WorkRun, meta,
 };
@@ -331,7 +331,7 @@ struct CommitteeState {
     /// group, else the first people group.
     groups: Vec<BoundGroup>,
     /// `(thread root, agent)` → the question awaiting that agent's answer.
-    open: HashMap<(Seq, SenatorPath), Open>,
+    open: HashMap<(Seq, SenatorName), Open>,
     stalled: bool,
     /// The `chat` this committee is stopped at until its interpretation
     /// returns.
@@ -352,14 +352,14 @@ struct CommitteeState {
     /// Task root → when it was asked (today's tasks).
     root_ts: HashMap<Seq, DateTime<Utc>>,
     /// Each agent's latest event: `(seq, ts, what)`.
-    activity: HashMap<SenatorPath, (Seq, DateTime<Utc>, String)>,
+    activity: HashMap<SenatorName, (Seq, DateTime<Utc>, String)>,
     /// Verdicts that came back from the Brain for a task root or a relaying
     /// `chat`, keyed by that seq, until the step that uses them is done.
     triage: HashMap<Seq, TriagePayload>,
     /// Agents the Speaker picked for a person while acting on a `chat`, by
     /// (chat seq, step key, person), so a step repeated after a stall or a
     /// triage wait acts on the same agent.
-    picks: HashMap<(Seq, String, Name), SenatorPath>,
+    picks: HashMap<(Seq, String, Name), SenatorName>,
     /// Debounced card updates, per task root.
     cards: HashMap<Seq, Timer>,
     pinned: Pinned,
@@ -367,15 +367,15 @@ struct CommitteeState {
     /// agents showed up).
     invited: HashSet<Name>,
     /// Each agent's latest `presence` event, as folded from the log.
-    presence: HashMap<SenatorPath, PresenceSeen>,
+    presence: HashMap<SenatorName, PresenceSeen>,
     /// Each agent's latest `taken_over`, and the answers given for it since.
-    taken_over: HashMap<SenatorPath, (Seq, Vec<Covered>)>,
+    taken_over: HashMap<SenatorName, (Seq, Vec<Covered>)>,
     /// Each work run's latest state, by root.
     work: BTreeMap<Seq, WorkRun>,
     /// Agents whose work is reassigned → the agent it is with.
-    reassigned: HashMap<SenatorPath, SenatorPath>,
+    reassigned: HashMap<SenatorName, SenatorName>,
     /// A hand-back's `presence` seq → the agent that held the work.
-    handbacks: HashMap<Seq, SenatorPath>,
+    handbacks: HashMap<Seq, SenatorName>,
 }
 
 /// An agent's latest presence transition in the log.
@@ -472,7 +472,7 @@ impl CommitteeState {
                 };
                 // An answer by the agent an agent's work is reassigned to
                 // answers for it too.
-                let covered: Vec<SenatorPath> = self
+                let covered: Vec<SenatorName> = self
                     .reassigned
                     .iter()
                     .filter(|(_, owner)| **owner == agent)
@@ -613,7 +613,7 @@ impl CommitteeState {
 
 /// The agents a question is put to (its `to`, minus the asker). A person in
 /// `to` is not here: nobody answers for a person.
-fn question_targets(event: &Event) -> Vec<SenatorPath> {
+fn question_targets(event: &Event) -> Vec<SenatorName> {
     event
         .to
         .iter()
@@ -624,7 +624,7 @@ fn question_targets(event: &Event) -> Vec<SenatorPath> {
 }
 
 /// Whose answer this is: the agent itself, or the Speaker speaking for it.
-fn answering_agent(event: &Event) -> Option<SenatorPath> {
+fn answering_agent(event: &Event) -> Option<SenatorName> {
     match (&event.from, &event.on_behalf_of) {
         (Address::Speaker, Some(behalf)) => behalf.as_agent().cloned(),
         (from, _) => from.as_agent().cloned(),
@@ -693,9 +693,9 @@ enum PendingAction {
     /// `owner`.
     Reassign {
         committee: CommitteeId,
-        agent: SenatorPath,
-        to: SenatorPath,
-        owner: Option<SenatorPath>,
+        agent: SenatorName,
+        to: SenatorName,
+        owner: Option<SenatorName>,
     },
 }
 
@@ -847,7 +847,7 @@ pub(crate) enum ThoughtKind {
     Answered {
         committee: CommitteeId,
         root: Seq,
-        agent: SenatorPath,
+        agent: SenatorName,
         question: Seq,
         asker: Address,
         takeover: bool,
@@ -948,7 +948,7 @@ pub(crate) struct Engine {
     in_flight: usize,
     /// Answers-for-agents sent to the mailbox to run as soon as it gets to
     /// them.
-    due_now: HashSet<(CommitteeId, Seq, SenatorPath)>,
+    due_now: HashSet<(CommitteeId, Seq, SenatorName)>,
     /// What does work runs, and what opens their PRs.
     runner: Option<Arc<dyn Runner>>,
     forge: Arc<dyn Forge>,
@@ -1309,7 +1309,7 @@ impl Engine {
 
     /// Arm a timer for every open question that has none, from its `ts`.
     fn rearm(&mut self, committee: &CommitteeId) {
-        let keys: Vec<(Seq, SenatorPath, DateTime<Utc>)> = self
+        let keys: Vec<(Seq, SenatorName, DateTime<Utc>)> = self
             .committees
             .get(committee)
             .map(|state| {
@@ -1332,7 +1332,7 @@ impl Engine {
         self.fallback_after.saturating_sub(elapsed)
     }
 
-    fn arm(&mut self, committee: &CommitteeId, root: Seq, agent: SenatorPath, delay: Duration) {
+    fn arm(&mut self, committee: &CommitteeId, root: Seq, agent: SenatorName, delay: Duration) {
         if delay.is_zero() {
             self.arm_now(committee, root, agent);
             return;
@@ -1358,7 +1358,7 @@ impl Engine {
 
     /// The fallback is due now: queue it behind whatever the mailbox holds,
     /// so the committee is caught up before it runs.
-    fn arm_now(&mut self, committee: &CommitteeId, root: Seq, agent: SenatorPath) {
+    fn arm_now(&mut self, committee: &CommitteeId, root: Seq, agent: SenatorName) {
         if let Some(previous) = self
             .committees
             .get_mut(committee)
@@ -2036,7 +2036,7 @@ impl Engine {
         &mut self,
         committee: CommitteeId,
         root: Seq,
-        agent: SenatorPath,
+        agent: SenatorName,
     ) {
         self.due_now
             .remove(&(committee.clone(), root, agent.clone()));
@@ -2093,7 +2093,7 @@ impl Engine {
         &mut self,
         committee: CommitteeId,
         root: Seq,
-        agent: SenatorPath,
+        agent: SenatorName,
         question: Seq,
         takeover: Option<Takeover>,
     ) {
@@ -2144,7 +2144,7 @@ impl Engine {
         &self,
         committee: &CommitteeId,
         question: Seq,
-        agent: &SenatorPath,
+        agent: &SenatorName,
     ) -> Result<Option<Question>, Stall> {
         let Some(event) = self.hub.get(committee, question).await? else {
             return Ok(None);
@@ -3322,7 +3322,7 @@ impl Engine {
 struct Drafted {
     committee: CommitteeId,
     root: Seq,
-    agent: SenatorPath,
+    agent: SenatorName,
     question: Seq,
     asker: Address,
 }
@@ -3333,7 +3333,7 @@ struct Drafted {
 fn behalf_answer(
     committee: &CommitteeId,
     root: Seq,
-    agent: &SenatorPath,
+    agent: &SenatorName,
     question: Seq,
     asker: Address,
     body: String,

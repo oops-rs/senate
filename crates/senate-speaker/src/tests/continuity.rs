@@ -8,7 +8,7 @@ use std::time::Duration;
 use chrono::Utc;
 use senate_core::{
     Address, CheckpointFiles, CheckpointPayload, CheckpointTrigger, Event, Hub, Kind, Locale,
-    NewEvent, PresencePayload, PresenceState, SenatorPath, Seq, StatusPayload, StatusState, meta,
+    NewEvent, PresencePayload, PresenceState, SenatorName, Seq, StatusPayload, StatusState, meta,
     presence_event,
 };
 use serde_json::json;
@@ -39,7 +39,7 @@ pub(crate) async fn agents_hub() -> Arc<MemoryHub> {
 /// The server's presence transition for `who` (a senator path such as
 /// `alice/claude`), `offset_ms` after a fixed base so each one has its own
 /// derived id.
-fn presence_of(who: &SenatorPath, state: PresenceState, offset_ms: i64) -> NewEvent {
+fn presence_of(who: &SenatorName, state: PresenceState, offset_ms: i64) -> NewEvent {
     let since = chrono::DateTime::<Utc>::from_timestamp_millis(1_800_000_000_000 + offset_ms)
         .expect("a time");
     presence_event(
@@ -78,7 +78,7 @@ fn checkpoint_by(
 
 /// A checkpoint of the agent `who` on its person's branch.
 fn checkpoint_of(
-    who: &SenatorPath,
+    who: &SenatorName,
     progress: &str,
     pushed: bool,
     trigger: CheckpointTrigger,
@@ -116,7 +116,7 @@ fn presence_states(events: &[Event], handle: &str) -> Vec<PresenceState> {
     presence_states_of(events, &agent_path(handle))
 }
 
-fn presence_states_of(events: &[Event], who: &SenatorPath) -> Vec<PresenceState> {
+fn presence_states_of(events: &[Event], who: &SenatorName) -> Vec<PresenceState> {
     events
         .iter()
         .filter_map(PresencePayload::of)

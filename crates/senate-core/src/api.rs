@@ -6,7 +6,7 @@
 //! Every `/v1` route takes `Authorization: Bearer <token>`, and the token
 //! names a **person** ([`Me::person`]). A machine never authenticates as an
 //! agent. Each thing it does as an agent names that agent's
-//! [`SenatorPath`]: the `from` of an append, [`Heartbeat::agent`], the
+//! [`SenatorName`]: the `from` of an append, [`Heartbeat::agent`], the
 //! `senator` of a stream or a cursor. The server accepts the name only when
 //! [`Roster::may_act_as`](crate::Roster::may_act_as) does (the agent is
 //! directly under the authenticated person in the top Senate, directly
@@ -146,7 +146,7 @@ use crate::continuity::AgentPresence;
 use crate::event::{Event, NewEvent, StatusState};
 use crate::ids::{CommitteeId, Name, Seq};
 use crate::roster::{ResolveError, SpeakerSeat};
-use crate::senator::SenatorPath;
+use crate::senator::SenatorName;
 use crate::task::ThreadSummary;
 
 /// Response header naming the log's epoch (see the module docs).
@@ -208,7 +208,7 @@ pub fn latest_checkpoint_path(committee: &CommitteeId) -> String {
 /// agent is named in full; a person's handle is not enough.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckpointQuery {
-    pub agent: SenatorPath,
+    pub agent: SenatorName,
 }
 
 pub fn docket_path(committee: &CommitteeId) -> String {
@@ -230,7 +230,7 @@ pub struct ThreadsQuery {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<StatusState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent: Option<SenatorPath>,
+    pub agent: Option<SenatorName>,
 }
 
 /// Longest in their state first (see [`TaskBoard::threads`](crate::TaskBoard::threads)).
@@ -275,7 +275,7 @@ pub struct StreamQuery {
     /// The agent this stream is the connection of. Absent: the person is
     /// only reading, and no agent's presence follows from the stream.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub senator: Option<SenatorPath>,
+    pub senator: Option<SenatorName>,
 }
 
 /// `GET` / `PUT .../cursors/{name}`: whose cursor.
@@ -283,7 +283,7 @@ pub struct StreamQuery {
 pub struct CursorQuery {
     /// Absent: the authenticated person's own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub senator: Option<SenatorPath>,
+    pub senator: Option<SenatorName>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -296,7 +296,7 @@ pub struct Cursor {
 pub struct Heartbeat {
     /// The agent whose heartbeat this is. A machine running two agents for
     /// one person sends two.
-    pub agent: SenatorPath,
+    pub agent: SenatorName,
     /// That agent's sessions currently bound to the committee.
     pub sessions: u32,
     /// The agent's delivered cursor for the committee.
@@ -329,7 +329,7 @@ pub struct Me {
     /// The senator presiding over the Senate this server serves. Absent for
     /// the top Senate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub presider: Option<SenatorPath>,
+    pub presider: Option<SenatorName>,
     /// Who holds this Senate's Speaker's seat: the built-in Speaker, a
     /// senator (a nested Senate's presider, or the agent a top Senate used
     /// alone names), or nobody (absent). A bridge gives the session of an
@@ -339,7 +339,7 @@ pub struct Me {
     /// The person's agents seated in this Senate now. May be none, one or
     /// several; an agent not listed is seated when it first connects.
     #[serde(default)]
-    pub agents: Vec<SenatorPath>,
+    pub agents: Vec<SenatorName>,
     /// Committees this person can join: every committee that has at least
     /// one event; empty means none exist yet.
     #[serde(default)]
@@ -387,7 +387,7 @@ pub struct ApiError {
     pub message: String,
     /// With [`code::AMBIGUOUS_RECIPIENT`]: the agents to choose from.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub candidates: Vec<SenatorPath>,
+    pub candidates: Vec<SenatorName>,
 }
 
 impl ApiError {
@@ -426,7 +426,7 @@ mod tests {
         CommitteeId::new("refund-v2").unwrap()
     }
 
-    fn path(s: &str) -> SenatorPath {
+    fn path(s: &str) -> SenatorName {
         s.parse().unwrap()
     }
 

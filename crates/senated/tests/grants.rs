@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use senate_core::{
     Address, Appended, BindingAction, BindingPayload, ChatSurface, CommitteeId, Event, GroupRole,
-    Hub, HubError, Kind, Mirror, MirrorRef, NewEvent, PostTarget, Roster, SenatorPath, Seq, Source,
+    Hub, HubError, Kind, Mirror, MirrorRef, NewEvent, PostTarget, Roster, SenatorName, Seq, Source,
 };
 use senated::testing::{Caps, FakeChat, GrantKind, GrantOutcome, Message};
 use senated::{ChatGateway, Component, ComponentContext, GrantPolicy};
@@ -117,7 +117,7 @@ impl Hub for MemoryHub {
         Ok(Roster::default())
     }
 
-    async fn is_agent_connected(&self, _committee: &CommitteeId, _agent: &SenatorPath) -> bool {
+    async fn is_agent_connected(&self, _committee: &CommitteeId, _agent: &SenatorName) -> bool {
         false
     }
 

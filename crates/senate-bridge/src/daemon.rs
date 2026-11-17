@@ -134,7 +134,7 @@ use senate_core::continuity::{DECISIONS_FILE, OPEN_FILE, PROGRESS_FILE};
 use senate_core::{
     Address, BranchNaming, Brief, CheckpointFiles, CheckpointPayload, CheckpointTrigger,
     CommitteeId, Event, EventId, Kind, Locale, Name, NewEvent, PROPOSAL_DECISION, Refs,
-    SenatorPath, Seq, SpeakerSeat, StatusPayload, TaskOwner, TriagePayload, TriageVerdict,
+    SenatorName, Seq, SpeakerSeat, StatusPayload, TaskOwner, TriagePayload, TriageVerdict,
     is_provisional, meta, needs_triage,
 };
 use serde::Serialize;
@@ -371,7 +371,7 @@ enum Hold {
 
 /// One agent's stream on one committee: the unit everything the bridge
 /// keeps per stream is keyed by.
-type Seat = (SenatorPath, CommitteeId);
+type Seat = (SenatorName, CommitteeId);
 /// The branch a session is on now and what it is bound to there.
 type Rebind = (Option<String>, Option<CommitteeId>);
 
@@ -406,7 +406,7 @@ pub(crate) struct Shared {
     resyncs: watch::Sender<u64>,
     pushes: Mutex<HashMap<String, PushState>>,
     /// Automatic checkpoints, per agent and worktree root.
-    auto: Mutex<HashMap<(SenatorPath, PathBuf), AutoCheckpoint>>,
+    auto: Mutex<HashMap<(SenatorName, PathBuf), AutoCheckpoint>>,
     /// The daemon's home, handed to companion sessions.
     home: PathBuf,
     /// Sessions whose committee changed because their worktree's branch
@@ -469,7 +469,7 @@ impl DaemonHandle {
 
     /// The state database of the Senate presided over by `presider`
     /// (`None`: the one where the person's agents sit directly).
-    pub fn store_of(&self, presider: Option<&SenatorPath>) -> Option<&Store> {
+    pub fn store_of(&self, presider: Option<&SenatorName>) -> Option<&Store> {
         self.front
             .senates()
             .iter()
@@ -645,7 +645,7 @@ impl Shared {
     fn open(
         config: BridgeConfig,
         db: &Path,
-        fixed: Option<Option<SenatorPath>>,
+        fixed: Option<Option<SenatorName>>,
         index: usize,
         common: &Common,
     ) -> anyhow::Result<Arc<Self>> {
@@ -764,7 +764,7 @@ fn wrap<T: Serialize>(result: Result<T, IpcError>) -> Reply {
 }
 
 /// Which Senate, in words: the top one, or the one a senator presides over.
-pub fn senate_words(presider: Option<&SenatorPath>, locale: Locale) -> String {
+pub fn senate_words(presider: Option<&SenatorName>, locale: Locale) -> String {
     match (presider, locale) {
         (None, Locale::Zh) => "顶层 Senate".to_string(),
         (None, Locale::En) => "the top Senate".to_string(),
@@ -780,8 +780,8 @@ pub fn senate_words(presider: Option<&SenatorPath>, locale: Locale) -> String {
 /// and the tools it has.
 fn orientation(
     committee: &CommitteeId,
-    agent: &SenatorPath,
-    presider: Option<&SenatorPath>,
+    agent: &SenatorName,
+    presider: Option<&SenatorName>,
     chat: bool,
     locale: Locale,
 ) -> String {
@@ -862,7 +862,7 @@ fn retry_delay(timing: &Timing, failures: u32) -> Duration {
         .min(timing.retry_max)
 }
 
-fn keys_of(agent: &SenatorPath, events: &[Event]) -> Vec<ItemKey> {
+fn keys_of(agent: &SenatorName, events: &[Event]) -> Vec<ItemKey> {
     events
         .iter()
         .map(|e| (agent.clone(), e.committee.clone(), e.seq))
@@ -890,7 +890,7 @@ impl Shared {
 
     /// Record the Senate `/v1/me` named. Sessions take the new seating at
     /// their next hook.
-    fn note_seating(&self, presider: Option<SenatorPath>) {
+    fn note_seating(&self, presider: Option<SenatorName>) {
         let seating = Seating::new(self.config.person.clone(), presider);
         if let Err(e) = self
             .store
@@ -921,7 +921,7 @@ impl Shared {
 
     /// Whether `agent`, one of this machine's person's agents, holds this
     /// Senate's Speaker's seat.
-    pub(crate) fn presided_by(&self, agent: &SenatorPath) -> bool {
+    pub(crate) fn presided_by(&self, agent: &SenatorName) -> bool {
         agent.owner() == &self.config.person
             && self
                 .speaker_seat()
@@ -931,7 +931,7 @@ impl Shared {
     /// Whether `event` is put to the Speaker of this Senate and `agent`
     /// holds its seat: pushed to the presiding session like a message for
     /// the agent itself. Not the Speaker's own words.
-    pub(crate) fn for_speaker(&self, agent: &SenatorPath, event: &Event) -> bool {
+    pub(crate) fn for_speaker(&self, agent: &SenatorName, event: &Event) -> bool {
         event.from != Address::Speaker
             && event.is_directed_to(&Address::Speaker)
             && self.presided_by(agent)
@@ -940,7 +940,7 @@ impl Shared {
     /// Whether `agent` holds this Senate's seat without sitting in it: the
     /// presider of a nested Senate, whose session sits in the Senate above.
     /// It speaks here only as `speaker`.
-    pub(crate) fn presides_from_above(&self, agent: &SenatorPath) -> bool {
+    pub(crate) fn presides_from_above(&self, agent: &SenatorName) -> bool {
         self.presided_by(agent) && !self.seating().owns(agent)
     }
 
@@ -950,7 +950,7 @@ impl Shared {
     }
 
     /// Every agent this machine has a session of on record, any state.
-    fn served_agents(&self) -> Result<BTreeSet<SenatorPath>, StoreError> {
+    fn served_agents(&self) -> Result<BTreeSet<SenatorName>, StoreError> {
         Ok(self
             .store
             .all_sessions()?
@@ -960,7 +960,7 @@ impl Shared {
     }
 
     /// The agents this bridge holds a stream for on `committee`.
-    fn agents_on(&self, committee: &CommitteeId) -> Vec<SenatorPath> {
+    fn agents_on(&self, committee: &CommitteeId) -> Vec<SenatorName> {
         lock(&self.streams)
             .keys()
             .filter(|(_, c)| c == committee)
@@ -976,7 +976,7 @@ impl Shared {
         &self,
         committee: &CommitteeId,
         named: Option<&Name>,
-    ) -> Result<SenatorPath, IpcError> {
+    ) -> Result<SenatorName, IpcError> {
         if let Some(name) = named {
             return Ok(self.seating().agent(name));
         }
@@ -1175,7 +1175,7 @@ impl Shared {
     /// its connection began in.
     pub(crate) async fn resync(
         &self,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         committee: &CommitteeId,
         resync: Resync,
         seen: u64,
@@ -1228,7 +1228,7 @@ impl Shared {
     /// Another agent's stream on the same committee finds the same and
     /// resets its own; until then its cursor is left alone, so a stream
     /// still connected never sees its cursor vanish under it.
-    async fn resync_committee(&self, agent: &SenatorPath, committee: &CommitteeId, seen: u64) {
+    async fn resync_committee(&self, agent: &SenatorName, committee: &CommitteeId, seen: u64) {
         let generation = self.generation.write().await;
         if *generation != seen {
             return; // A full resync already happened since.
@@ -1252,7 +1252,7 @@ impl Shared {
     /// after a reset).
     pub(crate) async fn ensure_seeded(
         &self,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         committee: &CommitteeId,
         generation: u64,
     ) -> Result<(), Intake> {
@@ -1280,7 +1280,7 @@ impl Shared {
     /// first time.
     async fn seed_point(
         &self,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         committee: &CommitteeId,
     ) -> Result<(Seq, Seq, &'static str), Intake> {
         let server = self
@@ -1384,7 +1384,7 @@ impl Shared {
     /// cursor past it.
     pub(crate) async fn take_in(
         &self,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         committee: &CommitteeId,
         incoming: Incoming,
         generation: u64,
@@ -1417,7 +1417,7 @@ impl Shared {
 
     async fn fill_gap(
         &self,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         committee: &CommitteeId,
         mut after: Seq,
         until: Seq,
@@ -1466,7 +1466,7 @@ impl Shared {
     /// fetched again.
     fn skip_undecodable(
         &self,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         committee: &CommitteeId,
         seq: Seq,
         error: &str,
@@ -1482,7 +1482,7 @@ impl Shared {
     /// Seed which agents' work on `committee` is `agent`'s from the
     /// server's presence (a stream opened). Best effort: a failure keeps
     /// what the stream folded so far.
-    pub(crate) async fn seed_covering(&self, agent: &SenatorPath, committee: &CommitteeId) {
+    pub(crate) async fn seed_covering(&self, agent: &SenatorName, committee: &CommitteeId) {
         match self.api.presence(committee).await {
             Ok(page) => lock(&self.covering).seed(agent, committee, &page.agents),
             Err(e) => tracing::debug!(%committee, "presence unavailable for reassigned work: {e}"),
@@ -1491,7 +1491,7 @@ impl Shared {
 
     fn ingest_one(
         &self,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         event: &Event,
         dirty: &Notify,
     ) -> Result<(), StoreError> {
@@ -1576,7 +1576,7 @@ impl Shared {
     /// Triage verdicts and takeovers off `agent`'s stream (see the module
     /// docs); each agent's stream cancels that agent's own waiting items.
     /// Returns whether the delivery plan may have changed.
-    fn observe_task(&self, agent: &SenatorPath, event: &Event) -> Result<bool, StoreError> {
+    fn observe_task(&self, agent: &SenatorName, event: &Event) -> Result<bool, StoreError> {
         let mut changed = false;
         if event.from == Address::Speaker
             && let Some(triage) = TriagePayload::of(event)
@@ -1674,7 +1674,7 @@ impl Shared {
     /// ([`routing::choose`]).
     fn recipient<'a>(
         &self,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         event: &Event,
         cands: &[&'a Session],
     ) -> Result<Option<&'a Session>, StoreError> {
@@ -1692,7 +1692,7 @@ impl Shared {
     /// message it was; a root that went through triage carries the verdict
     /// in `meta.triage`, so its header can say so (`unsure` when none came
     /// in time).
-    fn annotate(&self, agent: &SenatorPath, mut event: Event) -> Event {
+    fn annotate(&self, agent: &SenatorName, mut event: Event) -> Event {
         event.meta.remove(format::COVERING_META);
         event.meta.remove(format::SPEAKER_META);
         if !event.is_directed_to(&Address::senator(agent)) && self.for_speaker(agent, &event) {
@@ -1737,7 +1737,7 @@ impl Shared {
     /// pushed.
     fn own_roots(
         &self,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         events: &[Event],
         sid: &str,
     ) -> Result<(), StoreError> {
@@ -1753,7 +1753,7 @@ impl Shared {
 
     /// With no live session of `agent` bound to `committee`, keep only the
     /// agent's newest [`PENDING_CAP`] items there.
-    fn cap_unbound(&self, agent: &SenatorPath, committee: &CommitteeId) -> Result<(), StoreError> {
+    fn cap_unbound(&self, agent: &SenatorName, committee: &CommitteeId) -> Result<(), StoreError> {
         let bound = self
             .store
             .live_sessions()?
@@ -1776,7 +1776,7 @@ impl Shared {
     }
 
     /// `PUT` `agent`'s `delivered` cursor on `committee` when it moved.
-    pub(crate) async fn report_cursor(&self, agent: &SenatorPath, committee: &CommitteeId) {
+    pub(crate) async fn report_cursor(&self, agent: &SenatorName, committee: &CommitteeId) {
         let row = match self.store.cursor(agent, committee) {
             Ok(r) => r,
             Err(e) => {
@@ -1803,7 +1803,7 @@ impl Shared {
 
     /// `agent`'s heartbeat on `committee`: its own live sessions there and
     /// its own delivered cursor.
-    pub(crate) async fn heartbeat(&self, agent: &SenatorPath, committee: &CommitteeId) {
+    pub(crate) async fn heartbeat(&self, agent: &SenatorName, committee: &CommitteeId) {
         let (sessions, cursor) = match (
             self.store.live_sessions(),
             self.store.delivered_cursor(agent, committee),
@@ -2519,7 +2519,7 @@ impl Shared {
     async fn on_hook(
         &self,
         report: HookReport,
-        placed: Option<(SenatorPath, AgentSource)>,
+        placed: Option<(SenatorName, AgentSource)>,
     ) -> Result<HookReply, IpcError> {
         self.on_hook_as(report, placed, false).await
     }
@@ -2530,7 +2530,7 @@ impl Shared {
     pub(crate) async fn on_hook_as(
         &self,
         report: HookReport,
-        placed: Option<(SenatorPath, AgentSource)>,
+        placed: Option<(SenatorName, AgentSource)>,
         as_speaker: bool,
     ) -> Result<HookReply, IpcError> {
         let inferred = session::infer_committee(
@@ -4278,7 +4278,7 @@ struct Acting {
 
 /// The refusal an agent reads when `senator::<person>/*` names a person with
 /// several agents: the candidates as mentions, and what to do.
-pub fn ambiguous_message(candidates: &[SenatorPath], locale: Locale) -> String {
+pub fn ambiguous_message(candidates: &[SenatorName], locale: Locale) -> String {
     let list = candidates
         .iter()
         .map(|c| Address::senator(c).in_text())
@@ -4302,7 +4302,7 @@ pub fn ambiguous_message(candidates: &[SenatorPath], locale: Locale) -> String {
 /// taken over for it (`meta.takeover`): the thread is answered, and the
 /// hand-back note lists it when that agent returns. A provisional answer is
 /// no answer. An answer for another agent of the same person does not count.
-fn answered_for_me_in_takeover(event: &Event, me: &SenatorPath) -> bool {
+fn answered_for_me_in_takeover(event: &Event, me: &SenatorName) -> bool {
     event.kind == Kind::Answer
         && event.from == Address::Speaker
         && event.on_behalf_of.as_ref() == Some(&Address::senator(me))
@@ -4352,11 +4352,11 @@ mod tests {
     #[test]
     fn the_orientation_names_the_agent_and_the_senate() {
         let c = CommitteeId::new("refund-v2").unwrap();
-        let agent: SenatorPath = "alice/codex".parse().unwrap();
+        let agent: SenatorName = "alice/codex".parse().unwrap();
         let en = orientation(&c, &agent, None, false, Locale::En);
         assert!(en.contains("committee `refund-v2` of the top Senate as [senator::alice/codex]"));
-        let presider: SenatorPath = "alice/claude".parse().unwrap();
-        let nested: SenatorPath = "alice/claude/reviewer".parse().unwrap();
+        let presider: SenatorName = "alice/claude".parse().unwrap();
+        let nested: SenatorName = "alice/claude/reviewer".parse().unwrap();
         let zh = orientation(&c, &nested, Some(&presider), false, Locale::Zh);
         assert!(
             zh.contains("已加入 由 [senator::alice/claude] 主持的 Senate 的委员会 `refund-v2`，身份是 [senator::alice/claude/reviewer]"),
@@ -4370,7 +4370,7 @@ mod tests {
     #[test]
     fn the_orientation_says_the_person_can_speak_from_a_terminal() {
         let c = CommitteeId::new("refund-v2").unwrap();
-        let agent: SenatorPath = "alice/codex".parse().unwrap();
+        let agent: SenatorName = "alice/codex".parse().unwrap();
         let en = orientation(&c, &agent, None, false, Locale::En);
         assert!(
             en.contains("`senate ask`, `senate tell` and `senate reply`"),
@@ -4386,7 +4386,7 @@ mod tests {
     #[test]
     fn the_orientation_mentions_the_chat_only_when_a_group_is_bound() {
         let c = CommitteeId::new("refund-v2").unwrap();
-        let agent: SenatorPath = "alice/codex".parse().unwrap();
+        let agent: SenatorName = "alice/codex".parse().unwrap();
         let line = |chat, l| orientation(&c, &agent, None, chat, l);
         assert!(
             line(true, Locale::En)
@@ -4403,7 +4403,7 @@ mod tests {
 
     #[test]
     fn an_ambiguous_recipient_reads_as_a_choice() {
-        let candidates: Vec<SenatorPath> =
+        let candidates: Vec<SenatorName> =
             vec!["bob/claude".parse().unwrap(), "bob/codex".parse().unwrap()];
         assert_eq!(
             ambiguous_message(&candidates, Locale::En),

@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use common::*;
 use senate_core::api::Heartbeat;
 use senate_core::{
-    Appended, Brief, CommitteeId, Event, Hub, Kind, MirrorRef, NewEvent, SenatorPath, Seq,
+    Appended, Brief, CommitteeId, Event, Hub, Kind, MirrorRef, NewEvent, SenatorName, Seq,
 };
 use senate_log::{CursorOwner, HeartbeatRecord, LogError, LogStore, MemoryStore};
 
@@ -117,7 +117,7 @@ impl LogStore for Resettable {
     async fn last_heartbeat(
         &self,
         f: &CommitteeId,
-        agent: &SenatorPath,
+        agent: &SenatorName,
     ) -> Result<Option<HeartbeatRecord>, LogError> {
         self.inner().last_heartbeat(f, agent).await
     }

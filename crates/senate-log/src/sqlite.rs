@@ -35,7 +35,7 @@ use chrono::{DateTime, SecondsFormat, SubsecRound, Utc};
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use senate_core::api::Heartbeat;
 use senate_core::hub::{matches_terms, search_terms};
-use senate_core::{Appended, CommitteeId, Event, MirrorRef, NewEvent, SenatorPath, Seq};
+use senate_core::{Appended, CommitteeId, Event, MirrorRef, NewEvent, SenatorName, Seq};
 
 use crate::error::LogError;
 use crate::foreign;
@@ -552,7 +552,7 @@ impl LogStore for SqliteStore {
             let mut rows = stmt.query([committee.as_str()])?;
             let mut out = Vec::new();
             while let Some(row) = rows.next()? {
-                let agent: SenatorPath = row
+                let agent: SenatorName = row
                     .get::<_, String>(0)?
                     .parse()
                     .map_err(|e| LogError::Corrupt(format!("heartbeat agent: {e}")))?;
@@ -577,7 +577,7 @@ impl LogStore for SqliteStore {
     async fn last_heartbeat(
         &self,
         committee: &CommitteeId,
-        agent: &SenatorPath,
+        agent: &SenatorName,
     ) -> Result<Option<HeartbeatRecord>, LogError> {
         let committee = committee.clone();
         let agent = agent.clone();

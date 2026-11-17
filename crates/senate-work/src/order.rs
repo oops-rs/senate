@@ -6,7 +6,7 @@
 use std::fmt;
 
 use senate_core::continuity::{CHECKPOINT_DIR, DECISIONS_FILE, OPEN_FILE, PROGRESS_FILE};
-use senate_core::{BranchNaming, CheckpointFiles, CommitteeId, Locale, Name, SenatorPath};
+use senate_core::{BranchNaming, CheckpointFiles, CommitteeId, Locale, Name, SenatorName};
 use serde::{Deserialize, Serialize};
 
 /// Default wall clock for one run.
@@ -32,7 +32,7 @@ pub struct WorkOrder {
     /// named in full: a person with several agents has said (or been asked)
     /// which one before the order is made, and the work may be handed
     /// between two agents of the same person.
-    pub target_agent: SenatorPath,
+    pub target_agent: SenatorName,
     /// The task, in the requester's words (after the restatement they confirmed).
     pub instruction: String,
     pub repo: RepoRef,
@@ -207,7 +207,7 @@ pub enum WorkError {
     #[error("the instruction is empty")]
     EmptyInstruction,
     #[error("a run starts from an agent's checkpoint, and {0} is a person")]
-    TargetNotAnAgent(SenatorPath),
+    TargetNotAnAgent(SenatorName),
 }
 
 /// One `/`-free component of a git ref, safe for `git check-ref-format`:

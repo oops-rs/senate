@@ -48,7 +48,7 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use senate_core::{AgentPresence, PresenceBoard, PresencePayload, PresenceState, SenatorPath, Seq};
+use senate_core::{AgentPresence, PresenceBoard, PresencePayload, PresenceState, SenatorName, Seq};
 
 /// The two thresholds, from the server config.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,7 +76,7 @@ struct Agent {
     last_seen: Option<Instant>,
     last_seen_wall: Option<DateTime<Utc>>,
     cursor: Option<Seq>,
-    new_owner: Option<SenatorPath>,
+    new_owner: Option<SenatorName>,
     /// Restored from stored facts, with no activity seen since: a due
     /// transition is dated to when it fell due, so it has the same event id
     /// on every restart.
@@ -101,7 +101,7 @@ impl Agent {
 
 pub(crate) struct Leases {
     timing: LeaseTiming,
-    agents: BTreeMap<SenatorPath, Agent>,
+    agents: BTreeMap<SenatorName, Agent>,
 }
 
 /// The monotonic instant of the wall time `at`, as of `now`. A time before
@@ -133,7 +133,7 @@ impl Leases {
     pub(crate) fn restore(
         &mut self,
         board: &PresenceBoard,
-        beats: &BTreeMap<SenatorPath, DateTime<Utc>>,
+        beats: &BTreeMap<SenatorName, DateTime<Utc>>,
         now: Instant,
         wall: DateTime<Utc>,
     ) {
@@ -169,7 +169,7 @@ impl Leases {
     /// `last_beat` (before a restart): online, unwritten, quiet since then.
     pub(crate) fn restore_unlogged(
         &mut self,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         cursor: Seq,
         last_beat: DateTime<Utc>,
         now: Instant,
@@ -188,7 +188,7 @@ impl Leases {
     }
 
     /// Agents the machine knows.
-    pub(crate) fn agents(&self) -> impl Iterator<Item = &SenatorPath> {
+    pub(crate) fn agents(&self) -> impl Iterator<Item = &SenatorName> {
         self.agents.keys()
     }
 
@@ -196,7 +196,7 @@ impl Leases {
     /// that is due, if any. Nothing changes state until [`Self::apply`].
     pub(crate) fn decide(
         &mut self,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         activity: Option<Instant>,
         cursor: Option<Seq>,
         now: Instant,
@@ -276,7 +276,7 @@ impl Leases {
     /// `None` when it already is; an error when it is not away.
     pub(crate) fn take_over(
         &self,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         wall: DateTime<Utc>,
         head: Seq,
     ) -> Result<Option<PresencePayload>, String> {
@@ -310,8 +310,8 @@ impl Leases {
     /// refused ([`senate_core::reassign_transition`]).
     pub(crate) fn reassign(
         &self,
-        agent: &SenatorPath,
-        new_owner: &SenatorPath,
+        agent: &SenatorName,
+        new_owner: &SenatorName,
         wall: DateTime<Utc>,
         head: Seq,
     ) -> Result<Option<PresencePayload>, String> {
@@ -363,11 +363,11 @@ mod tests {
         lease: Duration::from_secs(900),
     };
 
-    fn path(s: &str) -> SenatorPath {
+    fn path(s: &str) -> SenatorName {
         s.parse().unwrap()
     }
 
-    fn alice() -> SenatorPath {
+    fn alice() -> SenatorName {
         path("alice/claude")
     }
 
@@ -497,7 +497,7 @@ mod tests {
         let bob = path("bob/claude");
         let carol = path("carol/claude");
         let committee = senate_core::CommitteeId::new("f").unwrap();
-        let mk = |agent: &SenatorPath, state, ago: i64| PresencePayload {
+        let mk = |agent: &SenatorName, state, ago: i64| PresencePayload {
             agent: agent.clone(),
             state,
             since: c.wall - chrono::Duration::seconds(ago),

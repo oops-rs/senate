@@ -2,7 +2,7 @@
 //!
 //! Both are kept **per agent**. A person may have several agents, each on
 //! its own machine or in its own session, so everything here is keyed by the
-//! agent's [`SenatorPath`], never by its person's handle. A person's
+//! agent's [`SenatorName`], never by its person's handle. A person's
 //! delegation is present while any one of its agents is
 //! ([`Roster::delegation_presence`](crate::Roster::delegation_presence) over
 //! [`PresenceBoard::is_present`]); a message for one specific agent that is
@@ -61,7 +61,7 @@ use crate::address::Address;
 use crate::event::{Event, Kind, NewEvent, meta};
 use crate::ids::{CommitteeId, EventId, Seq};
 use crate::locale::Locale;
-use crate::senator::SenatorPath;
+use crate::senator::SenatorName;
 
 /// Largest `meta.checkpoint`, serialized, in bytes.
 pub const MAX_CHECKPOINT_BYTES: usize = 64 * 1024;
@@ -213,7 +213,7 @@ pub struct CheckpointRecord {
     pub ts: DateTime<Utc>,
     /// The agent that wrote it. Never a person: a checkpoint is one agent's
     /// handover note, and a person with several agents has one per agent.
-    pub agent: SenatorPath,
+    pub agent: SenatorName,
     /// The summary line.
     pub body: String,
     pub checkpoint: CheckpointPayload,
@@ -239,7 +239,7 @@ impl CheckpointRecord {
 #[derive(Debug, Clone, Default)]
 pub struct Checkpoints {
     head: Seq,
-    latest: BTreeMap<SenatorPath, CheckpointRecord>,
+    latest: BTreeMap<SenatorName, CheckpointRecord>,
 }
 
 impl Checkpoints {
@@ -263,7 +263,7 @@ impl Checkpoints {
 
     /// That agent's latest. Another agent of the same person does not stand
     /// in for it.
-    pub fn latest(&self, agent: &SenatorPath) -> Option<&CheckpointRecord> {
+    pub fn latest(&self, agent: &SenatorName) -> Option<&CheckpointRecord> {
         self.latest.get(agent)
     }
 
@@ -330,7 +330,7 @@ pub(crate) fn lag_words(lag: u64, locale: Locale) -> String {
 /// `meta["presence"]` of a [`Kind::Presence`] event. Server-written.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PresencePayload {
-    pub agent: SenatorPath,
+    pub agent: SenatorName,
     pub state: PresenceState,
     /// When the state began.
     pub since: DateTime<Utc>,
@@ -350,7 +350,7 @@ pub struct PresencePayload {
     pub lag: Option<u64>,
     /// `reassigned`: the agent that has the work now.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub new_owner: Option<SenatorPath>,
+    pub new_owner: Option<SenatorName>,
 }
 
 impl PresencePayload {
@@ -383,9 +383,9 @@ impl PresencePayload {
 }
 
 fn presence_line(
-    agent: &SenatorPath,
+    agent: &SenatorName,
     state: PresenceState,
-    new_owner: Option<&SenatorPath>,
+    new_owner: Option<&SenatorName>,
     lag: Option<u64>,
     locale: Locale,
 ) -> String {
@@ -422,7 +422,7 @@ pub fn presence_event(committee: CommitteeId, payload: &PresencePayload) -> NewE
 /// server, how far behind its bridge is now.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentPresence {
-    pub agent: SenatorPath,
+    pub agent: SenatorName,
     pub state: PresenceState,
     pub since: DateTime<Utc>,
     /// The committee's head when the state began.
@@ -441,7 +441,7 @@ pub struct AgentPresence {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lag: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub new_owner: Option<SenatorPath>,
+    pub new_owner: Option<SenatorName>,
 }
 
 impl AgentPresence {
@@ -477,7 +477,7 @@ impl AgentPresence {
 #[derive(Debug, Clone, Default)]
 pub struct PresenceBoard {
     head: Seq,
-    agents: BTreeMap<SenatorPath, AgentPresence>,
+    agents: BTreeMap<SenatorName, AgentPresence>,
 }
 
 impl PresenceBoard {
@@ -505,7 +505,7 @@ impl PresenceBoard {
         }
     }
 
-    pub fn get(&self, agent: &SenatorPath) -> Option<&AgentPresence> {
+    pub fn get(&self, agent: &SenatorName) -> Option<&AgentPresence> {
         self.agents.get(agent)
     }
 
@@ -513,7 +513,7 @@ impl PresenceBoard {
     /// event is not: the log has not seen it leave, and has not seen it at
     /// all. (The server's live view knows a first `online` the log does
     /// not; see the module docs.)
-    pub fn is_present(&self, agent: &SenatorPath) -> bool {
+    pub fn is_present(&self, agent: &SenatorName) -> bool {
         self.get(agent)
             .is_some_and(|p| p.state == PresenceState::Online)
     }
@@ -531,7 +531,7 @@ mod tests {
     use crate::roster::{DelegationPresence, Roster, Senior};
     use crate::testing::assert_senate_vocabulary;
 
-    fn path(s: &str) -> SenatorPath {
+    fn path(s: &str) -> SenatorName {
         s.parse().unwrap()
     }
 
@@ -775,7 +775,7 @@ mod tests {
         put(&mut board, "alice/codex", PresenceState::Online);
         put(&mut board, "bob/claude", PresenceState::Disconnected);
 
-        let present = |a: &SenatorPath| board.is_present(a);
+        let present = |a: &SenatorName| board.is_present(a);
         assert_eq!(
             roster.delegation_presence(&name("alice"), present),
             DelegationPresence::Present

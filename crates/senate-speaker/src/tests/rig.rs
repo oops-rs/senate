@@ -6,7 +6,7 @@ use std::sync::Arc;
 use ractor::ActorRef;
 use senate_core::{
     Account, Address, BindingAction, BindingPayload, CommitteeId, Event, Guest, Hub, Kind, Locale,
-    Mirror, Name, NewEvent, Roster, SenatorPath, Senior, Seq, Source, UnboundMention,
+    Mirror, Name, NewEvent, Roster, SenatorName, Senior, Seq, Source, UnboundMention,
 };
 use serde_json::json;
 use tokio::sync::mpsc;
@@ -32,12 +32,12 @@ pub(crate) fn name(handle: &str) -> Name {
     Name::new(handle).expect("handle")
 }
 
-pub(crate) fn path(text: &str) -> SenatorPath {
+pub(crate) fn path(text: &str) -> SenatorName {
     text.parse().expect("senator path")
 }
 
 /// `<handle>/claude`: each person's one agent unless a test seats more.
-pub(crate) fn agent_path(handle: &str) -> SenatorPath {
+pub(crate) fn agent_path(handle: &str) -> SenatorName {
     path(&format!("{handle}/claude"))
 }
 

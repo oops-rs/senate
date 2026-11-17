@@ -27,7 +27,7 @@ use senate_bridge::ipc::{
 use senate_bridge::session::Runtime;
 use senate_bridge::{BridgeConfig, Paths};
 use senate_core::{
-    Address, Brief, CommitteeId, Event, Hub, Kind, Locale, Name, SenatorPath, Seq, StatusPayload,
+    Address, Brief, CommitteeId, Event, Hub, Kind, Locale, Name, SenatorName, Seq, StatusPayload,
 };
 use senate_server::ServerHub;
 use senate_speaker::{Brain, ScriptedBrain, SpeakerConfig, WorkConfig};
@@ -61,7 +61,7 @@ pub fn name(h: &str) -> Name {
     Name::new(h).unwrap()
 }
 
-pub fn path(p: &str) -> SenatorPath {
+pub fn path(p: &str) -> SenatorName {
     p.parse().unwrap()
 }
 

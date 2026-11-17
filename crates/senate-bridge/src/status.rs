@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use senate_core::{Address, Locale, SenatorPath};
+use senate_core::{Address, Locale, SenatorName};
 
 use crate::config::BridgeConfig;
 use crate::daemon::senate_words;
@@ -31,7 +31,7 @@ pub struct StatusView {
     pub person: Option<String>,
     /// The Senate connected to, by its presider (`None`: the top one, or
     /// not known).
-    pub presider: Option<SenatorPath>,
+    pub presider: Option<SenatorName>,
     pub server_url: Option<String>,
     pub committees: Vec<CommitteeStatus>,
     pub sessions: Vec<Session>,
@@ -409,7 +409,7 @@ mod tests {
 
     fn view(locale: Locale) -> StatusView {
         let now = Utc::now();
-        let agent = |s: &str| s.parse::<SenatorPath>().unwrap();
+        let agent = |s: &str| s.parse::<SenatorName>().unwrap();
         let row = |a: &str, sessions| CommitteeStatus {
             agent: agent(a),
             committee: CommitteeId::new("refund-v2").unwrap(),

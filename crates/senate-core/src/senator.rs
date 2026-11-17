@@ -1,6 +1,6 @@
 //! Who a senator is.
 //!
-//! A [`SenatorPath`] is a person's handle followed by zero or more agent
+//! A [`SenatorName`] is a person's handle followed by zero or more agent
 //! names:
 //!
 //! - `wendell` is the **senior senator**: the person. A person is global.
@@ -26,7 +26,7 @@ use crate::ids::{IdError, Name};
 pub const MAX_AGENT_DEPTH: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum SenatorPathError {
+pub enum SenatorNameError {
     #[error(transparent)]
     Name(#[from] IdError),
     #[error("senator path nests more than {max} agents: {path:?}")]
@@ -34,12 +34,12 @@ pub enum SenatorPathError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SenatorPath {
+pub struct SenatorName {
     owner: Name,
     agents: Vec<Name>,
 }
 
-impl SenatorPath {
+impl SenatorName {
     /// The person `owner`.
     pub fn senior(owner: Name) -> Self {
         Self {
@@ -48,10 +48,10 @@ impl SenatorPath {
         }
     }
 
-    pub fn new(owner: Name, agents: Vec<Name>) -> Result<Self, SenatorPathError> {
+    pub fn new(owner: Name, agents: Vec<Name>) -> Result<Self, SenatorNameError> {
         let path = Self { owner, agents };
         if path.agents.len() > MAX_AGENT_DEPTH {
-            return Err(SenatorPathError::TooDeep {
+            return Err(SenatorNameError::TooDeep {
                 path: path.to_string(),
                 max: MAX_AGENT_DEPTH,
             });
@@ -91,14 +91,14 @@ impl SenatorPath {
     }
 
     /// The person accountable for this senator. A person is their own.
-    pub fn senior_path(&self) -> SenatorPath {
+    pub fn senior_path(&self) -> SenatorName {
         Self::senior(self.owner.clone())
     }
 
     /// The agent that presides over the Senate this agent sits in, as that
     /// Senate's Speaker. `None` for a person, and for an agent in the top
     /// Senate, whose Speaker is not a senator.
-    pub fn presider(&self) -> Option<SenatorPath> {
+    pub fn presider(&self) -> Option<SenatorName> {
         (self.agents.len() >= 2).then(|| Self {
             owner: self.owner.clone(),
             agents: self.agents[..self.agents.len() - 1].to_vec(),
@@ -106,7 +106,7 @@ impl SenatorPath {
     }
 
     /// The agent `name` directly beneath this senator.
-    pub fn child(&self, name: Name) -> Result<SenatorPath, SenatorPathError> {
+    pub fn child(&self, name: Name) -> Result<SenatorName, SenatorNameError> {
         let mut agents = self.agents.clone();
         agents.push(name);
         Self::new(self.owner.clone(), agents)
@@ -115,14 +115,14 @@ impl SenatorPath {
     /// True when this senator is somewhere beneath `other`: every agent of a
     /// person is under that person, and `wendell/claude/reviewer` is under
     /// `wendell/claude`. A senator is not under itself.
-    pub fn is_under(&self, other: &SenatorPath) -> bool {
+    pub fn is_under(&self, other: &SenatorName) -> bool {
         self.owner == other.owner
             && self.agents.len() > other.agents.len()
             && self.agents[..other.agents.len()] == other.agents[..]
     }
 }
 
-impl fmt::Display for SenatorPath {
+impl fmt::Display for SenatorName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.owner.as_str())?;
         for agent in &self.agents {
@@ -132,8 +132,8 @@ impl fmt::Display for SenatorPath {
     }
 }
 
-impl FromStr for SenatorPath {
-    type Err = SenatorPathError;
+impl FromStr for SenatorName {
+    type Err = SenatorNameError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mut segments = s.split('/');
         // `split` always yields at least one item; an empty one fails as a name.
@@ -143,13 +143,13 @@ impl FromStr for SenatorPath {
     }
 }
 
-impl Serialize for SenatorPath {
+impl Serialize for SenatorName {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.collect_str(self)
     }
 }
 
-impl<'de> Deserialize<'de> for SenatorPath {
+impl<'de> Deserialize<'de> for SenatorName {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let s = String::deserialize(deserializer)?;
         s.parse().map_err(serde::de::Error::custom)
@@ -160,7 +160,7 @@ impl<'de> Deserialize<'de> for SenatorPath {
 mod tests {
     use super::*;
 
-    fn path(s: &str) -> SenatorPath {
+    fn path(s: &str) -> SenatorName {
         s.parse().unwrap()
     }
 
@@ -177,7 +177,7 @@ mod tests {
             "Wendell",
             "a b",
         ] {
-            assert!(s.parse::<SenatorPath>().is_err(), "{s:?}");
+            assert!(s.parse::<SenatorName>().is_err(), "{s:?}");
         }
     }
 
@@ -230,7 +230,7 @@ mod tests {
         }
         assert!(matches!(
             p.child(Name::new("a").unwrap()),
-            Err(SenatorPathError::TooDeep { .. })
+            Err(SenatorNameError::TooDeep { .. })
         ));
     }
 
@@ -238,6 +238,6 @@ mod tests {
     fn serializes_as_a_string() {
         let json = serde_json::to_value(path("wendell/claude")).unwrap();
         assert_eq!(json, serde_json::json!("wendell/claude"));
-        assert!(serde_json::from_value::<SenatorPath>(serde_json::json!("a//b")).is_err());
+        assert!(serde_json::from_value::<SenatorName>(serde_json::json!("a//b")).is_err());
     }
 }

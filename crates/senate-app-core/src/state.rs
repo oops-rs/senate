@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use senate_bridge::approvals::Approval;
 use senate_bridge::ipc::{SenateDocket, StatusReply, StreamState};
 use senate_core::{
-    Address, Awaiting, DocketItem, Locale, Mention, SenatorPath, SpeakerSeat, ThreadSummary,
+    Address, Awaiting, DocketItem, Locale, Mention, SenatorName, SpeakerSeat, ThreadSummary,
 };
 use serde::Serialize;
 
@@ -424,7 +424,7 @@ fn seat_mention(seat: &SpeakerSeat) -> String {
 /// The person's agents: every agent a stream or a live session names, in
 /// each Senate, the primary Senate's first.
 fn agents(model: &Model, waiting: &[Waiting]) -> Vec<AgentInfo> {
-    let presiding: Vec<&SenatorPath> = model.senates().filter_map(presider_of).collect();
+    let presiding: Vec<&SenatorName> = model.senates().filter_map(presider_of).collect();
     let mut out = Vec::new();
     for (i, s) in model.senates().enumerate() {
         let senate = s
@@ -432,7 +432,7 @@ fn agents(model: &Model, waiting: &[Waiting]) -> Vec<AgentInfo> {
             .as_ref()
             .map(ToString::to_string)
             .unwrap_or_default();
-        let mut paths: Vec<&SenatorPath> = s.committees.iter().map(|c| &c.agent).collect();
+        let mut paths: Vec<&SenatorName> = s.committees.iter().map(|c| &c.agent).collect();
         for x in s
             .sessions
             .iter()
@@ -598,7 +598,7 @@ fn docket_senate(s: &SenateDocket, locale: Locale) -> DocketSenate {
 
 fn docket_entry(item: &DocketItem, locale: Locale) -> DocketEntry {
     let e = &item.event;
-    let mentions = |paths: &[SenatorPath]| -> Vec<String> {
+    let mentions = |paths: &[SenatorName]| -> Vec<String> {
         paths
             .iter()
             .map(|p| Address::senator(p).in_text())

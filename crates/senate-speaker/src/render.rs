@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 
 use senate_core::{
     Address, AgentPresence, Brief, Card, CheckpointPayload, CommitteeId, Event, Kind, Locale, Name,
-    OutputLevel, PresencePayload, PresenceState, Roster, SenatorPath, Seq, StatusPayload,
+    OutputLevel, PresencePayload, PresenceState, Roster, SenatorName, Seq, StatusPayload,
     StatusState, ThreadSummary, TriagePayload, TriageVerdict,
 };
 
@@ -51,7 +51,7 @@ fn mentions(l: Locale, to: &[Address]) -> String {
 }
 
 /// A senator (person or agent) as a mention: `[senator::alice/claude]`.
-fn senator(path: &SenatorPath) -> String {
+fn senator(path: &SenatorName) -> String {
     Address::senator(path).in_text()
 }
 
@@ -461,11 +461,11 @@ pub(crate) fn binding_body(l: Locale, bind: bool, group: &str) -> String {
 pub(crate) fn status(
     l: Locale,
     committee: &CommitteeId,
-    online: &[SenatorPath],
-    offline: &[SenatorPath],
+    online: &[SenatorName],
+    offline: &[SenatorName],
     presence: &[String],
 ) -> String {
-    let list = |agents: &[SenatorPath]| {
+    let list = |agents: &[SenatorName]| {
         if agents.is_empty() {
             l.pick("无", "none").to_owned()
         } else {
@@ -498,7 +498,7 @@ pub(crate) fn status(
 pub(crate) fn presence_word(
     l: Locale,
     state: PresenceState,
-    new_owner: Option<&SenatorPath>,
+    new_owner: Option<&SenatorName>,
 ) -> String {
     match (state, new_owner) {
         (PresenceState::Absent, _) => l
@@ -554,7 +554,7 @@ pub(crate) fn age(l: Locale, age: chrono::Duration) -> String {
 /// `[senator::alice/claude] absent (lease expired) · 14 events behind · checkpoint 3 hours ago (seq 40)`.
 pub(crate) fn presence_status(
     l: Locale,
-    agent: &SenatorPath,
+    agent: &SenatorName,
     presence: Option<&AgentPresence>,
     checkpoint: Option<(Seq, chrono::Duration)>,
 ) -> String {
@@ -1570,7 +1570,7 @@ pub(crate) struct Today<'a> {
     pub(crate) questions: Vec<&'a senate_core::brief::BriefQuestion>,
     pub(crate) threads: Vec<&'a ThreadSummary>,
     /// `(agent, seq, what)`, one per agent, most recent first.
-    pub(crate) activity: Vec<(SenatorPath, Seq, String)>,
+    pub(crate) activity: Vec<(SenatorName, Seq, String)>,
     /// Each agent with a presence on the committee.
     pub(crate) presence: Vec<&'a AgentPresence>,
 }
@@ -1731,7 +1731,7 @@ mod tests {
         }
     }
 
-    fn path(s: &str) -> SenatorPath {
+    fn path(s: &str) -> SenatorName {
         s.parse().expect("senator path")
     }
 

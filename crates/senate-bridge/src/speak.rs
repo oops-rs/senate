@@ -30,7 +30,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use senate_core::{
-    Address, CommitteeId, Event, Kind, Locale, Name, SenatorPath, Seq, StatusPayload,
+    Address, CommitteeId, Event, Kind, Locale, Name, SenatorName, Seq, StatusPayload,
     is_provisional,
 };
 
@@ -45,7 +45,7 @@ use crate::ipc::{
 pub struct Context<'a> {
     pub me: &'a Name,
     /// The agents this machine seats for `me` (full paths).
-    pub mine: &'a [SenatorPath],
+    pub mine: &'a [SenatorName],
 }
 
 /// Why a `<to>` was not accepted.
@@ -139,7 +139,7 @@ pub fn parse_target(input: &str, ctx: &Context<'_>) -> Result<Address, TargetErr
 
 /// `names` as a path: relative to the speaker when it starts with one of
 /// their agents' names, else a full path (a person's handle first).
-fn path_of(names: Vec<Name>, ctx: &Context<'_>) -> Result<SenatorPath, ()> {
+fn path_of(names: Vec<Name>, ctx: &Context<'_>) -> Result<SenatorName, ()> {
     let first = &names[0];
     let relative = first != ctx.me
         && ctx
@@ -154,7 +154,7 @@ fn path_of(names: Vec<Name>, ctx: &Context<'_>) -> Result<SenatorPath, ()> {
         // One name that is not an agent of yours: a person.
         (names[0].clone(), Vec::new())
     };
-    SenatorPath::new(owner, agents).map_err(|_| ())
+    SenatorName::new(owner, agents).map_err(|_| ())
 }
 
 fn word(kind: SayKind) -> &'static str {
@@ -458,10 +458,10 @@ impl Sent {
 async fn who(
     socket: &Path,
     committee: &CommitteeId,
-) -> anyhow::Result<(Name, Locale, Vec<SenatorPath>)> {
+) -> anyhow::Result<(Name, Locale, Vec<SenatorName>)> {
     let pong: Pong = call(socket, &Request::Ping).await?;
     let status: StatusReply = call(socket, &Request::Status).await?;
-    let mut mine: Vec<SenatorPath> = Vec::new();
+    let mut mine: Vec<SenatorName> = Vec::new();
     for s in std::iter::once(&status).chain(&status.others) {
         for c in s.committees.iter().filter(|c| &c.committee == committee) {
             if !mine.contains(&c.agent) {
@@ -472,7 +472,7 @@ async fn who(
     // The two harnesses' default agents are yours even before a session of
     // theirs has opened here.
     for harness in ["claude", "codex"] {
-        let agent = SenatorPath::new(pong.person.clone(), vec![Name::new(harness)?])?;
+        let agent = SenatorName::new(pong.person.clone(), vec![Name::new(harness)?])?;
         if !mine.contains(&agent) {
             mine.push(agent);
         }
@@ -658,7 +658,7 @@ mod tests {
     fn name(s: &str) -> Name {
         Name::new(s).unwrap()
     }
-    fn path(s: &str) -> SenatorPath {
+    fn path(s: &str) -> SenatorName {
         s.parse().unwrap()
     }
 

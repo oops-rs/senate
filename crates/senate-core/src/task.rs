@@ -94,7 +94,7 @@ use serde_json::Value;
 use crate::address::Address;
 use crate::event::{Event, Kind, StatusState, is_provisional, meta};
 use crate::ids::{Name, Seq};
-use crate::senator::SenatorPath;
+use crate::senator::SenatorName;
 
 /// How long a bridge holds a root that [`needs_triage`] for a verdict.
 pub const TRIAGE_WAIT_SECS: u64 = 10;
@@ -327,7 +327,7 @@ impl OutputLevel {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskOwner {
     /// The agent whose status claimed the thread.
-    pub agent: SenatorPath,
+    pub agent: SenatorName,
     /// That agent's bridge's id for the session.
     pub session: String,
 }
@@ -443,13 +443,13 @@ pub enum WaitsOn {
 
 impl ThreadSummary {
     /// The agents the task was addressed to, in the root's order.
-    pub fn agents(&self) -> impl Iterator<Item = &SenatorPath> {
+    pub fn agents(&self) -> impl Iterator<Item = &SenatorName> {
         self.to.iter().filter_map(Address::as_agent)
     }
 
     /// Whether the task was addressed to exactly this agent. Another agent
     /// of the same person does not count.
-    pub fn is_for(&self, agent: &SenatorPath) -> bool {
+    pub fn is_for(&self, agent: &SenatorName) -> bool {
         self.agents().any(|a| a == agent)
     }
 
@@ -590,7 +590,7 @@ impl TaskBoard {
     /// agent's inbox, not its person's.
     pub fn threads_for(
         &self,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         state: Option<StatusState>,
     ) -> Vec<&ThreadSummary> {
         let mut out = self.threads(state);
@@ -945,7 +945,7 @@ mod tests {
         s.parse().unwrap()
     }
 
-    fn path(s: &str) -> SenatorPath {
+    fn path(s: &str) -> SenatorName {
         s.parse().unwrap()
     }
 

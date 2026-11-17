@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use senate_core::{
     Address, BranchNaming, CheckpointFiles, CheckpointPayload, CheckpointTrigger, Event, Hub, Kind,
-    Locale, NewEvent, PresencePayload, PresenceState, Roster, SenatorPath, Senior, Seq,
+    Locale, NewEvent, PresencePayload, PresenceState, Roster, SenatorName, Senior, Seq,
     StatusPayload, StatusState, WorkRun, WorkState, meta,
 };
 use senate_work::testing::{FakeForge, FakeRun, FakeRunner};
@@ -45,7 +45,7 @@ fn checkpoint(handle: &str, pushed: bool, remote: Option<&str>) -> NewEvent {
 }
 
 /// A hand-off checkpoint of the agent `who` on its person's branch.
-fn checkpoint_at(who: &SenatorPath, commit: &str, pushed: bool, remote: Option<&str>) -> NewEvent {
+fn checkpoint_at(who: &SenatorName, commit: &str, pushed: bool, remote: Option<&str>) -> NewEvent {
     let payload = CheckpointPayload {
         branch: format!("feature/refund-v2/{}", who.owner()),
         commit: commit.into(),
@@ -817,7 +817,7 @@ async fn in_english_the_restatement_and_the_result_read_in_english() {
 
 // ----- reassignment --------------------------------------------------------------
 
-fn presence_for(events: &[Event], who: &SenatorPath) -> Vec<(PresencePayload, Event)> {
+fn presence_for(events: &[Event], who: &SenatorName) -> Vec<(PresencePayload, Event)> {
     events
         .iter()
         .filter_map(|e| Some((PresencePayload::of(e)?, e.clone())))

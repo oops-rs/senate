@@ -4,7 +4,7 @@
 //! committee: a machine seats several agents of one person, each with its
 //! own stream, cursor, queue and dropped count, and two agents of one
 //! person on one committee never share any of them. The agent is stored as
-//! its full [`SenatorPath`] (`alice/claude`).
+//! its full [`SenatorName`] (`alice/claude`).
 //!
 //! - `cursors` — per (agent, committee), the highest `seq` the bridge has
 //!   durably taken in (`delivered`) and the highest it has reported to the
@@ -53,7 +53,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, Transaction, params};
-use senate_core::{CommitteeId, Event, SenatorPath, Seq, TaskOwner, TriageVerdict};
+use senate_core::{CommitteeId, Event, SenatorName, Seq, TaskOwner, TriageVerdict};
 use serde::{Deserialize, Serialize};
 
 use crate::agent::AgentSource;
@@ -196,12 +196,12 @@ impl ItemStatus {
 }
 
 /// `(agent, committee, seq)`: a queue item's identity.
-pub type ItemKey = (SenatorPath, CommitteeId, Seq);
+pub type ItemKey = (SenatorName, CommitteeId, Seq);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct QueueItem {
     /// The agent of this bridge the event is for.
-    pub agent: SenatorPath,
+    pub agent: SenatorName,
     pub event: Event,
     pub status: ItemStatus,
     pub session_id: Option<String>,
@@ -235,7 +235,7 @@ pub struct SessionUpsert {
     pub ancestor_pids: Vec<u32>,
     pub runtime: Runtime,
     /// The agent the session speaks as, chosen at every hook.
-    pub agent: SenatorPath,
+    pub agent: SenatorName,
     pub agent_source: AgentSource,
 }
 
@@ -265,7 +265,7 @@ pub struct ResetSummary {
 /// state still holds for it ([`Store::idle_agents`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdleAgent {
-    pub agent: SenatorPath,
+    pub agent: SenatorName,
     pub committees: Vec<CommitteeId>,
     /// Queued items, of any status.
     pub items: usize,
@@ -330,13 +330,13 @@ fn committee_col(row: &Row<'_>, idx: usize) -> rusqlite::Result<CommitteeId> {
     opt_committee(row, idx)?.ok_or_else(|| conversion(idx, "missing committee".into()))
 }
 
-fn agent_col(row: &Row<'_>, idx: usize) -> rusqlite::Result<SenatorPath> {
+fn agent_col(row: &Row<'_>, idx: usize) -> rusqlite::Result<SenatorName> {
     let raw: String = row.get(idx)?;
     raw.parse()
-        .map_err(|e: senate_core::SenatorPathError| conversion(idx, e.to_string()))
+        .map_err(|e: senate_core::SenatorNameError| conversion(idx, e.to_string()))
 }
 
-fn agent_text(agent: &SenatorPath) -> String {
+fn agent_text(agent: &SenatorName) -> String {
     agent.to_string()
 }
 
@@ -397,7 +397,7 @@ fn item_from_row(row: &Row<'_>) -> rusqlite::Result<QueueItem> {
 /// behind the cursor.
 fn take(
     tx: &Transaction<'_>,
-    agent: &SenatorPath,
+    agent: &SenatorName,
     committee: &CommitteeId,
     seq: Seq,
     enqueue: Option<&Event>,
@@ -485,7 +485,7 @@ impl Store {
 
     pub fn cursor(
         &self,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         committee: &CommitteeId,
     ) -> Result<CursorRow, StoreError> {
         let row = self
@@ -510,7 +510,7 @@ impl Store {
 
     pub fn delivered_cursor(
         &self,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         committee: &CommitteeId,
     ) -> Result<Seq, StoreError> {
         Ok(self.cursor(agent, committee)?.delivered)
@@ -520,7 +520,7 @@ impl Store {
     /// before and not reset since).
     pub fn has_cursor(
         &self,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         committee: &CommitteeId,
     ) -> Result<bool, StoreError> {
         Ok(self
@@ -538,7 +538,7 @@ impl Store {
     /// Does nothing (and returns `false`) when it already has one.
     pub fn seed_cursor(
         &self,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         committee: &CommitteeId,
         delivered: Seq,
         reported: Seq,
@@ -558,7 +558,7 @@ impl Store {
     }
 
     /// Every cursor, by agent then committee.
-    pub fn cursors(&self) -> Result<Vec<(SenatorPath, CommitteeId, CursorRow)>, StoreError> {
+    pub fn cursors(&self) -> Result<Vec<(SenatorName, CommitteeId, CursorRow)>, StoreError> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
             "SELECT agent, committee, delivered, reported FROM cursors ORDER BY agent, committee",
@@ -578,7 +578,7 @@ impl Store {
 
     pub fn mark_reported(
         &self,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         committee: &CommitteeId,
         seq: Seq,
     ) -> Result<(), StoreError> {
@@ -601,7 +601,7 @@ impl Store {
     /// cursor.
     pub fn ingest(
         &self,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         event: &Event,
         directed: bool,
     ) -> Result<bool, StoreError> {
@@ -622,7 +622,7 @@ impl Store {
     /// this build cannot decode). `false` when `seq` is at or behind it.
     pub fn advance(
         &self,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         committee: &CommitteeId,
         seq: Seq,
     ) -> Result<bool, StoreError> {
@@ -663,7 +663,7 @@ impl Store {
 
     /// The Senate `server` serves, by its presider, as `/v1/me` last said:
     /// `None` when never recorded, `Some(None)` for the top Senate.
-    pub fn seating(&self, server: &str) -> Result<Option<Option<SenatorPath>>, StoreError> {
+    pub fn seating(&self, server: &str) -> Result<Option<Option<SenatorName>>, StoreError> {
         let raw: Option<Option<String>> = self
             .conn()
             .query_row(
@@ -673,7 +673,7 @@ impl Store {
             )
             .optional()?;
         raw.map(|p| {
-            p.map(|p| p.parse::<SenatorPath>())
+            p.map(|p| p.parse::<SenatorName>())
                 .transpose()
                 .map_err(|e| StoreError::Corrupt(e.to_string()))
         })
@@ -683,7 +683,7 @@ impl Store {
     pub fn set_seating(
         &self,
         server: &str,
-        presider: Option<&SenatorPath>,
+        presider: Option<&SenatorName>,
     ) -> Result<(), StoreError> {
         self.conn().execute(
             "INSERT INTO seating (server, presider) VALUES (?1, ?2)
@@ -737,7 +737,7 @@ impl Store {
     /// to reset. Returns how many undelivered items were dropped.
     pub fn reset_committee(
         &self,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         committee: &CommitteeId,
     ) -> Result<usize, StoreError> {
         let agent = agent_text(agent);
@@ -955,7 +955,7 @@ impl Store {
     pub fn release_held_for_others(
         &self,
         id: &str,
-        agent: &SenatorPath,
+        agent: &SenatorName,
     ) -> Result<usize, StoreError> {
         Ok(self.conn().execute(
             "UPDATE queue SET status = 'pending', session_id = NULL
@@ -1042,7 +1042,7 @@ impl Store {
                 let Ok(committee) = CommitteeId::new(committee) else {
                     continue;
                 };
-                if let Ok(path) = agent.parse::<SenatorPath>() {
+                if let Ok(path) = agent.parse::<SenatorName>() {
                     agents
                         .entry(agent.clone())
                         .or_insert_with(|| IdleAgent {
@@ -1070,7 +1070,7 @@ impl Store {
                 let (agent, committee, enqueued, delivered) = row?;
                 bump(&agent, enqueued.max(delivered));
                 if let (Ok(path), Ok(committee)) =
-                    (agent.parse::<SenatorPath>(), CommitteeId::new(committee))
+                    (agent.parse::<SenatorName>(), CommitteeId::new(committee))
                 {
                     let entry = agents.entry(agent.clone()).or_insert_with(|| IdleAgent {
                         agent: path,
@@ -1118,7 +1118,7 @@ impl Store {
     /// `committees`. Returns (cursors, items) removed.
     pub fn forget_agent(
         &self,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         committees: &[CommitteeId],
     ) -> Result<(usize, usize), StoreError> {
         let mut conn = self.conn();
@@ -1166,7 +1166,7 @@ impl Store {
     /// `agent`'s items on `committee` waiting for routing.
     pub fn pending_for(
         &self,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         committee: &CommitteeId,
     ) -> Result<Vec<QueueItem>, StoreError> {
         self.items(
@@ -1187,7 +1187,7 @@ impl Store {
 
     pub fn item(
         &self,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         committee: &CommitteeId,
         seq: Seq,
     ) -> Result<Option<QueueItem>, StoreError> {
@@ -1387,7 +1387,7 @@ impl Store {
     /// were dropped.
     pub fn cap_pending(
         &self,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         committee: &CommitteeId,
         keep: usize,
     ) -> Result<usize, StoreError> {
@@ -1419,7 +1419,7 @@ impl Store {
 
     /// Items of `agent` on `committee` dropped by the cap and not yet
     /// announced.
-    pub fn dropped(&self, agent: &SenatorPath, committee: &CommitteeId) -> Result<u64, StoreError> {
+    pub fn dropped(&self, agent: &SenatorName, committee: &CommitteeId) -> Result<u64, StoreError> {
         let n: Option<i64> = self
             .conn()
             .query_row(
@@ -1434,7 +1434,7 @@ impl Store {
     /// `n` dropped items were announced in a push that went out.
     pub fn consume_dropped(
         &self,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         committee: &CommitteeId,
         n: u64,
     ) -> Result<(), StoreError> {
@@ -1563,7 +1563,7 @@ impl Store {
     /// cancelled.
     pub fn cancel(
         &self,
-        agent: Option<&SenatorPath>,
+        agent: Option<&SenatorName>,
         committee: &CommitteeId,
         root: Seq,
         whole_thread: bool,
@@ -1599,15 +1599,15 @@ mod tests {
         CommitteeId::new("refund-v2").unwrap()
     }
 
-    fn agent(s: &str) -> SenatorPath {
+    fn agent(s: &str) -> SenatorName {
         s.parse().unwrap()
     }
 
-    fn claude() -> SenatorPath {
+    fn claude() -> SenatorName {
         agent("alice/claude")
     }
 
-    fn codex() -> SenatorPath {
+    fn codex() -> SenatorName {
         agent("alice/codex")
     }
 
@@ -1622,7 +1622,7 @@ mod tests {
         .into_event(Seq(seq), Utc::now())
     }
 
-    fn key(agent: &SenatorPath, seq: u64) -> ItemKey {
+    fn key(agent: &SenatorName, seq: u64) -> ItemKey {
         (agent.clone(), committee(), Seq(seq))
     }
 
@@ -1710,7 +1710,7 @@ mod tests {
         assert!(s.ingest(&claude(), &event(2), true).unwrap());
         assert_eq!(s.delivered_cursor(&claude(), &committee()).unwrap(), Seq(2));
         assert_eq!(s.delivered_cursor(&codex(), &committee()).unwrap(), Seq(1));
-        let seqs = |a: &SenatorPath| -> Vec<u64> {
+        let seqs = |a: &SenatorName| -> Vec<u64> {
             s.pending_for(a, &committee())
                 .unwrap()
                 .iter()

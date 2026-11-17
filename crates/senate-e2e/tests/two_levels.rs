@@ -17,7 +17,7 @@ use std::time::Duration;
 use common::*;
 use senate_bridge::ipc::{ClientError, DocketReply, Posted, Request};
 use senate_core::{
-    Address, Awaiting, Event, Hub, Kind, Locale, NewEvent, SenatorPath, SpeakerSeat, meta,
+    Address, Awaiting, Event, Hub, Kind, Locale, NewEvent, SenatorName, SpeakerSeat, meta,
 };
 
 const PRESIDER: &str = "alice/claude";
@@ -283,7 +283,7 @@ async fn the_two_senates_keep_apart_and_survive_a_restart() {
     assert!(head_below > senate_core::Seq::ZERO);
     // Cursors: alice/claude's delivered cursor is kept per Senate, each
     // against its own log (above as a senator, below as the Speaker).
-    let presider: SenatorPath = path(PRESIDER);
+    let presider: SenatorName = path(PRESIDER);
     for (hub, head) in [(&above_hub, head_above), (&below_hub, head_below)] {
         let hub = hub.clone();
         let presider = presider.clone();

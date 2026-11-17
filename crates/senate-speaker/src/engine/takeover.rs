@@ -76,7 +76,7 @@ use senate_core::{
 
 use super::{
     Address, Answer, BrainError, CommitteeId, Drafted, Engine, Event, HubError, Kind, MirrorPlan,
-    NewEvent, OutputLevel, PostTarget, STALL_RETRY, SenatorPath, Seq, Stall, StatusPayload,
+    NewEvent, OutputLevel, PostTarget, STALL_RETRY, SenatorName, Seq, Stall, StatusPayload,
     TAKEOVER_META, Takeover, behalf_answer, debug, derived_event_id, json, meta, warn,
 };
 use crate::render::{self, HandedBack, NoCover};
@@ -87,7 +87,7 @@ impl Engine {
     pub(super) async fn presence_state(
         &self,
         committee: &CommitteeId,
-        agent: &SenatorPath,
+        agent: &SenatorName,
     ) -> Result<Option<PresenceState>, Stall> {
         Ok(self
             .hub
@@ -116,7 +116,7 @@ impl Engine {
             .and_then(|s| s.brief.as_ref())
             .map(|b| b.brief().checkpoints)
             .unwrap_or_default();
-        let mut agents: Vec<SenatorPath> = presence.iter().map(|p| p.agent.clone()).collect();
+        let mut agents: Vec<SenatorName> = presence.iter().map(|p| p.agent.clone()).collect();
         agents.extend(checkpoints.iter().map(|c| c.agent.clone()));
         agents.sort();
         agents.dedup();
@@ -236,7 +236,7 @@ impl Engine {
 
     /// Every question still waiting on `agent` is due now (it is away: the
     /// takeover decides). Only that agent's: its siblings are not touched.
-    fn due_for(&mut self, committee: &CommitteeId, agent: &SenatorPath) {
+    fn due_for(&mut self, committee: &CommitteeId, agent: &SenatorName) {
         let roots: Vec<Seq> = self
             .committees
             .get(committee)
@@ -263,7 +263,7 @@ impl Engine {
         &mut self,
         committee: CommitteeId,
         root: Seq,
-        agent: SenatorPath,
+        agent: SenatorName,
         question: Seq,
     ) {
         let checkpoint = match self.hub.latest_checkpoint(&committee, &agent).await {
@@ -373,7 +373,7 @@ impl Engine {
         }
     }
 
-    fn forget_open(&mut self, committee: &CommitteeId, root: Seq, agent: &SenatorPath) {
+    fn forget_open(&mut self, committee: &CommitteeId, root: Seq, agent: &SenatorName) {
         if let Some(open) = self
             .committees
             .get_mut(committee)
@@ -391,7 +391,7 @@ impl Engine {
         &mut self,
         committee: &CommitteeId,
         root: Seq,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         question: Seq,
         why: NoCover,
     ) {
@@ -455,7 +455,7 @@ impl Engine {
                 state
                     .activity
                     .keys()
-                    .map(SenatorPath::owner)
+                    .map(SenatorName::owner)
                     .filter(|person| *person != away.owner())
                     .cloned()
                     .collect()
@@ -513,7 +513,7 @@ impl Engine {
     async fn hand_back(
         &mut self,
         event: &Event,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         group: Option<&str>,
     ) -> Result<(), Stall> {
         let l = self.locale(&event.committee);

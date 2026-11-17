@@ -27,7 +27,7 @@ use senate_bridge::ipc::{
 };
 use senate_bridge::session::{Runtime, Session, SessionState};
 use senate_core::{
-    CommitteeId, Directed, Locale, SenatorPath, Seq, SpeakerSeat, StatusPayload, StatusState,
+    CommitteeId, Directed, Locale, SenatorName, Seq, SpeakerSeat, StatusPayload, StatusState,
     ThreadSummary,
 };
 
@@ -38,7 +38,7 @@ use crate::text;
 pub enum Refresh {
     /// `inbox` of one agent on one committee of the primary Senate.
     Inbox {
-        agent: SenatorPath,
+        agent: SenatorName,
         committee: CommitteeId,
     },
     /// Every inbox of the primary Senate.
@@ -119,7 +119,7 @@ impl Offline {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReadOf {
     Inbox {
-        agent: SenatorPath,
+        agent: SenatorName,
         committee: CommitteeId,
     },
     Approvals,
@@ -174,7 +174,7 @@ pub struct Model {
     /// Pending approvals by id.
     pub approvals: BTreeMap<String, Approval>,
     /// The last `inbox` reply per (agent, committee) of the primary Senate.
-    pub inboxes: BTreeMap<(SenatorPath, CommitteeId), InboxReply>,
+    pub inboxes: BTreeMap<(SenatorName, CommitteeId), InboxReply>,
     /// What awaits the Speaker, while one of the person's agents presides.
     pub docket: Option<DocketReply>,
     pub last_error: Option<Failure>,
@@ -188,7 +188,7 @@ pub struct Waiting {
     pub committee: CommitteeId,
     pub thread: ThreadSummary,
     /// The person's agents the thread was addressed to.
-    pub for_agents: Vec<SenatorPath>,
+    pub for_agents: Vec<SenatorName>,
     /// The thread was escalated to the person: it waits on them whichever
     /// agent it was for.
     pub escalated: bool,
@@ -332,7 +332,7 @@ impl Model {
 
     /// The (agent, committee) streams of the primary Senate: the inboxes the
     /// app can read.
-    pub fn targets(&self) -> Vec<(SenatorPath, CommitteeId)> {
+    pub fn targets(&self) -> Vec<(SenatorName, CommitteeId)> {
         self.status
             .as_ref()
             .map(|s| {
@@ -428,7 +428,7 @@ impl Model {
 
 /// The person's agent holding the Speaker's seat of the Senate `status`
 /// describes, if it is one of theirs.
-pub fn presider_of(status: &StatusReply) -> Option<&SenatorPath> {
+pub fn presider_of(status: &StatusReply) -> Option<&SenatorName> {
     match &status.speaker {
         Some(SpeakerSeat::Senator(p)) if p.owner() == &status.person => Some(p),
         _ => None,
@@ -439,7 +439,7 @@ pub fn presider_of(status: &StatusReply) -> Option<&SenatorPath> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     Inbox {
-        agent: SenatorPath,
+        agent: SenatorName,
         committee: CommitteeId,
     },
     /// Reply in a thread as the person (`senator::<person>`).
@@ -655,7 +655,7 @@ mod tests {
         CommitteeId::new(c).unwrap()
     }
 
-    fn path(p: &str) -> SenatorPath {
+    fn path(p: &str) -> SenatorName {
         p.parse().unwrap()
     }
 

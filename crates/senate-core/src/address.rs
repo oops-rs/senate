@@ -27,7 +27,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::ids::{IdError, Name};
-use crate::senator::{SenatorPath, SenatorPathError};
+use crate::senator::{SenatorName, SenatorNameError};
 
 pub(crate) const SENATOR_PREFIX: &str = "senator::";
 pub(crate) const GUEST_PREFIX: &str = "guest::";
@@ -127,7 +127,7 @@ impl FromStr for Guest {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Address {
-    Senator(SenatorPath),
+    Senator(SenatorName),
     /// `senator::<person>/*`: whichever of that person's agents should get
     /// it. Only ever a recipient a sender wrote. It names the person, not a
     /// level: in a nested Senate it means that person's agents seated there.
@@ -146,19 +146,19 @@ pub enum AddressParseError {
     )]
     Unknown(String),
     #[error(transparent)]
-    Senator(#[from] SenatorPathError),
+    Senator(#[from] SenatorNameError),
     #[error(transparent)]
     Guest(#[from] GuestError),
 }
 
 impl Address {
-    pub fn senator(path: &SenatorPath) -> Self {
+    pub fn senator(path: &SenatorName) -> Self {
         Self::Senator(path.clone())
     }
 
     /// The person `handle`.
     pub fn senior(handle: &Name) -> Self {
-        Self::Senator(SenatorPath::senior(handle.clone()))
+        Self::Senator(SenatorName::senior(handle.clone()))
     }
 
     /// Whichever of `owner`'s agents should get it: `senator::<owner>/*`.
@@ -168,7 +168,7 @@ impl Address {
 
     /// The senator behind a `senator::` address that names one. The wildcard
     /// names none.
-    pub fn as_senator(&self) -> Option<&SenatorPath> {
+    pub fn as_senator(&self) -> Option<&SenatorName> {
         match self {
             Self::Senator(path) => Some(path),
             _ => None,
@@ -176,7 +176,7 @@ impl Address {
     }
 
     /// The agent behind a `senator::` address that names an agent.
-    pub fn as_agent(&self) -> Option<&SenatorPath> {
+    pub fn as_agent(&self) -> Option<&SenatorName> {
         self.as_senator().filter(|path| path.is_junior())
     }
 
@@ -189,12 +189,12 @@ impl Address {
 
     /// A person.
     pub fn is_senior(&self) -> bool {
-        self.as_senator().is_some_and(SenatorPath::is_senior)
+        self.as_senator().is_some_and(SenatorName::is_senior)
     }
 
     /// An agent.
     pub fn is_junior(&self) -> bool {
-        self.as_senator().is_some_and(SenatorPath::is_junior)
+        self.as_senator().is_some_and(SenatorName::is_junior)
     }
 
     /// `senator::<person>/*`, which must be resolved before an event is
@@ -226,8 +226,8 @@ impl Address {
     }
 }
 
-impl From<SenatorPath> for Address {
-    fn from(path: SenatorPath) -> Self {
+impl From<SenatorName> for Address {
+    fn from(path: SenatorName) -> Self {
         Self::Senator(path)
     }
 }
@@ -263,7 +263,7 @@ impl FromStr for Address {
                     // is not a form, and fails here as a bad name.
                     match rest.strip_suffix(ANY_AGENT_SUFFIX) {
                         Some(owner) => Ok(Self::AgentOf(
-                            Name::new(owner).map_err(SenatorPathError::from)?,
+                            Name::new(owner).map_err(SenatorNameError::from)?,
                         )),
                         None => Ok(Self::Senator(rest.parse()?)),
                     }

@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 
 use chrono::Utc;
 use senate_core::continuity::short_commit;
-use senate_core::{Address, Locale, Name, SenatorPath};
+use senate_core::{Address, Locale, Name, SenatorName};
 
 use crate::brain::AgentCandidate;
 
@@ -22,7 +22,7 @@ fn clip(text: &str) -> String {
     out
 }
 
-fn mentions(candidates: &[SenatorPath], l: Locale) -> String {
+fn mentions(candidates: &[SenatorName], l: Locale) -> String {
     candidates
         .iter()
         .map(|c| Address::senator(c).in_text())
@@ -93,7 +93,7 @@ pub(crate) fn which_agent(l: Locale, owner: &Name, candidates: &[AgentCandidate]
 }
 
 /// The reply to "which agent?" named none of them.
-pub(crate) fn choice_not_understood(l: Locale, candidates: &[SenatorPath]) -> String {
+pub(crate) fn choice_not_understood(l: Locale, candidates: &[SenatorName]) -> String {
     let list = mentions(candidates, l);
     match l {
         Locale::Zh => format!("没认出是哪一个。请回复编号或名字：{list}"),
@@ -102,7 +102,7 @@ pub(crate) fn choice_not_understood(l: Locale, candidates: &[SenatorPath]) -> St
 }
 
 /// The Speaker cannot ask here: the person names one and asks again.
-pub(crate) fn name_one_of(l: Locale, owner: &Name, candidates: &[SenatorPath]) -> String {
+pub(crate) fn name_one_of(l: Locale, owner: &Name, candidates: &[SenatorName]) -> String {
     let person = Address::senior(owner).in_text();
     let list = mentions(candidates, l);
     match l {
@@ -182,7 +182,7 @@ mod tests {
     use super::*;
     use crate::tests_support::assert_senate_vocabulary;
 
-    fn path(s: &str) -> SenatorPath {
+    fn path(s: &str) -> SenatorName {
         s.parse().expect("path")
     }
 

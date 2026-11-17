@@ -9,7 +9,7 @@
 
 use std::sync::{PoisonError, RwLock};
 
-use senate_core::{Name, Roster, RosterConfig, RosterError, SenatorPath, Senior};
+use senate_core::{Name, Roster, RosterConfig, RosterError, SenatorName, Senior};
 
 pub(crate) struct Seats {
     roster: RwLock<Roster>,
@@ -32,7 +32,7 @@ impl Seats {
 
     /// Whether `person`, authenticated, may act as `senator`; if it is an
     /// agent, seat it. `Ok(true)` when it was seated by this call.
-    pub(crate) fn act_as(&self, person: &Name, senator: &SenatorPath) -> Result<bool, RosterError> {
+    pub(crate) fn act_as(&self, person: &Name, senator: &SenatorName) -> Result<bool, RosterError> {
         let mut roster = self.roster.write().unwrap_or_else(PoisonError::into_inner);
         roster.may_act_as(person, senator)?;
         if senator.is_senior() {
@@ -44,7 +44,7 @@ impl Seats {
     /// Seat an agent the log has already seen, with no person authenticating:
     /// seats are not stored, so a restarted server seats again the agents it
     /// finds in the log.
-    pub(crate) fn seat_again(&self, agent: SenatorPath) -> Result<bool, RosterError> {
+    pub(crate) fn seat_again(&self, agent: SenatorName) -> Result<bool, RosterError> {
         self.roster
             .write()
             .unwrap_or_else(PoisonError::into_inner)

@@ -17,7 +17,7 @@ use std::sync::Arc;
 use senate_core::api::Heartbeat;
 use senate_core::hub::{matches_terms, search_terms};
 use senate_core::{
-    Address, CommitteeId, Event, EventId, Kind, Mirror, MirrorRef, NewEvent, Refs, SenatorPath,
+    Address, CommitteeId, Event, EventId, Kind, Mirror, MirrorRef, NewEvent, Refs, SenatorName,
     Seq, Source,
 };
 use senate_log::{CursorOwner, LogError, LogStore, MemoryStore, PgStore, SqliteStore};
@@ -127,7 +127,7 @@ fn committee(name: &str) -> CommitteeId {
     CommitteeId::new(name).unwrap()
 }
 
-fn path(s: &str) -> SenatorPath {
+fn path(s: &str) -> SenatorName {
     s.parse().unwrap()
 }
 

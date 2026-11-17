@@ -12,7 +12,7 @@ use futures::{Stream, StreamExt};
 use reqwest::{Method, RequestBuilder, StatusCode};
 use senate_core::api::{ApiError, AppendResponse};
 use senate_core::{
-    Address, CommitteeId, Event, Kind, Name, NewEvent, RosterConfig, SenatorPath, Senior, Seq,
+    Address, CommitteeId, Event, Kind, Name, NewEvent, RosterConfig, SenatorName, Senior, Seq,
 };
 use senate_log::{LogStore, MemoryStore};
 use senate_server::{Running, Server, ServerConfig, TokenConfig};
@@ -26,7 +26,7 @@ pub fn name(h: &str) -> Name {
     Name::new(h).unwrap()
 }
 
-pub fn path(p: &str) -> SenatorPath {
+pub fn path(p: &str) -> SenatorName {
     p.parse().unwrap()
 }
 

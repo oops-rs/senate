@@ -15,7 +15,7 @@ use std::time::Duration;
 use basis::OutputSpec;
 use chrono::{DateTime, Utc};
 use senate_core::{
-    Address, Brief, CommitteeId, Event, Locale, OutputLevel, Roster, SenatorPath, Seq,
+    Address, Brief, CommitteeId, Event, Locale, OutputLevel, Roster, SenatorName, Seq,
     TriagePayload,
 };
 use serde::Deserialize;
@@ -247,7 +247,7 @@ pub(crate) fn brief_top(brief: &Brief, locale: Locale) -> String {
 }
 
 /// How the Speaker's answer for `agent` is labelled.
-fn answer_label(agent: &SenatorPath) -> String {
+fn answer_label(agent: &SenatorName) -> String {
     format!("[speaker::{agent}]")
 }
 
@@ -1020,7 +1020,7 @@ impl PickWire {
         };
         let raw = raw.trim().trim_start_matches('[').trim_end_matches(']');
         let bare = raw.strip_prefix("senator::").unwrap_or(raw);
-        match bare.parse::<SenatorPath>() {
+        match bare.parse::<SenatorName>() {
             Ok(path) if candidates.iter().any(|c| c.agent == path) => Pick::Agent(path),
             _ => Pick::Ask,
         }
@@ -1349,7 +1349,7 @@ mod tests {
                 .expect("wire")
                 .into_pick(&candidates)
         };
-        let codex: SenatorPath = "alice/codex".parse().expect("path");
+        let codex: SenatorName = "alice/codex".parse().expect("path");
         assert_eq!(
             pick(json!({ "agent": "alice/codex", "reason": "r" })),
             Pick::Agent(codex.clone())

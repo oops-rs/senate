@@ -21,7 +21,7 @@ use senate_core::api::{
 };
 use senate_core::{
     Address, Brief, CheckpointPayload, CheckpointRecord, CommitteeId, DocketPage, Hub, Kind, Name,
-    NewEvent, PickPayload, ResolveError, SenatorPath, Seq, StatusPayload, meta,
+    NewEvent, PickPayload, ResolveError, SenatorName, Seq, StatusPayload, meta,
 };
 
 use crate::auth::{Authenticate, bearer_token};
@@ -107,7 +107,7 @@ impl AppState {
     /// `person` acts as `senator`: themselves, or an agent under their own
     /// name that could sit in this Senate, which is seated if this is its
     /// first contact. Anyone else's is 403.
-    fn act_as(&self, person: &Person, senator: &SenatorPath) -> Result<(), ApiFailure> {
+    fn act_as(&self, person: &Person, senator: &SenatorName) -> Result<(), ApiFailure> {
         self.hub
             .act_as(&person.0, senator)
             .map(|_| ())
@@ -146,7 +146,7 @@ impl AppState {
     /// `senator::<person>/*` counts it. Where it could not (a nested Senate,
     /// presided over by an agent that sits in the Senate above) it is let
     /// in without a seat.
-    fn connect_as(&self, person: &Person, senator: &SenatorPath) -> Result<(), ApiFailure> {
+    fn connect_as(&self, person: &Person, senator: &SenatorName) -> Result<(), ApiFailure> {
         let presides = self
             .hub
             .speaker_seat()
@@ -162,9 +162,9 @@ impl AppState {
     fn act_as_or_self(
         &self,
         person: &Person,
-        senator: Option<SenatorPath>,
-    ) -> Result<SenatorPath, ApiFailure> {
-        let senator = senator.unwrap_or_else(|| SenatorPath::senior(person.0.clone()));
+        senator: Option<SenatorName>,
+    ) -> Result<SenatorName, ApiFailure> {
+        let senator = senator.unwrap_or_else(|| SenatorName::senior(person.0.clone()));
         self.connect_as(person, &senator)?;
         Ok(senator)
     }
@@ -638,7 +638,7 @@ async fn stream(
     let agent = match params.senator {
         Some(senator) => {
             state.connect_as(&person, &senator)?;
-            Some(senator).filter(SenatorPath::is_junior)
+            Some(senator).filter(SenatorName::is_junior)
         }
         None => None,
     };

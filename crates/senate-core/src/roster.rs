@@ -51,7 +51,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::address::Address;
 use crate::ids::Name;
-use crate::senator::SenatorPath;
+use crate::senator::SenatorName;
 
 /// A person's identity on an outside platform: a chat platform's user id, an
 /// identity provider's subject.
@@ -82,8 +82,8 @@ impl Senior {
         }
     }
 
-    pub fn path(&self) -> SenatorPath {
-        SenatorPath::senior(self.handle.clone())
+    pub fn path(&self) -> SenatorName {
+        SenatorName::senior(self.handle.clone())
     }
 
     /// This person's ids on `platform`, in the order listed: who to invite
@@ -99,33 +99,33 @@ impl Senior {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RosterError {
     #[error("{0} is listed twice")]
-    Duplicate(SenatorPath),
+    Duplicate(SenatorName),
     #[error("{0} is a person; only agents are seated")]
-    NotAnAgent(SenatorPath),
+    NotAnAgent(SenatorName),
     #[error("{agent} has no person: {owner} is not listed")]
-    NoSenior { agent: SenatorPath, owner: Name },
+    NoSenior { agent: SenatorName, owner: Name },
     #[error("{agent} does not sit in this Senate: {reason}")]
     WrongLevel {
-        agent: SenatorPath,
+        agent: SenatorName,
         reason: &'static str,
     },
     #[error("a Senate is presided over by an agent, and {0} is a person")]
-    PresiderIsAPerson(SenatorPath),
+    PresiderIsAPerson(SenatorName),
     #[error("{0} is not a person this Senate knows")]
     UnknownSenior(Name),
     #[error("{person} may not act as {senator}: it is not under their name")]
-    NotYours { person: Name, senator: SenatorPath },
+    NotYours { person: Name, senator: SenatorName },
     #[error("the Speaker is always backed by a model, and {0} is a person")]
-    SpeakerIsAPerson(SenatorPath),
+    SpeakerIsAPerson(SenatorName),
     #[error("{speaker} cannot be this Senate's Speaker: {reason}")]
     WrongSpeaker {
-        speaker: SenatorPath,
+        speaker: SenatorName,
         reason: &'static str,
     },
     #[error("only a top Senate may have the built-in Speaker")]
     BuiltInSpeakerNested,
     #[error("a Senate has one Speaker: {0} is named, and the built-in Speaker runs too")]
-    TwoSpeakers(SenatorPath),
+    TwoSpeakers(SenatorName),
 }
 
 /// Who holds the Speaker's seat of one Senate.
@@ -140,12 +140,12 @@ pub enum SpeakerSeat {
     /// A senator: the agent presiding over a nested Senate, or the agent a
     /// top Senate used alone names. Its session does the Speaker's work and
     /// writes as `speaker`.
-    Senator(SenatorPath),
+    Senator(SenatorName),
 }
 
 impl SpeakerSeat {
     /// The senator holding the seat; `None` for the built-in Speaker.
-    pub fn senator(&self) -> Option<&SenatorPath> {
+    pub fn senator(&self) -> Option<&SenatorName> {
         match self {
             Self::BuiltIn => None,
             Self::Senator(path) => Some(path),
@@ -186,13 +186,13 @@ pub enum ResolveError {
     #[error("{owner} has several agents here; name one of: {}", list(.candidates))]
     Ambiguous {
         owner: Name,
-        candidates: Vec<SenatorPath>,
+        candidates: Vec<SenatorName>,
     },
     #[error("{0} is not a person this Senate knows")]
     UnknownSenior(Name),
 }
 
-fn list(paths: &[SenatorPath]) -> String {
+fn list(paths: &[SenatorName]) -> String {
     paths
         .iter()
         .map(|p| Address::senator(p).to_string())
@@ -216,17 +216,17 @@ fn list(paths: &[SenatorPath]) -> String {
 pub struct RosterConfig {
     /// The senator presiding over this Senate. Absent for the top Senate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub presider: Option<SenatorPath>,
+    pub presider: Option<SenatorName>,
     /// The agent named Speaker of this Senate. Absent: a nested Senate's
     /// Speaker is its presider, and a top Senate's is the built-in one when
     /// it runs, else nobody. See [`Roster::speaker_seat`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub speaker: Option<SenatorPath>,
+    pub speaker: Option<SenatorName>,
     #[serde(default)]
     pub seniors: Vec<Senior>,
     /// Agents seated from the start. The rest are seated as they connect.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub agents: Vec<SenatorPath>,
+    pub agents: Vec<SenatorName>,
 }
 
 /// Which agent a message for "this person's agent" reaches when the sender
@@ -234,13 +234,13 @@ pub struct RosterConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentOf {
     /// The person has one agent here: it is the one.
-    One(SenatorPath),
+    One(SenatorName),
     /// The person has several. The sender must name one; a sender that
     /// cannot leaves the choice to the Speaker, who asks the person when
     /// unsure.
-    Several(Vec<SenatorPath>),
+    Several(Vec<SenatorName>),
     /// The person has no agent here: the message goes to the person.
-    None(SenatorPath),
+    None(SenatorName),
 }
 
 /// Whether a person's delegation can be reached through an agent.
@@ -259,23 +259,23 @@ pub enum DelegationPresence {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "RosterConfig", into = "RosterConfig")]
 pub struct Roster {
-    presider: Option<SenatorPath>,
-    speaker: Option<SenatorPath>,
+    presider: Option<SenatorName>,
+    speaker: Option<SenatorName>,
     seniors: Vec<Senior>,
-    agents: Vec<SenatorPath>,
+    agents: Vec<SenatorName>,
 }
 
 impl Roster {
     /// The roster of the top Senate, whose Speaker is not a senator.
-    pub fn top(seniors: Vec<Senior>, agents: Vec<SenatorPath>) -> Result<Self, RosterError> {
+    pub fn top(seniors: Vec<Senior>, agents: Vec<SenatorName>) -> Result<Self, RosterError> {
         Self::build(None, seniors, agents)
     }
 
     /// The roster of the Senate that `presider` presides over as its Speaker.
     pub fn under(
-        presider: SenatorPath,
+        presider: SenatorName,
         seniors: Vec<Senior>,
-        agents: Vec<SenatorPath>,
+        agents: Vec<SenatorName>,
     ) -> Result<Self, RosterError> {
         if presider.is_senior() {
             return Err(RosterError::PresiderIsAPerson(presider));
@@ -284,9 +284,9 @@ impl Roster {
     }
 
     fn build(
-        presider: Option<SenatorPath>,
+        presider: Option<SenatorName>,
         seniors: Vec<Senior>,
-        agents: Vec<SenatorPath>,
+        agents: Vec<SenatorName>,
     ) -> Result<Self, RosterError> {
         for (i, senior) in seniors.iter().enumerate() {
             if seniors[..i].iter().any(|s| s.handle == senior.handle) {
@@ -317,7 +317,7 @@ impl Roster {
 
     /// Name `speaker` this Senate's Speaker, under [`Roster::name_speaker`]'s
     /// rules.
-    pub fn with_speaker(mut self, speaker: SenatorPath) -> Result<Self, RosterError> {
+    pub fn with_speaker(mut self, speaker: SenatorName) -> Result<Self, RosterError> {
         self.name_speaker(Some(speaker))?;
         Ok(self)
     }
@@ -331,7 +331,7 @@ impl Roster {
     /// - in a nested Senate, an agent of the presider's own person at the
     ///   presider's level, that is a senator of the Senate above (the
     ///   presider itself is the default).
-    pub fn name_speaker(&mut self, speaker: Option<SenatorPath>) -> Result<(), RosterError> {
+    pub fn name_speaker(&mut self, speaker: Option<SenatorName>) -> Result<(), RosterError> {
         if let Some(speaker) = &speaker {
             if speaker.is_senior() {
                 return Err(RosterError::SpeakerIsAPerson(speaker.clone()));
@@ -366,7 +366,7 @@ impl Roster {
     }
 
     /// The agent named Speaker, if the roster names one (not the default).
-    pub fn named_speaker(&self) -> Option<&SenatorPath> {
+    pub fn named_speaker(&self) -> Option<&SenatorName> {
         self.speaker.as_ref()
     }
 
@@ -393,7 +393,7 @@ impl Roster {
 
     /// Whether `agent` could sit in this Senate: it is an agent, its person
     /// is listed, and it is at this Senate's level.
-    fn check_seat(&self, agent: &SenatorPath) -> Result<(), RosterError> {
+    fn check_seat(&self, agent: &SenatorName) -> Result<(), RosterError> {
         if agent.is_senior() {
             return Err(RosterError::NotAnAgent(agent.clone()));
         }
@@ -422,7 +422,7 @@ impl Roster {
     /// is held to. `Ok(true)` when it was seated now, `Ok(false)` when it
     /// already sat here: seating is what happens on an agent's first
     /// contact, and every later contact asks again.
-    pub fn seat(&mut self, agent: SenatorPath) -> Result<bool, RosterError> {
+    pub fn seat(&mut self, agent: SenatorName) -> Result<bool, RosterError> {
         self.check_seat(&agent)?;
         if self.agents.contains(&agent) {
             return Ok(false);
@@ -433,7 +433,7 @@ impl Roster {
 
     /// Remove `agent` from this Senate. Returns whether it sat here. Its
     /// person stays: people are not seated, so they are not unseated.
-    pub fn unseat(&mut self, agent: &SenatorPath) -> bool {
+    pub fn unseat(&mut self, agent: &SenatorName) -> bool {
         let before = self.agents.len();
         self.agents.retain(|a| a != agent);
         self.agents.len() != before
@@ -454,7 +454,7 @@ impl Roster {
     /// The agent need not be seated yet. A caller that gets `Ok` for an
     /// agent seats it with [`Roster::seat`], which is how an agent is seated
     /// on first contact.
-    pub fn may_act_as(&self, person: &Name, senator: &SenatorPath) -> Result<(), RosterError> {
+    pub fn may_act_as(&self, person: &Name, senator: &SenatorName) -> Result<(), RosterError> {
         if self.senior(person).is_none() {
             return Err(RosterError::UnknownSenior(person.clone()));
         }
@@ -482,7 +482,7 @@ impl Roster {
 
     /// The senator presiding over this Senate as its Speaker. `None` in the
     /// top Senate.
-    pub fn presider(&self) -> Option<&SenatorPath> {
+    pub fn presider(&self) -> Option<&SenatorName> {
         self.presider.as_ref()
     }
 
@@ -491,7 +491,7 @@ impl Roster {
     }
 
     /// The agents seated in this Senate.
-    pub fn agents(&self) -> &[SenatorPath] {
+    pub fn agents(&self) -> &[SenatorName] {
         &self.agents
     }
 
@@ -518,7 +518,7 @@ impl Roster {
 
     /// Whether `senator` can be addressed in this Senate: a listed person,
     /// or an agent seated here.
-    pub fn knows(&self, senator: &SenatorPath) -> bool {
+    pub fn knows(&self, senator: &SenatorName) -> bool {
         if senator.is_senior() {
             self.senior(senator.owner()).is_some()
         } else {
@@ -527,7 +527,7 @@ impl Roster {
     }
 
     /// The person's agents seated here, in roster order.
-    pub fn agents_of(&self, owner: &Name) -> Vec<&SenatorPath> {
+    pub fn agents_of(&self, owner: &Name) -> Vec<&SenatorName> {
         self.agents.iter().filter(|a| a.owner() == owner).collect()
     }
 
@@ -587,7 +587,7 @@ impl Roster {
     pub fn delegation_presence(
         &self,
         owner: &Name,
-        is_present: impl Fn(&SenatorPath) -> bool,
+        is_present: impl Fn(&SenatorName) -> bool,
     ) -> DelegationPresence {
         let agents = self.agents_of(owner);
         if agents.is_empty() {
@@ -631,7 +631,7 @@ mod tests {
         Name::new(s).unwrap()
     }
 
-    fn path(s: &str) -> SenatorPath {
+    fn path(s: &str) -> SenatorName {
         s.parse().unwrap()
     }
 
@@ -755,7 +755,7 @@ mod tests {
     #[test]
     fn a_delegation_is_present_while_any_agent_is() {
         let roster = top();
-        let only_codex = |p: &SenatorPath| p == &path("wendell/codex");
+        let only_codex = |p: &SenatorName| p == &path("wendell/codex");
         assert_eq!(
             roster.delegation_presence(&name("wendell"), only_codex),
             DelegationPresence::Present

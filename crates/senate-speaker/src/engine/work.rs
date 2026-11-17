@@ -83,7 +83,7 @@ use std::sync::Arc;
 
 use senate_core::task::MAX_STEPS;
 use senate_core::{
-    CheckpointPayload, Link, Locale, Name, PresencePayload, PresenceState, SenatorPath, Step,
+    CheckpointPayload, Link, Locale, Name, PresencePayload, PresenceState, SenatorName, Step,
     WorkRun, WorkState, is_work_root,
 };
 use senate_work::{
@@ -244,7 +244,7 @@ impl Engine {
     /// it now (an agent's first `online` is not logged, so a bridge that has
     /// only joined leaves nothing in the log), or the config lists them.
     async fn is_developer(&self, committee: &CommitteeId, person: &Name) -> bool {
-        let mine = |agent: &SenatorPath| agent.owner() == person;
+        let mine = |agent: &SenatorName| agent.owner() == person;
         let active = self.committees.get(committee).is_some_and(|state| {
             state.activity.keys().any(mine) || state.presence.keys().any(mine)
         });
@@ -393,7 +393,7 @@ impl Engine {
         let l = self.locale(&chat.committee);
         let committee = self.acting_committee(chat);
         let presence = self.hub.presence(&committee).await?.agents;
-        let owner_of = |agent: &SenatorPath| {
+        let owner_of = |agent: &SenatorName| {
             presence
                 .iter()
                 .find(|p| p.agent == *agent && p.state == PresenceState::Reassigned)
@@ -403,7 +403,7 @@ impl Engine {
         // away is meant, when only one is.
         let handing_back = match super::route::resolve_name(&self.roster, to) {
             super::route::Resolved::Several { candidates, .. } if from == to => {
-                let away: Vec<&SenatorPath> = candidates
+                let away: Vec<&SenatorName> = candidates
                     .iter()
                     .filter(|a| owner_of(a).is_some())
                     .collect();
@@ -509,8 +509,8 @@ impl Engine {
     pub(super) async fn execute_reassign(
         &self,
         committee: &CommitteeId,
-        agent: &SenatorPath,
-        to: &SenatorPath,
+        agent: &SenatorName,
+        to: &SenatorName,
         requester: &Address,
         strict: bool,
     ) -> Result<String, Stall> {
@@ -1026,8 +1026,8 @@ impl Engine {
     pub(super) fn cover_of(
         &self,
         committee: &CommitteeId,
-        agent: &SenatorPath,
-    ) -> Option<SenatorPath> {
+        agent: &SenatorName,
+    ) -> Option<SenatorName> {
         self.committees
             .get(committee)
             .and_then(|state| state.reassigned.get(agent))
@@ -1040,7 +1040,7 @@ impl Engine {
         &self,
         event: &Event,
         root: Seq,
-    ) -> Result<Option<SenatorPath>, Stall> {
+    ) -> Result<Option<SenatorName>, Stall> {
         let Some(author) = event.from.as_agent() else {
             return Ok(None);
         };
@@ -1093,7 +1093,7 @@ impl Engine {
                     .on_behalf_of
                     .as_ref()
                     .and_then(Address::as_senator)
-                    .map(SenatorPath::owner),
+                    .map(SenatorName::owner),
                 checkpoint.as_ref(),
                 &self.branch_naming(),
             ),

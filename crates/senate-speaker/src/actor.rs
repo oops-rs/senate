@@ -17,7 +17,7 @@
 use std::sync::Arc;
 
 use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort, SpawnErr};
-use senate_core::{ChatSurface, CommitteeId, Event, Hub, SenatorPath, Seq, UnboundMention};
+use senate_core::{ChatSurface, CommitteeId, Event, Hub, SenatorName, Seq, UnboundMention};
 use senate_work::{Forge, Runner};
 use tokio::sync::{Mutex, broadcast, mpsc};
 use tokio::task::JoinHandle;
@@ -104,7 +104,7 @@ pub enum SpeakerMsg {
     FallbackDue {
         committee: CommitteeId,
         root: Seq,
-        agent: SenatorPath,
+        agent: SenatorName,
     },
     /// A committee's brief top is due for a rewrite (debounced after a
     /// decision).

@@ -40,7 +40,7 @@ use ractor::{Actor, ActorProcessingErr, ActorRef, MessagingErr, RpcReplyPort, Su
 use senate_core::hub::SCAN_PAGE;
 use senate_core::{
     AgentPresence, Appended, CommitteeId, Event, Kind, Name, NewEvent, PresenceBoard,
-    PresencePayload, SenatorPath, Seq, presence_event, reassign_event,
+    PresencePayload, SenatorName, Seq, presence_event, reassign_event,
 };
 use senate_log::{LogError, LogStore};
 use tokio::sync::{broadcast, mpsc};
@@ -56,7 +56,7 @@ pub(crate) enum CommitteeMsg {
     /// Register a live stream for `agent`. Replies with the proxy that owns it
     /// once every later commit is guaranteed to reach `sender`.
     Attach {
-        agent: SenatorPath,
+        agent: SenatorName,
         conn: ConnId,
         sender: mpsc::Sender<Arc<Event>>,
         reply: RpcReplyPort<Result<ActorRef<ProxyMsg>, String>>,
@@ -71,19 +71,19 @@ pub(crate) enum CommitteeMsg {
     /// Re-evaluate every lease.
     PresenceTick,
     /// `agent` just heartbeated: re-evaluate its lease now.
-    PresenceCheck(SenatorPath),
+    PresenceCheck(SenatorName),
     /// Each agent's presence, lag measured against the head.
     Presence(RpcReplyPort<(Seq, Vec<AgentPresence>)>),
     /// The Speaker picked up for an away agent.
     TakeOver {
-        agent: SenatorPath,
+        agent: SenatorName,
         reply: RpcReplyPort<Result<Option<Event>, String>>,
     },
     /// A person, through the Speaker, hands `agent`'s work to `new_owner`
     /// (or back to the agent itself).
     Reassign {
-        agent: SenatorPath,
-        new_owner: SenatorPath,
+        agent: SenatorName,
+        new_owner: SenatorName,
         by: Name,
         reply: RpcReplyPort<Result<Option<Event>, String>>,
     },
@@ -103,7 +103,7 @@ pub(crate) struct CommitteeState {
     args: CommitteeArgs,
     /// Highest seq fanned out, or the store's head when this writer started.
     fanned: Seq,
-    proxies: HashMap<SenatorPath, ActorRef<ProxyMsg>>,
+    proxies: HashMap<SenatorName, ActorRef<ProxyMsg>>,
     /// Streams of people who are only reading.
     watchers: Vec<(ConnId, mpsc::Sender<Arc<Event>>)>,
     leases: Leases,
@@ -116,7 +116,7 @@ impl CommitteeState {
     async fn proxy(
         &mut self,
         myself: &ActorRef<CommitteeMsg>,
-        agent: &SenatorPath,
+        agent: &SenatorName,
     ) -> Result<ActorRef<ProxyMsg>, ActorProcessingErr> {
         if let Some(proxy) = self.proxies.get(agent) {
             return Ok(proxy.clone());
@@ -139,7 +139,7 @@ impl CommitteeState {
     async fn attach(
         &mut self,
         myself: &ActorRef<CommitteeMsg>,
-        agent: SenatorPath,
+        agent: SenatorName,
         conn: ConnId,
         sender: mpsc::Sender<Arc<Event>>,
     ) -> Result<ActorRef<ProxyMsg>, ActorProcessingErr> {
@@ -247,7 +247,7 @@ impl CommitteeState {
     }
 
     /// Commit whatever transition of `agent`'s lease is due.
-    async fn check_lease(&mut self, agent: &SenatorPath) {
+    async fn check_lease(&mut self, agent: &SenatorName) {
         let (activity, cursor) = self
             .args
             .presence
@@ -267,7 +267,7 @@ impl CommitteeState {
     }
 
     async fn check_leases(&mut self) {
-        let mut agents: Vec<SenatorPath> = self.leases.agents().cloned().collect();
+        let mut agents: Vec<SenatorName> = self.leases.agents().cloned().collect();
         agents.extend(self.args.presence.agents_on(&self.args.committee));
         agents.sort();
         agents.dedup();
@@ -282,7 +282,7 @@ impl CommitteeState {
 async fn presence_board(
     store: &dyn LogStore,
     committee: &CommitteeId,
-) -> Result<(PresenceBoard, BTreeSet<SenatorPath>), LogError> {
+) -> Result<(PresenceBoard, BTreeSet<SenatorName>), LogError> {
     let mut board = PresenceBoard::new();
     let mut authors = BTreeSet::new();
     let mut after = Seq::ZERO;
@@ -317,7 +317,7 @@ impl Actor for CommitteeActor {
         let (board, authors) = presence_board(args.store.as_ref(), &args.committee).await?;
         let (now, wall) = (Instant::now(), chrono::Utc::now());
         let stored = args.store.heartbeats(&args.committee).await?;
-        let beats: BTreeMap<SenatorPath, chrono::DateTime<chrono::Utc>> =
+        let beats: BTreeMap<SenatorName, chrono::DateTime<chrono::Utc>> =
             stored.iter().map(|b| (b.agent.clone(), b.at)).collect();
         leases.restore(&board, &beats, now, wall);
         // An agent online but never written is restored from its last stored

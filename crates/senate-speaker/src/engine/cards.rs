@@ -460,7 +460,7 @@ fn pinned_cards(state: &CommitteeState) -> (Card, Card) {
         })
         .collect();
     threads.sort_by_key(|t| t.root);
-    let mut activity: Vec<(senate_core::SenatorPath, Seq, String)> = state
+    let mut activity: Vec<(senate_core::SenatorName, Seq, String)> = state
         .activity
         .iter()
         .filter(|(_, (_, ts, _))| is_today(ts, day))

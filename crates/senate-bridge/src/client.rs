@@ -18,7 +18,7 @@ use senate_core::api::{
     self, AppendResponse, CheckpointQuery, Cursor, CursorQuery, Heartbeat, Me, PresencePage,
     SearchQuery, ThreadsPage, ThreadsQuery,
 };
-use senate_core::{Brief, CheckpointRecord, CommitteeId, Event, NewEvent, SenatorPath, Seq};
+use senate_core::{Brief, CheckpointRecord, CommitteeId, Event, NewEvent, SenatorName, Seq};
 
 use reqwest::header::HeaderMap;
 use reqwest::{Client, RequestBuilder, Response, StatusCode};
@@ -41,7 +41,7 @@ pub enum ApiClientError {
         /// The log epoch the error response named, if any.
         epoch: Option<String>,
         /// With `ambiguous_recipient`: the agents to choose from.
-        candidates: Vec<SenatorPath>,
+        candidates: Vec<SenatorName>,
     },
 }
 
@@ -75,7 +75,7 @@ impl ApiClientError {
 
     /// 409 `ambiguous_recipient`: a `senator::<person>/*` named a person
     /// with several agents. The agents to choose from.
-    pub fn ambiguous_candidates(&self) -> Option<&[SenatorPath]> {
+    pub fn ambiguous_candidates(&self) -> Option<&[SenatorName]> {
         match self {
             Self::Api {
                 code, candidates, ..
@@ -244,7 +244,7 @@ impl ApiClient {
         &self,
         committee: &CommitteeId,
         name: &str,
-        senator: Option<&SenatorPath>,
+        senator: Option<&SenatorName>,
     ) -> Result<Seq, ApiClientError> {
         let url = self.url(&api::cursor_path(committee, name));
         let query = CursorQuery {
@@ -262,7 +262,7 @@ impl ApiClient {
         &self,
         committee: &CommitteeId,
         name: &str,
-        senator: Option<&SenatorPath>,
+        senator: Option<&SenatorName>,
         seq: Seq,
     ) -> Result<Seq, ApiClientError> {
         let url = self.url(&api::cursor_path(committee, name));
@@ -328,7 +328,7 @@ impl ApiClient {
     pub async fn threads(
         &self,
         committee: &CommitteeId,
-        agent: Option<&SenatorPath>,
+        agent: Option<&SenatorName>,
     ) -> Result<ThreadsPage, ApiClientError> {
         let url = self.url(&api::threads_path(committee));
         let query = ThreadsQuery {
@@ -352,7 +352,7 @@ impl ApiClient {
     pub async fn latest_checkpoint(
         &self,
         committee: &CommitteeId,
-        agent: &SenatorPath,
+        agent: &SenatorName,
     ) -> Result<Option<CheckpointRecord>, ApiClientError> {
         let url = self.url(&api::latest_checkpoint_path(committee));
         let query = CheckpointQuery {
@@ -390,7 +390,7 @@ impl ApiClient {
         &self,
         committee: &CommitteeId,
         after: Seq,
-        agent: &SenatorPath,
+        agent: &SenatorName,
     ) -> Result<Response, ApiClientError> {
         let url = self.url(&api::stream_path(committee));
         let query = api::StreamQuery {
@@ -477,7 +477,7 @@ mod tests {
 
     #[test]
     fn an_ambiguous_recipient_carries_its_candidates() {
-        let candidates: Vec<SenatorPath> =
+        let candidates: Vec<SenatorName> =
             vec!["bob/claude".parse().unwrap(), "bob/codex".parse().unwrap()];
         let e = ApiClientError::Api {
             status: 409,

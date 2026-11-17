@@ -34,7 +34,7 @@ use senate_core::hub::SCAN_PAGE;
 use senate_core::{
     Appended, Awaiting, Brief, BriefBuilder, CheckpointFacts, CheckpointRecord, Checkpoints,
     CommitteeId, DocketItem, DocketPage, Event, Hub, HubError, Kind, Locale, MirrorRef, Name,
-    NewEvent, Roster, RosterError, SeatFacts, SenatorPath, Senior, Seq, SpeakerDocket, SpeakerSeat,
+    NewEvent, Roster, RosterError, SeatFacts, SenatorName, Senior, Seq, SpeakerDocket, SpeakerSeat,
     StatusState, TaskBoard,
 };
 use senate_log::{CursorOwner, LogError, LogStore};
@@ -232,7 +232,7 @@ impl ServerHub {
         let head = self.head(committee).await?;
         let board = self.tasks(committee).await?;
         let roster = self.seats.snapshot();
-        let latest: HashMap<SenatorPath, CheckpointFacts> = {
+        let latest: HashMap<SenatorName, CheckpointFacts> = {
             let cached = self.folded(&self.checkpoints, committee).await?;
             roster
                 .agents()
@@ -284,7 +284,7 @@ impl ServerHub {
             // other agents: what is addressed to the seat's holder is that
             // agent's own question, delivered when its session opens.
             let holder = self.speaker.as_ref().and_then(SpeakerSeat::senator);
-            let agents: Vec<SenatorPath> = thread
+            let agents: Vec<SenatorName> = thread
                 .agents()
                 .filter(|a| Some(*a) != holder)
                 .cloned()
@@ -445,7 +445,7 @@ impl ServerHub {
     /// an agent that is not yet seated, it is seated now: this is the first
     /// contact. `Ok(true)` when this call seated it. See
     /// [`Roster::may_act_as`] and [`Roster::seat`].
-    pub fn act_as(&self, person: &Name, senator: &SenatorPath) -> Result<bool, RosterError> {
+    pub fn act_as(&self, person: &Name, senator: &SenatorName) -> Result<bool, RosterError> {
         let seated = self.seats.act_as(person, senator)?;
         if seated {
             tracing::info!(%person, agent = %senator, "agent seated on first contact");
@@ -468,7 +468,7 @@ impl ServerHub {
     pub async fn open_stream(
         &self,
         committee: &CommitteeId,
-        agent: Option<&SenatorPath>,
+        agent: Option<&SenatorName>,
     ) -> Result<LiveStream, HubError> {
         let (sender, events) = mpsc::channel(STREAM_BUFFER);
         let conn = self.next_conn.fetch_add(1, Ordering::Relaxed);
@@ -509,7 +509,7 @@ impl ServerHub {
     pub async fn owned_cursor(
         &self,
         committee: &CommitteeId,
-        owner: &SenatorPath,
+        owner: &SenatorName,
         name: &str,
     ) -> Result<Seq, HubError> {
         Ok(self
@@ -523,7 +523,7 @@ impl ServerHub {
     pub async fn set_owned_cursor(
         &self,
         committee: &CommitteeId,
-        owner: &SenatorPath,
+        owner: &SenatorName,
         name: &str,
         seq: Seq,
     ) -> Result<(), HubError> {
@@ -563,7 +563,7 @@ impl ServerHub {
     pub async fn last_heartbeat(
         &self,
         committee: &CommitteeId,
-        agent: &SenatorPath,
+        agent: &SenatorName,
     ) -> Result<Option<senate_log::HeartbeatRecord>, HubError> {
         self.store
             .last_heartbeat(committee, agent)
@@ -624,7 +624,7 @@ impl Hub for ServerHub {
     /// An open stream, and either a heartbeat or the stream's opening within
     /// `presence_grace_secs` (so a sleeping laptop's half-open stream stops
     /// counting once its heartbeats stop).
-    async fn is_agent_connected(&self, committee: &CommitteeId, agent: &SenatorPath) -> bool {
+    async fn is_agent_connected(&self, committee: &CommitteeId, agent: &SenatorName) -> bool {
         self.presence.is_connected(committee, agent)
     }
 
@@ -720,7 +720,7 @@ impl Hub for ServerHub {
     async fn latest_checkpoint(
         &self,
         committee: &CommitteeId,
-        agent: &SenatorPath,
+        agent: &SenatorName,
     ) -> Result<Option<CheckpointRecord>, HubError> {
         let cached = self.folded(&self.checkpoints, committee).await?;
         Ok(cached.fold.latest(agent).cloned())
@@ -735,7 +735,7 @@ impl Hub for ServerHub {
     async fn mark_taken_over(
         &self,
         committee: &CommitteeId,
-        agent: &SenatorPath,
+        agent: &SenatorName,
     ) -> Result<Option<Event>, HubError> {
         self.ask_writer(committee, |reply| CommitteeMsg::TakeOver {
             agent: agent.clone(),
@@ -748,8 +748,8 @@ impl Hub for ServerHub {
     async fn reassign(
         &self,
         committee: &CommitteeId,
-        agent: &SenatorPath,
-        new_owner: &SenatorPath,
+        agent: &SenatorName,
+        new_owner: &SenatorName,
         by: &Name,
     ) -> Result<Option<Event>, HubError> {
         self.ask_writer(committee, |reply| CommitteeMsg::Reassign {

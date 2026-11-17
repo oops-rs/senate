@@ -36,7 +36,7 @@ use crate::continuity::PresenceState;
 use crate::event::{Event, Kind, StatusState, meta};
 use crate::ids::{CommitteeId, Name, Seq};
 use crate::roster::SpeakerSeat;
-use crate::senator::SenatorPath;
+use crate::senator::SenatorName;
 use crate::task::StatusPayload;
 
 /// `meta["pick"]` on a message the server addressed to the Speaker because
@@ -44,7 +44,7 @@ use crate::task::StatusPayload;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PickPayload {
     pub owner: Name,
-    pub candidates: Vec<SenatorPath>,
+    pub candidates: Vec<SenatorName>,
 }
 
 impl PickPayload {
@@ -66,13 +66,13 @@ pub enum Awaiting {
     /// Route it to one of `candidates` ([`PickPayload`]).
     Pick {
         owner: Name,
-        candidates: Vec<SenatorPath>,
+        candidates: Vec<SenatorName>,
     },
     /// It is addressed to the Speaker: answer it.
     Addressed,
     /// A question to `agents`, none of which is connected, with no answer:
     /// cover for one of them from its own checkpoint.
-    Away { agents: Vec<SenatorPath> },
+    Away { agents: Vec<SenatorName> },
 }
 
 /// One item awaiting the Speaker: the root event and why.
@@ -86,7 +86,7 @@ pub struct DocketItem {
 /// The facts a Speaker picks and covers by, for one agent seated here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SeatFacts {
-    pub agent: SenatorPath,
+    pub agent: SenatorName,
     /// A live connection now: an open stream with a fresh heartbeat.
     pub connected: bool,
     /// Its presence on the committee, when it ever had one.

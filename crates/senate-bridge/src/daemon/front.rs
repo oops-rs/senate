@@ -86,13 +86,13 @@ impl Front {
 
     /// The Senate `agent` sits in: the one whose agents sit directly under
     /// `agent`'s parent path.
-    fn senate_of(&self, agent: &SenatorPath) -> Option<&Arc<Shared>> {
+    fn senate_of(&self, agent: &SenatorName) -> Option<&Arc<Shared>> {
         let parent = agent.presider().unwrap_or_else(|| agent.senior_path());
         self.senates.iter().find(|s| s.seating().base() == parent)
     }
 
     /// The Senate whose Speaker's seat `agent` holds.
-    fn seat_of(&self, agent: &SenatorPath) -> Option<&Arc<Shared>> {
+    fn seat_of(&self, agent: &SenatorName) -> Option<&Arc<Shared>> {
         self.senates.iter().find(|s| s.presided_by(agent))
     }
 
@@ -292,7 +292,7 @@ impl Front {
     fn presiding(
         &self,
         selector: &SessionSelector,
-    ) -> Result<(Arc<Shared>, SenatorPath), IpcError> {
+    ) -> Result<(Arc<Shared>, SenatorName), IpcError> {
         let locale = self.primary().locale;
         let Some((_, session)) = self.locate(selector) else {
             // The same refusal a session-scoped request gets.
@@ -411,7 +411,7 @@ fn asks_below(seat: &Shared, to: &[Address]) -> bool {
 }
 
 /// No Senate on this machine seats `agent`.
-fn no_senate(agent: &SenatorPath, locale: Locale) -> String {
+fn no_senate(agent: &SenatorName, locale: Locale) -> String {
     let me = Address::senator(agent).in_text();
     match locale {
         Locale::Zh => format!(

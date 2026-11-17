@@ -59,7 +59,7 @@ use crate::address::Address;
 use crate::event::{Event, Kind, StatusState, meta};
 use crate::ids::{CommitteeId, Name, Seq};
 use crate::locale::Locale;
-use crate::senator::SenatorPath;
+use crate::senator::SenatorName;
 
 /// The first segment of a branch name unless a deployment says otherwise.
 /// A git convention, not Senate's word for a committee.
@@ -208,7 +208,7 @@ pub struct WorkRun {
     /// The person who asked and confirmed.
     pub requester: Name,
     /// The agent whose checkpoint the run starts from.
-    pub target_agent: SenatorPath,
+    pub target_agent: SenatorName,
     /// The task, in the requester's words.
     pub instruction: String,
     /// The branch the run creates and pushes.

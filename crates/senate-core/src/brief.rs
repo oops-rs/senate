@@ -29,7 +29,7 @@ use crate::continuity::{
 use crate::event::{BindingAction, Event, Kind, Refs, meta};
 use crate::ids::{CommitteeId, Seq};
 use crate::locale::Locale;
-use crate::senator::SenatorPath;
+use crate::senator::SenatorName;
 
 /// Most recent decisions kept (in seq order).
 pub const MAX_DECISIONS: usize = 30;
@@ -114,7 +114,7 @@ pub struct BriefCheckpoint {
     pub seq: Seq,
     pub ts: DateTime<Utc>,
     /// The agent whose checkpoint it is.
-    pub agent: SenatorPath,
+    pub agent: SenatorName,
     pub body: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refs: Option<Refs>,
@@ -149,7 +149,7 @@ pub struct BriefBuilder {
     /// Question roots not yet answered, by seq.
     open: BTreeMap<Seq, BriefQuestion>,
     groups: Vec<BriefGroup>,
-    checkpoints: HashMap<SenatorPath, BriefCheckpoint>,
+    checkpoints: HashMap<SenatorName, BriefCheckpoint>,
     presence: PresenceBoard,
     participants: HashMap<Address, (Seq, DateTime<Utc>)>,
 }
@@ -806,7 +806,7 @@ mod tests {
         assert_eq!(brief.checkpoints[0].seq, Seq(1));
         assert_eq!(
             brief.checkpoints[0].agent,
-            "alice/claude".parse::<SenatorPath>().unwrap()
+            "alice/claude".parse::<SenatorName>().unwrap()
         );
         assert_eq!(brief.checkpoints[0].pushed, Some(false));
         assert_eq!(brief.presence.len(), 1);

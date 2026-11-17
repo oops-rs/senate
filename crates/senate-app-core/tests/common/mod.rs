@@ -24,7 +24,7 @@ use senate_bridge::session::{Runtime, Session, SessionState};
 use senate_bridge::state::QueueCounts;
 use senate_core::{
     Address, Awaiting, CheckpointFacts, CommitteeId, DocketItem, DocketPage, Event, EventId, Kind,
-    Locale, Name, SeatFacts, SenatorPath, Seq, SpeakerSeat, StatusState, ThreadSummary,
+    Locale, Name, SeatFacts, SenatorName, Seq, SpeakerSeat, StatusState, ThreadSummary,
     TriageVerdict,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -36,7 +36,7 @@ pub fn committee() -> CommitteeId {
     CommitteeId::new("refund-v2").unwrap()
 }
 
-pub fn path(s: &str) -> SenatorPath {
+pub fn path(s: &str) -> SenatorName {
     s.parse().unwrap()
 }
 

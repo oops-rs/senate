@@ -45,7 +45,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use senate_core::{Address, CommitteeId, Event, Locale, SenatorPath, Seq};
+use senate_core::{Address, CommitteeId, Event, Locale, SenatorName, Seq};
 use serde::Deserialize;
 use tokio::io::AsyncWriteExt;
 
@@ -136,7 +136,7 @@ impl CompanionConfig {
 pub struct Running {
     pub session_id: String,
     /// The agent it answers as: the one the question is for.
-    pub agent: SenatorPath,
+    pub agent: SenatorName,
     pub committee: CommitteeId,
     /// The question it was started for.
     pub root: Seq,
@@ -148,7 +148,7 @@ pub struct Running {
 }
 
 /// What the companion is told, before the question itself.
-pub fn prompt(agent: &SenatorPath, question: &Event, pushed: &str, locale: Locale) -> String {
+pub fn prompt(agent: &SenatorName, question: &Event, pushed: &str, locale: Locale) -> String {
     let me = Address::senator(agent).in_text();
     let committee = &question.committee;
     let seq = question.seq;
@@ -260,7 +260,7 @@ mod tests {
     #[test]
     fn the_prompt_names_the_agent_in_either_language() {
         use senate_core::{Kind, NewEvent};
-        let agent: SenatorPath = "bob/claude".parse().unwrap();
+        let agent: SenatorName = "bob/claude".parse().unwrap();
         let q = NewEvent::new(
             CommitteeId::new("refund-v2").unwrap(),
             Kind::Question,

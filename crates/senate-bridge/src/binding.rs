@@ -112,7 +112,7 @@ pub struct AgentHere {
     pub runtime: Runtime,
     pub rel: RelPath,
     /// In full, when `senate.toml` names the person.
-    pub path: Option<senate_core::SenatorPath>,
+    pub path: Option<senate_core::SenatorName>,
     pub source: AgentSource,
 }
 

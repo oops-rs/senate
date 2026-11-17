@@ -228,7 +228,7 @@ pub const SPEAKER_META: &str = "bridge_as_speaker";
 /// ` · for you as Speaker of …` for an event put to the Speaker.
 fn as_speaker(event: &Event, locale: Locale) -> Option<String> {
     let senate = event.meta.get(SPEAKER_META)?.as_str()?;
-    let presider = senate.parse::<senate_core::SenatorPath>().ok();
+    let presider = senate.parse::<senate_core::SenatorName>().ok();
     let senate = crate::daemon::senate_words(presider.as_ref(), locale);
     Some(match locale {
         Locale::Zh => format!(" · 给作为 {senate} Speaker 的你"),
@@ -243,8 +243,8 @@ fn covering(event: &Event, locale: Locale) -> String {
         .meta
         .get(COVERING_META)
         .and_then(|v| v.as_str())
-        .and_then(|p| p.parse::<senate_core::SenatorPath>().ok())
-        .filter(senate_core::SenatorPath::is_junior)
+        .and_then(|p| p.parse::<senate_core::SenatorName>().ok())
+        .filter(senate_core::SenatorName::is_junior)
     else {
         return String::new();
     };

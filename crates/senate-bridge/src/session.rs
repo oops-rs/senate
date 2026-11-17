@@ -30,7 +30,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use senate_core::{BranchNaming, CommitteeId, Locale, SenatorPath};
+use senate_core::{BranchNaming, CommitteeId, Locale, SenatorName};
 use serde::{Deserialize, Serialize};
 
 use crate::agent::{AGENT_FILE, AgentSource};
@@ -149,7 +149,7 @@ pub struct Session {
     #[serde(default)]
     pub runtime: Runtime,
     /// The agent this session speaks as and receives for.
-    pub agent: SenatorPath,
+    pub agent: SenatorName,
     /// How [`Session::agent`] was chosen.
     pub agent_source: AgentSource,
     pub cwd: PathBuf,

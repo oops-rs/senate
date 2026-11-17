@@ -86,7 +86,7 @@ slug_id!(
 );
 
 slug_id!(
-    /// One segment of a [`SenatorPath`](crate::SenatorPath): a person's
+    /// One segment of a [`SenatorName`](crate::SenatorName): a person's
     /// handle (`wendell`) or an agent's name under its presider (`claude`).
     Name,
     "senator name"

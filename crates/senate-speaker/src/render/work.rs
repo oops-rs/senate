@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 
 use senate_core::continuity::short_commit;
 use senate_core::{
-    BranchNaming, CheckpointRecord, CommitteeId, Event, Locale, Name, SenatorPath, Seq, WorkRun,
+    BranchNaming, CheckpointRecord, CommitteeId, Event, Locale, Name, SenatorName, Seq, WorkRun,
     WorkState,
 };
 
@@ -131,7 +131,7 @@ pub(crate) fn work_needs_binding(l: Locale) -> String {
     .to_owned()
 }
 
-pub(crate) fn no_checkpoint(l: Locale, agent: &SenatorPath) -> String {
+pub(crate) fn no_checkpoint(l: Locale, agent: &SenatorName) -> String {
     let agent = senator(agent);
     match l {
         Locale::Zh => {
@@ -143,7 +143,7 @@ pub(crate) fn no_checkpoint(l: Locale, agent: &SenatorPath) -> String {
     }
 }
 
-pub(crate) fn checkpoint_detached(l: Locale, agent: &SenatorPath) -> String {
+pub(crate) fn checkpoint_detached(l: Locale, agent: &SenatorName) -> String {
     let agent = senator(agent);
     match l {
         Locale::Zh => format!("{agent} 的检查点不在一个分支上（HEAD 分离），我没法从它拉分支。"),
@@ -153,7 +153,7 @@ pub(crate) fn checkpoint_detached(l: Locale, agent: &SenatorPath) -> String {
     }
 }
 
-pub(crate) fn checkpoint_no_remote(l: Locale, agent: &SenatorPath) -> String {
+pub(crate) fn checkpoint_no_remote(l: Locale, agent: &SenatorName) -> String {
     let agent = senator(agent);
     match l {
         Locale::Zh => format!("{agent} 的检查点没有远程仓库地址，我拿不到代码。"),
@@ -165,7 +165,7 @@ pub(crate) fn checkpoint_no_remote(l: Locale, agent: &SenatorPath) -> String {
 
 pub(crate) fn checkpoint_not_pushed(
     l: Locale,
-    agent: &SenatorPath,
+    agent: &SenatorName,
     record: &CheckpointRecord,
 ) -> String {
     let agent = senator(agent);
@@ -301,8 +301,8 @@ pub(crate) fn pr_failed(l: Locale, reason: &str) -> String {
 pub(crate) fn describe_reassign(
     l: Locale,
     committee: &CommitteeId,
-    from: &SenatorPath,
-    to: &SenatorPath,
+    from: &SenatorName,
+    to: &SenatorName,
 ) -> String {
     let (from, to) = (senator(from), senator(to));
     match l {
@@ -318,8 +318,8 @@ pub(crate) fn describe_reassign(
 pub(crate) fn describe_handback(
     l: Locale,
     committee: &CommitteeId,
-    agent: &SenatorPath,
-    owner: &SenatorPath,
+    agent: &SenatorName,
+    owner: &SenatorName,
 ) -> String {
     let (agent, owner) = (senator(agent), senator(owner));
     match l {
@@ -332,7 +332,7 @@ pub(crate) fn describe_handback(
     }
 }
 
-pub(crate) fn reassigned(l: Locale, from: &SenatorPath, to: &SenatorPath) -> String {
+pub(crate) fn reassigned(l: Locale, from: &SenatorName, to: &SenatorName) -> String {
     let (from, to) = (senator(from), senator(to));
     match l {
         Locale::Zh => format!("好的，{from} 的工作已交给 {to}。"),
@@ -340,7 +340,7 @@ pub(crate) fn reassigned(l: Locale, from: &SenatorPath, to: &SenatorPath) -> Str
     }
 }
 
-pub(crate) fn handed_back(l: Locale, agent: &SenatorPath) -> String {
+pub(crate) fn handed_back(l: Locale, agent: &SenatorName) -> String {
     let agent = senator(agent);
     match l {
         Locale::Zh => format!("好的，工作已交还给 {agent}。"),
@@ -348,7 +348,7 @@ pub(crate) fn handed_back(l: Locale, agent: &SenatorPath) -> String {
     }
 }
 
-pub(crate) fn already_reassigned(l: Locale, from: &SenatorPath, to: &SenatorPath) -> String {
+pub(crate) fn already_reassigned(l: Locale, from: &SenatorName, to: &SenatorName) -> String {
     let (from, to) = (senator(from), senator(to));
     match l {
         Locale::Zh => format!("{from} 的工作已经在 {to} 那里了。"),
@@ -356,7 +356,7 @@ pub(crate) fn already_reassigned(l: Locale, from: &SenatorPath, to: &SenatorPath
     }
 }
 
-pub(crate) fn not_reassigned(l: Locale, agent: &SenatorPath) -> String {
+pub(crate) fn not_reassigned(l: Locale, agent: &SenatorName) -> String {
     let agent = senator(agent);
     match l {
         Locale::Zh => format!("{agent} 的工作没有交给别人，不需要交还。"),
@@ -376,7 +376,7 @@ pub(crate) fn reassign_refused(l: Locale, reason: &str) -> String {
 }
 
 /// The Agent group's line for a reassignment.
-pub(crate) fn reassigned_line(l: Locale, from: &SenatorPath, to: &SenatorPath) -> String {
+pub(crate) fn reassigned_line(l: Locale, from: &SenatorName, to: &SenatorName) -> String {
     let (from, to) = (senator(from), senator(to));
     match l {
         Locale::Zh => format!("{from} 的工作已交给 {to}"),
@@ -385,7 +385,7 @@ pub(crate) fn reassigned_line(l: Locale, from: &SenatorPath, to: &SenatorPath) -
 }
 
 /// The Agent group's line for a hand-back.
-pub(crate) fn work_handback_line(l: Locale, agent: &SenatorPath) -> String {
+pub(crate) fn work_handback_line(l: Locale, agent: &SenatorName) -> String {
     let agent = senator(agent);
     match l {
         Locale::Zh => format!("{agent} 的工作已交还给 {agent}"),
@@ -400,8 +400,8 @@ pub(crate) fn work_handback_line(l: Locale, agent: &SenatorPath) -> String {
 pub(crate) fn reassign_note(
     l: Locale,
     committee: &CommitteeId,
-    from: &SenatorPath,
-    to: &SenatorPath,
+    from: &SenatorName,
+    to: &SenatorName,
     by: Option<&Name>,
     checkpoint: Option<&CheckpointRecord>,
     branches: &BranchNaming,
@@ -494,7 +494,7 @@ pub(crate) fn reassign_note(
 pub(crate) fn work_handback_note(
     l: Locale,
     committee: &CommitteeId,
-    agent: &SenatorPath,
+    agent: &SenatorName,
 ) -> String {
     let agent = senator(agent);
     match l {
@@ -509,7 +509,7 @@ pub(crate) fn work_handback_note(
 
 /// `[senator::bob/claude]（接手 [senator::alice/claude]）` /
 /// `[senator::bob/claude] (covering for [senator::alice/claude])`.
-fn covering_label(l: Locale, event: &Event, old: &SenatorPath) -> String {
+fn covering_label(l: Locale, event: &Event, old: &SenatorName) -> String {
     let (who, old) = (author(l, event), senator(old));
     match l {
         Locale::Zh => format!("{who}（接手 {old}）"),
@@ -520,7 +520,7 @@ fn covering_label(l: Locale, event: &Event, old: &SenatorPath) -> String {
 /// A reply in a mirrored thread addressed to `old`, from the agent its work
 /// was reassigned to:
 /// `[senator::bob/claude]（接手 [senator::alice/claude]）<body>`.
-pub(crate) fn thread_mirror_covering(l: Locale, event: &Event, old: &SenatorPath) -> String {
+pub(crate) fn thread_mirror_covering(l: Locale, event: &Event, old: &SenatorName) -> String {
     let label = covering_label(l, event, old);
     let body = body(l, event);
     match quoted_for(event, &body) {
@@ -530,7 +530,7 @@ pub(crate) fn thread_mirror_covering(l: Locale, event: &Event, old: &SenatorPath
 }
 
 /// The same for a people group, signed.
-pub(crate) fn signed_covering(l: Locale, event: &Event, old: &SenatorPath) -> String {
+pub(crate) fn signed_covering(l: Locale, event: &Event, old: &SenatorName) -> String {
     format!(
         "{}\n\n{}",
         thread_mirror_covering(l, event, old),
@@ -545,7 +545,7 @@ mod tests {
 
     use crate::tests_support::assert_senate_vocabulary;
 
-    fn path(s: &str) -> SenatorPath {
+    fn path(s: &str) -> SenatorName {
         s.parse().expect("senator path")
     }
 

@@ -45,7 +45,7 @@ use async_trait::async_trait;
 use senate_bridge::config::{Hosted, SenateLink};
 use senate_bridge::daemon::{self, DaemonOptions, Timing};
 use senate_bridge::{BridgeConfig, Paths};
-use senate_core::{EventId, RosterConfig, SenatorPath, Senior};
+use senate_core::{EventId, RosterConfig, SenatorName, Senior};
 use senate_server::{ServerConfig, TokenConfig};
 
 use crate::assembly::{Assembly, AssemblyError, Senated};
@@ -76,7 +76,7 @@ pub struct HostedSenate {
     /// Its directory under `senates/`.
     pub key: String,
     /// Its presider; `None` for the local top Senate.
-    pub presider: Option<SenatorPath>,
+    pub presider: Option<SenatorName>,
     /// `http://127.0.0.1:<port>`.
     pub url: String,
     /// The person's token there.
@@ -96,8 +96,8 @@ pub struct Machine {
 /// What one hosted Senate is, before it starts.
 struct Plan {
     key: String,
-    presider: Option<SenatorPath>,
-    speaker: Option<SenatorPath>,
+    presider: Option<SenatorName>,
+    speaker: Option<SenatorName>,
     listen: String,
     token: String,
     dir: std::path::PathBuf,
@@ -264,7 +264,7 @@ impl Machine {
 
     /// The hosted Senate presided over by `presider` (`None`: the local top
     /// Senate).
-    pub fn senate(&self, presider: Option<&SenatorPath>) -> Option<&HostedSenate> {
+    pub fn senate(&self, presider: Option<&SenatorName>) -> Option<&HostedSenate> {
         self.senates
             .iter()
             .find(|s| s.presider.as_ref() == presider)
@@ -339,8 +339,8 @@ impl Machine {
 fn plan(
     paths: &Paths,
     key: String,
-    presider: Option<SenatorPath>,
-    speaker: Option<SenatorPath>,
+    presider: Option<SenatorName>,
+    speaker: Option<SenatorName>,
     listen: Option<&str>,
 ) -> Result<Plan, MachineError> {
     let dir = paths.hosted(&key);

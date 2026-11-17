@@ -12,7 +12,7 @@
 //!
 //! # Agents are named, never derived
 //!
-//! Every method that concerns an agent takes that agent's [`SenatorPath`].
+//! Every method that concerns an agent takes that agent's [`SenatorName`].
 //! A component that starts from a person (a chat message for "alice's
 //! agent") asks the roster which agent that is, and must be ready for one,
 //! several or none ([`Roster::agent_of`]). [`Hub::resolve_and_append`] does
@@ -33,7 +33,7 @@ use crate::continuity::{
 use crate::event::{Event, Kind, NewEvent};
 use crate::ids::{CommitteeId, Name, Seq};
 use crate::roster::{DelegationPresence, ResolveError, Roster};
-use crate::senator::SenatorPath;
+use crate::senator::SenatorName;
 use crate::task::TaskBoard;
 
 #[derive(Debug, thiserror::Error)]
@@ -119,7 +119,7 @@ pub trait Hub: Send + Sync + 'static {
     /// presence grace, so a sleeping machine whose socket never closed reads
     /// as absent. It answers for the one agent named; whether the person can
     /// be reached through *any* agent is [`Hub::delegation_presence`].
-    async fn is_agent_connected(&self, committee: &CommitteeId, agent: &SenatorPath) -> bool;
+    async fn is_agent_connected(&self, committee: &CommitteeId, agent: &SenatorName) -> bool;
 
     /// Named cursors for server-side consumers (e.g. `speaker`).
     async fn cursor(&self, committee: &CommitteeId, name: &str) -> Result<Seq, HubError>;
@@ -295,7 +295,7 @@ pub trait Hub: Send + Sync + 'static {
     async fn latest_checkpoint(
         &self,
         committee: &CommitteeId,
-        agent: &SenatorPath,
+        agent: &SenatorName,
     ) -> Result<Option<CheckpointRecord>, HubError> {
         let all = scan(self, committee, Checkpoints::new(), Checkpoints::observe).await?;
         Ok(all.latest(agent).cloned())
@@ -313,7 +313,7 @@ pub trait Hub: Send + Sync + 'static {
     async fn mark_taken_over(
         &self,
         committee: &CommitteeId,
-        agent: &SenatorPath,
+        agent: &SenatorName,
     ) -> Result<Option<Event>, HubError> {
         let board = scan(
             self,
@@ -377,8 +377,8 @@ pub trait Hub: Send + Sync + 'static {
     async fn reassign(
         &self,
         committee: &CommitteeId,
-        agent: &SenatorPath,
-        new_owner: &SenatorPath,
+        agent: &SenatorName,
+        new_owner: &SenatorName,
         by: &Name,
     ) -> Result<Option<Event>, HubError> {
         let _ = (agent, new_owner, by);
@@ -392,11 +392,11 @@ pub trait Hub: Send + Sync + 'static {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ReassignRefused {
     #[error("work moves from an agent to an agent, and {0} is a person")]
-    NotAnAgent(SenatorPath),
+    NotAnAgent(SenatorName),
     #[error("{0} is not reassigned")]
-    NotReassigned(SenatorPath),
+    NotReassigned(SenatorName),
     #[error("{0}'s own work is reassigned; hand that back first")]
-    OwnerReassigned(SenatorPath),
+    OwnerReassigned(SenatorName),
 }
 
 impl From<ReassignRefused> for HubError {
@@ -411,8 +411,8 @@ impl From<ReassignRefused> for HubError {
 pub fn reassign_transition(
     board: &[AgentPresence],
     head: Seq,
-    agent: &SenatorPath,
-    new_owner: &SenatorPath,
+    agent: &SenatorName,
+    new_owner: &SenatorName,
     now: DateTime<Utc>,
 ) -> Result<Option<PresencePayload>, ReassignRefused> {
     for senator in [agent, new_owner] {
@@ -513,7 +513,7 @@ mod tests {
     use crate::event::{BindingAction, BindingPayload, GroupRole, meta};
     use crate::roster::Senior;
 
-    fn path(s: &str) -> SenatorPath {
+    fn path(s: &str) -> SenatorName {
         s.parse().unwrap()
     }
 
@@ -534,7 +534,7 @@ mod tests {
     struct VecHub {
         logs: Mutex<BTreeMap<CommitteeId, Vec<Event>>>,
         roster: Roster,
-        connected: Mutex<HashSet<SenatorPath>>,
+        connected: Mutex<HashSet<SenatorName>>,
         tx: broadcast::Sender<Event>,
     }
 
@@ -625,7 +625,7 @@ mod tests {
             Ok(self.roster.clone())
         }
 
-        async fn is_agent_connected(&self, _committee: &CommitteeId, agent: &SenatorPath) -> bool {
+        async fn is_agent_connected(&self, _committee: &CommitteeId, agent: &SenatorName) -> bool {
             self.connected.lock().unwrap().contains(agent)
         }
 

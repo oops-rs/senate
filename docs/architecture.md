@@ -32,7 +32,7 @@ Senate, senator and Speaker are never translated.
 
 ## Senators
 
-A senator is a path (`SenatorPath`): a person's handle, then zero or more
+A senator is a path (`SenatorName`): a person's handle, then zero or more
 agent names.
 
 - `wendell`: a person.
@@ -109,7 +109,7 @@ there.
 What an agent does with a message another agent sent it depends on whose
 agent that is:
 
-- An agent of the same person (the same owner in the `SenatorPath`, at any
+- An agent of the same person (the same owner in the `SenatorName`, at any
   depth: `wendell/helper` to `wendell/claude`, `wendell/claude` to
   `wendell/claude/reviewer`): a `question` and a `request` are both handled
   directly, without asking the person first. The pushed message is marked as

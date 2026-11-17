@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, SubsecRound, Utc};
 use senate_core::api::Heartbeat;
-use senate_core::{Appended, CommitteeId, Event, EventId, MirrorRef, NewEvent, SenatorPath, Seq};
+use senate_core::{Appended, CommitteeId, Event, EventId, MirrorRef, NewEvent, SenatorName, Seq};
 
 use crate::error::LogError;
 use crate::memory::MemoryStore;
@@ -22,7 +22,7 @@ pub const SQLITE_PREFIX: &str = "sqlite:";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeartbeatRecord {
     pub committee: CommitteeId,
-    pub agent: SenatorPath,
+    pub agent: SenatorName,
     pub heartbeat: Heartbeat,
     pub at: DateTime<Utc>,
 }
@@ -34,7 +34,7 @@ pub enum CursorOwner {
     Hub,
     /// One senator, by full path: `wendell/claude` and `wendell/codex` have
     /// separate cursors, and neither is `wendell`'s own.
-    Senator(SenatorPath),
+    Senator(SenatorName),
 }
 
 impl CursorOwner {
@@ -48,14 +48,14 @@ impl CursorOwner {
     }
 }
 
-impl From<SenatorPath> for CursorOwner {
-    fn from(path: SenatorPath) -> Self {
+impl From<SenatorName> for CursorOwner {
+    fn from(path: SenatorName) -> Self {
         Self::Senator(path)
     }
 }
 
-impl From<&SenatorPath> for CursorOwner {
-    fn from(path: &SenatorPath) -> Self {
+impl From<&SenatorName> for CursorOwner {
+    fn from(path: &SenatorName) -> Self {
         Self::Senator(path.clone())
     }
 }
@@ -184,7 +184,7 @@ pub trait LogStore: Send + Sync + 'static {
     async fn last_heartbeat(
         &self,
         committee: &CommitteeId,
-        agent: &SenatorPath,
+        agent: &SenatorName,
     ) -> Result<Option<HeartbeatRecord>, LogError>;
 }
 

@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use senate_core::{
     Appended, CommitteeId, Event, EventId, Hub, HubError, MirrorRef, Name, NewEvent, Roster,
-    SenatorPath, Seq,
+    SenatorName, Seq,
 };
 use tokio::sync::broadcast;
 
@@ -17,7 +17,7 @@ struct State {
     logs: BTreeMap<CommitteeId, Vec<Event>>,
     cursors: HashMap<(CommitteeId, String), Seq>,
     mirrors: Vec<MirrorRef>,
-    connected: HashSet<(CommitteeId, SenatorPath)>,
+    connected: HashSet<(CommitteeId, SenatorName)>,
     roster: Roster,
     last_ts: Option<DateTime<Utc>>,
     gets: usize,
@@ -82,14 +82,14 @@ impl MemoryHub {
 
     /// `agent`'s own connection, as its bridge's stream would make it.
     /// Seats it first, as the server does on first contact.
-    pub(crate) fn connect(&self, committee: &CommitteeId, agent: &SenatorPath) {
+    pub(crate) fn connect(&self, committee: &CommitteeId, agent: &SenatorName) {
         let mut state = self.lock();
         let _ = state.roster.seat(agent.clone());
         state.connected.insert((committee.clone(), agent.clone()));
     }
 
     /// Seat another agent in the Senate (its first contact), unconnected.
-    pub(crate) fn seat(&self, agent: &SenatorPath) {
+    pub(crate) fn seat(&self, agent: &SenatorName) {
         self.lock().roster.seat(agent.clone()).expect("seatable");
     }
 
@@ -98,7 +98,7 @@ impl MemoryHub {
         self.lock().roster = roster;
     }
 
-    pub(crate) fn disconnect(&self, committee: &CommitteeId, agent: &SenatorPath) {
+    pub(crate) fn disconnect(&self, committee: &CommitteeId, agent: &SenatorName) {
         self.lock()
             .connected
             .remove(&(committee.clone(), agent.clone()));
@@ -212,7 +212,7 @@ impl Hub for MemoryHub {
         Ok(self.lock().roster.clone())
     }
 
-    async fn is_agent_connected(&self, committee: &CommitteeId, agent: &SenatorPath) -> bool {
+    async fn is_agent_connected(&self, committee: &CommitteeId, agent: &SenatorName) -> bool {
         self.lock()
             .connected
             .contains(&(committee.clone(), agent.clone()))
@@ -291,8 +291,8 @@ impl Hub for MemoryHub {
     async fn reassign(
         &self,
         committee: &CommitteeId,
-        agent: &SenatorPath,
-        new_owner: &SenatorPath,
+        agent: &SenatorName,
+        new_owner: &SenatorName,
         by: &Name,
     ) -> Result<Option<Event>, HubError> {
         let page = self.presence(committee).await?;

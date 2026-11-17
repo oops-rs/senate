@@ -3,7 +3,7 @@
 //! Everything that crosses a crate or process boundary is defined here, once:
 //!
 //! - [`ids`]: committee ids, name segments, `seq`, event ids.
-//! - [`senator`]: [`SenatorPath`], a person (`wendell`) or one of their
+//! - [`senator`]: [`SenatorName`], a person (`wendell`) or one of their
 //!   agents at any depth (`wendell/claude`, `wendell/claude/reviewer`).
 //! - [`address`]: `senator::<path>`, `senator::<person>/*`, `speaker`,
 //!   `committee`, `guest::<platform>/<id>`, as stored in an event's fields.
@@ -43,7 +43,7 @@
 //!
 //! Two consequences run through every module here. An agent is a path, and
 //! a person may have several, so nothing is keyed by "a person's agent":
-//! presence, checkpoints, leases and tasks are keyed by [`SenatorPath`], and
+//! presence, checkpoints, leases and tasks are keyed by [`SenatorName`], and
 //! getting from a person to an agent is a roster lookup that may find one,
 //! several or none ([`Roster::agent_of`]). And a contract that describes a
 //! Senate says which one by its presider ([`Roster::presider`], `None` for
@@ -103,7 +103,7 @@ pub use roster::{
     Account, AgentOf, DelegationPresence, ResolveError, Roster, RosterConfig, RosterError, Senior,
     SpeakerSeat,
 };
-pub use senator::{MAX_AGENT_DEPTH, SenatorPath, SenatorPathError};
+pub use senator::{MAX_AGENT_DEPTH, SenatorName, SenatorNameError};
 pub use surface::{
     AdoptedGroup, Card, ChatSurface, CreatedGroup, NewGroup, PostTarget, Posted, SurfaceError,
     UnboundMention,

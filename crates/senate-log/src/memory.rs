@@ -9,7 +9,7 @@ use chrono::{DateTime, SubsecRound, Utc};
 use senate_core::api::Heartbeat;
 use senate_core::hub::{matches_terms, search_terms};
 use senate_core::{
-    Appended, CommitteeId, Event, EventId, Kind, MirrorRef, NewEvent, SenatorPath, Seq,
+    Appended, CommitteeId, Event, EventId, Kind, MirrorRef, NewEvent, SenatorName, Seq,
 };
 
 use crate::error::LogError;
@@ -39,7 +39,7 @@ struct Inner {
     /// `(platform, message_ref)` → the keys of the copies that are that
     /// message, lowest first.
     mirrors_by_message: HashMap<(String, String), BTreeSet<MirrorKey>>,
-    heartbeats: HashMap<(CommitteeId, SenatorPath), HeartbeatRecord>,
+    heartbeats: HashMap<(CommitteeId, SenatorName), HeartbeatRecord>,
 }
 
 /// A [`LogStore`] over a mutex. Every call is a short critical section with
@@ -316,7 +316,7 @@ impl LogStore for MemoryStore {
     async fn last_heartbeat(
         &self,
         committee: &CommitteeId,
-        agent: &SenatorPath,
+        agent: &SenatorName,
     ) -> Result<Option<HeartbeatRecord>, LogError> {
         let inner = self.lock();
         Ok(inner

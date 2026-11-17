@@ -22,7 +22,7 @@
 //! function per message; ids are bracketed mentions; Senate, senator and
 //! Speaker are not translated.
 
-use senate_core::{Address, Awaiting, CheckpointRecord, Kind, Locale, SeatFacts, SenatorPath};
+use senate_core::{Address, Awaiting, CheckpointRecord, Kind, Locale, SeatFacts, SenatorName};
 
 use crate::daemon::senate_words;
 use crate::format;
@@ -33,16 +33,16 @@ const ITEM_CHARS: usize = 400;
 /// Characters of each checkpoint file shown for an away agent.
 const CHECKPOINT_FILE_CHARS: usize = 1_500;
 
-fn mention(path: &SenatorPath) -> String {
+fn mention(path: &SenatorName) -> String {
     Address::senator(path).in_text()
 }
 
-fn mentions(paths: &[SenatorPath]) -> String {
+fn mentions(paths: &[SenatorName]) -> String {
     paths.iter().map(mention).collect::<Vec<_>>().join(", ")
 }
 
 /// A presiding op from a session that does not preside.
-pub fn not_presiding(agent: &SenatorPath, locale: Locale) -> String {
+pub fn not_presiding(agent: &SenatorName, locale: Locale) -> String {
     let me = mention(agent);
     match locale {
         Locale::Zh => format!(
@@ -59,15 +59,15 @@ pub fn not_presiding(agent: &SenatorPath, locale: Locale) -> String {
 /// Told at session start: this session presides, over which Senate, who
 /// sits there, and how much awaits it.
 pub fn orientation(
-    speaker: &SenatorPath,
-    senate: Option<&SenatorPath>,
-    seated: &[SenatorPath],
+    speaker: &SenatorName,
+    senate: Option<&SenatorName>,
+    seated: &[SenatorName],
     waiting: usize,
     locale: Locale,
 ) -> String {
     let me = mention(speaker);
     let senate = senate_words(senate, locale);
-    let others: Vec<SenatorPath> = seated.iter().filter(|a| *a != speaker).cloned().collect();
+    let others: Vec<SenatorName> = seated.iter().filter(|a| *a != speaker).cloned().collect();
     match locale {
         Locale::Zh => {
             let who = if others.is_empty() {
@@ -117,7 +117,7 @@ pub fn orientation(
 }
 
 /// Told at the user's next prompt: new items await the Speaker.
-pub fn nudge(new: usize, senate: Option<&SenatorPath>, locale: Locale) -> String {
+pub fn nudge(new: usize, senate: Option<&SenatorName>, locale: Locale) -> String {
     let senate = senate_words(senate, locale);
     match locale {
         Locale::Zh => format!(
@@ -333,7 +333,7 @@ pub fn render_docket(reply: &DocketReply, locale: Locale) -> String {
 mod tests {
     use super::*;
 
-    fn path(s: &str) -> SenatorPath {
+    fn path(s: &str) -> SenatorName {
         s.parse().unwrap()
     }
 
