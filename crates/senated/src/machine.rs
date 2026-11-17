@@ -281,12 +281,10 @@ impl Machine {
         for p in ordered {
             let carries = Some(&p.key) == carrier.as_ref();
             let config = senate_config(&p, &config)?;
-            // TODO(built-in session): the built-in session (the engine, as
-            // a secretary or the Speaker of an unattended root) runs here
-            // when a `[model]` is configured. Its configuration and its
-            // place in the assembly are being built in `crate::speaker` /
-            // `crate::assembly`; wire it through `built_in_session` below
-            // once that lands. Until then the machine runs none.
+            // The built-in session (the engine, as a secretary or the
+            // Speaker of an unattended root) runs when `[model]` (or a
+            // complete model in `secretary.toml`) is configured in the
+            // Senate home and the roster names it; the assembly decides.
             // The log is opened here so the uplink keeps its cursors in
             // the same store's registry.
             let store = senate_log::connect(&config.server.database_url)
@@ -294,7 +292,7 @@ impl Machine {
                 .map_err(|e| MachineError::Invalid(format!("the Senate {}: {e}", p.name)))?;
             stores.push(store.clone());
             let mut assembly = match built_in_session(&paths, &p) {
-                Some(()) => Assembly::new(config),
+                Some(secretary) => Assembly::new(config).secretary(Arc::new(secretary)),
                 None => Assembly::new(config).without_speaker(),
             }
             .store(store);
@@ -515,17 +513,21 @@ pub fn parent_unreachable(url: &str, error: &str, locale: Locale) -> String {
     }
 }
 
-/// The built-in session for the hosted Senate, when one should run.
-///
-/// TODO(built-in session): returns what the assembly needs to run the
-/// built-in session (its configuration from `[model]` and
-/// `secretary.toml` in the Senate home, `paths.home()`), from the function
-/// the `crate::speaker` / `crate::assembly` work provides, when `[model]`
-/// is configured and the session is referenced (named Speaker in `plan`,
-/// or listed in its secretaries). `None` until then.
-fn built_in_session(paths: &Paths, plan: &Plan) -> Option<()> {
-    let _ = (paths, plan);
-    None
+/// The built-in session's configuration for the hosted Senate, read from
+/// the Senate home (`[model]` in `senate.toml`, `secretary.toml`,
+/// `<committee>.secretary.toml`), when a model is configured there. The
+/// assembly runs it only when the roster names it (as the Speaker, or as
+/// a secretary). `None`: no model, or the files could not be read (said
+/// once in the log).
+fn built_in_session(paths: &Paths, plan: &Plan) -> Option<senate_speaker::SecretaryConfigs> {
+    match crate::config::load_secretary_home(paths.home(), &plan.dir.join("data")) {
+        Ok(secretary) if secretary.model_configured() => Some(secretary),
+        Ok(_) => None,
+        Err(e) => {
+            tracing::warn!("the built-in session's configuration: {e}");
+            None
+        }
+    }
 }
 
 /// Say once, in the machine's language, how `[local] speaker` was read.
