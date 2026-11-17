@@ -1,7 +1,7 @@
-//! Senate alone on one machine: `senated --machine` hosting a local top
-//! Senate whose Speaker is one of the person's agents, `alice/claude` (a
-//! Claude Code session), with `alice/codex` (a Codex session) seated beside
-//! it. No Senate above, no built-in Speaker, no chat platform.
+//! Senate alone on one machine: `senated --machine` hosting the machine's
+//! one Senate, whose Speaker is one of the person's agents, `claude` (a
+//! Claude Code session), with `codex` (a Codex session) seated beside
+//! it. No team server, no built-in Speaker, no chat platform.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -12,10 +12,14 @@ use common::*;
 use senate_bridge::ipc::{ClientError, DocketReply, Posted, PresidesReply, Request};
 use senate_bridge::session::Runtime;
 use senate_core::{
-    Address, Awaiting, Hub, Kind, Locale, NewEvent, PickPayload, Seq, SpeakerSeat, is_takeover,
+    Address, Awaiting, Hub, Kind, Locale, NewEvent, PickPayload, SenatePath, Seq, SpeakerSeat,
+    is_takeover,
 };
 
-const ALONE: &str = "[local]\nspeaker = \"claude\"\n";
+/// An agent as the Speaker of a root, named in full: today's alone. (A
+/// bare `speaker = "claude"`, as older homes wrote it, now makes the person
+/// the Speaker and claude her secretary.)
+const ALONE: &str = "[local]\nspeaker = \"senator::claude\"\n";
 
 fn codex_pushes(codex: &common::fake_codex::FakeCodex) -> Vec<String> {
     codex
@@ -32,36 +36,42 @@ async fn one_person_chains_claude_code_and_codex_under_a_presiding_agent() {
     desk.git_init("feature/refund-v2/alice");
     let codex = desk.codex_app_server();
     desk.start().await;
-    let top = desk.senate(None);
+    let top = desk.senate();
     let (url, token) = (top.url.clone(), top.token.clone());
 
-    // The local top Senate: alice alone, alice/claude in the Speaker's seat.
+    // The machine's Senate (`alice-desk` by default): alice alone, claude
+    // in the Speaker's seat, under no parent.
     let me = me_at(&url, &token).await;
     assert_eq!(me.person.as_str(), "alice");
-    assert_eq!(me.presider, None);
-    assert_eq!(me.speaker, Some(SpeakerSeat::Senator(path("alice/claude"))));
+    assert_eq!(me.senate.as_str(), "alice-desk");
+    assert_eq!(me.parent, None);
+    assert_eq!(me.speaker, Some(SpeakerSeat::Senator(path("claude"))));
     assert!(!me.triaged);
 
-    // The Claude Code session presides, and is told so.
+    // The Claude Code session presides, and is told so. The Senate is
+    // named by its path from the root.
+    let senate = format!("[{}]", SenatePath::top(name("alice-desk")).unwrap());
     let claude = desk.inbox("s-claude");
     let start = desk.session_start("s-claude", &claude).await.unwrap();
     assert!(
-        context(&start).contains("of the top Senate as [senator::alice/claude]"),
+        context(&start).contains(&format!("of the Senate {senate} as [senator::claude]")),
         "{}",
         context(&start)
     );
     assert!(
-        context(&start).contains("[senator::alice/claude] is the Speaker of the top Senate"),
+        context(&start).contains(&format!(
+            "[senator::claude] is the Speaker of the Senate {senate}"
+        )),
         "{}",
         context(&start)
     );
     // The Codex session sits beside it, and does not preside.
     let start = desk.codex_start("thread-codex").await.unwrap();
-    assert!(context(&start).contains("[senator::alice/codex]"));
+    assert!(context(&start).contains("[senator::codex]"));
     assert!(!context(&start).contains("is the Speaker"));
     codex.idle("thread-codex");
-    desk.wait_connected(None, "alice/claude", true).await;
-    desk.wait_connected(None, "alice/codex", true).await;
+    desk.wait_connected("claude", true).await;
+    desk.wait_connected("codex", true).await;
     let presides: PresidesReply = desk
         .ipc(Request::Presides {
             session: Laptop::session("thread-codex"),
@@ -70,21 +80,22 @@ async fn one_person_chains_claude_code_and_codex_under_a_presiding_agent() {
             agent_file: None,
         })
         .await;
-    assert_eq!(presides.agent, Some(path("alice/codex")));
+    assert_eq!(presides.agent, Some(path("codex")));
     assert!(presides.presiding.is_none());
 
     // Codex asks Claude and gets an answer, at once: no verdict is awaited.
     let asked = desk
         .ask(
             "thread-codex",
-            senator("alice/claude"),
+            senator("claude"),
             "Which header carries the idempotency key?",
         )
         .await;
     let push = claude.wait_for("idempotency key").await;
-    assert!(push.contains("from [senator::alice/codex]"), "{push}");
-    // Same person's agent: marked as such, and answered directly.
-    assert!(push.contains("(your user's own agent)"), "{push}");
+    assert!(push.contains("from [senator::codex]"), "{push}");
+    // Codex took the committee's first seat, so it chairs it: a question
+    // from the chair is answered directly (the answering rule).
+    assert!(push.contains("from your committee's chair"), "{push}");
     assert!(
         push.contains("answer it directly, without asking your user first"),
         "{push}"
@@ -105,8 +116,18 @@ async fn one_person_chains_claude_code_and_codex_under_a_presiding_agent() {
     })
     .await;
 
-    // Alice, as herself, writes to "her agent": she has two here, so it is
-    // put to the presiding session to route.
+    // Codex took the committee's first seat, so it chairs it; the Speaker's
+    // office (claude's session) makes claude the chair instead.
+    let _: serde_json::Value = desk
+        .ipc(Request::SetChair {
+            session: Laptop::session("s-claude"),
+            committee: Some(committee()),
+            senator: path("claude"),
+        })
+        .await;
+
+    // Alice, as herself, writes to "an agent" (`senator::*`): two agents
+    // are on the committee, so it is put to the chair to pick.
     let picked = speak(
         &url,
         &token,
@@ -116,48 +137,22 @@ async fn one_person_chains_claude_code_and_codex_under_a_presiding_agent() {
             person("alice"),
             "Please check the refund retry limit.",
         )
-        .to(agent_of("alice")),
+        .to(any_agent()),
     )
     .await
     .unwrap();
-    assert_eq!(picked.to, [Address::Speaker]);
+    assert_eq!(picked.to, [Address::Chair]);
     let mut candidates = PickPayload::of(&picked).unwrap().candidates;
     candidates.sort();
-    assert_eq!(candidates, [path("alice/claude"), path("alice/codex")]);
+    assert_eq!(candidates, [path("claude"), path("codex")]);
     let put = claude.wait_for("refund retry limit").await;
-    assert!(
-        put.contains("for you as Speaker of the top Senate"),
-        "{put}"
-    );
-    assert!(put.contains("speaker_route"), "{put}");
-    let docket: DocketReply = desk
-        .ipc(Request::Docket {
-            session: Laptop::session("s-claude"),
-            committee: None,
-        })
-        .await;
-    assert_eq!(docket.speaker, Some(path("alice/claude")));
-    let page = &docket.senates[0].pages[0];
-    let item = page
-        .items
-        .iter()
-        .find(|i| i.event.seq == picked.seq)
-        .unwrap();
-    assert!(matches!(&item.awaiting, Awaiting::Pick { candidates, .. } if candidates.len() == 2));
-    // The facts to pick by.
-    let codex_seat = page
-        .seats
-        .iter()
-        .find(|s| s.agent == path("alice/codex"))
-        .unwrap();
-    assert!(codex_seat.connected);
-    // Codex may not route it: it does not preside.
+    assert!(put.contains("chair_route"), "{put}");
+    // Codex may not route it: it does not chair.
     let refused = desk
-        .try_ipc::<Posted>(Request::Route {
+        .try_ipc::<Posted>(Request::ChairRoute {
             session: Laptop::session("thread-codex"),
-            committee: committee(),
             seq: picked.seq,
-            to: path("alice/codex"),
+            to: path("codex"),
             id: None,
         })
         .await
@@ -165,24 +160,22 @@ async fn one_person_chains_claude_code_and_codex_under_a_presiding_agent() {
     let ClientError::Remote(refused) = refused else {
         panic!("{refused}")
     };
-    assert_eq!(refused.code, "not_presiding");
-    // The presiding session routes it to Codex, in Alice's name.
+    assert_eq!(refused.code, "not_chairing");
+    // The chair routes it to Codex, saying where it came from.
     let routed: Posted = desk
-        .ipc(Request::Route {
+        .ipc(Request::ChairRoute {
             session: Laptop::session("s-claude"),
-            committee: committee(),
             seq: picked.seq,
-            to: path("alice/codex"),
+            to: path("codex"),
             id: None,
         })
         .await;
-    let relayed = eventually("codex is relayed it", || {
+    eventually("codex is relayed it", || {
         codex_pushes(&codex)
             .into_iter()
             .find(|p| p.contains("refund retry limit"))
     })
     .await;
-    assert!(relayed.contains("[speaker::alice]"), "{relayed}");
     let relay = top
         .daemon
         .hub
@@ -190,8 +183,8 @@ async fn one_person_chains_claude_code_and_codex_under_a_presiding_agent() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(relay.from, Address::Speaker);
-    assert_eq!(relay.to, [senator("alice/codex")]);
+    assert_eq!(relay.from, senator("claude"));
+    assert_eq!(relay.to, [senator("codex")]);
 
     // Codex leaves a checkpoint, then goes away.
     desk.checkpoint(
@@ -202,7 +195,7 @@ async fn one_person_chains_claude_code_and_codex_under_a_presiding_agent() {
     )
     .await;
     desk.codex_end("thread-codex").await;
-    desk.wait_connected(None, "alice/codex", false).await;
+    desk.wait_connected("codex", false).await;
 
     // A question for Codex while it is away: the presiding session covers
     // from Codex's own checkpoint, never by asking itself instead.
@@ -215,7 +208,7 @@ async fn one_person_chains_claude_code_and_codex_under_a_presiding_agent() {
             person("alice"),
             "What is the retry limit?",
         )
-        .to(senator("alice/codex")),
+        .to(senator("codex")),
     )
     .await
     .unwrap();
@@ -234,11 +227,11 @@ async fn one_person_chains_claude_code_and_codex_under_a_presiding_agent() {
     assert_eq!(
         item.awaiting,
         Awaiting::Away {
-            agents: vec![path("alice/codex")]
+            agents: vec![path("codex")]
         }
     );
     let checkpoint = &senate.checkpoints[0];
-    assert_eq!(checkpoint.agent, path("alice/codex"));
+    assert_eq!(checkpoint.agent, path("codex"));
     assert!(
         checkpoint
             .checkpoint
@@ -253,7 +246,7 @@ async fn one_person_chains_claude_code_and_codex_under_a_presiding_agent() {
             session: Laptop::session("s-claude"),
             committee: committee(),
             seq: away.seq,
-            to: path("alice/claude"),
+            to: path("claude"),
             id: None,
         })
         .await;
@@ -276,17 +269,14 @@ async fn one_person_chains_claude_code_and_codex_under_a_presiding_agent() {
         .unwrap()
         .unwrap();
     assert_eq!(answer.from, Address::Speaker);
-    assert_eq!(answer.on_behalf_of, Some(senator("alice/codex")));
+    assert_eq!(answer.on_behalf_of, Some(senator("codex")));
     assert_eq!(answer.to, [person("alice")]);
     assert!(is_takeover(&answer));
     assert_eq!(
         answer.byline(Locale::En).unwrap(),
-        "[speaker::alice/codex] takeover"
+        "[speaker::codex] takeover"
     );
-    assert_eq!(
-        answer.byline(Locale::Zh).unwrap(),
-        "[speaker::alice/codex] 接管"
-    );
+    assert_eq!(answer.byline(Locale::Zh).unwrap(), "[speaker::codex] 接管");
     assert_eq!(
         answer.refs.as_ref().unwrap().branch.as_deref(),
         Some("feature/refund-v2/alice")
@@ -310,7 +300,7 @@ async fn one_person_chains_claude_code_and_codex_under_a_presiding_agent() {
     // seat holder, is that agent's to answer when its session opens: it is
     // never on the docket to cover, and covering for it is refused.
     desk.session_end("s-claude", &claude).await;
-    desk.wait_connected(None, "alice/claude", false).await;
+    desk.wait_connected("claude", false).await;
     let own = speak(
         &url,
         &token,
@@ -320,7 +310,7 @@ async fn one_person_chains_claude_code_and_codex_under_a_presiding_agent() {
             person("alice"),
             "Where does the idempotency key live?",
         )
-        .to(senator("alice/claude")),
+        .to(senator("claude")),
     )
     .await
     .unwrap();
@@ -330,18 +320,16 @@ async fn one_person_chains_claude_code_and_codex_under_a_presiding_agent() {
         "{:?}",
         page.items
     );
-    assert!(
-        page.items
-            .iter()
-            .all(|i| !matches!(&i.awaiting, Awaiting::Away { agents } if agents.contains(&path("alice/claude")))),
-    );
+    assert!(page.items.iter().all(
+        |i| !matches!(&i.awaiting, Awaiting::Away { agents } if agents.contains(&path("claude")))
+    ),);
     let refused = desk
         .try_ipc::<Posted>(Request::Cover {
             session: Laptop::session("s-claude"),
             committee: committee(),
             thread: own.seq,
             body: "from nowhere".into(),
-            agent: Some(path("alice/claude")),
+            agent: Some(path("claude")),
             id: None,
         })
         .await;
@@ -366,11 +354,11 @@ async fn the_person_asks_whichever_agent_from_the_command_line_and_waits_for_the
     desk.session_start("s-claude", &claude).await.unwrap();
     desk.codex_start("thread-codex").await.unwrap();
     codex.idle("thread-codex");
-    desk.wait_connected(None, "alice/claude", true).await;
-    desk.wait_connected(None, "alice/codex", true).await;
+    desk.wait_connected("claude", true).await;
+    desk.wait_connected("codex", true).await;
     let socket = desk.paths.socket();
 
-    // `senate ask '*' ... --wait`: alice has two agents here, so the server
+    // `senate ask '*' ... --wait`: two agents are on the committee, so the server
     // puts it to the presiding session to pick.
     let sent = senate_bridge::speak::send(
         &socket,
@@ -382,10 +370,10 @@ async fn the_person_asks_whichever_agent_from_the_command_line_and_waits_for_the
     .await
     .unwrap();
     assert_eq!(sent.posted.to, [Address::Speaker]);
-    assert_eq!(sent.wrote.to_string(), "senator::alice/*");
+    assert_eq!(sent.wrote.to_string(), "senator::*");
     assert!(
         sent.render(true)
-            .contains("to [speaker] (you wrote [senator::alice/*]; the Speaker picks which agent)"),
+            .contains("to [speaker] (you wrote [senator::*]; the Speaker picks which agent)"),
         "{}",
         sent.render(true)
     );
@@ -404,7 +392,7 @@ async fn the_person_asks_whichever_agent_from_the_command_line_and_waits_for_the
             session: Laptop::session("s-claude"),
             committee: committee(),
             seq: sent.posted.seq,
-            to: path("alice/codex"),
+            to: path("codex"),
             id: None,
         })
         .await;
@@ -424,11 +412,11 @@ async fn the_person_asks_whichever_agent_from_the_command_line_and_waits_for_the
 
     // The waiting command returns the answer, with its byline.
     let answer = waiting.await.unwrap().unwrap().expect("an answer");
-    assert_eq!(answer.from, senator("alice/codex"));
+    assert_eq!(answer.from, senator("codex"));
     assert_eq!(
         senate_bridge::speak::render_answer(&answer, Locale::En),
         format!(
-            "[senator::alice/codex] answered in thread {}:\n3 attempts, see refund/retry.rs",
+            "[senator::codex] answered in thread {}:\n3 attempts, see refund/retry.rs",
             routed.seq
         )
     );
@@ -483,7 +471,7 @@ async fn the_person_asks_whichever_agent_from_the_command_line_and_waits_for_the
     )
     .await
     .unwrap();
-    assert_eq!(posted.to, [senator("alice/codex")]);
+    assert_eq!(posted.to, [senator("codex")]);
     assert_eq!(posted.thread, Some(routed.seq));
     let waiting = inbox(false).await;
     assert_eq!(waiting.threads.len(), 1);
@@ -510,7 +498,7 @@ async fn what_the_agent_hands_back_stays_in_the_persons_inbox_until_they_act() {
     desk.start().await;
     let claude = desk.inbox("s-claude");
     desk.session_start("s-claude", &claude).await.unwrap();
-    desk.wait_connected(None, "alice/claude", true).await;
+    desk.wait_connected("claude", true).await;
     let socket = desk.paths.socket();
 
     let inbox = |all: bool| {
@@ -576,7 +564,7 @@ async fn what_the_agent_hands_back_stays_in_the_persons_inbox_until_they_act() {
         "{text}"
     );
     assert!(
-        text.contains("[senator::alice/claude] answered: Plan is in docs/retry.md"),
+        text.contains("[senator::claude] answered: Plan is in docs/retry.md"),
         "{text}"
     );
     assert!(shown(&reply, Locale::Zh).contains("回答了：Plan is in docs/retry.md"));

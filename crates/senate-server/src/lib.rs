@@ -6,7 +6,7 @@
 //! # Who is calling, and as whom
 //!
 //! A bearer token names a **person**. The person then acts as themselves or
-//! as one of their own agents (`wendell/claude`); each request names which,
+//! as one of their own agents (`claude`); each request names which,
 //! and the server checks it with
 //! [`Roster::may_act_as`](senate_core::Roster::may_act_as). An agent not yet
 //! on the roster is seated on its first contact. Presence, leases, cursors
@@ -26,7 +26,7 @@
 //!
 //! - [`Authenticate`]: bearer token to person. Default [`StaticTokens`].
 //! - The roster: [`ServerBuilder::roster`] takes a ready
-//!   [`Roster`](senate_core::Roster); [`ServerHub::set_seniors`] changes the
+//!   [`Roster`](senate_core::Roster); [`ServerHub::set_principals`] changes the
 //!   people later. Default: the configuration's `[roster]`.
 //!
 //! ```no_run
@@ -44,9 +44,12 @@
 
 mod actors;
 mod auth;
+mod chairs;
 mod config;
 mod http;
 mod hub;
+mod office;
+mod registry;
 mod rules;
 mod seats;
 mod server;
@@ -54,4 +57,5 @@ mod server;
 pub use auth::{Authenticate, StaticTokens, bearer_token};
 pub use config::{ConfigError, DEFAULT_PRESENCE_GRACE_SECS, ServerConfig, TokenConfig, redact_url};
 pub use hub::{BROADCAST_CAPACITY, LiveStream, STREAM_BUFFER, ServerHub};
+pub use office::{DEFAULT_BUILT_IN_NAME, default_built_in_name};
 pub use server::{Running, Server, ServerBuilder, ServerError};

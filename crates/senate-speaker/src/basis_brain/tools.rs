@@ -124,7 +124,7 @@ impl ToolDefinition for LogRead {
             "Read this committee's shared log in seq order. With `after`, returns the events \
              following that seq (oldest first); without it, the most recent events. Each line \
              shows seq, time, kind, who wrote it (a bracketed mention: [senator::alice] is a \
-             person, [senator::alice/claude] one of their agents, [speaker::alice/claude] the \
+             person, [senator::claude] one of their agents, [speaker::claude] the \
              Speaker answering for that agent), recipients, thread, and the body.",
             log_read_schema(),
         )

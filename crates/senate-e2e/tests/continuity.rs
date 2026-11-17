@@ -120,7 +120,7 @@ async fn a_checkpoint_survives_the_laptop() {
         .find(|e| e.kind == Kind::Checkpoint)
         .expect("a checkpoint event");
     assert_eq!(event.seq, reply.posted.seq);
-    assert_eq!(event.from, claude("alice"));
+    assert_eq!(event.from, senator("claude"));
     let payload = CheckpointPayload::of(&event).expect("a payload");
     assert_eq!(payload.branch, BRANCH);
     assert_eq!(payload.commit, head);
@@ -148,15 +148,13 @@ async fn a_checkpoint_survives_the_laptop() {
     let listed = brief
         .checkpoints
         .iter()
-        .find(|c| c.agent == path("alice/claude"))
+        .find(|c| c.agent == path("claude"))
         .expect("alice's checkpoint in the brief");
     assert_eq!(listed.seq, handoff.posted.seq);
     let markdown = brief.to_markdown(world.locale, 10_000);
     let short = &head[..7];
     assert!(
-        markdown.contains(&format!(
-            "[senator::alice/claude] 最近检查点 · {BRANCH}@{short}"
-        )),
+        markdown.contains(&format!("[senator::claude] 最近检查点 · {BRANCH}@{short}")),
         "{markdown}"
     );
 
@@ -165,7 +163,7 @@ async fn a_checkpoint_survives_the_laptop() {
     agent_line(
         &world,
         &format!(
-            "[senator::alice/claude] 检查点 · {BRANCH}@{short}（未推送）· seq {}",
+            "[senator::claude] 检查点 · {BRANCH}@{short}（未推送）· seq {}",
             handoff.posted.seq
         ),
     )
@@ -196,18 +194,18 @@ async fn presence_is_visible() {
         let page = world.hub().presence(&committee()).await.ok()?;
         page.agents
             .iter()
-            .any(|p| p.agent == path("alice/claude") && p.state == PresenceState::Online)
+            .any(|p| p.agent == path("claude") && p.state == PresenceState::Online)
             .then_some(())
     })
     .await;
     assert!(
-        presence_of(&world, "alice/claude").await.is_empty(),
+        presence_of(&world, "claude").await.is_empty(),
         "coming online the first time writes nothing"
     );
 
     alice.close().await;
-    wait_presence(&world, "alice/claude", PresenceState::Absent).await;
-    let states: Vec<PresenceState> = presence_of(&world, "alice/claude")
+    wait_presence(&world, "claude", PresenceState::Absent).await;
+    let states: Vec<PresenceState> = presence_of(&world, "claude")
         .await
         .into_iter()
         .map(|(p, _)| p.state)
@@ -217,8 +215,8 @@ async fn presence_is_visible() {
         [PresenceState::Disconnected, PresenceState::Absent],
         "disconnected first, then absent"
     );
-    let gone = agent_line(&world, "[senator::alice/claude] 失联").await;
-    let absent = agent_line(&world, "[senator::alice/claude] 缺席（租约过期）").await;
+    let gone = agent_line(&world, "[senator::claude] 失联").await;
+    let absent = agent_line(&world, "[senator::claude] 缺席（租约过期）").await;
     let posts = world.posts();
     let at = |p: &Post| posts.iter().position(|q| q.message_ref == p.message_ref);
     assert!(at(&gone) < at(&absent), "in order");
@@ -229,32 +227,31 @@ async fn presence_is_visible() {
         .await;
     let status = world
         .wait_post("the /status reply", |p| {
-            p.markdown.contains("本群绑定在委员会")
-                && p.markdown.contains("[senator::alice/claude]")
+            p.markdown.contains("本群绑定在委员会") && p.markdown.contains("[senator::claude]")
         })
         .await;
     assert!(
         status
             .markdown
-            .contains("[senator::alice/claude] 缺席（租约过期）"),
+            .contains("[senator::claude] 缺席（租约过期）"),
         "{}",
         status.markdown
     );
 
     // She reopens.
     alice.open().await;
-    let online = wait_presence(&world, "alice/claude", PresenceState::Online).await;
+    let online = wait_presence(&world, "claude", PresenceState::Online).await;
     assert_eq!(
         PresencePayload::of(&online).unwrap().previous,
         Some(PresenceState::Absent)
     );
-    agent_line(&world, "[senator::alice/claude] 在线").await;
+    agent_line(&world, "[senator::claude] 在线").await;
     alice.close().await;
     world.stop().await;
 }
 
 /// Covered while away: with Alice absent the Speaker answers from her
-/// checkpoint as `[speaker::alice/claude] 接管`; a question her files do not
+/// checkpoint as `[speaker::claude] 接管`; a question her files do not
 /// cover goes to Bob; when she is back, her session gets one message
 /// listing what was answered for her.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -273,18 +270,18 @@ async fn covered_while_away() {
     bob.session_start("s-bob", &bob_inbox).await;
 
     alice.close().await;
-    wait_presence(&world, "alice/claude", PresenceState::Absent).await;
+    wait_presence(&world, "claude", PresenceState::Absent).await;
 
     // Covered by PROGRESS.md.
     world.brain.answers(Ok(format!(
         "用 Idempotency-Key header，已合入（检查点 seq {checkpoint}）"
     )));
     let covered = bob
-        .ask("s-bob", claude("alice"), "网关幂等键用哪个 header？")
+        .ask("s-bob", senator("claude"), "网关幂等键用哪个 header？")
         .await;
     let post = world
         .wait_post("the takeover answer", |p| {
-            p.markdown.contains("[speaker::alice/claude] 接管")
+            p.markdown.contains("[speaker::claude] 接管")
         })
         .await;
     assert!(
@@ -300,12 +297,12 @@ async fn covered_while_away() {
         .find(|e| e.kind == Kind::Answer && e.thread == Some(covered.seq))
         .expect("the answer in the log");
     assert_eq!(answer.from, Address::Speaker);
-    assert_eq!(answer.on_behalf_of, Some(claude("alice")));
+    assert_eq!(answer.on_behalf_of, Some(senator("claude")));
     let asked = world.brain.questions();
     let takeover = asked[0].takeover.as_ref().expect("asked as a takeover");
     assert_eq!(takeover.checkpoint.seq, checkpoint);
-    wait_presence(&world, "alice/claude", PresenceState::TakenOver).await;
-    agent_line(&world, "[senator::alice/claude] 由 Speaker 接管").await;
+    wait_presence(&world, "claude", PresenceState::TakenOver).await;
+    agent_line(&world, "[senator::claude] 由 Speaker 接管").await;
     bob_inbox.wait_for("已合入").await;
 
     // Not covered: sent to the committee's other developer, bob.
@@ -313,7 +310,7 @@ async fn covered_while_away() {
         .brain
         .answers_uncovered("检查点里没有回调签名的信息。");
     let uncovered = bob
-        .ask("s-bob", claude("alice"), "回调签名用哪个密钥？")
+        .ask("s-bob", senator("claude"), "回调签名用哪个密钥？")
         .await;
     let escalation = world
         .wait_post("bob mentioned about the uncovered question", |p| {
@@ -323,7 +320,7 @@ async fn covered_while_away() {
     assert!(
         escalation
             .markdown
-            .contains("[senator::alice/claude] 不在，检查点没有覆盖这个问题，这条需要人"),
+            .contains("[senator::claude] 不在，检查点没有覆盖这个问题，这条需要人"),
         "{}",
         escalation.markdown
     );
@@ -344,11 +341,7 @@ async fn covered_while_away() {
         handback.contains(&format!("seq {}", covered.seq)) && handback.contains("网关幂等键"),
         "{handback}"
     );
-    agent_line(
-        &world,
-        "[senator::alice/claude] 回来了，Speaker 交还 1 条代答",
-    )
-    .await;
+    agent_line(&world, "[senator::claude] 回来了，Speaker 交还 1 条代答").await;
     let notes = alice_inbox
         .messages()
         .iter()
@@ -386,7 +379,7 @@ fn fake_claude(dir: &Path) -> PathBuf {
 
 /// The companion answers: Alice's bridge runs, her session is closed; a
 /// question to her agent goes to a fork of her last session, whose answer
-/// is labelled `[senator::alice/claude] 伴随`.
+/// is labelled `[senator::claude] 伴随`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_companion_answers() {
     let world = World::start(60).await;
@@ -404,7 +397,7 @@ async fn the_companion_answers() {
     let bob_inbox = bob.inbox("s-bob");
     bob.session_start("s-bob", &bob_inbox).await;
     let asked = bob
-        .ask("s-bob", claude("alice"), "幂等键用哪个 header？")
+        .ask("s-bob", senator("claude"), "幂等键用哪个 header？")
         .await;
 
     // The fork of s-old gets the question...
@@ -432,15 +425,19 @@ async fn the_companion_answers() {
         .into_iter()
         .find(|e| e.seq == posted.seq)
         .expect("the answer in the log");
-    assert_eq!(answer.from, claude("alice"));
+    // The companion is claude's secretary: the answer is claude's, given
+    // by its secretary.
+    assert_eq!(answer.from, senator("companion"));
+    assert_eq!(answer.on_behalf_of, Some(senator("claude")));
     assert_eq!(answer.thread, Some(asked.seq));
     assert_eq!(
-        answer.meta.get(meta::COMPANION),
+        answer.meta.get(meta::TAKEOVER),
         Some(&serde_json::json!(true))
     );
     world
         .wait_post("the companion's answer mirrored", |p| {
-            p.markdown.contains("[senator::alice/claude] 伴随")
+            p.markdown
+                .contains("[senator::claude]（由秘书 [senator::companion] 代答）")
                 && p.markdown.contains("Idempotency-Key")
         })
         .await;

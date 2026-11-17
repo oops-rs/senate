@@ -12,7 +12,7 @@
 //! by that account ([`Roster::by_account`](crate::Roster::by_account)) and
 //! `guest::<platform>/<id>` for anyone else. Going the other way, the
 //! Speaker looks a person's platform ids up in the roster
-//! ([`Senior::account_ids`](crate::Senior::account_ids)) when it invites or
+//! ([`Principal::account_ids`](crate::Principal::account_ids)) when it invites or
 //! mentions them.
 
 use async_trait::async_trait;

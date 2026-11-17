@@ -3,14 +3,21 @@
 //! Everything that crosses a crate or process boundary is defined here, once:
 //!
 //! - [`ids`]: committee ids, name segments, `seq`, event ids.
-//! - [`senator`]: [`SenatorPath`], a person (`wendell`) or one of their
-//!   agents at any depth (`wendell/claude`, `wendell/claude/reviewer`).
-//! - [`address`]: `senator::<path>`, `senator::<person>/*`, `speaker`,
-//!   `committee`, `guest::<platform>/<id>`, as stored in an event's fields.
+//! - [`senator`]: [`SenatorName`], one flat name scoped to a Senate: a
+//!   person (`wendell`) or an agent (`claude`, `codex`).
+//! - [`senate`]: Senate names and [`SenatePath`] (`acme/north-desk`); only
+//!   Senates nest.
+//! - [`address`]: `senator::<name>`, `senator::*`, `speaker`, `committee`,
+//!   `guest::<platform>/<id>`, as stored in an event's fields.
+//! - [`senator_id`]: who a senator is: `senator::wendell`,
+//!   `/acme::senator::wendell` (a Senate path in an id starts with `/`).
+//! - [`locator`]: qualified names, read from the right
+//!   (`acme/north-desk::ibot::senator::codex`, `ibot::speaker`), naming a
+//!   seat or a Speaker from anywhere.
 //! - [`mention`]: the same ids as written in running text, in brackets:
-//!   `[senator::wendell/claude]`, `[speaker::wendell/claude]`.
+//!   `[senator::claude]`, `[speaker::claude]`, `[ibot::senator::codex]`.
 //! - [`roster`]: who sits in one Senate, the rules that hold for it, who may
-//!   act as whom, and what "this person's agent" resolves to.
+//!   act as whom, and what "whichever agent" resolves to.
 //! - [`locale`]: the language a text for people is rendered in.
 //! - [`event`]: the single envelope of a committee's log, its payloads and
 //!   its shared `meta` keys.
@@ -25,29 +32,35 @@
 //! - [`task`]: task threads: status, triage, and the board derived from
 //!   them.
 //! - [`work`]: the Speaker's work runs, branch naming, and reassignment.
+//! - [`flatten`]: converting what was stored when senators were paths
+//!   (`senator::wendell/claude`) to flat names, once.
 //!
 //! # The model
 //!
-//! A **Senate** is one level of deliberation. Its **senators** are people and
-//! agents. A person is a *senior* senator and is global: the same senator in
-//! every Senate. An agent is a *junior* senator, named under its person. The
-//! **Speaker** presides and is always backed by a model.
+//! Only Senates nest. Senators and committees are flat, and both are scoped
+//! to one Senate:
 //!
-//! Senates nest. An agent seated in one Senate may preside, as Speaker, over
-//! a Senate of its own subagents one level down, and speaks upward in its own
-//! name for what happens there. Who holds a Senate's Speaker's seat is data
-//! ([`SpeakerSeat`]): the built-in Speaker (a top Senate only), or a senator,
-//! by default the one presiding over a nested Senate.
+//! | Thing | Scope | Shape | Example |
+//! | --- | --- | --- | --- |
+//! | Senate | its parent Senate | a path of names, parent first | `acme/north-desk` |
+//! | Committee | one Senate | flat id | `ibot` |
+//! | Senator | one Senate | flat name | `wendell`, `codex` |
+//! | Seat | one committee | committee × senator | `ibot::senator::codex` |
 //!
-//! Work is divided into **committees**, each with its own append-only log.
+//! A **senator** is a person or an agent. No path is inside a senator's
+//! name: nothing about who owns it or where it sits. Whether a name is a
+//! person's or an agent's is the roster's to say. A **seat** is a senator
+//! on a committee, and messages only ever go to seats: each seat has its
+//! own sessions, inbox, cursors, presence and checkpoints, so presence,
+//! checkpoints, leases and tasks are keyed by committee and
+//! [`SenatorName`].
 //!
-//! Two consequences run through every module here. An agent is a path, and
-//! a person may have several, so nothing is keyed by "a person's agent":
-//! presence, checkpoints, leases and tasks are keyed by [`SenatorPath`], and
-//! getting from a person to an agent is a roster lookup that may find one,
-//! several or none ([`Roster::agent_of`]). And a contract that describes a
-//! Senate says which one by its presider ([`Roster::presider`], `None` for
-//! the top), so nothing assumes there is only one level.
+//! The **Speaker** presides and is always backed by a model. Who holds the
+//! Speaker's seat is data ([`SpeakerSeat`]): the built-in Speaker, a
+//! senator, or nobody.
+//!
+//! A qualified name ([`Locator`]) says where a seat is; the parts it leaves
+//! out come from where the writer stands, nearest first.
 //!
 //! # Languages
 //!
@@ -65,21 +78,28 @@
 pub mod address;
 pub mod api;
 pub mod brief;
+pub mod chair;
 pub mod continuity;
 pub mod docket;
 pub mod event;
+pub mod flatten;
 pub mod hub;
 pub mod ids;
 pub mod locale;
+pub mod locator;
 pub mod mention;
 pub mod roster;
+pub mod senate;
 pub mod senator;
+pub mod senator_id;
 pub mod surface;
 pub mod task;
 pub mod work;
 
 pub use address::{Address, AddressParseError, Guest, GuestError, MAX_GUEST_ID_LEN};
+pub use api::ChildSenate;
 pub use brief::{Brief, BriefBuilder};
+pub use chair::{ChairFold, ChairPayload, ChairSource};
 pub use continuity::{
     AgentPresence, CheckpointFiles, CheckpointPayload, CheckpointRecord, CheckpointTrigger,
     Checkpoints, PresenceBoard, PresencePayload, PresenceState, presence_event,
@@ -98,12 +118,16 @@ pub use hub::{
 };
 pub use ids::{CommitteeId, EventId, IdError, Name, Seq};
 pub use locale::{Locale, LocaleParseError};
+pub use locator::{Locator, LocatorParseError, Origin};
 pub use mention::{Found, Mention, MentionParseError};
 pub use roster::{
-    Account, AgentOf, DelegationPresence, ResolveError, Roster, RosterConfig, RosterError, Senior,
-    SpeakerSeat,
+    Account, AgentOf, DEFAULT_SENATE_NAME, DelegationPresence, Office, People, Principal,
+    PrincipalKind, ResolveError, Roster, RosterConfig, RosterError, SeatedAgent, SenatorKind,
+    SpeakerName, SpeakerSeat,
 };
-pub use senator::{MAX_AGENT_DEPTH, SenatorPath, SenatorPathError};
+pub use senate::{KEYWORDS, KeywordError, SenatePath, SenatePathError, check_not_keyword};
+pub use senator::{SenatorName, SenatorNameError};
+pub use senator_id::{SenatorId, SenatorIdParseError};
 pub use surface::{
     AdoptedGroup, Card, ChatSurface, CreatedGroup, NewGroup, PostTarget, Posted, SurfaceError,
     UnboundMention,
@@ -141,6 +165,6 @@ pub(crate) mod testing {
 
     #[test]
     fn the_vocabulary_check_lets_a_branch_name_through() {
-        assert_senate_vocabulary("[senator::alice/claude] on feature/refund-v2/alice");
+        assert_senate_vocabulary("[senator::claude] on feature/refund-v2/alice");
     }
 }

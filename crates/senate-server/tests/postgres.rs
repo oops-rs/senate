@@ -131,7 +131,7 @@ async fn server_over_postgres() {
     let beat = server
         .request(Method::POST, &heartbeat_path(&committee()), BOB)
         .json(&Heartbeat {
-            agent: path("bob/claude"),
+            agent: path("claude"),
             sessions: 1,
             cursor: Seq(5),
         })

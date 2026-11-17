@@ -177,7 +177,7 @@ async fn relay_reaches_the_live_agent_before_group_adoption_is_confirmed() {
     alice.open().await;
     let inbox = alice.inbox("s-alice");
     alice.session_start("s-alice", &inbox).await;
-    world.wait_connected("alice/claude", true).await;
+    world.wait_connected("claude", true).await;
     world.brain.converses(Ok(AgentTurn::act(
         "",
         vec![
@@ -204,7 +204,7 @@ async fn relay_reaches_the_live_agent_before_group_adoption_is_confirmed() {
         .iter()
         .find(|e| e.kind == Kind::Note && e.body == "先别合并")
         .unwrap();
-    assert_eq!(relay.to, vec![claude("alice")]);
+    assert_eq!(relay.to, vec![senator("claude")]);
     assert_eq!(relay.on_behalf_of, Some(person("pm")));
     assert!(relay.meta.contains_key(meta::RELAYED_FROM));
     assert!(!events.iter().any(|e| {
@@ -234,12 +234,12 @@ async fn clarification_continues_without_a_mention_only_for_the_original_speaker
     let world = agent_world(5).await;
     world.bind().await;
     // Both agents must be seated for "alice" and "bob" to name one each.
-    for who in ["alice", "bob"] {
+    for (who, agent) in [("alice", "claude"), ("bob", BOB_CLAUDE)] {
         let mut laptop = world.laptop(who);
         laptop.open().await;
         let inbox = laptop.inbox(&format!("s-{who}"));
         laptop.session_start(&format!("s-{who}"), &inbox).await;
-        world.wait_connected(&format!("{who}/claude"), true).await;
+        world.wait_connected(agent, true).await;
         laptop.close().await;
     }
     world
@@ -271,8 +271,7 @@ async fn clarification_continues_without_a_mention_only_for_the_original_speaker
         })
         .await;
     assert!(
-        plan.markdown.contains("[senator::alice/claude]")
-            && plan.markdown.contains("[senator::bob/claude]"),
+        plan.markdown.contains("[senator::claude]") && plan.markdown.contains("[senator::copilot]"),
         "{}",
         plan.markdown
     );
@@ -303,9 +302,9 @@ async fn clarification_continues_without_a_mention_only_for_the_original_speaker
             .agents
             .into_iter()
             .find(|p| {
-                p.agent == path("alice/claude")
+                p.agent == path("claude")
                     && p.state == PresenceState::Reassigned
-                    && p.new_owner == Some(path("bob/claude"))
+                    && p.new_owner == Some(path("copilot"))
             })
     })
     .await;

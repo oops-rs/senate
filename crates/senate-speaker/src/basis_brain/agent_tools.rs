@@ -10,9 +10,9 @@
 //! `brief_top`, `triage` and `pick_agent` never see them.
 //!
 //! Presence, checkpoints and task threads are kept per agent, and a person
-//! may have several agents, so these tools answer per agent path
-//! (`alice/claude`). Senators in their output are bracketed mentions:
-//! `[senator::alice]` for a person, `[senator::alice/claude]` for an agent.
+//! may have several agents, so these tools answer per agent, by its own
+//! name (`claude`). Senators in their output are bracketed mentions:
+//! `[senator::alice]` for a person, `[senator::claude]` for an agent.
 //! Their text is read by the model only, and is English.
 
 use std::collections::BTreeSet;
@@ -24,7 +24,7 @@ use basis::tools::{
     ParallelToolContext, RuntimeToolDescriptor, ToolDefinition, ToolExecutor, ToolResult,
 };
 use senate_core::{
-    Address, AgentOf, CommitteeId, Hub, Locale, PresenceState, Roster, SenatorPath, Senior,
+    Address, AgentOf, CommitteeId, Hub, Locale, PresenceState, Principal, Roster, SenatorName,
     StatusState,
 };
 use serde_json::{Value, json};
@@ -63,31 +63,27 @@ fn cut(text: &str, max: usize) -> String {
 }
 
 /// A senator as the model may write one: a person's handle or a name they
-/// go by (`alice`, `Alice`, `@alice`), an agent path (`alice/claude`), or
-/// either as an address or mention (`senator::alice/claude`,
-/// `[senator::alice/claude]`, `senator::alice/*` for the person).
-fn senator_of(raw: &str, roster: &Roster) -> Option<SenatorPath> {
+/// go by (`alice`, `Alice`, `@alice`), an agent's name (`claude`), or
+/// either as an address or mention (`senator::claude`, `[senator::claude]`).
+/// The roster says which it is ([`Roster::is_person`]).
+fn senator_of(raw: &str, roster: &Roster) -> Option<SenatorName> {
     let raw = raw
         .trim()
         .trim_start_matches('[')
         .trim_end_matches(']')
         .trim();
     let bare = raw.strip_prefix("senator::").unwrap_or(raw);
-    let bare = bare.strip_suffix("/*").unwrap_or(bare);
-    if bare.contains('/') {
-        return bare.parse().ok();
-    }
     roster
         .resolve(bare)
-        .map(Senior::path)
+        .map(Principal::path)
         .or_else(|| bare.trim_start_matches('@').parse().ok())
 }
 
-fn mention(path: &SenatorPath) -> String {
+fn mention(path: &SenatorName) -> String {
     Address::senator(path).in_text()
 }
 
-fn mentions<'a>(paths: impl IntoIterator<Item = &'a SenatorPath>) -> String {
+fn mentions<'a>(paths: impl IntoIterator<Item = &'a SenatorName>) -> String {
     paths
         .into_iter()
         .map(mention)
@@ -171,7 +167,7 @@ impl ToolDefinition for CommitteeStatus {
             COMMITTEE_STATUS,
             "Which groups this committee is bound to, and which agents are connected right now. \
              Pass `agents` to check some: a person's handle checks every agent seated under \
-             them, an agent path (alice/claude) that one agent. null checks every agent known \
+             them, an agent's name (claude) that one agent. null checks every agent known \
              to the committee (its presence, checkpoints and recent writers).",
             committee_status_schema(),
         )
@@ -188,26 +184,27 @@ impl ToolExecutor for CommitteeStatus {
             .and_then(Value::as_array)
             .map(|list| list.iter().filter_map(Value::as_str).collect())
             .unwrap_or_default();
-        let mut agents: BTreeSet<SenatorPath> = BTreeSet::new();
-        let mut agentless: Vec<SenatorPath> = Vec::new();
+        let mut agents: BTreeSet<SenatorName> = BTreeSet::new();
+        let mut agentless: Vec<SenatorName> = Vec::new();
         let mut unknown: Vec<&str> = Vec::new();
+        let roster = self.0.roster().await?;
         if asked.is_empty() {
+            let people = roster.people();
             let present = brief.presence.iter().map(|p| p.agent.clone());
             let wrote = brief
                 .participants
                 .iter()
-                .filter_map(|p| p.address.as_agent().cloned());
+                .filter_map(|p| people.as_agent(&p.address).cloned());
             let checkpointed = brief.checkpoints.iter().map(|c| c.agent.clone());
             agents.extend(present.chain(wrote).chain(checkpointed));
         } else {
-            let roster = self.0.roster().await?;
             for raw in asked {
                 match senator_of(raw, &roster) {
-                    Some(path) if path.is_junior() => {
-                        agents.insert(path);
+                    Some(agent) if !roster.is_person(&agent) => {
+                        agents.insert(agent);
                     }
                     Some(person) => {
-                        let seated = roster.agents_of(person.owner());
+                        let seated = roster.agents_of(person.name());
                         if seated.is_empty() {
                             agentless.push(person);
                         }
@@ -234,7 +231,7 @@ impl ToolExecutor for CommitteeStatus {
                 offline.push(agent);
             }
         }
-        let list = |paths: &[&SenatorPath]| {
+        let list = |paths: &[&SenatorName]| {
             if paths.is_empty() {
                 "none".to_owned()
             } else {
@@ -329,8 +326,8 @@ impl ToolExecutor for Tasks {
                 let roster = self.0.roster().await?;
                 Some(senator_of(raw, &roster).ok_or_else(|| {
                     format!(
-                        "not a senator: {raw:?}; write a person's handle or an agent path \
-                         such as alice/claude"
+                        "not a senator: {raw:?}; write a person's handle or an agent's name \
+                         such as claude"
                     )
                 })?)
             }
@@ -340,9 +337,11 @@ impl ToolExecutor for Tasks {
         let mut threads = board.threads(state);
         if let Some(only) = &only {
             // An agent: its own threads. A person: those of any of their agents.
+            let roster = self.0.roster().await?;
+            let owner = roster.is_person(only).then(|| only.name());
             threads.retain(|t| {
                 t.agents()
-                    .any(|a| a == only || (only.is_senior() && a.is_under(only)))
+                    .any(|a| a == only || (owner.is_some() && roster.owner_of(a) == owner))
             });
         }
         if threads.is_empty() {
@@ -393,7 +392,7 @@ impl ToolDefinition for Checkpoint {
             CHECKPOINT,
             "One agent's latest checkpoint on this committee: its seq and time, branch and commit, \
              whether it was pushed, the summary, and its PROGRESS.md, DECISIONS.md and OPEN.md. \
-             A checkpoint is one agent's own; name the agent (alice/claude). A person's handle \
+             A checkpoint is one agent's own; name the agent (claude). A person's handle \
              is accepted only when that person has exactly one agent; otherwise the candidates \
              are listed and you call again with one of them.",
             checkpoint_schema(),
@@ -411,27 +410,26 @@ impl ToolExecutor for Checkpoint {
             .unwrap_or_default();
         let roster = self.0.roster().await?;
         let senator = senator_of(raw, &roster).ok_or_else(|| {
-            format!("not a senator: {raw:?}; write an agent path such as alice/claude")
+            format!("not a senator: {raw:?}; write an agent's name such as claude")
         })?;
-        let agent = if senator.is_junior() {
+        let agent = if !roster.is_person(&senator) {
             senator
         } else {
             let person = mention(&senator);
-            match roster.agent_of(senator.owner()) {
-                Ok(AgentOf::One(agent)) => agent,
-                Ok(AgentOf::Several(candidates)) => {
+            match crate::engine::agent_of(&roster, senator.name()) {
+                AgentOf::One(agent) => agent,
+                AgentOf::Several(candidates) => {
                     return Err(format!(
                         "{person} has several agents here: {}. A checkpoint is one agent's own: \
                          call checkpoint again with one of them.",
                         mentions(&candidates)
                     ));
                 }
-                Ok(AgentOf::None(_)) => {
+                AgentOf::None(_) => {
                     return Ok(format!(
                         "{person} has no agent seated here, so there is no checkpoint."
                     ));
                 }
-                Err(_) => return Err(format!("{person} is not on the roster.")),
             }
         };
         let Some(record) = self
@@ -486,7 +484,7 @@ fn committee_status_schema() -> Value {
             "agents": {
                 "type": ["array", "null"],
                 "items": { "type": "string" },
-                "description": "Whom to check: a person's handle checks every agent seated under them (e.g. \"alice\"), an agent path checks that one agent (e.g. \"alice/codex\"). null for every agent known to the committee."
+                "description": "Whom to check: a person's handle checks every agent seated under them (e.g. \"alice\"), an agent's name checks that one agent (e.g. \"codex\"). null for every agent known to the committee."
             }
         },
         "required": ["agents"],
@@ -505,7 +503,7 @@ fn tasks_schema() -> Value {
             },
             "agent": {
                 "type": ["string", "null"],
-                "description": "Only threads addressed to this agent (an agent path, e.g. \"alice/claude\"), or to any agent of this person (a handle, e.g. \"alice\"); null for every thread."
+                "description": "Only threads addressed to this agent (an agent's name, e.g. \"claude\"), or to any agent of this person (a handle, e.g. \"alice\"); null for every thread."
             },
             "limit": {
                 "type": ["integer", "null"],
@@ -526,7 +524,7 @@ fn checkpoint_schema() -> Value {
             "agent": {
                 "type": "string",
                 "minLength": 1,
-                "description": "The agent whose checkpoint to read, as its path, e.g. \"alice/claude\". A person's handle (e.g. \"alice\") only when that person has exactly one agent."
+                "description": "The agent whose checkpoint to read, by its name, e.g. \"claude\". A person's handle (e.g. \"alice\") only when that person has exactly one agent."
             }
         },
         "required": ["agent"],

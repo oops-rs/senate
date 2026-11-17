@@ -86,25 +86,21 @@ async fn offline_then_online_with_every_part_of_the_model() {
     .await;
     assert_eq!(s.person.as_deref(), Some("alice"));
 
-    // Who the person is in each Senate the daemon serves.
-    let keys: Vec<_> = s.senates.iter().map(|x| x.key.as_str()).collect();
-    assert_eq!(keys, vec!["", "alice/claude"]);
-    assert!(s.senates[0].primary && !s.senates[1].primary);
-    assert_eq!(s.senates[0].me, "[senator::alice]");
-    assert_eq!(s.senates[0].title, "Senate");
-    assert_eq!(s.senates[1].title, "Senate under alice/claude");
-    assert_eq!(s.senates[0].speaker.as_deref(), Some("[speaker]"));
-    assert_eq!(
-        s.senates[1].speaker.as_deref(),
-        Some("[senator::alice/claude]")
-    );
-    assert_eq!(
-        s.senates[1].presiding_agent.as_deref(),
-        Some("alice/claude")
-    );
-    assert_eq!(s.senates[0].committees[0].stream, "live");
+    // The one Senate the daemon serves, who the person is in it, and the
+    // agent of hers presiding.
+    assert_eq!(s.senates.len(), 1);
+    let senate = &s.senates[0];
+    assert_eq!(senate.key, "alice-desk");
+    assert_eq!(senate.senate.as_deref(), Some("alice-desk"));
+    assert!(senate.primary);
+    assert_eq!(senate.me, "[senator::alice]");
+    assert_eq!(senate.title, "Senate alice-desk");
+    assert_eq!(senate.speaker.as_deref(), Some("[senator::claude]"));
+    assert_eq!(senate.presiding_agent.as_deref(), Some("claude"));
+    assert_eq!(senate.committees[0].stream, "live");
 
-    // The person's agents, with what waits on each.
+    // The person's agents, with what waits on each: those with a stream on
+    // this machine (not `reviewer` or `tester`, which only the docket names).
     let agents: Vec<_> = s
         .agents
         .iter()
@@ -121,41 +117,39 @@ async fn offline_then_online_with_every_part_of_the_model() {
     assert_eq!(
         agents,
         vec![
-            ("alice/claude", "", 1, true, true),
-            ("alice/codex", "", 1, false, true),
-            ("alice/claude/reviewer", "alice/claude", 0, false, false),
+            ("claude", "alice-desk", 1, true, true),
+            ("codex", "alice-desk", 1, false, true),
         ]
     );
     assert_eq!(s.agents[1].runtime.as_deref(), Some("codex"));
 
     // The merged inbox lists each thread once, with its mentions bracketed.
-    assert_eq!(s.inbox[0].from, "[speaker::bob/claude]");
-    assert_eq!(s.inbox[0].for_agents, vec!["alice/claude".to_string()]);
-    assert_eq!(s.inbox[1].for_agents, vec!["alice/codex".to_string()]);
+    assert_eq!(s.inbox[0].from, "[speaker::copilot]");
+    assert_eq!(s.inbox[0].for_agents, vec!["claude".to_string()]);
+    assert_eq!(s.inbox[1].for_agents, vec!["codex".to_string()]);
     assert_eq!(s.inbox[0].state, "suspended");
     assert_eq!(s.inbox[0].triage_label.as_deref(), Some("needs a person"));
 
     // The Codex panel and its approval.
     assert_eq!(s.codex.len(), 1);
-    assert_eq!(s.codex[0].agent, "alice/codex");
+    assert_eq!(s.codex[0].agent, "codex");
     assert_eq!(s.codex[0].approvals, 1);
     assert_eq!(
         *sink.notified.lock().unwrap(),
         vec!["019a-thread:7".to_string()]
     );
 
-    // The docket of the Senate alice/claude presides over, read-only.
+    // The docket of the Senate claude presides over, read-only.
     assert_eq!(s.docket.len(), 1);
     let d = &s.docket[0];
-    assert_eq!(d.senate, "alice/claude");
+    assert_eq!(d.senate, "alice-desk");
+    assert_eq!(d.title, "Senate alice-desk");
+    assert_eq!(d.speaker.as_deref(), Some("[senator::claude]"));
     assert_eq!(d.committees[0].items.len(), 2);
     let pick = &d.committees[0].items[0];
     assert_eq!(pick.awaiting, "pick");
     assert_eq!(pick.by, "[senator::alice]");
-    assert!(
-        pick.why
-            .starts_with("route to one of [senator::alice/claude/reviewer]")
-    );
+    assert!(pick.why.starts_with("route to one of [senator::reviewer]"));
     assert_eq!(d.committees[0].items[1].awaiting, "away");
     assert_eq!(
         d.committees[0].seats[0].checkpoint.as_deref(),
@@ -171,7 +165,7 @@ async fn offline_then_online_with_every_part_of_the_model() {
         s.menu.docket.as_deref(),
         Some("Docket: 2 awaiting the Speaker")
     );
-    assert_eq!(s.menu.lines[0], "alice/claude · refund-v2 · live · seq 120");
+    assert_eq!(s.menu.lines[0], "claude · refund-v2 · live · seq 120");
     assert_eq!(s.counts.pending, 3);
 }
 
@@ -214,7 +208,7 @@ async fn an_escalated_thread_is_listed_once_and_belongs_to_every_agent() {
     let (_dir, socket, world) = setup();
     {
         let mut w = world.lock().unwrap();
-        let mut t = suspended(150, "ship it?", "alice/claude");
+        let mut t = suspended(150, "ship it?", "claude");
         t.escalated_to = Some(alice());
         w.threads = vec![t];
     }
@@ -224,7 +218,7 @@ async fn an_escalated_thread_is_listed_once_and_belongs_to_every_agent() {
     let t = &s.inbox[0];
     assert!(t.escalated);
     assert_eq!(t.escalated_to.as_deref(), Some("[senator::alice]"));
-    assert_eq!(t.for_agents, vec!["alice/claude".to_string()]);
+    assert_eq!(t.for_agents, vec!["claude".to_string()]);
     // It waits on the person whichever agent it was for: both agents count it.
     let pending: Vec<_> = s.agents.iter().map(|a| a.pending).collect();
     assert_eq!(&pending[..2], &[1, 1]);
@@ -381,20 +375,21 @@ async fn an_inbox_event_rereads_that_agents_inbox_and_the_docket() {
         .lock()
         .unwrap()
         .threads
-        .push(suspended(160, "new one", "alice/codex"));
+        .push(suspended(160, "new one", "codex"));
     daemon.emit(WatchEvent::Inbox {
-        agent: path("alice/codex"),
+        agent: path("codex"),
         committee: committee(),
         seq: Seq(160),
         kind: senate_core::Kind::Question,
     });
     until(&driver, "the new thread", |s| s.inbox.len() == 3).await;
 
-    // An event of a Senate below names an agent the app cannot read an inbox
-    // for: no inbox request for it, but the docket is read again.
+    // An event names an agent with no stream on this machine, whose inbox
+    // the app cannot read: no inbox request for it, but the docket is read
+    // again.
     let before = daemon.requests().len();
     daemon.emit(WatchEvent::Inbox {
-        agent: path("alice/claude/reviewer"),
+        agent: path("reviewer"),
         committee: committee(),
         seq: Seq(161),
         kind: senate_core::Kind::Question,
@@ -436,20 +431,22 @@ async fn the_language_can_change_while_running() {
     assert_eq!(s.menu.title, "Senate：已作为 alice 在线");
     assert_eq!(s.menu.pending, "2 个待处理线程，1 个审批");
     assert_eq!(s.menu.docket.as_deref(), Some("议程：2 项等待 Speaker"));
-    assert_eq!(s.senates[1].title, "alice/claude 主持的 Senate");
+    assert_eq!(
+        s.senates[0].title, "Senate alice-desk",
+        "Senate and its path read the same in every language"
+    );
     assert_eq!(s.inbox[0].state_label, "等待中");
     assert_eq!(
-        s.inbox[0].from, "[speaker::bob/claude]",
+        s.inbox[0].from, "[speaker::copilot]",
         "ids read the same in every language"
     );
     assert!(
         s.docket[0].committees[0].items[0]
             .why
-            .starts_with("要在 [senator::alice/claude/reviewer]")
+            .starts_with("要在 [senator::reviewer]")
     );
     assert_eq!(
-        s.docket[0].committees[0].items[0].body,
-        "谁来看一下 [senator::alice/claude/reviewer] 的补丁？",
+        s.docket[0].committees[0].items[0].body, "谁来看一下 [senator::reviewer] 的补丁？",
         "what people wrote is shown as written"
     );
 }
@@ -457,6 +454,15 @@ async fn the_language_can_change_while_running() {
 #[test]
 fn world_is_the_one_the_tests_describe() {
     let w = World::new();
-    assert_eq!(w.status.others.len(), 1);
+    assert_eq!(
+        w.status.senate.as_ref().map(ToString::to_string).as_deref(),
+        Some("alice-desk")
+    );
+    assert!(w.status.people.is_person(&path("alice")));
+    assert!(!w.status.people.is_person(&path("claude")));
+    assert_eq!(
+        w.status.speaker,
+        Some(senate_core::SpeakerSeat::Senator(path("claude")))
+    );
     assert_eq!(w.threads.len(), 2);
 }

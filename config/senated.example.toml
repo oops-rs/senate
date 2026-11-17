@@ -1,5 +1,5 @@
 # senated as a team's Senate server: the top Senate, with the built-in
-# Speaker when [speaker] is set (below).
+# session when [model] is set (below).
 #
 #   senated --config config/senated.example.toml
 #
@@ -57,25 +57,47 @@ data_dir = "data"
 # Who exists
 # ---------------------------------------------------------------------------
 
-# The roster: the people this Senate knows. Every agent is named under a
-# person (`alice/claude`, `alice/codex`) and is seated the first time its
-# bridge connects, so agents need not be listed. `names` are what people
-# call the person in chat, matched case-insensitively like the handle.
-# `accounts` are the person's ids on outside platforms; a chat layer uses
-# them to tell this person from a guest, and to mention or invite them.
+# The roster: the principals this Senate knows. A principal is a person
+# (the default), a team or a service; any of them may run agents, and only
+# a person confirms a decision. Every senator has one flat name, unique in
+# this Senate (`alice`, `claude`, `codex`): a principal and an agent may not
+# share one. An agent is seated the first time its principal's bridge acts
+# as it; that principal runs it, and no other may act as it. Agents need
+# not be listed. `names` are what people call the principal in chat,
+# matched case-insensitively like the handle. `accounts` are the
+# principal's ids on outside platforms; a chat layer uses them to tell this
+# person from a guest, and to mention or invite them.
+# (`[[roster.seniors]]` is still read, as `[[roster.principals]]`.)
 
-[[roster.seniors]]
+[[roster.principals]]
 handle = "alice"
 names = ["Alice"]
 accounts = [{ platform = "chat", id = "u_alice" }]
 
-[[roster.seniors]]
+[[roster.principals]]
 handle = "bob"
 names = ["Bob"]
 
-# Agents seated from the start, optional:
+# A team as a principal: it runs agents (a CI bot, say); it cannot confirm
+# a decision.
+# [[roster.principals]]
+# handle = "acme"
+# kind = "team"
+
+# Optional, under [roster]:
 # [roster]
-# agents = ["alice/claude"]
+# # Agents seated from the start.
+# agents = [{ name = "claude", owner = "alice" }]
+# # The Speaker: exactly one per Senate, named by senator id. A person
+# # (`senator::alice`) whose agents and secretaries work the desk, or the
+# # built-in session by its name (`senator::secretary`, below). For a child
+# # Senate it is its parent's principal, by absolute id
+# # (`/acme::senator::alice`). Without it the built-in session, when it
+# # runs, is the Speaker.
+# speaker = "senator::alice"
+# # Secretaries: who answers for a senator while it is away, in this order
+# # (`senate secretary add` registers more at run time).
+# secretaries = { claude = ["secretary"] }
 
 # Bearer tokens. A token names a person; that person's bridge then acts as
 # the person and as any of their own agents. Set exactly one of:
@@ -95,14 +117,43 @@ person = "bob"
 token_sha256 = "5b88a3d16b92cd96dd5a2cf692e1c84fc3df64bbc2a56df44877f33b980b60ea"
 
 # ---------------------------------------------------------------------------
+# The model
+# ---------------------------------------------------------------------------
+
+# How the built-in session reaches its model; `secretary.toml` and a
+# committee's file may override any key, the rest falling back to this.
+# The key itself is never written here, only the NAME of the variable that
+# holds it.
+#
+# [model]
+# # anthropic, openai, gemini, openrouter, ollama, lmstudio.
+# provider = "anthropic"
+# model = "claude-sonnet-4-5"
+# api_key_env = "ANTHROPIC_API_KEY"
+# # An OpenAI-compatible endpoint, for a gateway.
+# # base_url = "http://model-gateway.internal:4000"
+# deadline_secs = 45
+# triage_deadline_secs = 5
+# token_budget = 80000
+
+# ---------------------------------------------------------------------------
 # The Speaker
 # ---------------------------------------------------------------------------
 
-# Without [speaker], senated serves the log and the bridge API only. With
-# it, the built-in Speaker presides: it triages questions between agents,
-# answers for an agent that is away from that agent's own checkpoint, and
-# answers agents that address it. A chat platform, mounted by a private
-# layer built on the senated library, adds what people say in chat.
+# The built-in session is the daemon's own senator, driven by a model. It
+# runs when [model] (above) is complete and something
+# refers to it: the roster names it as the Speaker, or as someone's
+# secretary, or no Speaker is named at all. It then works the Speaker's
+# desk (triage, routing, covering for an agent that is away from that
+# agent's own checkpoint) and answers agents that address it. A chat
+# platform, mounted by a private layer built on the senated library, adds
+# what people say in chat.
+#
+# What it does is configured in `secretary.toml` beside this file (and
+# `<committee>.secretary.toml` there for one committee), reloaded while
+# senated runs; `senated secretary show --config <this file>` prints what is
+# in force. [speaker] below (or [secretary]) is still read, as if it were
+# `secretary.toml`; when both exist, `secretary.toml` wins.
 #
 # [speaker]
 # # Default: data_dir above. The model's workspaces live in <data_dir>/speaker/.
@@ -162,7 +213,7 @@ token_sha256 = "5b88a3d16b92cd96dd5a2cf692e1c84fc3df64bbc2a56df44877f33b980b60ea
 # [speaker.work.developers]
 # refund-v2 = ["alice", "bob"]
 #
-# # What does the work. Needs [speaker]. The runner: Claude Code headless in
+# # What does the work. Needs [model]. The runner: Claude Code headless in
 # # a throwaway checkout inside a container, with no credentials but the
 # # repository's; work is pushed to the Speaker's own branch, never to a
 # # developer's.

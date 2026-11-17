@@ -13,7 +13,7 @@ use common::*;
 use ractor::ActorId;
 use reqwest::{Method, StatusCode};
 use senate_core::api::{AppendResponse, Heartbeat, events_path};
-use senate_core::{Appended, CommitteeId, Event, Hub, MirrorRef, NewEvent, SenatorPath, Seq};
+use senate_core::{Appended, CommitteeId, Event, Hub, MirrorRef, NewEvent, SenatorName, Seq};
 use senate_log::{CursorOwner, HeartbeatRecord, LogError, LogStore, MemoryStore};
 use tokio::sync::broadcast::error::TryRecvError;
 
@@ -131,7 +131,7 @@ impl LogStore for Faulty {
     async fn last_heartbeat(
         &self,
         f: &CommitteeId,
-        agent: &SenatorPath,
+        agent: &SenatorName,
     ) -> Result<Option<HeartbeatRecord>, LogError> {
         self.inner.last_heartbeat(f, agent).await
     }
@@ -180,11 +180,9 @@ async fn a_crashed_writer_restarts_and_rebuilds_from_the_log() {
     let server = TestServer::start_with(store.clone(), None).await;
     let hub = server.running.hub.clone();
     let f = committee();
-    let alice = path("alice/claude");
+    let alice = path("claude");
 
-    let mut stream = server
-        .stream_as(ALICE, Some("alice/claude"), None, None)
-        .await;
+    let mut stream = server.stream_as(ALICE, Some("claude"), None, None).await;
     server.append("one").await;
     server.append("two").await;
     assert_eq!(stream.seqs(2).await, vec![1, 2]);
@@ -226,9 +224,7 @@ async fn a_crashed_writer_restarts_and_rebuilds_from_the_log() {
     assert_eq!(retry.event.seq, Seq(3));
 
     // Reconnecting replays what the dead stream missed, then goes live.
-    let mut resumed = server
-        .stream_as(ALICE, Some("alice/claude"), None, Some(2))
-        .await;
+    let mut resumed = server.stream_as(ALICE, Some("claude"), None, Some(2)).await;
     assert_eq!(resumed.seqs(2).await, vec![3, 4]);
     server.append("five").await;
     assert_eq!(resumed.seqs(1).await, vec![5]);

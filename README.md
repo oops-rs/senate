@@ -11,42 +11,44 @@ A deliberation system for people and their coding agents. Work is divided into *
 
 Senate, senator, and Speaker are used as-is in every language.
 
+**Only Senates nest. Senators and committees are flat, and both are scoped to one Senate.**
+
+| Thing | Scope | Shape | Example |
+| :--- | :--- | :--- | :--- |
+| **Senate** | its parent Senate | a path of names, parent first | `/acme/north-desk` |
+| **Committee** | one Senate | flat id | `ibot` |
+| **Senator** | one Senate | flat name | `wendell`, `codex`, `claude` |
+| **Seat** | one committee | committee × senator | `ibot::senator::codex` |
+
 | Term | Meaning |
 | :--- | :--- |
-| **Senate** | One level of deliberation, served by one `senated`. Senates nest hierarchically. |
-| **senator** | Anyone who can speak: a person or a coding agent. |
-| **senior senator** | A person. Global identity: `senator::wendell` is the exact same senator at every level. |
-| **junior senator** | An agent, named under its person: `senator::wendell/claude`. |
-| **Speaker** | Presides over one Senate. Always backed by a foundation model. The Speaker of a nested Senate is an agent session of the Senate above it. |
-| **Committee** | The primary unit of collaboration: its own append-only log, members, and task threads. |
-| **Guest** | External caller or chat participant not on the roster (`guest::<platform>/<id>`). A guest may ask and receive answers, but cannot change state. |
+| **principal** | Who a token names: a person, or a team or a service. A principal runs agents; only a person confirms decisions. |
+| **agent** | A senator run by a principal: a coding session, or the daemon's built-in session. |
+| **Speaker** | The one senator who presides over a Senate, named by a senator id (`senator::alice`, or a parent's `/acme::senator::alice`). `speaker` is a link to it. |
+| **desk** | Everything addressed to the Speaker. Its **secretaries** (agents, or the built-in session on a model) work it; the first one present acts. |
+| **chair** | The one senator who chairs a committee; `chair` is a link to it. It picks among agents and covers for absent members. |
+| **Guest** | Someone not on the roster (`guest::<platform>/<id>`): may ask and receive answers, cannot change state. |
 
-An agent's own subagents do not sit beside it. They sit in a Senate one level down that the agent presides over: `senator::wendell/claude/reviewer`.
+An agent's own team is a child Senate, never a path inside a name.
 
-### Addressing & Mentions
+### Addressing
 
-Identifiers are stored in structured fields:
+Stored in an event's fields:
 
-| Format | Meaning |
+| Form | Meaning |
 | :--- | :--- |
-| `senator::wendell` | A senior senator (the person). |
-| `senator::wendell/claude` | A specific junior senator (that person's agent). |
-| `senator::wendell/*` | Whichever of `wendell`'s agents should receive the message. |
-| `speaker` | The Speaker of the Senate whose log this is. |
+| `senator::wendell`, `senator::codex` | A principal or an agent of this Senate: one flat name. |
+| `senator::*` | Whichever agent on this committee: one → it; several → an agent is refused with the candidates, a person's message goes to the chair to pick; none → the Senate's one person. |
+| `speaker`, `chair` | This Senate's Speaker; this committee's chair (links). |
 | `committee` | Broadcast to everyone on the committee. |
-| `guest::<platform>/<id>` | Someone not on the roster (e.g. external chat caller). |
+| `guest::<platform>/<id>` | Someone who is not a senator. |
+| `<child>::<committee>::speaker` | A child Senate's Speaker's office, in its parent's log. |
 
-In running text, identifiers are enclosed in brackets so they remain unambiguous across all languages without spacing issues: `[senator::wendell/claude]`, `[speaker]`, `[committee]`. When the Speaker answers on an agent's behalf, it is explicitly labeled `[speaker::wendell/claude]`.
+A **qualified name** names a seat from anywhere, read from the right: `[<senate path>::][<committee>::]<address>`, e.g. `/acme/north-desk::ibot::senator::codex`, `ibot::senator::codex` (the nearest Senate that has `ibot`), `ibot::speaker`. In running text ids are bracketed: `[senator::claude]`, `[ibot::senator::codex]`, `[speaker]`.
 
-### Routing & Delegation Rules
+### The boundary rule
 
-1. **People are global:** There is only one `senator::wendell`, regardless of how many Senates are nested.
-2. **Accountability:** Every junior senator belongs to exactly one senior senator (`<person>/<agent>`). No agent acts anonymously.
-3. **Wildcard routing (`senator::<person>/*`):**
-   - **One agent:** Delivered directly to that agent.
-   - **Multiple agents:** An agent sender is refused with a candidate list and must name one; for human senders, the Speaker routes the question or asks for clarification.
-   - **No agents:** Routed to the person.
-4. **Agent seating:** Agents are dynamically seated on their first contact. Seats are not persisted in a database; a restarting server re-seats every agent seen in its log before serving requests.
+A person's message is delivered directly. An agent's message that leaves its own committee is handed to the Speaker's desk on the way, which forwards it, refuses with a reason, or leaves it for the Speaker; the answer comes back to the asker's own thread. See [docs/architecture.md](docs/architecture.md) for the roles, the chains (authority down, escalation up, cover) and parent and child Senates.
 
 ---
 
@@ -72,10 +74,10 @@ In running text, identifiers are enclosed in brackets so they remain unambiguous
  │                    │                     │      │       │                   │                    │       │
  │                    ▼                     │      │       ▼                   ▼                    ▼       │
  │ ┌──────────────────────────────────────┐ │      │ ┌───────────┐      ┌─────────────┐      ┌────────────┐ │
- │ │ Hosted Local Senates                 │ │      │ │senate-log │      │senate-speaker│     │senate-work │ │
- │ │                                      │ │      │ │(Postgres /│      │(Basis Brain, │     │(Docker Run,│ │
- │ │ • top (standalone mode)              │ │      │ │ SQLite /  │      │ Triage,      │     │ GhForge)   │ │
- │ │ • under-<agent> (one per presider)   │ │      │ │ Memory)   │      │ Takeover)    │     └────────────┘ │
+ │ │ The machine's Senate                 │ │      │ │senate-log │      │senate-speaker│     │senate-work │ │
+ │ │                                      │ │      │ │(Postgres /│      │(built-in     │     │(Docker Run,│ │
+ │ │ • senates/top/ (one per machine)     │ │      │ │ SQLite /  │      │ session:     │     │ GhForge)   │ │
+ │ │ • a child of the team's, if any      │ │      │ │ Memory)   │      │ secretary)   │     └────────────┘ │
  │ │ (Loopback SQLite, private token)     │ │      │ └───────────┘      └──────┬──────┘                     │
  │ └──────────────────────────────────────┘ │      │                           │                            │
  └──────────────────────────────────────────┘      │                           ▼                            │
@@ -110,7 +112,7 @@ graph TD
     subgraph Machine["senated --machine (Developer Machine)"]
         MSUP[Supervisor]
         BRG[senate-bridge::daemon]
-        HOSTED[Hosted Senates: SQLite loopback]
+        HOSTED[The machine's Senate: SQLite loopback]
         SOCK[(Unix Domain Socket: bridge.sock)]
 
         MSUP -. supervises .-> BRG
@@ -131,15 +133,13 @@ graph TD
 The exact same daemon binary operates in two modes depending on command-line flags:
 
 1. **Server Mode (`senated --config <senated.toml>`)**:
-   - Runs as a team server hosting the primary, top-level Senate.
+   - Runs as a team server hosting one Senate (its `name` in `senated.toml`, default `senate`).
    - Manages durable multi-client persistence, high-concurrency event broadcasting, and token-based authentication.
-   - Hosts the built-in, model-backed Speaker and the containerized coding execution pipeline (`senate-work`).
+   - Runs the built-in session (the engine on a model, configured by `[model]` and `secretary.toml`) as the Speaker's secretary, and the containerized coding execution pipeline (`senate-work`).
 2. **Developer Machine Mode (`senated --machine`)**:
    - Runs on the engineer's workstation, reading configuration from `$SENATE_HOME/senate.toml` (`~/.senate/senate.toml`).
-   - Hosts local child Senates in SQLite on loopback:
-     - `senates/top/`: A local top Senate (when operating standalone).
-     - `senates/under-<agent>/`: One nested Senate per presiding agent (`[[preside]]`).
-   - Hosts the developer-machine bridge (`senate-bridge::daemon`) as a supervised component, maintaining persistent SSE connections to both upstream and local Senates, routing incoming events, and managing session state.
+   - Hosts exactly one Senate, the machine's, in SQLite on loopback (`senates/top/`), named `<person>-desk` unless `[local] name` says otherwise. Every session of the machine sits in it. Under a team it registers as a child of the team's Senate, with the person as its Speaker.
+   - Hosts the developer-machine bridge (`senate-bridge::daemon`) as a supervised component, maintaining persistent SSE connections, routing incoming events, and managing session state.
    - Serves the local IPC socket `~/.senate/bridge.sock` for MCP tools, hooks, and native GUI apps.
 
 ---
@@ -165,20 +165,21 @@ The log is the single source of truth:
 
 #### HTTP & SSE Protocol Engine (`senate-server`)
 Built with Axum, `senate-server` exposes the deliberation protocol over HTTP:
-- **Authentication Seam (`Authenticate`):** Bearer tokens resolve to a human senior senator (`senator::<person>`). Tokens never name agents directly; requests state which junior senator the human is acting as (`Roster::may_act_as`).
-- **Dynamic Seating:** Agents are seated dynamically upon first connection without manual pre-registration in configuration files.
+- **Authentication Seam (`Authenticate`):** Bearer tokens resolve to a principal. Tokens never name agents directly; requests state which agent the principal acts as (`Roster::may_act_as`).
+- **Dynamic Seating:** Agents are seated on their first contact, recorded as run by the principal who acted as them; a second principal cannot take the same name.
+- **Resolution, chairs, secretaries, children:** `GET /v1/resolve` answers whether a qualified name is in this Senate; chairs, secretary relations and child Senates have their own routes.
 - **Agent Presence & Leases:**
   - Active connections maintain heartbeats every 60 seconds.
   - An agent with no heartbeat transitions from `online` to `disconnected` after `presence_grace_secs` (default: 120s).
   - After `lease_secs` (default: 900s), its lease expires, transitioning to `absent`. Directed questions to an absent agent are routed to the Speaker for takeover.
 - **Real-Time Streaming (`/v1/committees/{id}/stream`):** Delivers live committee events via Server-Sent Events (SSE) with `since` resumption and periodic keep-alive pings.
 
-#### Built-in Speaker Engine (`senate-speaker`)
-The Speaker presides over the top Senate, backed by a foundation model via `basis` (Anthropic Claude, OpenAI, or compatible gateways):
+#### Built-in Session (`senate-speaker`)
+The built-in session works the Speaker's desk as its secretary (or is the Speaker of an unattended root), backed by a foundation model via `basis` (Anthropic Claude, OpenAI, or compatible gateways):
 - **Actor-Driven Execution:** Built using the `ractor` actor framework, maintaining responsive concurrent event processing across committees.
 - **Intelligent Triage:** Evaluates incoming task roots (`question` / `request` to an agent) within a configurable deadline to classify whether human review is required.
-- **Checkpoint-Based Takeover (`speaker_cover`):** When an agent is `absent`, the Speaker answers incoming questions on its behalf using *that agent's own latest checkpoint* branch and commit. A sibling agent never answers for another.
-- **Wildcard Resolution (`speaker_route`):** Intelligently routes messages directed to `senator::<person>/*` to the most qualified or active agent.
+- **Checkpoint-Based Cover:** When an agent is `absent`, its secretaries, then its chair, then the Speaker's desk answer questions on its behalf using *that agent's own latest checkpoint*. Another agent never answers for it.
+- **Crossings:** Decides what becomes of an agent's message for another committee or Senate: forward it, refuse it with a reason, or leave it for the Speaker.
 - **Summary & Brief Synthesis:** Continuously derives the committee brief (`Brain::brief_top`) and coalesces updates to task cards.
 
 #### Autonomous Coding Hands (`senate-work`)
@@ -195,41 +196,34 @@ Decouples external chat platforms (messaging tools) from deliberation logic:
 
 #### Developer Machine Bridge (`senate-bridge`)
 Runs inside `senated --machine`:
-- **Multi-Senate Routing:** Connects to the upstream Senate and any number of hosted local Senates, isolating credentials, cursors, and state per Senate.
+- **One Senate:** Serves the machine's Senate (or a team's directly), and, under a team, its uplink as a child Senate.
 - **Local IPC Socket:** Listens on `~/.senate/bridge.sock`, serving CLI commands, agent hooks, and the macOS native app.
 - **Delivery Ladder:** Buffers and routes events to active Claude Code and Codex sessions via local session sockets, falling back to durable prompt injection.
-- **Presiding Tool Injection:** Dynamically equips agents that hold a Speaker's seat with presiding tools (`speaker_docket`, `speaker_route`, `speaker_cover`, `speaker_escalate`).
+- **Presiding and Chair Tools:** Equips sessions whose agent works the Speaker's desk with the presiding tools (`speaker_docket`, `speaker_route`, `speaker_cover`, `speaker_escalate`, `speaker_forward`, `speaker_refuse`), and a chairing agent's session with its committee's chair tools.
 
 ---
 
-## Hierarchical Senates (How Senates Nest)
-
-Senates nest like federal and state legislative chambers.
+## Parent and Child Senates
 
 ```text
- TOP SENATE (Team Server or Local Top)
- ┌─────────────────────────────────────────────────────────────┐
- │ Roster: senator::alice, senator::bob, speaker               │
- │ Seated: senator::alice/claude, senator::alice/codex         │
- └──────────────────────────────┬──────────────────────────────┘
-                                │ alice/claude presides below
+ TEAM SENATE /acme (team server, built-in session as secretary)
+ ┌──────────────────────────────────────────────────────────────┐
+ │ Principals: alice, bob     Speaker: senator::alice            │
+ │ Children:   alice-desk (Speaker alice), bob-desk (Speaker bob)│
+ └──────────────────────────────┬───────────────────────────────┘
+                                │ alice-desk::ibot::speaker
                                 ▼
- NESTED SENATE (Hosted on Alice's machine under-claude/)
- ┌─────────────────────────────────────────────────────────────┐
- │ Speaker: alice/claude                                       │
- │ Roster:  senator::alice                                     │
- │ Seated:  senator::alice/claude/reviewer, .../tester         │
- └─────────────────────────────────────────────────────────────┘
+ CHILD SENATE /acme/alice-desk (alice's machine)
+ ┌──────────────────────────────────────────────────────────────┐
+ │ Speaker: /acme::senator::alice   secretaries: claude          │
+ │ Agents:  claude, codex           (never seated above)         │
+ └──────────────────────────────────────────────────────────────┘
 ```
 
-- **Zero Log Synchronization:** There is no replication or synchronization between the parent log and child logs.
-- **The Presiding Session is the Bridge:** The presiding agent (`alice/claude`) sits as an ordinary junior senator in the parent Senate and acts as the Speaker in the child Senate below.
-- **Strict Boundary Isolation:** Subagents (`alice/claude/reviewer`) cannot write to or be addressed directly from the top Senate.
-- **Presiding Tools:**
-  - `speaker_docket`: Views awaiting picks, unresolved questions, and away subagents.
-  - `speaker_route`: Routes wildcard requests down to specific subagents.
-  - `speaker_cover`: Answers on behalf of an away subagent using that subagent's checkpoint.
-  - `speaker_escalate`: Escalates unresolvable questions up to the human developer.
+- **No log synchronisation:** each Senate keeps its own log.
+- **A child registers upward as a Senate,** authenticated as its Speaker (a principal of the parent). The parent knows the child's name and Speaker, never its agents.
+- **The parent addresses the child as its Speaker's office** (`alice-desk::ibot::speaker`); the child's desk decides what becomes of it and its answer returns to the asker's thread.
+- **A person speaks above directly; an agent goes through its desk.**
 
 ---
 
@@ -255,11 +249,11 @@ cp config/senated.example.toml senated.toml
 Verify the server is running:
 ```sh
 curl -H "Authorization: Bearer dev-alice-token" http://127.0.0.1:7878/v1/me
-# {"person":"alice","agents":[],"committees":[],"epoch":"...","triaged":false}
+# {"person":"alice","senate":"acme","office":{"speaker":"senator::alice","kind":"person",…},"agents":[],…}
 ```
 
 - **Storage:** In-memory by default. For persistent logs, configure `database_url = "sqlite:/var/lib/senate/log.db"` or PostgreSQL: `database_url = "postgres://senate:senate@127.0.0.1:5432/senate"` (a Docker setup is provided in [`deploy/docker-compose.yml`](deploy/docker-compose.yml)).
-- **Model Brain:** Add `[speaker]` to enable the built-in Speaker. Model credentials are read from `ANTHROPIC_API_KEY` or `BASIS_BASE_URL` / `BASIS_API_KEY`.
+- **Speaker and built-in session:** `[roster] speaker = "senator::alice"` names the Speaker (a principal). Add `[model]` (and optionally `secretary.toml` beside the config) to run the built-in session; list its name among the Speaker's secretaries (`[roster.secretaries] alice = ["secretary"]`). Model credentials are read from the environment variables `[model]` names (`ANTHROPIC_API_KEY`, or `BASIS_BASE_URL` / `BASIS_API_KEY`).
 
 ### 2. A Developer Machine under a Team
 
@@ -271,8 +265,9 @@ server_url = "https://senate.example.com"
 token = "dev-alice-token"
 person = "alice"
 
-[[preside]]
-agent = "claude"     # alice/claude presides over a child Senate for subagents
+[local]                         # this machine's Senate, a child of the team's
+speaker = "/acme::senator::alice"
+secretaries = ["claude"]        # works your desk while you are away
 ```
 
 Install integrations and start the machine daemon:
@@ -304,7 +299,7 @@ senate join                               # in a repository: bind it to a commit
 
 `senate service install --yes` keeps `senated --machine` running as a user service instead of leaving a terminal open (`senate service status` and `senate service uninstall --yes` to inspect and remove it; each is a dry run without `--yes`).
 
-In solo mode, `senated --machine` hosts a local top Senate on loopback SQLite (`127.0.0.1:7979`), and your primary agent (`alice/claude`) is designated as Speaker.
+In solo mode, `senated --machine` hosts the machine's Senate (`alice-desk`) on loopback SQLite (`127.0.0.1:7979`). You are its Speaker; `claude` (and, with `[model]`, the built-in session) works your desk as a secretary.
 
 Speak to your agents as yourself, and see what waits for you (no token, no `curl`):
 ```sh
@@ -316,7 +311,7 @@ Speak to your agents as yourself, and see what waits for you (no token, no `curl
 ./target/release/senate inbox                                                        # what waits on someone
 ./target/release/senate inbox --all                                                  # and the answered threads, too
 ```
-Commands act on the committee of the current directory (`--committee <id>` to name one) and on the Senate where your agents sit directly. `<to>` is one of your agents (`claude`, `claude/reviewer`), a full path (`bob/claude`), a person (`bob`), whichever agent (`*`, `bob/*`) or `speaker`; text `-` is read from stdin.
+Commands act on the committee of the current directory (`--committee <id>` to name one). `<to>` is a qualified name: a senator here (`claude`, `bob`), whichever agent (`*`), `speaker`, or a seat elsewhere (`ibot::codex`, `/acme::ibot::bob`), delivered there directly; text `-` is read from stdin.
 
 ---
 
@@ -344,7 +339,7 @@ A coding session resolves its active **committee** from the first of these that 
 senate join refund-v2   # bind this worktree, on this branch, to a committee (writes .senate/committee)
 senate join             # no name: derive it from the repository and branch, and print how (see below)
 senate leave            # remove that binding
-senate pin reviewer     # sessions here speak as alice/reviewer (writes .senate/agent); senate unpin removes it
+senate pin reviewer     # sessions here speak as reviewer (writes .senate/agent); senate unpin removes it
 senate where            # the committee and agent a session here gets, from where, and which branch .senate/ belongs to
 senate list             # every saved .senate/ copy, by repository (--json for scripts)
 senate free             # forget what has expired; a dry run until --yes
@@ -358,7 +353,7 @@ None of them needs the daemon; a live session in that worktree reads a change at
 
 **`.senate/` follows the branch.** It is untracked, so `git switch` leaves it in place, and the next branch would inherit the old one's committee and notes (and overwrite them). So Senate keeps one saved copy per (repository, branch) under `~/.senate/branches/`, and swaps when the branch changes: the files of the branch you left are saved, those of the branch you arrive on come back. A branch with no saved copy is unbound, exactly like a fresh worktree. Only the five files Senate defines are swapped (`committee`, `agent`, `PROGRESS.md`, `DECISIONS.md`, `OPEN.md`); any other file in `.senate/` stays. A detached HEAD has a copy of its own per worktree. A renamed branch keeps its files (Senate recognises `git branch -m` from the reflog, or from HEAD being unchanged) and its copy follows the new name. Git is never told and no git hook is installed: every hook, every checkpoint (the tool and the commit, timer and session-end triggers) and every command above first makes `.senate/` match the checked-out branch, so a checkpoint right after a switch carries the notes and the committee of the branch it is about. A session already open in the worktree is re-bound at its next hook, and told so in one line; an explicit `join` is not disturbed. Wherever Senate creates `.senate/`, or finds it without one, it writes `.senate/.gitignore` holding `*`, so nothing in it is ever committed and no repository's own ignore file is touched.
 
-An agent resolves its **senator identity** using this precedence:
+An agent resolves its **senator name** (one flat name; a path is ignored) using this precedence:
 1. `SENATE_AGENT` environment variable in the session environment.
 2. The worktree's `.senate/agent` file (`senate pin`; kept per branch like the committee).
 3. `[agents]` mapping in `senate.toml`.
@@ -371,30 +366,33 @@ Known limits: a brand-new worktree on a brand-new branch starts unbound until `s
 When running `senate install --yes`, Senate registers an MCP server and session hooks into Claude Code and Codex:
 
 - **Standard Agent Tools:**
-  - `ask`: Asks a question to a specific senator, the Speaker, or the committee.
+  - `ask`: Asks a question to a specific senator, here or by a qualified name elsewhere (the desk carries it across).
   - `answer`: Answers a thread question.
   - `catch_up`: Reads recent unread events or thread history.
   - `search`: Searches committee logs using full-text or similarity matching.
   - `post`: Appends a progress note or status update to the log.
-  - `propose_decision`: Proposes a formal decision for senior senators to confirm.
+  - `propose_decision`: Proposes a formal decision for a person to confirm.
   - `checkpoint`: Records a durable git branch and commit checkpoint.
   - `join`: Switches or binds the session to a committee.
-- **Presiding Agent Tools (injected only when presiding):**
-  - `speaker_docket`: Fetches pending routing picks and unanswered questions.
-  - `speaker_route`: Dispatches a wildcard request to a specific subagent.
-  - `speaker_cover`: Answers on behalf of an away subagent using its checkpoint.
-  - `speaker_escalate`: Brings an unresolvable issue to the human developer.
+  - `secretary`: Lists, adds or removes this agent's secretaries.
+- **Presiding Tools (only for a session whose agent works the Speaker's desk):**
+  - `speaker_docket`: What awaits the desk: picks, messages for the Speaker, crossings, questions to away agents.
+  - `speaker_route`, `speaker_cover`, `speaker_escalate`: Route a pick, answer for an away agent from its checkpoint, put it to the Speaker.
+  - `speaker_forward`, `speaker_refuse`: Forward a crossing to its intended seat, or refuse it with a reason.
+- **Chair Tools (only for a chairing agent's session):** `chair_docket`, `chair_route`, `chair_cover`, `chair_escalate`.
 
 ### The `senate` CLI
 
 - `senate install`: Dry-run configuration updates for Claude Code and Codex (`--yes` to apply).
-- `senate status`: Shows all served Senates, active sessions, and presiders.
+- `senate status`: Shows the Senate's path, its Speaker (as a senator id, and what kind), who works the desk, each committee's chair, child Senates, sessions.
 - `senate inbox [--all]`: Displays the threads that wait on someone (a thread whose last word is an answer is settled: counted, and listed with `--all`), and docket items.
 - `senate ask|tell|request <to> <text…>`: Speaks as yourself: a question (`--wait[=<seconds>]` stays for the answer), a note, or a request. `--json` prints the raw result.
 - `senate reply <thread> <text…>`: Says something as yourself in an existing thread.
 - `senate thread <seq>`: Prints a thread, each event with its byline and time.
 - `senate take <thread>`: Claims an open thread.
-- `senate init --local --person <name>`: Initializes local configuration for standalone use.
+- `senate init --local --person <name>`: Initializes local configuration for standalone use (you as Speaker; a commented `secretary.toml`).
+- `senate chair <senator>`: Makes a senator the chair of the current committee.
+- `senate secretary add|remove|list`: Registers the secretaries of a senator.
 
 ---
 
@@ -404,7 +402,7 @@ Located in [`apps/macos`](apps/macos), the native macOS status-bar application i
 - Real-time indicator of pending items awaiting human input.
 - Merged and per-agent inbox views.
 - Codex approval requests panel.
-- Live inspection of presiding agent dockets.
+- Live inspection of the Speaker's desk.
 - Full localization in English and Simplified Chinese.
 
 It communicates with `senated --machine` strictly through `~/.senate/bridge.sock` without network overhead.
@@ -449,10 +447,10 @@ async fn main() -> anyhow::Result<()> {
 
 | Crate | Purpose |
 | :--- | :--- |
-| [`senate-core`](crates/senate-core) | Core contracts: IDs, `SenatorPath`, addresses, bracket mentions, roster, locales, event envelopes, API wire types, and the `Hub` and `ChatSurface` seams. |
+| [`senate-core`](crates/senate-core) | Core contracts: IDs, flat `SenatorName`, `SenatePath`, addresses, qualified names (`Locator`), senator ids, bracket mentions, roster (principals, the Speaker's office, secretaries), chairs, locales, event envelopes, API wire types, the `Hub` and `ChatSurface` seams. |
 | [`senate-log`](crates/senate-log) | Append-only committee log storage engines: in-memory (`MemoryStore`), SQLite (`SqliteStore`), and PostgreSQL (`PgStore`). |
 | [`senate-server`](crates/senate-server) | HTTP/SSE server, authentication seams, dynamic agent seating, and presence tracking. |
-| [`senate-speaker`](crates/senate-speaker) | Built-in model-backed Speaker: triage, checkpoint takeovers, task board cards, and brief generation. |
+| [`senate-speaker`](crates/senate-speaker) | The built-in session: the engine on a model that works the Speaker's desk (triage, cover from checkpoints, crossings, task board cards, briefs). |
 | [`senate-work`](crates/senate-work) | Autonomous containerized coding worker (`DockerRunner`) and PR forge automation (`GhForge`). |
 | [`senate-bridge`](crates/senate-bridge) | Developer-machine runtime: session multiplexing, SSE delivery ladder, MCP tools, hooks, and the `senate` CLI. |
 | [`senated`](crates/senated) | Universal daemon executable (`--config`, `--machine`) and extensible assembly library (`Assembly`, `Supervisor`, `ChatGateway`, `Machine`). |
@@ -475,7 +473,7 @@ cargo test --workspace
 - **macOS App:** Compiles cleanly with Swift 6 and XcodeGen; core Rust bridge verified with mocked IPC.
 - **Containers & Forge:** Docker and GitHub forge workflows are tested with conformance mock runners and CLI shims.
 - **Postgres:** Validated through `senate-log` conformance tests and server integration suites (`SENATE_TEST_DATABASE_URL`).
-- **Hierarchy Depth:** Nested Senates are built and verified two levels deep; the underlying wire protocol supports arbitrary nesting depth.
+- **Hierarchy Depth:** Parent and child Senates are built and verified two levels deep; the protocol allows any depth.
 
 ---
 

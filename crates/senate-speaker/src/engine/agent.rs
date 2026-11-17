@@ -355,7 +355,7 @@ impl Engine {
         strict: bool,
     ) -> Result<Option<Event>, Stall> {
         if strict {
-            return Ok(Some(self.hub.append(event).await?.event));
+            return Ok(Some(self.hub.append(self.stamped(event)).await?.event));
         }
         self.append(event).await
     }

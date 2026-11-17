@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use senate_core::{
     Account, Address, BindingAction, Event, Hub, Kind, Locale, Mirror, NewEvent, PostTarget,
-    Roster, Senior, Seq, SurfaceError, UnboundMention,
+    Principal, Roster, Seq, SurfaceError, UnboundMention,
 };
 use serde_json::json;
 
@@ -56,8 +56,9 @@ fn last_relay(rig: &Rig) -> Event {
 /// The usual roster plus carol, who has no agent.
 fn roster_with_carol() -> Roster {
     let base = roster();
-    let mut seniors = base.seniors().to_vec();
-    seniors.push(Senior {
+    let mut principals = base.principals().to_vec();
+    principals.push(Principal {
+        kind: senate_core::PrincipalKind::Person,
         handle: name("carol"),
         names: vec!["Carol".into()],
         accounts: vec![Account {
@@ -65,13 +66,13 @@ fn roster_with_carol() -> Roster {
             id: "u_carol".into(),
         }],
     });
-    Roster::top(seniors, base.agents().to_vec()).expect("roster")
+    Roster::new(principals, base.seated().to_vec()).expect("roster")
 }
 
-/// A bound hub where alice has a second agent, `alice/codex`, seated.
+/// A bound hub where alice has a second agent, `codex`, seated.
 async fn hub_with_codex() -> std::sync::Arc<MemoryHub> {
     let hub = bound_hub().await;
-    hub.seat(&path("alice/codex"));
+    hub.seat(&path("codex"), "alice");
     hub
 }
 
@@ -114,7 +115,7 @@ async fn criterion_1_a_relay_is_acknowledged_and_the_answer_lands_in_the_same_th
     assert_eq!(utterance.committee, Some(refund()));
     assert_eq!(utterance.group.group_id, GROUP);
     assert_eq!(utterance.context.len(), 1, "the binding event");
-    assert_eq!(utterance.roster.seniors().len(), 3);
+    assert_eq!(utterance.roster.principals().len(), 3);
 
     // The ack, in the human's thread, keyed to the relay's seq.
     let posts = rig.surface.posts();
@@ -122,7 +123,7 @@ async fn criterion_1_a_relay_is_acknowledged_and_the_answer_lands_in_the_same_th
     assert_eq!(posts[0].target, reply_to("m_h1"));
     assert_eq!(
         posts[0].markdown,
-        format!("已转给 [senator::alice/claude]（seq {}）", relay.seq)
+        format!("已转给 [senator::claude]（seq {}）", relay.seq)
     );
     assert_eq!(
         posts[0].operation_id,
@@ -156,10 +157,7 @@ async fn criterion_1_a_relay_is_acknowledged_and_the_answer_lands_in_the_same_th
     let posts = rig.surface.posts();
     assert_eq!(posts.len(), 2);
     assert_eq!(posts[1].target, reply_to("m_h1"));
-    assert_eq!(
-        posts[1].markdown,
-        "[senator::alice/claude] 收到，已按 30 天处理"
-    );
+    assert_eq!(posts[1].markdown, "[senator::claude] 收到，已按 30 天处理");
     assert_eq!(posts[1].thread_ref, posts[0].thread_ref);
     assert_eq!(rig.cursor(&refund()).await, reply.seq);
     assert!(
@@ -197,7 +195,7 @@ async fn criterion_2_agent_to_agent_is_one_thread_and_human_corrections_are_not_
     assert_eq!(
         posts[0].markdown,
         format!(
-            "[senator::alice/claude] → [senator::bob/claude] 网关的幂等键用哪个 header？（seq {}）",
+            "[senator::claude] → [senator::copilot] 网关的幂等键用哪个 header？（seq {}）",
             asked.seq
         )
     );
@@ -214,7 +212,7 @@ async fn criterion_2_agent_to_agent_is_one_thread_and_human_corrections_are_not_
     let posts = rig.surface.posts();
     assert_eq!(posts.len(), 2);
     assert_eq!(posts[1].target, reply_to(&root_ref));
-    assert_eq!(posts[1].markdown, "[senator::bob/claude] Idempotency-Key");
+    assert_eq!(posts[1].markdown, "[senator::copilot] Idempotency-Key");
 
     // The gateway records a human reply in that thread as a chat to both
     // agents; it is already in the chat, so the Speaker says nothing.
@@ -427,10 +425,7 @@ async fn the_fixed_syntax_works_without_the_brain_and_covers_its_failures() {
     rig.append(mention("pm", "帮我看看这个", "m_h1")).await;
     rig.settle().await;
     let said = rig.surface.texts();
-    assert!(
-        said[0].contains("/tell <handle>[/<agent>] <内容>"),
-        "{said:?}"
-    );
+    assert!(said[0].contains("/tell <name> <内容>"), "{said:?}");
 
     // /tell relays without consulting the Brain.
     rig.append(mention("pm", "/tell alice 记得更新退款文档", "m_h2"))
@@ -442,7 +437,7 @@ async fn the_fixed_syntax_works_without_the_brain_and_covers_its_failures() {
     assert_eq!(relay.body, "记得更新退款文档");
     assert_eq!(
         rig.surface.texts().last().map(String::as_str),
-        Some(format!("已转给 [senator::alice/claude]（seq {}）", relay.seq).as_str())
+        Some(format!("已转给 [senator::claude]（seq {}）", relay.seq).as_str())
     );
 
     // /status is deterministic.
@@ -451,7 +446,7 @@ async fn the_fixed_syntax_works_without_the_brain_and_covers_its_failures() {
     assert_eq!(
         rig.surface.texts().last().map(String::as_str),
         Some(
-            "本群绑定在委员会 refund-v2。\n在线 agent：[senator::alice/claude]\n离线 agent：[senator::pm/claude]、[senator::bob/claude]"
+            "本群绑定在委员会 refund-v2。\n在线 agent：[senator::claude]\n离线 agent：[senator::aider]、[senator::copilot]"
         )
     );
 
@@ -532,7 +527,7 @@ async fn a_question_to_an_offline_agent_is_answered_on_its_behalf_at_once() {
     assert_eq!(posts[1].target, reply_to(&posts[0].message_ref));
     assert_eq!(
         posts[1].markdown,
-        "[speaker::alice/claude] 退款上限是 30 天（seq 1）"
+        "[speaker::claude] 退款上限是 30 天（seq 1）"
     );
 
     // Alice comes back and answers herself: that is mirrored too.
@@ -541,7 +536,7 @@ async fn a_question_to_an_offline_agent_is_answered_on_its_behalf_at_once() {
     rig.settle().await;
     assert_eq!(
         rig.surface.texts().last().map(String::as_str),
-        Some("[senator::alice/claude] 对，30 天")
+        Some("[senator::claude] 对，30 天")
     );
     assert_eq!(rig.brain.questions().len(), 1);
 }
@@ -590,7 +585,7 @@ async fn an_unanswered_question_is_answered_on_behalf_after_the_window() {
     assert_eq!(fallback.thread, Some(asked.seq));
     assert_eq!(
         rig.surface.texts().last().map(String::as_str),
-        Some("[speaker::alice/claude] 记录里没有结论（seq 1 只有绑定）。")
+        Some("[speaker::claude] 记录里没有结论（seq 1 只有绑定）。")
     );
 
     // A late real answer is still mirrored.
@@ -599,7 +594,7 @@ async fn an_unanswered_question_is_answered_on_behalf_after_the_window() {
     rig.settle().await;
     assert_eq!(
         rig.surface.texts().last().map(String::as_str),
-        Some("[senator::alice/claude] 30 天")
+        Some("[senator::claude] 30 天")
     );
 }
 
@@ -638,8 +633,8 @@ async fn the_fallback_says_whether_the_agent_has_the_question() {
 }
 
 /// Who wrote a copy is its byline, never text in the stored body: an
-/// agent's answer is headed `[senator::bob/claude]`, the Speaker's answer
-/// for it `[speaker::bob/claude]`.
+/// agent's answer is headed `[senator::copilot]`, the Speaker's answer
+/// for it `[speaker::copilot]`.
 #[tokio::test]
 async fn mirrors_are_headed_by_the_byline_and_bodies_carry_no_labels() {
     let rig = Rig::start(bound_hub().await).await;
@@ -664,11 +659,8 @@ async fn mirrors_are_headed_by_the_byline_and_bodies_carry_no_labels() {
 
     let texts = rig.surface.texts();
     assert_eq!(texts.len(), 3, "{texts:?}");
-    assert_eq!(
-        texts[1],
-        "[speaker::bob/claude] 用 Idempotency-Key（seq 1）"
-    );
-    assert_eq!(texts[2], "[senator::bob/claude] 确认是 Idempotency-Key");
+    assert_eq!(texts[1], "[speaker::copilot] 用 Idempotency-Key（seq 1）");
+    assert_eq!(texts[2], "[senator::copilot] 确认是 Idempotency-Key");
     for text in &texts {
         assert_senate_vocabulary(text);
     }
@@ -681,7 +673,7 @@ async fn mirrors_are_headed_by_the_byline_and_bodies_carry_no_labels() {
     assert_eq!(on_behalf.on_behalf_of, Some(agent("bob")));
     assert_eq!(
         on_behalf.byline(Locale::Zh).as_deref(),
-        Some("[speaker::bob/claude]")
+        Some("[speaker::copilot]")
     );
     assert_eq!(on_behalf.body, "用 Idempotency-Key（seq 1）");
     for event in events.iter().filter(|e| e.from == Address::Speaker) {
@@ -801,7 +793,7 @@ async fn a_lagging_subscription_recovers_from_the_log_in_order() {
     for (n, text) in texts.iter().enumerate() {
         assert!(
             text.starts_with(&format!(
-                "[senator::alice/claude] → [senator::bob/claude] 问题 {}（",
+                "[senator::claude] → [senator::copilot] 问题 {}（",
                 n + 1
             )),
             "{text}"
@@ -913,18 +905,18 @@ async fn a_relay_to_an_agent_named_outright_reaches_that_one() {
     hub.connect(&refund(), &agent_path("alice"));
     let rig = Rig::start(hub).await;
 
-    rig.append(mention("pm", "/tell alice/codex 记得更新退款文档", "m_h1"))
+    rig.append(mention("pm", "/tell codex 记得更新退款文档", "m_h1"))
         .await;
     rig.settle().await;
     let relay = last_relay(&rig);
     assert_eq!(relay.to, vec![agent_named("alice", "codex")]);
     assert_eq!(
         rig.surface.texts().last().map(String::as_str),
-        Some(format!("已转给 [senator::alice/codex]（seq {}）", relay.seq).as_str())
+        Some(format!("已转给 [senator::codex]（seq {}）", relay.seq).as_str())
     );
 
     rig.brain.interprets(Ok(Intent::Relay {
-        targets: vec!["alice/codex".into()],
+        targets: vec!["codex".into()],
         kind: RelayKind::Note,
         body: "退款上限是 30 天".into(),
     }));
@@ -944,11 +936,73 @@ async fn a_relay_to_an_agent_named_outright_reaches_that_one() {
     );
 }
 
+/// `[senator::*]` is whichever agent on the committee: the only one there
+/// gets it, nobody's in particular, and no pick is needed.
+#[tokio::test]
+async fn whichever_agent_is_the_only_one_on_the_committee() {
+    let hub = hub_with_codex().await;
+    hub.connect(&refund(), &path("codex"));
+    let rig = Rig::start(hub).await;
+
+    rig.append(mention("pm", "/tell [senator::*] 记得更新退款文档", "m_h1"))
+        .await;
+    rig.settle().await;
+    let relay = last_relay(&rig);
+    assert_eq!(relay.to, vec![agent_named("alice", "codex")]);
+    assert!(rig.brain.pick_inputs().is_empty(), "one candidate, no pick");
+}
+
+/// Several agents on the committee: the Speaker picks among all of them,
+/// for no person in particular.
+#[tokio::test]
+async fn whichever_agent_among_several_on_the_committee_is_picked() {
+    let hub = hub_with_codex().await;
+    hub.connect(&refund(), &path("codex"));
+    hub.connect(&refund(), &agent_path("bob"));
+    let rig = Rig::start(hub).await;
+    rig.brain.picks(Ok(Pick::Agent(agent_path("bob"))));
+
+    rig.append(mention("pm", "/tell [senator::*] 记得更新退款文档", "m_h1"))
+        .await;
+    rig.settle().await;
+    let relay = last_relay(&rig);
+    assert_eq!(relay.to, vec![agent("bob")]);
+    let picks = rig.brain.pick_inputs();
+    assert_eq!(picks.len(), 1, "{picks:#?}");
+    assert_eq!(picks[0].owner, None);
+    let candidates: Vec<String> = picks[0]
+        .candidates
+        .iter()
+        .map(|c| c.agent.to_string())
+        .collect();
+    assert_eq!(candidates, ["copilot", "codex"]);
+}
+
+/// No agent on the committee, and several people in the Senate: nobody
+/// to give it to, so nothing is relayed.
+#[tokio::test]
+async fn whichever_agent_with_none_on_the_committee_is_nobody_among_several_people() {
+    let rig = Rig::start(bound_hub().await).await;
+    let before = rig.hub.events(&refund()).len();
+    rig.append(mention("pm", "/tell [senator::*] 记得更新退款文档", "m_h1"))
+        .await;
+    rig.settle().await;
+    assert_eq!(rig.hub.events(&refund()).len(), before + 1, "only the chat");
+    assert!(
+        rig.surface
+            .texts()
+            .last()
+            .is_some_and(|t| t.starts_with("我不认识 [senator::*]")),
+        "{:?}",
+        rig.surface.texts()
+    );
+}
+
 /// Unnamed, with exactly one of the person's agents connected: that one.
 #[tokio::test]
 async fn an_unnamed_relay_reaches_the_only_connected_agent() {
     let hub = hub_with_codex().await;
-    hub.connect(&refund(), &path("alice/codex"));
+    hub.connect(&refund(), &path("codex"));
     let rig = Rig::start(hub).await;
 
     rig.append(mention("pm", "/tell alice 记得更新退款文档", "m_h1"))
@@ -975,17 +1029,14 @@ async fn an_unnamed_relay_reaches_the_only_connected_agent() {
 
     let picks = rig.brain.pick_inputs();
     assert_eq!(picks.len(), 2, "{picks:#?}");
-    assert_eq!(picks[0].owner, name("alice"));
+    assert_eq!(picks[0].owner, Some(name("alice")));
     assert_eq!(picks[0].asker, user("pm"));
     let present: Vec<(String, bool)> = picks[0]
         .candidates
         .iter()
         .map(|c| (c.agent.to_string(), c.present))
         .collect();
-    assert_eq!(
-        present,
-        [("alice/claude".into(), false), ("alice/codex".into(), true)]
-    );
+    assert_eq!(present, [("claude".into(), false), ("codex".into(), true)]);
 }
 
 /// Unnamed, with none of them connected: the Speaker asks in the thread,
@@ -1009,8 +1060,8 @@ async fn an_unnamed_relay_with_no_agent_connected_asks_which_and_a_number_answer
     assert_eq!(
         posts[0].markdown,
         "[senator::alice] 有 2 个 agent，你指的是哪一个？回复编号或名字：\n\
-         1. [senator::alice/claude] 不在线\n\
-         2. [senator::alice/codex] 不在线"
+         1. [senator::claude] 不在线\n\
+         2. [senator::codex] 不在线"
     );
 
     rig.append(in_thread(
@@ -1030,7 +1081,7 @@ async fn an_unnamed_relay_with_no_agent_connected_asks_which_and_a_number_answer
     assert_eq!(relay.body, "记得更新退款文档");
     assert_eq!(
         rig.surface.texts().last().map(String::as_str),
-        Some(format!("已转给 [senator::alice/codex]（seq {}）", relay.seq).as_str())
+        Some(format!("已转给 [senator::codex]（seq {}）", relay.seq).as_str())
     );
     for text in rig.surface.texts() {
         assert_senate_vocabulary(&text);
@@ -1043,7 +1094,7 @@ async fn an_unnamed_relay_with_no_agent_connected_asks_which_and_a_number_answer
 async fn an_unnamed_relay_with_both_connected_asks_and_a_name_answers() {
     let hub = hub_with_codex().await;
     hub.connect(&refund(), &agent_path("alice"));
-    hub.connect(&refund(), &path("alice/codex"));
+    hub.connect(&refund(), &path("codex"));
     let rig = Rig::start(hub).await;
     rig.brain.interprets(Ok(Intent::Relay {
         targets: vec!["alice".into()],
@@ -1064,8 +1115,8 @@ async fn an_unnamed_relay_with_both_connected_asks_and_a_name_answers() {
     assert_eq!(
         posts[0].markdown,
         "[senator::alice] 有 2 个 agent，你指的是哪一个？回复编号或名字：\n\
-         1. [senator::alice/claude] 在线\n\
-         2. [senator::alice/codex] 在线"
+         1. [senator::claude] 在线\n\
+         2. [senator::codex] 在线"
     );
     let (thread_ref, question_ref) = (posts[0].thread_ref.clone(), posts[0].message_ref.clone());
 
@@ -1094,7 +1145,7 @@ async fn an_unnamed_relay_with_both_connected_asks_and_a_name_answers() {
     rig.settle().await;
     assert_eq!(
         rig.surface.texts().last().map(String::as_str),
-        Some("没认出是哪一个。请回复编号或名字：[senator::alice/claude]、[senator::alice/codex]")
+        Some("没认出是哪一个。请回复编号或名字：[senator::claude]、[senator::codex]")
     );
     assert_eq!(rig.hub.events(&refund()).len(), 4, "still nothing relayed");
 
@@ -1124,8 +1175,8 @@ async fn the_brains_pick_is_honoured_and_a_pick_of_a_stranger_asks() {
     hub.connect(&refund(), &agent_path("alice"));
     let rig = Rig::start(hub).await;
 
-    // The rules would say alice/claude, the only one connected.
-    rig.brain.picks(Ok(Pick::Agent(path("alice/codex"))));
+    // The rules would say claude, the only one connected.
+    rig.brain.picks(Ok(Pick::Agent(path("codex"))));
     rig.append(mention("pm", "/tell alice 记得更新退款文档", "m_h1"))
         .await;
     rig.settle().await;
@@ -1204,7 +1255,7 @@ async fn a_guest_may_ask_but_not_change_anything() {
     assert_eq!(relay.on_behalf_of, Some(guest(STRANGER)));
     assert_eq!(
         rig.surface.texts().last().map(String::as_str),
-        Some(format!("已转给 [senator::alice/claude]（seq {}）", relay.seq).as_str())
+        Some(format!("已转给 [senator::claude]（seq {}）", relay.seq).as_str())
     );
 
     // /tell with a question is a question, and goes through too.
@@ -1302,7 +1353,7 @@ async fn the_main_flows_read_in_english() {
     assert_eq!(relay.to, vec![agent("alice")]);
     assert_eq!(
         rig.surface.texts().last().map(String::as_str),
-        Some(format!("Passed to [senator::alice/claude] (seq {})", relay.seq).as_str())
+        Some(format!("Passed to [senator::claude] (seq {})", relay.seq).as_str())
     );
 
     rig.append(in_random("pm", "/status", "m_h2")).await;
@@ -1310,7 +1361,7 @@ async fn the_main_flows_read_in_english() {
     assert_eq!(
         rig.surface.texts().last().map(String::as_str),
         Some(
-            "This group is bound to committee refund-v2.\nAgents online: [senator::alice/claude]\nAgents offline: [senator::pm/claude], [senator::bob/claude]"
+            "This group is bound to committee refund-v2.\nAgents online: [senator::claude]\nAgents offline: [senator::aider], [senator::copilot]"
         )
     );
 
@@ -1336,7 +1387,7 @@ async fn the_main_flows_read_in_english() {
     let said = rig.surface.texts();
     assert!(
         said.last()
-            .is_some_and(|t| t.contains("/tell <handle>[/<agent>] <text>")),
+            .is_some_and(|t| t.contains("/tell <name> <text>")),
         "{said:?}"
     );
     for text in &said {
@@ -1364,12 +1415,12 @@ async fn which_agent_and_answers_on_behalf_read_in_english() {
     assert_eq!(
         posts[0].markdown,
         "[senator::alice] has 2 agents here. Which one do you mean? Reply with its number or name:\n\
-         1. [senator::alice/claude] not online\n\
-         2. [senator::alice/codex] not online"
+         1. [senator::claude] not online\n\
+         2. [senator::codex] not online"
     );
     rig.append(in_thread(
         "pm",
-        "alice/claude",
+        "claude",
         "m_h2",
         ask.seq,
         posts[0].thread_ref.clone(),
@@ -1381,7 +1432,7 @@ async fn which_agent_and_answers_on_behalf_read_in_english() {
     assert_eq!(relay.to, vec![agent("alice")]);
     assert_eq!(
         rig.surface.texts().last().map(String::as_str),
-        Some(format!("Passed to [senator::alice/claude] (seq {})", relay.seq).as_str())
+        Some(format!("Passed to [senator::claude] (seq {})", relay.seq).as_str())
     );
 
     rig.brain.answers(Ok("30 days (seq 1)".into()));
@@ -1394,6 +1445,152 @@ async fn which_agent_and_answers_on_behalf_read_in_english() {
     rig.settle().await;
     assert_eq!(
         rig.surface.texts().last().map(String::as_str),
-        Some("[speaker::bob/claude] 30 days (seq 1)")
+        Some("[speaker::copilot] 30 days (seq 1)")
     );
+}
+
+// ----- a person's agent one level up: their child Senates ---------------------------
+
+/// The child Senate's desk for refund-v2, as the parent's log names it.
+fn desk_of(child: &str) -> Address {
+    Address::Child {
+        senate: name(child),
+        committee: refund(),
+    }
+}
+
+/// carol runs no agent here and is the Speaker of one child Senate: her
+/// agent is that Senate's Speaker's desk, on the same committee; written
+/// out, `senator::carol` is still carol.
+#[tokio::test]
+async fn a_persons_agent_with_one_child_senate_is_that_senates_desk() {
+    let hub = bound_hub().await;
+    hub.set_roster(roster_with_carol());
+    hub.add_child("north-desk", "carol");
+    // Someone else's child Senate changes nothing for carol.
+    hub.add_child("south-desk", "bob");
+    let rig = Rig::start(hub).await;
+
+    rig.brain.interprets(Ok(Intent::Relay {
+        targets: vec!["carol".into()],
+        kind: RelayKind::Question,
+        body: "退款文档更新了吗？".into(),
+    }));
+    rig.append(mention(
+        "pm",
+        "问一下 carol 的 agent 退款文档更新了吗",
+        "m_c1",
+    ))
+    .await;
+    rig.settle().await;
+    let relay = last_relay(&rig);
+    assert_eq!(relay.kind, Kind::Question);
+    assert_eq!(relay.to, vec![desk_of("north-desk")]);
+    assert_eq!(relay.on_behalf_of, Some(user("pm")));
+    assert!(rig.brain.pick_inputs().is_empty(), "nothing to pick from");
+
+    rig.brain.interprets(Ok(Intent::Relay {
+        targets: vec!["senator::carol".into()],
+        kind: RelayKind::Note,
+        body: "记得更新退款文档".into(),
+    }));
+    rig.append(mention(
+        "pm",
+        "告诉 senator::carol 记得更新退款文档",
+        "m_c2",
+    ))
+    .await;
+    rig.settle().await;
+    let relay = last_relay(&rig);
+    assert_eq!(relay.to, vec![user("carol")], "the person, written out");
+    for text in rig.surface.texts() {
+        assert_senate_vocabulary(&text);
+    }
+}
+
+/// Two child Senates: the Speaker asks which, and the answer carries the
+/// relay on to that Senate's desk.
+#[tokio::test]
+async fn a_persons_agent_with_two_child_senates_is_asked_and_picked() {
+    let hub = bound_hub().await;
+    hub.set_roster(roster_with_carol());
+    hub.add_child("north-desk", "carol");
+    hub.add_child("south-desk", "carol");
+    let rig = Rig::start(hub).await;
+
+    let ask = rig
+        .append(mention("pm", "/tell carol 记得更新退款文档", "m_c1"))
+        .await;
+    rig.settle().await;
+    assert_eq!(
+        rig.hub.events(&refund()).len(),
+        2,
+        "nothing relayed while it asks"
+    );
+    let posts = rig.surface.posts();
+    assert_eq!(posts.len(), 1);
+    assert_eq!(
+        posts[0].markdown,
+        "[senator::carol] 是 2 个 Senate 的 Speaker，你指的是哪一个？回复编号或名字：\n\
+         1. [north-desk]\n\
+         2. [south-desk]"
+    );
+    let picked = rig.brain.pick_inputs();
+    assert_eq!(picked.len(), 1, "the same pick as among agents");
+    assert_eq!(picked[0].owner, Some(name("carol")));
+
+    rig.append(in_thread(
+        "pm",
+        "south-desk",
+        "m_c2",
+        ask.seq,
+        posts[0].thread_ref.clone(),
+        &posts[0].message_ref,
+    ))
+    .await;
+    rig.settle().await;
+    let relay = last_relay(&rig);
+    assert_eq!(relay.kind, Kind::Note);
+    assert_eq!(relay.to, vec![desk_of("south-desk")]);
+    assert_eq!(relay.body, "记得更新退款文档");
+
+    // In English, the same question names the Senates.
+    assert_eq!(
+        render::which_senate(
+            Locale::En,
+            Some(&name("carol")),
+            &[path("north-desk"), path("south-desk")]
+        ),
+        "[senator::carol] is the Speaker of 2 Senates. Which one do you mean? Reply with its number or name:\n\
+         1. [north-desk]\n\
+         2. [south-desk]"
+    );
+}
+
+/// The Brain's pick among the Senates is honoured.
+#[tokio::test]
+async fn the_brain_may_pick_one_of_a_persons_child_senates() {
+    let hub = bound_hub().await;
+    hub.set_roster(roster_with_carol());
+    hub.add_child("north-desk", "carol");
+    hub.add_child("south-desk", "carol");
+    let rig = Rig::start(hub).await;
+    rig.brain.picks(Ok(Pick::Agent(path("north-desk"))));
+    rig.append(mention("pm", "/tell carol 记得更新退款文档", "m_c1"))
+        .await;
+    rig.settle().await;
+    assert_eq!(last_relay(&rig).to, vec![desk_of("north-desk")]);
+}
+
+/// A person who runs an agent here keeps the lookup here, child Senates
+/// or not.
+#[tokio::test]
+async fn a_person_with_an_agent_here_keeps_it_over_a_child_senate() {
+    let hub = bound_hub().await;
+    hub.add_child("north-desk", "alice");
+    let rig = Rig::start(hub).await;
+    rig.append(mention("pm", "/tell alice 记得更新退款文档", "m_c1"))
+        .await;
+    rig.settle().await;
+    assert_eq!(last_relay(&rig).to, vec![agent("alice")]);
 }

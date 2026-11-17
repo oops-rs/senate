@@ -153,7 +153,7 @@ pub struct Event {
     pub kind: Kind,
     pub from: Address,
     /// Empty means undirected: recorded, never pushed, seen on catch-up.
-    /// Always concrete: `senator::<person>/*` is resolved before an event is
+    /// Always concrete: `senator::*` is resolved before an event is
     /// stored.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub to: Vec<Address>,
@@ -161,7 +161,7 @@ pub struct Event {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread: Option<Seq>,
     /// Set when one party speaks for another: `from: speaker`,
-    /// `on_behalf_of: senator::wendell/claude` is the Speaker answering for
+    /// `on_behalf_of: senator::claude` is the Speaker answering for
     /// an absent agent. Stored as fields, never as text in `body`, so the
     /// label is written when the event is shown ([`Event::author`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -186,8 +186,8 @@ impl Event {
         self.to.iter().any(|a| a == addr)
     }
 
-    /// The label for who wrote this: `[senator::wendell/claude]`, or
-    /// `[speaker::wendell/claude]` when the Speaker answered for that senator.
+    /// The label for who wrote this: `[senator::claude]`, or
+    /// `[speaker::claude]` when the Speaker answered for that senator.
     pub fn author(&self) -> Option<Mention> {
         Mention::author(&self.from, self.on_behalf_of.as_ref())
     }
@@ -196,8 +196,11 @@ impl Event {
     /// localized word when the Speaker wrote it while taken over for an
     /// away agent ([`is_takeover`]) or an agent's companion session wrote it
     /// ([`is_companion`]). The label itself is the same in every language:
-    /// `[speaker::wendell/claude] 接管`, `[speaker::wendell/claude] takeover`.
+    /// `[speaker::claude] 接管`, `[speaker::claude] takeover`.
     pub fn byline(&self, locale: Locale) -> Option<String> {
+        if let Some((principal, secretary)) = self.by_secretary() {
+            return Some(secretary_byline(principal, secretary, locale));
+        }
         let label = self.author()?;
         Some(if is_takeover(self) {
             format!("{label} {}", locale.pick("接管", "takeover"))
@@ -208,10 +211,41 @@ impl Event {
         })
     }
 
+    /// An answer a secretary gave on its principal's behalf while the
+    /// principal was away: `from` the secretary, `on_behalf_of` the
+    /// principal, flagged [`meta::TAKEOVER`]. The principal and the
+    /// secretary.
+    pub fn by_secretary(&self) -> Option<(&crate::SenatorName, &crate::SenatorName)> {
+        match (&self.from, &self.on_behalf_of) {
+            (Address::Senator(secretary), Some(Address::Senator(principal)))
+                if flag(self, meta::TAKEOVER) =>
+            {
+                Some((principal, secretary))
+            }
+            _ => None,
+        }
+    }
+
     pub fn binding(&self) -> Option<BindingPayload> {
         self.meta
             .get(meta::BINDING)
             .and_then(|v| serde_json::from_value(v.clone()).ok())
+    }
+}
+
+/// The byline of an answer `secretary` gave for `principal`: the
+/// principal's answer, given by its secretary. One function, both
+/// languages.
+pub fn secretary_byline(
+    principal: &crate::SenatorName,
+    secretary: &crate::SenatorName,
+    locale: Locale,
+) -> String {
+    let principal = Address::senator(principal).in_text();
+    let secretary = Address::senator(secretary).in_text();
+    match locale {
+        Locale::Zh => format!("{principal}（由秘书 {secretary} 代答）"),
+        Locale::En => format!("{principal} (answered by its secretary {secretary})"),
     }
 }
 
@@ -223,7 +257,7 @@ pub struct NewEvent {
     pub committee: CommitteeId,
     pub kind: Kind,
     pub from: Address,
-    /// A sender may write `senator::<person>/*` here. Whoever accepts the
+    /// A sender may write `senator::*` here. Whoever accepts the
     /// event resolves it against the roster
     /// ([`Roster::resolve_recipients`](crate::Roster::resolve_recipients))
     /// before it reaches the log; see [`NewEvent::is_resolved`].
@@ -313,7 +347,7 @@ impl NewEvent {
     }
 
     /// True when the event can be stored as it is: no address in it is the
-    /// wildcard `senator::<person>/*`. In `to` a wildcard is waiting to be
+    /// wildcard `senator::*`. In `to` a wildcard is waiting to be
     /// resolved; in `from` or `on_behalf_of` it is simply wrong.
     pub fn is_resolved(&self) -> bool {
         !self.from.is_wildcard()
@@ -429,11 +463,33 @@ pub mod meta {
     /// ([`Event::byline`](super::Event::byline)).
     pub const TAKEOVER: &str = "takeover";
     /// A message the server addressed to the Speaker because its sender
-    /// wrote `senator::<person>/*` and that person has several agents here:
-    /// the [`PickPayload`](crate::docket::PickPayload), whose candidates the
+    /// wrote `senator::*` and several agents could get it: the
+    /// [`PickPayload`](crate::docket::PickPayload), whose candidates the
     /// Speaker picks among. Written by the server only; the server refuses
     /// the key from senators.
     pub const PICK: &str = "pick";
+    /// A message meant for a seat outside the committee it is written in:
+    /// the intended recipient as a qualified name
+    /// ([`Locator`](crate::Locator)), completed with the Senate and
+    /// committee it was resolved to. Plumbing: who decides what becomes of
+    /// such a message is not settled yet.
+    pub const INTENDED: &str = "intended";
+    /// A message that started somewhere else (another committee, another
+    /// Senate): an [`Origin`](crate::locator::Origin), naming the seat that
+    /// asked and the root of its thread, so an answer can go back there.
+    pub const ORIGIN: &str = "origin";
+    /// `note` from `committee`, written by the server: the committee's
+    /// chair, set explicitly ([`ChairPayload`](crate::chair::ChairPayload)).
+    pub const CHAIR: &str = "chair";
+    /// On an event `from: speaker`: the senator who acted for the Speaker's
+    /// office (the Speaker itself, or which secretary), as a name.
+    pub const ACTED_BY: &str = "acted_by";
+    /// On the desk's note in an asker's thread: where the message was
+    /// forwarded, as a qualified name.
+    pub const FORWARDED_TO: &str = "forwarded_to";
+    /// On an answer relayed back into an asker's thread: who answered
+    /// where the message was forwarded, as a qualified name.
+    pub const ANSWERED_BY: &str = "answered_by";
 }
 
 fn flag(event: &Event, key: &str) -> bool {
@@ -454,7 +510,9 @@ pub fn is_takeover(event: &Event) -> bool {
 /// True for an agent's answer written by its companion session
 /// ([`meta::COMPANION`]).
 pub fn is_companion(event: &Event) -> bool {
-    event.kind == Kind::Answer && event.from.is_junior() && flag(event, meta::COMPANION)
+    // Only an agent's answer may carry the flag: the server refuses it from
+    // anyone else.
+    event.kind == Kind::Answer && event.from.as_senator().is_some() && flag(event, meta::COMPANION)
 }
 
 /// The [`meta::PROPOSAL`] value for a proposed decision.
@@ -583,15 +641,15 @@ mod tests {
             "id": "01JB0000000000000000000000",
             "ts": "2026-11-16T09:00:00Z",
             "kind": "question",
-            "from": "senator::alice/claude",
-            "to": ["senator::wendell/claude"],
+            "from": "senator::copilot",
+            "to": ["senator::claude"],
             "body": "retry cap?"
         }))
         .unwrap();
         assert_eq!(event.seq, Seq(118));
         assert_eq!(event.committee, committee());
         assert_eq!(event.kind, Kind::Question);
-        assert!(event.is_directed_to(&addr("senator::wendell/claude")));
+        assert!(event.is_directed_to(&addr("senator::claude")));
         assert!(!event.is_directed_to(&addr("senator::wendell")));
         assert_eq!(event.thread, None);
         assert!(event.meta.is_empty());
@@ -632,16 +690,13 @@ mod tests {
     fn the_speaker_answering_for_a_senator_is_fields_not_text() {
         let ts = "2026-11-16T09:00:00Z".parse().unwrap();
         let answer = NewEvent::new(committee(), Kind::Answer, Address::Speaker, "cap is 3")
-            .on_behalf_of(addr("senator::wendell/claude"))
-            .to(addr("senator::alice/claude"))
+            .on_behalf_of(addr("senator::claude"))
+            .to(addr("senator::copilot"))
             .in_thread(Seq(118))
             .into_event(Seq(119), ts);
 
         assert_eq!(answer.body, "cap is 3");
-        assert_eq!(
-            answer.author().unwrap().to_string(),
-            "[speaker::wendell/claude]"
-        );
+        assert_eq!(answer.author().unwrap().to_string(), "[speaker::claude]");
         assert_eq!(answer.thread, Some(Seq(118)));
     }
 
@@ -660,8 +715,8 @@ mod tests {
             "id": "01JB0000000000000000000000",
             "ts": "2026-11-16T01:14:03Z",
             "kind": "question",
-            "from": "senator::alice/claude",
-            "to": ["senator::bob/claude", "guest::chat/u_8f3a"],
+            "from": "senator::copilot",
+            "to": ["senator::cursor", "guest::chat/u_8f3a"],
             "thread": 112,
             "source": { "platform": "chat", "group_id": "backend", "group_name": "退款 v2 · 后端群" },
             "body": "网关的幂等键用哪个 header？",
@@ -670,27 +725,18 @@ mod tests {
         });
         let event: Event = serde_json::from_value(json.clone()).unwrap();
         assert_eq!(event.kind, Kind::Question);
-        assert!(event.is_directed_to(&addr("senator::bob/claude")));
+        assert!(event.is_directed_to(&addr("senator::cursor")));
         assert_eq!(serde_json::to_value(&event).unwrap(), json);
     }
 
     #[test]
     fn a_new_event_with_a_wildcard_is_not_ready_to_store() {
-        let new = NewEvent::new(
-            committee(),
-            Kind::Question,
-            addr("senator::alice/claude"),
-            "?",
-        );
-        assert!(new.clone().to(addr("senator::bob/claude")).is_resolved());
-        assert!(!new.clone().to(addr("senator::bob/*")).is_resolved());
-        assert!(
-            !new.clone()
-                .on_behalf_of(addr("senator::bob/*"))
-                .is_resolved()
-        );
+        let new = NewEvent::new(committee(), Kind::Question, addr("senator::copilot"), "?");
+        assert!(new.clone().to(addr("senator::cursor")).is_resolved());
+        assert!(!new.clone().to(addr("senator::*")).is_resolved());
+        assert!(!new.clone().on_behalf_of(addr("senator::*")).is_resolved());
         let mut from_wildcard = new;
-        from_wildcard.from = addr("senator::bob/*");
+        from_wildcard.from = addr("senator::*");
         assert!(!from_wildcard.is_resolved());
     }
 
@@ -698,7 +744,7 @@ mod tests {
     fn thread_participants_are_the_senators_and_guests_in_it() {
         let root = NewEvent::new(committee(), Kind::Question, Address::Speaker, "q")
             .on_behalf_of(addr("senator::pm"))
-            .to(addr("senator::alice/claude"))
+            .to(addr("senator::copilot"))
             .into_event(Seq(5), Utc::now());
         let reply = |from: Address| {
             NewEvent::new(committee(), Kind::Answer, from, "a")
@@ -706,7 +752,7 @@ mod tests {
                 .into_event(Seq(6), Utc::now())
         };
         let replies = [
-            reply(addr("senator::alice/claude")),
+            reply(addr("senator::copilot")),
             reply(Address::Speaker),
             reply(addr("senator::carol")),
             reply(addr("guest::chat/u_1")),
@@ -717,7 +763,7 @@ mod tests {
             thread_participants(&root, &replies),
             vec![
                 addr("senator::pm"),
-                addr("senator::alice/claude"),
+                addr("senator::copilot"),
                 addr("senator::carol"),
                 addr("guest::chat/u_1"),
             ]
@@ -755,7 +801,7 @@ mod tests {
     #[test]
     fn takeover_is_a_flag_shown_as_a_localized_word_after_the_same_label() {
         let covered = answer(Address::Speaker)
-            .on_behalf_of(addr("senator::wendell/claude"))
+            .on_behalf_of(addr("senator::claude"))
             .with_meta(meta::TAKEOVER, json!(true))
             .into_event(Seq(2), Utc::now());
         assert!(is_takeover(&covered));
@@ -763,18 +809,18 @@ mod tests {
         assert_eq!(covered.body, "cap is 3");
         assert_eq!(
             covered.byline(Locale::Zh).unwrap(),
-            "[speaker::wendell/claude] 接管"
+            "[speaker::claude] 接管"
         );
         assert_eq!(
             covered.byline(Locale::En).unwrap(),
-            "[speaker::wendell/claude] takeover"
+            "[speaker::claude] takeover"
         );
         // The label is the one a plain answer on behalf of the agent carries.
         let plain = answer(Address::Speaker)
-            .on_behalf_of(addr("senator::wendell/claude"))
+            .on_behalf_of(addr("senator::claude"))
             .into_event(Seq(3), Utc::now());
         for locale in Locale::ALL {
-            assert_eq!(plain.byline(locale).unwrap(), "[speaker::wendell/claude]");
+            assert_eq!(plain.byline(locale).unwrap(), "[speaker::claude]");
             assert!(
                 covered
                     .byline(locale)
@@ -784,32 +830,33 @@ mod tests {
             crate::testing::assert_senate_vocabulary(&covered.byline(locale).unwrap());
         }
         // Only the Speaker's flag counts.
-        let forged = answer(addr("senator::eve/claude"))
+        let forged = answer(addr("senator::forger"))
             .with_meta(meta::TAKEOVER, json!(true))
             .into_event(Seq(4), Utc::now());
         assert!(!is_takeover(&forged));
-        assert_eq!(forged.byline(Locale::En).unwrap(), "[senator::eve/claude]");
+        assert_eq!(forged.byline(Locale::En).unwrap(), "[senator::forger]");
     }
 
     #[test]
     fn a_companion_answer_is_a_flag_shown_as_a_localized_word() {
-        let companion = answer(addr("senator::bob/claude"))
+        let companion = answer(addr("senator::cursor"))
             .with_meta(meta::COMPANION, json!(true))
             .into_event(Seq(2), Utc::now());
         assert!(is_companion(&companion));
         assert_eq!(
             companion.byline(Locale::Zh).unwrap(),
-            "[senator::bob/claude] 伴随"
+            "[senator::cursor] 伴随"
         );
         assert_eq!(
             companion.byline(Locale::En).unwrap(),
-            "[senator::bob/claude] companion"
+            "[senator::cursor] companion"
         );
-        // A person has no companion session.
-        let person = answer(addr("senator::bob"))
+        // Only a senator's answer is one: the Speaker has no companion
+        // session (the server refuses the flag from a person).
+        let speaker = answer(Address::Speaker)
             .with_meta(meta::COMPANION, json!(true))
             .into_event(Seq(3), Utc::now());
-        assert!(!is_companion(&person));
+        assert!(!is_companion(&speaker));
         // An unknown author has no label, so no byline.
         let unknown = answer(Address::Other("x:y".into())).into_event(Seq(4), Utc::now());
         assert_eq!(unknown.byline(Locale::En), None);

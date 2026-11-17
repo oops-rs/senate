@@ -33,7 +33,7 @@ use chrono::Utc;
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use senate_core::api;
-use senate_core::{CommitteeId, Event, SenatorPath, Seq};
+use senate_core::{CommitteeId, Event, SenatorName, Seq};
 use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -73,7 +73,7 @@ impl CommitteeWorker {
 
 pub(crate) fn spawn(
     shared: Arc<Shared>,
-    agent: SenatorPath,
+    agent: SenatorName,
     committee: CommitteeId,
 ) -> CommitteeWorker {
     let (stop, rx) = watch::channel(false);
@@ -121,7 +121,7 @@ enum Ended {
 
 async fn run_stream(
     shared: Arc<Shared>,
-    agent: SenatorPath,
+    agent: SenatorName,
     committee: CommitteeId,
     state: Arc<Mutex<StreamState>>,
     dirty: Arc<Notify>,
@@ -174,7 +174,7 @@ async fn run_stream(
 /// One connection, from seeding to the stream's end.
 async fn consume(
     shared: &Shared,
-    (agent, committee): (&SenatorPath, &CommitteeId),
+    (agent, committee): (&SenatorName, &CommitteeId),
     state: &Mutex<StreamState>,
     dirty: &Notify,
     stop: &mut watch::Receiver<bool>,
@@ -211,6 +211,7 @@ async fn consume(
     *attempt = 0;
     // Whose work is mine, as of now; the stream's presence events keep it.
     shared.seed_covering(agent, committee).await;
+    shared.seed_chair(committee).await;
     set(state, StreamState::Connected { since: Utc::now() });
     tracing::info!(%agent, %committee, after = %cursor, "stream open");
     let mut messages = response.bytes_stream().eventsource();
@@ -263,7 +264,7 @@ async fn consume(
 
 async fn run_reporter(
     shared: Arc<Shared>,
-    agent: SenatorPath,
+    agent: SenatorName,
     committee: CommitteeId,
     dirty: Arc<Notify>,
     mut stop: watch::Receiver<bool>,

@@ -1,6 +1,6 @@
 //! What the app renders: a full, flat snapshot of the [`Model`], with every
 //! sentence already written in the app's language ([`crate::text`]) and every
-//! id written as a bracketed mention (`[senator::alice/claude]`), the form
+//! id written as a bracketed mention (`[senator::claude]`), the form
 //! [`crate::ffi::split_mentions`] splits for display.
 //!
 //! Enum-valued fields come twice where the UI needs both: the wire spelling
@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use senate_bridge::approvals::Approval;
 use senate_bridge::ipc::{SenateDocket, StatusReply, StreamState};
 use senate_core::{
-    Address, Awaiting, DocketItem, Locale, Mention, SenatorPath, SpeakerSeat, ThreadSummary,
+    Address, Awaiting, DocketItem, Locale, Mention, SenatorName, SpeakerSeat, ThreadSummary,
 };
 use serde::Serialize;
 
@@ -58,7 +58,7 @@ pub struct MenuState {
     pub tooltip: String,
     /// `2 pending threads, 1 approval`.
     pub pending: String,
-    /// One line per stream: `alice/claude · refund-v2 · live · seq 120`.
+    /// One line per stream: `claude · refund-v2 · live · seq 120`.
     pub lines: Vec<String>,
     /// `Docket: 3 awaiting the Speaker`, only while an agent presides.
     pub docket: Option<String>,
@@ -80,12 +80,13 @@ pub struct Counts {
 /// One Senate the daemon serves, and who the person is in it.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct SenateInfo {
-    /// The presiding agent's path (`alice/claude`) for a Senate one level
-    /// down, empty for the top Senate. Unique.
+    /// The Senate's path (`acme/north-desk`), empty until the daemon knows
+    /// it. Unique.
     pub key: String,
-    /// `Senate` / `Senate under alice/claude` / `alice/claude 主持的 Senate`.
+    /// `Senate` / `Senate acme/north-desk`.
     pub title: String,
-    pub presider: Option<String>,
+    /// The Senate's path, when known.
+    pub senate: Option<String>,
     /// The Senate where the person's agents sit directly: the one whose
     /// inboxes the app can read and answer in.
     pub primary: bool,
@@ -103,7 +104,7 @@ pub struct SenateInfo {
 /// One agent's stream on one committee.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct CommitteeLine {
-    /// The agent's path: `alice/claude`.
+    /// The agent's path: `claude`.
     pub agent: String,
     pub committee: String,
     /// `live`, `connecting`, `behind, retry in 12s (attempt 3)`, `stopped`.
@@ -117,9 +118,9 @@ pub struct CommitteeLine {
 /// One of the person's agents in one Senate.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct AgentInfo {
-    /// `alice/claude`: what an inbox filter compares.
+    /// `claude`: what an inbox filter compares.
     pub path: String,
-    /// `[senator::alice/claude]`.
+    /// `[senator::claude]`.
     pub mention: String,
     /// The [`SenateInfo::key`] of the Senate it sits in.
     pub senate: String,
@@ -152,7 +153,7 @@ pub struct InboxThread {
     /// listed.
     pub state: String,
     pub state_label: String,
-    /// Who wrote it: `[senator::bob/claude]`, or `[speaker::alice/claude]`
+    /// Who wrote it: `[senator::copilot]`, or `[speaker::claude]`
     /// for the Speaker speaking for a senator.
     pub from: String,
     /// Whom a sender other than the Speaker spoke for.
@@ -160,7 +161,7 @@ pub struct InboxThread {
     pub to: Vec<String>,
     /// When it entered its state.
     pub since: SystemTime,
-    /// The agent session in charge: `[senator::alice/claude]`.
+    /// The agent session in charge: `[senator::claude]`.
     pub owner: Option<String>,
     pub triage: Option<String>,
     pub triage_label: Option<String>,
@@ -176,7 +177,7 @@ pub struct InboxThread {
     /// `news_*` describe the latest such event. It may be listed for this
     /// alone, with `state` `active` (answered).
     pub unread: bool,
-    /// Who wrote it: `[senator::alice/claude]`.
+    /// Who wrote it: `[senator::claude]`.
     pub news_from: Option<String>,
     /// Its kind (`answer`, `note`, `status` for an escalation) and a label.
     pub news_kind: Option<String>,
@@ -205,7 +206,7 @@ pub struct ApprovalRequest {
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct CodexThreadInfo {
     pub thread: String,
-    /// The agent it speaks as: `alice/codex`.
+    /// The agent it speaks as: `codex`.
     pub agent: String,
     pub committee: Option<String>,
     /// `live`, `stale`.
@@ -389,11 +390,11 @@ fn menu(
 }
 
 fn senate_info(s: &StatusReply, primary: bool, locale: Locale, now: DateTime<Utc>) -> SenateInfo {
-    let presider = s.presider.as_ref().map(ToString::to_string);
+    let senate = s.senate.as_ref().map(ToString::to_string);
     SenateInfo {
-        key: presider.clone().unwrap_or_default(),
-        title: text::senate_title(locale, presider.as_deref()),
-        presider,
+        key: senate.clone().unwrap_or_default(),
+        title: text::senate_title(locale, senate.as_deref()),
+        senate,
         primary,
         server_url: s.server_url.clone(),
         me: Address::senior(&s.person).in_text(),
@@ -424,15 +425,15 @@ fn seat_mention(seat: &SpeakerSeat) -> String {
 /// The person's agents: every agent a stream or a live session names, in
 /// each Senate, the primary Senate's first.
 fn agents(model: &Model, waiting: &[Waiting]) -> Vec<AgentInfo> {
-    let presiding: Vec<&SenatorPath> = model.senates().filter_map(presider_of).collect();
+    let presiding: Vec<&SenatorName> = model.senates().filter_map(presider_of).collect();
     let mut out = Vec::new();
     for (i, s) in model.senates().enumerate() {
         let senate = s
-            .presider
+            .senate
             .as_ref()
             .map(ToString::to_string)
             .unwrap_or_default();
-        let mut paths: Vec<&SenatorPath> = s.committees.iter().map(|c| &c.agent).collect();
+        let mut paths: Vec<&SenatorName> = s.committees.iter().map(|c| &c.agent).collect();
         for x in s
             .sessions
             .iter()
@@ -565,10 +566,10 @@ fn docket(model: &Model) -> Vec<DocketSenate> {
 }
 
 fn docket_senate(s: &SenateDocket, locale: Locale) -> DocketSenate {
-    let presider = s.senate.as_ref().map(ToString::to_string);
+    let senate = s.senate.as_ref().map(ToString::to_string);
     DocketSenate {
-        senate: presider.clone().unwrap_or_default(),
-        title: text::senate_title(locale, presider.as_deref()),
+        senate: senate.clone().unwrap_or_default(),
+        title: text::senate_title(locale, senate.as_deref()),
         speaker: s
             .pages
             .iter()
@@ -598,7 +599,7 @@ fn docket_senate(s: &SenateDocket, locale: Locale) -> DocketSenate {
 
 fn docket_entry(item: &DocketItem, locale: Locale) -> DocketEntry {
     let e = &item.event;
-    let mentions = |paths: &[SenatorPath]| -> Vec<String> {
+    let mentions = |paths: &[SenatorName]| -> Vec<String> {
         paths
             .iter()
             .map(|p| Address::senator(p).in_text())

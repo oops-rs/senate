@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 
 use senate_core::continuity::short_commit;
 use senate_core::{
-    BranchNaming, CheckpointRecord, CommitteeId, Event, Locale, Name, SenatorPath, Seq, WorkRun,
+    BranchNaming, CheckpointRecord, CommitteeId, Event, Locale, Name, SenatorName, Seq, WorkRun,
     WorkState,
 };
 
@@ -28,7 +28,7 @@ fn base(run: &WorkRun) -> String {
 }
 
 /// The restatement of a work order, asking for a yes:
-/// `我理解为：从 [senator::alice/claude] 的检查点 feature/refund-v2/alice@a41f9c2 拉新分支 …，代表 [senator::bob]。…回复「对」确认`.
+/// `我理解为：从 [senator::claude] 的检查点 feature/refund-v2/alice@a41f9c2 拉新分支 …，代表 [senator::bob]。…回复「对」确认`.
 pub(crate) fn confirm_work(l: Locale, run: &WorkRun) -> String {
     super::confirm_action(l, &describe_work(l, run))
 }
@@ -113,11 +113,11 @@ pub(crate) fn work_busy(l: Locale, root: Seq) -> String {
 pub(crate) fn work_whom(l: Locale) -> String {
     match l {
         Locale::Zh => format!(
-            "要接着谁的工作做什么？用 /work <handle>[/<agent>] <要做的事>。{}",
+            "要接着谁的工作做什么？用 /work <name> <要做的事>。{}",
             usage(l)
         ),
         Locale::En => format!(
-            "Whose work should I continue, and with what? Use /work <handle>[/<agent>] <what to do>. {}",
+            "Whose work should I continue, and with what? Use /work <name> <what to do>. {}",
             usage(l)
         ),
     }
@@ -131,7 +131,7 @@ pub(crate) fn work_needs_binding(l: Locale) -> String {
     .to_owned()
 }
 
-pub(crate) fn no_checkpoint(l: Locale, agent: &SenatorPath) -> String {
+pub(crate) fn no_checkpoint(l: Locale, agent: &SenatorName) -> String {
     let agent = senator(agent);
     match l {
         Locale::Zh => {
@@ -143,7 +143,7 @@ pub(crate) fn no_checkpoint(l: Locale, agent: &SenatorPath) -> String {
     }
 }
 
-pub(crate) fn checkpoint_detached(l: Locale, agent: &SenatorPath) -> String {
+pub(crate) fn checkpoint_detached(l: Locale, agent: &SenatorName) -> String {
     let agent = senator(agent);
     match l {
         Locale::Zh => format!("{agent} 的检查点不在一个分支上（HEAD 分离），我没法从它拉分支。"),
@@ -153,7 +153,7 @@ pub(crate) fn checkpoint_detached(l: Locale, agent: &SenatorPath) -> String {
     }
 }
 
-pub(crate) fn checkpoint_no_remote(l: Locale, agent: &SenatorPath) -> String {
+pub(crate) fn checkpoint_no_remote(l: Locale, agent: &SenatorName) -> String {
     let agent = senator(agent);
     match l {
         Locale::Zh => format!("{agent} 的检查点没有远程仓库地址，我拿不到代码。"),
@@ -165,7 +165,7 @@ pub(crate) fn checkpoint_no_remote(l: Locale, agent: &SenatorPath) -> String {
 
 pub(crate) fn checkpoint_not_pushed(
     l: Locale,
-    agent: &SenatorPath,
+    agent: &SenatorName,
     record: &CheckpointRecord,
 ) -> String {
     let agent = senator(agent);
@@ -301,8 +301,8 @@ pub(crate) fn pr_failed(l: Locale, reason: &str) -> String {
 pub(crate) fn describe_reassign(
     l: Locale,
     committee: &CommitteeId,
-    from: &SenatorPath,
-    to: &SenatorPath,
+    from: &SenatorName,
+    to: &SenatorName,
 ) -> String {
     let (from, to) = (senator(from), senator(to));
     match l {
@@ -318,8 +318,8 @@ pub(crate) fn describe_reassign(
 pub(crate) fn describe_handback(
     l: Locale,
     committee: &CommitteeId,
-    agent: &SenatorPath,
-    owner: &SenatorPath,
+    agent: &SenatorName,
+    owner: &SenatorName,
 ) -> String {
     let (agent, owner) = (senator(agent), senator(owner));
     match l {
@@ -332,7 +332,7 @@ pub(crate) fn describe_handback(
     }
 }
 
-pub(crate) fn reassigned(l: Locale, from: &SenatorPath, to: &SenatorPath) -> String {
+pub(crate) fn reassigned(l: Locale, from: &SenatorName, to: &SenatorName) -> String {
     let (from, to) = (senator(from), senator(to));
     match l {
         Locale::Zh => format!("好的，{from} 的工作已交给 {to}。"),
@@ -340,7 +340,7 @@ pub(crate) fn reassigned(l: Locale, from: &SenatorPath, to: &SenatorPath) -> Str
     }
 }
 
-pub(crate) fn handed_back(l: Locale, agent: &SenatorPath) -> String {
+pub(crate) fn handed_back(l: Locale, agent: &SenatorName) -> String {
     let agent = senator(agent);
     match l {
         Locale::Zh => format!("好的，工作已交还给 {agent}。"),
@@ -348,7 +348,7 @@ pub(crate) fn handed_back(l: Locale, agent: &SenatorPath) -> String {
     }
 }
 
-pub(crate) fn already_reassigned(l: Locale, from: &SenatorPath, to: &SenatorPath) -> String {
+pub(crate) fn already_reassigned(l: Locale, from: &SenatorName, to: &SenatorName) -> String {
     let (from, to) = (senator(from), senator(to));
     match l {
         Locale::Zh => format!("{from} 的工作已经在 {to} 那里了。"),
@@ -356,7 +356,7 @@ pub(crate) fn already_reassigned(l: Locale, from: &SenatorPath, to: &SenatorPath
     }
 }
 
-pub(crate) fn not_reassigned(l: Locale, agent: &SenatorPath) -> String {
+pub(crate) fn not_reassigned(l: Locale, agent: &SenatorName) -> String {
     let agent = senator(agent);
     match l {
         Locale::Zh => format!("{agent} 的工作没有交给别人，不需要交还。"),
@@ -376,7 +376,7 @@ pub(crate) fn reassign_refused(l: Locale, reason: &str) -> String {
 }
 
 /// The Agent group's line for a reassignment.
-pub(crate) fn reassigned_line(l: Locale, from: &SenatorPath, to: &SenatorPath) -> String {
+pub(crate) fn reassigned_line(l: Locale, from: &SenatorName, to: &SenatorName) -> String {
     let (from, to) = (senator(from), senator(to));
     match l {
         Locale::Zh => format!("{from} 的工作已交给 {to}"),
@@ -385,7 +385,7 @@ pub(crate) fn reassigned_line(l: Locale, from: &SenatorPath, to: &SenatorPath) -
 }
 
 /// The Agent group's line for a hand-back.
-pub(crate) fn work_handback_line(l: Locale, agent: &SenatorPath) -> String {
+pub(crate) fn work_handback_line(l: Locale, agent: &SenatorName) -> String {
     let agent = senator(agent);
     match l {
         Locale::Zh => format!("{agent} 的工作已交还给 {agent}"),
@@ -395,13 +395,14 @@ pub(crate) fn work_handback_line(l: Locale, agent: &SenatorPath) -> String {
 
 /// The one note the new owner's bridge is pushed: the old owner's latest
 /// checkpoint and how to start from its branch. The suggested branch is the
-/// new owner's person's own branch on the committee
+/// new owner's person's own branch on the committee (`to_person`, the
+/// person who answers for the new owner)
 /// ([`BranchNaming::developer`] with the default prefix).
 pub(crate) fn reassign_note(
     l: Locale,
     committee: &CommitteeId,
-    from: &SenatorPath,
-    to: &SenatorPath,
+    from: &SenatorName,
+    to_person: &Name,
     by: Option<&Name>,
     checkpoint: Option<&CheckpointRecord>,
     branches: &BranchNaming,
@@ -465,7 +466,7 @@ pub(crate) fn reassign_note(
             Locale::En => write!(out, ", repository {remote}"),
         };
     }
-    let own = branches.developer(committee, to.owner());
+    let own = branches.developer(committee, to_person);
     let _ = match l {
         Locale::Zh => write!(
             out,
@@ -494,7 +495,7 @@ pub(crate) fn reassign_note(
 pub(crate) fn work_handback_note(
     l: Locale,
     committee: &CommitteeId,
-    agent: &SenatorPath,
+    agent: &SenatorName,
 ) -> String {
     let agent = senator(agent);
     match l {
@@ -507,9 +508,9 @@ pub(crate) fn work_handback_note(
     }
 }
 
-/// `[senator::bob/claude]（接手 [senator::alice/claude]）` /
-/// `[senator::bob/claude] (covering for [senator::alice/claude])`.
-fn covering_label(l: Locale, event: &Event, old: &SenatorPath) -> String {
+/// `[senator::copilot]（接手 [senator::claude]）` /
+/// `[senator::copilot] (covering for [senator::claude])`.
+fn covering_label(l: Locale, event: &Event, old: &SenatorName) -> String {
     let (who, old) = (author(l, event), senator(old));
     match l {
         Locale::Zh => format!("{who}（接手 {old}）"),
@@ -519,8 +520,8 @@ fn covering_label(l: Locale, event: &Event, old: &SenatorPath) -> String {
 
 /// A reply in a mirrored thread addressed to `old`, from the agent its work
 /// was reassigned to:
-/// `[senator::bob/claude]（接手 [senator::alice/claude]）<body>`.
-pub(crate) fn thread_mirror_covering(l: Locale, event: &Event, old: &SenatorPath) -> String {
+/// `[senator::copilot]（接手 [senator::claude]）<body>`.
+pub(crate) fn thread_mirror_covering(l: Locale, event: &Event, old: &SenatorName) -> String {
     let label = covering_label(l, event, old);
     let body = body(l, event);
     match quoted_for(event, &body) {
@@ -530,7 +531,7 @@ pub(crate) fn thread_mirror_covering(l: Locale, event: &Event, old: &SenatorPath
 }
 
 /// The same for a people group, signed.
-pub(crate) fn signed_covering(l: Locale, event: &Event, old: &SenatorPath) -> String {
+pub(crate) fn signed_covering(l: Locale, event: &Event, old: &SenatorName) -> String {
     format!(
         "{}\n\n{}",
         thread_mirror_covering(l, event, old),
@@ -545,7 +546,7 @@ mod tests {
 
     use crate::tests_support::assert_senate_vocabulary;
 
-    fn path(s: &str) -> SenatorPath {
+    fn path(s: &str) -> SenatorName {
         s.parse().expect("senator path")
     }
 
@@ -561,7 +562,7 @@ mod tests {
         WorkRun {
             run_id: 7,
             requester: name("bob"),
-            target_agent: path("alice/claude"),
+            target_agent: path("claude"),
             instruction: "把重试路径做完".into(),
             branch: "feature/refund-v2/speaker-7".into(),
             state,
@@ -581,7 +582,7 @@ mod tests {
         CheckpointRecord {
             seq: Seq(40),
             ts: chrono::Utc::now(),
-            agent: path("alice/claude"),
+            agent: path("claude"),
             body: String::new(),
             checkpoint: CheckpointPayload {
                 branch: "feature/refund-v2/alice".into(),
@@ -603,7 +604,7 @@ mod tests {
     fn the_restatement_names_branch_commit_instruction_and_whom() {
         let text = confirm_work(Locale::Zh, &run(WorkState::Queued));
         for part in [
-            "[senator::alice/claude] 的检查点 feature/refund-v2/alice@a41f9c2",
+            "[senator::claude] 的检查点 feature/refund-v2/alice@a41f9c2",
             "feature/refund-v2/speaker-7",
             "做：把重试路径做完",
             "代表 [senator::bob]",
@@ -615,11 +616,11 @@ mod tests {
         r.instruction = "finish the retry path".into();
         assert_eq!(
             confirm_work(Locale::En, &r),
-            "I understand: Branch feature/refund-v2/speaker-7 off [senator::alice/claude]'s checkpoint feature/refund-v2/alice@a41f9c2 and do: finish the retry path; then push and open a PR, on behalf of [senator::bob]. [senator::alice/claude]'s own branch is not touched. Reply \"yes\" to confirm."
+            "I understand: Branch feature/refund-v2/speaker-7 off [senator::claude]'s checkpoint feature/refund-v2/alice@a41f9c2 and do: finish the retry path; then push and open a PR, on behalf of [senator::bob]. [senator::claude]'s own branch is not touched. Reply \"yes\" to confirm."
         );
         assert_eq!(
             work_root(Locale::En, &r),
-            "Coding task: finish the retry path\nFor [senator::bob], from [senator::alice/claude]'s checkpoint feature/refund-v2/alice@a41f9c2, branch feature/refund-v2/speaker-7"
+            "Coding task: finish the retry path\nFor [senator::bob], from [senator::claude]'s checkpoint feature/refund-v2/alice@a41f9c2, branch feature/refund-v2/speaker-7"
         );
     }
 
@@ -669,60 +670,60 @@ mod tests {
         let e = senate_core::NewEvent::new(
             committee(),
             Kind::Answer,
-            Address::senator(&path("bob/claude")),
+            Address::senator(&path("copilot")),
             "做到第二步了",
         )
         .in_thread(Seq(3))
         .into_event(Seq(9), chrono::Utc::now());
-        let old = path("alice/claude");
+        let old = path("claude");
         assert_eq!(
             thread_mirror_covering(Locale::Zh, &e, &old),
-            "[senator::bob/claude]（接手 [senator::alice/claude]） 做到第二步了"
+            "[senator::copilot]（接手 [senator::claude]） 做到第二步了"
         );
         assert!(
             signed_covering(Locale::Zh, &e, &old)
-                .contains("由 [senator::bob/claude]（接手 [senator::alice/claude]） 回答"),
+                .contains("由 [senator::copilot]（接手 [senator::claude]） 回答"),
             "{}",
             signed_covering(Locale::Zh, &e, &old)
         );
         assert_eq!(
             thread_mirror_covering(Locale::En, &e, &old),
-            "[senator::bob/claude] (covering for [senator::alice/claude]) 做到第二步了"
+            "[senator::copilot] (covering for [senator::claude]) 做到第二步了"
         );
         assert!(
             signed_covering(Locale::En, &e, &old).ends_with(
-                "\n\nAnswered by [senator::bob/claude] (covering for [senator::alice/claude]) · from the refund-v2 Agent group"
+                "\n\nAnswered by [senator::copilot] (covering for [senator::claude]) · from the refund-v2 Agent group"
             )
         );
     }
 
     #[test]
     fn reassignment_names_agents_as_mentions() {
-        let (alice, bob) = (path("alice/claude"), path("bob/claude"));
+        let (alice, bob) = (path("claude"), path("copilot"));
         assert_eq!(
             reassigned(Locale::Zh, &alice, &bob),
-            "好的，[senator::alice/claude] 的工作已交给 [senator::bob/claude]。"
+            "好的，[senator::claude] 的工作已交给 [senator::copilot]。"
         );
         assert_eq!(
             reassigned(Locale::En, &alice, &bob),
-            "OK, [senator::alice/claude]'s work is now with [senator::bob/claude]."
+            "OK, [senator::claude]'s work is now with [senator::copilot]."
         );
         assert_eq!(
             work_handback_line(Locale::En, &alice),
-            "[senator::alice/claude]'s work is back with [senator::alice/claude]"
+            "[senator::claude]'s work is back with [senator::claude]"
         );
         let note = reassign_note(
             Locale::En,
             &committee(),
             &alice,
-            &bob,
+            &name("bob"),
             Some(&name("carol")),
             Some(&record(true)),
             &BranchNaming::default(),
         );
         assert!(
             note.starts_with(
-                "[senator::alice/claude]'s work on refund-v2 is yours now (confirmed by [senator::carol])."
+                "[senator::claude]'s work on refund-v2 is yours now (confirmed by [senator::carol])."
             ),
             "{note}"
         );
@@ -740,21 +741,18 @@ mod tests {
             Locale::Zh,
             &committee(),
             &alice,
-            &bob,
+            &name("bob"),
             None,
             None,
             &BranchNaming::default(),
         );
-        assert!(
-            note.contains("[senator::alice/claude] 没有留下检查点"),
-            "{note}"
-        );
+        assert!(note.contains("[senator::claude] 没有留下检查点"), "{note}");
     }
 
     #[test]
     fn no_work_text_uses_the_old_vocabulary() {
         let c = committee();
-        let (alice, bob) = (path("alice/claude"), path("bob/claude"));
+        let (alice, bob) = (path("claude"), path("copilot"));
         let e = senate_core::NewEvent::new(c.clone(), Kind::Answer, Address::senator(&bob), "ok")
             .in_thread(Seq(3))
             .into_event(Seq(9), chrono::Utc::now());
@@ -794,12 +792,20 @@ mod tests {
                     l,
                     &c,
                     &alice,
-                    &bob,
+                    &name("bob"),
                     Some(&name("carol")),
                     Some(&record(false)),
                     &BranchNaming::new("team"),
                 ),
-                reassign_note(l, &c, &alice, &bob, None, None, &BranchNaming::default()),
+                reassign_note(
+                    l,
+                    &c,
+                    &alice,
+                    &name("bob"),
+                    None,
+                    None,
+                    &BranchNaming::default(),
+                ),
                 work_handback_note(l, &c, &alice),
                 thread_mirror_covering(l, &e, &alice),
                 signed_covering(l, &e, &alice),

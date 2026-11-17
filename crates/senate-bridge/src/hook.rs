@@ -116,10 +116,25 @@ impl HookEnv {
     /// The pid comes only from `CLAUDE_PID`. The hook's parent may be a
     /// short-lived `sh -c` wrapper, and a wrong pid would get the session
     /// marked stale; with no pid, liveness rests on the inbox socket alone.
+    ///
+    /// A process confined to a test's directory ([`crate::testenv`]) takes
+    /// no inbox socket from outside it, nor its token.
     pub fn from_process() -> Self {
+        let socket = env_nonempty("CLAUDE_CODE_MESSAGING_SOCKET").map(PathBuf::from);
+        let (socket, token) = match socket {
+            Some(socket) if !crate::testenv::confined(&socket) => {
+                eprintln!(
+                    "senate hook: ignoring the inbox socket {}: outside the directory this \
+                     process is confined to",
+                    socket.display()
+                );
+                (None, None)
+            }
+            socket => (socket, env_nonempty("CLAUDE_CODE_MESSAGING_TOKEN")),
+        };
         Self {
-            socket: env_nonempty("CLAUDE_CODE_MESSAGING_SOCKET").map(PathBuf::from),
-            token: env_nonempty("CLAUDE_CODE_MESSAGING_TOKEN"),
+            socket,
+            token,
             claude_pid: env_nonempty("CLAUDE_PID").and_then(|p| p.parse().ok()),
             session_id: env_nonempty("CLAUDE_CODE_SESSION_ID"),
             agent: env_nonempty(crate::agent::AGENT_ENV),

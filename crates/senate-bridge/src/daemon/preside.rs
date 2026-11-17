@@ -15,34 +15,10 @@ const HOOK_DOCKET_TIMEOUT: Duration = Duration::from_secs(1);
 impl Shared {
     /// The agents seated in this Senate that this machine knows of: every
     /// agent with a session here on record.
-    pub(crate) fn seated(&self) -> Vec<SenatorPath> {
+    pub(crate) fn seated(&self) -> Vec<SenatorName> {
         self.served_agents()
             .map(|agents| agents.into_iter().collect())
             .unwrap_or_default()
-    }
-
-    /// End `session_id` here if it is live: it moved to another Senate.
-    pub(crate) fn retire(&self, session_id: &str) {
-        match self.store.session(session_id) {
-            Ok(Some(session)) if session.state != SessionState::Ended => {
-                if let Err(e) = self
-                    .store
-                    .set_session_state(session_id, SessionState::Ended)
-                {
-                    tracing::warn!(session = session_id, "ending a session that moved: {e}");
-                    return;
-                }
-                tracing::info!(
-                    session = session_id,
-                    agent = %session.agent,
-                    senate = %self.senate_label(),
-                    "the session moved to another Senate"
-                );
-                self.committees_changed.notify_one();
-            }
-            Ok(_) => {}
-            Err(e) => tracing::warn!(session = session_id, "reading a session: {e}"),
-        }
     }
 
     /// The committees of this Senate a docket covers: `committee`, or every
@@ -55,6 +31,7 @@ impl Shared {
             return Ok(vec![committee]);
         }
         let me = self.api.me().await.map_err(server_error)?;
+        self.note_office(&me);
         self.note_speaker(me.speaker.clone());
         Ok(me.committees)
     }
@@ -69,7 +46,7 @@ impl Shared {
         let mut checkpoints = Vec::new();
         for committee in self.docket_committees(committee).await? {
             let page = self.api.docket(&committee).await.map_err(server_error)?;
-            let mut away: BTreeSet<SenatorPath> = BTreeSet::new();
+            let mut away: BTreeSet<SenatorName> = BTreeSet::new();
             for item in &page.items {
                 if let Awaiting::Away { agents } = &item.awaiting {
                     away.extend(agents.iter().cloned());
@@ -88,14 +65,14 @@ impl Shared {
             pages.push(page);
         }
         Ok(SenateDocket {
-            senate: self.seating().presider().cloned(),
+            senate: self.senate_name(),
             pages,
             checkpoints,
         })
     }
 
     /// One item on the committee's docket, and the page it is on.
-    async fn docket_item(
+    pub(crate) async fn docket_item(
         &self,
         committee: &CommitteeId,
         seq: Seq,
@@ -117,10 +94,10 @@ impl Shared {
     /// should have it. A question to an away agent is never rerouted.
     pub(crate) async fn on_route(
         &self,
-        speaker: &SenatorPath,
+        speaker: &SenatorName,
         committee: CommitteeId,
         seq: Seq,
-        to: SenatorPath,
+        to: SenatorName,
         id: Option<EventId>,
     ) -> Result<Posted, IpcError> {
         let (item, _) = self.docket_item(&committee, seq).await?;
@@ -137,7 +114,7 @@ impl Shared {
                     self.locale,
                 )));
             }
-            _ if !to.is_junior() || &to == speaker => {
+            _ if self.people().is_person(&to) || &to == speaker => {
                 return Err(IpcError::bad_request(preside_text::route_to_an_agent(
                     &to,
                     self.locale,
@@ -153,7 +130,8 @@ impl Shared {
         let mut event = NewEvent::new(committee, root.kind.clone(), Address::Speaker, root.body)
             .to(Address::senator(&to))
             .on_behalf_of(behalf)
-            .with_meta(meta::RELAYED_FROM, serde_json::json!(seq.0));
+            .with_meta(meta::RELAYED_FROM, serde_json::json!(seq.0))
+            .with_meta(meta::ACTED_BY, serde_json::json!(speaker.to_string()));
         if let Some(refs) = root.refs {
             event = event.with_refs(refs);
         }
@@ -168,11 +146,11 @@ impl Shared {
     /// takeover word, pointing at the checkpoint's branch and commit.
     pub(crate) async fn on_cover(
         &self,
-        speaker: &SenatorPath,
+        speaker: &SenatorName,
         committee: CommitteeId,
         thread: Seq,
         body: String,
-        agent: Option<SenatorPath>,
+        agent: Option<SenatorName>,
         id: Option<EventId>,
     ) -> Result<Posted, IpcError> {
         if body.trim().is_empty() {
@@ -230,7 +208,8 @@ impl Shared {
                 path: None,
                 branch: Some(checkpoint.checkpoint.branch.clone()),
             })
-            .with_meta(meta::TAKEOVER, serde_json::json!(true));
+            .with_meta(meta::TAKEOVER, serde_json::json!(true))
+            .with_meta(meta::ACTED_BY, serde_json::json!(speaker.to_string()));
         if let Some(id) = id {
             event = event.with_id(id);
         }
@@ -243,7 +222,7 @@ impl Shared {
     /// agent), else the Speaker's own person.
     pub(crate) async fn on_refer(
         &self,
-        speaker: &SenatorPath,
+        speaker: &SenatorName,
         committee: CommitteeId,
         seq: Seq,
         reason: String,
@@ -253,18 +232,25 @@ impl Shared {
             return Err(IpcError::bad_request("`reason` is empty"));
         }
         let (item, _) = self.docket_item(&committee, seq).await?;
+        // The person whose agent was meant, else the Speaker when it is a
+        // person, else the person who runs this machine's agents.
+        let people = self.people();
         let person = match &item.awaiting {
-            Awaiting::Pick { owner, .. } => owner.clone(),
-            Awaiting::Away { agents } => agents
-                .first()
-                .map(|a| a.owner().clone())
-                .unwrap_or_else(|| speaker.owner().clone()),
-            Awaiting::Addressed => speaker.owner().clone(),
+            Awaiting::Pick {
+                owner: Some(owner), ..
+            } => owner.clone(),
+            _ => self
+                .office()
+                .and_then(|o| o.speaker_here().cloned())
+                .filter(|s| people.is_person(s))
+                .map(|s| s.name().clone())
+                .unwrap_or_else(|| self.config.person.clone()),
         };
+        let acted = serde_json::json!(speaker.to_string());
         let root = item.event;
         let task = root.thread.is_none()
             && matches!(root.kind, Kind::Question | Kind::Request)
-            && root.to.iter().any(Address::is_junior);
+            && root.to.iter().any(|a| people.is_agent_address(a));
         let mut event = if task {
             let mut status = StatusPayload::new(senate_core::StatusState::Suspended);
             status.escalated_to = Some(person);
@@ -272,10 +258,12 @@ impl Shared {
             NewEvent::new(committee, Kind::Status, Address::Speaker, reason)
                 .in_thread(root.seq)
                 .with_meta(meta::STATUS, status.value())
+                .with_meta(meta::ACTED_BY, acted)
         } else {
             NewEvent::new(committee, Kind::Question, Address::Speaker, reason)
                 .to(Address::senior(&person))
                 .in_thread(root.seq)
+                .with_meta(meta::ACTED_BY, acted)
         };
         if let Some(id) = id {
             event = event.with_id(id);
@@ -312,17 +300,19 @@ impl Shared {
             told.extend(items.iter().cloned());
             new
         };
-        let senate = self.seating().presider().cloned();
+        let senate = self.senate_path();
         match event {
             HookEvent::SessionStart => {
-                let mut seated: BTreeSet<SenatorPath> = self.seated().into_iter().collect();
+                let mut seated: BTreeSet<SenatorName> = self.seated().into_iter().collect();
                 if let Some(docket) = &docket {
                     for page in &docket.pages {
                         seated.extend(page.seats.iter().map(|s| s.agent.clone()));
                     }
                 }
-                let seated: Vec<SenatorPath> = seated.into_iter().collect();
-                Some(crate::preside::orientation(
+                let seated: Vec<SenatorName> = seated.into_iter().collect();
+                Some(crate::preside::orientation_as(
+                    self.desk_role(&session.agent).unwrap_or_default(),
+                    self.speaker_id().as_ref(),
                     &session.agent,
                     senate.as_ref(),
                     &seated,
@@ -340,9 +330,9 @@ impl Shared {
 
 /// Refusals of the presiding requests, in the bridge's locale.
 mod preside_text {
-    use senate_core::{Address, CommitteeId, Locale, SenatorPath, Seq};
+    use senate_core::{Address, CommitteeId, Locale, SenatorName, Seq};
 
-    fn mentions(paths: &[SenatorPath]) -> String {
+    fn mentions(paths: &[SenatorName]) -> String {
         paths
             .iter()
             .map(|p| Address::senator(p).in_text())
@@ -363,8 +353,8 @@ mod preside_text {
     }
 
     pub(super) fn not_a_candidate(
-        to: &SenatorPath,
-        candidates: &[SenatorPath],
+        to: &SenatorName,
+        candidates: &[SenatorName],
         locale: Locale,
     ) -> String {
         let to = Address::senator(to).in_text();
@@ -389,7 +379,7 @@ mod preside_text {
             .to_owned()
     }
 
-    pub(super) fn route_to_an_agent(to: &SenatorPath, locale: Locale) -> String {
+    pub(super) fn route_to_an_agent(to: &SenatorName, locale: Locale) -> String {
         let to = Address::senator(to).in_text();
         match locale {
             Locale::Zh => format!("只能交给这个 Senate 里在席的另一个 agent，不能交给 {to}。"),
@@ -399,7 +389,7 @@ mod preside_text {
         }
     }
 
-    pub(super) fn cover_for_the_speaker(speaker: &SenatorPath, locale: Locale) -> String {
+    pub(super) fn cover_for_the_speaker(speaker: &SenatorName, locale: Locale) -> String {
         let speaker = Address::senator(speaker).in_text();
         match locale {
             Locale::Zh => format!(
@@ -423,8 +413,8 @@ mod preside_text {
     }
 
     pub(super) fn not_its_question(
-        agent: &SenatorPath,
-        agents: &[SenatorPath],
+        agent: &SenatorName,
+        agents: &[SenatorName],
         locale: Locale,
     ) -> String {
         let agent = Address::senator(agent).in_text();
@@ -440,7 +430,7 @@ mod preside_text {
         }
     }
 
-    pub(super) fn name_which(agents: &[SenatorPath], locale: Locale) -> String {
+    pub(super) fn name_which(agents: &[SenatorName], locale: Locale) -> String {
         match locale {
             Locale::Zh => format!(
                 "问题问的是几个 agent：用 `agent` 指定代谁回答：{}。",
@@ -453,7 +443,7 @@ mod preside_text {
         }
     }
 
-    pub(super) fn no_checkpoint(agent: &SenatorPath, locale: Locale) -> String {
+    pub(super) fn no_checkpoint(agent: &SenatorName, locale: Locale) -> String {
         let agent = Address::senator(agent).in_text();
         match locale {
             Locale::Zh => format!(
@@ -470,14 +460,14 @@ mod preside_text {
 #[cfg(test)]
 mod tests {
     use super::preside_text;
-    use senate_core::{Locale, SenatorPath};
+    use senate_core::{Locale, SenatorName};
 
     #[test]
     fn covering_for_the_seat_holder_is_refused_in_both_languages() {
-        let holder: SenatorPath = "alice/claude".parse().unwrap();
+        let holder: SenatorName = "claude".parse().unwrap();
         let zh = preside_text::cover_for_the_speaker(&holder, Locale::Zh);
         let en = preside_text::cover_for_the_speaker(&holder, Locale::En);
-        assert!(zh.starts_with("[senator::alice/claude] 自己就是这个 Senate 的 Speaker"));
-        assert!(en.starts_with("[senator::alice/claude] holds the Speaker's seat"));
+        assert!(zh.starts_with("[senator::claude] 自己就是这个 Senate 的 Speaker"));
+        assert!(en.starts_with("[senator::claude] holds the Speaker's seat"));
     }
 }

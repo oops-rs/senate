@@ -43,7 +43,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, SubsecRound, Utc};
 use senate_core::api::Heartbeat;
 use senate_core::hub::search_terms;
-use senate_core::{Appended, CommitteeId, Event, MirrorRef, NewEvent, SenatorPath, Seq};
+use senate_core::{Appended, CommitteeId, Event, MirrorRef, NewEvent, SenatorName, Seq};
 use sqlx::migrate::Migrator;
 use sqlx::postgres::{PgExecutor, PgPool, PgPoolOptions, PgRow};
 use sqlx::{AssertSqlSafe, Row};
@@ -61,6 +61,22 @@ pub const NEAR_MATCH_SIMILARITY: f64 = 0.3;
 #[derive(Debug, Clone)]
 pub struct PgStore {
     pool: PgPool,
+}
+
+/// The log format with flat senator names (see [`crate::flatten`]).
+pub const FLAT_NAMES_FORMAT: i32 = 2;
+
+/// What [`PgStore::flatten_names`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FlattenOutcome {
+    /// The log was already at format 2: nothing done.
+    AlreadyFlat,
+    /// Converted: how many events changed, and each agent with the person
+    /// it was named under.
+    Converted {
+        events: usize,
+        agents: std::collections::BTreeMap<String, String>,
+    },
 }
 
 impl PgStore {
@@ -92,15 +108,193 @@ impl PgStore {
     pub async fn migrate(&self) -> Result<(), LogError> {
         self.refuse_foreign().await?;
         MIGRATOR.run(&self.pool).await?;
-        sqlx::query("INSERT INTO log_meta (epoch) VALUES ($1) ON CONFLICT (singleton) DO NOTHING")
-            .bind(mint_epoch())
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "INSERT INTO log_meta (epoch, format) VALUES ($1, $2) ON CONFLICT (singleton) DO NOTHING",
+        )
+        .bind(mint_epoch())
+        .bind(FLAT_NAMES_FORMAT)
+        .execute(&self.pool)
+        .await?;
+        self.note_format().await?;
         Ok(())
     }
 
     pub fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    /// A log with no events at format 1 is simply new: it is at format 2.
+    /// One that has events written when senators were paths is left as it
+    /// is, with a warning: it is converted only when asked
+    /// ([`PgStore::flatten_names`]).
+    async fn note_format(&self) -> Result<(), LogError> {
+        if self.format().await? >= FLAT_NAMES_FORMAT {
+            return Ok(());
+        }
+        let any: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM events)")
+            .fetch_one(&self.pool)
+            .await?;
+        if !any {
+            sqlx::query("UPDATE log_meta SET format = $1")
+                .bind(FLAT_NAMES_FORMAT)
+                .execute(&self.pool)
+                .await?;
+            return Ok(());
+        }
+        let old: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM events WHERE envelope::text LIKE '%senator::%/%')",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        if old {
+            tracing::warn!(
+                "this log was written when senators were paths (senator::alice/claude); \
+                 convert it with `senated flatten-log --database-url …` (a copy of each table \
+                 is kept as <table>_pre_flat_names); until then those names read as unknown"
+            );
+        }
+        Ok(())
+    }
+
+    /// The log's format: 1 when senators were paths, 2 since they are flat
+    /// names.
+    pub async fn format(&self) -> Result<i32, LogError> {
+        Ok(sqlx::query_scalar("SELECT format FROM log_meta")
+            .fetch_optional(&self.pool)
+            .await?
+            .unwrap_or(FLAT_NAMES_FORMAT))
+    }
+
+    /// Convert a log written when senators were paths to flat names
+    /// ([`crate::flatten`]), when asked: never automatically. In one
+    /// transaction: read and check everything (a refusal changes nothing),
+    /// copy `events`, `cursors` and `heartbeats` to `<table>_pre_flat_names`
+    /// (kept; never removed), rewrite, and record format 2. A log already
+    /// at format 2 is left alone.
+    pub async fn flatten_names(&self) -> Result<FlattenOutcome, LogError> {
+        use crate::flatten::{Flattener, Place};
+        let mut tx = self.pool.begin().await?;
+        let format: i32 = sqlx::query_scalar("SELECT format FROM log_meta FOR UPDATE")
+            .fetch_optional(&mut *tx)
+            .await?
+            .unwrap_or(FLAT_NAMES_FORMAT);
+        if format >= FLAT_NAMES_FORMAT {
+            return Ok(FlattenOutcome::AlreadyFlat);
+        }
+        let mut scan = Flattener::new();
+        let rows = sqlx::query("SELECT committee, seq, envelope::text AS envelope FROM events")
+            .fetch_all(&mut *tx)
+            .await?;
+        let mut events = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let committee: String = row.try_get("committee")?;
+            let seq: i64 = row.try_get("seq")?;
+            let text: String = row.try_get("envelope")?;
+            let value: serde_json::Value = serde_json::from_str(&text)
+                .map_err(|e| LogError::Corrupt(format!("event envelope {committee} {seq}: {e}")))?;
+            scan.see_envelope(
+                &value,
+                &Place::Event {
+                    committee: committee.clone(),
+                    seq,
+                },
+            );
+            events.push((committee, seq, value));
+        }
+        let cursors: Vec<(String, String)> =
+            sqlx::query_as("SELECT DISTINCT committee, owner FROM cursors")
+                .fetch_all(&mut *tx)
+                .await?;
+        for (committee, owner) in &cursors {
+            scan.see_address(
+                owner,
+                &Place::Cursor {
+                    committee: committee.clone(),
+                    owner: owner.clone(),
+                },
+            );
+        }
+        let beats: Vec<(String, String)> =
+            sqlx::query_as("SELECT committee, agent FROM heartbeats")
+                .fetch_all(&mut *tx)
+                .await?;
+        for (committee, agent) in &beats {
+            scan.see_agent(
+                agent,
+                &Place::Heartbeat {
+                    committee: committee.clone(),
+                    agent: agent.clone(),
+                },
+            );
+        }
+        scan.check()?;
+        let mut converted = 0usize;
+        if scan.has_paths() {
+            for table in ["events", "cursors", "heartbeats"] {
+                sqlx::query(AssertSqlSafe(format!(
+                    "CREATE TABLE IF NOT EXISTS {table}_pre_flat_names AS TABLE {table}"
+                )))
+                .execute(&mut *tx)
+                .await?;
+            }
+            for (committee, seq, value) in &events {
+                let flat = Flattener::envelope(value);
+                if &flat == value {
+                    continue;
+                }
+                let from = flat
+                    .get("from")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                sqlx::query(
+                    "UPDATE events SET from_addr = $1, envelope = $2::jsonb \
+                     WHERE committee = $3 AND seq = $4",
+                )
+                .bind(from)
+                .bind(flat.to_string())
+                .bind(committee)
+                .bind(seq)
+                .execute(&mut *tx)
+                .await?;
+                converted += 1;
+            }
+            for (committee, owner) in &cursors {
+                let flat = Flattener::address(owner);
+                if &flat != owner {
+                    sqlx::query(
+                        "UPDATE cursors SET owner = $1 WHERE committee = $2 AND owner = $3",
+                    )
+                    .bind(flat)
+                    .bind(committee)
+                    .bind(owner)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+            }
+            for (committee, agent) in &beats {
+                let flat = Flattener::agent(agent);
+                if &flat != agent {
+                    sqlx::query(
+                        "UPDATE heartbeats SET agent = $1 WHERE committee = $2 AND agent = $3",
+                    )
+                    .bind(flat)
+                    .bind(committee)
+                    .bind(agent)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+            }
+        }
+        sqlx::query("UPDATE log_meta SET format = $1")
+            .bind(FLAT_NAMES_FORMAT)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(FlattenOutcome::Converted {
+            events: converted,
+            agents: scan.owners(),
+        })
     }
 
     async fn refuse_foreign(&self) -> Result<(), LogError> {
@@ -575,7 +769,7 @@ impl LogStore for PgStore {
         .await?;
         rows.iter()
             .map(|row| {
-                let agent: SenatorPath = row
+                let agent: SenatorName = row
                     .try_get::<String, _>("agent")?
                     .parse()
                     .map_err(|e| LogError::Corrupt(format!("heartbeat agent: {e}")))?;
@@ -598,7 +792,7 @@ impl LogStore for PgStore {
     async fn last_heartbeat(
         &self,
         committee: &CommitteeId,
-        agent: &SenatorPath,
+        agent: &SenatorName,
     ) -> Result<Option<HeartbeatRecord>, LogError> {
         let row = sqlx::query(
             "SELECT sessions, delivered_seq, seen_at FROM heartbeats \
@@ -623,5 +817,41 @@ impl LogStore for PgStore {
             },
             at: row.try_get("seen_at")?,
         }))
+    }
+
+    async fn registry(&self, prefix: &str) -> Result<Vec<(String, serde_json::Value)>, LogError> {
+        let rows: Vec<(String, serde_json::Value)> = sqlx::query_as(
+            "SELECT key, value FROM registry WHERE left(key, length($1)) = $1 ORDER BY key",
+        )
+        .bind(prefix)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    async fn put_registry(
+        &self,
+        key: &str,
+        value: Option<serde_json::Value>,
+    ) -> Result<(), LogError> {
+        match value {
+            Some(value) => {
+                sqlx::query(
+                    "INSERT INTO registry (key, value) VALUES ($1, $2) \
+                     ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = now()",
+                )
+                .bind(key)
+                .bind(value)
+                .execute(&self.pool)
+                .await?;
+            }
+            None => {
+                sqlx::query("DELETE FROM registry WHERE key = $1")
+                    .bind(key)
+                    .execute(&self.pool)
+                    .await?;
+            }
+        }
+        Ok(())
     }
 }

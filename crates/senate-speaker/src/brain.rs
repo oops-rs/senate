@@ -14,8 +14,8 @@ use async_trait::async_trait;
 use std::time::Duration;
 
 use senate_core::{
-    Address, Brief, CheckpointRecord, CommitteeId, Event, Kind, Locale, Name, OutputLevel, Roster,
-    SenatorPath, Seq, ThreadSummary, TriagePayload, TriageVerdict,
+    Address, Brief, CheckpointRecord, CommitteeId, Event, Kind, Locale, Locator, Name, OutputLevel,
+    Roster, SenatorName, Seq, ThreadSummary, TriagePayload, TriageVerdict,
 };
 use serde::{Deserialize, Serialize};
 
@@ -43,7 +43,7 @@ pub struct Utterance {
     pub context: Vec<Event>,
     /// Who sits in this Senate: its people (with the names they go by) and
     /// the agents seated under each, so "alice's agent" can become the
-    /// handle `alice` and "alice's codex" the agent `alice/codex`.
+    /// handle `alice` and "alice's codex" the agent `codex`.
     pub roster: Roster,
     /// The language to reply in.
     pub locale: Locale,
@@ -56,7 +56,7 @@ pub struct Question {
     pub event: Event,
     /// The agent it was put to. Answered from that agent's own checkpoint,
     /// never another agent's of the same person.
-    pub agent: SenatorPath,
+    pub agent: SenatorName,
     pub committee: CommitteeId,
     /// The committee's most recent events up to the question, oldest first.
     pub context: Vec<Event>,
@@ -174,7 +174,7 @@ pub enum RelayKind {
 #[serde(tag = "action", rename_all = "lowercase")]
 pub enum Intent {
     /// Pass `body` to `targets`: each a person (handle or name as said),
-    /// whose agent gets it, or one agent named outright (`alice/codex`).
+    /// whose agent gets it, or one agent named outright (`codex`).
     Relay {
         targets: Vec<String>,
         kind: RelayKind,
@@ -376,13 +376,60 @@ pub trait Brain: Send + Sync + 'static {
     async fn pick_agent(&self, input: PickInput) -> Result<Pick, BrainError> {
         Ok(rule_pick(&input))
     }
+
+    /// An agent's message for a seat outside its own committee, put on the
+    /// Speaker's desk on the way ([`meta::INTENDED`](senate_core::meta::INTENDED)):
+    /// forward it, refuse it with a reason the asker reads, or leave it on
+    /// the desk for the Speaker. The default is [`rule_crossing`]; an error,
+    /// or no answer within the triage deadline, leaves it for the Speaker.
+    async fn decide_crossing(&self, input: CrossingInput) -> Result<Crossing, BrainError> {
+        Ok(rule_crossing(&input))
+    }
+}
+
+/// A message an agent wrote for a seat outside its committee, on the
+/// Speaker's desk.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CrossingInput {
+    /// The committee it was written in (the asker's).
+    pub committee: CommitteeId,
+    /// The message itself: a root addressed to `speaker`.
+    pub event: Event,
+    /// Where it was meant to go.
+    pub intended: Locator,
+    /// The committee's most recent events before it, oldest first.
+    pub context: Vec<Event>,
+    /// The language of a refusal's reason.
+    pub locale: Locale,
+}
+
+/// What the desk does with a crossing message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Crossing {
+    /// Deliver it where it was meant to go, as the Speaker's office.
+    Forward,
+    /// Tell the asker no, with this reason.
+    Refuse(String),
+    /// Leave it on the desk: the Speaker decides.
+    Leave,
+}
+
+/// The crossing decision without a model, conservative: a plain question
+/// is forwarded; anything else (a request, a note) is left for the
+/// Speaker.
+pub fn rule_crossing(input: &CrossingInput) -> Crossing {
+    if input.event.kind == Kind::Question {
+        Crossing::Forward
+    } else {
+        Crossing::Leave
+    }
 }
 
 /// What the Speaker knows about one of a person's agents when it must pick
 /// one of them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentCandidate {
-    pub agent: SenatorPath,
+    pub agent: SenatorName,
     /// This agent's own connection: it can be reached now.
     pub present: bool,
     /// Its own latest checkpoint on the committee.
@@ -395,19 +442,22 @@ pub struct AgentCandidate {
     pub owns_thread: bool,
 }
 
-/// A person has several agents here and the one who asked did not name one.
+/// Several agents could be meant and the one who asked did not name one:
+/// a person's agents, or whichever agent on the committee (`senator::*`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct PickInput {
     pub committee: CommitteeId,
-    /// The person whose agent is meant.
-    pub owner: Name,
+    /// The person whose agent is meant; `None` for whichever agent on the
+    /// committee.
+    pub owner: Option<Name>,
     /// Who asked.
     pub asker: Address,
     /// What the agent would be asked to do, in the asker's words.
     pub task: String,
     /// The task thread the request was made in, if any.
     pub thread: Option<Seq>,
-    /// Every agent of `owner` seated here, in roster order.
+    /// Every agent of `owner` seated here, in roster order (every agent on
+    /// the committee when there is no owner).
     pub candidates: Vec<AgentCandidate>,
     pub locale: Locale,
 }
@@ -416,7 +466,7 @@ pub struct PickInput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pick {
     /// This one (it must be one of the candidates; anything else is asked).
-    Agent(SenatorPath),
+    Agent(SenatorName),
     /// It cannot be told: ask in the thread which one.
     Ask,
 }
@@ -455,7 +505,7 @@ mod tests {
     fn input(candidates: Vec<AgentCandidate>) -> PickInput {
         PickInput {
             committee: CommitteeId::new("refund-v2").expect("committee"),
-            owner: Name::new("alice").expect("name"),
+            owner: Some(Name::new("alice").expect("name")),
             asker: Address::senior(&Name::new("bob").expect("name")),
             task: "is the cap 3?".into(),
             thread: None,
@@ -471,21 +521,21 @@ mod tests {
     #[test]
     fn the_only_present_agent_is_picked() {
         let picked = rule_pick(&input(vec![
-            candidate("alice/claude", false, true),
-            candidate("alice/codex", true, false),
+            candidate("claude", false, true),
+            candidate("codex", true, false),
         ]));
         // Presence first: the connected one, even when the other owns the thread.
-        assert_eq!(picked, agent("alice/codex"));
+        assert_eq!(picked, agent("codex"));
     }
 
     #[test]
     fn among_equally_reachable_agents_the_thread_decides() {
         for present in [true, false] {
             let picked = rule_pick(&input(vec![
-                candidate("alice/claude", present, false),
-                candidate("alice/codex", present, true),
+                candidate("claude", present, false),
+                candidate("codex", present, true),
             ]));
-            assert_eq!(picked, agent("alice/codex"), "present: {present}");
+            assert_eq!(picked, agent("codex"), "present: {present}");
         }
     }
 
@@ -494,18 +544,18 @@ mod tests {
         for candidates in [
             // Neither present, neither owns the thread.
             vec![
-                candidate("alice/claude", false, false),
-                candidate("alice/codex", false, false),
+                candidate("claude", false, false),
+                candidate("codex", false, false),
             ],
             // Both present, neither owns it.
             vec![
-                candidate("alice/claude", true, false),
-                candidate("alice/codex", true, false),
+                candidate("claude", true, false),
+                candidate("codex", true, false),
             ],
             // Both present and both own it (a thread addressed to both).
             vec![
-                candidate("alice/claude", true, true),
-                candidate("alice/codex", true, true),
+                candidate("claude", true, true),
+                candidate("codex", true, true),
             ],
             // Nobody to pick from.
             Vec::new(),
@@ -527,12 +577,12 @@ mod tests {
             }
         }
         let input = input(vec![
-            candidate("alice/claude", true, false),
-            candidate("alice/codex", false, false),
+            candidate("claude", true, false),
+            candidate("codex", false, false),
         ]);
         let picked = futures_lite_block_on(Plain.pick_agent(input.clone()));
         assert_eq!(picked, Ok(rule_pick(&input)));
-        assert_eq!(picked, Ok(agent("alice/claude")));
+        assert_eq!(picked, Ok(agent("claude")));
     }
 
     /// Run a future that never waits on anything (the default pick is

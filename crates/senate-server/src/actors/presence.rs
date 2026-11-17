@@ -26,14 +26,14 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use senate_core::{CommitteeId, Event, SenatorPath, Seq};
+use senate_core::{CommitteeId, Event, SenatorName, Seq};
 
 use tokio::sync::mpsc::WeakSender;
 
 /// Identifies one SSE connection for the life of the process.
 pub(crate) type ConnId = u64;
 
-type Key = (CommitteeId, SenatorPath);
+type Key = (CommitteeId, SenatorName);
 
 struct Stream {
     conn: ConnId,
@@ -77,7 +77,7 @@ impl Presence {
     pub(crate) fn add(
         &self,
         committee: &CommitteeId,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         conn: ConnId,
         sender: WeakSender<Arc<Event>>,
     ) {
@@ -87,7 +87,7 @@ impl Presence {
     fn add_at(
         &self,
         committee: &CommitteeId,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         conn: ConnId,
         sender: WeakSender<Arc<Event>>,
         now: Instant,
@@ -105,7 +105,7 @@ impl Presence {
         });
     }
 
-    pub(crate) fn remove(&self, committee: &CommitteeId, agent: &SenatorPath, conn: ConnId) {
+    pub(crate) fn remove(&self, committee: &CommitteeId, agent: &SenatorName, conn: ConnId) {
         let mut state = self.lock();
         let key = (committee.clone(), agent.clone());
         if let Some(entry) = state.streams.get_mut(&key) {
@@ -118,14 +118,14 @@ impl Presence {
 
     /// The agent's bridge heartbeated the committee just now, reporting its
     /// delivered cursor.
-    pub(crate) fn heartbeat(&self, committee: &CommitteeId, agent: &SenatorPath, cursor: Seq) {
+    pub(crate) fn heartbeat(&self, committee: &CommitteeId, agent: &SenatorName, cursor: Seq) {
         self.heartbeat_at(committee, agent, cursor, Instant::now());
     }
 
     fn heartbeat_at(
         &self,
         committee: &CommitteeId,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         cursor: Seq,
         now: Instant,
     ) {
@@ -140,7 +140,7 @@ impl Presence {
     pub(crate) fn last_activity(
         &self,
         committee: &CommitteeId,
-        agent: &SenatorPath,
+        agent: &SenatorName,
     ) -> (Option<Instant>, Option<Seq>) {
         let state = self.lock();
         let key = (committee.clone(), agent.clone());
@@ -158,9 +158,9 @@ impl Presence {
     }
 
     /// Agents with a stream or a heartbeat on the committee.
-    pub(crate) fn agents_on(&self, committee: &CommitteeId) -> Vec<SenatorPath> {
+    pub(crate) fn agents_on(&self, committee: &CommitteeId) -> Vec<SenatorName> {
         let state = self.lock();
-        let mut out: Vec<SenatorPath> = state
+        let mut out: Vec<SenatorName> = state
             .streams
             .keys()
             .chain(state.heartbeats.keys())
@@ -172,11 +172,11 @@ impl Presence {
         out
     }
 
-    pub(crate) fn is_connected(&self, committee: &CommitteeId, agent: &SenatorPath) -> bool {
+    pub(crate) fn is_connected(&self, committee: &CommitteeId, agent: &SenatorName) -> bool {
         self.is_connected_at(committee, agent, Instant::now())
     }
 
-    fn is_connected_at(&self, committee: &CommitteeId, agent: &SenatorPath, now: Instant) -> bool {
+    fn is_connected_at(&self, committee: &CommitteeId, agent: &SenatorName, now: Instant) -> bool {
         let state = self.lock();
         let key = (committee.clone(), agent.clone());
         let Some(newest) = state
@@ -202,12 +202,12 @@ mod tests {
 
     const GRACE: Duration = Duration::from_secs(150);
 
-    fn path(s: &str) -> SenatorPath {
+    fn path(s: &str) -> SenatorName {
         s.parse().unwrap()
     }
 
-    fn ids() -> (CommitteeId, SenatorPath) {
-        (CommitteeId::new("refund-v2").unwrap(), path("alice/claude"))
+    fn ids() -> (CommitteeId, SenatorName) {
+        (CommitteeId::new("refund-v2").unwrap(), path("claude"))
     }
 
     #[test]
@@ -245,10 +245,10 @@ mod tests {
     fn an_open_stream_needs_heartbeats_once_the_grace_passes() {
         let presence = Presence::new(GRACE);
         let (committee, alice) = ids();
-        let bob = path("bob/claude");
+        let bob = path("copilot");
         let start = Instant::now();
         let at = |secs: u64| start + Duration::from_secs(secs);
-        let connected = |f: &CommitteeId, who: &SenatorPath, secs: u64| {
+        let connected = |f: &CommitteeId, who: &SenatorName, secs: u64| {
             presence.is_connected_at(f, who, at(secs))
         };
 
@@ -295,7 +295,7 @@ mod tests {
     fn two_agents_of_one_person_are_present_separately() {
         let presence = Presence::new(GRACE);
         let committee = CommitteeId::new("refund-v2").unwrap();
-        let (claude, codex) = (path("alice/claude"), path("alice/codex"));
+        let (claude, codex) = (path("claude"), path("codex"));
         let (tx, _rx) = mpsc::channel::<Arc<Event>>(1);
         presence.add(&committee, &claude, 1, tx.downgrade());
         assert!(presence.is_connected(&committee, &claude));

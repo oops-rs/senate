@@ -3,9 +3,9 @@
 //! The bridge seats several agents of one person, and each agent has its own
 //! stream. An agent's stream decides what is pushed to that agent; delivery
 //! then picks one of that agent's sessions. A message for
-//! `senator::wendell/claude` therefore reaches a session that speaks as
-//! `wendell/claude` (by default a Claude Code session) and never a session
-//! of `wendell/codex`, and vice versa.
+//! `senator::claude` therefore reaches a session that speaks as `claude`
+//! (by default a Claude Code session) and never a session of `codex`, and
+//! vice versa.
 //!
 //! 1. Only events with `senator::<the agent>` in `to`, and not written by
 //!    that agent, are pushed to it. An event whose `from` or `to` holds an
@@ -26,12 +26,12 @@
 //!
 //! # Reassigned work ("covering")
 //!
-//! While `senator::alice/claude`'s work on a committee is reassigned to one
-//! of my agents (a server-written `presence` `reassigned` with `new_owner`
-//! = that agent), rule 1 also gives that agent the events directed to
-//! `senator::alice/claude` ([`should_push_covering`]). Both sides are agent
-//! paths: reassigning `bob/codex`'s work to `alice/claude` makes
-//! `alice/claude` cover `bob/codex` and nothing else. The stored `to` is
+//! While `senator::copilot`'s work on a committee is reassigned to one of
+//! my agents (a server-written `presence` `reassigned` with `new_owner` =
+//! that agent), rule 1 also gives that agent the events directed to
+//! `senator::copilot` ([`should_push_covering`]). Both sides are agents:
+//! reassigning `aider`'s work to `claude` makes `claude` cover `aider` and
+//! nothing else. The stored `to` is
 //! never rewritten; the push says whose message it was. [`Covering`] folds
 //! the presence events off each agent's stream, and is seeded from the
 //! server's presence when a stream opens, so a restarted bridge still knows.
@@ -40,20 +40,21 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use senate_core::{
-    Address, AgentPresence, CommitteeId, Event, Locale, PresencePayload, PresenceState, SenatorPath,
+    Address, AgentPresence, CommitteeId, Event, Locale, People, PresencePayload, PresenceState,
+    SenatorName,
 };
 
 use crate::session::Session;
 
 /// Rule 1, for `me`, one of this bridge's agents.
-pub fn should_push(event: &Event, me: &SenatorPath) -> bool {
+pub fn should_push(event: &Event, me: &SenatorName) -> bool {
     let addr = Address::senator(me);
     event.is_directed_to(&addr) && event.from != addr && !names_unknown_address(event)
 }
 
 /// Rule 1 with reassigned work: also an event directed to an agent whose
 /// work on the committee is `me`'s now, unless `me` or that agent wrote it.
-pub fn should_push_covering(event: &Event, me: &SenatorPath, covering: &Covering) -> bool {
+pub fn should_push_covering(event: &Event, me: &SenatorName, covering: &Covering) -> bool {
     should_push(event, me)
         || (event.from != Address::senator(me)
             && !names_unknown_address(event)
@@ -65,7 +66,7 @@ pub fn should_push_covering(event: &Event, me: &SenatorPath, covering: &Covering
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Covering {
     /// (my agent, committee) → the agents whose work it has.
-    by_seat: BTreeMap<(SenatorPath, CommitteeId), BTreeSet<SenatorPath>>,
+    by_seat: BTreeMap<(SenatorName, CommitteeId), BTreeSet<SenatorName>>,
 }
 
 impl Covering {
@@ -76,7 +77,7 @@ impl Covering {
     /// Fold one event off `me`'s stream: a server `presence` reassigning
     /// work to `me` adds its agent; any later presence of that agent (a
     /// hand-back, or a reassignment to someone else) removes it.
-    pub fn observe(&mut self, event: &Event, me: &SenatorPath) {
+    pub fn observe(&mut self, event: &Event, me: &SenatorName) {
         if event.from != Address::Committee {
             return;
         }
@@ -94,7 +95,7 @@ impl Covering {
 
     /// Replace `me`'s view of a committee with the server's presence (a
     /// stream opened).
-    pub fn seed(&mut self, me: &SenatorPath, committee: &CommitteeId, agents: &[AgentPresence]) {
+    pub fn seed(&mut self, me: &SenatorName, committee: &CommitteeId, agents: &[AgentPresence]) {
         self.by_seat.remove(&(me.clone(), committee.clone()));
         for p in agents {
             self.set(me, committee, &p.agent, p.state, p.new_owner.as_ref());
@@ -103,11 +104,11 @@ impl Covering {
 
     fn set(
         &mut self,
-        me: &SenatorPath,
+        me: &SenatorName,
         committee: &CommitteeId,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         state: PresenceState,
-        new_owner: Option<&SenatorPath>,
+        new_owner: Option<&SenatorName>,
     ) {
         let seat = (me.clone(), committee.clone());
         let mine = state == PresenceState::Reassigned && new_owner == Some(me) && agent != me;
@@ -122,7 +123,7 @@ impl Covering {
     }
 
     /// Whether `me` covers `agent`'s work on `committee`.
-    pub fn covers(&self, me: &SenatorPath, committee: &CommitteeId, agent: &SenatorPath) -> bool {
+    pub fn covers(&self, me: &SenatorName, committee: &CommitteeId, agent: &SenatorName) -> bool {
         self.by_seat
             .get(&(me.clone(), committee.clone()))
             .is_some_and(|set| set.contains(agent))
@@ -130,9 +131,9 @@ impl Covering {
 
     /// The agent `me` covers that `event` is directed to (and did not
     /// write), if any.
-    pub fn covered_for(&self, event: &Event, me: &SenatorPath) -> Option<SenatorPath> {
+    pub fn covered_for(&self, event: &Event, me: &SenatorName) -> Option<SenatorName> {
         let set = self.by_seat.get(&(me.clone(), event.committee.clone()))?;
-        event.to.iter().find_map(|a| match a.as_agent() {
+        event.to.iter().find_map(|a| match a.as_senator() {
             Some(agent) if set.contains(agent) && event.from != *a => Some(agent.clone()),
             _ => None,
         })
@@ -145,24 +146,24 @@ pub fn names_unknown_address(event: &Event) -> bool {
         || event.to.iter().any(|a| matches!(a, Address::Other(_)))
 }
 
-/// Whom `ask` may address: an agent (`senator::bob/claude`) or whichever of
-/// a person's agents should get it (`senator::bob/*`). A question to the
-/// Speaker, the committee, a person by themselves or a guest would never be
-/// answered by an agent, so it is refused here. `Err` is written for the
-/// asking agent, in `locale`.
-pub fn check_ask_recipients(to: &[Address], locale: Locale) -> Result<(), String> {
+/// Whom `ask` may address: an agent (`senator::codex`) or whichever agent
+/// on the committee (`senator::*`). A question to the Speaker, the
+/// committee, a person (one of `people`) or a guest would never be answered
+/// by an agent, so it is refused here. `Err` is written for the asking
+/// agent, in `locale`. With no `people` known, only the forms are checked.
+pub fn check_ask_recipients(to: &[Address], people: &People, locale: Locale) -> Result<(), String> {
     if to.is_empty() {
         return Err(locale
             .pick(
-                "`to` 没有指定要问谁；请写队友的 agent，例如 senator::bob/claude，或 bob（bob 的 agent）",
-                "`to` names nobody to ask; name a teammate's agent, e.g. senator::bob/claude, or \
-                 bob for whichever of bob's agents",
+                "`to` 没有指定要问谁；请写队友的 agent，例如 senator::codex，或 *（这个委员会上的任意一个 agent）",
+                "`to` names nobody to ask; name a teammate's agent, e.g. senator::codex, or * for \
+                 whichever agent is on this committee",
             )
             .to_string());
     }
     let refused: Vec<String> = to
         .iter()
-        .filter(|a| !(a.is_junior() || a.is_wildcard()))
+        .filter(|a| !(people.is_agent_address(a) || a.is_wildcard()))
         .map(Address::in_text)
         .collect();
     if refused.is_empty() {
@@ -171,16 +172,15 @@ pub fn check_ask_recipients(to: &[Address], locale: Locale) -> Result<(), String
     let refused = refused.join(", ");
     Err(match locale {
         Locale::Zh => format!(
-            "`ask` 只能问队友的 agent：写 senator::<person>/<agent>（例如 senator::bob/claude），\
-             或 senator::<person>/*、直接写 bob 表示 bob 的 agent；{refused} 不会回答。\
+            "`ask` 只能问队友的 agent：写 senator::<name>（例如 senator::codex），或 senator::* \
+             表示这个委员会上的任意一个 agent；{refused} 不会回答。\
              Speaker 不接受提问，问题也不会直接送到某个人本人。要找人，就问他的 agent，或者告诉你的用户。"
         ),
         Locale::En => format!(
-            "`ask` can only reach a teammate's agent: write senator::<person>/<agent> (for \
-             example senator::bob/claude), or senator::<person>/* or just bob for whichever of \
-             bob's agents; {refused} would never answer. The Speaker does not take questions, and \
-             a question does not reach a person directly. To involve a person, ask their agent or \
-             tell your user."
+            "`ask` can only reach a teammate's agent: write senator::<name> (for example \
+             senator::codex), or senator::* for whichever agent is on this committee; {refused} \
+             would never answer. The Speaker does not take questions, and a question does not \
+             reach a person directly. To involve a person, ask their agent or tell your user."
         ),
     })
 }
@@ -188,7 +188,7 @@ pub fn check_ask_recipients(to: &[Address], locale: Locale) -> Result<(), String
 /// Rule 2: live sessions of `agent` whose committee is `committee`.
 pub fn candidates<'a>(
     sessions: &'a [Session],
-    agent: &SenatorPath,
+    agent: &SenatorName,
     committee: &CommitteeId,
 ) -> Vec<&'a Session> {
     sessions
@@ -255,7 +255,7 @@ mod tests {
         CommitteeId::new("refund-v2").unwrap()
     }
 
-    fn path(s: &str) -> SenatorPath {
+    fn path(s: &str) -> SenatorName {
         s.parse().unwrap()
     }
 
@@ -263,8 +263,8 @@ mod tests {
         s.parse().unwrap()
     }
 
-    fn me() -> SenatorPath {
-        path("alice/claude")
+    fn me() -> SenatorName {
+        path("copilot")
     }
 
     fn session(id: &str, cwd: &str, age_secs: i64) -> Session {
@@ -336,19 +336,19 @@ mod tests {
     #[test]
     fn a_message_for_one_agent_is_not_for_the_persons_other_agents() {
         let to_claude = event(None);
-        assert!(should_push(&to_claude, &path("alice/claude")));
-        assert!(!should_push(&to_claude, &path("alice/codex")));
+        assert!(should_push(&to_claude, &path("copilot")));
+        assert!(!should_push(&to_claude, &path("cline")));
         // A message to the person is not a message to any of their agents.
         let to_person = NewEvent::new(committee(), Kind::Question, Address::Speaker, "q")
             .to(addr("senator::alice"))
             .into_event(Seq(2), Utc::now());
-        assert!(!should_push(&to_person, &path("alice/claude")));
+        assert!(!should_push(&to_person, &path("copilot")));
         // One agent writing to the other is a push to the other.
-        let between = NewEvent::new(committee(), Kind::Note, addr("senator::alice/codex"), "n")
-            .to(addr("senator::alice/claude"))
+        let between = NewEvent::new(committee(), Kind::Note, addr("senator::cline"), "n")
+            .to(addr("senator::copilot"))
             .into_event(Seq(3), Utc::now());
-        assert!(should_push(&between, &path("alice/claude")));
-        assert!(!should_push(&between, &path("alice/codex")));
+        assert!(should_push(&between, &path("copilot")));
+        assert!(!should_push(&between, &path("cline")));
     }
 
     fn reassigned(agent: &str, owner: Option<&str>, seq: u64) -> Event {
@@ -372,7 +372,7 @@ mod tests {
 
     #[test]
     fn reassigned_work_is_pushed_to_the_new_owner_until_handed_back() {
-        let bob = path("bob/claude");
+        let bob = path("devin");
         let to_alice = || {
             NewEvent::new(committee(), Kind::Question, Address::Speaker, "q")
                 .to(Address::senator(&me()))
@@ -381,7 +381,7 @@ mod tests {
         let mut covering = Covering::new();
         assert!(!should_push_covering(&to_alice(), &bob, &covering));
 
-        covering.observe(&reassigned("alice/claude", Some("bob/claude"), 5), &bob);
+        covering.observe(&reassigned("copilot", Some("devin"), 5), &bob);
         assert!(covering.covers(&bob, &committee(), &me()));
         assert!(should_push_covering(&to_alice(), &bob, &covering));
         assert_eq!(covering.covered_for(&to_alice(), &bob), Some(me()));
@@ -389,11 +389,11 @@ mod tests {
         // and alice's other agent is not covered.
         assert!(!should_push_covering(
             &to_alice(),
-            &path("bob/codex"),
+            &path("aider"),
             &covering
         ));
         let to_alice_codex = NewEvent::new(committee(), Kind::Question, Address::Speaker, "q")
-            .to(addr("senator::alice/codex"))
+            .to(addr("senator::cline"))
             .into_event(Seq(14), Utc::now());
         assert!(!should_push_covering(&to_alice_codex, &bob, &covering));
         // Not what I wrote, nor what alice wrote to herself.
@@ -417,22 +417,22 @@ mod tests {
         assert!(!should_push_covering(&elsewhere, &bob, &covering));
         // Alice's own bridge is unaffected by a reassignment to bob.
         let mut hers_view = Covering::new();
-        hers_view.observe(&reassigned("alice/claude", Some("bob/claude"), 5), &me());
+        hers_view.observe(&reassigned("copilot", Some("devin"), 5), &me());
         assert_eq!(hers_view, Covering::new());
         // A senator's forged presence does not count.
-        let mut forged = reassigned("alice/claude", Some("bob/claude"), 6);
+        let mut forged = reassigned("copilot", Some("devin"), 6);
         forged.from = Address::senator(&bob);
         let mut fresh = Covering::new();
         fresh.observe(&forged, &bob);
         assert_eq!(fresh, Covering::new());
 
         // Handed back.
-        covering.observe(&reassigned("alice/claude", None, 20), &bob);
+        covering.observe(&reassigned("copilot", None, 20), &bob);
         assert!(!should_push_covering(&to_alice(), &bob, &covering));
 
         // Seeded from the server's view.
         let page = vec![senate_core::AgentPresence::from_payload(
-            &PresencePayload::of(&reassigned("alice/claude", Some("bob/claude"), 30)).unwrap(),
+            &PresencePayload::of(&reassigned("copilot", Some("devin"), 30)).unwrap(),
             Some(Seq(30)),
         )];
         covering.seed(&bob, &committee(), &page);
@@ -444,23 +444,29 @@ mod tests {
     #[test]
     fn only_agents_can_be_asked() {
         let en = Locale::En;
-        assert!(check_ask_recipients(&[Address::senator(&me())], en).is_ok());
-        assert!(check_ask_recipients(&[addr("senator::bob/*")], en).is_ok());
-        assert!(check_ask_recipients(&[], en).is_err());
+        let people =
+            People::new(["alice", "bob", "pm"].map(|h| senate_core::Name::new(h).unwrap()));
+        assert!(check_ask_recipients(&[Address::senator(&me())], &people, en).is_ok());
+        assert!(check_ask_recipients(&[addr("senator::*")], &people, en).is_ok());
+        assert!(check_ask_recipients(&[], &people, en).is_err());
         let refused = [
             Address::senator(&me()),
             Address::Speaker,
             addr("senator::pm"),
             addr("guest::chat/u_1"),
         ];
-        let err = check_ask_recipients(&refused, en).unwrap_err();
+        let err = check_ask_recipients(&refused, &people, en).unwrap_err();
         assert!(
             err.contains("[speaker], [senator::pm], [guest::chat/u_1] would never answer"),
             "{err}"
         );
-        let zh = check_ask_recipients(&refused, Locale::Zh).unwrap_err();
+        let zh = check_ask_recipients(&refused, &people, Locale::Zh).unwrap_err();
         assert!(zh.contains("只能问队友的 agent"), "{zh}");
         assert!(zh.contains("[senator::pm]"), "{zh}");
+        // A name is flat: who is a person is the Senate's people's to say.
+        // With none known, only the forms are checked.
+        assert!(check_ask_recipients(&[addr("senator::pm")], &People::default(), en).is_ok());
+        assert!(check_ask_recipients(&[Address::Speaker], &People::default(), en).is_err());
     }
 
     #[test]
@@ -473,7 +479,7 @@ mod tests {
         other.joined_committee = Some(CommitteeId::new("other").unwrap());
         let mut codex = session("cx", "/cx", 0);
         codex.runtime = Runtime::Codex;
-        codex.agent = path("alice/codex");
+        codex.agent = path("cline");
         let ok = session("ok", "/ok", 0);
         let all = [unbound, stale, other, codex, ok];
         let ids = |agent: &str| -> Vec<String> {
@@ -482,9 +488,9 @@ mod tests {
                 .map(|s| s.session_id.clone())
                 .collect()
         };
-        assert_eq!(ids("alice/claude"), ["ok"]);
-        assert_eq!(ids("alice/codex"), ["cx"]);
-        assert!(ids("alice/reviewer").is_empty());
+        assert_eq!(ids("copilot"), ["ok"]);
+        assert_eq!(ids("cline"), ["cx"]);
+        assert!(ids("reviewer").is_empty());
     }
 
     #[test]

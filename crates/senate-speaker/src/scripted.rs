@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use senate_core::{Brief, Locale, TriagePayload, TriageVerdict};
 
 use crate::brain::{
-    AgentTurn, Answer, Brain, BrainError, Conversation, Intent, Pick, PickInput, Question,
-    TriageInput, Utterance, rule_pick,
+    AgentTurn, Answer, Brain, BrainError, Conversation, Crossing, CrossingInput, Intent, Pick,
+    PickInput, Question, TriageInput, Utterance, rule_crossing, rule_pick,
 };
 
 /// One scripted result, and how long the "model" takes to produce it.
@@ -35,13 +35,16 @@ struct Script {
     top_locales: Vec<Locale>,
     picks: VecDeque<Step<Pick>>,
     pick_inputs: Vec<PickInput>,
+    crossings: VecDeque<Step<Crossing>>,
+    crossing_inputs: Vec<CrossingInput>,
 }
 
 /// Plays queued answers in order and records every call. An unscripted call
 /// is [`BrainError::Unavailable`], which is exactly the "model is down" path,
 /// except [`Brain::triage`]: unscripted, it judges *agent* (p 1.0) at once,
-/// so a test that does not care about triage sees deliveries unchanged; and
-/// [`Brain::pick_agent`]: unscripted, it is the rule-based default.
+/// so a test that does not care about triage sees deliveries unchanged;
+/// [`Brain::pick_agent`] and [`Brain::decide_crossing`]: unscripted, they
+/// are the rule-based defaults.
 #[derive(Default)]
 pub struct ScriptedBrain {
     script: Mutex<Script>,
@@ -182,6 +185,21 @@ impl ScriptedBrain {
         self.lock().pick_inputs.clone()
     }
 
+    /// Queue the next [`Brain::decide_crossing`] result.
+    pub fn decides_crossing(&self, result: Result<Crossing, BrainError>) -> &Self {
+        self.lock().crossings.push_back(Step {
+            delay: Duration::ZERO,
+            result,
+        });
+        self
+    }
+
+    /// Every crossing decision asked for so far (recorded when the call
+    /// starts).
+    pub fn crossing_inputs(&self) -> Vec<CrossingInput> {
+        self.lock().crossing_inputs.clone()
+    }
+
     fn lock(&self) -> MutexGuard<'_, Script> {
         self.script
             .lock()
@@ -251,6 +269,18 @@ impl Brain for ScriptedBrain {
         match step {
             Some(step) => play(Some(step), "").await,
             None => Ok(rule_pick(&input)),
+        }
+    }
+
+    async fn decide_crossing(&self, input: CrossingInput) -> Result<Crossing, BrainError> {
+        let step = {
+            let mut script = self.lock();
+            script.crossing_inputs.push(input.clone());
+            script.crossings.pop_front()
+        };
+        match step {
+            Some(step) => play(Some(step), "").await,
+            None => Ok(rule_crossing(&input)),
         }
     }
 

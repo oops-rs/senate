@@ -94,7 +94,8 @@ use serde_json::Value;
 use crate::address::Address;
 use crate::event::{Event, Kind, StatusState, is_provisional, meta};
 use crate::ids::{Name, Seq};
-use crate::senator::SenatorPath;
+use crate::roster::People;
+use crate::senator::SenatorName;
 
 /// How long a bridge holds a root that [`needs_triage`] for a verdict.
 pub const TRIAGE_WAIT_SECS: u64 = 10;
@@ -289,12 +290,13 @@ impl TriagePayload {
 
 /// Whether `event` is a root the bridge must hold for a triage verdict: a
 /// `question` or `request` that starts a thread, is addressed to at least one
-/// agent, was not written by the Speaker, and carries no verdict of its own.
-pub fn needs_triage(event: &Event) -> bool {
+/// agent (a senator not among `people`), was not written by the Speaker,
+/// and carries no verdict of its own.
+pub fn needs_triage(event: &Event, people: &People) -> bool {
     matches!(event.kind, Kind::Question | Kind::Request)
         && event.thread.is_none()
         && event.from != Address::Speaker
-        && event.to.iter().any(Address::is_junior)
+        && event.to.iter().any(|a| people.is_agent_address(a))
         && !event.meta.contains_key(meta::TRIAGE)
 }
 
@@ -327,7 +329,7 @@ impl OutputLevel {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskOwner {
     /// The agent whose status claimed the thread.
-    pub agent: SenatorPath,
+    pub agent: SenatorName,
     /// That agent's bridge's id for the session.
     pub session: String,
 }
@@ -343,6 +345,9 @@ pub struct ThreadSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_behalf_of: Option<Address>,
     pub to: Vec<Address>,
+    /// The agents among `to`: the senators that are not people.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<SenatorName>,
     /// The status title, else the start of the root's body.
     pub title: String,
     pub state: StatusState,
@@ -443,13 +448,13 @@ pub enum WaitsOn {
 
 impl ThreadSummary {
     /// The agents the task was addressed to, in the root's order.
-    pub fn agents(&self) -> impl Iterator<Item = &SenatorPath> {
-        self.to.iter().filter_map(Address::as_agent)
+    pub fn agents(&self) -> impl Iterator<Item = &SenatorName> {
+        self.agents.iter()
     }
 
     /// Whether the task was addressed to exactly this agent. Another agent
     /// of the same person does not count.
-    pub fn is_for(&self, agent: &SenatorPath) -> bool {
+    pub fn is_for(&self, agent: &SenatorName) -> bool {
         self.agents().any(|a| a == agent)
     }
 
@@ -555,11 +560,18 @@ pub struct TaskBoard {
     head: Seq,
     threads: BTreeMap<Seq, ThreadSummary>,
     output_level: OutputLevel,
+    /// Who the Senate's people are: a `senator::` address that is not one
+    /// of them is an agent's.
+    people: People,
 }
 
 impl TaskBoard {
-    pub fn new() -> Self {
-        Self::default()
+    /// The board of a committee whose Senate's people are `people`.
+    pub fn new(people: People) -> Self {
+        Self {
+            people,
+            ..Self::default()
+        }
     }
 
     /// The last seq folded in.
@@ -590,7 +602,7 @@ impl TaskBoard {
     /// agent's inbox, not its person's.
     pub fn threads_for(
         &self,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         state: Option<StatusState>,
     ) -> Vec<&ThreadSummary> {
         let mut out = self.threads(state);
@@ -614,8 +626,13 @@ impl TaskBoard {
 
     fn observe_root(&mut self, event: &Event) {
         let is_task = (matches!(event.kind, Kind::Question | Kind::Request)
-            && event.to.iter().any(Address::is_junior))
+            && event.to.iter().any(|a| self.people.is_agent_address(a)))
             || crate::work::is_work_root(event);
+        let agents = event
+            .to
+            .iter()
+            .filter_map(|a| self.people.as_agent(a).cloned())
+            .collect();
         if !is_task {
             return;
         }
@@ -627,6 +644,7 @@ impl TaskBoard {
                 from: event.from.clone(),
                 on_behalf_of: event.on_behalf_of.clone(),
                 to: event.to.clone(),
+                agents,
                 title: untitled(&event.body),
                 state: StatusState::Processing,
                 since: event.seq,
@@ -762,7 +780,7 @@ impl TaskBoard {
                 // no owner.
                 if thread.owner.is_none()
                     && let Some(session) = status.session
-                    && let Some(agent) = event.from.as_agent()
+                    && let Some(agent) = self.people.as_agent(&event.from)
                 {
                     thread.owner = Some(TaskOwner {
                         agent: agent.clone(),
@@ -869,12 +887,10 @@ pub fn attention(event: &Event, person: &Name) -> Option<Attention> {
     })
 }
 
-/// The person an address names, when it is a person.
+/// The handle an address names, when it names a senator: compared with a
+/// person's handle, it says whether the address is that person.
 fn person_of(address: &Address) -> Option<Name> {
-    address
-        .is_senior()
-        .then(|| address.as_senator().map(|p| p.owner().clone()))
-        .flatten()
+    address.as_senator().map(|p| p.name().clone())
 }
 
 /// What the author of `event` had seen of its thread when they wrote it
@@ -945,12 +961,18 @@ mod tests {
         s.parse().unwrap()
     }
 
-    fn path(s: &str) -> SenatorPath {
+    fn path(s: &str) -> SenatorName {
         s.parse().unwrap()
     }
 
     fn name(s: &str) -> Name {
         Name::new(s).unwrap()
+    }
+
+    /// The people of the Senate these logs are in: every other senator
+    /// named in them is an agent.
+    fn people() -> People {
+        People::new(["alice", "bob", "carol", "wendell", "pm"].map(name))
     }
 
     struct Log(Vec<Event>);
@@ -962,7 +984,7 @@ mod tests {
             seq
         }
         fn board(&self) -> TaskBoard {
-            let mut b = TaskBoard::new();
+            let mut b = TaskBoard::new(people());
             for e in &self.0 {
                 b.observe(e);
             }
@@ -978,7 +1000,7 @@ mod tests {
 
     fn json_work() -> serde_json::Value {
         serde_json::json!({
-            "run_id": 1, "requester": "bob", "target_agent": "alice/claude",
+            "run_id": 1, "requester": "bob", "target_agent": "claude",
             "instruction": "x", "branch": "feature/refund-v2/speaker-1", "state": "queued"
         })
     }
@@ -993,7 +1015,7 @@ mod tests {
                 .with_meta(meta::WORK, work.clone()),
         );
         let forged = log.push(
-            NewEvent::new(c(), Kind::Note, addr("senator::eve/claude"), "x")
+            NewEvent::new(c(), Kind::Note, addr("senator::forger"), "x")
                 .with_meta(meta::WORK, work),
         );
         let plain = log.push(NewEvent::new(c(), Kind::Note, Address::Speaker, "hi"));
@@ -1012,10 +1034,10 @@ mod tests {
             NewEvent::new(
                 c(),
                 Kind::Question,
-                addr("senator::bob/claude"),
+                addr("senator::copilot"),
                 "网关幂等用哪个 header？",
             )
-            .to(addr("senator::alice/claude")),
+            .to(addr("senator::claude")),
         );
         assert_eq!(
             log.board().get(root).unwrap().state,
@@ -1030,13 +1052,13 @@ mod tests {
             label: "已读日志".into(),
             done: true,
         }]);
-        log.push(status(root, addr("senator::alice/claude"), s));
+        log.push(status(root, addr("senator::claude"), s));
         let t = log.board().get(root).unwrap().clone();
         assert_eq!(t.title, "查幂等 header");
         assert_eq!(
             t.owner,
             Some(TaskOwner {
-                agent: path("alice/claude"),
+                agent: path("claude"),
                 session: "s-01".into()
             })
         );
@@ -1046,7 +1068,7 @@ mod tests {
             NewEvent::new(
                 c(),
                 Kind::Answer,
-                addr("senator::alice/claude"),
+                addr("senator::claude"),
                 "Idempotency-Key",
             )
             .in_thread(root),
@@ -1059,7 +1081,7 @@ mod tests {
 
         log.push(status(
             root,
-            addr("senator::alice/claude"),
+            addr("senator::claude"),
             StatusPayload::new(StatusState::Archived),
         ));
         let board = log.board();
@@ -1068,11 +1090,11 @@ mod tests {
         assert_eq!(board.get(root).unwrap().steps.len(), 1);
     }
 
-    /// A question from bob to alice/claude; returns its root.
+    /// A question from bob to claude; returns its root.
     fn ask(log: &mut Log) -> Seq {
         log.push(
-            NewEvent::new(c(), Kind::Question, addr("senator::bob/claude"), "?")
-                .to(addr("senator::alice/claude")),
+            NewEvent::new(c(), Kind::Question, addr("senator::copilot"), "?")
+                .to(addr("senator::claude")),
         )
     }
 
@@ -1093,7 +1115,7 @@ mod tests {
         // A provisional answer does not settle it.
         log.push(
             NewEvent::new(c(), Kind::Answer, Address::Speaker, "")
-                .on_behalf_of(addr("senator::alice/claude"))
+                .on_behalf_of(addr("senator::claude"))
                 .in_thread(root)
                 .with_meta(meta::PROVISIONAL, true.into()),
         );
@@ -1104,37 +1126,37 @@ mod tests {
     fn a_thread_whose_last_word_is_an_answer_is_settled() {
         let mut log = Log(Vec::new());
         let root = ask(&mut log);
-        say(&mut log, Kind::Answer, "senator::alice/claude", root);
+        say(&mut log, Kind::Answer, "senator::claude", root);
         // The answerer's own later words, status updates that keep it
         // answered, and the Speaker's bookkeeping do not reopen it.
-        say(&mut log, Kind::Note, "senator::alice/claude", root);
+        say(&mut log, Kind::Note, "senator::claude", root);
         say(&mut log, Kind::Note, "speaker", root);
         let t = log.board().get(root).unwrap().clone();
         assert_eq!(t.waits(), None);
         assert!(t.is_settled());
-        assert_eq!(t.answered_by, Some(addr("senator::alice/claude")));
+        assert_eq!(t.answered_by, Some(addr("senator::claude")));
     }
 
     #[test]
     fn a_follow_up_after_the_answer_reopens_it_until_the_next_answer() {
         let mut log = Log(Vec::new());
         let root = ask(&mut log);
-        say(&mut log, Kind::Answer, "senator::alice/claude", root);
+        say(&mut log, Kind::Answer, "senator::claude", root);
         for kind in [Kind::Question, Kind::Request, Kind::Note, Kind::Chat] {
             let mut l = Log(log.0.clone());
-            say(&mut l, kind, "senator::bob/claude", root);
+            say(&mut l, kind, "senator::copilot", root);
             assert_eq!(waits(&l, root), Some(WaitsOn::Agents));
         }
         say(&mut log, Kind::Note, "senator::bob", root);
         assert_eq!(waits(&log, root), Some(WaitsOn::Agents));
         // A person's correction, then the agent answers again.
-        say(&mut log, Kind::Answer, "senator::alice/claude", root);
+        say(&mut log, Kind::Answer, "senator::claude", root);
         assert_eq!(waits(&log, root), None);
         // The person answers after the agent: they are the answerer now, so
         // the agent's words reopen it.
         say(&mut log, Kind::Answer, "senator::alice", root);
         assert_eq!(waits(&log, root), None);
-        say(&mut log, Kind::Note, "senator::alice/claude", root);
+        say(&mut log, Kind::Note, "senator::claude", root);
         assert_eq!(waits(&log, root), Some(WaitsOn::Agents));
     }
 
@@ -1142,10 +1164,10 @@ mod tests {
     fn a_thread_parked_on_a_person_waits_on_them_even_when_answered() {
         let mut log = Log(Vec::new());
         let root = ask(&mut log);
-        say(&mut log, Kind::Answer, "senator::alice/claude", root);
+        say(&mut log, Kind::Answer, "senator::claude", root);
         let mut s = StatusPayload::new(StatusState::Suspended);
         s.escalated_to = Some(name("alice"));
-        log.push(status(root, addr("senator::alice/claude"), s));
+        log.push(status(root, addr("senator::claude"), s));
         assert_eq!(waits(&log, root), Some(WaitsOn::Person));
         // Their answer settles it.
         say(&mut log, Kind::Answer, "senator::alice", root);
@@ -1156,10 +1178,10 @@ mod tests {
     fn an_explicit_in_progress_status_after_an_answer_waits() {
         let mut log = Log(Vec::new());
         let root = ask(&mut log);
-        say(&mut log, Kind::Answer, "senator::alice/claude", root);
+        say(&mut log, Kind::Answer, "senator::claude", root);
         log.push(status(
             root,
-            addr("senator::alice/claude"),
+            addr("senator::claude"),
             StatusPayload::new(StatusState::Processing),
         ));
         assert_eq!(waits(&log, root), Some(WaitsOn::Agents));
@@ -1183,12 +1205,12 @@ mod tests {
     fn a_provisional_answer_leaves_the_thread_open() {
         let mut log = Log(Vec::new());
         let root = log.push(
-            NewEvent::new(c(), Kind::Question, addr("senator::bob/claude"), "?")
-                .to(addr("senator::alice/claude")),
+            NewEvent::new(c(), Kind::Question, addr("senator::copilot"), "?")
+                .to(addr("senator::claude")),
         );
         log.push(
             NewEvent::new(c(), Kind::Answer, Address::Speaker, "")
-                .on_behalf_of(addr("senator::alice/claude"))
+                .on_behalf_of(addr("senator::claude"))
                 .in_thread(root)
                 .with_meta(meta::PROVISIONAL, true.into()),
         );
@@ -1200,17 +1222,17 @@ mod tests {
     fn a_task_belongs_to_the_agent_it_names_not_to_that_persons_other_agents() {
         let mut log = Log(Vec::new());
         let for_claude = log.push(
-            NewEvent::new(c(), Kind::Question, addr("senator::bob/claude"), "a")
-                .to(addr("senator::alice/claude")),
+            NewEvent::new(c(), Kind::Question, addr("senator::copilot"), "a")
+                .to(addr("senator::claude")),
         );
         let for_codex = log.push(
-            NewEvent::new(c(), Kind::Request, addr("senator::bob/claude"), "b")
-                .to(addr("senator::alice/codex")),
+            NewEvent::new(c(), Kind::Request, addr("senator::copilot"), "b")
+                .to(addr("senator::codex")),
         );
         let for_both = log.push(
             NewEvent::new(c(), Kind::Question, addr("senator::bob"), "c")
-                .to(addr("senator::alice/claude"))
-                .to(addr("senator::alice/codex"))
+                .to(addr("senator::claude"))
+                .to(addr("senator::codex"))
                 .to(addr("senator::alice")),
         );
         // To the person alone: no agent, no task.
@@ -1228,10 +1250,10 @@ mod tests {
                 .map(|t| t.root)
                 .collect()
         };
-        assert_eq!(roots("alice/claude"), [for_claude, for_both]);
-        assert_eq!(roots("alice/codex"), [for_codex, for_both]);
+        assert_eq!(roots("claude"), [for_claude, for_both]);
+        assert_eq!(roots("codex"), [for_codex, for_both]);
         assert!(roots("alice").is_empty());
-        assert!(roots("alice/gemini").is_empty());
+        assert!(roots("gemini").is_empty());
         assert_eq!(
             board
                 .get(for_both)
@@ -1239,7 +1261,7 @@ mod tests {
                 .agents()
                 .cloned()
                 .collect::<Vec<_>>(),
-            [path("alice/claude"), path("alice/codex")]
+            [path("claude"), path("codex")]
         );
     }
 
@@ -1248,8 +1270,8 @@ mod tests {
         let mut log = Log(Vec::new());
         let root = log.push(
             NewEvent::new(c(), Kind::Question, addr("senator::bob"), "?")
-                .to(addr("senator::alice/claude"))
-                .to(addr("senator::alice/codex")),
+                .to(addr("senator::claude"))
+                .to(addr("senator::codex")),
         );
         let claim = |session: &str| {
             let mut s = StatusPayload::new(StatusState::Processing);
@@ -1262,12 +1284,12 @@ mod tests {
         assert_eq!(log.board().get(root).unwrap().owner, None);
         // Two of alice's agents use the same session id; the first claim
         // stands, and says whose session it is.
-        log.push(status(root, addr("senator::alice/codex"), claim("s-01")));
-        log.push(status(root, addr("senator::alice/claude"), claim("s-01")));
+        log.push(status(root, addr("senator::codex"), claim("s-01")));
+        log.push(status(root, addr("senator::claude"), claim("s-01")));
         assert_eq!(
             log.board().get(root).unwrap().owner,
             Some(TaskOwner {
-                agent: path("alice/codex"),
+                agent: path("codex"),
                 session: "s-01".into()
             })
         );
@@ -1277,16 +1299,16 @@ mod tests {
     fn suspended_threads_are_listed_oldest_first() {
         let mut log = Log(Vec::new());
         let a = log.push(
-            NewEvent::new(c(), Kind::Request, addr("senator::bob/claude"), "改 header")
-                .to(addr("senator::alice/claude")),
+            NewEvent::new(c(), Kind::Request, addr("senator::copilot"), "改 header")
+                .to(addr("senator::claude")),
         );
         let b = log.push(
             NewEvent::new(c(), Kind::Question, addr("senator::pm"), "能延期吗")
-                .to(addr("senator::alice/claude")),
+                .to(addr("senator::claude")),
         );
         let mut esc = StatusPayload::new(StatusState::Suspended);
         esc.escalated_to = Some(name("alice"));
-        log.push(status(b, addr("senator::alice/claude"), esc));
+        log.push(status(b, addr("senator::claude"), esc));
         log.push(status(
             a,
             Address::Speaker,
@@ -1305,11 +1327,11 @@ mod tests {
     #[test]
     fn triage_gating() {
         let mut log = Log(Vec::new());
-        let question = || NewEvent::new(c(), Kind::Question, addr("senator::bob/claude"), "?");
-        let q = log.push(question().to(addr("senator::alice/claude")));
-        assert!(needs_triage(&log.0[0]));
+        let question = || NewEvent::new(c(), Kind::Question, addr("senator::copilot"), "?");
+        let q = log.push(question().to(addr("senator::claude")));
+        assert!(needs_triage(&log.0[0], &people()));
         // Not a root, not to an agent, from the Speaker, or already judged.
-        log.push(question().to(addr("senator::alice/claude")).in_thread(q));
+        log.push(question().to(addr("senator::claude")).in_thread(q));
         log.push(question().to(addr("senator::alice")));
         log.push(
             question()
@@ -1317,8 +1339,7 @@ mod tests {
                 .to(Address::Committee),
         );
         log.push(
-            NewEvent::new(c(), Kind::Question, Address::Speaker, "?")
-                .to(addr("senator::alice/claude")),
+            NewEvent::new(c(), Kind::Question, Address::Speaker, "?").to(addr("senator::claude")),
         );
         let verdict = TriagePayload {
             verdict: TriageVerdict::Agent,
@@ -1330,10 +1351,10 @@ mod tests {
         };
         log.push(
             question()
-                .to(addr("senator::alice/claude"))
+                .to(addr("senator::claude"))
                 .with_meta(meta::TRIAGE, verdict.value()),
         );
-        assert!(log.0[1..].iter().all(|e| !needs_triage(e)));
+        assert!(log.0[1..].iter().all(|e| !needs_triage(e, &people())));
 
         log.push(
             NewEvent::new(c(), Kind::Note, Address::Speaker, "")
@@ -1350,7 +1371,7 @@ mod tests {
     fn output_level_from_the_speaker_only() {
         let mut log = Log(Vec::new());
         log.push(
-            NewEvent::new(c(), Kind::Note, addr("senator::bob/claude"), "")
+            NewEvent::new(c(), Kind::Note, addr("senator::copilot"), "")
                 .with_meta(meta::OUTPUT_LEVEL, Value::from("all")),
         );
         assert_eq!(log.board().output_level(), OutputLevel::Status);
@@ -1409,12 +1430,12 @@ mod tests {
     fn request_to_own_agent(log: &mut Log) -> Seq {
         log.push(
             NewEvent::new(c(), Kind::Request, addr("senator::wendell"), "do the thing")
-                .to(addr("senator::wendell/claude")),
+                .to(addr("senator::cursor")),
         )
     }
 
     fn from_agent(log: &mut Log, root: Seq, s: StatusPayload) -> Seq {
-        log.push(status(root, addr("senator::wendell/claude"), s))
+        log.push(status(root, addr("senator::cursor"), s))
     }
 
     fn escalate(log: &mut Log, root: Seq, reason: &str) -> Seq {
@@ -1438,19 +1459,13 @@ mod tests {
         }]);
         from_agent(&mut log, root, s);
         log.push(
-            NewEvent::new(
-                c(),
-                Kind::Answer,
-                addr("senator::wendell/claude"),
-                "The result",
-            )
-            .to(addr("senator::wendell"))
-            .in_thread(root),
+            NewEvent::new(c(), Kind::Answer, addr("senator::cursor"), "The result")
+                .to(addr("senator::wendell"))
+                .in_thread(root),
         );
         escalate(&mut log, root, "nine decisions\nneeded");
         log.push(
-            NewEvent::new(c(), Kind::Checkpoint, addr("senator::wendell/claude"), "cp")
-                .in_thread(root),
+            NewEvent::new(c(), Kind::Checkpoint, addr("senator::cursor"), "cp").in_thread(root),
         );
         let mut s = StatusPayload::new(StatusState::Active);
         s.steps = Some(vec![Step {
@@ -1475,7 +1490,7 @@ mod tests {
         let w = t.waits_on_person(&name("wendell"), Seq(0)).unwrap();
         let e = w.escalation.unwrap();
         assert_eq!(e.reason.as_deref(), Some("nine decisions\nneeded"));
-        assert_eq!(e.by, addr("senator::wendell/claude"));
+        assert_eq!(e.by, addr("senator::cursor"));
         assert_eq!(t.reason.as_deref(), Some("nine decisions\nneeded"));
         // Seen everything: the escalation still waits, it is not new.
         let w = t.waits_on_person(&name("wendell"), Seq(99)).unwrap();
@@ -1686,18 +1701,13 @@ mod tests {
             let mut log = Log(Vec::new());
             let root = request_to_own_agent(&mut log);
             let e = log.push(
-                NewEvent::new(
-                    c(),
-                    kind.clone(),
-                    addr("senator::wendell/claude"),
-                    "Done\nmore",
-                )
-                .to(addr("senator::wendell"))
-                .in_thread(root),
+                NewEvent::new(c(), kind.clone(), addr("senator::cursor"), "Done\nmore")
+                    .to(addr("senator::wendell"))
+                    .in_thread(root),
             );
             if kind == Kind::Note {
                 // A note is not an answer; make it settled for agents.
-                say(&mut log, Kind::Answer, "senator::wendell/claude", root);
+                say(&mut log, Kind::Answer, "senator::cursor", root);
             }
             let t = log.board().get(root).unwrap().clone();
             // The agents' rule: nobody waits (or, for the note, the answer
@@ -1721,12 +1731,12 @@ mod tests {
         let mut log = Log(Vec::new());
         let root = request_to_own_agent(&mut log);
         let first = log.push(
-            NewEvent::new(c(), Kind::Answer, addr("senator::wendell/claude"), "one")
+            NewEvent::new(c(), Kind::Answer, addr("senator::cursor"), "one")
                 .to(addr("senator::wendell"))
                 .in_thread(root),
         );
         let second = log.push(
-            NewEvent::new(c(), Kind::Note, addr("senator::wendell/claude"), "two")
+            NewEvent::new(c(), Kind::Note, addr("senator::cursor"), "two")
                 .to(addr("senator::wendell"))
                 .in_thread(root),
         );
@@ -1734,7 +1744,7 @@ mod tests {
         assert!(t.waits_on_person(&wendell, first).is_some());
         assert!(t.waits_on_person(&wendell, second).is_none());
         let third = log.push(
-            NewEvent::new(c(), Kind::Note, addr("senator::wendell/claude"), "three")
+            NewEvent::new(c(), Kind::Note, addr("senator::cursor"), "three")
                 .to(addr("senator::wendell"))
                 .in_thread(root),
         );
@@ -1754,7 +1764,7 @@ mod tests {
         let root = request_to_own_agent(&mut log);
         log.push(
             NewEvent::new(c(), Kind::Answer, Address::Speaker, "where it stands")
-                .on_behalf_of(addr("senator::wendell/claude"))
+                .on_behalf_of(addr("senator::cursor"))
                 .to(addr("senator::wendell"))
                 .in_thread(root)
                 .with_meta(meta::PROVISIONAL, true.into()),
@@ -1805,7 +1815,7 @@ mod tests {
             .to(addr("senator::wendell"))
             .into_event(Seq(9), Utc::now());
         assert!(attention(&own, &wendell).is_none());
-        let to_speaker = NewEvent::new(c(), Kind::Question, addr("senator::wendell/claude"), "x")
+        let to_speaker = NewEvent::new(c(), Kind::Question, addr("senator::cursor"), "x")
             .to(Address::Speaker)
             .into_event(Seq(9), Utc::now());
         assert!(attention(&to_speaker, &wendell).is_none());

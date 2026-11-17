@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use ractor::{Actor, ActorProcessingErr, ActorRef};
-use senate_core::{CommitteeId, Event, SenatorPath};
+use senate_core::{CommitteeId, Event, SenatorName};
 use tokio::sync::mpsc::{self, error::TrySendError};
 
 use super::presence::{ConnId, Presence};
@@ -26,7 +26,7 @@ pub(crate) enum ProxyMsg {
 
 pub(crate) struct ProxyArgs {
     pub committee: CommitteeId,
-    pub agent: SenatorPath,
+    pub agent: SenatorName,
     pub presence: Arc<Presence>,
 }
 

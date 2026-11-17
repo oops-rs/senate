@@ -87,9 +87,8 @@ fn the_machine_example_parses_into_what_the_machine_reads() {
     assert_eq!(shipped.locale, Locale::En);
     let hosted = Hosted::load(&path).unwrap();
     assert_eq!(hosted.validate(&shipped), Ok(()));
-    assert!(hosted.local.is_none(), "under a team: the Senate above");
-    assert_eq!(hosted.preside.len(), 1);
-    assert_eq!(hosted.preside[0].agent.to_string(), "claude");
+    assert!(hosted.local.is_none(), "under a team: the team's Senate");
+    assert!(hosted.preside.is_empty(), "no Senate nests under an agent");
 
     let dir = tempfile::tempdir().unwrap();
     let full = dir.path().join("senate.toml");
@@ -100,10 +99,22 @@ fn the_machine_example_parses_into_what_the_machine_reads() {
     assert_eq!(config.branches().prefix(), "feature");
     assert_eq!(config.agents.claude.to_string(), "claude");
     assert_eq!(config.agents.codex.to_string(), "codex");
+    let under = Hosted::load(&full).unwrap();
+    assert!(under.preside.is_empty());
+    // Uncommented, [local] puts the machine's own Senate under the team's.
+    assert_eq!(under.validate(&config), Ok(()));
+    assert!(under.under_a_parent(&config));
+    let local = under.local.clone().unwrap();
+    assert_eq!(local.name.unwrap().as_str(), "alice-desk");
+    assert_eq!(local.speaker.unwrap().to_string(), "/acme::senator::alice");
+    let parent: senate_core::SenatePath = "/acme".parse().unwrap();
+    let (speaker, secretaries, note) = under.office_config(&config.person, Some(&parent)).unwrap();
+    assert_eq!(speaker.to_string(), "/acme::senator::alice");
     assert_eq!(
-        Hosted::load(&full).unwrap().preside[0].listen.as_deref(),
-        Some("127.0.0.1:7980")
+        secretaries,
+        ["claude".parse::<senate_core::SenatorName>().unwrap()]
     );
+    assert!(note.is_none());
     let codex = CodexConfig::load(&full).unwrap();
     assert!(codex.listen.is_some() && codex.bin.is_some());
     let companion = CompanionConfig::load(&full).unwrap();
@@ -120,12 +131,22 @@ fn the_local_example_is_what_init_writes() {
     let hosted = Hosted::load(&path).unwrap();
     assert_eq!(hosted.validate(&config), Ok(()));
     let local = hosted.local.clone().unwrap();
-    assert_eq!(local.speaker.unwrap().to_string(), "claude");
+    // The person presides; an agent is at most a secretary.
+    assert_eq!(local.speaker.unwrap().to_string(), "senator::alice");
+    assert!(local.secretaries.is_empty());
+    assert!(text.contains("# secretaries = [\"claude\"]"));
+    assert_eq!(local.name.unwrap().as_str(), "alice-desk");
     assert!(config.server_url.is_empty(), "no Senate above");
+    // Uncommented, claude works the desk.
+    let full: Hosted = toml::from_str(&uncommented(&text)).unwrap();
+    assert_eq!(
+        full.local.unwrap().secretaries,
+        ["claude".parse::<senate_core::SenatorName>().unwrap()]
+    );
 
     let written = senate_bridge::init::LocalProfile {
         person: "alice".parse().unwrap(),
-        speaker: "claude".parse().unwrap(),
+        speaker: None,
         locale: Locale::En,
         listen: senate_bridge::init::DEFAULT_LOCAL_LISTEN.into(),
     }

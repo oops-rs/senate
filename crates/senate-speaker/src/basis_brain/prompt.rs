@@ -3,7 +3,7 @@
 //! Every prompt is written once, in English, and asks for what people read
 //! in the committee's language (the input's [`Locale`]). Examples of what
 //! people say are given in both languages, because people type either.
-//! Identifiers (handles, agent paths, committee ids, seq, tool names) are
+//! Identifiers (handles, agent names, committee ids, seq, tool names) are
 //! never translated.
 //!
 //! The schemas are hand-written because their field descriptions are
@@ -15,15 +15,15 @@ use std::time::Duration;
 use basis::OutputSpec;
 use chrono::{DateTime, Utc};
 use senate_core::{
-    Address, Brief, CommitteeId, Event, Locale, OutputLevel, Roster, SenatorPath, Seq,
+    Address, Brief, CommitteeId, Event, Locale, OutputLevel, Roster, SenatorName, Seq,
     TriagePayload,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::brain::{
-    AgentCandidate, AgentTurn, Answer, BrainError, Conversation, Intent, Pick, PickInput, Question,
-    RelayKind, Takeover, TriageInput, Utterance, apply_threshold,
+    AgentCandidate, AgentTurn, Answer, BrainError, Conversation, Crossing, CrossingInput, Intent,
+    Pick, PickInput, Question, RelayKind, Takeover, TriageInput, Utterance, apply_threshold,
 };
 
 /// How much of one event body a prompt or tool result shows.
@@ -48,9 +48,9 @@ macro_rules! target_rule {
          agent …\", 「告诉 alice 的 agent …」, or a name the person goes by, e.g. 「爱丽丝的 \
          agent」): the system settles which of their agents gets it (their only agent; the person \
          themselves when they have none; when they have several, the one the speaker named, else \
-         the system picks by the task or asks). (2) One agent, written <handle>/<agent> (e.g. \
-         \"alice/codex\"), only when the speaker named that agent (\"alice's codex\", 「alice 的 \
-         codex」, \"alice/codex\"). Never choose one of a person's agents yourself when the speaker \
+         the system picks by the task or asks). (2) One agent, written by its own name (e.g. \
+         \"codex\"), only when the speaker named that agent (\"alice's codex\", 「alice 的 \
+         codex」, \"codex\"). Never choose one of a person's agents yourself when the speaker \
          did not name it, and never guess a person who is not named."
     };
 }
@@ -85,8 +85,8 @@ fn persona_with(
          \n\
          Who is who:\n\
          - People and agents are senators. A person is written senator::<handle> (e.g. \
-         senator::alice); an agent is written senator::<handle>/<agent> (e.g. \
-         senator::alice/claude). A person may have several agents, each with its own \
+         senator::alice); an agent is written senator::<agent>, by its own name (e.g. \
+         senator::claude). A person may have several agents, each with its own \
          presence, checkpoints and task threads.\n\
          - {targets}\n\
          \n\
@@ -100,7 +100,7 @@ fn persona_with(
          {reach}\n\
          - When relaying, keep the facts and numbers of the original words exactly: add \
          nothing, drop nothing.\n\
-         - Identifiers are never translated: handles, agent paths, committee ids, seq, tool \
+         - Identifiers are never translated: handles, agent names, committee ids, seq, tool \
          names.",
         place = place(committee),
         targets = target_rule!(),
@@ -111,6 +111,19 @@ fn persona_with(
 /// The system prompt of every run but `converse`.
 pub(crate) fn persona(committee: Option<&CommitteeId>, bot_name: &str, locale: Locale) -> String {
     persona_with(committee, bot_name, locale, ONLY_THE_LOG)
+}
+
+/// `persona` with this Senate's extra instructions after it: they add to
+/// its rules, never replace them.
+pub(crate) fn with_instructions(persona: String, instructions: Option<&str>) -> String {
+    match instructions.map(str::trim).filter(|t| !t.is_empty()) {
+        Some(text) => format!(
+            "{persona}\n\n\
+             Additional instructions from this Senate's configuration. They add to the rules \
+             above and never replace them; where they disagree, the rules above win:\n{text}"
+        ),
+        None => persona,
+    }
 }
 
 /// One event as a line a model can cite: who wrote it as a bracketed
@@ -157,13 +170,13 @@ fn render_context(events: &[Event]) -> String {
 }
 
 /// The roster as people (handle, the names they go by) with their seated
-/// agents: `- alice (also called Alice, 爱丽丝): alice/claude, alice/codex`.
+/// agents: `- alice (also called Alice, 爱丽丝): claude, codex`.
 pub(crate) fn render_roster(roster: &Roster) -> String {
-    if roster.seniors().is_empty() {
+    if roster.principals().is_empty() {
         return "(the roster is empty)".to_owned();
     }
     roster
-        .seniors()
+        .principals()
         .iter()
         .map(|senior| {
             let names = if senior.names.is_empty() {
@@ -247,7 +260,7 @@ pub(crate) fn brief_top(brief: &Brief, locale: Locale) -> String {
 }
 
 /// How the Speaker's answer for `agent` is labelled.
-fn answer_label(agent: &SenatorPath) -> String {
+fn answer_label(agent: &SenatorName) -> String {
     format!("[speaker::{agent}]")
 }
 
@@ -431,7 +444,7 @@ fn intent_schema() -> Value {
             },
             "target": {
                 "type": "string",
-                "description": "work only. Whose checkpoint to start from: a person's handle from the roster (e.g. \"alice\"), and the system settles which of their agents as it does for relay targets, or one agent written <handle>/<agent> (e.g. \"alice/codex\") when the speaker named that agent. The work starts from that one agent's own latest checkpoint."
+                "description": "work only. Whose checkpoint to start from: a person's handle from the roster (e.g. \"alice\"), and the system settles which of their agents as it does for relay targets, or one agent by its own name (e.g. \"codex\") when the speaker named that agent. The work starts from that one agent's own latest checkpoint."
             },
             "instruction": {
                 "type": "string",
@@ -439,11 +452,11 @@ fn intent_schema() -> Value {
             },
             "from": {
                 "type": "string",
-                "description": "reassign only. Whose work is handed over: a person's handle from the roster, or one agent written <handle>/<agent> when the speaker named that agent."
+                "description": "reassign only. Whose work is handed over: a person's handle from the roster, or one agent by its own name when the speaker named that agent."
             },
             "to": {
                 "type": "string",
-                "description": "reassign only. Who takes the work (the original owner when it is handed back): a person's handle from the roster, or one agent written <handle>/<agent> when the speaker named that agent."
+                "description": "reassign only. Who takes the work (the original owner when it is handed back): a person's handle from the roster, or one agent by its own name when the speaker named that agent."
             },
             "level": {
                 "type": "string",
@@ -903,7 +916,7 @@ fn pick_schema() -> Value {
         "properties": {
             "agent": {
                 "type": ["string", "null"],
-                "description": "The chosen agent's path exactly as listed, e.g. \"alice/claude\". null when you cannot tell which: the Speaker then asks."
+                "description": "The chosen agent's name exactly as listed, e.g. \"claude\". null when you cannot tell which: the Speaker then asks."
             },
             "reason": {
                 "type": "string",
@@ -966,7 +979,6 @@ fn render_candidate(candidate: &AgentCandidate, now: DateTime<Utc>) -> String {
 }
 
 pub(crate) fn pick(input: &PickInput, now: DateTime<Utc>) -> String {
-    let owner = Address::senior(&input.owner).in_text();
     let thread = match input.thread {
         Some(root) => format!("It was asked in the task thread rooted at seq {root}."),
         None => "It was not asked in a task thread.".to_owned(),
@@ -976,11 +988,26 @@ pub(crate) fn pick(input: &PickInput, now: DateTime<Utc>) -> String {
         .iter()
         .map(|c| render_candidate(c, now))
         .collect();
+    let (whose, which, listed) = match &input.owner {
+        Some(owner) => {
+            let owner = Address::senior(owner).in_text();
+            (
+                format!("an agent of {owner}"),
+                format!("which of {owner}'s agents"),
+                format!("{owner}'s agents here"),
+            )
+        }
+        None => (
+            "an agent on this committee".to_owned(),
+            "which agent".to_owned(),
+            "The agents on this committee".to_owned(),
+        ),
+    };
     format!(
-        "In committee {committee}, {asker} wants an agent of {owner} to take this on, without \
-         saying which of {owner}'s agents:\n\n{task}\n\n\
+        "In committee {committee}, {asker} wants {whose} to take this on, without \
+         saying {which}:\n\n{task}\n\n\
          {thread}\n\n\
-         {owner}'s agents here:\n{candidates}\n\n\
+         {listed}:\n{candidates}\n\n\
          Pick the agent this belongs to. Weigh the task against what each agent is working on: \
          its latest checkpoint (summary, branch) and its open task threads. Prefer the agent \
          whose thread it was asked in, or whose current work it continues. When it fits two \
@@ -1020,9 +1047,84 @@ impl PickWire {
         };
         let raw = raw.trim().trim_start_matches('[').trim_end_matches(']');
         let bare = raw.strip_prefix("senator::").unwrap_or(raw);
-        match bare.parse::<SenatorPath>() {
+        match bare.parse::<SenatorName>() {
             Ok(path) if candidates.iter().any(|c| c.agent == path) => Pick::Agent(path),
             _ => Pick::Ask,
+        }
+    }
+}
+
+// ---- A message crossing into another committee ------------------------
+
+/// The crossing answering tool's description; also how a scripted test finds it.
+pub(crate) const CROSSING_DESCRIPTION: &str = "Report what the Speaker's desk does with a message an agent wrote for a seat outside \
+     its committee. Call this exactly once.";
+
+pub(crate) fn crossing_spec() -> OutputSpec {
+    OutputSpec::new("speaker_crossing", CROSSING_DESCRIPTION, crossing_schema())
+}
+
+fn crossing_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "decision": {
+                "type": "string",
+                "enum": ["forward", "refuse", "leave"],
+                "description": "forward: deliver it where it was meant to go (a plain question someone there can answer). refuse: it should not go there; the asker is told why. leave: the Speaker must decide (a request that commits someone, anything about priorities, people, money or deadlines, anything you are unsure of)."
+            },
+            "reason": {
+                "type": "string",
+                "description": "Required for refuse: one short line the asker reads, in the language the prompt names. Otherwise why, briefly."
+            }
+        },
+        "required": ["decision"],
+        "additionalProperties": false
+    })
+}
+
+pub(crate) fn crossing(input: &CrossingInput) -> String {
+    format!(
+        "In committee {committee}, {asker} wrote a {kind} meant for {intended}, which is outside \
+         its committee:\n\n{body}\n\n\
+         Recent log:\n{context}\n\n\
+         An agent's message that leaves its own committee passes the Speaker's desk on the way. \
+         Decide: forward it when it is a plain question that someone there can answer; refuse it \
+         when it should not go there, with a reason; leave it for the Speaker when it asks \
+         someone to do something, commits anyone to anything, or you are not sure. When in \
+         doubt, leave it. Write the reason in {language}. Call the speaker_crossing tool \
+         exactly once.",
+        committee = input.committee,
+        asker = input.event.from.in_text(),
+        kind = input.event.kind,
+        intended = input.intended.in_text(),
+        body = input.event.body,
+        context = render_context(&input.context),
+        language = language(input.locale),
+    )
+}
+
+/// The crossing tool's payload.
+#[derive(Debug, Deserialize)]
+pub(crate) struct CrossingWire {
+    decision: String,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+impl CrossingWire {
+    pub(crate) fn into_crossing(self) -> Result<Crossing, BrainError> {
+        let reason = self
+            .reason
+            .map(|r| r.trim().chars().take(200).collect::<String>())
+            .filter(|r| !r.is_empty());
+        match self.decision.trim() {
+            "forward" => Ok(Crossing::Forward),
+            "leave" => Ok(Crossing::Leave),
+            "refuse" => reason
+                .map(Crossing::Refuse)
+                .ok_or_else(|| BrainError::Invalid("a refusal needs a reason".into())),
+            other => Err(BrainError::Invalid(format!("unknown decision {other:?}"))),
         }
     }
 }
@@ -1050,9 +1152,9 @@ mod tests {
             })
         );
         assert_eq!(
-            wire(json!({"action": "relay", "targets": ["alice/codex"], "body": "rebase first"})),
+            wire(json!({"action": "relay", "targets": ["codex"], "body": "rebase first"})),
             Ok(Intent::Relay {
-                targets: vec!["alice/codex".into()],
+                targets: vec!["codex".into()],
                 kind: RelayKind::Note,
                 body: "rebase first".into()
             })
@@ -1161,7 +1263,7 @@ mod tests {
         for rule in [
             "A person's handle from the roster",
             "the system settles which of their agents",
-            "<handle>/<agent>",
+            "written by its own name",
             "only when the speaker named that agent",
             "「alice 的 codex」",
             "Never choose one of a person's agents yourself",
@@ -1173,7 +1275,7 @@ mod tests {
             let text = schema["properties"][field]["description"]
                 .as_str()
                 .expect(field);
-            assert!(text.contains("<handle>/<agent>"), "{field}: {text}");
+            assert!(text.contains("by its own name"), "{field}: {text}");
         }
     }
 
@@ -1343,24 +1445,24 @@ mod tests {
             open_threads: Vec::new(),
             owns_thread: false,
         };
-        let candidates = [candidate("alice/claude"), candidate("alice/codex")];
+        let candidates = [candidate("claude"), candidate("codex")];
         let pick = |value: Value| {
             serde_json::from_value::<PickWire>(value)
                 .expect("wire")
                 .into_pick(&candidates)
         };
-        let codex: SenatorPath = "alice/codex".parse().expect("path");
+        let codex: SenatorName = "codex".parse().expect("path");
         assert_eq!(
-            pick(json!({ "agent": "alice/codex", "reason": "r" })),
+            pick(json!({ "agent": "codex", "reason": "r" })),
             Pick::Agent(codex.clone())
         );
         assert_eq!(
-            pick(json!({ "agent": "[senator::alice/codex]", "reason": "r" })),
+            pick(json!({ "agent": "[senator::codex]", "reason": "r" })),
             Pick::Agent(codex)
         );
         for asked in [
             json!({ "agent": null, "reason": "r" }),
-            json!({ "agent": "bob/claude", "reason": "r" }),
+            json!({ "agent": "copilot", "reason": "r" }),
             json!({ "agent": "alice", "reason": "r" }),
             json!({ "agent": "", "reason": "r" }),
         ] {

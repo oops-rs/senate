@@ -61,18 +61,7 @@ fn snapshot(dir: &Path) -> BTreeMap<String, Vec<u8>> {
 
 fn senate(dir: &Path, cwd: &Path, args: &[&str]) -> Output {
     let mut cmd = Command::new(BIN);
-    for var in [
-        "CLAUDE_CODE_MESSAGING_SOCKET",
-        "CLAUDE_CODE_MESSAGING_TOKEN",
-        "CLAUDE_CODE_SESSION_ID",
-        "CLAUDE_PID",
-        "CLAUDE_CONFIG_DIR",
-        "CODEX_HOME",
-        "RUST_LOG",
-        "SENATE_AGENT",
-    ] {
-        cmd.env_remove(var);
-    }
+    senate_bridge::testenv::isolate(&mut cmd, dir);
     cmd.env("HOME", dir)
         .env("SENATE_HOME", dir.join("home"))
         .env("GIT_CONFIG_NOSYSTEM", "1")

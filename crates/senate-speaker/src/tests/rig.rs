@@ -6,7 +6,8 @@ use std::sync::Arc;
 use ractor::ActorRef;
 use senate_core::{
     Account, Address, BindingAction, BindingPayload, CommitteeId, Event, Guest, Hub, Kind, Locale,
-    Mirror, Name, NewEvent, Roster, SenatorPath, Senior, Seq, Source, UnboundMention,
+    Mirror, Name, NewEvent, Principal, Roster, SeatedAgent, SenatorName, Seq, Source,
+    UnboundMention,
 };
 use serde_json::json;
 use tokio::sync::mpsc;
@@ -32,23 +33,53 @@ pub(crate) fn name(handle: &str) -> Name {
     Name::new(handle).expect("handle")
 }
 
-pub(crate) fn path(text: &str) -> SenatorPath {
-    text.parse().expect("senator path")
+pub(crate) fn path(text: &str) -> SenatorName {
+    text.parse().expect("senator name")
 }
 
-/// `<handle>/claude`: each person's one agent unless a test seats more.
-pub(crate) fn agent_path(handle: &str) -> SenatorPath {
-    path(&format!("{handle}/claude"))
+/// The agent each person runs, unless a test seats more: alice runs
+/// `claude`, bob `copilot`, pm `aider`. carol and mallory are not seated
+/// with one; theirs are `cline` and `devin` where a test needs a name.
+const AGENTS: [(&str, &str); 5] = [
+    ("alice", "claude"),
+    ("bob", "copilot"),
+    ("pm", "aider"),
+    ("carol", "cline"),
+    ("mallory", "devin"),
+];
+
+/// The one agent `handle` runs (see [`AGENTS`]).
+pub(crate) fn agent_path(handle: &str) -> SenatorName {
+    let (_, agent) = AGENTS
+        .iter()
+        .find(|(person, _)| *person == handle)
+        .unwrap_or_else(|| panic!("{handle} runs no agent in these tests"));
+    path(agent)
 }
 
-/// `senator::<handle>/claude`.
+/// The person who runs `agent`: the [`AGENTS`] table, and alice for the
+/// second agent (`codex`) tests seat for her.
+pub(crate) fn runner_of(agent: &SenatorName) -> Name {
+    if agent.as_str() == "codex" {
+        return name("alice");
+    }
+    let (person, _) = AGENTS
+        .iter()
+        .find(|(_, a)| *a == agent.as_str())
+        .unwrap_or_else(|| panic!("nobody runs {agent} in these tests"));
+    name(person)
+}
+
+/// `senator::<agent>` for the agent `handle` runs.
 pub(crate) fn agent(handle: &str) -> Address {
     Address::Senator(agent_path(handle))
 }
 
-/// `senator::<handle>/<agent>`: one of several agents of a person.
+/// `senator::<agent>`: one of several agents `handle` runs (the test seats
+/// it under them).
 pub(crate) fn agent_named(handle: &str, agent: &str) -> Address {
-    Address::Senator(path(&format!("{handle}/{agent}")))
+    let _ = handle;
+    Address::Senator(path(agent))
 }
 
 /// `senator::<handle>`: the person.
@@ -64,14 +95,15 @@ pub(crate) fn guest(id: &str) -> Address {
 /// What a sender is in the log: a handle on the roster is that person,
 /// anything else (like [`STRANGER`]) a guest, as the gateway records them.
 pub(crate) fn sender(from: &str) -> Address {
-    let known = Name::new(from).is_ok_and(|handle| roster().senior(&handle).is_some());
+    let known = Name::new(from).is_ok_and(|handle| roster().principal(&handle).is_some());
     if known { user(from) } else { guest(from) }
 }
 
-/// pm, alice and bob, each with one agent `claude` seated, and each with an
-/// account on the chat platform (`u_<handle>`).
+/// pm, alice and bob, each running one agent (see [`AGENTS`]) seated under
+/// them, and each with an account on the chat platform (`u_<handle>`).
 pub(crate) fn roster() -> Roster {
-    let senior = |handle: &str, names: &[&str]| Senior {
+    let senior = |handle: &str, names: &[&str]| Principal {
+        kind: senate_core::PrincipalKind::Person,
         handle: name(handle),
         names: names.iter().map(|n| (*n).to_owned()).collect(),
         accounts: vec![Account {
@@ -79,13 +111,14 @@ pub(crate) fn roster() -> Roster {
             id: format!("u_{handle}"),
         }],
     };
-    Roster::top(
+    let seated = |handle: &str| SeatedAgent::new(agent_path(handle), name(handle));
+    Roster::new(
         vec![
             senior("pm", &["PM"]),
             senior("alice", &["Alice", "爱丽丝"]),
             senior("bob", &["Bob"]),
         ],
-        vec![agent_path("pm"), agent_path("alice"), agent_path("bob")],
+        vec![seated("pm"), seated("alice"), seated("bob")],
     )
     .expect("roster")
 }

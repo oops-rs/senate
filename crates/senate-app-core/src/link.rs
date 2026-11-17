@@ -18,7 +18,7 @@ use senate_bridge::ipc::{
     self, ApprovalsReply, ApproveReply, ClientError, DocketReply, InboxReply, MAX_LINE, Posted,
     Reply, Request, SessionSelector, WatchEvent,
 };
-use senate_core::{CommitteeId, Locale, SenatorPath};
+use senate_core::{CommitteeId, Locale, SenatorName};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -308,7 +308,7 @@ impl<S: Sink> Driver<S> {
         self.changed();
     }
 
-    async fn refresh_inbox(&self, agent: SenatorPath, committee: CommitteeId) {
+    async fn refresh_inbox(&self, agent: SenatorName, committee: CommitteeId) {
         let what = ReadOf::Inbox {
             agent: agent.clone(),
             committee: committee.clone(),
@@ -387,7 +387,7 @@ impl<S: Sink> Driver<S> {
             Action::MarkRead { .. } => self.link.call::<Value>(&request).await,
         };
         if let Some(committee) = action.committee() {
-            let agents: Vec<SenatorPath> = self
+            let agents: Vec<SenatorName> = self
                 .model()
                 .targets()
                 .into_iter()

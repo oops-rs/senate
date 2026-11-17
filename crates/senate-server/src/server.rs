@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use axum::http::HeaderValue;
 use ractor::{Actor, ActorCell};
-use senate_core::{Roster, SpeakerSeat};
+use senate_core::{Roster, SenatorName};
 use senate_log::LogStore;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, oneshot};
@@ -18,6 +18,8 @@ use crate::auth::{Authenticate, StaticTokens};
 use crate::config::{ConfigError, ServerConfig};
 use crate::http::{self, AppState};
 use crate::hub::{BROADCAST_CAPACITY, HubParts, ServerHub};
+use crate::office::{self, default_built_in_name};
+use crate::registry;
 use crate::seats::Seats;
 
 /// How long [`Running::shutdown`] waits for each stage.
@@ -66,7 +68,7 @@ impl Server {
             auth: None,
             roster: None,
             triaged: false,
-            built_in_speaker: false,
+            built_in: None,
         }
     }
 }
@@ -78,7 +80,7 @@ impl Server {
 /// - **Roster**: the people, and the agents seated from the start. Default:
 ///   `config.roster`. A layer whose people live elsewhere builds the
 ///   [`Roster`] itself and passes it here, and can change the people while
-///   the server runs with [`ServerHub::set_seniors`]. Agents are seated as
+///   the server runs with [`ServerHub::set_principals`]. Agents are seated as
 ///   they connect either way.
 pub struct ServerBuilder {
     config: ServerConfig,
@@ -86,7 +88,7 @@ pub struct ServerBuilder {
     auth: Option<Arc<dyn Authenticate>>,
     roster: Option<Roster>,
     triaged: bool,
-    built_in_speaker: bool,
+    built_in: Option<SenatorName>,
 }
 
 impl ServerBuilder {
@@ -114,15 +116,22 @@ impl ServerBuilder {
         self
     }
 
-    /// Say that the built-in Speaker is attached to this server's hub: it
-    /// holds the Speaker's seat of this (top) Senate, and judges roots.
-    /// Without it, the seat is the roster's ([`Roster::speaker_seat`]): a
-    /// nested Senate's presider, a top Senate's named agent, or nobody.
-    /// Refused at start for a nested Senate, and for a top Senate whose
-    /// roster also names a Speaker.
-    pub fn built_in_speaker(mut self, built_in: bool) -> Self {
-        self.built_in_speaker = built_in;
+    /// Say that the daemon runs the built-in session beside this server's
+    /// hub, under the flat name `name` (`None`: it does not run). It is a
+    /// senator of the roster ([`Roster::with_built_in`]), run by the
+    /// Speaker's principal; it is the Speaker when the configuration names
+    /// it, or names no Speaker at all (an unattended root, as a Senate
+    /// configured before Speakers were named had it); else it works the
+    /// desk of whoever lists it as a secretary.
+    pub fn built_in_session(mut self, name: Option<SenatorName>) -> Self {
+        self.built_in = name;
         self
+    }
+
+    /// The older form of [`ServerBuilder::built_in_session`]: the built-in
+    /// session runs under its default name, `secretary`.
+    pub fn built_in_speaker(self, built_in: bool) -> Self {
+        self.built_in_session(built_in.then(default_built_in_name))
     }
 
     /// Spawn the supervision tree over the store, bind `config.listen`, and
@@ -135,33 +144,45 @@ impl ServerBuilder {
             auth,
             roster,
             triaged,
-            built_in_speaker,
+            built_in,
         } = self;
         config.validate_intervals()?;
-        let (auth, roster): (Arc<dyn Authenticate>, Roster) = match (auth, roster) {
-            (Some(auth), Some(roster)) => (auth, roster),
-            (auth, roster) => {
-                // Only what is not replaced is read from, and so checked in,
-                // the configuration.
-                let roster = match roster {
-                    Some(roster) => roster,
-                    None => config.roster()?,
-                };
-                let auth = match auth {
-                    Some(auth) => auth,
-                    None => Arc::new(StaticTokens::new(&config.tokens)?),
-                };
-                (auth, roster)
-            }
+        let auth: Arc<dyn Authenticate> = match auth {
+            Some(auth) => auth,
+            // Only what is not replaced is read from, and so checked in,
+            // the configuration.
+            None => Arc::new(StaticTokens::new(&config.tokens)?),
         };
+        let roster = match roster {
+            Some(roster) => roster.to_config(),
+            None => config.roster.clone(),
+        };
+        let (mut roster, notes) = office::settle(
+            roster,
+            config.parent.as_ref(),
+            built_in.clone(),
+            config.locale,
+        )?;
+        // What was registered at runtime, over the configuration's: who
+        // runs each agent, the secretaries, the child Senates.
+        let loaded = load_registry(store.as_ref(), &mut roster).await;
         let speaker = roster
-            .speaker_seat(built_in_speaker)
+            .speaker_seat(built_in.is_some())
             .map_err(|e| ConfigError::Invalid(format!("the Speaker: {e}")))?;
-        // Only the built-in Speaker judges roots; a senator-held seat never
-        // makes a bridge wait ([`SpeakerSeat::triages`]).
-        let triaged = triaged || speaker.as_ref().is_some_and(SpeakerSeat::triages);
-        if let Some(seat) = &speaker {
-            tracing::info!(speaker = ?seat, "the Speaker's seat");
+        // Only the built-in session judges roots, where it works the desk;
+        // a desk worked by agents never makes a bridge wait.
+        let triaged = triaged || roster.office().is_some_and(|o| o.triages());
+        if let Some(office) = roster.office() {
+            tracing::info!(speaker = %office.speaker, kind = ?office.kind, desk = ?office.desk, "the Speaker's office");
+        }
+        let mut said = Vec::with_capacity(notes.len());
+        for note in notes {
+            if registry::first_time(store.as_ref(), &note.key).await {
+                tracing::warn!("{}", note.text);
+            } else {
+                tracing::debug!("{}", note.text);
+            }
+            said.push(note.text);
         }
         let seats = Arc::new(Seats::new(roster));
         let epoch = store
@@ -199,6 +220,11 @@ impl ServerBuilder {
             seats,
             locale: config.locale,
             speaker,
+            built_in,
+            notes: said,
+            children: loaded,
+            senate: config.senate_name(),
+            parent: config.parent.clone(),
         }));
 
         // Every committee's writer runs its presence leases, so start them all
@@ -252,6 +278,46 @@ impl ServerBuilder {
             http_task: Some(http_task),
             supervisor_task: Some(supervisor_task),
         })
+    }
+}
+
+/// Load the store's registry over `roster` (who runs each agent, the
+/// secretaries) and return the registered child Senates. An entry the
+/// roster refuses now is logged and left out; a store that cannot be read
+/// starts the server with the configuration alone.
+async fn load_registry(
+    store: &dyn LogStore,
+    roster: &mut Roster,
+) -> std::collections::BTreeMap<senate_core::Name, senate_core::api::ChildSenate> {
+    match registry::seats(store).await {
+        Ok(seats) => {
+            for (agent, owner) in seats {
+                if roster.built_in() == Some(&agent) {
+                    continue;
+                }
+                if let Err(e) = roster.seat(agent.clone(), &owner) {
+                    tracing::warn!(%agent, %owner, "a kept seat is not seated again: {e}");
+                }
+            }
+        }
+        Err(e) => tracing::warn!("reading the kept seats: {e}"),
+    }
+    match registry::secretaries(store).await {
+        Ok(relations) => {
+            for (principal, secretaries) in relations {
+                if let Err(e) = roster.set_secretaries(principal.clone(), secretaries) {
+                    tracing::warn!(%principal, "kept secretaries are not registered again: {e}");
+                }
+            }
+        }
+        Err(e) => tracing::warn!("reading the kept secretaries: {e}"),
+    }
+    match registry::children(store).await {
+        Ok(children) => children,
+        Err(e) => {
+            tracing::warn!("reading the registered child Senates: {e}");
+            Default::default()
+        }
     }
 }
 

@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
 use ractor::ActorRef;
-use senate_core::{ChatSurface, PostTarget, Posted, SurfaceError};
-use senate_speaker::{Speaker, SpeakerArgs, SpeakerMsg};
+use senate_core::{ChatSurface, CommitteeId, PostTarget, Posted, SurfaceError};
+use senate_speaker::{SecretaryConfigs, Speaker, SpeakerArgs, SpeakerMsg};
 
 use crate::component::{Component, ComponentContext};
 
@@ -91,4 +91,13 @@ impl Component for SpeakerComponent {
         self.slot.set(None);
         outcome
     }
+}
+
+/// What `senated secretary show` prints: the built-in session's
+/// configuration in force for `committee` (`None`: the Senate as a whole),
+/// re-read from its files now, where each value came from, and the current
+/// problems, in the deployment's language. A model's key is never in it:
+/// only the name of its variable and whether it is set.
+pub fn secretary_show(secretary: &SecretaryConfigs, committee: Option<&CommitteeId>) -> String {
+    secretary.explain(committee).render(secretary.locale())
 }

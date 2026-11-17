@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, SubsecRound, Utc};
 use senate_core::api::Heartbeat;
-use senate_core::{Appended, CommitteeId, Event, EventId, MirrorRef, NewEvent, SenatorPath, Seq};
+use senate_core::{Appended, CommitteeId, Event, EventId, MirrorRef, NewEvent, SenatorName, Seq};
 
 use crate::error::LogError;
 use crate::memory::MemoryStore;
@@ -22,7 +22,7 @@ pub const SQLITE_PREFIX: &str = "sqlite:";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeartbeatRecord {
     pub committee: CommitteeId,
-    pub agent: SenatorPath,
+    pub agent: SenatorName,
     pub heartbeat: Heartbeat,
     pub at: DateTime<Utc>,
 }
@@ -32,9 +32,9 @@ pub struct HeartbeatRecord {
 pub enum CursorOwner {
     /// An in-process, server-side consumer (the Speaker, a gateway).
     Hub,
-    /// One senator, by full path: `wendell/claude` and `wendell/codex` have
+    /// One senator, by full path: `claude` and `codex` have
     /// separate cursors, and neither is `wendell`'s own.
-    Senator(SenatorPath),
+    Senator(SenatorName),
 }
 
 impl CursorOwner {
@@ -48,20 +48,20 @@ impl CursorOwner {
     }
 }
 
-impl From<SenatorPath> for CursorOwner {
-    fn from(path: SenatorPath) -> Self {
+impl From<SenatorName> for CursorOwner {
+    fn from(path: SenatorName) -> Self {
         Self::Senator(path)
     }
 }
 
-impl From<&SenatorPath> for CursorOwner {
-    fn from(path: &SenatorPath) -> Self {
+impl From<&SenatorName> for CursorOwner {
+    fn from(path: &SenatorName) -> Self {
         Self::Senator(path.clone())
     }
 }
 
 /// Refuse what the log cannot hold: an event whose `to`, `from` or
-/// `on_behalf_of` still names `senator::<person>/*`. A stored event always
+/// `on_behalf_of` still names `senator::*`. A stored event always
 /// names concrete senators, so whoever accepts the event resolves the
 /// wildcard first. Every store calls this before it writes.
 pub(crate) fn check_storable(event: &NewEvent) -> Result<(), LogError> {
@@ -184,8 +184,34 @@ pub trait LogStore: Send + Sync + 'static {
     async fn last_heartbeat(
         &self,
         committee: &CommitteeId,
-        agent: &SenatorPath,
+        agent: &SenatorName,
     ) -> Result<Option<HeartbeatRecord>, LogError>;
+
+    /// The registry: what the Senate keeps beside its log, facts that are
+    /// no committee's events (a child Senate registered from below, the
+    /// secretaries registered for a senator). Every entry whose key starts
+    /// with `prefix`, by key. Keys are namespaced (`child:<name>`); values
+    /// are JSON.
+    ///
+    /// The default keeps nothing (a store that wraps another for a test);
+    /// every store Senate ships keeps it.
+    async fn registry(&self, prefix: &str) -> Result<Vec<(String, serde_json::Value)>, LogError> {
+        let _ = prefix;
+        Ok(Vec::new())
+    }
+
+    /// Set (`Some`) or remove (`None`) one registry entry. The default
+    /// refuses: it keeps nothing.
+    async fn put_registry(
+        &self,
+        key: &str,
+        value: Option<serde_json::Value>,
+    ) -> Result<(), LogError> {
+        let _ = value;
+        Err(LogError::Invalid(format!(
+            "this store keeps no registry; cannot set {key}"
+        )))
+    }
 }
 
 /// The log's clock: now, truncated to the microsecond precision Postgres

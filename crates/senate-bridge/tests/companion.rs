@@ -136,7 +136,7 @@ async fn a_question_with_no_session_is_answered_by_a_companion() {
     .await
     .unwrap_err();
     assert!(refused.to_string().contains("companion"), "{refused}");
-    let read_before = h.server.cursor("refund-v2", "alice/claude", "read");
+    let read_before = h.server.cursor("refund-v2", "claude", "read");
     let caught: CatchUpReply = ipc::request(
         &h.socket(),
         &Request::CatchUp {
@@ -150,7 +150,7 @@ async fn a_question_with_no_session_is_answered_by_a_companion() {
     .unwrap();
     assert!(!caught.items.is_empty());
     assert_eq!(
-        h.server.cursor("refund-v2", "alice/claude", "read"),
+        h.server.cursor("refund-v2", "claude", "read"),
         read_before,
         "a companion does not move the read cursor"
     );
@@ -168,8 +168,15 @@ async fn a_question_with_no_session_is_answered_by_a_companion() {
     let answer = h.server.last_event("refund-v2");
     assert_eq!(answer.seq, posted.seq);
     assert_eq!(answer.thread, Some(q.seq));
+    // The companion is the agent's secretary: its answer is its own,
+    // given on the agent's behalf, flagged as a cover.
+    assert_eq!(answer.from.to_string(), "senator::companion");
     assert_eq!(
-        answer.meta.get(meta::COMPANION),
+        answer.on_behalf_of.as_ref().map(ToString::to_string),
+        Some("senator::claude".to_string())
+    );
+    assert_eq!(
+        answer.meta.get(meta::TAKEOVER),
         Some(&serde_json::json!(true))
     );
 

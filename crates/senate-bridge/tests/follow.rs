@@ -167,18 +167,7 @@ fn home(dir: &Path) -> Paths {
 
 fn senate(dir: &Path, cwd: &Path, args: &[&str]) -> Output {
     let mut cmd = Command::new(BIN);
-    for var in [
-        "CLAUDE_CODE_MESSAGING_SOCKET",
-        "CLAUDE_CODE_MESSAGING_TOKEN",
-        "CLAUDE_CODE_SESSION_ID",
-        "CLAUDE_PID",
-        "CLAUDE_CONFIG_DIR",
-        "CODEX_HOME",
-        "RUST_LOG",
-        "SENATE_AGENT",
-    ] {
-        cmd.env_remove(var);
-    }
+    senate_bridge::testenv::isolate(&mut cmd, dir);
     cmd.env("HOME", dir)
         .env("SENATE_HOME", dir.join("home"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -553,8 +542,9 @@ fn two_processes_swapping_at_once_leave_one_consistent_state() {
         git(&wd, &["switch", "-q", target]);
         let children: Vec<_> = (0..3)
             .map(|_| {
-                Command::new(BIN)
-                    .env("HOME", dir.path())
+                let mut cmd = Command::new(BIN);
+                senate_bridge::testenv::isolate(&mut cmd, dir.path());
+                cmd.env("HOME", dir.path())
                     .env("SENATE_HOME", dir.path().join("home"))
                     .current_dir(&wd)
                     .arg("where")
@@ -905,15 +895,22 @@ fn join_leave_pin_unpin_where_list_round_trip_and_touch_nothing_under_dot_git() 
         "refund-v2\n"
     );
 
-    let out = ok(&senate(dir.path(), &wd, &["pin", "claude/reviewer"]));
-    assert!(out.contains("now speak as claude/reviewer"), "{out}");
+    let out = ok(&senate(dir.path(), &wd, &["pin", "reviewer"]));
+    assert!(out.contains("now speak as reviewer"), "{out}");
     assert!(out.contains("(source: file)"), "{out}");
     assert_eq!(
         std::fs::read_to_string(wd.join(".senate/agent")).unwrap(),
-        "claude/reviewer\n"
+        "reviewer\n"
     );
     let err = failed(&senate(dir.path(), &wd, &["pin", "Not An Agent"]));
     assert!(err.contains("not an agent"), "{err}");
+    // A path is not a name: refused, the pin unchanged.
+    let err = failed(&senate(dir.path(), &wd, &["pin", "claude/reviewer"]));
+    assert!(err.contains("one name, with no path inside it"), "{err}");
+    assert_eq!(
+        std::fs::read_to_string(wd.join(".senate/agent")).unwrap(),
+        "reviewer\n"
+    );
 
     // On another branch: its own, unbound; `a`'s copy is listed.
     git(&wd, &["switch", "-q", "-c", "b"]);
@@ -939,10 +936,7 @@ fn join_leave_pin_unpin_where_list_round_trip_and_touch_nothing_under_dot_git() 
     git(&wd, &["switch", "-q", "a"]);
     let out = ok(&senate(dir.path(), &wd, &["where"]));
     assert!(out.contains("committee refund-v2 (file)"), "{out}");
-    assert!(
-        out.contains("claude/reviewer") || out.contains("reviewer"),
-        "{out}"
-    );
+    assert!(out.contains("reviewer"), "{out}");
     assert!(
         out.contains("Saved copies for other branches of this repository (1): b → other"),
         "{out}"
@@ -992,7 +986,7 @@ fn the_commands_work_outside_git_and_speak_chinese_when_asked() {
     assert!(plain.join(".senate/.gitignore").exists());
     let out = ok(&senate(dir.path(), &plain, &["where"]));
     assert!(out.contains("委员会 refund-v2 (文件)"), "{out}");
-    assert!(out.contains("[senator::alice/claude]"), "{out}");
+    assert!(out.contains("[senator::claude]"), "{out}");
     assert!(
         !out.contains(".senate/ 属于"),
         "no branch outside git: {out}"
@@ -1128,7 +1122,10 @@ fn free_removes_each_kind_of_stale_copy_and_never_a_live_branchs() {
 }
 
 #[test]
-fn free_lists_a_hosted_senates_log_and_removes_it_only_with_the_extra_flag() {
+fn free_lists_a_senate_log_no_longer_hosted_and_removes_it_only_with_the_extra_flag() {
+    // A machine hosts one Senate (`top/`). A Senate once nested under an
+    // agent (`under-<agent>/`, still named by a `[[preside]]` entry) is no
+    // longer hosted: its log is listed like any other.
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
     std::fs::create_dir_all(home.join("senates/top")).unwrap();
@@ -1147,10 +1144,8 @@ fn free_lists_a_hosted_senates_log_and_removes_it_only_with_the_extra_flag() {
     let out = ok(&senate(dir.path(), dir.path(), &["free"]));
     assert!(out.contains("senates/old"), "{out}");
     assert!(out.contains("senates/under-codex"), "{out}");
-    assert!(
-        !out.contains("senates/top") && !out.contains("senates/under-claude"),
-        "{out}"
-    );
+    assert!(out.contains("senates/under-claude"), "{out}");
+    assert!(!out.contains("senates/top"), "{out}");
     // --yes alone keeps logs, and says so.
     let out = ok(&senate(dir.path(), dir.path(), &["free", "--yes"]));
     assert!(
@@ -1159,6 +1154,7 @@ fn free_lists_a_hosted_senates_log_and_removes_it_only_with_the_extra_flag() {
     );
     assert!(home.join("senates/old/log.db").exists());
     assert!(home.join("senates/under-codex/log.db").exists());
+    assert!(home.join("senates/under-claude/log.db").exists());
     // The extra flag needs --yes.
     failed(&senate(dir.path(), dir.path(), &["free", "--delete-logs"]));
     assert!(home.join("senates/old/log.db").exists());
@@ -1170,11 +1166,8 @@ fn free_lists_a_hosted_senates_log_and_removes_it_only_with_the_extra_flag() {
     assert!(out.contains("logs deleted"), "{out}");
     assert!(!home.join("senates/old").exists());
     assert!(!home.join("senates/under-codex").exists());
+    assert!(!home.join("senates/under-claude").exists());
     assert!(home.join("senates/top/log.db").exists(), "still hosted");
-    assert!(
-        home.join("senates/under-claude/log.db").exists(),
-        "still hosted"
-    );
 }
 
 #[test]
@@ -1209,10 +1202,10 @@ fn free_forgets_old_sessions_and_idle_agents_and_keeps_the_rest() {
         agent_source: AgentSource::Harness,
     };
     for (id, agent, pid) in [
-        ("ended-long-ago", "alice/old", None),
-        ("process-gone", "alice/gone", Some(2_000_000_000)),
-        ("ended-just-now", "alice/fresh", None),
-        ("live", "alice/live", Some(std::process::id())),
+        ("ended-long-ago", "old", None),
+        ("process-gone", "gone", Some(2_000_000_000)),
+        ("ended-just-now", "fresh", None),
+        ("live", "live", Some(std::process::id())),
     ] {
         store.upsert_session(&upsert(id, agent, pid)).unwrap();
     }
@@ -1225,11 +1218,11 @@ fn free_forgets_old_sessions_and_idle_agents_and_keeps_the_rest() {
     // Cursors: an old idle agent, one with an old session, a recent one,
     // and one on a committee the configuration keeps open.
     for (agent, committee) in [
-        ("alice/idle", "refund-v2"),
-        ("alice/old", "refund-v2"),
-        ("alice/fresh", "refund-v2"),
-        ("alice/watching", "watched"),
-        ("alice/live", "refund-v2"),
+        ("idle", "refund-v2"),
+        ("old", "refund-v2"),
+        ("fresh", "refund-v2"),
+        ("watching", "watched"),
+        ("live", "refund-v2"),
     ] {
         store
             .seed_cursor(
@@ -1258,7 +1251,7 @@ fn free_forgets_old_sessions_and_idle_agents_and_keeps_the_rest() {
         params![ago(0)],
     )
     .unwrap();
-    for agent in ["alice/idle", "alice/old", "alice/watching"] {
+    for agent in ["idle", "old", "watching"] {
         conn.execute(
             "UPDATE cursors SET touched = ?1 WHERE agent = ?2",
             params![ago(90), agent],
@@ -1271,15 +1264,15 @@ fn free_forgets_old_sessions_and_idle_agents_and_keeps_the_rest() {
     let out = ok(&senate(dir.path(), dir.path(), &["free"]));
     assert!(out.contains("would free 2 (ended over 7 days ago"), "{out}");
     assert!(
-        out.contains("alice/idle") || out.contains("[senator::alice/idle]"),
+        out.contains("idle") || out.contains("[senator::idle]"),
         "{out}"
     );
     assert!(
-        out.contains("alice/old") || out.contains("[senator::alice/old]"),
+        out.contains("old") || out.contains("[senator::old]"),
         "{out}"
     );
     assert!(
-        !out.contains("alice/watching"),
+        !out.contains("watching"),
         "a committee the configuration keeps: {out}"
     );
     let _ = snapshot;
@@ -1310,7 +1303,7 @@ fn free_forgets_old_sessions_and_idle_agents_and_keeps_the_rest() {
             .collect()
     };
     assert_eq!(remaining, ["ended-just-now", "live"]);
-    // alice/idle (nothing at all for 90 days) goes; alice/old's only session
+    // idle (nothing at all for 90 days) goes; old's only session
     // went with it, and its cursor was old too; the watched committee and
     // the recent and live ones stay.
     let agents: Vec<String> = {
@@ -1321,5 +1314,5 @@ fn free_forgets_old_sessions_and_idle_agents_and_keeps_the_rest() {
             .map(Result::unwrap)
             .collect()
     };
-    assert_eq!(agents, ["alice/fresh", "alice/live", "alice/watching"]);
+    assert_eq!(agents, ["fresh", "live", "watching"]);
 }

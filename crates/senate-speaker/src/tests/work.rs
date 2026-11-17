@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use senate_core::{
     Address, BranchNaming, CheckpointFiles, CheckpointPayload, CheckpointTrigger, Event, Hub, Kind,
-    Locale, NewEvent, PresencePayload, PresenceState, Roster, SenatorPath, Senior, Seq,
+    Locale, NewEvent, PresencePayload, PresenceState, Principal, Roster, SenatorName, Seq,
     StatusPayload, StatusState, WorkRun, WorkState, meta,
 };
 use senate_work::testing::{FakeForge, FakeRun, FakeRunner};
@@ -18,7 +18,7 @@ use super::continuity::{AGENTS, agents_hub};
 use super::hub::MemoryHub;
 use super::rig::{
     Rig, STRANGER, agent, agent_named, agent_path, answer, assert_senate_vocabulary, config_in,
-    in_thread, mention, name, path, question, refund, roster, user,
+    in_thread, mention, name, path, question, refund, roster, runner_of, user,
 };
 use super::surface::{Caps, FakeSurface};
 use crate::{Intent, ScriptedBrain, SpeakerArgs, SpeakerConfig, WorkConfig, render};
@@ -45,9 +45,9 @@ fn checkpoint(handle: &str, pushed: bool, remote: Option<&str>) -> NewEvent {
 }
 
 /// A hand-off checkpoint of the agent `who` on its person's branch.
-fn checkpoint_at(who: &SenatorPath, commit: &str, pushed: bool, remote: Option<&str>) -> NewEvent {
+fn checkpoint_at(who: &SenatorName, commit: &str, pushed: bool, remote: Option<&str>) -> NewEvent {
     let payload = CheckpointPayload {
-        branch: format!("feature/refund-v2/{}", who.owner()),
+        branch: format!("feature/refund-v2/{}", runner_of(who)),
         commit: commit.into(),
         pushed,
         remote_url: remote.map(str::to_owned),
@@ -85,12 +85,12 @@ async fn work_hub() -> Arc<MemoryHub> {
     hub
 }
 
-/// [`work_hub`] with alice's second agent `alice/codex` seated (not
+/// [`work_hub`] with alice's second agent `codex` seated (not
 /// connected), with a pushed checkpoint of its own.
 async fn two_agents_hub() -> Arc<MemoryHub> {
     let hub = work_hub().await;
-    let codex = path("alice/codex");
-    hub.seat(&codex);
+    let codex = path("codex");
+    hub.seat(&codex, "alice");
     hub.append(checkpoint_at(&codex, CODEX_COMMIT, true, Some(&github())))
         .await
         .expect("append");
@@ -100,9 +100,9 @@ async fn two_agents_hub() -> Arc<MemoryHub> {
 /// The rig's roster with carol, a person with no agent.
 fn roster_with_carol() -> Roster {
     let base = roster();
-    let mut seniors = base.seniors().to_vec();
-    seniors.push(Senior::new(name("carol")));
-    Roster::top(seniors, base.agents().to_vec()).expect("roster")
+    let mut principals = base.principals().to_vec();
+    principals.push(Principal::new(name("carol")));
+    Roster::new(principals, base.seated().to_vec()).expect("roster")
 }
 
 async fn start(hub: Arc<MemoryHub>, runner: Option<&FakeRunner>, forge: Option<&FakeForge>) -> Rig {
@@ -258,7 +258,7 @@ async fn a_confirmed_run_opens_a_pr_on_behalf_of_the_asker_and_puts_it_on_the_ca
     let (chat, restated) = ask(&rig, "bob", "/work alice 把重试路径做完", "m_w1").await;
     let branch = format!("feature/refund-v2/speaker-{}", chat.seq);
     for part in [
-        "[senator::alice/claude] 的检查点 feature/refund-v2/alice@a41f9c2",
+        "[senator::claude] 的检查点 feature/refund-v2/alice@a41f9c2",
         branch.as_str(),
         "做：把重试路径做完",
         "代表 [senator::bob]",
@@ -478,41 +478,35 @@ async fn an_agent_named_outright_is_worked_from_its_own_checkpoint() {
         Some(&FakeForge::new()),
     )
     .await;
-    let (chat, restated) = ask(&rig, "bob", "/work alice/codex 把重试路径做完", "m_w1").await;
+    let (chat, restated) = ask(&rig, "bob", "/work codex 把重试路径做完", "m_w1").await;
     assert!(
-        restated.contains("从 [senator::alice/codex] 的检查点 feature/refund-v2/alice@c0dec0d"),
+        restated.contains("从 [senator::codex] 的检查点 feature/refund-v2/alice@c0dec0d"),
         "{restated}"
     );
     assert!(rig.brain.pick_inputs().is_empty(), "named: nothing to pick");
     confirm(&rig, "bob", &chat, "m_w2").await;
     let calls = runner.calls();
     assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].target_agent, path("alice/codex"));
+    assert_eq!(calls[0].target_agent, path("codex"));
     assert_eq!(calls[0].base_commit, CODEX_COMMIT);
     assert_eq!(calls[0].requester, name("bob"));
     let root = root_of(&rig.hub.events(&refund()));
-    assert_eq!(
-        WorkRun::of(&root).expect("run").target_agent,
-        path("alice/codex")
-    );
+    assert_eq!(WorkRun::of(&root).expect("run").target_agent, path("codex"));
 }
 
 #[tokio::test(start_paused = true)]
 async fn an_unnamed_agent_of_several_is_the_connected_one() {
     let hub = two_agents_hub().await;
-    hub.connect(&refund(), &path("alice/codex"));
+    hub.connect(&refund(), &path("codex"));
     let runner = FakeRunner::new();
     let rig = start(hub, Some(&runner), Some(&FakeForge::new())).await;
     let (chat, restated) = ask(&rig, "bob", "/work alice 把重试路径做完", "m_w1").await;
-    assert!(
-        restated.contains("[senator::alice/codex] 的检查点"),
-        "{restated}"
-    );
+    assert!(restated.contains("[senator::codex] 的检查点"), "{restated}");
     let picks = rig.brain.pick_inputs();
     assert_eq!(picks.len(), 1);
-    assert_eq!(picks[0].owner, name("alice"));
+    assert_eq!(picks[0].owner, Some(name("alice")));
     confirm(&rig, "bob", &chat, "m_w2").await;
-    assert_eq!(runner.calls()[0].target_agent, path("alice/codex"));
+    assert_eq!(runner.calls()[0].target_agent, path("codex"));
 }
 
 #[tokio::test(start_paused = true)]
@@ -529,29 +523,22 @@ async fn when_the_speaker_cannot_tell_it_asks_and_the_answer_carries_the_order_o
         asked.starts_with("[senator::alice] 有 2 个 agent，你指的是哪一个？回复编号或名字："),
         "{asked}"
     );
-    assert!(
-        asked.contains("\n1. [senator::alice/claude] 不在线"),
-        "{asked}"
-    );
-    assert!(
-        asked.contains("\n2. [senator::alice/codex] 不在线"),
-        "{asked}"
-    );
+    assert!(asked.contains("\n1. [senator::claude] 不在线"), "{asked}");
+    assert!(asked.contains("\n2. [senator::codex] 不在线"), "{asked}");
     assert_senate_vocabulary(&asked);
     assert!(runner.calls().is_empty());
 
     let restated = choose(&rig, "bob", "2", &chat, "m_w2").await;
     assert!(
-        restated.starts_with(
-            "我理解为：从 [senator::alice/codex] 的检查点 feature/refund-v2/alice@c0dec0d"
-        ),
+        restated
+            .starts_with("我理解为：从 [senator::codex] 的检查点 feature/refund-v2/alice@c0dec0d"),
         "{restated}"
     );
     assert!(restated.contains("代表 [senator::bob]"), "{restated}");
     confirm(&rig, "bob", &chat, "m_w3").await;
     let calls = runner.calls();
     assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].target_agent, path("alice/codex"));
+    assert_eq!(calls[0].target_agent, path("codex"));
     assert_eq!(calls[0].requester, name("bob"));
 }
 
@@ -650,7 +637,7 @@ async fn natural_language_is_restated_too() {
     }));
     let (chat, reply) = ask(&rig, "bob", "把 alice 的重试路径做完", "m_w1").await;
     assert!(
-        reply.starts_with("我理解为：从 [senator::alice/claude] 的检查点"),
+        reply.starts_with("我理解为：从 [senator::claude] 的检查点"),
         "{reply}"
     );
     // Anything but 「对」 cancels.
@@ -777,7 +764,7 @@ async fn in_english_the_restatement_and_the_result_read_in_english() {
     assert_eq!(
         restated,
         format!(
-            "I understand: Branch {branch} off [senator::alice/claude]'s checkpoint feature/refund-v2/alice@a41f9c2 and do: finish the retry path; then push and open a PR, on behalf of [senator::bob]. [senator::alice/claude]'s own branch is not touched. Reply \"yes\" to confirm."
+            "I understand: Branch {branch} off [senator::claude]'s checkpoint feature/refund-v2/alice@a41f9c2 and do: finish the retry path; then push and open a PR, on behalf of [senator::bob]. [senator::claude]'s own branch is not touched. Reply \"yes\" to confirm."
         )
     );
     // The yes is accepted in either language.
@@ -817,7 +804,7 @@ async fn in_english_the_restatement_and_the_result_read_in_english() {
 
 // ----- reassignment --------------------------------------------------------------
 
-fn presence_for(events: &[Event], who: &SenatorPath) -> Vec<(PresencePayload, Event)> {
+fn presence_for(events: &[Event], who: &SenatorName) -> Vec<(PresencePayload, Event)> {
     events
         .iter()
         .filter_map(|e| Some((PresencePayload::of(e)?, e.clone())))
@@ -833,8 +820,7 @@ async fn a_reassignment_is_confirmed_pushes_the_checkpoint_and_routes_answers() 
     let alice = agent_path("alice");
     let (chat, restated) = ask(&rig, "pm", "/reassign alice bob", "m_r1").await;
     assert!(
-        restated
-            .contains("把 [senator::alice/claude] 在 refund-v2 的工作交给 [senator::bob/claude]"),
+        restated.contains("把 [senator::claude] 在 refund-v2 的工作交给 [senator::copilot]"),
         "{restated}"
     );
     assert!(presence_for(&hub.events(&refund()), &alice).is_empty());
@@ -856,7 +842,7 @@ async fn a_reassignment_is_confirmed_pushes_the_checkpoint_and_routes_answers() 
     assert_eq!(notes.len(), 1, "{notes:#?}");
     let note = &notes[0].body;
     for part in [
-        "[senator::alice/claude] 的工作交给你了",
+        "[senator::claude] 的工作交给你了",
         "feature/refund-v2/alice",
         COMMIT,
         "git fetch origin && git switch -c feature/refund-v2/bob origin/feature/refund-v2/alice",
@@ -867,7 +853,7 @@ async fn a_reassignment_is_confirmed_pushes_the_checkpoint_and_routes_answers() 
     }
     let texts = rig.surface.texts();
     assert!(
-        texts.contains(&"[senator::alice/claude] 的工作已交给 [senator::bob/claude]".to_owned()),
+        texts.contains(&"[senator::claude] 的工作已交给 [senator::copilot]".to_owned()),
         "{texts:#?}"
     );
 
@@ -890,16 +876,13 @@ async fn a_reassignment_is_confirmed_pushes_the_checkpoint_and_routes_answers() 
     assert!(
         texts
             .iter()
-            .any(|t| t.starts_with("[senator::bob/claude]（接手 [senator::alice/claude]） 三次")),
+            .any(|t| t.starts_with("[senator::copilot]（接手 [senator::claude]） 三次")),
         "{texts:#?}"
     );
 
     // Undo: back to alice.
     let (chat, restated) = ask(&rig, "pm", "/reassign bob alice", "m_r3").await;
-    assert!(
-        restated.contains("交还给 [senator::alice/claude]"),
-        "{restated}"
-    );
+    assert!(restated.contains("交还给 [senator::claude]"), "{restated}");
     confirm(&rig, "pm", &chat, "m_r4").await;
     let events = hub.events(&refund());
     let moved = presence_for(&events, &alice);
@@ -909,7 +892,7 @@ async fn a_reassignment_is_confirmed_pushes_the_checkpoint_and_routes_answers() 
     assert!(
         rig.surface
             .texts()
-            .contains(&"[senator::alice/claude] 的工作已交还给 [senator::alice/claude]".to_owned())
+            .contains(&"[senator::claude] 的工作已交还给 [senator::claude]".to_owned())
     );
     let told: Vec<&Event> = events
         .iter()
@@ -951,10 +934,9 @@ async fn a_question_to_a_reassigned_agent_gets_a_plain_answer_when_the_new_owner
 async fn work_may_move_between_two_agents_of_one_person() {
     let hub = two_agents_hub().await;
     let rig = start(hub.clone(), None, None).await;
-    let (chat, restated) = ask(&rig, "pm", "/reassign alice/claude alice/codex", "m_r1").await;
+    let (chat, restated) = ask(&rig, "pm", "/reassign claude codex", "m_r1").await;
     assert!(
-        restated
-            .contains("把 [senator::alice/claude] 在 refund-v2 的工作交给 [senator::alice/codex]"),
+        restated.contains("把 [senator::claude] 在 refund-v2 的工作交给 [senator::codex]"),
         "{restated}"
     );
     confirm(&rig, "pm", &chat, "m_r2").await;
@@ -962,7 +944,7 @@ async fn work_may_move_between_two_agents_of_one_person() {
     let moved = presence_for(&events, &agent_path("alice"));
     assert_eq!(moved.len(), 1);
     assert_eq!(moved[0].0.state, PresenceState::Reassigned);
-    assert_eq!(moved[0].0.new_owner, Some(path("alice/codex")));
+    assert_eq!(moved[0].0.new_owner, Some(path("codex")));
     assert_eq!(moved[0].1.on_behalf_of, Some(user("pm")));
     let codex = agent_named("alice", "codex");
     assert_eq!(
@@ -976,7 +958,7 @@ async fn work_may_move_between_two_agents_of_one_person() {
     assert!(
         rig.surface
             .texts()
-            .contains(&"[senator::alice/claude] 的工作已交给 [senator::alice/codex]".to_owned()),
+            .contains(&"[senator::claude] 的工作已交给 [senator::codex]".to_owned()),
         "{:#?}",
         rig.surface.texts()
     );
@@ -991,18 +973,17 @@ async fn a_reassignment_settles_both_sides_and_asks_when_it_cannot_tell() {
         asked.starts_with("[senator::alice] 有 2 个 agent，你指的是哪一个？"),
         "{asked}"
     );
-    assert!(presence_for(&hub.events(&refund()), &path("alice/codex")).is_empty());
+    assert!(presence_for(&hub.events(&refund()), &path("codex")).is_empty());
 
     // pm, who asked, answers by name; bob has one agent, settled at once.
     let restated = choose(&rig, "pm", "codex", &chat, "m_r2").await;
     assert!(
-        restated
-            .contains("把 [senator::alice/codex] 在 refund-v2 的工作交给 [senator::bob/claude]"),
+        restated.contains("把 [senator::codex] 在 refund-v2 的工作交给 [senator::copilot]"),
         "{restated}"
     );
     confirm(&rig, "pm", &chat, "m_r3").await;
     let events = hub.events(&refund());
-    let moved = presence_for(&events, &path("alice/codex"));
+    let moved = presence_for(&events, &path("codex"));
     assert_eq!(moved.len(), 1);
     assert_eq!(moved[0].0.new_owner, Some(agent_path("bob")));
     assert!(
@@ -1015,9 +996,9 @@ async fn a_reassignment_settles_both_sides_and_asks_when_it_cannot_tell() {
 async fn handing_back_to_a_person_with_two_agents_picks_the_one_whose_work_is_away() {
     let hub = two_agents_hub().await;
     let rig = start(hub.clone(), None, None).await;
-    let (chat, _) = ask(&rig, "pm", "/reassign alice/codex bob", "m_r1").await;
+    let (chat, _) = ask(&rig, "pm", "/reassign codex bob", "m_r1").await;
     confirm(&rig, "pm", &chat, "m_r2").await;
-    let codex = path("alice/codex");
+    let codex = path("codex");
     assert_eq!(
         presence_for(&hub.events(&refund()), &codex)[0].0.state,
         PresenceState::Reassigned
@@ -1026,7 +1007,7 @@ async fn handing_back_to_a_person_with_two_agents_picks_the_one_whose_work_is_aw
     let (chat, restated) = ask(&rig, "pm", "/reassign alice alice", "m_r3").await;
     assert!(
         restated.contains(
-            "把 refund-v2 上 [senator::alice/codex] 的工作从 [senator::bob/claude] 交还给 [senator::alice/codex]"
+            "把 refund-v2 上 [senator::codex] 的工作从 [senator::copilot] 交还给 [senator::codex]"
         ),
         "{restated}"
     );
@@ -1057,7 +1038,9 @@ async fn in_english_a_reassignment_and_its_hand_back_read_in_english() {
     let rig = start_with(hub.clone(), None, None, work_config_in(Locale::En)).await;
     let (chat, restated) = ask(&rig, "pm", "/reassign alice bob", "m_r1").await;
     assert!(
-        restated.starts_with("I understand: Hand [senator::alice/claude]'s work on refund-v2 to [senator::bob/claude]."),
+        restated.starts_with(
+            "I understand: Hand [senator::claude]'s work on refund-v2 to [senator::copilot]."
+        ),
         "{restated}"
     );
     reply_to_restatement(&rig, "pm", "yes", &chat, "m_r2").await;
@@ -1067,8 +1050,8 @@ async fn in_english_a_reassignment_and_its_hand_back_read_in_english() {
     rig.settle().await;
     let texts = rig.surface.texts();
     for line in [
-        "[senator::alice/claude]'s work is now with [senator::bob/claude]",
-        "[senator::alice/claude]'s work is back with [senator::alice/claude]",
+        "[senator::claude]'s work is now with [senator::copilot]",
+        "[senator::claude]'s work is back with [senator::claude]",
     ] {
         assert!(texts.contains(&line.to_owned()), "{line}: {texts:#?}");
     }

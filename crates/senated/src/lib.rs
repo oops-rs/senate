@@ -20,9 +20,13 @@
 //!   HTTP/SSE API bridges connect to, authentication ([`Authenticate`],
 //!   default static tokens from `[[tokens]]`) and the roster (default
 //!   `[roster]`, with agents seated as they connect);
-//! - **the built-in Speaker** (`senate-speaker`) when `[speaker]` is
-//!   configured, with its [`Brain`](senate_speaker::Brain) (default: basis)
-//!   and, with `[work]`, its runner and forge;
+//! - **the built-in session** (`senate-speaker`'s engine) when a model is
+//!   configured (`[model]`) and the roster refers to it (as the Speaker of
+//!   an unattended root, or as someone's secretary; see [`Assembly`]), with
+//!   its [`Brain`](senate_speaker::Brain) (default: basis), its
+//!   configuration re-read from `secretary.toml` and the committees' files
+//!   beside the configuration file ([`config`]) and, with `[work]`, its
+//!   runner and forge;
 //! - **at most one chat platform** ([`ChatMount`]: the surface the Speaker
 //!   posts through and its unbound mentions), usually through
 //!   [`ChatGateway`], which turns what the platform delivers into the log's
@@ -94,4 +98,4 @@ pub use component::{Component, ComponentContext, GaveUp, component_fn};
 pub use config::{ForgeSection, SenatedConfig, SenatedConfigError, WorkSection};
 pub use machine::{HostedSenate, Machine, MachineError};
 pub use senate_server::{Authenticate, StaticTokens};
-pub use speaker::{NO_CHAT_PLATFORM, NoChat};
+pub use speaker::{NO_CHAT_PLATFORM, NoChat, secretary_show};

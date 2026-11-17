@@ -2,7 +2,7 @@ use axum::Json;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use senate_core::api::{ApiError, code};
-use senate_core::{HubError, SenatorPath, Seq};
+use senate_core::{HubError, Locator, SenatorName, Seq};
 
 /// A non-2xx response with an [`ApiError`] body.
 #[derive(Debug)]
@@ -11,7 +11,9 @@ pub(crate) struct ApiFailure {
     code: &'static str,
     message: String,
     /// With `ambiguous_recipient`: the agents to choose from.
-    candidates: Vec<SenatorPath>,
+    candidates: Vec<SenatorName>,
+    /// With `ambiguous_name`: the qualified names to choose from.
+    locators: Vec<Locator>,
 }
 
 impl ApiFailure {
@@ -21,6 +23,15 @@ impl ApiFailure {
             code,
             message: message.into(),
             candidates: Vec::new(),
+            locators: Vec::new(),
+        }
+    }
+
+    /// A qualified name several things answer to: 409 with them.
+    pub(crate) fn ambiguous_name(message: impl Into<String>, locators: Vec<Locator>) -> Self {
+        Self {
+            locators,
+            ..Self::new(StatusCode::CONFLICT, code::AMBIGUOUS_NAME, message)
         }
     }
 
@@ -42,6 +53,16 @@ impl ApiFailure {
 
     pub(crate) fn not_found(message: impl Into<String>) -> Self {
         Self::new(StatusCode::NOT_FOUND, code::NOT_FOUND, message)
+    }
+
+    pub(crate) fn conflict(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::CONFLICT, code::CONFLICT, message)
+    }
+
+    /// A person's message for a seat outside this Senate and its children:
+    /// their own machine posts it above.
+    pub(crate) fn elsewhere(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::CONFLICT, code::ELSEWHERE, message)
     }
 
     /// The client's cursor is beyond the committee's head: it belongs to
@@ -71,7 +92,7 @@ impl From<HubError> for ApiFailure {
         match error {
             HubError::Rejected(message) => Self::bad_request(message),
             // Several agents: 409 with the candidates, so the sender names
-            // one. An unknown person is the sender's mistake: 400.
+            // one. No agent and nobody to take it instead: 400.
             HubError::Unresolved(error) => {
                 let api = ApiError::from(&error);
                 let status = if api.code == code::AMBIGUOUS_RECIPIENT {
@@ -88,6 +109,7 @@ impl From<HubError> for ApiFailure {
                     },
                     message: api.message,
                     candidates: api.candidates,
+                    locators: Vec::new(),
                 }
             }
             HubError::NotFound(message) => Self::not_found(message),
@@ -113,6 +135,7 @@ impl IntoResponse for ApiFailure {
             code: self.code.to_string(),
             message: self.message,
             candidates: self.candidates,
+            locators: self.locators,
         });
         let mut response = (self.status, body).into_response();
         if self.status == StatusCode::UNAUTHORIZED {

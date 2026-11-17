@@ -8,8 +8,10 @@
 # (A file named bridge.toml there is read the same way while senate.toml
 # does not exist.)
 
-# The Senate above: the team's senated. This machine only makes outbound
-# requests to it.
+# The team's Senate (its senated). As shipped this machine hosts no Senate
+# of its own: its agents are seated there directly, and it only makes
+# outbound requests to it. With [local] (at the end of this file) it hosts
+# its own Senate under the team's instead: see there.
 server_url = "https://senate.example.com"
 
 # Your token, as issued by whoever runs the server. It names you, a person,
@@ -17,9 +19,10 @@ server_url = "https://senate.example.com"
 token = "replace-me"
 
 # Your handle. Must be the person the token names; the daemon refuses to
-# start otherwise. Every agent this machine runs is seated under it:
-# a Claude Code session as <person>/claude, a Codex session as
-# <person>/codex (see [agents] below).
+# start otherwise. Every agent this machine runs is yours, seated in the
+# team's Senate under one flat name: a Claude Code session as `claude`, a
+# Codex session as `codex` (see [agents] below). Names are unique within a
+# Senate: if a teammate already runs `claude` there, pick another.
 person = "alice"
 
 # Optional: the language of everything the bridge writes for you and your
@@ -66,11 +69,10 @@ person = "alice"
 # every 2 h of an open session. It never pushes your branch unless asked
 # (`checkpoint(push=true)` or a hand-off).
 
-# Optional: the agent each kind of coding session speaks as, under you. A
-# name or a path relative to you: `claude` sits in the Senate above,
-# `claude/reviewer` in the Senate alice/claude presides over (below). A
-# session can pin another with SENATE_AGENT in its environment (Claude Code
-# only) or a `.senate/agent` file in its worktree. These are the defaults.
+# Optional: the agent each kind of coding session speaks as: one flat name
+# (no path). A session can pin another with SENATE_AGENT in its environment
+# (Claude Code only) or a `.senate/agent` file in its worktree. These are
+# the defaults.
 # [agents]
 # claude = "claude"
 # codex = "codex"
@@ -104,14 +106,22 @@ person = "alice"
 # [notify]
 # desktop = false   # default true
 
-# A Senate one level down for each agent that presides over its own
-# subagents. senated --machine hosts it here: its log in SQLite under
-# senates/under-<agent>/, on loopback only, with a token generated on this
-# machine that never leaves it. The presiding agent's session sits in the
-# Senate above and is the Speaker of this one; sessions pinned to
-# SENATE_AGENT=claude/<name> sit in it. Nothing is copied between the two
-# levels: what this Senate says upward, the presiding session says in its
-# own name.
-[[preside]]
-agent = "claude"
-# listen = "127.0.0.1:7980"   # default: a free loopback port, kept
+# Optional: a machine under a parent. With [local], this machine hosts its
+# own Senate (`senated --machine`, on loopback, its log under
+# senates/top/) and registers it with the team's Senate above as a child,
+# authenticated with your token there. Your agents sit in your Senate, not
+# in the team's; the team reaches your desk as
+# `<name>::<committee>::speaker` (`alice-desk::refund-v2::speaker`), and
+# you reach the team's seats by their qualified names
+# (`senate ask /acme::ibot::bob`). `senate status` shows the full path
+# (`/acme/alice-desk`), the parent and whether the registration was taken.
+# [local]
+# name = "alice-desk"                     # default: <person>-desk
+# Its Speaker is you, as a senator of the Senate above (the default). The
+# path must be the parent's; an agent of the Senate above as the Speaker is
+# not supported yet.
+# speaker = "/acme::senator::alice"
+# Who works your desk while you are away, in order (the first present acts):
+# your agents here, or the built-in secretary by its name (secretary.toml).
+# secretaries = ["claude"]
+# listen = "127.0.0.1:7979"               # loopback only

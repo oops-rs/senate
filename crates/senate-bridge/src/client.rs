@@ -18,7 +18,7 @@ use senate_core::api::{
     self, AppendResponse, CheckpointQuery, Cursor, CursorQuery, Heartbeat, Me, PresencePage,
     SearchQuery, ThreadsPage, ThreadsQuery,
 };
-use senate_core::{Brief, CheckpointRecord, CommitteeId, Event, NewEvent, SenatorPath, Seq};
+use senate_core::{Brief, CheckpointRecord, CommitteeId, Event, NewEvent, SenatorName, Seq};
 
 use reqwest::header::HeaderMap;
 use reqwest::{Client, RequestBuilder, Response, StatusCode};
@@ -41,7 +41,7 @@ pub enum ApiClientError {
         /// The log epoch the error response named, if any.
         epoch: Option<String>,
         /// With `ambiguous_recipient`: the agents to choose from.
-        candidates: Vec<SenatorPath>,
+        candidates: Vec<SenatorName>,
     },
 }
 
@@ -73,9 +73,9 @@ impl ApiClientError {
         }
     }
 
-    /// 409 `ambiguous_recipient`: a `senator::<person>/*` named a person
-    /// with several agents. The agents to choose from.
-    pub fn ambiguous_candidates(&self) -> Option<&[SenatorPath]> {
+    /// 409 `ambiguous_recipient`: `senator::*` could reach several agents
+    /// on the committee. The agents to choose from.
+    pub fn ambiguous_candidates(&self) -> Option<&[SenatorName]> {
         match self {
             Self::Api {
                 code, candidates, ..
@@ -244,7 +244,7 @@ impl ApiClient {
         &self,
         committee: &CommitteeId,
         name: &str,
-        senator: Option<&SenatorPath>,
+        senator: Option<&SenatorName>,
     ) -> Result<Seq, ApiClientError> {
         let url = self.url(&api::cursor_path(committee, name));
         let query = CursorQuery {
@@ -262,7 +262,7 @@ impl ApiClient {
         &self,
         committee: &CommitteeId,
         name: &str,
-        senator: Option<&SenatorPath>,
+        senator: Option<&SenatorName>,
         seq: Seq,
     ) -> Result<Seq, ApiClientError> {
         let url = self.url(&api::cursor_path(committee, name));
@@ -328,7 +328,7 @@ impl ApiClient {
     pub async fn threads(
         &self,
         committee: &CommitteeId,
-        agent: Option<&SenatorPath>,
+        agent: Option<&SenatorName>,
     ) -> Result<ThreadsPage, ApiClientError> {
         let url = self.url(&api::threads_path(committee));
         let query = ThreadsQuery {
@@ -352,7 +352,7 @@ impl ApiClient {
     pub async fn latest_checkpoint(
         &self,
         committee: &CommitteeId,
-        agent: &SenatorPath,
+        agent: &SenatorName,
     ) -> Result<Option<CheckpointRecord>, ApiClientError> {
         let url = self.url(&api::latest_checkpoint_path(committee));
         let query = CheckpointQuery {
@@ -375,6 +375,106 @@ impl ApiClient {
         Ok(checked(resp).await?.json().await?)
     }
 
+    /// `GET .../docket?role=chair`: what awaits the committee's chair.
+    pub async fn chair_docket(
+        &self,
+        committee: &CommitteeId,
+    ) -> Result<senate_core::DocketPage, ApiClientError> {
+        let url = self.url(&api::docket_path(committee));
+        let resp = self
+            .authed(self.http.get(url))
+            .query(&[("role", "chair")])
+            .send()
+            .await?;
+        Ok(checked(resp).await?.json().await?)
+    }
+
+    /// `GET .../chair`: the committee's chair and how it was found.
+    pub async fn chair(&self, committee: &CommitteeId) -> Result<api::ChairInfo, ApiClientError> {
+        let url = self.url(&api::chair_path(committee));
+        let resp = self.authed(self.http.get(url)).send().await?;
+        Ok(checked(resp).await?.json().await?)
+    }
+
+    /// `PUT .../chair`: make `senator` the committee's chair.
+    pub async fn set_chair(
+        &self,
+        committee: &CommitteeId,
+        senator: &SenatorName,
+    ) -> Result<api::ChairInfo, ApiClientError> {
+        let url = self.url(&api::chair_path(committee));
+        let body = api::SetChair {
+            senator: senator.clone(),
+        };
+        let resp = self.authed(self.http.put(url)).json(&body).send().await?;
+        Ok(checked(resp).await?.json().await?)
+    }
+
+    /// `GET /v1/secretaries`: every secretary relation.
+    pub async fn secretaries(&self) -> Result<api::Secretaries, ApiClientError> {
+        let url = self.url(api::SECRETARIES_PATH);
+        let resp = self.authed(self.http.get(url)).send().await?;
+        Ok(checked(resp).await?.json().await?)
+    }
+
+    /// `PUT /v1/secretaries/{senator}`: `senator`'s secretaries, in order;
+    /// `acted_by` when writing for the Speaker's office.
+    pub async fn set_secretaries(
+        &self,
+        senator: &SenatorName,
+        secretaries: Vec<SenatorName>,
+        acted_by: Option<SenatorName>,
+    ) -> Result<api::Secretaries, ApiClientError> {
+        let url = self.url(&api::secretaries_of_path(senator));
+        let body = api::SetSecretaries {
+            secretaries,
+            acted_by,
+        };
+        let resp = self.authed(self.http.put(url)).json(&body).send().await?;
+        Ok(checked(resp).await?.json().await?)
+    }
+
+    /// `PUT /v1/children/{name}`: register the child Senate `name`, its
+    /// Speaker `speaker` (who this token must name).
+    pub async fn register_child(
+        &self,
+        name: &senate_core::Name,
+        speaker: &senate_core::SenatorId,
+    ) -> Result<api::ChildSenate, ApiClientError> {
+        let url = self.url(&api::child_path(name));
+        let body = api::RegisterChild {
+            speaker: speaker.clone(),
+        };
+        let resp = self.authed(self.http.put(url)).json(&body).send().await?;
+        Ok(checked(resp).await?.json().await?)
+    }
+
+    /// `GET /v1/children`: the child Senates registered here.
+    pub async fn children(&self) -> Result<Vec<api::ChildSenate>, ApiClientError> {
+        let url = self.url(api::CHILDREN_PATH);
+        let resp = self.authed(self.http.get(url)).send().await?;
+        Ok(checked(resp).await?.json().await?)
+    }
+
+    /// `GET /v1/resolve`: whether `name` is in this Senate, written from
+    /// `committee` (the writer's own, when the writer stands here).
+    pub async fn resolve(
+        &self,
+        name: &senate_core::Locator,
+        committee: Option<&CommitteeId>,
+    ) -> Result<api::Resolved, ApiClientError> {
+        let query = api::ResolveQuery {
+            name: name.clone(),
+            committee: committee.cloned(),
+        };
+        let resp = self
+            .authed(self.http.get(self.url(api::RESOLVE_PATH)))
+            .query(&query)
+            .send()
+            .await?;
+        Ok(checked(resp).await?.json().await?)
+    }
+
     /// `GET .../presence`: each agent's presence on the committee.
     pub async fn presence(&self, committee: &CommitteeId) -> Result<PresencePage, ApiClientError> {
         let url = self.url(&api::presence_path(committee));
@@ -390,7 +490,7 @@ impl ApiClient {
         &self,
         committee: &CommitteeId,
         after: Seq,
-        agent: &SenatorPath,
+        agent: &SenatorName,
     ) -> Result<Response, ApiClientError> {
         let url = self.url(&api::stream_path(committee));
         let query = api::StreamQuery {
@@ -431,6 +531,28 @@ async fn checked(resp: Response) -> Result<Response, ApiClientError> {
             candidates: Vec::new(),
         },
     })
+}
+
+/// Resolve a qualified name nearest first: ask each Senate in `levels`
+/// (the writer's own first, then the one above, outward) until one answers
+/// for it. The writer stands on `committee` in the first Senate only. The
+/// answer is the index of the Senate that answered and what it said;
+/// [`Resolved::Elsewhere`](api::Resolved::Elsewhere) with the index past
+/// the last when none did. There is no central registry: each Senate
+/// answers for itself.
+pub async fn resolve_outward(
+    levels: &[&ApiClient],
+    name: &senate_core::Locator,
+    committee: Option<&CommitteeId>,
+) -> Result<(usize, api::Resolved), ApiClientError> {
+    for (i, level) in levels.iter().enumerate() {
+        let standing = if i == 0 { committee } else { None };
+        match level.resolve(name, standing).await? {
+            api::Resolved::Elsewhere => continue,
+            found => return Ok((i, found)),
+        }
+    }
+    Ok((levels.len(), api::Resolved::Elsewhere))
 }
 
 #[cfg(test)]
@@ -477,8 +599,8 @@ mod tests {
 
     #[test]
     fn an_ambiguous_recipient_carries_its_candidates() {
-        let candidates: Vec<SenatorPath> =
-            vec!["bob/claude".parse().unwrap(), "bob/codex".parse().unwrap()];
+        let candidates: Vec<SenatorName> =
+            vec!["claude".parse().unwrap(), "codex".parse().unwrap()];
         let e = ApiClientError::Api {
             status: 409,
             code: api::code::AMBIGUOUS_RECIPIENT.into(),

@@ -10,8 +10,8 @@
 //!
 //! Each `presence` transition (written by the server, `from: committee`) is
 //! one root line in the mirror group (the Agent group when there is one),
-//! e.g. `[senator::alice/claude] 失联` / `[senator::alice/claude] absent`,
-//! `… taken over by the Speaker`, `… reassigned → [senator::bob/claude]`.
+//! e.g. `[senator::claude] 失联` / `[senator::claude] absent`,
+//! `… taken over by the Speaker`, `… reassigned → [senator::copilot]`.
 //! At output level "answers only" just `absent`, `taken_over` and `online`
 //! are posted; otherwise every transition. Each hand-off `checkpoint`
 //! (trigger `handoff`) is one line too, at "status" and "everything"; other
@@ -76,7 +76,7 @@ use senate_core::{
 
 use super::{
     Address, Answer, BrainError, CommitteeId, Drafted, Engine, Event, HubError, Kind, MirrorPlan,
-    NewEvent, OutputLevel, PostTarget, STALL_RETRY, SenatorPath, Seq, Stall, StatusPayload,
+    NewEvent, OutputLevel, PostTarget, STALL_RETRY, SenatorName, Seq, Stall, StatusPayload,
     TAKEOVER_META, Takeover, behalf_answer, debug, derived_event_id, json, meta, warn,
 };
 use crate::render::{self, HandedBack, NoCover};
@@ -87,7 +87,7 @@ impl Engine {
     pub(super) async fn presence_state(
         &self,
         committee: &CommitteeId,
-        agent: &SenatorPath,
+        agent: &SenatorName,
     ) -> Result<Option<PresenceState>, Stall> {
         Ok(self
             .hub
@@ -116,7 +116,7 @@ impl Engine {
             .and_then(|s| s.brief.as_ref())
             .map(|b| b.brief().checkpoints)
             .unwrap_or_default();
-        let mut agents: Vec<SenatorPath> = presence.iter().map(|p| p.agent.clone()).collect();
+        let mut agents: Vec<SenatorName> = presence.iter().map(|p| p.agent.clone()).collect();
         agents.extend(checkpoints.iter().map(|c| c.agent.clone()));
         agents.sort();
         agents.dedup();
@@ -192,7 +192,7 @@ impl Engine {
     /// interval, …) stay in the log and the brief only.
     pub(super) async fn on_checkpoint(&mut self, event: &Event) -> Result<(), Stall> {
         let l = self.locale(&event.committee);
-        if !event.from.is_junior() {
+        if !self.roster.is_agent_address(&event.from) {
             return Ok(());
         }
         let Some(payload) = CheckpointPayload::of(event) else {
@@ -236,7 +236,7 @@ impl Engine {
 
     /// Every question still waiting on `agent` is due now (it is away: the
     /// takeover decides). Only that agent's: its siblings are not touched.
-    fn due_for(&mut self, committee: &CommitteeId, agent: &SenatorPath) {
+    fn due_for(&mut self, committee: &CommitteeId, agent: &SenatorName) {
         let roots: Vec<Seq> = self
             .committees
             .get(committee)
@@ -263,9 +263,22 @@ impl Engine {
         &mut self,
         committee: CommitteeId,
         root: Seq,
-        agent: SenatorPath,
+        agent: SenatorName,
         question: Seq,
     ) {
+        // The cover chain: the agent's own secretaries, then the desk.
+        match self.cover_by(&committee, &agent).await {
+            super::desk::CoverBy::Secretary => {
+                self.cover_as_secretary(committee, root, agent, question)
+                    .await;
+                return;
+            }
+            super::desk::CoverBy::Nobody => {
+                self.forget_open(&committee, root, &agent);
+                return;
+            }
+            super::desk::CoverBy::Office => {}
+        }
         let checkpoint = match self.hub.latest_checkpoint(&committee, &agent).await {
             Ok(checkpoint) => checkpoint,
             Err(error) => {
@@ -373,7 +386,7 @@ impl Engine {
         }
     }
 
-    fn forget_open(&mut self, committee: &CommitteeId, root: Seq, agent: &SenatorPath) {
+    pub(super) fn forget_open(&mut self, committee: &CommitteeId, root: Seq, agent: &SenatorName) {
         if let Some(open) = self
             .committees
             .get_mut(committee)
@@ -387,11 +400,11 @@ impl Engine {
     /// Not answered from the checkpoint: the question waits on people
     /// (`suspended`, with the reason). The mentions are posted when the
     /// status is processed.
-    async fn escalate_takeover(
+    pub(super) async fn escalate_takeover(
         &mut self,
         committee: &CommitteeId,
         root: Seq,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         question: Seq,
         why: NoCover,
     ) {
@@ -437,9 +450,15 @@ impl Engine {
         root: Seq,
         status: &StatusPayload,
     ) -> Result<(), Stall> {
-        let Some(away) = event.on_behalf_of.as_ref().and_then(Address::as_agent) else {
+        let Some(away) = event
+            .on_behalf_of
+            .as_ref()
+            .filter(|a| self.roster.is_agent_address(a))
+            .and_then(Address::as_senator)
+        else {
             return Ok(());
         };
+        let away_owner = self.roster.owner_of(away);
         let platform = self.surface.platform().to_owned();
         let Some((message_ref, group)) = self
             .thread_target(&event.committee, root, &platform)
@@ -455,8 +474,8 @@ impl Engine {
                 state
                     .activity
                     .keys()
-                    .map(SenatorPath::owner)
-                    .filter(|person| *person != away.owner())
+                    .filter_map(|agent| self.roster.owner_of(agent))
+                    .filter(|person| Some(*person) != away_owner)
                     .cloned()
                     .collect()
             })
@@ -513,7 +532,7 @@ impl Engine {
     async fn hand_back(
         &mut self,
         event: &Event,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         group: Option<&str>,
     ) -> Result<(), Stall> {
         let l = self.locale(&event.committee);

@@ -180,7 +180,7 @@ impl Desktop {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct News {
     pub committee: CommitteeId,
-    /// `[senator::alice/claude] answered: the first line`, in the daemon's
+    /// `[senator::claude] answered: the first line`, in the daemon's
     /// language.
     pub line: String,
 }

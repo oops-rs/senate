@@ -27,7 +27,7 @@ use senate_bridge::ipc::{
 };
 use senate_bridge::session::{Runtime, Session, SessionState};
 use senate_core::{
-    CommitteeId, Directed, Locale, SenatorPath, Seq, SpeakerSeat, StatusPayload, StatusState,
+    CommitteeId, Directed, Locale, SenatorName, Seq, SpeakerSeat, StatusPayload, StatusState,
     ThreadSummary,
 };
 
@@ -38,7 +38,7 @@ use crate::text;
 pub enum Refresh {
     /// `inbox` of one agent on one committee of the primary Senate.
     Inbox {
-        agent: SenatorPath,
+        agent: SenatorName,
         committee: CommitteeId,
     },
     /// Every inbox of the primary Senate.
@@ -63,7 +63,7 @@ pub enum Notice {
         thread: Seq,
         /// `Senate · refund-v2`.
         title: String,
-        /// `[senator::alice/claude] answered: the first line`.
+        /// `[senator::claude] answered: the first line`.
         body: String,
     },
 }
@@ -119,7 +119,7 @@ impl Offline {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReadOf {
     Inbox {
-        agent: SenatorPath,
+        agent: SenatorName,
         committee: CommitteeId,
     },
     Approvals,
@@ -169,12 +169,12 @@ pub struct Model {
     pub online: bool,
     /// Why the daemon is unreachable, when it is.
     pub offline: Option<Offline>,
-    /// The primary Senate's status, the other Senates under `others`.
+    /// The status of the Senate the daemon serves.
     pub status: Option<StatusReply>,
     /// Pending approvals by id.
     pub approvals: BTreeMap<String, Approval>,
     /// The last `inbox` reply per (agent, committee) of the primary Senate.
-    pub inboxes: BTreeMap<(SenatorPath, CommitteeId), InboxReply>,
+    pub inboxes: BTreeMap<(SenatorName, CommitteeId), InboxReply>,
     /// What awaits the Speaker, while one of the person's agents presides.
     pub docket: Option<DocketReply>,
     pub last_error: Option<Failure>,
@@ -188,7 +188,7 @@ pub struct Waiting {
     pub committee: CommitteeId,
     pub thread: ThreadSummary,
     /// The person's agents the thread was addressed to.
-    pub for_agents: Vec<SenatorPath>,
+    pub for_agents: Vec<SenatorName>,
     /// The thread was escalated to the person: it waits on them whichever
     /// agent it was for.
     pub escalated: bool,
@@ -228,6 +228,7 @@ impl Model {
         let mut fx = Effects::default();
         match event {
             WatchEvent::Status(status) => {
+                crate::ffi::note_people(&status.people);
                 self.status = Some(*status);
                 let targets: BTreeSet<_> = self.targets().into_iter().collect();
                 self.inboxes.retain(|k, _| targets.contains(k));
@@ -323,16 +324,14 @@ impl Model {
         self.approvals.remove(id);
     }
 
-    /// Every Senate the machine serves: the primary first.
+    /// Every Senate the machine serves: one.
     pub fn senates(&self) -> impl Iterator<Item = &StatusReply> {
-        self.status
-            .iter()
-            .flat_map(|s| std::iter::once(s).chain(s.others.iter()))
+        self.status.iter()
     }
 
     /// The (agent, committee) streams of the primary Senate: the inboxes the
     /// app can read.
-    pub fn targets(&self) -> Vec<(SenatorPath, CommitteeId)> {
+    pub fn targets(&self) -> Vec<(SenatorName, CommitteeId)> {
         self.status
             .as_ref()
             .map(|s| {
@@ -426,11 +425,12 @@ impl Model {
     }
 }
 
-/// The person's agent holding the Speaker's seat of the Senate `status`
-/// describes, if it is one of theirs.
-pub fn presider_of(status: &StatusReply) -> Option<&SenatorPath> {
+/// The agent holding the Speaker's seat of the Senate `status` describes,
+/// when it is an agent (the person's own: a machine's agents are its
+/// person's).
+pub fn presider_of(status: &StatusReply) -> Option<&SenatorName> {
     match &status.speaker {
-        Some(SpeakerSeat::Senator(p)) if p.owner() == &status.person => Some(p),
+        Some(SpeakerSeat::Senator(p)) if !status.people.is_person(p) => Some(p),
         _ => None,
     }
 }
@@ -439,7 +439,7 @@ pub fn presider_of(status: &StatusReply) -> Option<&SenatorPath> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     Inbox {
-        agent: SenatorPath,
+        agent: SenatorName,
         committee: CommitteeId,
     },
     /// Reply in a thread as the person (`senator::<person>`).
@@ -655,7 +655,7 @@ mod tests {
         CommitteeId::new(c).unwrap()
     }
 
-    fn path(p: &str) -> SenatorPath {
+    fn path(p: &str) -> SenatorName {
         p.parse().unwrap()
     }
 
@@ -664,7 +664,11 @@ mod tests {
             pid: 1,
             version: "0.1.0".into(),
             person: Name::new("alice").unwrap(),
-            presider: None,
+            senate: Some("alice-desk".parse().unwrap()),
+            people: senate_core::People::new([
+                Name::new("alice").unwrap(),
+                Name::new("bob").unwrap(),
+            ]),
             locale: Locale::En,
             server_url: "http://senate.test".into(),
             committees: streams
@@ -682,7 +686,7 @@ mod tests {
             sessions: Vec::new(),
             queue: Default::default(),
             speaker: None,
-            others: Vec::new(),
+            roles: None,
         }
     }
 
@@ -693,6 +697,7 @@ mod tests {
             from: Address::Speaker,
             on_behalf_of: None,
             to: vec![Address::senator(&path(agent))],
+            agents: vec![path(agent)],
             title: "why?".into(),
             state: StatusState::Suspended,
             since: Seq(root),
@@ -729,20 +734,17 @@ mod tests {
         let mut m = Model::default();
         m.connected();
         let fx = m.apply(WatchEvent::Status(Box::new(status(&[
-            ("alice/claude", "a"),
-            ("alice/codex", "a"),
-            ("alice/claude", "b"),
+            ("claude", "a"),
+            ("codex", "a"),
+            ("claude", "b"),
         ]))));
         assert_eq!(fx.refresh, vec![Refresh::AllInboxes, Refresh::Docket]);
-        m.set_inbox(inbox("alice/claude", "a", &[3, 5]));
-        m.set_inbox(inbox("alice/codex", "a", &[7]));
-        m.set_inbox(inbox("alice/claude", "b", &[9]));
+        m.set_inbox(inbox("claude", "a", &[3, 5]));
+        m.set_inbox(inbox("codex", "a", &[7]));
+        m.set_inbox(inbox("claude", "b", &[9]));
         assert_eq!(m.pending_threads(), 4);
         assert_eq!(m.committees(), vec![committee("a"), committee("b")]);
-        m.apply(WatchEvent::Status(Box::new(status(&[(
-            "alice/claude",
-            "a",
-        )]))));
+        m.apply(WatchEvent::Status(Box::new(status(&[("claude", "a")]))));
         assert_eq!(m.pending_threads(), 2, "the other streams are gone");
     }
 
@@ -750,11 +752,8 @@ mod tests {
     fn answered_threads_leave_the_list_and_the_count_together() {
         let mut m = Model::default();
         m.connected();
-        m.apply(WatchEvent::Status(Box::new(status(&[(
-            "alice/claude",
-            "a",
-        )]))));
-        let mut reply = inbox("alice/claude", "a", &[3, 5, 8]);
+        m.apply(WatchEvent::Status(Box::new(status(&[("claude", "a")]))));
+        let mut reply = inbox("claude", "a", &[3, 5, 8]);
         reply.threads[2].state = StatusState::Processing;
         m.set_inbox(reply.clone());
         assert_eq!(m.pending_threads(), 3);
@@ -770,11 +769,8 @@ mod tests {
     fn a_settled_thread_waits_on_no_one_until_something_is_said_after_the_answer() {
         let mut m = Model::default();
         m.connected();
-        m.apply(WatchEvent::Status(Box::new(status(&[(
-            "alice/claude",
-            "a",
-        )]))));
-        let mut reply = inbox("alice/claude", "a", &[3, 5]);
+        m.apply(WatchEvent::Status(Box::new(status(&[("claude", "a")]))));
+        let mut reply = inbox("claude", "a", &[3, 5]);
         for t in &mut reply.threads {
             t.state = StatusState::Active;
             t.answered = true;
@@ -794,39 +790,36 @@ mod tests {
         let mut m = Model::default();
         m.connected();
         m.apply(WatchEvent::Status(Box::new(status(&[
-            ("alice/claude", "a"),
-            ("alice/claude", "b"),
+            ("claude", "a"),
+            ("claude", "b"),
         ]))));
-        m.set_inbox(inbox("alice/claude", "a", &[3]));
-        m.set_inbox(inbox("alice/claude", "b", &[3]));
+        m.set_inbox(inbox("claude", "a", &[3]));
+        m.set_inbox(inbox("claude", "b", &[3]));
         assert_eq!(m.pending_threads(), 2);
     }
 
     #[test]
     fn inbox_event_refreshes_its_stream_only_when_the_app_can_read_it() {
         let mut m = Model::default();
-        m.apply(WatchEvent::Status(Box::new(status(&[(
-            "alice/claude",
-            "a",
-        )]))));
+        m.apply(WatchEvent::Status(Box::new(status(&[("claude", "a")]))));
         let event = |agent: &str| WatchEvent::Inbox {
             agent: path(agent),
             committee: committee("a"),
             seq: Seq(9),
             kind: Kind::Question,
         };
-        let fx = m.apply(event("alice/claude"));
+        let fx = m.apply(event("claude"));
         assert_eq!(
             fx.refresh,
             vec![
                 Refresh::Inbox {
-                    agent: path("alice/claude"),
+                    agent: path("claude"),
                     committee: committee("a")
                 },
                 Refresh::Docket
             ]
         );
-        let fx = m.apply(event("alice/claude/reviewer"));
+        let fx = m.apply(event("reviewer"));
         assert_eq!(fx.refresh, vec![Refresh::Docket]);
     }
 
@@ -835,7 +828,7 @@ mod tests {
             person: Name::new(person).unwrap(),
             seq: Seq(seq),
             ts: Utc::now(),
-            from: Address::senator(&path("alice/claude")),
+            from: Address::senator(&path("claude")),
             on_behalf_of: None,
             kind,
             escalated,
@@ -845,7 +838,7 @@ mod tests {
 
     /// An answered thread for alice's agent, with `d` addressed to alice.
     fn answered_to_alice(root: u64, d: Directed) -> ThreadSummary {
-        let mut t = thread(root, "alice/claude");
+        let mut t = thread(root, "claude");
         t.state = StatusState::Active;
         t.answered = true;
         t.updated = Seq(root + 5);
@@ -857,11 +850,8 @@ mod tests {
     fn an_answer_the_person_has_not_seen_waits_on_them_until_they_have() {
         let mut m = Model::default();
         m.connected();
-        m.apply(WatchEvent::Status(Box::new(status(&[(
-            "alice/claude",
-            "a",
-        )]))));
-        let mut reply = inbox("alice/claude", "a", &[]);
+        m.apply(WatchEvent::Status(Box::new(status(&[("claude", "a")]))));
+        let mut reply = inbox("claude", "a", &[]);
         reply.threads = vec![
             answered_to_alice(3, directed("alice", 4, Kind::Answer, false, "The result")),
             answered_to_alice(6, directed("alice", 8, Kind::Note, false, "FYI")),
@@ -902,21 +892,18 @@ mod tests {
     fn an_escalation_waits_after_it_is_seen_but_is_not_news() {
         let mut m = Model::default();
         m.connected();
-        m.apply(WatchEvent::Status(Box::new(status(&[(
-            "alice/claude",
-            "a",
-        )]))));
+        m.apply(WatchEvent::Status(Box::new(status(&[("claude", "a")]))));
         let mut t = answered_to_alice(3, directed("alice", 5, Kind::Status, true, "nine things"));
         t.state = StatusState::Suspended;
         t.escalated_to = Some(Name::new("alice").unwrap());
         t.escalation = Some(senate_core::Escalation {
             to: Name::new("alice").unwrap(),
-            by: Address::senator(&path("alice/claude")),
+            by: Address::senator(&path("claude")),
             seq: Seq(5),
             ts: Utc::now(),
             reason: Some("nine things".into()),
         });
-        let mut reply = inbox("alice/claude", "a", &[]);
+        let mut reply = inbox("claude", "a", &[]);
         reply.threads = vec![t];
         m.set_inbox(reply.clone());
         let w = m.waiting();
@@ -953,7 +940,7 @@ mod tests {
         t.escalated_to = Some(alice.clone());
         t.escalation = Some(senate_core::Escalation {
             to: alice,
-            by: Address::senator(&path("alice/claude")),
+            by: Address::senator(&path("claude")),
             seq: Seq(5),
             ts: Utc::now(),
             reason: None,
@@ -971,10 +958,7 @@ mod tests {
     fn an_answer_that_crossed_an_escalation_leaves_it_new_in_the_app() {
         let mut m = Model::default();
         m.connected();
-        m.apply(WatchEvent::Status(Box::new(status(&[(
-            "alice/claude",
-            "a",
-        )]))));
+        m.apply(WatchEvent::Status(Box::new(status(&[("claude", "a")]))));
         let alice = Name::new("alice").unwrap();
         // The escalation at 5 is still in force after the person's answer at
         // 6, which carried `seen` 4; the daemon marked them seen up to 4.
@@ -983,13 +967,13 @@ mod tests {
         t.escalated_to = Some(alice.clone());
         t.escalation = Some(senate_core::Escalation {
             to: alice,
-            by: Address::senator(&path("alice/claude")),
+            by: Address::senator(&path("claude")),
             seq: Seq(5),
             ts: Utc::now(),
             reason: Some("nine things".into()),
         });
         t.updated = Seq(6);
-        let mut reply = inbox("alice/claude", "a", &[]);
+        let mut reply = inbox("claude", "a", &[]);
         reply.threads = vec![t];
         reply.seen = vec![senate_bridge::ipc::ThreadSeen {
             thread: Seq(3),
@@ -1023,20 +1007,14 @@ mod tests {
     #[test]
     fn something_for_the_person_is_a_notice_in_the_apps_language_and_a_refresh() {
         for (locale, body) in [
-            (
-                Locale::En,
-                "[senator::alice/claude] answered: Idempotency-Key",
-            ),
-            (
-                Locale::Zh,
-                "[senator::alice/claude] 回答了：Idempotency-Key",
-            ),
+            (Locale::En, "[senator::claude] answered: Idempotency-Key"),
+            (Locale::Zh, "[senator::claude] 回答了：Idempotency-Key"),
         ] {
             let mut m = Model::new(locale);
             let event = senate_core::NewEvent::new(
                 committee("a"),
                 Kind::Answer,
-                Address::senator(&path("alice/claude")),
+                Address::senator(&path("claude")),
                 "Idempotency-Key\nmore",
             )
             .to(Address::senior(&Name::new("alice").unwrap()))
@@ -1100,50 +1078,36 @@ mod tests {
     }
 
     #[test]
-    fn presiding_is_one_of_the_persons_agents_holding_a_seat() {
+    fn presiding_is_an_agent_holding_the_seat() {
+        let presiding = |s: &StatusReply| {
+            Model {
+                status: Some(s.clone()),
+                ..Model::default()
+            }
+            .presiding()
+        };
         let mut s = status(&[]);
-        assert!(
-            !Model {
-                status: Some(s.clone()),
-                ..Model::default()
-            }
-            .presiding()
-        );
-        // The built-in Speaker, or somebody else's agent: not the person's.
+        assert!(!presiding(&s));
+        // The built-in Speaker, or a person holding the seat: no agent presides.
         s.speaker = Some(SpeakerSeat::BuiltIn);
-        assert!(
-            !Model {
-                status: Some(s.clone()),
-                ..Model::default()
-            }
-            .presiding()
-        );
-        s.speaker = Some(SpeakerSeat::Senator(path("bob/claude")));
-        assert!(
-            !Model {
-                status: Some(s.clone()),
-                ..Model::default()
-            }
-            .presiding()
-        );
-        s.speaker = Some(SpeakerSeat::Senator(path("alice/claude")));
-        assert!(
+        assert!(!presiding(&s));
+        s.speaker = Some(SpeakerSeat::Senator(path("bob")));
+        assert!(!presiding(&s), "bob is one of the Senate's people");
+        s.speaker = Some(SpeakerSeat::Senator(path("alice")));
+        assert!(!presiding(&s));
+        // An agent: whoever is not among the people the daemon reported.
+        s.speaker = Some(SpeakerSeat::Senator(path("claude")));
+        assert!(presiding(&s));
+        assert_eq!(presider_of(&s), Some(&path("claude")));
+        // The daemon serves one Senate: there is no Senate below to preside over.
+        assert_eq!(
             Model {
                 status: Some(s.clone()),
                 ..Model::default()
             }
-            .presiding()
-        );
-        // Presiding below counts too.
-        let mut top = status(&[]);
-        s.presider = Some(path("alice/claude"));
-        top.others.push(s);
-        assert!(
-            Model {
-                status: Some(top),
-                ..Model::default()
-            }
-            .presiding()
+            .senates()
+            .count(),
+            1
         );
     }
 
@@ -1180,7 +1144,7 @@ mod tests {
             }
         ));
         let inbox = Action::Inbox {
-            agent: path("alice/codex"),
+            agent: path("codex"),
             committee: committee("a"),
         };
         let json = serde_json::to_value(inbox.request().unwrap()).unwrap();
@@ -1209,19 +1173,13 @@ mod tests {
         );
         let f = Failure::Read {
             what: ReadOf::Inbox {
-                agent: path("alice/claude"),
+                agent: path("claude"),
                 committee: committee("a"),
             },
             message: "no".into(),
         };
-        assert_eq!(
-            f.text(Locale::En),
-            "inbox of [senator::alice/claude] on a: no"
-        );
-        assert_eq!(
-            f.text(Locale::Zh),
-            "[senator::alice/claude] 在 a 的收件箱：no"
-        );
+        assert_eq!(f.text(Locale::En), "inbox of [senator::claude] on a: no");
+        assert_eq!(f.text(Locale::Zh), "[senator::claude] 在 a 的收件箱：no");
     }
 
     #[test]

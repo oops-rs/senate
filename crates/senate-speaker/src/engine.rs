@@ -176,6 +176,7 @@
 mod agent;
 mod agents;
 mod cards;
+mod desk;
 mod route;
 mod takeover;
 mod tasks;
@@ -195,8 +196,8 @@ use ractor::concurrency::JoinHandle;
 use senate_core::{
     Address, BindingAction, BindingPayload, BriefBuilder, Card, ChatSurface, CommitteeId, Event,
     GroupRole, Hub, HubError, Kind, Locale, MirrorRef, Name, NewEvent, OutputLevel,
-    PROPOSAL_DECISION, PostTarget, Posted, PresencePayload, PresenceState, Roster, SenatorPath,
-    Seq, Source, StatusPayload, SurfaceError, TaskBoard, TriagePayload, TriageVerdict,
+    PROPOSAL_DECISION, People, PostTarget, Posted, PresencePayload, PresenceState, Roster,
+    SenatorName, Seq, Source, StatusPayload, SurfaceError, TaskBoard, TriagePayload, TriageVerdict,
     UnboundMention, WorkRun, meta,
 };
 use senate_work::{Forge, NoForge, Runner};
@@ -215,6 +216,7 @@ use crate::brain::{
 use crate::config::{SpeakerConfig, SpeakerMode, WorkConfig};
 use crate::ids::{derived_event_id, operation_id, unbound_operation_id};
 use crate::render;
+use crate::secretary::{Effective, SecretaryConfigs};
 use crate::syntax::{is_affirmative, parse_command};
 use route::{Choice, Settled, Waiting};
 
@@ -331,7 +333,7 @@ struct CommitteeState {
     /// group, else the first people group.
     groups: Vec<BoundGroup>,
     /// `(thread root, agent)` → the question awaiting that agent's answer.
-    open: HashMap<(Seq, SenatorPath), Open>,
+    open: HashMap<(Seq, SenatorName), Open>,
     stalled: bool,
     /// The `chat` this committee is stopped at until its interpretation
     /// returns.
@@ -346,20 +348,23 @@ struct CommitteeState {
     /// The committee's task threads, folded from the log like everything
     /// here.
     board: TaskBoard,
+    /// The Senate's people as the roster said when this state was loaded:
+    /// every other senator in the log is an agent.
+    people: People,
     brief: Option<BriefBuilder>,
     /// Task root → the start of its latest answer, for its card.
     answers: HashMap<Seq, String>,
     /// Task root → when it was asked (today's tasks).
     root_ts: HashMap<Seq, DateTime<Utc>>,
     /// Each agent's latest event: `(seq, ts, what)`.
-    activity: HashMap<SenatorPath, (Seq, DateTime<Utc>, String)>,
+    activity: HashMap<SenatorName, (Seq, DateTime<Utc>, String)>,
     /// Verdicts that came back from the Brain for a task root or a relaying
     /// `chat`, keyed by that seq, until the step that uses them is done.
     triage: HashMap<Seq, TriagePayload>,
     /// Agents the Speaker picked for a person while acting on a `chat`, by
     /// (chat seq, step key, person), so a step repeated after a stall or a
     /// triage wait acts on the same agent.
-    picks: HashMap<(Seq, String, Name), SenatorPath>,
+    picks: HashMap<(Seq, String, Option<Name>), SenatorName>,
     /// Debounced card updates, per task root.
     cards: HashMap<Seq, Timer>,
     pinned: Pinned,
@@ -367,15 +372,21 @@ struct CommitteeState {
     /// agents showed up).
     invited: HashSet<Name>,
     /// Each agent's latest `presence` event, as folded from the log.
-    presence: HashMap<SenatorPath, PresenceSeen>,
+    presence: HashMap<SenatorName, PresenceSeen>,
     /// Each agent's latest `taken_over`, and the answers given for it since.
-    taken_over: HashMap<SenatorPath, (Seq, Vec<Covered>)>,
+    taken_over: HashMap<SenatorName, (Seq, Vec<Covered>)>,
     /// Each work run's latest state, by root.
     work: BTreeMap<Seq, WorkRun>,
     /// Agents whose work is reassigned → the agent it is with.
-    reassigned: HashMap<SenatorPath, SenatorPath>,
+    reassigned: HashMap<SenatorName, SenatorName>,
     /// A hand-back's `presence` seq → the agent that held the work.
-    handbacks: HashMap<Seq, SenatorPath>,
+    handbacks: HashMap<Seq, SenatorName>,
+    /// The built-in session's own name: its answers for an agent whose
+    /// secretary it is count as that agent's.
+    me: Option<SenatorName>,
+    /// Crossing decisions back from the Brain, by desk item seq, until the
+    /// step that uses them is done.
+    crossings: HashMap<Seq, crate::brain::Crossing>,
 }
 
 /// An agent's latest presence transition in the log.
@@ -412,7 +423,7 @@ impl CommitteeState {
         self.brief
             .get_or_insert_with(|| BriefBuilder::new(event.committee.clone()))
             .observe(event);
-        if let Some(agent) = event.from.as_agent() {
+        if let Some(agent) = self.people.as_agent(&event.from) {
             self.activity.insert(
                 agent.clone(),
                 (event.seq, event.ts, render::activity(self.locale, event)),
@@ -451,7 +462,7 @@ impl CommitteeState {
                     // question, and a parked relay waits on its person.
                     return;
                 }
-                for agent in question_targets(event) {
+                for agent in question_targets(event, &self.people) {
                     self.open.entry((root, agent)).or_insert(Open {
                         question: event.seq,
                         ts: event.ts,
@@ -467,12 +478,15 @@ impl CommitteeState {
                 {
                     self.answers.insert(root, render::excerpt(&event.body));
                 }
-                let (Some(root), Some(agent)) = (event.thread, answering_agent(event)) else {
+                let (Some(root), Some(agent)) = (
+                    event.thread,
+                    answering_agent(event, &self.people, self.me.as_ref()),
+                ) else {
                     return;
                 };
                 // An answer by the agent an agent's work is reassigned to
                 // answers for it too.
-                let covered: Vec<SenatorPath> = self
+                let covered: Vec<SenatorName> = self
                     .reassigned
                     .iter()
                     .filter(|(_, owner)| **owner == agent)
@@ -486,7 +500,7 @@ impl CommitteeState {
                     }
                 }
                 let open = self.open.remove(&(root, agent.clone()));
-                if render::is_takeover(event)
+                if desk::is_cover(event, self.me.as_ref())
                     && let Some((_, covered)) = self.taken_over.get_mut(&agent)
                     && !covered.iter().any(|c| c.answer == event.seq)
                 {
@@ -611,23 +625,43 @@ impl CommitteeState {
     }
 }
 
+/// A person's agent: their one agent seated here, several of them, or none
+/// (the person, then, gets what was meant for it). Agents are seated under
+/// the person who runs them ([`Roster::owner_of`]).
+pub(crate) fn agent_of(roster: &Roster, owner: &Name) -> senate_core::AgentOf {
+    use senate_core::AgentOf;
+    match roster.agents_of(owner).as_slice() {
+        [] => AgentOf::None(SenatorName::new(owner.clone()).ok()),
+        [one] => AgentOf::One((*one).clone()),
+        several => AgentOf::Several(several.iter().map(|a| (*a).clone()).collect()),
+    }
+}
+
 /// The agents a question is put to (its `to`, minus the asker). A person in
 /// `to` is not here: nobody answers for a person.
-fn question_targets(event: &Event) -> Vec<SenatorPath> {
+fn question_targets(event: &Event, people: &People) -> Vec<SenatorName> {
     event
         .to
         .iter()
         .filter(|address| event.from != **address)
-        .filter_map(Address::as_agent)
+        .filter_map(|address| people.as_agent(address))
         .cloned()
         .collect()
 }
 
-/// Whose answer this is: the agent itself, or the Speaker speaking for it.
-fn answering_agent(event: &Event) -> Option<SenatorPath> {
+/// Whose answer this is: the agent itself, or the Speaker (or the built-in
+/// session as its secretary, `me`) speaking for it.
+fn answering_agent(
+    event: &Event,
+    people: &People,
+    me: Option<&SenatorName>,
+) -> Option<SenatorName> {
     match (&event.from, &event.on_behalf_of) {
-        (Address::Speaker, Some(behalf)) => behalf.as_agent().cloned(),
-        (from, _) => from.as_agent().cloned(),
+        (Address::Speaker, Some(behalf)) => people.as_agent(behalf).cloned(),
+        (Address::Senator(from), Some(behalf)) if Some(from) == me => {
+            people.as_agent(behalf).cloned()
+        }
+        (from, _) => people.as_agent(from).cloned(),
     }
 }
 
@@ -693,9 +727,9 @@ enum PendingAction {
     /// `owner`.
     Reassign {
         committee: CommitteeId,
-        agent: SenatorPath,
-        to: SenatorPath,
-        owner: Option<SenatorPath>,
+        agent: SenatorName,
+        to: SenatorName,
+        owner: Option<SenatorName>,
     },
 }
 
@@ -847,11 +881,19 @@ pub(crate) enum ThoughtKind {
     Answered {
         committee: CommitteeId,
         root: Seq,
-        agent: SenatorPath,
+        agent: SenatorName,
         question: Seq,
         asker: Address,
         takeover: bool,
+        /// Drafted as the agent's secretary rather than for the desk.
+        secretary: bool,
         answer: Result<Answer, BrainError>,
+    },
+    /// The desk's decision on a crossing at `seq`.
+    Crossed {
+        committee: CommitteeId,
+        seq: Seq,
+        crossing: Result<crate::brain::Crossing, BrainError>,
     },
     /// A triage verdict for the task root, or the relaying `chat`, at
     /// `seq`.
@@ -867,6 +909,22 @@ pub(crate) enum ThoughtKind {
         basis: Seq,
         top: Result<String, BrainError>,
     },
+}
+
+impl ThoughtKind {
+    /// The committee the thought is about; `None` for a mention in a group
+    /// bound to none.
+    pub(crate) fn committee(&self) -> Option<&CommitteeId> {
+        match self {
+            Self::Interpreted { committee, .. }
+            | Self::Conversed { committee, .. }
+            | Self::Answered { committee, .. }
+            | Self::Crossed { committee, .. }
+            | Self::Triaged { committee, .. }
+            | Self::TopWritten { committee, .. } => Some(committee),
+            Self::UnboundConversed { .. } | Self::UnboundInterpreted { .. } => None,
+        }
+    }
 }
 
 type Deliver<T> = Box<dyn FnOnce(Result<T, BrainError>) -> ThoughtKind + Send>;
@@ -948,7 +1006,7 @@ pub(crate) struct Engine {
     in_flight: usize,
     /// Answers-for-agents sent to the mailbox to run as soon as it gets to
     /// them.
-    due_now: HashSet<(CommitteeId, Seq, SenatorPath)>,
+    due_now: HashSet<(CommitteeId, Seq, SenatorName)>,
     /// What does work runs, and what opens their PRs.
     runner: Option<Arc<dyn Runner>>,
     forge: Arc<dyn Forge>,
@@ -958,6 +1016,16 @@ pub(crate) struct Engine {
     runs: HashMap<(CommitteeId, Seq), work::Run>,
     /// Their tasks; aborted with the engine like the Brain calls.
     running: JoinSet<()>,
+    /// The built-in session's configuration, re-read before it acts on a
+    /// committee (`engine::desk`).
+    secretary: Arc<SecretaryConfigs>,
+    /// The configuration the fields above were last set from.
+    applied: Option<Arc<Effective>>,
+    /// The built-in session's senator name: what it signs as
+    /// [`meta::ACTED_BY`], and what an office or a secretary relation names.
+    me: SenatorName,
+    /// The child Senates registered here, as the hub said last.
+    children: Vec<senate_core::ChildSenate>,
 }
 
 impl Engine {
@@ -974,8 +1042,10 @@ impl Engine {
             config,
             runner,
             forge,
+            secretary,
             ..
         } = args;
+        let me = secretary.name().clone();
         let owned = config.clone();
         let config = &config;
         let max_runs = config
@@ -1019,6 +1089,10 @@ impl Engine {
             run_permits: Arc::new(Semaphore::new(max_runs)),
             runs: HashMap::new(),
             running: JoinSet::new(),
+            secretary,
+            applied: None,
+            me,
+            children: Vec::new(),
         }
     }
 
@@ -1139,6 +1213,7 @@ impl Engine {
     /// Process the event right after the cursor. False when the committee
     /// stopped at it (a stall, or a Brain call to wait for).
     async fn step(&mut self, event: Event) -> bool {
+        self.use_config(Some(&event.committee));
         self.sync_roster().await;
         let platform = self.surface.platform().to_owned();
         let committee = event.committee.clone();
@@ -1161,6 +1236,7 @@ impl Engine {
                     state.cursor = event.seq;
                     state.decisions.remove(&event.seq);
                     state.triage.remove(&event.seq);
+                    state.crossings.remove(&event.seq);
                     state.picks.retain(|(seq, _, _), _| *seq != event.seq);
                     self.agent_progress.remove(&(committee.clone(), event.seq));
                 }
@@ -1206,7 +1282,10 @@ impl Engine {
 
     /// The language `committee`'s people read.
     fn locale(&self, committee: &CommitteeId) -> Locale {
-        self.config.locale_of(committee)
+        self.secretary
+            .effective(Some(committee))
+            .speaker
+            .locale_of(committee)
     }
 
     /// Read the roster again: agents are seated as they connect. When the
@@ -1216,6 +1295,10 @@ impl Engine {
             Ok(roster) => self.roster = roster,
             Err(error) => debug!(%error, "cannot read the roster; using the last one"),
         }
+        match self.hub.children().await {
+            Ok(children) => self.children = children,
+            Err(error) => debug!(%error, "cannot read the child Senates; using the last list"),
+        }
     }
 
     /// A person on the roster: someone who may change state through the
@@ -1223,17 +1306,14 @@ impl Engine {
     /// so may a `senator::` address the roster does not list, which the
     /// Speaker cannot vouch for either.
     fn is_member(&self, who: &Address) -> bool {
-        who.may_change_state()
-            && who
-                .as_senator()
-                .is_some_and(|p| p.is_senior() && self.roster.senior(p.owner()).is_some())
+        who.may_change_state() && who.as_senator().is_some_and(|p| self.roster.is_person(p))
     }
 
     /// What people call a person: the first of their names on the roster,
     /// else their handle.
     fn display_name(&self, person: &Name) -> String {
         self.roster
-            .senior(person)
+            .principal(person)
             .and_then(|s| s.names.first().cloned())
             .unwrap_or_else(|| person.to_string())
     }
@@ -1241,8 +1321,18 @@ impl Engine {
     /// The person behind `who`, if it is one on the roster.
     fn person_of(&self, who: &Address) -> Option<Name> {
         self.is_member(who)
-            .then(|| who.as_senator().map(|p| p.owner().clone()))
+            .then(|| who.as_senator().map(|p| p.name().clone()))
             .flatten()
+    }
+
+    /// The person behind `senator`: the person themselves, or the person
+    /// an agent's seat records as answering for it.
+    fn person_behind(&self, senator: &SenatorName) -> Option<Name> {
+        if self.roster.is_person(senator) {
+            Some(senator.name().clone())
+        } else {
+            self.roster.owner_of(senator).cloned()
+        }
     }
 
     fn op_id(&self, committee: &CommitteeId, seq: Seq, target: &str) -> Result<String, Stall> {
@@ -1291,6 +1381,9 @@ impl Engine {
         let mut state = CommitteeState {
             locale: self.locale(committee),
             cursor,
+            board: TaskBoard::new(self.roster.people()),
+            people: self.roster.people(),
+            me: Some(self.me.clone()),
             ..CommitteeState::default()
         };
         let mut after = Seq::ZERO;
@@ -1309,7 +1402,7 @@ impl Engine {
 
     /// Arm a timer for every open question that has none, from its `ts`.
     fn rearm(&mut self, committee: &CommitteeId) {
-        let keys: Vec<(Seq, SenatorPath, DateTime<Utc>)> = self
+        let keys: Vec<(Seq, SenatorName, DateTime<Utc>)> = self
             .committees
             .get(committee)
             .map(|state| {
@@ -1332,7 +1425,7 @@ impl Engine {
         self.fallback_after.saturating_sub(elapsed)
     }
 
-    fn arm(&mut self, committee: &CommitteeId, root: Seq, agent: SenatorPath, delay: Duration) {
+    fn arm(&mut self, committee: &CommitteeId, root: Seq, agent: SenatorName, delay: Duration) {
         if delay.is_zero() {
             self.arm_now(committee, root, agent);
             return;
@@ -1358,7 +1451,7 @@ impl Engine {
 
     /// The fallback is due now: queue it behind whatever the mailbox holds,
     /// so the committee is caught up before it runs.
-    fn arm_now(&mut self, committee: &CommitteeId, root: Seq, agent: SenatorPath) {
+    fn arm_now(&mut self, committee: &CommitteeId, root: Seq, agent: SenatorName) {
         if let Some(previous) = self
             .committees
             .get_mut(committee)
@@ -1495,6 +1588,7 @@ impl Engine {
                 question,
                 asker,
                 takeover,
+                secretary,
                 answer,
             } => {
                 let draft = Drafted {
@@ -1504,12 +1598,19 @@ impl Engine {
                     question,
                     asker,
                 };
-                if takeover {
+                if secretary {
+                    self.on_secretary_answered(draft, answer).await;
+                } else if takeover {
                     self.on_takeover_answered(draft, answer).await;
                 } else {
                     self.on_answered(draft, answer.map(|a| a.text)).await;
                 }
             }
+            ThoughtKind::Crossed {
+                committee,
+                seq,
+                crossing,
+            } => self.on_crossed(committee, seq, crossing).await,
             ThoughtKind::TopWritten {
                 committee,
                 basis,
@@ -1542,6 +1643,9 @@ impl Engine {
     // ----- acting on one event --------------------------------------------
 
     async fn act(&mut self, event: &Event) -> Result<Flow, Stall> {
+        if desk::is_crossing(event) {
+            return self.on_crossing(event).await;
+        }
         let flow = match event.kind {
             Kind::Chat => self.on_chat(event).await?,
             Kind::Binding => {
@@ -1711,7 +1815,7 @@ impl Engine {
                 return Ok(self.card_plan(event, &group.group_id).into_iter().collect());
             }
             // A proposal's root is what a confirming reply maps back to.
-            let text = if is_proposal(event) {
+            let text = if is_proposal(event, &self.roster.people()) {
                 render::proposal_root(l, event)
             } else {
                 render::root_mirror(l, event)
@@ -1763,7 +1867,8 @@ impl Engine {
         platform: &str,
     ) -> Result<Vec<MirrorPlan>, Stall> {
         let l = self.locale(&event.committee);
-        let approval = event.from.is_senior() && event.meta.contains_key(meta::RELAYED_FROM);
+        let approval = self.roster.is_person_address(&event.from)
+            && event.meta.contains_key(meta::RELAYED_FROM);
         if event.kind == Kind::Status
             || (event.from == Address::Speaker && event.kind == Kind::Note)
             || approval
@@ -1861,7 +1966,7 @@ impl Engine {
                     message_ref: mirror.message_ref.clone(),
                     in_thread: true,
                 },
-                text: render::relay_ack_for(l, event),
+                text: render::relay_ack_for(l, event, &self.roster),
                 target: group,
                 record_as: Some(mirror.message_ref),
                 card: None,
@@ -1999,7 +2104,7 @@ impl Engine {
             return;
         }
         let root = event.thread.unwrap_or(event.seq);
-        for agent in question_targets(event) {
+        for agent in question_targets(event, &self.roster.people()) {
             let watching_this = self
                 .committees
                 .get(&event.committee)
@@ -2036,7 +2141,7 @@ impl Engine {
         &mut self,
         committee: CommitteeId,
         root: Seq,
-        agent: SenatorPath,
+        agent: SenatorName,
     ) {
         self.due_now
             .remove(&(committee.clone(), root, agent.clone()));
@@ -2093,9 +2198,23 @@ impl Engine {
         &mut self,
         committee: CommitteeId,
         root: Seq,
-        agent: SenatorPath,
+        agent: SenatorName,
         question: Seq,
         takeover: Option<Takeover>,
+    ) {
+        self.draft_answer_as(committee, root, agent, question, takeover, false)
+            .await;
+    }
+
+    /// [`Engine::draft_answer`], as the agent's `secretary` or for the desk.
+    pub(super) async fn draft_answer_as(
+        &mut self,
+        committee: CommitteeId,
+        root: Seq,
+        agent: SenatorName,
+        question: Seq,
+        takeover: Option<Takeover>,
+        secretary: bool,
     ) {
         match self.question_for(&committee, question, &agent).await {
             Ok(Some(mut draft)) => {
@@ -2123,6 +2242,7 @@ impl Engine {
                         question,
                         asker,
                         takeover: is_takeover,
+                        secretary,
                         answer,
                     },
                 );
@@ -2144,7 +2264,7 @@ impl Engine {
         &self,
         committee: &CommitteeId,
         question: Seq,
-        agent: &SenatorPath,
+        agent: &SenatorName,
     ) -> Result<Option<Question>, Stall> {
         let Some(event) = self.hub.get(committee, question).await? else {
             return Ok(None);
@@ -2649,9 +2769,19 @@ impl Engine {
                 said: target.clone(),
                 confirm: true,
             };
-            match self.settle(chat, target, body, waiting).await? {
+            match self.settle_reach(chat, target, body, waiting).await? {
                 Settled::To(senator) => {
                     let address = Address::Senator(senator);
+                    if !to.contains(&address) {
+                        to.push(address);
+                    }
+                }
+                Settled::Child(senate) => {
+                    // That Senate's Speaker's desk, on the same committee.
+                    let address = Address::Child {
+                        senate,
+                        committee: self.acting_committee(chat),
+                    };
                     if !to.contains(&address) {
                         to.push(address);
                     }
@@ -2782,7 +2912,7 @@ impl Engine {
             .hub
             .get(&chat.committee, root)
             .await?
-            .filter(is_proposal)
+            .filter(|e| is_proposal(e, &self.roster.people()))
         else {
             return Ok(false);
         };
@@ -2934,7 +3064,7 @@ impl Engine {
             PendingAction::Relay { event } => {
                 let relayed = self.append_action((**event).clone(), strict).await?;
                 Ok(relayed
-                    .map(|event| render::relay_ack_for(l, &event))
+                    .map(|event| render::relay_ack_for(l, &event, &self.roster))
                     .unwrap_or_default())
             }
             PendingAction::Status { committee } => Ok(self.status_text(committee).await),
@@ -2999,10 +3129,10 @@ impl Engine {
         let mut online = Vec::new();
         let mut offline = Vec::new();
         for agent in self.roster.agents() {
-            if self.hub.is_agent_connected(committee, agent).await {
-                online.push(agent.clone());
+            if self.hub.is_agent_connected(committee, &agent).await {
+                online.push(agent);
             } else {
-                offline.push(agent.clone());
+                offline.push(agent);
             }
         }
         let presence = self.presence_lines(committee).await;
@@ -3236,7 +3366,7 @@ impl Engine {
     /// Append, treating a refusal as permanent (logged, passed).
     async fn append(&self, event: NewEvent) -> Result<Option<Event>, Stall> {
         let committee = event.committee.clone();
-        match self.hub.append(event).await {
+        match self.hub.append(self.stamped(event)).await {
             Ok(appended) => Ok(Some(appended.event)),
             Err(error @ (HubError::Rejected(_) | HubError::NotFound(_))) => {
                 warn!(%committee, %error, "the log refused a speaker event; passing it");
@@ -3322,7 +3452,7 @@ impl Engine {
 struct Drafted {
     committee: CommitteeId,
     root: Seq,
-    agent: SenatorPath,
+    agent: SenatorName,
     question: Seq,
     asker: Address,
 }
@@ -3333,7 +3463,7 @@ struct Drafted {
 fn behalf_answer(
     committee: &CommitteeId,
     root: Seq,
-    agent: &SenatorPath,
+    agent: &SenatorName,
     question: Seq,
     asker: Address,
     body: String,
@@ -3411,9 +3541,9 @@ fn is_brief_top(event: &Event) -> bool {
 }
 
 /// An agent's root `note` proposing a decision.
-fn is_proposal(event: &Event) -> bool {
+fn is_proposal(event: &Event, people: &People) -> bool {
     event.kind == Kind::Note
-        && event.from.is_junior()
+        && people.is_agent_address(&event.from)
         && event.thread.is_none()
         && event.meta.get(meta::PROPOSAL).and_then(Value::as_str) == Some(PROPOSAL_DECISION)
 }

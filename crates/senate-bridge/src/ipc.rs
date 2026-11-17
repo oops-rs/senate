@@ -43,6 +43,16 @@
 //! | `route` | `session`, `committee`, `seq`, `to`, `id?` | [`Posted`] |
 //! | `cover` | `session`, `committee`, `thread`, `body`, `agent?`, `id?` | [`Posted`] |
 //! | `refer` | `session`, `committee`, `seq`, `reason`, `id?` | [`Posted`] |
+//! | `forward` | `session`, `committee`, `seq`, `id?` | [`Forwarded`] |
+//! | `refuse` | `session`, `committee`, `seq`, `reason`, `id?` | [`Posted`] |
+//! | `set_chair` | `session`, `committee?`, `senator` | [`ChairInfo`](senate_core::api::ChairInfo) |
+//! | `chair_docket` | `session` | [`ChairDocketReply`] |
+//! | `chair_route` | `session`, `seq`, `to`, `id?` | [`Posted`] |
+//! | `chair_cover` | `session`, `thread`, `body`, `agent?`, `id?` | [`Posted`] |
+//! | `chair_escalate` | `session`, `seq`, `reason`, `id?` | [`Posted`] |
+//! | `send` | `session`, `kind`, `to?`, `at?`, `body`, `refs?`, `id?` | [`SendReply`] |
+//! | `secretaries` | `session`, `action`, `for?`, `secretary?` | [`SecretariesReply`] |
+//! | `roles` | — | [`RolesReply`] |
 //!
 //! | `approvals` | — | [`ApprovalsReply`] |
 //! | `approve` | `id`, `decision` | [`ApproveReply`] |
@@ -69,12 +79,53 @@
 //! machine one of their agents presides over: what waits for a Speaker that
 //! may be away.
 //!
+//! # The Speaker's office
+//!
+//! A session presides when its agent works the Speaker's desk
+//! ([`senate_core::Office::desk`]: the Speaker itself when it is an agent,
+//! then the Speaker's secretaries, in order). Everything it writes as
+//! `speaker` carries `meta.acted_by` = its agent. `forward` passes a desk
+//! item that carries an intended recipient (`meta.intended`, an agent's
+//! message for another committee) on: a new root at that seat, `from:
+//! speaker`, with `meta.origin` naming the asker and its thread, and a note
+//! in the asker's thread with `meta.forwarded_to`. `refuse` answers the
+//! asker in its thread with the reason instead. `set_chair` (with a
+//! presiding session, or without a session for the person) makes a senator
+//! the chair of a committee.
+//!
+//! # A committee's chair
+//!
+//! A session whose agent chairs its bound committee gets `chair_docket`
+//! (what awaits the chair there, `GET .../docket?role=chair`),
+//! `chair_route`, `chair_cover` and `chair_escalate` (one step up: the
+//! Speaker's desk); any other session is refused with
+//! [`codes::NOT_CHAIRING`]. Events addressed to `chair` are pushed to the
+//! chair's session (an agent) or announced to the person (a principal).
+//!
+//! # Qualified names and secretaries
+//!
+//! `send` is an agent writing a question, request or note: to addresses on
+//! its own committee, or to a qualified name (`at`). A name on another
+//! committee is written on the session's own committee to `speaker` with
+//! `meta.intended` = the name, completed (the boundary rule: the Speaker's
+//! desk gets it); [`SendReply`] says where it went. `secretaries` lists,
+//! adds or removes a senator's secretaries (`for`: the session's agent, or
+//! without a session the person). `roles` is what `senate status` shows of
+//! the Speaker's office, the chairs and the child Senates.
+//!
+//! `escalate` with no `to` goes one step up: a member to its committee's
+//! chair, the chair (or a committee with no chair) to the Speaker's desk, a
+//! desk worker to the Speaker; [`EscalateReply`] says where.
+//!
 //! `say` and `thread` are the person's own (`senate ask`, `tell`, `request`,
 //! `reply`, `thread`): `say` appends a `question`, `note` or `request` as
 //! `senator::<person>`, never as an agent. `to` may hold an agent, a person,
-//! `speaker`, or `senator::<person>/*`, which the server resolves, or puts to
-//! the Speaker to pick where a senator presides; with several agents and
-//! nobody to pick it is refused with [`codes::AMBIGUOUS_RECIPIENT`]. With
+//! `speaker`, or `senator::*`, which the server resolves among the agents on
+//! the committee, or puts to the Speaker to pick where a senator presides;
+//! with several agents and nobody to pick it is refused with
+//! [`codes::AMBIGUOUS_RECIPIENT`]. `at` instead of `to` is a qualified name
+//! (`ibot::senator::codex`): the daemon resolves it through the server and
+//! posts on the committee it names. With
 //! `thread` (any seq in it) the event is written in that thread, and an
 //! empty `to` addresses whoever took part in it other than the person. A
 //! person's `committee` is required without a session; which Senate the
@@ -122,10 +173,10 @@
 //! `_meta.threadId`, and Codex hooks report no pids (every thread of an
 //! app-server shares the same ones).
 //!
-//! `ask` accepts an agent (`senator::bob/claude`) or whichever of a
-//! person's agents should get it (`senator::bob/*`); the Speaker, the
-//! committee, a person alone and guests are refused. When the server
-//! resolves `senator::bob/*` and bob has several agents, the reply is the
+//! `ask` accepts an agent (`senator::codex`) or whichever agent on the
+//! committee should get it (`senator::*`); the Speaker, the committee, a
+//! person and guests are refused. When the server resolves `senator::*`
+//! and several agents could get it, the reply is the
 //! error [`codes::AMBIGUOUS_RECIPIENT`] with the agents in
 //! [`IpcError::candidates`]: the asker names one and asks again.
 //!
@@ -163,7 +214,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use senate_core::{
-    Address, CommitteeId, Event, EventId, Kind, Locale, Name, Refs, SenatorPath, Seq,
+    Address, CommitteeId, Event, EventId, Kind, Locale, Name, Refs, SenatorName, Seq,
     StatusPayload, ThreadSummary,
 };
 
@@ -191,11 +242,14 @@ pub mod codes {
     pub const NO_SESSION: &str = "no_session";
     /// The session is not bound to any committee.
     pub const NOT_JOINED: &str = "not_joined";
-    /// A presiding op from a session whose agent holds no Speaker's seat.
+    /// A presiding op from a session whose agent does not work the
+    /// Speaker's desk.
     pub const NOT_PRESIDING: &str = "not_presiding";
+    /// A chair op from a session whose agent does not chair its committee.
+    pub const NOT_CHAIRING: &str = "not_chairing";
     /// The Senate server refused or could not be reached.
     pub const SERVER: &str = "server";
-    /// `senator::<person>/*` named a person with several agents;
+    /// `senator::*` could reach several agents on the committee;
     /// [`IpcError::candidates`](super::IpcError::candidates) lists them.
     pub const AMBIGUOUS_RECIPIENT: &str = senate_core::api::code::AMBIGUOUS_RECIPIENT;
     pub const INTERNAL: &str = "internal";
@@ -390,6 +444,11 @@ pub enum Request {
         /// Empty with `thread`: whoever took part in the thread.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         to: Vec<Address>,
+        /// A qualified name instead of `to`: a seat on another committee
+        /// (or Senate). The daemon resolves it, nearest first, and the
+        /// person's message is delivered there directly.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<senate_core::Locator>,
         body: String,
         /// Any seq of the thread to speak in; the event goes in its root's
         /// thread.
@@ -451,7 +510,7 @@ pub enum Request {
         session: SessionSelector,
         committee: CommitteeId,
         seq: Seq,
-        to: SenatorPath,
+        to: SenatorName,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<EventId>,
     },
@@ -462,7 +521,7 @@ pub enum Request {
         thread: Seq,
         body: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        agent: Option<SenatorPath>,
+        agent: Option<SenatorName>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<EventId>,
     },
@@ -475,6 +534,89 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<EventId>,
     },
+    /// Pass a desk item meant for another committee on to that seat.
+    Forward {
+        session: SessionSelector,
+        committee: CommitteeId,
+        seq: Seq,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<EventId>,
+    },
+    /// Send a desk item back to its sender with the reason.
+    Refuse {
+        session: SessionSelector,
+        committee: CommitteeId,
+        seq: Seq,
+        reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<EventId>,
+    },
+    /// Make `senator` the chair of `committee` (default: the session's).
+    /// With a session, for the Speaker's office; without one, as the person.
+    SetChair {
+        session: SessionSelector,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        committee: Option<CommitteeId>,
+        senator: SenatorName,
+    },
+    /// What awaits the chair of the session's committee.
+    ChairDocket {
+        session: SessionSelector,
+    },
+    /// The chair routes an item to one member.
+    ChairRoute {
+        session: SessionSelector,
+        seq: Seq,
+        to: SenatorName,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<EventId>,
+    },
+    /// The chair answers for an absent member from its own checkpoint.
+    ChairCover {
+        session: SessionSelector,
+        thread: Seq,
+        body: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<SenatorName>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<EventId>,
+    },
+    /// The chair puts an item one step up: to the Speaker's desk.
+    ChairEscalate {
+        session: SessionSelector,
+        seq: Seq,
+        reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<EventId>,
+    },
+    /// An agent writes: to addresses on its committee, or to a qualified
+    /// name (`at`).
+    Send {
+        session: SessionSelector,
+        kind: SayKind,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        to: Vec<Address>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<senate_core::Locator>,
+        body: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        refs: Option<Refs>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<EventId>,
+    },
+    /// List, add or remove a senator's secretaries.
+    Secretaries {
+        session: SessionSelector,
+        action: SecretaryOp,
+        /// Whose: default the session's agent, or without a session the
+        /// person.
+        #[serde(default, rename = "for", skip_serializing_if = "Option::is_none")]
+        for_: Option<SenatorName>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        secretary: Option<SenatorName>,
+    },
+    /// The Speaker's office, the chairs, the child Senates.
+    Roles,
     /// Codex approval requests waiting for an answer.
     Approvals,
     /// Answer a Codex approval request; the first answer wins.
@@ -542,6 +684,188 @@ impl SayKind {
     }
 }
 
+/// What `secretaries` does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretaryOp {
+    List,
+    Add,
+    Remove,
+}
+
+/// A senator's secretaries after `secretaries`, and every relation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecretariesReply {
+    /// Whose list was read or changed.
+    pub senator: SenatorName,
+    /// Its secretaries, in order.
+    pub secretaries: Vec<SenatorName>,
+    /// Every secretary relation of the Senate.
+    #[serde(default)]
+    pub all: senate_core::api::Secretaries,
+}
+
+/// Where an agent's message went.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SendReply {
+    #[serde(flatten)]
+    pub posted: Posted,
+    /// The qualified name it is meant for, when it left the committee: it
+    /// was put to the Speaker's desk on the way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intended: Option<senate_core::Locator>,
+    /// The Speaker whose desk it was put to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<senate_core::SenatorId>,
+    /// The Senate whose desk it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub senate: Option<senate_core::SenatePath>,
+}
+
+impl SendReply {
+    /// Put to the Speaker's desk rather than delivered.
+    pub fn on_the_desk(&self) -> bool {
+        self.posted.to.contains(&Address::Speaker) && self.intended.is_some()
+    }
+}
+
+/// A desk item passed on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Forwarded {
+    /// The new root at the intended seat.
+    #[serde(flatten)]
+    pub posted: Posted,
+    /// The note in the asker's thread.
+    pub note: Posted,
+    /// Where it went. Named apart from the flattened root's `to` (its
+    /// recipients), which it would otherwise collide with.
+    #[serde(rename = "forwarded_to")]
+    pub to: senate_core::Locator,
+}
+
+/// Where `escalate` handed a thread.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "to", rename_all = "snake_case")]
+pub enum EscalatedTo {
+    /// A person (named, the chair, or the Speaker).
+    Person { person: Name },
+    /// The committee's chair, an agent.
+    Chair { chair: SenatorName },
+    /// The Speaker's desk.
+    Desk,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EscalateReply {
+    #[serde(flatten)]
+    pub posted: Posted,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub went: Option<EscalatedTo>,
+}
+
+/// What awaits the chair of one committee.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChairDocketReply {
+    pub chair: SenatorName,
+    pub page: senate_core::DocketPage,
+    /// The latest checkpoint of every absent member an item names.
+    #[serde(default)]
+    pub checkpoints: Vec<senate_core::CheckpointRecord>,
+}
+
+/// The Speaker's office, the chairs and the child Senates, as `senate
+/// status` shows them.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RolesReply {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub senate: Option<senate_core::SenatePath>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub office: Option<senate_core::Office>,
+    /// The desk's workers with a live session on this machine.
+    #[serde(default)]
+    pub present: Vec<SenatorName>,
+    /// Each committee's chair.
+    #[serde(default)]
+    pub chairs: Vec<senate_core::api::ChairInfo>,
+    #[serde(default)]
+    pub children: Vec<senate_core::api::ChildSenate>,
+    /// The Senate above, when this machine's Senate is a child of it: its
+    /// address, its path and whether the registration was taken.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uplink: Option<UplinkStatus>,
+}
+
+/// The machine's Senate registered as a child of the Senate above, as its
+/// uplink last found it. `senated --machine` writes it to
+/// [`UplinkStatus::FILE`] in the hosted Senate's directory on every
+/// (re)connect; `senate status` reads it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UplinkStatus {
+    /// The Senate above's address.
+    pub url: String,
+    /// The Senate above's path, when it answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<senate_core::SenatePath>,
+    /// The name the machine's Senate registers under.
+    pub name: Name,
+    /// The Speaker it registers with.
+    pub speaker: senate_core::SenatorId,
+    pub registration: Registration,
+    pub at: DateTime<Utc>,
+}
+
+/// Where a child Senate's registration with the Senate above stands.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum Registration {
+    /// Not tried yet.
+    Pending,
+    /// Taken: the Senate above lists it among its children.
+    Registered,
+    /// The Senate above refused it, and why.
+    Refused { reason: String },
+    /// The Senate above did not answer.
+    Unreachable { error: String },
+}
+
+impl UplinkStatus {
+    /// Its file in the hosted Senate's directory.
+    pub const FILE: &'static str = "uplink.json";
+
+    /// Write it to `dir` (best effort: status is informational).
+    pub fn write(&self, dir: &Path) {
+        let path = dir.join(Self::FILE);
+        let text = serde_json::to_string_pretty(self).unwrap_or_default();
+        if let Err(e) = std::fs::write(&path, text) {
+            tracing::debug!("{}: {e}", path.display());
+        }
+    }
+
+    /// Where the registration stands now.
+    pub fn now(
+        url: &str,
+        parent: Option<senate_core::SenatePath>,
+        name: Name,
+        speaker: senate_core::SenatorId,
+        registration: Registration,
+    ) -> Self {
+        Self {
+            url: url.to_owned(),
+            parent,
+            name,
+            speaker,
+            registration,
+            at: Utc::now(),
+        }
+    }
+
+    /// What was last written to `dir`, if anything readable.
+    pub fn read(dir: &Path) -> Option<Self> {
+        let text = std::fs::read_to_string(dir.join(Self::FILE)).ok()?;
+        serde_json::from_str(&text).ok()
+    }
+}
+
 /// One thread's events, root first.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ThreadReply {
@@ -555,31 +879,51 @@ pub struct ThreadReply {
 pub struct PresidesReply {
     /// The session's agent, registered or worked out.
     #[serde(default)]
-    pub agent: Option<SenatorPath>,
+    pub agent: Option<SenatorName>,
     /// The Senate it presides over, if it does.
     #[serde(default)]
     pub presiding: Option<Presiding>,
+    /// The committees its agent chairs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chairs: Vec<CommitteeId>,
+}
+
+/// How a session's agent works the Speaker's desk.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeskRole {
+    /// It is the Speaker (an agent Speaker).
+    #[default]
+    Speaker,
+    /// It is one of the Speaker's secretaries.
+    Secretary,
 }
 
 /// A Senate a session presides over.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Presiding {
-    /// The presiding agent: the holder of the Speaker's seat.
-    pub speaker: SenatorPath,
-    /// That Senate, by its presider (`None`: a top Senate used alone).
+    /// The presiding agent: the one working the Speaker's desk.
+    pub speaker: SenatorName,
+    /// As the Speaker itself, or as a secretary.
     #[serde(default)]
-    pub senate: Option<SenatorPath>,
+    pub role: DeskRole,
+    /// The Speaker, as a senator id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub office: Option<senate_core::SenatorId>,
+    /// That Senate's name, as `/v1/me` gave it.
+    #[serde(default)]
+    pub senate: Option<Name>,
     /// The agents seated there.
     #[serde(default)]
-    pub seated: Vec<SenatorPath>,
+    pub seated: Vec<SenatorName>,
 }
 
 /// One Senate's docket on each of its committees.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SenateDocket {
-    /// The Senate, by its presider (`None`: a top Senate).
+    /// The Senate's name, as `/v1/me` gave it.
     #[serde(default)]
-    pub senate: Option<SenatorPath>,
+    pub senate: Option<Name>,
     pub pages: Vec<senate_core::DocketPage>,
     /// The latest checkpoint of every away agent an item names: what the
     /// Speaker covers from.
@@ -591,7 +935,7 @@ pub struct SenateDocket {
 pub struct DocketReply {
     /// The presiding agent reading it; `None` for a person's read.
     #[serde(default)]
-    pub speaker: Option<SenatorPath>,
+    pub speaker: Option<SenatorName>,
     pub senates: Vec<SenateDocket>,
 }
 
@@ -627,7 +971,7 @@ pub enum WatchEvent {
     /// answer or status): read the inbox again.
     Inbox {
         /// The agent whose stream carried it.
-        agent: SenatorPath,
+        agent: SenatorName,
         committee: CommitteeId,
         seq: Seq,
         kind: Kind,
@@ -678,7 +1022,7 @@ pub struct CheckpointReply {
 pub struct InboxReply {
     pub committee: CommitteeId,
     /// The agents whose inbox this is: the calling session's one.
-    pub agents: Vec<SenatorPath>,
+    pub agents: Vec<SenatorName>,
     pub person: Name,
     /// Not archived, addressed to one of `agents` or escalated to `person`,
     /// longest in their state first. Without `all` only those that wait on
@@ -758,6 +1102,15 @@ pub struct CatchUpReply {
     pub committee: CommitteeId,
     /// The agent that caught up: `senator::<agent>`.
     pub me: Address,
+    /// The Senate's people: every other senator is an agent.
+    #[serde(default)]
+    pub people: senate_core::People,
+    /// The agents run by the same person as `me`.
+    #[serde(default)]
+    pub own: Vec<SenatorName>,
+    /// The committee's chair, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chair: Option<SenatorName>,
     /// Directed first, then the rest, each group in seq order.
     pub items: Vec<CatchUpItem>,
     /// More events remain after this page.
@@ -767,11 +1120,26 @@ pub struct CatchUpReply {
     pub read: Seq,
 }
 
+impl CatchUpReply {
+    /// How `me` reads these events ([`crate::format::Reader`]).
+    pub fn reader(&self) -> crate::format::Reader {
+        let reader = crate::format::Reader::new(
+            self.me.clone(),
+            self.people.clone(),
+            self.own.iter().cloned().collect(),
+        );
+        match &self.chair {
+            Some(chair) => reader.with_chair(self.committee.clone(), chair.clone()),
+            None => reader,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JoinReply {
     pub session_id: String,
     /// The agent the session speaks as.
-    pub agent: SenatorPath,
+    pub agent: SenatorName,
     pub committee: CommitteeId,
     #[serde(default)]
     pub previous: Option<CommitteeId>,
@@ -817,7 +1185,7 @@ pub enum StreamState {
 /// One agent's stream on one committee.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommitteeStatus {
-    pub agent: SenatorPath,
+    pub agent: SenatorName,
     pub committee: CommitteeId,
     pub delivered: Seq,
     pub reported: Seq,
@@ -836,10 +1204,14 @@ pub struct StatusReply {
     pub pid: u32,
     pub version: String,
     pub person: Name,
-    /// The Senate this bridge is connected to, by its presider; `None` for
-    /// the top Senate.
+    /// The Senate this bridge serves, by its path (`acme/north-desk`), as
+    /// `/v1/me` gave it; `None` until the server answered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub presider: Option<SenatorPath>,
+    pub senate: Option<senate_core::SenatePath>,
+    /// That Senate's people, as `/v1/me` named them: every other senator
+    /// is an agent.
+    #[serde(default)]
+    pub people: senate_core::People,
     pub locale: Locale,
     pub server_url: String,
     pub committees: Vec<CommitteeStatus>,
@@ -848,10 +1220,12 @@ pub struct StatusReply {
     /// Who holds the Speaker's seat of that Senate, as `/v1/me` said.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speaker: Option<senate_core::SpeakerSeat>,
-    /// The other Senates this machine serves, each with its own streams,
-    /// sessions and queue.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub others: Vec<StatusReply>,
+    /// The Speaker's office (the Speaker as a senator id and its kind, the
+    /// desk's workers and which are present here), each committee's chair,
+    /// the child Senates, and the Senate above when this one is a child.
+    /// Absent from an older daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roles: Option<RolesReply>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
@@ -861,7 +1235,7 @@ pub struct IpcError {
     pub message: String,
     /// With [`codes::AMBIGUOUS_RECIPIENT`]: the agents to choose from.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub candidates: Vec<SenatorPath>,
+    pub candidates: Vec<SenatorName>,
 }
 
 impl IpcError {
@@ -875,7 +1249,7 @@ impl IpcError {
 
     /// The server refused a wildcard that names a person with several
     /// agents; the asker must name one of `candidates`.
-    pub fn ambiguous(message: impl Into<String>, candidates: Vec<SenatorPath>) -> Self {
+    pub fn ambiguous(message: impl Into<String>, candidates: Vec<SenatorName>) -> Self {
         Self {
             code: codes::AMBIGUOUS_RECIPIENT.to_string(),
             message: message.into(),
@@ -1168,13 +1542,13 @@ mod tests {
         );
         let ambiguous = IpcError::ambiguous(
             "bob has several agents",
-            vec!["bob/claude".parse().unwrap(), "bob/codex".parse().unwrap()],
+            vec!["claude".parse().unwrap(), "codex".parse().unwrap()],
         );
         let json = serde_json::to_value(Reply::err(ambiguous.clone())).unwrap();
         assert_eq!(json["error"]["code"], "ambiguous_recipient");
         assert_eq!(
             json["error"]["candidates"],
-            serde_json::json!(["bob/claude", "bob/codex"])
+            serde_json::json!(["claude", "codex"])
         );
         let back: Reply = serde_json::from_value(json).unwrap();
         assert_eq!(back.error, Some(ambiguous));

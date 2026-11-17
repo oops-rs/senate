@@ -1,33 +1,20 @@
-//! One daemon, several Senates.
+//! The daemon's front: what the local socket talks to.
 //!
-//! The daemon keeps one [`Shared`] per Senate it serves, each with its own
-//! server, token, state database, streams, cursors, heartbeats, queue and
-//! sessions: nothing one Senate keeps is seen by another. [`Front`] is what
-//! the local socket talks to. It sends each request to the Senate it
-//! concerns:
+//! The daemon serves one Senate ([`Shared`]): the one at `server_url`, or
+//! the one `senated --machine` hosts. [`Front`] sends each request to it,
+//! and handles what concerns the session holding the Speaker's seat:
 //!
-//! - a hook to the Senate the session's agent path selects
-//!   ([`crate::agent`]): `alice/claude` to the one where alice's agents sit
-//!   directly, `alice/claude/reviewer` to the one `alice/claude` presides
-//!   over. A session that moves to another Senate (its pin changed) is
-//!   ended in the one it left;
-//! - a request from a session to the Senate the session is registered in;
-//! - a presiding request (`docket`, `route`, `cover`, `refer`) to the
-//!   Senate whose Speaker's seat the session's agent holds, and so is the
-//!   presiding session's `ask` when every agent it asks sits there: it asks
-//!   them as their Speaker.
+//! - a hook registers the session, and tells a presiding session what it
+//!   presides over;
+//! - a presiding request (`docket`, `route`, `cover`, `refer`, `forward`,
+//!   `refuse`, and `set_chair` from a session) is served only for a
+//!   session whose agent works the Speaker's desk: the Speaker itself (an
+//!   agent Speaker) or one of its secretaries. It writes as `speaker` with
+//!   `meta.acted_by` naming that agent.
 //!
-//! So a presiding session is attached to two Senates: a senator in one,
-//! the Speaker of the other (or both in one, for a top Senate used alone).
-//! It is registered in both, under the same agent path: in the one it
-//! presides over, it holds the Speaker's connection (its own stream,
-//! cursors and heartbeat there, without a seat) and is pushed what is put
-//! to the Speaker, marked as such.
-//! - anything else (no session, the desktop app's requests) to the primary
-//!   Senate: the one where the person's agents sit directly.
-//!
-//! With one Senate, every request goes to it, exactly as before there were
-//! several.
+//! A presiding session sits in the Senate it presides over: its agent is a
+//! senator there like any other, and is pushed what is put to the Speaker
+//! as well, marked as such.
 
 use super::*;
 use crate::ipc::{DocketReply, PresidesReply, Presiding, SenateDocket};
@@ -38,28 +25,24 @@ pub(crate) struct Front {
     watch: broadcast::Sender<WatchEvent>,
     /// Watch clients that show notifications themselves, connected now.
     app_clients: Arc<std::sync::atomic::AtomicUsize>,
-    /// Several Senates: agent paths are placed under the person, and
-    /// select the Senate.
-    several: bool,
 }
 
 impl Front {
     pub(crate) fn new(
-        senates: Vec<Arc<Shared>>,
+        senate: Arc<Shared>,
         relay: Arc<Relay>,
         watch: broadcast::Sender<WatchEvent>,
         app_clients: Arc<std::sync::atomic::AtomicUsize>,
-        several: bool,
     ) -> Self {
         Self {
-            senates,
+            senates: vec![senate],
             relay,
             watch,
             app_clients,
-            several,
         }
     }
 
+    /// Every Senate served: one.
     pub(crate) fn senates(&self) -> &[Arc<Shared>] {
         &self.senates
     }
@@ -76,29 +59,17 @@ impl Front {
         &self.watch
     }
 
-    /// The Senate where the person's agents sit directly, else the first.
+    /// The Senate served.
     fn primary(&self) -> &Arc<Shared> {
-        self.senates
-            .iter()
-            .find(|s| s.seating().presider().is_none())
-            .unwrap_or(&self.senates[0])
-    }
-
-    /// The Senate `agent` sits in: the one whose agents sit directly under
-    /// `agent`'s parent path.
-    fn senate_of(&self, agent: &SenatorPath) -> Option<&Arc<Shared>> {
-        let parent = agent.presider().unwrap_or_else(|| agent.senior_path());
-        self.senates.iter().find(|s| s.seating().base() == parent)
+        &self.senates[0]
     }
 
     /// The Senate whose Speaker's seat `agent` holds.
-    fn seat_of(&self, agent: &SenatorPath) -> Option<&Arc<Shared>> {
+    fn seat_of(&self, agent: &SenatorName) -> Option<&Arc<Shared>> {
         self.senates.iter().find(|s| s.presided_by(agent))
     }
 
-    /// The Senate a session is registered in, and the session: the one its
-    /// agent sits in rather than one it only presides over; when it is
-    /// registered in several (it moved), the most recently seen.
+    /// The Senate a session is registered in, and the session.
     fn locate(&self, selector: &SessionSelector) -> Option<(Arc<Shared>, Session)> {
         if selector.session_id.is_none() && selector.claude_pid.is_none() {
             return None;
@@ -109,23 +80,27 @@ impl Front {
                 let session = s.resolve(selector).ok()?;
                 (session.state != SessionState::Ended).then(|| (s.clone(), session))
             })
-            .max_by_key(|(s, session)| (!s.presides_from_above(&session.agent), session.last_seen))
+            .max_by_key(|(_, session)| session.last_seen)
     }
 
-    /// The daemon's status: the primary Senate's, with the others under it.
+    /// The daemon's status.
     pub(crate) fn status(&self) -> Result<StatusReply, IpcError> {
-        let mut status = self.primary().on_status()?;
-        for shared in &self.senates {
-            if !Arc::ptr_eq(shared, self.primary()) {
-                status.others.push(shared.on_status()?);
-            }
-        }
-        Ok(status)
+        self.primary().on_status()
     }
 
     pub(crate) async fn dispatch(self: &Arc<Self>, request: Request) -> Reply {
         match request {
-            Request::Status => wrap(self.status()),
+            Request::Status => {
+                // The office, the chairs and the children as the server says
+                // now, bounded: a server that does not answer leaves what
+                // was last known.
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    self.primary().refresh_me(),
+                )
+                .await;
+                wrap(self.status())
+            }
             Request::Hook(report) => wrap(self.on_hook(report).await),
             Request::SessionEnd { session_id, reason } => {
                 let mut reply = Reply::ok(&serde_json::json!({}));
@@ -147,7 +122,10 @@ impl Front {
                 runtime,
                 agent_env,
                 agent_file,
-            } => wrap(self.on_presides(&session, runtime, agent_env, agent_file)),
+            } => wrap(
+                self.on_presides(&session, runtime, agent_env, agent_file)
+                    .await,
+            ),
             Request::Docket { session, committee } => {
                 wrap(self.on_docket(&session, committee).await)
             }
@@ -187,31 +165,38 @@ impl Front {
                 }
                 Err(e) => Reply::err(e),
             },
-            Request::Ask {
+            Request::Forward {
                 session,
-                to,
-                body,
-                refs,
+                committee,
+                seq,
                 id,
-                request,
-            } => {
-                let ask = Request::Ask {
-                    session: session.clone(),
-                    to: to.clone(),
-                    body,
-                    refs,
-                    id,
-                    request,
-                };
-                let target = match self.locate(&session) {
-                    Some((sits, found)) => self
-                        .seat_of(&found.agent)
-                        .filter(|seat| !Arc::ptr_eq(seat, &sits) && asks_below(seat, &to))
-                        .cloned()
-                        .unwrap_or(sits),
-                    None => self.primary().clone(),
-                };
-                target.dispatch(ask).await
+            } => match self.presiding(&session) {
+                Ok((seat, speaker)) => wrap(seat.on_forward(&speaker, committee, seq, id).await),
+                Err(e) => Reply::err(e),
+            },
+            Request::Refuse {
+                session,
+                committee,
+                seq,
+                reason,
+                id,
+            } => match self.presiding(&session) {
+                Ok((seat, speaker)) => {
+                    wrap(seat.on_refuse(&speaker, committee, seq, reason, id).await)
+                }
+                Err(e) => Reply::err(e),
+            },
+            // From a session: the Speaker's office's. Without one: the
+            // person's own.
+            Request::SetChair {
+                session,
+                committee,
+                senator,
+            } if session.session_id.is_some() || session.claude_pid.is_some() => {
+                match self.presiding(&session) {
+                    Ok((seat, _)) => wrap(seat.on_set_chair(&session, committee, senator).await),
+                    Err(e) => Reply::err(e),
+                }
             }
             other => {
                 let target = selector_of(&other)
@@ -223,65 +208,22 @@ impl Front {
         }
     }
 
-    /// Register the session in the Senate its agent selects, end it in any
-    /// other it was registered in, and tell a presiding session what it
-    /// presides over.
+    /// Register the session, and tell a presiding session what it presides
+    /// over.
     async fn on_hook(&self, report: HookReport) -> Result<HookReply, IpcError> {
         let codex = report.runtime == Runtime::Codex;
-        let (target, placed) = if self.several {
-            let (rel, source) = agent::choose(
-                &self.primary().config.agents,
-                report.runtime,
-                agent::Pins {
-                    env: report.agent_env.as_deref(),
-                    file: report.agent_file.as_deref(),
-                },
-            );
-            let agent = rel.under(&self.primary().config.person);
-            let Some(target) = self.senate_of(&agent) else {
-                return Err(IpcError::bad_request(no_senate(
-                    &agent,
-                    self.primary().locale,
-                )));
-            };
-            (target.clone(), Some((agent, source)))
-        } else {
-            (self.primary().clone(), None)
-        };
+        let target = self.primary().clone();
         let event = report.event;
-        let attached = report.clone();
-        let mut reply = target.on_hook(report, placed).await?;
+        let mut reply = target.on_hook(report, None).await?;
         if codex {
             target.reconcile_approvals();
         }
         let agent = reply.session.agent.clone();
-        let seat = self.seat_of(&agent).cloned();
-        for other in &self.senates {
-            let presided = seat.as_ref().is_some_and(|s| Arc::ptr_eq(s, other));
-            if !Arc::ptr_eq(other, &target) && !presided {
-                other.retire(&reply.session.session_id);
-            }
-        }
         let mut parts: Vec<String> = reply.context.take().into_iter().collect();
-        if let Some(seat) = &seat {
-            if !Arc::ptr_eq(seat, &target) {
-                // Attached below as the Speaker, under the same agent path:
-                // what is put to the Speaker there is pushed to it too.
-                let source = reply.session.agent_source;
-                match seat
-                    .on_hook_as(attached, Some((agent.clone(), source)), true)
-                    .await
-                {
-                    Ok(below) => {
-                        reply.delivered += below.delivered;
-                        parts.extend(below.context);
-                    }
-                    Err(e) => tracing::warn!(%agent, "attaching the Speaker's session: {e}"),
-                }
-            }
-            if let Some(text) = seat.presiding_context(&reply.session, event).await {
-                parts.push(text);
-            }
+        if let Some(seat) = self.seat_of(&agent)
+            && let Some(text) = seat.presiding_context(&reply.session, event).await
+        {
+            parts.push(text);
         }
         reply.context = (!parts.is_empty()).then(|| parts.join("\n\n"));
         Ok(reply)
@@ -292,7 +234,7 @@ impl Front {
     fn presiding(
         &self,
         selector: &SessionSelector,
-    ) -> Result<(Arc<Shared>, SenatorPath), IpcError> {
+    ) -> Result<(Arc<Shared>, SenatorName), IpcError> {
         let locale = self.primary().locale;
         let Some((_, session)) = self.locate(selector) else {
             // The same refusal a session-scoped request gets.
@@ -309,7 +251,7 @@ impl Front {
         }
     }
 
-    fn on_presides(
+    async fn on_presides(
         &self,
         selector: &SessionSelector,
         runtime: Runtime,
@@ -320,7 +262,7 @@ impl Front {
             Some((_, session)) => Some(session.agent),
             None => {
                 let primary = self.primary();
-                let (rel, _) = agent::choose(
+                let (name, _) = agent::choose(
                     &primary.config.agents,
                     runtime,
                     agent::Pins {
@@ -328,27 +270,43 @@ impl Front {
                         file: agent_file.as_deref(),
                     },
                 );
-                Some(if self.several {
-                    rel.under(&primary.config.person)
-                } else {
-                    primary.seating().place(&rel)
-                })
+                Some(primary.seating().place(&name))
             }
         };
+        // The desk may have changed since the daemon last asked.
+        self.primary().refresh_me().await;
         let presiding = agent.as_ref().and_then(|agent| {
             let seat = self.seat_of(agent)?;
             Some(Presiding {
                 speaker: agent.clone(),
-                senate: seat.seating().presider().cloned(),
+                role: seat.desk_role(agent).unwrap_or_default(),
+                office: seat.speaker_id(),
+                senate: seat.senate_name(),
                 seated: seat.seated(),
             })
         });
-        Ok(PresidesReply { agent, presiding })
+        let mut chairs = Vec::new();
+        if let Some(agent) = &agent {
+            let primary = self.primary();
+            let committee = self
+                .locate(selector)
+                .and_then(|(_, session)| session.committee().cloned());
+            if let Some(committee) = committee
+                && primary.current_chair(&committee).await.as_ref() == Some(agent)
+            {
+                chairs.push(committee);
+            }
+        }
+        Ok(PresidesReply {
+            agent,
+            presiding,
+            chairs,
+        })
     }
 
     /// A presiding session's docket of the Senate it presides over; without
-    /// a session, a person's read of every Senate here that one of their
-    /// agents presides over.
+    /// a session, the person's read of it when one of their agents
+    /// presides.
     async fn on_docket(
         &self,
         selector: &SessionSelector,
@@ -364,10 +322,20 @@ impl Front {
         }
         let mut senates: Vec<SenateDocket> = Vec::new();
         for shared in &self.senates {
+            // One of the person's agents works the desk, or the person is
+            // the Speaker: the person sees the whole desk.
             let mine = shared
-                .speaker_seat()
-                .and_then(|seat| seat.senator().cloned())
-                .is_some_and(|s| s.owner() == &shared.config.person);
+                .office()
+                .map(|o| {
+                    shared.person_is_speaker()
+                        || o.agent_workers().any(|w| shared.seating().owns(w))
+                })
+                .unwrap_or_else(|| {
+                    shared
+                        .speaker_seat()
+                        .and_then(|seat| seat.senator().cloned())
+                        .is_some_and(|s| shared.seating().owns(&s))
+                });
             if mine {
                 senates.push(shared.docket(committee.clone()).await?);
             }
@@ -394,33 +362,13 @@ fn selector_of(request: &Request) -> Option<&SessionSelector> {
         | Request::Escalate { session, .. }
         | Request::Take { session, .. }
         | Request::Inbox { session, .. }
-        | Request::Checkpoint { session, .. } => Some(session),
+        | Request::Checkpoint { session, .. }
+        | Request::Send { session, .. }
+        | Request::Secretaries { session, .. }
+        | Request::ChairDocket { session }
+        | Request::ChairRoute { session, .. }
+        | Request::ChairCover { session, .. }
+        | Request::ChairEscalate { session, .. } => Some(session),
         _ => None,
-    }
-}
-
-/// Whether every recipient of an `ask` sits in `seat`'s Senate: an agent
-/// directly under its base.
-fn asks_below(seat: &Shared, to: &[Address]) -> bool {
-    let base = seat.seating().base();
-    !to.is_empty()
-        && to.iter().all(|a| {
-            a.as_agent()
-                .is_some_and(|agent| agent.presider().as_ref() == Some(&base))
-        })
-}
-
-/// No Senate on this machine seats `agent`.
-fn no_senate(agent: &SenatorPath, locale: Locale) -> String {
-    let me = Address::senator(agent).in_text();
-    match locale {
-        Locale::Zh => format!(
-            "这台机器上没有任何 Senate 安置 {me}：它的上一级路径既不是你本人，也不是本机某个 \
-             Senate 的主持者。检查 SENATE_AGENT 或 .senate/agent。"
-        ),
-        Locale::En => format!(
-            "No Senate on this machine seats {me}: its parent path is neither you nor the \
-             presider of a Senate here. Check SENATE_AGENT or .senate/agent."
-        ),
     }
 }

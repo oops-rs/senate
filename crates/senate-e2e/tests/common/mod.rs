@@ -27,7 +27,7 @@ use senate_bridge::ipc::{
 use senate_bridge::session::Runtime;
 use senate_bridge::{BridgeConfig, Paths};
 use senate_core::{
-    Address, Brief, CommitteeId, Event, Hub, Kind, Locale, Name, SenatorPath, Seq, StatusPayload,
+    Address, Brief, CommitteeId, Event, Hub, Kind, Locale, Name, SenatorName, Seq, StatusPayload,
 };
 use senate_server::ServerHub;
 use senate_speaker::{Brain, ScriptedBrain, SpeakerConfig, WorkConfig};
@@ -61,11 +61,11 @@ pub fn name(h: &str) -> Name {
     Name::new(h).unwrap()
 }
 
-pub fn path(p: &str) -> SenatorPath {
+pub fn path(p: &str) -> SenatorName {
     p.parse().unwrap()
 }
 
-/// `senator::<p>`: a person (`alice`) or an agent (`alice/claude`).
+/// `senator::<p>`: a person (`alice`) or an agent (`claude`).
 pub fn senator(p: &str) -> Address {
     Address::senator(&path(p))
 }
@@ -75,21 +75,15 @@ pub fn person(h: &str) -> Address {
     Address::senior(&name(h))
 }
 
-/// `senator::<person>/claude`: what a Claude Code session of that person
-/// speaks as.
-pub fn claude(h: &str) -> Address {
-    senator(&format!("{h}/claude"))
+/// `senator::*`: whichever agent on the committee should get it.
+pub fn any_agent() -> Address {
+    Address::any_agent()
 }
 
-/// `senator::<person>/codex`: what a Codex session of that person speaks as.
-pub fn codex(h: &str) -> Address {
-    senator(&format!("{h}/codex"))
-}
-
-/// `senator::<person>/*`: whichever of that person's agents should get it.
-pub fn agent_of(h: &str) -> Address {
-    Address::agent_of(&name(h))
-}
+/// The name bob's Claude Code session is seated under in these worlds:
+/// names are unique within a Senate and alice's runs as `claude`, so bob's
+/// bridge names its Claude Code agent `copilot` (`[agents] claude`).
+pub const BOB_CLAUDE: &str = "copilot";
 
 /// The chat platform's id for a person on the roster.
 pub fn user_id(h: &str) -> String {
@@ -295,7 +289,7 @@ impl World {
         let mut people = String::new();
         for (handle, chat) in &setup.people {
             people.push_str(&format!(
-                "\n[[roster.seniors]]\nhandle = \"{handle}\"\n{}\n[[tokens]]\nperson = \"{handle}\"\ntoken = \"tok-{handle}\"\n",
+                "\n[[roster.principals]]\nhandle = \"{handle}\"\n{}\n[[tokens]]\nperson = \"{handle}\"\ntoken = \"tok-{handle}\"\n",
                 if *chat {
                     format!("accounts = [{{ platform = \"chat\", id = \"u_{handle}\" }}]")
                 } else {
@@ -317,22 +311,22 @@ sse_ping_secs = 1
 answer_fallback_secs = {fallback}
 brief_top_debounce_secs = 1
 
-[[roster.seniors]]
+[[roster.principals]]
 handle = "alice"
 names = ["Alice", "爱丽丝"]
 accounts = [{{ platform = "chat", id = "u_alice" }}]
 
-[[roster.seniors]]
+[[roster.principals]]
 handle = "bob"
 names = ["Bob"]
 accounts = [{{ platform = "chat", id = "u_bob" }}]
 
-[[roster.seniors]]
+[[roster.principals]]
 handle = "pm"
 names = ["小王"]
 accounts = [{{ platform = "chat", id = "u_pm" }}]
 
-[[roster.seniors]]
+[[roster.principals]]
 handle = "carol"
 accounts = [{{ platform = "chat", id = "u_carol" }}]
 
@@ -500,7 +494,7 @@ token = "tok-carol"
         self.hub().read(committee, Seq::ZERO, 1000).await.unwrap()
     }
 
-    /// Wait until `agent` (`alice/claude`) is, or is not, connected.
+    /// Wait until `agent` (`claude`) is, or is not, connected.
     pub async fn wait_connected(&self, agent: &str, connected: bool) {
         let agent = path(agent);
         eventually_async(&format!("{agent} connected={connected}"), || async {
@@ -596,6 +590,9 @@ token = "tok-carol"
         .unwrap();
         let mut config = BridgeConfig::new(&self.server_url(), &format!("tok-{who}"), name(who));
         config.locale = self.locale;
+        if who == "bob" {
+            config.agents.claude = path(BOB_CLAUDE);
+        }
         Laptop {
             paths,
             config,
@@ -766,11 +763,7 @@ impl Laptop {
     pub async fn wait_stream_of(&self, session_id: &str) {
         eventually_async(&format!("{session_id}'s agent to be streaming"), || async {
             let status: ipc::StatusReply = self.try_ipc(Request::Status).await.ok()?;
-            // The Senate whose bridge holds the session: this machine's own,
-            // or one of the others it serves.
-            let senate = std::iter::once(&status)
-                .chain(&status.others)
-                .find(|s| s.sessions.iter().any(|x| x.session_id == session_id))?;
+            let senate = &status;
             let session = senate
                 .sessions
                 .iter()
@@ -867,7 +860,21 @@ impl Laptop {
     }
 
     /// What the agent's `escalate` tool does.
+    /// What the agent's `escalate` tool does when it names the person
+    /// (`to`): the thread is handed to its own user.
     pub async fn escalate(&self, session_id: &str, thread: Seq, reason: &str) -> Posted {
+        self.ipc(Request::Escalate {
+            session: Self::session(session_id),
+            thread,
+            to: Some(self.config.person.clone()),
+            reason: Some(reason.to_string()),
+            id: None,
+        })
+        .await
+    }
+
+    /// What `escalate` does with no target: one step up the chain.
+    pub async fn escalate_up(&self, session_id: &str, thread: Seq, reason: &str) -> Posted {
         self.ipc(Request::Escalate {
             session: Self::session(session_id),
             thread,
@@ -1144,7 +1151,7 @@ pub fn of_kind(events: &[Event], kind: Kind) -> Vec<&Event> {
 
 /// A developer machine whose daemon is `senated --machine`: its
 /// `senate.toml` is `person`, `locale`, a fake Codex app-server, and `body`
-/// (the Senate above, `[local]`, `[[preside]]`). The returned [`Laptop`]
+/// (the team's Senate, or `[local]`). The returned [`Laptop`]
 /// drives its sessions; [`Desk::start`] runs the machine.
 pub struct Desk {
     pub laptop: Laptop,
@@ -1216,17 +1223,14 @@ impl Desk {
         self.machine.as_ref().expect("the machine is running")
     }
 
-    /// The hosted Senate presided over by `presider` (`None`: the local top).
-    pub fn senate(&self, presider: Option<&str>) -> &senated::HostedSenate {
-        let presider = presider.map(path);
-        self.machine()
-            .senate(presider.as_ref())
-            .expect("a hosted Senate")
+    /// The one Senate this machine hosts.
+    pub fn senate(&self) -> &senated::HostedSenate {
+        self.machine().senate().expect("a hosted Senate")
     }
 
     /// Wait until `agent` has a live connection to the hosted Senate.
-    pub async fn wait_connected(&self, presider: Option<&str>, agent: &str, connected: bool) {
-        let hub = self.senate(presider).daemon.hub.clone();
+    pub async fn wait_connected(&self, agent: &str, connected: bool) {
+        let hub = self.senate().daemon.hub.clone();
         let agent = path(agent);
         eventually_async(&format!("{agent} connected = {connected}"), || {
             let hub = hub.clone();
@@ -1316,4 +1320,61 @@ pub async fn me_at(url: &str, token: &str) -> senate_core::api::Me {
         .json()
         .await
         .unwrap()
+}
+
+// ---- a machine under a parent ----------------------------------------------
+
+/// A team's Senate, `acme`, above the machines: no built-in Speaker and no
+/// chat platform; its Speaker is bob, a person (a principal Speaker).
+pub async fn team_above() -> World {
+    Setup::new()
+        .without_speaker()
+        .server(|c| {
+            c.name = Some(name("acme"));
+            c.roster.speaker = Some("senator::bob".parse().unwrap());
+        })
+        .start()
+        .await
+}
+
+/// `senate.toml` of a machine under `world`: the Senate above at its
+/// address with `token`, and the machine's own Senate, `[local]` with
+/// `local` (its keys, one per line).
+pub fn under(world: &World, token: &str, local: &str) -> String {
+    format!(
+        "server_url = \"{}\"\ntoken = \"{token}\"\n\n[local]\n{local}",
+        world.server_url()
+    )
+}
+
+impl Desk {
+    /// What `senate status` asks the machine.
+    pub async fn machine_status(&self) -> ipc::StatusReply {
+        self.ipc(Request::Status).await
+    }
+
+    /// Wait until the machine's uplink has tried to register its Senate
+    /// above (taken or refused), and say how it went.
+    pub async fn wait_registration(&self) -> ipc::UplinkStatus {
+        let dir = self.paths.hosted(senate_bridge::paths::HOSTED_KEY);
+        eventually("the registration with the Senate above", || {
+            ipc::UplinkStatus::read(&dir).filter(|u| {
+                matches!(
+                    u.registration,
+                    ipc::Registration::Registered | ipc::Registration::Refused { .. }
+                )
+            })
+        })
+        .await
+    }
+
+    /// The hosted Senate's events on `committee`.
+    pub async fn events_of(&self, committee: &CommitteeId) -> Vec<Event> {
+        self.senate()
+            .daemon
+            .hub
+            .read(committee, Seq::ZERO, 10_000)
+            .await
+            .unwrap()
+    }
 }

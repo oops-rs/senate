@@ -45,9 +45,10 @@ enum Cmd {
         /// Your handle (lowercase letters, digits, `-`).
         #[arg(long)]
         person: Name,
-        /// The agent that presides, relative to you.
-        #[arg(long, default_value = "claude")]
-        speaker: String,
+        /// The Speaker, as a senator id (`senator::claude`: an agent
+        /// presides over an unattended root). Default: you.
+        #[arg(long)]
+        speaker: Option<String>,
         /// `en` or `zh`.
         #[arg(long, default_value = "en")]
         locale: Locale,
@@ -126,9 +127,10 @@ enum Cmd {
         #[arg(long)]
         mark_read: bool,
     },
-    /// Ask a question as yourself. `<to>` is one of your agents (`claude`,
-    /// `claude/reviewer`), a full path (`alice/claude`), a person (`alice`),
-    /// whichever agent (`*`, `alice/*`), `speaker`, or a `senator::…` address.
+    /// Ask a question as yourself. `<to>` is a senator's name (an agent
+    /// such as `claude`, or a person such as `bob`), whichever agent (`*`),
+    /// `speaker`, a `senator::…` address, or a qualified name on another
+    /// committee (`ibot::codex`).
     /// Text `-` is read from stdin; put `--` before text that starts with `-`.
     /// Goes to the primary Senate of this machine.
     Ask {
@@ -716,7 +718,17 @@ fn run(command: Cmd) -> anyhow::Result<()> {
             let paths = Paths::from_env()?;
             let profile = init::LocalProfile {
                 person,
-                speaker: speaker.parse().map_err(anyhow::Error::msg)?,
+                speaker: speaker
+                    .map(|s| {
+                        let s = if s.contains("::") {
+                            s
+                        } else {
+                            format!("senator::{s}")
+                        };
+                        s.parse::<senate_core::SenatorId>()
+                    })
+                    .transpose()
+                    .map_err(anyhow::Error::msg)?,
                 locale,
                 listen,
             };

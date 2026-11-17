@@ -28,4 +28,14 @@ pub enum LogError {
     /// Applying the embedded migrations failed.
     #[error("migration: {0}")]
     Migrate(#[from] sqlx::migrate::MigrateError),
+    /// A log written when senators were paths cannot be converted to flat
+    /// names ([`crate::flatten`]). Nothing was changed.
+    #[error("converting this log to flat senator names: {0}")]
+    Flatten(Box<crate::flatten::FlattenError>),
+}
+
+impl From<Box<crate::flatten::FlattenError>> for LogError {
+    fn from(error: Box<crate::flatten::FlattenError>) -> Self {
+        Self::Flatten(error)
+    }
 }

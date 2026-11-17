@@ -27,6 +27,10 @@ pub const SOCKET_PATH_LIMIT: usize = if cfg!(target_os = "macos") { 103 } else {
 /// Environment variable that replaces `~/.senate`.
 pub const HOME_ENV: &str = "SENATE_HOME";
 
+/// The directory under `senates/` of the Senate a machine hosts
+/// (`[local]`).
+pub const HOSTED_KEY: &str = "top";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Paths {
     home: PathBuf,
@@ -109,7 +113,8 @@ impl Paths {
         self.home.join("senate.toml")
     }
 
-    /// Where `senated` keeps a Senate it hosts on this machine.
+    /// Where `senated` keeps a Senate it hosts on this machine
+    /// ([`HOSTED_KEY`] for the machine's own).
     pub fn hosted(&self, key: &str) -> PathBuf {
         self.home.join("senates").join(key)
     }
@@ -122,15 +127,6 @@ impl Paths {
 
     pub fn state_db(&self) -> PathBuf {
         self.home.join("state.db")
-    }
-
-    /// The state of a Senate presided over by `presider` (relative to the
-    /// person, `claude`), when this machine serves several:
-    /// `state.<presider with / as ->.db`. The Senate where the person's
-    /// agents sit directly keeps `state.db`.
-    pub fn state_db_for(&self, presider: &str) -> PathBuf {
-        self.home
-            .join(format!("state.{}.db", presider.replace('/', "-")))
     }
 
     pub fn socket(&self) -> PathBuf {
@@ -175,10 +171,6 @@ mod tests {
         assert_eq!(p.hosted("top"), PathBuf::from("/x/.senate/senates/top"));
         assert_eq!(p.state_db(), PathBuf::from("/x/.senate/state.db"));
         assert_eq!(p.socket(), PathBuf::from("/x/.senate/bridge.sock"));
-        assert_eq!(
-            p.state_db_for("claude/reviewer"),
-            PathBuf::from("/x/.senate/state.claude-reviewer.db")
-        );
     }
 
     #[test]

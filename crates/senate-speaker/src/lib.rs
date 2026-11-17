@@ -1,4 +1,4 @@
-//! The built-in Speaker: it presides over the top Senate, backed by a model
+//! The built-in Speaker: it presides over a Senate, backed by a model
 //! on basis.
 //!
 //! The Speaker is the only voice on the chat platform. It reads the log
@@ -7,7 +7,7 @@
 //!
 //! - **interprets** a platform `chat` addressed to it with its [`Brain`], or
 //!   the fixed syntax (`/bind <committee>`, `/unbind`, `/tell
-//!   <handle>[/<agent>] <text>`, `/status`, `/decide <text>`, `/brief`,
+//!   <name> <text>`, `/status`, `/decide <text>`, `/brief`,
 //!   `/agents [<committee>]`, `/invite <handle>…`, `/output
 //!   answers|status|all`, `/work`, `/reassign`), which always works and is
 //!   the fallback when the Brain fails. `relay` appends a `question`/`note`
@@ -20,7 +20,7 @@
 //! - **routes to agents, never derives them.** A person may have several
 //!   agents. "Alice's agent" is a roster lookup: one agent is that agent;
 //!   none is Alice herself; several is the agent the asker named
-//!   (`alice/codex`, 「alice 的 codex」), else the one [`Brain::pick_agent`]
+//!   (`codex`, 「alice 的 codex」), else the one [`Brain::pick_agent`]
 //!   settles on from what each is doing, else a question in the thread
 //!   asking which, answered in the same thread.
 //! - **converses** instead, with `mode = "agent"` (see [`SpeakerMode`]): a
@@ -37,8 +37,8 @@
 //!   archives it with the last people group.
 //! - **mirrors** agents' traffic to the platform. Who wrote what is never
 //!   written into a body: a copy is headed by the event's byline
-//!   ([`senate_core::Event::byline`]), `[senator::alice/claude]`, or
-//!   `[speaker::alice/claude]` when the Speaker answered for that agent,
+//!   ([`senate_core::Event::byline`]), `[senator::claude]`, or
+//!   `[speaker::claude]` when the Speaker answered for that agent,
 //!   followed by the localized takeover or companion word when it applies.
 //! - **asks people to confirm** an agent's proposed decision.
 //! - **writes the brief's top** with [`Brain::brief_top`].
@@ -49,7 +49,7 @@
 //!   people when the checkpoint is missing, stale or does not cover them,
 //!   and handed back when the agent returns. A sibling agent of the same
 //!   person never stands in.
-//! - **works on request**: a person's `/work <handle>[/<agent>]
+//! - **works on request**: a person's `/work <name>
 //!   <instruction>`, restated and confirmed, runs a [`senate_work::Runner`]
 //!   from that agent's checkpoint on a Speaker branch, and opens the PR with
 //!   a [`senate_work::Forge`]; `/reassign <from> <to>` hands one agent's work
@@ -62,8 +62,10 @@
 //! [`Locale`](senate_core::Locale) ([`SpeakerConfig::locale_of`]); commands
 //! and confirmation words are understood in Chinese and English always.
 //!
-//! The roster comes from [`Hub::roster`](senate_core::Hub::roster), which
-//! knows the Senate's presider, so nothing here assumes there is one level.
+//! The roster comes from [`Hub::roster`](senate_core::Hub::roster): who is a
+//! person and who an agent, and the person each agent's seat records as
+//! running it. Names are flat (`alice`, `claude`); nothing here reads an
+//! owner out of a name.
 //!
 //! It is restart-safe, and no Brain call or post can hold up other
 //! committees: see the `engine` module docs.
@@ -94,18 +96,25 @@ mod engine;
 mod ids;
 mod render;
 mod scripted;
+pub mod secretary;
 mod syntax;
 
 pub use actor::{RunReport, Speaker, SpeakerArgs, SpeakerMsg, SpeakerState, Thought};
-pub use basis_brain::{BasisBrain, LOG_READ, LOG_SEARCH, RuntimeRecipe};
+pub use basis_brain::{
+    BasisBrain, LOG_READ, LOG_SEARCH, ModelRecipe, RuntimeRecipe, basis_runtime,
+};
 pub use brain::{
-    AgentCandidate, AgentTurn, Answer, Brain, BrainError, Conversation, GroupRef, Intent, Pick,
-    PickInput, Question, RelayKind, Takeover, TriageInput, Turn, Utterance, apply_threshold,
-    rule_pick, triage_verdict,
+    AgentCandidate, AgentTurn, Answer, Brain, BrainError, Conversation, Crossing, CrossingInput,
+    GroupRef, Intent, Pick, PickInput, Question, RelayKind, Takeover, TriageInput, Turn, Utterance,
+    apply_threshold, rule_crossing, rule_pick, triage_verdict,
 };
 pub use config::{DEFAULT_BOT_NAME, SpeakerConfig, SpeakerMode, WorkConfig};
 pub use engine::{CURSOR, TAKEOVER_META};
 pub use scripted::{ScriptedBrain, scripted_verdict};
+pub use secretary::{
+    BaseLayer, DEFAULT_NAME, Duty, Effective, ModelCheck, ModelSettings, Problem, SecretaryConfigs,
+    Shown, ShownValue, Source,
+};
 
 #[cfg(test)]
 mod tests;

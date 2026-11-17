@@ -12,12 +12,12 @@ use common::*;
 use reqwest::{Method, StatusCode};
 use senate_core::api::{
     AppendResponse, Cursor, DEFAULT_SEARCH, EventsPage, Heartbeat, MAX_PAGE, MAX_SEARCH, Me,
-    SearchResults, ThreadsPage, brief_path, cursor_path, events_path, heartbeat_path, search_path,
-    stream_path, threads_path,
+    RESOLVE_PATH, Resolved, SearchResults, ThreadsPage, brief_path, cursor_path, events_path,
+    heartbeat_path, search_path, stream_path, threads_path,
 };
 use senate_core::{
-    Address, Brief, Hub, Kind, MirrorRef, NewEvent, PROPOSAL_DECISION, Seq, StatusPayload,
-    StatusState, meta,
+    Address, Brief, Hub, Kind, Locator, MirrorRef, NewEvent, PROPOSAL_DECISION, People, Seq,
+    StatusPayload, StatusState, meta,
 };
 use senate_log::MemoryStore;
 use serde_json::json;
@@ -51,6 +51,7 @@ async fn every_v1_route_requires_a_token() {
         (Method::GET, format!("{}?q=refund", search_path(&f))),
         (Method::GET, brief_path(&f)),
         (Method::GET, threads_path(&f)),
+        (Method::GET, format!("{RESOLVE_PATH}?name=senator::alice")),
     ];
     for (method, path) in routes {
         let missing = server
@@ -114,7 +115,17 @@ async fn me_names_the_person_their_agents_and_the_committees_in_the_log() {
         .await
         .unwrap();
     assert_eq!(me.person, name("bob"));
-    assert_eq!(me.presider, None, "the top Senate has no presider");
+    assert_eq!(
+        me.senate,
+        name("senate"),
+        "a Senate configured with no name"
+    );
+    assert_eq!(me.parent, None, "and no Senate above");
+    assert_eq!(
+        me.people,
+        People::new(["alice", "bob", "carol"].map(name)),
+        "every senator not among the people is an agent"
+    );
     assert!(me.agents.is_empty(), "no agent has connected yet");
     assert!(me.committees.is_empty());
 
@@ -132,12 +143,12 @@ async fn me_names_the_person_their_agents_and_the_committees_in_the_log() {
     // An agent that connects is seated, and is listed for its person only.
     let seated = server
         .request(Method::GET, &cursor_path(&committee(), "delivered"), BOB)
-        .query(&[("senator", "bob/claude")])
+        .query(&[("senator", "claude")])
         .send()
         .await
         .unwrap();
     assert_eq!(seated.status(), StatusCode::OK);
-    for (token, agents) in [(BOB, vec![path("bob/claude")]), (ALICE, vec![])] {
+    for (token, agents) in [(BOB, vec![path("claude")]), (ALICE, vec![])] {
         let me: Me = server
             .request(Method::GET, "/v1/me", token)
             .send()
@@ -155,7 +166,9 @@ async fn me_names_the_person_their_agents_and_the_committees_in_the_log() {
 async fn a_person_acts_as_themselves_and_their_own_agents_only() {
     let server = TestServer::start().await;
     let f = committee();
-    for from in ["alice/claude", "alice/codex", "alice"] {
+    // Bob runs claude: he acted as it first.
+    assert_eq!(server.act_as(BOB, "claude").await, StatusCode::OK);
+    for from in ["copilot", "codex", "alice"] {
         let event = NewEvent::new(f.clone(), Kind::Question, person_addr(from), "q");
         assert_eq!(
             server.post_event(ALICE, &event).await.status(),
@@ -171,9 +184,7 @@ async fn a_person_acts_as_themselves_and_their_own_agents_only() {
     let forbidden = [
         // Somebody else's person and agent.
         person_addr("bob"),
-        person_addr("bob/claude"),
-        // An agent seated one level too deep for the top Senate.
-        person_addr("alice/claude/reviewer"),
+        person_addr("claude"),
         // Not senators at all.
         Address::Speaker,
         Address::Committee,
@@ -199,10 +210,15 @@ async fn a_person_acts_as_themselves_and_their_own_agents_only() {
         "rejected appends store nothing"
     );
 
-    // Only the agents that acted were seated: alice's two, not bob's.
+    // The agents alice acted as were seated under her; bob's stays his.
     let roster = server.running.hub.roster().await.unwrap();
     let seated: Vec<_> = roster.agents().iter().map(ToString::to_string).collect();
-    assert_eq!(seated, ["alice/claude", "alice/codex"]);
+    assert_eq!(seated, ["claude", "copilot", "codex"]);
+    assert_eq!(
+        roster.agents_of(&name("alice")),
+        [&path("copilot"), &path("codex")]
+    );
+    assert_eq!(roster.owner_of(&path("claude")), Some(&name("bob")));
     server.running.shutdown().await.unwrap();
 }
 
@@ -225,32 +241,30 @@ async fn an_agent_is_seated_on_first_contact_by_any_request_that_acts_as_it() {
     assert!(seated(&server).await.is_empty());
 
     // A heartbeat, a stream, a cursor and an append each seat their agent.
-    beat(&server, ALICE, "alice/a", 0).await;
-    assert_eq!(seated(&server).await, ["alice/a"]);
-    let _stream = server.stream_as(ALICE, Some("alice/b"), None, None).await;
+    beat(&server, ALICE, "a", 0).await;
+    assert_eq!(seated(&server).await, ["a"]);
+    let _stream = server.stream_as(ALICE, Some("b"), None, None).await;
     server
         .request(Method::GET, &cursor_path(&f, "read"), ALICE)
-        .query(&[("senator", "alice/c")])
+        .query(&[("senator", "c")])
         .send()
         .await
         .unwrap();
     server
         .post_event(
             ALICE,
-            &NewEvent::new(f.clone(), Kind::Note, person_addr("alice/d"), "hi"),
+            &NewEvent::new(f.clone(), Kind::Note, person_addr("d"), "hi"),
         )
         .await;
-    assert_eq!(
-        seated(&server).await,
-        ["alice/a", "alice/b", "alice/c", "alice/d"]
-    );
+    assert_eq!(seated(&server).await, ["a", "b", "c", "d"]);
 
     // Contact again: seated once. A refused request seats nothing.
-    beat(&server, ALICE, "alice/a", 0).await;
+    beat(&server, ALICE, "a", 0).await;
+    assert_eq!(server.act_as(BOB, "claude").await, StatusCode::OK);
     let refused = server
         .request(Method::POST, &heartbeat_path(&f), ALICE)
         .json(&Heartbeat {
-            agent: path("bob/claude"),
+            agent: path("claude"),
             sessions: 1,
             cursor: Seq::ZERO,
         })
@@ -258,7 +272,7 @@ async fn an_agent_is_seated_on_first_contact_by_any_request_that_acts_as_it() {
         .await
         .unwrap();
     api_error(refused, StatusCode::FORBIDDEN, "forbidden").await;
-    assert_eq!(seated(&server).await.len(), 4);
+    assert_eq!(seated(&server).await, ["a", "b", "c", "d", "claude"]);
     server.running.shutdown().await.unwrap();
 }
 
@@ -285,10 +299,10 @@ async fn senators_may_not_author_chat() {
     // itself or as its user, threaded or not.
     for event in [
         NewEvent::new(f.clone(), Kind::Chat, person_addr("alice"), "x"),
-        NewEvent::new(f.clone(), Kind::Chat, agent_addr("alice"), "x"),
+        NewEvent::new(f.clone(), Kind::Chat, agent_addr("copilot"), "x"),
         NewEvent::new(f.clone(), Kind::Chat, person_addr("alice"), "不对")
             .in_thread(Seq(1))
-            .to(agent_addr("bob")),
+            .to(agent_addr("claude")),
     ] {
         let error = api_error(
             server.post_event(ALICE, &event).await,
@@ -320,12 +334,12 @@ async fn senators_may_not_author_chat() {
 async fn senators_cannot_state_server_provenance() {
     let server = TestServer::start().await;
     let f = committee();
-    let me = agent_addr("alice");
+    let me = agent_addr("copilot");
     let mut forged = vec![
         NewEvent::new(f.clone(), Kind::Binding, me.clone(), "bind"),
         NewEvent::new(f.clone(), Kind::Presence, me.clone(), "online"),
         NewEvent::new(f.clone(), Kind::Answer, me.clone(), "for bob")
-            .on_behalf_of(agent_addr("bob")),
+            .on_behalf_of(agent_addr("claude")),
         NewEvent::new(f.clone(), Kind::Note, me.clone(), "from chat").with_source(
             senate_core::Source {
                 platform: "chat".into(),
@@ -358,7 +372,7 @@ async fn senators_cannot_state_server_provenance() {
 async fn only_the_speaker_writes_the_brief_top_and_only_people_decide() {
     let server = TestServer::start().await;
     let f = committee();
-    let agent = agent_addr("alice");
+    let agent = agent_addr("copilot");
     let user = person_addr("alice");
     let refused = [
         // The key at all, whatever its value or the author.
@@ -447,7 +461,7 @@ async fn malformed_appends_are_bad_requests() {
     for body in [
         json!({"committee": "refund-v2", "kind": "note", "from": "robot:x", "body": "b"}),
         json!({"committee": "refund-v2", "kind": "note", "from": "senator::alice",
-               "to": ["senator::bob/claude", "group:oc_1"], "body": "b"}),
+               "to": ["senator::claude", "group:oc_1"], "body": "b"}),
         json!({"committee": "refund-v2", "kind": "note", "from": "senator::alice",
                "to": ["agent:Not-A-Slug"], "body": "b"}),
     ] {
@@ -644,32 +658,28 @@ async fn an_open_stream_marks_the_agent_connected() {
     let server = TestServer::start().await;
     let hub = server.running.hub.clone();
     let f = committee();
-    let alice = path("alice/claude");
+    let alice = path("copilot");
     assert!(!hub.is_agent_connected(&f, &alice).await);
 
-    let first = server
-        .stream_as(ALICE, Some("alice/claude"), None, None)
-        .await;
+    let first = server.stream_as(ALICE, Some("copilot"), None, None).await;
     eventually("alice connected", || hub.is_agent_connected(&f, &alice)).await;
-    assert!(!hub.is_agent_connected(&f, &path("bob/claude")).await);
+    assert!(!hub.is_agent_connected(&f, &path("claude")).await);
     let other = senate_core::CommitteeId::new("search").unwrap();
     assert!(!hub.is_agent_connected(&other, &alice).await);
     // Presence is per agent, not per person: a sibling is not connected
     // because alice's other agent is, and a stream that only reads counts
     // for nobody.
-    assert!(!hub.is_agent_connected(&f, &path("alice/codex")).await);
+    assert!(!hub.is_agent_connected(&f, &path("codex")).await);
     assert!(!hub.is_agent_connected(&f, &path("alice")).await);
     let reader = server.stream_as(ALICE, Some("alice"), None, None).await;
     let anonymous = server.stream(ALICE, None, None).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(!hub.is_agent_connected(&f, &path("alice")).await);
-    assert!(!hub.is_agent_connected(&f, &path("alice/codex")).await);
+    assert!(!hub.is_agent_connected(&f, &path("codex")).await);
     drop((reader, anonymous));
 
     // A second connection keeps her connected after the first closes.
-    let second = server
-        .stream_as(ALICE, Some("alice/claude"), None, None)
-        .await;
+    let second = server.stream_as(ALICE, Some("copilot"), None, None).await;
     drop(first);
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     assert!(hub.is_agent_connected(&f, &alice).await);
@@ -721,15 +731,16 @@ async fn cursors_are_scoped_to_the_senator() {
     );
 
     // Two agents of one person: separate cursors, and the person has a third.
-    put(ALICE, Some("alice/claude"), 7).await;
-    put(ALICE, Some("alice/codex"), 2).await;
-    assert_eq!(get(ALICE, Some("alice/claude"), "delivered").await, Seq(7));
-    assert_eq!(get(ALICE, Some("alice/codex"), "delivered").await, Seq(2));
+    put(ALICE, Some("copilot"), 7).await;
+    put(ALICE, Some("codex"), 2).await;
+    assert_eq!(get(ALICE, Some("copilot"), "delivered").await, Seq(7));
+    assert_eq!(get(ALICE, Some("codex"), "delivered").await, Seq(2));
     assert_eq!(get(ALICE, Some("alice"), "delivered").await, Seq(5));
     assert_eq!(get(ALICE, None, "delivered").await, Seq(5));
 
-    // Nobody else's.
-    for (token, senator) in [(ALICE, "bob"), (ALICE, "bob/claude"), (BOB, "alice/claude")] {
+    // Nobody else's: not another person, not an agent another person runs.
+    assert_eq!(server.act_as(BOB, "claude").await, StatusCode::OK);
+    for (token, senator) in [(ALICE, "bob"), (ALICE, "claude"), (BOB, "copilot")] {
         let response = server
             .request(Method::GET, &cursor_path(&f, "delivered"), token)
             .query(&[("senator", senator)])
@@ -740,7 +751,7 @@ async fn cursors_are_scoped_to_the_senator() {
         let response = put(token, Some(senator), 99).await;
         api_error(response, StatusCode::FORBIDDEN, "forbidden").await;
     }
-    assert_eq!(get(ALICE, Some("alice/claude"), "delivered").await, Seq(7));
+    assert_eq!(get(ALICE, Some("copilot"), "delivered").await, Seq(7));
     assert_eq!(
         server.running.hub.cursor(&f, "delivered").await.unwrap(),
         Seq::ZERO,
@@ -776,7 +787,7 @@ async fn heartbeat_is_recorded_per_agent() {
     let server = TestServer::start().await;
     let f = committee();
     let beat = Heartbeat {
-        agent: path("bob/claude"),
+        agent: path("claude"),
         sessions: 2,
         cursor: Seq(3),
     };
@@ -792,13 +803,13 @@ async fn heartbeat_is_recorded_per_agent() {
         let (f, agent) = (f.clone(), path(agent));
         async move { hub.last_heartbeat(&f, &agent).await.unwrap() }
     };
-    assert_eq!(last("bob/claude").await.unwrap().heartbeat, beat);
-    assert!(last("bob/codex").await.is_none(), "a sibling has none");
-    assert!(last("alice/claude").await.is_none());
+    assert_eq!(last("claude").await.unwrap().heartbeat, beat);
+    assert!(last("aider").await.is_none(), "a sibling has none");
+    assert!(last("copilot").await.is_none());
 
     // A second agent of the same person beats separately.
     let other = Heartbeat {
-        agent: path("bob/codex"),
+        agent: path("aider"),
         sessions: 1,
         cursor: Seq(1),
     };
@@ -808,11 +819,12 @@ async fn heartbeat_is_recorded_per_agent() {
         .send()
         .await
         .unwrap();
-    assert_eq!(last("bob/codex").await.unwrap().heartbeat, other);
-    assert_eq!(last("bob/claude").await.unwrap().heartbeat, beat);
+    assert_eq!(last("aider").await.unwrap().heartbeat, other);
+    assert_eq!(last("claude").await.unwrap().heartbeat, beat);
 
-    // Not a person's, not somebody else's.
-    for agent in ["bob", "alice/claude", "bob/claude/reviewer"] {
+    // Not a person's, not somebody else's (alice runs copilot).
+    assert_eq!(server.act_as(ALICE, "copilot").await, StatusCode::OK);
+    for agent in ["bob", "copilot"] {
         let response = server
             .request(Method::POST, &heartbeat_path(&f), BOB)
             .json(&Heartbeat {
@@ -875,7 +887,7 @@ async fn every_response_carries_the_epoch() {
     server.append("one").await;
     let after = |after: &str| format!("{}?after={after}", events_path(&f));
     let beat = Heartbeat {
-        agent: path("bob/claude"),
+        agent: path("claude"),
         sessions: 1,
         cursor: Seq(1),
     };
@@ -977,7 +989,7 @@ async fn a_cursor_beyond_the_head_is_cursor_ahead() {
         !server
             .running
             .hub
-            .is_agent_connected(&f, &path("bob/claude"))
+            .is_agent_connected(&f, &path("claude"))
             .await,
         "a refused stream never attached"
     );
@@ -1063,7 +1075,7 @@ async fn a_stream_without_heartbeats_stops_counting_after_the_grace() {
     .await;
     let hub = server.running.hub.clone();
     let f = committee();
-    let alice = path("alice/claude");
+    let alice = path("copilot");
     let beat = || async {
         let response = server
             .request(Method::POST, &heartbeat_path(&f), ALICE)
@@ -1081,9 +1093,7 @@ async fn a_stream_without_heartbeats_stops_counting_after_the_grace() {
 
     // Like a laptop that went to sleep: its stream stays open on the server,
     // but no heartbeat arrives.
-    let stream = server
-        .stream_as(ALICE, Some("alice/claude"), None, None)
-        .await;
+    let stream = server.stream_as(ALICE, Some("copilot"), None, None).await;
     eventually("a new stream counts", || hub.is_agent_connected(&f, &alice)).await;
     tokio::time::sleep(past_grace).await;
     assert!(!hub.is_agent_connected(&f, &alice).await);
@@ -1113,8 +1123,8 @@ async fn hub_queries_and_mirrors_come_from_the_store() {
     let f = committee();
     let root = server.append("Refund question").await;
     server.append("unrelated").await;
-    let reply =
-        NewEvent::new(f.clone(), Kind::Answer, agent_addr("alice"), "30 days").in_thread(root.seq);
+    let reply = NewEvent::new(f.clone(), Kind::Answer, agent_addr("copilot"), "30 days")
+        .in_thread(root.seq);
     assert_eq!(
         server.post_event(ALICE, &reply).await.status(),
         StatusCode::OK
@@ -1267,10 +1277,10 @@ async fn brief_folds_the_log_as_it_grows() {
     let question = NewEvent::new(
         f.clone(),
         Kind::Question,
-        agent_addr("alice"),
+        agent_addr("copilot"),
         "用哪个 header？",
     )
-    .to(agent_addr("bob"));
+    .to(agent_addr("claude"));
     server.post_event(ALICE, &question).await;
     let brief = get_brief().await;
     assert_eq!(brief, whole().await);
@@ -1311,7 +1321,7 @@ async fn triage_and_output_level_are_the_speakers() {
     let server = TestServer::start().await;
     let f = committee();
     for key in [meta::TRIAGE, meta::OUTPUT_LEVEL] {
-        let event = NewEvent::new(f.clone(), Kind::Note, agent_addr("alice"), "")
+        let event = NewEvent::new(f.clone(), Kind::Note, agent_addr("copilot"), "")
             .with_meta(key, json!({"verdict": "agent"}));
         api_error(
             server.post_event(ALICE, &event).await,
@@ -1327,8 +1337,9 @@ async fn triage_and_output_level_are_the_speakers() {
 async fn status_belongs_to_a_task_thread_and_its_agent() {
     let server = TestServer::start().await;
     let f = committee();
-    let alice = agent_addr("alice");
-    let bob = agent_addr("bob");
+    // copilot is alice's agent, claude bob's.
+    let alice = agent_addr("copilot");
+    let bob = agent_addr("claude");
     let root: AppendResponse = server
         .post_event(
             BOB,
@@ -1392,8 +1403,8 @@ async fn status_belongs_to_a_task_thread_and_its_agent() {
     )
     .await;
     // A sibling agent of the thread's agent does not qualify either: the
-    // thread is addressed to alice/claude, and alice/codex is not it.
-    let sibling = person_addr("alice/codex");
+    // thread is addressed to copilot, and codex is not it.
+    let sibling = person_addr("codex");
     api_error(
         server
             .post_event(ALICE, &status(&f, sibling, root, &processing))
@@ -1454,5 +1465,219 @@ async fn status_belongs_to_a_task_thread_and_its_agent() {
         .await
         .unwrap();
     assert!(none.threads.is_empty());
+    server.running.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_path_inside_a_name_is_refused_wherever_a_senator_is_named() {
+    // A senator's name is one flat name: `alice/claude` is no agent of
+    // alice's, and not a name at all. Nothing that carries one is served,
+    // and nothing is seated.
+    let server = TestServer::start().await;
+    let f = committee();
+    let nested = "alice/claude";
+
+    let beat = server
+        .request(Method::POST, &heartbeat_path(&f), ALICE)
+        .json(&json!({"agent": nested, "sessions": 1, "cursor": 0}))
+        .send()
+        .await
+        .unwrap();
+    api_error(beat, StatusCode::BAD_REQUEST, "bad_request").await;
+    let stream = server.try_stream(ALICE, Some(nested), None, None).await;
+    api_error(stream, StatusCode::BAD_REQUEST, "bad_request").await;
+    let cursor = server
+        .request(Method::GET, &cursor_path(&f, "read"), ALICE)
+        .query(&[("senator", nested)])
+        .send()
+        .await
+        .unwrap();
+    api_error(cursor, StatusCode::BAD_REQUEST, "bad_request").await;
+    for body in [
+        json!({"committee": "refund-v2", "kind": "note", "from": "senator::alice/claude",
+               "body": "as a nested agent"}),
+        json!({"committee": "refund-v2", "kind": "question", "from": "senator::alice",
+               "to": ["senator::alice/claude"], "body": "to a nested agent"}),
+        json!({"committee": "refund-v2", "kind": "question", "from": "senator::alice",
+               "to": ["senator::alice/*"], "body": "to a person's agents"}),
+    ] {
+        api_error(
+            server.post_json(ALICE, &body).await,
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+        )
+        .await;
+    }
+
+    let roster = server.running.hub.roster().await.unwrap();
+    assert!(roster.agents().is_empty(), "{:?}", roster.agents());
+    assert!(server.running.hub.committees().await.unwrap().is_empty());
+    server.running.shutdown().await.unwrap();
+}
+
+/// `GET /v1/resolve?name=<locator>[&committee=<writer's committee>]`.
+async fn resolve(server: &TestServer, name: &str, committee: Option<&str>) -> Resolved {
+    let mut query = vec![("name", name)];
+    if let Some(committee) = committee {
+        query.push(("committee", committee));
+    }
+    let response = server
+        .request(Method::GET, RESOLVE_PATH, BOB)
+        .query(&query)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "{name}");
+    response.json().await.unwrap()
+}
+
+fn here(locator: &str) -> Resolved {
+    let locator: Locator = locator.parse().unwrap();
+    Resolved::Here {
+        committee: locator.committee().unwrap().clone(),
+        address: locator.address().clone(),
+        locator,
+    }
+}
+
+#[tokio::test]
+async fn resolve_finds_a_name_here_and_completes_it_with_this_senates_path() {
+    let server = TestServer::start().await;
+    server.append("refund-v2 exists").await;
+    assert_eq!(server.act_as(ALICE, "codex").await, StatusCode::OK);
+
+    for (name, committee, found) in [
+        // A committee here: the name completed with this Senate's path.
+        (
+            "refund-v2::senator::codex",
+            None,
+            "/senate::refund-v2::senator::codex",
+        ),
+        ("refund-v2::speaker", None, "/senate::refund-v2::speaker"),
+        (
+            "refund-v2::senator::*",
+            None,
+            "/senate::refund-v2::senator::*",
+        ),
+        // No committee: the writer's own.
+        (
+            "senator::alice",
+            Some("refund-v2"),
+            "/senate::refund-v2::senator::alice",
+        ),
+        // This Senate named by its path, relative or from the root.
+        (
+            "senate::refund-v2::senator::codex",
+            None,
+            "/senate::refund-v2::senator::codex",
+        ),
+        (
+            "/senate::refund-v2::senator::codex",
+            None,
+            "/senate::refund-v2::senator::codex",
+        ),
+    ] {
+        assert_eq!(
+            resolve(&server, name, committee).await,
+            here(found),
+            "{name}"
+        );
+    }
+    server.running.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn resolve_says_elsewhere_for_what_another_senate_may_have() {
+    let server = TestServer::start().await;
+    server.append("refund-v2 exists").await;
+    for (name, committee) in [
+        // A committee that is not here: ask the Senate above.
+        ("ibot::senator::codex", None),
+        ("ibot::speaker", Some("refund-v2")),
+        // Another Senate's path, even with a committee of the same name.
+        ("acme::refund-v2::senator::alice", None),
+        ("acme/north-desk::refund-v2::senator::alice", None),
+    ] {
+        assert_eq!(
+            resolve(&server, name, committee).await,
+            Resolved::Elsewhere,
+            "{name}"
+        );
+    }
+    server.running.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn resolve_says_unknown_for_what_this_senate_should_have_and_does_not() {
+    let server = TestServer::start().await;
+    server.append("refund-v2 exists").await;
+    for (name, committee) in [
+        // A senator nobody knows, on a committee here.
+        ("refund-v2::senator::nobody", None),
+        ("senator::nobody", Some("refund-v2")),
+        // A committee that is not here, in a path naming this Senate.
+        ("senate::ibot::senator::alice", None),
+        // No committee in the name and none where it is written.
+        ("senator::alice", None),
+    ] {
+        match resolve(&server, name, committee).await {
+            Resolved::Unknown { reason } => assert!(!reason.is_empty(), "{name}"),
+            other => panic!("{name}: expected unknown, got {other:?}"),
+        }
+    }
+    // Not a qualified name at all.
+    for bad in ["alice", "refund-v2::senator::alice/claude", ""] {
+        let response = server
+            .request(Method::GET, RESOLVE_PATH, BOB)
+            .query(&[("name", bad)])
+            .send()
+            .await
+            .unwrap();
+        api_error(response, StatusCode::BAD_REQUEST, "bad_request").await;
+    }
+    server.running.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_configured_senate_name_is_in_me_and_in_what_resolve_answers() {
+    let server = TestServer::start_configured(Arc::new(MemoryStore::new()), |config| {
+        config.name = Some(name("north-desk"));
+        config.parent = Some("acme".parse().unwrap());
+    })
+    .await;
+    server.append("refund-v2 exists").await;
+    let me: Me = server
+        .request(Method::GET, "/v1/me", BOB)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(me.senate, name("north-desk"));
+    assert_eq!(me.parent, Some("acme".parse().unwrap()));
+
+    let found = here("/acme/north-desk::refund-v2::senator::alice");
+    for name in [
+        "refund-v2::senator::alice",
+        "north-desk::refund-v2::senator::alice",
+        "acme/north-desk::refund-v2::senator::alice",
+        "/acme/north-desk::refund-v2::senator::alice",
+    ] {
+        assert_eq!(resolve(&server, name, None).await, found, "{name}");
+    }
+    // The default name and the Senate above are other Senates now.
+    for name in [
+        "senate::refund-v2::senator::alice",
+        "acme::refund-v2::senator::alice",
+        // From the root, a path must be all of this Senate's.
+        "/north-desk::refund-v2::senator::alice",
+    ] {
+        assert_eq!(
+            resolve(&server, name, None).await,
+            Resolved::Elsewhere,
+            "{name}"
+        );
+    }
     server.running.shutdown().await.unwrap();
 }

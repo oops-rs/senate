@@ -3,10 +3,10 @@
 //! goes; inviting people into it and its output level.
 //!
 //! People are invited by their accounts on this surface's platform, as the
-//! roster lists them ([`Senior::account_ids`](senate_core::Senior::account_ids));
+//! roster lists them ([`Principal::account_ids`](senate_core::Principal::account_ids));
 //! a person is invited once however many of their agents show up.
 
-use senate_core::{Mention, Name, NewGroup, OutputLevel};
+use senate_core::{Mention, Name, NewGroup, OutputLevel, SenatorName};
 
 use super::{
     Address, BindingAction, Engine, Event, Flow, GroupRef, GroupRole, Kind, MirrorPlan, NewEvent,
@@ -77,7 +77,7 @@ impl Engine {
         let platform = self.surface.platform().to_owned();
         let account = |person: &Name| {
             self.roster
-                .senior(person)
+                .principal(person)
                 .and_then(|s| s.account_ids(&platform).next())
                 .map(str::to_owned)
         };
@@ -89,8 +89,10 @@ impl Engine {
             add(account(&binder).as_ref());
         }
         for agent in self.roster.agents() {
-            if self.hub.is_agent_connected(&committee, agent).await {
-                add(account(agent.owner()).as_ref());
+            if self.hub.is_agent_connected(&committee, &agent).await
+                && let Some(owner) = self.roster.owner_of(&agent)
+            {
+                add(account(owner).as_ref());
             }
         }
         let operation = self.op_id(&committee, binding.seq, "agents-group")?;
@@ -154,7 +156,7 @@ impl Engine {
                 if !binding
                     .on_behalf_of
                     .as_ref()
-                    .is_some_and(Address::is_senior)
+                    .is_some_and(|a| self.roster.is_person_address(a))
                 {
                     return Ok(()); // nobody to tell
                 }
@@ -218,7 +220,7 @@ impl Engine {
 
     /// 「把 @alice 拉进 agent 群」 / "add @alice to the agent group": the
     /// people named, and every person the chat mentions, invited into the
-    /// committee's Agent group. Naming an agent (`alice/claude`) invites its
+    /// committee's Agent group. Naming an agent (`claude`) invites its
     /// person.
     pub(super) async fn invite_to_agents(
         &mut self,
@@ -246,7 +248,8 @@ impl Engine {
                     .iter()
                     .filter_map(|m| m.get("address").and_then(|a| a.as_str()))
                     .filter_map(|a| a.parse::<Address>().ok())
-                    .filter_map(|a| a.as_senator().map(|p| p.owner().to_string())),
+                    .filter_map(|a| a.as_senator().and_then(|p| self.person_behind(p)))
+                    .map(|p| p.to_string()),
             );
         }
         let platform = self.surface.platform().to_owned();
@@ -255,16 +258,16 @@ impl Engine {
         let mut unknown = Vec::new();
         for raw in &names {
             let raw = raw.trim().trim_start_matches('@');
-            let person = match raw.parse::<Mention>() {
-                Ok(Mention::Senator(path)) => path.owner().to_string(),
-                _ => raw
-                    .strip_prefix("senator::")
-                    .unwrap_or(raw)
-                    .split('/')
-                    .next()
-                    .unwrap_or_default()
-                    .to_owned(),
+            // An agent's name (bare or as a mention) stands for the person
+            // who runs it; anything else is a person's handle or name.
+            let bare = raw.strip_prefix("senator::").unwrap_or(raw);
+            let senator = match raw.parse::<Mention>() {
+                Ok(Mention::Senator(name)) => Some(name),
+                _ => bare.parse::<SenatorName>().ok(),
             };
+            let person = senator
+                .and_then(|name| self.person_behind(&name))
+                .map_or_else(|| bare.to_owned(), |p| p.to_string());
             match self.roster.resolve(&person) {
                 Some(senior) => {
                     let handle = senior.handle.to_string();
@@ -340,7 +343,12 @@ impl Engine {
     /// the Agent group, once per run and person (invites are idempotent;
     /// failures and surfaces without invites are ignored).
     pub(super) async fn invite_on_activity(&mut self, event: &Event) {
-        let Some(handle) = event.from.as_agent().map(|a| a.owner().clone()) else {
+        let Some(handle) = self
+            .roster
+            .people()
+            .as_agent(&event.from)
+            .and_then(|a| self.roster.owner_of(a).cloned())
+        else {
             return;
         };
         let Some(state) = self.committees.get_mut(&event.committee) else {
@@ -354,7 +362,7 @@ impl Engine {
         }
         let Some(id) = self
             .roster
-            .senior(&handle)
+            .principal(&handle)
             .and_then(|s| s.account_ids(self.surface.platform()).next())
             .map(str::to_owned)
         else {

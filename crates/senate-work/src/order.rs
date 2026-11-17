@@ -6,7 +6,7 @@
 use std::fmt;
 
 use senate_core::continuity::{CHECKPOINT_DIR, DECISIONS_FILE, OPEN_FILE, PROGRESS_FILE};
-use senate_core::{BranchNaming, CheckpointFiles, CommitteeId, Locale, Name, SenatorPath};
+use senate_core::{BranchNaming, CheckpointFiles, CommitteeId, Locale, Name, SenatorName};
 use serde::{Deserialize, Serialize};
 
 /// Default wall clock for one run.
@@ -32,7 +32,7 @@ pub struct WorkOrder {
     /// named in full: a person with several agents has said (or been asked)
     /// which one before the order is made, and the work may be handed
     /// between two agents of the same person.
-    pub target_agent: SenatorPath,
+    pub target_agent: SenatorName,
     /// The task, in the requester's words (after the restatement they confirmed).
     pub instruction: String,
     pub repo: RepoRef,
@@ -207,7 +207,7 @@ pub enum WorkError {
     #[error("the instruction is empty")]
     EmptyInstruction,
     #[error("a run starts from an agent's checkpoint, and {0} is a person")]
-    TargetNotAnAgent(SenatorPath),
+    TargetNotAnAgent(SenatorName),
 }
 
 /// One `/`-free component of a git ref, safe for `git check-ref-format`:
@@ -286,7 +286,10 @@ impl WorkOrder {
 
     /// Every rule an order must pass before a runner touches anything.
     pub fn validate(&self, allowed: &RepoAllowlist) -> Result<(), WorkError> {
-        if !self.target_agent.is_junior() {
+        // Whether the target is an agent is the roster's to say, and the
+        // Speaker checks it before it orders anything; an order alone knows
+        // one person, the requester, who is never the agent.
+        if self.target_agent == self.requester {
             return Err(WorkError::TargetNotAnAgent(self.target_agent.clone()));
         }
         if !valid_slug(&self.repo.slug) {
@@ -354,7 +357,7 @@ pub(crate) fn sample_order() -> WorkOrder {
         run_id: 7,
         requester: Name::new("bob").unwrap(),
         on_behalf_of: "Bob".into(),
-        target_agent: "alice/claude".parse().unwrap(),
+        target_agent: "claude".parse().unwrap(),
         instruction: "把 alice 的重试路径做完\nwith tests".into(),
         repo: RepoRef::from_url("git@github.com:example/refund.git").unwrap(),
         base_branch: "feature/refund-v2/alice".into(),
@@ -564,14 +567,14 @@ mod tests {
         let o = sample_order();
         let json = serde_json::to_value(&o).unwrap();
         assert_eq!(json["requester"], "bob");
-        assert_eq!(json["target_agent"], "alice/claude");
+        assert_eq!(json["target_agent"], "claude");
         assert_eq!(json["branches"], "feature");
         assert_eq!(json["locale"], "zh");
         let back: WorkOrder = serde_json::from_value(json).unwrap();
         assert_eq!(back, o);
         let minimal = serde_json::json!({
             "committee": "refund-v2", "run_id": 1, "requester": "bob", "on_behalf_of": "Bob",
-            "target_agent": "alice/claude",
+            "target_agent": "claude",
             "instruction": "x", "repo": {"url": "git@github.com:o/n.git", "slug": "o/n"},
             "base_branch": "feature/refund-v2/alice", "base_commit": "abcdef0"
         });
@@ -595,8 +598,8 @@ mod tests {
         for (field, bad) in [
             ("requester", "bob/claude"),
             ("requester", "senator::bob"),
-            ("target_agent", "alice/*"),
-            ("target_agent", "senator::alice/claude"),
+            ("target_agent", "*"),
+            ("target_agent", "senator::claude"),
         ] {
             let mut v = base.clone();
             v[field] = bad.into();
@@ -606,15 +609,15 @@ mod tests {
             );
         }
         let mut o = sample_order();
-        o.target_agent = "alice".parse().unwrap();
+        o.target_agent = o.requester.as_str().parse().unwrap();
         assert_eq!(
             o.validate(&allow()),
-            Err(WorkError::TargetNotAnAgent("alice".parse().unwrap()))
+            Err(WorkError::TargetNotAnAgent(o.target_agent.clone()))
         );
         // Handing work between two agents of one person is an ordinary order.
         let mut o = sample_order();
         o.requester = Name::new("alice").unwrap();
-        o.target_agent = "alice/codex".parse().unwrap();
+        o.target_agent = "codex".parse().unwrap();
         o.validate(&allow()).unwrap();
     }
 

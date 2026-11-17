@@ -23,7 +23,7 @@
 //!   `committee_status`, `presence`, `tasks`, `checkpoint`), registered on
 //!   every workspace but outside its roster: only a `converse` run is
 //!   offered them, through its [`RunProfile`] (roster and persona), so the
-//!   other runs never see them. They answer per agent path: a person may
+//!   other runs never see them. They answer per agent: a person may
 //!   have several agents, each with its own presence, checkpoints and tasks.
 //!
 //! `converse` (agent mode) is a typed turn like `interpret`
@@ -54,6 +54,17 @@
 //! [`BrainError`], on which the Speaker falls back to its fixed syntax (or,
 //! for a pick, to [`rule_pick`](crate::rule_pick)).
 //!
+//! **Configuration per committee.** Everything a run is bounded by, the
+//! persona's bot name and language, the model, and this Senate's extra
+//! instructions (appended after the persona's rules, never replacing them)
+//! come from the built-in session's configuration for the run's committee
+//! ([`SecretaryConfigs`]). Each committee's workspace is opened for the model
+//! in force there and opened again, for that committee alone, when its model
+//! changes.
+//!
+//! `decide_crossing` is a typed turn without tools (`speaker_crossing`:
+//! forward, refuse with a reason, or leave), under the triage deadline.
+//!
 //! **History is durable**, under `<data_dir>/speaker/history`
 //! (`RuntimeBuilder::with_store_dir`). No run is ever resumed — each call is a
 //! fresh run built from the log, which stays the only memory — so the store
@@ -65,10 +76,9 @@ mod agent_tools;
 pub(crate) mod prompt;
 mod tools;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use basis::runtime::FileToolProfile;
@@ -80,12 +90,13 @@ use senate_core::{Brief, CommitteeId, Hub, Locale, TriagePayload};
 use tokio::sync::Mutex;
 
 use crate::brain::{
-    AgentTurn, Answer, Brain, BrainError, Conversation, Intent, Pick, PickInput, Question,
-    TriageInput, Utterance,
+    AgentTurn, Answer, Brain, BrainError, Conversation, Crossing, CrossingInput, Intent, Pick,
+    PickInput, Question, TriageInput, Utterance,
 };
 use crate::config::SpeakerConfig;
+use crate::secretary::{Effective, ModelSettings, SecretaryConfigs};
 use agent_tools::{Checkpoint, CommitteeBrief, CommitteeStatus, Presence, Tasks};
-use prompt::{AgentTurnWire, IntentWire, PickWire, TriageWire};
+use prompt::{AgentTurnWire, CrossingWire, IntentWire, PickWire, TriageWire};
 use tools::{LogRead, LogSearch};
 
 /// The two tool names the Speaker's model is offered.
@@ -120,45 +131,51 @@ const AGENT_TOOL_BUDGET: usize = 16;
 /// delegation), whatever the recipe says.
 pub type RuntimeRecipe = Arc<dyn Fn() -> RuntimeBuilder + Send + Sync>;
 
+/// [`RuntimeRecipe`] for one model's settings: the provider, endpoint and
+/// key `[model]` names. An error makes the committee's calls fail (the
+/// Speaker falls back to its fixed syntax) until its model changes.
+pub type ModelRecipe = Arc<dyn Fn(&ModelSettings) -> Result<RuntimeBuilder, String> + Send + Sync>;
+
+/// One committee's open workspace, and the model it was opened for.
+struct Opened {
+    connection: String,
+    workspace: Arc<Workspace>,
+}
+
 pub struct BasisBrain {
     hub: Arc<dyn Hub>,
-    root: PathBuf,
-    model: Option<String>,
+    /// The configuration per committee, re-read by the engine.
+    secretary: Arc<SecretaryConfigs>,
     config: Config,
-    recipe: RuntimeRecipe,
-    deadline: Duration,
-    triage_deadline: Duration,
-    token_budget: u64,
-    max_actions: usize,
-    /// How people address the bot in chat (`@<bot_name>`).
-    bot_name: String,
-    /// The language of a workspace's own persona: the deployment's, unless
-    /// `locales` names the committee's. Every run states its input's locale
-    /// over it.
-    locale: Locale,
-    locales: BTreeMap<CommitteeId, Locale>,
-    workspaces: Mutex<HashMap<String, Arc<Workspace>>>,
+    recipe: ModelRecipe,
+    workspaces: Mutex<HashMap<String, Opened>>,
 }
 
 impl BasisBrain {
-    /// The production Brain: provider and credential from basis's usual
+    /// The production Brain on one fixed configuration: provider and
+    /// credential from `config`'s model keys, else basis's usual
     /// environment and global config (`ANTHROPIC_API_KEY`, `BASIS_BASE_URL`,
-    /// …), the model from `config.model` when set, durable history under
-    /// `<data_dir>/speaker/history`.
+    /// …), durable history under `<data_dir>/speaker/history`.
     pub fn new(config: &SpeakerConfig, hub: Arc<dyn Hub>) -> Self {
-        let speaker_dir = config.speaker_dir();
+        Self::on_secretary(Arc::new(SecretaryConfigs::fixed(config.clone())), hub)
+    }
+
+    /// The production Brain on the built-in session's configuration, per
+    /// committee: each committee's model is built from its `[model]`
+    /// ([`basis_runtime`]), with durable history under
+    /// `<data_dir>/speaker/history`.
+    pub fn on_secretary(secretary: Arc<SecretaryConfigs>, hub: Arc<dyn Hub>) -> Self {
+        let speaker_dir = secretary.effective(None).speaker.speaker_dir();
         let history = speaker_dir.join("history");
         // The global config may name a provider or endpoint; a workspace
         // opened without discovery would not read it, so it is read here.
         let discovered = Config::discover_default(&speaker_dir).unwrap_or_default();
         let runtime_config = discovered.clone();
-        let mut brain = Self::with_runtime(
-            config,
+        let mut brain = Self::with_models(
+            secretary,
             hub,
-            Arc::new(move || {
-                Runtime::builder()
-                    .with_config(&runtime_config)
-                    .with_store_dir(history.clone())
+            Arc::new(move |settings: &ModelSettings| {
+                basis_runtime(settings, &runtime_config, history.clone())
             }),
         );
         brain.config = discovered;
@@ -166,50 +183,71 @@ impl BasisBrain {
     }
 
     /// A Brain on runtimes `recipe` makes (tests, or a host with its own
-    /// provider). Opens nothing until the first call.
+    /// provider), on one fixed configuration. Opens nothing until the first
+    /// call.
     pub fn with_runtime(config: &SpeakerConfig, hub: Arc<dyn Hub>, recipe: RuntimeRecipe) -> Self {
+        Self::with_models(
+            Arc::new(SecretaryConfigs::fixed(config.clone())),
+            hub,
+            Arc::new(move |_: &ModelSettings| Ok(recipe())),
+        )
+    }
+
+    /// A Brain on the built-in session's configuration whose runtimes
+    /// `recipe` makes from each committee's model.
+    pub fn with_models(
+        secretary: Arc<SecretaryConfigs>,
+        hub: Arc<dyn Hub>,
+        recipe: ModelRecipe,
+    ) -> Self {
         Self {
             hub,
-            root: config.speaker_dir(),
-            model: config.model.clone(),
+            secretary,
             config: Config::default(),
             recipe,
-            deadline: config.brain_deadline(),
-            triage_deadline: config.triage_deadline(),
-            token_budget: config.brain_token_budget,
-            max_actions: config.agent_max_actions,
-            bot_name: config.bot_name.clone(),
-            locale: config.locale,
-            locales: config.locales.clone(),
             workspaces: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The configuration in force for `committee`, as last refreshed.
+    fn settings(&self, committee: Option<&CommitteeId>) -> Arc<Effective> {
+        self.secretary.effective(committee)
     }
 
     async fn workspace(
         &self,
         committee: Option<&CommitteeId>,
     ) -> Result<Arc<Workspace>, BrainError> {
+        let settings = self.settings(committee);
+        let Some(model) = settings.model.clone() else {
+            return Err(BrainError::Unavailable(
+                "no usable model is configured for this committee".into(),
+            ));
+        };
+        let connection = model.connection_key();
         let key = committee.map_or_else(|| UNBOUND_WORKSPACE.to_owned(), ToString::to_string);
         let mut workspaces = self.workspaces.lock().await;
-        if let Some(workspace) = workspaces.get(&key) {
-            return Ok(Arc::clone(workspace));
+        if let Some(opened) = workspaces.get(&key)
+            && opened.connection == connection
+        {
+            return Ok(Arc::clone(&opened.workspace));
         }
-        let path = self.root.join(&key);
+        // New, or its model changed: (re)open this committee's alone.
+        let path = settings.speaker.speaker_dir().join(&key);
         tokio::fs::create_dir_all(&path).await.map_err(|e| {
             BrainError::Unavailable(format!("cannot create {}: {e}", path.display()))
         })?;
-        let runtime = (self.recipe)()
+        let runtime = (self.recipe)(&model)
+            .map_err(BrainError::Unavailable)?
             .with_file_tools(FileToolProfile::None)
             .with_delegation_depth(0);
         let mut builder = Workspace::builder(&path)
             .without_discovery()
             .with_config(self.config.clone())
             .with_runtime_builder(runtime)
-            .with_system_prompt(SystemPrompt::Replace(prompt::persona(
-                committee,
-                &self.bot_name,
-                self.locale_of(committee),
-            )))
+            .with_system_prompt(SystemPrompt::Replace(
+                self.persona(committee, settings.speaker.locale_of_opt(committee)),
+            ))
             .with_shell(ShellAccess::Denied)
             .with_tool_roster(ToolRoster::only([LOG_READ, LOG_SEARCH]))
             .with_tool(LogRead::new(Arc::clone(&self.hub), committee.cloned()))
@@ -225,7 +263,7 @@ impl BasisBrain {
             .with_tool(Presence::new(Arc::clone(&self.hub), committee.cloned()))
             .with_tool(Tasks::new(Arc::clone(&self.hub), committee.cloned()))
             .with_tool(Checkpoint::new(Arc::clone(&self.hub), committee.cloned()));
-        if let Some(model) = &self.model {
+        if let Some(model) = &model.model {
             builder = builder.with_model(ModelSelector::Id(model.clone()));
         }
         let workspace = Arc::new(
@@ -234,51 +272,89 @@ impl BasisBrain {
                 .await
                 .map_err(|e| BrainError::Unavailable(format!("cannot open the workspace: {e}")))?,
         );
-        workspaces.insert(key, Arc::clone(&workspace));
+        workspaces.insert(
+            key,
+            Opened {
+                connection,
+                workspace: Arc::clone(&workspace),
+            },
+        );
         Ok(workspace)
     }
 
-    fn locale_of(&self, committee: Option<&CommitteeId>) -> Locale {
-        committee
-            .and_then(|c| self.locales.get(c).copied())
-            .unwrap_or(self.locale)
+    /// The persona of every run but `converse`, with this committee's extra
+    /// instructions after its rules.
+    fn persona(&self, committee: Option<&CommitteeId>, locale: Locale) -> String {
+        let settings = self.settings(committee);
+        prompt::with_instructions(
+            prompt::persona(committee, &settings.speaker.bot_name, locale),
+            settings.instructions.as_deref(),
+        )
     }
 
     /// The persona for one run, in the language of its input.
     fn speaking(&self, committee: Option<&CommitteeId>, locale: Locale) -> RunProfile {
-        RunProfile::new().with_system_prompt(SystemPrompt::Replace(prompt::persona(
-            committee,
-            &self.bot_name,
-            locale,
-        )))
+        RunProfile::new().with_system_prompt(SystemPrompt::Replace(self.persona(committee, locale)))
     }
 
-    fn bounded(&self, spec: RunSpec, name: &str) -> RunSpec {
+    fn bounded(&self, spec: RunSpec, name: &str, committee: Option<&CommitteeId>) -> RunSpec {
+        let settings = self.settings(committee);
         spec.with_session_name(name)
-            .with_deadline(self.deadline)
+            .with_deadline(settings.speaker.brain_deadline())
             .with_tool_budget(TOOL_BUDGET)
-            .with_token_budget(self.token_budget)
+            .with_token_budget(settings.speaker.brain_token_budget)
     }
 
     /// A typed turn with no tools but its answer, bounded by the triage
     /// deadline.
     fn quick(&self, name: &str, committee: &CommitteeId, locale: Locale) -> RunSpec {
+        let settings = self.settings(Some(committee));
         RunSpec::default()
             .with_session_name(name)
-            .with_deadline(self.triage_deadline)
+            .with_deadline(settings.speaker.triage_deadline())
             .with_tool_budget(1)
-            .with_token_budget(self.token_budget)
+            .with_token_budget(settings.speaker.brain_token_budget)
             .with_profile(self.speaking(Some(committee), locale))
     }
+}
+
+/// The runtime for `settings` on basis: the provider, endpoint and key it
+/// names (the key read from the variable `api_key_env` names), the rest
+/// from `config` and the environment as basis resolves them, history in
+/// `history`.
+pub fn basis_runtime(
+    settings: &ModelSettings,
+    config: &Config,
+    history: PathBuf,
+) -> Result<RuntimeBuilder, String> {
+    let mut builder = Runtime::builder()
+        .with_config(config)
+        .with_store_dir(history);
+    if let Some(provider) = &settings.provider {
+        builder =
+            builder.with_provider(basis::provider::parse(provider).map_err(|e| e.to_string())?);
+    }
+    if let Some(url) = &settings.base_url {
+        builder = builder.with_base_url(url.clone());
+    }
+    if let Some(var) = &settings.api_key_env {
+        let key = std::env::var(var)
+            .ok()
+            .filter(|k| !k.is_empty())
+            .ok_or_else(|| format!("the environment variable {var} is not set"))?;
+        builder = builder.with_api_key(key);
+    }
+    Ok(builder)
 }
 
 #[async_trait]
 impl Brain for BasisBrain {
     async fn interpret(&self, utterance: Utterance) -> Result<Intent, BrainError> {
-        let workspace = self.workspace(utterance.committee.as_ref()).await?;
+        let committee = utterance.committee.as_ref();
+        let workspace = self.workspace(committee).await?;
         let spec = self
-            .bounded(RunSpec::default(), "speaker-interpret")
-            .with_profile(self.speaking(utterance.committee.as_ref(), utterance.locale));
+            .bounded(RunSpec::default(), "speaker-interpret", committee)
+            .with_profile(self.speaking(committee, utterance.locale));
         let mut run = workspace
             .prepare(spec)
             .map_err(|e| BrainError::Unavailable(e.to_string()))?;
@@ -296,10 +372,15 @@ impl Brain for BasisBrain {
 
     async fn answer_on_behalf(&self, question: Question) -> Result<Answer, BrainError> {
         let takeover = question.takeover.is_some();
-        let workspace = self.workspace(Some(&question.committee)).await?;
+        let committee = Some(&question.committee);
+        let workspace = self.workspace(committee).await?;
         let spec = self
-            .bounded(RunSpec::new(prompt::answer(&question)), "speaker-answer")
-            .with_profile(self.speaking(Some(&question.committee), question.locale));
+            .bounded(
+                RunSpec::new(prompt::answer(&question)),
+                "speaker-answer",
+                committee,
+            )
+            .with_profile(self.speaking(committee, question.locale));
         let mut run = workspace
             .prepare(spec)
             .map_err(|e| BrainError::Unavailable(e.to_string()))?;
@@ -316,13 +397,15 @@ impl Brain for BasisBrain {
     }
 
     async fn brief_top(&self, brief: &Brief, locale: Locale) -> Result<String, BrainError> {
-        let workspace = self.workspace(Some(&brief.committee)).await?;
+        let committee = Some(&brief.committee);
+        let workspace = self.workspace(committee).await?;
         let spec = self
             .bounded(
                 RunSpec::new(prompt::brief_top(brief, locale)),
                 "speaker-brief-top",
+                committee,
             )
-            .with_profile(self.speaking(Some(&brief.committee), locale));
+            .with_profile(self.speaking(committee, locale));
         let mut run = workspace
             .prepare(spec)
             .map_err(|e| BrainError::Unavailable(e.to_string()))?;
@@ -353,17 +436,22 @@ impl Brain for BasisBrain {
 
     async fn converse(&self, conversation: Conversation) -> Result<AgentTurn, BrainError> {
         let committee = conversation.utterance.committee.clone();
+        let settings = self.settings(committee.as_ref());
+        let max_actions = settings.speaker.agent_max_actions;
         let workspace = self.workspace(committee.as_ref()).await?;
         let profile = RunProfile::new()
             .with_tool_roster(ToolRoster::only(AGENT_TOOLS))
-            .with_system_prompt(SystemPrompt::Replace(prompt::agent_persona(
-                committee.as_ref(),
-                &self.bot_name,
-                conversation.utterance.locale,
-                self.max_actions,
+            .with_system_prompt(SystemPrompt::Replace(prompt::with_instructions(
+                prompt::agent_persona(
+                    committee.as_ref(),
+                    &settings.speaker.bot_name,
+                    conversation.utterance.locale,
+                    max_actions,
+                ),
+                settings.instructions.as_deref(),
             )));
         let spec = self
-            .bounded(RunSpec::default(), "speaker-converse")
+            .bounded(RunSpec::default(), "speaker-converse", committee.as_ref())
             .with_tool_budget(AGENT_TOOL_BUDGET)
             .with_profile(profile);
         let mut run = workspace
@@ -371,8 +459,8 @@ impl Brain for BasisBrain {
             .map_err(|e| BrainError::Unavailable(e.to_string()))?;
         let output = run
             .output::<AgentTurnWire, _, _>(
-                prompt::converse(&conversation, self.max_actions),
-                prompt::agent_turn_spec(self.max_actions),
+                prompt::converse(&conversation, max_actions),
+                prompt::agent_turn_spec(max_actions),
                 NullSink,
                 AllowAll,
             )
@@ -400,6 +488,24 @@ impl Brain for BasisBrain {
             .await
             .map_err(|failure| BrainError::Unavailable(failure.error.to_string()))?;
         Ok(output.value.into_pick(&input.candidates))
+    }
+
+    async fn decide_crossing(&self, input: CrossingInput) -> Result<Crossing, BrainError> {
+        let workspace = self.workspace(Some(&input.committee)).await?;
+        let spec = self.quick("speaker-crossing", &input.committee, input.locale);
+        let mut run = workspace
+            .prepare(spec)
+            .map_err(|e| BrainError::Unavailable(e.to_string()))?;
+        let output = run
+            .output::<CrossingWire, _, _>(
+                prompt::crossing(&input),
+                prompt::crossing_spec(),
+                NullSink,
+                AllowAll,
+            )
+            .await
+            .map_err(|failure| BrainError::Unavailable(failure.error.to_string()))?;
+        output.value.into_crossing()
     }
 }
 

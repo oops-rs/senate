@@ -649,7 +649,7 @@ impl Inner {
             // A person speaking after an answer corrects it: the agents are
             // told whose answer this overrides.
             if let Some(answer) = thread.latest_answer
-                && chat.from.is_senior()
+                && chat.from.as_senator().is_some()
             {
                 chat = chat.with_meta(meta::OVERRIDES, json!(answer.0));
             }
@@ -690,6 +690,7 @@ impl Inner {
             };
             let root = hit.thread.unwrap_or(hit.seq);
             let thread = hub.thread(committee, root).await?;
+            let people = hub.roster().await?.people();
             let latest_answer = thread
                 .iter()
                 .filter(|e| e.kind == Kind::Answer && !is_provisional(e))
@@ -697,7 +698,7 @@ impl Inner {
                 .max();
             return Ok(Some(MirroredThread {
                 root,
-                agents: thread_agents(&thread, root),
+                agents: thread_agents(&thread, root, &people),
                 latest_answer,
             }));
         }
@@ -714,7 +715,7 @@ struct MirroredThread {
     latest_answer: Option<Seq>,
 }
 
-fn thread_agents(thread: &[Event], root: Seq) -> Vec<Address> {
+fn thread_agents(thread: &[Event], root: Seq, people: &senate_core::People) -> Vec<Address> {
     let participants = match thread.split_first() {
         Some((first, replies)) if first.seq == root => thread_participants(first, replies),
         // The root is not stored (it always should be): its replies'
@@ -731,7 +732,7 @@ fn thread_agents(thread: &[Event], root: Seq) -> Vec<Address> {
     };
     participants
         .into_iter()
-        .filter(Address::is_junior)
+        .filter(|a| people.is_agent_address(a))
         .collect()
 }
 
@@ -996,17 +997,17 @@ impl ChatSurface for RecordingSurface {
 
 #[cfg(test)]
 mod tests {
-    use senate_core::{Account, Name, Senior};
+    use senate_core::{Account, Name, Principal};
 
     use super::*;
 
     fn roster() -> Roster {
-        let mut alice = Senior::new(Name::new("alice").unwrap());
+        let mut alice = Principal::new(Name::new("alice").unwrap());
         alice.accounts.push(Account {
             platform: "chat".into(),
             id: "u_alice".into(),
         });
-        Roster::top(vec![alice], Vec::new()).unwrap()
+        Roster::new(vec![alice], Vec::new()).unwrap()
     }
 
     #[test]

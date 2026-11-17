@@ -8,15 +8,16 @@ use std::time::Duration;
 use chrono::Utc;
 use senate_core::{
     Address, CheckpointFiles, CheckpointPayload, CheckpointTrigger, Event, Hub, Kind, Locale,
-    NewEvent, PresencePayload, PresenceState, SenatorPath, Seq, StatusPayload, StatusState, meta,
-    presence_event,
+    NewEvent, PresencePayload, PresenceState, Principal, Roster, SeatedAgent, SenatorName, Seq,
+    StatusPayload, StatusState, meta, presence_event,
 };
 use serde_json::json;
 
 use super::hub::MemoryHub;
 use super::rig::{
     GROUP, Rig, agent, agent_named, agent_path, agents_bind_event, answer,
-    assert_senate_vocabulary, bind_event, config, config_in, mention, path, question, refund,
+    assert_senate_vocabulary, bind_event, config, config_in, mention, name, path, question, refund,
+    roster, runner_of,
 };
 use super::surface::{Caps, FakeSurface};
 use crate::{ScriptedBrain, SpeakerConfig, TAKEOVER_META};
@@ -37,9 +38,9 @@ pub(crate) async fn agents_hub() -> Arc<MemoryHub> {
 }
 
 /// The server's presence transition for `who` (a senator path such as
-/// `alice/claude`), `offset_ms` after a fixed base so each one has its own
+/// `claude`), `offset_ms` after a fixed base so each one has its own
 /// derived id.
-fn presence_of(who: &SenatorPath, state: PresenceState, offset_ms: i64) -> NewEvent {
+fn presence_of(who: &SenatorName, state: PresenceState, offset_ms: i64) -> NewEvent {
     let since = chrono::DateTime::<Utc>::from_timestamp_millis(1_800_000_000_000 + offset_ms)
         .expect("a time");
     presence_event(
@@ -78,13 +79,13 @@ fn checkpoint_by(
 
 /// A checkpoint of the agent `who` on its person's branch.
 fn checkpoint_of(
-    who: &SenatorPath,
+    who: &SenatorName,
     progress: &str,
     pushed: bool,
     trigger: CheckpointTrigger,
 ) -> NewEvent {
     let payload = CheckpointPayload {
-        branch: format!("feature/refund-v2/{}", who.owner()),
+        branch: format!("feature/refund-v2/{}", runner_of(who)),
         commit: COMMIT.into(),
         pushed,
         remote_url: None,
@@ -116,7 +117,7 @@ fn presence_states(events: &[Event], handle: &str) -> Vec<PresenceState> {
     presence_states_of(events, &agent_path(handle))
 }
 
-fn presence_states_of(events: &[Event], who: &SenatorPath) -> Vec<PresenceState> {
+fn presence_states_of(events: &[Event], who: &SenatorName) -> Vec<PresenceState> {
     events
         .iter()
         .filter_map(PresencePayload::of)
@@ -161,11 +162,11 @@ async fn presence_transitions_are_lines_in_the_agent_group() {
     assert_eq!(
         rig.surface.texts(),
         vec![
-            "[senator::alice/claude] 失联",
-            "[senator::alice/claude] 缺席（租约过期）",
-            "[senator::alice/claude] 由 Speaker 接管",
-            "[senator::alice/claude] 在线",
-            "[senator::bob/claude] 的工作已交给 [senator::pm/claude]",
+            "[senator::claude] 失联",
+            "[senator::claude] 缺席（租约过期）",
+            "[senator::claude] 由 Speaker 接管",
+            "[senator::claude] 在线",
+            "[senator::copilot] 的工作已交给 [senator::aider]",
         ]
     );
     for text in rig.surface.texts() {
@@ -214,9 +215,9 @@ async fn at_answers_only_just_absent_taken_over_and_back_online_are_posted() {
     assert_eq!(
         rig.surface.texts()[before..].to_vec(),
         vec![
-            "[senator::alice/claude] 缺席（租约过期）",
-            "[senator::alice/claude] 由 Speaker 接管",
-            "[senator::alice/claude] 在线",
+            "[senator::claude] 缺席（租约过期）",
+            "[senator::claude] 由 Speaker 接管",
+            "[senator::claude] 在线",
         ]
     );
 }
@@ -266,11 +267,11 @@ async fn only_a_handoff_checkpoint_is_a_line_in_the_agent_group() {
         rig.surface.texts(),
         vec![
             format!(
-                "[senator::alice/claude] 检查点 · feature/refund-v2/alice@a41f9c2（已推送）· seq {}",
+                "[senator::claude] 检查点 · feature/refund-v2/alice@a41f9c2（已推送）· seq {}",
                 pushed.seq
             ),
             format!(
-                "[senator::bob/claude] 检查点 · feature/refund-v2/bob@a41f9c2（未推送）· seq {}",
+                "[senator::copilot] 检查点 · feature/refund-v2/bob@a41f9c2（未推送）· seq {}",
                 local.seq
             ),
         ]
@@ -298,13 +299,13 @@ async fn status_shows_presence_lag_and_checkpoint_age() {
     assert!(said.starts_with("本群绑定在委员会 refund-v2。"), "{said}");
     assert!(
         said.contains(&format!(
-            "\n- [senator::alice/claude] 缺席（租约过期） · 落后 3 条事件 · 检查点 0 分钟前（seq {}）",
+            "\n- [senator::claude] 缺席（租约过期） · 落后 3 条事件 · 检查点 0 分钟前（seq {}）",
             cp.seq
         )),
         "{said}"
     );
     assert!(
-        said.contains("\n- [senator::bob/claude] 失联 · 落后 3 条事件 · 没有检查点"),
+        said.contains("\n- [senator::copilot] 失联 · 落后 3 条事件 · 没有检查点"),
         "{said}"
     );
     assert_senate_vocabulary(&said);
@@ -315,7 +316,7 @@ async fn status_lists_each_agent_by_its_own_connection() {
     // Alice has two agents: codex is connected, claude is not. Neither
     // stands for the other. Agents are listed in the order they were seated.
     let hub = alice_away().await;
-    let codex = path("alice/codex");
+    let codex = path("codex");
     hub.connect(&refund(), &codex);
     hub.connect(&refund(), &agent_path("bob"));
     hub.append(presence_of(&codex, PresenceState::Online, 2))
@@ -326,18 +327,18 @@ async fn status_lists_each_agent_by_its_own_connection() {
     rig.settle().await;
     let said = rig.surface.texts().last().cloned().expect("a reply");
     assert!(
-        said.contains("\n在线 agent：[senator::bob/claude]、[senator::alice/codex]\n"),
+        said.contains("\n在线 agent：[senator::copilot]、[senator::codex]\n"),
         "{said}"
     );
     assert!(
-        said.contains("\n离线 agent：[senator::pm/claude]、[senator::alice/claude]\n"),
+        said.contains("\n离线 agent：[senator::aider]、[senator::claude]\n"),
         "{said}"
     );
     assert!(
-        said.contains("\n- [senator::alice/claude] 缺席（租约过期）"),
+        said.contains("\n- [senator::claude] 缺席（租约过期）"),
         "{said}"
     );
-    assert!(said.contains("\n- [senator::alice/codex] 在线"), "{said}");
+    assert!(said.contains("\n- [senator::codex] 在线"), "{said}");
     rig.stop().await;
 
     // The same in English.
@@ -354,11 +355,11 @@ async fn status_lists_each_agent_by_its_own_connection() {
     rig.settle().await;
     let said = rig.surface.texts().last().cloned().expect("a reply");
     assert!(
-        said.starts_with("This group is bound to committee refund-v2.\nAgents online: [senator::alice/codex]\nAgents offline: [senator::pm/claude], [senator::alice/claude], [senator::bob/claude]"),
+        said.starts_with("This group is bound to committee refund-v2.\nAgents online: [senator::codex]\nAgents offline: [senator::aider], [senator::claude], [senator::copilot]"),
         "{said}"
     );
     assert!(
-        said.contains("\n- [senator::alice/claude] absent (lease expired) · 3 events behind · checkpoint 0 minutes ago"),
+        said.contains("\n- [senator::claude] absent (lease expired) · 3 events behind · checkpoint 0 minutes ago"),
         "{said}"
     );
     assert_senate_vocabulary(&said);
@@ -384,10 +385,10 @@ async fn the_today_card_has_a_presence_line_per_agent() {
     let text = today.now.markdown;
     assert!(text.contains("**各 agent 在场**"), "{text}");
     assert!(
-        text.contains("- [senator::alice/claude] 缺席（租约过期） · 落后 3 条事件"),
+        text.contains("- [senator::claude] 缺席（租约过期） · 落后 3 条事件"),
         "{text}"
     );
-    assert!(text.contains("- [senator::bob/claude] 失联"), "{text}");
+    assert!(text.contains("- [senator::copilot] 失联"), "{text}");
 }
 
 // ----- takeover ----------------------------------------------------------------
@@ -434,12 +435,12 @@ async fn an_absent_agents_question_is_answered_from_its_checkpoint() {
 
     let texts = rig.surface.texts();
     assert!(
-        texts.contains(&"[senator::alice/claude] 由 Speaker 接管".to_owned()),
+        texts.contains(&"[senator::claude] 由 Speaker 接管".to_owned()),
         "{texts:?}"
     );
     assert_eq!(
         texts.last().map(String::as_str),
-        Some("[speaker::alice/claude] 接管 据检查点 seq 5 的 PROGRESS.md，用 Idempotency-Key。")
+        Some("[speaker::claude] 接管 据检查点 seq 5 的 PROGRESS.md，用 Idempotency-Key。")
     );
     for text in &texts {
         assert_senate_vocabulary(text);
@@ -469,7 +470,7 @@ async fn an_absent_agents_question_is_answered_from_its_checkpoint() {
 /// one.
 async fn alice_with_two_agents(claude_checkpoint: bool) -> Arc<MemoryHub> {
     let hub = agents_hub().await;
-    let codex = path("alice/codex");
+    let codex = path("codex");
     hub.connect(&refund(), &codex);
     let mut events = vec![
         presence("alice", PresenceState::Disconnected, 0),
@@ -531,13 +532,13 @@ async fn an_absent_agent_is_taken_over_from_its_own_checkpoint_never_its_sibling
         "never rerouted to codex"
     );
     assert_eq!(
-        presence_states_of(&events, &path("alice/codex")),
+        presence_states_of(&events, &path("codex")),
         vec![PresenceState::Online]
     );
     assert!(presence_states(&events, "alice").contains(&PresenceState::TakenOver));
     assert_eq!(
         rig.surface.texts().last().map(String::as_str),
-        Some("[speaker::alice/claude] 接管 用 Idempotency-Key。")
+        Some("[speaker::claude] 接管 用 Idempotency-Key。")
     );
 }
 
@@ -553,7 +554,7 @@ async fn an_absent_agent_without_its_own_checkpoint_is_escalated_though_a_siblin
     assert!(speaker_answers(&events).is_empty());
     assert_eq!(
         escalations(&events)[0].1.reason.as_deref(),
-        Some("[senator::alice/claude] 不在，检查点没有，这条需要人：q1 多少天？")
+        Some("[senator::claude] 不在，检查点没有，这条需要人：q1 多少天？")
     );
     assert!(
         !events
@@ -593,7 +594,7 @@ async fn a_disconnected_agent_keeps_the_answer_window() {
     assert!(!answered.meta.contains_key(TAKEOVER_META));
     assert_eq!(
         rig.surface.texts().last().map(String::as_str),
-        Some("[speaker::alice/claude] 记录里没有。")
+        Some("[speaker::claude] 记录里没有。")
     );
 }
 
@@ -648,8 +649,13 @@ fn escalations(events: &[Event]) -> Vec<(&Event, StatusPayload)> {
 #[tokio::test]
 async fn a_stale_checkpoint_is_escalated_to_the_other_developers() {
     let hub = alice_away().await;
-    // Carol's agent has been active on the committee too (she is not on the
-    // roster); pm's has not.
+    // Carol's agent has been active on the committee too (she is on the
+    // roster with no account on the platform); pm's has not.
+    let mut principals = roster().principals().to_vec();
+    principals.push(Principal::new(name("carol")));
+    let mut seated = roster().seated().to_vec();
+    seated.push(SeatedAgent::new(agent_path("carol"), name("carol")));
+    hub.set_roster(Roster::new(principals, seated).expect("roster"));
     hub.append(NewEvent::new(
         refund(),
         Kind::Note,
@@ -686,7 +692,7 @@ async fn a_stale_checkpoint_is_escalated_to_the_other_developers() {
     assert_eq!(status.state, StatusState::Suspended);
     assert_eq!(status_event.thread, Some(asked.seq));
     assert_eq!(status_event.on_behalf_of, Some(agent("alice")));
-    let reason = "[senator::alice/claude] 不在，检查点太旧，这条需要人：幂等键用哪个 header？";
+    let reason = "[senator::claude] 不在，检查点太旧，这条需要人：幂等键用哪个 header？";
     assert_eq!(status.reason.as_deref(), Some(reason));
 
     // A native mention of bob, and carol's written out, under the question.
@@ -707,7 +713,7 @@ async fn a_stale_checkpoint_is_escalated_to_the_other_developers() {
             .map(|p| p.mention.clone().unwrap_or_default())
             .collect::<Vec<_>>(),
         vec!["u_bob".to_owned()],
-        "carol is not on the roster: her mention is written out"
+        "carol has no account on the platform: her mention is written out"
     );
     assert!(mentions.iter().all(|p| p.markdown == reason));
     assert!(mentions.iter().all(|p| p.target
@@ -736,11 +742,11 @@ async fn no_checkpoint_or_an_uncovered_question_is_escalated() {
     let events = rig.hub.events(&refund());
     assert_eq!(
         escalations(&events)[0].1.reason.as_deref(),
-        Some("[senator::alice/claude] 不在，检查点没有，这条需要人：q1 多少天？")
+        Some("[senator::claude] 不在，检查点没有，这条需要人：q1 多少天？")
     );
     assert!(
         rig.surface.texts().contains(
-            &"@bob [senator::alice/claude] 不在，检查点没有，这条需要人：q1 多少天？".to_owned()
+            &"@bob [senator::claude] 不在，检查点没有，这条需要人：q1 多少天？".to_owned()
         ),
         "{:?}",
         rig.surface.texts()
@@ -759,7 +765,7 @@ async fn no_checkpoint_or_an_uncovered_question_is_escalated() {
             .last()
             .and_then(|(_, s)| s.reason.clone())
             .as_deref(),
-        Some("[senator::alice/claude] 不在，检查点没有覆盖这个问题，这条需要人：q2 回调签名？")
+        Some("[senator::claude] 不在，检查点没有覆盖这个问题，这条需要人：q2 回调签名？")
     );
     assert!(!presence_states(&events, "alice").contains(&PresenceState::TakenOver));
 }
@@ -820,8 +826,8 @@ async fn coming_back_hands_the_mailbox_back_once() {
     assert_eq!(
         tail,
         vec![
-            "[senator::alice/claude] 在线",
-            "[senator::alice/claude] 回来了，Speaker 交还 2 条代答"
+            "[senator::claude] 在线",
+            "[senator::claude] 回来了，Speaker 交还 2 条代答"
         ]
     );
     // The hand-back note itself is never mirrored.
@@ -949,7 +955,7 @@ async fn a_companion_answer_is_labelled() {
     rig.settle().await;
     assert_eq!(
         rig.surface.texts().last().map(String::as_str),
-        Some("[senator::bob/claude] 伴随 Idempotency-Key")
+        Some("[senator::copilot] 伴随 Idempotency-Key")
     );
     // A forged takeover flag on an agent's own answer is just its answer.
     rig.append(
@@ -960,7 +966,7 @@ async fn a_companion_answer_is_labelled() {
     rig.settle().await;
     assert_eq!(
         rig.surface.texts().last().map(String::as_str),
-        Some("[senator::bob/claude] 再补一句")
+        Some("[senator::copilot] 再补一句")
     );
 }
 
@@ -987,12 +993,12 @@ async fn in_english_the_takeover_escalation_and_hand_back_read_in_english() {
     rig.settle().await;
     let texts = rig.surface.texts();
     assert!(
-        texts.contains(&"[senator::alice/claude] taken over by the Speaker".to_owned()),
+        texts.contains(&"[senator::claude] taken over by the Speaker".to_owned()),
         "{texts:?}"
     );
     assert_eq!(
         texts.last().map(String::as_str),
-        Some("[speaker::alice/claude] takeover Idempotency-Key, per PROGRESS.md.")
+        Some("[speaker::claude] takeover Idempotency-Key, per PROGRESS.md.")
     );
 
     // Not covered: escalated, in English.
@@ -1004,7 +1010,7 @@ async fn in_english_the_takeover_escalation_and_hand_back_read_in_english() {
     ))
     .await;
     rig.settle().await;
-    let reason = "[senator::alice/claude] is away and its checkpoint does not cover this, so this needs a person: Is the callback signed?";
+    let reason = "[senator::claude] is away and its checkpoint does not cover this, so this needs a person: Is the callback signed?";
     assert_eq!(
         escalations(&rig.hub.events(&refund()))
             .last()
@@ -1026,8 +1032,8 @@ async fn in_english_the_takeover_escalation_and_hand_back_read_in_english() {
     assert_eq!(
         texts[texts.len() - 2..].to_vec(),
         vec![
-            "[senator::alice/claude] online",
-            "[senator::alice/claude] is back; the Speaker handed back 1 answer",
+            "[senator::claude] online",
+            "[senator::claude] is back; the Speaker handed back 1 answer",
         ]
     );
     let note = rig

@@ -31,7 +31,7 @@ async fn chat_to_terminal_and_back_in_english() {
     let inbox = alice.inbox("s-alice");
     let start = alice.session_start("s-alice", &inbox).await.unwrap();
     assert!(!has_cjk(context(&start)), "{}", context(&start));
-    world.wait_connected("alice/claude", true).await;
+    world.wait_connected("claude", true).await;
 
     let body = "The refund window is 30 days, not 14.";
     world.brain.interprets(Ok(Intent::Relay {
@@ -63,12 +63,12 @@ async fn chat_to_terminal_and_back_in_english() {
         .find(|e| e.seq == thread)
         .unwrap();
     assert_eq!(relay.kind, Kind::Note);
-    assert_eq!(relay.to, [claude("alice")]);
+    assert_eq!(relay.to, [senator("claude")]);
     assert_eq!(relay.on_behalf_of, Some(person("pm")));
 
     let ack = world
         .wait_post("the relay ack", |p| {
-            p.replies_to("m_pm_1") && p.markdown.contains("[senator::alice/claude]")
+            p.replies_to("m_pm_1") && p.markdown.contains("[senator::claude]")
         })
         .await;
     assert!(!has_cjk(&ack.markdown), "{}", ack.markdown);
@@ -82,7 +82,7 @@ async fn chat_to_terminal_and_back_in_english() {
         })
         .await;
     assert!(
-        reply.markdown.contains("[senator::alice/claude]"),
+        reply.markdown.contains("[senator::claude]"),
         "{}",
         reply.markdown
     );

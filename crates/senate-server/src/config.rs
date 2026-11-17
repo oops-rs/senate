@@ -6,7 +6,7 @@
 //! Two separate things are configured about people. The **roster**
 //! (`[roster]`, a [`RosterConfig`]) says who exists: handles, names,
 //! accounts on outside platforms, optionally agents seated from the start
-//! and the presider of a nested Senate. The **tokens** (`[[tokens]]`) say
+//! and the agent named Speaker. The **tokens** (`[[tokens]]`) say
 //! how a bearer token maps to one of those people. The first is the default
 //! roster source, the second the default [`Authenticate`](crate::Authenticate);
 //! a private layer replaces either without the other.
@@ -20,7 +20,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use senate_core::api::SSE_PING_SECS;
-use senate_core::{Locale, Name, Roster, RosterConfig};
+use senate_core::{
+    DEFAULT_SENATE_NAME, Locale, Name, Roster, RosterConfig, SenatePath, SenatorName,
+};
 use serde::Deserialize;
 
 #[derive(Debug, thiserror::Error)]
@@ -38,6 +40,14 @@ pub enum ConfigError {
 
 #[derive(Clone, Deserialize)]
 pub struct ServerConfig {
+    /// This Senate's name: a slug that is not an address keyword. Absent:
+    /// `senate` ([`DEFAULT_SENATE_NAME`]), so a configuration written
+    /// before Senates had names still starts.
+    #[serde(default)]
+    pub name: Option<Name>,
+    /// The path of the Senate above, when this Senate has one and knows it.
+    #[serde(default)]
+    pub parent: Option<SenatePath>,
     /// Address the HTTP API binds, e.g. `"0.0.0.0:7878"` or `"127.0.0.1:0"`.
     pub listen: String,
     /// `"memory:"`, a `postgres://` URL, or `"sqlite:<path>"`.
@@ -69,8 +79,8 @@ pub struct ServerConfig {
     /// (900); must exceed `presence_disconnected_secs`.
     #[serde(default = "default_lease_secs")]
     pub lease_secs: u64,
-    /// The people this Senate knows, optionally the agents already seated,
-    /// and the presider of a nested Senate (absent for the top Senate).
+    /// The people this Senate knows, optionally the agents already seated
+    /// (each with its person), and the agent named Speaker.
     #[serde(default)]
     pub roster: RosterConfig,
     /// Bearer tokens, each naming a person in the roster.
@@ -139,6 +149,8 @@ impl ServerConfig {
     /// the given roster and tokens.
     pub fn new(roster: RosterConfig, tokens: Vec<TokenConfig>) -> Self {
         Self {
+            name: None,
+            parent: None,
             listen: "127.0.0.1:0".into(),
             database_url: senate_log::MEMORY_URL.into(),
             locale: Locale::default(),
@@ -180,14 +192,23 @@ impl ServerConfig {
         Ok(())
     }
 
-    /// Every check: the timing keys, the roster's rules, and that each token
-    /// names a person in the roster.
+    /// This Senate's name: `name`, or [`DEFAULT_SENATE_NAME`].
+    pub fn senate_name(&self) -> Name {
+        self.name.clone().unwrap_or_else(|| {
+            Name::new(DEFAULT_SENATE_NAME).unwrap_or_else(|_| unreachable!("a valid name"))
+        })
+    }
+
+    /// Every check: the timing keys, the Senate's name, the roster's rules,
+    /// and that each token names a person in the roster.
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.validate_intervals()?;
+        senate_core::check_not_keyword(self.senate_name().as_str(), "a Senate")
+            .map_err(|e| ConfigError::Invalid(e.to_string()))?;
         let roster = self.roster()?;
         for token in &self.tokens {
             token.digest()?;
-            if roster.senior(&token.person).is_none() {
+            if roster.principal(&token.person).is_none() {
                 return Err(ConfigError::Invalid(format!(
                     "a token names {}, who is not in the roster",
                     token.person
@@ -198,10 +219,39 @@ impl ServerConfig {
     }
 
     /// The configured roster, with the roster's own rules applied (people
-    /// listed once, agents under a listed person at this Senate's level).
+    /// listed once, each agent run by one listed person, one name for one
+    /// senator) and the Speaker read against `parent` (see
+    /// [`ServerConfig::roster_with`]). A Speaker named like the built-in
+    /// session's default name (`secretary`) is taken to be the built-in
+    /// session: whether it runs is the daemon's to say, at start.
     pub fn roster(&self) -> Result<Roster, ConfigError> {
-        Roster::try_from(self.roster.clone())
-            .map_err(|e| ConfigError::Invalid(format!("roster: {e}")))
+        let default = crate::office::default_built_in_name();
+        let assumed = self
+            .roster
+            .speaker
+            .as_ref()
+            .filter(|s| s.id.senate().is_none() && s.id.name() == &default)
+            .map(|_| default);
+        self.roster_with(assumed)
+    }
+
+    /// The configured roster as it runs beside the built-in session
+    /// `built_in` (`None`: it does not run): the Speaker read against
+    /// `parent` (a Senate path must be the parent's; a bare name is the
+    /// parent's senator when there is a parent), and the built-in session
+    /// seated, the Speaker when nothing names one.
+    pub fn roster_with(&self, built_in: Option<SenatorName>) -> Result<Roster, ConfigError> {
+        crate::office::settle(
+            self.roster.clone(),
+            self.parent.as_ref(),
+            built_in,
+            self.locale,
+        )
+        .map(|(roster, _)| roster)
+        .map_err(|e| match e {
+            ConfigError::Invalid(message) => ConfigError::Invalid(format!("roster: {message}")),
+            other => other,
+        })
     }
 
     pub fn sse_ping_interval(&self) -> Duration {
@@ -327,13 +377,13 @@ mod tests {
         let alice = roster.resolve("Alice").unwrap();
         assert_eq!(alice.handle.as_str(), "alice");
         assert_eq!(alice.account_ids("chat").collect::<Vec<_>>(), ["u_alice"]);
-        assert!(roster.senior(&name("bob")).is_some());
-        assert_eq!(
-            roster.agents().len(),
-            1,
-            "alice/claude is seated from the start"
-        );
-        assert_eq!(roster.presider(), None);
+        assert!(roster.principal(&name("bob")).is_some());
+        assert_eq!(roster.agents().len(), 1, "claude is seated from the start");
+        let claude: senate_core::SenatorName = "claude".parse().unwrap();
+        assert_eq!(roster.owner_of(&claude), Some(&name("alice")));
+        assert_eq!(roster.named_speaker(), None);
+        assert_eq!(config.senate_name().as_str(), DEFAULT_SENATE_NAME);
+        assert_eq!(config.parent, None);
         assert_eq!(config.sse_ping_secs, SSE_PING_SECS);
         assert_eq!(config.presence_grace(), Duration::from_secs(150));
         assert_eq!(config.locale, Locale::default());
@@ -341,33 +391,74 @@ mod tests {
     }
 
     #[test]
-    fn the_locale_and_the_presider_come_from_config() {
+    fn the_locale_the_senate_name_and_the_speaker_come_from_config() {
         let config = ServerConfig::from_toml_str(
             r#"
+            name = "north-desk"
+            parent = "acme"
             listen = "127.0.0.1:0"
             database_url = "memory:"
             locale = "en"
 
             [roster]
-            presider = "alice/claude"
-            agents = ["alice/claude/reviewer"]
+            speaker = "claude"
+            agents = [{ name = "claude", owner = "alice" }]
 
-            [[roster.seniors]]
+            [[roster.principals]]
             handle = "alice"
+
+            [[roster.principals]]
+            handle = "bob"
             "#,
         )
         .unwrap();
         assert_eq!(config.locale, Locale::En);
-        let roster = config.roster().unwrap();
+        assert_eq!(config.senate_name(), name("north-desk"));
         assert_eq!(
-            roster.presider().map(ToString::to_string).as_deref(),
-            Some("alice/claude")
+            config.parent.as_ref().map(ToString::to_string).as_deref(),
+            Some("acme")
+        );
+        // A bare name in a Senate with a parent is the parent's senator.
+        let roster = config.roster().unwrap();
+        assert_eq!(roster.named_speaker(), None);
+        assert_eq!(
+            roster.speaker().map(|s| s.id.to_string()).as_deref(),
+            Some("/acme::senator::claude")
+        );
+        assert_eq!(
+            roster.owner_of(&"claude".parse().unwrap()),
+            Some(&name("alice"))
         );
         let bad = "listen = 'x'\ndatabase_url = 'memory:'\nlocale = 'fr'";
         assert!(matches!(
             ServerConfig::from_toml_str(bad),
             Err(ConfigError::Parse(_))
         ));
+    }
+
+    #[test]
+    fn a_senate_name_that_is_a_keyword_or_not_a_slug_is_refused() {
+        let text =
+            |senate: &str| format!("name = '{senate}'\nlisten = 'x'\ndatabase_url = 'memory:'");
+        for keyword in ["senator", "speaker", "committee", "guest"] {
+            assert!(
+                matches!(
+                    ServerConfig::from_toml_str(&text(keyword)),
+                    Err(ConfigError::Invalid(_))
+                ),
+                "accepted: {keyword}"
+            );
+        }
+        for bad in ["North Desk", "acme/north-desk"] {
+            assert!(
+                matches!(
+                    ServerConfig::from_toml_str(&text(bad)),
+                    Err(ConfigError::Parse(_))
+                ),
+                "accepted: {bad}"
+            );
+        }
+        assert!(ServerConfig::from_toml_str(&text("north-desk")).is_ok());
     }
 
     #[test]
@@ -425,7 +516,7 @@ mod tests {
 
     #[test]
     fn tokens_are_validated() {
-        let roster = "[roster]\n[[roster.seniors]]\nhandle = \"alice\"\n";
+        let roster = "[roster]\n[[roster.principals]]\nhandle = \"alice\"\n";
         let bad = [
             // neither
             "[[tokens]]\nperson = \"alice\"",
@@ -460,12 +551,17 @@ mod tests {
 
     #[test]
     fn a_roster_that_breaks_its_rules_is_refused() {
-        // An agent two levels down does not sit in the top Senate; a person
-        // listed twice; an agent whose person is not listed.
+        // A person listed twice; an agent whose person is not listed; one
+        // name run by two people; an agent named like a person; a named
+        // Speaker nobody runs, with several people listed.
+        let alice_and_bob =
+            "[[roster.principals]]\nhandle = \"alice\"\n[[roster.principals]]\nhandle = \"bob\"";
         for roster in [
-            "agents = [\"alice/claude/reviewer\"]\n[[roster.seniors]]\nhandle = \"alice\"",
-            "[[roster.seniors]]\nhandle = \"alice\"\n[[roster.seniors]]\nhandle = \"alice\"",
-            "agents = [\"bob/claude\"]\n[[roster.seniors]]\nhandle = \"alice\"",
+            "[[roster.principals]]\nhandle = \"alice\"\n[[roster.principals]]\nhandle = \"alice\"".to_string(),
+            "agents = [{ name = \"copilot\", owner = \"bob\" }]\n[[roster.principals]]\nhandle = \"alice\"".to_string(),
+            format!("agents = [{{ name = \"claude\", owner = \"alice\" }}, {{ name = \"claude\", owner = \"bob\" }}]\n{alice_and_bob}"),
+            format!("agents = [{{ name = \"bob\", owner = \"alice\" }}]\n{alice_and_bob}"),
+            format!("speaker = \"claude\"\n{alice_and_bob}"),
         ] {
             let text = format!("listen = 'x'\ndatabase_url = 'memory:'\n[roster]\n{roster}");
             assert!(
@@ -476,6 +572,12 @@ mod tests {
                 "accepted: {roster}"
             );
         }
+        // A path inside an agent's name is not a name at all.
+        let nested = "listen = 'x'\ndatabase_url = 'memory:'\n[roster]\nagents = [{ name = \"alice/claude\", owner = \"alice\" }]\n[[roster.principals]]\nhandle = \"alice\"";
+        assert!(matches!(
+            ServerConfig::from_toml_str(nested),
+            Err(ConfigError::Parse(_))
+        ));
     }
 
     #[test]

@@ -4,7 +4,7 @@
 //! committee: a machine seats several agents of one person, each with its
 //! own stream, cursor, queue and dropped count, and two agents of one
 //! person on one committee never share any of them. The agent is stored as
-//! its full [`SenatorPath`] (`alice/claude`).
+//! its [`SenatorName`] (`claude`).
 //!
 //! - `cursors` — per (agent, committee), the highest `seq` the bridge has
 //!   durably taken in (`delivered`) and the highest it has reported to the
@@ -53,7 +53,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, Transaction, params};
-use senate_core::{CommitteeId, Event, SenatorPath, Seq, TaskOwner, TriageVerdict};
+use senate_core::{CommitteeId, Event, SenatorName, Seq, TaskOwner, TriageVerdict};
 use serde::{Deserialize, Serialize};
 
 use crate::agent::AgentSource;
@@ -72,10 +72,6 @@ CREATE TABLE IF NOT EXISTS epochs (
     server  TEXT PRIMARY KEY,
     epoch   TEXT NOT NULL,
     seen_at INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS seating (
-    server   TEXT PRIMARY KEY,
-    presider TEXT
 );
 CREATE TABLE IF NOT EXISTS sessions (
     session_id       TEXT PRIMARY KEY,
@@ -196,12 +192,12 @@ impl ItemStatus {
 }
 
 /// `(agent, committee, seq)`: a queue item's identity.
-pub type ItemKey = (SenatorPath, CommitteeId, Seq);
+pub type ItemKey = (SenatorName, CommitteeId, Seq);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct QueueItem {
     /// The agent of this bridge the event is for.
-    pub agent: SenatorPath,
+    pub agent: SenatorName,
     pub event: Event,
     pub status: ItemStatus,
     pub session_id: Option<String>,
@@ -235,7 +231,7 @@ pub struct SessionUpsert {
     pub ancestor_pids: Vec<u32>,
     pub runtime: Runtime,
     /// The agent the session speaks as, chosen at every hook.
-    pub agent: SenatorPath,
+    pub agent: SenatorName,
     pub agent_source: AgentSource,
 }
 
@@ -265,7 +261,7 @@ pub struct ResetSummary {
 /// state still holds for it ([`Store::idle_agents`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdleAgent {
-    pub agent: SenatorPath,
+    pub agent: SenatorName,
     pub committees: Vec<CommitteeId>,
     /// Queued items, of any status.
     pub items: usize,
@@ -330,13 +326,13 @@ fn committee_col(row: &Row<'_>, idx: usize) -> rusqlite::Result<CommitteeId> {
     opt_committee(row, idx)?.ok_or_else(|| conversion(idx, "missing committee".into()))
 }
 
-fn agent_col(row: &Row<'_>, idx: usize) -> rusqlite::Result<SenatorPath> {
+fn agent_col(row: &Row<'_>, idx: usize) -> rusqlite::Result<SenatorName> {
     let raw: String = row.get(idx)?;
     raw.parse()
-        .map_err(|e: senate_core::SenatorPathError| conversion(idx, e.to_string()))
+        .map_err(|e: senate_core::SenatorNameError| conversion(idx, e.to_string()))
 }
 
-fn agent_text(agent: &SenatorPath) -> String {
+fn agent_text(agent: &SenatorName) -> String {
     agent.to_string()
 }
 
@@ -397,7 +393,7 @@ fn item_from_row(row: &Row<'_>) -> rusqlite::Result<QueueItem> {
 /// behind the cursor.
 fn take(
     tx: &Transaction<'_>,
-    agent: &SenatorPath,
+    agent: &SenatorName,
     committee: &CommitteeId,
     seq: Seq,
     enqueue: Option<&Event>,
@@ -430,12 +426,127 @@ fn take(
     Ok(true)
 }
 
+/// The `user_version` of a state database whose agents are flat names.
+pub const FLAT_NAMES_VERSION: i64 = 1;
+
+/// The tables whose `agent` column names an agent.
+const AGENT_TABLES: [&str; 5] = ["cursors", "sessions", "queue", "dropped", "owners"];
+
+/// Convert a state database written when senators were paths
+/// (`wendell/claude`) to flat names, once, recorded as `user_version` 1.
+///
+/// - Every `agent` column (cursors, sessions, queued items, drop counts,
+///   task owners) loses its person: `wendell/claude` → `claude`. Queued
+///   items keep their place and status; the event each holds is converted
+///   like the log's ([`senate_core::flatten`]). Read marks (`person_seen`)
+///   are keyed by committee and thread and are kept as they are.
+/// - Rows of an agent nested deeper (`wendell/claude/reviewer`) belonged to
+///   a Senate nested under an agent, which is no longer hosted: they are
+///   dropped, and how many is logged.
+/// - `seating` (where the bridge last sat, a cache) is dropped.
+///
+/// Before anything changes, the file is copied beside itself
+/// (`state.db.pre-flat-names`, never removed). Everything happens in one
+/// transaction: a crash leaves the old database. A new database is created
+/// at version 1.
+fn flatten_names(conn: &mut Connection, path: Option<&Path>) -> Result<(), StoreError> {
+    use senate_core::flatten::Flattener;
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if version >= FLAT_NAMES_VERSION {
+        return Ok(());
+    }
+    let exists = |conn: &Connection, table: &str| -> rusqlite::Result<bool> {
+        conn.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1")?
+            .exists([table])
+    };
+    let mut old = false;
+    for table in AGENT_TABLES {
+        if exists(conn, table)? {
+            old |= conn
+                .prepare(&format!(
+                    "SELECT 1 FROM {table} WHERE agent LIKE '%/%' LIMIT 1"
+                ))?
+                .exists([])?;
+        }
+    }
+    if old && let Some(path) = path {
+        let base = format!("{}.pre-flat-names", path.display());
+        let mut target = std::path::PathBuf::from(&base);
+        let mut n = 1;
+        while target.exists() {
+            target = std::path::PathBuf::from(format!("{base}.{n}"));
+            n += 1;
+        }
+        conn.execute("VACUUM INTO ?1", [target.to_string_lossy().as_ref()])?;
+        tracing::info!(copy = %target.display(), "saved state.db before converting its names");
+    }
+    let tx = conn.transaction()?;
+    if old {
+        let mut dropped = 0usize;
+        for table in AGENT_TABLES {
+            if !exists(&tx, table)? {
+                continue;
+            }
+            let agents: Vec<String> = {
+                let mut stmt = tx.prepare(&format!(
+                    "SELECT DISTINCT agent FROM {table} WHERE agent LIKE '%/%'"
+                ))?;
+                let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+                rows.collect::<rusqlite::Result<_>>()?
+            };
+            for agent in agents {
+                if agent.matches('/').count() > 1 {
+                    dropped +=
+                        tx.execute(&format!("DELETE FROM {table} WHERE agent = ?1"), [&agent])?;
+                    continue;
+                }
+                let flat = Flattener::agent(&agent);
+                tx.execute(
+                    &format!("UPDATE OR REPLACE {table} SET agent = ?1 WHERE agent = ?2"),
+                    params![flat, agent],
+                )?;
+            }
+        }
+        if exists(&tx, "queue")? {
+            let items: Vec<(String, String, i64, String)> = {
+                let mut stmt = tx.prepare("SELECT agent, committee, seq, event FROM queue")?;
+                let rows =
+                    stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+                rows.collect::<rusqlite::Result<_>>()?
+            };
+            for (agent, committee, seq, text) in items {
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+                    continue;
+                };
+                let flat = Flattener::envelope(&value);
+                if flat != value {
+                    tx.execute(
+                        "UPDATE queue SET event = ?1 WHERE agent = ?2 AND committee = ?3 AND seq = ?4",
+                        params![flat.to_string(), agent, committee, seq],
+                    )?;
+                }
+            }
+        }
+        if exists(&tx, "seating")? {
+            tx.execute("DROP TABLE seating", [])?;
+        }
+        tracing::info!(
+            dropped,
+            "converted state.db to flat senator names (rows of agents nested under an agent \
+             were dropped; the cache of where the bridge sat was reset)"
+        );
+    }
+    tx.pragma_update(None, "user_version", FLAT_NAMES_VERSION)?;
+    tx.commit()?;
+    Ok(())
+}
+
 impl Store {
     /// Open (creating if needed) the daemon's database, mode 0600.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
         let conn = Connection::open(path)?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-        Self::init(conn)
+        Self::init_at(conn, Some(path))
     }
 
     /// For `status` while the daemon is down.
@@ -455,7 +566,14 @@ impl Store {
     }
 
     fn init(conn: Connection) -> Result<Self, StoreError> {
+        Self::init_at(conn, None)
+    }
+
+    /// Open the database at `path`, converting one written when senators
+    /// were paths first ([`flatten_names`]).
+    fn init_at(mut conn: Connection, path: Option<&Path>) -> Result<Self, StoreError> {
         conn.busy_timeout(Duration::from_secs(5))?;
+        flatten_names(&mut conn, path)?;
         // journal_mode answers with a row, so it is a query, not an update.
         let _mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))?;
         conn.pragma_update(None, "synchronous", "FULL")?;
@@ -485,7 +603,7 @@ impl Store {
 
     pub fn cursor(
         &self,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         committee: &CommitteeId,
     ) -> Result<CursorRow, StoreError> {
         let row = self
@@ -510,7 +628,7 @@ impl Store {
 
     pub fn delivered_cursor(
         &self,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         committee: &CommitteeId,
     ) -> Result<Seq, StoreError> {
         Ok(self.cursor(agent, committee)?.delivered)
@@ -520,7 +638,7 @@ impl Store {
     /// before and not reset since).
     pub fn has_cursor(
         &self,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         committee: &CommitteeId,
     ) -> Result<bool, StoreError> {
         Ok(self
@@ -538,7 +656,7 @@ impl Store {
     /// Does nothing (and returns `false`) when it already has one.
     pub fn seed_cursor(
         &self,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         committee: &CommitteeId,
         delivered: Seq,
         reported: Seq,
@@ -558,7 +676,7 @@ impl Store {
     }
 
     /// Every cursor, by agent then committee.
-    pub fn cursors(&self) -> Result<Vec<(SenatorPath, CommitteeId, CursorRow)>, StoreError> {
+    pub fn cursors(&self) -> Result<Vec<(SenatorName, CommitteeId, CursorRow)>, StoreError> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
             "SELECT agent, committee, delivered, reported FROM cursors ORDER BY agent, committee",
@@ -578,7 +696,7 @@ impl Store {
 
     pub fn mark_reported(
         &self,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         committee: &CommitteeId,
         seq: Seq,
     ) -> Result<(), StoreError> {
@@ -601,7 +719,7 @@ impl Store {
     /// cursor.
     pub fn ingest(
         &self,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         event: &Event,
         directed: bool,
     ) -> Result<bool, StoreError> {
@@ -622,7 +740,7 @@ impl Store {
     /// this build cannot decode). `false` when `seq` is at or behind it.
     pub fn advance(
         &self,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         committee: &CommitteeId,
         seq: Seq,
     ) -> Result<bool, StoreError> {
@@ -659,38 +777,6 @@ impl Store {
             )
             .optional()?
             .is_some())
-    }
-
-    /// The Senate `server` serves, by its presider, as `/v1/me` last said:
-    /// `None` when never recorded, `Some(None)` for the top Senate.
-    pub fn seating(&self, server: &str) -> Result<Option<Option<SenatorPath>>, StoreError> {
-        let raw: Option<Option<String>> = self
-            .conn()
-            .query_row(
-                "SELECT presider FROM seating WHERE server = ?1",
-                [server],
-                |r| r.get(0),
-            )
-            .optional()?;
-        raw.map(|p| {
-            p.map(|p| p.parse::<SenatorPath>())
-                .transpose()
-                .map_err(|e| StoreError::Corrupt(e.to_string()))
-        })
-        .transpose()
-    }
-
-    pub fn set_seating(
-        &self,
-        server: &str,
-        presider: Option<&SenatorPath>,
-    ) -> Result<(), StoreError> {
-        self.conn().execute(
-            "INSERT INTO seating (server, presider) VALUES (?1, ?2)
-             ON CONFLICT(server) DO UPDATE SET presider = excluded.presider",
-            params![server, presider.map(agent_text)],
-        )?;
-        Ok(())
     }
 
     /// Record `server`'s epoch without touching anything else.
@@ -737,7 +823,7 @@ impl Store {
     /// to reset. Returns how many undelivered items were dropped.
     pub fn reset_committee(
         &self,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         committee: &CommitteeId,
     ) -> Result<usize, StoreError> {
         let agent = agent_text(agent);
@@ -955,7 +1041,7 @@ impl Store {
     pub fn release_held_for_others(
         &self,
         id: &str,
-        agent: &SenatorPath,
+        agent: &SenatorName,
     ) -> Result<usize, StoreError> {
         Ok(self.conn().execute(
             "UPDATE queue SET status = 'pending', session_id = NULL
@@ -1042,7 +1128,7 @@ impl Store {
                 let Ok(committee) = CommitteeId::new(committee) else {
                     continue;
                 };
-                if let Ok(path) = agent.parse::<SenatorPath>() {
+                if let Ok(path) = agent.parse::<SenatorName>() {
                     agents
                         .entry(agent.clone())
                         .or_insert_with(|| IdleAgent {
@@ -1070,7 +1156,7 @@ impl Store {
                 let (agent, committee, enqueued, delivered) = row?;
                 bump(&agent, enqueued.max(delivered));
                 if let (Ok(path), Ok(committee)) =
-                    (agent.parse::<SenatorPath>(), CommitteeId::new(committee))
+                    (agent.parse::<SenatorName>(), CommitteeId::new(committee))
                 {
                     let entry = agents.entry(agent.clone()).or_insert_with(|| IdleAgent {
                         agent: path,
@@ -1118,7 +1204,7 @@ impl Store {
     /// `committees`. Returns (cursors, items) removed.
     pub fn forget_agent(
         &self,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         committees: &[CommitteeId],
     ) -> Result<(usize, usize), StoreError> {
         let mut conn = self.conn();
@@ -1166,7 +1252,7 @@ impl Store {
     /// `agent`'s items on `committee` waiting for routing.
     pub fn pending_for(
         &self,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         committee: &CommitteeId,
     ) -> Result<Vec<QueueItem>, StoreError> {
         self.items(
@@ -1187,7 +1273,7 @@ impl Store {
 
     pub fn item(
         &self,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         committee: &CommitteeId,
         seq: Seq,
     ) -> Result<Option<QueueItem>, StoreError> {
@@ -1387,7 +1473,7 @@ impl Store {
     /// were dropped.
     pub fn cap_pending(
         &self,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         committee: &CommitteeId,
         keep: usize,
     ) -> Result<usize, StoreError> {
@@ -1419,7 +1505,7 @@ impl Store {
 
     /// Items of `agent` on `committee` dropped by the cap and not yet
     /// announced.
-    pub fn dropped(&self, agent: &SenatorPath, committee: &CommitteeId) -> Result<u64, StoreError> {
+    pub fn dropped(&self, agent: &SenatorName, committee: &CommitteeId) -> Result<u64, StoreError> {
         let n: Option<i64> = self
             .conn()
             .query_row(
@@ -1434,7 +1520,7 @@ impl Store {
     /// `n` dropped items were announced in a push that went out.
     pub fn consume_dropped(
         &self,
-        agent: &SenatorPath,
+        agent: &SenatorName,
         committee: &CommitteeId,
         n: u64,
     ) -> Result<(), StoreError> {
@@ -1563,7 +1649,7 @@ impl Store {
     /// cancelled.
     pub fn cancel(
         &self,
-        agent: Option<&SenatorPath>,
+        agent: Option<&SenatorName>,
         committee: &CommitteeId,
         root: Seq,
         whole_thread: bool,
@@ -1599,16 +1685,16 @@ mod tests {
         CommitteeId::new("refund-v2").unwrap()
     }
 
-    fn agent(s: &str) -> SenatorPath {
+    fn agent(s: &str) -> SenatorName {
         s.parse().unwrap()
     }
 
-    fn claude() -> SenatorPath {
-        agent("alice/claude")
+    fn claude() -> SenatorName {
+        agent("claude")
     }
 
-    fn codex() -> SenatorPath {
-        agent("alice/codex")
+    fn codex() -> SenatorName {
+        agent("codex")
     }
 
     fn event(seq: u64) -> Event {
@@ -1622,7 +1708,7 @@ mod tests {
         .into_event(Seq(seq), Utc::now())
     }
 
-    fn key(agent: &SenatorPath, seq: u64) -> ItemKey {
+    fn key(agent: &SenatorName, seq: u64) -> ItemKey {
         (agent.clone(), committee(), Seq(seq))
     }
 
@@ -1664,10 +1750,10 @@ mod tests {
         assert!(got.can_push());
         // A pin changes the agent at the next hook.
         let mut pinned = upsert("cc");
-        pinned.agent = agent("alice/reviewer");
+        pinned.agent = agent("reviewer");
         pinned.agent_source = AgentSource::Env;
         let got = s.upsert_session(&pinned).unwrap();
-        assert_eq!(got.agent, agent("alice/reviewer"));
+        assert_eq!(got.agent, agent("reviewer"));
         assert_eq!(got.agent_source, AgentSource::Env);
         drop(s);
         let ro = Store::open_read_only(&path).unwrap();
@@ -1710,7 +1796,7 @@ mod tests {
         assert!(s.ingest(&claude(), &event(2), true).unwrap());
         assert_eq!(s.delivered_cursor(&claude(), &committee()).unwrap(), Seq(2));
         assert_eq!(s.delivered_cursor(&codex(), &committee()).unwrap(), Seq(1));
-        let seqs = |a: &SenatorPath| -> Vec<u64> {
+        let seqs = |a: &SenatorName| -> Vec<u64> {
             s.pending_for(a, &committee())
                 .unwrap()
                 .iter()
@@ -1751,13 +1837,7 @@ mod tests {
             .into_iter()
             .map(|(a, _, c)| (a.to_string(), c.delivered.0))
             .collect();
-        assert_eq!(
-            all,
-            [
-                ("alice/claude".to_string(), 2),
-                ("alice/codex".to_string(), 1)
-            ]
-        );
+        assert_eq!(all, [("claude".to_string(), 2), ("codex".to_string(), 1)]);
     }
 
     #[test]
@@ -1827,14 +1907,65 @@ mod tests {
     }
 
     #[test]
-    fn the_seating_is_remembered_per_server() {
-        let s = Store::in_memory().unwrap();
-        assert_eq!(s.seating("http://a").unwrap(), None);
-        s.set_seating("http://a", None).unwrap();
-        assert_eq!(s.seating("http://a").unwrap(), Some(None));
-        s.set_seating("http://a", Some(&claude())).unwrap();
-        assert_eq!(s.seating("http://a").unwrap(), Some(Some(claude())));
-        assert_eq!(s.seating("http://b").unwrap(), None);
+    fn a_state_database_written_with_paths_is_converted_once_keeping_queue_and_read_marks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE seating (server TEXT PRIMARY KEY, presider TEXT);
+                 INSERT INTO seating VALUES ('http://127.0.0.1:7979', NULL);",
+            )
+            .unwrap();
+            let event = serde_json::json!({
+                "id": "01KQ8Z3M7N0000000000000E03", "committee": "refund", "seq": 3,
+                "ts": "2026-11-01T09:02:00Z", "kind": "question",
+                "from": "senator::wendell", "to": ["senator::wendell/claude"],
+                "body": "still there?", "meta": {}
+            });
+            conn.execute(
+                "INSERT INTO queue (agent, committee, seq, event, status, enqueued_at)
+                 VALUES ('wendell/claude', 'refund', 3, ?1, 'pending', 1)",
+                [event.to_string()],
+            )
+            .unwrap();
+            conn.execute_batch(
+                "INSERT INTO cursors (agent, committee, delivered, reported, touched)
+                   VALUES ('wendell/claude', 'refund', 3, 2, 1),
+                          ('wendell/claude/reviewer', 'refund', 1, 1, 1);
+                 INSERT INTO person_seen (committee, root, seen) VALUES ('refund', 1, 2);
+                 INSERT INTO owners (committee, root, agent, session_id)
+                   VALUES ('refund', 1, 'wendell/claude', 's1');",
+            )
+            .unwrap();
+        }
+        let s = Store::open(&path).unwrap();
+        let claude: SenatorName = "claude".parse().unwrap();
+        let refund = CommitteeId::new("refund").unwrap();
+        assert_eq!(s.delivered_cursor(&claude, &refund).unwrap(), Seq(3));
+        let item = s.item(&claude, &refund, Seq(3)).unwrap().unwrap();
+        assert_eq!(item.event.to, ["senator::claude".parse().unwrap()]);
+        assert_eq!(s.seen(&refund).unwrap(), vec![(Seq(1), Seq(2))]);
+        drop(s);
+        assert!(dir.path().join("state.db.pre-flat-names").exists());
+        let conn = Connection::open(&path).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, FLAT_NAMES_VERSION);
+        let nested: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM cursors WHERE agent LIKE '%/%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(nested, 0, "a nested agent's rows are dropped");
+        drop(conn);
+        // Once: no second copy.
+        drop(Store::open(&path).unwrap());
+        assert!(!dir.path().join("state.db.pre-flat-names.1").exists());
     }
 
     #[test]
@@ -2096,7 +2227,7 @@ mod tests {
                 "CREATE TABLE cursors (agent TEXT NOT NULL, committee TEXT NOT NULL,
                      delivered INTEGER NOT NULL, reported INTEGER NOT NULL DEFAULT 0,
                      touched INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (agent, committee));
-                 INSERT INTO cursors (agent, committee, delivered) VALUES ('alice/claude', 'refund-v2', 7);",
+                 INSERT INTO cursors (agent, committee, delivered) VALUES ('claude', 'refund-v2', 7);",
             )
             .unwrap();
         }

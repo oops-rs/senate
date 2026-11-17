@@ -29,7 +29,7 @@ use crate::continuity::{
 use crate::event::{BindingAction, Event, Kind, Refs, meta};
 use crate::ids::{CommitteeId, Seq};
 use crate::locale::Locale;
-use crate::senator::SenatorPath;
+use crate::senator::SenatorName;
 
 /// Most recent decisions kept (in seq order).
 pub const MAX_DECISIONS: usize = 30;
@@ -114,7 +114,7 @@ pub struct BriefCheckpoint {
     pub seq: Seq,
     pub ts: DateTime<Utc>,
     /// The agent whose checkpoint it is.
-    pub agent: SenatorPath,
+    pub agent: SenatorName,
     pub body: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refs: Option<Refs>,
@@ -149,7 +149,7 @@ pub struct BriefBuilder {
     /// Question roots not yet answered, by seq.
     open: BTreeMap<Seq, BriefQuestion>,
     groups: Vec<BriefGroup>,
-    checkpoints: HashMap<SenatorPath, BriefCheckpoint>,
+    checkpoints: HashMap<SenatorName, BriefCheckpoint>,
     presence: PresenceBoard,
     participants: HashMap<Address, (Seq, DateTime<Utc>)>,
 }
@@ -236,9 +236,10 @@ impl BriefBuilder {
                     body: event.body.clone(),
                 });
             }
-            // A checkpoint is an agent's; one from anyone else is not kept.
+            // A checkpoint is an agent's (the server takes it from no one
+            // else); one that is not from a senator is not kept.
             Kind::Checkpoint => {
-                if let Some(agent) = event.from.as_agent() {
+                if let Some(agent) = event.from.as_senator() {
                     let payload = CheckpointPayload::of(event);
                     self.checkpoints.insert(
                         agent.clone(),
@@ -643,14 +644,11 @@ mod tests {
             ev(Kind::Decision, "speaker", "退款上限 14 天").on_behalf_of(addr("senator::pm")),
         );
         let q = log.push(
-            ev(Kind::Question, "senator::alice/claude", "用哪个 header？")
-                .to(addr("senator::bob/claude")),
+            ev(Kind::Question, "senator::claude", "用哪个 header？").to(addr("senator::copilot")),
         );
-        let q2 = log.push(
-            ev(Kind::Question, "senator::bob/claude", "重试几次？")
-                .to(addr("senator::alice/claude")),
-        );
-        log.push(ev(Kind::Answer, "senator::bob/claude", "Idempotency-Key").in_thread(q));
+        let q2 = log
+            .push(ev(Kind::Question, "senator::copilot", "重试几次？").to(addr("senator::claude")));
+        log.push(ev(Kind::Answer, "senator::copilot", "Idempotency-Key").in_thread(q));
         let d2 = log.push(
             ev(Kind::Decision, "senator::pm", "退款上限 30 天")
                 .with_meta(meta::SUPERSEDES, json!(d1.0)),
@@ -661,7 +659,7 @@ mod tests {
         );
         // A note from anyone else with the flag is not the top.
         log.push(
-            ev(Kind::Note, "senator::bob/claude", "fake").with_meta(meta::BRIEF_TOP, json!(true)),
+            ev(Kind::Note, "senator::copilot", "fake").with_meta(meta::BRIEF_TOP, json!(true)),
         );
 
         let brief = Brief::from_events(c(), &log.0);
@@ -680,7 +678,7 @@ mod tests {
         assert_eq!(brief.groups.len(), 1);
         assert_eq!(brief.groups[0].group_id, "product");
         assert_eq!(brief.top.as_ref().map(|t| t.seq), Some(top));
-        assert_eq!(brief.participants[0].address, addr("senator::bob/claude"));
+        assert_eq!(brief.participants[0].address, addr("senator::copilot"));
 
         for locale in Locale::ALL {
             let md = brief.to_markdown(locale, DEFAULT_MARKDOWN_CHARS);
@@ -765,7 +763,7 @@ mod tests {
     fn full_log(now: DateTime<Utc>) -> Log {
         let mut log = Log(Vec::new());
         log.push_at(
-            ev(Kind::Checkpoint, "senator::alice/claude", "幂等键做完了")
+            ev(Kind::Checkpoint, "senator::claude", "幂等键做完了")
                 .with_meta(meta::CHECKPOINT, checkpoint_payload().value()),
             now - Duration::minutes(3),
         );
@@ -773,7 +771,7 @@ mod tests {
         log.push(presence_event(
             c(),
             &PresencePayload {
-                agent: "bob/claude".parse().unwrap(),
+                agent: "copilot".parse().unwrap(),
                 state: PresenceState::Disconnected,
                 since,
                 since_seq: Seq(1),
@@ -790,8 +788,8 @@ mod tests {
             "2026-11-15T08:00:00Z".parse().unwrap(),
         );
         log.push(
-            ev(Kind::Question, "senator::bob/claude", "how many\nretries?")
-                .to(addr("senator::alice/claude"))
+            ev(Kind::Question, "senator::copilot", "how many\nretries?")
+                .to(addr("senator::claude"))
                 .to(addr("senator::alice")),
         );
         log.push(ev(Kind::Chat, "guest::chat/u_8f3a", "when does it ship?"));
@@ -806,7 +804,7 @@ mod tests {
         assert_eq!(brief.checkpoints[0].seq, Seq(1));
         assert_eq!(
             brief.checkpoints[0].agent,
-            "alice/claude".parse::<SenatorPath>().unwrap()
+            "claude".parse::<SenatorName>().unwrap()
         );
         assert_eq!(brief.checkpoints[0].pushed, Some(false));
         assert_eq!(brief.presence.len(), 1);
@@ -827,16 +825,17 @@ mod tests {
     }
 
     #[test]
-    fn each_of_a_persons_agents_has_its_own_checkpoint_and_a_person_has_none() {
+    fn each_agent_has_its_own_checkpoint_and_the_speaker_none() {
         let mut log = Log(Vec::new());
         let cp = |from: &str, body: &str| {
             ev(Kind::Checkpoint, from, body)
                 .with_meta(meta::CHECKPOINT, checkpoint_payload().value())
         };
-        log.push(cp("senator::alice/claude", "one"));
-        log.push(cp("senator::alice/codex", "two"));
-        log.push(cp("senator::alice/claude", "three"));
-        log.push(cp("senator::alice", "not an agent"));
+        log.push(cp("senator::claude", "one"));
+        log.push(cp("senator::codex", "two"));
+        log.push(cp("senator::claude", "three"));
+        // A person's would be refused by the server; the Speaker's is no
+        // agent's.
         log.push(cp("speaker", "not an agent"));
         let brief = Brief::from_events(c(), &log.0);
         assert_eq!(
@@ -846,8 +845,8 @@ mod tests {
                 .map(|c| (c.agent.to_string(), c.body.as_str()))
                 .collect::<Vec<_>>(),
             [
-                ("alice/codex".to_string(), "two"),
-                ("alice/claude".to_string(), "three")
+                ("codex".to_string(), "two"),
+                ("claude".to_string(), "three")
             ]
         );
     }
@@ -863,10 +862,10 @@ mod tests {
              \n## 当前最关键的三件事（seq 7）\n\n1. ship it\n\
              \n## 已绑定的群\n\n- backend 群（chat:backend）\n\
              \n## 决定\n\n- seq 4 · 2026-11-15 · [senator::pm]：cap is 30 days\n\
-             \n## 待回答的问题\n\n- seq 5 · [senator::bob/claude] → [senator::alice/claude]、[senator::alice]：how many retries?\n\
-             \n## 最近检查点\n\n- [senator::alice/claude] 最近检查点 · feature/refund-v2/alice@a41f9c2，未推送 · 3 分钟前 · seq 1：幂等键做完了\n\
-             \n## 在场\n\n- [senator::bob/claude] 失联（自 2026-11-16 09:00 UTC 起） · 在 refund-v2 上落后 14 条事件\n\
-             \n## 最近活跃\n\n[guest::chat/u_8f3a]（seq 6）、[senator::bob/claude]（seq 5）、[senator::alice/claude]（seq 1）\n"
+             \n## 待回答的问题\n\n- seq 5 · [senator::copilot] → [senator::claude]、[senator::alice]：how many retries?\n\
+             \n## 最近检查点\n\n- [senator::claude] 最近检查点 · feature/refund-v2/alice@a41f9c2，未推送 · 3 分钟前 · seq 1：幂等键做完了\n\
+             \n## 在场\n\n- [senator::copilot] 失联（自 2026-11-16 09:00 UTC 起） · 在 refund-v2 上落后 14 条事件\n\
+             \n## 最近活跃\n\n[guest::chat/u_8f3a]（seq 6）、[senator::copilot]（seq 5）、[senator::claude]（seq 1）\n"
         );
         assert_senate_vocabulary(&md);
     }
@@ -882,10 +881,10 @@ mod tests {
              \n## Top of mind (seq 7)\n\n1. ship it\n\
              \n## Bound groups\n\n- backend 群 (chat:backend)\n\
              \n## Decisions\n\n- seq 4 · 2026-11-15 · [senator::pm]: cap is 30 days\n\
-             \n## Open questions\n\n- seq 5 · [senator::bob/claude] → [senator::alice/claude], [senator::alice]: how many retries?\n\
-             \n## Latest checkpoints\n\n- [senator::alice/claude] latest checkpoint · feature/refund-v2/alice@a41f9c2, not pushed · 3 min ago · seq 1: 幂等键做完了\n\
-             \n## Presence\n\n- [senator::bob/claude] disconnected since 2026-11-16 09:00 UTC · 14 events behind on refund-v2\n\
-             \n## Recently active\n\n[guest::chat/u_8f3a] (seq 6), [senator::bob/claude] (seq 5), [senator::alice/claude] (seq 1)\n"
+             \n## Open questions\n\n- seq 5 · [senator::copilot] → [senator::claude], [senator::alice]: how many retries?\n\
+             \n## Latest checkpoints\n\n- [senator::claude] latest checkpoint · feature/refund-v2/alice@a41f9c2, not pushed · 3 min ago · seq 1: 幂等键做完了\n\
+             \n## Presence\n\n- [senator::copilot] disconnected since 2026-11-16 09:00 UTC · 14 events behind on refund-v2\n\
+             \n## Recently active\n\n[guest::chat/u_8f3a] (seq 6), [senator::copilot] (seq 5), [senator::claude] (seq 1)\n"
         );
         assert_senate_vocabulary(&md);
     }
@@ -924,8 +923,8 @@ mod tests {
         assert_eq!(back, brief);
         // The data names states and addresses; the words come at rendering.
         assert_eq!(value["presence"][0]["state"], "disconnected");
-        assert_eq!(value["presence"][0]["agent"], "bob/claude");
-        assert_eq!(value["checkpoints"][0]["agent"], "alice/claude");
+        assert_eq!(value["presence"][0]["agent"], "copilot");
+        assert_eq!(value["checkpoints"][0]["agent"], "claude");
         assert_eq!(value["committee"], "refund-v2");
     }
 }

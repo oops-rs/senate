@@ -181,6 +181,7 @@ async fn ask_answer_and_catch_up_end_to_end() {
             "post",
             "propose_decision",
             "search",
+            "secretary",
             "status",
             "take"
         ]
@@ -213,12 +214,12 @@ async fn ask_answer_and_catch_up_end_to_end() {
     let (err, text) = mcp
         .call(
             "ask",
-            json!({"to": "senator::bob/claude", "body": "网关的幂等键用哪个 header？", "refs": {"path": "gateway/src/idem.rs"}}),
+            json!({"to": "senator::copilot", "body": "网关的幂等键用哪个 header？", "refs": {"path": "gateway/src/idem.rs"}}),
         )
         .await;
     assert!(!err, "{text}");
     assert!(
-        text.contains("Asked [senator::bob/claude] on refund-v2 (question seq 1)"),
+        text.contains("Asked [senator::copilot] on refund-v2 (question seq 1)"),
         "{text}"
     );
     let q = h.server.last_event("refund-v2");
@@ -308,7 +309,7 @@ async fn ask_answer_and_catch_up_end_to_end() {
     let (err, text) = mcp.call("catch_up", json!({})).await;
     assert!(!err, "{text}");
     assert!(
-        text.contains("9 event(s), seq 1–9, 3 addressed to you ([senator::alice/claude])"),
+        text.contains("9 event(s), seq 1–9, 3 addressed to you ([senator::claude])"),
         "{text}"
     );
     let order = [
@@ -328,10 +329,7 @@ async fn ask_answer_and_catch_up_end_to_end() {
     assert!(text.contains(&decision), "decisions stay whole");
     assert!(text.contains(&format!("{}…", "N".repeat(300))));
     assert!(!text.contains(&"N".repeat(301)));
-    assert_eq!(
-        h.server.cursor("refund-v2", "alice/claude", "read"),
-        Some(Seq(9))
-    );
+    assert_eq!(h.server.cursor("refund-v2", "claude", "read"), Some(Seq(9)));
     assert_eq!(h.server.cursor("refund-v2", "alice", "read"), None);
     for s in [2u64, 4, 6] {
         let item = h.item(s).unwrap();
@@ -360,7 +358,7 @@ async fn ask_answer_and_catch_up_end_to_end() {
     let (_, text) = mcp.call("catch_up", json!({"limit": 2})).await;
     assert!(text.contains("More remain"), "{text}");
     assert_eq!(
-        h.server.cursor("refund-v2", "alice/claude", "read"),
+        h.server.cursor("refund-v2", "claude", "read"),
         Some(Seq(11))
     );
     let (_, text) = mcp.call("catch_up", json!({})).await;
@@ -402,9 +400,11 @@ async fn join_binds_a_session_and_failures_explain_themselves() {
         Some(&committee())
     );
 
-    // `bob` is whichever of bob's agents: here the one bob has seated.
-    h.server.seat("bob/claude");
-    let (err, text) = mcp.call("ask", json!({"to": "bob", "body": "hi"})).await;
+    // A bare name is that senator: `copilot` is the agent bob runs.
+    h.server.seat("copilot", "bob");
+    let (err, text) = mcp
+        .call("ask", json!({"to": "copilot", "body": "hi"}))
+        .await;
     assert!(!err, "{text}");
     assert_eq!(h.server.last_event("refund-v2").to, vec![claude("bob")]);
 
@@ -430,10 +430,7 @@ async fn join_binds_a_session_and_failures_explain_themselves() {
     )
     .await;
     let (err, text) = after_clear
-        .call(
-            "ask",
-            json!({"to": "senator::bob/claude", "body": "status?"}),
-        )
+        .call("ask", json!({"to": "senator::copilot", "body": "status?"}))
         .await;
     assert!(!err, "{text}");
     let last = h.server.last_event("refund-v2");
@@ -451,7 +448,7 @@ async fn ask_refuses_recipients_that_would_never_answer() {
     h.hook(HookKind::SessionStart, "a1", &wd, None).await;
     let before = h.server.events("refund-v2").len();
     let mut mcp = McpClient::start(h.socket(), selector("a1")).await;
-    for to in ["speaker", "senator::pm", "senator::bob/claude, speaker"] {
+    for to in ["speaker", "senator::pm", "senator::copilot, speaker"] {
         let (err, text) = mcp.call("ask", json!({"to": to, "body": "?"})).await;
         assert!(err, "{to}");
         assert!(text.contains("only reach a teammate's agent"), "{text}");
@@ -470,7 +467,9 @@ async fn ask_refuses_recipients_that_would_never_answer() {
         .unwrap();
     let description = ask["description"].as_str().unwrap();
     assert!(
-        description.contains("Only agents can be asked") && description.contains("senator::bob/*"),
+        description.contains("A person is not reached through `ask`")
+            && description.contains("senator::*")
+            && description.contains("ibot::codex"),
         "{description}"
     );
 
@@ -584,7 +583,7 @@ async fn a_session_is_found_by_a_pid_above_its_hook() {
     )
     .await;
     let (err, text) = mcp
-        .call("ask", json!({"to": "bob/claude", "body": "found me?"}))
+        .call("ask", json!({"to": "copilot", "body": "found me?"}))
         .await;
     assert!(!err, "{text}");
     assert_eq!(h.server.last_event("refund-v2").body, "found me?");
@@ -629,7 +628,7 @@ async fn search_post_and_propose_decision_end_to_end() {
     assert!(text.contains("not from your user"));
     // Best (here: newest) first, each with seq, sender, kind and time.
     let decision = at(&text, "· seq 3 · from [senator::pm] · decision · ");
-    let note_hit = at(&text, "· seq 2 · from [senator::bob/claude] · note · ");
+    let note_hit = at(&text, "· seq 2 · from [senator::copilot] · note · ");
     // A hit said in a chat group names the group it was said in.
     let chat = at(
         &text,
@@ -828,7 +827,7 @@ async fn status_escalate_take_and_inbox_end_to_end() {
         "the calling session owns it"
     );
     let owner = h.store().owner(&committee(), q.seq).unwrap().unwrap();
-    assert_eq!(owner.agent, path("alice/claude"));
+    assert_eq!(owner.agent, path("claude"));
     assert_eq!(payload.steps.unwrap().len(), 2);
 
     // Waiting on a person is escalate's job, not status's.
@@ -840,7 +839,7 @@ async fn status_escalate_take_and_inbox_end_to_end() {
     let (err, text) = mcp
         .call(
             "escalate",
-            json!({"thread": r.seq.0, "reason": "改接口要 alice 定"}),
+            json!({"thread": r.seq.0, "to": "alice", "reason": "改接口要 alice 定"}),
         )
         .await;
     assert!(!err, "{text}");
@@ -851,7 +850,7 @@ async fn status_escalate_take_and_inbox_end_to_end() {
     let (err, text) = mcp
         .call(
             "escalate",
-            json!({"thread": r.seq.0, "to": "senator::bob/claude"}),
+            json!({"thread": r.seq.0, "to": "senator::copilot"}),
         )
         .await;
     assert!(err && text.contains("is not a person"), "{text}");
@@ -865,9 +864,7 @@ async fn status_escalate_take_and_inbox_end_to_end() {
     let (err, text) = mcp.call("inbox", json!({})).await;
     assert!(!err, "{text}");
     assert!(
-        text.contains(
-            "2 open task thread(s) on refund-v2 for [senator::alice/claude], [senator::alice]"
-        ),
+        text.contains("2 open task thread(s) on refund-v2 for [senator::claude], [senator::alice]"),
         "{text}"
     );
     assert!(text.contains("查幂等 header"), "{text}");
@@ -889,7 +886,7 @@ async fn status_escalate_take_and_inbox_end_to_end() {
     let (_, text) = zh.call("inbox", json!({})).await;
     assert!(
         text.starts_with(
-            "refund-v2 上有 2 个等着 [senator::alice/claude], [senator::alice] 的任务 thread"
+            "refund-v2 上有 2 个等着 [senator::claude], [senator::alice] 的任务 thread"
         ),
         "{text}"
     );
@@ -986,7 +983,7 @@ async fn a_codex_tool_call_is_resolved_by_the_thread_in_its_meta() {
         assert_eq!(s.runtime, Runtime::Codex);
         assert_eq!((s.socket, s.token, s.claude_pid), (None, None, None));
         // Nor does the Claude session's SENATE_AGENT: a Codex thread is codex.
-        assert_eq!(s.agent, path("alice/codex"));
+        assert_eq!(s.agent, path("codex"));
     }
     let above = std::os::unix::process::parent_id();
     assert!(h.store().sessions_below(above).unwrap().is_empty());
@@ -1056,32 +1053,36 @@ async fn a_codex_tool_call_is_resolved_by_the_thread_in_its_meta() {
     h.stop().await;
 }
 
-/// `ask` to a person's "whichever agent" when they have several: the server
-/// refuses with the candidates, the tool result lists them, and the agent
-/// names one and asks again.
+/// `ask` to `senator::*` when several agents are on the committee (here
+/// the two bob runs and the asker's own): the server refuses with the
+/// candidates, the tool result lists them, and the agent names one and asks
+/// again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_ambiguous_recipient_comes_back_as_a_choice_and_the_retry_lands() {
     let mut h = Harness::new().await;
     h.start().await;
-    h.server.seat("bob/claude");
-    h.server.seat("bob/codex");
+    h.server.seat("copilot", "bob");
+    h.server.seat("aider", "bob");
     let wd = h.workdir("a", Some("refund-v2"));
     h.hook(HookKind::SessionStart, "a1", &wd, None).await;
     let mut mcp = McpClient::start(h.socket(), selector("a1")).await;
     let before = h.server.events("refund-v2").len();
 
-    for to in ["bob", "senator::bob/*", "@bob"] {
+    for to in ["*", "senator::*", "[senator::*]"] {
         let (err, text) = mcp
             .call("ask", json!({"to": to, "body": "which header?"}))
             .await;
         assert!(err, "{to}: {text}");
         assert!(
-            text.starts_with("[senator::bob] has several agents here: [senator::bob/claude], [senator::bob/codex]."),
+            text.starts_with(
+                "[senator::*] could reach several agents on this committee: \
+                 [senator::copilot], [senator::aider], [senator::claude]."
+            ),
             "{text}"
         );
         assert!(text.contains("Name one of them in `to` and ask again."));
         assert!(
-            text.ends_with("\n- senator::bob/claude\n- senator::bob/codex"),
+            text.ends_with("\n- senator::copilot\n- senator::aider\n- senator::claude"),
             "{text}"
         );
     }
@@ -1092,7 +1093,7 @@ async fn an_ambiguous_recipient_comes_back_as_a_choice_and_the_retry_lands() {
         &h.socket(),
         &Request::Ask {
             session: selector("a1"),
-            to: vec!["senator::bob/*".parse().unwrap()],
+            to: vec!["senator::*".parse().unwrap()],
             body: "?".into(),
             refs: None,
             id: None,
@@ -1107,29 +1108,29 @@ async fn an_ambiguous_recipient_comes_back_as_a_choice_and_the_retry_lands() {
         panic!("{err}")
     };
     assert_eq!(e.code, "ambiguous_recipient");
-    assert_eq!(e.candidates, [path("bob/claude"), path("bob/codex")]);
+    assert_eq!(
+        e.candidates,
+        [path("copilot"), path("aider"), path("claude")]
+    );
 
     // Named: it lands, stored with the concrete agent.
     let (err, text) = mcp
         .call(
             "ask",
-            json!({"to": "senator::bob/codex", "body": "which header?"}),
+            json!({"to": "senator::aider", "body": "which header?"}),
         )
         .await;
     assert!(!err, "{text}");
-    assert!(text.contains("Asked [senator::bob/codex]"), "{text}");
-    assert_eq!(
-        h.server.last_event("refund-v2").to,
-        vec![senator("bob/codex")]
-    );
+    assert!(text.contains("Asked [senator::aider]"), "{text}");
+    assert_eq!(h.server.last_event("refund-v2").to, vec![senator("aider")]);
 
     // In Chinese, the same choice.
     let mut zh = McpClient::start_in(h.socket(), selector("a1"), Locale::Zh).await;
-    let (err, text) = zh.call("ask", json!({"to": "bob", "body": "?"})).await;
+    let (err, text) = zh.call("ask", json!({"to": "*", "body": "?"})).await;
     assert!(err);
     assert!(
         text.starts_with(
-            "[senator::bob] 在这里有好几个 agent：[senator::bob/claude], [senator::bob/codex]"
+            "[senator::*] 在这个委员会有好几个 agent 可以接：[senator::copilot], [senator::aider], [senator::claude]"
         ),
         "{text}"
     );
@@ -1155,7 +1156,7 @@ async fn each_agent_has_its_own_inbox_and_read_position() {
         .append(question(claude("bob"), claude("alice"), "for claude"));
     h.server.append(question(
         claude("bob"),
-        senator("alice/reviewer"),
+        senator("reviewer"),
         "for the reviewer",
     ));
 
@@ -1169,25 +1170,22 @@ async fn each_agent_has_its_own_inbox_and_read_position() {
         text.contains("for the reviewer") && !text.contains("for claude"),
         "{text}"
     );
-    assert!(text.contains("[senator::alice/reviewer]"), "{text}");
+    assert!(text.contains("[senator::reviewer]"), "{text}");
 
     let (_, text) = claude_mcp.call("catch_up", json!({})).await;
     assert!(
-        text.contains("1 addressed to you ([senator::alice/claude])"),
+        text.contains("1 addressed to you ([senator::claude])"),
         "{text}"
     );
     let (_, text) = reviewer_mcp.call("catch_up", json!({})).await;
     // The reviewer's read position is its own: it still reads both events.
     assert!(
-        text.contains("2 event(s), seq 1–2, 1 addressed to you ([senator::alice/reviewer])"),
+        text.contains("2 event(s), seq 1–2, 1 addressed to you ([senator::reviewer])"),
         "{text}"
     );
+    assert_eq!(h.server.cursor("refund-v2", "claude", "read"), Some(Seq(2)));
     assert_eq!(
-        h.server.cursor("refund-v2", "alice/claude", "read"),
-        Some(Seq(2))
-    );
-    assert_eq!(
-        h.server.cursor("refund-v2", "alice/reviewer", "read"),
+        h.server.cursor("refund-v2", "reviewer", "read"),
         Some(Seq(2))
     );
 
@@ -1199,10 +1197,7 @@ async fn each_agent_has_its_own_inbox_and_read_position() {
     reviewer_mcp
         .call("post", json!({"body": "from reviewer"}))
         .await;
-    assert_eq!(
-        h.server.last_event("refund-v2").from,
-        senator("alice/reviewer")
-    );
+    assert_eq!(h.server.last_event("refund-v2").from, senator("reviewer"));
     h.stop().await;
 }
 
@@ -1218,12 +1213,12 @@ async fn tool_results_follow_the_locale() {
     let (err, text) = mcp
         .call(
             "ask",
-            json!({"to": "senator::bob/claude", "body": "用哪个 header？"}),
+            json!({"to": "senator::copilot", "body": "用哪个 header？"}),
         )
         .await;
     assert!(!err, "{text}");
     assert!(
-        text.starts_with("已在 refund-v2 上问了 [senator::bob/claude]（问题 seq 1）"),
+        text.starts_with("已在 refund-v2 上问了 [senator::copilot]（问题 seq 1）"),
         "{text}"
     );
     let (_, text) = mcp.call("catch_up", json!({})).await;
@@ -1251,8 +1246,8 @@ async fn tool_results_follow_the_locale() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn only_the_presiding_session_is_given_the_presiding_tools() {
     let mut h = Harness::new().await;
-    // A top Senate used alone: alice/claude is named its Speaker.
-    h.server.set_speaker("alice/claude");
+    // A Senate used alone: claude is named its Speaker.
+    h.server.set_speaker("claude");
     h.start().await;
     let wd = h.workdir("a", Some("refund-v2"));
     let start = h
@@ -1263,7 +1258,7 @@ async fn only_the_presiding_session_is_given_the_presiding_tools() {
         .as_str()
         .unwrap();
     assert!(
-        context.contains("[senator::alice/claude] is the Speaker of the top Senate"),
+        context.contains("[senator::claude] is the Speaker of the Senate [/senate]"),
         "{context}"
     );
     let mut env = h.env_for("x1", None);
@@ -1301,12 +1296,12 @@ async fn only_the_presiding_session_is_given_the_presiding_tools() {
     let (err, text) = codex
         .call(
             "speaker_route",
-            json!({"committee": "refund-v2", "seq": 1, "to": "alice/claude"}),
+            json!({"committee": "refund-v2", "seq": 1, "to": "claude"}),
         )
         .await;
     assert!(err);
     assert!(
-        text.contains("[senator::alice/codex] holds no Senate's Speaker's seat"),
+        text.contains("[senator::codex] does not work the Speaker's desk"),
         "{text}"
     );
     // The daemon refuses the request itself, whatever a client lists.
@@ -1316,7 +1311,7 @@ async fn only_the_presiding_session_is_given_the_presiding_tools() {
             session: selector("x1"),
             committee: committee(),
             seq: Seq(1),
-            to: path("alice/claude"),
+            to: path("claude"),
             id: None,
         },
         Duration::from_secs(1),

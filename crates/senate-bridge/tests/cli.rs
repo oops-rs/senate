@@ -20,18 +20,7 @@ const BIN: &str = env!("CARGO_BIN_EXE_senate");
 
 fn bridge(home: &Path, senate_home: &Path) -> Command {
     let mut cmd = Command::new(BIN);
-    for var in [
-        "CLAUDE_CODE_MESSAGING_SOCKET",
-        "CLAUDE_CODE_MESSAGING_TOKEN",
-        "CLAUDE_CODE_SESSION_ID",
-        "CLAUDE_PID",
-        "CLAUDE_CONFIG_DIR",
-        "CODEX_HOME",
-        "RUST_LOG",
-        "SENATE_AGENT",
-    ] {
-        cmd.env_remove(var);
-    }
+    senate_bridge::testenv::isolate(&mut cmd, home);
     cmd.env("HOME", home).env("SENATE_HOME", senate_home);
     cmd
 }
@@ -510,7 +499,9 @@ fn mcp_binary_speaks_stdio_and_reports_a_missing_daemon() {
     assert_eq!(init["serverInfo"]["name"], "senate");
     rpc(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
     let tools = rpc(json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}));
-    assert_eq!(tools["tools"].as_array().unwrap().len(), 12);
+    // The everyday tools and `secretary`; the presiding and chair tools are
+    // listed only for a session that holds those roles.
+    assert_eq!(tools["tools"].as_array().unwrap().len(), 13);
     let call = rpc(json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
         "params": {"name": "catch_up", "arguments": {}}}));
     assert_eq!(call["isError"], true);
@@ -554,11 +545,15 @@ fn init_local_writes_one_profile_and_never_overwrites_it() {
     );
     let text = std::fs::read_to_string(&written).unwrap();
     assert!(text.contains("person = \"alice\""));
-    assert!(text.contains("speaker = \"claude\""));
+    // The person presides; an agent is a secretary, commented out.
+    assert!(text.contains("speaker = \"senator::alice\""));
+    assert!(text.contains("# secretaries = [\"claude\"]"));
     assert!(text.contains("listen = \"127.0.0.1:7979\""));
     assert!(text.contains("locale = \"zh\""));
-    // Only that file, under the Senate home; HOME is untouched.
-    assert_eq!(std::fs::read_dir(&home).unwrap().count(), 1);
+    // Only that file and the commented secretary.toml, under the Senate
+    // home; HOME is untouched.
+    assert_eq!(std::fs::read_dir(&home).unwrap().count(), 2);
+    assert!(home.join("secretary.toml").exists());
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
 
     let again = bridge(dir.path(), &home)

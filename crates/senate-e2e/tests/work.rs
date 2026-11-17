@@ -69,7 +69,7 @@ async fn bob_at_work(world: &World) -> (Laptop, FakeInbox) {
     bob.open().await;
     let inbox = bob.inbox("s-bob");
     bob.session_start("s-bob", &inbox).await;
-    world.wait_connected("bob/claude", true).await;
+    world.wait_connected("copilot", true).await;
     (bob, inbox)
 }
 
@@ -167,7 +167,7 @@ async fn work_on_a_checkpoint_branch() {
     let chat = chat_of(&world, "把 alice 的重试路径做完").await;
     let branch = format!("feature/refund-v2/speaker-{}", chat.seq);
     for part in [
-        format!("[senator::alice/claude] 的检查点 {BRANCH}@{}", &head[..7]),
+        format!("[senator::claude] 的检查点 {BRANCH}@{}", &head[..7]),
         branch.clone(),
         "做：把重试路径做完".into(),
         "代表 [senator::bob]".into(),
@@ -211,7 +211,7 @@ async fn work_on_a_checkpoint_branch() {
     assert_eq!(order.base_commit, head);
     assert_eq!(order.repo.slug, REPO);
     assert_eq!(order.requester, name("bob"));
-    assert_eq!(order.target_agent, path("alice/claude"));
+    assert_eq!(order.target_agent, path("claude"));
     assert_ne!(order.branch(), order.base_branch, "never alice's branch");
     assert!(
         order
@@ -299,7 +299,7 @@ async fn only_people_only_developers() {
             &NewEvent::new(
                 committee(),
                 Kind::Note,
-                claude("bob"),
+                senator(BOB_CLAUDE),
                 "/work alice 把重试路径做完",
             )
             .to(Address::Speaker),
@@ -316,7 +316,7 @@ async fn only_people_only_developers() {
         .find(|e| e.from == Address::Speaker && e.body.starts_with("我做不了这个"))
         .expect("the refusal in the log");
     assert_eq!(refusal.thread, Some(asked.seq));
-    assert_eq!(refusal.to, vec![claude("bob")]);
+    assert_eq!(refusal.to, vec![senator(BOB_CLAUDE)]);
 
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(runner.calls().is_empty(), "nothing ran");
@@ -430,28 +430,26 @@ async fn reassignment() {
     assert!(
         restated
             .markdown
-            .contains("把 [senator::alice/claude] 在 refund-v2 的工作交给 [senator::bob/claude]"),
+            .contains("把 [senator::claude] 在 refund-v2 的工作交给 [senator::copilot]"),
         "{}",
         restated.markdown
     );
     confirm(&world, "u_pm", "m_pm_r_ok", &restated, "m_pm_r").await;
 
     // Bob's session gets Alice's checkpoint and where to start.
-    let note = inbox
-        .wait_for("[senator::alice/claude] 的工作交给你了")
-        .await;
+    let note = inbox.wait_for("[senator::claude] 的工作交给你了").await;
     for part in [BRANCH, head.as_str(), "git switch -c", "重试路径"] {
         assert!(note.contains(part), "{part}: {note}");
     }
-    let moved = presence_of(&world.events().await, "alice/claude");
+    let moved = presence_of(&world.events().await, "claude");
     let last = moved.last().expect("alice's presence");
     assert_eq!(last.state, PresenceState::Reassigned);
-    assert_eq!(last.new_owner, Some(path("bob/claude")));
+    assert_eq!(last.new_owner, Some(path("copilot")));
     world
         .wait_post("the line in the Agent group", |p| {
             p.is_root_in(AGENTS)
                 && p.markdown
-                    .contains("[senator::alice/claude] 的工作已交给 [senator::bob/claude]")
+                    .contains("[senator::claude] 的工作已交给 [senator::copilot]")
         })
         .await;
 
@@ -459,7 +457,7 @@ async fn reassignment() {
     let body = "重试上限是几次？";
     let push = ask_alice(&world, &inbox, "m_pm_q1", body).await;
     assert!(
-        push.contains("给 [senator::alice/claude] 的消息（你已接手）"),
+        push.contains("给 [senator::claude] 的消息（你已接手）"),
         "{push}"
     );
     let thread = thread_of(&push, body);
@@ -472,7 +470,7 @@ async fn reassignment() {
     assert!(
         mirrored
             .markdown
-            .contains("[senator::bob/claude]（接手 [senator::alice/claude]）"),
+            .contains("[senator::copilot]（接手 [senator::claude]）"),
         "{}",
         mirrored.markdown
     );
@@ -489,11 +487,11 @@ async fn reassignment() {
     // presence (its stream resumes after the reassignment).
     bob.close().await;
     bob.open().await;
-    world.wait_connected("bob/claude", true).await;
+    world.wait_connected("copilot", true).await;
     let body = "退避的基数是多少？";
     let push = ask_alice(&world, &inbox, "m_pm_q2", body).await;
     assert!(
-        push.contains("给 [senator::alice/claude] 的消息（你已接手）"),
+        push.contains("给 [senator::claude] 的消息（你已接手）"),
         "{push}"
     );
 
@@ -507,19 +505,19 @@ async fn reassignment() {
     )
     .await;
     assert!(
-        restated.markdown.contains("交还给 [senator::alice/claude]"),
+        restated.markdown.contains("交还给 [senator::claude]"),
         "{}",
         restated.markdown
     );
     confirm(&world, "u_pm", "m_pm_u_ok", &restated, "m_pm_u").await;
     inbox.wait_for("不再推给你").await;
-    let moved = presence_of(&world.events().await, "alice/claude");
+    let moved = presence_of(&world.events().await, "claude");
     assert_eq!(moved.last().map(|p| p.state), Some(PresenceState::Online));
     world
         .wait_post("the hand-back line in the Agent group", |p| {
             p.is_root_in(AGENTS)
                 && p.markdown
-                    .contains("[senator::alice/claude] 的工作已交还给 [senator::alice/claude]")
+                    .contains("[senator::claude] 的工作已交还给 [senator::claude]")
         })
         .await;
 

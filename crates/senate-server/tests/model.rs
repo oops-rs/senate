@@ -1,5 +1,6 @@
 //! What changed from a one-agent-per-person world: a token names a person who
-//! acts as agents, `senator::<person>/*` is resolved before it is stored,
+//! acts as agents, `senator::*` is resolved among the agents on the
+//! committee before it is stored,
 //! guests cannot change state, and the seams a private layer replaces.
 
 #![allow(clippy::unwrap_used)]
@@ -13,14 +14,15 @@ use common::*;
 use reqwest::{Method, StatusCode};
 use senate_core::api::{AppendResponse, Me, PresencePage, presence_path};
 use senate_core::{
-    Address, Hub, HubError, Kind, Locale, Name, NewEvent, PresenceState, ResolveError, Roster,
-    Senior, Seq, meta,
+    Address, CommitteeId, Hub, HubError, Kind, Locale, Name, NewEvent, PresenceState, Principal,
+    ResolveError, Roster, Seq, SpeakerSeat, meta,
 };
 use senate_log::MemoryStore;
 use senate_server::{Authenticate, Server, ServerConfig};
 use serde_json::json;
 
-/// Seat `agents` of alice by having each of them connect.
+/// Seat `agents` of alice by having each of them heartbeat: each is then
+/// on the committee, where `senator::*` looks for an agent.
 async fn seat(server: &TestServer, agents: &[&str]) {
     for agent in agents {
         let response = server
@@ -41,11 +43,12 @@ async fn seat(server: &TestServer, agents: &[&str]) {
     }
 }
 
+/// A question from claude (bob's agent, seated by asking) to `to`.
 fn question_to(to: &str) -> NewEvent {
     NewEvent::new(
         committee(),
         Kind::Question,
-        person_addr("bob/claude"),
+        person_addr("claude"),
         "who owns the gateway?",
     )
     .to(to.parse().unwrap())
@@ -54,13 +57,11 @@ fn question_to(to: &str) -> NewEvent {
 #[tokio::test]
 async fn a_wildcard_to_one_agent_goes_to_that_agent() {
     let server = TestServer::start().await;
-    seat(&server, &["alice/claude"]).await;
-    let response = server
-        .post_event(BOB, &question_to("senator::alice/*"))
-        .await;
+    seat(&server, &["copilot"]).await;
+    let response = server.post_event(BOB, &question_to("senator::*")).await;
     assert_eq!(response.status(), StatusCode::OK);
     let appended: AppendResponse = response.json().await.unwrap();
-    assert_eq!(appended.event.to, [person_addr("alice/claude")]);
+    assert_eq!(appended.event.to, [person_addr("copilot")]);
     // What is stored is what came back: the wildcard never reaches the log.
     let stored = server
         .running
@@ -75,16 +76,11 @@ async fn a_wildcard_to_one_agent_goes_to_that_agent() {
 #[tokio::test]
 async fn a_wildcard_to_several_agents_is_a_409_with_the_candidates() {
     let server = TestServer::start().await;
-    seat(&server, &["alice/claude", "alice/codex"]).await;
-    let response = server
-        .post_event(BOB, &question_to("senator::alice/*"))
-        .await;
+    seat(&server, &["copilot", "codex"]).await;
+    let response = server.post_event(BOB, &question_to("senator::*")).await;
     let error = api_error(response, StatusCode::CONFLICT, "ambiguous_recipient").await;
-    assert_eq!(
-        error.candidates,
-        [path("alice/claude"), path("alice/codex")]
-    );
-    assert!(error.message.contains("senator::alice/claude"), "{error:?}");
+    assert_eq!(error.candidates, [path("copilot"), path("codex")]);
+    assert!(error.message.contains("senator::copilot"), "{error:?}");
     assert!(
         server
             .running
@@ -97,31 +93,88 @@ async fn a_wildcard_to_several_agents_is_a_409_with_the_candidates() {
     );
 
     // The sender names one and tries again.
-    let again = server
-        .post_event(BOB, &question_to("senator::alice/codex"))
-        .await;
+    let again = server.post_event(BOB, &question_to("senator::codex")).await;
     assert_eq!(again.status(), StatusCode::OK);
     server.running.shutdown().await.unwrap();
 }
 
 #[tokio::test]
-async fn a_wildcard_to_a_person_without_agents_goes_to_the_person() {
+async fn a_wildcard_reaches_only_the_agents_on_the_committee() {
     let server = TestServer::start().await;
-    let response = server
-        .post_event(BOB, &question_to("senator::carol/*"))
-        .await;
-    let appended: AppendResponse = response.json().await.unwrap();
-    assert_eq!(appended.event.to, [person_addr("carol")]);
+    // codex is on another committee only; claude (the asker) and aider are
+    // seated here but have no presence, stream or heartbeat on it.
+    let search = CommitteeId::new("search").unwrap();
+    let elsewhere = server
+        .request(
+            Method::POST,
+            &senate_core::api::heartbeat_path(&search),
+            ALICE,
+        )
+        .json(&senate_core::api::Heartbeat {
+            agent: path("codex"),
+            sessions: 1,
+            cursor: Seq::ZERO,
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(elsewhere.status(), StatusCode::NO_CONTENT);
+    assert_eq!(server.act_as(CAROL, "aider").await, StatusCode::OK);
+    seat(&server, &["copilot"]).await;
+    assert_eq!(
+        server
+            .running
+            .hub
+            .committee_agents(&committee())
+            .await
+            .unwrap(),
+        [path("copilot")]
+    );
+    let appended: AppendResponse = server
+        .post_event(BOB, &question_to("senator::*"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(appended.event.to, [person_addr("copilot")]);
+    server.running.shutdown().await.unwrap();
+}
 
-    // Several wildcards, a repeat after resolution is dropped; an unknown
-    // person is the sender's mistake.
-    let both = question_to("senator::carol/*").to(person_addr("carol"));
-    let appended: AppendResponse = server.post_event(BOB, &both).await.json().await.unwrap();
-    assert_eq!(appended.event.to, [person_addr("carol")]);
-    let unknown = server
-        .post_event(BOB, &question_to("senator::dave/*"))
-        .await;
-    api_error(unknown, StatusCode::BAD_REQUEST, "bad_request").await;
+#[tokio::test]
+async fn a_wildcard_with_no_agent_on_the_committee_goes_to_the_only_person() {
+    // A Senate of one person: what no agent can take goes to her.
+    let server = TestServer::start_configured(Arc::new(MemoryStore::new()), |config| {
+        config.roster.principals = vec![Principal::new(name("alice"))];
+        config.tokens.retain(|t| t.person == name("alice"));
+    })
+    .await;
+    let from_alice = |to: &str| {
+        NewEvent::new(committee(), Kind::Question, person_addr("alice"), "?")
+            .to(to.parse().unwrap())
+    };
+    let appended: AppendResponse = server
+        .post_event(ALICE, &from_alice("senator::*"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(appended.event.to, [person_addr("alice")]);
+    // A repeat after resolution is dropped.
+    let both = from_alice("senator::*").to(person_addr("alice"));
+    let appended: AppendResponse = server.post_event(ALICE, &both).await.json().await.unwrap();
+    assert_eq!(appended.event.to, [person_addr("alice")]);
+    server.running.shutdown().await.unwrap();
+
+    // Several people and no agent on the committee: nobody to take it, the
+    // sender's mistake.
+    let server = TestServer::start().await;
+    let error = api_error(
+        server.post_event(BOB, &question_to("senator::*")).await,
+        StatusCode::BAD_REQUEST,
+        "bad_request",
+    )
+    .await;
+    assert!(error.candidates.is_empty(), "{error:?}");
     server.running.shutdown().await.unwrap();
 }
 
@@ -129,22 +182,23 @@ async fn a_wildcard_to_a_person_without_agents_goes_to_the_person() {
 async fn in_process_callers_resolve_the_same_way() {
     let server = TestServer::start().await;
     let hub = server.running.hub.clone();
-    let wildcard = || question_to("senator::alice/*");
+    let wildcard = || question_to("senator::*");
 
-    // None: the person. One: the agent.
+    // None, with several people: refused. One: the agent.
+    assert!(matches!(
+        hub.resolve_and_append(wildcard()).await,
+        Err(HubError::Unresolved(ResolveError::NoAgent))
+    ));
+    seat(&server, &["copilot"]).await;
     let appended = hub.resolve_and_append(wildcard()).await.unwrap();
-    assert_eq!(appended.event.to, [person_addr("alice")]);
-    seat(&server, &["alice/claude"]).await;
-    let appended = hub.resolve_and_append(wildcard()).await.unwrap();
-    assert_eq!(appended.event.to, [person_addr("alice/claude")]);
+    assert_eq!(appended.event.to, [person_addr("copilot")]);
 
     // Several: nothing is appended, and the candidates come back.
-    seat(&server, &["alice/codex"]).await;
+    seat(&server, &["codex"]).await;
     let head = hub.read(&committee(), Seq::ZERO, 10).await.unwrap().len();
     match hub.resolve_and_append(wildcard()).await {
-        Err(HubError::Unresolved(ResolveError::Ambiguous { owner, candidates })) => {
-            assert_eq!(owner, name("alice"));
-            assert_eq!(candidates, [path("alice/claude"), path("alice/codex")]);
+        Err(HubError::Unresolved(ResolveError::Ambiguous { candidates })) => {
+            assert_eq!(candidates, [path("copilot"), path("codex")]);
         }
         other => panic!("expected the candidates, got {other:?}"),
     }
@@ -283,7 +337,7 @@ async fn the_auth_seam_can_be_swapped_for_a_fake() {
 
     // What the person may do is still the roster's rule, not the fake's: carol
     // is carol, and her agents are hers.
-    let own = NewEvent::new(committee(), Kind::Note, person_addr("carol/claude"), "hi");
+    let own = NewEvent::new(committee(), Kind::Note, person_addr("aider"), "hi");
     let ok = server.post_event("sso-ticket-42", &own).await;
     assert_eq!(ok.status(), StatusCode::OK);
     let theirs = NewEvent::new(committee(), Kind::Note, person_addr("alice"), "hi");
@@ -311,7 +365,7 @@ async fn a_person_the_roster_does_not_know_may_act_as_nobody() {
         running,
         client: reqwest::Client::new(),
     };
-    for from in ["mallory", "mallory/claude"] {
+    for from in ["mallory", "cline"] {
         let event = NewEvent::new(committee(), Kind::Note, person_addr(from), "hi");
         api_error(
             server.post_event("t", &event).await,
@@ -324,18 +378,17 @@ async fn a_person_the_roster_does_not_know_may_act_as_nobody() {
 }
 
 #[tokio::test]
-async fn the_roster_seam_takes_a_roster_and_any_level() {
-    // A nested Senate, presided over by alice/claude: it seats only agents
-    // directly under her, and the presider comes from the roster.
-    let nested = Roster::under(
-        path("alice/claude"),
-        vec![Senior::new(name("alice")), Senior::new(name("bob"))],
-        vec![path("alice/claude/reviewer")],
+async fn the_roster_seam_takes_a_roster() {
+    // A roster from somewhere other than configuration: alice and bob, and
+    // alice's reviewer seated from the start.
+    let given = Roster::new(
+        vec![Principal::new(name("alice")), Principal::new(name("bob"))],
+        vec![seated("reviewer", "alice")],
     )
     .unwrap();
     let config = ServerConfig::new(roster(), tokens());
     let running = Server::builder(config, Arc::new(MemoryStore::new()))
-        .roster(nested)
+        .roster(given)
         .start()
         .await
         .unwrap();
@@ -351,29 +404,25 @@ async fn the_roster_seam_takes_a_roster_and_any_level() {
         .json()
         .await
         .unwrap();
-    assert_eq!(me.presider, Some(path("alice/claude")));
-    assert_eq!(me.agents, [path("alice/claude/reviewer")]);
+    assert_eq!(me.agents, [path("reviewer")]);
+    assert_eq!(
+        me.people.handles().cloned().collect::<Vec<_>>(),
+        [name("alice"), name("bob")]
+    );
+    assert_eq!(me.senate, name("senate"));
 
     let f = committee();
-    let post = |from: &str| {
+    let post = |token: &'static str, from: &str| {
         let event = NewEvent::new(f.clone(), Kind::Note, person_addr(from), "hi");
         let server = &server;
-        async move { server.post_event(ALICE, &event).await.status() }
+        async move { server.post_event(token, &event).await.status() }
     };
-    assert_eq!(post("alice").await, StatusCode::OK, "people are global");
-    assert_eq!(
-        post("alice/claude/tester").await,
-        StatusCode::OK,
-        "seated now"
-    );
-    // The presider's own seat is upstairs, and its own subagents are not
-    // seated beside it.
-    assert_eq!(post("alice/claude").await, StatusCode::FORBIDDEN);
-    assert_eq!(post("alice/codex").await, StatusCode::FORBIDDEN);
-    assert_eq!(
-        post("alice/claude/tester/deeper").await,
-        StatusCode::FORBIDDEN
-    );
+    assert_eq!(post(ALICE, "alice").await, StatusCode::OK);
+    assert_eq!(post(ALICE, "reviewer").await, StatusCode::OK, "seated");
+    assert_eq!(post(ALICE, "tester").await, StatusCode::OK, "seated now");
+    // Each is alice's: bob runs neither.
+    assert_eq!(post(BOB, "reviewer").await, StatusCode::FORBIDDEN);
+    assert_eq!(post(BOB, "tester").await, StatusCode::FORBIDDEN);
 
     // Carol is in the configuration but not in the roster passed in.
     let carol = NewEvent::new(f.clone(), Kind::Note, person_addr("carol"), "hi");
@@ -387,19 +436,78 @@ async fn the_roster_seam_takes_a_roster_and_any_level() {
 }
 
 #[tokio::test]
-async fn the_presider_and_locale_come_from_configuration() {
+async fn two_people_cannot_run_agents_under_one_name() {
+    let server = TestServer::start().await;
+    let f = committee();
+    // Alice acts as claude first: she runs it.
+    assert_eq!(server.act_as(ALICE, "claude").await, StatusCode::OK);
+
+    // Bob can take that name by no route: not by a heartbeat, a stream, a
+    // cursor or an append.
+    api_error(
+        server.heartbeat(BOB, "claude").await,
+        StatusCode::FORBIDDEN,
+        "forbidden",
+    )
+    .await;
+    api_error(
+        server.try_stream(BOB, Some("claude"), None, None).await,
+        StatusCode::FORBIDDEN,
+        "forbidden",
+    )
+    .await;
+    assert_eq!(server.act_as(BOB, "claude").await, StatusCode::FORBIDDEN);
+    api_error(
+        server
+            .post_event(
+                BOB,
+                &NewEvent::new(f.clone(), Kind::Note, person_addr("claude"), "mine"),
+            )
+            .await,
+        StatusCode::FORBIDDEN,
+        "forbidden",
+    )
+    .await;
+    // Nor a person's handle: a person and an agent share one namespace.
+    assert_eq!(server.act_as(BOB, "carol").await, StatusCode::FORBIDDEN);
+
+    // His own agent goes by another name.
+    assert_eq!(server.act_as(BOB, "codex").await, StatusCode::OK);
+    let roster = server.running.hub.roster().await.unwrap();
+    assert_eq!(roster.owner_of(&path("claude")), Some(&name("alice")));
+    assert_eq!(roster.owner_of(&path("codex")), Some(&name("bob")));
+    for (token, agents) in [(ALICE, [path("claude")]), (BOB, [path("codex")])] {
+        let me: Me = server
+            .request(Method::GET, "/v1/me", token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(me.agents, agents);
+    }
+    server.running.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn the_senate_name_the_speaker_and_the_locale_come_from_configuration() {
     let mut config = ServerConfig::from_toml_str(
         r#"
+        name = "north-desk"
         listen = "127.0.0.1:0"
         database_url = "memory:"
         locale = "en"
 
         [roster]
-        presider = "alice/claude"
-        agents = ["alice/claude/reviewer"]
+        speaker = "copilot"
+        agents = [{ name = "copilot", owner = "alice" }]
 
-        [[roster.seniors]]
+        [[roster.principals]]
         handle = "alice"
+
+        [[roster.principals]]
+        handle = "bob"
 
         [[tokens]]
         person = "alice"
@@ -412,8 +520,14 @@ async fn the_presider_and_locale_come_from_configuration() {
         .await
         .unwrap();
     assert_eq!(running.hub.locale(), Locale::En);
+    assert_eq!(running.hub.senate_name(), &name("north-desk"));
+    assert_eq!(
+        running.hub.speaker_seat(),
+        Some(&SpeakerSeat::Senator(path("copilot")))
+    );
     let seated = running.hub.roster().await.unwrap();
-    assert_eq!(seated.presider(), Some(&path("alice/claude")));
+    assert_eq!(seated.named_speaker(), Some(&path("copilot")));
+    assert_eq!(seated.owner_of(&path("copilot")), Some(&name("alice")));
     running.shutdown().await.unwrap();
 
     let top = Server::start(
@@ -423,21 +537,26 @@ async fn the_presider_and_locale_come_from_configuration() {
     .await
     .unwrap();
     assert_eq!(top.hub.locale(), Locale::default());
-    assert_eq!(top.hub.roster().await.unwrap().presider(), None);
+    assert_eq!(top.hub.senate_name(), &name("senate"));
+    assert_eq!(top.hub.speaker_seat(), None);
+    assert_eq!(top.hub.roster().await.unwrap().named_speaker(), None);
     top.shutdown().await.unwrap();
 }
 
 #[tokio::test]
 async fn people_can_be_replaced_while_agents_stay_seated() {
     let server = TestServer::start().await;
-    seat(&server, &["alice/claude"]).await;
+    seat(&server, &["copilot"]).await;
     let hub = server.running.hub.clone();
-    hub.set_seniors(vec![Senior::new(name("alice")), Senior::new(name("dave"))])
-        .unwrap();
+    hub.set_principals(vec![
+        Principal::new(name("alice")),
+        Principal::new(name("dave")),
+    ])
+    .unwrap();
     let roster = hub.roster().await.unwrap();
-    assert!(roster.senior(&name("dave")).is_some());
-    assert!(roster.senior(&name("bob")).is_none());
-    assert_eq!(roster.agents(), [path("alice/claude")]);
+    assert!(roster.principal(&name("dave")).is_some());
+    assert!(roster.principal(&name("bob")).is_none());
+    assert_eq!(roster.agents(), [path("copilot")]);
 
     // Bob's token still authenticates, but he is nobody here now.
     let event = NewEvent::new(committee(), Kind::Note, person_addr("bob"), "hi");
@@ -462,16 +581,14 @@ async fn two_agents_of_one_person_have_separate_presence() {
     server.append("hello").await;
 
     // claude has a stream; codex only heartbeats once and then goes quiet.
-    let stream = server
-        .stream_as(ALICE, Some("alice/claude"), None, None)
-        .await;
-    seat(&server, &["alice/claude", "alice/codex"]).await;
-    assert!(hub.is_agent_connected(&f, &path("alice/claude")).await);
-    assert!(!hub.is_agent_connected(&f, &path("alice/codex")).await);
+    let stream = server.stream_as(ALICE, Some("copilot"), None, None).await;
+    seat(&server, &["copilot", "codex"]).await;
+    assert!(hub.is_agent_connected(&f, &path("copilot")).await);
+    assert!(!hub.is_agent_connected(&f, &path("codex")).await);
 
     // Keep claude alive; codex is silent past the disconnect window.
     for _ in 0..8 {
-        seat(&server, &["alice/claude"]).await;
+        seat(&server, &["copilot"]).await;
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
     let page: PresencePage = server
@@ -488,8 +605,8 @@ async fn two_agents_of_one_person_have_separate_presence() {
             .find(|a| a.agent == path(agent))
             .map(|a| a.state)
     };
-    assert_eq!(state("alice/claude"), Some(PresenceState::Online));
-    assert_eq!(state("alice/codex"), Some(PresenceState::Disconnected));
+    assert_eq!(state("copilot"), Some(PresenceState::Online));
+    assert_eq!(state("codex"), Some(PresenceState::Disconnected));
     assert_eq!(
         state("alice"),
         None,
@@ -515,43 +632,70 @@ async fn two_agents_of_one_person_have_separate_presence() {
     server.running.shutdown().await.unwrap();
 }
 
+/// Replaces "a restart seats the agents it finds in the log again" (which
+/// asserted that, with several people, who runs each agent was lost on
+/// restart and the first person to act as it again claimed it): seats are
+/// kept in the store's registry, so every agent sits again under the
+/// principal that ran it.
 #[tokio::test]
-async fn a_restart_seats_the_agents_it_finds_in_the_log_again() {
+async fn a_restart_seats_the_agents_again_under_the_principals_that_run_them() {
     let store: Arc<dyn senate_log::LogStore> = Arc::new(MemoryStore::new());
     let first = TestServer::start_configured(store.clone(), |_| {}).await;
-    seat(&first, &["alice/claude", "alice/codex"]).await;
+    seat(&first, &["copilot", "codex"]).await;
     // An agent that only ever wrote: no stream, no heartbeat.
-    let wrote = NewEvent::new(committee(), Kind::Note, person_addr("bob/claude"), "hello");
+    let wrote = NewEvent::new(committee(), Kind::Note, person_addr("claude"), "hello");
     assert_eq!(first.post_event(BOB, &wrote).await.status(), StatusCode::OK);
     first.running.shutdown().await.unwrap();
 
-    // Seats are not stored, but the log and the heartbeats are: the server
-    // that comes back seats every agent again before it serves anything, so
-    // `senator::alice/*` resolves against both of hers from the first
-    // request, and the roster in-process components read at their start is
-    // the whole one.
+    // The server that comes back seats every agent again before it serves
+    // anything, so `senator::*` resolves against the two on the committee
+    // from the first request, and the roster in-process components read at
+    // their start is the whole one.
     let second = TestServer::start_configured(store, |_| {}).await;
-    let mut seated: Vec<String> = second
+    let roster = second.running.hub.roster().await.unwrap();
+    let mut seated: Vec<String> = roster.agents().iter().map(ToString::to_string).collect();
+    seated.sort();
+    assert_eq!(seated, ["claude", "codex", "copilot"]);
+    // Two principals, and each agent is still its own principal's.
+    assert_eq!(roster.owner_of(&path("claude")), Some(&name("bob")));
+    assert_eq!(roster.owner_of(&path("copilot")), Some(&name("alice")));
+    assert_eq!(roster.owner_of(&path("codex")), Some(&name("alice")));
+    let agents_of = |token: &'static str| {
+        let request = second.request(Method::GET, "/v1/me", token);
+        async move {
+            request
+                .send()
+                .await
+                .unwrap()
+                .json::<Me>()
+                .await
+                .unwrap()
+                .agents
+        }
+    };
+    assert_eq!(agents_of(BOB).await, [path("claude")]);
+    let mut alices = agents_of(ALICE).await;
+    alices.sort();
+    assert_eq!(alices, [path("codex"), path("copilot")]);
+
+    let mut on = second
         .running
         .hub
-        .roster()
-        .await
-        .unwrap()
-        .agents()
-        .iter()
-        .map(ToString::to_string)
-        .collect();
-    seated.sort();
-    assert_eq!(seated, ["alice/claude", "alice/codex", "bob/claude"]);
-    let me: Me = second
-        .request(Method::GET, "/v1/me", BOB)
-        .send()
-        .await
-        .unwrap()
-        .json()
+        .committee_agents(&committee())
         .await
         .unwrap();
-    assert_eq!(me.agents, [path("bob/claude")]);
+    on.sort();
+    assert_eq!(on, [path("codex"), path("copilot")]);
+    let error = api_error(
+        second.post_event(BOB, &question_to("senator::*")).await,
+        StatusCode::CONFLICT,
+        "ambiguous_recipient",
+    )
+    .await;
+    assert_eq!(error.candidates.len(), 2, "{error:?}");
+    // Nobody else acts as an agent kept as another principal's.
+    assert_eq!(second.act_as(ALICE, "claude").await, StatusCode::FORBIDDEN);
+    assert_eq!(second.act_as(BOB, "codex").await, StatusCode::FORBIDDEN);
     second.running.shutdown().await.unwrap();
 }
 
@@ -565,14 +709,10 @@ async fn a_stream_without_a_senator_reads_everything_and_counts_for_nobody() {
     assert!(!hub.is_agent_connected(&committee(), &path("alice")).await);
 
     // Naming someone else's agent is refused, and attaches nothing.
-    let response = server
-        .try_stream(ALICE, Some("bob/claude"), None, None)
-        .await;
+    assert_eq!(server.act_as(BOB, "claude").await, StatusCode::OK);
+    let response = server.try_stream(ALICE, Some("claude"), None, None).await;
     api_error(response, StatusCode::FORBIDDEN, "forbidden").await;
-    assert!(
-        !hub.is_agent_connected(&committee(), &path("bob/claude"))
-            .await
-    );
+    assert!(!hub.is_agent_connected(&committee(), &path("claude")).await);
     server.running.shutdown().await.unwrap();
 }
 
@@ -582,7 +722,7 @@ async fn an_agent_may_not_decide_but_its_person_may() {
     let decision =
         |from: &str| NewEvent::new(committee(), Kind::Decision, person_addr(from), "limit 30");
     api_error(
-        server.post_event(ALICE, &decision("alice/claude")).await,
+        server.post_event(ALICE, &decision("copilot")).await,
         StatusCode::FORBIDDEN,
         "forbidden",
     )

@@ -377,7 +377,7 @@ async fn recall_replies_with_the_brief_in_chinese() {
     assert!(text.contains("：退款上限 30 天\n"), "{text}");
     assert!(
         text.contains(&format!(
-            "待回答的问题：\n- seq {} · [senator::alice/claude] → [senator::bob/claude]：网关用哪个 header？",
+            "待回答的问题：\n- seq {} · [senator::claude] → [senator::copilot]：网关用哪个 header？",
             asked.seq
         )),
         "{text}"
@@ -407,7 +407,7 @@ async fn an_agent_proposal_is_posted_and_a_members_yes_records_it_once() {
     assert_eq!(
         posts[0].markdown,
         format!(
-            "[senator::alice/claude] 提议记为决策：幂等键统一用 Idempotency-Key（seq {}）回复「对」确认",
+            "[senator::claude] 提议记为决策：幂等键统一用 Idempotency-Key（seq {}）回复「对」确认",
             proposed.seq
         )
     );
@@ -468,7 +468,7 @@ async fn an_agent_proposal_is_posted_and_a_members_yes_records_it_once() {
     assert_eq!(decision.body, "幂等键统一用 Idempotency-Key");
     assert_eq!(
         decision.meta.get(meta::PROPOSED_BY),
-        Some(&json!("senator::alice/claude"))
+        Some(&json!("senator::claude"))
     );
     assert_eq!(
         decision.meta.get(meta::RELAYED_FROM),
@@ -551,7 +551,7 @@ async fn in_english_a_proposal_is_posted_and_a_members_yes_records_it() {
     assert_eq!(
         root.markdown,
         format!(
-            "[senator::alice/claude] proposes a decision: Idempotency key is Idempotency-Key (seq {}). Reply \"yes\" to confirm.",
+            "[senator::claude] proposes a decision: Idempotency key is Idempotency-Key (seq {}). Reply \"yes\" to confirm.",
             proposed.seq
         )
     );
@@ -701,7 +701,7 @@ async fn a_brief_top_is_never_mirrored() {
     rig.settle().await;
     let said = rig.surface.texts();
     assert_eq!(said.len(), 2, "{said:?}");
-    assert_eq!(said[1], "[senator::bob/claude] Idempotency-Key");
+    assert_eq!(said[1], "[senator::copilot] Idempotency-Key");
 }
 
 #[tokio::test]
@@ -740,7 +740,7 @@ async fn with_two_groups_agents_talk_in_the_first_still_bound_and_people_hear_ba
     assert_eq!(posts.len(), 3, "{posts:#?}");
     assert_eq!(posts[1].target, reply_to("m_p1"));
     assert_eq!(posts[2].target, reply_to("m_p1"));
-    assert_eq!(posts[2].markdown, "[senator::alice/claude] 30 天");
+    assert_eq!(posts[2].markdown, "[senator::claude] 30 天");
     let copies = rig
         .hub
         .mirrors_of_seq(&refund(), relay.seq, PLATFORM)

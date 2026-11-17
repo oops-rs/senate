@@ -21,18 +21,7 @@ const BIN: &str = env!("CARGO_BIN_EXE_senate");
 /// `senate <args>` on `h`'s daemon, with `stdin` when given.
 async fn senate(h: &Harness, args: &[&str], stdin: Option<&str>, cwd: Option<&Path>) -> Output {
     let mut cmd = Command::new(BIN);
-    for var in [
-        "CLAUDE_CODE_MESSAGING_SOCKET",
-        "CLAUDE_CODE_MESSAGING_TOKEN",
-        "CLAUDE_CODE_SESSION_ID",
-        "CLAUDE_PID",
-        "CLAUDE_CONFIG_DIR",
-        "CODEX_HOME",
-        "RUST_LOG",
-        "SENATE_AGENT",
-    ] {
-        cmd.env_remove(var);
-    }
+    senate_bridge::testenv::isolate(&mut cmd, h.dir.path());
     cmd.env("HOME", h.dir.path())
         .env("SENATE_HOME", h.paths.home())
         .args(args)
@@ -111,7 +100,7 @@ async fn ask_names_an_agent_relative_to_you_and_says_where_it_went() {
     assert_eq!(
         out(&o).lines().next().unwrap(),
         format!(
-            "Sent a question on refund-v2: thread {}, to [senator::alice/claude].",
+            "Sent a question on refund-v2: thread {}, to [senator::claude].",
             sent.seq
         )
     );
@@ -145,11 +134,11 @@ async fn ask_names_an_agent_relative_to_you_and_says_where_it_went() {
     );
     assert!(
         text.contains("[senator::alice] · ")
-            && text.contains(" UTC · question · to [senator::alice/claude]"),
+            && text.contains(" UTC · question · to [senator::claude]"),
         "{text}"
     );
     assert!(
-        text.contains("[senator::alice/claude] · ") && text.contains(" · answer"),
+        text.contains("[senator::claude] · ") && text.contains(" · answer"),
         "{text}"
     );
     assert!(
@@ -179,7 +168,7 @@ async fn tell_is_a_note_and_request_is_a_request() {
         &h,
         &[
             "tell",
-            "alice/claude",
+            "claude",
             "the",
             "retry",
             "is",
@@ -201,7 +190,7 @@ async fn tell_is_a_note_and_request_is_a_request() {
     assert_eq!(
         out(&o).trim(),
         format!(
-            "Sent a note on refund-v2 (seq {}) to [senator::alice/claude].",
+            "Sent a note on refund-v2 (seq {}) to [senator::claude].",
             note.seq
         )
     );
@@ -210,7 +199,7 @@ async fn tell_is_a_note_and_request_is_a_request() {
         &h,
         &[
             "request",
-            "bob/claude",
+            "copilot",
             "bump",
             "the",
             "SDK",
@@ -263,7 +252,7 @@ async fn whichever_agent_resolves_and_says_what_it_resolved_to() {
             .lines()
             .next()
             .unwrap()
-            .ends_with("to [senator::alice/claude] (you wrote [senator::alice/*])."),
+            .ends_with("to [senator::claude] (you wrote [senator::*])."),
         "{}",
         out(&o)
     );
@@ -273,9 +262,9 @@ async fn whichever_agent_resolves_and_says_what_it_resolved_to() {
 async fn an_ambiguous_recipient_lists_the_candidates_and_fails() {
     for zh in [false, true] {
         let h = machine(zh).await;
-        h.server.seat("alice/codex");
+        h.server.seat("codex", "alice");
         let before = h.server.events("refund-v2").len();
-        for to in ["*", "alice/*"] {
+        for to in ["*", "senator::*"] {
             let o = senate(
                 &h,
                 &["ask", to, "which?", "--committee", "refund-v2"],
@@ -286,19 +275,19 @@ async fn an_ambiguous_recipient_lists_the_candidates_and_fails() {
             assert!(!o.status.success());
             let text = err(&o);
             assert!(
-                text.contains("[senator::alice/claude], [senator::alice/codex]"),
+                text.contains("[senator::claude], [senator::codex]"),
                 "{text}"
             );
             if zh {
                 assert!(
-                    text.contains("在这里有好几个 agent")
-                        && text.contains("senate ask alice/claude"),
+                    text.contains("[senator::*] 在这个委员会上有好几个 agent")
+                        && text.contains("senate ask claude"),
                     "{text}"
                 );
             } else {
                 assert!(
-                    text.contains("has several agents here")
-                        && text.contains("`senate ask alice/claude …`"),
+                    text.contains("[senator::*] could reach several agents on this committee")
+                        && text.contains("`senate ask claude …`"),
                     "{text}"
                 );
             }
@@ -429,7 +418,7 @@ async fn reply_speaks_in_the_thread_to_whoever_took_part() {
     assert_eq!(
         out(&o).trim(),
         format!(
-            "Replied in thread {root} on refund-v2 (seq {}), to [senator::alice/claude].",
+            "Replied in thread {root} on refund-v2 (seq {}), to [senator::claude].",
             said.seq
         )
     );
@@ -516,7 +505,7 @@ async fn wait_stays_until_the_answer_arrives_and_prints_it_with_its_byline() {
     );
     assert!(
         text.trim_end().ends_with(&format!(
-            "[senator::alice/claude] answered in thread {root}:\nIdempotency-Key"
+            "[senator::claude] answered in thread {root}:\nIdempotency-Key"
         )),
         "{text}"
     );
@@ -577,7 +566,7 @@ async fn everything_is_said_in_the_daemons_language() {
     let text = out(&o);
     assert!(
         text.starts_with(&format!(
-            "已发出 question 到 refund-v2：thread {root}，给 [senator::alice/claude]（你写的是 [senator::alice/*]）。"
+            "已发出 question 到 refund-v2：thread {root}，给 [senator::claude]（你写的是 [senator::*]）。"
         )),
         "{text}"
     );
@@ -697,7 +686,7 @@ async fn the_inbox_lists_what_came_back_to_the_person_until_they_read_it() {
             );
             assert!(text.contains("对你是新的"), "{text}");
             assert!(
-                text.contains("[senator::alice/claude] 把它转给了你：\n      1. which header?\n      2. which table?"),
+                text.contains("[senator::claude] 把它转给了你：\n      1. which header?\n      2. which table?"),
                 "{text}"
             );
             assert!(text.contains("读：`senate thread "), "{text}");
@@ -711,7 +700,7 @@ async fn the_inbox_lists_what_came_back_to_the_person_until_they_read_it() {
                 "{text}"
             );
             assert!(
-                text.contains("[senator::alice/claude] escalated this to you:\n      1. which header?\n      2. which table?"),
+                text.contains("[senator::claude] escalated this to you:\n      1. which header?\n      2. which table?"),
                 "{text}"
             );
             assert!(text.contains("read: `senate thread "), "{text}");
@@ -889,7 +878,7 @@ async fn request_wait_returns_on_an_answer_or_an_escalation_and_otherwise_times_
     assert!(o.status.success(), "{}", err(&o));
     assert!(
         out(&o).trim_end().ends_with(&format!(
-            "[senator::alice/claude] answered in thread {root}:\nDone"
+            "[senator::claude] answered in thread {root}:\nDone"
         )),
         "{}",
         out(&o)
@@ -927,11 +916,11 @@ async fn request_wait_returns_on_an_answer_or_an_escalation_and_otherwise_times_
         let text = out(&o);
         let expected = if zh {
             format!(
-                "[senator::alice/claude] 把 thread {root} 转给了你：\n1. which header?\n2. which table?\n用 `senate reply {root} <文字>` 回复。"
+                "[senator::claude] 把 thread {root} 转给了你：\n1. which header?\n2. which table?\n用 `senate reply {root} <文字>` 回复。"
             )
         } else {
             format!(
-                "[senator::alice/claude] escalated thread {root} to you:\n1. which header?\n2. which table?\nReply with `senate reply {root} <text>`."
+                "[senator::claude] escalated thread {root} to you:\n1. which header?\n2. which table?\nReply with `senate reply {root} <text>`."
             )
         };
         assert!(text.trim_end().ends_with(&expected), "{text}");
@@ -1010,9 +999,9 @@ struct Watcher {
 impl Watcher {
     fn start(h: &Harness, args: &[&str]) -> Self {
         let mut cmd = Command::new(BIN);
+        senate_bridge::testenv::isolate(&mut cmd, h.dir.path());
         cmd.env("HOME", h.dir.path())
             .env("SENATE_HOME", h.paths.home())
-            .env_remove("SENATE_AGENT")
             .arg("watch")
             .args(args)
             .stdin(Stdio::null())
@@ -1136,15 +1125,15 @@ async fn watch_prints_each_kind_addressed_to_the_person_and_nothing_else() {
         let (answer, note, esc) = (&blocks[0], &blocks[1], &blocks[2]);
         if zh {
             assert!(
-                answer.starts_with("[senator::alice/claude] 回答了 · "),
+                answer.starts_with("[senator::claude] 回答了 · "),
                 "{answer}"
             );
             assert!(
-                note.starts_with("[senator::alice/claude] 留了一条 note · "),
+                note.starts_with("[senator::claude] 留了一条 note · "),
                 "{note}"
             );
             assert!(
-                esc.starts_with("[senator::alice/claude] 把它转给了你 · "),
+                esc.starts_with("[senator::claude] 把它转给了你 · "),
                 "{esc}"
             );
             assert!(
@@ -1153,15 +1142,15 @@ async fn watch_prints_each_kind_addressed_to_the_person_and_nothing_else() {
             );
         } else {
             assert!(
-                answer.starts_with("[senator::alice/claude] answered · "),
+                answer.starts_with("[senator::claude] answered · "),
                 "{answer}"
             );
             assert!(
-                note.starts_with("[senator::alice/claude] left a note · "),
+                note.starts_with("[senator::claude] left a note · "),
                 "{note}"
             );
             assert!(
-                esc.starts_with("[senator::alice/claude] escalated this to you · "),
+                esc.starts_with("[senator::claude] escalated this to you · "),
                 "{esc}"
             );
             assert!(
@@ -1264,7 +1253,7 @@ async fn the_desktop_is_told_once_per_burst_and_says_who_and_the_first_line() {
         rec.posted(),
         [(
             "Senate · refund-v2".to_string(),
-            "[senator::alice/claude] answered: Plan is ready".to_string()
+            "[senator::claude] answered: Plan is ready".to_string()
         )]
     );
     // A burst: several events within the window are one notification.
@@ -1284,7 +1273,7 @@ async fn the_desktop_is_told_once_per_burst_and_says_who_and_the_first_line() {
     assert_eq!(posted.len(), 2, "{posted:?}");
     assert_eq!(
         posted[1].1,
-        "3 new for you, the latest: [senator::alice/claude] escalated this to you: three"
+        "3 new for you, the latest: [senator::claude] escalated this to you: three"
     );
     // Not for the person: nothing.
     h.server.append(

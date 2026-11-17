@@ -93,7 +93,7 @@ impl Fixture {
             run_id: 7,
             requester: Name::new("bob").unwrap(),
             on_behalf_of: "Bob".into(),
-            target_agent: "alice/claude".parse().unwrap(),
+            target_agent: "claude".parse().unwrap(),
             instruction: "把 alice 的重试路径做完".into(),
             repo: RepoRef::from_url(&format!("file://{}", self.origin.display())).unwrap(),
             base_branch: "feature/refund-v2/alice".into(),

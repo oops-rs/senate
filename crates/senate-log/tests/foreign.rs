@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::str::FromStr;
 
-use senate_core::{Address, CommitteeId, EventId, Kind, NewEvent, SenatorPath};
+use senate_core::{Address, CommitteeId, EventId, Kind, NewEvent, SenatorName};
 use senate_log::{LogError, LogStore, PgStore, SqliteStore};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{AssertSqlSafe, PgPool};
@@ -175,7 +175,7 @@ fn note(body: &str) -> NewEvent {
     NewEvent::new(
         committee(),
         Kind::Note,
-        Address::Senator("alice".parse::<SenatorPath>().unwrap()),
+        Address::Senator("alice".parse::<SenatorName>().unwrap()),
         body,
     )
 }

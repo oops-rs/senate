@@ -213,7 +213,7 @@ async fn steps_after_a_bind_wait_for_the_confirmation_and_run_on_the_new_committ
         "{plan}"
     );
     assert!(
-        plan.contains("2. 在 refund-v3 转告 [senator::bob/claude]：「改到 v3 了」"),
+        plan.contains("2. 在 refund-v3 转告 [senator::copilot]：「改到 v3 了」"),
         "{plan}"
     );
     assert!(plan.contains("3. 在 refund-v3 查看本群的绑定"), "{plan}");
@@ -235,7 +235,7 @@ async fn steps_after_a_bind_wait_for_the_confirmation_and_run_on_the_new_committ
         .into_iter()
         .find(|t| t.contains("1. 已执行"))
         .unwrap();
-    assert!(result.contains("已转给 [senator::bob/claude]"), "{result}");
+    assert!(result.contains("已转给 [senator::copilot]"), "{result}");
     assert!(result.contains("3. 已执行"), "{result}");
     rig.stop().await;
 }
@@ -956,7 +956,7 @@ async fn a_guests_plan_is_refused_step_by_step_and_nothing_waits_for_a_yes() {
 async fn rig_with_two_agents_of_alice() -> Rig {
     let hub = MemoryHub::new();
     hub.append(bind_event(&refund(), GROUP)).await.unwrap();
-    hub.seat(&path("alice/codex"));
+    hub.seat(&path("codex"), "alice");
     start(hub, FakeSurface::new(), ScriptedBrain::new()).await
 }
 
@@ -982,8 +982,8 @@ async fn a_relay_to_a_person_with_several_agents_asks_which_and_the_answer_carri
         "{}",
         ask.markdown
     );
-    assert!(ask.markdown.contains("1. [senator::alice/claude] 不在线"));
-    assert!(ask.markdown.contains("2. [senator::alice/codex] 不在线"));
+    assert!(ask.markdown.contains("1. [senator::claude] 不在线"));
+    assert!(ask.markdown.contains("2. [senator::codex] 不在线"));
     assert!(
         matches!(
             &ask.target,
@@ -1024,7 +1024,7 @@ async fn a_relay_to_a_person_with_several_agents_asks_which_and_the_answer_carri
         rig.surface
             .texts()
             .iter()
-            .any(|t| t.contains("已转给 [senator::alice/codex]")),
+            .any(|t| t.contains("已转给 [senator::codex]")),
         "{:?}",
         rig.surface.texts()
     );
@@ -1040,7 +1040,7 @@ async fn a_relay_to_one_agent_named_outright_goes_straight_there() {
     rig.brain.converses(Ok(AgentTurn::act(
         "",
         vec![Intent::Relay {
-            targets: vec!["alice/codex".into()],
+            targets: vec!["codex".into()],
             kind: RelayKind::Question,
             body: "重试上限是多少？".into(),
         }],

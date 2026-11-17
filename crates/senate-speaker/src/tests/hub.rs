@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use senate_core::{
     Appended, CommitteeId, Event, EventId, Hub, HubError, MirrorRef, Name, NewEvent, Roster,
-    SenatorPath, Seq,
+    SenatorName, Seq,
 };
 use tokio::sync::broadcast;
 
@@ -17,8 +17,9 @@ struct State {
     logs: BTreeMap<CommitteeId, Vec<Event>>,
     cursors: HashMap<(CommitteeId, String), Seq>,
     mirrors: Vec<MirrorRef>,
-    connected: HashSet<(CommitteeId, SenatorPath)>,
+    connected: HashSet<(CommitteeId, SenatorName)>,
     roster: Roster,
+    children: Vec<senate_core::ChildSenate>,
     last_ts: Option<DateTime<Utc>>,
     gets: usize,
     reads: usize,
@@ -82,15 +83,20 @@ impl MemoryHub {
 
     /// `agent`'s own connection, as its bridge's stream would make it.
     /// Seats it first, as the server does on first contact.
-    pub(crate) fn connect(&self, committee: &CommitteeId, agent: &SenatorPath) {
+    pub(crate) fn connect(&self, committee: &CommitteeId, agent: &SenatorName) {
         let mut state = self.lock();
-        let _ = state.roster.seat(agent.clone());
+        let _ = state.roster.seat_again(agent.clone());
         state.connected.insert((committee.clone(), agent.clone()));
     }
 
-    /// Seat another agent in the Senate (its first contact), unconnected.
-    pub(crate) fn seat(&self, agent: &SenatorPath) {
-        self.lock().roster.seat(agent.clone()).expect("seatable");
+    /// Seat another agent in the Senate under `owner`, the person who runs
+    /// it (its first contact), unconnected.
+    pub(crate) fn seat(&self, agent: &SenatorName, owner: &str) {
+        let owner = Name::new(owner).expect("handle");
+        self.lock()
+            .roster
+            .seat(agent.clone(), &owner)
+            .expect("seatable");
     }
 
     /// Replace the roster, e.g. with one that has guests' people missing.
@@ -98,7 +104,16 @@ impl MemoryHub {
         self.lock().roster = roster;
     }
 
-    pub(crate) fn disconnect(&self, committee: &CommitteeId, agent: &SenatorPath) {
+    /// Register the child Senate `name`, whose Speaker is `speaker` (a
+    /// person here).
+    pub(crate) fn add_child(&self, name: &str, speaker: &str) {
+        self.lock().children.push(senate_core::ChildSenate {
+            name: Name::new(name).expect("name"),
+            speaker: speaker.parse().expect("senator"),
+        });
+    }
+
+    pub(crate) fn disconnect(&self, committee: &CommitteeId, agent: &SenatorName) {
         self.lock()
             .connected
             .remove(&(committee.clone(), agent.clone()));
@@ -212,7 +227,26 @@ impl Hub for MemoryHub {
         Ok(self.lock().roster.clone())
     }
 
-    async fn is_agent_connected(&self, committee: &CommitteeId, agent: &SenatorPath) -> bool {
+    async fn children(&self) -> Result<Vec<senate_core::ChildSenate>, HubError> {
+        Ok(self.lock().children.clone())
+    }
+
+    /// The agents connected on `committee`, in roster order: like the
+    /// server, which counts the agents with a connection there.
+    async fn committee_agents(
+        &self,
+        committee: &CommitteeId,
+    ) -> Result<Vec<SenatorName>, HubError> {
+        let state = self.lock();
+        Ok(state
+            .roster
+            .agents()
+            .into_iter()
+            .filter(|a| state.connected.contains(&(committee.clone(), a.clone())))
+            .collect())
+    }
+
+    async fn is_agent_connected(&self, committee: &CommitteeId, agent: &SenatorName) -> bool {
         self.lock()
             .connected
             .contains(&(committee.clone(), agent.clone()))
@@ -291,14 +325,21 @@ impl Hub for MemoryHub {
     async fn reassign(
         &self,
         committee: &CommitteeId,
-        agent: &SenatorPath,
-        new_owner: &SenatorPath,
+        agent: &SenatorName,
+        new_owner: &SenatorName,
         by: &Name,
     ) -> Result<Option<Event>, HubError> {
         let page = self.presence(committee).await?;
-        let payload =
-            senate_core::reassign_transition(&page.agents, page.head, agent, new_owner, Utc::now())
-                .map_err(HubError::from)?;
+        let people = self.lock().roster.people();
+        let payload = senate_core::reassign_transition(
+            &page.agents,
+            &people,
+            page.head,
+            agent,
+            new_owner,
+            Utc::now(),
+        )
+        .map_err(HubError::from)?;
         let Some(payload) = payload else {
             return Ok(None);
         };

@@ -41,11 +41,15 @@ async fn a_restart_keeps_the_log_and_seats_the_agents_again() {
     let bob_inbox = bob.inbox("s-bob");
     alice.session_start("s-alice", &alice_inbox).await;
     bob.session_start("s-bob", &bob_inbox).await;
-    world.wait_connected("alice/claude", true).await;
-    world.wait_connected("bob/claude", true).await;
+    world.wait_connected("claude", true).await;
+    world.wait_connected(BOB_CLAUDE, true).await;
 
     let asked = alice
-        .ask("s-alice", claude("bob"), "q1: 网关幂等用哪个 header？")
+        .ask(
+            "s-alice",
+            senator(BOB_CLAUDE),
+            "q1: 网关幂等用哪个 header？",
+        )
         .await;
     bob_inbox.wait_for("q1:").await;
     bob.answer("s-bob", asked.seq, "a1: Idempotency-Key").await;
@@ -54,6 +58,7 @@ async fn a_restart_keeps_the_log_and_seats_the_agents_again() {
     let before = world.events().await;
     let epoch = world.hub().epoch().await.unwrap();
     let (alice_seen, bob_seen) = (alice_inbox.messages().len(), bob_inbox.messages().len());
+    assert_eq!(me(&world, "tok-bob").await.agents, [path(BOB_CLAUDE)]);
 
     // Bob's machine is off across the restart: only the log knows his agent.
     bob.close().await;
@@ -63,11 +68,13 @@ async fn a_restart_keeps_the_log_and_seats_the_agents_again() {
     assert_eq!(world.events().await, before, "every event kept");
     let roster = world.hub().roster().await.unwrap();
     assert!(
-        roster.agents().contains(&path("bob/claude")),
+        roster.agents().contains(&path(BOB_CLAUDE)),
         "seated again from the log: {:?}",
         roster.agents()
     );
-    assert_eq!(me(&world, "tok-bob").await.agents, [path("bob/claude")]);
+    // Who runs it is kept in the Senate's store: bob still answers for it
+    // after the restart.
+    assert_eq!(roster.owner_of(&path(BOB_CLAUDE)), Some(&name("bob")));
     assert_eq!(
         me(&world, "tok-alice").await.committees,
         [committee()],
@@ -83,7 +90,7 @@ async fn a_restart_keeps_the_log_and_seats_the_agents_again() {
     .await;
     assert_eq!(routed, committee());
     // Alice's bridge finds the server again on its own.
-    world.wait_connected("alice/claude", true).await;
+    world.wait_connected("claude", true).await;
 
     // The Speaker resumes from its cursor: nothing old is posted again.
     world.settle().await;
@@ -94,8 +101,10 @@ async fn a_restart_keeps_the_log_and_seats_the_agents_again() {
     );
 
     // And everything carries on, with seq continuing.
+    // Bob's agent by its name: until bob's bridge acts as it again, "bob's
+    // agent" would find none of his.
     world.brain.interprets(Ok(Intent::Relay {
-        targets: vec!["bob".into()],
+        targets: vec![BOB_CLAUDE.into()],
         kind: RelayKind::Question,
         body: "q2: 重试上限是几次？".into(),
     }));
@@ -116,6 +125,11 @@ async fn a_restart_keeps_the_log_and_seats_the_agents_again() {
         .find(|e| e.kind == Kind::Question && e.body.contains("q2:"))
         .unwrap();
     assert!(relayed.seq > before.last().unwrap().seq);
+    // Bob's bridge acted as it again: it is his once more.
+    eventually_async("bob runs his agent again", || async {
+        (me(&world, "tok-bob").await.agents == [path(BOB_CLAUDE)]).then_some(())
+    })
+    .await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(
         alice_inbox.messages().len(),

@@ -5,7 +5,7 @@
 //! each one starts from an item on the docket:
 //!
 //! - **Pick.** A person (or anyone who is not an agent) wrote to
-//!   `senator::<person>/*` and that person has several agents here. The
+//!   `senator::*` and several agents are on the committee. The
 //!   server stores the message addressed to `speaker` with
 //!   [`meta::PICK`] = a [`PickPayload`] naming the candidates
 //!   ([`Awaiting::Pick`]). The Speaker routes it to one of them as a relay
@@ -35,16 +35,20 @@ use crate::address::Address;
 use crate::continuity::PresenceState;
 use crate::event::{Event, Kind, StatusState, meta};
 use crate::ids::{CommitteeId, Name, Seq};
+use crate::locator::Locator;
 use crate::roster::SpeakerSeat;
-use crate::senator::SenatorPath;
+use crate::senator::SenatorName;
 use crate::task::StatusPayload;
 
 /// `meta["pick"]` on a message the server addressed to the Speaker because
 /// its sender wrote `senator::<owner>/*` and `owner` has several agents.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PickPayload {
-    pub owner: Name,
-    pub candidates: Vec<SenatorPath>,
+    /// The person whose agents these were, in a log written before names
+    /// were flat; absent since: `senator::*` names no person.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<Name>,
+    pub candidates: Vec<SenatorName>,
 }
 
 impl PickPayload {
@@ -65,14 +69,15 @@ impl PickPayload {
 pub enum Awaiting {
     /// Route it to one of `candidates` ([`PickPayload`]).
     Pick {
-        owner: Name,
-        candidates: Vec<SenatorPath>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<Name>,
+        candidates: Vec<SenatorName>,
     },
     /// It is addressed to the Speaker: answer it.
     Addressed,
     /// A question to `agents`, none of which is connected, with no answer:
     /// cover for one of them from its own checkpoint.
-    Away { agents: Vec<SenatorPath> },
+    Away { agents: Vec<SenatorName> },
 }
 
 /// One item awaiting the Speaker: the root event and why.
@@ -81,12 +86,16 @@ pub struct DocketItem {
     pub event: Event,
     #[serde(flatten)]
     pub awaiting: Awaiting,
+    /// The seat outside this committee the message was meant for
+    /// ([`meta::INTENDED`]), when it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intended: Option<Locator>,
 }
 
 /// The facts a Speaker picks and covers by, for one agent seated here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SeatFacts {
-    pub agent: SenatorPath,
+    pub agent: SenatorName,
     /// A live connection now: an open stream with a fresh heartbeat.
     pub connected: bool,
     /// Its presence on the committee, when it ever had one.
@@ -120,6 +129,9 @@ pub struct DocketPage {
     /// Who holds the Speaker's seat here; `None`: nobody presides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speaker: Option<SpeakerSeat>,
+    /// The Speaker's office: who the Speaker is and who works the desk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub office: Option<crate::roster::Office>,
     pub items: Vec<DocketItem>,
     pub seats: Vec<SeatFacts>,
     /// The last seq folded in.
@@ -193,6 +205,7 @@ impl SpeakerDocket {
                     },
                     None => Awaiting::Addressed,
                 },
+                intended: crate::locator::intended(event),
                 event: event.clone(),
             })
             .collect()
@@ -219,11 +232,8 @@ mod tests {
 
     fn pick(seq: u64) -> Event {
         let payload = PickPayload {
-            owner: Name::new("alice").unwrap(),
-            candidates: vec![
-                "alice/claude".parse().unwrap(),
-                "alice/codex".parse().unwrap(),
-            ],
+            owner: Some(Name::new("alice").unwrap()),
+            candidates: vec!["claude".parse().unwrap(), "codex".parse().unwrap()],
         };
         at(
             seq,
@@ -251,7 +261,7 @@ mod tests {
         // Someone else talking about it does not deal with it.
         docket.observe(&at(
             2,
-            NewEvent::new(c(), Kind::Note, addr("senator::alice/codex"), "hm").in_thread(Seq(1)),
+            NewEvent::new(c(), Kind::Note, addr("senator::codex"), "hm").in_thread(Seq(1)),
         ));
         assert_eq!(docket.items().len(), 1);
         docket.observe(&at(
@@ -262,7 +272,7 @@ mod tests {
                 Address::Speaker,
                 "who looks at refunds?",
             )
-            .to(addr("senator::alice/codex"))
+            .to(addr("senator::codex"))
             .on_behalf_of(addr("senator::alice"))
             .with_meta(meta::RELAYED_FROM, serde_json::json!(1)),
         ));
@@ -278,7 +288,7 @@ mod tests {
         let ask = |seq| {
             at(
                 seq,
-                NewEvent::new(c(), Kind::Question, addr("senator::alice/codex"), "status?")
+                NewEvent::new(c(), Kind::Question, addr("senator::codex"), "status?")
                     .to(Address::Speaker),
             )
         };
@@ -294,7 +304,7 @@ mod tests {
         docket.observe(&at(
             4,
             NewEvent::new(c(), Kind::Answer, Address::Speaker, "fine")
-                .to(addr("senator::alice/codex"))
+                .to(addr("senator::codex"))
                 .in_thread(Seq(1)),
         ));
         let mut archive = StatusPayload::new(StatusState::Archived);
@@ -312,15 +322,17 @@ mod tests {
     fn a_docket_page_reads_back() {
         let page = DocketPage {
             committee: c(),
-            speaker: Some(SpeakerSeat::Senator("alice/claude".parse().unwrap())),
+            speaker: Some(SpeakerSeat::Senator("claude".parse().unwrap())),
+            office: None,
             items: vec![DocketItem {
                 event: pick(1),
                 awaiting: Awaiting::Away {
-                    agents: vec!["alice/codex".parse().unwrap()],
+                    agents: vec!["codex".parse().unwrap()],
                 },
+                intended: Some("ibot::senator::codex".parse().unwrap()),
             }],
             seats: vec![SeatFacts {
-                agent: "alice/codex".parse().unwrap(),
+                agent: "codex".parse().unwrap(),
                 connected: false,
                 presence: Some(PresenceState::Absent),
                 last_seen: None,

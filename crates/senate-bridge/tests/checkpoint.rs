@@ -223,7 +223,7 @@ async fn two_agents_in_one_worktree_checkpoint_as_themselves() {
     let reply = checkpoint(&h, "rv", Some("- review\n"), false).await;
     let (_, event) = checkpoints(&h).pop().unwrap();
     assert_eq!(event.seq, reply.posted.seq);
-    assert_eq!(event.from, senator("alice/reviewer"));
+    assert_eq!(event.from, senator("reviewer"));
 
     let head = commit(&wd, "b.txt");
     let both = eventually("a commit checkpoint from each agent", WAIT, || {
@@ -235,14 +235,8 @@ async fn two_agents_in_one_worktree_checkpoint_as_themselves() {
         (from.len() == 2).then_some(from)
     })
     .await;
-    assert!(
-        both.contains(&"senator::alice/claude".to_string()),
-        "{both:?}"
-    );
-    assert!(
-        both.contains(&"senator::alice/reviewer".to_string()),
-        "{both:?}"
-    );
+    assert!(both.contains(&"senator::claude".to_string()), "{both:?}");
+    assert!(both.contains(&"senator::reviewer".to_string()), "{both:?}");
     // Both sessions run on the person's one branch.
     for (p, _) in checkpoints(&h) {
         assert_eq!(p.branch, "feature/refund-v2/alice");
