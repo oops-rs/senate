@@ -394,6 +394,10 @@ pub(crate) struct Shared {
     speaker: Mutex<Option<SpeakerSeat>>,
     pub(crate) store: Store,
     pub(crate) api: ApiClient,
+    /// The Senate above, when the machine's Senate is a child of it
+    /// ([`BridgeConfig::uplink`]): asked second when a qualified name is
+    /// resolved, written to with the person's token there.
+    pub(crate) uplink: Option<ApiClient>,
     pub(crate) ladder: Ladder,
     pub(crate) timing: Timing,
     streams: Mutex<BTreeMap<Seat, CommitteeWorker>>,
@@ -643,6 +647,11 @@ impl Shared {
             );
         }
         let api = ApiClient::new(&config.server_url, &config.token)?;
+        let uplink = config
+            .uplink
+            .as_ref()
+            .map(|u| ApiClient::new(&u.url, &u.token))
+            .transpose()?;
         let seating = Seating::new(config.person.clone());
         let (resyncs, _) = watch::channel(0);
         Ok(Arc::new(Shared {
@@ -656,6 +665,7 @@ impl Shared {
             config,
             store,
             api,
+            uplink,
             timing: common.timing,
             streams: Mutex::new(BTreeMap::new()),
             work: Notify::new(),
@@ -2582,6 +2592,7 @@ impl Shared {
             sessions,
             queue: self.store.counts().map_err(internal)?,
             speaker: self.speaker_seat(),
+            roles: Some(self.roles_now()),
         })
     }
 
@@ -3634,7 +3645,12 @@ impl Shared {
                     "a reply stays in its thread; a qualified name starts a new one",
                 ));
             }
-            let (there, address) = self.resolve_seat(&at, &committee).await?;
+            let (level, there, address) = self.resolve_seat(&at, &committee).await?;
+            if level > 0 {
+                // A seat in the Senate above: posted there directly, as the
+                // person (their token there).
+                return self.say_above(there, kind, address, body, id).await;
+            }
             committee = there;
             to = vec![address];
         }
@@ -3688,23 +3704,59 @@ impl Shared {
         Ok(posted)
     }
 
-    /// Where a qualified name written from `committee` is: the committee
-    /// and the address there. Each Senate answers for itself, nearest
-    /// first ([`crate::client::resolve_outward`]); this daemon knows its
-    /// own Senate. Refused, in the person's language, when the name is in
-    /// none of them, names something that does not exist, or is ambiguous.
+    /// The Senates a qualified name is looked for in, nearest first: the
+    /// one served, then the one above when it is a child.
+    pub(crate) fn levels(&self) -> Vec<&ApiClient> {
+        std::iter::once(&self.api).chain(&self.uplink).collect()
+    }
+
+    /// A person's message for a seat in the Senate above: a new root
+    /// there, from the person, with their token there.
+    async fn say_above(
+        &self,
+        committee: CommitteeId,
+        kind: SayKind,
+        to: Address,
+        body: String,
+        id: Option<EventId>,
+    ) -> Result<Posted, IpcError> {
+        let Some(above) = &self.uplink else {
+            return Err(IpcError::internal("no Senate above"));
+        };
+        let mut event = NewEvent::new(committee, kind.event_kind(), self.person(), body).to(to);
+        if let Some(id) = id {
+            event = event.with_id(id);
+        }
+        let r = above.append(&event).await.map_err(server_error)?;
+        Ok(Posted {
+            committee: r.event.committee,
+            seq: r.event.seq,
+            to: r.event.to,
+            thread: r.event.thread,
+            duplicate: r.duplicate,
+            unseen_escalation: None,
+        })
+    }
+
+    /// Where a qualified name written from `committee` is: which Senate
+    /// (0: the one served; 1: the one above), the committee and the
+    /// address there. Each Senate answers for itself, nearest first
+    /// ([`crate::client::resolve_outward`]): a committee this Senate has
+    /// wins over one of the same name above. Refused, in the person's
+    /// language, when the name is in none of them, names something that
+    /// does not exist, or is ambiguous.
     pub(crate) async fn resolve_seat(
         &self,
         at: &Locator,
         committee: &CommitteeId,
-    ) -> Result<(CommitteeId, Address), IpcError> {
-        let (_, found) = crate::client::resolve_outward(&[&self.api], at, Some(committee))
+    ) -> Result<(usize, CommitteeId, Address), IpcError> {
+        let (level, found) = crate::client::resolve_outward(&self.levels(), at, Some(committee))
             .await
             .map_err(server_error)?;
         match found {
             api::Resolved::Here {
                 committee, address, ..
-            } => Ok((committee, address)),
+            } => Ok((level, committee, address)),
             api::Resolved::Elsewhere => Err(IpcError::bad_request(match self.locale {
                 Locale::Zh => format!(
                     "{} 不在这个 Senate，也不在它知道的任何上一级 Senate 里。",
@@ -3878,6 +3930,7 @@ impl Shared {
             && self
                 .chair_of(&committee)
                 .is_some_and(|c| c.name() == person);
+
         let seen: Vec<ThreadSeen> = if for_person {
             self.store
                 .seen(&committee)

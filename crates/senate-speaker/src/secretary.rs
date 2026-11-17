@@ -25,12 +25,14 @@
 //!
 //! When `secretary.toml` exists, the compatibility table's behaviour is not
 //! read (a one-time note says so); model keys found inside it still are,
-//! under `[model]`.
+//! as the layer just below `[model]`, with a note pointing at `[model]`.
 //!
 //! The model ([`ModelSettings`]) is layered the same way. A layer whose
 //! resulting model is incomplete or invalid (an unknown provider, a key
 //! variable that is not set, a base URL that is not one) falls back to the
-//! next layer down, and the error is reported against that file.
+//! next layer down, and the error is reported against that file. An empty
+//! `[model]` is complete: basis then resolves the provider and the key from
+//! its usual environment (`ANTHROPIC_API_KEY`, …).
 //!
 //! ```toml
 //! # secretary.toml
@@ -40,7 +42,7 @@
 //! bot_name = "Speaker"              # how people address it in chat
 //! instructions = "Answer in short sentences."
 //! instructions_file = "secretary.md"   # relative to this file
-//! duties = ["route", "forward", "cover", "triage"]   # default: all
+//! duties = ["route", "forward", "refuse", "cover", "triage"]   # default: all
 //!
 //! [model]                           # overrides the main configuration's [model], key by key
 //! provider = "anthropic"
@@ -69,8 +71,15 @@
 //! the file and the line, and it is listed by [`SecretaryConfigs::problems`]
 //! until it is fixed or removed. A changed `name` is not applied until the
 //! next start; the log says so once.
+//!
+//! # Showing it
+//!
+//! [`SecretaryConfigs::explain`] says, for one committee, every value in
+//! force and which layer it came from ([`Source`]); [`Shown::render`] writes
+//! it for people in their language. A model's key is never shown: only the
+//! name of the variable that holds it, and whether it is set.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -88,6 +97,9 @@ pub const DEFAULT_NAME: &str = "secretary";
 pub const SECRETARY_FILE: &str = "secretary.toml";
 /// A committee's file is `<committee>` followed by this.
 pub const COMMITTEE_FILE_SUFFIX: &str = ".secretary.toml";
+/// The tables of a main configuration read as if they were
+/// `secretary.toml`, for compatibility.
+pub const COMPAT_SECTIONS: [&str; 2] = ["secretary", "speaker"];
 
 /// What the built-in session may do on the Speaker's desk without leaving it
 /// for the Speaker. A duty left out is left on the desk.
@@ -197,7 +209,7 @@ impl ModelSettings {
                     "api_key_env = {var:?} needs a provider or a base_url to say what the key is for"
                 ));
             }
-            if std::env::var(var).map_or(true, |v| v.is_empty()) {
+            if !env_is_set(var) {
                 return Err(format!("the environment variable {var} is not set"));
             }
         }
@@ -224,6 +236,52 @@ impl ModelSettings {
             speaker.brain_token_budget = tokens;
         }
     }
+
+    /// Each key it sets, as people read it: the key's variable by name (and
+    /// whether it is set: the third field), never its value; a base URL
+    /// without the credentials it may carry.
+    fn shown(&self) -> Vec<(&'static str, String, Option<bool>)> {
+        let mut out = Vec::new();
+        let quoted = |s: &str| format!("{s:?}");
+        if let Some(v) = &self.provider {
+            out.push(("provider", quoted(v), None));
+        }
+        if let Some(v) = &self.model {
+            out.push(("model", quoted(v), None));
+        }
+        if let Some(v) = &self.api_key_env {
+            out.push(("api_key_env", v.clone(), Some(env_is_set(v))));
+        }
+        if let Some(v) = &self.base_url {
+            out.push(("base_url", quoted(&without_credentials(v)), None));
+        }
+        if let Some(v) = self.deadline_secs {
+            out.push(("deadline_secs", v.to_string(), None));
+        }
+        if let Some(v) = self.triage_deadline_secs {
+            out.push(("triage_deadline_secs", v.to_string(), None));
+        }
+        if let Some(v) = self.token_budget {
+            out.push(("token_budget", v.to_string(), None));
+        }
+        out
+    }
+}
+
+fn env_is_set(var: &str) -> bool {
+    std::env::var_os(var).is_some_and(|v| !v.is_empty())
+}
+
+/// `url` with any `user:password@` taken out.
+fn without_credentials(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_owned();
+    };
+    let host_end = rest.find('/').unwrap_or(rest.len());
+    match rest[..host_end].rfind('@') {
+        Some(at) => format!("{scheme}://***@{}", &rest[at + 1..]),
+        None => url.to_owned(),
+    }
 }
 
 /// The keys a `[speaker]` table held for its model, by their old names.
@@ -233,6 +291,10 @@ const OLD_MODEL_KEYS: [&str; 4] = [
     "triage_deadline_secs",
     "brain_token_budget",
 ];
+
+/// The keys only a secretary file (or a `[secretary]` table) says, which
+/// [`SpeakerConfig`] does not hold.
+pub const SECRETARY_KEYS: [&str; 4] = ["name", "instructions", "instructions_file", "duties"];
 
 /// A `[speaker]` (or `[secretary]`) table as the main configuration holds
 /// it: its model keys taken out (they belong under `[model]` now), the rest
@@ -269,40 +331,196 @@ pub fn split_model_keys(mut table: toml::Table) -> (toml::Table, Option<ModelSet
     (table, found.then_some(model))
 }
 
+/// What `config` says that its defaults do not: the table an older
+/// caller's whole [`SpeakerConfig`] stands for. `data_dir` and `locale`
+/// are the deployment's and left out.
+pub fn table_of_config(config: &SpeakerConfig) -> toml::Table {
+    let mut defaults = SpeakerConfig::new(config.data_dir.clone());
+    defaults.locale = config.locale;
+    let defaults = toml::Table::try_from(&defaults).unwrap_or_default();
+    let mut table = toml::Table::try_from(config).unwrap_or_default();
+    table.remove("data_dir");
+    table.remove("locale");
+    table.retain(|key, value| defaults.get(key) != Some(value));
+    table
+}
+
+/// Whether `table` says only what a secretary file may say (its model keys
+/// already taken out: [`split_model_keys`]). The message names the first
+/// key that is wrong.
+pub fn check_table(table: &toml::Table) -> Result<(), String> {
+    toml::Value::Table(table.clone())
+        .try_into::<SecretaryFile>()
+        .map(drop)
+        .map_err(|e| e.to_string())
+}
+
 /// What the main configuration says for the built-in session (layer 2).
 #[derive(Debug, Clone, Default)]
 pub struct BaseLayer {
     /// The deployment's data directory: the model's workspaces live in
     /// `<data_dir>/speaker/`.
     pub data_dir: PathBuf,
-    /// The deployment's language.
+    /// The deployment's language: what people read, and the language of
+    /// every problem and note this configuration reports.
     pub locale: Locale,
+    /// The main configuration file, to name it in what is shown.
+    pub main_file: Option<PathBuf>,
+    /// Other defaults the deployment gives, under every file (the rules
+    /// for work a runner implies, say): keys as `secretary.toml` says them.
+    pub deployment: toml::Table,
     /// An old `[speaker]` or a `[secretary]` table, read as if it were
-    /// `secretary.toml` (model keys already taken out:
-    /// [`split_model_keys`]), and which it was (`"speaker"`).
+    /// `secretary.toml` (model keys taken out: [`split_model_keys`]), and
+    /// which it was (`"speaker"`). Its presence configures a model (the
+    /// environment's, when it named none), as such a table always did.
     pub compat: Option<(String, toml::Table)>,
-    /// `[model]`, over the model keys found in the compatibility table.
-    /// `Some` (even empty) says a model is configured.
+    /// The model keys found in the compatibility table, when it had any.
+    pub compat_model: Option<ModelSettings>,
+    /// `[model]`. `Some` (even empty) says a model is configured.
     pub model: Option<ModelSettings>,
 }
 
 impl BaseLayer {
-    /// The layer an older caller's whole [`SpeakerConfig`] makes: its
-    /// behaviour as the compatibility table, its model keys as `[model]`.
-    pub fn of_config(config: &SpeakerConfig) -> Self {
-        let table = toml::Table::try_from(config).unwrap_or_default();
-        let (behaviour, model) = split_model_keys(table);
+    /// The deployment's data directory and language, nothing else.
+    pub fn new(data_dir: impl Into<PathBuf>, locale: Locale) -> Self {
         Self {
-            data_dir: config.data_dir.clone(),
-            locale: config.locale,
-            compat: Some(("speaker".to_owned(), behaviour)),
-            model: Some(model.unwrap_or_default()),
+            data_dir: data_dir.into(),
+            locale,
+            ..Self::default()
+        }
+    }
+
+    /// With `[model]`.
+    pub fn with_model(mut self, model: ModelSettings) -> Self {
+        self.model = Some(model);
+        self
+    }
+
+    /// With the main configuration named `file` in what is shown.
+    pub fn with_main_file(mut self, file: impl Into<PathBuf>) -> Self {
+        self.main_file = Some(file.into());
+        self
+    }
+
+    /// With the compatibility table `section` (`speaker` or `secretary`) as
+    /// written: its model keys are taken out here.
+    pub fn with_compat(mut self, section: &str, table: toml::Table) -> Self {
+        let (behaviour, model) = split_model_keys(table);
+        self.compat = Some((section.to_owned(), behaviour));
+        self.compat_model = model;
+        self
+    }
+
+    /// The layer an older caller's whole [`SpeakerConfig`] makes: what it
+    /// says beyond the defaults as the compatibility table `[speaker]`.
+    pub fn of_config(config: &SpeakerConfig) -> Self {
+        Self::new(config.data_dir.clone(), config.locale)
+            .with_compat("speaker", table_of_config(config))
+    }
+
+    /// The layer a main configuration file's table makes (`senate.toml` on
+    /// a machine, `senated.toml`): its `[model]`, and its `[secretary]` or
+    /// old `[speaker]` table. Refused when one of them says something a
+    /// secretary file may not, or both compatibility tables are there.
+    pub fn of_main_table(
+        table: &toml::Table,
+        data_dir: impl Into<PathBuf>,
+        locale: Locale,
+    ) -> Result<Self, String> {
+        let mut base = Self::new(data_dir, locale);
+        if let Some(model) = table.get("model") {
+            let model: ModelSettings = model
+                .clone()
+                .try_into()
+                .map_err(|e: toml::de::Error| format!("[model]: {e}"))?;
+            base.model = Some(model);
+        }
+        let found: Vec<&str> = COMPAT_SECTIONS
+            .into_iter()
+            .filter(|s| table.contains_key(*s))
+            .collect();
+        match found.as_slice() {
+            [] => {}
+            [section] => {
+                let Some(toml::Value::Table(inner)) = table.get(*section) else {
+                    return Err(format!("[{section}] must be a table"));
+                };
+                base = base.with_compat(section, inner.clone());
+                if let Some((_, behaviour)) = &base.compat {
+                    check_table(behaviour).map_err(|e| format!("[{section}]: {e}"))?;
+                }
+            }
+            _ => {
+                return Err(
+                    "[secretary] and [speaker] both configure the built-in session; keep one (better: neither, and a secretary.toml)".into(),
+                );
+            }
+        }
+        Ok(base)
+    }
+
+    /// Whether a model is configured here: `[model]`, or a compatibility
+    /// table.
+    pub fn configures_model(&self) -> bool {
+        self.model.is_some() || self.compat.is_some()
+    }
+}
+
+/// Where a value in force came from.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Source {
+    /// The built-in default.
+    Default,
+    /// The main configuration (`file`, when it was read from one), at its
+    /// top level (`table: None`) or in one of its tables.
+    Main {
+        file: Option<PathBuf>,
+        table: Option<String>,
+    },
+    /// A secretary file.
+    File(PathBuf),
+}
+
+impl Source {
+    /// The source as a path, for a [`Problem`]: the file, and the table.
+    fn as_path(&self) -> PathBuf {
+        match self {
+            Self::Default => PathBuf::from("(default)"),
+            Self::File(path) => path.clone(),
+            Self::Main { file, table } => {
+                let file = file.as_ref().map_or_else(
+                    || "main configuration".to_owned(),
+                    |f| f.display().to_string(),
+                );
+                match table {
+                    Some(table) => PathBuf::from(format!("{file} [{table}]")),
+                    None => PathBuf::from(file),
+                }
+            }
+        }
+    }
+
+    /// As people read it.
+    pub fn render(&self, l: Locale) -> String {
+        match self {
+            Self::Default => text::default_source(l),
+            Self::File(path) => path.display().to_string(),
+            Self::Main { file, table } => {
+                let file = file
+                    .as_ref()
+                    .map_or_else(|| text::main_configuration(l), |f| f.display().to_string());
+                match table {
+                    Some(table) => format!("{file} [{table}]"),
+                    None => file,
+                }
+            }
         }
     }
 }
 
 /// One error in a configuration file: shown by status, logged once per
-/// change.
+/// change. Its message is in the deployment's language.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct Problem {
     pub file: PathBuf,
@@ -401,6 +619,18 @@ struct State {
     logged: HashSet<String>,
 }
 
+/// The layers one configuration is computed from, as they are now.
+struct Layers {
+    secretary_file: Option<PathBuf>,
+    committee_file: Option<PathBuf>,
+    /// `secretary.toml`'s table (its last good content).
+    file_table: Option<toml::Table>,
+    committee_table: Option<toml::Table>,
+    /// Whether the compatibility table's behaviour is read (no
+    /// `secretary.toml`).
+    compat_read: bool,
+}
+
 /// The built-in session's configuration, re-read as its files change. Shared
 /// by the engine (which refreshes it before acting on a committee), the
 /// Brain (which reads the model and the instructions per committee) and the
@@ -410,6 +640,8 @@ pub struct SecretaryConfigs {
     base: BaseLayer,
     check: ModelCheck,
     name: SenatorName,
+    /// What the start assumed, to say once.
+    notes: Vec<String>,
     state: Mutex<State>,
 }
 
@@ -444,9 +676,11 @@ impl SecretaryConfigs {
             base,
             check,
             name: default_name(),
+            notes: Vec::new(),
             state: Mutex::new(State::default()),
         };
         configs.name = configs.initial_name();
+        configs.notes = configs.start_notes();
         configs
     }
 
@@ -465,6 +699,20 @@ impl SecretaryConfigs {
         self.dir.as_deref()
     }
 
+    /// The deployment's language.
+    pub fn locale(&self) -> Locale {
+        self.base.locale
+    }
+
+    /// The compatibility table the main configuration holds (`speaker` or
+    /// `secretary`), when it holds one.
+    pub fn compat_section(&self) -> Option<&str> {
+        self.base
+            .compat
+            .as_ref()
+            .map(|(section, _)| section.as_str())
+    }
+
     /// `<dir>/secretary.toml`.
     pub fn secretary_file(&self) -> Option<PathBuf> {
         self.dir.as_ref().map(|d| d.join(SECRETARY_FILE))
@@ -480,6 +728,20 @@ impl SecretaryConfigs {
     /// Whether some layer configures a model now.
     pub fn model_configured(&self) -> bool {
         self.refresh(None).model_configured
+    }
+
+    /// Whether a complete model is in force for the Senate as a whole
+    /// (`secretary.toml` over the main configuration): what the built-in
+    /// session needs to run.
+    pub fn model_in_force(&self) -> bool {
+        self.refresh(None).model.is_some()
+    }
+
+    /// What the start assumed (the compatibility table and its model
+    /// keys), in the deployment's language. Not logged here: the host says
+    /// them once (`senated` remembers in the store that it did).
+    pub fn notes(&self) -> &[String] {
+        &self.notes
     }
 
     /// Every error in force: unreadable files, models that fell back,
@@ -504,14 +766,7 @@ impl SecretaryConfigs {
     pub fn refresh(&self, committee: Option<&CommitteeId>) -> Arc<Effective> {
         let key = committee.cloned();
         let mut state = self.lock();
-        let watched = self.watched(&state, committee);
-        let stamps: Vec<(PathBuf, Stamp)> = watched
-            .into_iter()
-            .map(|p| {
-                let s = stamp(&p);
-                (p, s)
-            })
-            .collect();
+        let stamps = stamps_of(self.watched(&state, committee));
         if let (Some(previous), Some(effective)) =
             (state.stamps.get(&key), state.effective.get(&key))
             && *previous == stamps
@@ -536,14 +791,7 @@ impl SecretaryConfigs {
         state.effective.insert(key.clone(), Arc::clone(&effective));
         // The stamps of what this configuration now reads, instructions
         // included.
-        let stamps = self
-            .watched(&state, committee)
-            .into_iter()
-            .map(|p| {
-                let s = stamp(&p);
-                (p, s)
-            })
-            .collect();
+        let stamps = stamps_of(self.watched(&state, committee));
         state.stamps.insert(key, stamps);
         effective
     }
@@ -590,6 +838,32 @@ impl SecretaryConfigs {
         files
     }
 
+    fn main_source(&self, table: Option<&str>) -> Source {
+        Source::Main {
+            file: self.base.main_file.clone(),
+            table: table.map(str::to_owned),
+        }
+    }
+
+    /// The notes of a start: how the compatibility table is read.
+    fn start_notes(&self) -> Vec<String> {
+        let l = self.base.locale;
+        let mut notes = Vec::new();
+        let Some((section, _)) = &self.base.compat else {
+            return notes;
+        };
+        let main = self.main_source(None).render(l);
+        let file = self.secretary_file();
+        match file.as_ref().filter(|f| f.exists()) {
+            Some(file) => notes.push(text::compat_file_wins(l, &main, section, file)),
+            None => notes.push(text::compat_read(l, &main, section, file.as_deref())),
+        }
+        if self.base.compat_model.is_some() {
+            notes.push(text::compat_model_keys(l, &main, section));
+        }
+        notes
+    }
+
     /// The name at start: `secretary.toml`'s, else the compatibility
     /// table's, else [`DEFAULT_NAME`].
     fn initial_name(&self) -> SenatorName {
@@ -608,7 +882,7 @@ impl SecretaryConfigs {
             table
                 .get("name")
                 .and_then(|v| v.as_str())
-                .map(|name| (name.to_owned(), PathBuf::from(format!("[{section}]"))))
+                .map(|name| (name.to_owned(), self.main_source(Some(section)).as_path()))
         });
         let Some((name, file)) = from_file.or(from_table) else {
             return default_name();
@@ -619,9 +893,7 @@ impl SecretaryConfigs {
                 let problem = Problem {
                     file,
                     line: None,
-                    message: format!(
-                        "name {name:?} is not a senator name ({error}); using {DEFAULT_NAME:?}"
-                    ),
+                    message: text::bad_name(self.base.locale, &name, &error.to_string()),
                 };
                 warn!(%problem, "the built-in session's name");
                 state.name_problem = Some(problem);
@@ -646,7 +918,7 @@ impl SecretaryConfigs {
             entry.problem = None;
             return;
         }
-        match read_layer(path, committee_file) {
+        match read_layer(path, committee_file, self.base.locale) {
             Ok(table) => {
                 entry.table = Some(table);
                 entry.problem = None;
@@ -661,14 +933,9 @@ impl SecretaryConfigs {
         }
     }
 
-    /// Compute `committee`'s configuration from the files as they are now.
-    /// `None` when it cannot be (the last good one then stays).
-    fn compute(
-        &self,
-        state: &mut State,
-        committee: Option<&CommitteeId>,
-    ) -> (Option<Effective>, Vec<Problem>) {
-        let mut problems = Vec::new();
+    /// Read the files `committee`'s configuration is made of, as they are
+    /// now.
+    fn layers(&self, state: &mut State, committee: Option<&CommitteeId>) -> Layers {
         let secretary_file = self.secretary_file();
         if let Some(path) = &secretary_file {
             self.read(state, path, false);
@@ -684,58 +951,42 @@ impl SecretaryConfigs {
         };
         let file_table = table_of(state, &secretary_file);
         let committee_table = table_of(state, &committee_file);
-
-        // The name: fixed at start.
-        if let (Some(table), Some(path)) = (&file_table, &secretary_file)
-            && let Some(name) = table.get("name").and_then(|v| v.as_str())
-            && name != self.name.as_str()
-        {
-            let note = format!(
-                "{}: name {name:?} applies at the next start; this one keeps {:?}",
-                path.display(),
-                self.name.as_str()
-            );
-            self.log_once(state, &note, || info!("{note}"));
+        let compat_read = !secretary_file
+            .as_ref()
+            .is_some_and(|path| state.files.get(path).is_some_and(|f| f.stamp.is_some()));
+        Layers {
+            secretary_file,
+            committee_file,
+            file_table,
+            committee_table,
+            compat_read,
         }
+    }
 
-        // Layer 2: the deployment's defaults, then the compatibility table
-        // unless secretary.toml says it all.
-        let mut behaviour = toml::Table::new();
-        behaviour.insert(
-            "data_dir".into(),
-            toml::Value::String(self.base.data_dir.to_string_lossy().into_owned()),
-        );
-        behaviour.insert(
-            "locale".into(),
-            toml::Value::String(self.base.locale.as_str().to_owned()),
-        );
-        if let Some((section, compat)) = &self.base.compat {
-            match &secretary_file {
-                Some(path) if state.files.get(path).is_some_and(|f| f.stamp.is_some()) => {
-                    let note = format!(
-                        "{} is read instead of the [{section}] table of the main configuration (the file wins); move what is still there into it",
-                        path.display()
-                    );
-                    self.log_once(state, &note, || info!("{note}"));
-                }
-                _ => merge(&mut behaviour, compat),
-            }
+    /// The model layers, lowest first, and any `[model]` table in a file
+    /// that is not one.
+    fn model_layers(&self, layers: &Layers) -> (Vec<(Source, ModelSettings)>, Vec<Problem>) {
+        let mut out = Vec::new();
+        let mut problems = Vec::new();
+        if let Some((section, _)) = &self.base.compat {
+            out.push((
+                self.main_source(Some(section)),
+                self.base.compat_model.clone().unwrap_or_default(),
+            ));
         }
-        let mut model_layers: Vec<(PathBuf, ModelSettings)> = Vec::new();
         if let Some(model) = &self.base.model {
-            model_layers.push((PathBuf::from("[model]"), model.clone()));
+            out.push((self.main_source(Some("model")), model.clone()));
         }
         for (path, table) in [
-            (&secretary_file, &file_table),
-            (&committee_file, &committee_table),
+            (&layers.secretary_file, &layers.file_table),
+            (&layers.committee_file, &layers.committee_table),
         ] {
             let (Some(path), Some(table)) = (path, table) else {
                 continue;
             };
-            let mut table = table.clone();
-            if let Some(model) = table.remove("model") {
-                match toml::Value::try_into::<ModelSettings>(model) {
-                    Ok(model) => model_layers.push((path.clone(), model)),
+            if let Some(model) = table.get("model") {
+                match model.clone().try_into::<ModelSettings>() {
+                    Ok(model) => out.push((Source::File(path.clone()), model)),
                     Err(error) => problems.push(Problem {
                         file: path.clone(),
                         line: None,
@@ -743,14 +994,53 @@ impl SecretaryConfigs {
                     }),
                 }
             }
+        }
+        (out, problems)
+    }
+
+    /// Compute `committee`'s configuration from the files as they are now.
+    /// `None` when it cannot be (the last good one then stays).
+    fn compute(
+        &self,
+        state: &mut State,
+        committee: Option<&CommitteeId>,
+    ) -> (Option<Effective>, Vec<Problem>) {
+        let l = self.base.locale;
+        let layers = self.layers(state, committee);
+
+        // The name: fixed at start.
+        if let (Some(table), Some(path)) = (&layers.file_table, &layers.secretary_file)
+            && let Some(name) = table.get("name").and_then(|v| v.as_str())
+            && name != self.name.as_str()
+        {
+            let note = text::name_next_start(l, path, name, &self.name);
+            self.log_once(state, &note, || info!("{note}"));
+        }
+
+        // Layer 2: the deployment's defaults, then the compatibility table
+        // unless secretary.toml says it all.
+        let mut behaviour = self.deployment_table();
+        if let Some((_, compat)) = &self.base.compat
+            && layers.compat_read
+        {
+            merge(&mut behaviour, compat);
+        }
+        let (model_layers, mut problems) = self.model_layers(&layers);
+        for table in [&layers.file_table, &layers.committee_table]
+            .into_iter()
+            .flatten()
+        {
+            let mut table = table.clone();
+            table.remove("model");
             merge(&mut behaviour, &table);
         }
         let file: SecretaryFile = match toml::Value::Table(behaviour).try_into() {
             Ok(file) => file,
             Err(error) => {
-                let file = committee_file
+                let file = layers
+                    .committee_file
                     .clone()
-                    .or_else(|| secretary_file.clone())
+                    .or_else(|| layers.secretary_file.clone())
                     .unwrap_or_default();
                 problems.push(Problem {
                     file,
@@ -760,7 +1050,9 @@ impl SecretaryConfigs {
                 return (None, problems);
             }
         };
-        let model = self.model_of(&model_layers, &mut problems);
+        let model = self
+            .model_of(&model_layers, &mut problems)
+            .map(|(_, model)| model);
         let mut speaker = file.behaviour;
         if let Some(model) = &model {
             model.apply_to(&mut speaker);
@@ -779,7 +1071,7 @@ impl SecretaryConfigs {
                     problems.push(Problem {
                         file: path.clone(),
                         line: None,
-                        message: format!("instructions_file cannot be read: {error}"),
+                        message: text::instructions_unreadable(l, &error.to_string()),
                     });
                     return (None, problems);
                 }
@@ -801,29 +1093,42 @@ impl SecretaryConfigs {
         (Some(effective), problems)
     }
 
-    /// The highest layer whose model is complete; each one above it that is
-    /// not is reported.
+    /// `data_dir` and `locale`, as the deployment says them.
+    fn deployment_table(&self) -> toml::Table {
+        let mut table = toml::Table::new();
+        table.insert(
+            "data_dir".into(),
+            toml::Value::String(self.base.data_dir.to_string_lossy().into_owned()),
+        );
+        table.insert(
+            "locale".into(),
+            toml::Value::String(self.base.locale.as_str().to_owned()),
+        );
+        merge(&mut table, &self.base.deployment);
+        table
+    }
+
+    /// The highest layer whose model is complete (its index, and the model
+    /// merged up to it); each one above it that is not is reported.
     fn model_of(
         &self,
-        layers: &[(PathBuf, ModelSettings)],
+        layers: &[(Source, ModelSettings)],
         problems: &mut Vec<Problem>,
-    ) -> Option<ModelSettings> {
+    ) -> Option<(usize, ModelSettings)> {
+        let l = self.base.locale;
         for top in (0..layers.len()).rev() {
             let merged = layers[..=top]
                 .iter()
                 .fold(ModelSettings::default(), |below, (_, m)| m.over(&below));
             match (self.check)(&merged) {
-                Ok(()) => return Some(merged),
+                Ok(()) => return Some((top, merged)),
                 Err(error) => problems.push(Problem {
-                    file: layers[top].0.clone(),
+                    file: layers[top].0.as_path(),
                     line: None,
                     message: if top == 0 {
-                        format!("the model is incomplete: {error}; no model is in force")
+                        text::model_none(l, &error)
                     } else {
-                        format!(
-                            "the model is incomplete: {error}; the next layer down is used ({})",
-                            layers[top - 1].0.display()
-                        )
+                        text::model_falls_back(l, &error, &layers[top - 1].0.render(l))
                     },
                 }),
             }
@@ -835,19 +1140,266 @@ impl SecretaryConfigs {
     fn base_only(&self) -> Effective {
         let mut speaker = SpeakerConfig::new(self.base.data_dir.clone());
         speaker.locale = self.base.locale;
-        let model = self.base.model.clone().filter(|m| (self.check)(m).is_ok());
+        let model = self
+            .base
+            .model
+            .clone()
+            .or_else(|| {
+                self.base
+                    .compat
+                    .as_ref()
+                    .map(|_| self.base.compat_model.clone().unwrap_or_default())
+            })
+            .filter(|m| (self.check)(m).is_ok());
         if let Some(model) = &model {
             model.apply_to(&mut speaker);
         }
         Effective {
             name: self.name.clone(),
             speaker,
-            model_configured: self.base.model.is_some(),
+            model_configured: self.base.configures_model(),
             model,
             instructions: None,
             instructions_file: None,
             duties: Duty::ALL.into_iter().collect(),
         }
+    }
+
+    /// Every value in force for `committee` (`None`: the Senate as a whole,
+    /// `secretary.toml` over the main configuration) and where it came
+    /// from, re-read first if a file changed; the model's key is never
+    /// among them.
+    pub fn explain(&self, committee: Option<&CommitteeId>) -> Shown {
+        let effective = self.refresh(committee);
+        let mut state = self.lock();
+        let layers = self.layers(&mut state, committee);
+        drop(state);
+
+        // Behaviour, key by key.
+        let mut values: BTreeMap<String, (toml::Value, Source)> = BTreeMap::new();
+        let mut put = |table: &toml::Table, source: &Source| {
+            let mut flat = BTreeMap::new();
+            flatten("", table, &mut flat);
+            for (key, value) in flat {
+                if OLD_MODEL_KEYS.contains(&key.as_str())
+                    || key == "model"
+                    || key.starts_with("model.")
+                {
+                    continue;
+                }
+                values.insert(key, (value, source.clone()));
+            }
+        };
+        let mut defaults = toml::Table::try_from(SpeakerConfig::new(self.base.data_dir.clone()))
+            .unwrap_or_default();
+        defaults.insert("name".into(), toml::Value::String(DEFAULT_NAME.into()));
+        defaults.insert(
+            "duties".into(),
+            toml::Value::Array(
+                Duty::ALL
+                    .iter()
+                    .filter_map(|d| toml::Value::try_from(d).ok())
+                    .collect(),
+            ),
+        );
+        put(&defaults, &Source::Default);
+        put(&self.deployment_table(), &self.main_source(None));
+        if let Some((section, compat)) = &self.base.compat
+            && layers.compat_read
+        {
+            put(compat, &self.main_source(Some(section)));
+        }
+        if let (Some(path), Some(table)) = (&layers.secretary_file, &layers.file_table) {
+            put(table, &Source::File(path.clone()));
+        }
+        if let (Some(path), Some(table)) = (&layers.committee_file, &layers.committee_table) {
+            put(table, &Source::File(path.clone()));
+        }
+        // The name in force is the one of the start.
+        if let Some((value, _)) = values.get_mut("name") {
+            *value = toml::Value::String(self.name.to_string());
+        }
+        let values = values
+            .into_iter()
+            .map(|(key, (value, source))| ShownValue {
+                key,
+                value: shown_value(&value),
+                key_set: None,
+                source,
+            })
+            .collect();
+
+        // The model: the layers in force, key by key.
+        let (model_layers, _) = self.model_layers(&layers);
+        let mut discarded = Vec::new();
+        let in_force = self.model_of(&model_layers, &mut discarded);
+        let upto = in_force
+            .as_ref()
+            .map_or(model_layers.len(), |(top, _)| top + 1);
+        let mut model: BTreeMap<&'static str, (String, Option<bool>, Source)> = BTreeMap::new();
+        for (source, settings) in &model_layers[..upto] {
+            for (key, value, set) in settings.shown() {
+                model.insert(key, (value, set, source.clone()));
+            }
+        }
+        let model = model
+            .into_iter()
+            .map(|(key, (value, key_set, source))| ShownValue {
+                key: key.to_owned(),
+                value,
+                key_set,
+                source,
+            })
+            .collect();
+
+        Shown {
+            name: self.name.clone(),
+            committee: committee.cloned(),
+            values,
+            model_configured: effective.model_configured,
+            model_in_force: in_force.is_some(),
+            model,
+            problems: self.problems(),
+            notes: self.notes.clone(),
+        }
+    }
+}
+
+fn stamps_of(files: Vec<PathBuf>) -> Vec<(PathBuf, Stamp)> {
+    files
+        .into_iter()
+        .map(|p| {
+            let s = stamp(&p);
+            (p, s)
+        })
+        .collect()
+}
+
+/// `table`'s keys, dotted, with their values (arrays are values).
+fn flatten(prefix: &str, table: &toml::Table, out: &mut BTreeMap<String, toml::Value>) {
+    for (key, value) in table {
+        let key = if prefix.is_empty() {
+            key.clone()
+        } else {
+            format!("{prefix}.{key}")
+        };
+        match value {
+            toml::Value::Table(inner) => flatten(&key, inner, out),
+            other => {
+                out.insert(key, other.clone());
+            }
+        }
+    }
+}
+
+/// A value on one line, a long text cut short.
+fn shown_value(value: &toml::Value) -> String {
+    const MAX: usize = 80;
+    let text = value.to_string().replace('\n', " ");
+    if text.chars().count() > MAX {
+        let cut: String = text.chars().take(MAX).collect();
+        format!("{cut}…")
+    } else {
+        text
+    }
+}
+
+/// One value in force and where it came from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ShownValue {
+    /// The key, dotted inside a table (`work.pr_base`).
+    pub key: String,
+    /// As written in TOML; for `api_key_env`, the variable's name.
+    pub value: String,
+    /// For `api_key_env`: whether the variable is set (its value is never
+    /// read into what is shown).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_set: Option<bool>,
+    pub source: Source,
+}
+
+/// A committee's configuration in force, value by value, with the problems
+/// and the notes: what `secretary show` prints.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Shown {
+    pub name: SenatorName,
+    pub committee: Option<CommitteeId>,
+    /// The behaviour keys.
+    pub values: Vec<ShownValue>,
+    /// Some layer configures a model.
+    pub model_configured: bool,
+    /// A complete model is in force.
+    pub model_in_force: bool,
+    /// The model keys in force (or, when none is, as configured).
+    pub model: Vec<ShownValue>,
+    pub problems: Vec<Problem>,
+    pub notes: Vec<String>,
+}
+
+impl Shown {
+    /// The model key `key` as shown, when it is set.
+    pub fn model_value(&self, key: &str) -> Option<&ShownValue> {
+        self.model.iter().find(|v| v.key == key)
+    }
+
+    /// The behaviour key `key` as shown.
+    pub fn value(&self, key: &str) -> Option<&ShownValue> {
+        self.values.iter().find(|v| v.key == key)
+    }
+
+    /// As people read it, in `l`.
+    pub fn render(&self, l: Locale) -> String {
+        let mut out = String::new();
+        let id = format!("[senator::{}]", self.name);
+        out.push_str(&text::show_heading(l, &id, self.committee.as_ref()));
+        out.push('\n');
+        let width = self
+            .values
+            .iter()
+            .chain(&self.model)
+            .map(|v| v.key.len())
+            .max()
+            .unwrap_or(0);
+        let line = |v: &ShownValue| {
+            let value = match v.key_set {
+                Some(set) => text::key_variable(l, &v.value, set),
+                None => v.value.clone(),
+            };
+            format!("  {:width$} = {value}    ({})\n", v.key, v.source.render(l))
+        };
+        for value in &self.values {
+            out.push_str(&line(value));
+        }
+        out.push('\n');
+        out.push_str(&text::model_heading(
+            l,
+            self.model_configured,
+            self.model_in_force,
+        ));
+        out.push('\n');
+        for value in &self.model {
+            out.push_str(&line(value));
+        }
+        out.push('\n');
+        if self.problems.is_empty() {
+            out.push_str(&text::no_problems(l));
+            out.push('\n');
+        } else {
+            out.push_str(&text::problems_heading(l));
+            out.push('\n');
+            for problem in &self.problems {
+                out.push_str(&format!("  {problem}\n"));
+            }
+        }
+        if !self.notes.is_empty() {
+            out.push('\n');
+            out.push_str(&text::notes_heading(l));
+            out.push('\n');
+            for note in &self.notes {
+                out.push_str(&format!("  {note}\n"));
+            }
+        }
+        out
     }
 }
 
@@ -870,13 +1422,18 @@ fn line_of(text: &str, offset: usize) -> usize {
     text[..offset.min(text.len())].matches('\n').count() + 1
 }
 
-/// The line where `key` is set at the top of `text`.
+/// The line where `key` is set at the top of `text` (`key = …`), or where
+/// its table starts (`[key]`, `[key.…]`).
 fn line_of_key(text: &str, key: &str) -> Option<usize> {
     text.lines()
         .position(|line| {
-            line.trim_start()
-                .strip_prefix(key)
+            let line = line.trim_start();
+            line.strip_prefix(key)
                 .is_some_and(|rest| rest.trim_start().starts_with('='))
+                || line
+                    .strip_prefix('[')
+                    .and_then(|rest| rest.strip_prefix(key))
+                    .is_some_and(|rest| rest.starts_with(']') || rest.starts_with('.'))
         })
         .map(|i| i + 1)
 }
@@ -884,7 +1441,7 @@ fn line_of_key(text: &str, key: &str) -> Option<usize> {
 /// One file, read and checked: a TOML table whose keys are what a
 /// secretary file may say. A relative `instructions_file` is made relative
 /// to the file's directory.
-fn read_layer(path: &Path, committee_file: bool) -> Result<toml::Table, Problem> {
+fn read_layer(path: &Path, committee_file: bool, l: Locale) -> Result<toml::Table, Problem> {
     let problem = |line: Option<usize>, message: String| Problem {
         file: path.to_path_buf(),
         line,
@@ -895,15 +1452,26 @@ fn read_layer(path: &Path, committee_file: bool) -> Result<toml::Table, Problem>
         let line = e.span().map(|s| line_of(&text, s.start));
         problem(line, e.message().to_owned())
     })?;
-    // The keys and their types, with the line of the first that is wrong.
-    if let Err(error) = toml::from_str::<SecretaryFile>(&text) {
-        let line = error.span().map(|s| line_of(&text, s.start));
+    // The keys and their types, with the line of the first that is wrong
+    // (the flattened behaviour keys carry no position of their own, so it
+    // is found key by key).
+    if let Err(error) = toml::Value::Table(table.clone()).try_into::<SecretaryFile>() {
+        let wrong = table.iter().find(|(key, value)| {
+            let mut alone = toml::Table::new();
+            alone.insert((*key).clone(), (*value).clone());
+            toml::Value::Table(alone)
+                .try_into::<SecretaryFile>()
+                .is_err()
+        });
+        let line = wrong
+            .and_then(|(key, _)| line_of_key(&text, key))
+            .or_else(|| error.span().map(|s| line_of(&text, s.start)));
         return Err(problem(line, error.message().to_owned()));
     }
     if committee_file && table.contains_key("name") {
         return Err(problem(
             line_of_key(&text, "name"),
-            "a committee's file may not set name: the built-in session has one name in the whole Senate; set it in secretary.toml".into(),
+            text::name_in_committee_file(l),
         ));
     }
     if let Some(file) = table.get("instructions_file").and_then(|v| v.as_str()) {
@@ -927,4 +1495,185 @@ pub fn committee_of_file(file_name: &str) -> Option<CommitteeId> {
     let id = CommitteeId::new(prefix).ok()?;
     senate_core::check_not_keyword(id.as_str(), "a committee").ok()?;
     Some(id)
+}
+
+/// Every text this module writes for people, one function per message, in
+/// both languages. Senate, senator and Speaker are never translated; ids
+/// are bracketed.
+pub mod text {
+    use std::path::Path;
+
+    use senate_core::{CommitteeId, Locale, SenatorName};
+
+    pub(super) fn default_source(l: Locale) -> String {
+        match l {
+            Locale::Zh => "内置默认值".into(),
+            Locale::En => "built-in default".into(),
+        }
+    }
+
+    pub(super) fn main_configuration(l: Locale) -> String {
+        match l {
+            Locale::Zh => "主配置".into(),
+            Locale::En => "the main configuration".into(),
+        }
+    }
+
+    /// `api_key_env`'s value as shown: the variable, and whether it is set.
+    pub(super) fn key_variable(l: Locale, var: &str, set: bool) -> String {
+        match (l, set) {
+            (Locale::Zh, true) => format!("{var}（已设置）"),
+            (Locale::Zh, false) => format!("{var}（未设置）"),
+            (Locale::En, true) => format!("{var} (set)"),
+            (Locale::En, false) => format!("{var} (not set)"),
+        }
+    }
+
+    /// The compatibility table is read as `secretary.toml`.
+    pub fn compat_read(l: Locale, main: &str, section: &str, file: Option<&Path>) -> String {
+        let file = file.map_or_else(
+            || super::SECRETARY_FILE.to_owned(),
+            |f| f.display().to_string(),
+        );
+        match l {
+            Locale::Zh => format!(
+                "{main} 中的 [{section}] 表按 secretary.toml 读取（兼容旧配置）。请把它移到 {file}。"
+            ),
+            Locale::En => format!(
+                "The [{section}] table of {main} is read as if it were secretary.toml (for compatibility). Move it to {file}."
+            ),
+        }
+    }
+
+    /// Both are there: the file wins.
+    pub fn compat_file_wins(l: Locale, main: &str, section: &str, file: &Path) -> String {
+        let file = file.display();
+        match l {
+            Locale::Zh => format!(
+                "{file} 与 {main} 中的 [{section}] 表同时存在：以文件为准，[{section}] 表中除模型设置外的内容不再读取。请把仍需要的内容移入该文件。"
+            ),
+            Locale::En => format!(
+                "Both {file} and the [{section}] table of {main} exist: the file wins, and the table is no longer read (except its model keys). Move what you still need into the file."
+            ),
+        }
+    }
+
+    /// Model keys found in the compatibility table.
+    pub fn compat_model_keys(l: Locale, main: &str, section: &str) -> String {
+        match l {
+            Locale::Zh => format!(
+                "{main} 的 [{section}] 表中有模型设置（model、brain_deadline_secs 等），仍会读取；请移到顶层 [model] 表（provider、model、api_key_env、deadline_secs、triage_deadline_secs、token_budget）。"
+            ),
+            Locale::En => format!(
+                "The [{section}] table of {main} holds model keys (model, brain_deadline_secs, …); they are still read. Move them to the top-level [model] table (provider, model, api_key_env, deadline_secs, triage_deadline_secs, token_budget)."
+            ),
+        }
+    }
+
+    pub(super) fn name_next_start(l: Locale, path: &Path, new: &str, now: &SenatorName) -> String {
+        let path = path.display();
+        match l {
+            Locale::Zh => format!(
+                "{path}：name 改为 {new:?}，下次启动时生效；本次运行仍为 [senator::{now}]。"
+            ),
+            Locale::En => format!(
+                "{path}: name {new:?} applies at the next start; this run keeps [senator::{now}]."
+            ),
+        }
+    }
+
+    pub(super) fn name_in_committee_file(l: Locale) -> String {
+        match l {
+            Locale::Zh => "委员会的配置文件不能设置 name：内置会话在整个 Senate 中只有一个名字，请在 secretary.toml 中设置。整个文件未被采用。".into(),
+            Locale::En => "a committee's file may not set name: the built-in session has one name in the whole Senate; set it in secretary.toml. The file is not applied.".into(),
+        }
+    }
+
+    pub(super) fn bad_name(l: Locale, name: &str, error: &str) -> String {
+        match l {
+            Locale::Zh => format!(
+                "name {name:?} 不是有效的 senator 名字（{error}）；使用 {:?}",
+                super::DEFAULT_NAME
+            ),
+            Locale::En => format!(
+                "name {name:?} is not a senator name ({error}); using {:?}",
+                super::DEFAULT_NAME
+            ),
+        }
+    }
+
+    pub(super) fn instructions_unreadable(l: Locale, error: &str) -> String {
+        match l {
+            Locale::Zh => format!("instructions_file 无法读取：{error}"),
+            Locale::En => format!("instructions_file cannot be read: {error}"),
+        }
+    }
+
+    pub(super) fn model_falls_back(l: Locale, error: &str, below: &str) -> String {
+        match l {
+            Locale::Zh => format!("模型设置不完整：{error}；改用下一层（{below}）"),
+            Locale::En => {
+                format!("the model is incomplete: {error}; the next layer down is used ({below})")
+            }
+        }
+    }
+
+    pub(super) fn model_none(l: Locale, error: &str) -> String {
+        match l {
+            Locale::Zh => format!("模型设置不完整：{error}；没有可用的模型"),
+            Locale::En => format!("the model is incomplete: {error}; no model is in force"),
+        }
+    }
+
+    pub(super) fn show_heading(l: Locale, id: &str, committee: Option<&CommitteeId>) -> String {
+        match (l, committee) {
+            (Locale::Zh, Some(c)) => format!("内置会话 {id} 在委员会 [{c}] 的生效配置："),
+            (Locale::Zh, None) => format!("内置会话 {id} 在整个 Senate 的生效配置："),
+            (Locale::En, Some(c)) => {
+                format!("The built-in session {id}, configuration in force on committee [{c}]:")
+            }
+            (Locale::En, None) => {
+                format!("The built-in session {id}, configuration in force for the whole Senate:")
+            }
+        }
+    }
+
+    pub(super) fn model_heading(l: Locale, configured: bool, in_force: bool) -> String {
+        match (l, configured, in_force) {
+            (Locale::Zh, _, true) => {
+                "模型（生效中；密钥从不显示，只显示变量名及是否已设置）：".into()
+            }
+            (Locale::Zh, true, false) => "模型（已配置但不完整，未生效）：".into(),
+            (Locale::Zh, false, false) => "模型：未配置（内置会话不会运行）".into(),
+            (Locale::En, _, true) => {
+                "Model (in force; a key is never shown, only its variable and whether it is set):"
+                    .into()
+            }
+            (Locale::En, true, false) => "Model (configured but incomplete; not in force):".into(),
+            (Locale::En, false, false) => {
+                "Model: not configured (the built-in session does not run)".into()
+            }
+        }
+    }
+
+    pub(super) fn problems_heading(l: Locale) -> String {
+        match l {
+            Locale::Zh => "问题：".into(),
+            Locale::En => "Problems:".into(),
+        }
+    }
+
+    pub(super) fn no_problems(l: Locale) -> String {
+        match l {
+            Locale::Zh => "没有问题。".into(),
+            Locale::En => "No problems.".into(),
+        }
+    }
+
+    pub(super) fn notes_heading(l: Locale) -> String {
+        match l {
+            Locale::Zh => "说明：".into(),
+            Locale::En => "Notes:".into(),
+        }
+    }
 }

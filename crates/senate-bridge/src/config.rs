@@ -52,10 +52,11 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use senate_core::{BranchNaming, CommitteeId, DEFAULT_BRANCH_PREFIX, Locale, Name};
+use senate_core::{
+    BranchNaming, CommitteeId, DEFAULT_BRANCH_PREFIX, Locale, Name, SenatePath, SenatorId,
+    SenatorName, SpeakerName,
+};
 use serde::{Deserialize, Serialize};
-
-use senate_core::SenatorName;
 
 use crate::session::Runtime;
 
@@ -97,6 +98,31 @@ pub struct BridgeConfig {
     /// The agent name each kind of session speaks as.
     #[serde(default)]
     pub agents: AgentNames,
+    /// The Senate above the one this bridge serves, when the machine hosts
+    /// its own Senate under a parent (`[local]` with `server_url` and
+    /// `token`): `senated --machine` sets it, it is never read from the
+    /// file. A qualified name is resolved here, nearest first ([own,
+    /// parent]); a person's message for a seat above is posted there as
+    /// them, and the desk's forward to a seat above as the child's office.
+    #[serde(skip)]
+    pub uplink: Option<Uplink>,
+}
+
+/// The Senate above, as the machine reaches it: its address and the
+/// person's token there.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Uplink {
+    pub url: String,
+    pub token: String,
+}
+
+impl fmt::Debug for Uplink {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Uplink")
+            .field("url", &self.url)
+            .field("token", &"<redacted>")
+            .finish()
+    }
 }
 
 /// `[agents]`: the agent a session of each harness speaks as, unless the
@@ -170,20 +196,25 @@ impl fmt::Debug for BridgeConfig {
             .field("free_after_days", &self.free_after_days)
             .field("branch_prefix", &self.branch_prefix)
             .field("agents", &self.agents)
+            .field("uplink", &self.uplink)
             .finish()
     }
 }
 
 /// What `senated --machine` hosts on this machine, read from the same
-/// `senate.toml`: the machine's one Senate (`[local]`, for using Senate
-/// alone).
+/// `senate.toml`: the machine's one Senate (`[local]`).
 ///
 /// ```toml
-/// [local]                 # alone: no Senate above, no server_url
-/// name = "alice-desk"     # default: <person>-desk
-/// speaker = "claude"      # the agent named its Speaker
+/// [local]                         # alone, or under the Senate at server_url
+/// name = "alice-desk"             # default: <person>-desk
+/// speaker = "senator::alice"      # default: the person (see Hosted::office_config)
+/// secretaries = ["claude"]        # who works the Speaker's desk, in order
 /// listen = "127.0.0.1:7979"
 /// ```
+///
+/// With `server_url` and `token` too, the machine is **under a parent**:
+/// it hosts its Senate and registers it with the Senate at `server_url` as
+/// a child, its Speaker the person (`/<parent>::senator::<person>`).
 ///
 /// `[[preside]]` (a Senate nested under an agent) is still read, only so
 /// the machine can say once that such Senates are no longer hosted and
@@ -196,16 +227,23 @@ pub struct Hosted {
     pub preside: Vec<PresideSenate>,
 }
 
-/// `[local]`: this machine's Senate, with no Senate above.
+/// `[local]`: this machine's Senate.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct LocalSenate {
     /// The Senate's name. Absent: [`default_desk_name`] of the person.
     #[serde(default)]
     pub name: Option<Name>,
-    /// The agent named its Speaker. Absent: nobody presides, and the Senate
-    /// only keeps the log.
+    /// The Speaker, a senator id: `senator::<name>` (a senator of this
+    /// Senate: a root's), or `/<parent>::senator::<name>` (the parent's: a
+    /// child's). A bare name is read for compatibility
+    /// ([`Hosted::office_config`]). Absent: the person.
     #[serde(default)]
-    pub speaker: Option<SenatorName>,
+    pub speaker: Option<SpeakerName>,
+    /// The Speaker's secretaries, in order: agents of this Senate (or the
+    /// built-in session, by its name) who work the Speaker's desk; the
+    /// first present acts.
+    #[serde(default)]
+    pub secretaries: Vec<SenatorName>,
     /// A loopback address to serve it on. Default: a free port, kept for
     /// the next start.
     #[serde(default)]
@@ -250,24 +288,31 @@ impl Hosted {
         Ok(hosted)
     }
 
-    /// The rules: the machine's Senate has no Senate above (`server_url` is
-    /// empty); without it, the Senate above is configured; its address is
-    /// loopback; its name is not an address keyword.
+    /// The rules: a Senate is served (`[local]`, or the one at
+    /// `server_url`); with both, the Senate at `server_url` is the parent
+    /// of the machine's own, and its address and token are complete; a
+    /// Speaker named in a Senate above needs one; the machine's Senate
+    /// listens on loopback; its name is not an address keyword.
     pub fn validate(&self, config: &BridgeConfig) -> Result<(), String> {
         match (&self.local, config.server_url.is_empty()) {
-            (Some(_), false) => {
-                return Err(
-                    "[local] is this machine's own Senate, with no Senate above: drop \
-                     server_url and token, or [local]"
-                        .into(),
-                );
-            }
+            (Some(_), false) => config
+                .validate()
+                .map_err(|e| format!("the Senate above (server_url, token): {e}"))?,
             (None, true) => {
                 return Err("set server_url and token (the Senate above), or [local]".into());
             }
             _ => {}
         }
         if let Some(local) = &self.local {
+            if let Some(speaker) = &local.speaker
+                && speaker.id.senate().is_some()
+                && config.server_url.is_empty()
+            {
+                return Err(OfficeError::AboveWithoutParent {
+                    written: speaker.to_string(),
+                }
+                .text(config.locale));
+            }
             if let Some(listen) = &local.listen {
                 check_loopback(listen)?;
             }
@@ -288,6 +333,267 @@ impl Hosted {
     /// Whether this machine hosts a Senate.
     pub fn is_empty(&self) -> bool {
         self.local.is_none()
+    }
+
+    /// Whether the machine's Senate sits under the Senate at `server_url`.
+    pub fn under_a_parent(&self, config: &BridgeConfig) -> bool {
+        self.local.is_some() && !config.server_url.is_empty()
+    }
+
+    /// The machine's office: its Speaker (a senator id), the Speaker's
+    /// secretaries in order, and a note to show once when the file was
+    /// read for compatibility. `parent` is the path of the Senate above,
+    /// when the machine is under one and it answered.
+    ///
+    /// - absent: the person (`senator::<person>`; under a parent
+    ///   `/<parent>::senator::<person>`);
+    /// - `senator::<name>`: a senator of this Senate, for a root (the
+    ///   person, an agent of it, or the built-in session). Under a parent,
+    ///   `senator::<person>` is read as the parent's (noted); any other is
+    ///   refused: a child's Speaker is a senator of its parent;
+    /// - `/<path>::senator::<name>`: the parent's senator; `path` must be
+    ///   the parent's;
+    /// - a bare name, read for compatibility and noted: the person's own
+    ///   handle is the person; any other (`speaker = "claude"`, as older
+    ///   homes say) makes the person the Speaker and that agent the first
+    ///   secretary. Never refused.
+    pub fn office_config(
+        &self,
+        person: &Name,
+        parent: Option<&SenatePath>,
+    ) -> Result<(SpeakerName, Vec<SenatorName>, Option<OfficeNote>), Box<OfficeError>> {
+        let local = self.local.clone().unwrap_or_default();
+        let me = SenatorName::new(person.clone())
+            .unwrap_or_else(|_| unreachable!("a person's handle is a senator name"));
+        let own = |name: SenatorName| match parent {
+            Some(parent) => SenatorId::of(parent.clone(), name),
+            None => SenatorId::here(name),
+        };
+        let mut secretaries = Vec::new();
+        let (speaker, note) = match local.speaker {
+            None => (own(me.clone()), None),
+            Some(written) if written.bare => {
+                let name = written.id.name().clone();
+                let speaker = own(me.clone());
+                if name == me {
+                    let note = OfficeNote::BareName {
+                        written: name,
+                        read_as: speaker.clone(),
+                    };
+                    (speaker, Some(note))
+                } else {
+                    secretaries.push(name.clone());
+                    let note = OfficeNote::AgentWasSpeaker {
+                        agent: name,
+                        speaker: speaker.clone(),
+                    };
+                    (speaker, Some(note))
+                }
+            }
+            Some(written) => match (written.id.senate(), parent) {
+                (None, None) | (Some(_), None) => (written.id, None),
+                (None, Some(_)) if written.id.name() == &me => {
+                    let speaker = own(me.clone());
+                    let note = OfficeNote::SpeakerIsAbove {
+                        written: written.id,
+                        read_as: speaker.clone(),
+                    };
+                    (speaker, Some(note))
+                }
+                (None, Some(parent)) => {
+                    return Err(Box::new(OfficeError::NotAbove {
+                        written: written.id,
+                        person: own(me),
+                        parent: parent.clone().absolute(),
+                    }));
+                }
+                (Some(theirs), Some(parent)) => {
+                    if theirs.clone().absolute() != parent.clone().absolute() {
+                        return Err(Box::new(OfficeError::OtherParent {
+                            written: written.id,
+                            parent: parent.clone().absolute(),
+                        }));
+                    }
+                    (written.id, None)
+                }
+            },
+        };
+        for secretary in local.secretaries {
+            if !secretaries.contains(&secretary) {
+                secretaries.push(secretary);
+            }
+        }
+        Ok((SpeakerName::id(speaker), secretaries, note))
+    }
+}
+
+/// A parent's agent named as the Speaker of the machine's Senate: refused
+/// at start, before anything is registered. `agents_above` are the agents
+/// the person runs in the Senate above (its `/v1/me`), when it answered;
+/// `own_agents` the names this machine's sessions speak as. A Speaker that
+/// is the person, or a senator of this Senate, is never refused here.
+pub fn check_speaker_above(
+    speaker: &SenatorId,
+    person: &Name,
+    agents_above: &[SenatorName],
+    own_agents: &[SenatorName],
+) -> Result<(), Box<OfficeError>> {
+    if speaker.senate().is_none() || speaker.name().name() == person {
+        return Ok(());
+    }
+    if agents_above.contains(speaker.name()) || own_agents.contains(speaker.name()) {
+        return Err(Box::new(OfficeError::ParentAgent {
+            speaker: speaker.clone(),
+        }));
+    }
+    Ok(())
+}
+
+/// What the machine says once when `[local] speaker` was read for
+/// compatibility.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OfficeNote {
+    /// A bare name that is the person's handle.
+    BareName {
+        written: SenatorName,
+        read_as: SenatorId,
+    },
+    /// A bare name of an agent (`speaker = "claude"`): the person is the
+    /// Speaker, the agent the first secretary.
+    AgentWasSpeaker {
+        agent: SenatorName,
+        speaker: SenatorId,
+    },
+    /// `senator::<person>` under a parent: the parent's senator.
+    SpeakerIsAbove {
+        written: SenatorId,
+        read_as: SenatorId,
+    },
+}
+
+impl OfficeNote {
+    /// The note in `locale`.
+    pub fn text(&self, locale: Locale) -> String {
+        match (self, locale) {
+            (Self::BareName { written, read_as }, Locale::Zh) => format!(
+                "senate.toml 的 [local] speaker = \"{written}\" 是一个裸名字：按 senator id {} 读取。\
+                 写成 speaker = \"{read_as}\"，这条提示就不再出现。",
+                read_as.in_text()
+            ),
+            (Self::BareName { written, read_as }, Locale::En) => format!(
+                "senate.toml: [local] speaker = \"{written}\" is a bare name, read as the senator id {}. \
+                 Write speaker = \"{read_as}\" and this note stops.",
+                read_as.in_text()
+            ),
+            (Self::AgentWasSpeaker { agent, speaker }, Locale::Zh) => format!(
+                "senate.toml 的 [local] speaker = \"{agent}\" 把一个 agent 写成了这个 Senate 的 Speaker。\
+                 现在 Speaker 是你 {}，{} 作为你的 secretary 处理 Speaker 的 desk（secretaries = [\"{agent}\"]）。\
+                 写成 speaker = \"{speaker}\" 和 secretaries = [\"{agent}\"]，这条提示就不再出现；\
+                 要让 agent 继续做这个 Senate 的 Speaker，写 speaker = \"senator::{agent}\"。",
+                speaker.in_text(),
+                senate_core::Address::senator(agent).in_text()
+            ),
+            (Self::AgentWasSpeaker { agent, speaker }, Locale::En) => format!(
+                "senate.toml: [local] speaker = \"{agent}\" named an agent this Senate's Speaker. \
+                 The Speaker is now you, {}; {} works your desk as your secretary \
+                 (secretaries = [\"{agent}\"]). Write speaker = \"{speaker}\" and \
+                 secretaries = [\"{agent}\"] and this note stops; to keep the agent as this \
+                 Senate's Speaker, write speaker = \"senator::{agent}\".",
+                speaker.in_text(),
+                senate_core::Address::senator(agent).in_text()
+            ),
+            (Self::SpeakerIsAbove { written, read_as }, Locale::Zh) => format!(
+                "senate.toml 的 [local] speaker = \"{written}\"：子 Senate 的 Speaker 是上一级 Senate 的 senator，\
+                 按 {} 读取。写成 speaker = \"{read_as}\"，这条提示就不再出现。",
+                read_as.in_text()
+            ),
+            (Self::SpeakerIsAbove { written, read_as }, Locale::En) => format!(
+                "senate.toml: [local] speaker = \"{written}\": a child Senate's Speaker is a senator of \
+                 the Senate above, read as {}. Write speaker = \"{read_as}\" and this note stops.",
+                read_as.in_text()
+            ),
+        }
+    }
+}
+
+/// Why the machine's office cannot be what `[local]` says.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{}", self.text(Locale::En))]
+pub enum OfficeError {
+    /// Under a parent, a senator of the machine's own Senate other than
+    /// the person.
+    NotAbove {
+        written: SenatorId,
+        person: SenatorId,
+        parent: SenatePath,
+    },
+    /// A Senate path that is not the parent's.
+    OtherParent {
+        written: SenatorId,
+        parent: SenatePath,
+    },
+    /// A Speaker in a Senate above, and no Senate above.
+    AboveWithoutParent { written: String },
+    /// A parent's agent as the Speaker.
+    ParentAgent { speaker: SenatorId },
+}
+
+impl OfficeError {
+    /// The refusal in `locale`.
+    pub fn text(&self, locale: Locale) -> String {
+        match (self, locale) {
+            (
+                Self::NotAbove {
+                    written,
+                    person,
+                    parent,
+                },
+                Locale::Zh,
+            ) => format!(
+                "senate.toml 的 [local] speaker = \"{written}\"：这台机器的 Senate 在 Senate [{parent}] 之下，\
+                 它的 Speaker 是上一级的 senator（通常就是你：speaker = \"{person}\"）；\
+                 让本 Senate 的 agent 做子 Senate 的 Speaker 暂不支持，把它写进 secretaries。"
+            ),
+            (
+                Self::NotAbove {
+                    written,
+                    person,
+                    parent,
+                },
+                Locale::En,
+            ) => format!(
+                "senate.toml: [local] speaker = \"{written}\": this machine's Senate is under the Senate \
+                 [{parent}], so its Speaker is a senator of the Senate above (usually you: \
+                 speaker = \"{person}\"); an agent of this Senate as a child Senate's Speaker is not \
+                 supported yet: list it in secretaries."
+            ),
+            (Self::OtherParent { written, parent }, Locale::Zh) => format!(
+                "senate.toml 的 [local] speaker = \"{written}\" 指向另一个 Senate：这台机器的上一级是 Senate [{parent}]。"
+            ),
+            (Self::OtherParent { written, parent }, Locale::En) => format!(
+                "senate.toml: [local] speaker = \"{written}\" names another Senate: the Senate above this \
+                 machine's is [{parent}]."
+            ),
+            (Self::AboveWithoutParent { written }, Locale::Zh) => format!(
+                "senate.toml 的 [local] speaker = \"{written}\" 指向上一级 Senate 的 senator，但没有配置上一级\
+                 （server_url 和 token）。单独使用时写 speaker = \"senator::<你的名字>\"。"
+            ),
+            (Self::AboveWithoutParent { written }, Locale::En) => format!(
+                "senate.toml: [local] speaker = \"{written}\" names a senator of a Senate above, and no \
+                 Senate above is configured (server_url and token). Alone, write \
+                 speaker = \"senator::<your handle>\"."
+            ),
+            (Self::ParentAgent { speaker }, Locale::Zh) => format!(
+                "senate.toml 的 [local] speaker = \"{speaker}\" 是上一级 Senate 的 agent：\
+                 由上一级的 agent 做子 Senate 的 Speaker 暂不支持。写你自己（或上一级的另一个 principal），\
+                 把 agent 写进 secretaries。"
+            ),
+            (Self::ParentAgent { speaker }, Locale::En) => format!(
+                "senate.toml: [local] speaker = \"{speaker}\" is an agent of the Senate above: a parent's \
+                 agent as a child Senate's Speaker is not supported yet. Name yourself (or another \
+                 principal of the Senate above) and list the agent in secretaries."
+            ),
+        }
     }
 }
 
@@ -340,6 +646,7 @@ impl BridgeConfig {
             free_after_days: default_free_after_days(),
             branch_prefix: default_branch_prefix(),
             agents: AgentNames::default(),
+            uplink: None,
         }
     }
 
@@ -558,9 +865,18 @@ mod tests {
         assert_eq!(hosted.validate(&config), Ok(()));
         assert_eq!(hosted.preside[0].agent, "claude");
 
+        // Under a parent: the machine's Senate and the Senate above it.
+        let (config, hosted) = parse(
+            "person = \"alice\"\nserver_url = \"https://s\"\ntoken = \"t\"\n[local]\nspeaker = \"/acme::senator::alice\"\n",
+        );
+        assert_eq!(hosted.validate(&config), Ok(()));
+        assert!(hosted.under_a_parent(&config));
+
         for bad in [
-            // Alone, yet a Senate above.
-            "person = \"a\"\nserver_url = \"https://s\"\ntoken = \"t\"\n[local]\n",
+            // Under a parent with no token there.
+            "person = \"a\"\nserver_url = \"https://s\"\ntoken = \" \"\n[local]\n",
+            // A Speaker above, and no Senate above.
+            "person = \"a\"\n[local]\nspeaker = \"/acme::senator::a\"\n",
             // Neither.
             "person = \"a\"\n[[preside]]\nagent = \"claude\"\n",
             // Off the machine.
@@ -573,6 +889,147 @@ mod tests {
         }
         // The speaker is one flat name.
         assert!(toml::from_str::<Hosted>("[local]\nspeaker = \"alice/claude\"\n").is_err());
+    }
+
+    fn office(
+        local: &str,
+        parent: Option<&str>,
+    ) -> Result<(String, Vec<String>, Option<OfficeNote>), Box<OfficeError>> {
+        let hosted: Hosted = toml::from_str(&format!("[local]\n{local}")).unwrap();
+        let parent: Option<SenatePath> = parent.map(|p| p.parse().unwrap());
+        hosted
+            .office_config(&Name::new("alice").unwrap(), parent.as_ref())
+            .map(|(speaker, secretaries, note)| {
+                (
+                    speaker.to_string(),
+                    secretaries.iter().map(ToString::to_string).collect(),
+                    note,
+                )
+            })
+    }
+
+    #[test]
+    fn the_office_defaults_to_the_person_at_either_level() {
+        assert_eq!(
+            office("", None).unwrap(),
+            ("senator::alice".into(), vec![], None)
+        );
+        assert_eq!(
+            office("", Some("/acme")).unwrap(),
+            ("/acme::senator::alice".into(), vec![], None)
+        );
+        assert_eq!(
+            office("secretaries = [\"claude\", \"codex\"]\n", Some("acme")).unwrap(),
+            (
+                "/acme::senator::alice".into(),
+                vec!["claude".into(), "codex".into()],
+                None
+            )
+        );
+        // An agent as the Speaker of a root, as written: today's alone.
+        assert_eq!(
+            office("speaker = \"senator::claude\"\n", None).unwrap(),
+            ("senator::claude".into(), vec![], None)
+        );
+        assert_eq!(
+            office(
+                "speaker = \"senator::claude\"\nsecretaries = [\"codex\"]\n",
+                None
+            )
+            .unwrap(),
+            ("senator::claude".into(), vec!["codex".into()], None)
+        );
+        assert_eq!(
+            office("speaker = \"/acme::senator::alice\"\n", Some("/acme"))
+                .unwrap()
+                .0,
+            "/acme::senator::alice"
+        );
+    }
+
+    #[test]
+    fn an_agent_named_speaker_by_an_older_home_becomes_the_persons_secretary() {
+        let (speaker, secretaries, note) = office(
+            "speaker = \"claude\"\nsecretaries = [\"codex\", \"claude\"]\n",
+            None,
+        )
+        .unwrap();
+        assert_eq!(speaker, "senator::alice");
+        assert_eq!(secretaries, ["claude", "codex"]);
+        let note = note.expect("said once");
+        assert!(matches!(note, OfficeNote::AgentWasSpeaker { .. }));
+        let en = note.text(Locale::En);
+        let zh = note.text(Locale::Zh);
+        for text in [&en, &zh] {
+            assert!(text.contains("[senator::alice]"), "{text}");
+            assert!(text.contains("[senator::claude]"), "{text}");
+            assert!(
+                text.contains("Speaker") && text.contains("Senate"),
+                "{text}"
+            );
+        }
+        assert!(en.contains("works your desk as your secretary"), "{en}");
+        assert!(zh.contains("secretary"), "{zh}");
+        // Under a parent the same: the person, as the parent's senator.
+        let (speaker, secretaries, _) = office("speaker = \"claude\"\n", Some("/acme")).unwrap();
+        assert_eq!(speaker, "/acme::senator::alice");
+        assert_eq!(secretaries, ["claude"]);
+        // The person's bare handle is the person, noted.
+        let (speaker, secretaries, note) = office("speaker = \"alice\"\n", None).unwrap();
+        assert_eq!((speaker.as_str(), secretaries.len()), ("senator::alice", 0));
+        assert!(matches!(note, Some(OfficeNote::BareName { .. })));
+    }
+
+    #[test]
+    fn a_childs_speaker_is_the_parents_senator() {
+        // The person written as this Senate's: read as the parent's, noted.
+        let (speaker, _, note) = office("speaker = \"senator::alice\"\n", Some("/acme")).unwrap();
+        assert_eq!(speaker, "/acme::senator::alice");
+        assert!(matches!(note, Some(OfficeNote::SpeakerIsAbove { .. })));
+        // An agent of the child: not supported.
+        let err = office("speaker = \"senator::claude\"\n", Some("/acme")).unwrap_err();
+        assert!(matches!(*err, OfficeError::NotAbove { .. }));
+        assert!(err.text(Locale::En).contains("not supported yet"));
+        assert!(err.text(Locale::Zh).contains("暂不支持"));
+        // Another Senate's senator: the path must be the parent's.
+        let err = office("speaker = \"/other::senator::alice\"\n", Some("/acme")).unwrap_err();
+        assert!(matches!(*err, OfficeError::OtherParent { .. }));
+        assert!(
+            err.text(Locale::En).contains("[/acme]"),
+            "{}",
+            err.text(Locale::En)
+        );
+    }
+
+    #[test]
+    fn a_parents_agent_as_speaker_is_refused_in_both_languages() {
+        let alice = Name::new("alice").unwrap();
+        let claude: SenatorName = "claude".parse().unwrap();
+        let above: SenatorId = "/acme::senator::claude".parse().unwrap();
+        let err =
+            check_speaker_above(&above, &alice, &[], std::slice::from_ref(&claude)).unwrap_err();
+        assert!(err.text(Locale::En).contains("not supported yet"), "{err}");
+        assert!(err.text(Locale::Zh).contains("暂不支持"));
+        assert!(err.text(Locale::En).contains("/acme::senator::claude"));
+        assert!(check_speaker_above(&above, &alice, std::slice::from_ref(&claude), &[]).is_err());
+        // The person, a principal above, or a senator here: not refused here.
+        for ok in [
+            "/acme::senator::alice",
+            "/acme::senator::bob",
+            "senator::claude",
+        ] {
+            let id: SenatorId = ok.parse().unwrap();
+            assert!(
+                check_speaker_above(
+                    &id,
+                    &alice,
+                    std::slice::from_ref(&claude),
+                    std::slice::from_ref(&claude)
+                )
+                .is_ok(),
+                "{ok}"
+            );
+        }
     }
 
     #[test]

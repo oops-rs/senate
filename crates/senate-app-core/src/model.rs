@@ -686,6 +686,7 @@ mod tests {
             sessions: Vec::new(),
             queue: Default::default(),
             speaker: None,
+            roles: None,
         }
     }
 

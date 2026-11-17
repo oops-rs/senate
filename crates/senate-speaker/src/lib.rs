@@ -113,6 +113,7 @@ pub use engine::{CURSOR, TAKEOVER_META};
 pub use scripted::{ScriptedBrain, scripted_verdict};
 pub use secretary::{
     BaseLayer, DEFAULT_NAME, Duty, Effective, ModelCheck, ModelSettings, Problem, SecretaryConfigs,
+    Shown, ShownValue, Source,
 };
 
 #[cfg(test)]

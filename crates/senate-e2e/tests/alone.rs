@@ -16,7 +16,10 @@ use senate_core::{
     is_takeover,
 };
 
-const ALONE: &str = "[local]\nspeaker = \"claude\"\n";
+/// An agent as the Speaker of a root, named in full: today's alone. (A
+/// bare `speaker = "claude"`, as older homes wrote it, now makes the person
+/// the Speaker and claude her secretary.)
+const ALONE: &str = "[local]\nspeaker = \"senator::claude\"\n";
 
 fn codex_pushes(codex: &common::fake_codex::FakeCodex) -> Vec<String> {
     codex

@@ -90,7 +90,17 @@ impl Front {
 
     pub(crate) async fn dispatch(self: &Arc<Self>, request: Request) -> Reply {
         match request {
-            Request::Status => wrap(self.status()),
+            Request::Status => {
+                // The office, the chairs and the children as the server says
+                // now, bounded: a server that does not answer leaves what
+                // was last known.
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    self.primary().refresh_me(),
+                )
+                .await;
+                wrap(self.status())
+            }
             Request::Hook(report) => wrap(self.on_hook(report).await),
             Request::SessionEnd { session_id, reason } => {
                 let mut reply = Reply::ok(&serde_json::json!({}));
@@ -317,7 +327,7 @@ impl Front {
             let mine = shared
                 .office()
                 .map(|o| {
-                    o.speaker_here().map(|s| s.name()) == Some(&shared.config.person)
+                    shared.person_is_speaker()
                         || o.agent_workers().any(|w| shared.seating().owns(w))
                 })
                 .unwrap_or_else(|| {

@@ -568,11 +568,12 @@ impl Engine {
                         candidates,
                         &thread.title,
                         waiting,
+                        super::route::Among::Agents,
                     )
                     .await?
                 {
                     Settled::To(agent) => self.approve(chat, thread, &agent).await,
-                    Settled::Asked | Settled::Unknown => Ok(()),
+                    Settled::Asked | Settled::Unknown | Settled::Child(_) => Ok(()),
                 }
             }
         }

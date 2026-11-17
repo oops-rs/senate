@@ -82,6 +82,7 @@ pub fn status(sessions: Vec<Session>) -> StatusReply {
         },
         queue: QueueCounts::default(),
         speaker: Some(SpeakerSeat::Senator(path("claude"))),
+        roles: None,
     }
 }
 

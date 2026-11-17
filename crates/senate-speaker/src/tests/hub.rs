@@ -19,6 +19,7 @@ struct State {
     mirrors: Vec<MirrorRef>,
     connected: HashSet<(CommitteeId, SenatorName)>,
     roster: Roster,
+    children: Vec<senate_core::ChildSenate>,
     last_ts: Option<DateTime<Utc>>,
     gets: usize,
     reads: usize,
@@ -101,6 +102,15 @@ impl MemoryHub {
     /// Replace the roster, e.g. with one that has guests' people missing.
     pub(crate) fn set_roster(&self, roster: Roster) {
         self.lock().roster = roster;
+    }
+
+    /// Register the child Senate `name`, whose Speaker is `speaker` (a
+    /// person here).
+    pub(crate) fn add_child(&self, name: &str, speaker: &str) {
+        self.lock().children.push(senate_core::ChildSenate {
+            name: Name::new(name).expect("name"),
+            speaker: speaker.parse().expect("senator"),
+        });
     }
 
     pub(crate) fn disconnect(&self, committee: &CommitteeId, agent: &SenatorName) {
@@ -215,6 +225,10 @@ impl Hub for MemoryHub {
 
     async fn roster(&self) -> Result<Roster, HubError> {
         Ok(self.lock().roster.clone())
+    }
+
+    async fn children(&self) -> Result<Vec<senate_core::ChildSenate>, HubError> {
+        Ok(self.lock().children.clone())
     }
 
     /// The agents connected on `committee`, in roster order: like the

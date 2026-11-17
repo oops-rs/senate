@@ -2769,9 +2769,19 @@ impl Engine {
                 said: target.clone(),
                 confirm: true,
             };
-            match self.settle(chat, target, body, waiting).await? {
+            match self.settle_reach(chat, target, body, waiting).await? {
                 Settled::To(senator) => {
                     let address = Address::Senator(senator);
+                    if !to.contains(&address) {
+                        to.push(address);
+                    }
+                }
+                Settled::Child(senate) => {
+                    // That Senate's Speaker's desk, on the same committee.
+                    let address = Address::Child {
+                        senate,
+                        committee: self.acting_committee(chat),
+                    };
                     if !to.contains(&address) {
                         to.push(address);
                     }

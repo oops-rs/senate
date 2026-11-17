@@ -72,7 +72,8 @@ async fn an_old_home_with_preside_starts_its_one_senate_without_the_nested_one()
     std::fs::write(under.join("log.db"), b"an old log").unwrap();
     desk.start().await;
 
-    // One Senate, the machine's, with claude in the Speaker's seat.
+    // One Senate, the machine's. Its `speaker = "claude"` is read as the
+    // person presiding with claude as her secretary, first at the desk.
     let keys: Vec<&str> = desk
         .machine()
         .senates()
@@ -85,13 +86,17 @@ async fn an_old_home_with_preside_starts_its_one_senate_without_the_nested_one()
     let me = me_at(&top.url, &top.token).await;
     assert_eq!(me.speaker, Some(SpeakerSeat::Senator(path("claude"))));
     assert_eq!(me.parent, None);
+    let office = me.office.expect("an office");
+    assert_eq!(office.speaker.to_string(), "senator::alice");
+    assert_eq!(office.desk, [path("claude")]);
 
-    // The presiding session presides over that one Senate, and its old
+    // claude's session works the desk of that one Senate, and its old
     // subagent's pin seats it as the harness's name beside it, not below.
     let claude = desk.inbox("s-claude");
     let start = desk.session_start("s-claude", &claude).await.unwrap();
     assert!(
-        context(&start).contains("[senator::claude] is the Speaker"),
+        context(&start)
+            .contains("[senator::claude] is a secretary of [senator::alice], the Speaker of"),
         "{}",
         context(&start)
     );

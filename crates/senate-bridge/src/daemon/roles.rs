@@ -32,6 +32,7 @@ use crate::ipc::{
     ChairDocketReply, DeskRole, EscalateReply, EscalatedTo, Forwarded, RolesReply,
     SecretariesReply, SecretaryOp, SendReply,
 };
+use crate::paths::HOSTED_KEY;
 
 /// Bound on asking the server for a chair or for `/v1/me` while a request
 /// waits.
@@ -173,9 +174,12 @@ impl Shared {
     }
 
     /// Whether the person this machine runs for is the Speaker.
-    fn person_is_speaker(&self) -> bool {
+    /// The person is the Speaker of this Senate: as its own senator (a
+    /// root), or as a senator of the Senate above (a child on their
+    /// machine).
+    pub(crate) fn person_is_speaker(&self) -> bool {
         self.office().is_some_and(|o| {
-            o.speaker_here().map(|s| s.name()) == Some(&self.config.person)
+            o.speaker.name().name() == &self.config.person
                 && !matches!(o.kind, SenatorKind::Agent | SenatorKind::BuiltIn)
         })
     }
@@ -523,7 +527,8 @@ impl Shared {
             }
             (Some(_), None) => true,
         };
-        if elsewhere {
+        let above = elsewhere.then(|| self.above_for(&intended)).flatten();
+        if elsewhere && above.is_none() {
             return Err(IpcError::bad_request(roles_text::not_in_this_senate(
                 &intended,
                 self.locale,
@@ -538,7 +543,14 @@ impl Shared {
             thread: root.seq,
         };
         let acted = serde_json::json!(acted_by.to_string());
-        let mut forwarded = NewEvent::new(target, root.kind.clone(), Address::Speaker, root.body)
+        // Above, the office speaks as this child's Speaker for the
+        // committee it was asked on; the answer there is relayed down by
+        // the machine's uplink.
+        let from = match &above {
+            Some((name, _)) => Address::child(name.clone(), committee.clone()),
+            None => Address::Speaker,
+        };
+        let mut forwarded = NewEvent::new(target, root.kind.clone(), from, root.body)
             .to(to)
             .with_meta(meta::ORIGIN, origin.value())
             .with_meta(meta::ACTED_BY, acted.clone());
@@ -548,7 +560,23 @@ impl Shared {
         if let Some(id) = id {
             forwarded = forwarded.with_id(id);
         }
-        let posted = self.post(forwarded).await?;
+        let posted = match &above {
+            Some((_, client)) => {
+                let r = client
+                    .append(&forwarded)
+                    .await
+                    .map_err(|e| self.refusal(e))?;
+                Posted {
+                    committee: r.event.committee,
+                    seq: r.event.seq,
+                    to: r.event.to,
+                    thread: r.event.thread,
+                    duplicate: r.duplicate,
+                    unseen_escalation: None,
+                }
+            }
+            None => self.post(forwarded).await?,
+        };
         let note = NewEvent::new(
             committee,
             Kind::Note,
@@ -565,6 +593,19 @@ impl Shared {
             note,
             to: intended,
         })
+    }
+
+    /// The Senate above, when `intended` is in it: this Senate's name
+    /// there and the client that writes to it. Only the parent: a seat
+    /// further up is not forwarded to.
+    fn above_for(&self, intended: &Locator) -> Option<(Name, &ApiClient)> {
+        let client = self.uplink.as_ref()?;
+        let here = self.senate_path()?;
+        let parent = here.parent()?.absolute();
+        let theirs = intended.senate()?;
+        let in_parent =
+            parent.ends_with(theirs) && theirs.clone().absolute() != here.clone().absolute();
+        in_parent.then(|| (here.name().clone(), client))
     }
 
     /// Send a desk item back to its sender with the reason: an answer in
@@ -753,16 +794,16 @@ impl Shared {
         }
         let mut intended = None;
         if let Some(at) = at {
-            let (_, found) = crate::client::resolve_outward(&[&self.api], &at, Some(&committee))
-                .await
-                .map_err(server_error)?;
+            let (level, found) =
+                crate::client::resolve_outward(&self.levels(), &at, Some(&committee))
+                    .await
+                    .map_err(server_error)?;
             match found {
                 api::Resolved::Here {
                     committee: there,
                     address,
-                    locator,
-                } if there == committee => {
-                    let _ = locator;
+                    ..
+                } if level == 0 && there == committee => {
                     to = vec![address];
                 }
                 api::Resolved::Here { locator, .. } => intended = Some(locator),
@@ -961,12 +1002,55 @@ impl Shared {
             }
         }
         Ok(RolesReply {
+            chairs,
+            ..self.roles_now()
+        })
+    }
+
+    /// The roles as this side knows them now, with no request: the office
+    /// and the children `/v1/me` last named, the chairs known from the
+    /// log, and the registration with the Senate above.
+    pub(crate) fn roles_now(&self) -> RolesReply {
+        RolesReply {
             senate: self.senate_path(),
             office: self.office(),
             present: self.present_workers(),
-            chairs,
+            chairs: self
+                .known_chairs()
+                .into_iter()
+                .map(|(committee, chair)| ChairInfo {
+                    committee,
+                    chair: Some(chair),
+                    source: None,
+                })
+                .collect(),
             children: lock(&self.children).clone(),
-        })
+            uplink: self.uplink_status(),
+        }
+    }
+
+    /// What the machine's uplink last wrote, when this Senate is a child.
+    pub(crate) fn uplink_status(&self) -> Option<crate::ipc::UplinkStatus> {
+        let uplink = self.config.uplink.as_ref()?;
+        let dir = crate::paths::Paths::new(&self.home).hosted(HOSTED_KEY);
+        Some(crate::ipc::UplinkStatus::read(&dir).unwrap_or_else(|| {
+            crate::ipc::UplinkStatus {
+                url: uplink.url.clone(),
+                parent: None,
+                name: self
+                    .senate_path()
+                    .map(|p| p.name().clone())
+                    .unwrap_or_else(|| crate::config::default_desk_name(&self.config.person)),
+                speaker: self.speaker_id().unwrap_or_else(|| {
+                    SenatorId::here(
+                        SenatorName::new(self.config.person.clone())
+                            .unwrap_or_else(|_| unreachable!("a handle is a senator name")),
+                    )
+                }),
+                registration: crate::ipc::Registration::Pending,
+                at: chrono::Utc::now(),
+            }
+        }))
     }
 
     /// The Speaker of this Senate, as a senator id, when known.

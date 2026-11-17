@@ -4,12 +4,20 @@
 //! senated --config senated.toml     # a Senate server
 //! senated --machine                 # a developer machine: $SENATE_HOME/senate.toml
 //! senated flatten-log --database-url postgres://…   # convert an old Postgres log, once
+//! senated secretary show [--config senated.toml | --home DIR] [--committee ID]
 //! ```
 //!
 //! With `--config` it serves the log and the bridge API from
-//! `senated.toml`; with `[speaker]` it also runs the built-in Speaker, with
-//! `[work]` its hands. No chat platform is mounted: that is a private
-//! layer's, built on the `senated` library.
+//! `senated.toml`; with a model (`[model]`) and a reference to the built-in
+//! session (the roster's `speaker`, or a secretary list) it also runs the
+//! built-in session, reading `secretary.toml` beside the configuration
+//! file; with `[work]` its hands. No chat platform is mounted: that is a
+//! private layer's, built on the `senated` library.
+//!
+//! `secretary show` prints the built-in session's configuration in force
+//! (for one committee with `--committee`), which file each value came from,
+//! and the current problems, in the configured language. A model's key is
+//! never printed: only the name of its variable and whether it is set.
 //!
 //! With `--machine` it reads the developer machine's `senate.toml` in the
 //! Senate home (`--home`, else `$SENATE_HOME`, else `~/.senate`) and runs
@@ -29,6 +37,7 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use senate_bridge::Paths;
 use senate_bridge::daemon::Timing;
+use senate_core::CommitteeId;
 use senated::{Assembly, Machine, SenatedConfig};
 use tracing_subscriber::EnvFilter;
 
@@ -54,12 +63,35 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// The built-in session's configuration.
+    Secretary {
+        #[command(subcommand)]
+        command: SecretaryCommand,
+    },
     /// Convert a Postgres log written when senators were paths to flat
     /// names, once, keeping a copy of each table as <table>_pre_flat_names.
     FlattenLog {
         /// The log's database URL (postgres://…).
         #[arg(long, env = "SENATE_DATABASE_URL")]
         database_url: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SecretaryCommand {
+    /// Print the configuration in force, where each value came from, and
+    /// the current problems.
+    Show {
+        /// A Senate server's senated.toml (secretary.toml is beside it).
+        #[arg(long, env = "SENATED_CONFIG", conflicts_with = "home")]
+        config: Option<PathBuf>,
+        /// A developer machine's Senate home (default: $SENATE_HOME, else
+        /// ~/.senate).
+        #[arg(long, value_name = "DIR")]
+        home: Option<PathBuf>,
+        /// The committee to show (default: the Senate as a whole).
+        #[arg(long, value_name = "ID")]
+        committee: Option<CommitteeId>,
     },
 }
 
@@ -74,8 +106,17 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
-    if let Some(Command::FlattenLog { database_url }) = cli.command {
-        return flatten_log(&database_url).await;
+    match cli.command {
+        Some(Command::FlattenLog { database_url }) => return flatten_log(&database_url).await,
+        Some(Command::Secretary {
+            command:
+                SecretaryCommand::Show {
+                    config,
+                    home,
+                    committee,
+                },
+        }) => return secretary_show(config, home, committee.as_ref()),
+        None => {}
     }
     if cli.machine {
         let paths = match cli.home {
@@ -107,10 +148,8 @@ async fn main() -> anyhow::Result<()> {
     for section in config.other_sections() {
         tracing::warn!(%section, "senated does not read this section; ignoring it");
     }
-    if config.speaker.is_none() {
-        tracing::info!("no [speaker]: serving the log and the bridge API only");
-    }
     let daemon = Assembly::new(config)
+        .config_file(&path)
         .start()
         .await
         .context("starting senated")?;
@@ -144,5 +183,31 @@ async fn flatten_log(database_url: &str) -> anyhow::Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+/// `senated secretary show`: the configuration in force, in the configured
+/// language.
+fn secretary_show(
+    config: Option<PathBuf>,
+    home: Option<PathBuf>,
+    committee: Option<&CommitteeId>,
+) -> anyhow::Result<()> {
+    let secretary = match (config, home) {
+        (Some(path), _) => {
+            let config = SenatedConfig::load(&path)
+                .with_context(|| format!("loading {}", path.display()))?;
+            senated::config::load_secretary(&config, &path)
+        }
+        (None, home) => {
+            let paths = match home {
+                Some(home) => Paths::new(home),
+                None => Paths::from_env()?,
+            };
+            let data_dir = paths.hosted(senate_bridge::paths::HOSTED_KEY).join("data");
+            senated::config::load_secretary_home(paths.home(), &data_dir)?
+        }
+    };
+    print!("{}", senated::secretary_show(&secretary, committee));
     Ok(())
 }

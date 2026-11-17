@@ -30,6 +30,19 @@
 //! The pick call is bounded by `triage_deadline_secs` and runs on the
 //! mailbox: the rule-based default answers at once, and a model-backed one
 //! is cut off at the deadline and falls back to the rules.
+//!
+//! # A person's agent, one level up
+//!
+//! A relay ("ask alice's agent …", 「问 alice 的 agent …」) to a person who
+//! runs no agent in this Senate reaches that person's child Senates
+//! ([`Engine::settle_reach`]): the Senates registered here whose Speaker
+//! she is ([`Hub::children`](senate_core::Hub::children)). One: the relay
+//! goes to that Senate's Speaker's desk for the same committee,
+//! `<child>::<committee>::speaker`. Several: the same pick as among a
+//! person's agents (the Brain, else a question in the thread naming the
+//! Senates). None: the person herself, as before. A person who runs agents
+//! here keeps the lookup above; `senator::alice` written out is always the
+//! person.
 
 use senate_core::{AgentOf, Mention, Name, Roster, SenatorName, StatusState};
 
@@ -124,6 +137,30 @@ pub(super) enum Settled {
     /// The Speaker asked in the thread which agent; the request waits for
     /// the answer.
     Asked,
+    /// A child Senate's Speaker's desk: a person's agent one level down
+    /// ([`Engine::settle_reach`]).
+    Child(Name),
+}
+
+/// What a pick, or the question the Speaker asks, is among.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Among {
+    /// Agents of this Senate.
+    Agents,
+    /// A person's child Senates.
+    Senates,
+}
+
+/// How a child Senate is named in a request carried on after a choice.
+fn child_target(child: &str) -> String {
+    format!("{child}::speaker")
+}
+
+/// Whether `raw` names a senator written out (`senator::alice`,
+/// `[senator::alice]`): the person, never their agent one level down.
+fn written_out(raw: &str) -> bool {
+    let raw = raw.trim().trim_start_matches('@');
+    raw.starts_with("senator::") || raw.starts_with('[')
 }
 
 /// What a [`Choice`] carries on with once it is answered.
@@ -145,6 +182,8 @@ pub(super) enum Waiting {
 pub(super) struct Choice {
     pub(super) waiting: Waiting,
     pub(super) candidates: Vec<SenatorName>,
+    /// Agents, or child Senates (named like senators).
+    pub(super) among: Among,
     /// The question the Speaker posted, and the thread it is in.
     pub(super) ask_ref: String,
     pub(super) thread_ref: Option<String>,
@@ -235,7 +274,7 @@ impl Engine {
             Resolved::Agent(path) | Resolved::Person(path) => Ok(Settled::To(path)),
             Resolved::Unknown => Ok(Settled::Unknown),
             Resolved::Several { owner, candidates } => {
-                self.settle_among(chat, Some(owner), candidates, task, waiting)
+                self.settle_among(chat, Some(owner), candidates, task, waiting, Among::Agents)
                     .await
             }
             Resolved::AnyAgent => {
@@ -246,7 +285,7 @@ impl Engine {
                     AgentOf::None(Some(person)) => Ok(Settled::To(person)),
                     AgentOf::None(None) => Ok(Settled::Unknown),
                     AgentOf::Several(candidates) => {
-                        self.settle_among(chat, None, candidates, task, waiting)
+                        self.settle_among(chat, None, candidates, task, waiting, Among::Agents)
                             .await
                     }
                 }
@@ -254,8 +293,69 @@ impl Engine {
         }
     }
 
+    /// The child Senates registered here whose Speaker is `person`.
+    fn child_senates_of(&self, person: &SenatorName) -> Vec<Name> {
+        self.children
+            .iter()
+            .filter(|c| c.speaker == *person)
+            .map(|c| c.name.clone())
+            .collect()
+    }
+
+    /// `raw` names a registered child Senate's desk (`<child>::speaker`,
+    /// as a choice carries it on).
+    fn child_named(&self, raw: &str) -> Option<Name> {
+        let child = raw.trim().strip_suffix("::speaker")?;
+        self.children
+            .iter()
+            .find(|c| c.name.as_str() == child)
+            .map(|c| c.name.clone())
+    }
+
+    /// [`Engine::settle`] for a message to be delivered (a relay): a person
+    /// with no agent here is reached through their child Senates, one
+    /// level down, when they have any (see the module docs).
+    pub(super) async fn settle_reach(
+        &mut self,
+        chat: &Event,
+        raw: &str,
+        task: &str,
+        waiting: Waiting,
+    ) -> Result<Settled, Stall> {
+        if let Some(child) = self.child_named(raw) {
+            return Ok(Settled::Child(child));
+        }
+        let settled = self.settle(chat, raw, task, waiting.clone()).await?;
+        let Settled::To(person) = &settled else {
+            return Ok(settled);
+        };
+        if !self.roster.is_person(person) || written_out(raw) {
+            return Ok(settled);
+        }
+        let children = self.child_senates_of(person);
+        match children.as_slice() {
+            [] => Ok(settled),
+            [one] => Ok(Settled::Child(one.clone())),
+            several => {
+                let named: Vec<SenatorName> = several
+                    .iter()
+                    .filter_map(|c| SenatorName::new(c.clone()).ok())
+                    .collect();
+                let owner = person.name().clone();
+                match self
+                    .settle_among(chat, Some(owner), named, task, waiting, Among::Senates)
+                    .await?
+                {
+                    Settled::To(child) => Ok(Settled::Child(child.name().clone())),
+                    other => Ok(other),
+                }
+            }
+        }
+    }
+
     /// Pick one of `candidates`, or ask which: `owner`'s agents, or (with
-    /// no owner) the agents on the committee.
+    /// no owner) the agents on the committee; or `owner`'s child Senates
+    /// ([`Among::Senates`]), named like senators.
     pub(super) async fn settle_among(
         &mut self,
         chat: &Event,
@@ -263,6 +363,7 @@ impl Engine {
         candidates: Vec<SenatorName>,
         task: &str,
         waiting: Waiting,
+        among: Among,
     ) -> Result<Settled, Stall> {
         let committee = self.acting_committee(chat);
         let key = (chat.seq, super::agent::event_key(chat), owner.clone());
@@ -294,14 +395,20 @@ impl Engine {
             // A step after a Bind in an agent plan acts on another committee
             // than the thread's: no question can carry it there, so the
             // person names one and asks again.
-            let text = render::name_one_of(l, owner.as_ref(), &candidates);
+            let text = match among {
+                Among::Agents => render::name_one_of(l, owner.as_ref(), &candidates),
+                Among::Senates => render::name_one_senate_of(l, owner.as_ref(), &candidates),
+            };
             self.reply_to_chat(chat, &text).await?;
             return Ok(Settled::Asked);
         }
         let Some(group) = chat.source.as_ref().map(super::group_ref) else {
             return Ok(Settled::Unknown);
         };
-        let text = render::which_agent(l, owner.as_ref(), &info);
+        let text = match among {
+            Among::Agents => render::which_agent(l, owner.as_ref(), &info),
+            Among::Senates => render::which_senate(l, owner.as_ref(), &candidates),
+        };
         let Some(posted) = self.reply_to_chat(chat, &text).await? else {
             return Ok(Settled::Asked);
         };
@@ -316,6 +423,7 @@ impl Engine {
         self.choices.push(Choice {
             waiting,
             candidates,
+            among,
             ask_ref: posted.message_ref,
             thread_ref: posted.thread_ref,
             origin_ref: chat
@@ -366,7 +474,10 @@ impl Engine {
         };
         let l = self.locale(&chat.committee);
         let Some(agent) = syntax::choice(&chat.body, &choice.candidates) else {
-            let text = render::choice_not_understood(l, &choice.candidates);
+            let text = match choice.among {
+                Among::Agents => render::choice_not_understood(l, &choice.candidates),
+                Among::Senates => render::senate_choice_not_understood(l, &choice.candidates),
+            };
             return self.say(chat, &text).await;
         };
         let flow = match choice.waiting {
@@ -375,7 +486,11 @@ impl Engine {
                 said,
                 confirm,
             } => {
-                let intent = named(intent, &said, &agent);
+                let target = match choice.among {
+                    Among::Agents => agent.to_string(),
+                    Among::Senates => child_target(agent.as_str()),
+                };
+                let intent = named(intent, &said, &target);
                 self.run_bound(chat, super::Decision::Run { intent, confirm })
                     .await
             }
@@ -403,11 +518,17 @@ impl Engine {
     }
 }
 
-/// `intent` with the name `said` replaced by `agent`'s path wherever it
-/// stands for a senator, so running it again settles at once.
-fn named(intent: Intent, said: &str, agent: &SenatorName) -> Intent {
-    let path = agent.to_string();
-    let swap = |name: String| if name == said { path.clone() } else { name };
+/// `intent` with the name `said` replaced by `target` (an agent's name, or
+/// a child Senate's desk) wherever it stands for a senator, so running it
+/// again settles at once.
+fn named(intent: Intent, said: &str, target: &str) -> Intent {
+    let swap = |name: String| {
+        if name == said {
+            target.to_owned()
+        } else {
+            name
+        }
+    };
     match intent {
         Intent::Relay {
             targets,
@@ -555,7 +676,7 @@ mod tests {
 
     #[test]
     fn a_choice_answered_names_the_agent_in_the_intent() {
-        let agent = path("codex");
+        let agent = path("codex").to_string();
         let relay = Intent::Relay {
             targets: vec!["alice".into(), "bob".into()],
             kind: crate::brain::RelayKind::Note,

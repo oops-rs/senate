@@ -162,6 +162,21 @@ async fn an_old_home_starts_with_its_log_read_marks_and_queue_intact() {
     let senate = machine.senate().unwrap();
     assert_eq!(senate.name.as_str(), "wendell-desk", "the default name");
 
+    // `[local] speaker = "claude"`, as the old home says: the person is the
+    // Speaker and claude works her desk as her secretary; never refused,
+    // and said once.
+    let office = senate.daemon.hub.office().expect("an office");
+    assert_eq!(office.speaker.to_string(), "senator::wendell");
+    assert_eq!(office.kind, senate_core::SenatorKind::Person);
+    let claude: senate_core::SenatorName = "claude".parse().unwrap();
+    assert_eq!(office.desk, std::slice::from_ref(&claude));
+    let roster = senate.daemon.hub.roster().await.unwrap();
+    let wendell: senate_core::SenatorName = "wendell".parse().unwrap();
+    assert_eq!(roster.secretaries_of(&wendell), [claude]);
+    let note = std::fs::read_to_string(paths.hosted("top").join("OFFICE-NOTE")).unwrap();
+    assert!(note.contains("[senator::wendell]"), "{note}");
+    assert!(note.contains("works your desk as your secretary"), "{note}");
+
     // The log: converted, the thread reads back with flat names.
     let refund = CommitteeId::new("refund").unwrap();
     let thread = senate.daemon.hub.thread(&refund, Seq(1)).await.unwrap();

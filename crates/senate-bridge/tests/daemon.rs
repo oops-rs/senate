@@ -556,6 +556,7 @@ async fn streams_follow_sessions_and_configured_committees() {
             queue: status.queue,
             locale: status.locale,
             speaker: status.speaker.clone(),
+            roles: status.roles.clone(),
         },
         chrono::Utc::now(),
     );

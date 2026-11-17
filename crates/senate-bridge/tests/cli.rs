@@ -556,11 +556,15 @@ fn init_local_writes_one_profile_and_never_overwrites_it() {
     );
     let text = std::fs::read_to_string(&written).unwrap();
     assert!(text.contains("person = \"alice\""));
-    assert!(text.contains("speaker = \"claude\""));
+    // The person presides; an agent is a secretary, commented out.
+    assert!(text.contains("speaker = \"senator::alice\""));
+    assert!(text.contains("# secretaries = [\"claude\"]"));
     assert!(text.contains("listen = \"127.0.0.1:7979\""));
     assert!(text.contains("locale = \"zh\""));
-    // Only that file, under the Senate home; HOME is untouched.
-    assert_eq!(std::fs::read_dir(&home).unwrap().count(), 1);
+    // Only that file and the commented secretary.toml, under the Senate
+    // home; HOME is untouched.
+    assert_eq!(std::fs::read_dir(&home).unwrap().count(), 2);
+    assert!(home.join("secretary.toml").exists());
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
 
     let again = bridge(dir.path(), &home)

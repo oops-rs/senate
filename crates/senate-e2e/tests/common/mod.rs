@@ -1321,3 +1321,60 @@ pub async fn me_at(url: &str, token: &str) -> senate_core::api::Me {
         .await
         .unwrap()
 }
+
+// ---- a machine under a parent ----------------------------------------------
+
+/// A team's Senate, `acme`, above the machines: no built-in Speaker and no
+/// chat platform; its Speaker is bob, a person (a principal Speaker).
+pub async fn team_above() -> World {
+    Setup::new()
+        .without_speaker()
+        .server(|c| {
+            c.name = Some(name("acme"));
+            c.roster.speaker = Some("senator::bob".parse().unwrap());
+        })
+        .start()
+        .await
+}
+
+/// `senate.toml` of a machine under `world`: the Senate above at its
+/// address with `token`, and the machine's own Senate, `[local]` with
+/// `local` (its keys, one per line).
+pub fn under(world: &World, token: &str, local: &str) -> String {
+    format!(
+        "server_url = \"{}\"\ntoken = \"{token}\"\n\n[local]\n{local}",
+        world.server_url()
+    )
+}
+
+impl Desk {
+    /// What `senate status` asks the machine.
+    pub async fn machine_status(&self) -> ipc::StatusReply {
+        self.ipc(Request::Status).await
+    }
+
+    /// Wait until the machine's uplink has tried to register its Senate
+    /// above (taken or refused), and say how it went.
+    pub async fn wait_registration(&self) -> ipc::UplinkStatus {
+        let dir = self.paths.hosted(senate_bridge::paths::HOSTED_KEY);
+        eventually("the registration with the Senate above", || {
+            ipc::UplinkStatus::read(&dir).filter(|u| {
+                matches!(
+                    u.registration,
+                    ipc::Registration::Registered | ipc::Registration::Refused { .. }
+                )
+            })
+        })
+        .await
+    }
+
+    /// The hosted Senate's events on `committee`.
+    pub async fn events_of(&self, committee: &CommitteeId) -> Vec<Event> {
+        self.senate()
+            .daemon
+            .hub
+            .read(committee, Seq::ZERO, 10_000)
+            .await
+            .unwrap()
+    }
+}

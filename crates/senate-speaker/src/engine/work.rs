@@ -327,7 +327,7 @@ impl Engine {
                     .say(chat, &render::no_agent_to_work_from(l, person.name()))
                     .await;
             }
-            Settled::Unknown => {
+            Settled::Unknown | Settled::Child(_) => {
                 let text = render::unknown_targets(l, &[target.to_owned()], &self.roster);
                 return self.say(chat, &text).await;
             }
@@ -447,7 +447,7 @@ impl Engine {
                     let text = render::no_agent_to_reassign(l, person.name());
                     return self.say(chat, &text).await;
                 }
-                Settled::Unknown => {
+                Settled::Unknown | Settled::Child(_) => {
                     let text = render::unknown_targets(l, &[raw.to_owned()], &self.roster);
                     return self.say(chat, &text).await;
                 }

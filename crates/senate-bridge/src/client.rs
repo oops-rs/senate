@@ -434,6 +434,28 @@ impl ApiClient {
         Ok(checked(resp).await?.json().await?)
     }
 
+    /// `PUT /v1/children/{name}`: register the child Senate `name`, its
+    /// Speaker `speaker` (who this token must name).
+    pub async fn register_child(
+        &self,
+        name: &senate_core::Name,
+        speaker: &senate_core::SenatorId,
+    ) -> Result<api::ChildSenate, ApiClientError> {
+        let url = self.url(&api::child_path(name));
+        let body = api::RegisterChild {
+            speaker: speaker.clone(),
+        };
+        let resp = self.authed(self.http.put(url)).json(&body).send().await?;
+        Ok(checked(resp).await?.json().await?)
+    }
+
+    /// `GET /v1/children`: the child Senates registered here.
+    pub async fn children(&self) -> Result<Vec<api::ChildSenate>, ApiClientError> {
+        let url = self.url(api::CHILDREN_PATH);
+        let resp = self.authed(self.http.get(url)).send().await?;
+        Ok(checked(resp).await?.json().await?)
+    }
+
     /// `GET /v1/resolve`: whether `name` is in this Senate, written from
     /// `committee` (the writer's own, when the writer stands here).
     pub async fn resolve(

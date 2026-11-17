@@ -27,6 +27,10 @@ pub const SOCKET_PATH_LIMIT: usize = if cfg!(target_os = "macos") { 103 } else {
 /// Environment variable that replaces `~/.senate`.
 pub const HOME_ENV: &str = "SENATE_HOME";
 
+/// The directory under `senates/` of the Senate a machine hosts
+/// (`[local]`).
+pub const HOSTED_KEY: &str = "top";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Paths {
     home: PathBuf,
@@ -109,7 +113,8 @@ impl Paths {
         self.home.join("senate.toml")
     }
 
-    /// Where `senated` keeps a Senate it hosts on this machine.
+    /// Where `senated` keeps a Senate it hosts on this machine
+    /// ([`HOSTED_KEY`] for the machine's own).
     pub fn hosted(&self, key: &str) -> PathBuf {
         self.home.join("senates").join(key)
     }

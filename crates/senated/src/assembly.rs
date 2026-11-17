@@ -1,12 +1,36 @@
 //! Putting a daemon together: [`Assembly`] and the running [`Senated`].
+//!
+//! # When the built-in session runs
+//!
+//! The built-in session (the engine of `senate-speaker`, a senator named by
+//! `secretary.toml`'s `name`, `secretary` by default) runs when both hold:
+//!
+//! - **a complete model is configured**: `[model]`, `secretary.toml`'s
+//!   `[model]`, or (for compatibility) a `[speaker]` / `[secretary]` table,
+//!   and the model they make passes its check
+//!   ([`SecretaryConfigs::model_in_force`]);
+//! - **something refers to it**: the roster's `speaker` names it (an
+//!   unattended root), or it is listed among a senator's secretaries (in
+//!   `[roster.secretaries]`, or registered at runtime and kept in the
+//!   store), or (compatibility) the configuration has `[speaker]` and names
+//!   no Speaker, as before Speakers were named: it is then the Speaker of
+//!   an unattended root.
+//!
+//! `speaker` naming it with no complete model is a configuration error. A
+//! reference with no model, or a model with no reference, leaves it off,
+//! and the log says why. Its name is read once, at start: a changed `name`
+//! applies at the next start (the log says so when the file changes).
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use senate_core::{ChatSurface, Hub, Roster};
+use senate_core::{ChatSurface, Hub, Locale, Roster, RosterConfig, SenatorName};
 use senate_log::LogStore;
 use senate_server::{Authenticate, Running, Server, ServerError, ServerHub, redact_url};
-use senate_speaker::{BasisBrain, Brain, SpeakerArgs, SpeakerConfig, SpeakerMsg};
+use senate_speaker::{
+    BasisBrain, Brain, ModelCheck, SecretaryConfigs, SpeakerArgs, SpeakerConfig, SpeakerMsg,
+};
 use senate_work::{Forge, Runner};
 use tokio::sync::{mpsc, watch};
 
@@ -31,6 +55,11 @@ pub enum AssemblyError {
     SurfaceWithoutSpeaker,
     #[error("a gateway's surface can be mounted only once")]
     GatewayMountedTwice,
+    /// The roster's `speaker` names the built-in session, and no complete
+    /// model is configured for it. The message is in the deployment's
+    /// language.
+    #[error("{0}")]
+    BuiltInWithoutModel(String),
 }
 
 /// The Speaker's hands: a runner, and the forge that opens its PRs.
@@ -70,6 +99,14 @@ pub struct Assembly {
     hands: Option<Hands>,
     chats: Vec<ChatMount>,
     components: Vec<Arc<dyn Component>>,
+    /// Where `secretary.toml` is read, and the file the configuration came
+    /// from.
+    secretary_dir: Option<PathBuf>,
+    config_file: Option<PathBuf>,
+    secretary: Option<Arc<SecretaryConfigs>>,
+    model_check: Option<ModelCheck>,
+    /// No built-in session, whatever the configuration says.
+    without_session: bool,
 }
 
 impl Assembly {
@@ -83,7 +120,45 @@ impl Assembly {
             hands: None,
             chats: Vec::new(),
             components: Vec::new(),
+            secretary_dir: None,
+            config_file: None,
+            secretary: None,
+            model_check: None,
+            without_session: false,
         }
+    }
+
+    /// The configuration was read from `file`: `secretary.toml` is read
+    /// beside it ([`crate::config::secretary_dir`]), and what is shown names
+    /// it.
+    pub fn config_file(mut self, file: impl Into<PathBuf>) -> Self {
+        let file = file.into();
+        self.secretary_dir = Some(crate::config::secretary_dir(&file));
+        self.config_file = Some(file);
+        self
+    }
+
+    /// Read `secretary.toml` and the committees' files in `dir`. Without
+    /// this (or [`Assembly::config_file`]) there are none: the
+    /// configuration's `[model]` and `[speaker]` are all.
+    pub fn secretary_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.secretary_dir = Some(dir.into());
+        self
+    }
+
+    /// Run the built-in session on `secretary`, a configuration loaded
+    /// elsewhere (a machine's: [`crate::config::load_secretary_home`]),
+    /// instead of the one this configuration and its directory make.
+    pub fn secretary(mut self, secretary: Arc<SecretaryConfigs>) -> Self {
+        self.secretary = Some(secretary);
+        self
+    }
+
+    /// Check models with `check` instead of basis's rules (a host with
+    /// providers of its own, or a test).
+    pub fn model_check(mut self, check: ModelCheck) -> Self {
+        self.model_check = Some(check);
+        self
     }
 
     /// Keep the log in `store` instead of the one `database_url` names.
@@ -105,15 +180,18 @@ impl Assembly {
         self
     }
 
-    /// Run the built-in Speaker with `config`, replacing `[speaker]`.
+    /// Configure the built-in session with `config`, replacing `[speaker]`
+    /// (read, as that table is, as if it were `secretary.toml`; it also
+    /// configures a model).
     pub fn speaker(mut self, config: SpeakerConfig) -> Self {
         self.config.speaker = Some(config);
         self
     }
 
-    /// No built-in Speaker, whatever `[speaker]` says.
+    /// No built-in session, whatever the configuration says.
     pub fn without_speaker(mut self) -> Self {
         self.config.speaker = None;
+        self.without_session = true;
         self
     }
 
@@ -158,8 +236,8 @@ impl Assembly {
         self
     }
 
-    /// Open the log, start the server, then the Speaker and every
-    /// component.
+    /// Open the log, start the server, then the built-in session (when it
+    /// runs: see the module docs) and every component.
     pub async fn start(self) -> Result<Senated, AssemblyError> {
         let Self {
             config,
@@ -170,13 +248,22 @@ impl Assembly {
             hands,
             mut chats,
             components,
+            secretary_dir,
+            config_file,
+            secretary,
+            model_check,
+            without_session,
         } = self;
         if chats.len() > 1 {
             return Err(AssemblyError::SeveralSurfaces(chats.len()));
         }
-        if !chats.is_empty() && config.speaker.is_none() {
-            return Err(AssemblyError::SurfaceWithoutSpeaker);
-        }
+        let secretary = secretary.unwrap_or_else(|| {
+            let base = config.secretary_base(config_file.as_deref());
+            Arc::new(match model_check {
+                Some(check) => SecretaryConfigs::with_check(secretary_dir, base, check),
+                None => SecretaryConfigs::new(secretary_dir, base),
+            })
+        });
         let store = match store {
             Some(store) => store,
             None => senate_log::connect(&config.server.database_url)
@@ -186,11 +273,35 @@ impl Assembly {
                     source,
                 })?,
         };
-        // The built-in Speaker holds the seat of the Senate it runs in,
-        // and only it judges roots; without it the roster says who presides
-        // (a named agent, or nobody).
-        let mut server = Server::builder(config.server.clone(), store)
-            .built_in_speaker(config.speaker.is_some());
+        let locale = config.server.locale;
+        let roster_config = roster
+            .as_ref()
+            .map_or_else(|| config.server.roster.clone(), Roster::to_config);
+        let registered = registered_secretaries(store.as_ref()).await;
+        let session = if without_session {
+            None
+        } else {
+            decide_session(
+                &secretary,
+                &roster_config,
+                &registered,
+                secretary.compat_section().is_some(),
+                locale,
+            )?
+        };
+        if !chats.is_empty() && session.is_none() {
+            return Err(AssemblyError::SurfaceWithoutSpeaker);
+        }
+        if session.is_some() {
+            for note in secretary.notes() {
+                say_once(store.as_ref(), note).await;
+            }
+        }
+        // The built-in session is a senator of the roster: the Speaker, or
+        // a secretary of whoever lists it; only it judges roots, where it
+        // works the desk.
+        let mut server =
+            Server::builder(config.server.clone(), store).built_in_session(session.clone());
         if let Some(auth) = auth {
             server = server.auth(auth);
         }
@@ -202,7 +313,8 @@ impl Assembly {
 
         let slot = SpeakerSlot::default();
         let mut all: Vec<Arc<dyn Component>> = Vec::new();
-        if let Some(speaker_config) = config.speaker.clone() {
+        if session.is_some() {
+            let speaker_config = secretary.effective(None).speaker.clone();
             let (surface, unbound) = match chats.pop() {
                 Some(mount) => (mount.surface, mount.unbound),
                 None => {
@@ -213,9 +325,10 @@ impl Assembly {
                 }
             };
             let brain = brain.unwrap_or_else(|| {
-                Arc::new(BasisBrain::new(&speaker_config, hub.clone())) as Arc<dyn Brain>
+                Arc::new(BasisBrain::on_secretary(secretary.clone(), hub.clone())) as Arc<dyn Brain>
             });
-            let mut args = SpeakerArgs::new(hub.clone(), surface, brain, speaker_config, unbound);
+            let mut args = SpeakerArgs::new(hub.clone(), surface, brain, speaker_config, unbound)
+                .with_secretary(secretary.clone());
             if let Some((runner, forge)) = hands.or_else(|| config.work.as_ref().map(|w| w.hands()))
             {
                 args = args.with_work(runner, forge);
@@ -236,8 +349,181 @@ impl Assembly {
             gave_up: supervisor.gave_up(),
             server: Some(running),
             supervisor: Some(supervisor),
-            speaker: config.speaker.is_some().then_some(slot),
+            speaker: session.is_some().then_some(slot),
+            session,
+            secretary,
         })
+    }
+}
+
+/// The secretaries registered at runtime, as the server keeps them in the
+/// store's registry (`secretaries:<senator>` → names): read before the
+/// server starts, so a built-in session registered as someone's secretary
+/// runs again after a restart.
+async fn registered_secretaries(store: &dyn LogStore) -> Vec<SenatorName> {
+    match store.registry("secretaries:").await {
+        Ok(entries) => entries
+            .into_iter()
+            .filter_map(|(_, value)| serde_json::from_value::<Vec<SenatorName>>(value).ok())
+            .flatten()
+            .collect(),
+        Err(error) => {
+            tracing::debug!(%error, "cannot read the registered secretaries");
+            Vec::new()
+        }
+    }
+}
+
+/// Say `note` once: logged as a warning the first time, as a debug line
+/// after (the store's registry remembers it, as the server's start notes).
+async fn say_once(store: &dyn LogStore, note: &str) {
+    let key = format!("note:secretary:{note}");
+    let said = match store.registry(&key).await {
+        Ok(found) => found.iter().any(|(k, _)| *k == key),
+        Err(_) => false,
+    };
+    if said {
+        tracing::debug!("{note}");
+        return;
+    }
+    tracing::warn!("{note}");
+    if let Err(error) = store
+        .put_registry(&key, Some(serde_json::Value::Bool(true)))
+        .await
+    {
+        tracing::debug!(%error, "the note will be said again next start");
+    }
+}
+
+/// Whether the built-in session runs, and under which name: a complete
+/// model and a reference (see the module docs).
+fn decide_session(
+    secretary: &SecretaryConfigs,
+    roster: &RosterConfig,
+    registered: &[SenatorName],
+    compat: bool,
+    locale: Locale,
+) -> Result<Option<SenatorName>, AssemblyError> {
+    let name = secretary.name().clone();
+    let names_it = roster
+        .speaker
+        .as_ref()
+        .is_some_and(|s| s.id.senate().is_none() && *s.id.name() == name);
+    let listed = roster
+        .secretaries
+        .values()
+        .flatten()
+        .chain(registered)
+        .any(|s| *s == name);
+    let unattended = compat && roster.speaker.is_none();
+    let in_force = secretary.model_in_force();
+    if names_it && !in_force {
+        let problems: Vec<String> = secretary
+            .problems()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        return Err(AssemblyError::BuiltInWithoutModel(
+            text::speaker_without_model(locale, &name, &problems),
+        ));
+    }
+    if !(names_it || listed || unattended) {
+        if in_force {
+            tracing::info!("{}", text::model_unreferenced(locale, &name));
+        } else {
+            tracing::info!("{}", text::no_session(locale));
+        }
+        return Ok(None);
+    }
+    if !in_force {
+        tracing::warn!("{}", text::referenced_without_model(locale, &name));
+        return Ok(None);
+    }
+    let role = if names_it || unattended {
+        "the Speaker"
+    } else {
+        "a secretary"
+    };
+    tracing::info!(name = %name, role, "the built-in session runs");
+    Ok(Some(name))
+}
+
+/// What the assembly says about the built-in session, in both languages.
+mod text {
+    use senate_core::{Locale, SenatorName};
+
+    pub(super) fn speaker_without_model(
+        l: Locale,
+        name: &SenatorName,
+        problems: &[String],
+    ) -> String {
+        let mut out = match l {
+            Locale::Zh => format!(
+                "配置错误：speaker 指定内置会话 [senator::{name}] 为 Speaker，但没有配置可用的模型。请在顶层 [model] 表（或 secretary.toml 的 [model]）中配置 provider、model 和 api_key_env（密钥所在环境变量的名字）。"
+            ),
+            Locale::En => format!(
+                "configuration error: speaker names the built-in session [senator::{name}], but no usable model is configured for it. Configure provider, model and api_key_env (the NAME of the variable holding the key) in the top-level [model] table (or in secretary.toml's [model])."
+            ),
+        };
+        for problem in problems {
+            out.push_str(
+                "
+  ",
+            );
+            out.push_str(problem);
+        }
+        out
+    }
+
+    pub(super) fn model_unreferenced(l: Locale, name: &SenatorName) -> String {
+        match l {
+            Locale::Zh => format!(
+                "已配置模型，但没有任何地方引用内置会话 [senator::{name}]（既不是 speaker，也不是任何 senator 的秘书）：它不运行。"
+            ),
+            Locale::En => format!(
+                "A model is configured, but nothing refers to the built-in session [senator::{name}] (it is neither the speaker nor anyone's secretary): it does not run."
+            ),
+        }
+    }
+
+    pub(super) fn no_session(l: Locale) -> String {
+        match l {
+            Locale::Zh => "未配置模型，也没有引用内置会话：只提供日志和 bridge API。".into(),
+            Locale::En => {
+                "No model is configured and nothing refers to the built-in session: serving the log and the bridge API only."
+                    .into()
+            }
+        }
+    }
+
+    pub(super) fn referenced_without_model(l: Locale, name: &SenatorName) -> String {
+        match l {
+            Locale::Zh => format!(
+                "内置会话 [senator::{name}] 被列为秘书，但没有配置可用的模型：它不运行，Speaker 的待办由 Speaker 本人处理。请配置 [model]。"
+            ),
+            Locale::En => format!(
+                "The built-in session [senator::{name}] is listed as a secretary, but no usable model is configured: it does not run, and the Speaker's desk waits on the Speaker. Configure [model]."
+            ),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn every_text_reads_in_both_languages_with_ids_bracketed() {
+            let name: SenatorName = "clerk".parse().expect("name");
+            for l in Locale::ALL {
+                for text in [
+                    speaker_without_model(l, &name, &[]),
+                    model_unreferenced(l, &name),
+                    referenced_without_model(l, &name),
+                ] {
+                    assert!(text.contains("[senator::clerk]"), "{text}");
+                }
+            }
+        }
     }
 }
 
@@ -250,9 +536,22 @@ pub struct Senated {
     server: Option<Running>,
     supervisor: Option<Supervisor>,
     speaker: Option<SpeakerSlot>,
+    session: Option<SenatorName>,
+    secretary: Arc<SecretaryConfigs>,
 }
 
 impl Senated {
+    /// The built-in session's name, when it runs.
+    pub fn built_in_session(&self) -> Option<&SenatorName> {
+        self.session.as_ref()
+    }
+
+    /// The built-in session's configuration (its problems, what is in
+    /// force), whether or not it runs.
+    pub fn secretary(&self) -> &Arc<SecretaryConfigs> {
+        &self.secretary
+    }
+
     /// `http://<local_addr>`: where bridges connect.
     pub fn base_url(&self) -> String {
         format!("http://{}", self.local_addr)
@@ -263,7 +562,7 @@ impl Senated {
         self.hub.clone()
     }
 
-    /// Whether the built-in Speaker is part of this daemon.
+    /// Whether the built-in session is part of this daemon.
     pub fn has_speaker(&self) -> bool {
         self.speaker.is_some()
     }

@@ -1448,3 +1448,149 @@ async fn which_agent_and_answers_on_behalf_read_in_english() {
         Some("[speaker::copilot] 30 days (seq 1)")
     );
 }
+
+// ----- a person's agent one level up: their child Senates ---------------------------
+
+/// The child Senate's desk for refund-v2, as the parent's log names it.
+fn desk_of(child: &str) -> Address {
+    Address::Child {
+        senate: name(child),
+        committee: refund(),
+    }
+}
+
+/// carol runs no agent here and is the Speaker of one child Senate: her
+/// agent is that Senate's Speaker's desk, on the same committee; written
+/// out, `senator::carol` is still carol.
+#[tokio::test]
+async fn a_persons_agent_with_one_child_senate_is_that_senates_desk() {
+    let hub = bound_hub().await;
+    hub.set_roster(roster_with_carol());
+    hub.add_child("north-desk", "carol");
+    // Someone else's child Senate changes nothing for carol.
+    hub.add_child("south-desk", "bob");
+    let rig = Rig::start(hub).await;
+
+    rig.brain.interprets(Ok(Intent::Relay {
+        targets: vec!["carol".into()],
+        kind: RelayKind::Question,
+        body: "退款文档更新了吗？".into(),
+    }));
+    rig.append(mention(
+        "pm",
+        "问一下 carol 的 agent 退款文档更新了吗",
+        "m_c1",
+    ))
+    .await;
+    rig.settle().await;
+    let relay = last_relay(&rig);
+    assert_eq!(relay.kind, Kind::Question);
+    assert_eq!(relay.to, vec![desk_of("north-desk")]);
+    assert_eq!(relay.on_behalf_of, Some(user("pm")));
+    assert!(rig.brain.pick_inputs().is_empty(), "nothing to pick from");
+
+    rig.brain.interprets(Ok(Intent::Relay {
+        targets: vec!["senator::carol".into()],
+        kind: RelayKind::Note,
+        body: "记得更新退款文档".into(),
+    }));
+    rig.append(mention(
+        "pm",
+        "告诉 senator::carol 记得更新退款文档",
+        "m_c2",
+    ))
+    .await;
+    rig.settle().await;
+    let relay = last_relay(&rig);
+    assert_eq!(relay.to, vec![user("carol")], "the person, written out");
+    for text in rig.surface.texts() {
+        assert_senate_vocabulary(&text);
+    }
+}
+
+/// Two child Senates: the Speaker asks which, and the answer carries the
+/// relay on to that Senate's desk.
+#[tokio::test]
+async fn a_persons_agent_with_two_child_senates_is_asked_and_picked() {
+    let hub = bound_hub().await;
+    hub.set_roster(roster_with_carol());
+    hub.add_child("north-desk", "carol");
+    hub.add_child("south-desk", "carol");
+    let rig = Rig::start(hub).await;
+
+    let ask = rig
+        .append(mention("pm", "/tell carol 记得更新退款文档", "m_c1"))
+        .await;
+    rig.settle().await;
+    assert_eq!(
+        rig.hub.events(&refund()).len(),
+        2,
+        "nothing relayed while it asks"
+    );
+    let posts = rig.surface.posts();
+    assert_eq!(posts.len(), 1);
+    assert_eq!(
+        posts[0].markdown,
+        "[senator::carol] 是 2 个 Senate 的 Speaker，你指的是哪一个？回复编号或名字：\n\
+         1. [north-desk]\n\
+         2. [south-desk]"
+    );
+    let picked = rig.brain.pick_inputs();
+    assert_eq!(picked.len(), 1, "the same pick as among agents");
+    assert_eq!(picked[0].owner, Some(name("carol")));
+
+    rig.append(in_thread(
+        "pm",
+        "south-desk",
+        "m_c2",
+        ask.seq,
+        posts[0].thread_ref.clone(),
+        &posts[0].message_ref,
+    ))
+    .await;
+    rig.settle().await;
+    let relay = last_relay(&rig);
+    assert_eq!(relay.kind, Kind::Note);
+    assert_eq!(relay.to, vec![desk_of("south-desk")]);
+    assert_eq!(relay.body, "记得更新退款文档");
+
+    // In English, the same question names the Senates.
+    assert_eq!(
+        render::which_senate(
+            Locale::En,
+            Some(&name("carol")),
+            &[path("north-desk"), path("south-desk")]
+        ),
+        "[senator::carol] is the Speaker of 2 Senates. Which one do you mean? Reply with its number or name:\n\
+         1. [north-desk]\n\
+         2. [south-desk]"
+    );
+}
+
+/// The Brain's pick among the Senates is honoured.
+#[tokio::test]
+async fn the_brain_may_pick_one_of_a_persons_child_senates() {
+    let hub = bound_hub().await;
+    hub.set_roster(roster_with_carol());
+    hub.add_child("north-desk", "carol");
+    hub.add_child("south-desk", "carol");
+    let rig = Rig::start(hub).await;
+    rig.brain.picks(Ok(Pick::Agent(path("north-desk"))));
+    rig.append(mention("pm", "/tell carol 记得更新退款文档", "m_c1"))
+        .await;
+    rig.settle().await;
+    assert_eq!(last_relay(&rig).to, vec![desk_of("north-desk")]);
+}
+
+/// A person who runs an agent here keeps the lookup here, child Senates
+/// or not.
+#[tokio::test]
+async fn a_person_with_an_agent_here_keeps_it_over_a_child_senate() {
+    let hub = bound_hub().await;
+    hub.add_child("north-desk", "alice");
+    let rig = Rig::start(hub).await;
+    rig.append(mention("pm", "/tell alice 记得更新退款文档", "m_c1"))
+        .await;
+    rig.settle().await;
+    assert_eq!(last_relay(&rig).to, vec![agent("alice")]);
+}

@@ -130,6 +130,70 @@ pub(crate) fn name_one_of(l: Locale, owner: Option<&Name>, candidates: &[Senator
     }
 }
 
+fn senates(candidates: &[SenatorName], l: Locale) -> String {
+    candidates
+        .iter()
+        .map(|c| format!("[{c}]"))
+        .collect::<Vec<_>>()
+        .join(l.pick("、", ", "))
+}
+
+/// Asks which of a person's child Senates was meant ("alice's agent" one
+/// level up), numbered so the person can answer with the number or the
+/// Senate's name.
+///
+/// ```text
+/// [senator::alice] 是 2 个 Senate 的 Speaker，你指的是哪一个？回复编号或名字：
+/// 1. [north-desk]
+/// 2. [south-desk]
+/// ```
+pub(crate) fn which_senate(l: Locale, owner: Option<&Name>, candidates: &[SenatorName]) -> String {
+    let n = candidates.len();
+    let person = owner.map_or_else(String::new, |o| Address::senior(o).in_text());
+    let mut out = match l {
+        Locale::Zh => {
+            format!("{person} 是 {n} 个 Senate 的 Speaker，你指的是哪一个？回复编号或名字：")
+        }
+        Locale::En => format!(
+            "{person} is the Speaker of {n} Senates. Which one do you mean? Reply with its number or name:"
+        ),
+    };
+    for (i, c) in candidates.iter().enumerate() {
+        let _ = write!(out, "\n{}. [{c}]", i + 1);
+    }
+    out
+}
+
+/// The Speaker cannot ask here: the person names one of the Senates and
+/// asks again.
+pub(crate) fn name_one_senate_of(
+    l: Locale,
+    owner: Option<&Name>,
+    candidates: &[SenatorName],
+) -> String {
+    let list = senates(candidates, l);
+    let person = owner.map_or_else(String::new, |o| Address::senior(o).in_text());
+    match l {
+        Locale::Zh => format!("{person} 是几个 Senate 的 Speaker，请指明是哪一个再说一次：{list}"),
+        Locale::En => {
+            format!(
+                "{person} is the Speaker of several Senates; say which one and ask again: {list}"
+            )
+        }
+    }
+}
+
+/// The reply to "which Senate?" named none of them.
+pub(crate) fn senate_choice_not_understood(l: Locale, candidates: &[SenatorName]) -> String {
+    let list = senates(candidates, l);
+    match l {
+        Locale::Zh => format!("没认出是哪一个 Senate。请回复编号或名字：{list}"),
+        Locale::En => {
+            format!("I could not tell which Senate. Reply with a number or a name: {list}")
+        }
+    }
+}
+
 /// A person hands a thread to "my agent" and has none here.
 pub(crate) fn no_agent_of_yours(l: Locale) -> String {
     l.pick(

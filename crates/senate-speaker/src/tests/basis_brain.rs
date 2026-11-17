@@ -1354,3 +1354,212 @@ async fn live_interpret_understands_a_relay() {
     assert_eq!(targets, vec!["alice".to_owned()]);
     assert!(body.contains("30"), "{body}");
 }
+
+// ----- the configuration per committee ---------------------------------------------
+
+/// Models are complete when they name one of the scripted providers.
+fn scripted_check() -> crate::ModelCheck {
+    Arc::new(|m: &crate::ModelSettings| match m.provider.as_deref() {
+        Some("alpha" | "beta") => Ok(()),
+        Some(other) => Err(format!("unknown provider {other:?}")),
+        None => Err("no provider".into()),
+    })
+}
+
+/// A Brain on the files in `home`, whose runtimes are scripted models told
+/// apart by `<provider>/<model>`; every one made is kept in `made`.
+struct Configured {
+    hub: Arc<MemoryHub>,
+    secretary: Arc<crate::SecretaryConfigs>,
+    brain: BasisBrain,
+    made: Arc<Mutex<std::collections::BTreeMap<String, ScriptedModel>>>,
+    home: tempfile::TempDir,
+}
+
+impl Configured {
+    async fn new(files: &[(&str, &str)]) -> Self {
+        let home = tempfile::tempdir().expect("home");
+        for (name, text) in files {
+            std::fs::write(home.path().join(name), text).expect("write");
+        }
+        let hub = MemoryHub::new();
+        for committee in [refund(), other()] {
+            hub.append(NewEvent::new(
+                committee,
+                Kind::Decision,
+                agent("alice"),
+                "退款上限定为 30 天",
+            ))
+            .await
+            .expect("decision");
+        }
+        let base = crate::BaseLayer::new(home.path().join("data"), Locale::En).with_model(
+            crate::ModelSettings {
+                provider: Some("alpha".into()),
+                model: Some("m-1".into()),
+                ..crate::ModelSettings::default()
+            },
+        );
+        let secretary = Arc::new(crate::SecretaryConfigs::with_check(
+            Some(home.path().into()),
+            base,
+            scripted_check(),
+        ));
+        let made: Arc<Mutex<std::collections::BTreeMap<String, ScriptedModel>>> = Arc::default();
+        let models = made.clone();
+        let brain = BasisBrain::with_models(
+            secretary.clone(),
+            hub.clone(),
+            Arc::new(move |settings: &crate::ModelSettings| {
+                let key = format!(
+                    "{}/{}",
+                    settings.provider.as_deref().unwrap_or("-"),
+                    settings.model.as_deref().unwrap_or("-")
+                );
+                let model = models
+                    .lock()
+                    .expect("models")
+                    .entry(key)
+                    .or_insert_with(|| ScriptedModel::new(Vec::new()))
+                    .clone();
+                Ok(Runtime::builder()
+                    .with_provider_instance(model)
+                    .with_ephemeral_history()
+                    .with_provider_retry_budget(0))
+            }),
+        );
+        Self {
+            hub,
+            secretary,
+            brain,
+            made,
+            home,
+        }
+    }
+
+    /// One brief-top run on `committee`, after the refresh the engine makes
+    /// before it acts there.
+    async fn top(&self, committee: &CommitteeId) {
+        self.secretary.refresh(Some(committee));
+        let brief = self.hub.brief(committee).await.expect("brief");
+        self.brain
+            .brief_top(&brief, Locale::En)
+            .await
+            .expect("a top");
+    }
+
+    /// The system prompts each model was sent, by `<provider>/<model>`.
+    fn systems(&self) -> std::collections::BTreeMap<String, Vec<String>> {
+        self.made
+            .lock()
+            .expect("models")
+            .iter()
+            .map(|(key, model)| {
+                (
+                    key.clone(),
+                    model
+                        .requests()
+                        .iter()
+                        .map(|r| r.system.as_deref().unwrap_or_default().to_owned())
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+}
+
+fn other() -> CommitteeId {
+    CommitteeId::new("billing").expect("committee")
+}
+
+#[tokio::test]
+async fn extra_instructions_reach_that_committees_prompt_and_the_rules_remain() {
+    let configured = Configured::new(&[
+        ("secretary.toml", "instructions = \"Sign every reply.\"\n"),
+        (
+            "refund-v2.secretary.toml",
+            "instructions = \"Never promise a ship date.\"\ninstructions_file = \"refund.md\"\n",
+        ),
+        ("refund.md", "Cite the brief.\n"),
+    ])
+    .await;
+    configured.top(&refund()).await;
+    configured.top(&other()).await;
+    let systems = configured.systems();
+    let prompts = &systems["alpha/m-1"];
+    assert_eq!(prompts.len(), 2);
+    let rules = |committee: &CommitteeId| {
+        crate::basis_brain::prompt::persona(Some(committee), "Speaker", Locale::En)
+    };
+    // The engine's rules come first, whole; the instructions after them.
+    assert!(prompts[0].starts_with(&rules(&refund())), "{}", prompts[0]);
+    assert!(prompts[0].contains("Never promise a ship date.\n\nCite the brief."));
+    assert!(
+        !prompts[0].contains("Sign every reply."),
+        "the committee's file overrides the key"
+    );
+    assert!(prompts[1].starts_with(&rules(&other())), "{}", prompts[1]);
+    assert!(prompts[1].contains("Sign every reply."));
+    assert!(
+        !prompts[1].contains("Never promise a ship date.")
+            && !prompts[1].contains("Cite the brief."),
+        "that committee's only"
+    );
+    assert!(prompts[1].contains("never replace them"));
+
+    // The instructions file edited: the next run on that committee reads it.
+    std::fs::write(
+        configured.home.path().join("refund.md"),
+        "Quote the brief's seq numbers, and nothing else.\n",
+    )
+    .expect("edit");
+    configured.top(&refund()).await;
+    let systems = configured.systems();
+    assert!(systems["alpha/m-1"][2].contains("Quote the brief's seq numbers"));
+}
+
+#[tokio::test]
+async fn a_committee_file_switches_the_model_for_that_committee_only() {
+    let configured =
+        Configured::new(&[("refund-v2.secretary.toml", "[model]\nmodel = \"m-2\"\n")]).await;
+    configured.top(&refund()).await;
+    configured.top(&other()).await;
+    let systems = configured.systems();
+    assert_eq!(systems["alpha/m-2"].len(), 1, "{systems:?}");
+    assert_eq!(systems["alpha/m-1"].len(), 1, "{systems:?}");
+
+    // A provider-level override: the model id is inherited.
+    std::fs::write(
+        configured.home.path().join("refund-v2.secretary.toml"),
+        "[model]\nprovider = \"beta\"\n",
+    )
+    .expect("edit");
+    configured.top(&refund()).await;
+    configured.top(&other()).await;
+    let systems = configured.systems();
+    assert_eq!(systems["beta/m-1"].len(), 1, "{systems:?}");
+    assert_eq!(systems["alpha/m-1"].len(), 2, "{systems:?}");
+    assert!(configured.secretary.problems().is_empty());
+}
+
+#[tokio::test]
+async fn an_incomplete_committee_model_falls_back_and_is_reported() {
+    let configured = Configured::new(&[(
+        "refund-v2.secretary.toml",
+        "[model]\nprovider = \"gamma\"\nmodel = \"m-9\"\n",
+    )])
+    .await;
+    configured.top(&refund()).await;
+    let systems = configured.systems();
+    assert_eq!(
+        systems.keys().collect::<Vec<_>>(),
+        ["alpha/m-1"],
+        "{systems:?}"
+    );
+    let problems = configured.secretary.problems();
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(
+        problems[0].file.ends_with("refund-v2.secretary.toml"),
+        "{problems:?}"
+    );
+}

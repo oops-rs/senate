@@ -737,7 +737,9 @@ pub struct Forwarded {
     pub posted: Posted,
     /// The note in the asker's thread.
     pub note: Posted,
-    /// Where it went.
+    /// Where it went. Named apart from the flattened root's `to` (its
+    /// recipients), which it would otherwise collide with.
+    #[serde(rename = "forwarded_to")]
     pub to: senate_core::Locator,
 }
 
@@ -787,6 +789,81 @@ pub struct RolesReply {
     pub chairs: Vec<senate_core::api::ChairInfo>,
     #[serde(default)]
     pub children: Vec<senate_core::api::ChildSenate>,
+    /// The Senate above, when this machine's Senate is a child of it: its
+    /// address, its path and whether the registration was taken.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uplink: Option<UplinkStatus>,
+}
+
+/// The machine's Senate registered as a child of the Senate above, as its
+/// uplink last found it. `senated --machine` writes it to
+/// [`UplinkStatus::FILE`] in the hosted Senate's directory on every
+/// (re)connect; `senate status` reads it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UplinkStatus {
+    /// The Senate above's address.
+    pub url: String,
+    /// The Senate above's path, when it answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<senate_core::SenatePath>,
+    /// The name the machine's Senate registers under.
+    pub name: Name,
+    /// The Speaker it registers with.
+    pub speaker: senate_core::SenatorId,
+    pub registration: Registration,
+    pub at: DateTime<Utc>,
+}
+
+/// Where a child Senate's registration with the Senate above stands.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum Registration {
+    /// Not tried yet.
+    Pending,
+    /// Taken: the Senate above lists it among its children.
+    Registered,
+    /// The Senate above refused it, and why.
+    Refused { reason: String },
+    /// The Senate above did not answer.
+    Unreachable { error: String },
+}
+
+impl UplinkStatus {
+    /// Its file in the hosted Senate's directory.
+    pub const FILE: &'static str = "uplink.json";
+
+    /// Write it to `dir` (best effort: status is informational).
+    pub fn write(&self, dir: &Path) {
+        let path = dir.join(Self::FILE);
+        let text = serde_json::to_string_pretty(self).unwrap_or_default();
+        if let Err(e) = std::fs::write(&path, text) {
+            tracing::debug!("{}: {e}", path.display());
+        }
+    }
+
+    /// Where the registration stands now.
+    pub fn now(
+        url: &str,
+        parent: Option<senate_core::SenatePath>,
+        name: Name,
+        speaker: senate_core::SenatorId,
+        registration: Registration,
+    ) -> Self {
+        Self {
+            url: url.to_owned(),
+            parent,
+            name,
+            speaker,
+            registration,
+            at: Utc::now(),
+        }
+    }
+
+    /// What was last written to `dir`, if anything readable.
+    pub fn read(dir: &Path) -> Option<Self> {
+        let text = std::fs::read_to_string(dir.join(Self::FILE)).ok()?;
+        serde_json::from_str(&text).ok()
+    }
 }
 
 /// One thread's events, root first.
@@ -1143,6 +1220,12 @@ pub struct StatusReply {
     /// Who holds the Speaker's seat of that Senate, as `/v1/me` said.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speaker: Option<senate_core::SpeakerSeat>,
+    /// The Speaker's office (the Speaker as a senator id and its kind, the
+    /// desk's workers and which are present here), each committee's chair,
+    /// the child Senates, and the Senate above when this one is a child.
+    /// Absent from an older daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roles: Option<RolesReply>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
