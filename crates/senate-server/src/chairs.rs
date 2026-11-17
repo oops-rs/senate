@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 
 use senate_core::{
     Address, Awaiting, ChairFold, ChairSource, DocketItem, Event, Kind, People, PickPayload,
-    PresencePayload, SenatorName, Seq, StatusPayload, StatusState, meta,
+    SenatorName, Seq, StatusPayload, StatusState, meta,
 };
 use serde_json::Value;
 
@@ -34,51 +34,36 @@ fn awaits_chair(event: &Event) -> bool {
 /// A committee's chair, folded from its log (see the module docs).
 #[derive(Debug, Clone)]
 pub(crate) struct ChairView {
-    head: Seq,
     fold: ChairFold,
     people: People,
-    first_agent: Option<SenatorName>,
 }
 
 impl ChairView {
     pub(crate) fn new(people: People) -> Self {
         Self {
-            head: Seq::ZERO,
             fold: ChairFold::new(),
             people,
-            first_agent: None,
         }
     }
 
     pub(crate) fn head(&self) -> Seq {
-        self.head
+        self.fold.head()
     }
 
     pub(crate) fn observe(&mut self, event: &Event) {
-        if event.seq <= self.head {
+        if event.seq <= self.fold.head() {
             return;
         }
-        self.head = event.seq;
         self.fold.observe(event);
-        if self.first_agent.is_none() {
-            self.first_agent = match event.kind {
-                Kind::Presence => PresencePayload::of(event).map(|p| p.agent),
-                _ => self.people.as_agent(&event.from).cloned(),
-            };
+        if let Some(agent) = self.people.as_agent(&event.from) {
+            self.fold.observe_agent(agent, event.seq);
         }
     }
 
     /// The chair and how it was found; `None` for a committee with no
     /// event yet.
     pub(crate) fn chair(&self) -> Option<(&SenatorName, ChairSource)> {
-        match self.fold.chair() {
-            Some((set, ChairSource::Set)) => Some((set, ChairSource::Set)),
-            found => self
-                .first_agent
-                .as_ref()
-                .map(|agent| (agent, ChairSource::FirstAgent))
-                .or(found),
-        }
+        self.fold.chair()
     }
 }
 

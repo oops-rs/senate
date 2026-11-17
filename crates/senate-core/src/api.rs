@@ -39,6 +39,7 @@
 //! | GET  | `/v1/resolve?name=&committee=` | → [`Resolved`] |
 //! | GET  | `/v1/committees/{committee}/chair` | → [`ChairInfo`] |
 //! | PUT  | `/v1/committees/{committee}/chair` | [`SetChair`] → [`ChairInfo`] |
+//! | PUT  | `/v1/committees/{committee}/seat` | [`SetCommitteeSeat`] → [`CommitteeSeatInfo`] |
 //! | GET  | `/v1/secretaries` | → [`Secretaries`] |
 //! | PUT  | `/v1/secretaries/{senator}` | [`SetSecretaries`] → [`Secretaries`] |
 //! | GET  | `/v1/children` | → [`Vec<ChildSenate>`](ChildSenate) |
@@ -237,6 +238,10 @@ pub fn chair_path(committee: &CommitteeId) -> String {
     format!("/v1/committees/{committee}/chair")
 }
 
+pub fn committee_seat_path(committee: &CommitteeId) -> String {
+    format!("/v1/committees/{committee}/seat")
+}
+
 pub fn secretaries_of_path(senator: &SenatorName) -> String {
     format!("{SECRETARIES_PATH}/{senator}")
 }
@@ -261,6 +266,28 @@ pub struct ChairInfo {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetChair {
     pub senator: SenatorName,
+}
+
+/// An explicit seat change by the agent's owner or the Speaker's office.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetCommitteeSeat {
+    pub senator: SenatorName,
+    pub action: crate::CommitteeSeatAction,
+    /// Reuse the id when retrying the operation.
+    pub id: crate::EventId,
+    /// The senator acting for the Speaker's office on this call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acted_by: Option<SenatorName>,
+}
+
+/// The current explicit state, including after replay of an older operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitteeSeatInfo {
+    pub committee: CommitteeId,
+    pub senator: SenatorName,
+    pub action: crate::CommitteeSeatAction,
+    pub seq: Seq,
+    pub duplicate: bool,
 }
 
 /// `GET /v1/secretaries`: every secretary relation, principal → its

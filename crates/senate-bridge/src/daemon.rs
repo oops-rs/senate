@@ -1439,7 +1439,7 @@ impl Shared {
             self.fill_gap(agent, committee, cursor, seq, dirty).await?;
         }
         match incoming {
-            Incoming::Event(e) => self.ingest_one(agent, &e, dirty)?,
+            Incoming::Event(e) => self.ingest_one(agent, &e, dirty).await?,
             Incoming::Undecodable { seq, error } => {
                 self.skip_undecodable(agent, committee, seq, &error, dirty)?;
             }
@@ -1477,7 +1477,7 @@ impl Shared {
                 progressed = true;
                 match decoded {
                     Decoded::Event(e) if &e.committee == committee => {
-                        self.ingest_one(agent, &e, dirty)?;
+                        self.ingest_one(agent, &e, dirty).await?;
                     }
                     Decoded::Event(e) => {
                         let error = format!("it belongs to committee {}", e.committee);
@@ -1521,13 +1521,15 @@ impl Shared {
         }
     }
 
-    fn ingest_one(
+    async fn ingest_one(
         &self,
         agent: &SenatorName,
         event: &Event,
         dirty: &Notify,
     ) -> Result<(), StoreError> {
-        self.observe_chair(event);
+        if self.observe_chair(event) {
+            self.seed_chair(&event.committee).await;
+        }
         // Only the daemon marks a queued item as one to cover.
         let planted;
         let event = if event.meta.contains_key(format::COVER_META)
@@ -2414,6 +2416,13 @@ impl Shared {
                 version: env!("CARGO_PKG_VERSION").to_string(),
             }),
             Request::Aliases => wrap(self.api.aliases().await.map_err(server_error)),
+            Request::SetCommitteeSeat { committee, request } => {
+                let result = self.api.set_committee_seat(&committee, &request).await;
+                if result.is_ok() {
+                    self.seed_chair(&committee).await;
+                }
+                wrap(result.map_err(server_error))
+            }
             Request::Status => wrap(self.on_status()),
             Request::Hook(report) => wrap(self.on_hook(report, false).await),
             Request::SessionHook(report) => {

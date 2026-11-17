@@ -21,10 +21,13 @@
 //! that is absent (or concerned itself) leaves its duties to the Speaker's
 //! desk.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::address::Address;
+use crate::committee_seat::{CommitteeSeatAction, CommitteeSeatChange, CommitteeSeats};
 use crate::continuity::PresencePayload;
 use crate::event::{Event, Kind, meta};
 use crate::ids::Seq;
@@ -68,8 +71,9 @@ pub enum ChairSource {
 pub struct ChairFold {
     head: Seq,
     set: Option<SenatorName>,
-    first_agent: Option<SenatorName>,
+    agents: BTreeMap<SenatorName, Seq>,
     creator: Option<SenatorName>,
+    seats: CommitteeSeats,
 }
 
 impl ChairFold {
@@ -91,15 +95,33 @@ impl ChairFold {
         {
             self.creator = Some(author.clone());
         }
-        if let Some(chair) = ChairPayload::of(event) {
-            self.set = Some(chair.senator);
-            return;
-        }
-        if self.first_agent.is_none()
+        if let Some(change) = CommitteeSeatChange::of(event) {
+            self.seats.apply(&change, event.seq);
+            match change.action {
+                CommitteeSeatAction::Unseat => {
+                    self.agents.remove(&change.senator);
+                    if self.set.as_ref() == Some(&change.senator) {
+                        self.set = None;
+                    }
+                }
+                CommitteeSeatAction::Join => self.observe_agent(&change.senator, event.seq),
+            }
+        } else if let Some(chair) = ChairPayload::of(event) {
+            if !self.seats.is_unseated(&chair.senator) {
+                self.set = Some(chair.senator);
+            }
+        } else if event.from == Address::Committee
             && event.kind == Kind::Presence
             && let Some(presence) = PresencePayload::of(event)
         {
-            self.first_agent = Some(presence.agent);
+            self.observe_agent(&presence.agent, event.seq);
+        }
+    }
+
+    /// The author of an event the caller's roster identifies as an agent.
+    pub fn observe_agent(&mut self, agent: &SenatorName, seq: Seq) {
+        if !self.seats.is_unseated(agent) {
+            self.agents.entry(agent.clone()).or_insert(seq);
         }
     }
 
@@ -110,11 +132,17 @@ impl ChairFold {
             .as_ref()
             .map(|s| (s, ChairSource::Set))
             .or_else(|| {
-                self.first_agent
-                    .as_ref()
-                    .map(|s| (s, ChairSource::FirstAgent))
+                self.agents
+                    .iter()
+                    .min_by_key(|(_, seq)| *seq)
+                    .map(|(s, _)| (s, ChairSource::FirstAgent))
             })
-            .or_else(|| self.creator.as_ref().map(|s| (s, ChairSource::Creator)))
+            .or_else(|| {
+                self.creator
+                    .as_ref()
+                    .filter(|s| !self.seats.is_unseated(s))
+                    .map(|s| (s, ChairSource::Creator))
+            })
     }
 
     /// The chair from a whole log.

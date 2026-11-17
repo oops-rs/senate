@@ -22,6 +22,8 @@ pub(crate) enum ProxyMsg {
     },
     Detach(ConnId),
     Deliver(Arc<Event>),
+    /// Deliver a seat's last event and close its streams.
+    Retire(Arc<Event>),
 }
 
 pub(crate) struct ProxyArgs {
@@ -77,7 +79,7 @@ impl Actor for AgentProxy {
 
     async fn handle(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         message: ProxyMsg,
         state: &mut ProxyState,
     ) -> Result<(), ActorProcessingErr> {
@@ -95,6 +97,12 @@ impl Actor for AgentProxy {
                 state.senders.push((conn, sender));
             }
             ProxyMsg::Detach(conn) => state.drop_conn(conn),
+            ProxyMsg::Retire(event) => {
+                for (_, sender) in &state.senders {
+                    let _ = sender.try_send(event.clone());
+                }
+                myself.stop(None);
+            }
             ProxyMsg::Deliver(event) => {
                 let mut dropped = Vec::new();
                 for (conn, sender) in &state.senders {

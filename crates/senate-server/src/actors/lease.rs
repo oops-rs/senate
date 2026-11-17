@@ -192,6 +192,20 @@ impl Leases {
         self.agents.keys()
     }
 
+    pub(crate) fn unseat(&mut self, agent: &SenatorName) {
+        self.agents.remove(agent);
+    }
+
+    pub(crate) fn join(&mut self, payload: &PresencePayload, seq: Seq) {
+        if self
+            .agents
+            .get(&payload.agent)
+            .is_none_or(|agent| agent.state.is_none())
+        {
+            self.apply(payload, seq);
+        }
+    }
+
     /// Note `agent`'s latest activity and cursor, and return the transition
     /// that is due, if any. Nothing changes state until [`Self::apply`].
     pub(crate) fn decide(

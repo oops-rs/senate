@@ -10,7 +10,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use anyhow::Context;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use senate_bridge::binding::{self, Settings};
 use senate_bridge::delivery::{codex, inbox};
 use senate_bridge::hook::{self, HookEnv, HookKind, HookTimeouts};
@@ -20,7 +20,7 @@ use senate_bridge::session::Runtime;
 use senate_bridge::{
     BridgeConfig, Paths, init, install, mcp, person, preside, service, speak, status,
 };
-use senate_core::{CommitteeId, EventId, Locale, Name, Seq};
+use senate_core::{CommitteeId, CommitteeSeatAction, EventId, Locale, Name, SenatorName, Seq};
 
 #[derive(Parser)]
 #[command(
@@ -83,6 +83,11 @@ enum Cmd {
     Aliases,
     /// Remove this worktree's committee binding on the current branch.
     Leave,
+    /// Change one senator's membership of a committee.
+    Seat {
+        #[command(subcommand)]
+        command: SeatCmd,
+    },
     /// Suggest a flat initial senator alias to sessions on this worktree's current branch.
     Pin {
         /// Initial alias, e.g. reviewer.
@@ -353,6 +358,36 @@ enum DebugCmd {
         #[arg(long)]
         text: String,
     },
+}
+
+#[derive(Subcommand)]
+enum SeatCmd {
+    /// Remove the senator's seat and end its connection on this committee.
+    Unseat(SeatArgs),
+    /// Explicitly join the committee again under the same senator id.
+    Join(SeatArgs),
+}
+
+#[derive(Args)]
+struct SeatArgs {
+    #[arg(long)]
+    committee: CommitteeId,
+    /// A primary senator id or alias in this Senate.
+    #[arg(long, value_parser = parse_seat_name)]
+    senator: SenatorName,
+    /// The primary id acting for the Speaker's office.
+    #[arg(long, value_parser = parse_seat_name)]
+    acted_by: Option<SenatorName>,
+    /// Reuse the same operation id when retrying.
+    #[arg(long)]
+    id: Option<EventId>,
+    /// Print the server's current seat state as JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+fn parse_seat_name(raw: &str) -> Result<SenatorName, senate_core::SenatorNameError> {
+    raw.strip_prefix("senator::").unwrap_or(raw).parse()
 }
 
 fn init_logging(default: &str) {
@@ -764,6 +799,52 @@ fn run(command: Cmd) -> anyhow::Result<()> {
                     senate_core::Address::senator(&alias).in_text(),
                     senate_core::Address::senator(&primary).in_text()
                 );
+            }
+            Ok(())
+        }
+        Cmd::Seat { command } => {
+            let (action, args) = match command {
+                SeatCmd::Unseat(args) => (CommitteeSeatAction::Unseat, args),
+                SeatCmd::Join(args) => (CommitteeSeatAction::Join, args),
+            };
+            let paths = Paths::from_env()?;
+            let request = senate_core::api::SetCommitteeSeat {
+                senator: args.senator,
+                action,
+                id: args.id.unwrap_or_default(),
+                acted_by: args.acted_by,
+            };
+            let reply: senate_core::api::CommitteeSeatInfo =
+                runtime(false)?.block_on(daemon_call(
+                    &paths,
+                    &Request::SetCommitteeSeat {
+                        committee: args.committee,
+                        request,
+                    },
+                ))?;
+            if args.json {
+                return print_json(&reply);
+            }
+            let locale = BridgeConfig::locale_at(&paths.config());
+            let seat = senate_core::Address::senator(&reply.senator).in_text();
+            match reply.action {
+                CommitteeSeatAction::Unseat => println!(
+                    "{}",
+                    locale.pick(
+                        format!("{seat} 已从 {} 除席（seq {}）", reply.committee, reply.seq),
+                        format!(
+                            "{seat} unseated from {} (seq {})",
+                            reply.committee, reply.seq
+                        ),
+                    ),
+                ),
+                CommitteeSeatAction::Join => println!(
+                    "{}",
+                    locale.pick(
+                        format!("{seat} 已加入 {}（seq {}）", reply.committee, reply.seq),
+                        format!("{seat} joined {} (seq {})", reply.committee, reply.seq),
+                    ),
+                ),
             }
             Ok(())
         }

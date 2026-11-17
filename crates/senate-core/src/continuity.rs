@@ -58,6 +58,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::address::Address;
+use crate::committee_seat::{CommitteeSeatAction, CommitteeSeatChange, CommitteeSeats};
 use crate::event::{Event, Kind, NewEvent, meta};
 use crate::ids::{CommitteeId, EventId, Seq};
 use crate::locale::Locale;
@@ -480,6 +481,7 @@ impl AgentPresence {
 pub struct PresenceBoard {
     head: Seq,
     agents: BTreeMap<SenatorName, AgentPresence>,
+    seats: CommitteeSeats,
 }
 
 impl PresenceBoard {
@@ -491,6 +493,10 @@ impl PresenceBoard {
         self.head
     }
 
+    pub fn seats(&self) -> &CommitteeSeats {
+        &self.seats
+    }
+
     pub fn observe(&mut self, event: &Event) {
         if event.seq <= self.head {
             return;
@@ -499,7 +505,26 @@ impl PresenceBoard {
         if event.from != Address::Committee {
             return;
         }
-        if let Some(p) = PresencePayload::of(event) {
+        if let Some(change) = CommitteeSeatChange::of(event) {
+            self.seats.apply(&change, event.seq);
+            match change.action {
+                CommitteeSeatAction::Unseat => {
+                    self.agents.remove(&change.senator);
+                }
+                CommitteeSeatAction::Join => {
+                    self.agents
+                        .entry(change.senator.clone())
+                        .or_insert_with(|| {
+                            AgentPresence::from_payload(
+                                &change.joined_presence(event),
+                                Some(event.seq),
+                            )
+                        });
+                }
+            }
+        } else if let Some(p) = PresencePayload::of(event)
+            && !self.seats.is_unseated(&p.agent)
+        {
             self.agents.insert(
                 p.agent.clone(),
                 AgentPresence::from_payload(&p, Some(event.seq)),

@@ -384,3 +384,83 @@ async fn shutdown_ends_open_streams() {
         Err(senate_core::HubError::Unavailable(_))
     ));
 }
+
+#[tokio::test]
+async fn a_writer_rebuilds_the_seat_fence_after_a_lost_commit_ack() {
+    use senate_core::api::{CommitteeSeatInfo, SetCommitteeSeat, committee_seat_path};
+    use senate_core::{CommitteeSeatAction, EventId, PresenceState};
+
+    let store = Arc::new(Faulty::default());
+    let server = TestServer::start_configured(store.clone(), |config| {
+        config.roster.agents = vec![seated("claude", "alice")];
+    })
+    .await;
+    assert_eq!(
+        server.heartbeat(ALICE, "claude").await.status(),
+        StatusCode::NO_CONTENT
+    );
+    let hub = &server.running.hub;
+    let agent = path("claude");
+    let committee_id = committee();
+    let before = hub.last_heartbeat(&committee(), &agent).await.unwrap();
+    let mut request = SetCommitteeSeat {
+        senator: agent.clone(),
+        action: CommitteeSeatAction::Unseat,
+        id: EventId::new(),
+        acted_by: None,
+    };
+    let seat = |request: &SetCommitteeSeat| {
+        server
+            .request(Method::PUT, &committee_seat_path(&committee()), ALICE)
+            .json(request)
+            .send()
+    };
+    store.arm(LOSE_ACK_AFTER_COMMIT);
+    api_error(
+        seat(&request).await.unwrap(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal",
+    )
+    .await;
+    eventually("writer restored the excluded seat", || async {
+        hub.presence(&committee())
+            .await
+            .is_ok_and(|page| page.agents.is_empty())
+    })
+    .await;
+    assert_eq!(
+        server.heartbeat(ALICE, "claude").await.status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        hub.last_heartbeat(&committee(), &agent).await.unwrap(),
+        before
+    );
+    let replay: CommitteeSeatInfo = seat(&request).await.unwrap().json().await.unwrap();
+    assert!(replay.duplicate);
+    assert_eq!(replay.action, CommitteeSeatAction::Unseat);
+
+    request.action = CommitteeSeatAction::Join;
+    request.id = EventId::new();
+    store.arm(LOSE_ACK_AFTER_COMMIT);
+    api_error(
+        seat(&request).await.unwrap(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal",
+    )
+    .await;
+    eventually("writer restored the explicit join", || async {
+        hub.presence(&committee()).await.is_ok_and(|page| {
+            page.agents
+                .iter()
+                .any(|p| p.agent == agent && p.state == PresenceState::Absent)
+        })
+    })
+    .await;
+    let _stream = server.stream_as(ALICE, Some("claude"), None, None).await;
+    eventually("joined stream is connected", || {
+        hub.is_agent_connected(&committee_id, &agent)
+    })
+    .await;
+    server.running.shutdown().await.unwrap();
+}

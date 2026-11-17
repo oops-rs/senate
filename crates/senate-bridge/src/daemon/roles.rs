@@ -23,8 +23,8 @@
 
 use senate_core::api::ChairInfo;
 use senate_core::{
-    Awaiting, ChairFold, ChairPayload, ChairSource, DocketItem, Office, Origin, PresencePayload,
-    SenatorId, SenatorKind,
+    Awaiting, ChairFold, ChairPayload, ChairSource, CommitteeSeatAction, CommitteeSeatChange,
+    DocketItem, Office, Origin, PresencePayload, SenatorId, SenatorKind,
 };
 
 use super::*;
@@ -50,11 +50,25 @@ pub(crate) struct ChairCache {
 }
 
 impl ChairCache {
-    fn observe(&mut self, event: &Event) {
+    fn observe(&mut self, event: &Event) -> bool {
+        if event.seq <= self.fold.head() {
+            return false;
+        }
         if self.whole.is_none() {
             self.whole = Some(event.seq == Seq(1));
         }
         self.fold.observe(event);
+        if let Some(change) = CommitteeSeatChange::of(event) {
+            if change.action == CommitteeSeatAction::Unseat
+                && self
+                    .known
+                    .as_ref()
+                    .is_some_and(|(chair, _)| chair == &change.senator)
+            {
+                self.known = None;
+            }
+            return true;
+        }
         if let Some(chair) = ChairPayload::of(event) {
             self.known = Some((chair.senator, ChairSource::Set));
         } else if event.kind == Kind::Presence
@@ -63,6 +77,7 @@ impl ChairCache {
         {
             self.known = Some((p.agent, ChairSource::FirstAgent));
         }
+        false
     }
 
     fn chair(&self) -> Option<SenatorName> {
@@ -211,11 +226,11 @@ impl Shared {
     // ---- chairs --------------------------------------------------------------
 
     /// Follow the log for `event`'s committee's chair.
-    pub(crate) fn observe_chair(&self, event: &Event) {
+    pub(crate) fn observe_chair(&self, event: &Event) -> bool {
         lock(&self.chairs)
             .entry(event.committee.clone())
             .or_default()
-            .observe(event);
+            .observe(event)
     }
 
     /// Ask the server who chairs `committee` (a stream opened).
