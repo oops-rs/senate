@@ -9,3 +9,4 @@
 /apps/macos/Generated/
 /apps/macos/*.xcodeproj/
 /apps/macos/Senate/Info.plist
+.grapha
