@@ -31,6 +31,7 @@
 //! | `thread` | `session`, `committee?`, `thread`, `mark_seen?` | [`ThreadReply`] |
 //! | `seen` | `committee`, `marks` (thread, seq) | `{}` |
 //! | `catch_up` | `session`, `limit?` | [`CatchUpReply`] |
+//! | `join_as` | `session`, `committee`, `senator` | [`JoinReply`] |
 //! | `join` | `session`, `committee` | [`JoinReply`] |
 //! | `search` | `session`, `query`, `limit?`, `committee?` | [`SearchReply`] |
 //! | `post` | `session`, `body`, `proposal?`, `committee?`, `id?` | [`Posted`] |
@@ -363,6 +364,12 @@ pub enum Request {
     Join {
         session: SessionSelector,
         committee: CommitteeId,
+    },
+    /// Separate operation so an older daemon cannot silently ignore the name.
+    JoinAs {
+        session: SessionSelector,
+        committee: CommitteeId,
+        senator: SenatorName,
     },
     Search {
         session: SessionSelector,

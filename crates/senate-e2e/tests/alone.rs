@@ -677,3 +677,87 @@ async fn what_the_agent_hands_back_stays_in_the_persons_inbox_until_they_act() {
     assert!(!text.contains("wait on you"), "{text}");
     desk.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_codex_threads_in_one_worktree_choose_separate_seats() {
+    use senate_bridge::ipc::JoinReply;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut desk = Desk::new(dir.path(), "alice", Locale::En, ALONE);
+    let codex = desk.codex_app_server();
+    desk.start().await;
+    for id in ["author-thread", "review-thread"] {
+        codex.idle(id);
+        let start = desk.codex_start(id).await.unwrap();
+        assert!(context(&start).contains("[senator::codex]"));
+    }
+    desk.wait_connected("codex", true).await;
+    let named = Request::JoinAs {
+        session: Laptop::session("review-thread"),
+        committee: committee(),
+        senator: path("reviewer"),
+    };
+    for _ in 0..2 {
+        let reply: JoinReply = desk.ipc(named.clone()).await;
+        assert_eq!(reply.agent, path("reviewer"));
+    }
+    // Closing and resuming the thread across a machine restart keeps the choice.
+    desk.codex_end("review-thread").await;
+    desk.stop().await;
+    desk.start().await;
+    let start = desk.codex_start("review-thread").await.unwrap();
+    assert!(context(&start).contains("[senator::reviewer]"));
+    let joined: JoinReply = desk
+        .ipc(Request::Join {
+            session: Laptop::session("review-thread"),
+            committee: committee(),
+        })
+        .await;
+    assert_eq!(joined.agent, path("reviewer"));
+    desk.wait_connected("reviewer", true).await;
+    desk.wait_connected("codex", true).await;
+
+    for (sender, to, body, intended) in [
+        (
+            "author-thread",
+            "reviewer",
+            "Review the retry policy?",
+            "review-thread",
+        ),
+        (
+            "review-thread",
+            "codex",
+            "Which revision should I review?",
+            "author-thread",
+        ),
+    ] {
+        let asked = desk.ask(sender, senator(to), body).await;
+        let event = desk
+            .senate()
+            .daemon
+            .hub
+            .get(&committee(), asked.seq)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            event.from,
+            senator(if sender == "author-thread" {
+                "codex"
+            } else {
+                "reviewer"
+            })
+        );
+        eventually("directed question pushed to its own Codex thread", || {
+            let threads: Vec<_> = codex
+                .pushes()
+                .into_iter()
+                .filter(|(_, p)| input_text(p).contains(body))
+                .map(|(_, p)| p["threadId"].clone())
+                .collect();
+            (!threads.is_empty()).then(|| assert_eq!(threads, [serde_json::json!(intended)]))
+        })
+        .await;
+    }
+    desk.stop().await;
+}

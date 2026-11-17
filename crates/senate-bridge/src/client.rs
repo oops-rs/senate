@@ -246,14 +246,25 @@ impl ApiClient {
         name: &str,
         senator: Option<&SenatorName>,
     ) -> Result<Seq, ApiClientError> {
+        match self.read_cursor(committee, name, senator).await {
+            Err(e) if e.status() == Some(404) => Ok(Seq::ZERO),
+            other => other,
+        }
+    }
+
+    /// A named join requires a successful authenticated first contact. An absent
+    /// cursor from a legacy server is sufficient for replay but cannot confirm a seat.
+    pub(crate) async fn read_cursor(
+        &self,
+        committee: &CommitteeId,
+        name: &str,
+        senator: Option<&SenatorName>,
+    ) -> Result<Seq, ApiClientError> {
         let url = self.url(&api::cursor_path(committee, name));
         let query = CursorQuery {
             senator: senator.cloned(),
         };
         let resp = self.authed(self.http.get(url)).query(&query).send().await?;
-        if resp.status() == StatusCode::NOT_FOUND {
-            return Ok(Seq::ZERO);
-        }
         let cursor: Cursor = checked(resp).await?.json().await?;
         Ok(cursor.seq)
     }

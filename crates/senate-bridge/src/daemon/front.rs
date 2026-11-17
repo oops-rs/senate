@@ -354,6 +354,7 @@ fn selector_of(request: &Request) -> Option<&SessionSelector> {
         | Request::Answer { session, .. }
         | Request::CatchUp { session, .. }
         | Request::Join { session, .. }
+        | Request::JoinAs { session, .. }
         | Request::Search { session, .. }
         | Request::Post { session, .. }
         | Request::Brief { session, .. }

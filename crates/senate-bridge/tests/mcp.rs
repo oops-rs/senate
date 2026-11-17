@@ -1024,6 +1024,50 @@ async fn a_codex_tool_call_is_resolved_by_the_thread_in_its_meta() {
     assert_eq!(joined("thread-b").as_deref(), Some("other"));
     assert_eq!(joined("thread-a").as_deref(), Some("refund-v2"));
 
+    // Two Codex threads share a worktree. The tool can name just its caller.
+    h.server
+        .set_cursor("refund-v2", "reviewer", "delivered", Seq::ZERO);
+    let r = mcp
+        .request(
+            "tools/call",
+            json!({
+                "name": "join", "arguments": {"committee": "refund-v2", "senator": "reviewer"},
+                "_meta": {"threadId": "thread-b"}
+            }),
+        )
+        .await;
+    assert_ne!(r["isError"], json!(true), "{r}");
+    assert!(
+        r["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("[senator::reviewer]")
+    );
+    for (id, expected) in [("thread-a", "codex"), ("thread-b", "reviewer")] {
+        assert_eq!(
+            h.store().session(id).unwrap().unwrap().agent,
+            path(expected)
+        );
+    }
+    h.server.seat("owned", "bob");
+    for name in ["speaker", "not/a/name", "", "alice", "owned"] {
+        let r = mcp
+            .request(
+                "tools/call",
+                json!({
+                    "name": "join", "arguments": {"committee": "other", "senator": name},
+                    "_meta": {"threadId": "thread-b"}
+                }),
+            )
+            .await;
+        assert_eq!(r["isError"], json!(true), "{name}: {r}");
+        assert_eq!(joined("thread-b").as_deref(), Some("refund-v2"));
+        assert_eq!(
+            h.store().session("thread-b").unwrap().unwrap().agent,
+            path("reviewer")
+        );
+    }
+
     // Only the turn metadata: still that thread. An unknown thread is not
     // registered, and is not mistaken for another session.
     let r = mcp
