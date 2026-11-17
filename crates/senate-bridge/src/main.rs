@@ -57,9 +57,17 @@ enum Cmd {
     /// writes `.senate/committee` (untracked, kept per branch: switching
     /// branches swaps in that branch's own copy). Live sessions here pick it
     /// up at their next prompt. No daemon needed.
+    ///
+    /// Without a name, the committee is derived from where this is run, and
+    /// printed with how: the repository's name (the last segment of the
+    /// `origin` URL without `.git`; else the main worktree's folder; outside
+    /// git, the directory's name), plus `-<branch>` unless on the default
+    /// branch (what `origin/HEAD` points at, else main, master or trunk) or
+    /// detached; lowercased, other characters becoming `-`, at most 63
+    /// characters (a longer one ends in `-` and a short hash). Read-only.
     Join {
-        /// The committee.
-        committee: CommitteeId,
+        /// The committee; omit to derive it from the repository and branch.
+        committee: Option<CommitteeId>,
     },
     /// Remove this worktree's committee binding on the current branch.
     Leave,
@@ -623,8 +631,11 @@ fn run(command: Cmd) -> anyhow::Result<()> {
         Cmd::Join { committee } => {
             let (paths, settings) = settings_here();
             let cwd = std::env::current_dir()?;
-            let change =
-                runtime(false)?.block_on(binding::join(&paths, &cwd, &committee, &settings))?;
+            let (change, choice) = runtime(false)?
+                .block_on(binding::join_choosing(&paths, &cwd, committee, &settings))?;
+            if let senate_bridge::joinname::Choice::Derived(d) = &choice {
+                println!("{}", binding::render_derived(d, settings.locale));
+            }
             println!("{}", binding::render_join(&change, settings.locale));
             Ok(())
         }
@@ -671,8 +682,16 @@ fn run(command: Cmd) -> anyhow::Result<()> {
         Cmd::Where => {
             let (paths, settings) = settings_here();
             let cwd = std::env::current_dir()?;
-            let resolved = runtime(false)?.block_on(binding::resolve(&paths, &cwd, &settings));
-            print!("{}", binding::render_where(&resolved, settings.locale));
+            let rt = runtime(false)?;
+            let resolved = rt.block_on(binding::resolve(&paths, &cwd, &settings));
+            let would = match resolved.committee {
+                Some(_) => None,
+                None => Some(rt.block_on(binding::would_join(&cwd))),
+            };
+            print!(
+                "{}",
+                binding::render_where(&resolved, would.as_ref(), settings.locale)
+            );
             Ok(())
         }
         Cmd::List { json } => {

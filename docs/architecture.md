@@ -279,6 +279,21 @@ alone does not enable it); `.senate/committee`. Its agent is `SENATE_AGENT`,
 then `.senate/agent`, then `[agents]`, then the harness's name. A session with
 no committee is unbound.
 
+`senate join` with no name derives the committee from where it is run, with
+read-only git commands, and prints how:
+
+- Repository name: the last segment of the `origin` URL without `.git`; else
+  the main worktree's folder (a bare layout: the bare directory without
+  `.git`); outside git, the directory's name. All worktrees of a repository
+  agree.
+- On the default branch (`refs/remotes/origin/HEAD`'s target, else `main`,
+  `master` or `trunk`) or a detached HEAD: the repository name; otherwise
+  `<repository>-<branch>`.
+- Lowercased, runs of other characters become `-`, trimmed, at most 63
+  characters (longer: cut, then `-` and 8 hex digits of FNV-1a over the whole
+  name); with nothing usable it refuses and asks for an explicit name.
+`senate where` reports the name an unbound directory would get.
+
 ### `.senate/` follows the branch
 
 The contents of `.senate/` belong to a line of work, that is to a branch. Being

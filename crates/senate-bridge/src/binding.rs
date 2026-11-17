@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use crate::agent::{self, AgentSource, Pins, RelPath, Seating};
 use crate::config::AgentNames;
 use crate::follow::{self, Slot, SlotKey, Stale};
+use crate::joinname::{self, BranchPart, Cannot, Choice, Derived, NameFrom};
 use crate::paths::Paths;
 use crate::session::{self, CommitteeSource, GitFacts, Runtime};
 use crate::state::Store;
@@ -319,6 +320,131 @@ pub async fn join(
     .await
 }
 
+/// [`join`] with the name optional: without one, the name
+/// [`joinname::derive`] makes from where this is run, read-only. Fails, with
+/// nothing written, when none can be made.
+pub async fn join_choosing(
+    paths: &Paths,
+    cwd: &Path,
+    explicit: Option<CommitteeId>,
+    settings: &Settings,
+) -> anyhow::Result<(Change, Choice)> {
+    let facts = match explicit {
+        Some(_) => joinname::Facts::default(),
+        None => joinname::gather(cwd, GIT_TIMEOUT).await,
+    };
+    let choice = joinname::choose(explicit, &facts)
+        .map_err(|cannot| anyhow::anyhow!("{}", cannot_join_text(&cannot, settings.locale)))?;
+    let change = join(paths, cwd, choice.id(), settings).await?;
+    Ok((change, choice))
+}
+
+/// What `senate join` with no name would do here: for `senate where`.
+pub async fn would_join(cwd: &Path) -> Result<Derived, Cannot> {
+    joinname::derive(&joinname::gather(cwd, GIT_TIMEOUT).await)
+}
+
+fn why_cannot(c: &Cannot, l: Locale) -> String {
+    match c {
+        Cannot::Repository(name) if name.is_empty() => l.pick(
+            "没有可用来推导的名字".to_string(),
+            "there is no name to derive it from".to_string(),
+        ),
+        Cannot::Repository(name) => l.pick(
+            format!("名字 `{name}` 里没有 ASCII 字母或数字"),
+            format!("the name `{name}` has no ASCII letter or digit"),
+        ),
+        Cannot::Branch(name) => l.pick(
+            format!("分支名 `{name}` 里没有 ASCII 字母或数字"),
+            format!("the branch name `{name}` has no ASCII letter or digit"),
+        ),
+    }
+}
+
+/// The refusal of `senate join` with no name, when none can be derived.
+pub fn cannot_join_text(c: &Cannot, l: Locale) -> String {
+    l.pick(
+        format!(
+            "没有给名字，这里也推不出名字：{}。请明确给出：`senate join <name>`。",
+            why_cannot(c, l)
+        ),
+        format!(
+            "No name given, and none can be derived here: {}. Give one: `senate join <name>`.",
+            why_cannot(c, l)
+        ),
+    )
+}
+
+fn derived_source_words(d: &Derived, l: Locale) -> String {
+    let r = &d.repository;
+    match d.from {
+        NameFrom::Origin => l.pick(
+            format!("仓库 `{r}`（来自它的 origin 远程）"),
+            format!("the repository `{r}` (its origin remote)"),
+        ),
+        NameFrom::MainWorktree => l.pick(
+            format!("仓库 `{r}`（主工作区的文件夹名，没有 origin 远程）"),
+            format!("the repository `{r}` (the folder of its main worktree: no origin remote)"),
+        ),
+        NameFrom::Directory => l.pick(
+            format!("目录 `{r}`（这里不是 git 仓库）"),
+            format!("the directory `{r}` (not a git repository)"),
+        ),
+    }
+}
+
+fn derived_branch_words(d: &Derived, l: Locale) -> String {
+    match &d.branch {
+        BranchPart::Added(b) => l.pick(format!("和分支 `{b}`"), format!(" and the branch `{b}`")),
+        BranchPart::Default(b) => l.pick(
+            format!("；默认分支 `{b}` 不加后缀"),
+            format!("; the default branch `{b}` adds nothing"),
+        ),
+        BranchPart::Detached => l.pick(
+            "；HEAD 已分离，不加后缀".to_string(),
+            "; a detached HEAD adds nothing".to_string(),
+        ),
+        BranchPart::NoGit => String::new(),
+    }
+}
+
+/// The line `senate join` with no name prints: what was derived and why.
+pub fn render_derived(d: &Derived, l: Locale) -> String {
+    let (id, source, branch) = (
+        &d.id,
+        derived_source_words(d, l),
+        derived_branch_words(d, l),
+    );
+    l.pick(
+        format!("没有给名字：由{source}{branch}推出 `{id}`。想用别的名字：`senate join <name>`。"),
+        format!(
+            "No name given: derived `{id}` from {source}{branch}. \
+             Give a name to choose another: `senate join <name>`."
+        ),
+    )
+}
+
+/// The line `senate where` adds for an unbound directory.
+fn would_join_line(w: &Result<Derived, Cannot>, l: Locale) -> String {
+    match w {
+        Ok(d) => l.pick(
+            format!("不给名字的 `senate join` 在这里会叫它 `{}`。", d.id),
+            format!("`senate join` with no name would call it `{}` here.", d.id),
+        ),
+        Err(c) => l.pick(
+            format!(
+                "不给名字的 `senate join` 在这里推不出名字（{}）：请给出 `senate join <name>`。",
+                why_cannot(c, l)
+            ),
+            format!(
+                "`senate join` with no name cannot derive one here ({}): give a name, \
+                 `senate join <name>`.",
+                why_cannot(c, l)
+            ),
+        ),
+    }
+}
+
 /// Where `.senate/` is, for a message.
 fn place_words(c: &Change, l: Locale) -> String {
     match (&c.branch, c.in_git) {
@@ -476,7 +602,11 @@ pub fn parse_pin(text: &str) -> anyhow::Result<RelPath> {
 // ---- where ------------------------------------------------------------------
 
 /// What `senate where` prints.
-pub fn render_where(r: &Resolved, l: Locale) -> String {
+pub fn render_where(
+    r: &Resolved,
+    would_join: Option<&Result<Derived, Cannot>>,
+    l: Locale,
+) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "{} {}", l.pick("目录", "directory"), r.cwd.display());
     let branch = match (&r.facts.branch, r.facts.toplevel.is_some()) {
@@ -568,6 +698,9 @@ pub fn render_where(r: &Resolved, l: Locale) -> String {
         }
     }
     if r.committee.is_none() {
+        if let Some(w) = would_join {
+            let _ = writeln!(out, "{}", would_join_line(w, l));
+        }
         let _ = writeln!(
             out,
             "{}",
