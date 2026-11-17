@@ -198,9 +198,17 @@ async fn presence_is_visible() {
             .then_some(())
     })
     .await;
-    assert!(
-        presence_of(&world, "claude").await.is_empty(),
-        "coming online the first time writes nothing"
+    // Alice's agent is the first on the committee, so its first `online`
+    // is the one that is written: the seat that makes it the chair.
+    let first: Vec<PresenceState> = presence_of(&world, "claude")
+        .await
+        .into_iter()
+        .map(|(p, _)| p.state)
+        .collect();
+    assert_eq!(
+        first,
+        [PresenceState::Online],
+        "the first agent's seat is the only online written"
     );
 
     alice.close().await;
@@ -212,8 +220,12 @@ async fn presence_is_visible() {
         .collect();
     assert_eq!(
         states,
-        [PresenceState::Disconnected, PresenceState::Absent],
-        "disconnected first, then absent"
+        [
+            PresenceState::Online,
+            PresenceState::Disconnected,
+            PresenceState::Absent
+        ],
+        "the seat, then disconnected, then absent"
     );
     let gone = agent_line(&world, "[senator::claude] 失联").await;
     let absent = agent_line(&world, "[senator::claude] 缺席（租约过期）").await;
@@ -240,11 +252,17 @@ async fn presence_is_visible() {
 
     // She reopens.
     alice.open().await;
-    let online = wait_presence(&world, "claude", PresenceState::Online).await;
-    assert_eq!(
-        PresencePayload::of(&online).unwrap().previous,
-        Some(PresenceState::Absent)
-    );
+    // (The seat was an `online` too: the one that comes back from absent
+    // is the one with `previous` set.)
+    eventually_async("claude back online from absent", || async {
+        presence_of(&world, "claude")
+            .await
+            .into_iter()
+            .find(|(p, _)| {
+                p.state == PresenceState::Online && p.previous == Some(PresenceState::Absent)
+            })
+    })
+    .await;
     agent_line(&world, "[senator::claude] 在线").await;
     alice.close().await;
     world.stop().await;

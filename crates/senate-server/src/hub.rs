@@ -102,7 +102,7 @@ pub struct ServerHub {
     notes: Vec<String>,
     children: RwLock<BTreeMap<Name, ChildSenate>>,
     senate: Name,
-    parent: Option<SenatePath>,
+    parent: RwLock<Option<SenatePath>>,
     next_conn: AtomicU64,
     briefs: Caches<BriefBuilder>,
     tasks: Caches<TaskBoard>,
@@ -258,7 +258,7 @@ impl ServerHub {
             notes,
             children: RwLock::new(children),
             senate,
-            parent,
+            parent: RwLock::new(parent),
             next_conn: AtomicU64::new(1),
             briefs: Mutex::default(),
             tasks: Mutex::default(),
@@ -406,15 +406,32 @@ impl ServerHub {
         &self.senate
     }
 
-    /// The path of the Senate above, when configured.
-    pub fn parent(&self) -> Option<&SenatePath> {
-        self.parent.as_ref()
+    /// The path of the Senate above, when known: configured, or learned
+    /// since ([`ServerHub::set_parent`]).
+    pub fn parent(&self) -> Option<SenatePath> {
+        self.parent
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Learn the path of the Senate above, for a Senate that started with
+    /// no parent because the one above did not answer then. Ignored when
+    /// one is known already (a parent is changed by configuration and a
+    /// restart, not by what answers). Returns whether it was learned now.
+    pub fn set_parent(&self, parent: SenatePath) -> bool {
+        let mut known = self.parent.write().unwrap_or_else(PoisonError::into_inner);
+        if known.is_some() {
+            return false;
+        }
+        *known = Some(parent);
+        true
     }
 
     /// This Senate's path from the root: the parent's, then its own name.
     /// A Senate configured with no parent is a root.
     pub fn senate_path(&self) -> SenatePath {
-        match &self.parent {
+        match self.parent() {
             Some(parent) => parent
                 .clone()
                 .absolute()
@@ -570,6 +587,7 @@ impl ServerHub {
                     .count(),
             });
         }
+        let mut covered = BTreeMap::new();
         for thread in board.threads(Some(StatusState::Processing)) {
             if thread.kind != Kind::Question || thread.answered {
                 continue;
@@ -586,6 +604,15 @@ impl ServerHub {
             if !away {
                 continue;
             }
+            // An agent secretary of the away agent with a live session
+            // covers it first: the chain reaches the chair and the desk
+            // only when none is present.
+            if let [only] = agents.as_slice()
+                && let Some(secretary) = self.present_secretary(&roster, committee, only)
+            {
+                covered.insert(thread.root, secretary);
+                continue;
+            }
             if let Some(event) = self.get(committee, thread.root).await? {
                 items.push(DocketItem {
                     event,
@@ -600,9 +627,32 @@ impl ServerHub {
             speaker: roster.speaker_seat(self.built_in.is_some()).ok().flatten(),
             office: roster.office(),
             items,
+            covered,
             seats,
             head,
         })
+    }
+
+    /// The agent secretary that covers for `agent` now: the first of its
+    /// secretaries, in order, that is an agent of this Senate with a live
+    /// connection on `committee`. The built-in session ends the search
+    /// (it covers by its own timers, after any agent listed before it has
+    /// had its turn), as does anyone who is no agent.
+    fn present_secretary(
+        &self,
+        roster: &Roster,
+        committee: &CommitteeId,
+        agent: &SenatorName,
+    ) -> Option<SenatorName> {
+        for secretary in roster.secretaries_of(agent) {
+            if self.built_in.as_ref() == Some(secretary) || !roster.is_agent(secretary) {
+                return None;
+            }
+            if self.presence.is_connected(committee, secretary) {
+                return Some(secretary.clone());
+            }
+        }
+        None
     }
 
     /// The committee's fold in `caches`, brought up to the log's head. A failed
@@ -752,6 +802,25 @@ impl ServerHub {
             tracing::warn!(%person, agent = %senator, "who runs the agent is not kept: {e}");
         }
         Ok(seated.new)
+    }
+
+    /// An agent took a seat on `committee` (first contact there: a cursor;
+    /// a stream and a heartbeat do it themselves, and a write is its own seat).
+    /// The first agent's seat is written to the log, which makes it the
+    /// chair. A person has no seat to take. A seat that cannot be recorded
+    /// now is not the caller's failure: the agent's next contact records it.
+    pub async fn take_seat(&self, committee: &CommitteeId, senator: &SenatorName) {
+        if self.seats.snapshot().is_person(senator) {
+            return;
+        }
+        if let Err(e) = self
+            .ask_writer(committee, |reply| {
+                CommitteeMsg::Contact(senator.clone(), reply)
+            })
+            .await
+        {
+            tracing::warn!(%committee, agent = %senator, "a seat was not recorded: {e}");
+        }
     }
 
     /// Replace the people this Senate knows, for a layer whose people come

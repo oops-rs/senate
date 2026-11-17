@@ -12,6 +12,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use common::*;
 use reqwest::{Method, StatusCode};
+use senate_core::PresencePayload;
 use senate_core::api::{AppendResponse, Me, PresencePage, presence_path};
 use senate_core::{
     Address, CommitteeId, Hub, HubError, Kind, Locale, Name, NewEvent, PresenceState, Principal,
@@ -63,12 +64,17 @@ async fn a_wildcard_to_one_agent_goes_to_that_agent() {
     let appended: AppendResponse = response.json().await.unwrap();
     assert_eq!(appended.event.to, [person_addr("copilot")]);
     // What is stored is what came back: the wildcard never reaches the log.
-    let stored = server
+    // (Beside it is copilot's seat, the `presence` its heartbeat wrote as
+    // the first agent on the committee.)
+    let stored: Vec<_> = server
         .running
         .hub
         .read(&committee(), Seq::ZERO, 10)
         .await
-        .unwrap();
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind != Kind::Presence)
+        .collect();
     assert_eq!(stored, [appended.event]);
     server.running.shutdown().await.unwrap();
 }
@@ -88,8 +94,9 @@ async fn a_wildcard_to_several_agents_is_a_409_with_the_candidates() {
             .read(&committee(), Seq::ZERO, 10)
             .await
             .unwrap()
-            .is_empty(),
-        "nothing was appended"
+            .iter()
+            .all(|e| e.kind == Kind::Presence),
+        "nothing was appended (only the first agent's seat is in the log)"
     );
 
     // The sender names one and tries again.
@@ -119,7 +126,19 @@ async fn a_wildcard_reaches_only_the_agents_on_the_committee() {
         .await
         .unwrap();
     assert_eq!(elsewhere.status(), StatusCode::NO_CONTENT);
-    assert_eq!(server.act_as(CAROL, "aider").await, StatusCode::OK);
+    // aider's cursor is on `search` too: any contact on this committee is a
+    // seat on it.
+    let aider = server
+        .request(
+            Method::GET,
+            &senate_core::api::cursor_path(&search, "read"),
+            CAROL,
+        )
+        .query(&[("senator", "aider")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(aider.status(), StatusCode::OK);
     seat(&server, &["copilot"]).await;
     assert_eq!(
         server
@@ -617,10 +636,24 @@ async fn two_agents_of_one_person_have_separate_presence() {
     // payload in `meta`.
     let events = hub.read(&f, Seq::ZERO, 50).await.unwrap();
     let presence: Vec<_> = events.iter().filter(|e| e.kind == Kind::Presence).collect();
-    assert_eq!(presence.len(), 1);
-    assert_eq!(presence[0].body, "");
-    assert_eq!(presence[0].from, Address::Committee);
-    assert!(presence[0].meta.contains_key(meta::PRESENCE));
+    // The first agent's seat (copilot's `online`), then codex's disconnect;
+    // copilot's own `online` after the seat is not written.
+    assert_eq!(presence.len(), 2);
+    for event in &presence {
+        assert_eq!(event.body, "");
+        assert_eq!(event.from, Address::Committee);
+        assert!(event.meta.contains_key(meta::PRESENCE));
+    }
+    let first = PresencePayload::of(presence[0]).unwrap();
+    assert_eq!(
+        (first.agent, first.state),
+        (path("copilot"), PresenceState::Online)
+    );
+    let second = PresencePayload::of(presence[1]).unwrap();
+    assert_eq!(
+        (second.agent, second.state),
+        (path("codex"), PresenceState::Disconnected)
+    );
 
     // The delegation is present while either agent is.
     use senate_core::DelegationPresence;

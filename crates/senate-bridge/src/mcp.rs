@@ -127,11 +127,13 @@ const CHAIR_DOCKET: &str = "You chair this session's committee (only the chair's
 
 const CHAIR_ROUTE: &str = "As chair of this session's committee, hand an item from chair_docket to one member: it is relayed to that agent in your name, with the asker as its origin, so the answer goes back to the asker's thread. For a message to whichever agent, `to` must be one of its candidates. A question to an absent member is never rerouted: use chair_cover. `seq`: as chair_docket lists the item. `to`: the agent.";
 
+const SECRETARY_COVER: &str = "As the secretary of an agent that is away, answer a question put to that agent, from that agent's own latest checkpoint and notes (the pushed message shows them): the answer goes out in the agent's name, signed by you, pointing at the checkpoint's branch and commit. Only a question, only from what the checkpoint and notes say: never guess, and never perform a request, which waits for the agent. When it returns it is told what was answered for it. `thread`: the question's seq. `body`: the answer, self-contained. `agent`: which agent, when the question went to several.";
+
 const CHAIR_COVER: &str = "As chair of this session's committee, answer a question to an absent member from that member's own latest checkpoint (chair_docket shows it), in your name, saying for whom, pointing at the checkpoint's branch and commit. Answer only from what the checkpoint says; otherwise use chair_escalate. `thread`: the question's seq. `body`: the answer, self-contained. `agent`: which member, when the question went to several.";
 
 const CHAIR_ESCALATE: &str = "As chair of this session's committee, put an item from chair_docket you cannot settle one step up: to the Speaker's desk (a secretary, then the Speaker), with the asker as its origin. `seq`: as chair_docket lists the item. `reason`: what is needed and why you could not settle it.";
 
-const SECRETARY: &str = "List, add or remove the secretaries of this session's agent: senators (another agent of this Senate, or the built-in session) that act for it while it is away, in order, the first present acting. A secretary answers a question to your agent from your agent's own checkpoint and notes, labelled as your agent's answer given by its secretary; it never performs a request. `action`: `list`, `add` or `remove`. `secretary`: the agent to add or remove, e.g. `codex`. Only your agent itself, the principal that runs it, or the Speaker's office may change its secretaries; anyone else is refused.";
+const SECRETARY: &str = "List, add or remove the secretaries of this session's agent: senators (another agent of this Senate, or the built-in session) that act for it while it is away, in order, the first present acting. A secretary answers a question to your agent from your agent's own checkpoint and notes (a secretary that is an agent does it with secretary_cover), labelled as your agent's answer given by its secretary; it never performs a request. `action`: `list`, `add` or `remove`. `secretary`: the agent to add or remove, e.g. `codex`. Only your agent itself, the principal that runs it, or the Speaker's office may change its secretaries; anyone else is refused.";
 
 const SPEAKER_DOCKET: &str = "You preside over a Senate as its Speaker (this tool is only given to the session that does). List what awaits the Speaker there: messages written to whichever agent (`senator::*`) when several agents could get them (pick one with speaker_route), messages addressed to the Speaker, and questions to agents of that Senate that are away and unanswered (answer for them from their own checkpoint with speaker_cover). For each agent seated there it shows its presence, latest checkpoint and open threads, the facts to pick by; for each away agent an item names, its latest checkpoint in full. `committee`: one committee only; by default every committee of that Senate.";
 
@@ -369,6 +371,18 @@ pub struct ChairCoverParams {
     /// The answer, from the absent member's own checkpoint.
     pub body: String,
     /// Which member you answer for, when the question went to several.
+    #[serde(default)]
+    pub agent: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct SecretaryCoverParams {
+    /// The question's seq (the thread's root), as the pushed message shows it.
+    pub thread: u64,
+    /// The answer, from the absent agent's own checkpoint and notes.
+    pub body: String,
+    /// Which agent you answer for, when the question went to several.
     #[serde(default)]
     pub agent: Option<String>,
 }
@@ -1931,6 +1945,43 @@ impl SenateMcp {
         })
     }
 
+    #[tool(name = "secretary_cover", description = SECRETARY_COVER)]
+    async fn secretary_cover(
+        &self,
+        params: Parameters<SecretaryCoverParams>,
+    ) -> Result<String, String> {
+        let p = params.0;
+        let l = self.locale;
+        let agent = p
+            .agent
+            .as_deref()
+            .map(str::trim)
+            .filter(|a| !a.is_empty())
+            .map(parse_senator)
+            .transpose()?;
+        let posted = self
+            .append(Request::SecretaryCover {
+                session: self.selector.clone(),
+                thread: Seq(p.thread),
+                body: p.body,
+                agent,
+                id: Some(EventId::new()),
+            })
+            .await?;
+        let (c, seq, again) = (&posted.committee, posted.seq, already(&posted, l));
+        Ok(match l {
+            Locale::Zh => format!(
+                "已作为 secretary 代不在的 agent 回答 {c} 上的 thread {}（seq {seq}）{again}；它回来后会被告知。",
+                p.thread
+            ),
+            Locale::En => format!(
+                "As its secretary, answered thread {} on {c} for the absent agent (seq {seq}){again}; \
+                 it is told when it returns.",
+                p.thread
+            ),
+        })
+    }
+
     #[tool(name = "chair_escalate", description = CHAIR_ESCALATE)]
     async fn chair_escalate(
         &self,
@@ -2541,6 +2592,7 @@ mod tests {
                 "propose_decision",
                 "search",
                 "secretary",
+                "secretary_cover",
                 "speaker_chair",
                 "speaker_cover",
                 "speaker_docket",
@@ -2575,6 +2627,7 @@ mod tests {
             SPEAKER_ROUTE,
             SPEAKER_COVER,
             SPEAKER_ESCALATE,
+            SECRETARY_COVER,
         ] {
             let lower = text.to_lowercase();
             assert!(!lower.contains(&["fei", "shu"].concat()), "{text}");

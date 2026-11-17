@@ -182,6 +182,7 @@ async fn ask_answer_and_catch_up_end_to_end() {
             "propose_decision",
             "search",
             "secretary",
+            "secretary_cover",
             "status",
             "take"
         ]

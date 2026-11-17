@@ -272,6 +272,40 @@ impl Leases {
         })
     }
 
+    /// `agent` took a seat on this committee just now (its first contact):
+    /// the `online` that records it, to be written once, as the fact that
+    /// makes it the committee's chair when it is the first. The contact
+    /// counts as activity, so the lease runs from it even when nothing
+    /// else follows (a cursor, say).
+    pub(crate) fn first_seat(
+        &mut self,
+        agent: &SenatorName,
+        now: Instant,
+        wall: DateTime<Utc>,
+        head: Seq,
+    ) -> PresencePayload {
+        let entry = self
+            .agents
+            .entry(agent.clone())
+            .or_insert_with(|| Agent::new(wall));
+        if entry.last_seen.is_none_or(|seen| now > seen) {
+            entry.last_seen = Some(now);
+            entry.last_seen_wall = Some(wall);
+            entry.restored = false;
+        }
+        PresencePayload {
+            agent: agent.clone(),
+            state: PresenceState::Online,
+            since: wall,
+            since_seq: head,
+            previous: None,
+            last_seen: entry.last_seen_wall,
+            cursor: entry.cursor,
+            lag: lag(head, entry.cursor),
+            new_owner: None,
+        }
+    }
+
     /// The Speaker picked up for `agent`: the `taken_over` transition, or
     /// `None` when it already is; an error when it is not away.
     pub(crate) fn take_over(

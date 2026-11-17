@@ -7,8 +7,10 @@
 //! 1. the last chair set explicitly: a `note` the server writes from
 //!    `committee` carrying [`meta::CHAIR`](crate::meta::CHAIR) =
 //!    [`ChairPayload`] (`senate chair <senator>`, or the Speaker's office);
-//! 2. else the first agent to take a seat on the committee (its first
-//!    `presence`);
+//! 2. else the first agent to take a seat on the committee: its first
+//!    contact (a stream, a heartbeat, a cursor), which the server writes
+//!    as the agent's first `presence` when the log shows no agent yet, or
+//!    its first event of its own (the server's reading also counts it);
 //! 3. else the senator who wrote the committee's first event (the principal
 //!    who created it).
 //!

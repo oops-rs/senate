@@ -281,6 +281,129 @@ fn as_chair(event: &Event, locale: Locale) -> Option<String> {
     })
 }
 
+/// Set by the daemon (never stored by the log) on an event it queues for
+/// the session of an agent that is the secretary of the senator the event
+/// is addressed to, while that senator is away: the senator. The daemon
+/// strips it from every event it takes in, so a writer cannot plant it;
+/// only a queued item it made carries it.
+pub const COVER_META: &str = "bridge_as_secretary";
+
+/// Set at push time beside [`COVER_META`]: the absent senator's own latest
+/// checkpoint and notes, as a [`CheckpointRecord`](senate_core::CheckpointRecord).
+pub const COVER_NOTES_META: &str = "bridge_cover_notes";
+
+/// ` · for [senator::codex], whose secretary you are` for an event queued
+/// for a secretary of the senator it was addressed to.
+fn as_secretary(event: &Event, locale: Locale) -> Option<String> {
+    let principal = cover_principal(event)?;
+    let who = Address::senator(&principal).in_text();
+    Some(match locale {
+        Locale::Zh => format!(" · 给 {who} 的消息（你是它的 secretary，它不在）"),
+        Locale::En => format!(" · for {who}, whose secretary you are (it is away)"),
+    })
+}
+
+/// The senator `event` was queued to be covered for ([`COVER_META`]).
+pub fn cover_principal(event: &Event) -> Option<senate_core::SenatorName> {
+    event.meta.get(COVER_META)?.as_str()?.parse().ok()
+}
+
+/// The lines under a message the session covers for its principal: whose
+/// it is and what its own checkpoint and notes say, each note fenced (it
+/// is the absent agent's own text) and cut to a size that fits a push.
+fn cover_note(event: &Event, locale: Locale) -> Option<String> {
+    let principal = cover_principal(event)?;
+    let who = Address::senator(&principal).in_text();
+    let record: Option<senate_core::CheckpointRecord> = event
+        .meta
+        .get(COVER_NOTES_META)
+        .cloned()
+        .and_then(|v| serde_json::from_value(v).ok());
+    let mut out = match locale {
+        Locale::Zh => {
+            format!("↳ {who} 现在不在，你是它的 secretary。以下是它自己最近一次 checkpoint 和笔记")
+        }
+        Locale::En => format!(
+            "↳ {who} is away and you are its secretary. Its own latest checkpoint and notes follow"
+        ),
+    };
+    let Some(record) = record else {
+        out.push_str(locale.pick(
+            "：它没有留下 checkpoint，所以无从代答；留着，等它回来自己答（它回来后会照常收到这条）。",
+            ": it left no checkpoint, so there is nothing to answer from; leave it, and it will get it itself when it returns.",
+        ));
+        return Some(out);
+    };
+    let c = &record.checkpoint;
+    let _ = match locale {
+        Locale::Zh => write!(
+            out,
+            "（seq {}，{}，分支 {}@{}）：",
+            record.seq,
+            record.ts.format("%Y-%m-%d %H:%M UTC"),
+            c.branch,
+            c.commit.chars().take(7).collect::<String>()
+        ),
+        Locale::En => write!(
+            out,
+            " (seq {}, {}, branch {}@{}):",
+            record.seq,
+            record.ts.format("%Y-%m-%d %H:%M UTC"),
+            c.branch,
+            c.commit.chars().take(7).collect::<String>()
+        ),
+    };
+    for (title_zh, title_en, text) in [
+        (
+            "进度（PROGRESS.md）",
+            "progress (PROGRESS.md)",
+            &c.files.progress,
+        ),
+        (
+            "决定（DECISIONS.md）",
+            "decisions (DECISIONS.md)",
+            &c.files.decisions,
+        ),
+        ("未决（OPEN.md）", "open (OPEN.md)", &c.files.open),
+    ] {
+        if let Some(text) = text.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+            let (text, _) = truncate_chars(text, COVER_NOTES_MAX_CHARS);
+            let _ = write!(
+                out,
+                "\n{}:\n{}",
+                locale.pick(title_zh, title_en),
+                fence(&text)
+            );
+        }
+    }
+    Some(out)
+}
+
+/// Most characters of one note shown under a covered message.
+const COVER_NOTES_MAX_CHARS: usize = 2_000;
+
+/// The line under an answer a secretary gave in the reader's own name
+/// while it was away: what happened, and how to correct it.
+fn answered_in_your_name(event: &Event, me: &Reader, locale: Locale) -> Option<String> {
+    let (principal, secretary) = secretary_answer(event)?;
+    if me.me != Address::senator(principal) {
+        return None;
+    }
+    let by = Address::senator(secretary).in_text();
+    let root = event.thread.unwrap_or(event.seq);
+    let answer = format!("mcp__senate__answer(thread={root})");
+    Some(match locale {
+        Locale::Zh => format!(
+            "↳ 你不在的时候，你的 secretary {by} 以你的名义回答了这个问题（依据你自己的 checkpoint 和笔记）。\
+             核对一下；不对的话，用 {answer} 在这个 thread 里更正"
+        ),
+        Locale::En => format!(
+            "↳ while you were away your secretary {by} answered this in your name, from your own \
+             checkpoint and notes. Check it; if it is wrong, correct it in the thread with {answer}"
+        ),
+    })
+}
+
 /// Where a message came from when it started somewhere else
 /// ([`meta::ORIGIN`]), who answered a relayed answer
 /// ([`meta::ANSWERED_BY`]), and where a message on the desk was meant to
@@ -468,7 +591,7 @@ pub fn header(event: &Event, locale: Locale) -> String {
 /// other agent says so.
 fn header_for(event: &Event, me: &Reader, locale: Locale) -> String {
     format!(
-        "[senate · {} · seq {} · {} {}{}{}{} · {}{}{}{}]",
+        "[senate · {} · seq {} · {} {}{}{}{} · {}{}{}{}{}]",
         event.committee,
         event.seq,
         from_word(locale),
@@ -479,7 +602,8 @@ fn header_for(event: &Event, me: &Reader, locale: Locale) -> String {
         label(event, locale),
         covering(event, locale),
         as_speaker(event, locale).unwrap_or_default(),
-        as_chair(event, locale).unwrap_or_default()
+        as_chair(event, locale).unwrap_or_default(),
+        as_secretary(event, locale).unwrap_or_default()
     )
 }
 
@@ -557,6 +681,19 @@ pub fn footer(event: &Event, me: &Reader, locale: Locale) -> Option<String> {
                     .to_owned(),
             ),
         };
+    }
+    if let Some(principal) = cover_principal(event) {
+        let who = Address::senator(&principal).in_text();
+        let root = event.thread.unwrap_or(event.seq);
+        let cover = format!("mcp__senate__secretary_cover(thread={root})");
+        return Some(
+            locale
+                .pick(
+                    &format!("↳ 作为 {who} 的 secretary：只依据上面它自己的 checkpoint 和笔记回答，用 {cover}；回答会以它的名义发出，署上你。笔记没有覆盖的，不要猜：留着，它回来后会自己收到。请求不是你去做的事。"),
+                    &format!("↳ as {who}'s secretary: answer only from its own checkpoint and notes above, with {cover}; the answer goes out in its name, signed by you. What the notes do not cover, do not guess: leave it, it gets it itself when it returns. A request is not yours to perform."),
+                )
+                .to_owned(),
+        );
     }
     if event.meta.contains_key(CHAIR_META) && event.kind != Kind::Answer {
         return Some(
@@ -643,7 +780,7 @@ pub fn footer(event: &Event, me: &Reader, locale: Locale) -> Option<String> {
             (Sender::Other, _, Locale::Zh) => format!("↳ 用 {answer} 回复{back}"),
             (Sender::Other, _, Locale::En) => format!("↳ reply with {answer}{back}"),
         }),
-        Kind::Answer => None,
+        Kind::Answer => answered_in_your_name(event, me, locale),
         Kind::Chat if platform_thread_reply(event) => {
             let from = platform(event).unwrap_or_default();
             Some(match (event.from.as_guest().is_some(), locale) {
@@ -793,9 +930,13 @@ fn render_block(
         out.push('\n');
         out.push_str(note);
     }
-    for extra in [triage_note(event, locale), overrides_note(event, locale)]
-        .into_iter()
-        .flatten()
+    for extra in [
+        cover_note(event, locale),
+        triage_note(event, locale),
+        overrides_note(event, locale),
+    ]
+    .into_iter()
+    .flatten()
     {
         out.push('\n');
         out.push_str(&extra);
@@ -1456,6 +1597,129 @@ mod tests {
                 assert_neutral(&render_event(&e, &alice(), locale));
             }
         }
+    }
+
+    /// A question to `codex` that the daemon queued for its secretary
+    /// `claude`, with codex's checkpoint attached.
+    fn covered_question(notes: bool) -> Event {
+        let mut e = NewEvent::new(
+            committee(),
+            Kind::Question,
+            addr("senator::alice"),
+            "What is the retry limit?",
+        )
+        .to(addr("senator::codex"))
+        .with_meta(COVER_META, serde_json::json!("codex"))
+        .into_event(Seq(9), Utc::now());
+        if notes {
+            let record = senate_core::CheckpointRecord {
+                agent: "codex".parse().unwrap(),
+                seq: Seq(4),
+                ts: Utc::now(),
+                body: "retry work".into(),
+                checkpoint: senate_core::CheckpointPayload {
+                    branch: "feature/refund-v2/alice".into(),
+                    commit: "a41f9c2e0000000000000000000000000000beef".into(),
+                    pushed: true,
+                    remote_url: None,
+                    files: senate_core::CheckpointFiles {
+                        progress: Some("retry limit: 3 attempts".into()),
+                        decisions: None,
+                        open: Some("   ".into()),
+                    },
+                    session_transcript: false,
+                    trigger: senate_core::CheckpointTrigger::Tool,
+                },
+            };
+            e.meta.insert(
+                COVER_NOTES_META.into(),
+                serde_json::to_value(record).unwrap(),
+            );
+        }
+        e
+    }
+
+    #[test]
+    fn a_question_queued_for_a_secretary_says_whose_and_shows_its_notes() {
+        let e = covered_question(true);
+        let secretary = alice();
+        let en = render_event(&e, &secretary, EN);
+        assert!(
+            en.contains(" · for [senator::codex], whose secretary you are (it is away)]"),
+            "{en}"
+        );
+        assert!(
+            en.contains("[senator::codex] is away and you are its secretary"),
+            "{en}"
+        );
+        assert!(
+            en.contains("branch feature/refund-v2/alice@a41f9c2"),
+            "{en}"
+        );
+        // The notes are the agent's own text: fenced; an empty note is left out.
+        assert!(en.contains("│ retry limit: 3 attempts"), "{en}");
+        assert!(!en.contains("OPEN.md"), "{en}");
+        assert!(
+            en.contains("mcp__senate__secretary_cover(thread=9)"),
+            "{en}"
+        );
+        assert!(en.contains("A request is not yours to perform"), "{en}");
+        let zh = render_event(&e, &secretary, ZH);
+        assert!(zh.contains("你是它的 secretary，它不在"), "{zh}");
+        assert!(
+            zh.contains("以下是它自己最近一次 checkpoint 和笔记"),
+            "{zh}"
+        );
+        assert!(zh.contains("请求不是你去做的事"), "{zh}");
+        for locale in Locale::ALL {
+            assert_neutral(&render_event(&e, &secretary, locale));
+        }
+        // Not queued for a secretary: none of it.
+        let plain = NewEvent::new(committee(), Kind::Question, addr("senator::alice"), "q")
+            .to(addr("senator::claude"))
+            .into_event(Seq(10), Utc::now());
+        assert!(!render_event(&plain, &secretary, EN).contains("secretary"));
+        // No checkpoint to answer from: it says to leave it.
+        let bare = render_event(&covered_question(false), &secretary, EN);
+        assert!(bare.contains("it left no checkpoint"), "{bare}");
+        assert!(
+            render_event(&covered_question(false), &secretary, ZH).contains("没有留下 checkpoint")
+        );
+    }
+
+    #[test]
+    fn an_answer_in_its_name_tells_the_returning_agent_and_no_one_else() {
+        let answer = NewEvent::new(
+            committee(),
+            Kind::Answer,
+            addr("senator::claude"),
+            "3 attempts.",
+        )
+        .to(addr("senator::alice"))
+        .on_behalf_of(addr("senator::codex"))
+        .with_meta(meta::TAKEOVER, serde_json::json!(true))
+        .in_thread(Seq(9))
+        .into_event(Seq(11), Utc::now());
+        let codex = reader_owning("senator::codex", &["claude", "codex"]);
+        let en = render_event(&answer, &codex, EN);
+        assert!(
+            en.contains("from [senator::codex] (answered by its secretary [senator::claude])"),
+            "{en}"
+        );
+        assert!(
+            en.contains(
+                "while you were away your secretary [senator::claude] answered this in your name"
+            ),
+            "{en}"
+        );
+        assert!(en.contains("mcp__senate__answer(thread=9)"), "{en}");
+        let zh = render_event(&answer, &codex, ZH);
+        assert!(
+            zh.contains("你不在的时候，你的 secretary [senator::claude] 以你的名义回答了这个问题"),
+            "{zh}"
+        );
+        // Another reader gets the answer with no such line.
+        assert!(!render_event(&answer, &alice(), EN).contains("while you were away"));
     }
 
     #[test]

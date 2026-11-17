@@ -1026,6 +1026,9 @@ pub(crate) struct Engine {
     me: SenatorName,
     /// The child Senates registered here, as the hub said last.
     children: Vec<senate_core::ChildSenate>,
+    /// The configuration errors the Speaker was last told of (`None`: none
+    /// outstanding).
+    told_problems: Option<String>,
 }
 
 impl Engine {
@@ -1093,6 +1096,7 @@ impl Engine {
             applied: None,
             me,
             children: Vec::new(),
+            told_problems: None,
         }
     }
 

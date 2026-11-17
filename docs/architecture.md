@@ -203,11 +203,21 @@ register or remove one; anyone else is refused.
   `from` the secretary `on_behalf_of` the agent with `meta.takeover`; a
   request waits for the agent. The companion (a read-only fork of the
   agent's own last session) is such a secretary, provided by the daemon,
-  and the built-in session is one wherever it is listed. Not yet built: a
-  secretary that is itself an agent is not pushed the absent agent's
-  questions; it may answer one it is shown (the server accepts its answer
-  on the agent's behalf), but nothing brings the question to its session.
-  Until then the chain goes on to the chair and the Speaker's desk.
+  and the built-in session is one wherever it is listed. So is an agent
+  of the Senate: when the agent is away, its first present secretary
+  that is an agent (a live session on the committee) is pushed the
+  question as an item to cover, with the absent agent's own latest
+  checkpoint and notes, and answers with `secretary_cover`: the answer is
+  stored `from` the secretary `on_behalf_of` the agent, one byline with the
+  others, from the checkpoint only. It never performs a request: that
+  waits for the agent. If the agent returns before the secretary has been
+  pushed the item, the item is withdrawn; either way the agent still gets
+  the question itself when it returns, or, when the secretary answered, an
+  item saying so, to check and correct. The built-in session listed before
+  the agent secretary covers first (by its own timers); one listed after it
+  defers. When no secretary is present the question goes on to the chair
+  and the Speaker's desk: the server's docket leaves a question an agent
+  secretary covers off both (it lists it in `covered`).
 
 The **built-in session** is the engine on a model (`senate-speaker`), a
 senator with a flat name (default `secretary`). Its role comes from
@@ -222,7 +232,11 @@ Every committee has one chair, any senator of the Senate. The chair is a
 fact of the committee's log: set explicitly (`senate chair <senator>`,
 written by the server as a `note` from `committee` with `meta.chair`), else
 the first agent seated on the committee, else the principal who created
-it. `chair` is a link like `speaker`. The chair picks the agent for
+it. An agent takes its seat on first contact (a stream, a heartbeat, a
+cursor, or a write as the agent), not on its first write: when the log
+shows no agent yet, that contact is written as the agent's `online`
+`presence` (a write is its own seat), once, so every reader folds the same
+chair. `chair` is a link like `speaker`. The chair picks the agent for
 `senator::*`, covers for an absent member from that member's own notes,
 receives members' escalations, and does what the Speaker asks. A chairing
 agent's session gets chair tools scoped to its committee. A chair absent
@@ -472,7 +486,12 @@ key by key: built-in defaults ← `[model]` in the main configuration ←
 `secretary.toml` ← `<committee>.secretary.toml` (which may not set
 `name`). Files are read again when they change, before the session next
 acts on a committee; a broken file keeps the last good configuration and
-is reported, naming the file and the line. An older `[speaker]` or
+is reported, naming the file and the line: in `senate secretary show`, as
+one line per broken file in `senate status` (a developer machine looks at
+every file every couple of seconds, whether or not a model runs), and as
+one note to the Speaker per change of the errors, in the deployment's
+language, written on the committee the built-in session was handling when
+it saw the change. An older `[speaker]` or
 `[secretary]` table is read as `secretary.toml`, with a note.
 
 ## A developer machine's footprint

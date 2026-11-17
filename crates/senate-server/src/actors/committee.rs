@@ -68,6 +68,10 @@ pub(crate) enum CommitteeMsg {
         sender: mpsc::Sender<Arc<Event>>,
         reply: RpcReplyPort<()>,
     },
+    /// `agent` took a seat on this committee (first contact: a stream, a
+    /// heartbeat or a cursor; a write as the agent is its own seat). Replies
+    /// once the seat is in the log, when it needed to be.
+    Contact(SenatorName, RpcReplyPort<()>),
     /// Re-evaluate every lease.
     PresenceTick,
     /// `agent` just heartbeated: re-evaluate its lease now.
@@ -108,6 +112,10 @@ pub(crate) struct CommitteeState {
     watchers: Vec<(ConnId, mpsc::Sender<Arc<Event>>)>,
     leases: Leases,
     ticker: Option<JoinHandle<()>>,
+    /// Whether the log already shows an agent's seat (a `presence`, or an
+    /// event written as an agent). The first agent's seat makes it the
+    /// chair, so it is written once, for the first agent only.
+    seat_logged: bool,
 }
 
 pub(crate) struct CommitteeActor;
@@ -232,6 +240,8 @@ impl CommitteeState {
                     "presence"
                 );
                 self.leases.apply(&payload, appended.event.seq);
+                // Any presence in the log shows an agent's seat.
+                self.seat_logged = true;
                 Ok(appended.event)
             }
             Err(e) => {
@@ -244,6 +254,21 @@ impl CommitteeState {
                 Err(e.to_string())
             }
         }
+    }
+
+    /// `agent` took a seat: when the log shows none yet, record this one
+    /// (an `online` presence), which is the first agent's claim to the
+    /// chair (see `senate_core::chair`). A failed write is tried again by
+    /// the agent's next contact.
+    async fn contact(&mut self, agent: &SenatorName) {
+        if self.seat_logged {
+            return;
+        }
+        let payload =
+            self.leases
+                .first_seat(agent, Instant::now(), chrono::Utc::now(), self.fanned);
+        // Logged inside; `commit_presence` marks the seat as logged.
+        let _ = self.commit_presence(payload).await;
     }
 
     /// Commit whatever transition of `agent`'s lease is due.
@@ -318,6 +343,7 @@ impl Actor for CommitteeActor {
         let people = args.seats.snapshot().people();
         let (board, authors) =
             presence_board(args.store.as_ref(), &args.committee, &people).await?;
+        let seat_logged = !board.agents().is_empty() || !authors.is_empty();
         let (now, wall) = (Instant::now(), chrono::Utc::now());
         let stored = args.store.heartbeats(&args.committee).await?;
         let beats: BTreeMap<SenatorName, chrono::DateTime<chrono::Utc>> =
@@ -354,6 +380,7 @@ impl Actor for CommitteeActor {
             watchers: Vec::new(),
             leases,
             ticker: None,
+            seat_logged,
         })
     }
 
@@ -388,7 +415,20 @@ impl Actor for CommitteeActor {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             CommitteeMsg::Append(event, reply) => {
+                // An event written as an agent is its seat too: the first
+                // one needs no `presence` beside it.
+                let by_agent = !state.seat_logged
+                    && state
+                        .args
+                        .seats
+                        .snapshot()
+                        .people()
+                        .as_agent(&event.from)
+                        .is_some();
                 let result = state.commit(*event).await;
+                if by_agent && result.is_ok() {
+                    state.seat_logged = true;
+                }
                 reply_or_log(reply, result);
             }
             CommitteeMsg::Attach {
@@ -404,6 +444,7 @@ impl Actor for CommitteeActor {
                 let attached = result.is_ok();
                 reply_or_log(reply, result);
                 if attached {
+                    state.contact(&agent).await;
                     state.check_lease(&agent).await;
                 }
             }
@@ -416,7 +457,14 @@ impl Actor for CommitteeActor {
                 reply_or_log(reply, ());
             }
             CommitteeMsg::PresenceTick => state.check_leases().await,
-            CommitteeMsg::PresenceCheck(agent) => state.check_lease(&agent).await,
+            CommitteeMsg::PresenceCheck(agent) => {
+                state.contact(&agent).await;
+                state.check_lease(&agent).await;
+            }
+            CommitteeMsg::Contact(agent, reply) => {
+                state.contact(&agent).await;
+                reply_or_log(reply, ());
+            }
             CommitteeMsg::Presence(reply) => {
                 reply_or_log(reply, (state.fanned, state.leases.view(state.fanned)));
             }

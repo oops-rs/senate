@@ -161,3 +161,127 @@ async fn a_parent_that_does_not_answer_leaves_the_senate_with_no_parent() {
     assert!(senated::machine::parent_unreachable("u", "e", Locale::En).contains("did not answer"));
     assert!(senated::machine::parent_unreachable("u", "e", Locale::Zh).contains("没有应答"));
 }
+
+/// The wait between tries to register grows from the poll period and stops
+/// at a ceiling.
+#[test]
+fn the_wait_between_tries_to_register_grows_to_a_ceiling() {
+    use senated::machine::uplink::{MAX_BACKOFF, next_backoff};
+    let poll = Duration::from_secs(2);
+    let mut wait = Duration::ZERO;
+    let mut seen = Vec::new();
+    for _ in 0..8 {
+        wait = next_backoff(wait, poll);
+        seen.push(wait.as_secs());
+    }
+    assert_eq!(seen, [2, 4, 8, 16, 32, 60, 60, 60]);
+    assert_eq!(next_backoff(MAX_BACKOFF, poll), MAX_BACKOFF);
+    // A poll period longer than the ceiling is the wait.
+    let slow = Duration::from_secs(90);
+    assert_eq!(next_backoff(Duration::ZERO, slow), slow);
+}
+
+/// A parent that is not up when the machine starts: the machine's Senate
+/// starts with no parent and keeps trying; when the parent comes up it
+/// registers, and its `/v1/me` and `senate status` name the parent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_parent_that_comes_up_after_the_child_is_learned_and_registered_with() {
+    // A port nobody listens on yet.
+    let port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths::new(dir.path().join("h"));
+    let text = format!(
+        "person = \"alice\"\nserver_url = \"http://127.0.0.1:{port}\"\ntoken = \"tok-alice\"\n[local]\n"
+    );
+    let config: BridgeConfig = toml::from_str(&text).unwrap();
+    let hosted: Hosted = toml::from_str(&text).unwrap();
+    let machine = Machine::start_with(paths.clone(), config, hosted, quick())
+        .await
+        .expect("it starts all the same");
+    let top = machine.senate().unwrap();
+    assert_eq!(top.daemon.hub.parent(), None);
+    assert!(matches!(
+        registration(&paths).await.registration,
+        Registration::Unreachable { .. }
+    ));
+    let me = |client: &ApiClient| {
+        let client = client.clone();
+        async move { client.me().await.unwrap() }
+    };
+    let here = ApiClient::new(&top.url, &top.token).unwrap();
+    assert_eq!(me(&here).await.parent, None);
+
+    // The Senate above comes up, on the address the child was told.
+    let config = SenatedConfig::from_toml_str(&format!(
+        r#"
+listen = "127.0.0.1:{port}"
+database_url = "memory:"
+name = "acme"
+
+[roster]
+speaker = "senator::bob"
+
+[[roster.principals]]
+handle = "alice"
+
+[[roster.principals]]
+handle = "bob"
+
+[[tokens]]
+person = "alice"
+token = "tok-alice"
+
+[[tokens]]
+person = "bob"
+token = "tok-bob"
+"#
+    ))
+    .unwrap();
+    let above = Assembly::new(config)
+        .without_speaker()
+        .start()
+        .await
+        .unwrap();
+
+    // Registered, with no restart and the local Senate never blocked.
+    let mut registered = false;
+    for _ in 0..200 {
+        let status = registration(&paths).await;
+        if status.registration == Registration::Registered {
+            registered = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(registered, "the uplink never registered");
+    assert_eq!(top.daemon.hub.parent().unwrap().to_string(), "/acme");
+    assert_eq!(top.daemon.hub.senate_path().to_string(), "/acme/alice-desk");
+    let learned = me(&here).await;
+    assert_eq!(learned.parent.clone().unwrap().to_string(), "/acme");
+    assert_eq!(learned.senate_path().to_string(), "/acme/alice-desk");
+    let children = ApiClient::new(&above.base_url(), "tok-bob")
+        .unwrap()
+        .children()
+        .await
+        .unwrap();
+    assert_eq!(children.len(), 1);
+
+    // `senate status` asks the daemon, which asks the Senate again.
+    let mut senate = String::new();
+    for _ in 0..100 {
+        let view = senate_bridge::status::collect(&paths).await;
+        if let Some(path) = view.ok().and_then(|v| v.senate) {
+            senate = path.to_string();
+            if senate == "/acme/alice-desk" {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(senate, "/acme/alice-desk");
+    machine.shutdown().await;
+    above.shutdown().await.unwrap();
+}

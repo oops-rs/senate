@@ -50,6 +50,7 @@
 //! | `chair_route` | `session`, `seq`, `to`, `id?` | [`Posted`] |
 //! | `chair_cover` | `session`, `thread`, `body`, `agent?`, `id?` | [`Posted`] |
 //! | `chair_escalate` | `session`, `seq`, `reason`, `id?` | [`Posted`] |
+//! | `secretary_cover` | `session`, `thread`, `body`, `agent?`, `id?` | [`Posted`] |
 //! | `send` | `session`, `kind`, `to?`, `at?`, `body`, `refs?`, `id?` | [`SendReply`] |
 //! | `secretaries` | `session`, `action`, `for?`, `secretary?` | [`SecretariesReply`] |
 //! | `roles` | — | [`RolesReply`] |
@@ -581,6 +582,19 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<EventId>,
     },
+    /// A secretary answers for the agent it is the secretary of, which is
+    /// away, from that agent's own checkpoint and notes: a question only,
+    /// in the agent's name (`on_behalf_of`), signed by the secretary.
+    SecretaryCover {
+        session: SessionSelector,
+        thread: Seq,
+        body: String,
+        /// Which agent it answers for, when the question went to several.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<SenatorName>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<EventId>,
+    },
     /// The chair puts an item one step up: to the Speaker's desk.
     ChairEscalate {
         session: SessionSelector,
@@ -863,6 +877,60 @@ impl UplinkStatus {
     pub fn read(dir: &Path) -> Option<Self> {
         let text = std::fs::read_to_string(dir.join(Self::FILE)).ok()?;
         serde_json::from_str(&text).ok()
+    }
+}
+
+/// One error in the built-in session's `secretary.toml` or
+/// `<committee>.secretary.toml`, as `senate status` lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecretaryProblem {
+    pub file: PathBuf,
+    /// 1-based, when it is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<usize>,
+    /// In the machine's language.
+    pub message: String,
+}
+
+/// The errors the built-in session's configuration files have now.
+/// `senated --machine` rewrites [`SecretaryProblems::FILE`] in the hosted
+/// Senate's directory when they change; `senate status` reads it, with the
+/// daemon up or down.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecretaryProblems {
+    pub problems: Vec<SecretaryProblem>,
+}
+
+impl SecretaryProblems {
+    /// Its file in the hosted Senate's directory.
+    pub const FILE: &'static str = "secretary-problems.json";
+
+    /// Write it to `dir` (best effort: status is informational); an empty
+    /// one removes the file.
+    pub fn write(&self, dir: &Path) {
+        let path = dir.join(Self::FILE);
+        let result = if self.problems.is_empty() {
+            match std::fs::remove_file(&path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+                _ => Ok(()),
+            }
+        } else {
+            std::fs::write(
+                &path,
+                serde_json::to_string_pretty(self).unwrap_or_default(),
+            )
+        };
+        if let Err(e) = result {
+            tracing::debug!("{}: {e}", path.display());
+        }
+    }
+
+    /// What was last written to `dir`: none when there is no file.
+    pub fn read(dir: &Path) -> Self {
+        std::fs::read_to_string(dir.join(Self::FILE))
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
     }
 }
 

@@ -167,6 +167,15 @@ async fn presence_events(hub: &dyn Hub) -> Vec<(PresencePayload, Event)> {
         .collect()
 }
 
+/// An earlier agent's first event: it takes the committee's seat, so the
+/// agents these tests follow are not the first, and their first `online`
+/// stays unwritten.
+async fn first_agent_writes(server: &TestServer, agent: &str) {
+    let event = NewEvent::new(committee(), Kind::Note, agent_addr(agent), "hello");
+    let response = server.post_event(ALICE, &event).await;
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
 async fn states(hub: &dyn Hub) -> Vec<PresenceState> {
     presence_events(hub)
         .await
@@ -185,7 +194,11 @@ async fn presence_goes_disconnected_absent_taken_over_and_back_online() {
     let hub = server.running.hub.clone();
     let f = committee();
     let alice = path("claude");
-    for i in 0..3 {
+    // The first agent to sit chairs the committee, and its seat is the one
+    // `online` that is written; claude is the second, so its own `online`
+    // is not.
+    first_agent_writes(&server, "codex").await;
+    for i in 1..3 {
         server.append(&format!("note {i}")).await;
     }
     let stream = server.stream_as(ALICE, Some("claude"), None, None).await;
@@ -279,7 +292,7 @@ async fn a_restart_restores_leases_without_writing_transitions() {
         config.lease_secs = 60;
     };
     let first = TestServer::start_configured(store.clone(), configure).await;
-    first.append("hello").await;
+    first_agent_writes(&first, "codex").await;
     let stream = first.stream_as(ALICE, Some("claude"), None, None).await;
     beat(&first, ALICE, "claude", 1).await;
     drop(stream);
@@ -510,7 +523,7 @@ async fn a_reassignment_is_the_servers_and_stands_until_handed_back() {
     let alice = path("claude");
     let bob = path("copilot");
     let asker = name("bob");
-    server.append("hello").await;
+    first_agent_writes(&server, "codex").await;
     let stream = server.stream_as(ALICE, Some("claude"), None, None).await;
     beat(&server, ALICE, "claude", 1).await;
 
