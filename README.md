@@ -367,7 +367,7 @@ senate aliases                                      # list alias → primary ID
 senate ask reviewer "Which change needs review?"
 ```
 
-The Senate stores aliases in its own registry. An alias is unique within its Senate and stays registered while its session is offline. Setting a new alias releases the old one. Messages, inbox cursors, and role assignments use the primary ID. The prefixes `codex-` and `claude-` are reserved for session IDs. Existing committee logs keep their recorded addresses.
+The Senate stores aliases in its own registry. An alias is unique within its Senate and stays registered while its session is offline. Setting a new alias releases the old one. Messages, inbox cursors, and role assignments use the primary ID. The prefixes `codex-`, `claude-`, `agy-`, and `acp-` are reserved for session IDs. Existing committee logs keep their recorded addresses.
 
 A worktree pin, Claude Code's `SENATE_AGENT`, or a custom `[agents]` setting can suggest an initial alias. An explicit alias takes precedence. A conflicting pin produces a warning and the session remains reachable through its primary ID.
 
@@ -392,6 +392,72 @@ When running `senate install --yes`, Senate registers an MCP server and session 
   - `speaker_route`, `speaker_cover`, `speaker_escalate`: Route a pick, answer for an away agent from its checkpoint, put it to the Speaker.
   - `speaker_forward`, `speaker_refuse`: Forward a crossing to its intended seat, or refuse it with a reason.
 - **Chair Tools (only for a chairing agent's session):** `chair_docket`, `chair_route`, `chair_cover`, `chair_escalate`.
+
+### Antigravity and ACP
+
+For the local Antigravity CLI, merge this server entry into the
+workspace's `.agents/mcp_config.json`. Use the absolute path to your built
+`senate` binary.
+
+```json
+{
+  "mcpServers": {
+    "senate": {"command": "/path/to/senate", "args": ["mcp", "--agy"]}
+  }
+}
+```
+
+In `.agents/hooks.json`, add a named hook group:
+
+```json
+{
+  "senate": {
+    "SessionStart": [{"command": "/path/to/senate hook session-start --agy"}],
+    "PreInvocation": [{"command": "/path/to/senate hook user-prompt-submit --agy"}]
+  }
+}
+```
+
+The workspace should be bound to a committee with `senate join`. After the workspace loads the hooks, a
+turn registers the root conversation as `agy-<UUID>`. MCP uses the root
+conversation metadata from Antigravity CLI. An Antigravity `Stop` event
+finishes one turn, so leave it out of the Senate hook group.
+
+For immediate push into the native terminal, explicitly authorize its local
+`agentapi` endpoint. With agy 1.5.9, an operator can launch the CLI with a
+fresh per-process `ANTIGRAVITY_SERVER_CSRF_TOKEN`, set
+`SENATE_AGY_ENDPOINT_PROOF` to the lowercase SHA-256 hex digest of that
+token (without a trailing newline), and specify a private `--log-file`.
+Use the conversation UUID and the HTTP language-server port reported for that
+process. Supply the matching token through stdin:
+
+```sh
+senate agy-register <conversation-uuid> 127.0.0.1:<port> < /path/to/private/token
+senate agy-unregister <conversation-uuid>  # after closing that conversation
+```
+
+The launch proof binds the token to the conversation even when multiple
+terminals share Antigravity's saved history. The bridge checks it and verifies
+the root at the loopback endpoint. It keeps the token in memory. Re-register after the bridge or native endpoint
+restarts. The daemon needs `agy` on its PATH, or an explicit
+`SENATE_AGY_BIN`. The native endpoint is experimental and was exercised
+with agy 1.5.9. For an isolated Senate, supply its `SENATE_HOME` to both
+the hook command and the MCP server environment.
+
+Run an ACP server using the terminal client for a Senate-owned connection:
+
+```sh
+senate acp -- agy acp
+```
+
+Each input line starts a turn. `/quit` closes the connection. The launcher
+provides Senate's MCP server with the exact local `acp-…` session identity
+and accepts bridge pushes while the session is idle. Agent permission
+policies still apply. With `--allow-senate-answer` before `--`, the client
+can approve a single use of Antigravity's Senate answer tool in that
+session. It declines other interactive permission requests.
+ACP delivery applies to connections opened by this launcher. Independently
+started terminal sessions can use their own native integration.
 
 ### The `senate` CLI
 

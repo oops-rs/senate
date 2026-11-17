@@ -253,15 +253,25 @@ enum Cmd {
         #[arg(long)]
         committee: Option<CommitteeId>,
     },
-    /// Stdio MCP server (name `senate`) that Claude Code and Codex start per session.
-    Mcp,
+    /// Run the Senate MCP server over stdio.
+    Mcp {
+        /// Resolve the caller using Antigravity root conversation metadata.
+        #[arg(long, conflicts_with = "acp_session")]
+        agy: bool,
+        /// Exact session supplied by the owning Senate ACP client.
+        #[arg(long, hide = true)]
+        acp_session: Option<String>,
+    },
     /// Claude Code / Codex hook entry point; reads the hook JSON on stdin. Always exits 0.
     Hook {
         #[arg(value_enum)]
         event: HookKind,
         /// Run as a Codex hook (the session is a Codex thread).
-        #[arg(long)]
+        #[arg(long, conflicts_with = "agy")]
         codex: bool,
+        /// Run as an Antigravity SessionStart or PreInvocation hook.
+        #[arg(long)]
+        agy: bool,
     },
     /// Register the MCP server and hooks with Claude Code, and with Codex
     /// when `codex` is on PATH. Dry run without --yes.
@@ -312,6 +322,23 @@ enum Cmd {
         #[arg(long, value_name = "URL")]
         listen: Option<String>,
     },
+    /// Run a local ACP agent in a Senate-owned terminal session.
+    Acp {
+        /// Allow ACP approval requests for this session's Senate answer tool once per call.
+        #[arg(long)]
+        allow_senate_answer: bool,
+        /// Command and arguments of the ACP stdio server.
+        #[arg(last = true, required = true, num_args = 1..)]
+        command: Vec<std::ffi::OsString>,
+    },
+    /// Enable live push for a running Antigravity conversation. Reads its local API token from stdin.
+    AgyRegister {
+        conversation: String,
+        /// Antigravity's HTTP language-server endpoint on loopback.
+        endpoint: std::net::SocketAddr,
+    },
+    /// Close the Senate registration of an Antigravity conversation.
+    AgyUnregister { conversation: String },
     /// Manual checks.
     Debug {
         #[command(subcommand)]
@@ -423,7 +450,7 @@ fn read_stdin(timeout: Duration) -> Option<String> {
 }
 
 /// Hooks never fail and never print anything but their one JSON line.
-fn run_hook(kind: HookKind, codex: bool) {
+fn run_hook(kind: HookKind, runtime_override: Option<Runtime>) {
     let Some(stdin) = read_stdin(Duration::from_secs(1)) else {
         return;
     };
@@ -433,8 +460,14 @@ fn run_hook(kind: HookKind, codex: bool) {
     let Ok(rt) = runtime(false) else {
         return;
     };
-    let env = HookEnv::from_process();
-    let runtime = codex.then_some(Runtime::Codex);
+    let env = if runtime_override == Some(Runtime::Agy) {
+        HookEnv {
+            token: std::env::var(senate_bridge::delivery::agy::PROOF_ENV).ok(),
+            ..HookEnv::default()
+        }
+    } else {
+        HookEnv::from_process()
+    };
     let out = rt.block_on(async {
         tokio::time::timeout(
             Duration::from_secs(4),
@@ -443,7 +476,7 @@ fn run_hook(kind: HookKind, codex: bool) {
                 &paths.socket(),
                 &stdin,
                 &env,
-                runtime,
+                runtime_override,
                 HookTimeouts::default(),
             ),
         )
@@ -1112,15 +1145,75 @@ fn run(command: Cmd) -> anyhow::Result<()> {
             );
             Ok(())
         }
-        Cmd::Mcp => {
+        Cmd::Acp {
+            command,
+            allow_senate_answer,
+        } => {
+            let paths = Paths::from_env()?;
+            runtime(true)?.block_on(senate_bridge::delivery::acp::run(
+                &paths,
+                &std::env::current_dir()?,
+                &command,
+                allow_senate_answer,
+            ))
+        }
+        Cmd::AgyRegister {
+            conversation,
+            endpoint,
+        } => {
+            let paths = Paths::from_env()?;
+            let mut token = String::new();
+            std::io::stdin().take(515).read_to_string(&mut token)?;
+            let endpoint = senate_bridge::delivery::agy::Endpoint {
+                address: endpoint,
+                token: token.trim_end_matches(['\r', '\n']).to_owned(),
+            };
+            endpoint.validate()?;
+            let reply: serde_json::Value = runtime(false)?.block_on(daemon_call(
+                &paths,
+                &Request::RegisterAgy {
+                    session_id: conversation,
+                    endpoint,
+                },
+            ))?;
+            println!("{reply}");
+            Ok(())
+        }
+        Cmd::AgyUnregister { conversation } => {
+            let paths = Paths::from_env()?;
+            let key = senate_bridge::session::agy_session_key(&conversation)
+                .context("invalid Antigravity conversation UUID")?;
+            let _: serde_json::Value = runtime(false)?.block_on(daemon_call(
+                &paths,
+                &Request::SessionEnd {
+                    session_id: key,
+                    reason: None,
+                },
+            ))?;
+            Ok(())
+        }
+        Cmd::Mcp { agy, acp_session } => {
             init_logging("senate_bridge=warn");
             let paths = Paths::from_env()?;
             let locale = BridgeConfig::locale_at(&paths.config());
-            runtime(false)?.block_on(mcp::serve_stdio(
-                paths.socket(),
-                mcp::selector_from_env(),
-                locale,
-            ))
+            let (harness, selector) = if agy {
+                (Runtime::Agy, SessionSelector::default())
+            } else if let Some(session_id) = acp_session {
+                anyhow::ensure!(
+                    Runtime::Acp.native_id(&session_id).is_some(),
+                    "invalid ACP session key"
+                );
+                (
+                    Runtime::Acp,
+                    SessionSelector {
+                        session_id: Some(session_id),
+                        claude_pid: None,
+                    },
+                )
+            } else {
+                (Runtime::Claude, mcp::selector_from_env())
+            };
+            runtime(false)?.block_on(mcp::serve_stdio(paths.socket(), selector, locale, harness))
         }
         Cmd::Install {
             codex,
@@ -1214,8 +1307,11 @@ fn run(command: Cmd) -> anyhow::Result<()> {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    if let Cmd::Hook { event, codex } = cli.command {
-        run_hook(event, codex);
+    if let Cmd::Hook { event, codex, agy } = cli.command {
+        let harness = agy
+            .then_some(Runtime::Agy)
+            .or_else(|| codex.then_some(Runtime::Codex));
+        run_hook(event, harness);
         return ExitCode::SUCCESS;
     }
     match run(cli.command) {

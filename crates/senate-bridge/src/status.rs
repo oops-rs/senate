@@ -615,6 +615,13 @@ fn render_senate(view: &StatusView, now: DateTime<Utc>, full_ids: bool, out: &mu
                     (Runtime::Codex, _, Some(false)) => {
                         format!("codex {}", l.pick("失败", "failed"))
                     }
+                    (Runtime::Agy | Runtime::Acp, _, health) => match health {
+                        Some(true) => format!("{} ok", s.runtime.as_str()),
+                        Some(false) => {
+                            format!("{} {}", s.runtime.as_str(), l.pick("失败", "failed"))
+                        }
+                        None => s.runtime.as_str().to_string(),
+                    },
                     (Runtime::Claude, None, _) => l.pick("无", "none").into(),
                     (Runtime::Claude, Some(_), None) => l.pick("未试过", "untested").into(),
                     (Runtime::Claude, Some(_), Some(true)) => "ok".into(),

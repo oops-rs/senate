@@ -876,7 +876,8 @@ impl Store {
 
     /// Register a session or refresh it. Marks it live and active now. Keeps
     /// an earlier explicit join, and keeps socket/token/pid/ancestors when
-    /// the hook did not see them this time.
+    /// the hook did not see them this time. Each agy hook supplies the
+    /// current launch proof, or clears it if the launch has no proof.
     pub fn upsert_session(&self, s: &SessionUpsert) -> Result<Session, StoreError> {
         let now = now_ms();
         let (inferred, source) = match &s.inferred_committee {
@@ -901,7 +902,8 @@ impl Store {
                      inferred_committee = excluded.inferred_committee,
                      committee_source = excluded.committee_source,
                      socket = COALESCE(excluded.socket, sessions.socket),
-                     token = COALESCE(excluded.token, sessions.token),
+                     token = CASE WHEN excluded.runtime = 'agy' THEN excluded.token
+                                  ELSE COALESCE(excluded.token, sessions.token) END,
                      claude_pid = COALESCE(excluded.claude_pid, sessions.claude_pid),
                      transcript_path = COALESCE(excluded.transcript_path, sessions.transcript_path),
                      socket_ok = CASE WHEN sessions.state = 'live' THEN sessions.socket_ok END,
@@ -1799,7 +1801,6 @@ mod tests {
         codex_session.claude_pid = None;
         let got = s.upsert_session(&codex_session).unwrap();
         assert_eq!((got.runtime, &got.agent), (Runtime::Codex, &codex()));
-        assert!(got.can_push());
         // A pin changes the agent at the next hook.
         let mut pinned = upsert("cc");
         pinned.agent = agent("reviewer");

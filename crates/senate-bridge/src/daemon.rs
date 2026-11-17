@@ -152,7 +152,7 @@ use crate::companion::{self, CompanionConfig};
 
 use crate::config::BridgeConfig;
 use crate::delivery::codex::{CodexAppServerAdapter, CodexConfig};
-use crate::delivery::{Batch, DeliveryOutcome, Ladder};
+use crate::delivery::{Batch, DeliveryOutcome, Ladder, agy::AgyAdapter};
 use crate::format;
 use crate::ipc::{
     self, ApprovalsReply, ApproveReply, BoundReply, CatchUpReply, CheckpointReply, CommitteeStatus,
@@ -399,6 +399,7 @@ pub(crate) struct Shared {
     /// resolved, written to with the person's token there.
     pub(crate) uplink: Option<ApiClient>,
     pub(crate) ladder: Ladder,
+    agy: AgyAdapter,
     pub(crate) timing: Timing,
     streams: Mutex<BTreeMap<Seat, CommitteeWorker>>,
     /// Wakes the batcher.
@@ -662,8 +663,19 @@ impl Shared {
             .transpose()?;
         let seating = Seating::new(config.person.clone());
         let (resyncs, _) = watch::channel(0);
+        let agy = AgyAdapter::new(common.timing.inbox_timeout);
         Ok(Arc::new(Shared {
-            ladder: Ladder::new_default(common.timing.inbox_timeout, common.codex.clone()),
+            ladder: Ladder::new_default(
+                common.timing.inbox_timeout,
+                common.codex.clone(),
+                [
+                    Arc::new(agy.clone()) as Arc<dyn crate::delivery::DeliveryAdapter>,
+                    Arc::new(crate::delivery::acp::AcpAdapter {
+                        timeout: common.timing.inbox_timeout,
+                    }),
+                ],
+            ),
+            agy,
             locale: config.locale,
             convention: config.branch_convention(),
             seating: Mutex::new(seating),
@@ -2007,7 +2019,7 @@ impl Shared {
         plan.retain(|sid, _| !waiting.contains(sid));
         // Items held after an inbox failure go back to that inbox, ahead of
         // anything newer.
-        for s in sessions.iter().filter(|s| s.can_push()) {
+        for s in sessions.iter().filter(|s| self.ladder.can_push(s)) {
             let held = self.store.queued_for(&s.session_id)?;
             if !held.is_empty() {
                 plan.entry(s.session_id.clone()).or_default().extend(held);
@@ -2019,7 +2031,7 @@ impl Shared {
             let Some(session) = sessions.iter().find(|s| s.session_id == sid) else {
                 continue;
             };
-            if session.can_push() {
+            if self.ladder.can_push(session) {
                 let held = items.iter().any(|i| i.status == ItemStatus::Queued);
                 match self.hold(&sid, held, now) {
                     Hold::Ready => {}
@@ -2048,7 +2060,10 @@ impl Shared {
         let agent = &session.agent;
         // The routing pass may have selected this session before a join committed.
         if !self.store.session(sid)?.is_some_and(|s| {
-            s.is_live() && s.agent == *agent && s.committee() == session.committee()
+            s.is_live()
+                && s.agent == *agent
+                && s.committee() == session.committee()
+                && (s.runtime != Runtime::Agy || s.token == session.token)
         }) {
             return Ok(true);
         }
@@ -2057,7 +2072,7 @@ impl Shared {
             .filter(|i| &i.agent == agent)
             .map(QueueItem::key)
             .collect();
-        if !session.can_push() {
+        if !self.ladder.can_push(session) {
             // Nothing can be pushed to it, so what is routed to it waits for
             // its next hook. Hold it straight from pending: were it in
             // flight first, a hook running just then would find nothing and
@@ -2111,9 +2126,11 @@ impl Shared {
         tracing::debug!(session = sid, attempts = ?report.attempts, "delivery ladder");
         match report.outcome {
             DeliveryOutcome::Injected => {
-                let via = match session.runtime {
-                    Runtime::Claude => "inbox",
-                    Runtime::Codex => "codex",
+                let via = match report.attempts.last().map(|(name, _)| *name) {
+                    Some("claude-inbox") => "inbox",
+                    Some("codex-app-server") => "codex",
+                    Some(name) => name,
+                    None => "push",
                 };
                 self.store.finish_inflight(&now, sid, via)?;
                 self.own_roots(agent, &batch.events, sid)?;
@@ -2136,12 +2153,16 @@ impl Shared {
             DeliveryOutcome::Queued => {
                 self.store.hold_for_hooks(&now, sid)?;
                 if let Some(delay) = self.note_refused(sid) {
+                    // Recompute the delivery loop's timer with the retry
+                    // just scheduled, even with no future hook or event.
+                    again = true;
                     let why = report
                         .attempts
                         .iter()
                         .find_map(|(_, o)| match o {
                             DeliveryOutcome::Unavailable { reason, .. }
-                                if !reason.starts_with("not a ") =>
+                                if !reason.starts_with("not a ")
+                                    && !reason.starts_with("not an ") =>
                             {
                                 Some(reason.as_str())
                             }
@@ -2494,7 +2515,11 @@ impl Shared {
                 secretary,
             } => wrap(self.on_secretaries(&session, action, for_, secretary).await),
             Request::Roles => wrap(self.on_roles().await),
-            Request::SessionEnd { session_id, .. } => wrap(self.on_session_end(&session_id)),
+            Request::RegisterAgy {
+                session_id,
+                endpoint,
+            } => wrap(self.on_register_agy(&session_id, endpoint).await),
+            Request::SessionEnd { session_id, .. } => wrap(self.on_session_end(&session_id).await),
             Request::Checkpoint {
                 session,
                 summary,
@@ -2688,6 +2713,18 @@ impl Shared {
     /// Native hooks bring their session ID. Older local bridge clients report
     /// a fixed senator selected by their harness, file or environment.
     async fn on_hook(&self, report: HookReport, native: bool) -> Result<HookReply, IpcError> {
+        if report.runtime.native_id(&report.session_id).is_none()
+            || (matches!(report.runtime, Runtime::Agy | Runtime::Acp) && !native)
+            || (report.runtime == Runtime::Agy
+                && report
+                    .token
+                    .as_deref()
+                    .is_some_and(|t| !crate::delivery::agy::is_proof(t)))
+        {
+            return Err(IpcError::bad_request(
+                "invalid session key for this runtime",
+            ));
+        }
         let _binding = self.session_bindings.read().await;
         let inferred = session::infer_committee(
             report.branch.as_deref(),
@@ -2964,7 +3001,55 @@ impl Shared {
         Ok(((!text.is_empty()).then_some(text), delivered))
     }
 
-    fn on_session_end(self: &Arc<Self>, session_id: &str) -> Result<serde_json::Value, IpcError> {
+    async fn on_register_agy(
+        &self,
+        session_id: &str,
+        endpoint: crate::delivery::agy::Endpoint,
+    ) -> Result<serde_json::Value, IpcError> {
+        let key = session::agy_session_key(session_id)
+            .ok_or_else(|| IpcError::bad_request("invalid Antigravity conversation UUID"))?;
+        let id = Runtime::Agy
+            .native_id(&key)
+            .ok_or_else(|| IpcError::bad_request("invalid Antigravity session key"))?;
+        let check_proof = || {
+            let live = self
+                .store
+                .session(&key)
+                .map_err(internal)?
+                .filter(|s| s.runtime == Runtime::Agy && s.is_live())
+                .ok_or_else(|| {
+                    IpcError::new(
+                        codes::NO_SESSION,
+                        "start the Antigravity conversation with Senate hooks first",
+                    )
+                })?;
+            if !endpoint.matches_proof(live.token.as_deref()) {
+                return Err(IpcError::bad_request(
+                    "Antigravity endpoint token does not match this conversation's launch proof",
+                ));
+            }
+            Ok(())
+        };
+        check_proof()?;
+        self.agy
+            .verify(&endpoint, id)
+            .await
+            .map_err(|e| IpcError::bad_request(e.to_string()))?;
+
+        let _binding = self.session_bindings.write().await;
+        check_proof()?;
+        self.agy.register(key.clone(), endpoint);
+        self.note_delivered(&key);
+        self.work.notify_one();
+        Ok(serde_json::json!({ "session_id": key }))
+    }
+
+    async fn on_session_end(
+        self: &Arc<Self>,
+        session_id: &str,
+    ) -> Result<serde_json::Value, IpcError> {
+        let _binding = self.session_bindings.write().await;
+        self.agy.forget(session_id);
         let before = self.store.session(session_id).map_err(internal)?;
         if self
             .store
@@ -3251,8 +3336,13 @@ impl Shared {
             let pid = selector.claude_pid?;
             sessions
                 .iter()
+                .filter(|s| s.runtime == Runtime::Claude)
                 .find(|s| s.claude_pid == Some(pid))
-                .or_else(|| sessions.iter().find(|s| below.contains(&s.session_id)))
+                .or_else(|| {
+                    sessions
+                        .iter()
+                        .find(|s| s.runtime == Runtime::Claude && below.contains(&s.session_id))
+                })
         };
         let Some(session) = by_id.or_else(by_pid) else {
             return Err(IpcError::new(
