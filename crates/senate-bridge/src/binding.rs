@@ -633,10 +633,7 @@ pub fn render_where(
             || a.rel.to_string(),
             |p| senate_core::Address::senator(p).in_text(),
         );
-        let harness = match a.runtime {
-            Runtime::Claude => "Claude Code",
-            Runtime::Codex => "Codex",
-        };
+        let harness = a.runtime.display_name();
         if a.source == AgentSource::Harness && a.rel.as_str() == a.runtime.as_str() {
             let _ = writeln!(
                 out,

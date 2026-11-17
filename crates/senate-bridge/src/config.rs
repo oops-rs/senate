@@ -133,6 +133,10 @@ pub struct AgentNames {
     pub claude: SenatorName,
     #[serde(default = "default_codex")]
     pub codex: SenatorName,
+    #[serde(default = "default_agy")]
+    pub agy: SenatorName,
+    #[serde(default = "default_acp")]
+    pub acp: SenatorName,
 }
 
 fn default_claude() -> SenatorName {
@@ -149,11 +153,25 @@ fn default_codex() -> SenatorName {
         .unwrap_or_else(|_| unreachable!("a valid name"))
 }
 
+fn default_agy() -> SenatorName {
+    "agy"
+        .parse()
+        .unwrap_or_else(|_| unreachable!("a valid name"))
+}
+
+fn default_acp() -> SenatorName {
+    "acp"
+        .parse()
+        .unwrap_or_else(|_| unreachable!("a valid name"))
+}
+
 impl Default for AgentNames {
     fn default() -> Self {
         Self {
             claude: default_claude(),
             codex: default_codex(),
+            agy: default_agy(),
+            acp: default_acp(),
         }
     }
 }
@@ -164,6 +182,8 @@ impl AgentNames {
         match runtime {
             Runtime::Claude => &self.claude,
             Runtime::Codex => &self.codex,
+            Runtime::Agy => &self.agy,
+            Runtime::Acp => &self.acp,
         }
     }
 }

@@ -81,6 +81,33 @@ pub struct HookInput {
     pub reason: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AgyHookInput {
+    conversation_id: String,
+    cwd: Option<PathBuf>,
+    transcript_path: Option<String>,
+    #[serde(default)]
+    workspace_paths: Vec<PathBuf>,
+}
+
+impl AgyHookInput {
+    fn normalize(mut self) -> Option<HookInput> {
+        let cwd = self.cwd.take().or_else(|| {
+            (self.workspace_paths.len() == 1).then(|| self.workspace_paths.remove(0))
+        })?;
+        if !cwd.is_absolute() {
+            return None;
+        }
+        Some(HookInput {
+            session_id: Some(session::agy_session_key(&self.conversation_id)?),
+            cwd: Some(cwd),
+            transcript_path: self.transcript_path,
+            ..HookInput::default()
+        })
+    }
+}
+
 /// What the hook reads from its environment.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HookEnv {
@@ -205,7 +232,14 @@ pub async fn run_as(
         }
         _ => {
             let reply: HookReply = client.call(&request, timeouts.request).await.ok()?;
-            reply.context.map(|c| output_for(kind, &c))
+            reply.context.map(|context| {
+                if reply.session.runtime == Runtime::Agy {
+                    json!({"injectSteps": [{"systemMessage": {"systemMessage": context}}]})
+                        .to_string()
+                } else {
+                    output_for(kind, &context)
+                }
+            })
         }
     }
 }
@@ -224,14 +258,31 @@ pub async fn prepare(
     if std::env::var_os(crate::companion::ENV_COMPANION).is_some() {
         return None;
     }
-    let input: HookInput = serde_json::from_str(stdin).ok()?;
+    let input: HookInput = if runtime == Some(Runtime::Agy) {
+        // Antigravity's Stop ends an invocation, not the conversation.
+        if kind == HookKind::SessionEnd {
+            return None;
+        }
+        serde_json::from_str::<AgyHookInput>(stdin)
+            .ok()?
+            .normalize()?
+    } else {
+        serde_json::from_str(stdin).ok()?
+    };
     let runtime = runtime.unwrap_or_else(|| detect_runtime(&input));
     // A Codex hook runs in the app-server, whose environment may carry a
     // Claude Code session's variables (a daemon started from inside one):
     // none of them describe this session.
     let env = match runtime {
         Runtime::Claude => env.clone(),
-        Runtime::Codex => HookEnv::default(),
+        Runtime::Agy => HookEnv {
+            token: env
+                .token
+                .clone()
+                .filter(|t| crate::delivery::agy::is_proof(t)),
+            ..HookEnv::default()
+        },
+        Runtime::Codex | Runtime::Acp => HookEnv::default(),
     };
     let session_id = input.session_id.or_else(|| env.session_id.clone())?;
     // The Senate home is where the daemon's socket is.
@@ -253,7 +304,7 @@ pub async fn prepare(
             let ancestors = async {
                 // Every Codex thread's hooks share the app-server's pids, so
                 // they would name the wrong session.
-                if env.claude_pid.is_some() || runtime == Runtime::Codex {
+                if env.claude_pid.is_some() || runtime != Runtime::Claude {
                     return Vec::new();
                 }
                 let parent = std::os::unix::process::parent_id();

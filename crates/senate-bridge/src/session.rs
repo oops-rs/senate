@@ -121,6 +121,10 @@ pub enum Runtime {
     /// Codex: pushes go through the Codex app-server the session's TUI is
     /// attached to. The session id is the Codex thread id.
     Codex,
+    /// Local Antigravity CLI with an explicitly registered agentapi endpoint.
+    Agy,
+    /// An ACP session on a connection opened by the Senate client.
+    Acp,
 }
 
 impl Runtime {
@@ -128,6 +132,8 @@ impl Runtime {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Agy => "agy",
+            Self::Acp => "acp",
         }
     }
 
@@ -135,16 +141,63 @@ impl Runtime {
         match s {
             "claude" => Some(Self::Claude),
             "codex" => Some(Self::Codex),
+            "agy" => Some(Self::Agy),
+            "acp" => Some(Self::Acp),
             _ => None,
         }
     }
+
+    fn session_prefix(self) -> Option<&'static str> {
+        match self {
+            Self::Claude | Self::Codex => None,
+            Self::Agy => Some("agy:"),
+            Self::Acp => Some("acp:"),
+        }
+    }
+
+    /// Keep existing Claude and Codex keys; namespace new sessions before
+    /// using them as keys in the store, queue, or MCP selector.
+    pub fn session_key(self, id: &str) -> String {
+        self.session_prefix()
+            .map_or_else(|| id.to_owned(), |p| format!("{p}{id}"))
+    }
+
+    pub fn native_id(self, key: &str) -> Option<&str> {
+        if let Some(prefix) = self.session_prefix() {
+            key.strip_prefix(prefix).filter(|id| !id.is_empty())
+        } else {
+            (!key.is_empty() && !key.starts_with("agy:") && !key.starts_with("acp:")).then_some(key)
+        }
+    }
+
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Claude => "Claude Code",
+            Self::Codex => "Codex",
+            Self::Agy => "Antigravity",
+            Self::Acp => "ACP",
+        }
+    }
+}
+
+/// The Antigravity hooks and native agentapi use a canonical UUID.
+pub fn agy_session_key(id: &str) -> Option<String> {
+    (id.len() == 36
+        && id.bytes().enumerate().all(|(i, b)| {
+            if matches!(i, 8 | 13 | 18 | 23) {
+                b == b'-'
+            } else {
+                b.is_ascii_hexdigit()
+            }
+        }))
+    .then(|| Runtime::Agy.session_key(&id.to_ascii_lowercase()))
 }
 
 /// One registered session. The inbox token never leaves the daemon: it is
 /// skipped when a session is serialized onto the IPC wire.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Session {
-    /// Claude Code's `session_id`, or the Codex thread id.
+    /// Local session key. Antigravity and ACP keys carry a runtime prefix.
     pub session_id: String,
     #[serde(default)]
     pub runtime: Runtime,
@@ -165,10 +218,10 @@ pub struct Session {
     /// From an explicit `join`; overrides the inferred committee.
     #[serde(default)]
     pub joined_committee: Option<CommitteeId>,
-    /// `CLAUDE_CODE_MESSAGING_SOCKET` as the session's hooks saw it.
+    /// A Claude inbox socket or a Senate-owned ACP listener.
     #[serde(default)]
     pub socket: Option<PathBuf>,
-    /// `CLAUDE_CODE_MESSAGING_TOKEN`.
+    /// Claude inbox token, or agy's SHA-256 launch proof.
     #[serde(skip)]
     pub token: Option<String>,
     #[serde(default)]
@@ -205,15 +258,6 @@ impl Session {
 
     pub fn is_live(&self) -> bool {
         self.state == SessionState::Live
-    }
-
-    /// Whether the daemon can push into the session between its hooks: an
-    /// inbox socket for Claude Code, the app-server for Codex.
-    pub fn can_push(&self) -> bool {
-        match self.runtime {
-            Runtime::Claude => self.socket.is_some(),
-            Runtime::Codex => true,
-        }
     }
 }
 
