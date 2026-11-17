@@ -157,8 +157,10 @@ use crate::format;
 use crate::ipc::{
     self, ApprovalsReply, ApproveReply, BoundReply, CatchUpReply, CheckpointReply, CommitteeStatus,
     HookEvent, HookReply, HookReport, InboxReply, IpcError, JoinReply, Pong, Posted, Reply,
-    Request, SayKind, SearchReply, SessionSelector, StatusReply, ThreadReply, WatchEvent, codes,
+    Request, SayKind, SearchReply, SessionSelector, StatusReply, ThreadReply, ThreadSeen,
+    WatchEvent, codes,
 };
+use crate::notify::{News, Notifications, NotifyConfig};
 use crate::paths::Paths;
 use crate::routing;
 use crate::session::{self, Runtime, Session, SessionState};
@@ -195,6 +197,8 @@ const CODEX_PUSH_TIMEOUT: Duration = Duration::from_secs(10);
 /// Events a `watch` connection may fall behind by before it is told it
 /// lagged.
 const WATCH_CAPACITY: usize = 256;
+/// Events remembered as announced to the person.
+const ANNOUNCED_CAP: usize = 1024;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Timing {
@@ -257,6 +261,27 @@ pub struct DaemonOptions {
     pub paths: Paths,
     pub config: BridgeConfig,
     pub timing: Timing,
+    /// How to post desktop notifications for what is addressed to the
+    /// person ([`crate::notify`]); `None` posts none. `[notify] desktop =
+    /// false` in `senate.toml` turns it off too.
+    pub desktop: Option<crate::notify::Desktop>,
+}
+
+/// A connected client that shows notifications itself: while one is, the
+/// daemon posts no desktop notification.
+pub(crate) struct AppClient(Arc<std::sync::atomic::AtomicUsize>);
+
+impl AppClient {
+    pub(crate) fn enter(count: &Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        count.fetch_add(1, Ordering::SeqCst);
+        Self(count.clone())
+    }
+}
+
+impl Drop for AppClient {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// One event off an agent's stream on a committee.
@@ -397,6 +422,11 @@ pub(crate) struct Shared {
     relay: Arc<Relay>,
     /// Everything `watch` connections are told.
     watch: broadcast::Sender<WatchEvent>,
+    /// Desktop notifications for what is addressed to the person.
+    notifications: Option<Notifications>,
+    /// Events already announced to the person (every agent's stream carries
+    /// each one): the newest [`ANNOUNCED_CAP`].
+    announced_to_person: Mutex<BTreeSet<(CommitteeId, Seq)>>,
     /// Agents whose work on a committee is reassigned to one of mine
     /// ([`routing::Covering`]).
     covering: Mutex<routing::Covering>,
@@ -481,6 +511,7 @@ pub async fn start(options: DaemonOptions) -> anyhow::Result<DaemonHandle> {
         paths,
         config,
         timing,
+        desktop,
     } = options;
     config.validate().map_err(anyhow::Error::msg)?;
     paths.check_socket(config.locale)?;
@@ -510,6 +541,22 @@ pub async fn start(options: DaemonOptions) -> anyhow::Result<DaemonHandle> {
         timeout: CODEX_PUSH_TIMEOUT,
     };
     let (watch, _) = broadcast::channel(WATCH_CAPACITY);
+    let app_clients = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let notifications = match desktop {
+        Some(d)
+            if NotifyConfig::load(&paths.config())
+                .map_err(anyhow::Error::msg)?
+                .desktop =>
+        {
+            Some(Notifications::spawn(
+                d.notifier,
+                d.window,
+                app_clients.clone(),
+                config.locale,
+            ))
+        }
+        _ => None,
+    };
     let relay = Arc::new(Relay::new(
         codex.transport.clone(),
         (timing.backoff_base, timing.backoff_max),
@@ -521,6 +568,7 @@ pub async fn start(options: DaemonOptions) -> anyhow::Result<DaemonHandle> {
         codex,
         relay: relay.clone(),
         watch: watch.clone(),
+        notifications,
         companion_config,
         home: paths.home().to_path_buf(),
         codex_sessions: Arc::new(Mutex::new(BTreeMap::new())),
@@ -544,7 +592,7 @@ pub async fn start(options: DaemonOptions) -> anyhow::Result<DaemonHandle> {
         verify_person(&shared).await?;
         senates.push(shared);
     }
-    let front = Arc::new(Front::new(senates, relay, watch, several));
+    let front = Arc::new(Front::new(senates, relay, watch, app_clients, several));
 
     let listener =
         UnixListener::bind(&socket).with_context(|| format!("binding {}", socket.display()))?;
@@ -582,6 +630,7 @@ struct Common {
     codex: CodexAppServerAdapter,
     relay: Arc<Relay>,
     watch: broadcast::Sender<WatchEvent>,
+    notifications: Option<Notifications>,
     companion_config: CompanionConfig,
     home: PathBuf,
     /// Live Codex sessions per Senate, so the one relay watches all of them.
@@ -648,6 +697,8 @@ impl Shared {
             companion_tried: Mutex::new(BTreeSet::new()),
             relay: common.relay.clone(),
             watch: common.watch.clone(),
+            notifications: common.notifications.clone(),
+            announced_to_person: Mutex::new(BTreeSet::new()),
             covering: Mutex::new(routing::Covering::new()),
             index,
             codex_sessions: common.codex_sessions.clone(),
@@ -747,7 +798,9 @@ fn orientation(
              mcp__senate__post（给团队留言），mcp__senate__propose_decision（提议一个决定，由人确认），\
              mcp__senate__checkpoint（留交接记录：保持 .senate/PROGRESS.md、DECISIONS.md 和 \
              OPEN.md 是最新的）。你的用户也能在终端里用 `senate ask`、`senate tell`、\
-             `senate reply` 以本人的身份对你们说话。"
+             `senate reply` 以本人的身份对你们说话。你回答或转给你的用户的内容，会以桌面通知、`senate inbox` \
+             和实时的 `senate watch` 送到他们面前；转给他们的事项会一直留在他们那里，直到他们回复或接管，\
+             所以把你需要他们决定的写进 reason。"
         ),
         Locale::En => format!(
             "[senate] This session is joined to the committee `{committee}` of {senate} as {me}. \
@@ -758,7 +811,10 @@ fn orientation(
              for the team), mcp__senate__propose_decision (propose a decision for a person to \
              confirm), mcp__senate__checkpoint (leave a handover note: keep .senate/PROGRESS.md, \
              DECISIONS.md and OPEN.md current). Your user can also speak to you in their own \
-             name from a terminal with `senate ask`, `senate tell` and `senate reply`."
+             name from a terminal with `senate ask`, `senate tell` and `senate reply`. What you answer \
+             or escalate to your user reaches them as a desktop notification, in `senate inbox` and \
+             live in `senate watch`; an escalation stays with them until they reply or take the \
+             thread, so put what you need from them in its reason."
         ),
     }
 }
@@ -1439,9 +1495,10 @@ impl Shared {
         } || self.for_speaker(agent, event);
         if self.store.ingest(agent, event, directed)? {
             dirty.notify_one();
+            self.announce_to_person(event);
             if matches!(
                 event.kind,
-                Kind::Question | Kind::Request | Kind::Answer | Kind::Status
+                Kind::Question | Kind::Request | Kind::Answer | Kind::Status | Kind::Note
             ) {
                 self.publish(WatchEvent::Inbox {
                     agent: agent.clone(),
@@ -1469,6 +1526,44 @@ impl Shared {
             }
         }
         Ok(())
+    }
+
+    /// Tell the person what is addressed to them: `watch` clients get a
+    /// `for_person` line and, with no client showing notifications itself,
+    /// the desktop gets one notification (coalesced). Each event once,
+    /// whichever agent's stream carried it.
+    fn announce_to_person(&self, event: &Event) {
+        let Some(attention) = senate_core::attention(event, &self.config.person) else {
+            return;
+        };
+        {
+            let mut seen = lock(&self.announced_to_person);
+            if !seen.insert((event.committee.clone(), event.seq)) {
+                return;
+            }
+            while seen.len() > ANNOUNCED_CAP {
+                seen.pop_first();
+            }
+        }
+        if let Some(notifications) = &self.notifications {
+            let by = crate::person::byline(&event.from, event.on_behalf_of.as_ref());
+            let verb = crate::person::did(&event.kind, attention.escalated, self.locale);
+            let line = format::one_line(attention.text.lines().next().unwrap_or_default().trim());
+            let sep = self.locale.pick("：", ": ");
+            notifications.push(News {
+                committee: event.committee.clone(),
+                line: if line.is_empty() {
+                    format!("{by} {verb}")
+                } else {
+                    format!("{by} {verb}{sep}{line}")
+                },
+            });
+        }
+        self.publish(WatchEvent::ForPerson {
+            news: Box::new(event.clone()),
+            escalated: attention.escalated,
+            text: attention.text,
+        });
     }
 
     /// Triage verdicts and takeovers off `agent`'s stream (see the module
@@ -2333,7 +2428,9 @@ impl Shared {
                 session,
                 committee,
                 thread,
-            } => wrap(self.on_thread(&session, committee, thread).await),
+                mark_seen,
+            } => wrap(self.on_thread(&session, committee, thread, mark_seen).await),
+            Request::Seen { committee, marks } => wrap(self.on_seen(&committee, &marks)),
             Request::Inbox {
                 session,
                 committee,
@@ -2351,7 +2448,7 @@ impl Shared {
                     .map_err(IpcError::bad_request),
             ),
             // Served by the connection itself (`serve_connection`).
-            Request::Watch => Reply::err(IpcError::bad_request(
+            Request::Watch { .. } => Reply::err(IpcError::bad_request(
                 "watch turns a connection into a stream; send it as the connection's request",
             )),
         }
@@ -3219,6 +3316,9 @@ impl Shared {
         if companion && let Some(c) = lock(&self.companion).as_mut() {
             c.answered = true;
         }
+        if acting.as_person {
+            self.mark_seen_all(&posted.committee, &[root.seq], posted.seq)?;
+        }
         Ok(posted)
     }
 
@@ -3330,6 +3430,7 @@ impl Shared {
         self.store
             .cancel(None, &committee, root.seq, true, "takeover")
             .map_err(internal)?;
+        self.mark_seen_all(&committee, &[root.seq], posted.seq)?;
         Ok(posted)
     }
 
@@ -3434,6 +3535,7 @@ impl Shared {
                 bad.in_text()
             )));
         }
+        let mut spoke_in = Vec::new();
         let thread = match thread {
             Some(seq) => {
                 let (roots, events) = self.thread_events(&committee, seq).await?;
@@ -3442,7 +3544,9 @@ impl Shared {
                 }
                 // Where the agent that took it works: the latest relay's
                 // thread when the Speaker relayed it, else its own.
-                roots.last().copied()
+                let last = roots.last().copied();
+                spoke_in = roots;
+                last
             }
             None => None,
         };
@@ -3459,7 +3563,38 @@ impl Shared {
         if let Some(id) = id {
             event = event.with_id(id);
         }
-        self.post(event).await
+        let posted = self.post(event).await?;
+        // Replying is reading: they have seen the thread up to their words.
+        self.mark_seen_all(&posted.committee, &spoke_in, posted.seq)?;
+        Ok(posted)
+    }
+
+    /// The person has seen each of `roots` up to `seq`.
+    fn mark_seen_all(
+        &self,
+        committee: &CommitteeId,
+        roots: &[Seq],
+        seq: Seq,
+    ) -> Result<(), IpcError> {
+        for root in roots {
+            self.store
+                .mark_seen(committee, *root, seq)
+                .map_err(internal)?;
+        }
+        Ok(())
+    }
+
+    fn on_seen(
+        &self,
+        committee: &CommitteeId,
+        marks: &[crate::ipc::ThreadSeen],
+    ) -> Result<serde_json::Value, IpcError> {
+        for m in marks {
+            self.store
+                .mark_seen(committee, m.thread, m.seen)
+                .map_err(internal)?;
+        }
+        Ok(serde_json::json!({}))
     }
 
     async fn on_thread(
@@ -3467,10 +3602,16 @@ impl Shared {
         selector: &SessionSelector,
         committee: Option<CommitteeId>,
         thread: Seq,
+        mark_seen: bool,
     ) -> Result<ThreadReply, IpcError> {
         let (_, committee) = self.session_and_committee(selector, committee)?;
         let (roots, mut events) = self.thread_events(&committee, thread).await?;
         events.sort_by_key(|e| e.seq);
+        if mark_seen && let Some(last) = events.last() {
+            // Showing a thread is reading it: the person has seen all of it
+            // (and of the thread it was relayed into).
+            self.mark_seen_all(&committee, &roots, last.seq)?;
+        }
         Ok(ThreadReply {
             committee,
             root: roots[0],
@@ -3482,6 +3623,12 @@ impl Shared {
     /// a session, the named agent or every agent on the committee) or are
     /// escalated to this bridge's person. Another agent's threads are not
     /// in a session's inbox.
+    ///
+    /// Without a session this is the person's own read: it also lists, and
+    /// keeps among the settled ones, the threads that wait on the person
+    /// ([`senate_core::ThreadSummary::waits_on_person`]: something said to
+    /// them they have not seen), with how far they have seen each. The rule
+    /// for an agent's inbox is unchanged.
     async fn on_inbox(
         &self,
         selector: &SessionSelector,
@@ -3490,6 +3637,7 @@ impl Shared {
         all: bool,
     ) -> Result<InboxReply, IpcError> {
         let (session, committee) = self.session_and_committee(selector, committee)?;
+        let for_person = session.is_none();
         let agents = match (session, agent) {
             (Some(s), _) => vec![s.agent],
             (None, Some(name)) => vec![self.seating().agent(&name)],
@@ -3501,30 +3649,48 @@ impl Shared {
             .await
             .map_err(server_error)?;
         let person = &self.config.person;
+        let seen: Vec<ThreadSeen> = if for_person {
+            self.store
+                .seen(&committee)
+                .map_err(internal)?
+                .into_iter()
+                .map(|(thread, seen)| ThreadSeen { thread, seen })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut reply = InboxReply {
+            committee,
+            agents,
+            person: person.clone(),
+            threads: Vec::new(),
+            settled: 0,
+            seen,
+        };
         let mut threads: Vec<_> = page
             .threads
             .into_iter()
             .filter(|t| t.state != senate_core::StatusState::Archived)
             .filter(|t| {
-                agents.iter().any(|a| t.is_for(a)) || t.escalated_to.as_ref() == Some(person)
+                reply.agents.iter().any(|a| t.is_for(a))
+                    || t.escalated_to.as_ref() == Some(person)
+                    || for_person && t.directed_to(person).is_some()
             })
             .collect();
         // What waits on no one is left out and counted, unless asked for.
+        // What waits on the person only because they have not seen it is
+        // not settled, whatever the agents' rule says.
         let mut settled = 0;
         if !all {
             threads.retain(|t| {
-                let waits = t.waits().is_some();
+                let waits = t.waits().is_some() || for_person && reply.waits_on_person(t).is_some();
                 settled += usize::from(!waits);
                 waits
             });
         }
-        Ok(InboxReply {
-            committee,
-            agents,
-            person: person.clone(),
-            threads,
-            settled,
-        })
+        reply.threads = threads;
+        reply.settled = settled;
+        Ok(reply)
     }
 
     async fn on_catch_up(
@@ -3790,7 +3956,10 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
         let (reply, last) = match ipc::read_line(&mut reader).await {
             Ok(None) => return,
             Ok(Some(line)) => match serde_json::from_str::<Request>(&line) {
-                Ok(Request::Watch) => {
+                Ok(Request::Watch { app }) => {
+                    // An app that shows notifications itself keeps the
+                    // daemon quiet while it is connected.
+                    let _guard = app.then(|| AppClient::enter(shared.app_clients()));
                     serve_watch(&shared, reader, write, shutdown).await;
                     return;
                 }

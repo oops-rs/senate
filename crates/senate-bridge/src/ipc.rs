@@ -28,7 +28,8 @@
 //! | `answer` | `session`, `thread` (root seq), `body`, `id?` | [`Posted`] |
 //! | `inbox` | `session`, `committee?`, `agent?`, `all?` | [`InboxReply`] |
 //! | `say` | `session`, `committee?`, `kind`, `to`, `body`, `thread?`, `id?` | [`Posted`] |
-//! | `thread` | `session`, `committee?`, `thread` | [`ThreadReply`] |
+//! | `thread` | `session`, `committee?`, `thread`, `mark_seen?` | [`ThreadReply`] |
+//! | `seen` | `committee`, `marks` (thread, seq) | `{}` |
 //! | `catch_up` | `session`, `limit?` | [`CatchUpReply`] |
 //! | `join` | `session`, `committee` | [`JoinReply`] |
 //! | `search` | `session`, `query`, `limit?`, `committee?` | [`SearchReply`] |
@@ -45,7 +46,7 @@
 //!
 //! | `approvals` | — | [`ApprovalsReply`] |
 //! | `approve` | `id`, `decision` | [`ApproveReply`] |
-//! | `watch` | — | `{"watching": true}`, then a stream of [`WatchEvent`] lines |
+//! | `watch` | `app?` | `{"watching": true}`, then a stream of [`WatchEvent`] lines |
 //!
 //! # Presiding
 //!
@@ -404,6 +405,17 @@ pub enum Request {
         committee: Option<CommitteeId>,
         /// Any seq in the thread.
         thread: Seq,
+        /// The person is reading it (`senate thread`): they have seen it
+        /// up to its last event.
+        #[serde(default, skip_serializing_if = "is_false")]
+        mark_seen: bool,
+    },
+    /// The person has seen these threads up to these seqs (`senate inbox
+    /// --mark-read`, the app). Marks only move up; read state is this
+    /// machine's, and nothing is appended to the log.
+    Seen {
+        committee: CommitteeId,
+        marks: Vec<ThreadSeen>,
     },
     /// Open task threads that wait on this agent or this person (`/senate
     /// inbox`). Without a session, those of `agent` when given, else of
@@ -470,8 +482,13 @@ pub enum Request {
         id: String,
         decision: Decision,
     },
-    /// Stream [`WatchEvent`]s on this connection until it closes.
-    Watch,
+    /// Stream [`WatchEvent`]s on this connection until it closes. `app`:
+    /// the client shows notifications itself (the desktop app), so the
+    /// daemon posts no desktop notification while it is connected.
+    Watch {
+        #[serde(default, skip_serializing_if = "is_false")]
+        app: bool,
+    },
     /// Leave a checkpoint of the session's worktree (MCP `checkpoint`,
     /// `/senate handoff`).
     Checkpoint {
@@ -492,6 +509,15 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<EventId>,
     },
+}
+
+/// How far the person has seen one thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadSeen {
+    /// The thread's root seq.
+    pub thread: Seq,
+    /// The highest seq of it they have seen.
+    pub seen: Seq,
 }
 
 /// What a person says with `say`.
@@ -606,6 +632,18 @@ pub enum WatchEvent {
         seq: Seq,
         kind: Kind,
     },
+    /// An event arrived that is news for the person: addressed to them
+    /// (an answer, a note, a question) or an escalation to them. What
+    /// `senate watch` prints. Each event is announced once, whichever
+    /// agent's stream carried it.
+    ForPerson {
+        /// The event itself.
+        news: Box<Event>,
+        /// An escalation (a `status`): `text` is its reason.
+        escalated: bool,
+        /// The body, or an escalation's reason.
+        text: String,
+    },
     /// The watcher fell behind and missed `missed` events: read everything
     /// again.
     Lagged { missed: u64 },
@@ -649,6 +687,30 @@ pub struct InboxReply {
     /// Settled threads left out of `threads` (always 0 with `all`).
     #[serde(default)]
     pub settled: usize,
+    /// How far the person has seen each thread of the committee they have
+    /// seen any of (a thread not listed: nothing yet). The input of
+    /// [`ThreadSummary::waits_on_person`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub seen: Vec<ThreadSeen>,
+}
+
+impl InboxReply {
+    /// The highest seq of `root` the person has seen.
+    pub fn seen_of(&self, root: Seq) -> Seq {
+        self.seen
+            .iter()
+            .find(|m| m.thread == root)
+            .map_or(Seq::ZERO, |m| m.seen)
+    }
+
+    /// Whether `thread` waits on the person, and why: the person's rule
+    /// ([`ThreadSummary::waits_on_person`]) with what they have seen.
+    pub fn waits_on_person<'a>(
+        &self,
+        thread: &'a ThreadSummary,
+    ) -> Option<senate_core::PersonWait<'a>> {
+        thread.waits_on_person(&self.person, self.seen_of(thread.root))
+    }
 }
 
 fn is_false(b: &bool) -> bool {
@@ -922,6 +984,40 @@ impl IpcClient {
         tokio::time::timeout(timeout, exchange)
             .await
             .map_err(|_| ClientError::Timeout)?
+    }
+}
+
+/// An open `watch` connection: after its reply, [`WatchEvent`] lines.
+pub struct WatchStream {
+    reader: BufReader<OwnedReadHalf>,
+    // Kept open: closing it is how the client stops watching.
+    _writer: OwnedWriteHalf,
+}
+
+impl IpcClient {
+    /// Turn this connection into a `watch` stream (`app`: it shows
+    /// notifications itself).
+    pub async fn watch(mut self, app: bool, timeout: Duration) -> Result<WatchStream, ClientError> {
+        let _: Value = self.call(&Request::Watch { app }, timeout).await?;
+        Ok(WatchStream {
+            reader: self.reader,
+            _writer: self.writer,
+        })
+    }
+}
+
+impl WatchStream {
+    /// The next event; `None` when the daemon closed the stream. Lines this
+    /// build does not know are skipped.
+    pub async fn next(&mut self) -> Result<Option<WatchEvent>, ClientError> {
+        loop {
+            let Some(line) = read_line(&mut self.reader).await? else {
+                return Ok(None);
+            };
+            if let Ok(event) = serde_json::from_str::<WatchEvent>(&line) {
+                return Ok(Some(event));
+            }
+        }
     }
 }
 

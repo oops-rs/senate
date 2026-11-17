@@ -59,9 +59,13 @@ async fn main() -> anyhow::Result<()> {
             Some(home) => Paths::new(home),
             None => Paths::from_env()?,
         };
-        let machine = Machine::start(paths.clone(), Timing::default())
-            .await
-            .with_context(|| format!("starting the machine from {}", paths.config().display()))?;
+        let machine = Machine::start_desktop(
+            paths.clone(),
+            Timing::default(),
+            senate_bridge::notify::Desktop::system(),
+        )
+        .await
+        .with_context(|| format!("starting the machine from {}", paths.config().display()))?;
         for senate in machine.senates() {
             tracing::info!(senate = %senate.key, url = %senate.url, "serving");
         }

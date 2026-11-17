@@ -27,7 +27,8 @@ use senate_bridge::ipc::{
 };
 use senate_bridge::session::{Runtime, Session, SessionState};
 use senate_core::{
-    CommitteeId, Locale, SenatorPath, Seq, SpeakerSeat, StatusPayload, StatusState, ThreadSummary,
+    CommitteeId, Directed, Locale, SenatorPath, Seq, SpeakerSeat, StatusPayload, StatusState,
+    ThreadSummary,
 };
 
 use crate::text;
@@ -53,6 +54,18 @@ pub enum Refresh {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Notice {
     ApprovalArrived(Approval),
+    /// Something came back to the person: an answer, a note, an escalation
+    /// addressed to them. The app posts the notification itself, and the
+    /// daemon stays quiet while the app is connected.
+    ForPerson {
+        committee: CommitteeId,
+        /// The thread's root seq.
+        thread: Seq,
+        /// `Senate · refund-v2`.
+        title: String,
+        /// `[senator::alice/claude] answered: the first line`.
+        body: String,
+    },
 }
 
 /// What [`Model::apply`] asks of the backend.
@@ -179,6 +192,11 @@ pub struct Waiting {
     /// The thread was escalated to the person: it waits on them whichever
     /// agent it was for.
     pub escalated: bool,
+    /// The latest event addressed to the person that they have not seen
+    /// ([`ThreadSummary::waits_on_person`], with the daemon's read state):
+    /// the thread is unread for them. A thread can wait on the person for
+    /// this alone, though its last word is an answer.
+    pub unread: Option<Directed>,
 }
 
 impl Model {
@@ -241,6 +259,27 @@ impl Model {
                 }
                 // The event may have been put to a Speaker, in any Senate.
                 fx.refresh.push(Refresh::Docket);
+            }
+            WatchEvent::ForPerson {
+                news,
+                escalated,
+                text,
+            } => {
+                let by = senate_bridge::person::byline(&news.from, news.on_behalf_of.as_ref());
+                let verb = senate_bridge::person::did(&news.kind, escalated, self.locale);
+                let line = text.lines().next().unwrap_or_default().trim().to_string();
+                let sep = self.locale.pick("：", ": ");
+                fx.notices.push(Notice::ForPerson {
+                    committee: news.committee.clone(),
+                    thread: news.thread.unwrap_or(news.seq),
+                    title: format!("Senate · {}", news.committee),
+                    body: if line.is_empty() {
+                        format!("{by} {verb}")
+                    } else {
+                        format!("{by} {verb}{sep}{line}")
+                    },
+                });
+                fx.refresh.push(Refresh::AllInboxes);
             }
             WatchEvent::Lagged { .. } => {
                 fx.refresh.push(Refresh::Approvals);
@@ -330,14 +369,22 @@ impl Model {
         let person = self.status.as_ref().map(|s| &s.person);
         let mut merged: BTreeMap<(CommitteeId, Seq), Waiting> = BTreeMap::new();
         for ((agent, committee), reply) in &self.inboxes {
-            for t in reply.threads.iter().filter(|t| is_waiting(t)) {
+            for t in &reply.threads {
+                // The agents' rule, or the person's own: something said to
+                // them that they have not seen.
+                let wait = reply.waits_on_person(t);
+                if !is_waiting(t) && wait.is_none() {
+                    continue;
+                }
+                let unread = wait.and_then(|w| w.unread).cloned();
                 let entry = merged
                     .entry((committee.clone(), t.root))
                     .or_insert_with(|| Waiting {
                         committee: committee.clone(),
                         thread: t.clone(),
                         for_agents: Vec::new(),
-                        escalated: person.is_some_and(|p| t.escalated_to.as_ref() == Some(p)),
+                        escalated: person.is_some_and(|p| is_escalated_to(t, p)),
+                        unread,
                     });
                 if t.is_for(agent) && !entry.for_agents.contains(agent) {
                     entry.for_agents.push(agent.clone());
@@ -347,6 +394,11 @@ impl Model {
         let mut all: Vec<Waiting> = merged.into_values().collect();
         all.sort_by_key(|w| w.thread.since_ts);
         all
+    }
+
+    /// How many of [`Model::waiting`] are unread for the person.
+    pub fn unread_threads(&self) -> usize {
+        self.waiting().iter().filter(|w| w.unread.is_some()).count()
     }
 
     /// How many threads [`Model::waiting`] lists.
@@ -406,6 +458,13 @@ pub enum Action {
         committee: CommitteeId,
         thread: Seq,
     },
+    /// The person has seen the thread up to `seen`: read state on this
+    /// machine, nothing is appended to the log.
+    MarkRead {
+        committee: CommitteeId,
+        thread: Seq,
+        seen: Seq,
+    },
     Approvals,
     Docket,
     Approve {
@@ -460,6 +519,14 @@ impl Action {
                 agent: None,
                 as_person: true,
             },
+            Action::MarkRead {
+                committee,
+                thread,
+                seen,
+            } => Request::Seen {
+                committee,
+                marks: vec![senate_bridge::ipc::ThreadSeen { thread, seen }],
+            },
             Action::Approvals => Request::Approvals,
             Action::Docket => Request::Docket {
                 session,
@@ -475,15 +542,26 @@ impl Action {
             Action::Inbox { committee, .. }
             | Action::Answer { committee, .. }
             | Action::Take { committee, .. }
-            | Action::Close { committee, .. } => Some(committee),
+            | Action::Close { committee, .. }
+            | Action::MarkRead { committee, .. } => Some(committee),
             Action::Approvals | Action::Docket | Action::Approve { .. } => None,
         }
     }
 }
 
-/// Whether a thread from `inbox` still waits on someone: the rule every
-/// inbox shares ([`ThreadSummary::waits`]). A thread whose last word is an
-/// answer is settled, and one closed is neither.
+/// Whether the thread is (still) escalated to `person`.
+fn is_escalated_to(t: &ThreadSummary, person: &senate_core::Name) -> bool {
+    match &t.escalation {
+        Some(e) => &e.to == person,
+        None => t.state == StatusState::Suspended && t.escalated_to.as_ref() == Some(person),
+    }
+}
+
+/// Whether a thread from `inbox` still waits on an agent or is parked on a
+/// person: the agents' rule ([`ThreadSummary::waits`]). A thread whose last
+/// word is an answer is settled for them, and one closed is neither. What
+/// the person has not seen is the person's rule
+/// ([`InboxReply::waits_on_person`]), which [`Model::waiting`] adds.
 pub fn is_waiting(thread: &ThreadSummary) -> bool {
     thread.waits().is_some()
 }
@@ -622,6 +700,8 @@ mod tests {
             answered: false,
             answered_by: None,
             reopened: false,
+            escalation: None,
+            directed: Vec::new(),
         }
     }
 
@@ -632,6 +712,7 @@ mod tests {
             person: Name::new("alice").unwrap(),
             threads: roots.iter().map(|r| thread(*r, agent)).collect(),
             settled: 0,
+            seen: Vec::new(),
         }
     }
 
@@ -739,6 +820,164 @@ mod tests {
         );
         let fx = m.apply(event("alice/claude/reviewer"));
         assert_eq!(fx.refresh, vec![Refresh::Docket]);
+    }
+
+    fn directed(person: &str, seq: u64, kind: Kind, escalated: bool, line: &str) -> Directed {
+        Directed {
+            person: Name::new(person).unwrap(),
+            seq: Seq(seq),
+            ts: Utc::now(),
+            from: Address::senator(&path("alice/claude")),
+            on_behalf_of: None,
+            kind,
+            escalated,
+            line: line.into(),
+        }
+    }
+
+    /// An answered thread for alice's agent, with `d` addressed to alice.
+    fn answered_to_alice(root: u64, d: Directed) -> ThreadSummary {
+        let mut t = thread(root, "alice/claude");
+        t.state = StatusState::Active;
+        t.answered = true;
+        t.updated = Seq(root + 5);
+        t.directed = vec![d];
+        t
+    }
+
+    #[test]
+    fn an_answer_the_person_has_not_seen_waits_on_them_until_they_have() {
+        let mut m = Model::default();
+        m.connected();
+        m.apply(WatchEvent::Status(Box::new(status(&[(
+            "alice/claude",
+            "a",
+        )]))));
+        let mut reply = inbox("alice/claude", "a", &[]);
+        reply.threads = vec![
+            answered_to_alice(3, directed("alice", 4, Kind::Answer, false, "The result")),
+            answered_to_alice(6, directed("alice", 8, Kind::Note, false, "FYI")),
+            // Settled for the agents, nothing addressed to the person.
+            {
+                let mut t = answered_to_alice(9, directed("bob", 10, Kind::Answer, false, "x"));
+                t.directed.clear();
+                t
+            },
+        ];
+        m.set_inbox(reply.clone());
+        let w = m.waiting();
+        assert_eq!(
+            w.iter().map(|w| w.thread.root.0).collect::<Vec<_>>(),
+            vec![3, 6],
+            "settled for the agents, unread for the person"
+        );
+        assert!(w.iter().all(|w| w.unread.is_some() && !w.escalated));
+        assert_eq!(m.unread_threads(), 2);
+        assert_eq!(m.pending_threads(), 2);
+        // The person reads thread 3: only the later one is left.
+        reply.seen = vec![senate_bridge::ipc::ThreadSeen {
+            thread: Seq(3),
+            seen: Seq(4),
+        }];
+        m.set_inbox(reply.clone());
+        let w = m.waiting();
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0].thread.root, Seq(6));
+        assert_eq!(w[0].unread.as_ref().unwrap().line, "FYI");
+        // A new event after what they saw waits again.
+        reply.threads[0].directed = vec![directed("alice", 7, Kind::Answer, false, "More")];
+        m.set_inbox(reply);
+        assert_eq!(m.unread_threads(), 2);
+    }
+
+    #[test]
+    fn an_escalation_waits_after_it_is_seen_but_is_not_news() {
+        let mut m = Model::default();
+        m.connected();
+        m.apply(WatchEvent::Status(Box::new(status(&[(
+            "alice/claude",
+            "a",
+        )]))));
+        let mut t = answered_to_alice(3, directed("alice", 5, Kind::Status, true, "nine things"));
+        t.state = StatusState::Suspended;
+        t.escalated_to = Some(Name::new("alice").unwrap());
+        t.escalation = Some(senate_core::Escalation {
+            to: Name::new("alice").unwrap(),
+            by: Address::senator(&path("alice/claude")),
+            seq: Seq(5),
+            ts: Utc::now(),
+            reason: Some("nine things".into()),
+        });
+        let mut reply = inbox("alice/claude", "a", &[]);
+        reply.threads = vec![t];
+        m.set_inbox(reply.clone());
+        let w = m.waiting();
+        assert!(w[0].escalated && w[0].unread.as_ref().unwrap().escalated);
+        reply.seen = vec![senate_bridge::ipc::ThreadSeen {
+            thread: Seq(3),
+            seen: Seq(9),
+        }];
+        m.set_inbox(reply);
+        let w = m.waiting();
+        assert_eq!(w.len(), 1, "it lasts until the person acts");
+        assert!(w[0].escalated && w[0].unread.is_none());
+        assert_eq!(m.unread_threads(), 0);
+    }
+
+    #[test]
+    fn marking_a_thread_read_is_a_seen_request() {
+        let r = Action::MarkRead {
+            committee: committee("a"),
+            thread: Seq(3),
+            seen: Seq(9),
+        }
+        .request()
+        .unwrap();
+        assert!(matches!(
+            r,
+            Request::Seen { committee: c, marks } if c == committee("a")
+                && marks == vec![senate_bridge::ipc::ThreadSeen { thread: Seq(3), seen: Seq(9) }]
+        ));
+    }
+
+    #[test]
+    fn something_for_the_person_is_a_notice_in_the_apps_language_and_a_refresh() {
+        for (locale, body) in [
+            (
+                Locale::En,
+                "[senator::alice/claude] answered: Idempotency-Key",
+            ),
+            (
+                Locale::Zh,
+                "[senator::alice/claude] 回答了：Idempotency-Key",
+            ),
+        ] {
+            let mut m = Model::new(locale);
+            let event = senate_core::NewEvent::new(
+                committee("a"),
+                Kind::Answer,
+                Address::senator(&path("alice/claude")),
+                "Idempotency-Key\nmore",
+            )
+            .to(Address::senior(&Name::new("alice").unwrap()))
+            .in_thread(Seq(3))
+            .into_event(Seq(9), Utc::now());
+            let fx = m.apply(WatchEvent::ForPerson {
+                news: Box::new(event),
+                escalated: false,
+                text: "Idempotency-Key\nmore".into(),
+            });
+            assert_eq!(
+                fx.notices,
+                vec![Notice::ForPerson {
+                    committee: committee("a"),
+                    thread: Seq(3),
+                    title: "Senate · a".into(),
+                    body: body.into(),
+                }]
+            );
+            assert!(fx.refresh.contains(&Refresh::AllInboxes));
+        }
     }
 
     #[test]

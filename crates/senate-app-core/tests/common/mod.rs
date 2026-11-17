@@ -125,6 +125,8 @@ pub fn suspended(root: u64, title: &str, agent: &str) -> ThreadSummary {
         answered: false,
         answered_by: None,
         reopened: false,
+        escalation: None,
+        directed: Vec::new(),
     }
 }
 
@@ -342,7 +344,7 @@ async fn serve(conn: UnixStream, world: Arc<Mutex<World>>, events: broadcast::Se
     let mut lines = BufReader::new(r).lines();
     while let Ok(Some(line)) = lines.next_line().await {
         let request: Request = serde_json::from_str(&line).unwrap();
-        if request == Request::Watch {
+        if matches!(request, Request::Watch { .. }) {
             let mut rx = events.subscribe();
             let mut out = vec![
                 serde_json::to_string(&Reply::ok(&serde_json::json!({"watching": true}))).unwrap(),
@@ -411,6 +413,7 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
                 person: alice(),
                 threads,
                 settled: 0,
+                seen: Vec::new(),
             })
         }
         Request::Answer {

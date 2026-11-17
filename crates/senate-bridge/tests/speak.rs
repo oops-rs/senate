@@ -621,3 +621,714 @@ async fn everything_is_said_in_the_daemons_language() {
     .await;
     assert!(out(&o).starts_with("已发出 note（seq "), "{}", out(&o));
 }
+
+// ---- what comes back to the person --------------------------------------
+
+use senate_core::{StatusPayload, StatusState, Step, meta};
+
+fn status_ev(root: Seq, p: StatusPayload) -> NewEvent {
+    NewEvent::new(committee(), Kind::Status, claude("alice"), "")
+        .in_thread(root)
+        .with_meta(meta::STATUS, p.value())
+}
+
+/// What the first real task run did: processing with a title and steps, an
+/// answer to the person, a suspension escalated to them with nine decisions
+/// wanted, a checkpoint, then every step ticked off with `active`.
+fn the_real_sequence(h: &Harness) -> Seq {
+    let root = h.server.append(
+        NewEvent::new(committee(), Kind::Request, person("alice"), "do the thing")
+            .to(claude("alice")),
+    );
+    let mut s = StatusPayload::new(StatusState::Processing);
+    s.title = Some("The plan".into());
+    s.steps = Some(vec![Step {
+        id: "a".into(),
+        label: "read".into(),
+        done: false,
+    }]);
+    h.server.append(status_ev(root.seq, s));
+    h.server.append(
+        NewEvent::new(
+            committee(),
+            Kind::Answer,
+            claude("alice"),
+            "The result is in the doc.\nSecond line.",
+        )
+        .to(person("alice"))
+        .in_thread(root.seq),
+    );
+    let mut esc = StatusPayload::new(StatusState::Suspended);
+    esc.escalated_to = Some(senate_core::Name::new("alice").unwrap());
+    esc.reason = Some("1. which header?\n2. which table?".into());
+    h.server.append(status_ev(root.seq, esc));
+    h.server.append(
+        NewEvent::new(committee(), Kind::Checkpoint, claude("alice"), "cp").in_thread(root.seq),
+    );
+    let mut done = StatusPayload::new(StatusState::Active);
+    done.steps = Some(vec![Step {
+        id: "a".into(),
+        label: "read".into(),
+        done: true,
+    }]);
+    h.server.append(status_ev(root.seq, done));
+    root.seq
+}
+
+async fn inbox_text(h: &Harness, extra: &[&str]) -> String {
+    let mut args = vec!["inbox", "--committee", "refund-v2"];
+    args.extend_from_slice(extra);
+    let o = senate(h, &args, None, None).await;
+    assert!(o.status.success(), "{}", err(&o));
+    out(&o)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_inbox_lists_what_came_back_to_the_person_until_they_read_it() {
+    for zh in [false, true] {
+        let h = machine(zh).await;
+        let root = the_real_sequence(&h);
+        let text = inbox_text(&h, &[]).await;
+        let first = text.lines().next().unwrap();
+        if zh {
+            assert_eq!(
+                first,
+                "refund-v2 上有 1 个 thread 在等你（[senator::alice]），其中 1 个有新内容："
+            );
+            assert!(text.contains("对你是新的"), "{text}");
+            assert!(
+                text.contains("[senator::alice/claude] 把它转给了你：\n      1. which header?\n      2. which table?"),
+                "{text}"
+            );
+            assert!(text.contains("读：`senate thread "), "{text}");
+        } else {
+            assert_eq!(
+                first,
+                "1 thread(s) on refund-v2 wait on you ([senator::alice]); 1 with news:"
+            );
+            assert!(
+                text.contains(&format!("- thread {root} · The plan · new for you")),
+                "{text}"
+            );
+            assert!(
+                text.contains("[senator::alice/claude] escalated this to you:\n      1. which header?\n      2. which table?"),
+                "{text}"
+            );
+            assert!(text.contains("read: `senate thread "), "{text}");
+        }
+        assert!(
+            !text.contains("settled") && !text.contains("Nothing open waits"),
+            "{text}"
+        );
+
+        // Showing the thread reads it: no longer new, still waiting on the
+        // person because an escalation lasts until they act.
+        let t = senate(
+            &h,
+            &["thread", &root.to_string(), "--committee", "refund-v2"],
+            None,
+            None,
+        )
+        .await;
+        assert!(t.status.success(), "{}", err(&t));
+        let text = inbox_text(&h, &[]).await;
+        if zh {
+            assert!(
+                !text.contains("对你是新的") && text.contains("你已看过，等你处理"),
+                "{text}"
+            );
+            assert!(text.contains("其中 0 个有新内容"), "{text}");
+        } else {
+            assert!(
+                !text.contains("new for you") && text.contains("seen; it waits until you act"),
+                "{text}"
+            );
+            assert!(text.contains("0 with news"), "{text}");
+        }
+        assert!(text.contains("1. which header?"), "{text}");
+
+        // Replying hands it back to the agent.
+        let r = senate(
+            &h,
+            &[
+                "reply",
+                &root.to_string(),
+                "decided",
+                "--committee",
+                "refund-v2",
+            ],
+            None,
+            None,
+        )
+        .await;
+        assert!(r.status.success(), "{}", err(&r));
+        let text = inbox_text(&h, &[]).await;
+        assert!(
+            !text.contains("wait on you") && !text.contains("在等你"),
+            "{text}"
+        );
+        // A new note from the agent is news again.
+        h.server.append(
+            NewEvent::new(committee(), Kind::Note, claude("alice"), "Done, see PR")
+                .to(person("alice"))
+                .in_thread(root),
+        );
+        let text = inbox_text(&h, &[]).await;
+        assert!(text.contains("Done, see PR"), "{text}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_answer_nobody_has_read_is_not_settled_for_the_person_and_mark_read_clears_it() {
+    for zh in [false, true] {
+        let h = machine(zh).await;
+        let root = h.server.append(
+            NewEvent::new(
+                committee(),
+                Kind::Question,
+                person("alice"),
+                "which header?",
+            )
+            .to(claude("alice")),
+        );
+        h.server.append(
+            NewEvent::new(
+                committee(),
+                Kind::Answer,
+                claude("alice"),
+                "Idempotency-Key",
+            )
+            .to(person("alice"))
+            .in_thread(root.seq),
+        );
+        let text = inbox_text(&h, &[]).await;
+        assert!(text.contains("Idempotency-Key"), "{text}");
+        assert!(
+            text.contains(if zh { "回答了：" } else { "answered:" }),
+            "{text}"
+        );
+        assert!(
+            !text.contains("not shown") && !text.contains("未显示"),
+            "{text}"
+        );
+
+        let text = inbox_text(&h, &["--mark-read"]).await;
+        assert!(
+            text.contains("Idempotency-Key"),
+            "listed before it is cleared: {text}"
+        );
+        assert!(
+            text.contains(if zh {
+                "已把 1 个 thread 标为已读"
+            } else {
+                "Marked 1 thread(s) as read"
+            }),
+            "{text}"
+        );
+        // Now it is the settled thread the agents' rule says it is.
+        let text = inbox_text(&h, &[]).await;
+        assert!(!text.contains("Idempotency-Key"), "{text}");
+        assert!(
+            text.contains(if zh {
+                "已答复的 1 个 thread 未显示"
+            } else {
+                "1 answered thread(s) not shown"
+            }),
+            "{text}"
+        );
+        // And the agents' own inbox never changed: settled for them
+        // throughout.
+    }
+}
+
+// ---- being told: --wait for a request, escalations, watch, notifications ---
+
+use senate_bridge::notify::{Desktop, Recording};
+
+fn escalation_from_claude(root: Seq, reason: &str) -> NewEvent {
+    let mut esc = StatusPayload::new(StatusState::Suspended);
+    esc.escalated_to = Some(senate_core::Name::new("alice").unwrap());
+    esc.reason = Some(reason.into());
+    status_ev(root, esc)
+}
+
+async fn first_thread(h: &Harness, kind: Kind) -> senate_core::Event {
+    eventually("the person's message", WAIT, || {
+        h.server
+            .events("refund-v2")
+            .into_iter()
+            .find(|e| e.kind == kind && e.from == person("alice"))
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn request_wait_returns_on_an_answer_or_an_escalation_and_otherwise_times_out() {
+    // An answer.
+    let h = machine(false).await;
+    let args = [
+        "request",
+        "claude",
+        "do it",
+        "--committee",
+        "refund-v2",
+        "--wait=20",
+    ];
+    let waiting = senate(&h, &args, None, None);
+    let answering = async {
+        let r = first_thread(&h, Kind::Request).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        h.server.append(
+            NewEvent::new(committee(), Kind::Answer, claude("alice"), "Done")
+                .to(person("alice"))
+                .in_thread(r.seq),
+        );
+        r.seq
+    };
+    let (o, root) = tokio::join!(waiting, answering);
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(
+        out(&o).trim_end().ends_with(&format!(
+            "[senator::alice/claude] answered in thread {root}:\nDone"
+        )),
+        "{}",
+        out(&o)
+    );
+
+    // An escalation back to the asker ends the wait for `request` and `ask`,
+    // with its reason, in either language, and counts as seen.
+    for (zh, kind) in [(false, "request"), (true, "ask")] {
+        let h = machine(zh).await;
+        let args = [
+            kind,
+            "claude",
+            "do it",
+            "--committee",
+            "refund-v2",
+            "--wait=20",
+        ];
+        let waiting = senate(&h, &args, None, None);
+        let escalating = async {
+            let k = if kind == "ask" {
+                Kind::Question
+            } else {
+                Kind::Request
+            };
+            let r = first_thread(&h, k).await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            h.server.append(escalation_from_claude(
+                r.seq,
+                "1. which header?\n2. which table?",
+            ));
+            r.seq
+        };
+        let (o, root) = tokio::join!(waiting, escalating);
+        assert!(o.status.success(), "{}", err(&o));
+        let text = out(&o);
+        let expected = if zh {
+            format!(
+                "[senator::alice/claude] 把 thread {root} 转给了你：\n1. which header?\n2. which table?\n用 `senate reply {root} <文字>` 回复。"
+            )
+        } else {
+            format!(
+                "[senator::alice/claude] escalated thread {root} to you:\n1. which header?\n2. which table?\nReply with `senate reply {root} <text>`."
+            )
+        };
+        assert!(text.trim_end().ends_with(&expected), "{text}");
+        // It was shown, so it is not news; it still waits until they act.
+        let inbox = inbox_text(&h, &[]).await;
+        assert!(
+            inbox.contains(if zh {
+                "其中 0 个有新内容"
+            } else {
+                "0 with news"
+            }),
+            "{inbox}"
+        );
+    }
+
+    // Nothing in time.
+    let h = machine(false).await;
+    let o = senate(
+        &h,
+        &[
+            "request",
+            "claude",
+            "do it",
+            "--committee",
+            "refund-v2",
+            "--wait=1",
+        ],
+        None,
+        None,
+    )
+    .await;
+    assert!(!o.status.success());
+    assert!(err(&o).contains("no answer in thread"), "{}", err(&o));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn without_wait_ask_and_request_say_how_the_person_will_hear_back() {
+    for zh in [false, true] {
+        let h = machine(zh).await;
+        for kind in ["ask", "request"] {
+            let o = senate(
+                &h,
+                &[kind, "claude", "x", "--committee", "refund-v2"],
+                None,
+                None,
+            )
+            .await;
+            let text = out(&o);
+            for needle in if zh {
+                ["桌面通知", "`senate inbox`", "`senate watch`"]
+            } else {
+                ["desktop notification", "`senate inbox`", "`senate watch`"]
+            } {
+                assert!(text.contains(needle), "{needle}: {text}");
+            }
+        }
+        // `tell` expects no answer and promises nothing.
+        let o = senate(
+            &h,
+            &["tell", "claude", "x", "--committee", "refund-v2"],
+            None,
+            None,
+        )
+        .await;
+        assert!(!out(&o).contains("senate watch"), "{}", out(&o));
+    }
+}
+
+/// A running `senate watch`, its stdout read on a thread.
+struct Watcher {
+    child: std::process::Child,
+    lines: std::sync::mpsc::Receiver<String>,
+}
+
+impl Watcher {
+    fn start(h: &Harness, args: &[&str]) -> Self {
+        let mut cmd = Command::new(BIN);
+        cmd.env("HOME", h.dir.path())
+            .env("SENATE_HOME", h.paths.home())
+            .env_remove("SENATE_AGENT")
+            .arg("watch")
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = cmd.spawn().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (tx, lines) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            for line in std::io::BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        Self { child, lines }
+    }
+
+    /// Lines until `n` blocks (each ends at a blank line) or the timeout.
+    fn blocks(&self, n: usize) -> Vec<String> {
+        let mut blocks = Vec::new();
+        let mut current = String::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while blocks.len() < n {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            match self.lines.recv_timeout(left) {
+                Ok(line) if line.is_empty() => blocks.push(std::mem::take(&mut current)),
+                Ok(line) => {
+                    if !current.is_empty() {
+                        current.push('\n');
+                    }
+                    current.push_str(&line);
+                }
+                Err(_) => break,
+            }
+        }
+        blocks
+    }
+
+    fn json(&self, n: usize) -> Vec<Value> {
+        let mut out = Vec::new();
+        while out.len() < n {
+            match self.lines.recv_timeout(Duration::from_secs(10)) {
+                Ok(line) => out.push(serde_json::from_str(&line).unwrap()),
+                Err(_) => break,
+            }
+        }
+        out
+    }
+}
+
+impl Drop for Watcher {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn watch_prints_each_kind_addressed_to_the_person_and_nothing_else() {
+    for zh in [false, true] {
+        let h = machine(zh).await;
+        let w = Watcher::start(&h, &["--committee", "refund-v2"]);
+        // The watcher must be subscribed before events arrive.
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        let root = h.server.append(
+            NewEvent::new(committee(), Kind::Request, person("alice"), "do it").to(claude("alice")),
+        );
+        // Not for the person: their own words, an agent's progress, what is
+        // put to the Speaker.
+        h.server.append(status_ev(
+            root.seq,
+            StatusPayload::new(StatusState::Processing),
+        ));
+        h.server.append(
+            NewEvent::new(committee(), Kind::Question, claude("alice"), "pick one?")
+                .to(Address::Speaker),
+        );
+        h.server.append(
+            NewEvent::new(committee(), Kind::Answer, claude("alice"), "Plan\nline two")
+                .to(person("alice"))
+                .in_thread(root.seq),
+        );
+        h.server.append(
+            NewEvent::new(committee(), Kind::Note, claude("alice"), "FYI the PR is up")
+                .to(person("alice"))
+                .in_thread(root.seq),
+        );
+        h.server
+            .append(escalation_from_claude(root.seq, "1. which header?"));
+        let blocks = w.blocks(3);
+        assert_eq!(blocks.len(), 3, "{blocks:#?}");
+        let r = root.seq;
+        let (answer, note, esc) = (&blocks[0], &blocks[1], &blocks[2]);
+        if zh {
+            assert!(
+                answer.starts_with("[senator::alice/claude] 回答了 · "),
+                "{answer}"
+            );
+            assert!(
+                note.starts_with("[senator::alice/claude] 留了一条 note · "),
+                "{note}"
+            );
+            assert!(
+                esc.starts_with("[senator::alice/claude] 把它转给了你 · "),
+                "{esc}"
+            );
+            assert!(
+                answer.contains(&format!("读：`senate thread {r} --committee refund-v2`")),
+                "{answer}"
+            );
+        } else {
+            assert!(
+                answer.starts_with("[senator::alice/claude] answered · "),
+                "{answer}"
+            );
+            assert!(
+                note.starts_with("[senator::alice/claude] left a note · "),
+                "{note}"
+            );
+            assert!(
+                esc.starts_with("[senator::alice/claude] escalated this to you · "),
+                "{esc}"
+            );
+            assert!(
+                answer.contains(&format!("read: `senate thread {r} --committee refund-v2`")),
+                "{answer}"
+            );
+            assert!(
+                answer.contains(&format!(
+                    "reply: `senate reply {r} --committee refund-v2 <text>`"
+                )),
+                "{answer}"
+            );
+        }
+        assert!(
+            answer.contains(&format!("refund-v2 · thread {r}")),
+            "{answer}"
+        );
+        assert!(answer.contains("\n  Plan\n  line two\n"), "{answer}");
+        assert!(note.contains("\n  FYI the PR is up\n"), "{note}");
+        assert!(esc.contains("\n  1. which header?\n"), "{esc}");
+        // It marked nothing as read.
+        let text = inbox_text(&h, &[]).await;
+        assert!(
+            text.contains(if zh { "对你是新的" } else { "new for you" }),
+            "{text}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn watch_json_is_one_object_per_line_and_a_named_committee_filters() {
+    let h = machine(false).await;
+    let w = Watcher::start(&h, &["--committee", "refund-v2", "--json"]);
+    let other = Watcher::start(&h, &["--committee", "other"]);
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let root = h.server.append(
+        NewEvent::new(committee(), Kind::Request, person("alice"), "do it").to(claude("alice")),
+    );
+    h.server.append(
+        NewEvent::new(committee(), Kind::Answer, claude("alice"), "Done")
+            .to(person("alice"))
+            .in_thread(root.seq),
+    );
+    let lines = w.json(1);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["event"], "for_person");
+    assert_eq!(lines[0]["escalated"], false);
+    assert_eq!(lines[0]["text"], "Done");
+    assert_eq!(lines[0]["news"]["kind"], "answer");
+    assert_eq!(lines[0]["news"]["thread"], root.seq.0);
+    assert!(
+        other.blocks(1).is_empty(),
+        "another committee's watch prints nothing"
+    );
+}
+
+/// A machine whose daemon posts through `rec` with a short burst window.
+async fn machine_notifying(rec: &std::sync::Arc<Recording>, config: &str) -> Harness {
+    let mut h = Harness::new().await;
+    h.desktop = Some(Desktop {
+        notifier: rec.clone(),
+        window: Duration::from_millis(300),
+    });
+    if !config.is_empty() {
+        use std::io::Write as _;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(h.paths.config())
+            .unwrap();
+        writeln!(f, "\n{config}").unwrap();
+    }
+    h.start().await;
+    let wd = h.workdir("s", Some("refund-v2"));
+    h.hook(HookKind::SessionStart, "s1", &wd, None).await;
+    h.wait_stream("refund-v2").await;
+    h
+}
+
+fn answer_to_alice(root: Seq, body: &str) -> NewEvent {
+    NewEvent::new(committee(), Kind::Answer, claude("alice"), body)
+        .to(person("alice"))
+        .in_thread(root)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_desktop_is_told_once_per_burst_and_says_who_and_the_first_line() {
+    let rec = Recording::new();
+    let h = machine_notifying(&rec, "").await;
+    let root = h.server.append(
+        NewEvent::new(committee(), Kind::Request, person("alice"), "do it").to(claude("alice")),
+    );
+    h.server
+        .append(answer_to_alice(root.seq, "Plan is ready\nsecond line"));
+    eventually("one notification", WAIT, || {
+        (!rec.posted().is_empty()).then_some(())
+    })
+    .await;
+    assert_eq!(
+        rec.posted(),
+        [(
+            "Senate · refund-v2".to_string(),
+            "[senator::alice/claude] answered: Plan is ready".to_string()
+        )]
+    );
+    // A burst: several events within the window are one notification.
+    h.server.append(answer_to_alice(root.seq, "one"));
+    h.server.append(
+        NewEvent::new(committee(), Kind::Note, claude("alice"), "two")
+            .to(person("alice"))
+            .in_thread(root.seq),
+    );
+    h.server.append(escalation_from_claude(root.seq, "three"));
+    eventually("the burst", WAIT, || {
+        (rec.posted().len() >= 2).then_some(())
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let posted = rec.posted();
+    assert_eq!(posted.len(), 2, "{posted:?}");
+    assert_eq!(
+        posted[1].1,
+        "3 new for you, the latest: [senator::alice/claude] escalated this to you: three"
+    );
+    // Not for the person: nothing.
+    h.server.append(
+        NewEvent::new(committee(), Kind::Question, claude("alice"), "pick?").to(Address::Speaker),
+    );
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_eq!(rec.posted().len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_daemon_stays_quiet_while_the_app_is_connected_and_when_it_is_turned_off() {
+    // An app client that shows notifications itself.
+    let rec = Recording::new();
+    let h = machine_notifying(&rec, "").await;
+    let root = h.server.append(
+        NewEvent::new(committee(), Kind::Request, person("alice"), "do it").to(claude("alice")),
+    );
+    let app = senate_bridge::ipc::IpcClient::connect(&h.socket(), Duration::from_secs(1))
+        .await
+        .unwrap()
+        .watch(true, Duration::from_secs(5))
+        .await
+        .unwrap();
+    h.server
+        .append(answer_to_alice(root.seq, "while the app is open"));
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert!(rec.posted().is_empty(), "{:?}", rec.posted());
+    // A plain `senate watch` does not show notifications: it does not count.
+    drop(app);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    h.server
+        .append(answer_to_alice(root.seq, "after the app is gone"));
+    eventually("the notification", WAIT, || {
+        (!rec.posted().is_empty()).then_some(())
+    })
+    .await;
+    assert!(rec.posted()[0].1.ends_with("after the app is gone"));
+
+    // `[notify] desktop = false`.
+    let rec = Recording::new();
+    let h = machine_notifying(&rec, "[notify]\ndesktop = false").await;
+    let root = h.server.append(
+        NewEvent::new(committee(), Kind::Request, person("alice"), "do it").to(claude("alice")),
+    );
+    h.server.append(answer_to_alice(root.seq, "quietly"));
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert!(rec.posted().is_empty());
+    // It is still in the inbox.
+    assert!(inbox_text(&h, &[]).await.contains("quietly"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failing_notifier_never_disturbs_delivery() {
+    let rec = Recording::new().failing();
+    let h = machine_notifying(&rec, "").await;
+    let root = h.server.append(
+        NewEvent::new(committee(), Kind::Request, person("alice"), "do it").to(claude("alice")),
+    );
+    let w = Watcher::start(&h, &["--committee", "refund-v2", "--json"]);
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    h.server.append(answer_to_alice(root.seq, "first"));
+    eventually("an attempt", WAIT, || {
+        (!rec.posted().is_empty()).then_some(())
+    })
+    .await;
+    h.server.append(answer_to_alice(root.seq, "second"));
+    let lines = w.json(2);
+    assert_eq!(lines.len(), 2, "both still delivered");
+    eventually("another attempt", WAIT, || {
+        (rec.posted().len() >= 2).then_some(())
+    })
+    .await;
+    assert!(inbox_text(&h, &[]).await.contains("second"));
+}

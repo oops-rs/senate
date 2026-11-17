@@ -97,6 +97,10 @@ final class CoreStore {
         notifier.approvalRequested(approval)
     }
 
+    fileprivate func forPerson(_ note: PersonNote) {
+        notifier.forPerson(note)
+    }
+
     // MARK: Window
 
     func attach(openWindow: OpenWindowAction) {
@@ -212,6 +216,13 @@ final class ListenerBridge: CoreListener, @unchecked Sendable {
         let store = self.store
         DispatchQueue.main.async {
             MainActor.assumeIsolated { store?.approvalRequested(approval) }
+        }
+    }
+
+    func onForPerson(note: PersonNote) {
+        let store = self.store
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated { store?.forPerson(note) }
         }
     }
 }

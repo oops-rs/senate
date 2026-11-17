@@ -151,6 +151,88 @@ presides over delivers every root at once (`triaged: false`, default), as
 does a Senate nobody presides over. A senator Speaker may still write a verdict;
 nothing waits for one.
 
+## Escalation
+
+An agent hands a task thread to a person with `escalate` (a `status`:
+`suspended`, `escalated_to` the person, a `reason`). The Speaker's own
+hand-offs are the same status. An escalation is a hand-off, so it lasts until
+the person acts; the board folds it ([`senate_core::task`]), and no server
+rule is needed beyond the existing ones (an agent reports only on its own
+threads and never takes one over).
+
+- It ends when the person says anything in the thread (a reply, a correction,
+  an answer, a decision) or takes the thread over, or when the thread is
+  archived. Words in a chat group are the Speaker's to read: its status that
+  follows (a hand-off, a takeover) ends it.
+- It is withdrawn explicitly by whoever made it: a `status` from the same
+  author with `withdraw` (the `status` tool's `withdraw_escalation`), naming
+  the state the thread goes back to. Anyone else's withdrawal is ignored.
+- An ordinary progress update never withdraws it. A later `status` from the
+  agent (`active`, ticked-off steps) still updates the title, steps and links,
+  but the thread stays suspended and the escalation's reason stays.
+- The reason is shown wherever the thread is listed for the person.
+
+## What comes back to the person
+
+"The last word is an answer, so nobody waits" is the rule for an *agent's*
+inbox (`ThreadSummary::waits`; the `inbox` tool, the docket). It is wrong for
+a person's: an answer, a note or an escalation addressed to them that they
+have not seen is exactly what their inbox is for. The person's rule is
+`ThreadSummary::waits_on_person(person, seen)` in `senate-core`, and every
+reader of a person's inbox (`senate inbox`, the app core) uses it:
+
+- A thread waits on the person when an escalation to them is in force
+  (whatever they have seen), or when it holds an event directed to them
+  (`to` contains `senator::<person>`, or an escalation to them) with a seq
+  above `seen`. The board keeps, per person, the latest such event and the
+  latest escalation (`ThreadSummary::directed`); speaking in the thread
+  themselves answers them. A provisional answer is not addressed to them.
+- `seen` is read state, kept on the developer machine: per (Senate,
+  committee, thread root), the highest seq the person has seen, in the
+  `person_seen` table of that Senate's `state.db`. It is this machine's view,
+  never a log fact, and only moves up. `senate thread <n>` marks the thread
+  seen up to its last event; replying (`senate reply`, the app's answer) and
+  taking it mark it too; `senate inbox --mark-read` marks every thread it
+  lists as new; the app's `mark_read` action does the same for one thread.
+  An existing `state.db` gets the empty table when the daemon opens it, so
+  what was answered and never opened shows once as new; seqs belong to a log
+  epoch, so a new epoch drops the marks with the cursors.
+- `senate inbox` lists the threads that wait on the person first (news
+  marked, with who wrote, the kind and the first line, an escalation with its
+  reason, and the commands to read, reply and take over), then the threads
+  that wait for other reasons, then how many settled ones were left out. The
+  daemon's sessionless `inbox` carries `seen` so the reader can apply the rule.
+
+### Being told
+
+With no chat platform the person would learn nothing unless they polled.
+
+- `senate ask|request … --wait[=SECONDS]` stays until the agent answers in the
+  thread or escalates it to the asker (printed with its reason), then marks
+  what it showed as read. Without `--wait`, the output says how they will
+  hear back.
+- `senate watch [--committee ID] [--json]` stays in the foreground and prints,
+  as they arrive, the events addressed to the person on the committees the
+  machine's sessions are on (`senate_core::attention`: answers, notes,
+  questions, requests, escalations; not what is put to the Speaker, which is
+  the agent's docket). One block per event: byline, what it did, time,
+  committee, thread, the first lines and the commands to read and reply. It
+  marks nothing as read. The daemon announces each such event once on its
+  `watch` stream (`for_person`), whichever agent's stream carried it.
+- The daemon posts one desktop notification for them, so nothing needs to be
+  left open (`senate_bridge::notify`). The title is `Senate · <committee>`; the
+  body is `<byline> <did>: <first line>` (`[senator::wendell/claude]
+  answered: …`), or `<n> new for you, the latest: …` for a burst: events within
+  a few seconds are one notification. It is best effort: a failure is logged
+  once and never touches delivery. It is skipped while a client that shows
+  notifications itself is connected (the desktop app's `watch` stream, which
+  says `app: true`; the app core notifies through `on_for_person`). Only
+  `senated --machine` installs the system notifier; a daemon built any other
+  way posts nothing. `[notify] desktop = false` in `senate.toml` turns it off.
+  macOS runs `osascript -e 'display notification "<body>" with title
+  "<title>"'` (text escaped for an AppleScript string); Linux runs
+  `notify-send --app-name Senate -- <title> <body>` when it is on `PATH`.
+
 ## Guests
 
 A guest may ask questions and receive answers. A guest may not change state:

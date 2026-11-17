@@ -490,3 +490,159 @@ async fn the_person_asks_whichever_agent_from_the_command_line_and_waits_for_the
     assert_eq!(waiting.settled, 0);
     desk.stop().await;
 }
+
+/// The first real task run, replayed: the person asks their agent for
+/// something; the agent reports (processing, with steps), answers to the
+/// person, escalates to them with its open decisions, checkpoints, and ticks
+/// off its steps with `active`. What the person's inbox shows at each point,
+/// through the very requests and renderers `senate inbox` and `senate thread`
+/// use.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn what_the_agent_hands_back_stays_in_the_persons_inbox_until_they_act() {
+    use senate_bridge::ipc::{InboxReply, SayKind, SessionSelector};
+    use senate_bridge::mcp::ShowAll;
+    use senate_bridge::person;
+    use senate_core::{StatusPayload, StatusState, Step};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut desk = Desk::new(dir.path(), "alice", Locale::En, ALONE);
+    desk.git_init("main");
+    desk.start().await;
+    let claude = desk.inbox("s-claude");
+    desk.session_start("s-claude", &claude).await.unwrap();
+    desk.wait_connected(None, "alice/claude", true).await;
+    let socket = desk.paths.socket();
+
+    let inbox = |all: bool| {
+        let desk = &desk;
+        async move {
+            desk.ipc::<InboxReply>(Request::Inbox {
+                session: SessionSelector::default(),
+                committee: Some(committee()),
+                agent: None,
+                all,
+            })
+            .await
+        }
+    };
+    let shown = |reply: &InboxReply, locale| person::render_inbox(reply, locale, ShowAll::Flag);
+
+    // `senate request claude - --committee …`
+    let sent = senate_bridge::speak::send(
+        &socket,
+        committee(),
+        SayKind::Request,
+        "claude",
+        "Plan the refund retry change.".into(),
+    )
+    .await
+    .unwrap();
+    let root = sent.posted.seq;
+    claude.wait_for("refund retry change").await;
+
+    // The agent has it: it waits on the agent, nothing is news to the person.
+    let mut working = StatusPayload::new(StatusState::Processing);
+    working.title = Some("Retry plan".into());
+    working.steps = Some(vec![Step {
+        id: "read".into(),
+        label: "read the code".into(),
+        done: false,
+    }]);
+    desk.status("s-claude", root, working).await;
+    let reply = inbox(false).await;
+    assert!(
+        reply.threads[0]
+            .waits_on_person(&name("alice"), Seq(0))
+            .is_none()
+    );
+    let text = shown(&reply, Locale::En);
+    assert!(
+        text.contains("open task thread(s)") && !text.contains("wait on you"),
+        "{text}"
+    );
+
+    // It answers to the person: settled for agents, news for the person.
+    desk.answer("s-claude", root, "Plan is in docs/retry.md\nSecond line")
+        .await;
+    let reply = inbox(false).await;
+    assert_eq!(reply.settled, 0, "not left out as settled");
+    assert!(
+        reply.threads[0].is_settled(),
+        "the agents' rule is unchanged"
+    );
+    let text = shown(&reply, Locale::En);
+    assert!(
+        text.starts_with("1 thread(s) on refund-v2 wait on you ([senator::alice]); 1 with news:"),
+        "{text}"
+    );
+    assert!(
+        text.contains("[senator::alice/claude] answered: Plan is in docs/retry.md"),
+        "{text}"
+    );
+    assert!(shown(&reply, Locale::Zh).contains("回答了：Plan is in docs/retry.md"));
+
+    // It escalates with what it needs, leaves a checkpoint, and ticks off
+    // its steps. Nothing it does after the escalation withdraws it.
+    desk.escalate("s-claude", root, "1. which header?\n2. which table?")
+        .await;
+    desk.checkpoint("s-claude", Some("# Progress\nplanned"), None, None)
+        .await;
+    let mut done = StatusPayload::new(StatusState::Active);
+    done.steps = Some(vec![Step {
+        id: "read".into(),
+        label: "read the code".into(),
+        done: true,
+    }]);
+    desk.status("s-claude", root, done).await;
+    let reply = inbox(false).await;
+    let t = &reply.threads[0];
+    assert_eq!(t.state, StatusState::Suspended);
+    assert_eq!(t.title, "Retry plan");
+    assert!(t.steps[0].done, "the progress update still landed");
+    let text = shown(&reply, Locale::En);
+    assert!(text.contains("new for you"), "{text}");
+    assert!(
+        text.contains("escalated this to you:\n      1. which header?\n      2. which table?"),
+        "{text}"
+    );
+    assert!(!text.contains("settled"), "{text}");
+    let zh = shown(&reply, Locale::Zh);
+    assert!(
+        zh.contains("把它转给了你：\n      1. which header?"),
+        "{zh}"
+    );
+
+    // Reading it clears the news, not the wait.
+    let (_, _) = senate_bridge::speak::thread(&socket, committee(), root)
+        .await
+        .unwrap();
+    let reply = inbox(false).await;
+    let text = shown(&reply, Locale::En);
+    assert!(
+        text.contains("0 with news") && !text.contains("new for you"),
+        "{text}"
+    );
+    assert!(text.contains("seen; it waits until you act"), "{text}");
+    assert!(text.contains("1. which header?"), "{text}");
+
+    // Another progress update changes nothing about the wait.
+    let mut more = StatusPayload::new(StatusState::Processing);
+    more.title = Some("Retry plan v2".into());
+    desk.status("s-claude", root, more).await;
+    let reply = inbox(false).await;
+    assert_eq!(reply.threads[0].title, "Retry plan v2");
+    assert_eq!(reply.threads[0].state, StatusState::Suspended);
+    assert!(shown(&reply, Locale::En).contains("1. which header?"));
+
+    // The person replies: it is the agent's turn again, and nothing waits
+    // on the person.
+    senate_bridge::speak::reply(&socket, committee(), root, "Use Idempotency-Key.".into())
+        .await
+        .unwrap();
+    let reply = inbox(false).await;
+    assert!(reply.waits_on_person(&reply.threads[0]).is_none());
+    assert_eq!(reply.threads[0].waits(), Some(senate_core::WaitsOn::Agents));
+    let text = shown(&reply, Locale::En);
+    assert!(!text.contains("wait on you"), "{text}");
+    desk.stop().await;
+}

@@ -284,7 +284,10 @@ shown in `answer(thread=<n>)`. `state`: `processing` while you work, `active` on
 answered and the thread stays open, `archived` when it is done. Give the task a short `title` on \
 your first report. `steps` is your whole checklist each time (stable `id`s, short labels that \
 quote no code or secrets); `links` are branch, PR or preview URLs. Omit what did not change. \
-Waiting on your user? Use `escalate` instead.";
+Waiting on your user? Use `escalate` instead. An escalation lasts until your user speaks in the \
+thread or takes it: a later `status` (ticking off steps, `active`) updates the card but does not \
+withdraw it. Only when it no longer needs them, pass `withdraw_escalation: true` with the `state` \
+to go back to.";
 
 const ESCALATE: &str = "Hand a received Senate question or request to a person instead of \
 answering it yourself. Not the default: questions, and requests from your user's own other \
@@ -292,7 +295,8 @@ agents, are handled directly with `answer`; use this when it needs your user's j
 to an interface or plan), or you cannot answer it from the code and the log. The Speaker \
 mentions the person in the thread and tells the asker it went to them. `to` is a person: \
 `senator::<person>` or just the handle, and defaults to your own user; `reason` is one line \
-shown in the thread.";
+shown in the thread and in their inbox: put what you need from them in it. It stays with them \
+until they reply or take the thread, whatever `status` you report meanwhile.";
 
 const TAKE: &str = "Take a Senate task thread over as your user, in their name: run this only \
 when your user asks for it (`/senate take <seq>`). Anything still waiting to be pushed to an \
@@ -338,6 +342,11 @@ pub struct StatusParams {
     /// Omit to leave them as they were.
     #[serde(default)]
     pub links: Option<Vec<LinkParam>>,
+    /// Take back your own escalation to a person, going back to `state`.
+    /// Only for when it no longer needs them (they answered you some other
+    /// way); a progress update never does.
+    #[serde(default)]
+    pub withdraw_escalation: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -549,7 +558,7 @@ pub enum ShowAll {
 }
 
 /// The line that says how many settled threads were left out, if any.
-fn settled_line(settled: usize, how: ShowAll, locale: Locale) -> Option<String> {
+pub(crate) fn settled_line(settled: usize, how: ShowAll, locale: Locale) -> Option<String> {
     if settled == 0 {
         return None;
     }
@@ -561,6 +570,44 @@ fn settled_line(settled: usize, how: ShowAll, locale: Locale) -> Option<String> 
         Locale::Zh => format!("已答复的 {settled} 个 thread 未显示；用 {flag} 列出。"),
         Locale::En => format!("{settled} answered thread(s) not shown; {flag} lists them."),
     })
+}
+
+/// Most lines of an escalation's reason shown under a thread.
+const REASON_LINES: usize = 24;
+
+/// The reason a thread was handed to a person, under its line: what the
+/// agent asked of them, as it wrote it (its lines kept, each indented). The
+/// escalation in force, else the reason of a thread parked on a person.
+pub fn reason_block(t: &senate_core::ThreadSummary, locale: Locale) -> String {
+    let reason = match &t.escalation {
+        Some(e) => e.reason.as_deref(),
+        None if t.state == StatusState::Suspended => t.reason.as_deref(),
+        None => None,
+    };
+    let Some(reason) = reason.map(str::trim).filter(|r| !r.is_empty()) else {
+        return String::new();
+    };
+    let mut out = String::from(locale.pick("\n    原因：", "\n    reason:"));
+    let lines: Vec<&str> = reason.lines().collect();
+    for line in lines.iter().take(REASON_LINES) {
+        out.push_str("\n      ");
+        out.push_str(&format::one_line(line));
+    }
+    if lines.len() > REASON_LINES {
+        out.push_str(&match locale {
+            Locale::Zh => format!(
+                "\n      …（还有 {} 行，见 `senate thread {}`）",
+                lines.len() - REASON_LINES,
+                t.root
+            ),
+            Locale::En => format!(
+                "\n      … ({} more lines: `senate thread {}`)",
+                lines.len() - REASON_LINES,
+                t.root
+            ),
+        });
+    }
+    out
 }
 
 /// The `inbox` tool's (and `senate inbox`'s) text: the threads that wait on
@@ -646,6 +693,7 @@ pub fn render_inbox(reply: &InboxReply, locale: Locale, how: ShowAll) -> String 
         } else if t.is_settled() {
             out.push_str(locale.pick(" · 已答复，无人在等", " · settled: answered, nobody waits"));
         }
+        out.push_str(&reason_block(t, locale));
     }
     out.push_str(locale.pick(
         "\n用 answer(thread=<n>) 回答；用 take(thread=<n>) 以你的用户的身份接管。",
@@ -1310,6 +1358,7 @@ impl SenateMcp {
                 })
                 .collect()
         });
+        status.withdraw = p.withdraw_escalation;
         status.check()?;
         let state = status.state;
         let posted = self
@@ -2038,6 +2087,7 @@ mod tests {
             person: Name::new("alice").unwrap(),
             threads: board.threads(None).into_iter().cloned().collect(),
             settled: 0,
+            seen: Vec::new(),
         };
         let en = render_inbox(&reply, Locale::En, ShowAll::Flag);
         assert!(
@@ -2110,6 +2160,7 @@ mod tests {
             person: Name::new("alice").unwrap(),
             threads: waiting.clone(),
             settled: 1,
+            seen: Vec::new(),
         };
         let en = render_inbox(&base, Locale::En, ShowAll::Flag);
         assert!(en.contains("thread 3") && !en.contains("thread 1"), "{en}");
@@ -2156,6 +2207,57 @@ mod tests {
         let zh = render_inbox(&listed, Locale::Zh, ShowAll::Flag);
         assert!(
             zh.contains("含已答复的") && zh.contains("已答复，无人在等"),
+            "{zh}"
+        );
+    }
+
+    #[test]
+    fn an_escalated_thread_shows_its_reason_under_it_even_after_the_agent_ticks_off_steps() {
+        use chrono::Utc;
+        use senate_core::{Kind, NewEvent, StatusPayload, TaskBoard, meta};
+
+        let f = CommitteeId::new("refund-v2").unwrap();
+        let agent: senate_core::Address = "senator::alice/claude".parse().unwrap();
+        let mut board = TaskBoard::new();
+        let mut seq = 0;
+        let mut put = |e: NewEvent| {
+            seq += 1;
+            board.observe(&e.into_event(Seq(seq), Utc::now()));
+        };
+        put(NewEvent::new(
+            f.clone(),
+            Kind::Request,
+            "senator::alice".parse().unwrap(),
+            "do it",
+        )
+        .to(agent.clone()));
+        let status = |p: StatusPayload| {
+            NewEvent::new(f.clone(), Kind::Status, agent.clone(), "")
+                .in_thread(Seq(1))
+                .with_meta(meta::STATUS, p.value())
+        };
+        let mut esc = StatusPayload::new(StatusState::Suspended);
+        esc.escalated_to = Some(Name::new("alice").unwrap());
+        esc.reason = Some("1. which header?\n2. which table?".into());
+        put(status(esc));
+        put(status(StatusPayload::new(StatusState::Active)));
+        let reply = InboxReply {
+            committee: f.clone(),
+            agents: vec!["alice/claude".parse().unwrap()],
+            person: Name::new("alice").unwrap(),
+            threads: board.threads(None).into_iter().cloned().collect(),
+            settled: 0,
+            seen: Vec::new(),
+        };
+        let en = render_inbox(&reply, Locale::En, ShowAll::Flag);
+        assert!(
+            en.contains("escalated to [senator::alice] · not answered yet\n    reason:\n      1. which header?\n      2. which table?"),
+            "{en}"
+        );
+        assert!(!en.contains("settled"), "{en}");
+        let zh = render_inbox(&reply, Locale::Zh, ShowAll::Flag);
+        assert!(
+            zh.contains("尚未回答\n    原因：\n      1. which header?"),
             "{zh}"
         );
     }

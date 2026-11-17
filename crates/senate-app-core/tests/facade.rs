@@ -21,6 +21,7 @@ use common::{FakeDaemon, setup};
 struct Listener {
     last: Mutex<Option<AppState>>,
     approvals: Mutex<Vec<ApprovalRequest>>,
+    notes: Mutex<Vec<senate_app_core::ffi::PersonNote>>,
 }
 
 impl CoreListener for Listener {
@@ -29,6 +30,9 @@ impl CoreListener for Listener {
     }
     fn on_approval_requested(&self, approval: ApprovalRequest) {
         self.approvals.lock().unwrap().push(approval);
+    }
+    fn on_for_person(&self, note: senate_app_core::ffi::PersonNote) {
+        self.notes.lock().unwrap().push(note);
     }
 }
 

@@ -221,15 +221,22 @@ pub fn render_sent(
         out.push('\n');
         out.push_str(&match locale {
             Locale::Zh => format!(
-                "用 `senate thread {seq}` 看回答；用 `senate reply {seq} <文字>` 接着说。"
+                "用 `senate thread {seq}` 看回答；用 `senate reply {seq} <文字>` 接着说。\n{HEAR_BACK_ZH}"
             ),
             Locale::En => format!(
-                "Read the answer with `senate thread {seq}`; follow up with `senate reply {seq} <text>`."
+                "Read the answer with `senate thread {seq}`; follow up with `senate reply {seq} <text>`.\n{HEAR_BACK_EN}"
             ),
         });
     }
     out
 }
+
+/// How the person hears back, in the words `ask`, `request` and the session
+/// start use.
+pub const HEAR_BACK_ZH: &str = "回复和转给你的事项会通过桌面通知（`senate.toml` 的 `[notify]`）、\
+`senate inbox` 找到你，`senate watch` 会实时打印；也可以加 `--wait` 等在这里。";
+pub const HEAR_BACK_EN: &str = "You will hear back through a desktop notification (`[notify]` in \
+senate.toml), in `senate inbox`, and live in `senate watch`; or add `--wait` to stay here for it.";
 
 /// What `reply` prints.
 pub fn render_replied(thread: Seq, posted: &Posted, locale: Locale) -> String {
@@ -260,6 +267,37 @@ pub fn render_answer(event: &Event, locale: Locale) -> String {
         Locale::En => format!("{by} answered in thread {root}:"),
     };
     format!("{head}\n{}", event.body.trim_end())
+}
+
+/// What `--wait` was waiting for: an answer, or the thread escalated back
+/// to the asker (with its reason).
+pub fn render_arrival(event: &Event, locale: Locale) -> String {
+    let Some(status) = StatusPayload::of(event) else {
+        return render_answer(event, locale);
+    };
+    let root = event.thread.unwrap_or(event.seq);
+    let by = format::author(event, locale);
+    let reason = status
+        .reason
+        .as_deref()
+        .map(str::trim_end)
+        .filter(|r| !r.is_empty())
+        .map_or_else(
+            || {
+                locale
+                    .pick("（没有写原因）", "(no reason given)")
+                    .to_string()
+            },
+            str::to_string,
+        );
+    match locale {
+        Locale::Zh => format!(
+            "{by} 把 thread {root} 转给了你：\n{reason}\n用 `senate reply {root} <文字>` 回复。"
+        ),
+        Locale::En => format!(
+            "{by} escalated thread {root} to you:\n{reason}\nReply with `senate reply {root} <text>`."
+        ),
+    }
 }
 
 /// `--wait` ran out.
@@ -516,6 +554,8 @@ pub async fn thread(
             session: SessionSelector::default(),
             committee: Some(committee),
             thread,
+            // Showing a thread is reading it.
+            mark_seen: true,
         },
     )
     .await
@@ -523,9 +563,10 @@ pub async fn thread(
     Ok((reply, pong.locale))
 }
 
-/// The first answer in the thread `sent` started that someone else wrote
-/// (a provisional one only says where the question stands), or `None` when
-/// `timeout` passes first.
+/// The first thing that comes back in the thread `sent` started: an answer
+/// someone else wrote (a provisional one only says where the question
+/// stands) or the thread escalated to the person who asked, or `None` when
+/// `timeout` passes first. What is returned counts as seen ([`mark_seen`]).
 pub async fn wait_answer(
     socket: &Path,
     sent: &Sent,
@@ -540,20 +581,55 @@ pub async fn wait_answer(
                 session: SessionSelector::default(),
                 committee: Some(sent.posted.committee.clone()),
                 thread: sent.posted.seq,
+                mark_seen: false,
             },
         )
         .await
         .map_err(|e| refusal(e, sent.locale))?;
-        let answer = reply.events.into_iter().find(|e| {
-            e.kind == Kind::Answer && !is_provisional(e) && e.from != me && e.seq > sent.posted.seq
+        let back = reply.events.into_iter().find(|e| {
+            e.seq > sent.posted.seq
+                && match e.kind {
+                    Kind::Answer => !is_provisional(e) && e.from != me,
+                    Kind::Status => StatusPayload::of(e).is_some_and(|s| {
+                        s.escalated_to.as_ref() == Some(&sent.me) && s.takeover.is_none()
+                    }),
+                    _ => false,
+                }
         });
-        if answer.is_some() {
-            return Ok(answer);
+        if let Some(event) = back {
+            mark_seen(socket, sent, &event).await;
+            return Ok(Some(event));
         }
         if tokio::time::Instant::now() >= deadline {
             return Ok(None);
         }
         tokio::time::sleep(POLL.min(deadline - tokio::time::Instant::now())).await;
+    }
+}
+
+/// What the person was just shown counts as read. Best effort: not being
+/// able to say so changes nothing about what was shown.
+async fn mark_seen(socket: &Path, sent: &Sent, shown: &Event) {
+    let mut marks = vec![ipc::ThreadSeen {
+        thread: sent.posted.seq,
+        seen: shown.seq,
+    }];
+    if let Some(root) = shown.thread.filter(|t| *t != sent.posted.seq) {
+        marks.push(ipc::ThreadSeen {
+            thread: root,
+            seen: shown.seq,
+        });
+    }
+    let seen: Result<serde_json::Value, _> = call(
+        socket,
+        &Request::Seen {
+            committee: sent.posted.committee.clone(),
+            marks,
+        },
+    )
+    .await;
+    if let Err(e) = seen {
+        tracing::debug!("could not mark the thread read: {e}");
     }
 }
 

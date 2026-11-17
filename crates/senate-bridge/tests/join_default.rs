@@ -303,7 +303,7 @@ fn chinese_says_the_same() {
     let out = ok(&senate(dir.path(), &wd, &["join"]));
     assert!(
         out.contains(
-            "没有给名字：由仓库 `senate`（来自它的 origin 远程）和分支 `fix/inbox`推出 \
+            "没有给名字：由仓库 `senate`（来自它的 origin 远程）和分支 `fix/inbox` 推出 \
              `senate-fix-inbox`。想用别的名字：`senate join <name>`。"
         ),
         "{out}"

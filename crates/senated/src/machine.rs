@@ -112,6 +112,21 @@ impl Machine {
         Self::start_with(paths, config, hosted, timing).await
     }
 
+    /// [`Machine::start`], posting desktop notifications through `desktop`
+    /// for what is addressed to the person (`[notify] desktop = false`
+    /// turns them off). `start` posts none: only the real daemon should
+    /// reach the desktop.
+    pub async fn start_desktop(
+        paths: Paths,
+        timing: Timing,
+        desktop: senate_bridge::notify::Desktop,
+    ) -> Result<Self, MachineError> {
+        let path = paths.config();
+        let config = BridgeConfig::load_unchecked(&path)?;
+        let hosted = Hosted::load(&path)?;
+        Self::start_full(paths, config, hosted, timing, Some(desktop)).await
+    }
+
     /// Start from a configuration already read: the hosted Senates first,
     /// then the developer-machine side over all of them.
     pub async fn start_with(
@@ -119,6 +134,16 @@ impl Machine {
         config: BridgeConfig,
         hosted: Hosted,
         timing: Timing,
+    ) -> Result<Self, MachineError> {
+        Self::start_full(paths, config, hosted, timing, None).await
+    }
+
+    async fn start_full(
+        paths: Paths,
+        config: BridgeConfig,
+        hosted: Hosted,
+        timing: Timing,
+        desktop: Option<senate_bridge::notify::Desktop>,
     ) -> Result<Self, MachineError> {
         hosted.validate(&config).map_err(MachineError::Invalid)?;
         // Before anything is hosted or spawned: a socket path that cannot
@@ -176,6 +201,7 @@ impl Machine {
                 paths: paths.clone(),
                 config: bridge.clone(),
                 timing,
+                desktop,
             },
         });
 

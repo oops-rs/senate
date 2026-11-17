@@ -74,7 +74,7 @@ impl Link {
         let mut stream = WatchStream {
             reader: BufReader::new(stream),
         };
-        let mut line = serde_json::to_string(&Request::Watch)
+        let mut line = serde_json::to_string(&Request::Watch { app: true })
             .map_err(|e| ClientError::Protocol(e.to_string()))?;
         line.push('\n');
         stream.reader.get_mut().write_all(line.as_bytes()).await?;
@@ -146,6 +146,9 @@ pub trait Sink: Send + Sync + 'static {
     fn changed(&self, model: &Model);
     /// A Codex approval is waiting (first sight only).
     fn approval_arrived(&self, _approval: &Approval) {}
+    /// Something came back to the person (the app notifies; the daemon
+    /// stays quiet while it is connected).
+    fn for_person(&self, _committee: &str, _thread: u64, _title: &str, _body: &str) {}
 }
 
 /// Reconnect delays: doubling from `min` to `max`, reset by a connection.
@@ -259,6 +262,14 @@ impl<S: Sink> Driver<S> {
         for notice in fx.notices {
             match notice {
                 Notice::ApprovalArrived(a) => self.sink.approval_arrived(&a),
+                Notice::ForPerson {
+                    committee,
+                    thread,
+                    title,
+                    body,
+                } => self
+                    .sink
+                    .for_person(committee.as_str(), thread.0, &title, &body),
             }
         }
         if fx.refresh.is_empty() {
@@ -373,6 +384,7 @@ impl<S: Sink> Driver<S> {
             Action::Answer { .. } | Action::Take { .. } | Action::Close { .. } => {
                 self.link.call::<Posted>(&request).await.map(to_value)
             }
+            Action::MarkRead { .. } => self.link.call::<Value>(&request).await,
         };
         if let Some(committee) = action.committee() {
             let agents: Vec<SenatorPath> = self
