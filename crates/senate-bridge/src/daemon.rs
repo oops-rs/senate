@@ -1960,17 +1960,27 @@ impl Shared {
     async fn deliver_to(&self, session: &Session, items: Vec<QueueItem>) -> anyhow::Result<bool> {
         let sid = session.session_id.as_str();
         let agent = &session.agent;
-        let can_push = session.can_push();
         let keys: Vec<ItemKey> = items
             .iter()
             .filter(|i| &i.agent == agent)
             .map(QueueItem::key)
             .collect();
-        let claimed = if can_push {
-            self.store.claim_inflight_with_held(&keys, sid)?
-        } else {
-            self.store.claim_inflight(&keys, sid)?
-        };
+        if !session.can_push() {
+            // Nothing can be pushed to it, so what is routed to it waits for
+            // its next hook. Hold it straight from pending: were it in
+            // flight first, a hook running just then would find nothing and
+            // the backlog would wait for the hook after it.
+            let held = self.store.hold_pending_for_hooks(&keys, sid)?;
+            if !held.is_empty() {
+                tracing::info!(
+                    session = sid,
+                    count = held.len(),
+                    "held for the session's next hook"
+                );
+            }
+            return Ok(false);
+        }
+        let claimed = self.store.claim_inflight_with_held(&keys, sid)?;
         let mut events: Vec<Event> = items
             .into_iter()
             .filter(|i| claimed.contains(&i.key()))
@@ -2003,9 +2013,7 @@ impl Shared {
             events,
             text: rendered.text,
         };
-        if can_push {
-            self.note_attempt(sid);
-        }
+        self.note_attempt(sid);
         let report = self.ladder.deliver(session, &batch).await;
         tracing::debug!(session = sid, attempts = ?report.attempts, "delivery ladder");
         match report.outcome {
@@ -2034,13 +2042,7 @@ impl Shared {
             }
             DeliveryOutcome::Queued => {
                 self.store.hold_for_hooks(&now, sid)?;
-                if !can_push {
-                    tracing::info!(
-                        session = sid,
-                        count = now.len(),
-                        "held for the session's next hook"
-                    );
-                } else if let Some(delay) = self.note_refused(sid) {
+                if let Some(delay) = self.note_refused(sid) {
                     let why = report
                         .attempts
                         .iter()

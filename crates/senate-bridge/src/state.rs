@@ -1307,6 +1307,23 @@ impl Store {
         )
     }
 
+    /// `pending → queued`, in one step: held for `session`'s hooks, for a
+    /// session nothing can be pushed to. There is no moment when the items
+    /// are in flight, so a hook running meanwhile finds them.
+    pub fn hold_pending_for_hooks(
+        &self,
+        keys: &[ItemKey],
+        session: &str,
+    ) -> Result<Vec<ItemKey>, StoreError> {
+        self.transition(
+            keys,
+            ItemStatus::Queued,
+            Some(session),
+            None,
+            "status = 'pending'",
+        )
+    }
+
     /// `inflight → queued`: held for `session`'s hooks.
     pub fn hold_for_hooks(
         &self,
@@ -1880,6 +1897,36 @@ mod tests {
                 .status,
             ItemStatus::Delivered
         );
+    }
+
+    #[test]
+    fn items_for_a_session_nothing_can_be_pushed_to_are_never_in_flight() {
+        let s = Store::in_memory().unwrap();
+        s.upsert_session(&upsert("a")).unwrap();
+        s.ingest(&claude(), &event(1), true).unwrap();
+        s.ingest(&claude(), &event(2), true).unwrap();
+        let (one, two) = (key(&claude(), 1), key(&claude(), 2));
+        // One is already in flight (somebody's push): not this call's.
+        s.claim_inflight(std::slice::from_ref(&two), "a").unwrap();
+        let held = s
+            .hold_pending_for_hooks(&[one.clone(), two.clone()], "a")
+            .unwrap();
+        assert_eq!(held, vec![one.clone()]);
+        // Pending to queued in one step: a hook reading just after finds it.
+        let item = s.item(&claude(), &committee(), Seq(1)).unwrap().unwrap();
+        assert_eq!(
+            (item.status, item.session_id.as_deref()),
+            (ItemStatus::Queued, Some("a"))
+        );
+        assert_eq!(s.queued_for("a").unwrap().len(), 1);
+        assert_eq!(
+            s.claim_for_hook(&[one], "a").unwrap().len(),
+            1,
+            "and the hook takes it"
+        );
+        // Something in flight is not held by this call.
+        let again = s.hold_pending_for_hooks(&[two], "b").unwrap();
+        assert!(again.is_empty());
     }
 
     #[test]

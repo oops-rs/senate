@@ -1004,6 +1004,7 @@ async fn without_wait_ask_and_request_say_how_the_person_will_hear_back() {
 struct Watcher {
     child: std::process::Child,
     lines: std::sync::mpsc::Receiver<String>,
+    subscribed: std::sync::mpsc::Receiver<()>,
 }
 
 impl Watcher {
@@ -1016,9 +1017,22 @@ impl Watcher {
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
         let mut child = cmd.spawn().unwrap();
         let stdout = child.stdout.take().unwrap();
+        // The command says "watching" on stderr once the daemon has
+        // subscribed it: that is the signal to wait for, not a delay.
+        let stderr = child.stderr.take().unwrap();
+        let (subscribed_tx, subscribed) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            let mut lines = std::io::BufReader::new(stderr).lines();
+            if lines.next().is_some() {
+                let _ = subscribed_tx.send(());
+            }
+            // Keep draining so the command never blocks on a full pipe.
+            for _ in lines {}
+        });
         let (tx, lines) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             use std::io::BufRead;
@@ -1029,7 +1043,19 @@ impl Watcher {
                 }
             }
         });
-        Self { child, lines }
+        Self {
+            child,
+            lines,
+            subscribed,
+        }
+    }
+
+    /// Wait until the daemon has subscribed this watcher: anything appended
+    /// after this is printed.
+    fn ready(&self) {
+        self.subscribed
+            .recv_timeout(Duration::from_secs(30))
+            .expect("senate watch never said it was watching");
     }
 
     /// Lines until `n` blocks (each ends at a blank line) or the timeout.
@@ -1078,7 +1104,7 @@ async fn watch_prints_each_kind_addressed_to_the_person_and_nothing_else() {
         let h = machine(zh).await;
         let w = Watcher::start(&h, &["--committee", "refund-v2"]);
         // The watcher must be subscribed before events arrive.
-        tokio::time::sleep(Duration::from_millis(800)).await;
+        w.ready();
         let root = h.server.append(
             NewEvent::new(committee(), Kind::Request, person("alice"), "do it").to(claude("alice")),
         );
@@ -1170,7 +1196,8 @@ async fn watch_json_is_one_object_per_line_and_a_named_committee_filters() {
     let h = machine(false).await;
     let w = Watcher::start(&h, &["--committee", "refund-v2", "--json"]);
     let other = Watcher::start(&h, &["--committee", "other"]);
-    tokio::time::sleep(Duration::from_millis(800)).await;
+    w.ready();
+    other.ready();
     let root = h.server.append(
         NewEvent::new(committee(), Kind::Request, person("alice"), "do it").to(claude("alice")),
     );
@@ -1317,7 +1344,7 @@ async fn a_failing_notifier_never_disturbs_delivery() {
         NewEvent::new(committee(), Kind::Request, person("alice"), "do it").to(claude("alice")),
     );
     let w = Watcher::start(&h, &["--committee", "refund-v2", "--json"]);
-    tokio::time::sleep(Duration::from_millis(800)).await;
+    w.ready();
     h.server.append(answer_to_alice(root.seq, "first"));
     eventually("an attempt", WAIT, || {
         (!rec.posted().is_empty()).then_some(())
