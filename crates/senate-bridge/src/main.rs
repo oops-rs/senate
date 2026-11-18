@@ -238,9 +238,8 @@ enum Cmd {
     /// what is put to the Speaker: that is the agent's docket. It marks
     /// nothing as read.
     Watch {
-        /// Only this committee.
-        #[arg(long)]
-        committee: Option<CommitteeId>,
+        #[command(flatten)]
+        scope: DisplayScope,
         /// One JSON object per line.
         #[arg(long)]
         json: bool,
@@ -293,6 +292,8 @@ enum Cmd {
     },
     /// Show the daemon, the Senate it is connected to, each agent's committees, and registered sessions.
     Status {
+        #[command(flatten)]
+        scope: DisplayScope,
         /// Print full session IDs for use with join --session.
         #[arg(long)]
         full_ids: bool,
@@ -317,6 +318,27 @@ enum Cmd {
         #[command(subcommand)]
         command: DebugCmd,
     },
+}
+
+#[derive(Args)]
+struct DisplayScope {
+    /// Show all committees on this machine.
+    #[arg(long, conflicts_with = "committee")]
+    global: bool,
+    /// Show this committee. Defaults to the current worktree's committee.
+    #[arg(long)]
+    committee: Option<CommitteeId>,
+}
+
+impl DisplayScope {
+    async fn resolve(self, paths: &Paths) -> anyhow::Result<Option<CommitteeId>> {
+        if self.global || self.committee.is_some() {
+            return Ok(self.committee);
+        }
+        let settings = Settings::load(&paths.config());
+        let cwd = std::env::current_dir()?;
+        Ok(binding::directory_committee(paths, &cwd, &settings).await)
+    }
 }
 
 #[derive(Subcommand)]
@@ -548,7 +570,7 @@ async fn inbox(
         paths,
         &Request::Inbox {
             session: SessionSelector::default(),
-            committee: Some(committee),
+            committee: Some(committee.clone()),
             agent: None,
             all,
         },
@@ -574,7 +596,7 @@ async fn inbox(
         paths,
         &Request::Docket {
             session: SessionSelector::default(),
-            committee: None,
+            committee: Some(committee),
         },
     )
     .await?;
@@ -1077,9 +1099,12 @@ fn run(command: Cmd) -> anyhow::Result<()> {
                 }
             })
         }
-        Cmd::Watch { committee, json } => {
+        Cmd::Watch { scope, json } => {
             let paths = Paths::from_env()?;
-            runtime(false)?.block_on(watch(&paths, committee, json))
+            runtime(false)?.block_on(async {
+                let committee = scope.resolve(&paths).await?;
+                watch(&paths, committee, json).await
+            })
         }
         Cmd::Take { thread, committee } => {
             let paths = Paths::from_env()?;
@@ -1171,12 +1196,16 @@ fn run(command: Cmd) -> anyhow::Result<()> {
             runtime(false)?.block_on(codex_smoke(&transport, &thread, text.as_deref()))
         }
         Cmd::Service { command } => run_service(command),
-        Cmd::Status { full_ids } => {
+        Cmd::Status { scope, full_ids } => {
             let paths = Paths::from_env()?;
-            let view = runtime(false)?.block_on(status::collect(&paths))?;
+            let (view, committee) = runtime(false)?.block_on(async {
+                let scope = scope.resolve(&paths).await?;
+                let view = status::collect_for(&paths, scope.as_ref()).await?;
+                Ok::<_, anyhow::Error>((view, scope))
+            })?;
             print!(
                 "{}",
-                status::render_with_ids(&view, chrono::Utc::now(), full_ids)
+                status::render_scope(&view, chrono::Utc::now(), full_ids, committee.as_ref())
             );
             Ok(())
         }

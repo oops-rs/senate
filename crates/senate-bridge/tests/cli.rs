@@ -572,3 +572,56 @@ fn init_local_writes_one_profile_and_never_overwrites_it() {
     assert!(!no_flag.status.success());
     assert!(!dir.path().join("other").exists());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn status_defaults_to_the_directory_committee_and_global_includes_both_queues() {
+    use senate_bridge::hook::HookKind;
+    use senate_core::{CommitteeId, Kind, NewEvent, Seq};
+
+    let mut h = Harness::new().await;
+    h.start().await;
+    let first = h.workdir("first", Some("refund-v2"));
+    let second = h.workdir("second", Some("other"));
+    let nested = first.join("src");
+    std::fs::create_dir(&nested).unwrap();
+    h.hook(HookKind::SessionStart, "first-session", &first, None)
+        .await;
+    h.hook(HookKind::SessionStart, "second-session", &second, None)
+        .await;
+    for (committee, seq) in [("refund-v2", 50), ("other", 51), ("other", 52)] {
+        let event = NewEvent::new(
+            CommitteeId::new(committee).unwrap(),
+            Kind::Note,
+            person("pm"),
+            "waiting",
+        )
+        .to(senator("away"))
+        .into_event(Seq(seq), chrono::Utc::now());
+        h.store().enqueue(&path("away"), &event).unwrap();
+    }
+    let check = |dir: &Path, args: &[&str]| {
+        let out = bridge(h.dir.path(), h.paths.home())
+            .current_dir(dir)
+            .arg("status")
+            .arg("--full-ids")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    for dir in [&first, &nested] {
+        let local = check(dir, &[]);
+        assert!(local.contains("Committee refund-v2") && local.contains("first-session"));
+        assert!(!local.contains("second-session"));
+        assert!(local.contains("queue: 1 pending"), "{local}");
+    }
+    let global = check(&nested, &["--global"]);
+    assert!(global.contains("first-session") && global.contains("second-session"));
+    assert!(global.contains("queue: 3 pending"), "{global}");
+    let named = check(&first, &["--committee", "other"]);
+    assert!(named.contains("second-session") && !named.contains("first-session"));
+    assert!(named.contains("queue: 2 pending"));
+    assert!(check(h.dir.path(), &[]).contains("second-session"));
+    h.stop().await;
+}

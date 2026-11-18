@@ -98,6 +98,34 @@ pub async fn collect(paths: &Paths) -> anyhow::Result<StatusView> {
     }
 }
 
+/// The CLI's directory-scoped view. Service and app callers continue to use the
+/// machine-wide snapshot. Queue totals use the daemon's local SQLite store.
+pub async fn collect_for(
+    paths: &Paths,
+    committee: Option<&senate_core::CommitteeId>,
+) -> anyhow::Result<StatusView> {
+    let mut view = collect(paths).await?;
+    if let Some(c) = committee {
+        view.committees.retain(|s| &s.committee == c);
+        view.sessions.retain(|s| s.committee() == Some(c));
+        if let Some(roles) = &mut view.roles {
+            roles.chairs.retain(|chair| &chair.committee == c);
+        }
+        let filename = format!("{c}.secretary.toml");
+        view.secretary_problems.retain(|item| {
+            item.file.file_name().is_some_and(|name| {
+                name == "secretary.toml" || name == std::ffi::OsStr::new(&filename)
+            })
+        });
+        view.queue = if paths.state_db().try_exists()? {
+            Store::open_read_only(&paths.state_db())?.counts_for(Some(c))?
+        } else {
+            QueueCounts::default()
+        };
+    }
+    Ok(view)
+}
+
 /// What the files say of the roles with the daemon down: the office
 /// `[local]` configures, and the registration the uplink last wrote.
 fn offline_roles(paths: &Paths, config: &BridgeConfig) -> Option<RolesReply> {
@@ -290,8 +318,24 @@ pub fn render(view: &StatusView, now: DateTime<Utc>) -> String {
 }
 
 pub fn render_with_ids(view: &StatusView, now: DateTime<Utc>, full_ids: bool) -> String {
+    render_scope(view, now, full_ids, None)
+}
+
+pub fn render_scope(
+    view: &StatusView,
+    now: DateTime<Utc>,
+    full_ids: bool,
+    scope: Option<&senate_core::CommitteeId>,
+) -> String {
     let l = view.locale;
     let mut out = String::new();
+    if let Some(c) = scope {
+        let _ = writeln!(
+            out,
+            "{}",
+            l.pick(format!("委员会 {c}"), format!("Committee {c}"))
+        );
+    }
     let socket = view.socket.display();
     let _ = match (view.daemon, l) {
         (Some(pid), Locale::Zh) => writeln!(out, "daemon：运行中（pid {pid}），在 {socket}"),
@@ -305,7 +349,7 @@ pub fn render_with_ids(view: &StatusView, now: DateTime<Utc>, full_ids: bool) ->
             "daemon: not running (no answer on {socket}); start it with `senated --machine`"
         ),
     };
-    render_senate(view, now, full_ids, &mut out);
+    render_senate(view, now, full_ids, scope, &mut out);
     render_secretary_problems(&view.secretary_problems, l, &mut out);
     out
 }
@@ -518,7 +562,13 @@ fn render_roles(roles: &RolesReply, l: Locale, out: &mut String) {
 }
 
 /// One Senate the daemon serves: its server, committees, sessions, queue.
-fn render_senate(view: &StatusView, now: DateTime<Utc>, full_ids: bool, out: &mut String) {
+fn render_senate(
+    view: &StatusView,
+    now: DateTime<Utc>,
+    full_ids: bool,
+    scope: Option<&senate_core::CommitteeId>,
+    out: &mut String,
+) {
     let l = view.locale;
     if let (Some(person), Some(url)) = (&view.person, &view.server_url) {
         let senate = senate_words(
@@ -544,7 +594,11 @@ fn render_senate(view: &StatusView, now: DateTime<Utc>, full_ids: bool, out: &mu
         };
     }
     if let Some(roles) = &view.roles {
-        render_roles(roles, l, out);
+        if scope.is_none() {
+            render_roles(roles, l, out);
+        } else if !roles.chairs.is_empty() {
+            let _ = writeln!(out, "{}", chairs_line(&roles.chairs, l));
+        }
     }
 
     let _ = writeln!(out, "\n{}", l.pick("委员会", "committees"));

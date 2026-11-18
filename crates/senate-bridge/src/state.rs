@@ -1339,9 +1339,24 @@ impl Store {
     }
 
     pub fn counts(&self) -> Result<QueueCounts, StoreError> {
+        self.counts_for(None)
+    }
+
+    pub fn counts_for(&self, committee: Option<&CommitteeId>) -> Result<QueueCounts, StoreError> {
         let conn = self.conn();
-        let mut stmt = conn.prepare("SELECT status, COUNT(*) FROM queue GROUP BY status")?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        let sql = match committee {
+            Some(_) => {
+                "SELECT status, COUNT(*) FROM queue WHERE status IN ('pending','inflight','queued') AND committee=?1 GROUP BY status"
+            }
+            None => {
+                "SELECT status, COUNT(*) FROM queue WHERE status IN ('pending','inflight','queued') GROUP BY status"
+            }
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let params = rusqlite::params_from_iter(committee.map(CommitteeId::as_str));
+        let rows = stmt.query_map(params, |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?;
         let mut counts = QueueCounts::default();
         for row in rows {
             let (status, n) = row?;
