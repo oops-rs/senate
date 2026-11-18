@@ -12,6 +12,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+#[path = "support/common.rs"]
 mod common;
 
 use std::time::Duration;

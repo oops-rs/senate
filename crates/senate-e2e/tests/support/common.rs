@@ -13,9 +13,10 @@
 
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used)]
 
+#[path = "common/fake_codex.rs"]
 pub mod fake_codex;
 
-#[path = "../../../senate-bridge/tests/common/fixed_seat.rs"]
+#[path = "../../../senate-bridge/tests/support/common/fixed_seat.rs"]
 mod fixed_seat;
 
 use std::path::{Path, PathBuf};

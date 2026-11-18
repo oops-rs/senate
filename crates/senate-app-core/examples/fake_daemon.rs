@@ -14,7 +14,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-#[path = "../tests/common/mod.rs"]
+#[path = "../tests/support/common.rs"]
 mod common;
 
 use std::sync::{Arc, Mutex};
