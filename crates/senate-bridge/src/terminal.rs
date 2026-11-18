@@ -17,8 +17,17 @@ impl Terminal {
         if !stdout.is_terminal() {
             return None;
         }
-        let columns =
-            terminal_size::terminal_size_of(&stdout).map_or(80, |(width, _)| usize::from(width.0));
+        let columns = terminal_size::terminal_size_of(&stdout)
+            .map(|(width, _)| width.0)
+            .filter(|&width| width > 0)
+            .or_else(|| {
+                std::env::var("COLUMNS")
+                    .ok()?
+                    .parse::<u16>()
+                    .ok()
+                    .filter(|&w| w > 0)
+            })
+            .map_or(80, usize::from);
         let color = !std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty())
             && !std::env::var_os("TERM").is_some_and(|v| v == "dumb");
         Some(Self::new(columns, color))

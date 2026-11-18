@@ -1069,7 +1069,8 @@ mod tests {
             serde_json::from_value(serde_json::json!({
                 "session_id": id,
                 "runtime": "codex",
-                "agent": "codex",
+                "agent": format!("codex-{id}"),
+                "branch": "feature/终端",
                 "agent_source": "session",
                 "cwd": "/项目/非常长的中文目录/同一个目录前缀/应用",
                 "state": "live",
@@ -1087,7 +1088,7 @@ mod tests {
             now,
             false,
             Some(&committee),
-            Terminal::new(110, false),
+            Terminal::new(220, false),
         );
         let mut lines = wide.lines();
         assert_eq!(lines.next(), Some("Senate  /acme/alice-desk"));
@@ -1105,7 +1106,28 @@ mod tests {
             display_width(&header[..header.find("已接收").unwrap()]),
             display_width(&row[..row.find("12").unwrap()]),
         );
-        assert!(wide.contains("01a1eafc-3ba…3e931d") && !wide.contains(id));
+        let session = wide
+            .lines()
+            .find(|line| line.contains("feature/终端"))
+            .unwrap();
+        assert!(session.contains(id) && session.contains(&format!("codex-{id}")));
+        assert!(session.contains("/项目/非常长的中文目录/同一个目录前缀/应用"));
+        let headers = wide.lines().find(|line| line.contains("最近活动")).unwrap();
+        assert!(headers.contains("绑定") && headers.contains("分支") && headers.contains("目录"));
+
+        let medium = render_terminal(
+            &view,
+            now,
+            false,
+            Some(&committee),
+            Terminal::new(80, false),
+        );
+        assert!(
+            medium.contains("…3e931d") && !medium.contains(id),
+            "{medium}"
+        );
+        assert!(medium.contains("目录  /项目/"), "{medium}");
+        assert!(medium.lines().all(|line| display_width(line) <= 80));
         for columns in [24, 40] {
             let narrow = render_terminal(
                 &view,

@@ -253,7 +253,9 @@ agent's session gets chair tools scoped to its committee. A chair absent
 - **Authority, downward:** Speaker's office → chair → members, handled
   directly.
 - **Escalation, upward:** member → chair → the Speaker's desk (secretary,
-  then the Speaker). `escalate` with no target goes one step up.
+  then the Speaker). For unclear scope or a committee decision, prefer
+  `escalate(thread, reason)` with `to` omitted. Each call goes one step up.
+  Set `to` to a person when the decision requires that person's approval.
 - **Cover** for a message to an absent senator: its own secretaries →
   its committee's chair → the Speaker's desk.
 
