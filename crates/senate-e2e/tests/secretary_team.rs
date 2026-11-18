@@ -21,12 +21,22 @@ async fn register(
     committee: &str,
     inbox: &FakeInbox,
 ) {
+    register_socket(desk, root, session, committee, &inbox.path).await;
+}
+
+async fn register_socket(
+    desk: &Desk,
+    root: &std::path::Path,
+    session: &str,
+    committee: &str,
+    socket: &std::path::Path,
+) {
     let cwd = root.join(committee);
     fs::create_dir_all(cwd.join(".senate")).unwrap();
     fs::write(cwd.join(".senate/committee"), committee).unwrap();
     let args = serde_json::json!({"session_id":session, "cwd":cwd, "source":"startup"}).to_string();
     let env = HookEnv {
-        socket: Some(inbox.path.clone()),
+        socket: Some(socket.to_path_buf()),
         token: Some(format!("tok-{session}")),
         claude_pid: Some(std::process::id()),
         ..Default::default()
@@ -553,5 +563,130 @@ async fn an_offline_hook_only_secretary_gets_its_own_handoff_on_resume() {
             .iter()
             .all(|message| !message.contains(&id))
     }));
+    desk.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refusing_inbox_cannot_hide_a_different_sessions_handoff() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    let root = tempfile::tempdir().unwrap();
+    let mut desk = Desk::new(root.path(), "alice", Locale::En, "[local]\n");
+    desk.start().await;
+    let b = desk.inbox("available");
+    let socket = root.path().join("refusing.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let refused = Arc::new(AtomicUsize::new(0));
+    let count = refused.clone();
+    let rejecting = tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let (rx, mut tx) = stream.into_split();
+            let mut lines = BufReader::new(rx).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if line.contains("\"type\":\"user\"") {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    let _ = tx.write_all(b"busy\n").await;
+                    break;
+                }
+            }
+        }
+    });
+    register_socket(&desk, root.path(), "refusing-a", "triage", &socket).await;
+    register(&desk, root.path(), "available-b", "delivery", &b).await;
+    for member in ["refusing-a", "available-b"] {
+        let agent = path(&format!("claude-{member}"));
+        eventually_async(member, || async {
+            desk.senate()
+                .daemon
+                .hub
+                .roster_now()
+                .owner_of(&agent)
+                .is_some()
+                .then_some(())
+        })
+        .await;
+        membership(&desk, member, true).await;
+    }
+    for index in 1..=16 {
+        let item = saved(
+            work(
+                &desk,
+                None,
+                SecretaryWorkOp::Create {
+                    id: EventId::derived(index, "refusing inbox"),
+                    title: format!("Work waiting for A {index}"),
+                    thread: None,
+                },
+            )
+            .await
+            .unwrap(),
+        );
+        work(
+            &desk,
+            None,
+            change(
+                &item,
+                SecretaryWorkUpdate::Assign {
+                    to: path("claude-refusing-a"),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+    }
+    eventually("A to refuse a reminder", || {
+        (refused.load(Ordering::SeqCst) > 0).then_some(())
+    })
+    .await;
+    let item = saved(
+        work(
+            &desk,
+            Some("refusing-a"),
+            SecretaryWorkOp::Create {
+                id: EventId::derived(17, "available inbox"),
+                title: "Handoff to B".into(),
+                thread: None,
+            },
+        )
+        .await
+        .unwrap(),
+    );
+    work(
+        &desk,
+        Some("refusing-a"),
+        change(&item, SecretaryWorkUpdate::Claim),
+    )
+    .await
+    .unwrap();
+    work(
+        &desk,
+        Some("refusing-a"),
+        change(
+            &item,
+            SecretaryWorkUpdate::Handoff {
+                to: Some(path("claude-available-b")),
+                text: "B can continue now".into(),
+            },
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(
+        b.wait_for(&item.id.to_string())
+            .await
+            .contains("assigned to this session")
+    );
+    let client =
+        senate_bridge::client::ApiClient::new(&desk.senate().url, &desk.senate().token).unwrap();
+    let still_waiting = client
+        .secretary_reminders(&[path("claude-refusing-a")])
+        .await
+        .unwrap();
+    assert_eq!(still_waiting.len(), 1);
+    assert_eq!(still_waiting[0].item, EventId::derived(1, "refusing inbox"));
+    rejecting.abort();
     desk.stop().await;
 }
