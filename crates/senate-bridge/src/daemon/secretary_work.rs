@@ -155,15 +155,16 @@ impl Shared {
                     continue;
                 };
                 let _binding = self.session_bindings.read().await;
-                let Some(session) = self.store.session(sid)?.filter(|s| {
-                    s.agent == reminder.to
-                        && s.is_live()
-                        && self.native_session(s)
-                        && self.ladder.can_push(s)
-                }) else {
+                let Some(session) = self
+                    .store
+                    .session(sid)?
+                    .filter(|s| s.agent == reminder.to && s.is_live() && self.native_session(s))
+                else {
                     continue;
                 };
-                if !matches!(self.hold(sid, false, Instant::now()), Hold::Ready) {
+                if !self.can_push(&session)?
+                    || !matches!(self.hold(sid, false, Instant::now()), Hold::Ready)
+                {
                     continue;
                 }
                 let text = reminder_text(self.locale, &reminder);

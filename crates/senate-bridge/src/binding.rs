@@ -942,6 +942,11 @@ pub fn free(
             let dead =
                 s.claude_pid.is_some_and(|p| !session::pid_alive(p)) && s.last_seen < dead_before;
             if ended || dead {
+                if let Some(id) = store.session_host(&s.session_id)?
+                    && crate::host::running(paths, &id)?
+                {
+                    continue;
+                }
                 doomed.push(s.session_id.clone());
                 report.sessions.push((
                     db.clone(),
@@ -978,7 +983,7 @@ pub fn free(
             }
         }
         for (db, store, doomed) in &stores {
-            if let Err(e) = store.delete_sessions(doomed) {
+            if let Err(e) = store.delete_sessions(doomed, paths) {
                 report.errors.push(format!("{}: {e}", db.display()));
             }
             for (d, idle) in &report.agents {

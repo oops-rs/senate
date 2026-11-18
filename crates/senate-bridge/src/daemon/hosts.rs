@@ -11,6 +11,8 @@ use super::*;
 use crate::host;
 use crate::ipc::{HostedRuntime, SpawnReply};
 
+const HOST_NOTICE_FAILURE_LIMIT: u32 = 3;
+
 #[derive(Default)]
 pub(super) struct Launches(Mutex<BTreeMap<EventId, Pending>>);
 
@@ -281,9 +283,9 @@ impl Shared {
             // explicit request to resume that context.
             if report.event != HookEvent::SessionStart || report.source.as_deref() != Some("resume")
             {
-                return Err(IpcError::bad_request(
-                    "a previously registered native ID requires a verified resume hook",
-                ));
+                let reason = "a previously registered native ID requires a verified resume hook";
+                report_unverified_switch(paths, id, &report.session_id, reason);
+                return Err(IpcError::bad_request(reason));
             }
             if target
                 .claude_pid
@@ -355,17 +357,29 @@ impl Shared {
         };
         for notice in notices {
             let id = notice.id.clone();
-            match tokio::time::timeout(Duration::from_secs(1), self.post(notice)).await {
-                Ok(Ok(_)) => {
-                    if let Err(error) = self.store.remove_hosted_switch_notice(&id) {
-                        tracing::warn!(%error, "marking hosted identity switch as reported");
+            let failure =
+                match tokio::time::timeout(Duration::from_secs(1), self.post(notice)).await {
+                    Ok(Ok(_)) => {
+                        if let Err(error) = self.store.remove_hosted_switch_notice(&id) {
+                            tracing::warn!(%error, "marking hosted identity switch as reported");
+                        }
+                        continue;
                     }
+                    Ok(Err(error)) => error.to_string(),
+                    Err(_) => "server request timed out".to_string(),
+                };
+            match self
+                .store
+                .fail_hosted_switch_notice(&id, HOST_NOTICE_FAILURE_LIMIT)
+            {
+                Ok(true) => {
+                    tracing::warn!(%id, %failure, "dropping hosted identity switch notice after repeated failures")
                 }
-                Ok(Err(error)) => {
-                    tracing::warn!(%id, %error, "posting hosted identity switch, will retry");
+                Ok(false) => {
+                    tracing::warn!(%id, %failure, "posting hosted identity switch, will retry")
                 }
-                Err(_) => {
-                    tracing::warn!(%id, "posting hosted identity switch timed out, will retry")
+                Err(error) => {
+                    tracing::warn!(%id, %error, %failure, "recording hosted identity switch notice failure")
                 }
             }
         }

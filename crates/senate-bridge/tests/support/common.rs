@@ -166,6 +166,8 @@ pub struct Inner {
     pub events: BTreeMap<String, Vec<Event>>,
     pub reject_appends: bool,
     pub reject_append_containing: Option<String>,
+    pub secretary_reminders: Vec<senate_core::secretary_work::SecretaryReminder>,
+    pub secretary_reminder_polls: usize,
     /// `(committee, seq)` → the JSON served in place of the stored event.
     pub raw: HashMap<(String, u64), String>,
     /// `(committee, whose, name)`: `whose` is the senator in the query, else
@@ -465,6 +467,41 @@ async fn secretary_session(
         vec![]
     };
     Json(BTreeMap::from([(principal, team)])).into_response()
+}
+
+async fn secretary_reminders(
+    State(st): St,
+    headers: HeaderMap,
+    Json(senators): Json<Vec<SenatorName>>,
+) -> Response {
+    if let Err(error) = auth(&st, &headers) {
+        return error;
+    }
+    let mut inner = st.inner.lock().unwrap();
+    inner.secretary_reminder_polls += 1;
+    let reminders: Vec<_> = inner
+        .secretary_reminders
+        .iter()
+        .filter(|reminder| senators.contains(&reminder.to))
+        .cloned()
+        .collect();
+    Json(reminders).into_response()
+}
+
+async fn ack_secretary_reminder(
+    State(st): St,
+    headers: HeaderMap,
+    Json(reminder): Json<senate_core::secretary_work::SecretaryReminder>,
+) -> Response {
+    if let Err(error) = auth(&st, &headers) {
+        return error;
+    }
+    st.inner
+        .lock()
+        .unwrap()
+        .secretary_reminders
+        .retain(|pending| pending != &reminder);
+    StatusCode::NO_CONTENT.into_response()
 }
 
 async fn events(
@@ -853,6 +890,8 @@ impl FakeServer {
                 events: BTreeMap::new(),
                 reject_appends: false,
                 reject_append_containing: None,
+                secretary_reminders: Vec::new(),
+                secretary_reminder_polls: 0,
                 raw: HashMap::new(),
                 aliases: BTreeMap::new(),
                 alias_delay: Duration::ZERO,
@@ -900,6 +939,10 @@ impl FakeServer {
             )
             .route("/v1/committees/{committee}/heartbeat", post(heartbeat))
             .route("/v1/committees/{committee}/seat", get(seat_status))
+            .route(
+                senate_core::api::SECRETARY_REMINDERS_PATH,
+                post(secretary_reminders).put(ack_secretary_reminder),
+            )
             .route(
                 "/v1/secretary-teams/{principal}/session",
                 axum::routing::put(secretary_session),

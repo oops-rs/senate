@@ -984,6 +984,11 @@ async fn claude_hook_changes_native_context_without_moving_the_seat_or_its_mail(
     fixture
         .reject(&current_hook, "requires a verified resume")
         .await;
+    let status: StatusReply = call(h, &Request::Status).await;
+    assert_eq!(
+        status.hosted["cleared"].as_deref(),
+        Some(spawned.session_id.as_str())
+    );
 
     let back = fixture.hook(
         &spawned.session_id,
@@ -994,6 +999,8 @@ async fn claude_hook_changes_native_context_without_moving_the_seat_or_its_mail(
     );
     let back: HookReply = call(h, &back).await;
     assert_eq!(back.session.agent, *primary);
+    let status: StatusReply = call(h, &Request::Status).await;
+    assert_eq!(status.hosted[&spawned.session_id], None);
     assert_eq!(
         h.store().session("cleared").unwrap().unwrap().state,
         SessionState::Ended
@@ -1138,7 +1145,7 @@ async fn claude_refuses_known_native_ids_without_refreshing_the_other_session() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_refused_notice_does_not_block_later_context_change_notices() {
+async fn a_refused_notice_expires_and_a_non_chair_switch_stays_in_the_committee() {
     use senate_bridge::ipc::{HookEvent, HookReply};
     use senate_core::{Address, Kind, NewEvent};
 
@@ -1146,6 +1153,29 @@ async fn a_refused_notice_does_not_block_later_context_change_notices() {
     let h = &fixture.h;
     let pid = fixture.pid();
     let committee = committee();
+    let chair = h.server.append(
+        NewEvent::new(
+            committee.clone(),
+            Kind::Note,
+            Address::Committee,
+            "chair set",
+        )
+        .with_meta(
+            senate_core::meta::CHAIR,
+            senate_core::chair::ChairPayload {
+                senator: path("another-chair"),
+            }
+            .value(),
+        ),
+    );
+    eventually("the hosted seat to observe the new chair", TIMEOUT, || {
+        (h.store()
+            .delivered_cursor(&fixture.seat.senator, &committee)
+            .unwrap()
+            >= chair.seq)
+            .then_some(())
+    })
+    .await;
     // Model a persisted, permanently refused head of the durable outbox.
     let mut blocked = NewEvent::new(
         committee.clone(),
@@ -1178,7 +1208,7 @@ async fn a_refused_notice_does_not_block_later_context_change_notices() {
         &[pid],
     );
     let _: HookReply = call(h, &next).await;
-    eventually("later context notice to reach the server", TIMEOUT, || {
+    let published = eventually("later context notice to reach the server", TIMEOUT, || {
         h.server
             .events(committee.as_str())
             .into_iter()
@@ -1187,15 +1217,179 @@ async fn a_refused_notice_does_not_block_later_context_change_notices() {
             })
     })
     .await;
-    let pending: String = conn
+    assert!(published.to.is_empty());
+    assert!(
+        !published
+            .body
+            .contains("committee chair's session context changed")
+    );
+    eventually("refused notice to exhaust its attempts", TIMEOUT, || {
+        let count: u32 = conn
+            .query_row(
+                "SELECT count(*) FROM hosted_switch_notices WHERE id = ?1",
+                [blocked.id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        (count == 0).then_some(())
+    })
+    .await;
+
+    fixture.end_terminal().await;
+    fixture.h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pruning_keeps_an_expired_stale_seat_until_its_host_exits() {
+    use senate_bridge::SessionState;
+    use senate_bridge::ipc::{HookEvent, HookReply};
+
+    let mut fixture = HostedClaude::launch(false).await;
+    let h = &fixture.h;
+    let pid = fixture.pid();
+    let native = "aged-context";
+    let hook = fixture.hook(
+        native,
+        HookEvent::SessionStart,
+        Some("clear"),
+        Some(pid),
+        &[pid],
+    );
+    let changed: HookReply = call(h, &hook).await;
+    assert_eq!(changed.session.agent, fixture.seat.senator);
+    h.store()
+        .set_session_state(native, SessionState::Stale)
+        .unwrap();
+    let conn = rusqlite::Connection::open(h.paths.state_db()).unwrap();
+    conn.execute(
+        "UPDATE sessions SET last_seen = 0 WHERE session_id = ?1",
+        [native],
+    )
+    .unwrap();
+
+    let retention = Duration::from_secs(7 * 24 * 3600);
+    h.store().prune(retention, &h.paths).unwrap();
+    assert_eq!(
+        h.store()
+            .delete_sessions(&[native.into()], &h.paths)
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        h.store().session(native).unwrap().unwrap().state,
+        SessionState::Stale
+    );
+    assert_eq!(
+        call::<PathBuf>(h, &HostedClaude::attach_request()).await,
+        fixture.terminal
+    );
+
+    fixture.end_terminal().await;
+    h.store().prune(retention, &h.paths).unwrap();
+    assert!(h.store().session(native).unwrap().is_none());
+    let identity_rows: u32 = conn
         .query_row(
-            "SELECT event FROM hosted_switch_notices WHERE id = ?1",
-            [blocked.id.to_string()],
+            "SELECT count(*) FROM hosted_native_seats WHERE session_id = ?1",
+            [native],
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(serde_json::from_str::<NewEvent>(&pending).unwrap(), blocked);
+    assert_eq!(identity_rows, 0);
+    fixture.h.stop().await;
+}
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unbound_claude_tui_holds_committee_mail_and_secretary_reminders() {
+    use senate_bridge::ipc::{HookEvent, HookReply};
+    use senate_bridge::state::ItemStatus;
+    use senate_core::secretary_work::SecretaryReminder;
+    use senate_core::{Address, EventId, Kind, NewEvent};
+
+    let mut fixture = HostedClaude::launch(false).await;
+    let h = &fixture.h;
+    let pid = fixture.pid();
+    let inbox = common::FakeInbox::bind(h.dir.path().join("fixture-inbox.sock"));
+    let native = &fixture.seat.session_id;
+    let primary = &fixture.seat.senator;
+    let mut hook = fixture.hook(native, HookEvent::UserPromptSubmit, None, Some(pid), &[pid]);
+    let Request::SessionHook(report) = &mut hook else {
+        unreachable!()
+    };
+    report.socket = Some(inbox.path.clone());
+    let _: HookReply = call(h, &hook).await;
+    let refused = fixture.hook(
+        "unbound-context",
+        HookEvent::UserPromptSubmit,
+        None,
+        None,
+        &[pid],
+    );
+    fixture.reject(&refused, "could not attribute").await;
+
+    let committee = committee();
+    let note = h.server.append(
+        NewEvent::new(
+            committee.clone(),
+            Kind::Note,
+            Address::senior(&h.config.person),
+            "held committee note",
+        )
+        .to(Address::senator(primary)),
+    );
+    let reminder = SecretaryReminder {
+        principal: path("alice"),
+        item: EventId::new(),
+        id: EventId::new(),
+        to: primary.clone(),
+    };
+    let baseline = {
+        let mut server = h.server.state.inner.lock().unwrap();
+        server.secretary_reminders.push(reminder.clone());
+        server.secretary_reminder_polls
+    };
+    eventually("the committee message to wait for a hook", TIMEOUT, || {
+        h.store()
+            .item(primary, &committee, note.seq)
+            .unwrap()
+            .filter(|row| row.status == ItemStatus::Queued)
+    })
+    .await;
+    // Once the next poll starts, the delivery attempt for the previous poll has completed.
+    eventually(
+        "the secretary reminder worker to check the held session",
+        common::WAIT,
+        || {
+            (h.server
+                .state
+                .inner
+                .lock()
+                .unwrap()
+                .secretary_reminder_polls
+                >= baseline + 2)
+                .then_some(())
+        },
+    )
+    .await;
+    assert!(inbox.connections().is_empty());
+    assert_eq!(
+        h.server.state.inner.lock().unwrap().secretary_reminders,
+        vec![reminder.clone()]
+    );
+
+    let recovered: HookReply = call(h, &hook).await;
+    let context = recovered.context.unwrap();
+    assert!(context.contains(&note.body));
+    eventually(
+        "the verified session to receive its pending reminder",
+        TIMEOUT,
+        || {
+            inbox
+                .messages()
+                .into_iter()
+                .find(|text| text.contains(&reminder.item.to_string()))
+        },
+    )
+    .await;
     fixture.end_terminal().await;
     fixture.h.stop().await;
 }

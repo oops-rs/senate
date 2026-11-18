@@ -623,6 +623,7 @@ pub async fn start_with_host_binary(
         tasks.push(tokio::spawn(supervise(shared.clone(), rx.clone())));
         tasks.push(tokio::spawn(batcher(shared.clone(), rx.clone())));
         tasks.push(tokio::spawn(sweeper(shared.clone(), rx.clone())));
+        tasks.push(tokio::spawn(host_notices(shared.clone(), rx.clone())));
         tasks.push(tokio::spawn(checkpointer(shared.clone(), rx.clone())));
         shared.work.notify_one();
         tracing::info!(
@@ -1232,12 +1233,11 @@ impl Shared {
         if let Err(e) = self.checked_live_sessions() {
             tracing::warn!("session sweep failed: {e}");
         }
-        if let Err(e) = self.store.prune(RETENTION) {
+        let paths = Paths::new(&self.home);
+        if let Err(e) = self.store.prune(RETENTION, &paths) {
             tracing::warn!("pruning state failed: {e}");
         }
-        if let Err(error) =
-            crate::host::prune_abandoned(&Paths::new(&self.home), Duration::from_secs(300))
-        {
+        if let Err(error) = crate::host::prune_abandoned(&paths, Duration::from_secs(300)) {
             tracing::warn!(%error, "pruning abandoned terminal hosts");
         }
         self.committees_changed.notify_one();
@@ -2150,6 +2150,19 @@ impl Shared {
         Ok(due)
     }
 
+    /// A Claude process inbox can stay up while its visible context is unbound.
+    /// Call under the binding read lock so a new refusal cannot race a push.
+    fn can_push(&self, session: &Session) -> Result<bool, StoreError> {
+        let unbound = session.runtime == Runtime::Claude
+            && self
+                .store
+                .session_host(&session.session_id)?
+                .is_some_and(|id| {
+                    crate::host::unverified_switch(&Paths::new(&self.home), &id).is_some()
+                });
+        Ok(!unbound && self.ladder.can_push(session))
+    }
+
     /// Push one session's items as one message. Every item routed to a
     /// session is its agent's. Returns whether another pass is needed
     /// (items held back, or the session turned out gone).
@@ -2171,11 +2184,7 @@ impl Shared {
             .filter(|i| &i.agent == agent)
             .map(QueueItem::key)
             .collect();
-        let unbound_host = session.runtime == Runtime::Claude
-            && self.store.session_host(sid)?.is_some_and(|id| {
-                crate::host::unverified_switch(&Paths::new(&self.home), &id).is_some()
-            });
-        if unbound_host || !self.ladder.can_push(session) {
+        if !self.can_push(session)? {
             // Nothing can be pushed to it, so what is routed to it waits for
             // its next hook. Hold it straight from pending: were it in
             // flight first, a hook running just then would find nothing and
@@ -5080,15 +5089,31 @@ async fn sweeper(shared: Arc<Shared>, mut shutdown: watch::Receiver<bool>) {
     tick.tick().await;
     loop {
         tokio::select! {
-            _ = shared.host_notices_ready.notified() => shared.flush_host_switch_notices().await,
             _ = tick.tick() => {
                 shared.sweep_once();
-                shared.flush_host_switch_notices().await;
                 shared.reconcile_approvals();
                 shared.publish_status();
             }
             _ = shutdown.changed() => return,
         }
+    }
+}
+
+async fn host_notices(shared: Arc<Shared>, mut shutdown: watch::Receiver<bool>) {
+    let publish = async {
+        let mut retry = tokio::time::interval(shared.timing.sweep);
+        retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = shared.host_notices_ready.notified() => {},
+                _ = retry.tick() => {},
+            }
+            shared.flush_host_switch_notices().await;
+        }
+    };
+    tokio::select! {
+        _ = publish => {},
+        _ = shutdown.changed() => {},
     }
 }
 

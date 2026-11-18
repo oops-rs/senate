@@ -60,6 +60,7 @@ use senate_core::{EventId, NewEvent};
 
 use crate::agent::AgentSource;
 use crate::session::{CommitteeSource, Runtime, Session, SessionState};
+use crate::{host, paths::Paths};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS cursors (
@@ -102,7 +103,8 @@ CREATE TABLE IF NOT EXISTS hosted_native_seats (
 );
 CREATE TABLE IF NOT EXISTS hosted_switch_notices (
     id TEXT PRIMARY KEY,
-    event TEXT NOT NULL
+    event TEXT NOT NULL,
+    failures INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS session_ancestors (
     session_id TEXT NOT NULL,
@@ -360,6 +362,17 @@ fn agent_text(agent: &SenatorName) -> String {
 fn parse_host_id(id: &str) -> Result<EventId, StoreError> {
     id.parse()
         .map_err(|_| StoreError::Corrupt("invalid host ID".into()))
+}
+
+fn session_host(conn: &Connection, session_id: &str) -> Result<Option<EventId>, StoreError> {
+    let id: Option<Option<String>> = conn
+        .query_row(
+            "SELECT host_id FROM sessions WHERE session_id = ?1",
+            [session_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    id.flatten().as_deref().map(parse_host_id).transpose()
 }
 
 fn session_from_row(row: &Row<'_>) -> rusqlite::Result<Session> {
@@ -623,6 +636,17 @@ impl Store {
             .exists([])?;
         if !hosted {
             conn.execute("ALTER TABLE sessions ADD COLUMN host_id TEXT", [])?;
+        }
+        let counts_failures = conn
+            .prepare(
+                "SELECT 1 FROM pragma_table_info('hosted_switch_notices') WHERE name = 'failures'",
+            )?
+            .exists([])?;
+        if !counts_failures {
+            conn.execute(
+                "ALTER TABLE hosted_switch_notices ADD COLUMN failures INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
         }
         Ok(Self {
             conn: Mutex::new(conn),
@@ -1040,7 +1064,8 @@ impl Store {
 
     pub(crate) fn hosted_switch_notices(&self) -> Result<Vec<NewEvent>, StoreError> {
         let conn = self.conn();
-        let mut query = conn.prepare("SELECT event FROM hosted_switch_notices ORDER BY id")?;
+        let mut query =
+            conn.prepare("SELECT event FROM hosted_switch_notices ORDER BY failures, id LIMIT 16")?;
         let rows = query.query_map([], |row| row.get::<_, String>(0))?;
         rows.map(|event| {
             serde_json::from_str(&event?).map_err(|error| StoreError::Corrupt(error.to_string()))
@@ -1056,19 +1081,33 @@ impl Store {
         Ok(())
     }
 
+    /// Record a failed post. Returns whether the notice exhausted its retries.
+    pub(crate) fn fail_hosted_switch_notice(
+        &self,
+        id: &EventId,
+        limit: u32,
+    ) -> Result<bool, StoreError> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let id = id.to_string();
+        let failures: u32 = tx.query_row(
+            "UPDATE hosted_switch_notices SET failures = failures + 1
+             WHERE id = ?1 RETURNING failures",
+            [&id],
+            |row| row.get(0),
+        )?;
+        if failures >= limit {
+            tx.execute("DELETE FROM hosted_switch_notices WHERE id = ?1", [&id])?;
+        }
+        tx.commit()?;
+        Ok(failures >= limit)
+    }
+
     pub(crate) fn session_host(&self, session_id: &str) -> Result<Option<EventId>, StoreError> {
         if !self.has_host_id {
             return Ok(None);
         }
-        let id: Option<Option<String>> = self
-            .conn()
-            .query_row(
-                "SELECT host_id FROM sessions WHERE session_id = ?1",
-                [session_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        id.flatten().as_deref().map(parse_host_id).transpose()
+        session_host(&self.conn(), session_id)
     }
 
     pub(crate) fn clear_session_host(
@@ -1429,17 +1468,32 @@ impl Store {
         )?)
     }
 
-    /// Forget ended and stale sessions and delivered items not touched for
-    /// `older_than`, and hand items held for a session that is no longer
-    /// live back to routing.
-    pub fn prune(&self, older_than: Duration) -> Result<(), StoreError> {
+    /// Forget expired sessions and delivered items. A host can still own
+    /// a stale session after an inbox failure, so keep it while the lock is held.
+    pub fn prune(&self, older_than: Duration, paths: &Paths) -> Result<(), StoreError> {
         let cutoff = now_ms() - i64::try_from(older_than.as_millis()).unwrap_or(i64::MAX);
         let mut conn = self.conn();
         let tx = conn.transaction()?;
         tx.execute(
-            "DELETE FROM sessions WHERE state IN ('ended', 'stale') AND last_seen < ?1",
+            "DELETE FROM sessions
+             WHERE host_id IS NULL AND state IN ('ended', 'stale') AND last_seen < ?1",
             [cutoff],
         )?;
+        let hosted = {
+            let mut query = tx.prepare(
+                "SELECT session_id, host_id FROM sessions
+                 WHERE host_id IS NOT NULL AND state IN ('ended', 'stale') AND last_seen < ?1",
+            )?;
+            let rows = query.query_map([cutoff], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        for (session_id, host_id) in hosted {
+            if !host::running(paths, &parse_host_id(&host_id)?)? {
+                tx.execute("DELETE FROM sessions WHERE session_id = ?1", [&session_id])?;
+            }
+        }
         tx.execute(
             "DELETE FROM session_ancestors
              WHERE session_id NOT IN (SELECT session_id FROM sessions)",
@@ -1467,12 +1521,17 @@ impl Store {
 
     // ---- freeing what has expired -----------------------------------------
 
-    /// Forget these sessions (and their ancestor pids). How many were there.
-    pub fn delete_sessions(&self, ids: &[String]) -> Result<usize, StoreError> {
+    /// Forget the given sessions whose hosts have stopped. Returns the count.
+    pub fn delete_sessions(&self, ids: &[String], paths: &Paths) -> Result<usize, StoreError> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
         let mut gone = 0;
         for id in ids {
+            if let Some(host_id) = session_host(&tx, id)?
+                && host::running(paths, &host_id)?
+            {
+                continue;
+            }
             gone += tx.execute("DELETE FROM sessions WHERE session_id = ?1", [id])?;
             tx.execute("DELETE FROM session_ancestors WHERE session_id = ?1", [id])?;
             tx.execute(
@@ -2654,6 +2713,8 @@ mod tests {
     #[test]
     fn forgetting_session_rows_also_forgets_their_hosted_identity_metadata() {
         let store = Store::in_memory().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::new(home.path());
         let host = EventId::new();
         let committee = committee();
         let old = store
@@ -2671,11 +2732,14 @@ mod tests {
             )
             .unwrap();
 
-        store.prune(Duration::from_secs(60)).unwrap();
+        store.prune(Duration::from_secs(60), &paths).unwrap();
         assert!(store.session("old").unwrap().is_none());
         assert_eq!(store.hosted_native_retired("old").unwrap(), None);
         assert_eq!(store.hosted_native_retired("current").unwrap(), Some(false));
-        assert_eq!(store.delete_sessions(&["current".into()]).unwrap(), 1);
+        assert_eq!(
+            store.delete_sessions(&["current".into()], &paths).unwrap(),
+            1
+        );
         assert_eq!(store.hosted_native_retired("current").unwrap(), None);
     }
 
@@ -2701,7 +2765,8 @@ mod tests {
         .unwrap();
         // `last_seen` must be strictly older than the cutoff.
         std::thread::sleep(Duration::from_millis(5));
-        s.prune(Duration::ZERO).unwrap();
+        let home = tempfile::tempdir().unwrap();
+        s.prune(Duration::ZERO, &Paths::new(home.path())).unwrap();
         assert!(s.session("a").unwrap().is_none());
         assert!(s.session("live").unwrap().is_some());
         assert!(s.sessions_below(5).unwrap().is_empty());
