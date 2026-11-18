@@ -213,6 +213,20 @@ async fn ask_answer_and_catch_up_end_to_end() {
         }
     }
 
+    let escalate = tool("escalate");
+    assert!(
+        escalate["description"]
+            .as_str()
+            .unwrap()
+            .contains("Omit `to`")
+    );
+    assert!(
+        escalate["inputSchema"]["properties"]["to"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("one step up")
+    );
+
     // ask: from me, to bob, refs with my branch filled in.
     let (err, text) = mcp
         .call(

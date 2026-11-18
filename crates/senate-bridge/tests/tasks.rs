@@ -71,6 +71,7 @@ async fn a_root_waits_for_the_verdict_then_goes() {
     let (p1, p2) = (pos(&msgs[0], 1).unwrap(), pos(&msgs[0], 2).unwrap());
     assert!(p1 < p2, "seq order: {}", msgs[0]);
     assert!(!msgs[0].contains("本人确认"), "{}", msgs[0]);
+    assert!(msgs[0].contains("成员先找本委员会的 chair"), "{}", msgs[0]);
     h.stop().await;
 }
 
@@ -100,7 +101,8 @@ async fn no_verdict_in_time_goes_flagged() {
         "{}",
         msgs[0]
     );
-    assert!(msgs[0].contains("mcp__senate__escalate(thread=1)"));
+    assert!(msgs[0].contains("mcp__senate__escalate(thread=1, to=…)"));
+    assert!(!msgs[0].contains("成员先找本委员会的 chair"));
     h.stop().await;
 
     // The same in English.
