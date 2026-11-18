@@ -232,14 +232,22 @@ pub async fn run_as(
         }
         _ => {
             let reply: HookReply = client.call(&request, timeouts.request).await.ok()?;
-            reply.context.map(|context| {
-                if reply.session.runtime == Runtime::Agy {
-                    json!({"injectSteps": [{"systemMessage": {"systemMessage": context}}]})
-                        .to_string()
-                } else {
-                    output_for(kind, &context)
+            if reply.session.runtime == Runtime::Agy {
+                // Antigravity runs this step with system authority. Only locally
+                // constructed identity fields belong here; the committee brief
+                // and peer messages remain available through their ordinary channels.
+                if kind != HookKind::SessionStart {
+                    return None;
                 }
-            })
+                let committee = reply.session.committee()?;
+                let seat = senate_core::Address::senator(&reply.session.agent).in_text();
+                let identity = format!("[senate] {committee} · {seat}");
+                return Some(
+                    json!({"injectSteps": [{"systemMessage": {"systemMessage": identity}}]})
+                        .to_string(),
+                );
+            }
+            reply.context.map(|context| output_for(kind, &context))
         }
     }
 }

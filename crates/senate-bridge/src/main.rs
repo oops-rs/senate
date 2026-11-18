@@ -324,9 +324,6 @@ enum Cmd {
     },
     /// Run a local ACP agent in a Senate-owned terminal session.
     Acp {
-        /// Allow ACP approval requests for this session's Senate answer tool once per call.
-        #[arg(long)]
-        allow_senate_answer: bool,
         /// Command and arguments of the ACP stdio server.
         #[arg(last = true, required = true, num_args = 1..)]
         command: Vec<std::ffi::OsString>,
@@ -1145,16 +1142,12 @@ fn run(command: Cmd) -> anyhow::Result<()> {
             );
             Ok(())
         }
-        Cmd::Acp {
-            command,
-            allow_senate_answer,
-        } => {
+        Cmd::Acp { command } => {
             let paths = Paths::from_env()?;
             runtime(true)?.block_on(senate_bridge::delivery::acp::run(
                 &paths,
                 &std::env::current_dir()?,
                 &command,
-                allow_senate_answer,
             ))
         }
         Cmd::AgyRegister {

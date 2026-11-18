@@ -172,7 +172,10 @@ impl DeliveryAdapter for AgyAdapter {
         let Some(id) = session.runtime.native_id(&session.session_id) else {
             return DeliveryOutcome::unavailable("invalid Antigravity session key");
         };
-        let Some(endpoint) = self.endpoint(&session.session_id) else {
+        let Some(endpoint) = self
+            .endpoint(&session.session_id)
+            .filter(|e| e.matches_proof(session.token.as_deref()))
+        else {
             return DeliveryOutcome::unavailable("no registered Antigravity endpoint");
         };
         match self

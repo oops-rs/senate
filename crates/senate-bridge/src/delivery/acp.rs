@@ -3,7 +3,7 @@
 //! standard ACP for the connection to the agent.
 
 use std::ffi::OsString;
-use std::io::{BufRead, Write as _};
+use std::io::{BufRead, IsTerminal, Write as _};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -209,7 +209,7 @@ impl Client {
                     );
                     return frame.get("result").cloned().context("missing ACP result");
                 }
-                self.handle(&frame, None).await?;
+                self.handle(&frame).await?;
             }
             anyhow::bail!("ACP agent disconnected during {method}")
         })
@@ -217,18 +217,13 @@ impl Client {
         .context("ACP setup timed out")?
     }
 
-    async fn handle(
-        &mut self,
-        frame: &Value,
-        allow_answer_for: Option<&str>,
-    ) -> anyhow::Result<()> {
+    async fn handle(&mut self, frame: &Value) -> anyhow::Result<()> {
         let Some(method) = frame.get("method").and_then(Value::as_str) else {
             return Ok(());
         };
         if let Some(id) = frame.get("id") {
             let response = if method == "session/request_permission" {
-                let outcome = permission_outcome(&frame["params"], allow_answer_for);
-                json!({"jsonrpc": "2.0", "id": id, "result": {"outcome": outcome}})
+                json!({"jsonrpc": "2.0", "id": id, "result": {"outcome": {"outcome":"cancelled"}}})
             } else {
                 json!({
                     "jsonrpc": "2.0", "id": id,
@@ -257,20 +252,58 @@ impl Client {
     }
 }
 
-/// Grant a single use of Senate's answer tool when the operator opted in
-/// and the owned agent identified the call and current session. Other
-/// requests stay with the agent's configured policy.
-fn permission_outcome(params: &Value, allow_answer_for: Option<&str>) -> Value {
-    if let Some(session_id) = allow_answer_for
-        && params["sessionId"].as_str() == Some(session_id)
-        && params["toolCall"]["name"].as_str() == Some("mcp_senate_answer")
-        && let Some(option_id) = params["options"].as_array().and_then(|options| {
-            options.iter().find(|o| o["kind"] == "allow_once")?["optionId"].as_str()
+/// An ACP tool request is an opportunity for the person at this terminal to
+/// consent to one answer. A tool label alone never grants permission.
+struct AnswerPermission {
+    rpc_id: Value,
+    option: String,
+    command: String,
+    thread: u64,
+    body: String,
+}
+
+impl AnswerPermission {
+    fn from_request(frame: &Value, session: &str) -> Option<Self> {
+        let params = &frame["params"];
+        if frame["method"] != "session/request_permission"
+            || params["sessionId"] != session
+            || params["toolCall"]["name"] != "mcp_senate_answer"
+        {
+            return None;
+        }
+        let input = &params["toolCall"]["rawInput"];
+        let once = params["options"]
+            .as_array()?
+            .iter()
+            .find(|o| o["kind"] == "allow_once")?;
+        let nonce = EventId::new().to_string();
+        Some(Self {
+            rpc_id: frame.get("id")?.clone(),
+            option: once["optionId"].as_str()?.to_owned(),
+            command: format!("/allow {}", &nonce[nonce.len() - 8..]),
+            thread: input["thread"].as_u64()?,
+            body: input["body"].as_str()?.to_owned(),
         })
-    {
-        return json!({"outcome": "selected", "optionId": option_id});
     }
-    json!({"outcome": "cancelled"})
+
+    fn show(&self) {
+        eprintln!("Senate · thread {} · answer {:?}", self.thread, self.body);
+        eprintln!(
+            "{}  (allow once / 仅允许本次)    /deny  (decline / 拒绝)",
+            self.command
+        );
+    }
+
+    fn decision(&self, line: &str) -> Option<Value> {
+        let outcome = if line == self.command {
+            json!({"outcome":"selected","optionId":self.option})
+        } else if line == "/deny" {
+            json!({"outcome":"cancelled"})
+        } else {
+            return None;
+        };
+        Some(json!({"jsonrpc":"2.0", "id":self.rpc_id, "result":{"outcome":outcome}}))
+    }
 }
 
 struct Registration<'a> {
@@ -348,12 +381,7 @@ fn with_context(context: Option<String>, text: &str) -> String {
 /// An opt-in terminal client for a local ACP subprocess. Lines on stdin
 /// start normal turns, and Senate can start another while the session is
 /// idle. The listener is owned by this process, never discovered by PID.
-pub async fn run(
-    paths: &Paths,
-    cwd: &Path,
-    command: &[OsString],
-    allow_senate_answer: bool,
-) -> anyhow::Result<()> {
+pub async fn run(paths: &Paths, cwd: &Path, command: &[OsString]) -> anyhow::Result<()> {
     paths.ensure_home()?;
     let nonce = EventId::new().to_string().to_ascii_lowercase();
     let session_id = Runtime::Acp.session_key(&nonce);
@@ -419,14 +447,24 @@ pub async fn run(
 
     let result: anyhow::Result<()> = async {
         let mut active = None;
+        let mut permission: Option<AnswerPermission> = None;
         let sigint = tokio::signal::ctrl_c();
         tokio::pin!(sigint);
         loop {
             tokio::select! {
                 _ = &mut sigint => return Ok(()),
-                line = input.recv(), if active.is_none() => {
+                line = input.recv(), if active.is_none() || permission.is_some() => {
                     let Some(line) = line else { return Ok(()) };
                     if line == "/quit" { return Ok(()) }
+                    if let Some(pending) = &permission {
+                        if let Some(response) = pending.decision(&line) {
+                            write_json(&mut client.stdin, &response).await?;
+                            permission = None;
+                        } else {
+                            pending.show();
+                        }
+                        continue;
+                    }
                     if !line.trim().is_empty() {
                         if let Ok(reply) = registration.refresh(HookEvent::UserPromptSubmit).await
                             && let Some(new) = reply.context
@@ -467,12 +505,18 @@ pub async fn run(
                         }
                         println!();
                         active = None;
+                        permission = None;
                         if let Ok(reply) = registration.refresh(HookEvent::UserPromptSubmit).await {
                             context = reply.context;
                         }
                     } else {
-                        let grant = (allow_senate_answer && active.is_some()).then_some(remote_id);
-                        client.handle(&frame, grant).await?;
+                        if active.is_some() && permission.is_none() && std::io::stdin().is_terminal()
+                            && let Some(pending) = AnswerPermission::from_request(&frame, remote_id) {
+                            pending.show();
+                            permission = Some(pending);
+                        } else {
+                            client.handle(&frame).await?;
+                        }
                     }
                 }
             }
@@ -487,32 +531,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn opt_in_approves_only_one_answer_from_its_own_acp_session() {
-        let mut permission = json!({
-            "sessionId": "owned",
-            "toolCall": {"name": "mcp_senate_answer"},
-            "options": [
-                {"kind": "allow_always", "optionId": "always"},
-                {"kind": "reject_once", "optionId": "reject"},
-                {"kind": "allow_once", "optionId": "once"}
-            ]
+    fn approval_is_for_one_visible_answer_and_requires_its_exact_operator_response() {
+        let mut frame = json!({
+            "id":3, "method":"session/request_permission",
+            "params":{"sessionId":"owned","toolCall":{"name":"mcp_senate_answer","rawInput":{"thread":7,"body":"ack"}},
+                "options":[{"kind":"allow_once","optionId":"once"}]}
         });
+        let pending = AnswerPermission::from_request(&frame, "owned").unwrap();
+        assert!(pending.decision("/allow").is_none());
+        assert!(pending.decision("yes").is_none());
         assert_eq!(
-            permission_outcome(&permission, Some("owned")),
-            json!({
-                "outcome": "selected", "optionId": "once"
-            })
-        );
-        for granted in [None, Some("another")] {
-            assert_eq!(
-                permission_outcome(&permission, granted)["outcome"],
-                "cancelled"
-            );
-        }
-        permission["toolCall"]["name"] = json!("run_command");
-        assert_eq!(
-            permission_outcome(&permission, Some("owned"))["outcome"],
+            pending.decision("/deny").unwrap()["result"]["outcome"]["outcome"],
             "cancelled"
         );
+        assert_eq!(
+            pending.decision(&pending.command).unwrap()["result"]["outcome"]["optionId"],
+            "once"
+        );
+        assert!(AnswerPermission::from_request(&frame, "different").is_none());
+        frame["params"]["toolCall"]["rawInput"] = Value::Null;
+        assert!(AnswerPermission::from_request(&frame, "owned").is_none());
     }
 }

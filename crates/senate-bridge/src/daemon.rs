@@ -2800,7 +2800,9 @@ impl Shared {
         }
 
         let brief = match (report.event, session.committee()) {
-            (HookEvent::SessionStart, Some(committee)) => self.hook_brief(committee).await,
+            (HookEvent::SessionStart, Some(committee)) if session.runtime != Runtime::Agy => {
+                self.hook_brief(committee).await
+            }
             _ => None,
         };
         let (mut context, delivered) = self.hook_context(&session, report.event, brief.as_ref())?;
@@ -3518,8 +3520,9 @@ impl Shared {
     ) -> Result<(Option<Session>, CommitteeId), IpcError> {
         match committee {
             Some(committee) => {
-                let named = selector.session_id.is_some() || selector.claude_pid.is_some();
-                let session = if named {
+                let session = if selector.session_id.is_some() {
+                    Some(self.resolve(selector)?)
+                } else if selector.claude_pid.is_some() {
                     self.resolve(selector).ok()
                 } else {
                     None

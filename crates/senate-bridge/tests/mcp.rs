@@ -710,7 +710,7 @@ async fn search_post_and_propose_decision_end_to_end() {
     assert!(err);
     assert!(text.contains("`body` is empty"), "{text}");
 
-    // A session that never registered can still act on a named committee.
+    // A named, unregistered caller must resolve its identity even when it supplies a committee.
     let mut ghost = McpClient::start(h.socket(), selector("ghost")).await;
     let (err, text) = ghost.call("post", json!({"body": "hi"})).await;
     assert!(err);
@@ -718,8 +718,7 @@ async fn search_post_and_propose_decision_end_to_end() {
     let (err, text) = ghost
         .call("post", json!({"body": "hi", "committee": "other"}))
         .await;
-    assert!(!err, "{text}");
-    assert_eq!(h.server.last_event("other").body, "hi");
+    assert!(err && text.contains("not registered"), "{text}");
     let (err, _) = ghost
         .call("post", json!({"body": "hi", "committee": "Not A Slug"}))
         .await;
@@ -1505,6 +1504,25 @@ async fn antigravity_hooks_and_mcp_use_the_same_exact_root_session() {
         )
         .await;
     assert_eq!(without_root["isError"], true, "{without_root}");
+    // An explicit committee cannot turn a missing or unknown session into
+    // a sessionless writer using some other senator's identity.
+    let count = h.server.events("other").len();
+    for metadata in [
+        json!({}),
+        json!({"antigravity.google/root_conversation_id":"00000000-0000-4000-8000-000000000001"}),
+    ] {
+        let post = mcp
+            .request(
+                "tools/call",
+                json!({
+                    "name":"post", "arguments":{"committee":"other","body":"identity check"},
+                    "_meta":metadata
+                }),
+            )
+            .await;
+        assert_eq!(post["isError"], true, "{post}");
+    }
+    assert_eq!(h.server.events("other").len(), count);
     let joined = mcp
         .request(
             "tools/call",

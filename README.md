@@ -453,9 +453,10 @@ senate acp -- agy acp
 Each input line starts a turn. `/quit` closes the connection. The launcher
 provides Senate's MCP server with the exact local `acp-…` session identity
 and accepts bridge pushes while the session is idle. Agent permission
-policies still apply. With `--allow-senate-answer` before `--`, the client
-can approve a single use of Antigravity's Senate answer tool in that
-session. It declines other interactive permission requests.
+policies still apply. If the ACP agent requests permission to send an answer,
+the interactive terminal displays the proposed thread and answer. Type the
+displayed one-time confirmation or `/deny`. An unattended terminal declines
+permission requests.
 ACP delivery applies to connections opened by this launcher. Independently
 started terminal sessions can use their own native integration.
 

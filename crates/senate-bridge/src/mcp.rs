@@ -2358,6 +2358,16 @@ impl ServerHandler for SenateMcp {
     ) -> Result<rmcp::model::CallToolResponse, McpError> {
         let scoped = self.for_request(&context);
         let this = scoped.as_ref().unwrap_or(self);
+        if this.pins.runtime == Runtime::Agy && this.selector.session_id.is_none() {
+            let reason = this.locale.pick(
+                "此调用缺少 Antigravity 的会话身份。",
+                "Antigravity did not identify the calling session.",
+            );
+            return Ok(
+                rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(reason)])
+                    .into(),
+            );
+        }
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(this, request, context);
         this.tool_router.call(tcc).await
     }
