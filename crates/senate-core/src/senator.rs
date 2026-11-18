@@ -52,7 +52,9 @@ impl SenatorName {
 
     /// Namespace reserved for primary identities of interactive coding sessions.
     pub fn is_session_name(&self) -> bool {
-        self.as_str().starts_with("codex-") || self.as_str().starts_with("claude-")
+        ["codex-", "claude-", "agy-", "acp-"]
+            .into_iter()
+            .any(|prefix| self.as_str().starts_with(prefix))
     }
 
     /// The name itself.

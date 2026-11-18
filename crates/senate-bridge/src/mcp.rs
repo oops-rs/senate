@@ -933,10 +933,13 @@ pub async fn serve_stdio(
     daemon_socket: PathBuf,
     selector: SessionSelector,
     locale: Locale,
+    runtime: Runtime,
 ) -> anyhow::Result<()> {
+    let mut pins = Pins::from_process().await;
+    pins.runtime = runtime;
     let service = SenateMcp::new(daemon_socket, selector)
         .with_locale(locale)
-        .with_pins(Pins::from_process().await)
+        .with_pins(pins)
         .serve(rmcp::transport::stdio())
         .await?;
     service.waiting().await?;
@@ -2341,17 +2344,31 @@ pub fn codex_thread(meta: &serde_json::Map<String, serde_json::Value>) -> Option
         .map(str::to_string)
 }
 
+/// agy advertises the root conversation even for a call from a subagent.
+fn agy_session_from_meta(meta: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    let id = meta
+        .get("antigravity.google/root_conversation_id")?
+        .as_str()?;
+    crate::session::agy_session_key(id)
+}
+
 impl SenateMcp {
     /// This server as seen by one request: a request from a Codex thread
     /// names its session exactly, so the selector is that thread id alone
     /// (the process environment belongs to the app-server, shared by all
     /// its threads).
     fn for_request(&self, context: &RequestContext<RoleServer>) -> Option<Self> {
-        let thread = codex_thread(&context.meta)?;
+        let (runtime, session_id) = match self.pins.runtime {
+            Runtime::Acp => return None, // The owning client pinned the MCP process.
+            Runtime::Agy => (Runtime::Agy, agy_session_from_meta(&context.meta)),
+            Runtime::Claude | Runtime::Codex => {
+                (Runtime::Codex, Some(codex_thread(&context.meta)?))
+            }
+        };
         let mut this = self.clone();
-        this.pins.runtime = Runtime::Codex;
+        this.pins.runtime = runtime;
         this.selector = SessionSelector {
-            session_id: Some(thread),
+            session_id,
             claude_pid: None,
         };
         Some(this)
@@ -2367,6 +2384,16 @@ impl ServerHandler for SenateMcp {
     ) -> Result<rmcp::model::CallToolResponse, McpError> {
         let scoped = self.for_request(&context);
         let this = scoped.as_ref().unwrap_or(self);
+        if this.pins.runtime == Runtime::Agy && this.selector.session_id.is_none() {
+            let reason = this.locale.pick(
+                "此调用缺少 Antigravity 的会话身份。",
+                "Antigravity did not identify the calling session.",
+            );
+            return Ok(
+                rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(reason)])
+                    .into(),
+            );
+        }
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(this, request, context);
         this.tool_router.call(tcc).await
     }

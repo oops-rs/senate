@@ -9,19 +9,20 @@
 //! 2. [`codex::CodexAppServerAdapter`] — a Codex session: start a turn in
 //!    its thread, or steer the running one, through the app-server
 //!    ([`codex`]). → `Injected`.
-//! 3. [`HookQueueAdapter`] — hold it for the session's next SessionStart /
-//!    UserPromptSubmit hook. → `Queued`.
-//! 4. Nothing else: with no session at all the batch is `Unavailable`.
+//! 3. Antigravity agentapi or an ACP session owned by Senate. → `Injected`.
+//! 4. [`HookQueueAdapter`] — hold it for a future push, or for a runtime
+//!    whose hooks consume the backlog. → `Queued`.
 //!
 //! The companion session ([`crate::companion`]) sits beside the
 //! ladder rather than on it: it is for a question no session can take, so
 //! there is no session to hand a batch to. The daemon starts it and reports
 //! `Spawned`.
 //!
-//! Each of the first two answers `Unavailable` (not unreachable) for the
-//! other runtime's sessions, so a session only ever meets its own adapter.
+//! Each live adapter answers `Unavailable` for other runtimes.
 //! Claude Channels would be a further implementation of [`DeliveryAdapter`].
 
+pub mod acp;
+pub mod agy;
 pub mod codex;
 pub mod inbox;
 
@@ -70,6 +71,11 @@ pub struct Batch {
 #[async_trait]
 pub trait DeliveryAdapter: Send + Sync + 'static {
     fn name(&self) -> &'static str;
+    /// A live route is configured for this session. This is a local check,
+    /// so a transient transport failure still goes through the retry policy.
+    fn can_push(&self, _session: &Session) -> bool {
+        false
+    }
     async fn deliver(&self, session: &Session, batch: &Batch) -> DeliveryOutcome;
 }
 
@@ -83,6 +89,10 @@ pub struct ClaudeInboxAdapter {
 impl DeliveryAdapter for ClaudeInboxAdapter {
     fn name(&self) -> &'static str {
         "claude-inbox"
+    }
+
+    fn can_push(&self, session: &Session) -> bool {
+        session.runtime == Runtime::Claude && session.socket.is_some()
     }
 
     async fn deliver(&self, session: &Session, batch: &Batch) -> DeliveryOutcome {
@@ -156,13 +166,21 @@ impl Ladder {
         ])
     }
 
-    /// The inbox for Claude Code, the app-server for Codex, then the hooks.
-    pub fn new_default(inbox_timeout: Duration, codex: codex::CodexAppServerAdapter) -> Self {
-        Self::new(vec![
-            Arc::new(Self::inbox(inbox_timeout)),
-            Arc::new(codex),
-            Arc::new(HookQueueAdapter),
-        ])
+    /// Live transports first, then the daemon's queue fallback.
+    pub fn new_default(
+        inbox_timeout: Duration,
+        codex: codex::CodexAppServerAdapter,
+        extra: impl IntoIterator<Item = Arc<dyn DeliveryAdapter>>,
+    ) -> Self {
+        let mut rungs: Vec<Arc<dyn DeliveryAdapter>> =
+            vec![Arc::new(Self::inbox(inbox_timeout)), Arc::new(codex)];
+        rungs.extend(extra);
+        rungs.push(Arc::new(HookQueueAdapter));
+        Self::new(rungs)
+    }
+
+    pub fn can_push(&self, session: &Session) -> bool {
+        self.rungs.iter().any(|adapter| adapter.can_push(session))
     }
 
     fn inbox(timeout: Duration) -> ClaudeInboxAdapter {

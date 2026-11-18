@@ -938,6 +938,30 @@ async fn a_refused_push_is_retried_through_the_inbox_in_order() {
     h.stop().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_transport_failure_retries_without_further_activity() {
+    let mut h = Harness::new().await;
+    h.start_with(senate_bridge::Timing {
+        retry_base: Duration::from_millis(300),
+        ..fast_timing()
+    })
+    .await;
+    let inbox = FakeInbox::replying(h.dir.path().join("busy.sock"), &["busy"]);
+    let wd = h.workdir("idle", Some("refund-v2"));
+    h.hook(HookKind::SessionStart, "idle-1", &wd, Some(&inbox))
+        .await;
+    h.wait_stream("refund-v2").await;
+    h.server.append(relayed_question("one question while idle"));
+
+    let messages = inbox.wait_messages(2).await;
+    assert_eq!(messages[0], messages[1]);
+    eventually("delivered after the retry timer", WAIT, || {
+        (h.item(1)?.status == ItemStatus::Delivered).then_some(())
+    })
+    .await;
+    h.stop().await;
+}
+
 /// A backlog too big for one message goes out in several, spaced.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_big_backlog_is_split_and_the_pushes_are_spaced() {

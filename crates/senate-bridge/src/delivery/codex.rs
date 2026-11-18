@@ -483,6 +483,10 @@ impl DeliveryAdapter for CodexAppServerAdapter {
         "codex-app-server"
     }
 
+    fn can_push(&self, session: &Session) -> bool {
+        session.runtime == Runtime::Codex
+    }
+
     async fn deliver(&self, session: &Session, batch: &Batch) -> DeliveryOutcome {
         if session.runtime != Runtime::Codex {
             return DeliveryOutcome::unavailable("not a Codex session");

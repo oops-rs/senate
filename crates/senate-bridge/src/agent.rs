@@ -15,6 +15,7 @@ use crate::session::Runtime;
 /// Use the native ID verbatim whenever it fits the Senate address grammar. Reserve
 /// the hash marker so an opaque ID cannot collide with a literal digest-shaped ID.
 pub fn session_name(runtime: Runtime, id: &str) -> SenatorName {
+    let id = runtime.native_id(id).unwrap_or(id);
     let name = format!("{}-{id}", runtime.as_str());
     if !id.is_empty()
         && !id.starts_with("h-")
@@ -129,7 +130,7 @@ pub struct Pins<'a> {
 pub fn choose(names: &AgentNames, runtime: Runtime, pins: Pins<'_>) -> (SenatorName, AgentSource) {
     let env = match runtime {
         Runtime::Claude => pins.env,
-        Runtime::Codex => None,
+        Runtime::Codex | Runtime::Agy | Runtime::Acp => None,
     };
     let candidates = [
         (env.map(str::trim), AgentSource::Env),
@@ -205,6 +206,7 @@ mod tests {
         let renamed = AgentNames {
             claude: agent("cc"),
             codex: agent("cx"),
+            ..AgentNames::default()
         };
         assert_eq!(choose(&renamed, Runtime::Codex, none).0, agent("cx"));
     }

@@ -298,9 +298,14 @@ fn session_committee(session: &Session, locale: Locale) -> String {
 
 fn session_push(session: &Session, locale: Locale) -> String {
     match (session.runtime, &session.socket, session.socket_ok) {
-        (Runtime::Codex, _, None) => "codex".into(),
-        (Runtime::Codex, _, Some(true)) => "codex ok".into(),
-        (Runtime::Codex, _, Some(false)) => format!("codex {}", locale.pick("失败", "failed")),
+        (Runtime::Codex | Runtime::Agy | Runtime::Acp, _, health) => {
+            let runtime = session.runtime.as_str();
+            match health {
+                None => runtime.into(),
+                Some(true) => format!("{runtime} ok"),
+                Some(false) => format!("{runtime} {}", locale.pick("失败", "failed")),
+            }
+        }
         (Runtime::Claude, None, _) => locale.pick("无", "none").into(),
         (Runtime::Claude, Some(_), None) => locale.pick("未试过", "untested").into(),
         (Runtime::Claude, Some(_), Some(true)) => "ok".into(),
@@ -1014,6 +1019,39 @@ mod tests {
         );
         assert!(text.contains("已连接，自 1 分钟前"), "{text}");
         assert!(text.contains("没有登记的会话"), "{text}");
+    }
+
+    #[test]
+    fn agy_and_acp_show_the_last_push_result_in_both_status_views() {
+        let now = Utc::now();
+        for locale in [Locale::En, Locale::Zh] {
+            let mut view = view(locale);
+            let session: Session = serde_json::from_value(serde_json::json!({
+                "session_id": "example-thread", "agent": "tester", "agent_source": "session",
+                "cwd": "/work", "state": "live", "started_at": now, "last_seen": now,
+            }))
+            .unwrap();
+            view.sessions.push(session);
+            for runtime in [Runtime::Agy, Runtime::Acp] {
+                for (health, suffix) in [
+                    (None, ""),
+                    (Some(true), " ok"),
+                    (Some(false), locale.pick(" 失败", " failed")),
+                ] {
+                    view.sessions[0].runtime = runtime;
+                    view.sessions[0].socket_ok = health;
+                    let expected = format!("{}{suffix}", runtime.as_str());
+                    let pipe = render(&view, now);
+                    let tty = render_terminal(&view, now, false, None, Terminal::new(24, false));
+                    assert!(
+                        pipe.lines().any(|l| l.trim_end().ends_with(&expected)),
+                        "{pipe}"
+                    );
+                    let push_field = format!("{}  {expected}", locale.pick("推送", "Push"));
+                    assert!(tty.lines().any(|l| l.trim() == push_field), "{tty}");
+                }
+            }
+        }
     }
 
     #[test]

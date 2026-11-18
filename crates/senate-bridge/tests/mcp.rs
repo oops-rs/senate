@@ -39,10 +39,23 @@ impl McpClient {
 
     /// A shim writing its tool results in `locale`.
     async fn start_in(daemon_socket: PathBuf, selector: SessionSelector, locale: Locale) -> Self {
+        Self::start_for(daemon_socket, selector, locale, Runtime::Claude).await
+    }
+
+    async fn start_for(
+        daemon_socket: PathBuf,
+        selector: SessionSelector,
+        locale: Locale,
+        runtime: Runtime,
+    ) -> Self {
         let (client, server) = tokio::io::duplex(1 << 20);
         tokio::spawn(async move {
             let running = SenateMcp::new(daemon_socket, selector)
                 .with_locale(locale)
+                .with_pins(senate_bridge::mcp::Pins {
+                    runtime,
+                    ..Default::default()
+                })
                 .serve(server)
                 .await
                 .unwrap();
@@ -731,7 +744,7 @@ async fn search_post_and_propose_decision_end_to_end() {
     assert!(err);
     assert!(text.contains("`body` is empty"), "{text}");
 
-    // A session that never registered can still act on a named committee.
+    // A named, unregistered caller must resolve its identity even when it supplies a committee.
     let mut ghost = McpClient::start(h.socket(), selector("ghost")).await;
     let (err, text) = ghost.call("post", json!({"body": "hi"})).await;
     assert!(err);
@@ -739,8 +752,7 @@ async fn search_post_and_propose_decision_end_to_end() {
     let (err, text) = ghost
         .call("post", json!({"body": "hi", "committee": "other"}))
         .await;
-    assert!(!err, "{text}");
-    assert_eq!(h.server.last_event("other").body, "hi");
+    assert!(err && text.contains("not registered"), "{text}");
     let (err, _) = ghost
         .call("post", json!({"body": "hi", "committee": "Not A Slug"}))
         .await;
@@ -1447,4 +1459,142 @@ async fn an_answer_to_the_person_is_still_settled_in_the_agents_inbox() {
         text.ends_with("1 answered thread(s) not shown; all=true lists them."),
         "{text}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn antigravity_hooks_and_mcp_use_the_same_exact_root_session() {
+    let mut h = Harness::new().await;
+    h.start().await;
+    let wd = h.workdir("agy", Some("refund-v2"));
+    let ids = [
+        "9cf71898-7afd-492a-aada-8b05f48a337e",
+        "107c866b-314c-4404-856d-c9956fed3e2f",
+    ];
+    // The same raw id from a different runtime keeps its original record.
+    h.hook_codex(HookKind::SessionStart, ids[0], &wd).await;
+    for id in ids {
+        let input = json!({
+            "conversationId": id,
+            "cwd": wd,
+            "workspacePaths": ["/not-the-effective-cwd"],
+            "transcriptPath": wd.join("transcript.jsonl"),
+        })
+        .to_string();
+        let out = senate_bridge::hook::run_as(
+            HookKind::SessionStart,
+            &h.socket(),
+            &input,
+            &HookEnv {
+                session_id: Some("unrelated".into()),
+                ..Default::default()
+            },
+            Some(Runtime::Agy),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+        let out: Value = serde_json::from_str(&out).unwrap();
+        assert!(
+            out["injectSteps"][0]["systemMessage"]["systemMessage"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("agy-{id}")),
+            "{out}"
+        );
+        assert!(
+            senate_bridge::hook::run_as(
+                HookKind::SessionEnd,
+                &h.socket(),
+                &input,
+                &HookEnv::default(),
+                Some(Runtime::Agy),
+                Default::default(),
+            )
+            .await
+            .is_none()
+        );
+        assert!(
+            h.store()
+                .session(&Runtime::Agy.session_key(id))
+                .unwrap()
+                .unwrap()
+                .is_live()
+        );
+    }
+    assert_eq!(
+        h.store().session(ids[0]).unwrap().unwrap().runtime,
+        Runtime::Codex
+    );
+
+    let mut mcp =
+        McpClient::start_for(h.socket(), selector(ids[0]), Locale::En, Runtime::Agy).await;
+    let without_root = mcp
+        .request(
+            "tools/call",
+            json!({
+                "name": "join", "arguments": {"committee":"other"},
+                "_meta":{"threadId":ids[0]},
+            }),
+        )
+        .await;
+    assert_eq!(without_root["isError"], true, "{without_root}");
+    // An explicit committee cannot turn a missing or unknown session into
+    // a sessionless writer using some other senator's identity.
+    let count = h.server.events("other").len();
+    for metadata in [
+        json!({}),
+        json!({"antigravity.google/root_conversation_id":"00000000-0000-4000-8000-000000000001"}),
+    ] {
+        let post = mcp
+            .request(
+                "tools/call",
+                json!({
+                    "name":"post", "arguments":{"committee":"other","body":"identity check"},
+                    "_meta":metadata
+                }),
+            )
+            .await;
+        assert_eq!(post["isError"], true, "{post}");
+    }
+    assert_eq!(h.server.events("other").len(), count);
+    let joined = mcp
+        .request(
+            "tools/call",
+            json!({
+                "name": "join", "arguments": {"committee":"other"},
+                "_meta":{
+                    "antigravity.google/root_conversation_id": ids[1],
+                    "threadId":ids[0],
+                },
+            }),
+        )
+        .await;
+    assert_ne!(joined["isError"], true, "{joined}");
+    let committee = |id: &str| {
+        h.store()
+            .session(id)
+            .unwrap()
+            .unwrap()
+            .committee()
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(committee(ids[0]), "refund-v2");
+    assert_eq!(committee(&Runtime::Agy.session_key(ids[0])), "refund-v2");
+    assert_eq!(committee(&Runtime::Agy.session_key(ids[1])), "other");
+
+    let wrong_role = ipc::request::<Value>(
+        &h.socket(),
+        &Request::ChairDocket {
+            session: selector(&Runtime::Agy.session_key(ids[1])),
+        },
+        WAIT,
+        WAIT,
+    )
+    .await;
+    assert!(matches!(
+        wrong_role,
+        Err(ClientError::Remote(e)) if e.code == ipc::codes::NOT_CHAIRING
+    ));
+    h.stop().await;
 }

@@ -291,10 +291,10 @@ pub struct HookReport {
     /// Contents of `.senate/committee`, if present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub committee_file: Option<String>,
-    /// `CLAUDE_CODE_MESSAGING_SOCKET`.
+    /// A Claude inbox socket or a Senate-owned ACP listener.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub socket: Option<PathBuf>,
-    /// `CLAUDE_CODE_MESSAGING_TOKEN`.
+    /// Claude inbox token, or agy's SHA-256 launch proof.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -324,6 +324,11 @@ pub enum Request {
     Hook(HookReport),
     /// Native coding session. Its immutable senator ID is derived on the daemon.
     SessionHook(HookReport),
+    /// Operator registration for one previously reported Antigravity session.
+    RegisterAgy {
+        session_id: String,
+        endpoint: crate::delivery::agy::Endpoint,
+    },
     SessionEnd {
         session_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
