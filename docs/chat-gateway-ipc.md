@@ -15,7 +15,9 @@ The server validates the version, platform and bearer before accepting the conne
 
 ```json
 {"type":"error","error":{"kind":"rejected","detail":"gateway capabilities changed; restart senated to change adapter capabilities"}}
-``` The adapter keeps its platform credential separately.
+```
+
+The adapter keeps its platform credential separately.
 
 ## Platform messages
 
