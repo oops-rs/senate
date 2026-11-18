@@ -21,12 +21,6 @@ struct Pending {
 }
 
 impl Launches {
-    pub(super) fn pending(&self, session_id: &str) -> Option<watch::Receiver<bool>> {
-        lock(&self.0)
-            .values()
-            .find(|pending| pending.session_id.as_deref() == Some(session_id))
-            .map(|pending| pending.published.subscribe())
-    }
     pub(super) fn hook_gate(&self, session_id: &str) -> Option<watch::Receiver<bool>> {
         lock(&self.0)
             .values()
@@ -511,18 +505,6 @@ impl Shared {
         if let Some(pending) = lock(&self.hosts.0).get_mut(&id) {
             pending.session_id = Some(session_id.clone());
         }
-        let shared_codex = restoring
-            && runtime == HostedRuntime::Codex
-            && self
-                .store
-                .session(&session_id)
-                .map_err(internal)?
-                .is_some_and(|session| session.is_live())
-            && self
-                .store
-                .session_host(&session_id)
-                .map_err(internal)?
-                .is_none();
         let remote = (runtime == HostedRuntime::Codex).then(|| self.codex_transport.remote());
         let launch = host::SessionCommand {
             session_id: &session_id,
@@ -564,7 +546,7 @@ impl Shared {
                 Some((generation, (delivered, reported)))
             };
             let (child, errors) =
-                host::start(&self.host_binary, &paths, &id, runtime, &cwd, &launch, shared_codex)
+                host::start(&self.host_binary, &paths, &id, runtime, &cwd, &launch)
                     .map_err(IpcError::internal)?;
             let (ready, ack) = await_ready(child, errors).await?;
             process = Some(ready);
@@ -588,6 +570,24 @@ impl Shared {
                 return Err(IpcError::internal(
                     "the newly allocated native session already exists",
                 ));
+            }
+            // Native SessionEnd may have run while the restore was waiting
+            // for the new terminal. Inspect the prior registration under
+            // the same lock used by SessionEnd.
+            let shared_codex = restoring
+                && runtime == HostedRuntime::Codex
+                && self
+                    .store
+                    .session(&session_id)
+                    .map_err(internal)?
+                    .is_some_and(|session| session.is_live())
+                && self
+                    .store
+                    .session_host(&session_id)
+                    .map_err(internal)?
+                    .is_none();
+            if shared_codex {
+                host::mark_shared_codex_thread(&paths, &id).map_err(IpcError::internal)?;
             }
             let epoch = match cursor {
                 Some((generation, _)) => Some(self.intake_guard(generation).await.map_err(intake_error)?),
@@ -822,10 +822,10 @@ async fn await_ready(
         return if details.trim().is_empty() {
             Err(error)
         } else {
-            Err(IpcError::bad_request(format!(
-                "{error}: {}",
-                details.trim()
-            )))
+            Err(IpcError::new(
+                &error.code,
+                format!("{error}: {}", details.trim()),
+            ))
         };
     }
     Ok((process, ack))

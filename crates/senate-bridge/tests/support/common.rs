@@ -177,6 +177,7 @@ pub struct Inner {
     /// Who sits here; agents are seated on first contact.
     pub roster: Roster,
     pub aliases: senate_core::api::SenatorAliases,
+    pub alias_delay: Duration,
     /// The Senate's name `/v1/me` gives.
     pub senate: Name,
     /// The Senate above, as `/v1/me` gives it.
@@ -329,6 +330,10 @@ async fn alias(
     headers: HeaderMap,
     Json(request): Json<senate_core::api::SetAlias>,
 ) -> Response {
+    let delay = st.inner.lock().unwrap().alias_delay;
+    if !delay.is_zero() {
+        tokio::time::sleep(delay).await;
+    }
     let person = match auth(&st, &headers) {
         Ok(person) => person,
         Err(error) => return error,
@@ -804,6 +809,7 @@ impl FakeServer {
                 events: BTreeMap::new(),
                 raw: HashMap::new(),
                 aliases: BTreeMap::new(),
+                alias_delay: Duration::ZERO,
                 cursors: HashMap::new(),
                 heartbeats: Vec::new(),
                 stream_opens: Vec::new(),

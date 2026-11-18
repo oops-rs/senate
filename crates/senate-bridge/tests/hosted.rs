@@ -141,6 +141,7 @@ done
 
     h.stop().await;
     choose(&fixture);
+    h.config.committees.push(committee());
     start(&mut h).await;
     let launched: SpawnReply = call(&h, &request).await;
     assert_eq!(
@@ -151,6 +152,7 @@ done
     );
     // This second child starts successfully and reaches Ready. Failure of
     // the final alias operation must unwind its staged session and cursor.
+    h.server.state.inner.lock().unwrap().alias_delay = Duration::from_millis(350);
     let conflict = ipc::request::<SpawnReply>(&h.socket(), &request, TIMEOUT, TIMEOUT)
         .await
         .unwrap_err();
@@ -402,4 +404,171 @@ async fn restore_refuses_a_reachable_claude_and_keeps_the_servers_backlog() {
     .await
     .unwrap();
     h.stop().await;
+}
+
+#[tokio::test]
+async fn a_tui_that_exits_immediately_never_reports_ready() {
+    use std::process::Stdio;
+    let root = tempfile::tempdir_in("/tmp").unwrap();
+    let id = senate_core::EventId::new();
+    std::fs::create_dir_all(root.path().join("hosts").join(id.to_string())).unwrap();
+    let mut cmd = tokio::process::Command::new(BIN);
+    testenv::isolate_async(&mut cmd, root.path());
+    cmd.args(["session-host", &id.to_string(), "claude"])
+        .arg(root.path())
+        .args(["native-id", "--program", "/usr/bin/false"])
+        .env("SENATE_HOME", root.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(TIMEOUT, cmd.output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("exited during startup") && error.contains("exit status: 1"),
+        "{error}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn codex_native_end_during_or_after_restore_does_not_leave_a_live_row() {
+    use senate_bridge::SessionState;
+    use senate_bridge::agent::{self, AgentSource};
+    use senate_bridge::session::{CommitteeSource, Runtime};
+    use senate_bridge::state::{SessionUpsert, Store};
+    use senate_core::{Address, Kind, NewEvent};
+
+    for native_end in [Some(true), Some(false), None] {
+        let mut h = Harness::new().await;
+        h.dir = tempfile::tempdir_in("/tmp").unwrap();
+        h.paths = senate_bridge::Paths::new(h.dir.path().join("senate"));
+        h.paths.ensure_home().unwrap();
+        let project = h.workdir("codex", None);
+        let program = h.dir.path().join("fixture");
+        std::fs::write(
+            &program,
+            "#!/bin/sh\nwhile :; do printf 'fixture TUI\\n'; sleep 0.1; done\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let remote_socket = h.dir.path().join("codex.sock");
+        let fake = h.codex();
+        let id = "native-codex";
+        fake.idle(id);
+        std::fs::write(
+            h.paths.config(),
+            format!(
+                "[codex]\nbin = {:?}\nlisten = {:?}\n",
+                program.to_str().unwrap(),
+                format!("unix://{}", remote_socket.display()),
+            ),
+        )
+        .unwrap();
+        let senator = agent::session_name(Runtime::Codex, id);
+        let committee = committee();
+        let prehistory = h.server.append(NewEvent::new(
+            committee.clone(),
+            Kind::Note,
+            Address::senior(&h.config.person),
+            "pre-existing history",
+        ));
+        {
+            let store = Store::open(&h.paths.state_db()).unwrap();
+            store
+                .upsert_session(&SessionUpsert {
+                    session_id: id.into(),
+                    cwd: project,
+                    git_root: None,
+                    branch: None,
+                    inferred_committee: Some((committee.clone(), CommitteeSource::File)),
+                    socket: None,
+                    token: None,
+                    claude_pid: None,
+                    transcript_path: None,
+                    ancestor_pids: Vec::new(),
+                    runtime: Runtime::Codex,
+                    agent: senator.clone(),
+                    agent_source: AgentSource::Session,
+                })
+                .unwrap();
+            if native_end != Some(false) {
+                // Keep the initial worker from seeding a cursor before this
+                // test opens the hosted terminal.
+                store.set_session_state(id, SessionState::Ended).unwrap();
+            }
+        }
+        start(&mut h).await;
+        let session_end = Request::SessionEnd {
+            session_id: id.into(),
+            reason: None,
+        };
+        let request = Request::Restore {
+            session: Default::default(),
+            senator: senator.clone(),
+        };
+        let restored: SpawnReply = if native_end == Some(true) {
+            h.store().set_session_state(id, SessionState::Live).unwrap();
+            let (result, ()) = tokio::join!(call(&h, &request), async {
+                tokio::time::timeout(TIMEOUT, async {
+                    loop {
+                        let base = h.paths.home().join("hosts");
+                        if std::fs::read_dir(base)
+                            .ok()
+                            .into_iter()
+                            .flatten()
+                            .flatten()
+                            .any(|dir| dir.path().join("owner").is_file())
+                        {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                let _: serde_json::Value = call(&h, &session_end).await;
+                assert_eq!(
+                    h.store().session(id).unwrap().unwrap().state,
+                    SessionState::Ended
+                );
+            });
+            result
+        } else {
+            let result = call(&h, &request).await;
+            if native_end == Some(false) {
+                let _: serde_json::Value = call(&h, &session_end).await;
+                assert_eq!(
+                    h.store().session(id).unwrap().unwrap().state,
+                    SessionState::Live
+                );
+            }
+            result
+        };
+        assert_eq!(restored.session_id, id);
+        assert_eq!(
+            h.store().delivered_cursor(&senator, &committee).unwrap(),
+            prehistory.seq
+        );
+        let socket: PathBuf = call(&h, &Request::Attach { senator }).await;
+        let pid = std::fs::read_to_string(socket.parent().unwrap().join("owner")).unwrap();
+        let group = rustix::process::Pid::from_raw(pid.trim().parse().unwrap()).unwrap();
+        rustix::process::kill_process_group(group, rustix::process::Signal::TERM).unwrap();
+        tokio::time::timeout(TIMEOUT, async {
+            while socket.exists() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            h.store().session(id).unwrap().unwrap().state,
+            SessionState::Ended
+        );
+        h.stop().await;
+    }
 }

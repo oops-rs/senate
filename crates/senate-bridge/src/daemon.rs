@@ -1051,6 +1051,7 @@ impl Shared {
             .store
             .all_sessions()?
             .into_iter()
+            .filter(|s| !self.hosts.unpublished(&s.session_id))
             .map(|s| s.agent)
             .collect())
     }
@@ -1427,9 +1428,6 @@ impl Shared {
             .read_cursor(committee, api::CURSOR_DELIVERED, Some(agent), restoring)
             .await
             .map_err(|e| self.api_failure(e))?;
-        if restoring && server == Seq::ZERO {
-            return Ok((Seq::ZERO, Seq::ZERO, "this agent has no delivered cursor"));
-        }
         if server > Seq::ZERO {
             let before = Seq(server.0 - 1);
             if self.probe(committee, before).await? == Some(server) {
@@ -3282,7 +3280,7 @@ impl Shared {
         host_id: Option<&EventId>,
     ) -> Result<serde_json::Value, IpcError> {
         // A child that never published must not touch a prior session row.
-        if self.hosts.pending(session_id).is_some_and(|p| !*p.borrow()) {
+        if self.hosts.unpublished(session_id) {
             return Ok(serde_json::json!({}));
         }
         let _binding = self.session_bindings.write().await;
@@ -3302,6 +3300,7 @@ impl Shared {
                 return Ok(serde_json::json!({}));
             }
             (None, Some(id)) if crate::host::running(&paths, id).map_err(IpcError::internal)? => {
+                crate::host::clear_shared_codex_thread(&paths, id).map_err(IpcError::internal)?;
                 return Ok(serde_json::json!({}));
             }
             (Some(id), _) => crate::host::switched(&paths, id).is_some(),

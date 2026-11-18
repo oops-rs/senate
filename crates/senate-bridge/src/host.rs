@@ -201,7 +201,6 @@ pub(crate) fn start(
     runtime: HostedRuntime,
     cwd: &Path,
     session: &SessionCommand<'_>,
-    shared_codex: bool,
 ) -> anyhow::Result<(Child, File)> {
     let dir = directory(paths, id);
     let mut command = Command::new(host_binary);
@@ -226,9 +225,6 @@ pub(crate) fn start(
     std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
     let mut spawn = || -> anyhow::Result<(Child, File)> {
         File::create(dir.join("unpublished"))?;
-        if shared_codex {
-            File::create(dir.join("shared-codex"))?;
-        }
         let path = dir.join("errors");
         let log = OpenOptions::new()
             .write(true)
@@ -440,6 +436,17 @@ async fn stop_group(child: &mut Child, pid: Pid) -> anyhow::Result<()> {
     send(pid, Signal::KILL)?;
     child.wait().await.context("stop the coding TUI group")?;
     Ok(())
+}
+
+pub(crate) fn mark_shared_codex_thread(paths: &Paths, id: &EventId) -> io::Result<()> {
+    File::create(directory(paths, id).join("shared-codex")).map(drop)
+}
+
+pub(crate) fn clear_shared_codex_thread(paths: &Paths, id: &EventId) -> io::Result<()> {
+    match std::fs::remove_file(directory(paths, id).join("shared-codex")) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
 }
 
 pub(crate) fn shares_codex_thread(paths: &Paths, id: &EventId) -> bool {
