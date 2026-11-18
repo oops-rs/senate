@@ -78,6 +78,7 @@ async fn attach(h: &Harness, alias: &str, keys: &[u8]) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fixture_terminal_launch_detach_restart_and_restore() {
     let mut h = Harness::new().await;
+    h.config.hosted_session_limit = 1;
     h.dir = tempfile::tempdir_in("/tmp").unwrap();
     h.paths = senate_bridge::Paths::new(h.dir.path().join("senate"));
     let project = h.workdir("terminal", None);
@@ -115,14 +116,15 @@ done
     choose(&failing_fixture);
     start(&mut h).await;
 
-    let request = Request::Spawn {
+    let spawn = |alias| Request::Spawn {
         session: Default::default(),
         runtime: HostedRuntime::Claude,
         committee: committee(),
-        alias: Some(path("fixture")),
+        alias,
         cwd: project.clone(),
         chair: false,
     };
+    let request = spawn(Some(path("fixture")));
     let error = ipc::request::<SpawnReply>(&h.socket(), &request, TIMEOUT, TIMEOUT)
         .await
         .unwrap_err();
@@ -143,13 +145,96 @@ done
     choose(&fixture);
     h.config.committees.push(committee());
     start(&mut h).await;
+    h.server.state.inner.lock().unwrap().reject_appends = true;
+    let error = ipc::request::<SpawnReply>(&h.socket(), &request, TIMEOUT, TIMEOUT)
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("injected log refusal"),
+        "{error}"
+    );
+    h.server.state.inner.lock().unwrap().reject_appends = false;
+    assert!(h.store().all_sessions().unwrap().is_empty());
+    assert!(h.server.events(committee().as_str()).is_empty());
+    {
+        let server = h.server.state.inner.lock().unwrap();
+        assert!(server.aliases.is_empty());
+        assert!(server.roster.seated().is_empty());
+        assert!(server.stream_opens.is_empty());
+    }
+
+    let db = rusqlite::Connection::open(h.paths.state_db()).unwrap();
+    db.busy_timeout(TIMEOUT).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER fail_host_publication BEFORE INSERT ON sessions
+         WHEN NEW.host_id IS NOT NULL
+         BEGIN SELECT RAISE(ABORT, 'injected publication failure'); END;",
+    )
+    .unwrap();
+    let error = ipc::request::<SpawnReply>(&h.socket(), &spawn(None), TIMEOUT, TIMEOUT)
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("injected publication failure"),
+        "{error}"
+    );
+    let notes = h.server.events(committee().as_str());
+    let [ready, rollback] = notes.as_slice() else {
+        panic!("expected a ready audit and a rollback note: {notes:?}");
+    };
+    assert!(
+        ready
+            .body
+            .contains("[senator::alice] spawned [senator::claude-"),
+        "{ready:?}"
+    );
+    assert!(
+        rollback
+            .body
+            .contains("was rolled back after publication failed"),
+        "{rollback:?}"
+    );
+    assert!(
+        rollback.body.contains("injected publication failure"),
+        "{rollback:?}"
+    );
+    for event in [ready, rollback] {
+        assert_eq!(event.from, common::person("alice"));
+        assert!(event.body.contains("(claude)"), "{event:?}");
+    }
+    assert!(h.store().all_sessions().unwrap().is_empty());
+    {
+        let server = h.server.state.inner.lock().unwrap();
+        assert!(server.aliases.is_empty());
+        assert!(server.roster.seated().is_empty());
+        assert!(server.stream_opens.is_empty());
+    }
+    db.execute_batch("DROP TRIGGER fail_host_publication;")
+        .unwrap();
+    drop(db);
+
+    // Success at a limit of one verifies both failures released capacity.
     let launched: SpawnReply = call(&h, &request).await;
+    let expected_arg = format!("--session-id={}", launched.session_id);
     assert_eq!(
         std::fs::read_to_string(project.join("argv.log"))
             .unwrap()
-            .trim(),
-        format!("--session-id={}", launched.session_id)
+            .lines()
+            .last(),
+        Some(expected_arg.as_str())
     );
+    let attach_target = Request::Attach {
+        senator: launched.senator.clone(),
+    };
+    let socket: PathBuf = call(&h, &attach_target).await;
+    attach(&h, launched.senator.as_str(), b"\x1b[93;5u").await;
+    assert!(socket.exists());
+
+    h.stop().await;
+    assert!(socket.exists());
+    // Give the conflict attempt a slot beside the surviving host.
+    h.config.hosted_session_limit = 2;
+    start(&mut h).await;
     // This second child starts successfully and reaches Ready. Failure of
     // the final alias operation must unwind its staged session and cursor.
     h.server.state.inner.lock().unwrap().alias_delay = Duration::from_millis(350);
@@ -172,16 +257,6 @@ done
                 .all(|agent| agent.name == launched.senator)
         );
     }
-    let attach_target = Request::Attach {
-        senator: launched.senator.clone(),
-    };
-    let socket: PathBuf = call(&h, &attach_target).await;
-    attach(&h, launched.senator.as_str(), b"\x1b[93;5u").await;
-    assert!(socket.exists());
-
-    h.stop().await;
-    assert!(socket.exists());
-    start(&mut h).await;
     assert_eq!(call::<PathBuf>(&h, &attach_target).await, socket);
     attach(&h, launched.senator.as_str(), b"\x1d").await;
 

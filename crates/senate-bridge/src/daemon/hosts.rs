@@ -41,13 +41,6 @@ pub(super) enum LaunchAudit {
     RolledBack { reason: String },
 }
 
-async fn no_audit(phase: LaunchAudit, _: SpawnReply, _: HostedRuntime) -> Result<(), IpcError> {
-    if let LaunchAudit::RolledBack { reason } = phase {
-        tracing::debug!(%reason, "rolling back an operator terminal launch");
-    }
-    Ok(())
-}
-
 pub(super) fn switch_message(old: &SenatorName, new: &str) -> String {
     format!(
         "hosted Claude session {old} switched to native ID {new}; attach to {old} to inspect or exit the existing terminal"
@@ -132,18 +125,6 @@ async fn stop_child(child: &mut Child) -> Result<(), IpcError> {
 }
 
 impl Shared {
-    pub(super) async fn on_spawn(
-        &self,
-        runtime: HostedRuntime,
-        committee: CommitteeId,
-        alias: Option<SenatorName>,
-        cwd: PathBuf,
-        limit: Option<usize>,
-    ) -> Result<HostedLaunch, IpcError> {
-        self.on_spawn_with(runtime, committee, alias, cwd, limit, no_audit)
-            .await
-    }
-
     pub(super) async fn on_spawn_with<Fut>(
         &self,
         runtime: HostedRuntime,
@@ -274,14 +255,6 @@ impl Shared {
             committee,
             session,
         })
-    }
-
-    pub(super) async fn on_restore(
-        &self,
-        target: RestoreTarget,
-        limit: Option<usize>,
-    ) -> Result<HostedLaunch, IpcError> {
-        self.on_restore_with(target, limit, no_audit).await
     }
 
     pub(super) async fn on_restore_with<Fut>(

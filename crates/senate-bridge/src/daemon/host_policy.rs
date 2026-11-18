@@ -2,6 +2,7 @@
 
 use senate_core::SenatorKind;
 
+use super::hosts::LaunchAudit;
 use super::*;
 use crate::ipc::{HostedRuntime, SpawnReply};
 
@@ -122,17 +123,25 @@ impl Shared {
     ) -> Result<SpawnReply, IpcError> {
         let auth = self.authorize_host_launch(selector).await?;
         auth.check_target(&committee, appoint_chair)?;
+        let audit_auth = &auth;
         let launch = self
-            .on_spawn(
+            .on_spawn_with(
                 runtime,
                 committee,
                 alias,
                 cwd,
                 Some(self.config.hosted_session_limit),
+                move |phase, reply, runtime| async move {
+                    self.audit_host_launch(audit_auth, false, phase, reply, runtime)
+                        .await
+                },
             )
             .await?;
-        self.finish_hosted_launch(&auth, false, appoint_chair, launch)
-            .await
+        let reply = launch.finish();
+        if appoint_chair {
+            self.appoint_hosted_chair(&auth, &reply).await?;
+        }
+        Ok(reply)
     }
 
     pub(super) async fn on_hosted_restore(
@@ -145,10 +154,18 @@ impl Shared {
         auth.check_target(&target.committee, false)?;
         self.check_restore_seat(&target.committee, &target.session.agent)
             .await?;
+        let audit_auth = &auth;
         let launch = self
-            .on_restore(target, Some(self.config.hosted_session_limit))
+            .on_restore_with(
+                target,
+                Some(self.config.hosted_session_limit),
+                move |phase, reply, runtime| async move {
+                    self.audit_host_launch(audit_auth, true, phase, reply, runtime)
+                        .await
+                },
+            )
             .await?;
-        self.finish_hosted_launch(&auth, true, false, launch).await
+        Ok(launch.finish())
     }
 
     async fn check_restore_seat(
@@ -187,38 +204,15 @@ impl Shared {
         Ok(())
     }
 
-    async fn finish_hosted_launch(
-        &self,
-        auth: &HostAuthority,
-        restoring: bool,
-        appoint_chair: bool,
-        launch: hosts::HostedLaunch,
-    ) -> Result<SpawnReply, IpcError> {
-        if let Err(error) = self.audit_host_launch(auth, restoring, &launch.reply).await {
-            if let Err(stop_error) = launch.process.stop().await {
-                return Err(IpcError::new(
-                    &error.code,
-                    format!(
-                        "{error}. Could not stop the unaudited host for {}: {stop_error}",
-                        Address::senator(&launch.reply.senator).in_text()
-                    ),
-                ));
-            }
-            return Err(error);
-        }
-        let reply = launch.finish();
-        if appoint_chair {
-            self.appoint_hosted_chair(auth, &reply).await?;
-        }
-        Ok(reply)
-    }
-
-    /// Finish the launch before returning its successful IPC reply.
+    /// Attribute the ready host to its authorized caller before publication.
+    /// A publication failure after this audit gets a matching rollback note.
     async fn audit_host_launch(
         &self,
         auth: &HostAuthority,
         restoring: bool,
-        reply: &SpawnReply,
+        phase: LaunchAudit,
+        reply: SpawnReply,
+        runtime: HostedRuntime,
     ) -> Result<(), IpcError> {
         let committee = &reply.committee;
         let target = Address::senator(&reply.senator).in_text();
@@ -226,28 +220,39 @@ impl Shared {
             || auth.sender.in_text(),
             |agent| Address::senator(agent).in_text(),
         );
-        let runtime = self
-            .store
-            .session(&reply.session_id)
-            .map_err(internal)?
-            .ok_or_else(|| {
-                IpcError::new(
-                    codes::NO_SESSION,
-                    "host registration disappeared before audit",
-                )
-            })?
-            .runtime
-            .as_str();
-        let verb = match (self.locale, restoring) {
-            (Locale::En, false) => "spawned",
-            (Locale::En, true) => "restored",
-            (Locale::Zh, false) => "启动了",
-            (Locale::Zh, true) => "恢复了",
-        };
-        let body = match self.locale {
-            Locale::Zh => format!("{actor} 在委员会 `{committee}` {verb} {target}（{runtime}）。"),
-            Locale::En => {
-                format!("{actor} {verb} {target} ({runtime}) in the committee `{committee}`.")
+        let runtime = Runtime::from(runtime).as_str();
+        let (body, timeout_message) = match phase {
+            LaunchAudit::Ready => {
+                let body = match self.locale {
+                    Locale::En => {
+                        let verb = if restoring { "restored" } else { "spawned" };
+                        format!(
+                            "{actor} {verb} {target} ({runtime}) in the committee `{committee}`."
+                        )
+                    }
+                    Locale::Zh => {
+                        let verb = if restoring { "恢复了" } else { "启动了" };
+                        format!("{actor} 在委员会 `{committee}` {verb} {target}（{runtime}）。")
+                    }
+                };
+                (body, "the spawn or restore audit was not acknowledged")
+            }
+            LaunchAudit::RolledBack { reason } => {
+                let body = match self.locale {
+                    Locale::En => {
+                        let action = if restoring { "restore" } else { "spawn" };
+                        format!(
+                            "The {action} of {target} ({runtime}) by {actor} in committee `{committee}` was rolled back after publication failed. {reason}"
+                        )
+                    }
+                    Locale::Zh => {
+                        let action = if restoring { "恢复" } else { "启动" };
+                        format!(
+                            "{actor} 在委员会 `{committee}` 中{action} {target}（{runtime}）失败，操作已回滚。{reason}"
+                        )
+                    }
+                };
+                (body, "the launch rollback audit was not acknowledged")
             }
         };
         let mut event = NewEvent::new(committee.clone(), Kind::Note, auth.sender.clone(), body);
@@ -256,12 +261,7 @@ impl Shared {
         }
         tokio::time::timeout(AUDIT_TIMEOUT, self.post(event))
             .await
-            .map_err(|_| {
-                IpcError::new(
-                    codes::SERVER,
-                    "the spawn or restore audit was not acknowledged",
-                )
-            })??;
+            .map_err(|_| IpcError::new(codes::SERVER, timeout_message))??;
         Ok(())
     }
 

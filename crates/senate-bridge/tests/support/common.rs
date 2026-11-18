@@ -164,6 +164,7 @@ pub struct StreamOpen {
 
 pub struct Inner {
     pub events: BTreeMap<String, Vec<Event>>,
+    pub reject_appends: bool,
     /// `(committee, seq)` → the JSON served in place of the stored event.
     pub raw: HashMap<(String, u64), String>,
     /// `(committee, whose, name)`: `whose` is the senator in the query, else
@@ -399,6 +400,9 @@ async fn append(
     if ev.committee.as_str() != committee {
         return api_error(StatusCode::BAD_REQUEST, "bad_request", "committee mismatch");
     }
+    if st.inner.lock().unwrap().reject_appends {
+        return api_error(StatusCode::FORBIDDEN, "forbidden", "injected log refusal");
+    }
     let Some(from) = ev.from.as_senator().cloned() else {
         return api_error(StatusCode::FORBIDDEN, "forbidden", "not your address");
     };
@@ -421,6 +425,13 @@ async fn append(
     }
     let (event, duplicate) = st.store(ev, true);
     Json(AppendResponse { event, duplicate }).into_response()
+}
+
+async fn seat_status(State(st): St, headers: HeaderMap) -> Response {
+    if let Err(error) = auth(&st, &headers) {
+        return error;
+    }
+    Json(senate_core::api::CommitteeSeatStatus { unseated: false }).into_response()
 }
 
 async fn events(
@@ -807,6 +818,7 @@ impl FakeServer {
         let state = Arc::new(FakeState {
             inner: Mutex::new(Inner {
                 events: BTreeMap::new(),
+                reject_appends: false,
                 raw: HashMap::new(),
                 aliases: BTreeMap::new(),
                 alias_delay: Duration::ZERO,
@@ -852,6 +864,7 @@ impl FakeServer {
                 get(get_cursor).put(put_cursor),
             )
             .route("/v1/committees/{committee}/heartbeat", post(heartbeat))
+            .route("/v1/committees/{committee}/seat", get(seat_status))
             .route("/v1/committees/{committee}/search", get(search))
             .route("/v1/committees/{committee}/brief", get(brief))
             .route("/v1/committees/{committee}/threads", get(threads))
