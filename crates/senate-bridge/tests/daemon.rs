@@ -13,7 +13,7 @@ use common::*;
 use senate_bridge::SessionState;
 use senate_bridge::daemon::{MAX_BATCH_EVENTS, PENDING_CAP};
 use senate_bridge::hook::HookKind;
-use senate_bridge::ipc::{self, Request, StatusReply, StreamState};
+use senate_bridge::ipc::{self, IpcClient, Request, StatusReply, StreamState, WatchEvent};
 use senate_bridge::state::ItemStatus;
 use senate_core::{Address, Kind, NewEvent, Refs, Seq};
 use serde_json::{Value, json};
@@ -373,7 +373,17 @@ async fn unbound_sessions_and_own_or_undirected_events_get_nothing() {
     for seq in [1, 2, 3, 4, 5, 7] {
         assert!(pos(&m, seq).is_none(), "seq {seq} must not be pushed");
     }
-    h.wait_delivered_cursor("refund-v2", 8).await;
+    // The socket can receive a push before the daemon records it as delivered.
+    eventually("both inbox deliveries recorded", WAIT, || {
+        [6, 8]
+            .into_iter()
+            .all(|seq| {
+                h.item(seq)
+                    .is_some_and(|item| item.status == ItemStatus::Delivered)
+            })
+            .then_some(())
+    })
+    .await;
     let queued: Vec<u64> = h
         .store()
         .undelivered()
@@ -1026,19 +1036,42 @@ async fn an_unbound_committee_keeps_only_its_newest_items() {
     h.hook(HookKind::SessionStart, "first", &wd, None).await;
     end_session(&h, "first", &wd).await;
     h.wait_stream("refund-v2").await;
+    let mut watch = IpcClient::connect(&h.socket(), WAIT)
+        .await
+        .unwrap()
+        .watch(false, WAIT)
+        .await
+        .unwrap();
     let n = PENDING_CAP as u64 + 5;
     for i in 1..=n {
         h.server.append(relayed_question(&format!("q{i}")));
     }
-    // The cursor moves before the cap trims, so wait for both.
+    // An Inbox notice for a later undirected event proves that this stream
+    // has finished processing every earlier event, including queue trimming.
+    let barrier = h.server.append(note(person("pm"), "queue intake barrier"));
     let me = path("claude");
-    let pending = eventually("everything taken in and capped", WAIT, || {
-        let pending = h.store().pending().unwrap();
-        (h.store().delivered_cursor(&me, &committee()).unwrap() == Seq(n)
-            && pending.len() == PENDING_CAP)
-            .then_some(pending)
+    tokio::time::timeout(WAIT, async {
+        loop {
+            let event = watch
+                .next()
+                .await
+                .unwrap()
+                .expect("watch closed before the intake barrier");
+            if matches!(event, WatchEvent::Inbox { agent, committee, seq, .. }
+                if agent == me && committee == barrier.committee && seq == barrier.seq)
+            {
+                break;
+            }
+        }
     })
-    .await;
+    .await
+    .expect("agent stream reached the intake barrier");
+    assert_eq!(
+        h.store().delivered_cursor(&me, &committee()).unwrap(),
+        barrier.seq
+    );
+    let pending = h.store().pending().unwrap();
+    assert_eq!(pending.len(), PENDING_CAP);
     assert_eq!(pending[0].event.seq, Seq(6));
     assert_eq!(h.store().dropped(&me, &committee()).unwrap(), 5);
 
