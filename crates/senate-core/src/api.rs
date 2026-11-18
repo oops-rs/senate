@@ -39,6 +39,7 @@
 //! | GET  | `/v1/resolve?name=&committee=` | → [`Resolved`] |
 //! | GET  | `/v1/committees/{committee}/chair` | → [`ChairInfo`] |
 //! | PUT  | `/v1/committees/{committee}/chair` | [`SetChair`] → [`ChairInfo`] |
+//! | GET  | `/v1/committees/{committee}/seat?senator=` | → [`CommitteeSeatStatus`] |
 //! | PUT  | `/v1/committees/{committee}/seat` | [`SetCommitteeSeat`] → [`CommitteeSeatInfo`] |
 //! | GET  | `/v1/secretaries` | → [`Secretaries`] |
 //! | PUT  | `/v1/secretaries/{senator}` | [`SetSecretaries`] → [`Secretaries`] |
@@ -297,6 +298,12 @@ pub struct CommitteeSeatInfo {
     pub action: crate::CommitteeSeatAction,
     pub seq: Seq,
     pub duplicate: bool,
+}
+
+/// Whether an explicit unseat currently bars the senator from this committee.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitteeSeatStatus {
+    pub unseated: bool,
 }
 
 /// `GET /v1/secretaries`: every secretary relation, principal → its

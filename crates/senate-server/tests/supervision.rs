@@ -388,7 +388,9 @@ async fn shutdown_ends_open_streams() {
 
 #[tokio::test]
 async fn a_writer_rebuilds_the_seat_fence_after_a_lost_commit_ack() {
-    use senate_core::api::{CommitteeSeatInfo, SetCommitteeSeat, committee_seat_path};
+    use senate_core::api::{
+        CommitteeSeatInfo, CommitteeSeatStatus, SetCommitteeSeat, committee_seat_path,
+    };
     use senate_core::{CommitteeSeatAction, EventId, PresenceState};
 
     let store = Arc::new(Faulty::default());
@@ -416,6 +418,19 @@ async fn a_writer_rebuilds_the_seat_fence_after_a_lost_commit_ack() {
             .json(request)
             .send()
     };
+    let seat_status = || async {
+        server
+            .request(Method::GET, &committee_seat_path(&committee()), ALICE)
+            .query(&[("senator", &agent)])
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json::<CommitteeSeatStatus>()
+            .await
+            .unwrap()
+    };
     store.arm(LOSE_ACK_AFTER_COMMIT);
     api_error(
         seat(&request).await.unwrap(),
@@ -429,6 +444,7 @@ async fn a_writer_rebuilds_the_seat_fence_after_a_lost_commit_ack() {
             .is_ok_and(|page| page.agents.is_empty())
     })
     .await;
+    assert!(seat_status().await.unseated);
     assert_eq!(
         server.heartbeat(ALICE, "claude").await.status(),
         StatusCode::NO_CONTENT
@@ -458,6 +474,7 @@ async fn a_writer_rebuilds_the_seat_fence_after_a_lost_commit_ack() {
         })
     })
     .await;
+    assert!(!seat_status().await.unseated);
     let _stream = server.stream_as(ALICE, Some("claude"), None, None).await;
     eventually("joined stream is connected", || {
         hub.is_agent_connected(&committee_id, &agent)

@@ -64,7 +64,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/v1/committees/{committee}/heartbeat", post(heartbeat))
         .route(
             "/v1/committees/{committee}/seat",
-            put(committee_seat::put_seat),
+            get(committee_seat::get_seat).put(committee_seat::put_seat),
         )
         .route("/v1/committees/{committee}/search", get(search))
         .route("/v1/committees/{committee}/brief", get(brief))

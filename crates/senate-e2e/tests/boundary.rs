@@ -796,6 +796,93 @@ async fn spawning_checks_scope_and_capacity_on_the_daemon() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restoring_an_unseated_senator_requires_explicit_rejoin_before_capacity() {
+    use senate_bridge::ipc::{ClientError, JoinReply, SpawnReply, codes};
+    use senate_core::CommitteeSeatAction;
+    use senate_core::api::{CommitteeSeatInfo, SetCommitteeSeat};
+
+    const SESSION: &str = "00000000-0000-4000-8000-000000000123";
+    let primary = path(&format!("codex-{SESSION}"));
+    let alias = path("restore-target");
+    let committee = committee();
+    let join = format!("senate seat join --committee {committee} --senator {primary}");
+    for locale in [Locale::En, Locale::Zh] {
+        let dir = tempfile::tempdir().unwrap();
+        // The cap would refuse a seated target. The seat refusal must
+        // happen before the daemon reaches the launch path.
+        let mut desk = Desk::new(
+            dir.path(),
+            "alice",
+            locale,
+            "hosted_session_limit = 0\n[local]\n",
+        );
+        desk.start().await;
+        let inbox = desk.inbox("chair");
+        desk.session_start_as("chair", &inbox, "claude")
+            .await
+            .unwrap();
+        desk.codex_start_with_identity(SESSION, true).await.unwrap();
+        let _: JoinReply = desk
+            .ipc(Request::JoinAs {
+                session: Laptop::session(SESSION),
+                committee: committee.clone(),
+                senator: alias.clone(),
+            })
+            .await;
+        desk.codex_end(SESSION).await;
+
+        let seat = |action| Request::SetCommitteeSeat {
+            committee: committee.clone(),
+            request: SetCommitteeSeat {
+                senator: primary.clone(),
+                action,
+                id: senate_core::EventId::new(),
+                acted_by: None,
+            },
+        };
+        let _: CommitteeSeatInfo = desk.ipc(seat(CommitteeSeatAction::Unseat)).await;
+        let expected = match locale {
+            Locale::En => format!(
+                "[senator::{primary}] was unseated from committee `{committee}`. Run `{join}` before restoring."
+            ),
+            Locale::Zh => format!(
+                "[senator::{primary}] 已被委员会 `{committee}` 除席。请先运行 `{join}`，再恢复会话。"
+            ),
+        };
+        for session in [Default::default(), Laptop::session("chair")] {
+            let error = desk
+                .try_ipc::<SpawnReply>(Request::Restore {
+                    session,
+                    senator: alias.clone(),
+                })
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(&error, ClientError::Remote(e)
+                if e.code == codes::BAD_REQUEST && e.message == expected),
+                "{error:?}"
+            );
+        }
+        assert!(!desk.paths.home().join("hosts").exists());
+
+        let _: CommitteeSeatInfo = desk.ipc(seat(CommitteeSeatAction::Join)).await;
+        let error = desk
+            .try_ipc::<SpawnReply>(Request::Restore {
+                session: Laptop::session("chair"),
+                senator: alias.clone(),
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, ClientError::Remote(e)
+            if e.message.contains("hosted session limit (0)")),
+            "{error:?}"
+        );
+        desk.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_team_principals_agent_crosses_committees_by_way_of_the_desk() {
     // A team's Senate: bob presides; `north-desk` is a team (a principal
     // that is no person), with its own token, running the agent `runner`.

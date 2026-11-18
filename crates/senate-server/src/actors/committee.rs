@@ -85,6 +85,7 @@ pub(crate) enum CommitteeMsg {
     PresenceTick,
     /// Record activity and re-evaluate the lease in seat-change order.
     Heartbeat(Heartbeat, RpcReplyPort<Result<(), LogError>>),
+    IsUnseated(SenatorName, RpcReplyPort<bool>),
     SetSeat {
         change: CommitteeSeatChange,
         id: EventId,
@@ -689,6 +690,9 @@ impl Actor for CommitteeActor {
             CommitteeMsg::PresenceTick => state.check_leases().await,
             CommitteeMsg::Heartbeat(heartbeat, reply) => {
                 reply_or_log(reply, state.heartbeat(heartbeat).await);
+            }
+            CommitteeMsg::IsUnseated(senator, reply) => {
+                reply_or_log(reply, state.seats.is_unseated(&senator));
             }
             CommitteeMsg::SetSeat {
                 change,

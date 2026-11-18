@@ -67,9 +67,8 @@ impl Drop for PendingGuard<'_> {
 
 pub(super) struct RestoreTarget {
     pub(super) committee: CommitteeId,
+    pub(super) session: Session,
     runtime: HostedRuntime,
-    cwd: PathBuf,
-    session_id: String,
 }
 
 /// A registered launch that the caller can still roll back if a subsequent
@@ -258,12 +257,6 @@ impl Shared {
         senator: &SenatorName,
     ) -> Result<RestoreTarget, IpcError> {
         let session = self.find_local_senator(senator).await?;
-        self.refuse_running_host(&Paths::new(&self.home), &session.session_id)?;
-        if session.runtime == Runtime::Claude && claude_reachable(&session).await {
-            return Err(IpcError::bad_request(
-                "the original session is still running; exit it before restoring",
-            ));
-        }
         let runtime = match session.runtime {
             Runtime::Codex => HostedRuntime::Codex,
             Runtime::Claude => HostedRuntime::Claude,
@@ -279,8 +272,7 @@ impl Shared {
         Ok(RestoreTarget {
             runtime,
             committee,
-            cwd: session.cwd,
-            session_id: session.session_id,
+            session,
         })
     }
 
@@ -301,12 +293,19 @@ impl Shared {
     where
         Fut: std::future::Future<Output = Result<(), IpcError>> + Send,
     {
+        let session = target.session;
+        self.refuse_running_host(&Paths::new(&self.home), &session.session_id)?;
+        if session.runtime == Runtime::Claude && claude_reachable(&session).await {
+            return Err(IpcError::bad_request(
+                "the original session is still running; exit it before restoring",
+            ));
+        }
         self.launch_host(
             target.runtime,
             target.committee,
             None,
-            target.cwd,
-            Some(target.session_id),
+            session.cwd,
+            Some(session.session_id),
             limit,
             audit,
         )

@@ -143,10 +143,48 @@ impl Shared {
         let auth = self.authorize_host_launch(selector).await?;
         let target = self.resolve_restore(senator).await?;
         auth.check_target(&target.committee, false)?;
+        self.check_restore_seat(&target.committee, &target.session.agent)
+            .await?;
         let launch = self
             .on_restore(target, Some(self.config.hosted_session_limit))
             .await?;
         self.finish_hosted_launch(&auth, true, false, launch).await
+    }
+
+    async fn check_restore_seat(
+        &self,
+        committee: &CommitteeId,
+        senator: &SenatorName,
+    ) -> Result<(), IpcError> {
+        let status = tokio::time::timeout(
+            ROLE_TIMEOUT,
+            self.api.committee_seat_status(committee, senator),
+        )
+        .await
+        .map_err(|_| {
+            IpcError::new(
+                codes::SERVER,
+                self.locale.pick(
+                    "查询委员会席位时服务器超时。",
+                    "The server timed out checking the committee seat.",
+                ),
+            )
+        })?
+        .map_err(server_error)?;
+        if status.unseated {
+            let who = Address::senator(senator).in_text();
+            let join = format!("senate seat join --committee {committee} --senator {senator}");
+            let message = match self.locale {
+                Locale::En => format!(
+                    "{who} was unseated from committee `{committee}`. Run `{join}` before restoring."
+                ),
+                Locale::Zh => {
+                    format!("{who} 已被委员会 `{committee}` 除席。请先运行 `{join}`，再恢复会话。")
+                }
+            };
+            return Err(IpcError::bad_request(message));
+        }
+        Ok(())
     }
 
     async fn finish_hosted_launch(

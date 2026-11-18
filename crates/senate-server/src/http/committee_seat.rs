@@ -1,10 +1,31 @@
 use axum::Json;
-use axum::extract::rejection::{JsonRejection, PathRejection};
-use axum::extract::{Path, State};
-use senate_core::api::{CommitteeSeatInfo, SetCommitteeSeat};
-use senate_core::{Address, CommitteeSeatChange};
+use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
+use axum::extract::{Path, Query, State};
+use senate_core::api::{CommitteeSeatInfo, CommitteeSeatStatus, SetCommitteeSeat};
+use senate_core::{Address, CommitteeSeatChange, SenatorName};
+use serde::Deserialize;
 
-use super::{ApiFailure, AppState, Person, committee_path, json_body};
+use super::{ApiFailure, AppState, Person, committee_path, json_body, query};
+
+#[derive(Deserialize)]
+pub(super) struct SeatQuery {
+    senator: SenatorName,
+}
+
+pub(super) async fn get_seat(
+    State(state): State<AppState>,
+    _person: Person,
+    path: Result<Path<String>, PathRejection>,
+    params: Result<Query<SeatQuery>, QueryRejection>,
+) -> Result<Json<CommitteeSeatStatus>, ApiFailure> {
+    let committee = committee_path(path)?;
+    let senator = state.hub.primary_name(&query(params)?.senator).await;
+    let unseated = state
+        .hub
+        .is_explicitly_unseated(&committee, &senator)
+        .await?;
+    Ok(Json(CommitteeSeatStatus { unseated }))
+}
 
 pub(super) async fn put_seat(
     State(state): State<AppState>,

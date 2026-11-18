@@ -477,6 +477,20 @@ impl ApiClient {
         Ok(checked(resp).await?.json().await?)
     }
 
+    pub(crate) async fn committee_seat_status(
+        &self,
+        committee: &CommitteeId,
+        senator: &SenatorName,
+    ) -> Result<api::CommitteeSeatStatus, ApiClientError> {
+        let url = self.url(&api::committee_seat_path(committee));
+        let resp = self
+            .authed(self.http.get(url))
+            .query(&[("senator", senator)])
+            .send()
+            .await?;
+        Ok(checked(resp).await?.json().await?)
+    }
+
     pub async fn set_committee_seat(
         &self,
         committee: &CommitteeId,

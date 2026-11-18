@@ -1066,6 +1066,18 @@ impl ServerHub {
         .map_err(log_error)
     }
 
+    /// Read the seat fence in the same order as explicit changes.
+    pub(crate) async fn is_explicitly_unseated(
+        &self,
+        committee: &CommitteeId,
+        senator: &SenatorName,
+    ) -> Result<bool, HubError> {
+        self.ask_writer(committee, |reply| {
+            CommitteeMsg::IsUnseated(senator.clone(), reply)
+        })
+        .await
+    }
+
     pub(crate) async fn set_committee_seat(
         &self,
         committee: &CommitteeId,
