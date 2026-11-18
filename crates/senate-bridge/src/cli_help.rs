@@ -77,7 +77,7 @@ fn orient(mut command: Command) -> Command {
             .about("Show the Senate, committee, chair, sessions, and delivery.")
             .mut_arg("full_ids", |arg| arg.help("Show complete session and senator IDs"))
             .after_help(
-                "Examples:\n  senate status\n  senate status --global\n  senate status --committee commons",
+                "Examples:\n  senate status\n  senate status --global\n  senate status --committee refund-v2",
             );
     }
     if let Some((_, summary)) = SUMMARIES

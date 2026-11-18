@@ -107,7 +107,7 @@ fn chair_name(info: &senate_core::api::ChairInfo, full_ids: bool, l: Locale) -> 
 }
 
 fn display_id(id: &str, full_ids: bool) -> String {
-    // Runtime-generated IDs are ASCII. Keep arbitrary session names intact.
+    // Byte offsets are safe for ASCII IDs. Preserve Unicode names in full.
     if !full_ids && id.is_ascii() && id.len() > 20 {
         format!("{}…{}", &id[..12], &id[id.len() - 6..])
     } else {

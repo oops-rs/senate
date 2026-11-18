@@ -335,6 +335,8 @@ A coding session resolves its active **committee** from the first of these that 
 
 `senate status` and `senate watch` default to the directory's committee. Use `--global` for every committee or `--committee <id>` to select one. Outside a bound directory their default is global. Scoped status counts only that committee's queue. For deployment, check the machine-wide queue with `senate status --global`.
 
+In a terminal, `senate status` fits delivery and session details to the available width. Use `--full-ids` to see complete senator and session IDs, or set `NO_COLOR=1` to turn off color. Piping or redirecting status and help preserves their plain-text format.
+
 `senate status` says which one bound each session (`join`, `branch name`, `file`).
 
 ```sh
