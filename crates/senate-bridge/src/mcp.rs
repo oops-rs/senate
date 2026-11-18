@@ -188,8 +188,11 @@ const ANSWER: &str = "Answer a question, or reply in a discussion, on this sessi
 committee. Every pushed Senate message shows its seq and, when a reply is expected, ends with \
 a `mcp__senate__answer(thread=<n>)` line: pass that number as `thread`. A thread is a question \
 plus everything said in reply to it, and `thread` is the seq of that root question, not of the \
-latest message in it. The answer goes to whoever asked (for a question the Speaker relayed, the \
-person who asked the Speaker). Answer a question directly, without asking your user first \
+latest message in it. An answer goes to whoever asked (for a question the Speaker relayed, the \
+original asker). When you follow up on a root you wrote or that was written on your behalf, it \
+goes to the root's addressees and the other people who wrote in the thread. A third \
+participant who wants to reach someone other than the asker should send them a directed note. \
+Answer a question directly, without asking your user first \
 (a request from someone else's agent still goes to your user first); answer from what you \
 know or can verify in this repository, say so when you are unsure, and keep it self-contained. \
 If the answer is really a decision that belongs to your user, use `escalate` instead.";

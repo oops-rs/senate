@@ -3653,14 +3653,9 @@ impl Shared {
         if body.trim().is_empty() {
             return Err(IpcError::bad_request("`body` is empty"));
         }
-        let mut root = self.fetch_event(&committee, thread).await?;
-        // Given a message inside a thread rather than its root, answer the root.
-        if let Some(r) = root.thread.filter(|r| *r != root.seq) {
-            root = self.fetch_event(&committee, r).await?;
-        }
-        // The thread rule: the root's principal if someone spoke for them,
-        // else whoever wrote the root.
-        let to = root
+        let root = self.task_root(&committee, thread).await?;
+        let thread = root.seq;
+        let asker = root
             .on_behalf_of
             .clone()
             .unwrap_or_else(|| root.from.clone());
@@ -3673,14 +3668,43 @@ impl Shared {
         if companion
             && lock(&self.companion)
                 .as_ref()
-                .is_some_and(|c| c.root != root.seq)
+                .is_some_and(|c| c.root != thread)
         {
             return Err(IpcError::bad_request(
                 "a companion session answers only the question it was started for",
             ));
         }
         let from = self.speaker_for(session.as_ref(), &committee, &acting)?;
-        let seen = self.seen_before(&committee, &[root.seq])?;
+        let to = if companion || acting.as_person || from != asker {
+            vec![asker]
+        } else if root.is_chair_discussion() && root.from == from {
+            // A discussion started here has a server-pinned peer on the
+            // other committee and no local recipient.
+            Vec::new()
+        } else {
+            let (_, events) = self.thread_events(&committee, root).await?;
+            let mut to = self.thread_participants(&events, &from, false);
+            if to.contains(&Address::Chair)
+                && self.current_chair(&committee).await.as_ref() == from.as_senator()
+            {
+                to.retain(|address| *address != Address::Chair);
+            }
+            if to.contains(&Address::Speaker) && self.desk_pusher().as_ref() == from.as_senator() {
+                to.retain(|address| *address != Address::Speaker);
+            }
+            if to.is_empty() {
+                return Err(IpcError::bad_request(self.locale.pick(
+                    format!(
+                        "委员会 `{committee}` 的 thread {thread} 中没有其他参与者可以接收回复。"
+                    ),
+                    format!(
+                        "There is nobody else to reply to in thread {thread} on `{committee}`."
+                    ),
+                )));
+            }
+            to
+        };
+        let seen = self.seen_before(&committee, &[thread])?;
         // The companion is a secretary of the agent: its answer is the
         // agent's, given by its secretary.
         let (from, behalf) = match (companion, from) {
@@ -3691,10 +3715,10 @@ impl Shared {
             (false, from) => (from, None),
         };
         let mut event = NewEvent::new(committee, Kind::Answer, from, body)
-            .to(to)
-            .in_thread(root.seq);
+            .with_to(to)
+            .in_thread(thread);
         if acting.as_person {
-            event = event.with_meta(meta::SEEN, serde_json::json!(seen_in(&seen, root.seq).0));
+            event = event.with_meta(meta::SEEN, serde_json::json!(seen_in(&seen, thread).0));
         }
         if let Some(principal) = behalf {
             // Registered before it speaks for the agent: the server takes
@@ -3715,9 +3739,7 @@ impl Shared {
             c.answered = true;
         }
         if acting.as_person {
-            posted.unseen_escalation = self
-                .mark_after_speaking(&posted, &[root.seq], &seen)
-                .await?;
+            posted.unseen_escalation = self.mark_after_speaking(&posted, &[thread], &seen).await?;
         }
         Ok(posted)
     }
@@ -3842,12 +3864,11 @@ impl Shared {
     async fn thread_events(
         &self,
         committee: &CommitteeId,
-        seq: Seq,
+        root: Event,
     ) -> Result<(Vec<Seq>, Vec<Event>), IpcError> {
-        let root = self.task_root(committee, seq).await?;
         let mut roots = vec![root.seq];
-        let mut events = vec![root.clone()];
         let mut after = root.seq;
+        let mut events = vec![root];
         loop {
             let page = match self.api.events(committee, after, Some(api::MAX_PAGE)).await {
                 Ok(page) => page,
@@ -3881,18 +3902,33 @@ impl Shared {
         Ok((roots, events))
     }
 
-    /// Everyone but the person who took part in a thread, as recipients of
-    /// what the person says in it: its senators (the Speaker only when no
-    /// senator is left).
-    fn thread_participants(&self, events: &[Event]) -> Vec<Address> {
-        let me = self.person();
+    /// Authors and addressees other than the speaker. A person's implicit
+    /// reply includes addressees of earlier replies. An agent following up
+    /// its own root includes only root addressees and authors.
+    fn thread_participants(
+        &self,
+        events: &[Event],
+        speaker: &Address,
+        include_reply_addressees: bool,
+    ) -> Vec<Address> {
         let mut out: Vec<Address> = Vec::new();
         for e in events {
+            let addressees = if include_reply_addressees || e.thread.is_none() {
+                e.to.as_slice()
+            } else {
+                &[]
+            };
             let named = std::iter::once(&e.from)
                 .chain(e.on_behalf_of.iter())
-                .chain(e.to.iter());
+                .chain(addressees);
             for a in named {
-                if matches!(a, Address::Senator(_)) && *a != me && !out.contains(a) {
+                let routable = matches!(a, Address::Senator(_))
+                    || (!include_reply_addressees
+                        && (matches!(
+                            a,
+                            Address::Chair | Address::Child { .. } | Address::Guest(_)
+                        ) || (*a == Address::Speaker && addressees.contains(a))));
+                if routable && a != speaker && !out.contains(a) {
                     out.push(a.clone());
                 }
             }
@@ -3956,9 +3992,10 @@ impl Shared {
         let mut spoke_in = Vec::new();
         let thread = match thread {
             Some(seq) => {
-                let (roots, events) = self.thread_events(&committee, seq).await?;
+                let root = self.task_root(&committee, seq).await?;
+                let (roots, events) = self.thread_events(&committee, root).await?;
                 if to.is_empty() {
-                    to = self.thread_participants(&events);
+                    to = self.thread_participants(&events, &self.person(), true);
                 }
                 // Where the agent that took it works: the latest relay's
                 // thread when the Speaker relayed it, else its own.
@@ -4168,7 +4205,8 @@ impl Shared {
         mark_seen: bool,
     ) -> Result<ThreadReply, IpcError> {
         let (_, committee) = self.session_and_committee(selector, committee)?;
-        let (roots, mut events) = self.thread_events(&committee, thread).await?;
+        let root = self.task_root(&committee, thread).await?;
+        let (roots, mut events) = self.thread_events(&committee, root).await?;
         events.sort_by_key(|e| e.seq);
         if mark_seen && let Some(last) = events.last() {
             // Showing a thread is reading it: the person has seen all of it

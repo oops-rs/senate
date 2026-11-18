@@ -59,6 +59,131 @@ async fn send(desk: &Desk, session: &str, at: &str, body: &str) -> SendReply {
     .await
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_request_author_can_follow_up_with_the_assignee_and_other_writers() {
+    use senate_bridge::ipc::{ClientError, Posted, codes};
+
+    for locale in [Locale::En, Locale::Zh] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut desk = Desk::new(dir.path(), "alice", locale, "[local]\n");
+        desk.start().await;
+        let author = desk.inbox("author");
+        let assignee = desk.inbox("assignee");
+        let contributor = desk.inbox("contributor");
+        for (session, inbox, agent) in [
+            ("author", &author, "claude"),
+            ("assignee", &assignee, "codex"),
+            ("contributor", &contributor, "copilot"),
+        ] {
+            desk.session_start_as(session, inbox, agent).await.unwrap();
+        }
+        let request: Posted = desk
+            .ipc(Request::Ask {
+                session: Laptop::session("author"),
+                to: vec![senator("codex")],
+                body: "Update the retry tests.".into(),
+                refs: None,
+                id: None,
+                request: true,
+            })
+            .await;
+        assignee.wait_for("Update the retry tests.").await;
+
+        let answer = desk
+            .answer("assignee", request.seq, "I will update the retry tests.")
+            .await;
+        assert_eq!(answer.to, [senator("claude")]);
+        author.wait_for("I will update the retry tests.").await;
+        let third = desk
+            .answer(
+                "contributor",
+                request.seq,
+                "The fixture already tests the first retry.",
+            )
+            .await;
+        assert_eq!(third.to, [senator("claude")]);
+        author
+            .wait_for("The fixture already tests the first retry.")
+            .await;
+
+        let hub = &desk.senate().daemon.hub;
+        hub.append(
+            NewEvent::new(
+                committee(),
+                Kind::Note,
+                senator("codex"),
+                "Note for a copied recipient.",
+            )
+            .to(senator("observer"))
+            .in_thread(request.seq),
+        )
+        .await
+        .unwrap();
+        let followup = desk
+            .answer("author", answer.seq, "Please cover the timeout case too.")
+            .await;
+        assert_eq!(followup.thread, Some(request.seq));
+        assert_eq!(followup.to, [senator("codex"), senator("copilot")]);
+        assignee
+            .wait_for("Please cover the timeout case too.")
+            .await;
+        contributor
+            .wait_for("Please cover the timeout case too.")
+            .await;
+
+        let relayed = hub
+            .append(
+                NewEvent::new(
+                    committee(),
+                    Kind::Request,
+                    Address::Speaker,
+                    "Please review the timeout fixture.",
+                )
+                .on_behalf_of(senator("claude"))
+                .to(senator("codex")),
+            )
+            .await
+            .unwrap()
+            .event;
+        let followup = desk
+            .answer("author", relayed.seq, "The fixture is ready for review.")
+            .await;
+        assert_eq!(followup.to, [senator("codex")]);
+        assignee.wait_for("The fixture is ready for review.").await;
+
+        let solo = desk
+            .post("author", "A note with no other participant.")
+            .await;
+        let error = desk
+            .try_ipc::<Posted>(Request::Answer {
+                session: Laptop::session("author"),
+                thread: solo.seq,
+                body: "There is no recipient for this follow-up.".into(),
+                id: None,
+                committee: None,
+                agent: None,
+                as_person: false,
+            })
+            .await
+            .unwrap_err();
+        let reason = locale.pick(
+            "没有其他参与者可以接收回复",
+            "There is nobody else to reply to",
+        );
+        assert!(
+            matches!(&error, ClientError::Remote(e)
+            if e.code == codes::BAD_REQUEST && e.message.contains(reason)),
+            "{error:?}"
+        );
+        let events = desk.events_of(&committee()).await;
+        assert!(
+            !events.iter().any(|e| e.thread == Some(solo.seq)),
+            "{events:?}"
+        );
+        desk.stop().await;
+    }
+}
+
 /// Alice's machine alone: claude (her secretary) and copilot on
 /// refund-v2, codex on ibot.
 async fn alices_machine(dir: &std::path::Path) -> (Desk, FakeInbox, FakeInbox, FakeInbox) {
@@ -587,6 +712,26 @@ async fn another_committees_chair_receives_discussion_but_requests_wait_on_the_d
             .count(),
         1
     );
+
+    // The source root has a server-pinned peer even before anyone writes
+    // back from the target committee.
+    let early = desk
+        .answer(
+            "author",
+            receipt.posted.seq,
+            "This is about address resolution.",
+        )
+        .await;
+    assert!(early.to.is_empty());
+    chair.wait_for("This is about address resolution.").await;
+    let early_copy = desk
+        .events_of(&target)
+        .await
+        .into_iter()
+        .find(|event| event.body == "This is about address resolution.")
+        .unwrap();
+    assert_eq!(early_copy.thread, Some(target_thread));
+    assert_eq!(early_copy.to, [senator("claude-maintainer")]);
 
     desk.answer("maintainer", target_thread, "Use the qualified address.")
         .await;
