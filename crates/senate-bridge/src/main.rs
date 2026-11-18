@@ -4,6 +4,8 @@
 //! the person, and writes the local profile (`senate init --local`). The
 //! daemon itself is `senated` (`senated --machine` on a developer machine).
 
+mod cli_help;
+
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -17,6 +19,7 @@ use senate_bridge::hook::{self, HookEnv, HookKind, HookTimeouts};
 use senate_bridge::ipc::SayKind;
 use senate_bridge::ipc::{self, DocketReply, InboxReply, Posted, Request, SessionSelector};
 use senate_bridge::session::Runtime;
+use senate_bridge::terminal::Terminal;
 use senate_bridge::{
     BridgeConfig, Paths, init, install, mcp, person, preside, service, speak, status,
 };
@@ -767,7 +770,7 @@ fn run_service(command: ServiceCmd) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run(command: Cmd) -> anyhow::Result<()> {
+fn run(command: Cmd, terminal: Option<Terminal>) -> anyhow::Result<()> {
     match command {
         Cmd::Hook { .. } => Ok(()),
         Cmd::Init {
@@ -1203,10 +1206,14 @@ fn run(command: Cmd) -> anyhow::Result<()> {
                 let view = status::collect_for(&paths, scope.as_ref()).await?;
                 Ok::<_, anyhow::Error>((view, scope))
             })?;
-            print!(
-                "{}",
-                status::render_scope(&view, chrono::Utc::now(), full_ids, committee.as_ref())
-            );
+            let now = chrono::Utc::now();
+            let text = match terminal {
+                Some(terminal) => {
+                    status::render_terminal(&view, now, full_ids, committee.as_ref(), terminal)
+                }
+                None => status::render_scope(&view, now, full_ids, committee.as_ref()),
+            };
+            print!("{text}");
             Ok(())
         }
         Cmd::Debug {
@@ -1242,12 +1249,13 @@ fn run(command: Cmd) -> anyhow::Result<()> {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let terminal = Terminal::stdout();
+    let cli = cli_help::parse(terminal);
     if let Cmd::Hook { event, codex } = cli.command {
         run_hook(event, codex);
         return ExitCode::SUCCESS;
     }
-    match run(cli.command) {
+    match run(cli.command, terminal) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("senate: {e:#}");
