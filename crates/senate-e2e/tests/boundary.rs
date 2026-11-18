@@ -687,6 +687,115 @@ async fn chair_handover_notifies_both_sessions_and_changes_their_tools() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn spawning_checks_scope_and_capacity_on_the_daemon() {
+    use senate_bridge::ipc::{ClientError, HostedRuntime, SpawnReply, codes};
+    use senate_bridge::mcp::SenateMcp;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut desk = Desk::new(
+        dir.path(),
+        "alice",
+        Locale::En,
+        "hosted_session_limit = 0\n[local]\nsecretaries = [\"office\"]\n",
+    );
+    desk.start().await;
+    let chair = desk.inbox("chair");
+    let member = desk.inbox("member");
+    let office = desk.inbox("office");
+    desk.session_start_as("chair", &chair, "claude")
+        .await
+        .unwrap();
+    desk.session_start_as("member", &member, "codex")
+        .await
+        .unwrap();
+    desk.session_start_as("office", &office, "office")
+        .await
+        .unwrap();
+    desk.senate()
+        .daemon
+        .hub
+        .append(NewEvent::new(
+            ibot(),
+            Kind::Note,
+            person("alice"),
+            "ibot opens",
+        ))
+        .await
+        .unwrap();
+
+    for (session, allowed) in [("chair", true), ("office", true), ("member", false)] {
+        let mcp = SenateMcp::new(desk.paths.socket(), Laptop::session(session));
+        assert_eq!(
+            mcp.tools().await.iter().any(|tool| tool.name == "spawn"),
+            allowed
+        );
+    }
+    let spawn = |session, committee, chair| Request::Spawn {
+        session,
+        committee,
+        runtime: HostedRuntime::Codex,
+        alias: None,
+        cwd: dir.path().to_path_buf(),
+        chair,
+    };
+    for (session, committee, chair, code, message) in [
+        (
+            "member",
+            committee(),
+            false,
+            codes::NOT_CHAIRING,
+            "only the Speaker's office or this committee's chair",
+        ),
+        (
+            "chair",
+            ibot(),
+            false,
+            codes::NOT_PRESIDING,
+            "another committee",
+        ),
+        (
+            "chair",
+            committee(),
+            true,
+            codes::NOT_PRESIDING,
+            "office may start a chair",
+        ),
+        (
+            "chair",
+            committee(),
+            false,
+            codes::BAD_REQUEST,
+            "hosted session limit (0)",
+        ),
+        (
+            "office",
+            ibot(),
+            true,
+            codes::BAD_REQUEST,
+            "hosted session limit (0)",
+        ),
+    ] {
+        let error = desk
+            .try_ipc::<SpawnReply>(spawn(Laptop::session(session), committee, chair))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, ClientError::Remote(e) if e.code == code && e.message.contains(message)),
+            "{error:?}"
+        );
+    }
+    let cli = desk
+        .try_ipc::<SpawnReply>(spawn(Default::default(), committee(), false))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&cli, ClientError::Remote(e) if e.message.contains("hosted session limit (0)"))
+    );
+    assert!(!desk.paths.home().join("hosts").exists());
+    desk.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_team_principals_agent_crosses_committees_by_way_of_the_desk() {
     // A team's Senate: bob presides; `north-desk` is a team (a principal
     // that is no person), with its own token, running the agent `runner`.

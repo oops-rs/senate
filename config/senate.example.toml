@@ -57,6 +57,10 @@ person = "alice"
 # with no session and no contact for this many days. Default 30.
 # free_after_days = 30
 
+# Optional maximum for running and starting Senate-hosted sessions on
+# this machine. The default is 4. Set it to 0 to disable spawn and restore.
+# hosted_session_limit = 4
+
 # Optional: the first segment of a developer branch,
 # `<branch_prefix>/<committee>/<person>`: what `committee_from_branch`
 # reads, and how the Speaker names its work branches. Default "feature".

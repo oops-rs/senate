@@ -22,6 +22,8 @@
 //! # Optional: `senate free` forgets the queued items and cursors of an
 //! # agent with no session and no contact for this many days.
 //! free_after_days = 30
+//! # Optional: at most this many Senate-hosted sessions on the machine.
+//! hosted_session_limit = 4
 //!
 //! # Optional: the agent each kind of coding session speaks as. These are
 //! # the defaults.
@@ -92,6 +94,10 @@ pub struct BridgeConfig {
     /// for this many days left in the daemon's state.
     #[serde(default = "default_free_after_days")]
     pub free_after_days: u64,
+    /// Maximum running or starting Senate-hosted sessions. Zero disables
+    /// starting and restoring hosted sessions.
+    #[serde(default = "default_hosted_session_limit")]
+    pub hosted_session_limit: usize,
     /// First segment of a developer branch, `<prefix>/<committee>/<person>`.
     #[serde(default = "default_branch_prefix")]
     pub branch_prefix: String,
@@ -199,6 +205,10 @@ fn default_free_after_days() -> u64 {
     crate::binding::DEFAULT_FREE_AFTER_DAYS
 }
 
+fn default_hosted_session_limit() -> usize {
+    4
+}
+
 fn default_branch_prefix() -> String {
     DEFAULT_BRANCH_PREFIX.to_string()
 }
@@ -214,6 +224,7 @@ impl fmt::Debug for BridgeConfig {
             .field("brief_chars", &self.brief_chars)
             .field("committee_from_branch", &self.committee_from_branch)
             .field("free_after_days", &self.free_after_days)
+            .field("hosted_session_limit", &self.hosted_session_limit)
             .field("branch_prefix", &self.branch_prefix)
             .field("agents", &self.agents)
             .field("uplink", &self.uplink)
@@ -664,6 +675,7 @@ impl BridgeConfig {
             brief_chars: DEFAULT_BRIEF_CHARS,
             committee_from_branch: false,
             free_after_days: default_free_after_days(),
+            hosted_session_limit: default_hosted_session_limit(),
             branch_prefix: default_branch_prefix(),
             agents: AgentNames::default(),
             uplink: None,

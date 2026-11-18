@@ -168,6 +168,7 @@ use crate::state::{ItemKey, ItemStatus, QueueItem, SessionUpsert, Store, StoreEr
 use crate::stream::{self, CommitteeWorker};
 
 mod front;
+mod host_policy;
 mod hosts;
 mod preside;
 mod roles;
@@ -859,7 +860,10 @@ fn orientation(
 fn orientation_role(agent: &SenatorName, chair: Option<&SenatorName>, locale: Locale) -> String {
     if chair == Some(agent) {
         let tools = crate::mcp::CHAIR_TOOLS
+            .into_iter()
+            .chain([crate::mcp::SPAWN_TOOL])
             .map(|name| format!("mcp__senate__{name}"))
+            .collect::<Vec<_>>()
             .join(", ");
         return match locale {
             Locale::Zh => {
@@ -2550,28 +2554,20 @@ impl Shared {
                 version: env!("CARGO_PKG_VERSION").to_string(),
             }),
             Request::Aliases => wrap(self.api.aliases().await.map_err(server_error)),
-            Request::Spawn { chair: true, .. } => Reply::err(IpcError::bad_request(
-                "chair appointment is unavailable through this operation",
-            )),
             Request::Spawn {
+                session,
                 runtime,
                 committee,
                 alias,
                 cwd,
-                ..
+                chair,
             } => wrap(
-                self.on_spawn(runtime, committee, alias, cwd, None)
-                    .await
-                    .map(hosts::HostedLaunch::finish),
+                self.on_hosted_spawn(&session, runtime, committee, alias, cwd, chair)
+                    .await,
             ),
-            Request::Restore { senator, .. } => match self.resolve_restore(&senator).await {
-                Ok(target) => wrap(
-                    self.on_restore(target, None)
-                        .await
-                        .map(hosts::HostedLaunch::finish),
-                ),
-                Err(error) => Reply::err(error),
-            },
+            Request::Restore { session, senator } => {
+                wrap(self.on_hosted_restore(&session, &senator).await)
+            }
             Request::Attach { senator } => wrap(self.on_attach(senator).await),
             Request::Receipt { committee, seq } => wrap(self.receipt(&committee, seq).await),
             Request::SetCommitteeSeat { committee, request } => {

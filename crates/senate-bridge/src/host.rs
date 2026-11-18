@@ -27,7 +27,7 @@ use crate::paths::{HOME_ENV, Paths, SOCKET_PATH_LIMIT};
 pub use terminal::attach;
 
 pub(crate) const START_TIMEOUT: Duration = Duration::from_secs(10);
-pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(75);
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 const IO_CHUNK: usize = 8192;
 const ATTACHED: u8 = 1;
 const BUSY: u8 = 0;
