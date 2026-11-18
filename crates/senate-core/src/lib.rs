@@ -90,6 +90,7 @@ pub mod locale;
 pub mod locator;
 pub mod mention;
 pub mod roster;
+pub mod secretary_work;
 pub mod senate;
 pub mod senator;
 pub mod senator_id;

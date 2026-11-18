@@ -42,6 +42,8 @@
 //! | PUT  | `/v1/committees/{committee}/seat` | [`SetCommitteeSeat`] → [`CommitteeSeatInfo`] |
 //! | GET  | `/v1/secretaries` | → [`Secretaries`] |
 //! | PUT  | `/v1/secretaries/{senator}` | [`SetSecretaries`] → [`Secretaries`] |
+//! | PUT  | `/v1/secretaries/{senator}/session` | [`SetSecretarySession`](crate::secretary_work::SetSecretarySession) → [`Secretaries`] |
+//! | POST | `/v1/secretaries/{senator}/work` | [`SecretaryWorkRequest`](crate::secretary_work::SecretaryWorkRequest) → [`SecretaryWorkReply`](crate::secretary_work::SecretaryWorkReply) |
 //! | GET  | `/v1/children` | → [`Vec<ChildSenate>`](ChildSenate) |
 //! | PUT  | `/v1/children/{name}` | [`RegisterChild`] → [`ChildSenate`] |
 //!
@@ -245,6 +247,16 @@ pub fn committee_seat_path(committee: &CommitteeId) -> String {
 pub fn secretaries_of_path(senator: &SenatorName) -> String {
     format!("{SECRETARIES_PATH}/{senator}")
 }
+
+pub fn secretary_session_path(principal: &SenatorName) -> String {
+    format!("{SECRETARIES_PATH}/{principal}/session")
+}
+
+pub fn secretary_work_path(principal: &SenatorName) -> String {
+    format!("{SECRETARIES_PATH}/{principal}/work")
+}
+
+pub const SECRETARY_REMINDERS_PATH: &str = "/v1/secretary-reminders";
 
 pub fn child_path(name: &Name) -> String {
     format!("{CHILDREN_PATH}/{name}")

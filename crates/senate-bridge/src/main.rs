@@ -5,6 +5,7 @@
 //! daemon itself is `senated` (`senated --machine` on a developer machine).
 
 mod cli_help;
+mod cli_secretary;
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -84,6 +85,8 @@ enum Cmd {
     },
     /// List the registered aliases and their primary senator IDs.
     Aliases,
+    /// Appoint session secretaries and manage explicit shared work.
+    SecretaryTeam(cli_secretary::SecretaryTeam),
     /// Remove this worktree's committee binding on the current branch.
     Leave,
     /// Change one senator's membership of a committee.
@@ -836,6 +839,7 @@ fn run(command: Cmd, terminal: Option<Terminal>) -> anyhow::Result<()> {
             }
             Ok(())
         }
+        Cmd::SecretaryTeam(args) => cli_secretary::run(args),
         Cmd::Seat { command } => {
             let (action, args) = match command {
                 SeatCmd::Unseat(args) => (CommitteeSeatAction::Unseat, args),

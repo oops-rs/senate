@@ -4,6 +4,7 @@ mod chair_discussion;
 mod committee_seat;
 mod error;
 mod roles;
+mod secretary_work;
 mod sse;
 
 use std::sync::Arc;
@@ -79,6 +80,15 @@ pub(crate) fn router(state: AppState) -> Router {
         )
         .route("/v1/secretaries", get(roles::secretaries))
         .route("/v1/secretaries/{senator}", put(roles::put_secretaries))
+        .route(
+            "/v1/secretaries/{senator}/session",
+            put(secretary_work::put_session),
+        )
+        .route("/v1/secretaries/{senator}/work", post(secretary_work::work))
+        .route(
+            senate_core::api::SECRETARY_REMINDERS_PATH,
+            post(secretary_work::reminders).put(secretary_work::ack_reminder),
+        )
         .route("/v1/children", get(roles::children))
         .route(
             "/v1/children/{name}",

@@ -351,6 +351,7 @@ fn selector_of(request: &Request) -> Option<&SessionSelector> {
         | Request::Checkpoint { session, .. }
         | Request::Send { session, .. }
         | Request::Secretaries { session, .. }
+        | Request::SecretaryWork { session, .. }
         | Request::ChairDocket { session }
         | Request::ChairRoute { session, .. }
         | Request::ChairCover { session, .. }

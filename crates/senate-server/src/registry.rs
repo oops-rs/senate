@@ -90,10 +90,10 @@ pub(crate) async fn put_secretaries(
     principal: &SenatorName,
     secretaries: &[SenatorName],
 ) -> Result<(), LogError> {
-    let value =
-        (!secretaries.is_empty()).then(|| serde_json::to_value(secretaries).unwrap_or(Value::Null));
+    // An empty list overrides a configured default on restart.
+    let value = serde_json::to_value(secretaries).unwrap_or(Value::Null);
     store
-        .put_registry(&format!("{SECRETARIES}{principal}"), value)
+        .put_registry(&format!("{SECRETARIES}{principal}"), Some(value))
         .await
 }
 
