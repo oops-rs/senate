@@ -398,6 +398,7 @@ When running `senate install --yes`, Senate registers an MCP server and session 
 ### The `senate` CLI
 
 - `senate install`: Dry-run configuration updates for Claude Code and Codex (`--yes` to apply).
+- `senate receipt <seq> --committee <id> [--json]`: inspect an event's log receipt and any matching delivery records on this machine. Agents can use the read-only MCP tool `receipt(committee, seq)`. A recorded event has a sequence number; a bridge delivery record identifies a subsequent transport or read action. If the host blocks publication before Senate receives it, that attempt produces no receipt. Independent tasks can continue using their existing authorization.
 - `senate status`: Shows the Senate's path, its Speaker (as a senator id, and what kind), who works the desk, each committee's chair, child Senates, sessions.
 - `senate inbox [--all]`: Displays the threads that wait on someone (a thread whose last word is an answer is settled: counted, and listed with `--all`), and docket items.
 - `senate ask|tell|request <to> <text…>`: Speaks as yourself: a question (`--wait[=<seconds>]` stays for the answer), a note, or a request. `--json` prints the raw result.

@@ -2416,6 +2416,7 @@ impl Shared {
                 version: env!("CARGO_PKG_VERSION").to_string(),
             }),
             Request::Aliases => wrap(self.api.aliases().await.map_err(server_error)),
+            Request::Receipt { committee, seq } => wrap(self.receipt(&committee, seq).await),
             Request::SetCommitteeSeat { committee, request } => {
                 let result = self.api.set_committee_seat(&committee, &request).await;
                 if result.is_ok() {
@@ -3384,6 +3385,44 @@ impl Shared {
     async fn page_error(&self, e: ApiClientError) -> IpcError {
         self.note_epoch(e.epoch()).await;
         server_error(e)
+    }
+
+    /// Inspect the log and queue without performing intake, resetting an epoch,
+    /// touching a session, or advancing either kind of read cursor.
+    async fn receipt(
+        &self,
+        committee: &CommitteeId,
+        seq: Seq,
+    ) -> Result<ipc::EventReceipt, IpcError> {
+        let missing = || {
+            IpcError::bad_request(match self.locale {
+                Locale::Zh => format!("{committee} 没有 seq {seq} 的事件。"),
+                Locale::En => format!("No event recorded at seq {seq} on {committee}."),
+            })
+        };
+        let before = seq.0.checked_sub(1).ok_or_else(missing)?;
+        let page = match self.api.events(committee, Seq(before), Some(1)).await {
+            Ok(page) => page,
+            Err(e) if e.is_cursor_ahead() => return Err(missing()),
+            Err(e) => return Err(server_error(e)),
+        };
+        let value = page.events.into_iter().next().ok_or_else(missing)?;
+        let event = match client::decode_event(value) {
+            Decoded::Event(e) if e.seq == seq => e,
+            Decoded::Undecodable { error, .. } => return Err(IpcError::bad_request(error)),
+            _ => return Err(missing()),
+        };
+        let local_deliveries = self.store.local_deliveries(&event).map_err(internal)?;
+        Ok(ipc::EventReceipt {
+            committee: event.committee,
+            seq,
+            id: event.id,
+            thread: event.thread.unwrap_or(seq),
+            kind: event.kind,
+            from: event.from,
+            to: event.to,
+            local_deliveries,
+        })
     }
 
     /// One stored event, read as `GET .../events?after=<seq-1>&limit=1`.

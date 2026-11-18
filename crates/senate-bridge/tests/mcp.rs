@@ -180,6 +180,7 @@ async fn ask_answer_and_catch_up_end_to_end() {
             "join",
             "post",
             "propose_decision",
+            "receipt",
             "search",
             "secretary",
             "secretary_cover",
@@ -307,6 +308,31 @@ async fn ask_answer_and_catch_up_end_to_end() {
             .then_some(())
     })
     .await;
+    assert_eq!(tool("receipt")["annotations"]["readOnlyHint"], true);
+    let marks = h.store().seen(&committee()).unwrap();
+    let local = h.store().counts().unwrap();
+    let event_count = h.server.events("refund-v2").len();
+    let last_seen = h.store().session("m1").unwrap().unwrap().last_seen;
+    let read = h.server.cursor("refund-v2", "claude", "read");
+    let (err, receipt) = mcp
+        .call("receipt", json!({"committee":"refund-v2","seq":2}))
+        .await;
+    assert!(
+        !err && receipt.contains("recorded") && receipt.contains("queued"),
+        "{receipt}"
+    );
+    assert_eq!(h.store().seen(&committee()).unwrap(), marks);
+    assert_eq!(h.store().counts().unwrap(), local);
+    assert_eq!(h.server.events("refund-v2").len(), event_count);
+    assert_eq!(
+        h.store().session("m1").unwrap().unwrap().last_seen,
+        last_seen
+    );
+    assert_eq!(h.server.cursor("refund-v2", "claude", "read"), read);
+    let (err, missing) = mcp
+        .call("receipt", json!({"committee":"refund-v2","seq":9999}))
+        .await;
+    assert!(err && missing.contains("No event recorded"), "{missing}");
     let (err, text) = mcp.call("catch_up", json!({})).await;
     assert!(!err, "{text}");
     assert!(
@@ -347,6 +373,13 @@ async fn ask_answer_and_catch_up_end_to_end() {
         "nothing left to hand over after catch_up"
     );
 
+    let (err, delivered) = mcp
+        .call("receipt", json!({"committee":"refund-v2","seq":2}))
+        .await;
+    assert!(
+        !err && delivered.contains("delivered (catch_up)"),
+        "{delivered}"
+    );
     let (_, text) = mcp.call("catch_up", json!({})).await;
     assert!(
         text.contains("Nothing new on refund-v2 since seq 9"),
