@@ -33,21 +33,29 @@ pub fn render_terminal(
         &scope.map_or_else(|| l.pick("全部", "all").into(), ToString::to_string),
         0,
     );
+    let chair_label = l.pick("主席", "Chair");
+    let chair_width = if full_ids {
+        usize::MAX
+    } else {
+        terminal
+            .columns()
+            .saturating_sub(display_width(chair_label) + 2)
+    };
     if let Some(committee) = scope {
         let chair = roles
             .and_then(|r| r.chairs.iter().find(|c| &c.committee == committee))
             .map_or_else(
                 || l.pick("未知", "unknown").into(),
-                |info| chair_name(info, full_ids, l),
+                |info| chair_name(info, "", chair_width, l),
             );
-        field(terminal, &mut out, l.pick("主席", "Chair"), &chair, 0);
+        field(terminal, &mut out, chair_label, &chair, 0);
     } else if let Some(roles) = roles {
         for info in &roles.chairs {
             field(
                 terminal,
                 &mut out,
-                l.pick("主席", "Chair"),
-                &format!("{}  {}", info.committee, chair_name(info, full_ids, l)),
+                chair_label,
+                &chair_name(info, &format!("{}  ", info.committee), chair_width, l),
                 0,
             );
         }
@@ -99,17 +107,28 @@ pub fn render_terminal(
     out
 }
 
-fn chair_name(info: &senate_core::api::ChairInfo, full_ids: bool, l: Locale) -> String {
-    info.chair.as_ref().map_or_else(
-        || l.pick("暂无", "none").into(),
-        |chair| format!("[senator::{}]", display_id(chair.as_str(), full_ids)),
+const COMPACT_ID_WIDTH: usize = 19;
+
+fn chair_name(
+    info: &senate_core::api::ChairInfo,
+    prefix: &str,
+    width: usize,
+    locale: Locale,
+) -> String {
+    let Some(chair) = &info.chair else {
+        return format!("{prefix}{}", locale.pick("暂无", "none"));
+    };
+    let id_width = width.saturating_sub(display_width(prefix) + "[senator::]".len());
+    format!(
+        "{prefix}[senator::{}]",
+        display_id(chair.as_str(), id_width)
     )
 }
 
-fn display_id(id: &str, full_ids: bool) -> String {
-    // Byte offsets are safe for ASCII IDs. Preserve Unicode names in full.
-    if !full_ids && id.is_ascii() && id.len() > 20 {
-        format!("{}…{}", &id[..12], &id[id.len() - 6..])
+fn display_id(id: &str, width: usize) -> String {
+    let width = width.max(COMPACT_ID_WIDTH);
+    if id.is_ascii() && id.len() > width {
+        format!("{}…{}", &id[..width - 7], &id[id.len() - 6..])
     } else {
         id.to_owned()
     }
@@ -119,35 +138,119 @@ fn field(terminal: Terminal, out: &mut String, label: &str, value: &str, indent:
     terminal.line(out, &format!("{label}  {value}"), indent, false);
 }
 
+/// ID cells may abbreviate their value. A suffix such as the configured marker
+/// always keeps its own space.
+enum Cell {
+    Text(String),
+    Id(String, &'static str),
+}
+
+impl Cell {
+    fn fit(&self, width: usize) -> String {
+        match self {
+            Self::Text(text) => printable(text).into_owned(),
+            Self::Id(id, suffix) => {
+                let id = printable(id);
+                format!(
+                    "{}{suffix}",
+                    display_id(&id, width.saturating_sub(suffix.len()))
+                )
+            }
+        }
+    }
+}
+
 struct Row {
-    cells: Vec<String>,
+    cells: Vec<Cell>,
     details: Vec<(&'static str, String)>,
 }
 
-fn records(terminal: Terminal, out: &mut String, headers: &[&str], mut rows: Vec<Row>) {
+fn records(
+    terminal: Terminal,
+    out: &mut String,
+    mut headers: Vec<&'static str>,
+    mut rows: Vec<Row>,
+    full_ids: bool,
+    optional_columns: &[&'static str],
+) {
+    // Start with the smallest useful ID in each column, or the complete ID
+    // when explicitly requested. Measure in display columns for both locales.
     let mut widths: Vec<_> = headers.iter().map(|h| display_width(h)).collect();
-    for row in &mut rows {
-        for (cell, width) in row.cells.iter_mut().zip(&mut widths) {
-            *cell = printable(cell).into_owned();
-            *width = (*width).max(display_width(cell));
+    let mut natural = widths.clone();
+    let min_width = if full_ids { usize::MAX } else { 0 };
+    for row in &rows {
+        for (i, cell) in row.cells.iter().enumerate() {
+            widths[i] = widths[i].max(display_width(&cell.fit(min_width)));
+            natural[i] = natural[i].max(display_width(&cell.fit(usize::MAX)));
         }
     }
-    let fits = widths.iter().sum::<usize>() + 2 * headers.len() <= terminal.columns();
+    let minimum = widths.iter().sum::<usize>() + 2 * headers.len();
+    let fits = minimum <= terminal.columns();
     if fits {
+        let mut spare = terminal.columns() - minimum;
+        // Share space between abbreviated columns. Satisfy smaller deficits
+        // first so one short ID never strands space a longer ID could use.
+        let mut elastic: Vec<_> = (0..widths.len())
+            .filter(|&i| natural[i] > widths[i])
+            .collect();
+        elastic.sort_by_key(|&i| natural[i] - widths[i]);
+        for (pos, &i) in elastic.iter().enumerate() {
+            let extra = (natural[i] - widths[i]).min(spare.div_ceil(elastic.len() - pos));
+            widths[i] += extra;
+            spare -= extra;
+        }
+
+        for &label in optional_columns {
+            let Some(max_value) = rows
+                .iter()
+                .flat_map(|row| &row.details)
+                .filter(|(key, _)| *key == label)
+                .map(|(_, value)| display_width(&printable(value)))
+                .max()
+            else {
+                continue;
+            };
+            let width = display_width(label).max(max_value);
+            if width + 2 > spare {
+                continue;
+            }
+            headers.push(label);
+            widths.push(width);
+            spare -= width + 2;
+            for row in &mut rows {
+                let value = row
+                    .details
+                    .iter()
+                    .position(|(key, _)| *key == label)
+                    .map_or_else(|| "—".into(), |pos| row.details.remove(pos).1);
+                row.cells.push(Cell::Text(value));
+            }
+        }
         let heading = table_line(headers.iter().copied(), &widths);
         out.push_str(&terminal.emphasis(&heading));
         out.push('\n');
     }
     for (i, row) in rows.into_iter().enumerate() {
         if fits {
-            out.push_str(&table_line(row.cells.iter().map(String::as_str), &widths));
+            let values: Vec<_> = row
+                .cells
+                .iter()
+                .zip(&widths)
+                .map(|(cell, &w)| cell.fit(w))
+                .collect();
+            out.push_str(&table_line(values.iter().map(String::as_str), &widths));
             out.push('\n');
         } else {
             if i != 0 {
                 out.push('\n');
             }
             for (label, cell) in headers.iter().zip(&row.cells) {
-                field(terminal, out, label, cell, 2);
+                let available = if full_ids {
+                    usize::MAX
+                } else {
+                    terminal.columns().saturating_sub(4 + display_width(label))
+                };
+                field(terminal, out, label, &cell.fit(available), 2);
             }
         }
         for (label, value) in row.details {
@@ -210,23 +313,19 @@ fn delivery(
                 state => stream_text(state, now, l),
             };
             let mut cells = vec![
-                format!(
-                    "{}{}",
-                    display_id(f.agent.as_str(), full_ids),
-                    if f.configured { " *" } else { "" },
-                ),
-                f.delivered.to_string(),
-                f.reported.to_string(),
-                f.sessions.to_string(),
-                stream,
+                Cell::Id(f.agent.to_string(), if f.configured { " *" } else { "" }),
+                Cell::Text(f.delivered.to_string()),
+                Cell::Text(f.reported.to_string()),
+                Cell::Text(f.sessions.to_string()),
+                Cell::Text(stream),
             ];
             if show_committee {
-                cells.insert(0, f.committee.to_string());
+                cells.insert(0, Cell::Text(f.committee.to_string()));
             }
             Row { cells, details }
         })
         .collect();
-    records(terminal, out, &headers, rows);
+    records(terminal, out, headers, rows, full_ids, &[]);
     if view.committees.iter().any(|f| f.configured) {
         terminal.line(
             out,
@@ -258,6 +357,9 @@ fn sessions(
         );
         return;
     }
+    let binding = l.pick("绑定", "Binding");
+    let branch_label = l.pick("分支", "Branch");
+    let cwd = l.pick("目录", "CWD");
     let mut headers = l.pick(
         vec!["ID", "Agent", "状态", "推送", "最近活动"],
         vec!["ID", "Agent", "State", "Push", "Last seen"],
@@ -275,26 +377,33 @@ fn sessions(
                 SessionState::Ended => l.pick("已结束", "ended"),
             };
             let mut cells = vec![
-                display_id(&s.session_id, full_ids),
-                display_id(s.agent.as_str(), full_ids),
-                state.into(),
-                session_push(s, l),
-                ago(s.last_seen, now, l),
+                Cell::Id(s.session_id.clone(), ""),
+                Cell::Id(s.agent.to_string(), ""),
+                Cell::Text(state.into()),
+                Cell::Text(session_push(s, l)),
+                Cell::Text(ago(s.last_seen, now, l)),
             ];
             let mut details = Vec::new();
             if show_committee {
-                cells.insert(2, session_committee(s, l));
+                cells.insert(2, Cell::Text(session_committee(s, l)));
             } else if let Some(source) = s.effective_source() {
-                details.push((l.pick("绑定", "Binding"), source.label(l).into()));
+                details.push((binding, source.label(l).into()));
             }
             if let Some(branch) = &s.branch {
-                details.push((l.pick("分支", "Branch"), branch.clone()));
+                details.push((branch_label, branch.clone()));
             }
-            details.push((l.pick("目录", "CWD"), home_relative(&s.cwd)));
+            details.push((cwd, home_relative(&s.cwd)));
             Row { cells, details }
         })
         .collect();
-    records(terminal, out, &headers, rows);
+    records(
+        terminal,
+        out,
+        headers,
+        rows,
+        full_ids,
+        &[binding, branch_label, cwd],
+    );
 }
 
 fn connection(
