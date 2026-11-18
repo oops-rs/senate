@@ -4,6 +4,9 @@
 
 use std::io::Read as _;
 
+use tokio::process::Child;
+use tokio::sync::oneshot;
+
 use super::*;
 use crate::host;
 use crate::ipc::{HostedRuntime, SpawnReply};
@@ -44,6 +47,66 @@ pub(super) struct RestoreTarget {
     runtime: HostedRuntime,
     cwd: PathBuf,
     session_id: String,
+}
+
+/// A registered launch that the caller can still roll back if a subsequent
+/// Senate operation fails. The receipt sent to IPC clients has no process
+/// handle, and the wait task survives the caller dropping its handle.
+pub(super) struct HostedLaunch {
+    pub(super) reply: SpawnReply,
+    pub(super) process: HostProcess,
+}
+
+impl HostedLaunch {
+    pub(super) fn finish(self) -> SpawnReply {
+        drop(self.process);
+        self.reply
+    }
+}
+
+pub(super) struct HostProcess {
+    stop: oneshot::Sender<oneshot::Sender<Result<(), IpcError>>>,
+}
+
+impl HostProcess {
+    fn monitor(mut child: Child) -> Self {
+        let (stop, requested) = oneshot::channel::<oneshot::Sender<_>>();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = child.wait() => {}
+                result = requested => match result {
+                    Ok(ack) => { let _ = ack.send(stop_child(&mut child).await); }
+                    Err(_) => { let _ = child.wait().await; }
+                }
+            }
+        });
+        Self { stop }
+    }
+
+    pub(super) async fn stop(self) -> Result<(), IpcError> {
+        let (ack, result) = oneshot::channel();
+        if self.stop.send(ack).is_err() {
+            return Ok(()); // Already reaped by the monitor.
+        }
+        result.await.map_err(IpcError::internal)?
+    }
+}
+
+async fn stop_child(child: &mut Child) -> Result<(), IpcError> {
+    if let Some(pid) = child
+        .id()
+        .and_then(|pid| i32::try_from(pid).ok())
+        .and_then(rustix::process::Pid::from_raw)
+    {
+        match rustix::process::kill_process(pid, rustix::process::Signal::TERM) {
+            Ok(()) | Err(rustix::io::Errno::SRCH) => {}
+            Err(error) => return Err(IpcError::internal(error)),
+        }
+    }
+    match tokio::time::timeout(Duration::from_secs(4), child.wait()).await {
+        Ok(status) => status.map(|_| ()).map_err(IpcError::internal),
+        Err(_) => child.kill().await.map_err(IpcError::internal),
+    }
 }
 
 impl Launches {
@@ -89,7 +152,8 @@ impl Shared {
         committee: CommitteeId,
         alias: Option<SenatorName>,
         cwd: PathBuf,
-    ) -> Result<SpawnReply, IpcError> {
+        limit: Option<usize>,
+    ) -> Result<HostedLaunch, IpcError> {
         // Validate before starting a child, and never let spawn create a
         // committee merely by turning on a stream for an unknown name.
         let me = tokio::time::timeout(Duration::from_secs(5), self.api.me())
@@ -101,7 +165,8 @@ impl Shared {
                 "unknown committee {committee}"
             )));
         }
-        self.launch_host(runtime, committee, alias, cwd, None).await
+        self.launch_host(runtime, committee, alias, cwd, None, limit)
+            .await
     }
 
     /// Aliases are Senate-wide. The runtime, path and committee must come
@@ -163,13 +228,18 @@ impl Shared {
         })
     }
 
-    pub(super) async fn on_restore(&self, target: RestoreTarget) -> Result<SpawnReply, IpcError> {
+    pub(super) async fn on_restore(
+        &self,
+        target: RestoreTarget,
+        limit: Option<usize>,
+    ) -> Result<HostedLaunch, IpcError> {
         self.launch_host(
             target.runtime,
             target.committee,
             None,
             target.cwd,
             Some(target.session_id),
+            limit,
         )
         .await
     }
@@ -209,7 +279,8 @@ impl Shared {
         alias: Option<SenatorName>,
         cwd: PathBuf,
         resume: Option<String>,
-    ) -> Result<SpawnReply, IpcError> {
+        limit: Option<usize>,
+    ) -> Result<HostedLaunch, IpcError> {
         if !cwd.is_absolute() {
             return Err(IpcError::bad_request(
                 "the project directory must be absolute",
@@ -235,6 +306,9 @@ impl Shared {
         let (reply, result) = tokio::sync::oneshot::channel();
         {
             let mut launches = lock(&self.hosts.0);
+            if let Some(limit) = limit {
+                self.check_host_capacity(&paths, &launches, limit)?;
+            }
             if let Some(id) = &resume {
                 if launches
                     .values()
@@ -289,20 +363,39 @@ impl Shared {
             }
         };
 
-        if result.is_err()
-            && let Some(pid) = child
-                .id()
-                .and_then(|pid| i32::try_from(pid).ok())
-                .and_then(rustix::process::Pid::from_raw)
-        {
-            let _ = rustix::process::kill_process(pid, rustix::process::Signal::TERM);
+        let process = HostProcess::monitor(child);
+        match result {
+            Ok(reply) => Ok(HostedLaunch { reply, process }),
+            Err(error) => {
+                if let Err(stop_error) = process.stop().await {
+                    tracing::warn!(%stop_error, "stopping a failed terminal launch");
+                }
+                Err(error)
+            }
         }
-        // The host is intentionally detached. Reap it if it exits before
-        // this daemon does, without tying its lifetime to this task.
-        tokio::spawn(async move {
-            let _ = child.wait().await;
-        });
-        result
+    }
+
+    /// Count pending launches and running hosts once, under the same lock
+    /// used to reserve a launch. An already registered launch may be in both
+    /// the database and the pending map until its request returns.
+    fn check_host_capacity(
+        &self,
+        paths: &Paths,
+        launches: &HashMap<String, Pending>,
+        limit: usize,
+    ) -> Result<(), IpcError> {
+        let mut used: BTreeSet<EventId> = launches.values().map(|p| p.id.clone()).collect();
+        for id in self.store.session_hosts().map_err(internal)? {
+            if host::running(paths, &id).map_err(IpcError::internal)? {
+                used.insert(id);
+            }
+        }
+        if used.len() >= limit {
+            return Err(IpcError::bad_request(format!(
+                "the machine is at its hosted session limit ({limit})"
+            )));
+        }
+        Ok(())
     }
 
     pub(super) async fn register_hosted(
@@ -355,5 +448,66 @@ impl Shared {
         )
         .map_err(IpcError::internal)?;
         Ok(session)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_matching_start_hook_can_claim_a_launch_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path().canonicalize().unwrap();
+        let launches = Launches::default();
+        let (reply, _receipt) = oneshot::channel();
+        let id = EventId::new();
+        lock(&launches.0).insert(
+            "launch-secret".into(),
+            Pending {
+                id: id.clone(),
+                runtime: HostedRuntime::Claude,
+                cwd: cwd.clone(),
+                committee: "review".parse().unwrap(),
+                alias: Some("reviewer".parse().unwrap()),
+                resume: Some("old-session".into()),
+                reply: Some(reply),
+            },
+        );
+        let report: HookReport = serde_json::from_value(serde_json::json!({
+            "event": "session_start",
+            "session_id": "old-session",
+            "launch_token": "launch-secret",
+            "runtime": "claude",
+            "cwd": cwd,
+            "source": "resume",
+        }))
+        .unwrap();
+
+        let mut wrong = report.clone();
+        wrong.launch_token = None;
+        assert!(launches.claim(&wrong).unwrap().is_none());
+
+        wrong = report.clone();
+        wrong.event = HookEvent::UserPromptSubmit;
+        assert!(launches.claim(&wrong).unwrap().is_none());
+
+        wrong = report.clone();
+        wrong.session_id = "different-session".into();
+        assert!(launches.claim(&wrong).is_err());
+
+        wrong = report.clone();
+        wrong.runtime = Runtime::Codex;
+        assert!(launches.claim(&wrong).is_err());
+
+        wrong = report.clone();
+        wrong.cwd = cwd.join("another-project");
+        assert!(launches.claim(&wrong).is_err());
+
+        let registered = launches.claim(&report).unwrap().unwrap();
+        assert_eq!(registered.id, id);
+        assert_eq!(registered.committee.as_str(), "review");
+        assert_eq!(registered.alias.unwrap().as_str(), "reviewer");
+        assert!(launches.claim(&report).unwrap().is_none());
     }
 }

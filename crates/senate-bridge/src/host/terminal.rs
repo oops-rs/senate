@@ -118,7 +118,8 @@ impl Drop for RawTerminal {
             OptionalActions::Now,
             &self.original,
         );
-        let _ = (&self.output.get_ref().file).write_all(b"\x1b[0m\x1b[?2004l\x1b[?25h\x1b[?1049l");
+        let _ = (&self.output.get_ref().file)
+            .write_all(b"\x1b[0m\x1b[?2004l\x1b[?1004l\x1b[?2031l\x1b[?25h\x1b[?1049l");
     }
 }
 

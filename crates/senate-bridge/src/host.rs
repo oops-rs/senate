@@ -280,6 +280,7 @@ async fn serve(
         tokio::pin!(relay);
         loop {
             tokio::select! {
+                biased;
                 result = &mut relay => {
                     if let Err(error) = result {
                         tracing::debug!(%error, "terminal attachment ended");

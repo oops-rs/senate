@@ -2511,9 +2511,17 @@ impl Shared {
                 alias,
                 cwd,
                 ..
-            } => wrap(self.on_spawn(runtime, committee, alias, cwd).await),
+            } => wrap(
+                self.on_spawn(runtime, committee, alias, cwd, None)
+                    .await
+                    .map(hosts::HostedLaunch::finish),
+            ),
             Request::Restore { senator, .. } => match self.resolve_restore(&senator).await {
-                Ok(target) => wrap(self.on_restore(target).await),
+                Ok(target) => wrap(
+                    self.on_restore(target, None)
+                        .await
+                        .map(hosts::HostedLaunch::finish),
+                ),
                 Err(error) => Reply::err(error),
             },
             Request::Attach { senator } => wrap(self.on_attach(senator).await),

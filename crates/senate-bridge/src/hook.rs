@@ -330,9 +330,10 @@ pub async fn prepare(
                 cwd,
                 transcript_path: input.transcript_path,
                 source: input.source,
-                launch_token: (kind == HookKind::SessionStart)
-                    .then(|| env_nonempty(crate::host::LAUNCH_ENV))
-                    .flatten(),
+                launch_token: (kind == HookKind::SessionStart
+                    && matches!(runtime, Runtime::Claude | Runtime::Codex))
+                .then(|| env_nonempty(crate::host::LAUNCH_ENV))
+                .flatten(),
                 branch: facts.branch,
                 git_root: facts.toplevel,
                 committee_file: facts.committee_file,

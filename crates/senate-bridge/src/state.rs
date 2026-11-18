@@ -339,6 +339,11 @@ fn agent_text(agent: &SenatorName) -> String {
     agent.to_string()
 }
 
+fn parse_host_id(id: &str) -> Result<EventId, StoreError> {
+    id.parse()
+        .map_err(|_| StoreError::Corrupt("invalid host ID".into()))
+}
+
 fn session_from_row(row: &Row<'_>) -> rusqlite::Result<Session> {
     let state: String = row.get(11)?;
     Ok(Session {
@@ -909,12 +914,15 @@ impl Store {
                 |row| row.get(0),
             )
             .optional()?;
-        id.flatten()
-            .map(|id| {
-                id.parse()
-                    .map_err(|_| StoreError::Corrupt("invalid host ID".into()))
-            })
-            .transpose()
+        id.flatten().as_deref().map(parse_host_id).transpose()
+    }
+
+    pub(crate) fn session_hosts(&self) -> Result<Vec<EventId>, StoreError> {
+        let conn = self.conn();
+        let mut statement =
+            conn.prepare("SELECT host_id FROM sessions WHERE host_id IS NOT NULL")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        rows.map(|row| parse_host_id(&row?)).collect()
     }
 
     fn upsert(
@@ -2260,6 +2268,39 @@ mod tests {
         assert_eq!(got.claude_pid, Some(42));
         assert_eq!(s.sessions_below(99).unwrap(), ["a"]);
         assert!(s.sessions_below(7).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_hosted_binding_survives_reopen_and_replaces_old_inbox_credentials() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("state.db");
+        let store = Store::open(&path).unwrap();
+        let mut manual = upsert("a");
+        manual.ancestor_pids = vec![100, 99];
+        store.upsert_session(&manual).unwrap();
+        store.set_session_state("a", SessionState::Ended).unwrap();
+
+        let host = EventId::new();
+        let committee = CommitteeId::new("review").unwrap();
+        let mut resumed = upsert("a");
+        resumed.socket = None;
+        resumed.token = None;
+        resumed.claude_pid = None;
+        let session = store
+            .register_hosted_session(&resumed, &host, &committee)
+            .unwrap();
+        assert!(session.is_live());
+        assert!(
+            session.socket.is_none() && session.token.is_none() && session.claude_pid.is_none()
+        );
+        assert!(store.sessions_below(99).unwrap().is_empty());
+        drop(store);
+
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.session_hosts().unwrap(), std::slice::from_ref(&host));
+        let updated = store.upsert_session(&resumed).unwrap();
+        assert_eq!(updated.committee(), Some(&committee));
+        assert_eq!(store.session_host("a").unwrap(), Some(host));
     }
 
     #[test]
