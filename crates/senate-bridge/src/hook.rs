@@ -14,10 +14,9 @@
 //! something is waiting for the session.
 //!
 //! Claude's pid ties the session to its MCP shim (whose parent is Claude).
-//! When `CLAUDE_PID` is not set, the hook reports its own parent chain
-//! instead ([`ANCESTOR_DEPTH`] pids): Claude runs hooks directly or through
-//! a shell, so Claude is among them. The chain is used only to find the
-//! session, never for liveness, since a shell in it exits right away.
+//! The hook measures its parent chain when `CLAUDE_PID` is missing, and
+//! to verify a reported identity change in a hosted TUI. A parent shell
+//! exits quickly, so the chain is not evidence of liveness.
 //!
 //! Codex runs the same hooks (`hook <event> --codex`, from its
 //! `config.toml`) inside the app-server, with the same input shape and the
@@ -186,6 +185,10 @@ impl Default for HookTimeouts {
     }
 }
 
+pub(crate) fn changes_claude_session(event: HookEvent, source: Option<&str>) -> bool {
+    event == HookEvent::SessionStart && matches!(source, Some("clear" | "resume"))
+}
+
 /// The JSON line to print, if any.
 pub fn output_for(kind: HookKind, context: &str) -> String {
     json!({
@@ -309,10 +312,15 @@ pub async fn prepare(
         }
         HookKind::SessionStart | HookKind::UserPromptSubmit => {
             let cwd = input.cwd.or_else(|| std::env::current_dir().ok())?;
+            let event = if kind == HookKind::SessionStart {
+                HookEvent::SessionStart
+            } else {
+                HookEvent::UserPromptSubmit
+            };
             let ancestors = async {
-                // Claude source claims can be checked against the local
-                // process ancestry. Codex hooks share the app-server's PID.
-                if runtime != Runtime::Claude {
+                let hosted_change = changes_claude_session(event, input.source.as_deref())
+                    && std::env::var_os(crate::host::HOSTED_CLAUDE_ENV).is_some();
+                if runtime != Runtime::Claude || (env.claude_pid.is_some() && !hosted_change) {
                     return Vec::new();
                 }
                 let parent = std::os::unix::process::parent_id();
@@ -321,11 +329,7 @@ pub async fn prepare(
             let ((facts, _), ancestor_pids) =
                 tokio::join!(session::gather_synced(&home, &cwd, git_timeout), ancestors);
             Request::SessionHook(HookReport {
-                event: if kind == HookKind::SessionStart {
-                    HookEvent::SessionStart
-                } else {
-                    HookEvent::UserPromptSubmit
-                },
+                event,
                 session_id,
                 cwd,
                 transcript_path: input.transcript_path,

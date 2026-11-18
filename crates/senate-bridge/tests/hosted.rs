@@ -677,3 +677,142 @@ async fn codex_native_end_during_or_after_restore_does_not_leave_a_live_row() {
         h.stop().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_hook_changes_native_context_without_moving_the_seat_or_its_mail() {
+    use senate_bridge::SessionState;
+    use senate_bridge::ipc::{HookReply, HookReport, StatusReply};
+    use senate_core::{Address, Kind, NewEvent};
+    use serde_json::json;
+
+    let mut h = Harness::new().await;
+    h.dir = tempfile::tempdir_in("/tmp").unwrap();
+    h.paths = senate_bridge::Paths::new(h.dir.path().join("senate"));
+    h.paths.ensure_home().unwrap();
+    let project = h.workdir("switch", None);
+    let program = h.dir.path().join("fixture");
+    std::fs::write(&program, "#!/bin/sh\nwhile :; do sleep 1; done\n").unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(
+        h.paths.config(),
+        format!(
+            "[companion]\nclaude_bin = {:?}\n",
+            program.to_str().unwrap()
+        ),
+    )
+    .unwrap();
+    h.server.state.inner.lock().unwrap().triaged = false;
+    start(&mut h).await;
+    let committee = committee();
+    let spawned: SpawnReply = call(
+        &h,
+        &Request::Spawn {
+            session: Default::default(),
+            runtime: HostedRuntime::Claude,
+            committee: committee.clone(),
+            alias: Some(path("seat-fixture")),
+            cwd: project.clone(),
+            chair: false,
+        },
+    )
+    .await;
+    let attach = Request::Attach {
+        senator: spawned.senator.clone(),
+    };
+    let terminal: PathBuf = call(&h, &attach).await;
+    let pid: u32 = std::fs::read_to_string(terminal.parent().unwrap().join("owner"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let question = h.server.append(
+        NewEvent::new(
+            committee.clone(),
+            Kind::Question,
+            Address::senior(&h.config.person),
+            "queued before the native context changed",
+        )
+        .to(Address::senator(&spawned.senator)),
+    );
+    tokio::time::timeout(TIMEOUT, async {
+        while h
+            .store()
+            .item(&spawned.senator, &committee, question.seq)
+            .unwrap()
+            .is_none()
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let hook = |id: &str, source: &str, claimed: Option<u32>| {
+        Request::SessionHook(
+            serde_json::from_value::<HookReport>(json!({
+                "event":"session_start", "runtime":"claude", "session_id":id,
+                "cwd": project, "source":source, "claude_pid":claimed,
+                "ancestor_pids":[pid],
+            }))
+            .unwrap(),
+        )
+    };
+    let refused = ipc::request::<HookReply>(
+        &h.socket(),
+        &hook("unattributed", "clear", None),
+        TIMEOUT,
+        TIMEOUT,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        refused.to_string().contains("could not attribute"),
+        "{refused}"
+    );
+    assert!(h.store().session("unattributed").unwrap().is_none());
+    let status: StatusReply = call(&h, &Request::Status).await;
+    assert_eq!(
+        status.hosted[&spawned.session_id].as_deref(),
+        Some("unattributed")
+    );
+
+    let clear: HookReply = call(&h, &hook("cleared", "clear", Some(pid))).await;
+    assert_eq!(clear.session.agent, spawned.senator);
+    assert_eq!(
+        h.store()
+            .session(&spawned.session_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        SessionState::Ended
+    );
+    assert_eq!(call::<PathBuf>(&h, &attach).await, terminal);
+    assert!(
+        clear
+            .context
+            .as_deref()
+            .is_some_and(|text| text.contains("queued before the native context changed"))
+    );
+
+    let resumed: HookReply = call(&h, &hook("resumed", "resume", Some(pid))).await;
+    assert_eq!(resumed.session.agent, spawned.senator);
+    assert_eq!(
+        h.store().session("cleared").unwrap().unwrap().state,
+        SessionState::Ended
+    );
+    assert_eq!(call::<PathBuf>(&h, &attach).await, terminal);
+    let group = rustix::process::Pid::from_raw(i32::try_from(pid).unwrap()).unwrap();
+    rustix::process::kill_process_group(group, rustix::process::Signal::TERM).unwrap();
+    tokio::time::timeout(TIMEOUT, async {
+        while terminal.exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        h.store().session("resumed").unwrap().unwrap().state,
+        SessionState::Ended
+    );
+    h.stop().await;
+}

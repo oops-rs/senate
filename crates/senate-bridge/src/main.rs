@@ -364,10 +364,8 @@ enum Cmd {
     /// senate restore to return. A Codex session that was live before restore
     /// stays live on host close because a native client may remain.
     ///
-    /// After /clear in hosted Claude Code, the alias stops receiving until
-    /// you exit that terminal and run senate restore. Messages are held and
-    /// arrive after restore. Status reports the switch only when Claude Code
-    /// supplies its process ID to hooks.
+    /// Claude identity switching requires the configured executable to be the
+    /// Claude TUI itself, or a wrapper that execs it.
     Attach { senator: SenatorName },
     /// Resume a recorded Codex or Claude Code senator in a detached terminal.
     Restore { senator: SenatorName },

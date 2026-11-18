@@ -1211,7 +1211,7 @@ impl Shared {
                 if crate::host::awaiting_publication(&paths, &id) {
                     continue;
                 }
-                if crate::host::switched(&paths, &id).is_some() {
+                if crate::host::switched(&paths, &id).is_some_and(|new| new != s.session_id) {
                     continue;
                 }
             } else if s.claude_pid.is_some_and(|pid| !session::pid_alive(pid)) {
@@ -2376,7 +2376,7 @@ impl Shared {
         lock(&self.companion_tried).insert(key.clone());
         let committee = item.event.committee.clone();
         let agent = item.agent.clone();
-        let base = self.store.all_sessions()?.into_iter().find(|s| {
+        let base = self.store.current_sessions()?.into_iter().find(|s| {
             s.committee() == Some(&committee)
                 && s.agent == agent
                 && s.runtime == Runtime::Claude
@@ -2889,7 +2889,7 @@ impl Shared {
         } else {
             (hint.clone(), source)
         };
-        let upsert = SessionUpsert {
+        let mut upsert = SessionUpsert {
             session_id: report.session_id.clone(),
             cwd: report.cwd.clone(),
             git_root: report.git_root.clone(),
@@ -2910,16 +2910,10 @@ impl Shared {
                 .await
                 .map_err(|_| IpcError::bad_request("the hosted launch was rolled back"))?;
         }
-        let _binding = self.session_bindings.read().await;
-        if native
-            && report.runtime == Runtime::Claude
-            && let Some(previous) = self.detect_host_switch(&report)?
-        {
-            return Err(IpcError::bad_request(hosts::switch_message(
-                &previous,
-                &report.session_id,
-            )));
+        if native && report.runtime == Runtime::Claude {
+            self.maybe_switch_host(&report, &mut upsert).await?;
         }
+        let _binding = self.session_bindings.read().await;
         if native
             && let Some(id) = self
                 .store
@@ -2932,6 +2926,25 @@ impl Shared {
                 .map_err(internal)?;
         }
         let before = self.store.session(&report.session_id).map_err(internal)?;
+        if native && report.runtime == Runtime::Claude {
+            match self
+                .store
+                .hosted_native_retired(&report.session_id)
+                .map_err(internal)?
+            {
+                Some(true) => {
+                    return Err(IpcError::bad_request(
+                        "this native ID was retired by a hosted seat; restore the seat's current session",
+                    ));
+                }
+                Some(false) => {
+                    if let Some(previous) = &before {
+                        upsert.agent = previous.agent.clone();
+                    }
+                }
+                None => {}
+            }
+        }
         let session = self.store.upsert_session(&upsert).map_err(internal)?;
         if before.as_ref().is_some_and(|b| b.agent != session.agent) {
             let released = self
@@ -3280,6 +3293,14 @@ impl Shared {
             return Ok(serde_json::json!({}));
         }
         let _binding = self.session_bindings.write().await;
+        let current = match host_id {
+            Some(id) => match self.store.session_for_host(id).map_err(internal)? {
+                Some(current) => current,
+                None => return Ok(serde_json::json!({})),
+            },
+            None => session_id.to_string(),
+        };
+        let session_id = current.as_str();
         let paths = Paths::new(&self.home);
         let registered = self.store.session_host(session_id).map_err(internal)?;
         if let Some(id) = host_id
@@ -5043,6 +5064,7 @@ async fn sweeper(shared: Arc<Shared>, mut shutdown: watch::Receiver<bool>) {
         tokio::select! {
             _ = tick.tick() => {
                 shared.sweep_once();
+                shared.flush_host_switch_notices().await;
                 shared.reconcile_approvals();
                 shared.publish_status();
             }

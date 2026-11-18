@@ -471,14 +471,28 @@ pub(crate) fn status(
         if let Some(id) = store.session_host(&session.session_id)?
             && running(paths, &id)?
         {
-            hosted.insert(session.session_id.clone(), switched(paths, &id));
+            hosted.insert(
+                session.session_id.clone(),
+                switched(paths, &id)
+                    .or_else(|| {
+                        std::fs::read_to_string(directory(paths, &id).join("unverified-switch"))
+                            .ok()
+                    })
+                    .filter(|new| new != &session.session_id),
+            );
         }
     }
     Ok(hosted)
 }
 
-pub(crate) fn note_switch(paths: &Paths, id: &EventId, session: &str) -> io::Result<()> {
-    std::fs::write(directory(paths, id).join("switched"), session)
+pub(crate) fn note_unverified_switch(paths: &Paths, id: &EventId, session: &str) -> io::Result<()> {
+    std::fs::write(directory(paths, id).join("unverified-switch"), session)
+}
+
+pub(crate) fn clear_switch(paths: &Paths, id: &EventId) {
+    let dir = directory(paths, id);
+    let _ = std::fs::remove_file(dir.join("switched"));
+    let _ = std::fs::remove_file(dir.join("unverified-switch"));
 }
 
 pub(crate) fn child_pid(paths: &Paths, id: &EventId) -> Option<u32> {

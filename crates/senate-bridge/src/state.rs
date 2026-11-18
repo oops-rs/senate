@@ -56,7 +56,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, Transaction, param
 use senate_core::{CommitteeId, Event, SenatorName, Seq, TaskOwner, TriageVerdict};
 use serde::{Deserialize, Serialize};
 
-use senate_core::EventId;
+use senate_core::{EventId, NewEvent};
 
 use crate::agent::AgentSource;
 use crate::session::{CommitteeSource, Runtime, Session, SessionState};
@@ -95,6 +95,14 @@ CREATE TABLE IF NOT EXISTS sessions (
     agent            TEXT NOT NULL,
     agent_source     TEXT NOT NULL,
     host_id          TEXT
+);
+CREATE TABLE IF NOT EXISTS hosted_native_seats (
+    session_id TEXT PRIMARY KEY,
+    retired INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS hosted_switch_notices (
+    id TEXT PRIMARY KEY,
+    event TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS session_ancestors (
     session_id TEXT NOT NULL,
@@ -274,6 +282,7 @@ struct HostedBinding<'a> {
     id: &'a EventId,
     committee: &'a CommitteeId,
     cursor: Option<(Seq, Seq)>,
+    transition: Option<(&'a Session, &'a NewEvent)>,
 }
 
 pub struct Store {
@@ -921,6 +930,7 @@ impl Store {
                 id,
                 committee,
                 cursor,
+                transition: None,
             }),
         )
     }
@@ -940,6 +950,10 @@ impl Store {
         )?;
         if changed != 0 {
             tx.execute(
+                "DELETE FROM hosted_native_seats WHERE session_id = ?1",
+                [&launch.session_id],
+            )?;
+            tx.execute(
                 "DELETE FROM session_ancestors WHERE session_id = ?1",
                 [&launch.session_id],
             )?;
@@ -951,6 +965,78 @@ impl Store {
             }
         }
         tx.commit()?;
+        Ok(())
+    }
+
+    /// None is an ordinary session, false is the seat's current native ID,
+    /// true is a superseded native ID that must not start another host.
+    pub(crate) fn hosted_native_retired(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<bool>, StoreError> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT retired FROM hosted_native_seats WHERE session_id = ?1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    pub(crate) fn switch_hosted_session(
+        &self,
+        first: &Session,
+        next: &SessionUpsert,
+        id: &EventId,
+        notice: &NewEvent,
+    ) -> Result<Session, StoreError> {
+        let committee = first
+            .committee()
+            .ok_or_else(|| StoreError::Corrupt("the hosted session has no committee".into()))?;
+        if first.agent != next.agent || first.session_id == next.session_id {
+            return Err(StoreError::Corrupt(
+                "a hosted switch must keep the seat and change the native ID".into(),
+            ));
+        }
+        self.upsert(
+            next,
+            Some(HostedBinding {
+                id,
+                committee,
+                cursor: None,
+                transition: Some((first, notice)),
+            }),
+        )
+    }
+
+    pub(crate) fn session_for_host(&self, id: &EventId) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT session_id FROM sessions WHERE host_id = ?1",
+                [id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    pub(crate) fn hosted_switch_notices(&self) -> Result<Vec<NewEvent>, StoreError> {
+        let conn = self.conn();
+        let mut query =
+            conn.prepare("SELECT event FROM hosted_switch_notices ORDER BY id LIMIT 16")?;
+        let rows = query.query_map([], |row| row.get::<_, String>(0))?;
+        rows.map(|event| {
+            serde_json::from_str(&event?).map_err(|error| StoreError::Corrupt(error.to_string()))
+        })
+        .collect()
+    }
+
+    pub(crate) fn remove_hosted_switch_notice(&self, id: &EventId) -> Result<(), StoreError> {
+        self.conn().execute(
+            "DELETE FROM hosted_switch_notices WHERE id = ?1",
+            [id.to_string()],
+        )?;
         Ok(())
     }
 
@@ -994,6 +1080,61 @@ impl Store {
         {
             let mut conn = self.conn();
             let tx = conn.transaction()?;
+            if let Some(hosted) = &hosted
+                && let Some((first, notice)) = hosted.transition
+            {
+                let collision = tx.query_row(
+                    "SELECT 1 FROM sessions AS s WHERE s.session_id = ?1 AND
+                         (s.state = 'live' OR s.host_id IS NOT NULL OR
+                          (s.agent != ?2 AND EXISTS (
+                              SELECT 1 FROM hosted_native_seats AS h WHERE h.session_id = s.session_id
+                          )))",
+                    params![s.session_id, agent_text(&first.agent)], |_| Ok(()),
+                ).optional()?.is_some();
+                if collision {
+                    return Err(StoreError::Corrupt(
+                        "the target native ID belongs to another live session or hosted seat"
+                            .into(),
+                    ));
+                }
+                let changed = tx.execute(
+                    "UPDATE sessions SET state = 'ended', host_id = NULL,
+                        socket = NULL, token = NULL, claude_pid = NULL
+                     WHERE session_id = ?1 AND host_id = ?2 AND state = 'live'",
+                    params![first.session_id, hosted.id.to_string()],
+                )?;
+                if changed != 1 {
+                    return Err(StoreError::Corrupt(
+                        "hosted binding changed during the switch".into(),
+                    ));
+                }
+                tx.execute(
+                    "INSERT OR REPLACE INTO hosted_native_seats (session_id, retired) VALUES (?1, 1)",
+                    [&first.session_id],
+                )?;
+                tx.execute(
+                    "DELETE FROM session_ancestors WHERE session_id = ?1",
+                    [&first.session_id],
+                )?;
+                // The queue still belongs to this senator. Only the
+                // pointers to a particular native session change.
+                tx.execute(
+                    "UPDATE queue SET session_id = ?2
+                     WHERE session_id = ?1 AND agent = ?3 AND status = 'queued'",
+                    params![first.session_id, s.session_id, agent_text(&first.agent)],
+                )?;
+                tx.execute(
+                    "UPDATE owners SET session_id = ?2
+                     WHERE session_id = ?1 AND agent = ?3",
+                    params![first.session_id, s.session_id, agent_text(&first.agent)],
+                )?;
+                let body = serde_json::to_string(notice)
+                    .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+                tx.execute(
+                    "INSERT INTO hosted_switch_notices (id, event) VALUES (?1, ?2)",
+                    params![notice.id.to_string(), body],
+                )?;
+            }
             tx.execute(
                 "INSERT INTO sessions (session_id, cwd, git_root, branch, inferred_committee,
                      committee_source, socket, token, claude_pid, transcript_path, state,
@@ -1054,6 +1195,12 @@ impl Store {
                 }
             }
             if let Some(binding) = &hosted {
+                if s.runtime == Runtime::Claude {
+                    tx.execute(
+                        "INSERT OR REPLACE INTO hosted_native_seats (session_id, retired) VALUES (?1, 0)",
+                        [&s.session_id],
+                    )?;
+                }
                 let committee = binding.committee;
                 if let Some((delivered, reported)) = binding.cursor {
                     tx.execute(
@@ -1101,6 +1248,19 @@ impl Store {
         let conn = self.conn();
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map([], session_from_row)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Session registry rows other than native IDs retired by a hosted seat.
+    pub(crate) fn current_sessions(&self) -> Result<Vec<Session>, StoreError> {
+        let sql = format!(
+            "SELECT {SESSION_COLS} FROM sessions
+             WHERE session_id NOT IN (SELECT session_id FROM hosted_native_seats WHERE retired = 1)
+             ORDER BY last_seen DESC"
+        );
+        let conn = self.conn();
+        let mut query = conn.prepare(&sql)?;
+        let rows = query.query_map([], session_from_row)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
@@ -2405,6 +2565,62 @@ mod tests {
         let offline = Store::open_read_only(&path).unwrap();
         assert_eq!(offline.sessions().unwrap().len(), 1);
         assert_eq!(offline.session_host("old").unwrap(), None);
+    }
+
+    #[test]
+    fn moving_a_host_ends_the_previous_id_and_records_one_notice() {
+        let store = Store::in_memory().unwrap();
+        let host = EventId::new();
+        let committee = committee();
+        let first = store
+            .register_hosted_session(
+                &upsert("old"),
+                &host,
+                &committee,
+                Some((Seq(17), Seq::ZERO)),
+            )
+            .unwrap();
+        let next = upsert("new");
+        let notice = NewEvent::new(
+            committee.clone(),
+            Kind::Note,
+            Address::Committee,
+            "identity switched",
+        )
+        .to(Address::Speaker);
+        let replacement = store
+            .switch_hosted_session(&first, &next, &host, &notice)
+            .unwrap();
+
+        assert_eq!(replacement.committee(), Some(&committee));
+        assert_eq!(
+            store.session("old").unwrap().unwrap().state,
+            SessionState::Ended
+        );
+        assert_eq!(store.session_host("old").unwrap(), None);
+        assert_eq!(store.hosted_native_retired("old").unwrap(), Some(true));
+        assert_eq!(replacement.agent, first.agent);
+        assert_eq!(store.current_sessions().unwrap().len(), 1);
+        assert_eq!(
+            store.session_for_host(&host).unwrap().as_deref(),
+            Some("new")
+        );
+        assert_eq!(
+            store.delivered_cursor(&next.agent, &committee).unwrap(),
+            Seq(17)
+        );
+        assert_eq!(
+            store.hosted_switch_notices().unwrap(),
+            std::slice::from_ref(&notice)
+        );
+        assert!(
+            store
+                .switch_hosted_session(&first, &upsert("third"), &host, &notice)
+                .is_err()
+        );
+        assert!(store.session("third").unwrap().is_none());
+        store.remove_hosted_switch_notice(&notice.id).unwrap();
+        assert!(store.hosted_switch_notices().unwrap().is_empty());
     }
 
     #[test]

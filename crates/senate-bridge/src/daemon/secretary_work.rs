@@ -19,13 +19,24 @@ pub(super) fn reminder_text(l: Locale, reminder: &SecretaryReminder) -> String {
     )
 }
 
-fn native_session(session: &Session) -> bool {
-    session.agent_source == agent::AgentSource::Session
-        && !Shared::is_companion(session)
-        && session.agent == agent::session_name(session.runtime, &session.session_id)
-}
-
 impl Shared {
+    fn native_session(&self, session: &Session) -> bool {
+        if session.agent_source != AgentSource::Session
+            || Self::is_companion(session)
+            || self.hosts.unpublished(&session.session_id)
+        {
+            return false;
+        }
+        if session.runtime == Runtime::Claude {
+            match self.store.hosted_native_retired(&session.session_id) {
+                Ok(Some(retired)) => return !retired && session.agent.is_session_name(),
+                Ok(None) => {}
+                Err(_) => return false,
+            }
+        }
+        session.agent == agent::session_name(session.runtime, &session.session_id)
+    }
+
     fn person_senator(&self) -> Result<SenatorName, IpcError> {
         SenatorName::new(self.config.person.clone())
             .map_err(|e| IpcError::bad_request(e.to_string()))
@@ -43,7 +54,7 @@ impl Shared {
                 .store
                 .session(&id)
                 .map_err(internal)?
-                .filter(native_session)
+                .filter(|session| self.native_session(session))
                 .map(|session| session.agent)
                 .ok_or_else(|| {
                     IpcError::bad_request("name the full ID of a registered coding session")
@@ -72,7 +83,7 @@ impl Shared {
             self.person_senator()?
         } else {
             let session = self.resolve(selector)?;
-            if !native_session(&session) {
+            if !self.native_session(&session) {
                 return Err(IpcError::bad_request(
                     "team work needs a registered native coding session",
                 ));
@@ -97,7 +108,7 @@ impl Shared {
     ) -> Option<SecretaryReminder> {
         if session.runtime != Runtime::Claude
             || self.ladder.can_push(session)
-            || !native_session(session)
+            || !self.native_session(session)
         {
             return None;
         }
@@ -125,7 +136,7 @@ impl Shared {
             .store
             .live_sessions()?
             .into_iter()
-            .filter(|s| native_session(s) && self.ladder.can_push(s))
+            .filter(|s| self.native_session(s) && self.ladder.can_push(s))
             .map(|s| (s.agent.clone(), s.session_id))
             .collect();
         if sessions.is_empty() {
@@ -147,7 +158,7 @@ impl Shared {
                 let Some(session) = self.store.session(sid)?.filter(|s| {
                     s.agent == reminder.to
                         && s.is_live()
-                        && native_session(s)
+                        && self.native_session(s)
                         && self.ladder.can_push(s)
                 }) else {
                     continue;

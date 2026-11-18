@@ -169,7 +169,7 @@ impl Shared {
                     IpcError::new(codes::NO_SESSION, format!("unknown alias {senator}"))
                 })?
         };
-        for session in self.store.all_sessions().map_err(internal)? {
+        for session in self.store.current_sessions().map_err(internal)? {
             if self.hosts.unpublished(&session.session_id) {
                 continue;
             }
@@ -195,42 +195,121 @@ impl Shared {
         ))
     }
 
-    pub(super) fn detect_host_switch(
+    pub(super) async fn maybe_switch_host(
         &self,
         report: &HookReport,
-    ) -> Result<Option<SenatorName>, IpcError> {
-        if report.event != HookEvent::SessionStart || report.source.as_deref() != Some("clear") {
-            return Ok(None);
+        next: &mut SessionUpsert,
+    ) -> Result<(), IpcError> {
+        if !crate::hook::changes_claude_session(report.event, report.source.as_deref()) {
+            return Ok(());
         }
         let paths = Paths::new(&self.home);
-        let mut matching = None;
-        for session in self.store.live_sessions().map_err(internal)? {
-            if session.runtime != Runtime::Claude || session.session_id == report.session_id {
+        let binding = self.session_bindings.write().await;
+        let mut candidates = Vec::new();
+        for first in self.store.live_sessions().map_err(internal)? {
+            if first.runtime != Runtime::Claude || first.session_id == report.session_id {
                 continue;
             }
             if let Some(id) = self
                 .store
-                .session_host(&session.session_id)
+                .session_host(&first.session_id)
                 .map_err(internal)?
                 && let Some(pid) = host::child_pid(&paths, &id)
-                && owns_claude_hook(pid, report.claude_pid, &report.ancestor_pids)
-                && host::running(&paths, &id).map_err(IpcError::internal)?
                 && session::pid_alive(pid)
+                && host::running(&paths, &id).map_err(IpcError::internal)?
+                && (report.claude_pid == Some(pid)
+                    || (report.claude_pid.is_none() && report.ancestor_pids.contains(&pid)))
             {
-                if matching.is_some() {
-                    return Err(IpcError::bad_request(
-                        "the Claude session matches more than one hosted process",
-                    ));
-                }
-                matching = Some((session.agent, id));
+                candidates.push((
+                    first,
+                    id,
+                    owns_claude_hook(pid, report.claude_pid, &report.ancestor_pids),
+                ));
             }
         }
-        if let Some((old, id)) = matching {
-            host::note_switch(&paths, &id, &report.session_id).map_err(IpcError::internal)?;
-            self.committees_changed.notify_one();
-            return Ok(Some(old));
+        let (first, id) = match candidates.as_slice() {
+            [] => return Ok(()),
+            [(first, id, true)] => (first, id),
+            _ => {
+                for (prior, id, _) in &candidates {
+                    host::note_unverified_switch(&paths, id, &report.session_id)
+                        .map_err(IpcError::internal)?;
+                    tracing::warn!(seat = %prior.agent, native_id = %report.session_id,
+                        "unattributed hosted Claude context change; keeping the existing binding");
+                }
+                return Err(IpcError::bad_request(
+                    "could not attribute the Claude context change to one hosted TUI",
+                ));
+            }
+        };
+        let committee = first
+            .committee()
+            .ok_or_else(|| IpcError::internal("the hosted seat has no committee"))?;
+        let chair = self.chair_of(committee);
+        let headed_by_seat = chair.as_ref() == Some(&first.agent);
+        let seat = Address::senator(&first.agent).in_text();
+        let old_native = &first.session_id;
+        let new_native = &report.session_id;
+        let mut detail = match self.locale {
+            Locale::En => format!(
+                "Hosted Claude seat {seat} in `{committee}` changed session context from native ID `{old_native}` to `{new_native}`."
+            ),
+            Locale::Zh => format!(
+                "委员会 `{committee}` 的托管 Claude 席位 {seat} 已更换会话上下文，原生 ID 从 `{old_native}` 切换到 `{new_native}`。"
+            ),
+        };
+        if headed_by_seat {
+            detail.push_str(self.locale.pick(
+                " 该委员会主席的会话上下文已变更。",
+                " The committee chair's session context changed.",
+            ));
         }
-        Ok(None)
+        let mut notice = NewEvent::new(
+            committee.clone(),
+            Kind::Note,
+            Address::senior(&self.config.person),
+            detail,
+        );
+        // The stream normally knows the chair. If it has not caught up,
+        // tell the desk about the context change without claiming a role.
+        if headed_by_seat || chair.is_none() {
+            notice.to.push(Address::Speaker);
+        }
+        next.agent = first.agent.clone();
+        self.store
+            .switch_hosted_session(first, next, id, &notice)
+            .map_err(internal)?;
+        host::clear_switch(&paths, id);
+        self.committees_changed.notify_one();
+        self.work.notify_one();
+        drop(binding);
+        self.flush_host_switch_notices().await;
+        Ok(())
+    }
+
+    pub(super) async fn flush_host_switch_notices(&self) {
+        let notices = match self.store.hosted_switch_notices() {
+            Ok(notices) => notices,
+            Err(error) => {
+                tracing::warn!(%error, "reading hosted identity switch notices");
+                return;
+            }
+        };
+        for notice in notices {
+            let id = notice.id.clone();
+            match tokio::time::timeout(Duration::from_secs(1), self.post(notice)).await {
+                Ok(Ok(_)) => {
+                    if let Err(error) = self.store.remove_hosted_switch_notice(&id) {
+                        tracing::warn!(%error, "marking hosted identity switch as reported");
+                    }
+                }
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "posting hosted identity switch, will retry");
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
     }
 
     pub(super) async fn resolve_restore(
@@ -278,7 +357,7 @@ impl Shared {
             target.committee,
             None,
             session.cwd,
-            Some(session.session_id),
+            Some((session.session_id, session.agent)),
             limit,
             audit,
         )
@@ -344,7 +423,7 @@ impl Shared {
         committee: CommitteeId,
         alias: Option<SenatorName>,
         cwd: PathBuf,
-        resume: Option<String>,
+        resume: Option<(String, SenatorName)>,
         limit: Option<usize>,
         audit: impl Fn(LaunchAudit, SpawnReply, HostedRuntime) -> Fut + Send,
     ) -> Result<HostedLaunch, IpcError>
@@ -369,6 +448,10 @@ impl Shared {
             )));
         }
         let paths = Paths::new(self.home.canonicalize().map_err(IpcError::internal)?);
+        let (resume, seat) = match resume {
+            Some((id, agent)) => (Some(id), Some(agent)),
+            None => (None, None),
+        };
         let id = EventId::new();
         let (published, _) = watch::channel(false);
         {
@@ -486,7 +569,7 @@ impl Shared {
         };
         let session_runtime = Runtime::from(runtime);
         let reply = SpawnReply {
-            senator: agent::session_name(session_runtime, &session_id),
+            senator: seat.unwrap_or_else(|| agent::session_name(session_runtime, &session_id)),
             session_id: session_id.clone(),
             committee,
         };

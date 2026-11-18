@@ -174,7 +174,7 @@
 //! outlives `/clear`, which starts a new session id in the same process),
 //! matched against the pid the session's hooks reported (`claude_pid`) and
 //! then against the pids above its hooks (`ancestor_pids`, reported when
-//! Claude does not export `CLAUDE_PID`). A Codex session is selected by
+//! Claude does not export `CLAUDE_PID` or a hosted hook needs provenance). A Codex session is selected by
 //! its thread id alone: the MCP shim takes it from each tool call's
 //! `_meta.threadId`, and Codex hooks report no pids (every thread of an
 //! app-server shares the same ones).

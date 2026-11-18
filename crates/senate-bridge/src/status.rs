@@ -690,10 +690,14 @@ fn render_senate(
     }
     for session in &view.sessions {
         if let Some(Some(new)) = view.hosted.get(&session.session_id) {
-            let _ = writeln!(out, "  {}", l.pick(
-                format!("托管 Claude 会话 {} 已切换到原生 ID {new}。退出该终端并运行 senate restore {} 后，别名才会恢复接收消息。期间的消息会暂存，并在恢复后投递。仅当 Claude Code 向钩子提供进程 ID 时，状态才会报告此切换。", session.agent, session.agent),
-                format!("Hosted Claude session {} switched to native ID {new}. Its alias stops receiving until you exit that terminal and run senate restore {}. Messages are held and arrive after restore. Status reports the switch only when Claude Code supplies its process ID to hooks.", session.agent, session.agent),
-            ));
+            let _ = writeln!(
+                out,
+                "  {}",
+                l.pick(
+                    format!("托管 Claude 席位 {} 上报了无法归属的原生 ID {new}。已保留原绑定。运行 senate attach {} 检查或退出当前终端。", session.agent, session.agent),
+                    format!("Hosted Claude seat {} reported an unbound native ID {new}. The original binding is kept. Run senate attach {} to inspect or exit the terminal.", session.agent, session.agent),
+                )
+            );
         }
     }
     let _ = writeln!(out, "\n{}", l.pick("会话", "sessions"));
