@@ -685,6 +685,7 @@ mod tests {
                 .collect(),
             sessions: Vec::new(),
             hosted: Default::default(),
+            hosted_unbound: Default::default(),
             queue: Default::default(),
             speaker: None,
             roles: None,

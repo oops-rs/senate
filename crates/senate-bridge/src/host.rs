@@ -4,6 +4,7 @@
 mod terminal;
 
 use rustix::process::{Pid, Signal, kill_process_group};
+use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write as _};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
@@ -461,34 +462,54 @@ pub(crate) fn unverified_switch(paths: &Paths, id: &EventId) -> Option<String> {
     std::fs::read_to_string(directory(paths, id).join("unverified-switch")).ok()
 }
 
+pub(crate) fn unbound_context(paths: &Paths, id: &EventId) -> Option<String> {
+    std::fs::read_to_string(directory(paths, id).join("unbound-context")).ok()
+}
+
+#[derive(Default)]
+pub(crate) struct HostStatus {
+    pub(crate) hosted: BTreeMap<String, Option<String>>,
+    pub(crate) unbound: BTreeMap<String, String>,
+}
+
 pub(crate) fn status(
     paths: &Paths,
     store: &crate::state::Store,
     sessions: &[crate::session::Session],
-) -> Result<std::collections::BTreeMap<String, Option<String>>, crate::state::StoreError> {
-    let mut hosted = std::collections::BTreeMap::new();
+) -> Result<HostStatus, crate::state::StoreError> {
+    let mut status = HostStatus::default();
     for session in sessions {
         if let Some(id) = store.session_host(&session.session_id)?
             && running(paths, &id)?
         {
-            hosted.insert(
+            status.hosted.insert(
                 session.session_id.clone(),
                 unverified_switch(paths, &id).filter(|new| new != &session.session_id),
             );
+            if let Some(native) = unbound_context(paths, &id) {
+                status.unbound.insert(session.session_id.clone(), native);
+            }
         }
     }
-    Ok(hosted)
+    Ok(status)
 }
 
 pub(crate) fn note_unverified_switch(paths: &Paths, id: &EventId, session: &str) -> io::Result<()> {
     std::fs::write(directory(paths, id).join("unverified-switch"), session)
 }
 
-pub(crate) fn clear_unverified_switch(paths: &Paths, id: &EventId) {
-    if let Err(error) = std::fs::remove_file(directory(paths, id).join("unverified-switch"))
-        && error.kind() != io::ErrorKind::NotFound
-    {
-        tracing::warn!(%error, %id, "clearing a hosted Claude context diagnostic");
+pub(crate) fn note_unbound_context(paths: &Paths, id: &EventId, session: &str) -> io::Result<()> {
+    std::fs::write(directory(paths, id).join("unbound-context"), session)
+}
+
+pub(crate) fn clear_context_reports(paths: &Paths, id: &EventId) {
+    let dir = directory(paths, id);
+    for file in ["unverified-switch", "unbound-context"] {
+        if let Err(error) = std::fs::remove_file(dir.join(file))
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            tracing::warn!(%error, %id, file, "clearing a hosted Claude context report");
+        }
     }
 }
 

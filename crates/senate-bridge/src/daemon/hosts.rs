@@ -250,7 +250,7 @@ impl Shared {
             [] => return Ok(None),
             [(native, id, verified)] if *native == report.session_id => {
                 if *verified {
-                    host::clear_unverified_switch(paths, id);
+                    host::clear_context_reports(paths, id);
                 }
                 return Ok(None);
             }
@@ -293,9 +293,7 @@ impl Shared {
                 || (target.state == SessionState::Stale
                     && target.socket.as_ref().is_some_and(|socket| socket.exists()))
             {
-                let reason = StoreError::HostedNativeConflict.to_string();
-                report_unverified_switch(paths, id, &report.session_id, &reason);
-                return Err(IpcError::bad_request(reason));
+                return Err(refuse_verified_conflict(paths, id, report));
             }
         }
         let committee = first
@@ -334,14 +332,12 @@ impl Shared {
         next.agent = first.agent.clone();
         match self.store.switch_hosted_session(&first, next, id, &notice) {
             Ok(session) => {
-                host::clear_unverified_switch(paths, id);
+                host::clear_context_reports(paths, id);
                 self.host_notices_ready.notify_one();
                 Ok(Some(session))
             }
-            Err(error @ StoreError::HostedNativeConflict) => {
-                let reason = error.to_string();
-                report_unverified_switch(paths, id, &report.session_id, &reason);
-                Err(IpcError::bad_request(reason))
+            Err(StoreError::HostedNativeConflict) => {
+                Err(refuse_verified_conflict(paths, id, report))
             }
             Err(error) => Err(internal(error)),
         }
@@ -357,29 +353,40 @@ impl Shared {
         };
         for notice in notices {
             let id = notice.id.clone();
-            let failure =
-                match tokio::time::timeout(Duration::from_secs(1), self.post(notice)).await {
-                    Ok(Ok(_)) => {
-                        if let Err(error) = self.store.remove_hosted_switch_notice(&id) {
-                            tracing::warn!(%error, "marking hosted identity switch as reported");
-                        }
-                        continue;
+            let rejection = match tokio::time::timeout(
+                Duration::from_secs(1),
+                self.api.append(&notice),
+            )
+            .await
+            {
+                Ok(Ok(_)) => {
+                    if let Err(error) = self.store.remove_hosted_switch_notice(&id) {
+                        tracing::warn!(%error, "marking hosted identity switch as reported");
                     }
-                    Ok(Err(error)) => error.to_string(),
-                    Err(_) => "server request timed out".to_string(),
-                };
+                    continue;
+                }
+                Ok(Err(error)) if definitive_notice_rejection(&error) => error,
+                Ok(Err(error)) => {
+                    tracing::warn!(%id, %error, "posting hosted identity switch, will retry");
+                    continue;
+                }
+                Err(_) => {
+                    tracing::warn!(%id, "posting hosted identity switch timed out, will retry");
+                    continue;
+                }
+            };
             match self
                 .store
                 .fail_hosted_switch_notice(&id, HOST_NOTICE_FAILURE_LIMIT)
             {
                 Ok(true) => {
-                    tracing::warn!(%id, %failure, "dropping hosted identity switch notice after repeated failures")
+                    tracing::warn!(%id, %rejection, "dropping hosted identity switch notice after repeated rejections")
                 }
                 Ok(false) => {
-                    tracing::warn!(%id, %failure, "posting hosted identity switch, will retry")
+                    tracing::warn!(%id, %rejection, "posting hosted identity switch, will retry")
                 }
                 Err(error) => {
-                    tracing::warn!(%id, %error, %failure, "recording hosted identity switch notice failure")
+                    tracing::warn!(%id, %error, %rejection, "recording hosted identity switch notice rejection")
                 }
             }
         }
@@ -883,6 +890,28 @@ fn report_unverified_switch(paths: &Paths, host: &EventId, native: &str, reason:
         tracing::warn!(%error, %host, "recording a refused hosted Claude context change");
     }
     tracing::warn!(%host, %native, %reason, "keeping the existing hosted Claude binding");
+}
+
+fn refuse_verified_conflict(paths: &Paths, host: &EventId, report: &HookReport) -> IpcError {
+    let reason = StoreError::HostedNativeConflict.to_string();
+    report_unverified_switch(paths, host, &report.session_id, &reason);
+    // A verified context transition can leave the inbox pointing at the
+    // rejected conversation. A prompt alone can be a delayed report.
+    if report.event == HookEvent::SessionStart
+        && matches!(report.source.as_deref(), Some("clear" | "resume"))
+        && let Err(error) = host::note_unbound_context(paths, host, &report.session_id)
+    {
+        tracing::warn!(%error, %host, "recording an unbound Claude context");
+    }
+    IpcError::bad_request(reason)
+}
+
+fn definitive_notice_rejection(error: &ApiClientError) -> bool {
+    // A generic HTTP response may come from an intermediary. Only a
+    // Senate rejection consumes the notice's drop budget.
+    matches!(error, ApiClientError::Api { status, code, .. }
+        if code != "http" && (400..500).contains(status)
+            && !matches!(status, 408 | 421 | 425 | 429))
 }
 
 fn owns_claude_hook(tui: u32, reported: Option<u32>, ancestors: &[u32]) -> bool {

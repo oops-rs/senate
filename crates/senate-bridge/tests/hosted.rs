@@ -1240,6 +1240,99 @@ async fn a_refused_notice_expires_and_a_non_chair_switch_stays_in_the_committee(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_context_notice_survives_server_errors_and_timeouts() {
+    use senate_bridge::ipc::{HookEvent, HookReply};
+    use senate_core::{Address, Kind, NewEvent};
+
+    let mut fixture = HostedClaude::launch(false).await;
+    let h = &fixture.h;
+    let committee = committee();
+    let primary = &fixture.seat.senator;
+    let chair = h.server.append(
+        NewEvent::new(
+            committee.clone(),
+            Kind::Note,
+            Address::Committee,
+            "chair set",
+        )
+        .with_meta(
+            senate_core::meta::CHAIR,
+            senate_core::chair::ChairPayload {
+                senator: primary.clone(),
+            }
+            .value(),
+        ),
+    );
+    eventually(
+        "the hosted seat to observe its chair appointment",
+        TIMEOUT,
+        || (h.store().delivered_cursor(primary, &committee).unwrap() >= chair.seq).then_some(()),
+    )
+    .await;
+    let pid = fixture.pid();
+    let conn = rusqlite::Connection::open(h.paths.state_db()).unwrap();
+    let stored = || {
+        conn.query_row(
+            "SELECT id, failures FROM hosted_switch_notices",
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?)),
+        )
+        .unwrap()
+    };
+    for delay in [Duration::ZERO, Duration::from_secs(2)] {
+        let baseline = {
+            let mut server = h.server.state.inner.lock().unwrap();
+            server.transient_append_delay = Some(delay);
+            server.transient_append_attempts
+        };
+        if delay.is_zero() {
+            let switch = fixture.hook(
+                "outage-context",
+                HookEvent::SessionStart,
+                Some("clear"),
+                Some(pid),
+                &[pid],
+            );
+            let _: HookReply = call(h, &switch).await;
+        }
+        // Once a fourth attempt starts, three have failed or timed out.
+        eventually(
+            "four append attempts during the outage",
+            common::WAIT,
+            || {
+                (h.server
+                    .state
+                    .inner
+                    .lock()
+                    .unwrap()
+                    .transient_append_attempts
+                    >= baseline + 4)
+                    .then_some(())
+            },
+        )
+        .await;
+        assert_eq!(stored().1, 0);
+    }
+    let (id, _) = stored();
+    h.server.state.inner.lock().unwrap().transient_append_delay = None;
+    let notice = eventually(
+        "the original notice after server recovery",
+        common::WAIT,
+        || {
+            h.server
+                .events(committee.as_str())
+                .into_iter()
+                .find(|event| event.id.to_string() == id)
+        },
+    )
+    .await;
+    assert_eq!(notice.to, vec![Address::Speaker]);
+    assert!(notice.body.contains("outage-context"));
+    fixture.end_terminal().await;
+    fixture.h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pruning_keeps_an_expired_stale_seat_until_its_host_exits() {
     use senate_bridge::SessionState;
     use senate_bridge::ipc::{HookEvent, HookReply};
@@ -1300,7 +1393,7 @@ async fn pruning_keeps_an_expired_stale_seat_until_its_host_exits() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unbound_claude_tui_holds_committee_mail_and_secretary_reminders() {
-    use senate_bridge::ipc::{HookEvent, HookReply};
+    use senate_bridge::ipc::{HookEvent, HookReply, StatusReply};
     use senate_bridge::state::ItemStatus;
     use senate_core::secretary_work::SecretaryReminder;
     use senate_core::{Address, EventId, Kind, NewEvent};
@@ -1317,14 +1410,36 @@ async fn an_unbound_claude_tui_holds_committee_mail_and_secretary_reminders() {
     };
     report.socket = Some(inbox.path.clone());
     let _: HookReply = call(h, &hook).await;
+    let independent = std::process::id();
+    let occupied = fixture.hook(
+        "unbound-context",
+        HookEvent::SessionStart,
+        Some("startup"),
+        Some(independent),
+        &[independent, pid],
+    );
+    let _: HookReply = call(h, &occupied).await;
     let refused = fixture.hook(
         "unbound-context",
+        HookEvent::SessionStart,
+        Some("resume"),
+        Some(pid),
+        &[pid],
+    );
+    fixture
+        .reject(&refused, "target native ID belongs to another senator")
+        .await;
+    let uncertain = fixture.hook(
+        "uncertain-context",
         HookEvent::UserPromptSubmit,
         None,
         None,
         &[pid],
     );
-    fixture.reject(&refused, "could not attribute").await;
+    fixture.reject(&uncertain, "could not attribute").await;
+    let status: StatusReply = call(h, &Request::Status).await;
+    assert_eq!(status.hosted[native].as_deref(), Some("uncertain-context"));
+    assert_eq!(status.hosted_unbound[native], "unbound-context");
 
     let committee = committee();
     let note = h.server.append(
@@ -1377,6 +1492,8 @@ async fn an_unbound_claude_tui_holds_committee_mail_and_secretary_reminders() {
     );
 
     let recovered: HookReply = call(h, &hook).await;
+    let status: StatusReply = call(h, &Request::Status).await;
+    assert!(status.hosted_unbound.is_empty());
     let context = recovered.context.unwrap();
     assert!(context.contains(&note.body));
     eventually(
@@ -1390,6 +1507,76 @@ async fn an_unbound_claude_tui_holds_committee_mail_and_secretary_reminders() {
         },
     )
     .await;
+    fixture.end_terminal().await;
+    fixture.h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn diagnostic_only_reports_do_not_stop_pushes_to_an_idle_host() {
+    use senate_bridge::ipc::{HookEvent, HookReply, StatusReply};
+    use senate_core::{Address, Kind, NewEvent};
+
+    let mut fixture = HostedClaude::launch(false).await;
+    let h = &fixture.h;
+    let pid = fixture.pid();
+    let inbox = common::FakeInbox::bind(h.dir.path().join("current-inbox.sock"));
+    let prior = &fixture.seat.session_id;
+    let current = "current-context";
+    let stale = fixture.hook(prior, HookEvent::UserPromptSubmit, None, Some(pid), &[pid]);
+    let mut cleared = fixture.hook(
+        current,
+        HookEvent::SessionStart,
+        Some("clear"),
+        Some(pid),
+        &[pid],
+    );
+    let Request::SessionHook(report) = &mut cleared else {
+        unreachable!()
+    };
+    report.socket = Some(inbox.path.clone());
+    let _: HookReply = call(h, &cleared).await;
+
+    let ambiguous = fixture.hook(
+        "uncertain-resume",
+        HookEvent::SessionStart,
+        Some("resume"),
+        None,
+        &[pid],
+    );
+    for (hook, native, reason) in [
+        (stale, prior.as_str(), "requires a verified resume"),
+        (ambiguous, "uncertain-resume", "could not attribute"),
+    ] {
+        fixture.reject(&hook, reason).await;
+        let status: StatusReply = call(h, &Request::Status).await;
+        assert_eq!(status.hosted[current].as_deref(), Some(native));
+        assert!(status.hosted_unbound.is_empty());
+        let body = format!("idle inbox delivery after refused hook for {native}");
+        h.server.append(
+            NewEvent::new(
+                committee(),
+                Kind::Note,
+                Address::senior(&h.config.person),
+                &body,
+            )
+            .to(Address::senator(&fixture.seat.senator)),
+        );
+        eventually(
+            "the idle inbox to receive a note without another hook",
+            TIMEOUT,
+            || {
+                inbox
+                    .messages()
+                    .into_iter()
+                    .find(|text| text.contains(&body))
+            },
+        )
+        .await;
+    }
+    let view = senate_bridge::status::collect(&h.paths).await.unwrap();
+    let status = senate_bridge::status::render(&view, chrono::Utc::now());
+    assert!(status.contains("refused a hook reporting native session uncertain-resume"));
+    assert!(!status.contains("Messages wait for the original session"));
     fixture.end_terminal().await;
     fixture.h.stop().await;
 }

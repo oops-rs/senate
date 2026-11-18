@@ -81,6 +81,7 @@ pub fn status(sessions: Vec<Session>) -> StatusReply {
             all
         },
         hosted: Default::default(),
+        hosted_unbound: Default::default(),
         queue: QueueCounts::default(),
         speaker: Some(SpeakerSeat::Senator(path("claude"))),
         roles: None,

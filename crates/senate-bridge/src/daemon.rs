@@ -2158,7 +2158,7 @@ impl Shared {
                 .store
                 .session_host(&session.session_id)?
                 .is_some_and(|id| {
-                    crate::host::unverified_switch(&Paths::new(&self.home), &id).is_some()
+                    crate::host::unbound_context(&Paths::new(&self.home), &id).is_some()
                 });
         Ok(!unbound && self.ladder.can_push(session))
     }
@@ -2847,6 +2847,8 @@ impl Shared {
                 }
             })
             .collect();
+        let host_status = crate::host::status(&Paths::new(&self.home), &self.store, &sessions)
+            .map_err(internal)?;
         Ok(StatusReply {
             pid: std::process::id(),
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -2856,8 +2858,8 @@ impl Shared {
             locale: self.locale,
             server_url: self.api.base_url().to_string(),
             committees,
-            hosted: crate::host::status(&Paths::new(&self.home), &self.store, &sessions)
-                .map_err(internal)?,
+            hosted: host_status.hosted,
+            hosted_unbound: host_status.unbound,
             sessions,
             queue: self.store.counts().map_err(internal)?,
             speaker: self.speaker_seat(),

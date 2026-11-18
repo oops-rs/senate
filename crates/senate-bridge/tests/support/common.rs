@@ -166,6 +166,8 @@ pub struct Inner {
     pub events: BTreeMap<String, Vec<Event>>,
     pub reject_appends: bool,
     pub reject_append_containing: Option<String>,
+    pub transient_append_delay: Option<Duration>,
+    pub transient_append_attempts: usize,
     pub secretary_reminders: Vec<senate_core::secretary_work::SecretaryReminder>,
     pub secretary_reminder_polls: usize,
     /// `(committee, seq)` → the JSON served in place of the stored event.
@@ -409,6 +411,21 @@ async fn append(
     };
     if ev.committee.as_str() != committee {
         return api_error(StatusCode::BAD_REQUEST, "bad_request", "committee mismatch");
+    }
+    let temporary = {
+        let mut inner = st.inner.lock().unwrap();
+        if inner.transient_append_delay.is_some() {
+            inner.transient_append_attempts += 1;
+        }
+        inner.transient_append_delay
+    };
+    if let Some(delay) = temporary {
+        tokio::time::sleep(delay).await;
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+            "injected outage",
+        );
     }
     let rejected = {
         let inner = st.inner.lock().unwrap();
@@ -890,6 +907,8 @@ impl FakeServer {
                 events: BTreeMap::new(),
                 reject_appends: false,
                 reject_append_containing: None,
+                transient_append_delay: None,
+                transient_append_attempts: 0,
                 secretary_reminders: Vec::new(),
                 secretary_reminder_polls: 0,
                 raw: HashMap::new(),

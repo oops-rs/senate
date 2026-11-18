@@ -46,6 +46,7 @@ pub struct StatusView {
     pub committees: Vec<CommitteeStatus>,
     pub sessions: Vec<Session>,
     pub hosted: std::collections::BTreeMap<String, Option<String>>,
+    pub hosted_unbound: std::collections::BTreeMap<String, String>,
     pub queue: QueueCounts,
     pub locale: Locale,
     /// Who holds that Senate's Speaker's seat, as the daemon heard.
@@ -68,6 +69,7 @@ impl StatusView {
             committees: reply.committees,
             sessions: reply.sessions,
             hosted: reply.hosted,
+            hosted_unbound: reply.hosted_unbound,
             queue: reply.queue,
             locale: reply.locale,
             speaker: reply.speaker,
@@ -196,6 +198,7 @@ fn offline(paths: &Paths) -> anyhow::Result<StatusView> {
         committees: Vec::new(),
         sessions: Vec::new(),
         hosted: Default::default(),
+        hosted_unbound: Default::default(),
         queue: QueueCounts::default(),
         locale: config
             .as_ref()
@@ -209,7 +212,9 @@ fn offline(paths: &Paths) -> anyhow::Result<StatusView> {
     }
     let store = Store::open_read_only(&paths.state_db())?;
     view.sessions = store.sessions()?;
-    view.hosted = crate::host::status(paths, &store, &view.sessions)?;
+    let host_status = crate::host::status(paths, &store, &view.sessions)?;
+    view.hosted = host_status.hosted;
+    view.hosted_unbound = host_status.unbound;
     let configured: Vec<_> = config.map(|c| c.committees).unwrap_or_default();
     view.committees = store
         .cursors()?
@@ -362,11 +367,20 @@ fn hosted_advisories(view: &StatusView) -> Vec<String> {
         ).into());
     }
     for session in &view.sessions {
-        if let Some(Some(new)) = view.hosted.get(&session.session_id) {
-            let seat = &session.agent;
+        let seat = &session.agent;
+        let unbound = view.hosted_unbound.get(&session.session_id);
+        if let Some(new) = unbound {
             lines.push(l.pick(
                 format!("托管 Claude 席位 {seat} 无法绑定原生会话 {new}。消息暂存于原会话。运行 senate attach {seat} 检查终端，或退出终端后运行 senate restore {seat}。"),
                 format!("Hosted Claude seat {seat} could not bind native session {new}. Messages wait for the original session. Run senate attach {seat} to inspect the terminal, or exit it and run senate restore {seat}."),
+            ));
+        }
+        if let Some(Some(refused)) = view.hosted.get(&session.session_id)
+            && Some(refused) != unbound
+        {
+            lines.push(l.pick(
+                format!("托管 Claude 席位 {seat} 拒绝了原生会话 {refused} 的钩子上报。运行 senate attach {seat} 可检查当前会话。"),
+                format!("Hosted Claude seat {seat} refused a hook reporting native session {refused}. Use senate attach {seat} to check the current conversation."),
             ));
         }
     }
@@ -811,6 +825,7 @@ mod tests {
             committees: vec![row("claude", 1), row("codex", 0)],
             sessions: Vec::new(),
             hosted: Default::default(),
+            hosted_unbound: Default::default(),
             queue: QueueCounts::default(),
             locale,
             speaker: None,

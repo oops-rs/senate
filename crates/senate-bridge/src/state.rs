@@ -1485,13 +1485,23 @@ impl Store {
                  WHERE host_id IS NOT NULL AND state IN ('ended', 'stale') AND last_seen < ?1",
             )?;
             let rows = query.query_map([cutoff], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)))
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
         };
         for (session_id, host_id) in hosted {
-            if !host::running(paths, &parse_host_id(&host_id)?)? {
-                tx.execute("DELETE FROM sessions WHERE session_id = ?1", [&session_id])?;
+            let running = host_id
+                .map_err(StoreError::from)
+                .and_then(|id| parse_host_id(&id))
+                .and_then(|id| host::running(paths, &id).map_err(StoreError::from));
+            match running {
+                Ok(false) => {
+                    tx.execute("DELETE FROM sessions WHERE session_id = ?1", [&session_id])?;
+                }
+                Ok(true) => {}
+                Err(error) => {
+                    tracing::warn!(%session_id, %error, "keeping an expired hosted session with unverifiable ownership")
+                }
             }
         }
         tx.execute(
@@ -2568,6 +2578,36 @@ mod tests {
         assert!(s.set_session_state("a", SessionState::Stale).unwrap());
         let item = s.item(&claude(), &committee(), Seq(1)).unwrap().unwrap();
         assert_eq!((item.status, item.session_id), (ItemStatus::Pending, None));
+    }
+
+    #[test]
+    fn an_unreadable_host_row_does_not_stop_pruning_other_sessions() {
+        let store = Store::in_memory().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::new(home.path());
+        let inaccessible = EventId::new();
+        let directory = host::directory(&paths, &inaccessible);
+        std::fs::create_dir_all(&directory).unwrap();
+        // Opening a symlink to itself returns an I/O error even as root.
+        std::os::unix::fs::symlink("owner", directory.join("owner")).unwrap();
+        for (session, host_id) in [
+            ("ordinary", None),
+            ("bad-id", Some("invalid-id".into())),
+            ("bad-owner", Some(inaccessible.to_string())),
+            ("stopped-host", Some(EventId::new().to_string())),
+        ] {
+            store.upsert_session(&upsert(session)).unwrap();
+            store.conn().execute(
+                "UPDATE sessions SET host_id = ?2, state = 'stale', last_seen = 0 WHERE session_id = ?1",
+                params![session, host_id],
+            ).unwrap();
+        }
+
+        store.prune(Duration::from_secs(60), &paths).unwrap();
+        assert!(store.session("ordinary").unwrap().is_none());
+        assert!(store.session("stopped-host").unwrap().is_none());
+        assert!(store.session("bad-id").unwrap().is_some());
+        assert!(store.session("bad-owner").unwrap().is_some());
     }
 
     #[test]

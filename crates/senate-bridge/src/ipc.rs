@@ -1434,10 +1434,12 @@ pub struct StatusReply {
     pub server_url: String,
     pub committees: Vec<CommitteeStatus>,
     pub sessions: Vec<Session>,
-    /// Live terminal hosts by session ID. The value is a switched native
-    /// identity, if the hosted TUI is no longer showing the bound session.
+    /// Live terminal hosts by session ID, with the latest refused native ID if any.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub hosted: std::collections::BTreeMap<String, Option<String>>,
+    /// The unbound native context that is holding a hosted session's delivery.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub hosted_unbound: std::collections::BTreeMap<String, String>,
 
     pub queue: QueueCounts,
     /// Who holds the Speaker's seat of that Senate, as `/v1/me` said.
