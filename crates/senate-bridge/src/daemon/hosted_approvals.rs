@@ -15,12 +15,44 @@ const RETRY: Duration = Duration::from_secs(1);
 const POST_TIMEOUT: Duration = Duration::from_secs(5);
 const POST_FAILURE_LIMIT: u8 = 6;
 
+#[derive(Debug, thiserror::Error)]
+enum PostError {
+    #[error(transparent)]
+    Server(#[from] ApiClientError),
+    #[error(transparent)]
+    Store(#[from] StoreError),
+}
+
+struct PostBackoff {
+    failures: u32,
+    ready_at: Instant,
+}
+
 #[derive(Default)]
 pub(super) struct Monitor {
     wake: Notify,
+    missing_viewers: Mutex<BTreeSet<EventId>>,
 }
 
 impl Shared {
+    pub(super) fn log_missing_host_viewers(&self, paths: &Paths) -> Result<(), StoreError> {
+        let mut missing = BTreeSet::new();
+        let mut reported = lock(&self.hosted_approvals.missing_viewers);
+        for id in host::running_ids(paths)? {
+            if !host::awaiting_publication(paths, &id)
+                && host::viewer_activity(paths, &id).is_none()
+                && let Some(session) = self.store.session_for_host(&id)?
+            {
+                if !reported.contains(&id) {
+                    tracing::warn!(host = %id, %session, "viewer activity is unavailable for hosted approval notices");
+                }
+                missing.insert(id);
+            }
+        }
+        *reported = missing;
+        Ok(())
+    }
+
     fn approval_host(&self, session: &str) -> Result<Option<(EventId, Session)>, StoreError> {
         let Some(id) = self.store.session_host(session)? else {
             return Ok(None);
@@ -187,11 +219,13 @@ impl Shared {
             if session.runtime != Runtime::Codex {
                 continue;
             }
-            let Some(viewer) = host::viewer_activity(&paths, &id).filter(|viewer| !viewer.attached)
-            else {
+            let Some(viewer) = host::viewer_activity(&paths, &id) else {
                 continue;
             };
-            let at = prompt.at.max(viewer.detached_at);
+            let Some(unattended_since) = viewer.unattended_since(observed_at()) else {
+                continue;
+            };
+            let at = prompt.at.max(unattended_since);
             if at > viewer.input_at {
                 self.edit_approvals(&id, |state| {
                     open_notice(state, &session, at, prompt.request_id, Some(prompt.tool))
@@ -201,12 +235,11 @@ impl Shared {
         Ok(())
     }
 
-    async fn approval_recipient(&self, notice: &ApprovalNotice) -> Result<Address, IpcError> {
+    async fn approval_recipient(&self, notice: &ApprovalNotice) -> Result<Address, ApiClientError> {
         let (chair, docket) = tokio::try_join!(
             self.api.chair(&notice.committee),
             self.api.docket(&notice.committee),
-        )
-        .map_err(server_error)?;
+        )?;
         let connected = chair.chair.is_some_and(|chair| {
             chair != notice.agent
                 && docket
@@ -232,8 +265,10 @@ impl Shared {
             // its archive can name the real seq.
             return notice.append_attempted;
         }
-        let unattended = host::viewer_activity(&Paths::new(&self.home), host_id)
-            .is_some_and(|viewer| !viewer.attached && viewer.input_at < notice.at);
+        let unattended =
+            host::viewer_activity(&Paths::new(&self.home), host_id).is_some_and(|viewer| {
+                viewer.unattended_since(observed_at()).is_some() && viewer.input_at < notice.at
+            });
         unattended
             && self
                 .approval_host(native)
@@ -253,7 +288,7 @@ impl Shared {
         host_id: &EventId,
         native: &str,
         notice: &ApprovalNotice,
-    ) -> Result<(), IpcError> {
+    ) -> Result<(), PostError> {
         let sender = Address::senator(&notice.agent);
         match (notice.seq, notice.archive.as_ref()) {
             (None, _) => {
@@ -269,21 +304,17 @@ impl Shared {
                 if !self.can_append_approval(host_id, native, notice) {
                     return Ok(());
                 }
-                let started = self
-                    .store
-                    .edit_hosted_approvals(host_id, |state| {
-                        let Some(current) = state.notices.iter_mut().find(|n| n.id == notice.id)
-                        else {
-                            return false;
-                        };
-                        if current.archive.is_some() && !current.append_attempted {
-                            return false;
-                        }
-                        current.recipient = Some(recipient.clone());
-                        current.append_attempted = true;
-                        true
-                    })
-                    .map_err(internal)?;
+                let started = self.store.edit_hosted_approvals(host_id, |state| {
+                    let Some(current) = state.notices.iter_mut().find(|n| n.id == notice.id) else {
+                        return false;
+                    };
+                    if current.archive.is_some() && !current.append_attempted {
+                        return false;
+                    }
+                    current.recipient = Some(recipient.clone());
+                    current.append_attempted = true;
+                    true
+                })?;
                 if !started {
                     return Ok(());
                 }
@@ -296,14 +327,13 @@ impl Shared {
                 .with_id(notice.id.clone())
                 .to(recipient)
                 .with_meta(meta::HOSTED_APPROVAL, serde_json::json!(true));
-                let posted = self.post(event).await?;
+                let posted = self.api.append(&event).await?;
                 self.edit_approvals(host_id, |state| {
                     update_notice(state, &notice.id, |n| {
-                        n.seq = Some(posted.seq);
+                        n.seq = Some(posted.event.seq);
                         n.failures = 0;
                     })
-                })
-                .map_err(internal)?;
+                })?;
             }
             (Some(seq), Some(id)) => {
                 let event = Self::status_event(
@@ -314,21 +344,19 @@ impl Shared {
                     Some(id.clone()),
                 )
                 .with_meta(meta::HOSTED_APPROVAL, serde_json::json!(notice.id));
-                self.post(event).await?;
-                self.store
-                    .edit_hosted_approvals(host_id, |state| {
-                        let count = state.notices.len();
-                        state.notices.retain(|n| n.id != notice.id);
-                        state.notices.len() != count
-                    })
-                    .map_err(internal)?;
+                self.api.append(&event).await?;
+                self.store.edit_hosted_approvals(host_id, |state| {
+                    let count = state.notices.len();
+                    state.notices.retain(|n| n.id != notice.id);
+                    state.notices.len() != count
+                })?;
             }
             _ => {}
         }
         Ok(())
     }
 
-    fn failed_approval_post(&self, host_id: &EventId, notice: &ApprovalNotice) {
+    fn reject_approval_post(&self, host_id: &EventId, notice: &ApprovalNotice) {
         let updated = self.store.edit_hosted_approvals(host_id, |state| {
             let Some(current) = state.notices.iter_mut().find(|n| n.id == notice.id) else {
                 return false;
@@ -336,7 +364,7 @@ impl Shared {
             if current.seq != notice.seq || current.archive != notice.archive {
                 return false;
             }
-            current.failures += 1;
+            current.failures = current.failures.saturating_add(1);
             if current.failures == POST_FAILURE_LIMIT {
                 tracing::warn!(event = %notice.id, committee = %notice.committee, "hosted approval notice reached its retry limit");
             }
@@ -459,6 +487,7 @@ pub(super) async fn observe(
 ) {
     let mut retry = tokio::time::interval(shared.timing.sweep.min(RETRY));
     retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut backoff: BTreeMap<EventId, PostBackoff> = BTreeMap::new();
     loop {
         tokio::select! {
             _ = shutdown.changed() => break,
@@ -482,26 +511,54 @@ pub(super) async fn observe(
                 continue;
             }
         };
+        let mut pending = BTreeSet::new();
         for (host, state) in states {
             for notice in state.notices.into_iter().filter(|n| {
                 n.failures < POST_FAILURE_LIMIT && (n.seq.is_none() || n.archive.is_some())
             }) {
+                let operation = notice
+                    .seq
+                    .and(notice.archive.as_ref())
+                    .unwrap_or(&notice.id);
+                pending.insert(operation.clone());
+                if backoff
+                    .get(operation)
+                    .is_some_and(|retry| retry.ready_at > Instant::now())
+                {
+                    continue;
+                }
                 let result = tokio::select! {
                     _ = shutdown.changed() => return,
                     result = tokio::time::timeout(POST_TIMEOUT, shared.send_approval_notice(&host, &state.session_id, &notice)) => result,
                 };
                 match result {
-                    Ok(Ok(())) => {}
+                    Ok(Ok(())) => {
+                        backoff.remove(operation);
+                        continue;
+                    }
                     Ok(Err(error)) => {
                         tracing::debug!(%error, "posting hosted approval notice");
-                        shared.failed_approval_post(&host, &notice);
+                        if matches!(&error, PostError::Server(server) if server.definitive_notice_rejection())
+                        {
+                            shared.reject_approval_post(&host, &notice);
+                        }
                     }
                     Err(_) => {
                         tracing::debug!("timed out posting hosted approval notice");
-                        shared.failed_approval_post(&host, &notice);
                     }
                 }
+                let failures = backoff
+                    .get(operation)
+                    .map_or(1, |retry| retry.failures.saturating_add(1));
+                backoff.insert(
+                    operation.clone(),
+                    PostBackoff {
+                        failures,
+                        ready_at: Instant::now() + retry_delay(&shared.timing, failures),
+                    },
+                );
             }
         }
+        backoff.retain(|id, _| pending.contains(id));
     }
 }

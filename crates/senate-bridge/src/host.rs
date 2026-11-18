@@ -5,7 +5,7 @@ mod input;
 mod terminal;
 
 use rustix::process::{Pid, Signal, kill_process_group};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write as _};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
@@ -58,6 +58,21 @@ pub(crate) struct ViewerActivity {
     pub detached_at: u64,
 }
 
+// An attached terminal only stands in for a person who has used it in
+// the last three minutes. Leaving an attachment open cannot hide a prompt.
+const VIEWER_IDLE_NS: u64 = 3 * 60 * 1_000_000_000;
+
+impl ViewerActivity {
+    /// When this viewer stopped counting as attended, if it has.
+    pub(crate) fn unattended_since(&self, now: u64) -> Option<u64> {
+        if self.attached && self.input_at > self.detached_at {
+            let idle_at = self.input_at.saturating_add(VIEWER_IDLE_NS);
+            return (now >= idle_at).then_some(idle_at);
+        }
+        Some(self.detached_at)
+    }
+}
+
 pub(crate) fn viewer_activity(paths: &Paths, id: &EventId) -> Option<ViewerActivity> {
     let data = std::fs::read(directory(paths, id).join("viewer.json")).ok()?;
     serde_json::from_slice(&data).ok()
@@ -70,10 +85,12 @@ pub(crate) fn approval_candidate(paths: &Paths, id: &EventId) -> PathBuf {
 struct Viewer {
     path: PathBuf,
     activity: ViewerActivity,
+    dirty: bool,
 }
 
 impl Viewer {
-    fn record(&self) {
+    fn record(&mut self) {
+        self.dirty = false;
         let saved = (|| -> anyhow::Result<()> {
             let staged = self.path.with_extension("tmp");
             std::fs::write(&staged, serde_json::to_vec(&self.activity)?)?;
@@ -82,13 +99,15 @@ impl Viewer {
         })();
         if let Err(error) = saved {
             let _ = std::fs::remove_file(&self.path);
-            tracing::warn!(%error, "recording activity of the terminal viewer");
+            tracing::warn!(%error, path = %self.path.display(), "recording activity of the terminal viewer");
         }
     }
 
     fn input(&mut self, at: u64) {
-        self.activity.input_at = at;
-        self.record();
+        if at > self.activity.input_at {
+            self.activity.input_at = at;
+            self.dirty = true;
+        }
     }
 }
 
@@ -322,6 +341,12 @@ pub async fn run(
     let socket = socket(paths, id);
     let listener = UnixListener::bind(&socket).context("listen for terminal attachments")?;
     std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
+    let mut viewer = Viewer {
+        path: dir.join("viewer.json"),
+        activity: ViewerActivity::default(),
+        dirty: false,
+    };
+    viewer.record();
     let (pty, pts) = pty_process::open()?;
     pty.resize(Size::new(24, 80))?;
     let mut child = runtime_command(runtime, cwd, session, id, &dir)?
@@ -394,11 +419,6 @@ pub async fn run(
         tracing::warn!(%error, "clearing the host's startup marker");
     }
 
-    let mut viewer = Viewer {
-        path: dir.join("viewer.json"),
-        activity: ViewerActivity::default(),
-    };
-    viewer.record();
     let result = tokio::select! {
         status = child.wait() => status.context("wait for the coding TUI").and_then(|status| {
             ensure!(status.success(), "the coding TUI exited with {status}");
@@ -544,6 +564,7 @@ pub(crate) fn unbound_context(paths: &Paths, id: &EventId) -> Option<String> {
 pub(crate) struct HostStatus {
     pub(crate) hosted: BTreeMap<String, Option<String>>,
     pub(crate) unbound: BTreeMap<String, String>,
+    pub(crate) viewer_unavailable: BTreeSet<String>,
 }
 
 pub(crate) fn status(
@@ -562,6 +583,9 @@ pub(crate) fn status(
             );
             if let Some(native) = unbound_context(paths, &id) {
                 status.unbound.insert(session.session_id.clone(), native);
+            }
+            if !awaiting_publication(paths, &id) && viewer_activity(paths, &id).is_none() {
+                status.viewer_unavailable.insert(session.session_id.clone());
             }
         }
     }
@@ -649,22 +673,34 @@ async fn relay(
 ) -> anyhow::Result<()> {
     stream.write_u8(ATTACHED).await?;
     let (mut input, mut screen) = stream.into_split();
+    let mut classify = input::Input::default();
+    let cursor = std::sync::Mutex::new(input::CursorQueries::default());
     let from_terminal = async {
         let mut first_resize = true;
         let mut keys = [0; IO_CHUNK];
-        let mut classify = input::Input::default();
+        let mut writes = tokio::time::interval(Duration::from_millis(100));
+        writes.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            let tag = match input.read_u8().await {
-                Ok(tag) => tag,
-                Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
-                    if classify.end_of_input() {
-                        viewer.input(observed_at());
-                    }
-                    return Ok(());
+            let deadline = classify.deadline();
+            let mut tag = [0];
+            let len = tokio::select! {
+                biased;
+                _ = writes.tick(), if viewer.dirty => {
+                    viewer.record();
+                    continue;
                 }
-                Err(error) => return Err(error.into()),
+                _ = tokio::time::sleep(Duration::from_nanos(deadline.unwrap_or_default().saturating_sub(observed_at()))), if deadline.is_some() => {
+                    if let Some(at) = classify.expire(observed_at()) {
+                        viewer.input(at);
+                    }
+                    continue;
+                }
+                len = input.read(&mut tag) => len?,
             };
-            match tag {
+            if len == 0 {
+                return Ok(());
+            }
+            match tag[0] {
                 RESIZE => {
                     let rows = input.read_u16().await?;
                     let cols = input.read_u16().await?;
@@ -686,10 +722,10 @@ async fn relay(
                         // Timestamp before forwarding: these keys can cause
                         // the next prompt, whose episode they must not clear.
                         let at = observed_at();
-                        let human = classify.observe(&keys[..n]);
                         pty.write_all(&keys[..n]).await?;
-                        if human {
-                            viewer.input(at);
+                        let mut queries = cursor.lock().unwrap_or_else(|error| error.into_inner());
+                        if let Some(human_at) = classify.observe(&keys[..n], at, &mut queries) {
+                            viewer.input(human_at);
                         }
                     }
                 }
@@ -702,14 +738,24 @@ async fn relay(
             // If a viewer falls behind, an incomplete escape stream cannot
             // safely be replayed. Drop the connection and let it reattach.
             let bytes = output.recv().await?;
+            cursor
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .output(&bytes, observed_at());
             screen.write_all(&bytes).await?;
         }
     };
-    tokio::select! {
+    let result = tokio::select! {
         biased;
         result = from_terminal => result,
         result = to_terminal => result,
+    };
+    if let Some(at) = classify.finish() {
+        viewer.input(at);
     }
+    // The enclosing attachment records its detach and the final input in
+    // one snapshot. While attached, input snapshots are coalesced.
+    result
 }
 
 #[cfg(test)]
@@ -725,6 +771,7 @@ mod tests {
         let mut activity = Viewer {
             path: dir.path().join("viewer.json"),
             activity: ViewerActivity::default(),
+            dirty: false,
         };
         let (host, mut viewer) = UnixStream::pair().unwrap();
         let view_only = async {
@@ -757,12 +804,30 @@ mod tests {
             relay(host, &mut pty, output.subscribe(), &mut activity),
             with_input
         );
-        let saved = std::fs::read(&activity.path).unwrap();
-        assert_ne!(
-            serde_json::from_slice::<ViewerActivity>(&saved)
-                .unwrap()
-                .input_at,
-            0
+        assert_ne!(activity.activity.input_at, 0);
+    }
+
+    #[test]
+    fn an_attached_viewer_counts_as_attended_only_during_recent_human_activity() {
+        let mut viewer = ViewerActivity {
+            attached: true,
+            detached_at: 10,
+            input_at: 9,
+        };
+        assert_eq!(
+            viewer.unattended_since(11),
+            Some(10),
+            "input from a previous attachment"
+        );
+        viewer.input_at = 12;
+        assert_eq!(viewer.unattended_since(12 + VIEWER_IDLE_NS - 1), None);
+        assert_eq!(
+            viewer.unattended_since(12 + VIEWER_IDLE_NS),
+            Some(12 + VIEWER_IDLE_NS)
+        );
+        assert_eq!(
+            viewer.unattended_since(12 + VIEWER_IDLE_NS + 1),
+            Some(12 + VIEWER_IDLE_NS)
         );
     }
 

@@ -365,7 +365,7 @@ impl Shared {
                     }
                     continue;
                 }
-                Ok(Err(error)) if definitive_notice_rejection(&error) => error,
+                Ok(Err(error)) if error.definitive_notice_rejection() => error,
                 Ok(Err(error)) => {
                     tracing::warn!(%id, %error, "posting hosted identity switch, will retry");
                     continue;
@@ -904,14 +904,6 @@ fn refuse_verified_conflict(paths: &Paths, host: &EventId, report: &HookReport) 
         tracing::warn!(%error, %host, "recording an unbound Claude context");
     }
     IpcError::bad_request(reason)
-}
-
-fn definitive_notice_rejection(error: &ApiClientError) -> bool {
-    // A generic HTTP response may come from an intermediary. Only a
-    // Senate rejection consumes the notice's drop budget.
-    matches!(error, ApiClientError::Api { status, code, .. }
-        if code != "http" && (400..500).contains(status)
-            && !matches!(status, 408 | 421 | 425 | 429))
 }
 
 fn owns_claude_hook(tui: u32, reported: Option<u32>, ancestors: &[u32]) -> bool {

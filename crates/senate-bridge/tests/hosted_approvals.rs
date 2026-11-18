@@ -335,6 +335,12 @@ async fn claude_prompt_requires_a_notification_and_the_desk_covers_an_away_chair
 
     let mut attended = terminal.viewer().await;
     let before = terminal.activity().unwrap();
+    attended.write_all(&[2, 0, 1, b'x']).await.unwrap();
+    eventually("the connected viewer forwarded human input", WAIT, || {
+        let view = terminal.activity()?;
+        (view["input_at"].as_u64()? > before["input_at"].as_u64()?).then_some(())
+    })
+    .await;
     send(signal("PermissionRequest", "echo already-attended")).await;
     send(notify.clone()).await;
     send(signal("PostToolUse", "echo already-attended")).await;
@@ -616,6 +622,112 @@ async fn permanent_archive_refusal_stops_retrying_without_blocking_another_notic
     terminal.stop();
     wait_archived(&h, fresh.seq).await;
     assert!(archived(&h, stranded.seq).is_none());
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn transient_outages_do_not_exhaust_notice_or_archive_retries() {
+    let (mut h, project) = fixture(false, Locale::En).await;
+    start(&mut h).await;
+    let (launch, terminal) = Terminal::spawn(&h, project, HostedRuntime::Claude).await;
+    let pending = json!({
+        "hook_event_name": "Notification", "session_id": launch.session_id,
+        "notification_type": "permission_prompt",
+    });
+    h.server.state.inner.lock().unwrap().transient_append_delay = Some(std::time::Duration::ZERO);
+    claude_hook(h.dir.path(), &h, terminal.host_id(), pending).await;
+    eventually("more than six transient notice failures", WAIT, || {
+        (h.server
+            .state
+            .inner
+            .lock()
+            .unwrap()
+            .transient_append_attempts
+            >= 7)
+            .then_some(())
+    })
+    .await;
+    assert!(notices(&h).is_empty());
+    h.server.state.inner.lock().unwrap().transient_append_delay = None;
+    let notice = next_notice(&h, 1).await;
+
+    let next_attempt = {
+        let mut server = h.server.state.inner.lock().unwrap();
+        server.transient_append_delay = Some(std::time::Duration::ZERO);
+        server.transient_append_attempts + 7
+    };
+    send_input(&terminal).await;
+    eventually("more than six transient archive failures", WAIT, || {
+        (h.server
+            .state
+            .inner
+            .lock()
+            .unwrap()
+            .transient_append_attempts
+            >= next_attempt)
+            .then_some(())
+    })
+    .await;
+    assert!(archived(&h, notice.seq).is_none());
+    h.server.state.inner.lock().unwrap().transient_append_delay = None;
+    wait_archived(&h, notice.seq).await;
+    assert_eq!(notices(&h).len(), 1);
+    terminal.stop();
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_idle_attached_viewer_does_not_hide_a_prompt_and_escape_then_x_counts() {
+    let (mut h, project) = fixture(false, Locale::En).await;
+    start(&mut h).await;
+    let (launch, terminal) = Terminal::spawn(&h, project, HostedRuntime::Claude).await;
+    let mut viewer = terminal.viewer().await;
+    let idle = terminal.activity().unwrap();
+    assert_eq!(idle["attached"], true);
+    assert_eq!(idle["input_at"], 0);
+    claude_hook(
+        h.dir.path(),
+        &h,
+        terminal.host_id(),
+        json!({
+            "hook_event_name": "Notification", "session_id": launch.session_id,
+            "notification_type": "permission_prompt",
+        }),
+    )
+    .await;
+    let notice = next_notice(&h, 1).await;
+    assert_eq!(terminal.activity().unwrap()["attached"], true);
+
+    // Escape denies the prompt. The following capital X is ordinary
+    // typing, even though these bytes also start an SOS control string.
+    viewer
+        .write_all(b"\x02\0\x01\x1b\x02\0\x06Xreply")
+        .await
+        .unwrap();
+    wait_archived(&h, notice.seq).await;
+    assert_eq!(terminal.activity().unwrap()["attached"], true);
+    terminal.stop();
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_names_the_host_with_missing_viewer_activity() {
+    let (mut h, project) = fixture(false, Locale::En).await;
+    start(&mut h).await;
+    let (launch, terminal) = Terminal::spawn(&h, project, HostedRuntime::Claude).await;
+    std::fs::remove_file(terminal.socket.with_file_name("viewer.json")).unwrap();
+    let status = senate_bridge::status::collect(&h.paths).await.unwrap();
+    assert!(
+        status
+            .hosted_viewer_unavailable
+            .contains(&launch.session_id)
+    );
+    let rendered = senate_bridge::status::render(&status, chrono::Utc::now());
+    assert!(rendered.contains(&format!(
+        "Approval notices for hosted seat {} are unavailable",
+        launch.senator
+    )));
+    terminal.stop();
     h.stop().await;
 }
 

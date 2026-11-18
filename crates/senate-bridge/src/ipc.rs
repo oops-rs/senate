@@ -1448,6 +1448,9 @@ pub struct StatusReply {
     /// The unbound native context that is holding a hosted session's delivery.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub hosted_unbound: std::collections::BTreeMap<String, String>,
+    /// Running hosts without a readable viewer activity record.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub hosted_viewer_unavailable: std::collections::BTreeSet<String>,
 
     pub queue: QueueCounts,
     /// Who holds the Speaker's seat of that Senate, as `/v1/me` said.

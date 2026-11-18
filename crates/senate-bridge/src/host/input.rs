@@ -2,105 +2,212 @@
 //! prompt. The relay forwards both unchanged. Only the distinction leaves
 //! this module, and a report can span multiple frames.
 
+use std::collections::VecDeque;
+
+// A report arrives as terminal traffic, usually in one write. Waiting
+// briefly across frames avoids swallowing a person's standalone Escape
+// or the first keys after a malformed terminal control string.
+const REPORT_WAIT_NS: u64 = 200_000_000;
+const MAX_REPORT_BYTES: usize = 4096;
+
 #[derive(Default)]
-pub(super) enum Input {
-    #[default]
-    Ground,
+pub(super) struct Input {
+    pending: Option<Pending>,
+}
+
+struct Pending {
+    sequence: Sequence,
+    first_at: u64,
+    last_at: u64,
+    length: usize,
+}
+
+impl Pending {
+    fn escape(at: u64) -> Self {
+        Self {
+            sequence: Sequence::Escape,
+            first_at: at,
+            last_at: at,
+            length: 1,
+        }
+    }
+}
+
+enum Sequence {
     Escape,
     Csi(Vec<u8>),
     ControlStart(u8),
-    ControlString {
-        escape: bool,
-    },
+    ControlString { escape: bool },
     X10Mouse(u8),
 }
 
 impl Input {
-    pub(super) fn observe(&mut self, bytes: &[u8]) -> bool {
-        let mut human = false;
+    pub(super) fn deadline(&self) -> Option<u64> {
+        self.pending
+            .as_ref()
+            .map(|pending| pending.first_at.saturating_add(REPORT_WAIT_NS))
+    }
+
+    pub(super) fn expire(&mut self, now: u64) -> Option<u64> {
+        if self.deadline().is_some_and(|until| now >= until) {
+            return self.finish();
+        }
+        None
+    }
+
+    /// Incomplete protocol traffic cannot establish that the bytes came
+    /// from the emulator. Keep the actual key time, including at EOF.
+    pub(super) fn finish(&mut self) -> Option<u64> {
+        self.pending.take().map(|pending| pending.last_at)
+    }
+
+    pub(super) fn observe(
+        &mut self,
+        bytes: &[u8],
+        at: u64,
+        cursor: &mut CursorQueries,
+    ) -> Option<u64> {
+        let mut human = self.expire(at);
         for &byte in bytes {
-            match self {
-                Self::Ground if byte == 0x1b => *self = Self::Escape,
-                Self::Ground => human = true,
-                Self::Escape => match byte {
-                    b'[' => *self = Self::Csi(Vec::new()),
-                    b']' | b'P' | b'_' => *self = Self::ControlStart(byte),
+            let Some(mut pending) = self.pending.take() else {
+                if byte == 0x1b {
+                    self.pending = Some(Pending::escape(at));
+                } else {
+                    human = human.max(Some(at));
+                }
+                continue;
+            };
+            if byte == 0x1b
+                && matches!(
+                    pending.sequence,
+                    Sequence::Escape | Sequence::Csi(_) | Sequence::ControlStart(_)
+                )
+            {
+                human = human.max(Some(pending.last_at));
+                self.pending = Some(Pending::escape(at));
+                continue;
+            }
+
+            pending.length += 1;
+            pending.last_at = at;
+            if pending.length > MAX_REPORT_BYTES {
+                human = human.max(Some(at));
+                continue;
+            }
+            let complete = match &mut pending.sequence {
+                Sequence::Escape => match byte {
+                    b'[' => {
+                        pending.sequence = Sequence::Csi(Vec::new());
+                        None
+                    }
+                    b']' | b'P' | b'_' => {
+                        pending.sequence = Sequence::ControlStart(byte);
+                        None
+                    }
                     b'^' | b'X' => {
-                        *self = Self::ControlString { escape: false };
+                        pending.sequence = Sequence::ControlString { escape: false };
+                        None
                     }
-                    b'\\' => *self = Self::Ground, // String terminator.
-                    0x1b => human = true,          // Two independent Escape presses.
-                    _ => {
-                        *self = Self::Ground;
-                        human = true;
-                    }
+                    b'\\' => Some(false), // String terminator.
+                    _ => Some(true),
                 },
-                Self::Csi(params) => match byte {
-                    b'M' if params.is_empty() => *self = Self::X10Mouse(3),
-                    0x40..=0x7e => {
-                        human |= !report(params, byte);
-                        *self = Self::Ground;
+                Sequence::Csi(params) => match byte {
+                    b'M' if params.is_empty() => {
+                        pending.sequence = Sequence::X10Mouse(3);
+                        None
                     }
-                    0x20..=0x3f if params.len() < 64 => params.push(byte),
-                    0x20..=0x3f => {} // A bounded prefix suffices for classification.
-                    0x1b => *self = Self::Escape,
-                    _ => {
-                        *self = Self::Ground;
-                        human = true;
+                    0x40..=0x7e => Some(!report(params, byte, cursor, at)),
+                    0x20..=0x3f if params.len() < 64 => {
+                        params.push(byte);
+                        None
                     }
+                    _ => Some(true),
                 },
-                Self::ControlStart(kind) => {
+                Sequence::ControlStart(kind) => {
                     let report = match *kind {
-                        b']' => byte.is_ascii_digit(),
+                        b']' => byte.is_ascii_digit() || matches!(byte, b'l' | b'L'),
                         b'P' => matches!(byte, b'!' | b'+' | b'=' | b'>' | b'0'..=b'9'),
                         b'_' => byte == b'G',
                         _ => false,
                     };
                     if report {
-                        *self = Self::ControlString { escape: false };
+                        pending.sequence = Sequence::ControlString { escape: false };
+                        None
                     } else {
-                        // An Alt key can also have produced the prefix.
-                        *self = if byte == 0x1b {
-                            Self::Escape
-                        } else {
-                            Self::Ground
-                        };
-                        human = true;
+                        Some(true)
                     }
                 }
-                Self::ControlString { escape } => {
+                Sequence::ControlString { escape } => {
                     if byte == 7 || (*escape && byte == b'\\') {
-                        *self = Self::Ground;
+                        Some(false)
                     } else {
                         *escape = byte == 0x1b;
+                        None
                     }
                 }
-                Self::X10Mouse(left) => {
+                Sequence::X10Mouse(left) => {
                     *left -= 1;
-                    if *left == 0 {
-                        *self = Self::Ground;
-                    }
+                    (*left == 0).then_some(false)
                 }
+            };
+            match complete {
+                Some(true) => human = human.max(Some(at)),
+                Some(false) => {}
+                None => self.pending = Some(pending),
             }
         }
         human
     }
+}
 
-    /// The attach client has already waited for a possible split detach
-    /// sequence. An escape left at the end of its input stream was a key.
-    pub(super) fn end_of_input(&self) -> bool {
-        matches!(self, Self::Escape)
+/// Ordinary cursor position replies share an encoding with modified F3.
+/// Track queries forwarded to this viewer before using that encoding as
+/// evidence of a report. Old queries cannot hide later key presses.
+#[derive(Default)]
+pub(super) struct CursorQueries {
+    prefix: usize,
+    sent: VecDeque<u64>,
+}
+
+impl CursorQueries {
+    pub(super) fn output(&mut self, bytes: &[u8], at: u64) {
+        let query = b"\x1b[6n";
+        for &byte in bytes {
+            if byte == query[self.prefix] {
+                self.prefix += 1;
+                if self.prefix == query.len() {
+                    if self.sent.len() == 16 {
+                        self.sent.pop_front();
+                    }
+                    self.sent.push_back(at);
+                    self.prefix = 0;
+                }
+            } else {
+                self.prefix = usize::from(byte == query[0]);
+            }
+        }
+    }
+
+    fn consume(&mut self, at: u64) -> bool {
+        self.sent
+            .retain(|sent| at.saturating_sub(*sent) < 2_000_000_000);
+        self.sent.pop_front().is_some()
     }
 }
 
-fn report(params: &[u8], final_byte: u8) -> bool {
+fn report(params: &[u8], final_byte: u8, cursor: &mut CursorQueries, at: u64) -> bool {
     let numeric =
         |value: &[u8]| !value.is_empty() && value.iter().all(|c| c.is_ascii_digit() || *c == b';');
     let private = |prefix: u8| params.strip_prefix(&[prefix]).is_some_and(numeric);
     match final_byte {
-        // Cursor position, including the extended DEC form. The ordinary
-        // response shares its encoding with some modified F3 sequences.
-        b'R' => (numeric(params) || private(b'?')) && params.contains(&b';'),
+        b'R' if numeric(params) && params.contains(&b';') => {
+            let modified_f3 = params
+                .strip_prefix(b"1;")
+                .and_then(|modifier| std::str::from_utf8(modifier).ok()?.parse::<u8>().ok())
+                .is_some_and(|modifier| (2..=16).contains(&modifier));
+            cursor.consume(at) || !modified_f3
+        }
+        b'R' => private(b'?') && params.contains(&b';'),
         b'c' => private(b'?') || private(b'>') || private(b'='),
         b'u' => private(b'?'), // Kitty keyboard mode, unlike a Kitty key.
         b'y' => params
@@ -114,6 +221,11 @@ fn report(params: &[u8], final_byte: u8) -> bool {
                 || (final_byte == b'm' && private(b'>'))
         }
         b't' => numeric(params), // Window or pixel size.
+        b'x' => {
+            (params.starts_with(b"2;") || params.starts_with(b"3;"))
+                && numeric(params)
+                && params.split(|byte| *byte == b';').count() == 7
+        }
         _ => false,
     }
 }
@@ -134,6 +246,8 @@ mod tests {
             b"\x1bP>|Ghostty 1.4.0\x1b\\",
             b"\x1b]10;rgb:ffff/ffff/ffff\x07",
             b"\x1b]11;rgb:0000/0000/0000\x1b\\",
+            b"\x1b]ltest title\x1b\\",
+            b"\x1b[2;1;1;112;112;1;0x",
             b"\x1b[I",
             b"\x1b[O",
             b"\x1b[<32;21;4M",
@@ -144,17 +258,68 @@ mod tests {
             b"\x1b_Gi=1;OK\x1b\\",
         ];
         let mut input = Input::default();
+        let mut cursor = CursorQueries::default();
         for report in reports {
             for byte in *report {
-                assert!(!input.observe(std::slice::from_ref(byte)), "{report:?}");
+                assert_eq!(
+                    input.observe(std::slice::from_ref(byte), 1, &mut cursor),
+                    None,
+                    "{report:?}"
+                );
             }
-            assert!(!input.end_of_input());
+            assert_eq!(input.finish(), None);
         }
-        assert!(input.observe(b"\x1b[?31u\x1b[B"));
-        assert!(input.observe(b"\x1b[97;2u"));
-        assert!(input.observe(b"\x1b]x"));
-        assert!(input.observe(b"yes\r"));
-        assert!(!input.observe(b"\x1b"));
-        assert!(input.end_of_input());
+        assert_eq!(input.observe(b"\x1b[?31u\x1b[B", 2, &mut cursor), Some(2));
+        assert_eq!(input.observe(b"\x1b[97;2u", 3, &mut cursor), Some(3));
+        assert_eq!(input.observe(b"\x1b]x", 4, &mut cursor), Some(4));
+        assert_eq!(input.observe(b"yes\r", 5, &mut cursor), Some(5));
+    }
+
+    #[test]
+    fn unfinished_reports_count_as_human_at_the_byte_time() {
+        let mut input = Input::default();
+        let mut cursor = CursorQueries::default();
+        assert_eq!(input.observe(b"\x1b", 10, &mut cursor), None);
+        assert_eq!(input.observe(b"Xreply", 20, &mut cursor), None);
+        assert_eq!(input.expire(9 + REPORT_WAIT_NS), None);
+        assert_eq!(input.expire(10 + REPORT_WAIT_NS), Some(20));
+        assert_eq!(
+            input.observe(b"later text", 30 + REPORT_WAIT_NS, &mut cursor),
+            Some(30 + REPORT_WAIT_NS)
+        );
+
+        for prefix in [b"\x1b^".as_slice(), b"\x1bP>", b"\x1b]10;", b"\x1b_G"] {
+            assert_eq!(
+                input.observe(prefix, REPORT_WAIT_NS + 40, &mut cursor),
+                None
+            );
+            let text = vec![b'x'; MAX_REPORT_BYTES];
+            assert_eq!(
+                input.observe(&text, REPORT_WAIT_NS + 50, &mut cursor),
+                Some(REPORT_WAIT_NS + 50)
+            );
+            assert_eq!(input.finish(), None);
+        }
+        assert_eq!(
+            input.observe(b"\x1b]11;unterminated", REPORT_WAIT_NS + 60, &mut cursor),
+            None
+        );
+        assert_eq!(input.finish(), Some(REPORT_WAIT_NS + 60));
+        assert_eq!(
+            input.observe(b"\x1b", REPORT_WAIT_NS + 70, &mut cursor),
+            None
+        );
+        assert_eq!(input.finish(), Some(REPORT_WAIT_NS + 70));
+    }
+
+    #[test]
+    fn modified_f3_only_counts_as_a_report_when_a_query_is_outstanding() {
+        let mut input = Input::default();
+        let mut cursor = CursorQueries::default();
+        assert_eq!(input.observe(b"\x1b[1;2R", 3, &mut cursor), Some(3));
+        cursor.output(b"\x1b[", 4);
+        cursor.output(b"6n", 5);
+        assert_eq!(input.observe(b"\x1b[1;2R", 6, &mut cursor), None);
+        assert_eq!(input.observe(b"\x1b[1;2R", 7, &mut cursor), Some(7));
     }
 }

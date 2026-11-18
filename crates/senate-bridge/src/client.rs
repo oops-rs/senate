@@ -46,6 +46,14 @@ pub enum ApiClientError {
 }
 
 impl ApiClientError {
+    /// Only an explicit Senate rejection spends a notice's failure budget.
+    /// Generic HTTP responses may have come from an intermediary.
+    pub(crate) fn definitive_notice_rejection(&self) -> bool {
+        matches!(self, Self::Api { status, code, .. }
+            if code != "http" && (400..500).contains(status)
+                && !matches!(status, 408 | 421 | 425 | 429))
+    }
+
     pub fn status(&self) -> Option<u16> {
         match self {
             Self::Api { status, .. } => Some(*status),

@@ -686,6 +686,7 @@ mod tests {
             sessions: Vec::new(),
             hosted: Default::default(),
             hosted_unbound: Default::default(),
+            hosted_viewer_unavailable: Default::default(),
             queue: Default::default(),
             speaker: None,
             roles: None,

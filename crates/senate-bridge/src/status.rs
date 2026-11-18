@@ -47,6 +47,7 @@ pub struct StatusView {
     pub sessions: Vec<Session>,
     pub hosted: std::collections::BTreeMap<String, Option<String>>,
     pub hosted_unbound: std::collections::BTreeMap<String, String>,
+    pub hosted_viewer_unavailable: std::collections::BTreeSet<String>,
     pub queue: QueueCounts,
     pub locale: Locale,
     /// Who holds that Senate's Speaker's seat, as the daemon heard.
@@ -70,6 +71,7 @@ impl StatusView {
             sessions: reply.sessions,
             hosted: reply.hosted,
             hosted_unbound: reply.hosted_unbound,
+            hosted_viewer_unavailable: reply.hosted_viewer_unavailable,
             queue: reply.queue,
             locale: reply.locale,
             speaker: reply.speaker,
@@ -199,6 +201,7 @@ fn offline(paths: &Paths) -> anyhow::Result<StatusView> {
         sessions: Vec::new(),
         hosted: Default::default(),
         hosted_unbound: Default::default(),
+        hosted_viewer_unavailable: Default::default(),
         queue: QueueCounts::default(),
         locale: config
             .as_ref()
@@ -215,6 +218,7 @@ fn offline(paths: &Paths) -> anyhow::Result<StatusView> {
     let host_status = crate::host::status(paths, &store, &view.sessions)?;
     view.hosted = host_status.hosted;
     view.hosted_unbound = host_status.unbound;
+    view.hosted_viewer_unavailable = host_status.viewer_unavailable;
     let configured: Vec<_> = config.map(|c| c.committees).unwrap_or_default();
     view.committees = store
         .cursors()?
@@ -368,6 +372,12 @@ fn hosted_advisories(view: &StatusView) -> Vec<String> {
     }
     for session in &view.sessions {
         let seat = &session.agent;
+        if view.hosted_viewer_unavailable.contains(&session.session_id) {
+            lines.push(l.pick(
+                format!("托管席位 {seat} 的终端无法提供查看者活动，工具授权提醒不可用。"),
+                format!("Approval notices for hosted seat {seat} are unavailable because the terminal has no readable viewer activity."),
+            ));
+        }
         let unbound = view.hosted_unbound.get(&session.session_id);
         if let Some(new) = unbound {
             lines.push(l.pick(
@@ -826,6 +836,7 @@ mod tests {
             sessions: Vec::new(),
             hosted: Default::default(),
             hosted_unbound: Default::default(),
+            hosted_viewer_unavailable: Default::default(),
             queue: QueueCounts::default(),
             locale,
             speaker: None,

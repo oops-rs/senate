@@ -1250,6 +1250,9 @@ impl Shared {
         if let Err(error) = crate::host::prune_abandoned(&paths, Duration::from_secs(300)) {
             tracing::warn!(%error, "pruning abandoned terminal hosts");
         }
+        if let Err(error) = self.log_missing_host_viewers(&paths) {
+            tracing::warn!(%error, "checking activity of hosted terminal viewers");
+        }
         self.committees_changed.notify_one();
     }
 
@@ -2903,6 +2906,7 @@ impl Shared {
             committees,
             hosted: host_status.hosted,
             hosted_unbound: host_status.unbound,
+            hosted_viewer_unavailable: host_status.viewer_unavailable,
             sessions,
             queue: self.store.counts().map_err(internal)?,
             speaker: self.speaker_seat(),
