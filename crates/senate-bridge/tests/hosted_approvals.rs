@@ -288,6 +288,26 @@ async fn claude_prompt_requires_a_notification_and_the_desk_covers_an_away_chair
                 .ends_with("hook hosted-approval >/dev/null 2>&1 || :")
         );
     }
+    let old_binary = h.dir.path().join("old-senate");
+    std::fs::write(
+        &old_binary,
+        "#!/bin/sh\nprintf 'unknown subcommand\\n' >&2\nexit 2\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&old_binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let command = overlay["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    let (_, suffix) = command.split_once(" hook hosted-approval").unwrap();
+    let result = std::process::Command::new("/bin/sh")
+        .args([
+            "-c",
+            &format!("{old_binary:?} hook hosted-approval{suffix}"),
+        ])
+        .output()
+        .unwrap();
+    assert!(result.status.success());
+    assert!(result.stdout.is_empty() && result.stderr.is_empty());
     let signal = |event: &str, command: &str| {
         json!({
             "hook_event_name": event, "session_id": launch.session_id,
@@ -597,4 +617,114 @@ async fn permanent_archive_refusal_stops_retrying_without_blocking_another_notic
     wait_archived(&h, fresh.seq).await;
     assert!(archived(&h, stranded.seq).is_none());
     h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_verified_claude_clear_keeps_approval_notices_on_the_same_seat() {
+    use senate_bridge::ipc::{HookReply, HookReport};
+
+    let (mut h, project) = fixture(false, Locale::En).await;
+    start(&mut h).await;
+    let (launch, terminal) = Terminal::spawn(&h, project.clone(), HostedRuntime::Claude).await;
+    let request = |session: &str, command: &str| {
+        json!({
+            "session_id": session, "hook_event_name": "PermissionRequest",
+            "tool_name": "Bash", "tool_input": {"command": command},
+        })
+    };
+    let pending = |session: &str| {
+        json!({
+            "session_id": session, "hook_event_name": "Notification",
+            "notification_type": "permission_prompt",
+        })
+    };
+    claude_hook(
+        h.dir.path(),
+        &h,
+        terminal.host_id(),
+        request(&launch.session_id, "echo old-context"),
+    )
+    .await;
+    claude_hook(
+        h.dir.path(),
+        &h,
+        terminal.host_id(),
+        pending(&launch.session_id),
+    )
+    .await;
+    let original = next_notice(&h, 1).await;
+    assert!(original.body.contains("echo old-context"));
+
+    // The fixture TUI owns an actual host. Its verified SessionStart hook
+    // reports Claude's new native session after /clear.
+    let native = "20000000-0000-4000-8000-000000000123";
+    let pid = terminal.group.as_raw_pid();
+    let clear = serde_json::from_value::<HookReport>(json!({
+        "event": "session_start", "runtime": "claude", "session_id": native,
+        "cwd": project, "source": "clear", "claude_pid": pid, "ancestor_pids": [pid],
+        "transcript_path": project.join("cleared.jsonl"),
+    }))
+    .unwrap();
+    let transferred: HookReply =
+        ipc::request(&h.socket(), &Request::SessionHook(clear), WAIT, WAIT)
+            .await
+            .unwrap();
+    assert_eq!(transferred.session.session_id, native);
+    assert_eq!(transferred.session.agent, launch.senator);
+    let same_terminal: PathBuf = ipc::request(
+        &h.socket(),
+        &Request::Attach {
+            senator: launch.senator.clone(),
+        },
+        WAIT,
+        WAIT,
+    )
+    .await
+    .unwrap();
+    assert_eq!(same_terminal, terminal.socket);
+    wait_archived(&h, original.seq).await;
+
+    claude_hook(
+        h.dir.path(),
+        &h,
+        terminal.host_id(),
+        pending(&launch.session_id),
+    )
+    .await;
+    claude_hook(
+        h.dir.path(),
+        &h,
+        terminal.host_id(),
+        request(native, "echo new-context"),
+    )
+    .await;
+    claude_hook(h.dir.path(), &h, terminal.host_id(), pending(native)).await;
+    let fresh = next_notice(&h, 2).await;
+    assert_eq!(fresh.from, original.from);
+    assert!(fresh.body.contains("echo new-context"));
+    terminal.stop();
+    wait_archived(&h, fresh.seq).await;
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn an_unrelated_claude_result_skips_ipc_without_a_candidate() {
+    let (h, _) = fixture(false, Locale::En).await;
+    let listener = std::os::unix::net::UnixListener::bind(h.socket()).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let id = senate_core::EventId::new();
+    claude_hook(
+        h.dir.path(),
+        &h,
+        &id.to_string(),
+        json!({
+            "session_id": "fixture", "hook_event_name": "PostToolUse",
+            "tool_name": "Bash", "tool_input": {"command": "echo no-approval"},
+        }),
+    )
+    .await;
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
 }

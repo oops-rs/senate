@@ -8,6 +8,7 @@ pub(super) enum Input {
     Ground,
     Escape,
     Csi(Vec<u8>),
+    ControlStart(u8),
     ControlString {
         escape: bool,
     },
@@ -23,7 +24,8 @@ impl Input {
                 Self::Ground => human = true,
                 Self::Escape => match byte {
                     b'[' => *self = Self::Csi(Vec::new()),
-                    b']' | b'P' | b'_' | b'^' | b'X' => {
+                    b']' | b'P' | b'_' => *self = Self::ControlStart(byte),
+                    b'^' | b'X' => {
                         *self = Self::ControlString { escape: false };
                     }
                     b'\\' => *self = Self::Ground, // String terminator.
@@ -47,6 +49,25 @@ impl Input {
                         human = true;
                     }
                 },
+                Self::ControlStart(kind) => {
+                    let report = match *kind {
+                        b']' => byte.is_ascii_digit(),
+                        b'P' => matches!(byte, b'!' | b'+' | b'=' | b'>' | b'0'..=b'9'),
+                        b'_' => byte == b'G',
+                        _ => false,
+                    };
+                    if report {
+                        *self = Self::ControlString { escape: false };
+                    } else {
+                        // An Alt key can also have produced the prefix.
+                        *self = if byte == 0x1b {
+                            Self::Escape
+                        } else {
+                            Self::Ground
+                        };
+                        human = true;
+                    }
+                }
                 Self::ControlString { escape } => {
                     if byte == 7 || (*escape && byte == b'\\') {
                         *self = Self::Ground;
@@ -87,7 +108,11 @@ fn report(params: &[u8], final_byte: u8) -> bool {
             .is_some_and(|value| numeric(value) || value.strip_prefix(b"?").is_some_and(numeric)),
         b'n' => numeric(params) || private(b'?'), // DSR and colour scheme.
         b'I' | b'O' => params.is_empty(),         // Focus notifications.
-        b'M' | b'm' => private(b'<') || (numeric(params) && params.contains(&b';')),
+        b'M' | b'm' => {
+            private(b'<')
+                || (numeric(params) && params.contains(&b';'))
+                || (final_byte == b'm' && private(b'>'))
+        }
         b't' => numeric(params), // Window or pixel size.
         _ => false,
     }
@@ -127,6 +152,7 @@ mod tests {
         }
         assert!(input.observe(b"\x1b[?31u\x1b[B"));
         assert!(input.observe(b"\x1b[97;2u"));
+        assert!(input.observe(b"\x1b]x"));
         assert!(input.observe(b"yes\r"));
         assert!(!input.observe(b"\x1b"));
         assert!(input.end_of_input());

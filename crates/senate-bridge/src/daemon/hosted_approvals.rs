@@ -35,17 +35,20 @@ impl Shared {
         Ok(self
             .store
             .session(session)?
-            .filter(Session::is_live)
+            .filter(|session| session.state != SessionState::Ended)
             .map(|session| (id, session)))
     }
 
-    pub(super) fn on_hosted_claude_approval(
+    pub(super) async fn on_hosted_claude_approval(
         &self,
         session_id: &str,
         host_id: &EventId,
         at: u64,
         signal: ClaudeApprovalSignal,
     ) -> Result<serde_json::Value, IpcError> {
+        // The stable seat can switch its native ID between two hooks.
+        // Validate and record a hook under the registry's binding lock.
+        let _binding = self.session_bindings.read().await;
         if (1..=observed_at()).contains(&at)
             && let Some((id, session)) = self.approval_host(session_id).map_err(internal)?
             && id == *host_id
@@ -143,22 +146,32 @@ impl Shared {
         Ok(())
     }
 
-    fn reconcile_approval_hosts(&self) -> Result<(), StoreError> {
+    async fn reconcile_approval_hosts(&self) -> Result<(), StoreError> {
+        let _binding = self.session_bindings.read().await;
         let paths = Paths::new(&self.home);
         for (id, state) in self.store.hosted_approval_states()? {
             let native = state.session_id;
-            let is_live = self
-                .approval_host(&native)?
-                .is_some_and(|(live, _)| live == id);
+            let current = match self.store.session_for_host(&id)? {
+                Some(session_id)
+                    if self
+                        .approval_host(&session_id)?
+                        .is_some_and(|(live, _)| live == id) =>
+                {
+                    Some(session_id)
+                }
+                _ => None,
+            };
             let viewer = host::viewer_activity(&paths, &id);
             self.edit_approvals(&id, |state| {
                 if state.session_id != native {
                     return false;
                 }
-                if is_live {
-                    return viewer
+                if let Some(current) = &current {
+                    let moved = set_context(state, current);
+                    let attended = viewer
                         .as_ref()
                         .is_some_and(|viewer| observe_input(state, viewer.input_at));
+                    return moved || attended;
                 }
                 let had_candidate = state.claude.take().is_some();
                 close_notices(state, |_| true) || had_candidate
@@ -456,7 +469,7 @@ pub(super) async fn observe(
                 continue;
             }
             _ = retry.tick() => {
-                if let Err(error) = shared.reconcile_approval_hosts() {
+                if let Err(error) = shared.reconcile_approval_hosts().await {
                     tracing::warn!(%error, "checking hosted approvals");
                 }
             }

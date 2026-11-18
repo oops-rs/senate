@@ -735,7 +735,7 @@ mod tests {
             assert_eq!(&query, b"\x1b[6n");
             viewer
                 // The emulator's cursor position report, split into frames.
-                .write_all(b"\x01\0\x18\0P\x02\0\x02\x1b[\x02\0\x052;3;4")
+                .write_all(b"\x01\0\x18\0P\x02\0\x02\x1b[\x02\0\x042;34")
                 .await
                 .unwrap();
             viewer.write_all(&[KEYS, 0, 1, b'R']).await.unwrap();

@@ -2711,7 +2711,10 @@ impl Shared {
                 host_id,
                 at,
                 signal,
-            } => wrap(self.on_hosted_claude_approval(&session_id, &host_id, at, signal)),
+            } => wrap(
+                self.on_hosted_claude_approval(&session_id, &host_id, at, signal)
+                    .await,
+            ),
 
             Request::Checkpoint {
                 session,
