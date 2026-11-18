@@ -18,7 +18,9 @@ use senate_bridge::binding::{self, Settings};
 use senate_bridge::delivery::{codex, inbox};
 use senate_bridge::hook::{self, HookEnv, HookKind, HookTimeouts};
 use senate_bridge::ipc::SayKind;
-use senate_bridge::ipc::{self, DocketReply, InboxReply, Posted, Request, SessionSelector};
+use senate_bridge::ipc::{
+    self, DocketReply, HostedRuntime, InboxReply, Posted, Request, SessionSelector, SpawnReply,
+};
 use senate_bridge::session::Runtime;
 use senate_bridge::terminal::Terminal;
 use senate_bridge::{
@@ -344,6 +346,29 @@ enum Cmd {
         #[arg(last = true, required = true, num_args = 1..)]
         command: Vec<std::ffi::OsString>,
     },
+    /// Start a coding TUI as a senator and leave it running in the background.
+    Spawn {
+        runtime: HostedRuntime,
+        #[arg(long)]
+        committee: CommitteeId,
+        #[arg(long)]
+        alias: Option<SenatorName>,
+        /// The directory where the coding session will run.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
+    /// Open a hosted senator's terminal. Press Ctrl-] to detach.
+    Attach { senator: SenatorName },
+    /// Resume a recorded Codex or Claude Code senator in a detached terminal.
+    Restore { senator: SenatorName },
+    #[command(hide = true)]
+    SessionHost {
+        id: EventId,
+        runtime: HostedRuntime,
+        cwd: PathBuf,
+        #[arg(long)]
+        resume_id: Option<String>,
+    },
     /// Enable live push for a running Antigravity conversation. Reads its local API token from stdin.
     AgyRegister {
         conversation: String,
@@ -596,6 +621,18 @@ async fn daemon_call<T: serde::de::DeserializeOwned>(
         Duration::from_secs(20),
     )
     .await?)
+}
+
+fn launch(request: &Request) -> anyhow::Result<()> {
+    let paths = Paths::from_env()?;
+    let reply: SpawnReply = runtime(false)?.block_on(ipc::request(
+        &paths.socket(),
+        request,
+        Duration::from_secs(1),
+        senate_bridge::host::REQUEST_TIMEOUT,
+    ))?;
+    println!("{}", reply.senator);
+    Ok(())
 }
 
 async fn inbox(
@@ -1212,6 +1249,45 @@ fn run(command: Cmd, terminal: Option<Terminal>) -> anyhow::Result<()> {
                 &paths,
                 &std::env::current_dir()?,
                 &command,
+            ))
+        }
+        Cmd::Spawn {
+            runtime: harness,
+            committee,
+            alias,
+            dir,
+        } => launch(&Request::Spawn {
+            runtime: harness,
+            committee,
+            chair: false,
+            alias,
+            cwd: std::path::absolute(dir)?,
+            session: SessionSelector::default(),
+        }),
+        Cmd::Restore { senator } => launch(&Request::Restore {
+            senator,
+            session: SessionSelector::default(),
+        }),
+        Cmd::Attach { senator } => {
+            let paths = Paths::from_env()?;
+            runtime(false)?.block_on(async {
+                let socket: PathBuf = daemon_call(&paths, &Request::Attach { senator }).await?;
+                senate_bridge::host::attach(&socket).await
+            })
+        }
+        Cmd::SessionHost {
+            id,
+            runtime: harness,
+            cwd,
+            resume_id,
+        } => {
+            let paths = Paths::from_env()?;
+            runtime(false)?.block_on(senate_bridge::host::run(
+                &paths,
+                &id,
+                harness,
+                &cwd,
+                resume_id.as_deref(),
             ))
         }
         Cmd::AgyRegister {

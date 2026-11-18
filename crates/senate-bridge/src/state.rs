@@ -56,6 +56,8 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, Transaction, param
 use senate_core::{CommitteeId, Event, SenatorName, Seq, TaskOwner, TriageVerdict};
 use serde::{Deserialize, Serialize};
 
+use senate_core::EventId;
+
 use crate::agent::AgentSource;
 use crate::session::{CommitteeSource, Runtime, Session, SessionState};
 
@@ -91,7 +93,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     socket_ok        INTEGER,
     runtime          TEXT NOT NULL,
     agent            TEXT NOT NULL,
-    agent_source     TEXT NOT NULL
+    agent_source     TEXT NOT NULL,
+    host_id          TEXT
 );
 CREATE TABLE IF NOT EXISTS session_ancestors (
     session_id TEXT NOT NULL,
@@ -588,6 +591,12 @@ impl Store {
             )?;
             conn.execute("UPDATE cursors SET touched = ?1", [now_ms()])?;
         }
+        let hosted = conn
+            .prepare("SELECT 1 FROM pragma_table_info('sessions') WHERE name = 'host_id'")?
+            .exists([])?;
+        if !hosted {
+            conn.execute("ALTER TABLE sessions ADD COLUMN host_id TEXT", [])?;
+        }
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -879,6 +888,40 @@ impl Store {
     /// the hook did not see them this time. Each agy hook supplies the
     /// current launch proof, or clears it if the launch has no proof.
     pub fn upsert_session(&self, s: &SessionUpsert) -> Result<Session, StoreError> {
+        self.upsert(s, None)
+    }
+
+    pub(crate) fn register_hosted_session(
+        &self,
+        s: &SessionUpsert,
+        id: &EventId,
+        committee: &CommitteeId,
+    ) -> Result<Session, StoreError> {
+        self.upsert(s, Some((id, committee)))
+    }
+
+    pub(crate) fn session_host(&self, session_id: &str) -> Result<Option<EventId>, StoreError> {
+        let id: Option<Option<String>> = self
+            .conn()
+            .query_row(
+                "SELECT host_id FROM sessions WHERE session_id = ?1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        id.flatten()
+            .map(|id| {
+                id.parse()
+                    .map_err(|_| StoreError::Corrupt("invalid host ID".into()))
+            })
+            .transpose()
+    }
+
+    fn upsert(
+        &self,
+        s: &SessionUpsert,
+        hosted: Option<(&EventId, &CommitteeId)>,
+    ) -> Result<Session, StoreError> {
         let now = now_ms();
         let (inferred, source) = match &s.inferred_committee {
             Some((f, src)) => (Some(f.as_str().to_string()), Some(src.as_str())),
@@ -890,8 +933,9 @@ impl Store {
             tx.execute(
                 "INSERT INTO sessions (session_id, cwd, git_root, branch, inferred_committee,
                      committee_source, socket, token, claude_pid, transcript_path, state,
-                     started_at, last_seen, runtime, agent, agent_source)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'live', ?11, ?11, ?12, ?13, ?14)
+                     started_at, last_seen, runtime, agent, agent_source, host_id, joined_committee)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'live', ?11, ?11, ?12, ?13, ?14,
+                     ?15, ?16)
                  ON CONFLICT(session_id) DO UPDATE SET
                      runtime = excluded.runtime,
                      agent = excluded.agent,
@@ -901,12 +945,17 @@ impl Store {
                      branch = excluded.branch,
                      inferred_committee = excluded.inferred_committee,
                      committee_source = excluded.committee_source,
-                     socket = COALESCE(excluded.socket, sessions.socket),
-                     token = CASE WHEN excluded.runtime = 'agy' THEN excluded.token
+                     socket = CASE WHEN ?15 IS NOT NULL THEN excluded.socket
+                                   ELSE COALESCE(excluded.socket, sessions.socket) END,
+                     token = CASE WHEN ?15 IS NOT NULL OR excluded.runtime = 'agy' THEN excluded.token
                                   ELSE COALESCE(excluded.token, sessions.token) END,
-                     claude_pid = COALESCE(excluded.claude_pid, sessions.claude_pid),
+                     claude_pid = CASE WHEN ?15 IS NOT NULL THEN excluded.claude_pid
+                                       ELSE COALESCE(excluded.claude_pid, sessions.claude_pid) END,
                      transcript_path = COALESCE(excluded.transcript_path, sessions.transcript_path),
-                     socket_ok = CASE WHEN sessions.state = 'live' THEN sessions.socket_ok END,
+                     socket_ok = CASE WHEN ?15 IS NULL AND sessions.state = 'live'
+                                      THEN sessions.socket_ok END,
+                     host_id = COALESCE(excluded.host_id, sessions.host_id),
+                     joined_committee = COALESCE(excluded.joined_committee, sessions.joined_committee),
                      state = 'live',
                      last_seen = excluded.last_seen",
                 params![
@@ -924,9 +973,11 @@ impl Store {
                     s.runtime.as_str(),
                     agent_text(&s.agent),
                     s.agent_source.as_str(),
+                    hosted.map(|(id, _)| id.to_string()),
+                    hosted.map(|(_, committee)| committee.as_str()),
                 ],
             )?;
-            if !s.ancestor_pids.is_empty() {
+            if hosted.is_some() || !s.ancestor_pids.is_empty() {
                 tx.execute(
                     "DELETE FROM session_ancestors WHERE session_id = ?1",
                     [&s.session_id],
@@ -937,6 +988,13 @@ impl Store {
                         params![s.session_id, i64::from(*pid)],
                     )?;
                 }
+            }
+            if let Some((_, committee)) = hosted {
+                tx.execute(
+                    "UPDATE queue SET status = 'pending', session_id = NULL
+                     WHERE session_id = ?1 AND status = 'queued' AND (agent != ?2 OR committee != ?3)",
+                    params![s.session_id, s.agent.as_str(), committee.as_str()],
+                )?;
             }
             tx.commit()?;
         }

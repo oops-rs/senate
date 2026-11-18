@@ -168,6 +168,7 @@ use crate::state::{ItemKey, ItemStatus, QueueItem, SessionUpsert, Store, StoreEr
 use crate::stream::{self, CommitteeWorker};
 
 mod front;
+mod hosts;
 mod preside;
 mod roles;
 mod secretary_work;
@@ -414,6 +415,7 @@ pub(crate) struct Shared {
     resyncs: watch::Sender<u64>,
     /// A manual rebind waits for pushes and hooks using the previous seat to finish.
     session_bindings: RwLock<()>,
+    hosts: hosts::Launches,
     pushes: Mutex<HashMap<String, PushState>>,
     /// Automatic checkpoints, per agent and worktree root.
     auto: Mutex<HashMap<(SenatorName, PathBuf), AutoCheckpoint>>,
@@ -693,6 +695,7 @@ impl Shared {
             generation: RwLock::new(0),
             resyncs,
             session_bindings: RwLock::new(()),
+            hosts: hosts::Launches::default(),
             pushes: Mutex::new(HashMap::new()),
             auto: Mutex::new(HashMap::new()),
             home: common.home.clone(),
@@ -2459,6 +2462,8 @@ impl Shared {
             Request::ChairCover { session, .. } => ("chair_cover", session),
             Request::SecretaryCover { session, .. } => ("secretary_cover", session),
             Request::ChairEscalate { session, .. } => ("chair_escalate", session),
+            Request::Spawn { session, .. } => ("spawn", session),
+            Request::Restore { session, .. } => ("restore", session),
             _ => return None,
         };
         self.companion_session(session).map(|_| {
@@ -2497,6 +2502,21 @@ impl Shared {
                 version: env!("CARGO_PKG_VERSION").to_string(),
             }),
             Request::Aliases => wrap(self.api.aliases().await.map_err(server_error)),
+            Request::Spawn { chair: true, .. } => Reply::err(IpcError::bad_request(
+                "chair appointment is unavailable through this operation",
+            )),
+            Request::Spawn {
+                runtime,
+                committee,
+                alias,
+                cwd,
+                ..
+            } => wrap(self.on_spawn(runtime, committee, alias, cwd).await),
+            Request::Restore { senator, .. } => match self.resolve_restore(&senator).await {
+                Ok(target) => wrap(self.on_restore(target).await),
+                Err(error) => Reply::err(error),
+            },
+            Request::Attach { senator } => wrap(self.on_attach(senator).await),
             Request::Receipt { committee, seq } => wrap(self.receipt(&committee, seq).await),
             Request::SetCommitteeSeat { committee, request } => {
                 let result = self.api.set_committee_seat(&committee, &request).await;
@@ -2786,7 +2806,6 @@ impl Shared {
                 "invalid session key for this runtime",
             ));
         }
-        let _binding = self.session_bindings.read().await;
         let inferred = session::infer_committee(
             report.branch.as_deref(),
             report.committee_file.as_deref(),
@@ -2808,25 +2827,44 @@ impl Shared {
         } else {
             (hint.clone(), source)
         };
-        let before = self.store.session(&report.session_id).map_err(internal)?;
-        let session = self
-            .store
-            .upsert_session(&SessionUpsert {
-                session_id: report.session_id.clone(),
-                cwd: report.cwd.clone(),
-                git_root: report.git_root.clone(),
-                branch: report.branch.clone(),
-                inferred_committee: inferred,
-                socket: report.socket.clone(),
-                token: report.token.clone(),
-                claude_pid: report.claude_pid,
-                transcript_path: report.transcript_path.clone(),
-                ancestor_pids: report.ancestor_pids.clone(),
-                runtime: report.runtime,
-                agent,
-                agent_source,
-            })
-            .map_err(internal)?;
+        let upsert = SessionUpsert {
+            session_id: report.session_id.clone(),
+            cwd: report.cwd.clone(),
+            git_root: report.git_root.clone(),
+            branch: report.branch.clone(),
+            inferred_committee: inferred,
+            socket: report.socket.clone(),
+            token: report.token.clone(),
+            claude_pid: report.claude_pid,
+            transcript_path: report.transcript_path.clone(),
+            ancestor_pids: report.ancestor_pids.clone(),
+            runtime: report.runtime,
+            agent,
+            agent_source,
+        };
+        let registration = if native {
+            self.hosts.claim(&report)?
+        } else {
+            None
+        };
+        let (_binding, before, session) = match registration {
+            Some(registration) => {
+                let binding = self.session_bindings.write().await;
+                let before = self.store.session(&report.session_id).map_err(internal)?;
+                let session = self.register_hosted(registration, &upsert).await?;
+                (
+                    tokio::sync::RwLockWriteGuard::downgrade(binding),
+                    before,
+                    session,
+                )
+            }
+            None => {
+                let binding = self.session_bindings.read().await;
+                let before = self.store.session(&report.session_id).map_err(internal)?;
+                let session = self.store.upsert_session(&upsert).map_err(internal)?;
+                (binding, before, session)
+            }
+        };
         if before.as_ref().is_some_and(|b| b.agent != session.agent) {
             let released = self
                 .store

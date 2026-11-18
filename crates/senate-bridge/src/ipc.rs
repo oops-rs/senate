@@ -23,6 +23,9 @@
 //! | `ping` | — | [`Pong`] |
 //! | `status` | — | [`StatusReply`] |
 //! | `hook` | [`HookReport`] | [`HookReply`] |
+//! | `spawn` | `session?`, `runtime`, `committee`, `alias?`, `cwd`, `chair?` | [`SpawnReply`] |
+//! | `restore` | `session?`, `senator` | [`SpawnReply`] |
+//! | `attach` | `senator` | Local terminal socket path |
 //! | `session_end` | `session_id`, `reason?` | `{}` |
 //! | `ask` | `session`, `to` (addresses), `body`, `refs?`, `id?`, `request?` | [`Posted`] |
 //! | `answer` | `session`, `thread` (root seq), `body`, `id?` | [`Posted`] |
@@ -284,6 +287,9 @@ pub struct HookReport {
     /// SessionStart's `source`: `startup`, `resume`, `clear`, `compact`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// Private one-use proof on the first SessionStart of a hosted launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -315,6 +321,29 @@ pub struct HookReport {
     pub agent_file: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum HostedRuntime {
+    Codex,
+    Claude,
+}
+
+impl From<HostedRuntime> for Runtime {
+    fn from(runtime: HostedRuntime) -> Self {
+        match runtime {
+            HostedRuntime::Codex => Self::Codex,
+            HostedRuntime::Claude => Self::Claude,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpawnReply {
+    pub senator: SenatorName,
+    pub session_id: String,
+    pub committee: CommitteeId,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
@@ -324,6 +353,26 @@ pub enum Request {
     Hook(HookReport),
     /// Native coding session. Its immutable senator ID is derived on the daemon.
     SessionHook(HookReport),
+    Spawn {
+        #[serde(default)]
+        session: SessionSelector,
+        runtime: HostedRuntime,
+        committee: CommitteeId,
+        #[serde(default, skip_serializing_if = "is_false")]
+        chair: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        alias: Option<SenatorName>,
+        cwd: PathBuf,
+    },
+    Restore {
+        #[serde(default)]
+        session: SessionSelector,
+        senator: SenatorName,
+    },
+    /// Resolve a locally hosted terminal for the person attaching to it.
+    Attach {
+        senator: SenatorName,
+    },
     /// Operator registration for one previously reported Antigravity session.
     RegisterAgy {
         session_id: String,
@@ -1676,6 +1725,7 @@ mod tests {
             cwd: "/w".into(),
             transcript_path: None,
             source: Some("startup".into()),
+            launch_token: None,
             branch: None,
             git_root: None,
             committee_file: None,

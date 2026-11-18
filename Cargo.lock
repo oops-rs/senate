@@ -1750,6 +1750,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pty-process"
+version = "0.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5f0cff49b5194f464ce14bfaef7d6dba180889934e9bfa37ca5f2528ea515c0b"
+dependencies = [
+ "rustix",
+ "tokio",
+]
+
+[[package]]
 name = "quinn"
 version = "0.11.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2253,11 +2263,14 @@ dependencies = [
  "dirs",
  "eventsource-stream",
  "futures",
+ "getrandom 0.4.3",
  "hex",
  "libc",
+ "pty-process",
  "reqwest",
  "rmcp",
  "rusqlite",
+ "rustix",
  "senate-core",
  "serde",
  "serde_json",

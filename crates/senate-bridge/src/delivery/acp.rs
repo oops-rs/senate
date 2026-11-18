@@ -324,6 +324,7 @@ impl Registration<'_> {
                 cwd: self.cwd.to_path_buf(),
                 transcript_path: None,
                 source: None,
+                launch_token: None,
                 branch: facts.branch,
                 git_root: facts.toplevel,
                 committee_file: facts.committee_file,

@@ -72,6 +72,7 @@ pub mod delivery;
 pub mod follow;
 pub mod format;
 pub mod hook;
+pub mod host;
 pub mod init;
 pub mod install;
 pub mod ipc;

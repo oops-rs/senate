@@ -68,6 +68,9 @@ eventsource-stream = "0.2"
 rmcp = { version = "3.5.1", features = ["server", "transport-io", "macros"] }
 dirs = "6"
 libc = "0.2"
+getrandom = "0.4"
+pty-process = { version = "0.5.4", features = ["async"] }
+rustix = { version = "1.1.6", features = ["fs", "process", "termios"] }
 
 # CLI and logging.
 clap = { version = "4", features = ["derive", "env"] }

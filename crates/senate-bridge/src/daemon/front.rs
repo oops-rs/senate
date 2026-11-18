@@ -340,6 +340,8 @@ fn selector_of(request: &Request) -> Option<&SessionSelector> {
     match request {
         Request::Ask { session, .. }
         | Request::Answer { session, .. }
+        | Request::Spawn { session, .. }
+        | Request::Restore { session, .. }
         | Request::CatchUp { session, .. }
         | Request::Join { session, .. }
         | Request::JoinAs { session, .. }
