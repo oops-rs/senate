@@ -507,13 +507,13 @@ impl ServerHub {
     ) -> Result<Vec<SecretaryReminder>, HubError> {
         let _guard = self.secretary_gate.lock().await;
         let roster = self.roster_now();
-        let ours: BTreeSet<_> = senators
+        let mut remaining: BTreeSet<_> = senators
             .into_iter()
             .filter(|s| roster.owner_of(s) == Some(person))
             .collect();
         let mut reminders = Vec::new();
         for (principal, members) in roster.secretaries() {
-            if !team_exists(&roster, principal) || !members.iter().any(|s| ours.contains(s)) {
+            if !team_exists(&roster, principal) || !members.iter().any(|s| remaining.contains(s)) {
                 continue;
             }
             let rows = self
@@ -527,9 +527,11 @@ impl ServerHub {
                 {
                     let reminder: SecretaryReminder = serde_json::from_value(value.clone())
                         .map_err(|e| HubError::Other(Box::new(e)))?;
-                    if ours.contains(&reminder.to) && member(&roster, principal, &reminder.to) {
+                    // Every session gets its next pending assignment in
+                    // this poll, even while another inbox is refusing work.
+                    if member(&roster, principal, &reminder.to) && remaining.remove(&reminder.to) {
                         reminders.push(reminder);
-                        if reminders.len() == PAGE_SIZE {
+                        if remaining.is_empty() {
                             return Ok(reminders);
                         }
                     }
