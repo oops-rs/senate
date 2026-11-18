@@ -186,6 +186,23 @@ committee's chair, and the chair handles it directly.
 | Presiding tools | through a secretary's session, or the person's command line | its own session |
 | Secretaries | do the routine; the person overrules | optional; act when its session is closed |
 
+### Personal secretary teams
+
+Each person in a Senate can appoint specific coding sessions to a team that
+spans committees. The team owner manages membership through
+`senate secretary-team`. The server persists these appointments by person
+and stable session senator ID. A session can hold a personal appointment,
+a Speaker desk appointment, or both. Each membership can be granted and
+revoked independently, including when the team owner is the Speaker.
+
+The owner and current members can read the team's recorded items and history.
+An item has a stable ID and may link to a committee and root sequence. One
+member can claim an unassigned item. Members can add notes, and the owner
+of the item can update its progress or hand it to another member. The new
+assignee receives a targeted reminder. Other members can read the updates
+when they return. The bridge exposes this work to an appointed session
+through the `secretary_work` MCP tool.
+
 ### Secretaries
 
 A secretary relation is (principal senator, secretary senator, order),
@@ -193,7 +210,7 @@ both in one Senate: any senator may have secretaries, the Speaker
 included. A secretary is an agent of the Senate or the built-in session;
 the first one present acts; a senator is never its own secretary, and
 chains are not followed. Relations are registered with `senated` (in
-configuration, or at runtime with `senate secretary add|remove|list`),
+configuration, or at runtime with the secretary API),
 kept in the Senate's store, and visible in `GET /v1/secretaries`. The
 senator itself, the principal that runs it, or the Speaker's office may
 register or remove one; anyone else is refused.
