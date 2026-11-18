@@ -428,11 +428,24 @@ impl ApiClient {
         committee: &CommitteeId,
         senator: &SenatorName,
     ) -> Result<api::ChairInfo, ApiClientError> {
+        self.set_chair_as(committee, senator, None).await
+    }
+
+    pub(crate) async fn set_chair_as(
+        &self,
+        committee: &CommitteeId,
+        senator: &SenatorName,
+        acted_by: Option<&SenatorName>,
+    ) -> Result<api::ChairInfo, ApiClientError> {
         let url = self.url(&api::chair_path(committee));
         let body = api::SetChair {
             senator: senator.clone(),
         };
-        let resp = self.authed(self.http.put(url)).json(&body).send().await?;
+        let mut request = self.authed(self.http.put(url)).json(&body);
+        if let Some(acted_by) = acted_by {
+            request = request.query(&[("acted_by", acted_by)]);
+        }
+        let resp = request.send().await?;
         Ok(checked(resp).await?.json().await?)
     }
 

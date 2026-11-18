@@ -2529,7 +2529,7 @@ impl Shared {
                 session,
                 committee,
                 senator,
-            } => wrap(self.on_set_chair(&session, committee, senator).await),
+            } => wrap(self.on_set_chair(&session, committee, senator, None).await),
             Request::ChairDocket { session } => wrap(self.on_chair_docket(&session).await),
             Request::ChairRoute {
                 session,

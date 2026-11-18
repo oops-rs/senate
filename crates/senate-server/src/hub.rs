@@ -451,6 +451,16 @@ impl ServerHub {
         committee: &CommitteeId,
         senator: SenatorName,
     ) -> Result<ChairInfo, HubError> {
+        self.set_chair_as(committee, senator, Address::Committee)
+            .await
+    }
+
+    pub(crate) async fn set_chair_as(
+        &self,
+        committee: &CommitteeId,
+        senator: SenatorName,
+        by: Address,
+    ) -> Result<ChairInfo, HubError> {
         let senator = self.primary_name(&senator).await;
         if !self.seats.snapshot().knows(&senator) {
             return Err(HubError::Rejected(format!(
@@ -460,6 +470,7 @@ impl ServerHub {
         }
         self.ask_writer(committee, |reply| CommitteeMsg::SetChair {
             senator: senator.clone(),
+            by: by.clone(),
             locale: self.locale,
             reply,
         })

@@ -189,7 +189,10 @@ impl Front {
                 senator,
             } if session.session_id.is_some() || session.claude_pid.is_some() => {
                 match self.presiding(&session) {
-                    Ok((seat, _)) => wrap(seat.on_set_chair(&session, committee, senator).await),
+                    Ok((seat, actor)) => wrap(
+                        seat.on_set_chair(&session, committee, senator, Some(&actor))
+                            .await,
+                    ),
                     Err(e) => Reply::err(e),
                 }
             }

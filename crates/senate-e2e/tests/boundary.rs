@@ -608,8 +608,8 @@ async fn chair_handover_notifies_both_sessions_and_changes_their_tools() {
         assert_eq!(info.chair, Some(path("codex")));
         assert_eq!(info.source, Some(ChairSource::Set));
         let notice = locale.pick(
-            "[senator::codex] 现任委员会 `refund-v2` 的主席（chair）。[senator::claude] 卸任主席，仍是委员会成员。",
-            "[senator::codex] now chairs the committee `refund-v2`. [senator::claude] has been replaced as chair and remains a committee member.",
+            "[senator::codex] 现任委员会 `refund-v2` 的主席（chair）。[senator::alice] 免去了 [senator::claude] 的主席职务，[senator::claude] 仍是委员会成员。",
+            "[senator::codex] now chairs the committee `refund-v2`. [senator::claude] has been replaced as chair by [senator::alice] and remains a committee member.",
         );
         outgoing.wait_for(notice).await;
         incoming.wait_for(notice).await;

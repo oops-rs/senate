@@ -943,6 +943,7 @@ impl Shared {
         selector: &SessionSelector,
         committee: Option<CommitteeId>,
         senator: SenatorName,
+        acted_by: Option<&SenatorName>,
     ) -> Result<ChairInfo, IpcError> {
         let committee = match committee {
             Some(c) => c,
@@ -953,7 +954,7 @@ impl Shared {
         };
         let info = self
             .api
-            .set_chair(&committee, &senator)
+            .set_chair_as(&committee, &senator, acted_by)
             .await
             .map_err(|e| self.refusal(e))?;
         self.note_chair(&info);

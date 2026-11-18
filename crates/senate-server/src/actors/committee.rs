@@ -58,6 +58,7 @@ pub(crate) enum CommitteeMsg {
     Append(Box<NewEvent>, RpcReplyPort<Result<Appended, LogError>>),
     SetChair {
         senator: SenatorName,
+        by: Address,
         locale: Locale,
         reply: RpcReplyPort<Result<(), LogError>>,
     },
@@ -236,7 +237,12 @@ impl CommitteeState {
         result
     }
 
-    async fn set_chair(&mut self, senator: SenatorName, locale: Locale) -> Result<(), LogError> {
+    async fn set_chair(
+        &mut self,
+        senator: SenatorName,
+        by: Address,
+        locale: Locale,
+    ) -> Result<(), LogError> {
         let committee = &self.args.committee;
         if self.seats.is_unseated(&senator) {
             return Err(LogError::Invalid(format!(
@@ -247,6 +253,7 @@ impl CommitteeState {
         let mut event = NewEvent::new(committee.clone(), Kind::Note, Address::Committee, "")
             .with_meta(ChairPayload::META_KEY, ChairPayload { senator }.value());
         let current = self.chair.chair().map(|(chair, _)| Address::senator(chair));
+        let by = by.in_text();
         // Both chairs receive the same log event that changes the role.
         match current {
             Some(outgoing) if outgoing != incoming => {
@@ -254,10 +261,10 @@ impl CommitteeState {
                 let old = outgoing.in_text();
                 event.body = match locale {
                     Locale::Zh => format!(
-                        "{new} 现任委员会 `{committee}` 的主席（chair）。{old} 卸任主席，仍是委员会成员。"
+                        "{new} 现任委员会 `{committee}` 的主席（chair）。{by} 免去了 {old} 的主席职务，{old} 仍是委员会成员。"
                     ),
                     Locale::En => format!(
-                        "{new} now chairs the committee `{committee}`. {old} has been replaced as chair and remains a committee member."
+                        "{new} now chairs the committee `{committee}`. {old} has been replaced as chair by {by} and remains a committee member."
                     ),
                 };
                 event.to = vec![incoming, outgoing];
@@ -265,8 +272,12 @@ impl CommitteeState {
             None => {
                 let new = incoming.in_text();
                 event.body = match locale {
-                    Locale::Zh => format!("{new} 现任委员会 `{committee}` 的主席（chair）。"),
-                    Locale::En => format!("{new} now chairs the committee `{committee}`."),
+                    Locale::Zh => {
+                        format!("{by} 任命 {new} 为委员会 `{committee}` 的主席（chair）。")
+                    }
+                    Locale::En => {
+                        format!("{by} appointed {new} to chair the committee `{committee}`.")
+                    }
                 };
                 event.to = vec![incoming];
             }
@@ -600,9 +611,10 @@ impl Actor for CommitteeActor {
             }
             CommitteeMsg::SetChair {
                 senator,
+                by,
                 locale,
                 reply,
-            } => reply_or_log(reply, state.set_chair(senator, locale).await),
+            } => reply_or_log(reply, state.set_chair(senator, by, locale).await),
             CommitteeMsg::Attach {
                 agent,
                 conn,

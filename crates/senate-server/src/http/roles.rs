@@ -343,17 +343,46 @@ pub(super) async fn put_chair(
     State(state): State<AppState>,
     person: Person,
     path: Result<Path<String>, PathRejection>,
+    params: Result<Query<ChairAuthority>, QueryRejection>,
     body: Result<Json<SetChair>, JsonRejection>,
 ) -> Result<Json<ChairInfo>, ApiFailure> {
     let committee: CommitteeId = committee_path(path)?;
     let SetChair { senator } = json_body(body)?;
-    if state.hub.roster_now().principal(&person.0).is_none() {
+    let roster = state.hub.roster_now();
+    let Some(principal) = roster.principal(&person.0) else {
         return Err(ApiFailure::forbidden(format!(
             "{} is not a principal of this Senate: a principal or the Speaker's office sets a chair",
             person.0
         )));
-    }
-    Ok(Json(state.hub.set_chair(&committee, senator).await?))
+    };
+    let by = match query(params)?.acted_by {
+        Some(actor) => {
+            if !roster.may_act_for_office(&person.0, &actor)
+                || roster
+                    .office()
+                    .is_some_and(|office| office.built_in.as_ref() == Some(&actor))
+            {
+                return Err(ApiFailure::forbidden(format!(
+                    "{} may not set the chair as {}: only the Speaker or its secretary may act for the office",
+                    person.0,
+                    Address::senator(&actor)
+                )));
+            }
+            actor
+        }
+        None => principal.path(),
+    };
+    Ok(Json(
+        state
+            .hub
+            .set_chair_as(&committee, senator, Address::senator(&by))
+            .await?,
+    ))
+}
+
+#[derive(Deserialize)]
+pub(super) struct ChairAuthority {
+    acted_by: Option<SenatorName>,
 }
 
 pub(super) async fn secretaries(
