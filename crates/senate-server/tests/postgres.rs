@@ -3,6 +3,7 @@
 
 #![allow(clippy::unwrap_used)]
 
+#[path = "support/common.rs"]
 mod common;
 
 use std::str::FromStr;

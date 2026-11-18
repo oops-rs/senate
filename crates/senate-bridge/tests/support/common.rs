@@ -16,6 +16,7 @@
 // Handlers return a ready `Response` as their error, as axum handlers do.
 #![allow(clippy::result_large_err)]
 
+#[path = "common/fixed_seat.rs"]
 mod fixed_seat;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -52,6 +53,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_stream::wrappers::ReceiverStream;
 
+#[path = "common/fake_codex.rs"]
 pub mod fake_codex;
 
 // ---- addresses and events ---------------------------------------------------
