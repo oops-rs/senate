@@ -473,6 +473,9 @@ pub async fn ancestor_pids(start: u32, depth: usize, timeout: Duration) -> Vec<u
     let mut pid = start;
     while out.len() < depth && pid > 1 && !out.contains(&pid) {
         out.push(pid);
+        if out.len() == depth {
+            break;
+        }
         match parent_of(pid, timeout).await {
             Some(parent) => pid = parent,
             None => break,

@@ -346,6 +346,33 @@ fn table(headers: &[&str], rows: &[Vec<String>]) -> String {
     out
 }
 
+fn hosted_advisories(view: &StatusView) -> Vec<String> {
+    let l = view.locale;
+    let mut lines = Vec::new();
+    if view.sessions.iter().any(|session| {
+        session.runtime == Runtime::Codex && view.hosted.contains_key(&session.session_id)
+    }) {
+        lines.push(l.pick(
+            "在托管 Codex 中执行 /new 或 /clear 后，界面切换到新线程，但 Senate 仍向原线程投递。退出当前终端，再用 senate restore 返回原线程。",
+            "After /new or /clear in hosted Codex, Senate still delivers to the original thread, which the TUI no longer shows. Exit the TUI and use senate restore to return.",
+        ).into());
+        lines.push(l.pick(
+            "若恢复前 Codex 会话已在线，则关闭托管终端后该会话仍显示在线，因为守护进程无法判断是否还有原生客户端连接。",
+            "A Codex session that was live before restore stays live when the hosted terminal closes because the daemon cannot tell whether a native client remains.",
+        ).into());
+    }
+    for session in &view.sessions {
+        if let Some(Some(new)) = view.hosted.get(&session.session_id) {
+            let seat = &session.agent;
+            lines.push(l.pick(
+                format!("托管 Claude 席位 {seat} 无法绑定原生会话 {new}。消息暂存于原会话。运行 senate attach {seat} 检查终端，或退出终端后运行 senate restore {seat}。"),
+                format!("Hosted Claude seat {seat} could not bind native session {new}. Messages wait for the original session. Run senate attach {seat} to inspect the terminal, or exit it and run senate restore {seat}."),
+            ));
+        }
+    }
+    lines
+}
+
 pub fn render(view: &StatusView, now: DateTime<Utc>) -> String {
     render_with_ids(view, now, false)
 }
@@ -676,29 +703,8 @@ fn render_senate(
         }
     }
 
-    if view.sessions.iter().any(|session| {
-        session.runtime == Runtime::Codex && view.hosted.contains_key(&session.session_id)
-    }) {
-        let _ = writeln!(out, "  {}", l.pick(
-            "在托管 Codex 中执行 /new 或 /clear 后，界面切换到新线程，但 Senate 仍向原线程投递。退出当前终端，再用 senate restore 返回原线程。",
-            "After /new or /clear in hosted Codex, Senate still delivers to the original thread, which the TUI no longer shows. Exit the TUI and use senate restore to return.",
-        ));
-        let _ = writeln!(out, "  {}", l.pick(
-            "若恢复前 Codex 会话已在线，则关闭托管终端后该会话仍显示在线，因为守护进程无法判断是否还有原生客户端连接。",
-            "A Codex session that was live before restore stays live when the hosted terminal closes because the daemon cannot tell whether a native client remains.",
-        ));
-    }
-    for session in &view.sessions {
-        if let Some(Some(new)) = view.hosted.get(&session.session_id) {
-            let _ = writeln!(
-                out,
-                "  {}",
-                l.pick(
-                    format!("托管 Claude 席位 {} 上报了无法归属的原生 ID {new}。已保留原绑定。运行 senate attach {} 检查或退出当前终端。", session.agent, session.agent),
-                    format!("Hosted Claude seat {} reported an unbound native ID {new}. The original binding is kept. Run senate attach {} to inspect or exit the terminal.", session.agent, session.agent),
-                )
-            );
-        }
+    for advisory in hosted_advisories(view) {
+        let _ = writeln!(out, "  {advisory}");
     }
     let _ = writeln!(out, "\n{}", l.pick("会话", "sessions"));
     if view.sessions.is_empty() {

@@ -14,8 +14,8 @@
 //! something is waiting for the session.
 //!
 //! Claude's pid ties the session to its MCP shim (whose parent is Claude).
-//! The hook measures its parent chain when `CLAUDE_PID` is missing, and
-//! to verify a reported identity change in a hosted TUI. A parent shell
+//! The hook measures its parent chain when `CLAUDE_PID` is missing or the
+//! hook runs under a hosted Claude TUI. A parent shell
 //! exits quickly, so the chain is not evidence of liveness.
 //!
 //! Codex runs the same hooks (`hook <event> --codex`, from its
@@ -42,7 +42,7 @@ use serde_json::json;
 use crate::ipc::{self, HookEvent, HookReply, HookReport, Request};
 use crate::session::{self, Runtime};
 
-/// How many pids above the hook are reported without `CLAUDE_PID`.
+/// How many pids above the hook are reported when measuring ancestry.
 pub const ANCESTOR_DEPTH: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -185,10 +185,6 @@ impl Default for HookTimeouts {
     }
 }
 
-pub(crate) fn changes_claude_session(event: HookEvent, source: Option<&str>) -> bool {
-    event == HookEvent::SessionStart && matches!(source, Some("clear" | "resume"))
-}
-
 /// The JSON line to print, if any.
 pub fn output_for(kind: HookKind, context: &str) -> String {
     json!({
@@ -318,12 +314,14 @@ pub async fn prepare(
                 HookEvent::UserPromptSubmit
             };
             let ancestors = async {
-                let hosted_change = changes_claude_session(event, input.source.as_deref())
-                    && std::env::var_os(crate::host::HOSTED_CLAUDE_ENV).is_some();
-                if runtime != Runtime::Claude || (env.claude_pid.is_some() && !hosted_change) {
+                let in_host = std::env::var_os(crate::host::HOSTED_CLAUDE_ENV).is_some();
+                if runtime != Runtime::Claude || (env.claude_pid.is_some() && !in_host) {
                     return Vec::new();
                 }
                 let parent = std::os::unix::process::parent_id();
+                if env.claude_pid == Some(parent) {
+                    return vec![parent];
+                }
                 session::ancestor_pids(parent, ANCESTOR_DEPTH, git_timeout).await
             };
             let ((facts, _), ancestor_pids) =

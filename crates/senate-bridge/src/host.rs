@@ -457,8 +457,8 @@ pub(crate) fn awaiting_publication(paths: &Paths, id: &EventId) -> bool {
     directory(paths, id).join("unpublished").exists()
 }
 
-pub(crate) fn switched(paths: &Paths, id: &EventId) -> Option<String> {
-    std::fs::read_to_string(directory(paths, id).join("switched")).ok()
+pub(crate) fn unverified_switch(paths: &Paths, id: &EventId) -> Option<String> {
+    std::fs::read_to_string(directory(paths, id).join("unverified-switch")).ok()
 }
 
 pub(crate) fn status(
@@ -473,12 +473,7 @@ pub(crate) fn status(
         {
             hosted.insert(
                 session.session_id.clone(),
-                switched(paths, &id)
-                    .or_else(|| {
-                        std::fs::read_to_string(directory(paths, &id).join("unverified-switch"))
-                            .ok()
-                    })
-                    .filter(|new| new != &session.session_id),
+                unverified_switch(paths, &id).filter(|new| new != &session.session_id),
             );
         }
     }
@@ -489,10 +484,12 @@ pub(crate) fn note_unverified_switch(paths: &Paths, id: &EventId, session: &str)
     std::fs::write(directory(paths, id).join("unverified-switch"), session)
 }
 
-pub(crate) fn clear_switch(paths: &Paths, id: &EventId) {
-    let dir = directory(paths, id);
-    let _ = std::fs::remove_file(dir.join("switched"));
-    let _ = std::fs::remove_file(dir.join("unverified-switch"));
+pub(crate) fn clear_unverified_switch(paths: &Paths, id: &EventId) {
+    if let Err(error) = std::fs::remove_file(directory(paths, id).join("unverified-switch"))
+        && error.kind() != io::ErrorKind::NotFound
+    {
+        tracing::warn!(%error, %id, "clearing a hosted Claude context diagnostic");
+    }
 }
 
 pub(crate) fn child_pid(paths: &Paths, id: &EventId) -> Option<u32> {

@@ -41,12 +41,6 @@ pub(super) enum LaunchAudit {
     RolledBack { reason: String },
 }
 
-pub(super) fn switch_message(old: &SenatorName, new: &str) -> String {
-    format!(
-        "hosted Claude session {old} switched to native ID {new}; attach to {old} to inspect or exit the existing terminal"
-    )
-}
-
 struct PendingGuard<'a> {
     launches: &'a Launches,
     id: EventId,
@@ -170,23 +164,13 @@ impl Shared {
                 })?
         };
         for session in self.store.current_sessions().map_err(internal)? {
-            if self.hosts.unpublished(&session.session_id) {
-                continue;
-            }
-
             if session.agent == primary && session.agent_source == AgentSource::Session {
+                if self.hosts.unpublished(&session.session_id) {
+                    return Err(IpcError::bad_request(
+                        "this senator is still being restored; try again after it publishes",
+                    ));
+                }
                 return Ok(session);
-            }
-            let paths = Paths::new(&self.home);
-            if let Some(id) = self
-                .store
-                .session_host(&session.session_id)
-                .map_err(internal)?
-                && let Some(new) = host::switched(&paths, &id)
-                && agent::session_name(Runtime::Claude, &new) == primary
-                && host::running(&paths, &id).map_err(IpcError::internal)?
-            {
-                return Err(IpcError::bad_request(switch_message(&session.agent, &new)));
             }
         }
         Err(IpcError::new(
@@ -195,53 +179,123 @@ impl Shared {
         ))
     }
 
-    pub(super) async fn maybe_switch_host(
+    /// An ordinary hook can share the binding read lock with delivery.
+    /// Recheck ownership under the write lock before changing the native ID.
+    pub(super) async fn bind_claude_hook(
         &self,
         report: &HookReport,
         next: &mut SessionUpsert,
-    ) -> Result<(), IpcError> {
-        if !crate::hook::changes_claude_session(report.event, report.source.as_deref()) {
-            return Ok(());
-        }
+    ) -> Result<(tokio::sync::RwLockReadGuard<'_, ()>, Option<Session>), IpcError> {
         let paths = Paths::new(&self.home);
-        let binding = self.session_bindings.write().await;
+        let binding = self.session_bindings.read().await;
+        let candidates = self.hosted_claude_reports(&paths, report)?;
+        if candidates
+            .iter()
+            .any(|(native, _, _)| *native != report.session_id)
+        {
+            drop(binding);
+            let write = self.session_bindings.write().await;
+            let candidates = self.hosted_claude_reports(&paths, report)?;
+            let switched = self.reconcile_hosted_claude_hook(&paths, report, next, &candidates)?;
+            return Ok((tokio::sync::RwLockWriteGuard::downgrade(write), switched));
+        }
+        self.reconcile_hosted_claude_hook(&paths, report, next, &candidates)?;
+        Ok((binding, None))
+    }
+
+    fn hosted_claude_reports(
+        &self,
+        paths: &Paths,
+        report: &HookReport,
+    ) -> Result<Vec<(String, EventId, bool)>, IpcError> {
+        if report.claude_pid.is_none() && report.ancestor_pids.is_empty() {
+            return Ok(Vec::new());
+        }
         let mut candidates = Vec::new();
-        for first in self.store.live_sessions().map_err(internal)? {
-            if first.runtime != Runtime::Claude || first.session_id == report.session_id {
+        for (native, id) in self.store.hosted_claude_bindings().map_err(internal)? {
+            let Some(pid) = host::child_pid(paths, &id) else {
                 continue;
-            }
-            if let Some(id) = self
-                .store
-                .session_host(&first.session_id)
-                .map_err(internal)?
-                && let Some(pid) = host::child_pid(&paths, &id)
+            };
+            let ancestors = &report.ancestor_pids;
+            // A nearer, independently reported Claude process can have its own
+            // session. An inherited or absent PID cannot establish that.
+            let below_host = ancestors
+                .iter()
+                .take_while(|&&ancestor| ancestor != pid)
+                .any(|&ancestor| report.claude_pid == Some(ancestor));
+            if (report.claude_pid == Some(pid) || (ancestors.contains(&pid) && !below_host))
                 && session::pid_alive(pid)
-                && host::running(&paths, &id).map_err(IpcError::internal)?
-                && (report.claude_pid == Some(pid)
-                    || (report.claude_pid.is_none() && report.ancestor_pids.contains(&pid)))
+                && host::running(paths, &id).map_err(IpcError::internal)?
             {
                 candidates.push((
-                    first,
+                    native,
                     id,
-                    owns_claude_hook(pid, report.claude_pid, &report.ancestor_pids),
+                    owns_claude_hook(pid, report.claude_pid, ancestors),
                 ));
             }
         }
-        let (first, id) = match candidates.as_slice() {
-            [] => return Ok(()),
-            [(first, id, true)] => (first, id),
-            _ => {
-                for (prior, id, _) in &candidates {
-                    host::note_unverified_switch(&paths, id, &report.session_id)
-                        .map_err(IpcError::internal)?;
-                    tracing::warn!(seat = %prior.agent, native_id = %report.session_id,
-                        "unattributed hosted Claude context change; keeping the existing binding");
+        Ok(candidates)
+    }
+
+    fn reconcile_hosted_claude_hook(
+        &self,
+        paths: &Paths,
+        report: &HookReport,
+        next: &mut SessionUpsert,
+        candidates: &[(String, EventId, bool)],
+    ) -> Result<Option<Session>, IpcError> {
+        let (native, id) = match candidates {
+            [] => return Ok(None),
+            [(native, id, verified)] if *native == report.session_id => {
+                if *verified {
+                    host::clear_unverified_switch(paths, id);
                 }
-                return Err(IpcError::bad_request(
-                    "could not attribute the Claude context change to one hosted TUI",
-                ));
+                return Ok(None);
+            }
+            [(native, id, true)] => (native, id),
+            _ => {
+                let reason = "could not attribute the Claude context change to one hosted TUI";
+                for (native, id, _) in candidates {
+                    if *native != report.session_id {
+                        report_unverified_switch(paths, id, &report.session_id, reason);
+                    }
+                }
+                return Err(IpcError::bad_request(reason));
             }
         };
+        if self.hosts.unpublished(native) {
+            return Err(IpcError::bad_request(
+                "the hosted launch is still being published",
+            ));
+        }
+        let first = self
+            .store
+            .session(native)
+            .map_err(internal)?
+            .ok_or_else(|| IpcError::internal("the hosted seat has no session record"))?;
+        let target = self.store.session(&report.session_id).map_err(internal)?;
+        if let Some(target) = &target
+            && target.agent == first.agent
+        {
+            // An out-of-order prompt from a superseded context is not an
+            // explicit request to resume that context.
+            if report.event != HookEvent::SessionStart || report.source.as_deref() != Some("resume")
+            {
+                return Err(IpcError::bad_request(
+                    "a previously registered native ID requires a verified resume hook",
+                ));
+            }
+            if target
+                .claude_pid
+                .is_some_and(|pid| Some(pid) != report.claude_pid && session::pid_alive(pid))
+                || (target.state == SessionState::Stale
+                    && target.socket.as_ref().is_some_and(|socket| socket.exists()))
+            {
+                let reason = StoreError::HostedNativeConflict.to_string();
+                report_unverified_switch(paths, id, &report.session_id, &reason);
+                return Err(IpcError::bad_request(reason));
+            }
+        }
         let committee = first
             .committee()
             .ok_or_else(|| IpcError::internal("the hosted seat has no committee"))?;
@@ -276,15 +330,19 @@ impl Shared {
             notice.to.push(Address::Speaker);
         }
         next.agent = first.agent.clone();
-        self.store
-            .switch_hosted_session(first, next, id, &notice)
-            .map_err(internal)?;
-        host::clear_switch(&paths, id);
-        self.committees_changed.notify_one();
-        self.work.notify_one();
-        drop(binding);
-        self.flush_host_switch_notices().await;
-        Ok(())
+        match self.store.switch_hosted_session(&first, next, id, &notice) {
+            Ok(session) => {
+                host::clear_unverified_switch(paths, id);
+                self.host_notices_ready.notify_one();
+                Ok(Some(session))
+            }
+            Err(error @ StoreError::HostedNativeConflict) => {
+                let reason = error.to_string();
+                report_unverified_switch(paths, id, &report.session_id, &reason);
+                Err(IpcError::bad_request(reason))
+            }
+            Err(error) => Err(internal(error)),
+        }
     }
 
     pub(super) async fn flush_host_switch_notices(&self) {
@@ -304,10 +362,11 @@ impl Shared {
                     }
                 }
                 Ok(Err(error)) => {
-                    tracing::warn!(%error, "posting hosted identity switch, will retry");
-                    break;
+                    tracing::warn!(%id, %error, "posting hosted identity switch, will retry");
                 }
-                Err(_) => break,
+                Err(_) => {
+                    tracing::warn!(%id, "posting hosted identity switch timed out, will retry")
+                }
             }
         }
     }
@@ -372,10 +431,6 @@ impl Shared {
                 return Err(IpcError::bad_request(
                     "this terminal host is still waiting for publication",
                 ));
-            }
-            if let Some(new) = host::switched(paths, &id) {
-                let old = agent::session_name(Runtime::Claude, session_id);
-                return Err(IpcError::bad_request(switch_message(&old, &new)));
             }
             return Err(IpcError::bad_request(
                 "this senator already has a running terminal host; use senate attach",
@@ -807,6 +862,13 @@ fn intake_error(error: Intake) -> IpcError {
         Intake::Resync(reason) => IpcError::new(codes::SERVER, reason.to_string()),
         Intake::Failed(error) => IpcError::internal(error),
     }
+}
+
+fn report_unverified_switch(paths: &Paths, host: &EventId, native: &str, reason: &str) {
+    if let Err(error) = host::note_unverified_switch(paths, host, native) {
+        tracing::warn!(%error, %host, "recording a refused hosted Claude context change");
+    }
+    tracing::warn!(%host, %native, %reason, "keeping the existing hosted Claude binding");
 }
 
 fn owns_claude_hook(tui: u32, reported: Option<u32>, ancestors: &[u32]) -> bool {

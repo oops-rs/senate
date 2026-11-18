@@ -254,15 +254,27 @@ impl Front {
         selector: &SessionSelector,
         runtime: Runtime,
     ) -> Result<PresidesReply, IpcError> {
-        let agent = match self.locate(selector) {
-            Some((_, session)) => Some(session.agent),
-            None => selector
-                .session_id
-                .as_deref()
-                .map(|id| agent::session_name(runtime, id)),
+        let primary = self.primary();
+        let located = self.locate(selector).map(|(_, session)| session);
+        let agent = if let Some(session) = &located {
+            Some(session.agent.clone())
+        } else if let Some(id) = selector.session_id.as_deref()
+            && !primary.hosts.unpublished(id)
+        {
+            match primary.store.hosted_native_retired(id).map_err(internal)? {
+                Some(false) => primary
+                    .store
+                    .session(id)
+                    .map_err(internal)?
+                    .map(|s| s.agent),
+                Some(true) => None,
+                None => Some(agent::session_name(runtime, id)),
+            }
+        } else {
+            None
         };
         // The desk may have changed since the daemon last asked.
-        self.primary().refresh_me().await;
+        primary.refresh_me().await;
         let presiding = agent.as_ref().and_then(|agent| {
             let seat = self.seat_of(agent)?;
             Some(Presiding {
@@ -275,10 +287,7 @@ impl Front {
         });
         let mut chairs = Vec::new();
         if let Some(agent) = &agent {
-            let primary = self.primary();
-            let committee = self
-                .locate(selector)
-                .and_then(|(_, session)| session.committee().cloned());
+            let committee = located.and_then(|session| session.committee().cloned());
             if let Some(committee) = committee
                 && primary.current_chair(&committee).await.as_ref() == Some(agent)
             {

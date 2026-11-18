@@ -164,6 +164,8 @@ pub enum StoreError {
     Io(#[from] std::io::Error),
     #[error("state db holds an unreadable value: {0}")]
     Corrupt(String),
+    #[error("the target native ID belongs to another senator or live session")]
+    HostedNativeConflict,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1021,10 +1023,24 @@ impl Store {
             .optional()?)
     }
 
+    /// Process ownership can survive a failed inbox push that marked the row stale.
+    pub(crate) fn hosted_claude_bindings(&self) -> Result<Vec<(String, EventId)>, StoreError> {
+        let conn = self.conn();
+        let mut query = conn.prepare(
+            "SELECT session_id, host_id FROM sessions
+             WHERE runtime = 'claude' AND host_id IS NOT NULL",
+        )?;
+        let rows = query.query_map([], |row| Ok((row.get(0)?, row.get::<_, String>(1)?)))?;
+        rows.map(|row| {
+            let (session_id, host_id) = row?;
+            Ok((session_id, parse_host_id(&host_id)?))
+        })
+        .collect()
+    }
+
     pub(crate) fn hosted_switch_notices(&self) -> Result<Vec<NewEvent>, StoreError> {
         let conn = self.conn();
-        let mut query =
-            conn.prepare("SELECT event FROM hosted_switch_notices ORDER BY id LIMIT 16")?;
+        let mut query = conn.prepare("SELECT event FROM hosted_switch_notices ORDER BY id")?;
         let rows = query.query_map([], |row| row.get::<_, String>(0))?;
         rows.map(|event| {
             serde_json::from_str(&event?).map_err(|error| StoreError::Corrupt(error.to_string()))
@@ -1083,25 +1099,28 @@ impl Store {
             if let Some(hosted) = &hosted
                 && let Some((first, notice)) = hosted.transition
             {
-                let collision = tx.query_row(
-                    "SELECT 1 FROM sessions AS s WHERE s.session_id = ?1 AND
-                         (s.state = 'live' OR s.host_id IS NOT NULL OR
-                          (s.agent != ?2 AND EXISTS (
-                              SELECT 1 FROM hosted_native_seats AS h WHERE h.session_id = s.session_id
-                          )))",
-                    params![s.session_id, agent_text(&first.agent)], |_| Ok(()),
-                ).optional()?.is_some();
+                let collision = tx
+                    .query_row(
+                        "SELECT 1 FROM sessions AS s WHERE s.session_id = ?1 AND
+                         (s.agent != ?2 OR s.runtime != 'claude' OR
+                          s.state = 'live' OR s.host_id IS NOT NULL)",
+                        params![s.session_id, agent_text(&first.agent)],
+                        |_| Ok(()),
+                    )
+                    .optional()?
+                    .is_some();
                 if collision {
-                    return Err(StoreError::Corrupt(
-                        "the target native ID belongs to another live session or hosted seat"
-                            .into(),
-                    ));
+                    return Err(StoreError::HostedNativeConflict);
                 }
                 let changed = tx.execute(
                     "UPDATE sessions SET state = 'ended', host_id = NULL,
                         socket = NULL, token = NULL, claude_pid = NULL
-                     WHERE session_id = ?1 AND host_id = ?2 AND state = 'live'",
-                    params![first.session_id, hosted.id.to_string()],
+                     WHERE session_id = ?1 AND host_id = ?2 AND agent = ?3",
+                    params![
+                        first.session_id,
+                        hosted.id.to_string(),
+                        agent_text(&first.agent)
+                    ],
                 )?;
                 if changed != 1 {
                     return Err(StoreError::Corrupt(
@@ -1427,6 +1446,11 @@ impl Store {
             [],
         )?;
         tx.execute(
+            "DELETE FROM hosted_native_seats
+             WHERE session_id NOT IN (SELECT session_id FROM sessions)",
+            [],
+        )?;
+        tx.execute(
             "UPDATE queue SET status = 'pending', session_id = NULL
              WHERE status = 'queued'
                AND session_id NOT IN (SELECT session_id FROM sessions WHERE state = 'live')",
@@ -1451,6 +1475,10 @@ impl Store {
         for id in ids {
             gone += tx.execute("DELETE FROM sessions WHERE session_id = ?1", [id])?;
             tx.execute("DELETE FROM session_ancestors WHERE session_id = ?1", [id])?;
+            tx.execute(
+                "DELETE FROM hosted_native_seats WHERE session_id = ?1",
+                [id],
+            )?;
         }
         tx.commit()?;
         Ok(gone)
@@ -2621,6 +2649,34 @@ mod tests {
         assert!(store.session("third").unwrap().is_none());
         store.remove_hosted_switch_notice(&notice.id).unwrap();
         assert!(store.hosted_switch_notices().unwrap().is_empty());
+    }
+
+    #[test]
+    fn forgetting_session_rows_also_forgets_their_hosted_identity_metadata() {
+        let store = Store::in_memory().unwrap();
+        let host = EventId::new();
+        let committee = committee();
+        let old = store
+            .register_hosted_session(&upsert("old"), &host, &committee, None)
+            .unwrap();
+        let notice = NewEvent::new(committee, Kind::Note, Address::Committee, "changed context");
+        store
+            .switch_hosted_session(&old, &upsert("current"), &host, &notice)
+            .unwrap();
+        store
+            .conn()
+            .execute(
+                "UPDATE sessions SET last_seen = 0 WHERE session_id = 'old'",
+                [],
+            )
+            .unwrap();
+
+        store.prune(Duration::from_secs(60)).unwrap();
+        assert!(store.session("old").unwrap().is_none());
+        assert_eq!(store.hosted_native_retired("old").unwrap(), None);
+        assert_eq!(store.hosted_native_retired("current").unwrap(), Some(false));
+        assert_eq!(store.delete_sessions(&["current".into()]).unwrap(), 1);
+        assert_eq!(store.hosted_native_retired("current").unwrap(), None);
     }
 
     #[test]

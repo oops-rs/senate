@@ -417,6 +417,7 @@ pub(crate) struct Shared {
     /// A manual rebind waits for pushes and hooks using the previous seat to finish.
     session_bindings: RwLock<()>,
     hosts: hosts::Launches,
+    host_notices_ready: Notify,
     codex_transport: crate::delivery::codex::Transport,
     host_binary: PathBuf,
     pushes: Mutex<HashMap<String, PushState>>,
@@ -710,6 +711,7 @@ impl Shared {
             resyncs,
             session_bindings: RwLock::new(()),
             hosts: hosts::Launches::default(),
+            host_notices_ready: Notify::new(),
             codex_transport: common.codex.transport.clone(),
             host_binary: common.host_binary.clone(),
             pushes: Mutex::new(HashMap::new()),
@@ -1209,9 +1211,6 @@ impl Shared {
                     }
                 }
                 if crate::host::awaiting_publication(&paths, &id) {
-                    continue;
-                }
-                if crate::host::switched(&paths, &id).is_some_and(|new| new != s.session_id) {
                     continue;
                 }
             } else if s.claude_pid.is_some_and(|pid| !session::pid_alive(pid)) {
@@ -2172,7 +2171,11 @@ impl Shared {
             .filter(|i| &i.agent == agent)
             .map(QueueItem::key)
             .collect();
-        if !self.ladder.can_push(session) {
+        let unbound_host = session.runtime == Runtime::Claude
+            && self.store.session_host(sid)?.is_some_and(|id| {
+                crate::host::unverified_switch(&Paths::new(&self.home), &id).is_some()
+            });
+        if unbound_host || !self.ladder.can_push(session) {
             // Nothing can be pushed to it, so what is routed to it waits for
             // its next hook. Hold it straight from pending: were it in
             // flight first, a hook running just then would find nothing and
@@ -2899,7 +2902,11 @@ impl Shared {
             token: report.token.clone(),
             claude_pid: report.claude_pid,
             transcript_path: report.transcript_path.clone(),
-            ancestor_pids: report.ancestor_pids.clone(),
+            ancestor_pids: if report.claude_pid.is_none() {
+                report.ancestor_pids.clone()
+            } else {
+                Vec::new()
+            },
             runtime: report.runtime,
             agent,
             agent_source,
@@ -2910,10 +2917,11 @@ impl Shared {
                 .await
                 .map_err(|_| IpcError::bad_request("the hosted launch was rolled back"))?;
         }
-        if native && report.runtime == Runtime::Claude {
-            self.maybe_switch_host(&report, &mut upsert).await?;
-        }
-        let _binding = self.session_bindings.read().await;
+        let (_binding, switched) = if native && report.runtime == Runtime::Claude {
+            self.bind_claude_hook(&report, &mut upsert).await?
+        } else {
+            (self.session_bindings.read().await, None)
+        };
         if native
             && let Some(id) = self
                 .store
@@ -2938,14 +2946,22 @@ impl Shared {
                     ));
                 }
                 Some(false) => {
-                    if let Some(previous) = &before {
-                        upsert.agent = previous.agent.clone();
-                    }
+                    let previous = before.as_ref().ok_or_else(|| {
+                        IpcError::internal("the hosted seat has no session record")
+                    })?;
+                    upsert.agent = previous.agent.clone();
                 }
                 None => {}
             }
         }
-        let session = self.store.upsert_session(&upsert).map_err(internal)?;
+        let changed_host_context = switched.is_some();
+        let (session, context_event) = match switched {
+            Some(session) => (session, HookEvent::SessionStart),
+            None => (
+                self.store.upsert_session(&upsert).map_err(internal)?,
+                report.event,
+            ),
+        };
         if before.as_ref().is_some_and(|b| b.agent != session.agent) {
             let released = self
                 .store
@@ -2975,11 +2991,11 @@ impl Shared {
             session.committee().cloned(),
             SessionState::Live,
         );
-        if was != Some(now) {
+        if was != Some(now) || changed_host_context {
             self.committees_changed.notify_one();
         }
 
-        let (brief, chair) = match (report.event, session.committee()) {
+        let (brief, chair) = match (context_event, session.committee()) {
             (HookEvent::SessionStart, Some(committee)) => tokio::join!(
                 async {
                     if session.runtime == Runtime::Agy {
@@ -3004,12 +3020,15 @@ impl Shared {
             .map_or(0, |(_, text)| text.chars().count() + 2);
         let (mut context, delivered) = self.hook_context(
             &session,
-            report.event,
+            context_event,
             brief.as_ref(),
             chair.as_ref(),
             reserved,
         )?;
-        if native && (source != AgentSource::Harness || hint.as_str() != report.runtime.as_str()) {
+        if native
+            && !changed_host_context
+            && (source != AgentSource::Harness || hint.as_str() != report.runtime.as_str())
+        {
             let alias = tokio::time::timeout(
                 Duration::from_millis(600),
                 self.api.set_alias(&session.agent, &hint, true),
@@ -3312,7 +3331,7 @@ impl Shared {
                 .map_err(internal)?;
             return Ok(serde_json::json!({}));
         }
-        let switched = match (host_id, registered.as_ref()) {
+        match (host_id, registered.as_ref()) {
             (Some(expected), actual) if Some(expected) != actual => {
                 return Ok(serde_json::json!({}));
             }
@@ -3320,9 +3339,8 @@ impl Shared {
                 crate::host::clear_shared_codex_thread(&paths, id).map_err(IpcError::internal)?;
                 return Ok(serde_json::json!({}));
             }
-            (Some(id), _) => crate::host::switched(&paths, id).is_some(),
-            _ => false,
-        };
+            _ => {}
+        }
         self.agy.forget(session_id);
         let before = self.store.session(session_id).map_err(internal)?;
         if self
@@ -3333,7 +3351,7 @@ impl Shared {
             self.committees_changed.notify_one();
             self.work.notify_one();
             // The hook waits for this reply; the checkpoint does not keep it.
-            if let Some(session) = before.filter(|s| !switched && s.committee().is_some()) {
+            if let Some(session) = before.filter(|s| s.committee().is_some()) {
                 let shared = self.clone();
                 tokio::spawn(async move {
                     shared
@@ -5062,6 +5080,7 @@ async fn sweeper(shared: Arc<Shared>, mut shutdown: watch::Receiver<bool>) {
     tick.tick().await;
     loop {
         tokio::select! {
+            _ = shared.host_notices_ready.notified() => shared.flush_host_switch_notices().await,
             _ = tick.tick() => {
                 shared.sweep_once();
                 shared.flush_host_switch_notices().await;

@@ -174,8 +174,8 @@
 //! outlives `/clear`, which starts a new session id in the same process),
 //! matched against the pid the session's hooks reported (`claude_pid`) and
 //! then against the pids above its hooks (`ancestor_pids`, reported when
-//! Claude does not export `CLAUDE_PID` or a hosted hook needs provenance). A Codex session is selected by
-//! its thread id alone: the MCP shim takes it from each tool call's
+//! Claude does not export `CLAUDE_PID` or the hook runs under a hosted TUI).
+//! A Codex session is selected by its thread id alone: the MCP shim takes it from each tool call's
 //! `_meta.threadId`, and Codex hooks report no pids (every thread of an
 //! app-server shares the same ones).
 //!
@@ -303,8 +303,8 @@ pub struct HookReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_pid: Option<u32>,
     /// The hook's parent, grandparent, ... (nearest first), reported when
-    /// `CLAUDE_PID` is not set: Claude is one of them, so the MCP shim's
-    /// parent pid can still find this session.
+    /// `CLAUDE_PID` is absent or the hook runs under a hosted TUI. Used for
+    /// MCP lookup and to verify the process reporting a new native ID.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ancestor_pids: Vec<u32>,
     /// Absent from an older hook, which is always Claude Code's.

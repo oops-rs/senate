@@ -165,6 +165,7 @@ pub struct StreamOpen {
 pub struct Inner {
     pub events: BTreeMap<String, Vec<Event>>,
     pub reject_appends: bool,
+    pub reject_append_containing: Option<String>,
     /// `(committee, seq)` → the JSON served in place of the stored event.
     pub raw: HashMap<(String, u64), String>,
     /// `(committee, whose, name)`: `whose` is the senator in the query, else
@@ -325,6 +326,13 @@ async fn add_epoch(State(st): St, mut resp: Response) -> Response {
     resp
 }
 
+async fn aliases(State(st): St, headers: HeaderMap) -> Response {
+    if let Err(error) = auth(&st, &headers) {
+        return error;
+    }
+    Json(st.inner.lock().unwrap().aliases.clone()).into_response()
+}
+
 async fn alias(
     State(st): St,
     UrlPath(primary): UrlPath<SenatorName>,
@@ -400,7 +408,15 @@ async fn append(
     if ev.committee.as_str() != committee {
         return api_error(StatusCode::BAD_REQUEST, "bad_request", "committee mismatch");
     }
-    if st.inner.lock().unwrap().reject_appends {
+    let rejected = {
+        let inner = st.inner.lock().unwrap();
+        inner.reject_appends
+            || inner
+                .reject_append_containing
+                .as_ref()
+                .is_some_and(|text| ev.body.contains(text))
+    };
+    if rejected {
         return api_error(StatusCode::FORBIDDEN, "forbidden", "injected log refusal");
     }
     let Some(from) = ev.from.as_senator().cloned() else {
@@ -432,6 +448,23 @@ async fn seat_status(State(st): St, headers: HeaderMap) -> Response {
         return error;
     }
     Json(senate_core::api::CommitteeSeatStatus { unseated: false }).into_response()
+}
+
+async fn secretary_session(
+    State(st): St,
+    UrlPath(principal): UrlPath<SenatorName>,
+    headers: HeaderMap,
+    Json(request): Json<senate_core::secretary_work::SetSecretarySession>,
+) -> Response {
+    if let Err(error) = auth(&st, &headers) {
+        return error;
+    }
+    let team = if request.appointed {
+        vec![request.senator]
+    } else {
+        vec![]
+    };
+    Json(BTreeMap::from([(principal, team)])).into_response()
 }
 
 async fn events(
@@ -819,6 +852,7 @@ impl FakeServer {
             inner: Mutex::new(Inner {
                 events: BTreeMap::new(),
                 reject_appends: false,
+                reject_append_containing: None,
                 raw: HashMap::new(),
                 aliases: BTreeMap::new(),
                 alias_delay: Duration::ZERO,
@@ -852,6 +886,7 @@ impl FakeServer {
         let app = Router::new()
             .route("/healthz", get(|| async { "ok" }))
             .route("/v1/me", get(me))
+            .route("/v1/aliases", get(aliases))
             .route("/v1/aliases/{primary}", axum::routing::put(alias))
             .route(senate_core::api::RESOLVE_PATH, get(resolve))
             .route(
@@ -865,6 +900,10 @@ impl FakeServer {
             )
             .route("/v1/committees/{committee}/heartbeat", post(heartbeat))
             .route("/v1/committees/{committee}/seat", get(seat_status))
+            .route(
+                "/v1/secretary-teams/{principal}/session",
+                axum::routing::put(secretary_session),
+            )
             .route("/v1/committees/{committee}/search", get(search))
             .route("/v1/committees/{committee}/brief", get(brief))
             .route("/v1/committees/{committee}/threads", get(threads))

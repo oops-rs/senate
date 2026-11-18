@@ -364,8 +364,9 @@ enum Cmd {
     /// senate restore to return. A Codex session that was live before restore
     /// stays live on host close because a native client may remain.
     ///
-    /// Claude identity switching requires the configured executable to be the
-    /// Claude TUI itself, or a wrapper that execs it.
+    /// Hosted Claude keeps the senator when the same process reports a new
+    /// session after /clear or /resume. A refused change appears in status.
+    /// The configured executable must be Claude itself or a wrapper that execs it.
     Attach { senator: SenatorName },
     /// Resume a recorded Codex or Claude Code senator in a detached terminal.
     Restore { senator: SenatorName },

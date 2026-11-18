@@ -3,8 +3,9 @@ use senate_core::{CommitteeId, Locale};
 use textwrap::core::display_width;
 
 use super::{
-    StatusView, ago, children_line, desk_line, home_relative, office_speaker_words, parent_line,
-    render_secretary_problems, session_committee, session_push, speaker_words, stream_text,
+    StatusView, ago, children_line, desk_line, home_relative, hosted_advisories,
+    office_speaker_words, parent_line, render_secretary_problems, session_committee, session_push,
+    speaker_words, stream_text,
 };
 use crate::ipc::StreamState;
 use crate::session::SessionState;
@@ -89,6 +90,9 @@ pub fn render_terminal(
     );
     terminal.line(&mut out, &queue, 2, false);
     delivery(view, now, full_ids, scope.is_none(), terminal, &mut out);
+    for advisory in hosted_advisories(view) {
+        terminal.line(&mut out, &advisory, 2, false);
+    }
 
     out.push('\n');
     let title = if view.sessions.is_empty() {

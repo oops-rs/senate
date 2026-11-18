@@ -37,7 +37,7 @@ async fn start(h: &mut Harness) {
 async fn call<T: serde::de::DeserializeOwned>(h: &Harness, request: &Request) -> T {
     ipc::request(&h.socket(), request, TIMEOUT, TIMEOUT)
         .await
-        .unwrap()
+        .unwrap_or_else(|error| panic!("{request:?}: {error}"))
 }
 
 async fn attach(h: &Harness, alias: &str, keys: &[u8]) {
@@ -678,53 +678,224 @@ async fn codex_native_end_during_or_after_restore_does_not_leave_a_live_row() {
     }
 }
 
+struct HostedClaude {
+    h: Harness,
+    seat: SpawnReply,
+    project: PathBuf,
+    terminal: PathBuf,
+}
+
+impl Drop for HostedClaude {
+    fn drop(&mut self) {
+        let _ = self.signal_terminal();
+    }
+}
+
+impl HostedClaude {
+    async fn launch(companion: bool) -> Self {
+        let mut h = Harness::new().await;
+        h.dir = tempfile::tempdir_in("/tmp").unwrap();
+        h.paths = senate_bridge::Paths::new(h.dir.path().join("senate"));
+        h.paths.ensure_home().unwrap();
+        let project = h.workdir("switch", None);
+        let program = h.dir.path().join("fixture");
+        let senate = BIN.replace('\'', "'\"'\"'");
+        std::fs::write(
+            &program,
+            format!(
+                r#"#!/bin/sh
+output="${{0%/*}}"
+if [ "$1" = "-p" ]; then
+    cat >/dev/null
+    printf '%s\n' "$@" > "$output/companion-args.tmp"
+    mv "$output/companion-args.tmp" "$output/companion-args"
+    printf '%s\n' '{{"type":"result","is_error":false,"result":"ok"}}'
+    exit
+fi
+case "$1" in
+    --session-id=*|--resume=*) printf '%s\n' "$1" > "$output/host-args" ;;
+    *) exit 1 ;;
+esac
+trap 'printf "fixture TUI\n"' WINCH
+while :; do
+    IFS= read -r line || continue
+    if [ "$line" = "nested" ]; then
+        /bin/sh -c '
+            printf "%s" "$2" | CLAUDE_PID=$$ "$1" hook session-start > /dev/null
+        ' nested '{senate}' '{{"session_id":"fixture-nested","source":"startup"}}'
+    fi
+done
+"#
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(
+            h.paths.config(),
+            format!(
+                "[companion]\nenabled = {companion}\nclaude_bin = {:?}\n",
+                program.to_str().unwrap()
+            ),
+        )
+        .unwrap();
+        h.server.state.inner.lock().unwrap().triaged = false;
+        start(&mut h).await;
+        let seat = call(
+            &h,
+            &Request::Spawn {
+                session: Default::default(),
+                runtime: HostedRuntime::Claude,
+                committee: committee(),
+                alias: Some(path("seat-fixture")),
+                cwd: project.clone(),
+                chair: false,
+            },
+        )
+        .await;
+        let terminal = call(&h, &Self::attach_request()).await;
+        Self {
+            h,
+            seat,
+            project,
+            terminal,
+        }
+    }
+
+    fn attach_request() -> Request {
+        Request::Attach {
+            senator: path("seat-fixture"),
+        }
+    }
+
+    fn pid(&self) -> u32 {
+        std::fs::read_to_string(self.terminal.parent().unwrap().join("owner"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    }
+
+    fn hook(
+        &self,
+        id: &str,
+        event: senate_bridge::ipc::HookEvent,
+        source: Option<&str>,
+        pid: Option<u32>,
+        ancestors: &[u32],
+    ) -> Request {
+        use senate_bridge::ipc::HookReport;
+        use serde_json::json;
+
+        Request::SessionHook(
+            serde_json::from_value::<HookReport>(json!({
+                "event":event, "runtime":"claude", "session_id":id,
+                "cwd": self.project, "source":source, "claude_pid":pid,
+                "ancestor_pids":ancestors,
+                "transcript_path":self.project.join(format!("{id}.jsonl")),
+            }))
+            .unwrap(),
+        )
+    }
+
+    async fn reject(&self, request: &Request, reason: &str) {
+        let error = ipc::request::<serde_json::Value>(&self.h.socket(), request, TIMEOUT, TIMEOUT)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains(reason), "{error}");
+    }
+
+    fn signal_terminal(&self) -> std::io::Result<()> {
+        let owner = std::fs::read_to_string(self.terminal.with_file_name("owner"))?;
+        let group = owner
+            .trim()
+            .parse()
+            .ok()
+            .and_then(rustix::process::Pid::from_raw)
+            .ok_or_else(|| std::io::Error::other("invalid fixture terminal PID"))?;
+        rustix::process::kill_process_group(group, rustix::process::Signal::TERM)?;
+        Ok(())
+    }
+
+    async fn end_terminal(&self) {
+        self.signal_terminal().unwrap();
+        eventually("host to exit", TIMEOUT, || {
+            (!self.terminal.exists()).then_some(())
+        })
+        .await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn claude_hook_changes_native_context_without_moving_the_seat_or_its_mail() {
-    use senate_bridge::SessionState;
-    use senate_bridge::ipc::{HookReply, HookReport, StatusReply};
+    use senate_bridge::ipc::{HookEvent, HookReply, PresidesReply, SessionSelector, StatusReply};
+    use senate_bridge::state::ItemStatus;
+    use senate_bridge::{SessionState, session::Runtime};
     use senate_core::{Address, Kind, NewEvent};
-    use serde_json::json;
 
-    let mut h = Harness::new().await;
-    h.dir = tempfile::tempdir_in("/tmp").unwrap();
-    h.paths = senate_bridge::Paths::new(h.dir.path().join("senate"));
-    h.paths.ensure_home().unwrap();
-    let project = h.workdir("switch", None);
-    let program = h.dir.path().join("fixture");
-    std::fs::write(&program, "#!/bin/sh\nwhile :; do sleep 1; done\n").unwrap();
-    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
-    std::fs::write(
-        h.paths.config(),
-        format!(
-            "[companion]\nclaude_bin = {:?}\n",
-            program.to_str().unwrap()
-        ),
-    )
-    .unwrap();
-    h.server.state.inner.lock().unwrap().triaged = false;
-    start(&mut h).await;
-    let committee = committee();
-    let spawned: SpawnReply = call(
-        &h,
-        &Request::Spawn {
-            session: Default::default(),
-            runtime: HostedRuntime::Claude,
-            committee: committee.clone(),
-            alias: Some(path("seat-fixture")),
-            cwd: project.clone(),
-            chair: false,
-        },
-    )
+    let mut fixture = HostedClaude::launch(true).await;
+    let pid = fixture.pid();
+    let h = &fixture.h;
+    let spawned = &fixture.seat;
+    let primary = &spawned.senator;
+
+    // The nested process runs the actual hook CLI under the fixture's TUI.
+    attach(h, "seat-fixture", b"nested\n\x1d").await;
+    let nested = eventually("nested Claude hook", TIMEOUT, || {
+        h.store().session("fixture-nested").unwrap()
+    })
     .await;
-    let attach = Request::Attach {
-        senator: spawned.senator.clone(),
-    };
-    let terminal: PathBuf = call(&h, &attach).await;
-    let pid: u32 = std::fs::read_to_string(terminal.parent().unwrap().join("owner"))
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    assert_eq!(nested.agent, path("claude-fixture-nested"));
+    assert!(
+        nested
+            .claude_pid
+            .is_some_and(|nested_pid| nested_pid != pid)
+    );
+    assert_eq!(
+        call::<PathBuf>(h, &HostedClaude::attach_request()).await,
+        fixture.terminal
+    );
+
+    let current_hook = fixture.hook(
+        &spawned.session_id,
+        HookEvent::UserPromptSubmit,
+        None,
+        Some(pid),
+        &[pid],
+    );
+    let ambiguous = fixture.hook(
+        "unattributed",
+        HookEvent::UserPromptSubmit,
+        None,
+        None,
+        &[pid],
+    );
+    fixture.reject(&ambiguous, "could not attribute").await;
+    assert!(h.store().session("unattributed").unwrap().is_none());
+    let status: StatusReply = call(h, &Request::Status).await;
+    assert_eq!(
+        status.hosted[&spawned.session_id].as_deref(),
+        Some("unattributed")
+    );
+    let _: HookReply = call(h, &current_hook).await;
+    let status: StatusReply = call(h, &Request::Status).await;
+    assert_eq!(status.hosted[&spawned.session_id], None);
+
+    let committee = committee();
+    h.server.append(
+        NewEvent::new(
+            committee.clone(),
+            Kind::Note,
+            Address::Committee,
+            "chair set",
+        )
+        .with_meta(
+            senate_core::meta::CHAIR,
+            senate_core::chair::ChairPayload {
+                senator: primary.clone(),
+            }
+            .value(),
+        ),
+    );
     let question = h.server.append(
         NewEvent::new(
             committee.clone(),
@@ -732,52 +903,27 @@ async fn claude_hook_changes_native_context_without_moving_the_seat_or_its_mail(
             Address::senior(&h.config.person),
             "queued before the native context changed",
         )
-        .to(Address::senator(&spawned.senator)),
+        .to(Address::senator(primary)),
     );
-    tokio::time::timeout(TIMEOUT, async {
-        while h
-            .store()
-            .item(&spawned.senator, &committee, question.seq)
+    eventually("question held for the original hook", TIMEOUT, || {
+        h.store()
+            .item(primary, &committee, question.seq)
             .unwrap()
-            .is_none()
-        {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+            .filter(|item| item.status == ItemStatus::Queued)
     })
-    .await
-    .unwrap();
+    .await;
 
-    let hook = |id: &str, source: &str, claimed: Option<u32>| {
-        Request::SessionHook(
-            serde_json::from_value::<HookReport>(json!({
-                "event":"session_start", "runtime":"claude", "session_id":id,
-                "cwd": project, "source":source, "claude_pid":claimed,
-                "ancestor_pids":[pid],
-            }))
-            .unwrap(),
-        )
-    };
-    let refused = ipc::request::<HookReply>(
-        &h.socket(),
-        &hook("unattributed", "clear", None),
-        TIMEOUT,
-        TIMEOUT,
-    )
-    .await
-    .unwrap_err();
-    assert!(
-        refused.to_string().contains("could not attribute"),
-        "{refused}"
+    // The daemon missed SessionStart. The first user prompt must still
+    // recover the seat and see the question already held for its old ID.
+    let cleared = fixture.hook(
+        "cleared",
+        HookEvent::UserPromptSubmit,
+        None,
+        Some(pid),
+        &[pid],
     );
-    assert!(h.store().session("unattributed").unwrap().is_none());
-    let status: StatusReply = call(&h, &Request::Status).await;
-    assert_eq!(
-        status.hosted[&spawned.session_id].as_deref(),
-        Some("unattributed")
-    );
-
-    let clear: HookReply = call(&h, &hook("cleared", "clear", Some(pid))).await;
-    assert_eq!(clear.session.agent, spawned.senator);
+    let clear: HookReply = call(h, &cleared).await;
+    assert_eq!(clear.session.agent, *primary);
     assert_eq!(
         h.store()
             .session(&spawned.session_id)
@@ -786,33 +932,270 @@ async fn claude_hook_changes_native_context_without_moving_the_seat_or_its_mail(
             .state,
         SessionState::Ended
     );
-    assert_eq!(call::<PathBuf>(&h, &attach).await, terminal);
+    assert_eq!(
+        call::<PathBuf>(h, &HostedClaude::attach_request()).await,
+        fixture.terminal
+    );
     assert!(
         clear
             .context
             .as_deref()
-            .is_some_and(|text| text.contains("queued before the native context changed"))
+            .is_some_and(|text| text.contains(&question.body))
     );
 
-    let resumed: HookReply = call(&h, &hook("resumed", "resume", Some(pid))).await;
-    assert_eq!(resumed.session.agent, spawned.senator);
+    let notice = eventually("context change notice", TIMEOUT, || {
+        h.server
+            .events(committee.as_str())
+            .into_iter()
+            .find(|event| {
+                event.body.contains("changed session context")
+                    && event.body.contains(&spawned.session_id)
+                    && event.body.contains("cleared")
+            })
+    })
+    .await;
+    assert_eq!(notice.to, vec![Address::Speaker]);
+    assert!(notice.body.contains(primary.as_str()));
+    assert!(
+        notice
+            .body
+            .contains("committee chair's session context changed")
+    );
+
+    let appoint = |id: &str| Request::SetSecretarySession {
+        target_session: Some(id.into()),
+        senator: None,
+        principal: None,
+        appointed: true,
+    };
+    let team: senate_core::api::Secretaries = call(h, &appoint("cleared")).await;
+    assert_eq!(team[&path(h.config.person.as_str())], vec![primary.clone()]);
+    fixture
+        .reject(&appoint(&spawned.session_id), "name the full ID")
+        .await;
+    let from_old_terminal = fixture.hook(
+        &spawned.session_id,
+        HookEvent::SessionStart,
+        Some("startup"),
+        None,
+        &[],
+    );
+    fixture.reject(&from_old_terminal, "was retired").await;
+    fixture
+        .reject(&current_hook, "requires a verified resume")
+        .await;
+
+    let back = fixture.hook(
+        &spawned.session_id,
+        HookEvent::SessionStart,
+        Some("resume"),
+        Some(pid),
+        &[pid],
+    );
+    let back: HookReply = call(h, &back).await;
+    assert_eq!(back.session.agent, *primary);
     assert_eq!(
         h.store().session("cleared").unwrap().unwrap().state,
         SessionState::Ended
     );
-    assert_eq!(call::<PathBuf>(&h, &attach).await, terminal);
-    let group = rustix::process::Pid::from_raw(i32::try_from(pid).unwrap()).unwrap();
-    rustix::process::kill_process_group(group, rustix::process::Signal::TERM).unwrap();
-    tokio::time::timeout(TIMEOUT, async {
-        while terminal.exists() {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .unwrap();
+    // Stale inbox state does not change who owns the host.
+    h.store()
+        .set_session_state(&spawned.session_id, SessionState::Stale)
+        .unwrap();
+    let resumed = fixture.hook(
+        "resumed",
+        HookEvent::SessionStart,
+        Some("resume"),
+        Some(pid),
+        &[pid],
+    );
+    let resumed: HookReply = call(h, &resumed).await;
+    assert_eq!(resumed.session.agent, *primary);
+    assert_eq!(
+        h.store()
+            .session(&spawned.session_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        SessionState::Ended
+    );
+
+    fixture.end_terminal().await;
     assert_eq!(
         h.store().session("resumed").unwrap().unwrap().state,
         SessionState::Ended
     );
-    h.stop().await;
+
+    let presides = |id: &str| Request::Presides {
+        session: SessionSelector {
+            session_id: Some(id.into()),
+            claude_pid: None,
+        },
+        runtime: Runtime::Claude,
+        agent_env: None,
+        agent_file: None,
+    };
+    assert_eq!(
+        call::<PresidesReply>(h, &presides(&spawned.session_id))
+            .await
+            .agent,
+        None
+    );
+    assert_eq!(
+        call::<PresidesReply>(h, &presides("resumed")).await.agent,
+        Some(primary.clone())
+    );
+
+    // Make a retired row newer than the current one to exercise the
+    // companion's real choice of --resume argument.
+    h.store().touch_session("cleared").unwrap();
+    h.server.append(
+        NewEvent::new(
+            committee,
+            Kind::Question,
+            Address::senior(&h.config.person),
+            "which conversation is the latest one for this seat?",
+        )
+        .to(Address::senator(primary)),
+    );
+    let args = eventually("companion command", TIMEOUT, || {
+        std::fs::read_to_string(h.dir.path().join("companion-args")).ok()
+    })
+    .await;
+    assert_eq!(
+        args.lines().take(4).collect::<Vec<_>>(),
+        ["-p", "--resume", "resumed", "--fork-session"]
+    );
+
+    let restored: SpawnReply = call(
+        h,
+        &Request::Restore {
+            session: Default::default(),
+            senator: path("seat-fixture"),
+        },
+    )
+    .await;
+    assert_eq!(restored.senator, *primary);
+    assert_eq!(restored.session_id, "resumed");
+    assert_eq!(
+        std::fs::read_to_string(h.dir.path().join("host-args"))
+            .unwrap()
+            .trim(),
+        "--resume=resumed"
+    );
+    fixture.terminal = call(&fixture.h, &HostedClaude::attach_request()).await;
+    fixture.end_terminal().await;
+    fixture.h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_refuses_known_native_ids_without_refreshing_the_other_session() {
+    use senate_bridge::SessionState;
+    use senate_bridge::ipc::{HookEvent, HookReply, StatusReply};
+
+    let mut fixture = HostedClaude::launch(false).await;
+    let h = &fixture.h;
+    let pid = fixture.pid();
+    for (target, state) in [
+        ("ended-ordinary", SessionState::Ended),
+        ("stale-ordinary", SessionState::Stale),
+    ] {
+        let independent = std::process::id();
+        let existing = fixture.hook(
+            target,
+            HookEvent::SessionStart,
+            Some("startup"),
+            Some(independent),
+            &[independent, pid],
+        );
+        let existing: HookReply = call(h, &existing).await;
+        assert_ne!(existing.session.agent, fixture.seat.senator);
+        h.store().set_session_state(target, state).unwrap();
+        let before = h.store().session(target).unwrap().unwrap();
+
+        for (event, source) in [
+            (HookEvent::SessionStart, Some("resume")),
+            (HookEvent::UserPromptSubmit, None),
+        ] {
+            let foreign = fixture.hook(target, event, source, Some(pid), &[pid]);
+            fixture
+                .reject(&foreign, "target native ID belongs to another senator")
+                .await;
+            assert_eq!(h.store().session(target).unwrap().unwrap(), before);
+            let status: StatusReply = call(h, &Request::Status).await;
+            assert_eq!(
+                status.hosted[&fixture.seat.session_id].as_deref(),
+                Some(target)
+            );
+        }
+        assert_eq!(
+            call::<PathBuf>(h, &HostedClaude::attach_request()).await,
+            fixture.terminal
+        );
+    }
+    fixture.end_terminal().await;
+    fixture.h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_notice_does_not_block_later_context_change_notices() {
+    use senate_bridge::ipc::{HookEvent, HookReply};
+    use senate_core::{Address, Kind, NewEvent};
+
+    let mut fixture = HostedClaude::launch(false).await;
+    let h = &fixture.h;
+    let pid = fixture.pid();
+    let committee = committee();
+    // Model a persisted, permanently refused head of the durable outbox.
+    let mut blocked = NewEvent::new(
+        committee.clone(),
+        Kind::Note,
+        Address::senior(&h.config.person),
+        "refused fixture note",
+    );
+    blocked.id = "00000000000000000000000000".parse().unwrap();
+    h.server
+        .state
+        .inner
+        .lock()
+        .unwrap()
+        .reject_append_containing = Some(blocked.body.clone());
+    let conn = rusqlite::Connection::open(h.paths.state_db()).unwrap();
+    conn.execute(
+        "INSERT INTO hosted_switch_notices (id, event) VALUES (?1, ?2)",
+        [
+            blocked.id.to_string(),
+            serde_json::to_string(&blocked).unwrap(),
+        ],
+    )
+    .unwrap();
+
+    let next = fixture.hook(
+        "announced",
+        HookEvent::SessionStart,
+        Some("clear"),
+        Some(pid),
+        &[pid],
+    );
+    let _: HookReply = call(h, &next).await;
+    eventually("later context notice to reach the server", TIMEOUT, || {
+        h.server
+            .events(committee.as_str())
+            .into_iter()
+            .find(|event| {
+                event.body.contains("changed session context") && event.body.contains("announced")
+            })
+    })
+    .await;
+    let pending: String = conn
+        .query_row(
+            "SELECT event FROM hosted_switch_notices WHERE id = ?1",
+            [blocked.id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(serde_json::from_str::<NewEvent>(&pending).unwrap(), blocked);
+
+    fixture.end_terminal().await;
+    fixture.h.stop().await;
 }
