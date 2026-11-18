@@ -24,6 +24,129 @@ fn ibot() -> CommitteeId {
     CommitteeId::new("ibot").unwrap()
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hosted_approval_stays_on_the_docket_until_its_senator_archives_it() {
+    use senate_bridge::client::ApiClient;
+    use senate_core::{EventId, StatusPayload, StatusState};
+    use serde_json::json;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut desk = Desk::new(dir.path(), "alice", Locale::En, "[local]\n");
+    desk.start().await;
+    let chair_inbox = desk.inbox("chair");
+    desk.session_start_as("live-chair", &chair_inbox, "claude")
+        .await
+        .unwrap();
+    let _: senate_core::api::ChairInfo = desk
+        .ipc(Request::SetChair {
+            session: Default::default(),
+            committee: Some(committee()),
+            senator: path("claude"),
+        })
+        .await;
+    desk.wait_connected("claude", true).await;
+    let live = desk.senate();
+    let api = ApiClient::new(&live.url, &live.token).unwrap();
+    let hub = &live.daemon.hub;
+    let waiting = senator("waiting-tui");
+    let root = api
+        .append(
+            &NewEvent::new(
+                committee(),
+                Kind::Question,
+                waiting.clone(),
+                "Tool approval is waiting",
+            )
+            .to(Address::Chair)
+            .with_meta(meta::HOSTED_APPROVAL, json!(true)),
+        )
+        .await
+        .unwrap()
+        .event;
+    assert!(
+        hub.chair_docket(&committee())
+            .await
+            .unwrap()
+            .items
+            .iter()
+            .any(|i| i.event.id == root.id)
+    );
+    assert!(
+        !hub.docket(&committee())
+            .await
+            .unwrap()
+            .items
+            .iter()
+            .any(|i| i.event.id == root.id)
+    );
+    chair_inbox.wait_for("Tool approval is waiting").await;
+    api.append(
+        &NewEvent::new(
+            committee(),
+            Kind::Answer,
+            senator("claude"),
+            "A person can attach.",
+        )
+        .to(waiting.clone())
+        .in_thread(root.seq),
+    )
+    .await
+    .unwrap();
+    assert!(
+        hub.chair_docket(&committee())
+            .await
+            .unwrap()
+            .items
+            .iter()
+            .any(|i| i.event.id == root.id)
+    );
+
+    desk.session_end("live-chair", &chair_inbox).await;
+    desk.wait_connected("claude", false).await;
+    assert!(
+        hub.docket(&committee())
+            .await
+            .unwrap()
+            .items
+            .iter()
+            .any(|i| i.event.id == root.id)
+    );
+
+    let archive = |sender: Address, root_id: &EventId| {
+        NewEvent::new(committee(), Kind::Status, sender, "")
+            .in_thread(root.seq)
+            .with_meta(
+                meta::STATUS,
+                StatusPayload::new(StatusState::Archived).value(),
+            )
+            .with_meta(meta::HOSTED_APPROVAL, json!(root_id))
+    };
+    for invalid in [
+        archive(senator("claude"), &root.id),
+        archive(waiting.clone(), &EventId::new()),
+    ] {
+        assert_eq!(api.append(&invalid).await.unwrap_err().status(), Some(403));
+    }
+    api.append(&archive(waiting, &root.id)).await.unwrap();
+    assert!(
+        !hub.chair_docket(&committee())
+            .await
+            .unwrap()
+            .items
+            .iter()
+            .any(|i| i.event.id == root.id)
+    );
+    assert!(
+        !hub.docket(&committee())
+            .await
+            .unwrap()
+            .items
+            .iter()
+            .any(|i| i.event.id == root.id)
+    );
+    desk.stop().await;
+}
+
 /// Wait until the desk worker's docket (its `speaker_docket` tool) lists
 /// the item `seq` on ibot.
 async fn on_the_desk(desk: &Desk, seq: senate_core::Seq) {

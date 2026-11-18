@@ -20,8 +20,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::process::{Child, Command};
 use tokio::signal::unix::{SignalKind, signal};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 
+use crate::host_approval::observed_at;
 use crate::ipc::{self, HostedRuntime, Request};
 use crate::paths::{HOME_ENV, Paths, SOCKET_PATH_LIMIT};
 
@@ -279,7 +280,7 @@ pub async fn run(
     std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
     let (pty, pts) = pty_process::open()?;
     pty.resize(Size::new(24, 80))?;
-    let mut child = runtime_command(runtime, cwd, session)?
+    let mut child = runtime_command(runtime, cwd, session, id, &dir)?
         .spawn(pts)
         .context("start coding TUI on its PTY")?;
 
@@ -349,14 +350,22 @@ pub async fn run(
         tracing::warn!(%error, "clearing the host's startup marker");
     }
 
+    let (viewer_input, input_reports) = watch::channel(0);
+    let reporter = tokio::spawn(report_viewer_input(
+        paths.socket(),
+        session.session_id.to_owned(),
+        id.clone(),
+        input_reports,
+    ));
     let result = tokio::select! {
         status = child.wait() => status.context("wait for the coding TUI").and_then(|status| {
             ensure!(status.success(), "the coding TUI exited with {status}");
             Ok(())
         }),
-        served = serve(&listener, &mut pty_write, &output) => served,
+        served = serve(&listener, &mut pty_write, &output, &viewer_input) => served,
         _ = terminate.recv() => stop_group(&mut child, pid).await,
     };
+    reporter.abort();
     pump.abort();
     // The runtime's normal SessionEnd hook usually gets there first. A
     // crash or stop without that hook must also retire this session.
@@ -377,6 +386,8 @@ fn runtime_command(
     runtime: HostedRuntime,
     cwd: &Path,
     session: &SessionCommand<'_>,
+    id: &EventId,
+    dir: &Path,
 ) -> anyhow::Result<pty_process::Command> {
     let command = match runtime {
         HostedRuntime::Codex => pty_process::Command::new(session.program)
@@ -392,16 +403,38 @@ fn runtime_command(
             .arg("--")
             .arg(session.session_id),
         HostedRuntime::Claude => {
+            // Claude merges this overlay with its other settings. Only a
+            // Senate-hosted Claude session runs these observer hooks.
+            let settings = dir.join("approval-hooks.json");
+            let exe = std::env::current_exe()?;
+            let hook = |matcher: &str| {
+                serde_json::json!([{
+                    "matcher": matcher, "hooks": [{
+                        "type": "command", "timeout": 4,
+                        "command": crate::install::hook_command(&exe.to_string_lossy(), "hosted-approval")
+                    }]
+                }])
+            };
+            let overlay = serde_json::json!({"hooks": {
+                "PermissionRequest": hook("*"),
+                "Notification": hook("permission_prompt"),
+                "PostToolUse": hook("*"),
+                "PostToolUseFailure": hook("*"),
+            }});
+            std::fs::write(&settings, serde_json::to_vec(&overlay)?)?;
             let flag = if session.resume {
                 "--resume"
             } else {
                 "--session-id"
             };
-            pty_process::Command::new(session.program).arg(format!("{flag}={}", session.session_id))
+            pty_process::Command::new(session.program)
+                .arg(format!("{flag}={}", session.session_id))
+                .arg("--settings")
+                .arg(settings)
         }
     };
     let command = if runtime == HostedRuntime::Claude {
-        command.env(HOSTED_CLAUDE_ENV, "1")
+        command.env(HOSTED_CLAUDE_ENV, id.to_string())
     } else {
         command.env_remove(HOSTED_CLAUDE_ENV)
     };
@@ -537,10 +570,11 @@ async fn serve(
     listener: &UnixListener,
     pty: &mut OwnedWritePty,
     output: &broadcast::Sender<Vec<u8>>,
+    viewer_input: &watch::Sender<u64>,
 ) -> anyhow::Result<()> {
     loop {
         let (stream, _) = accept(listener).await;
-        let relay = relay(stream, pty, output.subscribe());
+        let relay = relay(stream, pty, output.subscribe(), viewer_input);
         tokio::pin!(relay);
         loop {
             tokio::select! {
@@ -563,6 +597,7 @@ async fn relay(
     mut stream: UnixStream,
     pty: &mut OwnedWritePty,
     mut output: broadcast::Receiver<Vec<u8>>,
+    viewer_input: &watch::Sender<u64>,
 ) -> anyhow::Result<()> {
     stream.write_u8(ATTACHED).await?;
     let (mut input, mut screen) = stream.into_split();
@@ -588,7 +623,13 @@ async fn relay(
                     let n = usize::from(input.read_u16().await?);
                     ensure!(n <= keys.len(), "oversized terminal input");
                     input.read_exact(&mut keys[..n]).await?;
-                    pty.write_all(&keys[..n]).await?;
+                    if n != 0 {
+                        // Timestamp before forwarding: these keys can cause
+                        // the next prompt, whose episode they must not clear.
+                        let at = observed_at();
+                        pty.write_all(&keys[..n]).await?;
+                        viewer_input.send_replace(at);
+                    }
                 }
                 _ => bail!("unknown terminal input frame"),
             }
@@ -608,9 +649,77 @@ async fn relay(
     }
 }
 
+async fn report_viewer_input(
+    socket: PathBuf,
+    session_id: String,
+    host_id: EventId,
+    mut reports: watch::Receiver<u64>,
+) {
+    // Coalesce typing while the daemon is unavailable. Reporting must never
+    // block the PTY or cause the host to retain any input bytes.
+    while reports.changed().await.is_ok() {
+        loop {
+            let at = *reports.borrow_and_update();
+            let result: Result<serde_json::Value, _> = ipc::request(
+                &socket,
+                &Request::HostedViewerInput {
+                    session_id: session_id.clone(),
+                    host_id: host_id.clone(),
+                    at,
+                },
+                Duration::from_millis(300),
+                Duration::from_secs(1),
+            )
+            .await;
+            if result.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_viewer_has_to_forward_nonempty_input_to_report_activity() {
+        let (pty, _pts) = pty_process::open().unwrap();
+        let (_read, mut pty) = pty.into_split();
+        let (output, _) = broadcast::channel(1);
+        let (events, mut reports) = watch::channel(0);
+        let (host, mut viewer) = UnixStream::pair().unwrap();
+        let view_only = async {
+            assert_eq!(viewer.read_u8().await.unwrap(), ATTACHED);
+            viewer
+                .write_all(&[RESIZE, 0, 24, 0, 80, KEYS, 0, 0])
+                .await
+                .unwrap();
+            viewer.shutdown().await.unwrap();
+        };
+        let _ = tokio::join!(
+            relay(host, &mut pty, output.subscribe(), &events),
+            view_only
+        );
+        assert!(!reports.has_changed().unwrap());
+
+        let (host, mut viewer) = UnixStream::pair().unwrap();
+        let with_input = async {
+            assert_eq!(viewer.read_u8().await.unwrap(), ATTACHED);
+            viewer.write_all(&[KEYS, 0, 1, b'x']).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(2), reports.changed())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_ne!(*reports.borrow(), 0);
+            viewer.shutdown().await.unwrap();
+        };
+        let _ = tokio::join!(
+            relay(host, &mut pty, output.subscribe(), &events),
+            with_input
+        );
+    }
 
     #[test]
     fn an_unregistered_owner_lock_counts_until_the_host_exits() {

@@ -11,18 +11,17 @@
 //!
 //! The chair's items are the roots addressed to `chair` (among them the
 //! messages for `senator::*` the server put to the chair to pick, carrying
-//! [`meta::PICK`]). An item leaves when the chair (whoever chairs when it
+//! [`senate_core::meta::PICK`]). An item leaves when the chair (whoever chairs when it
 //! writes) or the Speaker's office writes in its thread, relays it, or the
-//! thread is archived. Covering for away members is added when the docket
+//! thread is archived. Hosted approvals stay until their archive. Covering for away members is added when the docket
 //! is served, as for the Speaker's desk.
 
 use std::collections::BTreeMap;
 
 use senate_core::{
     Address, Awaiting, ChairFold, ChairSource, DocketItem, Event, Kind, People, PickPayload,
-    SenatorName, Seq, StatusPayload, StatusState, meta,
+    SenatorName, Seq,
 };
-use serde_json::Value;
 
 /// Whether `event` is a root that waits on the chair.
 fn awaits_chair(event: &Event) -> bool {
@@ -101,21 +100,11 @@ impl ChairDocket {
             self.open.insert(event.seq, event.clone());
             return;
         }
-        if by_chair || event.from == Address::Speaker {
-            if let Some(root) = event.thread {
-                self.open.remove(&root);
-            }
-            if let Some(relayed) = event.meta.get(meta::RELAYED_FROM).and_then(Value::as_u64) {
-                self.open.remove(&Seq(relayed));
-            }
-            return;
-        }
-        if event.kind == Kind::Status
-            && let Some(root) = event.thread
-            && StatusPayload::of(event).is_some_and(|s| s.state == StatusState::Archived)
-        {
-            self.open.remove(&root);
-        }
+        senate_core::docket::close_docket_items(
+            &mut self.open,
+            event,
+            by_chair || event.from == Address::Speaker,
+        );
     }
 
     pub(crate) fn items(&self) -> Vec<DocketItem> {

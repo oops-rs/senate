@@ -169,6 +169,7 @@ use crate::stream::{self, CommitteeWorker};
 
 mod front;
 mod host_policy;
+mod hosted_approvals;
 mod hosts;
 mod preside;
 mod roles;
@@ -418,6 +419,7 @@ pub(crate) struct Shared {
     session_bindings: RwLock<()>,
     hosts: hosts::Launches,
     host_notices_ready: Notify,
+    hosted_approvals: hosted_approvals::Monitor,
     codex_transport: crate::delivery::codex::Transport,
     host_binary: PathBuf,
     pushes: Mutex<HashMap<String, PushState>>,
@@ -591,11 +593,15 @@ pub async fn start_with_host_binary(
         }
         _ => None,
     };
-    let relay = Arc::new(Relay::new(
-        codex.transport.clone(),
-        (timing.backoff_base, timing.backoff_max),
-        watch.clone(),
-    ));
+    let (signals, observed) = tokio::sync::mpsc::unbounded_channel();
+    let relay = Arc::new(
+        Relay::new(
+            codex.transport.clone(),
+            (timing.backoff_base, timing.backoff_max),
+            watch.clone(),
+        )
+        .with_host_observer(signals),
+    );
     tracing::debug!(transport = %codex.transport, "Codex sessions are pushed through the app-server");
     let common = Common {
         host_binary,
@@ -610,14 +616,17 @@ pub async fn start_with_host_binary(
     };
     let shared = Shared::open(config, &paths.state_db(), 0, &common)?;
     verify_person(&shared).await?;
-    let front = Arc::new(Front::new(shared, relay, watch, app_clients));
+    let front = Arc::new(Front::new(shared.clone(), relay, watch, app_clients));
 
     let listener =
         UnixListener::bind(&socket).with_context(|| format!("binding {}", socket.display()))?;
     std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
 
     let (shutdown, rx) = watch::channel(false);
-    let mut tasks = vec![tokio::spawn(serve_ipc(front.clone(), listener, rx.clone()))];
+    let mut tasks = vec![
+        tokio::spawn(serve_ipc(front.clone(), listener, rx.clone())),
+        tokio::spawn(hosted_approvals::observe(shared, observed, rx.clone())),
+    ];
     for shared in front.senates() {
         shared.sweep_once();
         tasks.push(tokio::spawn(supervise(shared.clone(), rx.clone())));
@@ -713,6 +722,7 @@ impl Shared {
             session_bindings: RwLock::new(()),
             hosts: hosts::Launches::default(),
             host_notices_ready: Notify::new(),
+            hosted_approvals: hosted_approvals::Monitor::default(),
             codex_transport: common.codex.transport.clone(),
             host_binary: common.host_binary.clone(),
             pushes: Mutex::new(HashMap::new()),
@@ -2340,6 +2350,31 @@ impl Shared {
         }
     }
 
+    async fn answer_desktop_approval(
+        &self,
+        id: &str,
+        decision: crate::approvals::Decision,
+    ) -> Result<crate::approvals::Approval, String> {
+        self.relay
+            .answer_with(id, decision, |approval| {
+                if self
+                    .store
+                    .session_host(&approval.session_id)
+                    .map_err(|e| e.to_string())?
+                    .is_some()
+                    || self.hosts.unpublished(&approval.session_id)
+                {
+                    let message = self.locale.pick(
+                        "请使用 senate attach 在托管会话的终端内处理此权限请求。",
+                        "Use senate attach to handle this approval in the hosted session's terminal.",
+                    );
+                    return Err(message.into());
+                }
+                Ok(())
+            })
+            .await
+    }
+
     fn publish(&self, event: WatchEvent) {
         // Nobody watching is not an error.
         let _ = self.watch.send(event);
@@ -2671,6 +2706,17 @@ impl Shared {
                 session_id,
                 host_id,
             } => wrap(self.on_session_end(&session_id, Some(&host_id)).await),
+            Request::HostedViewerInput {
+                session_id,
+                host_id,
+                at,
+            } => wrap(self.on_hosted_viewer_input(&session_id, &host_id, at)),
+            Request::HostedClaudeApproval {
+                session_id,
+                host_id,
+                at,
+                signal,
+            } => wrap(self.on_hosted_claude_approval(&session_id, &host_id, at, signal)),
 
             Request::Checkpoint {
                 session,
@@ -2799,8 +2845,7 @@ impl Shared {
                 approvals: self.relay.list(),
             }),
             Request::Approve { id, decision } => wrap(
-                self.relay
-                    .answer(&id, decision)
+                self.answer_desktop_approval(&id, decision)
                     .await
                     .map(|approval| ApproveReply { approval, decision })
                     .map_err(IpcError::bad_request),

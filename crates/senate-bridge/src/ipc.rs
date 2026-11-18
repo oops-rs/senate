@@ -233,6 +233,7 @@ use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
 use crate::catch_up::CatchUpItem;
+pub use crate::host_approval::ClaudeApprovalSignal;
 use crate::session::{Runtime, Session};
 use crate::state::QueueCounts;
 
@@ -383,6 +384,19 @@ pub enum Request {
     HostedSessionEnd {
         session_id: String,
         host_id: EventId,
+    },
+    /// The attached viewer forwarded nonempty input to the TUI.
+    HostedViewerInput {
+        session_id: String,
+        host_id: EventId,
+        at: u64,
+    },
+    /// An observation from a Claude hook installed by its terminal host.
+    HostedClaudeApproval {
+        session_id: String,
+        host_id: EventId,
+        at: u64,
+        signal: ClaudeApprovalSignal,
     },
     Ask {
         session: SessionSelector,

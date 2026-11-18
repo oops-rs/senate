@@ -37,9 +37,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
-use crate::ipc::{self, HookEvent, HookReply, HookReport, Request};
+use crate::host_approval::observed_at;
+use crate::ipc::{self, ClaudeApprovalSignal, HookEvent, HookReply, HookReport, Request};
 use crate::session::{self, Runtime};
 
 /// How many pids above the hook are reported when measuring ancestry.
@@ -50,6 +52,7 @@ pub enum HookKind {
     SessionStart,
     UserPromptSubmit,
     SessionEnd,
+    HostedApproval,
 }
 
 impl HookKind {
@@ -59,6 +62,7 @@ impl HookKind {
             Self::SessionStart => "SessionStart",
             Self::UserPromptSubmit => "UserPromptSubmit",
             Self::SessionEnd => "SessionEnd",
+            Self::HostedApproval => "HostedApproval",
         }
     }
 }
@@ -225,7 +229,7 @@ pub async fn run_as(
         .ok()?;
     let request = prepare(kind, daemon_socket, stdin, env, runtime, timeouts.git).await?;
     match kind {
-        HookKind::SessionEnd => {
+        HookKind::SessionEnd | HookKind::HostedApproval => {
             let _: serde_json::Value = client.call(&request, timeouts.request).await.ok()?;
             None
         }
@@ -264,6 +268,19 @@ pub async fn prepare(
     // interactive session: it must not register, nor take pushes.
     if std::env::var_os(crate::companion::ENV_COMPANION).is_some() {
         return None;
+    }
+    if kind == HookKind::HostedApproval {
+        let host_id = std::env::var(crate::host::HOSTED_CLAUDE_ENV)
+            .ok()?
+            .parse()
+            .ok()?;
+        let hook: Value = serde_json::from_str(stdin).ok()?;
+        return Some(Request::HostedClaudeApproval {
+            host_id,
+            at: observed_at(),
+            session_id: hook.get("session_id")?.as_str()?.to_owned(),
+            signal: approval_signal(&hook)?,
+        });
     }
     let input: HookInput = if runtime == Some(Runtime::Agy) {
         // Antigravity's Stop ends an invocation, not the conversation.
@@ -344,8 +361,38 @@ pub async fn prepare(
                 agent_file: facts.agent_file,
             })
         }
+        HookKind::HostedApproval => return None,
     };
     Some(request)
+}
+
+// Claude 2.1.327 supplies tool_name and tool_input on PermissionRequest,
+// with no tool_use_id. Its later result can be matched by the same input.
+fn approval_signal(hook: &Value) -> Option<ClaudeApprovalSignal> {
+    let event = hook.get("hook_event_name")?.as_str()?;
+    if event == "Notification" {
+        return (hook.get("notification_type")?.as_str()? == "permission_prompt")
+            .then_some(ClaudeApprovalSignal::Pending);
+    }
+    let tool = hook.get("tool_name")?.as_str()?;
+    let input = hook.get("tool_input")?;
+    let fingerprint = format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&(tool, input)).ok()?)
+    );
+    match event {
+        "PermissionRequest" => {
+            let tool = input.get("command").and_then(Value::as_str).unwrap_or(tool);
+            Some(ClaudeApprovalSignal::Requested {
+                tool: crate::host_approval::tool_label(tool),
+                fingerprint,
+            })
+        }
+        "PostToolUse" | "PostToolUseFailure" => {
+            Some(ClaudeApprovalSignal::Finished { fingerprint })
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]

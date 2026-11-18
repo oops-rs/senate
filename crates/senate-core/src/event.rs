@@ -186,6 +186,20 @@ impl Event {
         self.to.iter().any(|a| a == addr)
     }
 
+    /// A hosted terminal needs a person to attend to a permission prompt.
+    pub fn is_hosted_approval(&self) -> bool {
+        self.kind == Kind::Question
+            && self.thread.is_none()
+            && self.from.as_senator().is_some()
+            && self.on_behalf_of.is_none()
+            && matches!(self.to.as_slice(), [Address::Chair | Address::Speaker])
+            && self
+                .meta
+                .get(meta::HOSTED_APPROVAL)
+                .and_then(Value::as_bool)
+                == Some(true)
+    }
+
     /// The server filed this event in a direct discussion between committees.
     pub fn is_chair_discussion(&self) -> bool {
         match (&self.from, self.meta.get(meta::CHAIR_DISCUSSION)) {
@@ -404,6 +418,9 @@ pub mod meta {
     pub const BINDING: &str = "binding";
     /// `status` events: the [`StatusPayload`](crate::task::StatusPayload).
     pub const STATUS: &str = "status";
+    /// True on a hosted approval notice. Its archive status carries the
+    /// root's event ID under the same key, pinning it across log epochs.
+    pub const HOSTED_APPROVAL: &str = "hosted_approval";
     /// The Speaker's triage verdict, a
     /// [`TriagePayload`](crate::task::TriagePayload): on a Speaker `note` in
     /// the root's thread, or inline on a Speaker relay. Speaker only; the

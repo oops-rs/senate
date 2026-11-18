@@ -70,7 +70,7 @@ dirs = "6"
 libc = "0.2"
 uuid = { version = "1", features = ["v4"] }
 pty-process = { version = "0.5.4", features = ["async"] }
-rustix = { version = "1.1.6", features = ["fs", "process", "termios"] }
+rustix = { version = "1.1.6", features = ["fs", "process", "termios", "time"] }
 
 # CLI and logging.
 clap = { version = "4", features = ["derive", "env"] }

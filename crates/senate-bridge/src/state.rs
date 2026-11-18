@@ -62,6 +62,8 @@ use crate::agent::AgentSource;
 use crate::session::{CommitteeSource, Runtime, Session, SessionState};
 use crate::{host, paths::Paths};
 
+mod hosted_approvals;
+
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS cursors (
     agent     TEXT NOT NULL,
@@ -110,6 +112,10 @@ CREATE TABLE IF NOT EXISTS session_ancestors (
     session_id TEXT NOT NULL,
     pid        INTEGER NOT NULL,
     PRIMARY KEY (session_id, pid)
+);
+CREATE TABLE IF NOT EXISTS hosted_approvals (
+    host_id TEXT PRIMARY KEY,
+    state   TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS queue (
     agent        TEXT NOT NULL,
@@ -885,7 +891,8 @@ impl Store {
         )?;
         tx.execute_batch(
             "DELETE FROM cursors; DELETE FROM queue; DELETE FROM dropped; DELETE FROM epochs;
-             DELETE FROM verdicts; DELETE FROM owners; DELETE FROM person_seen;",
+             DELETE FROM verdicts; DELETE FROM owners; DELETE FROM person_seen;
+             DELETE FROM hosted_approvals;",
         )?;
         tx.execute(
             "INSERT INTO epochs (server, epoch, seen_at) VALUES (?1, ?2, ?3)",

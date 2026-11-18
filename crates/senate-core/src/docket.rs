@@ -184,23 +184,7 @@ impl SpeakerDocket {
             self.open.insert(event.seq, event.clone());
             return;
         }
-        if event.from == Address::Speaker {
-            // Dealt with: an answer, a question to the person, or a status
-            // in its thread; or a relay of it.
-            if let Some(root) = event.thread {
-                self.open.remove(&root);
-            }
-            if let Some(relayed) = event.meta.get(meta::RELAYED_FROM).and_then(Value::as_u64) {
-                self.open.remove(&Seq(relayed));
-            }
-            return;
-        }
-        if event.kind == Kind::Status
-            && let Some(root) = event.thread
-            && StatusPayload::of(event).is_some_and(|s| s.state == StatusState::Archived)
-        {
-            self.open.remove(&root);
-        }
+        close_docket_items(&mut self.open, event, event.from == Address::Speaker);
     }
 
     /// The open items, oldest first, each with why it waits.
@@ -219,6 +203,31 @@ impl SpeakerDocket {
                 event: event.clone(),
             })
             .collect()
+    }
+}
+
+/// Both desks close a hosted approval notice on its archive. Discussing or
+/// forwarding it does not mean anyone attended to the terminal.
+pub fn close_docket_items(open: &mut BTreeMap<Seq, Event>, event: &Event, by_desk: bool) {
+    if let Some(root) = event.thread
+        && StatusPayload::of(event).is_some_and(|s| s.state == StatusState::Archived)
+    {
+        open.remove(&root);
+    }
+    if by_desk {
+        let relayed = event
+            .meta
+            .get(meta::RELAYED_FROM)
+            .and_then(Value::as_u64)
+            .map(Seq);
+        for root in event.thread.into_iter().chain(relayed) {
+            if open
+                .get(&root)
+                .is_some_and(|item| !item.is_hosted_approval())
+            {
+                open.remove(&root);
+            }
+        }
     }
 }
 

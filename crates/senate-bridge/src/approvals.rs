@@ -1,6 +1,6 @@
-//! The approvals relay: Codex app-server approval requests,
-//! offered to the bridge's IPC clients (the desktop app) as well as to the
-//! TUI. The first answer wins.
+//! The approvals relay carries Codex app-server approval requests.
+//! Independently started sessions can be answered by the desktop app or
+//! the TUI. Hosted sessions feed the daemon's read-only approval observer.
 //!
 //! For each live Codex session the daemon keeps one persistent app-server
 //! connection (the pushes of [`crate::delivery::codex`] stay one connection
@@ -27,10 +27,8 @@
 //! live. Other server requests (user input, elicitations, permission
 //! profiles) are left to the TUI.
 //!
-//! Verified against the app-server's published JSON schema and a fake; not
-//! yet against a live codex-cli (whether `thread/resume` from a second
-//! client is what subscribes it, and whether requests already pending when
-//! it connects are re-sent).
+//! On Codex 0.170.0, an observer connected with `thread/resume` receives
+//! new requests and any pending requests replayed on reconnect.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -39,11 +37,12 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 
 use crate::delivery::codex::ws::{Incoming, WsWriter};
 use crate::delivery::codex::{AppServer, CodexError, Transport};
+use crate::host_approval::{CodexApprovalSignal, observed_at, tool_label};
 use crate::ipc::WatchEvent;
 
 /// Server-request methods relayed.
@@ -184,6 +183,14 @@ pub fn parse_request(thread: &str, msg: &Value) -> Option<(Value, Approval)> {
     let kind = ApprovalKind::of(method)?;
     let rpc_id = msg.get("id")?.clone();
     let params = msg.get("params").cloned().unwrap_or(Value::Null);
+    if params
+        .get("threadId")
+        .or_else(|| params.get("conversationId"))
+        .and_then(Value::as_str)
+        .is_some_and(|reported| reported != thread)
+    {
+        return None;
+    }
     let command = params.get("command").and_then(text);
     let cwd = params.get("cwd").and_then(text);
     let reason = params.get("reason").and_then(text);
@@ -226,6 +233,7 @@ pub fn parse_request(thread: &str, msg: &Value) -> Option<(Value, Approval)> {
 
 struct Pending {
     approval: Approval,
+    at: u64,
     rpc_id: Value,
     writer: Arc<tokio::sync::Mutex<WsWriter>>,
 }
@@ -236,6 +244,7 @@ pub struct Relay {
     transport: Transport,
     backoff: (Duration, Duration),
     events: broadcast::Sender<WatchEvent>,
+    hosted: Option<mpsc::UnboundedSender<CodexApprovalSignal>>,
     pending: Mutex<BTreeMap<String, Pending>>,
     subscribers: Mutex<HashMap<String, JoinHandle<()>>>,
 }
@@ -255,8 +264,38 @@ impl Relay {
             transport,
             backoff,
             events,
+            hosted: None,
             pending: Mutex::new(BTreeMap::new()),
             subscribers: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub(crate) fn with_host_observer(
+        mut self,
+        observer: mpsc::UnboundedSender<CodexApprovalSignal>,
+    ) -> Self {
+        self.hosted = Some(observer);
+        self
+    }
+
+    fn observe_host(&self, approval: &Approval, at: u64, pending: bool) {
+        if let Some(observer) = &self.hosted {
+            let _ = observer.send(CodexApprovalSignal {
+                session_id: approval.session_id.clone(),
+                request_id: approval.id.clone(),
+                at,
+                tool: pending.then(|| tool_label(&approval.summary)),
+            });
+        }
+    }
+
+    /// A restore can publish a host over a Codex thread the relay already
+    /// follows. Hand its current requests to the now-hosted observer.
+    pub(crate) fn observe_pending_on_restore(&self, session: &str) {
+        for pending in lock(&self.pending).values() {
+            if pending.approval.session_id == session {
+                self.observe_host(&pending.approval, pending.at, true);
+            }
         }
     }
 
@@ -306,10 +345,27 @@ impl Relay {
     /// Answer approval `id`. Fails when it is not pending (answered
     /// elsewhere first, or its session went away).
     pub async fn answer(&self, id: &str, decision: Decision) -> Result<Approval, String> {
-        let Some(pending) = lock(&self.pending).remove(id) else {
-            return Err(format!(
-                "no pending approval {id}: it was answered elsewhere first, or its session is gone"
-            ));
+        self.answer_with(id, decision, |_| Ok(())).await
+    }
+
+    pub(crate) async fn answer_with(
+        &self,
+        id: &str,
+        decision: Decision,
+        check: impl FnOnce(&Approval) -> Result<(), String>,
+    ) -> Result<Approval, String> {
+        let pending = {
+            let mut requests = lock(&self.pending);
+            let Some(entry) = requests.get(id) else {
+                return Err(format!(
+                    "no pending approval {id}: it was answered elsewhere first, or its session is gone"
+                ));
+            };
+            check(&entry.approval)?;
+            // The check runs while this same request is still in the map.
+            requests
+                .remove(id)
+                .ok_or_else(|| format!("no pending approval {id}"))?
         };
         let response = json!({
             "jsonrpc": "2.0",
@@ -424,6 +480,7 @@ impl Relay {
             let id = approval_id(of, request);
             if let Some(p) = lock(&self.pending).remove(&id) {
                 tracing::info!(id, "a Codex approval was answered elsewhere");
+                self.observe_host(&p.approval, observed_at(), false);
                 self.publish(WatchEvent::ApprovalResolved {
                     id,
                     session_id: p.approval.session_id,
@@ -434,15 +491,21 @@ impl Relay {
             return;
         }
         if let Some((rpc_id, approval)) = parse_request(thread, &msg) {
+            use std::collections::btree_map::Entry;
+            let mut pending = lock(&self.pending);
+            let Entry::Vacant(slot) = pending.entry(approval.id.clone()) else {
+                return;
+            };
             tracing::info!(id = %approval.id, summary = %approval.summary, "a Codex approval is waiting");
-            lock(&self.pending).insert(
-                approval.id.clone(),
-                Pending {
-                    approval: approval.clone(),
-                    rpc_id,
-                    writer: writer.clone(),
-                },
-            );
+            let at = observed_at();
+            slot.insert(Pending {
+                approval: approval.clone(),
+                at,
+                rpc_id,
+                writer: writer.clone(),
+            });
+            self.observe_host(&approval, at, true);
+            drop(pending);
             self.publish(WatchEvent::ApprovalRequested(Box::new(approval)));
         }
     }
@@ -458,6 +521,7 @@ mod tests {
             "threadId": "t1", "turnId": "u", "itemId": "i", "startedAtMs": 1,
             "command": "cargo test", "cwd": "/w", "reason": null}});
         let (id, a) = parse_request("t1", &msg).unwrap();
+        assert!(parse_request("other-thread", &msg).is_none());
         assert_eq!(id, json!(7));
         assert_eq!(a.id, "t1:7");
         assert_eq!(a.summary, "run: cargo test");

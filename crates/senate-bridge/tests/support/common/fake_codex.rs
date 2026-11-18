@@ -175,6 +175,22 @@ impl FakeCodex {
         id
     }
 
+    pub fn replay_approval(&self, thread: &str, id: i64, method: &str, params: Value) {
+        let mut st = self.state.lock().unwrap();
+        assert_eq!(st.pending.get(&id).map(String::as_str), Some(thread));
+        st.broadcast(
+            thread,
+            &json!({"id": id, "method": method, "params": params}),
+        );
+    }
+
+    pub fn disconnect_subscribers(&self, thread: &str) {
+        let mut st = self.state.lock().unwrap();
+        for (_, tx) in st.subscribers.remove(thread).into_iter().flatten() {
+            let _ = tx.send(frame(8, b""));
+        }
+    }
+
     /// The TUI answers request `id` first.
     pub fn answer_in_tui(&self, id: i64) -> bool {
         self.state.lock().unwrap().resolve(id)
@@ -390,6 +406,18 @@ fn answer(st: &mut CodexState, method: &str, params: &Value) -> Result<Value, St
             "platformFamily": "unix",
             "platformOs": "macos"
         })),
+        "thread/start" => {
+            let id = format!("hosted-thread-{}", st.connections);
+            st.threads.insert(
+                id.clone(),
+                FakeThread {
+                    loaded: true,
+                    active: None,
+                },
+            );
+            Ok(json!({"thread": {"id": id}}))
+        }
+        "thread/inject_items" if thread.is_some() => Ok(json!({})),
         "thread/read" => {
             let t = thread.ok_or(format!("thread not loaded: {thread_id}"))?;
             let status = match (&t.active, t.loaded) {

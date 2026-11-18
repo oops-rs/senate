@@ -73,6 +73,7 @@ pub mod follow;
 pub mod format;
 pub mod hook;
 pub mod host;
+mod host_approval;
 pub mod init;
 pub mod install;
 pub mod ipc;

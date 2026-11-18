@@ -170,6 +170,8 @@ pub struct Inner {
     pub transient_append_attempts: usize,
     pub secretary_reminders: Vec<senate_core::secretary_work::SecretaryReminder>,
     pub secretary_reminder_polls: usize,
+    pub lose_approval_ack: bool,
+    pub hosted_approval_appends: usize,
     /// `(committee, seq)` → the JSON served in place of the stored event.
     pub raw: HashMap<(String, u64), String>,
     /// `(committee, whose, name)`: `whose` is the senator in the query, else
@@ -190,6 +192,8 @@ pub struct Inner {
     pub parent: Option<SenatePath>,
     /// Who `/v1/me` says holds the Speaker's seat; unset: nobody.
     pub speaker: Option<senate_core::SpeakerSeat>,
+    /// The chair and its connection, for tests that exercise role routing.
+    pub chair: Option<(SenatorName, bool)>,
     /// What `/v1/me` says about a Speaker judging roots here.
     pub triaged: bool,
     pub offline: bool,
@@ -458,7 +462,24 @@ async fn append(
             return (status, Json(refused)).into_response();
         }
     }
+    let lose_ack = ev
+        .meta
+        .get(senate_core::meta::HOSTED_APPROVAL)
+        .and_then(Value::as_bool)
+        == Some(true)
+        && {
+            let mut inner = st.inner.lock().unwrap();
+            inner.hosted_approval_appends += 1;
+            std::mem::take(&mut inner.lose_approval_ack)
+        };
     let (event, duplicate) = st.store(ev, true);
+    if lose_ack {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+            "injected lost append reply",
+        );
+    }
     Json(AppendResponse { event, duplicate }).into_response()
 }
 
@@ -698,6 +719,53 @@ async fn threads(
     .into_response()
 }
 
+async fn chair(State(st): St, UrlPath(committee): UrlPath<String>, headers: HeaderMap) -> Response {
+    if let Err(error) = auth(&st, &headers) {
+        return error;
+    }
+    let inner = st.inner.lock().unwrap();
+    let Some((chair, _)) = &inner.chair else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    Json(senate_core::api::ChairInfo {
+        committee: CommitteeId::new(committee).unwrap(),
+        chair: Some(chair.clone()),
+        source: None,
+    })
+    .into_response()
+}
+
+async fn docket(
+    State(st): St,
+    UrlPath(committee): UrlPath<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(error) = auth(&st, &headers) {
+        return error;
+    }
+    let inner = st.inner.lock().unwrap();
+    let Some((chair, connected)) = &inner.chair else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    Json(senate_core::DocketPage {
+        head: Seq(inner.head(&committee)),
+        committee: CommitteeId::new(committee).unwrap(),
+        speaker: inner.speaker.clone(),
+        office: None,
+        items: Vec::new(),
+        covered: BTreeMap::new(),
+        seats: vec![senate_core::docket::SeatFacts {
+            agent: chair.clone(),
+            connected: *connected,
+            presence: None,
+            last_seen: None,
+            checkpoint: None,
+            open_threads: 0,
+        }],
+    })
+    .into_response()
+}
+
 async fn latest_checkpoint(
     State(st): St,
     UrlPath(committee): UrlPath<String>,
@@ -911,6 +979,8 @@ impl FakeServer {
                 transient_append_attempts: 0,
                 secretary_reminders: Vec::new(),
                 secretary_reminder_polls: 0,
+                lose_approval_ack: false,
+                hosted_approval_appends: 0,
                 raw: HashMap::new(),
                 aliases: BTreeMap::new(),
                 alias_delay: Duration::ZERO,
@@ -922,6 +992,7 @@ impl FakeServer {
                 senate: name("senate"),
                 parent: None,
                 speaker: None,
+                chair: None,
                 triaged: true,
                 offline: false,
                 epoch: "epoch-1".into(),
@@ -966,6 +1037,8 @@ impl FakeServer {
                 "/v1/secretary-teams/{principal}/session",
                 axum::routing::put(secretary_session),
             )
+            .route("/v1/committees/{committee}/chair", get(chair))
+            .route("/v1/committees/{committee}/docket", get(docket))
             .route("/v1/committees/{committee}/search", get(search))
             .route("/v1/committees/{committee}/brief", get(brief))
             .route("/v1/committees/{committee}/threads", get(threads))

@@ -626,7 +626,23 @@ impl ServerHub {
     /// about every seated agent (connected, presence, latest checkpoint,
     /// open threads).
     pub async fn docket(&self, committee: &CommitteeId) -> Result<DocketPage, HubError> {
-        let items = self.folded(&self.dockets, committee).await?.fold.items();
+        let mut items = self.folded(&self.dockets, committee).await?.fold.items();
+        let chair = self.chair(committee).await?.chair;
+        if chair
+            .as_ref()
+            .is_none_or(|chair| !self.presence.is_connected(committee, chair))
+        {
+            // Carry the same open approval to the desk if its chair goes
+            // away between the original notice and the viewer's input.
+            items.extend(
+                self.folded(&self.chair_dockets, committee)
+                    .await?
+                    .fold
+                    .items()
+                    .into_iter()
+                    .filter(|item| item.event.is_hosted_approval()),
+            );
+        }
         // Covering for an absent agent is the desk's duty toward other
         // agents: what is addressed to the seat's holder is that agent's
         // own question, delivered when its session opens.
