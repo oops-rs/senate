@@ -85,6 +85,8 @@ async fn fixture_terminal_launch_detach_restart_and_restore() {
     std::fs::write(
         &fixture,
         r#"#!/bin/sh
+case "$1" in --session-id=?*|--resume=?*) ;; *) exit 64 ;; esac
+printf '%s\n' "$1" >> argv.log
 (while :; do printf 'fixture TUI\n'; sleep 0.1; done) &
 painter=$!
 trap 'kill "$painter" 2>/dev/null; wait "$painter" 2>/dev/null' EXIT
@@ -96,11 +98,7 @@ done
     .unwrap();
     std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o700)).unwrap();
     let failing_fixture = h.dir.path().join("failing-claude");
-    std::fs::write(
-        &failing_fixture,
-        "#!/bin/sh\nprintf 'fixture bootstrap failure\\n'\nexit 47\n",
-    )
-    .unwrap();
+    std::fs::write(&failing_fixture, "#!/senate-test-no-such-interpreter\n").unwrap();
     std::fs::set_permissions(&failing_fixture, std::fs::Permissions::from_mode(0o700)).unwrap();
     h.paths.ensure_home().unwrap();
     let config = h.paths.config();
@@ -129,7 +127,7 @@ done
         .await
         .unwrap_err();
     assert!(
-        error.to_string().contains("exited during startup"),
+        error.to_string().contains("start coding TUI on its PTY"),
         "{error}"
     );
     assert!(h.store().all_sessions().unwrap().is_empty());
@@ -145,6 +143,33 @@ done
     choose(&fixture);
     start(&mut h).await;
     let launched: SpawnReply = call(&h, &request).await;
+    assert_eq!(
+        std::fs::read_to_string(project.join("argv.log"))
+            .unwrap()
+            .trim(),
+        format!("--session-id={}", launched.session_id)
+    );
+    // This second child starts successfully and reaches Ready. Failure of
+    // the final alias operation must unwind its staged session and cursor.
+    let conflict = ipc::request::<SpawnReply>(&h.socket(), &request, TIMEOUT, TIMEOUT)
+        .await
+        .unwrap_err();
+    assert!(conflict.to_string().contains("already taken"), "{conflict}");
+    assert_eq!(h.store().all_sessions().unwrap().len(), 1);
+    {
+        let server = h.server.state.inner.lock().unwrap();
+        assert_eq!(
+            server.aliases.get(&path("fixture")),
+            Some(&launched.senator)
+        );
+        assert!(
+            server
+                .roster
+                .seated()
+                .iter()
+                .all(|agent| agent.name == launched.senator)
+        );
+    }
     let attach_target = Request::Attach {
         senator: launched.senator.clone(),
     };
@@ -190,10 +215,187 @@ done
     )
     .await;
     assert_eq!(restored, launched);
+    assert!(
+        std::fs::read_to_string(project.join("argv.log"))
+            .unwrap()
+            .lines()
+            .any(|arg| arg == format!("--resume={}", restored.session_id))
+    );
     let socket: PathBuf = call(&h, &attach_target).await;
     attach(&h, restored.senator.as_str(), b"q\r").await;
     tokio::time::timeout(TIMEOUT, async {
         while socket.exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn host_ready_without_publication_closes_its_tui_group() {
+    use std::process::Stdio;
+
+    let root = tempfile::tempdir_in("/tmp").unwrap();
+    let paths = senate_bridge::Paths::new(root.path());
+    let id = senate_core::EventId::new();
+    let directory = root.path().join("hosts").join(id.to_string());
+    std::fs::create_dir_all(&directory).unwrap();
+    let program = root.path().join("fixture");
+    std::fs::write(
+        &program,
+        "#!/bin/sh\ntrap 'touch stopped; exit 0' TERM\nwhile :; do sleep 1; done\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut cmd = tokio::process::Command::new(BIN);
+    testenv::isolate_async(&mut cmd, root.path());
+    cmd.args(["session-host", &id.to_string(), "claude"])
+        .arg(root.path())
+        .args(["native-id", "--program"])
+        .arg(program)
+        .env("SENATE_HOME", paths.home())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let mut child = cmd.spawn().unwrap();
+    let ready = tokio::time::timeout(TIMEOUT, child.stdout.as_mut().unwrap().read_u8())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(ready, 1);
+    drop(child.stdin.take()); // The starting daemon stopped before publishing.
+    let exit = tokio::time::timeout(TIMEOUT, child.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!exit.success());
+    assert!(!directory.exists());
+    assert!(
+        root.path().join("stopped").exists(),
+        "the TUI did not receive TERM"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restore_refuses_a_reachable_claude_and_keeps_the_servers_backlog() {
+    use senate_bridge::agent::{self, AgentSource};
+    use senate_bridge::session::{CommitteeSource, Runtime};
+    use senate_bridge::state::{SessionUpsert, Store};
+    use senate_core::{Address, Kind, NewEvent, Seq};
+
+    let mut h = Harness::new().await;
+    h.dir = tempfile::tempdir_in("/tmp").unwrap();
+    h.paths = senate_bridge::Paths::new(h.dir.path().join("senate"));
+    h.paths.ensure_home().unwrap();
+    let project = h.workdir("restoring", None);
+    let program = h.dir.path().join("fixture");
+    std::fs::write(
+        &program,
+        "#!/bin/sh\ntrap 'exit 0' TERM\nwhile :; do sleep 1; done\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(
+        h.paths.config(),
+        format!(
+            "[companion]\nclaude_bin = {:?}\n",
+            program.to_str().unwrap()
+        ),
+    )
+    .unwrap();
+
+    let senator = agent::session_name(Runtime::Claude, "restore-fixture");
+    let committee = committee();
+    let socket = h.dir.path().join("manual.sock");
+    let manual = tokio::net::UnixListener::bind(&socket).unwrap();
+    {
+        let store = Store::open(&h.paths.state_db()).unwrap();
+        store
+            .upsert_session(&SessionUpsert {
+                session_id: "restore-fixture".into(),
+                cwd: project,
+                git_root: None,
+                branch: None,
+                inferred_committee: Some((committee.clone(), CommitteeSource::File)),
+                socket: Some(socket),
+                token: None,
+                claude_pid: None,
+                transcript_path: None,
+                ancestor_pids: Vec::new(),
+                runtime: Runtime::Claude,
+                agent: senator.clone(),
+                agent_source: AgentSource::Session,
+            })
+            .unwrap();
+        store
+            .set_session_state("restore-fixture", senate_bridge::SessionState::Ended)
+            .unwrap();
+    }
+    let sender = Address::senior(&h.config.person);
+    let first = h.server.append(NewEvent::new(
+        committee.clone(),
+        Kind::Note,
+        sender.clone(),
+        "already seen",
+    ));
+    let waiting = h.server.append(
+        NewEvent::new(
+            committee.clone(),
+            Kind::Question,
+            sender,
+            "send this after restore",
+        )
+        .to(Address::senator(&senator)),
+    );
+    h.server.state.inner.lock().unwrap().cursors.insert(
+        (
+            committee.to_string(),
+            senator.to_string(),
+            "delivered".into(),
+        ),
+        first.seq,
+    );
+    start(&mut h).await;
+    let restore = Request::Restore {
+        session: Default::default(),
+        senator: senator.clone(),
+    };
+    let refused = ipc::request::<SpawnReply>(&h.socket(), &restore, TIMEOUT, TIMEOUT)
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("still running"), "{refused}");
+    drop(manual);
+
+    let hosted: SpawnReply = call(&h, &restore).await;
+    assert_eq!(hosted.senator, senator);
+    tokio::time::timeout(TIMEOUT, async {
+        loop {
+            if h.store()
+                .item(&senator, &committee, waiting.seq)
+                .unwrap()
+                .is_some()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(waiting.seq > Seq::ZERO);
+    let binding: PathBuf = call(&h, &Request::Attach { senator }).await;
+    let child_pid = std::fs::read_to_string(binding.parent().unwrap().join("owner"))
+        .unwrap()
+        .trim()
+        .parse::<i32>()
+        .unwrap();
+    let group = rustix::process::Pid::from_raw(child_pid).unwrap();
+    rustix::process::kill_process_group(group, rustix::process::Signal::TERM).unwrap();
+    tokio::time::timeout(TIMEOUT, async {
+        while binding.exists() {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })

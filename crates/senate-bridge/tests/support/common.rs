@@ -329,18 +329,25 @@ async fn alias(
     headers: HeaderMap,
     Json(request): Json<senate_core::api::SetAlias>,
 ) -> Response {
-    if let Err(error) = auth(&st, &headers).and_then(|person| act_as(&st, &person, &primary)) {
+    let person = match auth(&st, &headers) {
+        Ok(person) => person,
+        Err(error) => return error,
+    };
+    {
+        let inner = st.inner.lock().unwrap();
+        if inner.roster.knows(&request.alias)
+            || inner
+                .aliases
+                .get(&request.alias)
+                .is_some_and(|p| p != &primary)
+        {
+            return api_error(StatusCode::CONFLICT, "conflict", "name is already taken");
+        }
+    }
+    if let Err(error) = act_as(&st, &person, &primary) {
         return error;
     }
     let mut inner = st.inner.lock().unwrap();
-    if inner.roster.knows(&request.alias)
-        || inner
-            .aliases
-            .get(&request.alias)
-            .is_some_and(|p| p != &primary)
-    {
-        return api_error(StatusCode::CONFLICT, "conflict", "name is already taken");
-    }
     inner.aliases.retain(|_, p| p != &primary);
     inner.aliases.insert(request.alias.clone(), primary);
     Json(request.alias).into_response()

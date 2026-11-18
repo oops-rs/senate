@@ -1191,9 +1191,19 @@ impl Shared {
         let mut changed = false;
         let paths = Paths::new(&self.home);
         for s in self.store.live_sessions()? {
+            if self.hosts.unpublished(&s.session_id) {
+                continue;
+            }
             if let Some(id) = self.store.session_host(&s.session_id)? {
                 if !crate::host::running(&paths, &id)? {
-                    changed |= self.store.mark_host_gone(&s.session_id, &id)?;
+                    if crate::host::shares_codex_thread(&paths, &id) {
+                        self.store.clear_session_host(&s.session_id, &id)?;
+                    } else {
+                        changed |= self.store.mark_host_gone(&s.session_id, &id)?;
+                        continue;
+                    }
+                }
+                if crate::host::awaiting_publication(&paths, &id) {
                     continue;
                 }
                 if crate::host::switched(&paths, &id).is_some() {
@@ -1387,7 +1397,7 @@ impl Shared {
         if self.store.has_cursor(agent, committee)? {
             return Ok(());
         }
-        let (delivered, reported, from) = self.seed_point(agent, committee).await?;
+        let (delivered, reported, from) = self.seed_point(agent, committee, false).await?;
         let _guard = self.intake_guard(generation).await?;
         if self
             .store
@@ -1410,12 +1420,16 @@ impl Shared {
         &self,
         agent: &SenatorName,
         committee: &CommitteeId,
+        restoring: bool,
     ) -> Result<(Seq, Seq, &'static str), Intake> {
         let server = self
             .api
-            .cursor(committee, api::CURSOR_DELIVERED, Some(agent))
+            .read_cursor(committee, api::CURSOR_DELIVERED, Some(agent), restoring)
             .await
             .map_err(|e| self.api_failure(e))?;
+        if restoring && server == Seq::ZERO {
+            return Ok((Seq::ZERO, Seq::ZERO, "this agent has no delivered cursor"));
+        }
         if server > Seq::ZERO {
             let before = Seq(server.0 - 1);
             if self.probe(committee, before).await? == Some(server) {
@@ -1985,7 +1999,7 @@ impl Shared {
     /// its own delivered cursor.
     pub(crate) async fn heartbeat(&self, agent: &SenatorName, committee: &CommitteeId) {
         let (sessions, cursor) = match (
-            self.store.live_sessions(),
+            self.checked_live_sessions(),
             self.store.delivered_cursor(agent, committee),
         ) {
             (Ok(s), Ok(c)) => (
@@ -2293,7 +2307,7 @@ impl Shared {
 
     /// One approvals subscriber per live Codex session.
     pub(crate) fn reconcile_approvals(&self) {
-        match self.store.live_sessions() {
+        match self.checked_live_sessions() {
             Ok(sessions) => {
                 let codex: Vec<String> = sessions
                     .into_iter()
@@ -2793,7 +2807,8 @@ impl Shared {
     }
 
     fn on_status(&self) -> Result<StatusReply, IpcError> {
-        let sessions = self.store.sessions().map_err(internal)?;
+        let mut sessions = self.store.sessions().map_err(internal)?;
+        sessions.retain(|session| !self.hosts.unpublished(&session.session_id));
         let cursors: BTreeMap<Seat, _> = self
             .store
             .cursors()
@@ -2895,7 +2910,7 @@ impl Shared {
             agent,
             agent_source,
         };
-        if let Some(mut publication) = self.hosts.pending(&report.session_id) {
+        if let Some(mut publication) = self.hosts.hook_gate(&report.session_id) {
             publication
                 .wait_for(|published| *published)
                 .await
@@ -3131,7 +3146,7 @@ impl Shared {
         let mut items = Vec::new();
         if session.runtime == Runtime::Claude {
             items = self.store.queued_for(sid).map_err(internal)?;
-            let live = self.store.live_sessions().map_err(internal)?;
+            let live = self.checked_live_sessions().map_err(internal)?;
             let cands = routing::candidates(&live, agent, &committee);
             for item in self
                 .store
@@ -3273,6 +3288,15 @@ impl Shared {
         let _binding = self.session_bindings.write().await;
         let paths = Paths::new(&self.home);
         let registered = self.store.session_host(session_id).map_err(internal)?;
+        if let Some(id) = host_id
+            && registered.as_ref() == Some(id)
+            && crate::host::shares_codex_thread(&paths, id)
+        {
+            self.store
+                .clear_session_host(session_id, id)
+                .map_err(internal)?;
+            return Ok(serde_json::json!({}));
+        }
         let switched = match (host_id, registered.as_ref()) {
             (Some(expected), actual) if Some(expected) != actual => {
                 return Ok(serde_json::json!({}));
@@ -3502,7 +3526,7 @@ impl Shared {
     /// One poll of every live bound session's worktree: a new commit, or a
     /// session open for another interval, is a checkpoint.
     async fn poll_checkpoints(&self) {
-        let sessions = match self.store.live_sessions() {
+        let sessions = match self.checked_live_sessions() {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("reading sessions for checkpoints: {e}");
@@ -3555,7 +3579,8 @@ impl Shared {
         if let Some(companion) = self.companion_session(selector) {
             return Ok(companion);
         }
-        let sessions = self.store.sessions().map_err(internal)?;
+        let mut sessions = self.store.sessions().map_err(internal)?;
+        sessions.retain(|session| !self.hosts.unpublished(&session.session_id));
         let below = match selector.claude_pid {
             Some(pid) => self.store.sessions_below(pid).map_err(internal)?,
             None => Vec::new(),

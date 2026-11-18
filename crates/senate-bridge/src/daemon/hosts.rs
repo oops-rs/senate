@@ -3,8 +3,8 @@
 
 use std::io::Read as _;
 
-use tokio::io::AsyncReadExt as _;
-use tokio::process::Child;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::process::{Child, ChildStdin};
 use tokio::sync::oneshot;
 
 use super::*;
@@ -17,6 +17,7 @@ pub(super) struct Launches(Mutex<BTreeMap<EventId, Pending>>);
 struct Pending {
     session_id: Option<String>,
     published: watch::Sender<bool>,
+    codex_restore: bool,
 }
 
 impl Launches {
@@ -25,6 +26,19 @@ impl Launches {
             .values()
             .find(|pending| pending.session_id.as_deref() == Some(session_id))
             .map(|pending| pending.published.subscribe())
+    }
+    pub(super) fn hook_gate(&self, session_id: &str) -> Option<watch::Receiver<bool>> {
+        lock(&self.0)
+            .values()
+            .find(|pending| {
+                !pending.codex_restore && pending.session_id.as_deref() == Some(session_id)
+            })
+            .map(|pending| pending.published.subscribe())
+    }
+
+    pub(super) fn unpublished(&self, session_id: &str) -> bool {
+        self.hook_gate(session_id)
+            .is_some_and(|publication| !*publication.borrow())
     }
 }
 
@@ -153,7 +167,7 @@ impl Shared {
         // committee merely by turning on a stream for an unknown name.
         let me = tokio::time::timeout(Duration::from_secs(5), self.api.me())
             .await
-            .map_err(|_| IpcError::bad_request("could not confirm the committee in time"))?
+            .map_err(|_| IpcError::new(codes::SERVER, "could not confirm the committee in time"))?
             .map_err(server_error)?;
         if !me.committees.contains(&committee) {
             return Err(IpcError::bad_request(format!(
@@ -172,7 +186,9 @@ impl Shared {
         } else {
             tokio::time::timeout(Duration::from_secs(5), self.api.aliases())
                 .await
-                .map_err(|_| IpcError::bad_request("could not resolve the senator alias in time"))?
+                .map_err(|_| {
+                    IpcError::new(codes::SERVER, "could not resolve the senator alias in time")
+                })?
                 .map_err(server_error)?
                 .remove(senator)
                 .ok_or_else(|| {
@@ -180,6 +196,10 @@ impl Shared {
                 })?
         };
         for session in self.store.all_sessions().map_err(internal)? {
+            if self.hosts.unpublished(&session.session_id) {
+                continue;
+            }
+
             if session.agent == primary && session.agent_source == AgentSource::Session {
                 return Ok(session);
             }
@@ -205,7 +225,11 @@ impl Shared {
         &self,
         report: &HookReport,
     ) -> Result<Option<SenatorName>, IpcError> {
+        if report.event != HookEvent::SessionStart || report.source.as_deref() != Some("clear") {
+            return Ok(None);
+        }
         let paths = Paths::new(&self.home);
+        let mut matching = None;
         for session in self.store.live_sessions().map_err(internal)? {
             if session.runtime != Runtime::Claude || session.session_id == report.session_id {
                 continue;
@@ -215,13 +239,22 @@ impl Shared {
                 .session_host(&session.session_id)
                 .map_err(internal)?
                 && let Some(pid) = host::child_pid(&paths, &id)
-                && (Some(pid) == report.claude_pid || report.ancestor_pids.contains(&pid))
+                && owns_claude_hook(pid, report.claude_pid, &report.ancestor_pids)
                 && host::running(&paths, &id).map_err(IpcError::internal)?
+                && session::pid_alive(pid)
             {
-                host::note_switch(&paths, &id, &report.session_id).map_err(IpcError::internal)?;
-                self.committees_changed.notify_one();
-                return Ok(Some(session.agent));
+                if matching.is_some() {
+                    return Err(IpcError::bad_request(
+                        "the Claude session matches more than one hosted process",
+                    ));
+                }
+                matching = Some((session.agent, id));
             }
+        }
+        if let Some((old, id)) = matching {
+            host::note_switch(&paths, &id, &report.session_id).map_err(IpcError::internal)?;
+            self.committees_changed.notify_one();
+            return Ok(Some(old));
         }
         Ok(None)
     }
@@ -290,6 +323,11 @@ impl Shared {
         if let Some(id) = self.store.session_host(session_id).map_err(internal)?
             && host::running(paths, &id).map_err(IpcError::internal)?
         {
+            if host::awaiting_publication(paths, &id) {
+                return Err(IpcError::bad_request(
+                    "this terminal host is still waiting for publication",
+                ));
+            }
             if let Some(new) = host::switched(paths, &id) {
                 let old = agent::session_name(Runtime::Claude, session_id);
                 return Err(IpcError::bad_request(switch_message(&old, &new)));
@@ -310,6 +348,21 @@ impl Shared {
             .map_err(internal)?
             && host::running(&paths, &id).map_err(IpcError::internal)?
         {
+            if host::awaiting_publication(&paths, &id) {
+                // The acknowledgement is already in the pipe after a
+                // successful launch. Allow the host to consume it.
+                for _ in 0..20 {
+                    if !host::awaiting_publication(&paths, &id) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                if host::awaiting_publication(&paths, &id) {
+                    return Err(IpcError::bad_request(
+                        "this terminal host is still waiting for publication",
+                    ));
+                }
+            }
             return Ok(host::socket(&paths, &id));
         }
         Err(IpcError::new(
@@ -373,6 +426,7 @@ impl Shared {
                 Pending {
                     session_id: resume.clone(),
                     published: published.clone(),
+                    codex_restore: resume.is_some() && runtime == HostedRuntime::Codex,
                 },
             );
         }
@@ -405,18 +459,51 @@ impl Shared {
         let session_id = match runtime {
             HostedRuntime::Claude => resume.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             HostedRuntime::Codex => {
-                let (server, id) = tokio::time::timeout(CODEX_PUSH_TIMEOUT, async {
-                    let mut server =
-                        crate::delivery::codex::AppServer::connect(&self.codex_transport).await?;
-                    let id = match resume {
-                        Some(id) => id,
-                        None => server.start_hosted_thread(&cwd).await?,
-                    };
-                    Ok::<_, crate::delivery::codex::CodexError>((server, id))
-                })
-                .await
-                .map_err(|_| IpcError::new(codes::SERVER, "timed out preparing the Codex thread"))?
-                .map_err(IpcError::internal)?;
+                let connect = || crate::delivery::codex::AppServer::connect(&self.codex_transport);
+                let mut server = tokio::time::timeout(CODEX_PUSH_TIMEOUT, connect())
+                    .await
+                    .map_err(|_| {
+                        IpcError::new(
+                            codes::SERVER,
+                            "timed out connecting to the Codex app-server",
+                        )
+                    })?
+                    .map_err(IpcError::internal)?;
+                let id = if let Some(id) = resume {
+                    id
+                } else {
+                    let id = tokio::time::timeout(CODEX_PUSH_TIMEOUT, server.create_thread(&cwd))
+                        .await
+                        .map_err(|_| {
+                            IpcError::new(codes::SERVER, "timed out creating the Codex thread")
+                        })?
+                        .map_err(IpcError::internal)?;
+                    let seeded =
+                        tokio::time::timeout(CODEX_PUSH_TIMEOUT, server.seed_hosted_thread(&id))
+                            .await;
+                    if !matches!(seeded, Ok(Ok(()))) {
+                        // The thread ID is known even if the injection response
+                        // was lost. Do not reuse a cancelled WebSocket read.
+                        let mut rollback_errors = Vec::new();
+                        record_rollback(&mut rollback_errors, "archive Codex thread", async {
+                            connect().await?.archive_thread(&id).await
+                        })
+                        .await;
+                        let error = match seeded {
+                            Ok(Err(error)) => IpcError::internal(error),
+                            _ => IpcError::new(codes::SERVER, "timed out seeding the Codex thread"),
+                        };
+                        return if rollback_errors.is_empty() {
+                            Err(error)
+                        } else {
+                            Err(IpcError::new(
+                                &error.code,
+                                format!("{error}. Rollback: {}", rollback_errors.join(", ")),
+                            ))
+                        };
+                    }
+                    id
+                };
                 app_server = Some(server);
                 id
             }
@@ -424,6 +511,18 @@ impl Shared {
         if let Some(pending) = lock(&self.hosts.0).get_mut(&id) {
             pending.session_id = Some(session_id.clone());
         }
+        let shared_codex = restoring
+            && runtime == HostedRuntime::Codex
+            && self
+                .store
+                .session(&session_id)
+                .map_err(internal)?
+                .is_some_and(|session| session.is_live())
+            && self
+                .store
+                .session_host(&session_id)
+                .map_err(internal)?
+                .is_none();
         let remote = (runtime == HostedRuntime::Codex).then(|| self.codex_transport.remote());
         let launch = host::SessionCommand {
             session_id: &session_id,
@@ -444,48 +543,37 @@ impl Shared {
             self.convention.as_ref(),
         );
         let mut process = None;
+        let mut publication = None;
         let mut audit_written = false;
-        let mut alias_attempted = false;
-        let result = async {
-            // No agent cursor GET here: that endpoint seats the senator.
-            // Snapshot the head without acting as the new senator.
-            let cursor = if self
-                .store
-                .has_cursor(&reply.senator, &reply.committee)
-                .map_err(internal)?
-            {
+        let mut alias_may_have_landed = false;
+        let mut staged = None;
+        let result: Result<(), IpcError> = async {
+            let cursor = if self.store.has_cursor(&reply.senator, &reply.committee).map_err(internal)? {
                 None
             } else {
-                Some(
-                    tokio::time::timeout(Duration::from_secs(5), self.head(&reply.committee))
-                        .await
-                        .map_err(|_| {
-                            IpcError::new(codes::SERVER, "timed out preparing the senator's inbox")
-                        })?
-                        .map_err(|error| match error {
-                            Intake::Resync(reason) => {
-                                IpcError::new(codes::SERVER, reason.to_string())
-                            }
-                            Intake::Failed(error) => IpcError::internal(error),
-                        })?,
-                )
+                let generation = *self.generation.read().await;
+                let (delivered, reported) = tokio::time::timeout(Duration::from_secs(5), async {
+                    if restoring {
+                        let (delivered, reported, _) = self.seed_point(&reply.senator, &reply.committee, true).await?;
+                        Ok((delivered, reported))
+                    } else {
+                        Ok((self.head(&reply.committee).await?, Seq::ZERO))
+                    }
+                }).await.map_err(|_| IpcError::new(codes::SERVER, "timed out preparing the senator's inbox"))?
+                    .map_err(intake_error)?;
+                Some((generation, (delivered, reported)))
             };
             let (child, errors) =
-                host::start(&self.host_binary, &paths, &id, runtime, &cwd, &launch)
+                host::start(&self.host_binary, &paths, &id, runtime, &cwd, &launch, shared_codex)
                     .map_err(IpcError::internal)?;
-            process = Some(await_ready(child, errors).await?);
+            let (ready, ack) = await_ready(child, errors).await?;
+            process = Some(ready);
+            publication = Some(ack);
+            // The hosted Claude hook can wait for this bounded phase within
+            // its own IPC deadline. Existing Codex hooks do not wait here.
+            tokio::time::timeout(Duration::from_secs(7), async {
             audit(LaunchAudit::Ready, reply.clone(), runtime).await?;
             audit_written = true;
-            if let Some(alias) = &alias {
-                alias_attempted = true;
-                tokio::time::timeout(
-                    Duration::from_secs(5),
-                    self.api.set_alias(&reply.senator, alias, false),
-                )
-                .await
-                .map_err(|_| self.join_name_timeout())?
-                .map_err(server_error)?;
-            }
             if !host::running(&paths, &id).map_err(IpcError::internal)?
                 || !host::child_pid(&paths, &id).is_some_and(session::pid_alive)
             {
@@ -495,7 +583,16 @@ impl Shared {
             }
             // This launch's hook is waiting on its own publication
             // channel; unrelated hooks and delivery can keep running.
-            let _binding = self.session_bindings.write().await;
+            let binding = self.session_bindings.write().await;
+            if !restoring && self.store.session(&session_id).map_err(internal)?.is_some() {
+                return Err(IpcError::internal(
+                    "the newly allocated native session already exists",
+                ));
+            }
+            let epoch = match cursor {
+                Some((generation, _)) => Some(self.intake_guard(generation).await.map_err(intake_error)?),
+                None => None,
+            };
             self.store
                 .register_hosted_session(
                     &SessionUpsert {
@@ -515,21 +612,73 @@ impl Shared {
                     },
                     &id,
                     &reply.committee,
-                    cursor,
+                    cursor.map(|(_, seqs)| seqs),
                 )
                 .map_err(internal)?;
+            if !restoring {
+                staged = Some(cursor.is_some());
+            }
+            drop(epoch);
+            drop(binding);
+
+            // The server's alias operation also records its owner. Make it
+            // the last fallible publication step, after the local transaction.
+            // During the call, this launch stays hidden behind its gate.
+            if let Some(alias) = &alias {
+                alias_may_have_landed = true;
+                match tokio::time::timeout(
+                    Duration::from_secs(5),
+                    self.api.set_alias(&reply.senator, alias, false),
+                )
+                .await
+                {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => {
+                        alias_may_have_landed = error.status().is_none_or(|status| status >= 500);
+                        return Err(server_error(error));
+                    }
+                    Err(_) => {
+                        alias_may_have_landed = true;
+                        return Err(self.join_name_timeout());
+                    }
+                }
+            }
+                Ok::<_, IpcError>(())
+            }).await.map_err(|_| IpcError::new(codes::SERVER, "timed out publishing the hosted session"))??;
+            // The publication is committed. Losing the host at this point
+            // is a liveness failure, not grounds to undo an acknowledged alias.
             published.send_replace(true);
+            if let Some(mut ack) = publication.take()
+                && !tokio::time::timeout(Duration::from_secs(1), ack.write_all(&[host::PUBLISHED]))
+                    .await.is_ok_and(|result| result.is_ok())
+            {
+                tracing::warn!(session = %session_id, "the published terminal host closed its acknowledgement pipe");
+            }
+            // Do not race the first stream reconciliation against the
+            // host consuming the acknowledgement.
+            for _ in 0..20 {
+                if !host::awaiting_publication(&paths, &id) { break; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
             Ok(())
         }
         .await;
         if let Err(error) = result {
+            drop(publication);
             let mut rollback = Vec::new();
             if let Some(process) = process
                 && let Err(stop) = process.stop().await
             {
                 rollback.push(format!("could not stop terminal host: {stop}"));
             }
-            if alias_attempted && let Some(alias) = &alias {
+            if let Some(seed_cursor) = staged
+                && let Err(error) = self.store.discard_hosted_launch(&reply, &id, seed_cursor)
+            {
+                rollback.push(format!(
+                    "could not discard the provisional binding: {error}"
+                ));
+            }
+            if alias_may_have_landed && let Some(alias) = &alias {
                 record_rollback(
                     &mut rollback,
                     "remove alias",
@@ -598,6 +747,20 @@ impl Shared {
     }
 }
 
+fn intake_error(error: Intake) -> IpcError {
+    match error {
+        Intake::Resync(reason) => IpcError::new(codes::SERVER, reason.to_string()),
+        Intake::Failed(error) => IpcError::internal(error),
+    }
+}
+
+fn owns_claude_hook(tui: u32, reported: Option<u32>, ancestors: &[u32]) -> bool {
+    // Claude sets CLAUDE_PID to the runtime that called the hook, even
+    // for a nested headless Claude. Mere descent under the TUI is not
+    // evidence that the TUI itself changed its native identity.
+    reported == Some(tui) && ancestors.contains(&tui)
+}
+
 async fn record_rollback<E: std::fmt::Display>(
     errors: &mut Vec<String>,
     action: &str,
@@ -623,7 +786,16 @@ async fn claude_reachable(session: &Session) -> bool {
             .is_ok_and(|result| result.is_ok())
 }
 
-async fn await_ready(mut child: Child, errors: std::fs::File) -> Result<HostProcess, IpcError> {
+async fn await_ready(
+    mut child: Child,
+    errors: std::fs::File,
+) -> Result<(HostProcess, ChildStdin), IpcError> {
+    let Some(ack) = child.stdin.take() else {
+        let _ = stop_child(&mut child).await;
+        return Err(IpcError::internal(
+            "the terminal host has no publication pipe",
+        ));
+    };
     let Some(mut ready) = child.stdout.take() else {
         let _ = stop_child(&mut child).await;
         return Err(IpcError::internal(
@@ -656,5 +828,18 @@ async fn await_ready(mut child: Child, errors: std::fs::File) -> Result<HostProc
             )))
         };
     }
-    Ok(process)
+    Ok((process, ack))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::owns_claude_hook;
+
+    #[test]
+    fn clear_from_the_tui_matches_but_a_nested_claude_does_not() {
+        assert!(owns_claude_hook(10, Some(10), &[11, 10]));
+        assert!(!owns_claude_hook(10, Some(12), &[12, 11, 10]));
+        assert!(!owns_claude_hook(10, Some(10), &[12, 11]));
+        assert!(!owns_claude_hook(10, None, &[10]));
+    }
 }

@@ -327,38 +327,34 @@ impl AppServer {
         }
     }
 
-    /// Create a resumable thread without sending a model turn.
-    pub(crate) async fn start_hosted_thread(&mut self, cwd: &Path) -> Result<String, CodexError> {
+    pub(crate) async fn create_thread(&mut self, cwd: &Path) -> Result<String, CodexError> {
         let result = self
             .request("thread/start", "", json!({"cwd": cwd}))
             .await?;
-        let id = result
+        result
             .pointer("/thread/id")
             .and_then(Value::as_str)
             .filter(|id| !id.is_empty())
-            .ok_or_else(|| CodexError::Protocol("thread/start returned no thread ID".into()))?;
+            .map(str::to_owned)
+            .ok_or_else(|| CodexError::Protocol("thread/start returned no thread ID".into()))
+    }
+
+    pub(crate) async fn seed_hosted_thread(&mut self, id: &str) -> Result<(), CodexError> {
         // A newly created thread needs history for the TUI's resume bootstrap.
-        if let Err(error) = self
-            .request(
-                "thread/inject_items",
-                id,
-                json!({
-                    "threadId": id,
-                    "items": [{
-                        "type": "message",
-                        "role": "developer",
-                        "content": [{"type": "input_text", "text": "Senate started this session."}]
-                    }]
-                }),
-            )
-            .await
-        {
-            if let Err(archive) = self.archive_thread(id).await {
-                tracing::warn!(%archive, thread = %id, "could not archive a failed hosted thread");
-            }
-            return Err(error);
-        }
-        Ok(id.into())
+        self.request(
+            "thread/inject_items",
+            id,
+            json!({
+                "threadId": id,
+                "items": [{
+                    "type": "message",
+                    "role": "developer",
+                    "content": [{"type": "input_text", "text": "Senate started this session."}]
+                }]
+            }),
+        )
+        .await?;
+        Ok(())
     }
 
     pub(crate) async fn archive_thread(&mut self, id: &str) -> Result<(), CodexError> {

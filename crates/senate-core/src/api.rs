@@ -431,6 +431,9 @@ pub struct CursorQuery {
     /// Absent: the authenticated person's own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub senator: Option<SenatorName>,
+    /// Read the cursor without claiming ownership or taking a seat.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub peek: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

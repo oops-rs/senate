@@ -62,7 +62,7 @@ pub(crate) fn running(paths: &Paths, id: &EventId) -> io::Result<bool> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(e) => return Err(e),
     };
-    match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+    match flock(&file, FlockOperation::NonBlockingLockShared) {
         Ok(()) => Ok(false),
         Err(rustix::io::Errno::WOULDBLOCK) => Ok(true),
         Err(e) => Err(e.into()),
@@ -144,6 +144,8 @@ pub struct SessionCommand<'a> {
 }
 
 pub(crate) const READY: u8 = 1;
+pub(crate) const PUBLISHED: u8 = 1;
+pub const HOSTED_CLAUDE_ENV: &str = "SENATE_HOSTED_CLAUDE";
 
 pub(crate) fn preflight(paths: &Paths, id: &EventId, program: &Path) -> anyhow::Result<PathBuf> {
     let dir = directory(paths, id);
@@ -199,6 +201,7 @@ pub(crate) fn start(
     runtime: HostedRuntime,
     cwd: &Path,
     session: &SessionCommand<'_>,
+    shared_codex: bool,
 ) -> anyhow::Result<(Child, File)> {
     let dir = directory(paths, id);
     let mut command = Command::new(host_binary);
@@ -211,7 +214,7 @@ pub(crate) fn start(
         .arg("--program")
         .arg(session.program)
         .env(HOME_ENV, paths.home())
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped());
     if session.resume {
         command.arg("--resume");
@@ -222,6 +225,10 @@ pub(crate) fn start(
 
     std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
     let mut spawn = || -> anyhow::Result<(Child, File)> {
+        File::create(dir.join("unpublished"))?;
+        if shared_codex {
+            File::create(dir.join("shared-codex"))?;
+        }
         let path = dir.join("errors");
         let log = OpenOptions::new()
             .write(true)
@@ -259,6 +266,10 @@ pub async fn run(
     cwd: &Path,
     session: &SessionCommand<'_>,
 ) -> anyhow::Result<()> {
+    let mut publication = tokio::net::unix::pipe::Receiver::from_owned_fd(
+        rustix::io::fcntl_dupfd_cloexec(std::io::stdin(), 3)?,
+    )
+    .context("open the daemon publication pipe")?;
     let dir = directory(paths, id);
     let file = open_lock(&dir).context("own the host directory")?;
     // A liveness reader may have opened the file just before we locked it.
@@ -313,12 +324,33 @@ pub async fn run(
         _ = terminate.recv() => return stop_group(&mut child, pid).await,
     }
     drop(startup_output);
+    if let Some(status) = child.try_wait().context("check coding TUI startup")? {
+        bail!("the coding TUI exited during startup ({status})");
+    }
 
-    // This pipe belongs to the launching daemon. When it has gone away,
-    // allow the already recorded session to keep running.
-    let mut ready = std::io::stdout().lock();
-    let _ = ready.write_all(&[READY]).and_then(|()| ready.flush());
-    drop(ready);
+    let ready = {
+        let mut stdout = std::io::stdout().lock();
+        stdout.write_all(&[READY]).and_then(|()| stdout.flush())
+    };
+    if let Err(error) = ready {
+        stop_group(&mut child, pid).await?;
+        return Err(error).context("report host readiness");
+    }
+    let published = tokio::select! {
+        result = tokio::time::timeout(Duration::from_secs(20), publication.read_u8()) =>
+            matches!(result, Ok(Ok(PUBLISHED))),
+        status = child.wait() => bail!("the coding TUI exited before publication ({})", status?),
+        _ = terminate.recv() => false,
+    };
+    if !published {
+        stop_group(&mut child, pid).await?;
+        bail!("the daemon did not acknowledge publication");
+    }
+    // This is a host-local record for a restarted daemon. Failure to remove
+    // it is diagnostic; the daemon's publication byte is the authority.
+    if let Err(error) = std::fs::remove_file(dir.join("unpublished")) {
+        tracing::warn!(%error, "clearing the host's startup marker");
+    }
 
     let result = tokio::select! {
         status = child.wait() => status.context("wait for the coding TUI").and_then(|status| {
@@ -371,6 +403,11 @@ fn runtime_command(
             pty_process::Command::new(session.program).arg(format!("{flag}={}", session.session_id))
         }
     };
+    let command = if runtime == HostedRuntime::Claude {
+        command.env(HOSTED_CLAUDE_ENV, "1")
+    } else {
+        command.env_remove(HOSTED_CLAUDE_ENV)
+    };
     let command = command
         .current_dir(cwd)
         .env("TERM", "xterm-256color")
@@ -403,6 +440,14 @@ async fn stop_group(child: &mut Child, pid: Pid) -> anyhow::Result<()> {
     send(pid, Signal::KILL)?;
     child.wait().await.context("stop the coding TUI group")?;
     Ok(())
+}
+
+pub(crate) fn shares_codex_thread(paths: &Paths, id: &EventId) -> bool {
+    directory(paths, id).join("shared-codex").exists()
+}
+
+pub(crate) fn awaiting_publication(paths: &Paths, id: &EventId) -> bool {
+    directory(paths, id).join("unpublished").exists()
 }
 
 pub(crate) fn switched(paths: &Paths, id: &EventId) -> Option<String> {
@@ -550,6 +595,12 @@ mod tests {
         assert!(!dead.exists());
         // Other tests can be forking while we run. Unlock explicitly so
         // a descriptor inherited briefly before exec cannot delay release.
+        flock(&owner, FlockOperation::Unlock).unwrap();
+        flock(&owner, FlockOperation::LockShared).unwrap();
+        assert!(
+            !running(&paths, &id).unwrap(),
+            "concurrent readers are not a live owner"
+        );
         flock(&owner, FlockOperation::Unlock).unwrap();
         assert!(running_ids(&paths).unwrap().is_empty());
     }

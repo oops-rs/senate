@@ -532,16 +532,29 @@ fn run_hook(kind: HookKind, runtime_override: Option<Runtime>) {
     } else {
         HookEnv::from_process()
     };
+    let hosted_claude_start = kind == HookKind::SessionStart
+        && runtime_override.is_none_or(|runtime| runtime == Runtime::Claude)
+        && std::env::var_os(senate_bridge::host::HOSTED_CLAUDE_ENV).is_some();
+    let mut timeouts = HookTimeouts::default();
+    if hosted_claude_start {
+        // The installed native hook has a 10s limit. Reserve time for IPC
+        // connect, gathering git facts, and writing its brief back.
+        timeouts.request = Duration::from_secs(8);
+    }
     let out = rt.block_on(async {
         tokio::time::timeout(
-            Duration::from_secs(4),
+            if hosted_claude_start {
+                Duration::from_millis(9_500)
+            } else {
+                Duration::from_secs(4)
+            },
             hook::run_as(
                 kind,
                 &paths.socket(),
                 &stdin,
                 &env,
                 runtime_override,
-                HookTimeouts::default(),
+                timeouts,
             ),
         )
         .await
@@ -849,6 +862,16 @@ fn run_service(command: ServiceCmd) -> anyhow::Result<()> {
         ServiceCmd::Status => {
             let status = service::status(&spec, &service::SystemManager);
             print!("{}", service::render_status(&status, locale));
+            if spec.platform == service::Platform::Linux
+                && status.file_exists
+                && std::fs::read_to_string(&status.file)
+                    .is_ok_and(|unit| !unit.lines().any(|line| line.trim() == "KillMode=process"))
+            {
+                println!("{}", locale.pick(
+                    "请重新运行 senate service install --yes，以便托管终端在 systemd 重启 Senate 守护进程时继续运行。",
+                    "Run senate service install --yes to update the systemd unit so hosted terminals survive a daemon restart.",
+                ));
+            }
         }
     }
     Ok(())

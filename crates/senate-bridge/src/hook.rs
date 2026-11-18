@@ -310,9 +310,9 @@ pub async fn prepare(
         HookKind::SessionStart | HookKind::UserPromptSubmit => {
             let cwd = input.cwd.or_else(|| std::env::current_dir().ok())?;
             let ancestors = async {
-                // Every Codex thread's hooks share the app-server's pids, so
-                // they would name the wrong session.
-                if env.claude_pid.is_some() || runtime != Runtime::Claude {
+                // Claude source claims can be checked against the local
+                // process ancestry. Codex hooks share the app-server's PID.
+                if runtime != Runtime::Claude {
                     return Vec::new();
                 }
                 let parent = std::os::unix::process::parent_id();

@@ -288,9 +288,20 @@ impl ApiClient {
         name: &str,
         senator: Option<&SenatorName>,
     ) -> Result<Seq, ApiClientError> {
+        self.read_cursor(committee, name, senator, false).await
+    }
+
+    pub(crate) async fn read_cursor(
+        &self,
+        committee: &CommitteeId,
+        name: &str,
+        senator: Option<&SenatorName>,
+        peek: bool,
+    ) -> Result<Seq, ApiClientError> {
         let url = self.url(&api::cursor_path(committee, name));
         let query = CursorQuery {
             senator: senator.cloned(),
+            peek,
         };
         let resp = self.authed(self.http.get(url)).query(&query).send().await?;
         if resp.status() == StatusCode::NOT_FOUND {
@@ -310,6 +321,7 @@ impl ApiClient {
         let url = self.url(&api::cursor_path(committee, name));
         let query = CursorQuery {
             senator: senator.cloned(),
+            peek: false,
         };
         let resp = self
             .authed(self.http.put(url))

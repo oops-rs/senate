@@ -270,8 +270,15 @@ pub struct IdleAgent {
     pub items: usize,
 }
 
+struct HostedBinding<'a> {
+    id: &'a EventId,
+    committee: &'a CommitteeId,
+    cursor: Option<(Seq, Seq)>,
+}
+
 pub struct Store {
     conn: Mutex<Connection>,
+    has_host_id: bool,
 }
 
 fn now_ms() -> i64 {
@@ -564,8 +571,12 @@ impl Store {
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
         conn.busy_timeout(Duration::from_secs(2))?;
+        let has_host_id = conn
+            .prepare("SELECT 1 FROM pragma_table_info('sessions') WHERE name = 'host_id'")?
+            .exists([])?;
         Ok(Self {
             conn: Mutex::new(conn),
+            has_host_id,
         })
     }
 
@@ -604,6 +615,7 @@ impl Store {
         }
         Ok(Self {
             conn: Mutex::new(conn),
+            has_host_id: true,
         })
     }
 
@@ -901,12 +913,51 @@ impl Store {
         s: &SessionUpsert,
         id: &EventId,
         committee: &CommitteeId,
-        cursor: Option<Seq>,
+        cursor: Option<(Seq, Seq)>,
     ) -> Result<Session, StoreError> {
-        self.upsert(s, Some((id, committee, cursor)))
+        self.upsert(
+            s,
+            Some(HostedBinding {
+                id,
+                committee,
+                cursor,
+            }),
+        )
+    }
+
+    /// Discard a fresh launch and the local cursor that transaction created.
+    pub(crate) fn discard_hosted_launch(
+        &self,
+        launch: &crate::ipc::SpawnReply,
+        host: &EventId,
+        seeded: bool,
+    ) -> Result<(), StoreError> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let changed = tx.execute(
+            "DELETE FROM sessions WHERE session_id = ?1 AND host_id = ?2",
+            params![launch.session_id, host.to_string()],
+        )?;
+        if changed != 0 {
+            tx.execute(
+                "DELETE FROM session_ancestors WHERE session_id = ?1",
+                [&launch.session_id],
+            )?;
+            if seeded {
+                tx.execute(
+                    "DELETE FROM cursors WHERE agent = ?1 AND committee = ?2",
+                    params![agent_text(&launch.senator), launch.committee.as_str()],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     pub(crate) fn session_host(&self, session_id: &str) -> Result<Option<EventId>, StoreError> {
+        if !self.has_host_id {
+            return Ok(None);
+        }
         let id: Option<Option<String>> = self
             .conn()
             .query_row(
@@ -933,7 +984,7 @@ impl Store {
     fn upsert(
         &self,
         s: &SessionUpsert,
-        hosted: Option<(&EventId, &CommitteeId, Option<Seq>)>,
+        hosted: Option<HostedBinding<'_>>,
     ) -> Result<Session, StoreError> {
         let now = now_ms();
         let (inferred, source) = match &s.inferred_committee {
@@ -986,8 +1037,8 @@ impl Store {
                     s.runtime.as_str(),
                     agent_text(&s.agent),
                     s.agent_source.as_str(),
-                    hosted.map(|(id, _, _)| id.to_string()),
-                    hosted.map(|(_, committee, _)| committee.as_str()),
+                    hosted.as_ref().map(|binding| binding.id.to_string()),
+                    hosted.as_ref().map(|binding| binding.committee.as_str()),
                 ],
             )?;
             if (hosted.is_some() && s.runtime == Runtime::Claude) || !s.ancestor_pids.is_empty() {
@@ -1002,12 +1053,13 @@ impl Store {
                     )?;
                 }
             }
-            if let Some((_, committee, cursor)) = hosted {
-                if let Some(cursor) = cursor {
+            if let Some(binding) = &hosted {
+                let committee = binding.committee;
+                if let Some((delivered, reported)) = binding.cursor {
                     tx.execute(
                         "INSERT OR IGNORE INTO cursors (agent, committee, delivered, reported, touched)
-                         VALUES (?1, ?2, ?3, 0, ?4)",
-                        params![agent_text(&s.agent), committee.as_str(), seq_sql(cursor), now],
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![agent_text(&s.agent), committee.as_str(), seq_sql(delivered), seq_sql(reported), now],
                     )?;
                 }
                 tx.execute(
@@ -2336,6 +2388,23 @@ mod tests {
         let updated = store.upsert_session(&resumed).unwrap();
         assert_eq!(updated.committee(), Some(&committee));
         assert_eq!(store.session_host("a").unwrap(), Some(host));
+    }
+
+    #[test]
+    fn an_offline_store_without_host_id_still_lists_sessions() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("state.db");
+        let store = Store::open(&path).unwrap();
+        store.upsert_session(&upsert("old")).unwrap();
+        drop(store);
+        Connection::open(&path)
+            .unwrap()
+            .execute("ALTER TABLE sessions DROP COLUMN host_id", [])
+            .unwrap();
+
+        let offline = Store::open_read_only(&path).unwrap();
+        assert_eq!(offline.sessions().unwrap().len(), 1);
+        assert_eq!(offline.session_host("old").unwrap(), None);
     }
 
     #[test]

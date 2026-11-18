@@ -775,10 +775,22 @@ async fn get_cursor(
     params: Result<Query<CursorQuery>, QueryRejection>,
 ) -> Result<Json<Cursor>, ApiFailure> {
     let (committee, name) = cursor_path(path)?;
-    let owner = state
-        .act_as_or_self(&person, query(params)?.senator)
-        .await?;
-    state.hub.take_seat(&committee, &owner).await;
+    let params = query(params)?;
+    let owner = if params.peek {
+        let owner = params.senator.unwrap_or(
+            SenatorName::new(person.0.clone()).map_err(|e| ApiFailure::forbidden(e.to_string()))?,
+        );
+        state
+            .hub
+            .roster_now()
+            .may_act_as(&person.0, &owner)
+            .map_err(|e| ApiFailure::forbidden(e.to_string()))?;
+        owner
+    } else {
+        let owner = state.act_as_or_self(&person, params.senator).await?;
+        state.hub.take_seat(&committee, &owner).await;
+        owner
+    };
     let seq = state.hub.owned_cursor(&committee, &owner, &name).await?;
     Ok(Json(Cursor { seq }))
 }
