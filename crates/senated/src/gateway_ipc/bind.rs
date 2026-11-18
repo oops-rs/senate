@@ -154,18 +154,17 @@ impl InboundHandler {
             self.gateway.observe_inbound(&message).await?;
             return Ok(());
         }
-        if self.builtin {
-            self.gateway.deliver(message).await?;
-            return Ok(());
-        }
         if self.gateway.observe_inbound(&message).await?.is_some() {
             self.gateway.deliver(message).await?;
             return Ok(());
         }
 
         let Some(raw) = bind_argument(&message) else {
-            // There is neither a committee nor a built-in session for an
-            // unbound message. In particular, ambient text cannot bind.
+            // Explicit first binds use the durable path even with a built-in
+            // Speaker. Other unbound messages can still reach its inbox.
+            if self.builtin {
+                self.gateway.deliver(message).await?;
+            }
             return Ok(());
         };
         let roster = self.hub.roster().await?;

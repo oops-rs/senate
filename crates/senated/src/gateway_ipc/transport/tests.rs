@@ -194,6 +194,7 @@ async fn an_unverified_hello_cannot_attach_a_surface() {
         ("token", json!("wrong")),
         ("version", json!(2)),
         ("platform", json!("other")),
+        ("capabilities", json!(["adopt_group", "release_group"])),
     ] {
         let surface = RemoteSurface::new("chat".into());
         let (server, mut adapter) = UnixStream::pair().unwrap();
@@ -207,7 +208,11 @@ async fn an_unverified_hello_cannot_attach_a_surface() {
         let mut frame = hello();
         frame[key] = value;
         send(&mut adapter, frame).await.unwrap();
-        assert!(task.await.unwrap().is_err());
+        let result = timeout(Duration::from_secs(2), task)
+            .await
+            .expect("an invalid hello should close the connection")
+            .unwrap();
+        assert!(result.is_err());
         assert!(surface.peer().is_none());
     }
 }

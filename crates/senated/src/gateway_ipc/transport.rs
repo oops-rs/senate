@@ -296,6 +296,7 @@ where
             && bool::from(presented.as_bytes().ct_eq(token.as_bytes())),
         "gateway handshake refused"
     );
+    ensure!(capabilities.contains("post"), "gateway must advertise post");
     let (tx, mut calls) = mpsc::channel(MAX_PENDING);
     {
         let mut peer = surface.peer();
