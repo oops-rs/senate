@@ -34,7 +34,7 @@ use senate_core::api::{
 };
 use senate_core::hub::SCAN_PAGE;
 use senate_core::{
-    Address, Appended, Awaiting, Brief, BriefBuilder, ChairPayload, CheckpointFacts,
+    Address, Appended, Awaiting, Brief, BriefBuilder, ChairSource, CheckpointFacts,
     CheckpointRecord, Checkpoints, CommitteeId, CommitteeSeatChange, DocketItem, DocketPage, Event,
     EventId, Hub, HubError, Kind, Locale, Locator, MirrorRef, Name, NewEvent, Office, Origin,
     People, Principal, Roster, RosterError, SeatFacts, SenatePath, SenatorName, Seq, SpeakerDocket,
@@ -443,8 +443,9 @@ impl ServerHub {
         })
     }
 
-    /// Make `senator` the committee's chair: a `note` from `committee`
-    /// carrying [`meta::CHAIR`]. The caller has checked who may.
+    /// Make `senator` the committee's chair. The writer records and addresses
+    /// the handover in one note carrying [`meta::CHAIR`]. The caller has
+    /// checked who may set the chair.
     pub async fn set_chair(
         &self,
         committee: &CommitteeId,
@@ -457,10 +458,18 @@ impl ServerHub {
                 Address::senator(&senator)
             )));
         }
-        let note = NewEvent::new(committee.clone(), Kind::Note, Address::Committee, "")
-            .with_meta(meta::CHAIR, ChairPayload { senator }.value());
-        self.append(note).await?;
-        self.chair(committee).await
+        self.ask_writer(committee, |reply| CommitteeMsg::SetChair {
+            senator: senator.clone(),
+            locale: self.locale,
+            reply,
+        })
+        .await?
+        .map_err(log_error)?;
+        Ok(ChairInfo {
+            committee: committee.clone(),
+            chair: Some(senator),
+            source: Some(ChairSource::Set),
+        })
     }
 
     /// This Senate's name.

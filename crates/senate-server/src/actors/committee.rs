@@ -40,9 +40,9 @@ use ractor::{Actor, ActorProcessingErr, ActorRef, MessagingErr, RpcReplyPort, Su
 use senate_core::api::{CommitteeSeatInfo, Heartbeat};
 use senate_core::hub::SCAN_PAGE;
 use senate_core::{
-    AgentPresence, Appended, ChairPayload, CommitteeId, CommitteeSeatAction, CommitteeSeatChange,
-    CommitteeSeats, Event, EventId, HubError, Kind, Name, NewEvent, People, PresenceBoard,
-    PresencePayload, SenatorName, Seq, presence_event, reassign_event,
+    Address, AgentPresence, Appended, ChairPayload, CommitteeId, CommitteeSeatAction,
+    CommitteeSeatChange, CommitteeSeats, Event, EventId, HubError, Kind, Locale, Name, NewEvent,
+    People, PresenceBoard, PresencePayload, SenatorName, Seq, presence_event, reassign_event,
 };
 use senate_log::{LogError, LogStore};
 use tokio::sync::{broadcast, mpsc};
@@ -51,10 +51,16 @@ use tokio::task::JoinHandle;
 use super::lease::{LeaseTiming, Leases};
 use super::presence::{ConnId, Presence};
 use super::proxy::{AgentProxy, ProxyArgs, ProxyMsg};
+use crate::chairs::ChairView;
 use crate::seats::Seats;
 
 pub(crate) enum CommitteeMsg {
     Append(Box<NewEvent>, RpcReplyPort<Result<Appended, LogError>>),
+    SetChair {
+        senator: SenatorName,
+        locale: Locale,
+        reply: RpcReplyPort<Result<(), LogError>>,
+    },
     /// Register a live stream for `agent`. Replies with the proxy that owns it
     /// once every later commit is guaranteed to reach `sender`.
     Attach {
@@ -119,6 +125,7 @@ pub(crate) struct CommitteeState {
     watchers: Vec<(ConnId, mpsc::Sender<Arc<Event>>)>,
     leases: Leases,
     seats: CommitteeSeats,
+    chair: ChairView,
     ticker: Option<JoinHandle<()>>,
     /// Whether the log already shows an agent's seat (a `presence`, or an
     /// event written as an agent). The first agent's seat makes it the
@@ -202,6 +209,7 @@ impl CommitteeState {
         if let Ok(appended) = &result {
             let seq = appended.event.seq;
             self.observe_seat(&appended.event);
+            self.chair.observe(&appended.event);
             if !appended.duplicate && seq != self.fanned.next() {
                 tracing::warn!(
                     committee = %self.args.committee,
@@ -226,6 +234,45 @@ impl CommitteeState {
             }
         }
         result
+    }
+
+    async fn set_chair(&mut self, senator: SenatorName, locale: Locale) -> Result<(), LogError> {
+        let committee = &self.args.committee;
+        if self.seats.is_unseated(&senator) {
+            return Err(LogError::Invalid(format!(
+                "{senator} must explicitly join {committee} before chairing"
+            )));
+        }
+        let incoming = Address::senator(&senator);
+        let mut event = NewEvent::new(committee.clone(), Kind::Note, Address::Committee, "")
+            .with_meta(ChairPayload::META_KEY, ChairPayload { senator }.value());
+        let current = self.chair.chair().map(|(chair, _)| Address::senator(chair));
+        // Both chairs receive the same log event that changes the role.
+        match current {
+            Some(outgoing) if outgoing != incoming => {
+                let new = incoming.in_text();
+                let old = outgoing.in_text();
+                event.body = match locale {
+                    Locale::Zh => format!(
+                        "{new} 现任委员会 `{committee}` 的主席（chair）。{old} 卸任主席，仍是委员会成员。"
+                    ),
+                    Locale::En => format!(
+                        "{new} now chairs the committee `{committee}`. {old} has been replaced as chair and remains a committee member."
+                    ),
+                };
+                event.to = vec![incoming, outgoing];
+            }
+            None => {
+                let new = incoming.in_text();
+                event.body = match locale {
+                    Locale::Zh => format!("{new} 现任委员会 `{committee}` 的主席（chair）。"),
+                    Locale::En => format!("{new} now chairs the committee `{committee}`."),
+                };
+                event.to = vec![incoming];
+            }
+            Some(_) => {}
+        }
+        self.commit(event).await.map(|_| ())
     }
 
     fn observe_seat(&mut self, event: &Event) {
@@ -379,15 +426,15 @@ impl CommitteeState {
     }
 }
 
-/// The latest `presence` per agent in the committee's log, and every agent
-/// that wrote in it.
-async fn presence_board(
+/// The presence, agent authors and chair recorded in the committee's log.
+async fn restore_views(
     store: &dyn LogStore,
     committee: &CommitteeId,
     people: &People,
-) -> Result<(PresenceBoard, BTreeSet<SenatorName>), LogError> {
+) -> Result<(PresenceBoard, BTreeSet<SenatorName>, ChairView), LogError> {
     let mut board = PresenceBoard::new();
     let mut authors = BTreeSet::new();
+    let mut chair = ChairView::new(people.clone());
     let mut after = Seq::ZERO;
     loop {
         let page = store.read(committee, after, SCAN_PAGE).await?;
@@ -400,9 +447,10 @@ async fn presence_board(
             if let Some(agent) = people.as_agent(&event.from) {
                 authors.insert(agent.clone());
             }
+            chair.observe(event);
         }
     }
-    Ok((board, authors))
+    Ok((board, authors, chair))
 }
 
 impl Actor for CommitteeActor {
@@ -418,8 +466,8 @@ impl Actor for CommitteeActor {
         let head = args.store.head(&args.committee).await?;
         let mut leases = Leases::new(args.leases);
         let people = args.seats.snapshot().people();
-        let (board, authors) =
-            presence_board(args.store.as_ref(), &args.committee, &people).await?;
+        let (board, authors, chair) =
+            restore_views(args.store.as_ref(), &args.committee, &people).await?;
         let seats = board.seats().clone();
         let active = board.agents();
         for agent in seats.unseated() {
@@ -469,6 +517,7 @@ impl Actor for CommitteeActor {
             watchers: Vec::new(),
             leases,
             seats,
+            chair,
             ticker: None,
             seat_logged,
         })
@@ -549,6 +598,11 @@ impl Actor for CommitteeActor {
                 }
                 reply_or_log(reply, result);
             }
+            CommitteeMsg::SetChair {
+                senator,
+                locale,
+                reply,
+            } => reply_or_log(reply, state.set_chair(senator, locale).await),
             CommitteeMsg::Attach {
                 agent,
                 conn,

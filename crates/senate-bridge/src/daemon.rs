@@ -189,9 +189,8 @@ pub const INBOX_RETRIES: u32 = 6;
 const RETENTION: Duration = Duration::from_secs(7 * 24 * 3600);
 /// Bound on the gallop-and-bisect search for a committee's head.
 const HEAD_PROBES: usize = 128;
-/// Bound on fetching the brief while a SessionStart hook waits (the hook
-/// gives the whole request about two seconds).
-const HOOK_BRIEF_TIMEOUT: Duration = Duration::from_secs(1);
+/// Bound on fetching committee context while a SessionStart hook waits.
+const HOOK_COMMITTEE_TIMEOUT: Duration = Duration::from_secs(1);
 /// Hook context kept for the backlog when the brief would crowd it out.
 const HOOK_BACKLOG_RESERVE: usize = 2_000;
 /// Bound on one push into a Codex thread: connect, read, start or steer.
@@ -786,12 +785,12 @@ pub fn senate_words(senate: Option<&SenatePath>, locale: Locale) -> String {
     }
 }
 
-/// The line a starting session reads first: where it is joined, as whom,
-/// and the tools it has.
+/// What a starting session reads first: its seat, role and tools.
 fn orientation(
     committee: &CommitteeId,
     agent: &SenatorName,
     senate: Option<&SenatePath>,
+    chair: Option<&SenatorName>,
     chat: bool,
     locale: Locale,
 ) -> String {
@@ -807,9 +806,11 @@ fn orientation(
     } else {
         "Teammates' agents and the Speaker"
     };
+    let role = orientation_role(agent, chair, locale);
     match locale {
         Locale::Zh => format!(
-            "[senate] 这个会话已加入 {senate} 的委员会 `{committee}`，身份是 {me}。{reach_zh}会以 `[senate · …]` 消息在这里找到你。工具：\
+            "[senate] 这个会话已加入 {senate} 的委员会 `{committee}`，身份是 {me}。{role}\n\n\
+             {reach_zh}会以 `[senate · …]` 消息在这里找到你。工具：\
              mcp__senate__join（可用 senator 参数为当前会话选择名称），mcp__senate__ask（问队友，也可用 <委员会>::chair 直接咨询同一 Senate 的其他委员会），mcp__senate__answer（在 thread 里回复），\
              mcp__senate__catch_up（读你错过的），mcp__senate__search（搜索整个日志），\
              mcp__senate__post（给团队留言），mcp__senate__propose_decision（提议一个决定，由人确认），\
@@ -820,7 +821,7 @@ fn orientation(
              所以把你需要他们决定的写进 reason。"
         ),
         Locale::En => format!(
-            "[senate] This session is joined to the committee `{committee}` of {senate} as {me}. \
+            "[senate] This session is joined to the committee `{committee}` of {senate} as {me}. {role}\n\n\
              {reach_en} reach you here as \
              `[senate · …]` messages. Tools: mcp__senate__join (pass senator to name this session), \
              mcp__senate__ask (ask a teammate or reach another chair in this Senate with <committee>::chair), \
@@ -835,6 +836,49 @@ fn orientation(
              thread, so put what you need from them in its reason."
         ),
     }
+}
+
+fn orientation_role(agent: &SenatorName, chair: Option<&SenatorName>, locale: Locale) -> String {
+    if chair == Some(agent) {
+        let tools = crate::mcp::CHAIR_TOOLS
+            .map(|name| format!("mcp__senate__{name}"))
+            .join(", ");
+        return match locale {
+            Locale::Zh => {
+                format!("你是本委员会的主席（chair），负责主持委员会。主席工具包括 {tools}。")
+            }
+            Locale::En => format!(
+                "You are the chair of this committee and are in charge of it. Your chair tools are {tools}."
+            ),
+        };
+    }
+    let chair = match (locale, chair) {
+        (Locale::Zh, Some(chair)) => format!(
+            "你是委员会成员。委员会的主席（chair）是 {}。",
+            Address::senator(chair).in_text()
+        ),
+        (Locale::En, Some(chair)) => format!(
+            "You are a committee member. The chair is {}.",
+            Address::senator(chair).in_text()
+        ),
+        (Locale::Zh, None) => "你是委员会成员。当前会话暂未获知主席身份。".to_owned(),
+        (Locale::En, None) => {
+            "You are a committee member. This session has yet to learn who chairs the committee."
+                .to_owned()
+        }
+    };
+    format!(
+        "{chair}{}",
+        locale.pick(
+            "按主席的请求行事，用 mcp__senate__status 在任务 thread 里报告进度，完成后用 \
+             mcp__senate__answer 回复同一个 thread。有问题或需要确认的事项时，用 mcp__senate__ask \
+             或省略 to 的 mcp__senate__escalate 交给主席，由主席通过 Senate 向 Speaker 提请确认。",
+            " Follow the chair's requests. Report progress on the task thread with mcp__senate__status \
+             and report completion on that thread with mcp__senate__answer. Take questions and matters \
+             needing confirmation to the chair with mcp__senate__ask or mcp__senate__escalate without \
+             to. The chair takes confirmations to the Speaker through Senate.",
+        )
+    )
 }
 
 /// Least room for the brief's Markdown worth injecting.
@@ -2816,11 +2860,18 @@ impl Shared {
             self.committees_changed.notify_one();
         }
 
-        let brief = match (report.event, session.committee()) {
-            (HookEvent::SessionStart, Some(committee)) if session.runtime != Runtime::Agy => {
-                self.hook_brief(committee).await
-            }
-            _ => None,
+        let (brief, chair) = match (report.event, session.committee()) {
+            (HookEvent::SessionStart, Some(committee)) => tokio::join!(
+                async {
+                    if session.runtime == Runtime::Agy {
+                        None
+                    } else {
+                        self.hook_brief(committee).await
+                    }
+                },
+                self.hook_chair(committee, &session.agent),
+            ),
+            _ => (None, None),
         };
         let reminder = self
             .secretary_hook_reminder(&session)
@@ -2832,8 +2883,13 @@ impl Shared {
         let reserved = reminder
             .as_ref()
             .map_or(0, |(_, text)| text.chars().count() + 2);
-        let (mut context, delivered) =
-            self.hook_context(&session, report.event, brief.as_ref(), reserved)?;
+        let (mut context, delivered) = self.hook_context(
+            &session,
+            report.event,
+            brief.as_ref(),
+            chair.as_ref(),
+            reserved,
+        )?;
         if native && (source != AgentSource::Harness || hint.as_str() != report.runtime.as_str()) {
             let alias = tokio::time::timeout(
                 Duration::from_millis(600),
@@ -2925,7 +2981,7 @@ impl Shared {
         if self.config.brief_chars == 0 {
             return None;
         }
-        match tokio::time::timeout(HOOK_BRIEF_TIMEOUT, self.api.brief(committee)).await {
+        match tokio::time::timeout(HOOK_COMMITTEE_TIMEOUT, self.api.brief(committee)).await {
             Ok(Ok(brief)) => Some(brief),
             Ok(Err(e)) => {
                 tracing::warn!(%committee, "session start without the brief: {e}");
@@ -2936,6 +2992,21 @@ impl Shared {
                 None
             }
         }
+    }
+
+    /// Report the starting session's presence before reading the chair.
+    /// The first agent to take a seat may become chair on that contact.
+    async fn hook_chair(
+        &self,
+        committee: &CommitteeId,
+        agent: &SenatorName,
+    ) -> Option<SenatorName> {
+        tokio::time::timeout(HOOK_COMMITTEE_TIMEOUT, async {
+            self.heartbeat(agent, committee).await;
+            self.current_chair(committee).await
+        })
+        .await
+        .unwrap_or_else(|_| self.chair_of(committee))
     }
 
     /// Hand the session what is waiting for it: at SessionStart the
@@ -2952,6 +3023,7 @@ impl Shared {
         session: &Session,
         event: HookEvent,
         brief: Option<&Brief>,
+        chair: Option<&SenatorName>,
         reserved: usize,
     ) -> Result<(Option<String>, usize), IpcError> {
         let Some(committee) = session.committee().cloned() else {
@@ -2986,6 +3058,7 @@ impl Shared {
                 &committee,
                 agent,
                 self.senate_path().as_ref(),
+                chair,
                 brief.is_some_and(|b| !b.groups.is_empty()),
                 self.locale,
             );
@@ -4961,18 +5034,18 @@ mod tests {
         // `/v1/me` has answered it is "this Senate".
         let c = CommitteeId::new("refund-v2").unwrap();
         let agent: SenatorName = "codex".parse().unwrap();
-        let en = orientation(&c, &agent, None, false, Locale::En);
+        let en = orientation(&c, &agent, None, None, false, Locale::En);
         assert!(en.contains("committee `refund-v2` of this Senate as [senator::codex]"));
         let path: SenatePath = "acme/north-desk".parse().unwrap();
         let reviewer: SenatorName = "reviewer".parse().unwrap();
-        let en = orientation(&c, &reviewer, Some(&path), false, Locale::En);
+        let en = orientation(&c, &reviewer, Some(&path), None, false, Locale::En);
         assert!(
             en.contains(
                 "committee `refund-v2` of the Senate [acme/north-desk] as [senator::reviewer]"
             ),
             "{en}"
         );
-        let zh = orientation(&c, &reviewer, Some(&path), false, Locale::Zh);
+        let zh = orientation(&c, &reviewer, Some(&path), None, false, Locale::Zh);
         assert!(
             zh.contains(
                 "已加入 Senate [acme/north-desk] 的委员会 `refund-v2`，身份是 [senator::reviewer]"
@@ -4988,12 +5061,12 @@ mod tests {
     fn the_orientation_says_the_person_can_speak_from_a_terminal() {
         let c = CommitteeId::new("refund-v2").unwrap();
         let agent: SenatorName = "codex".parse().unwrap();
-        let en = orientation(&c, &agent, None, false, Locale::En);
+        let en = orientation(&c, &agent, None, None, false, Locale::En);
         assert!(
             en.contains("`senate ask`, `senate tell` and `senate reply`"),
             "{en}"
         );
-        let zh = orientation(&c, &agent, None, false, Locale::Zh);
+        let zh = orientation(&c, &agent, None, None, false, Locale::Zh);
         assert!(
             zh.contains("`senate ask`、`senate tell`、`senate reply`"),
             "{zh}"
@@ -5004,7 +5077,7 @@ mod tests {
     fn the_orientation_mentions_the_chat_only_when_a_group_is_bound() {
         let c = CommitteeId::new("refund-v2").unwrap();
         let agent: SenatorName = "codex".parse().unwrap();
-        let line = |chat, l| orientation(&c, &agent, None, chat, l);
+        let line = |chat, l| orientation(&c, &agent, None, None, chat, l);
         assert!(
             line(true, Locale::En)
                 .contains("Speaker, and people in the committee's chat reach you")

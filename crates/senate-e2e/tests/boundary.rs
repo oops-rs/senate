@@ -543,6 +543,128 @@ async fn a_chair_set_for_the_committee_picks_for_senator_any() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn chair_handover_notifies_both_sessions_and_changes_their_tools() {
+    use senate_bridge::mcp::{CHAIR_TOOLS, SenateMcp};
+    use senate_core::{ChairPayload, ChairSource, Seq};
+
+    async fn has_chair_tools(mcp: &SenateMcp, expected: bool) {
+        let tools = mcp.tools().await;
+        for name in CHAIR_TOOLS {
+            assert_eq!(tools.iter().any(|tool| tool.name == name), expected);
+        }
+    }
+
+    for locale in [Locale::En, Locale::Zh] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut desk = Desk::new(dir.path(), "alice", locale, "[local]\n");
+        desk.start().await;
+        let outgoing = desk.inbox("outgoing");
+        let incoming = desk.inbox("incoming");
+        let outgoing_ctx = desk
+            .session_start_as("outgoing", &outgoing, "claude")
+            .await
+            .unwrap();
+        let incoming_ctx = desk
+            .session_start_as("incoming", &incoming, "codex")
+            .await
+            .unwrap();
+        let chair_text = locale.pick(
+            "你是本委员会的主席（chair），负责主持委员会。",
+            "You are the chair of this committee and are in charge of it.",
+        );
+        let member_text = |chair: &str| {
+            if locale == Locale::Zh {
+                format!("你是委员会成员。委员会的主席（chair）是 [senator::{chair}]。")
+            } else {
+                format!("You are a committee member. The chair is [senator::{chair}].")
+            }
+        };
+        assert!(
+            context(&outgoing_ctx).contains(chair_text),
+            "{outgoing_ctx}"
+        );
+        for name in CHAIR_TOOLS {
+            assert!(context(&outgoing_ctx).contains(&format!("mcp__senate__{name}")));
+        }
+        let member = context(&incoming_ctx);
+        assert!(member.contains(&member_text("claude")), "{member}");
+        for tool in ["ask", "status", "answer", "escalate"] {
+            assert!(member.contains(&format!("mcp__senate__{tool}")), "{member}");
+        }
+        assert!(member.contains(locale.pick("省略 to", "without to")));
+
+        let outgoing_mcp = SenateMcp::new(desk.paths.socket(), Laptop::session("outgoing"));
+        let incoming_mcp = SenateMcp::new(desk.paths.socket(), Laptop::session("incoming"));
+        has_chair_tools(&outgoing_mcp, true).await;
+        has_chair_tools(&incoming_mcp, false).await;
+
+        let info: senate_core::api::ChairInfo = desk
+            .ipc(Request::SetChair {
+                session: Default::default(),
+                committee: Some(committee()),
+                senator: path("codex"),
+            })
+            .await;
+        assert_eq!(info.chair, Some(path("codex")));
+        assert_eq!(info.source, Some(ChairSource::Set));
+        let notice = locale.pick(
+            "[senator::codex] 现任委员会 `refund-v2` 的主席（chair）。[senator::claude] 卸任主席，仍是委员会成员。",
+            "[senator::codex] now chairs the committee `refund-v2`. [senator::claude] has been replaced as chair and remains a committee member.",
+        );
+        outgoing.wait_for(notice).await;
+        incoming.wait_for(notice).await;
+
+        let hub = &desk.senate().daemon.hub;
+        assert_eq!(hub.chair(&committee()).await.unwrap(), info);
+        let log = hub.read(&committee(), Seq::ZERO, 100).await.unwrap();
+        let change = log
+            .iter()
+            .find(|event| ChairPayload::of(event).is_some())
+            .unwrap();
+        assert_eq!(change.to, [senator("codex"), senator("claude")]);
+        assert_eq!(change.body, notice);
+        let status = senate_bridge::status::collect(&desk.paths).await.unwrap();
+        assert!(
+            status
+                .roles
+                .unwrap()
+                .chairs
+                .iter()
+                .any(|chair| { chair.committee == info.committee && chair.chair == info.chair })
+        );
+        has_chair_tools(&outgoing_mcp, false).await;
+        has_chair_tools(&incoming_mcp, true).await;
+        let old_role_call = desk
+            .try_ipc::<serde_json::Value>(Request::ChairDocket {
+                session: Laptop::session("outgoing"),
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(old_role_call, senate_bridge::ipc::ClientError::Remote(e)
+            if e.code == senate_bridge::ipc::codes::NOT_CHAIRING)
+        );
+        let _: serde_json::Value = desk
+            .ipc(Request::ChairDocket {
+                session: Laptop::session("incoming"),
+            })
+            .await;
+
+        let outgoing_ctx = desk
+            .session_start_as("outgoing", &outgoing, "claude")
+            .await
+            .unwrap();
+        let incoming_ctx = desk
+            .session_start_as("incoming", &incoming, "codex")
+            .await
+            .unwrap();
+        assert!(context(&outgoing_ctx).contains(&member_text("codex")));
+        assert!(context(&incoming_ctx).contains(chair_text));
+        desk.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_team_principals_agent_crosses_committees_by_way_of_the_desk() {
     // A team's Senate: bob presides; `north-desk` is a team (a principal
     // that is no person), with its own token, running the agent `runner`.
