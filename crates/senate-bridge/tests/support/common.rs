@@ -172,6 +172,8 @@ pub struct Inner {
     pub secretary_reminder_polls: usize,
     pub lose_approval_ack: bool,
     pub hosted_approval_appends: usize,
+    pub reject_approval_archive: bool,
+    pub approval_archive_attempts: usize,
     /// `(committee, seq)` → the JSON served in place of the stored event.
     pub raw: HashMap<(String, u64), String>,
     /// `(committee, whose, name)`: `whose` is the senator in the query, else
@@ -449,6 +451,17 @@ async fn append(
         return r;
     }
     let mut ev = ev;
+    if ev.kind == Kind::Status && ev.meta.contains_key(senate_core::meta::HOSTED_APPROVAL) {
+        let mut inner = st.inner.lock().unwrap();
+        inner.approval_archive_attempts += 1;
+        if inner.reject_approval_archive {
+            return api_error(
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "injected archive refusal",
+            );
+        }
+    }
     let resolved = st.inner.lock().unwrap().roster.resolve_recipients(&ev.to);
     match resolved {
         Ok(to) => ev.to = to,
@@ -981,6 +994,8 @@ impl FakeServer {
                 secretary_reminder_polls: 0,
                 lose_approval_ack: false,
                 hosted_approval_appends: 0,
+                reject_approval_archive: false,
+                approval_archive_attempts: 0,
                 raw: HashMap::new(),
                 aliases: BTreeMap::new(),
                 alias_delay: Duration::ZERO,

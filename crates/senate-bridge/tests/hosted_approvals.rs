@@ -32,7 +32,11 @@ async fn fixture(chair_connected: bool, locale: Locale) -> (Harness, PathBuf) {
     h.config.committees.push(committee());
     h.server.state.inner.lock().unwrap().chair = Some((path("chair-test"), chair_connected));
     let program = h.dir.path().join("tui");
-    std::fs::write(&program, "#!/bin/sh\nwhile IFS= read -r line; do :; done\n").unwrap();
+    std::fs::write(
+        &program,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > argv\nwhile IFS= read -r line; do :; done\n",
+    )
+    .unwrap();
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
     std::fs::write(
         h.paths.config(),
@@ -137,6 +141,20 @@ impl Terminal {
             .to_str()
             .unwrap()
     }
+
+    fn activity(&self) -> Option<Value> {
+        let data = std::fs::read(self.socket.with_file_name("viewer.json")).ok()?;
+        serde_json::from_slice(&data).ok()
+    }
+
+    async fn wait_detached(&self, previous: u64) -> Value {
+        eventually("the viewer finished detaching", WAIT, || {
+            let value = self.activity()?;
+            (value["attached"] == false && value["detached_at"].as_u64()? > previous)
+                .then_some(value)
+        })
+        .await
+    }
 }
 
 impl Drop for Terminal {
@@ -146,10 +164,11 @@ impl Drop for Terminal {
 }
 
 fn notices(h: &Harness) -> Vec<Event> {
+    let people = h.server.state.inner.lock().unwrap().roster.people();
     h.server
         .events("refund-v2")
         .into_iter()
-        .filter(Event::is_hosted_approval)
+        .filter(|event| event.is_hosted_approval(&people))
         .collect()
 }
 
@@ -175,12 +194,34 @@ async fn wait_archived(h: &Harness, seq: Seq) {
 
 async fn view_without_input(terminal: &Terminal) {
     let mut viewer = terminal.viewer().await;
-    viewer.write_all(&[1, 0, 32, 0, 81, 2, 0, 0]).await.unwrap();
+    let before = terminal.activity().unwrap();
+    viewer.write_all(&[1, 0, 32, 0, 81]).await.unwrap();
+    let reply = b"\x1b[1;32R\x1b[?31u\x1b[I";
+    viewer.write_u8(2).await.unwrap();
+    viewer
+        .write_u16(reply.len().try_into().unwrap())
+        .await
+        .unwrap();
+    viewer.write_all(reply).await.unwrap();
+    viewer.shutdown().await.unwrap();
+    let after = terminal
+        .wait_detached(before["detached_at"].as_u64().unwrap())
+        .await;
+    assert_eq!(
+        before["input_at"], after["input_at"],
+        "the host processed the emulator replies without finding human input"
+    );
 }
 
 async fn send_input(terminal: &Terminal) {
     let mut viewer = terminal.viewer().await;
+    let previous = terminal.activity().unwrap();
     viewer.write_all(&[2, 0, 2, b'x', b'\n']).await.unwrap();
+    viewer.shutdown().await.unwrap();
+    let after = terminal
+        .wait_detached(previous["detached_at"].as_u64().unwrap())
+        .await;
+    assert!(after["input_at"].as_u64() > previous["input_at"].as_u64());
 }
 
 async fn claude_hook(root: &Path, h: &Harness, host: &str, input: Value) {
@@ -216,7 +257,37 @@ async fn claude_hook(root: &Path, h: &Harness, host: &str, input: Value) {
 async fn claude_prompt_requires_a_notification_and_the_desk_covers_an_away_chair() {
     let (mut h, project) = fixture(false, Locale::Zh).await;
     start(&mut h).await;
-    let (launch, terminal) = Terminal::spawn(&h, project, HostedRuntime::Claude).await;
+    let (launch, terminal) = Terminal::spawn(&h, project.clone(), HostedRuntime::Claude).await;
+    let args = std::fs::read_to_string(project.join("argv")).unwrap();
+    let args: Vec<_> = args.lines().collect();
+    assert_eq!(
+        args,
+        [
+            format!("--session-id={}", launch.session_id).as_str(),
+            "--settings",
+            terminal
+                .socket
+                .with_file_name("approval-hooks.json")
+                .to_str()
+                .unwrap()
+        ]
+    );
+    let overlay: Value = serde_json::from_slice(&std::fs::read(args[2]).unwrap()).unwrap();
+    assert_eq!(overlay.as_object().unwrap().len(), 1);
+    assert_eq!(overlay["hooks"].as_object().unwrap().len(), 4);
+    for event in [
+        "PermissionRequest",
+        "Notification",
+        "PostToolUse",
+        "PostToolUseFailure",
+    ] {
+        assert!(
+            overlay["hooks"][event][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap()
+                .ends_with("hook hosted-approval >/dev/null 2>&1 || :")
+        );
+    }
     let signal = |event: &str, command: &str| {
         json!({
             "hook_event_name": event, "session_id": launch.session_id,
@@ -236,11 +307,21 @@ async fn claude_prompt_requires_a_notification_and_the_desk_covers_an_away_chair
         signal("PermissionRequest", "wrong host"),
     )
     .await;
-    send(notify.clone()).await;
+    claude_hook(h.dir.path(), &h, &wrong_host, notify.clone()).await;
     assert!(
         notices(&h).is_empty(),
         "the unverified claim did not arm a prompt"
     );
+
+    let mut attended = terminal.viewer().await;
+    let before = terminal.activity().unwrap();
+    send(signal("PermissionRequest", "echo already-attended")).await;
+    send(notify.clone()).await;
+    send(signal("PostToolUse", "echo already-attended")).await;
+    attended.shutdown().await.unwrap();
+    terminal
+        .wait_detached(before["detached_at"].as_u64().unwrap())
+        .await;
 
     send(signal("PermissionRequest", "echo approval-fixture")).await;
     assert!(
@@ -249,7 +330,7 @@ async fn claude_prompt_requires_a_notification_and_the_desk_covers_an_away_chair
     );
     send(notify.clone()).await;
     let first = next_notice(&h, 1).await;
-    assert!(first.body.contains("工具或命令：echo approval-fixture"));
+    assert!(first.body.contains("工具或命令 \"echo approval-fixture\""));
     assert!(
         first
             .body
@@ -265,10 +346,24 @@ async fn claude_prompt_requires_a_notification_and_the_desk_covers_an_away_chair
     assert_eq!(notices(&h).len(), 1);
 
     send(signal("PermissionRequest", "echo next-fixture")).await;
-    send(notify).await;
+    send(notify.clone()).await;
     let next = next_notice(&h, 2).await;
-    terminal.stop();
+    // An input can deny the prompt without a Claude tool result. Accept it
+    // while the daemon is down and recover the same open notice on restart.
+    h.stop().await;
+    send_input(&terminal).await;
+    start(&mut h).await;
     wait_archived(&h, next.seq).await;
+    claude_hook(h.dir.path(), &h, terminal.host_id(), notify).await;
+    let generic = next_notice(&h, 3).await;
+    assert!(!generic.body.contains("echo next-fixture"));
+    assert!(!generic.body.contains("工具或命令"));
+    h.server.reset_log(Some("new-hosted-approval-epoch"));
+    let carried = next_notice(&h, 1).await;
+    assert_ne!(generic.id, carried.id);
+    assert_eq!(generic.body, carried.body);
+    terminal.stop();
+    wait_archived(&h, carried.seq).await;
     h.stop().await;
 }
 
@@ -298,7 +393,7 @@ async fn codex_hosted_notices_close_on_input_and_recur_on_native_replay() {
     assert!(
         first
             .body
-            .contains("Tool or command: run: echo approval-fixture")
+            .contains("Tool or command \"run: echo approval-fixture\"")
     );
     assert_eq!(first.to, [Address::Chair]);
     assert!(fake.responses().is_empty());
@@ -323,7 +418,8 @@ async fn codex_hosted_notices_close_on_input_and_recur_on_native_replay() {
     fake.replay_approval(thread, native, method, params.clone());
     view_without_input(&terminal).await;
     assert!(archived(&h, first.seq).is_none());
-    send_input(&terminal).await;
+    let mut active_viewer = terminal.viewer().await;
+    active_viewer.write_all(&[2, 0, 1, b'x']).await.unwrap();
     wait_archived(&h, first.seq).await;
     assert_eq!(notices(&h).len(), 1);
     assert!(
@@ -337,6 +433,34 @@ async fn codex_hosted_notices_close_on_input_and_recur_on_native_replay() {
     })
     .await;
     fake.replay_approval(thread, native, method, params);
+    tokio::time::timeout(WAIT, async {
+        loop {
+            let pending: ApprovalsReply =
+                ipc::request(&h.socket(), &Request::Approvals, WAIT, WAIT)
+                    .await
+                    .unwrap();
+            if pending
+                .approvals
+                .iter()
+                .any(|request| request.id == format!("{thread}:{native}"))
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        notices(&h).len(),
+        1,
+        "a connected viewer leaves this approval attended"
+    );
+    let previous = terminal.activity().unwrap();
+    active_viewer.shutdown().await.unwrap();
+    terminal
+        .wait_detached(previous["detached_at"].as_u64().unwrap())
+        .await;
     let second = next_notice(&h, 2).await;
     assert_ne!(first.id, second.id);
     assert!(
@@ -344,6 +468,15 @@ async fn codex_hosted_notices_close_on_input_and_recur_on_native_replay() {
         "the request was still pending when the TUI handled it"
     );
     wait_archived(&h, second.seq).await;
+    // No resolution notification reaches the relay while it is away.
+    let third_id = fake.request_approval(
+        thread,
+        method,
+        json!({"threadId": thread, "command": "echo disconnect-fixture"}),
+    );
+    let third = next_notice(&h, 3).await;
+    fake.resolve_while_disconnected(thread, third_id);
+    wait_archived(&h, third.seq).await;
     assert!(fake.responses().is_empty());
     terminal.stop();
     eventually("the fixture host exited", WAIT, || {
@@ -397,6 +530,7 @@ async fn an_existing_codex_approval_is_observed_only_after_hosted_restore() {
     .unwrap();
     assert!(notices(&h).is_empty());
     let senator = h.store().session(thread).unwrap().unwrap().agent;
+    h.server.state.inner.lock().unwrap().chair = Some((senator.clone(), true));
     let launch: SpawnReply = ipc::request(
         &h.socket(),
         &Request::Restore {
@@ -411,8 +545,56 @@ async fn an_existing_codex_approval_is_observed_only_after_hosted_restore() {
     let terminal = Terminal::from_launch(&h, &launch).await;
     let waiting = next_notice(&h, 1).await;
     assert!(waiting.body.contains("echo held-before-restore"));
+    assert_eq!(
+        waiting.to,
+        [Address::Speaker],
+        "the stalled chair cannot attend to itself"
+    );
     terminal.stop();
     wait_archived(&h, waiting.seq).await;
     assert!(fake.responses().is_empty());
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn permanent_archive_refusal_stops_retrying_without_blocking_another_notice() {
+    let (mut h, project) = fixture(false, Locale::En).await;
+    start(&mut h).await;
+    let (launch, terminal) = Terminal::spawn(&h, project, HostedRuntime::Claude).await;
+    let pending = json!({
+        "hook_event_name": "Notification", "session_id": launch.session_id,
+        "notification_type": "permission_prompt",
+    });
+    claude_hook(h.dir.path(), &h, terminal.host_id(), pending.clone()).await;
+    let stranded = next_notice(&h, 1).await;
+    h.server.state.inner.lock().unwrap().reject_approval_archive = true;
+    send_input(&terminal).await;
+    eventually("the archive retry budget was exhausted", WAIT, || {
+        (h.server
+            .state
+            .inner
+            .lock()
+            .unwrap()
+            .approval_archive_attempts
+            == 6)
+            .then_some(())
+    })
+    .await;
+    h.server.state.inner.lock().unwrap().reject_approval_archive = false;
+    claude_hook(h.dir.path(), &h, terminal.host_id(), pending).await;
+    let fresh = next_notice(&h, 2).await;
+    assert!(archived(&h, stranded.seq).is_none());
+    assert_eq!(
+        h.server
+            .state
+            .inner
+            .lock()
+            .unwrap()
+            .approval_archive_attempts,
+        6
+    );
+    terminal.stop();
+    wait_archived(&h, fresh.seq).await;
+    assert!(archived(&h, stranded.seq).is_none());
     h.stop().await;
 }

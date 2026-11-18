@@ -120,6 +120,26 @@ async fn codex_approvals_reach_the_app_and_the_first_answer_wins() {
         approvals(&h).await.approvals,
         std::slice::from_ref(&approval)
     );
+    // Preserve the desktop's existing behavior for legacy or duplicate
+    // observations, independently of the hosted attribution guard.
+    codex.replay_approval(
+        "thread-1",
+        first,
+        "item/commandExecution/requestApproval",
+        json!({"threadId":"another-thread","command":"updated manual request"}),
+    );
+    let replacement = watch
+        .wait(|event| match event {
+            WatchEvent::ApprovalRequested(approval) => Some(*approval),
+            _ => None,
+        })
+        .await;
+    assert_eq!(replacement.id, approval.id);
+    assert_eq!(
+        replacement.command.as_deref(),
+        Some("updated manual request")
+    );
+    assert_eq!(approvals(&h).await.approvals, [replacement]);
     let reply = approve(&h, &approval.id, Decision::Deny).await.unwrap();
     assert_eq!(reply.approval.id, approval.id);
     eventually("Codex got the answer", WAIT, || {

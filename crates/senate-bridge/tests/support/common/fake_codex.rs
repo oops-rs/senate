@@ -191,6 +191,14 @@ impl FakeCodex {
         }
     }
 
+    pub fn resolve_while_disconnected(&self, thread: &str, id: i64) {
+        let mut st = self.state.lock().unwrap();
+        for (_, tx) in st.subscribers.remove(thread).into_iter().flatten() {
+            let _ = tx.send(frame(8, b""));
+        }
+        assert!(st.resolve(id));
+    }
+
     /// The TUI answers request `id` first.
     pub fn answer_in_tui(&self, id: i64) -> bool {
         self.state.lock().unwrap().resolve(id)
@@ -432,9 +440,13 @@ fn answer(st: &mut CodexState, method: &str, params: &Value) -> Result<Value, St
                 Some(t) if t.loaded => t,
                 _ => return Err(format!("thread not found: {thread_id}")),
             };
-            let status = match &t.active {
-                Some(_) => json!({"type": "active", "activeFlags": []}),
-                None => json!({"type": "idle"}),
+            let status = match (
+                &t.active,
+                st.pending.values().any(|thread| thread == &thread_id),
+            ) {
+                (_, true) => json!({"type": "active", "activeFlags": ["waitingOnApproval"]}),
+                (Some(_), false) => json!({"type": "active", "activeFlags": []}),
+                (None, false) => json!({"type": "idle"}),
             };
             Ok(json!({"thread": {"id": thread_id, "status": status, "turns": []}}))
         }

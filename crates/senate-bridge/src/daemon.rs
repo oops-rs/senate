@@ -2706,11 +2706,6 @@ impl Shared {
                 session_id,
                 host_id,
             } => wrap(self.on_session_end(&session_id, Some(&host_id)).await),
-            Request::HostedViewerInput {
-                session_id,
-                host_id,
-                at,
-            } => wrap(self.on_hosted_viewer_input(&session_id, &host_id, at)),
             Request::HostedClaudeApproval {
                 session_id,
                 host_id,

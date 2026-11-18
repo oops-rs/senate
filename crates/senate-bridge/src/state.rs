@@ -891,9 +891,9 @@ impl Store {
         )?;
         tx.execute_batch(
             "DELETE FROM cursors; DELETE FROM queue; DELETE FROM dropped; DELETE FROM epochs;
-             DELETE FROM verdicts; DELETE FROM owners; DELETE FROM person_seen;
-             DELETE FROM hosted_approvals;",
+             DELETE FROM verdicts; DELETE FROM owners; DELETE FROM person_seen;",
         )?;
+        hosted_approvals::reset_epoch(&tx)?;
         tx.execute(
             "INSERT INTO epochs (server, epoch, seen_at) VALUES (?1, ?2, ?3)",
             params![server, epoch, now_ms()],

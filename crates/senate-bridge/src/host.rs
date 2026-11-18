@@ -1,6 +1,7 @@
 //! A detached terminal owner. The daemon records the session's identity, but
 //! only this process holds the master PTY and its child.
 
+mod input;
 mod terminal;
 
 use rustix::process::{Pid, Signal, kill_process_group};
@@ -20,7 +21,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::process::{Child, Command};
 use tokio::signal::unix::{SignalKind, signal};
-use tokio::sync::{broadcast, watch};
+use tokio::sync::broadcast;
 
 use crate::host_approval::observed_at;
 use crate::ipc::{self, HostedRuntime, Request};
@@ -46,6 +47,49 @@ fn hosts(paths: &Paths) -> PathBuf {
 
 pub(crate) fn socket(paths: &Paths, id: &EventId) -> PathBuf {
     directory(paths, id).join("tty")
+}
+
+/// Host-owned facts that outlive a bridge restart. Raw terminal bytes
+/// never enter this record.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ViewerActivity {
+    pub attached: bool,
+    pub input_at: u64,
+    pub detached_at: u64,
+}
+
+pub(crate) fn viewer_activity(paths: &Paths, id: &EventId) -> Option<ViewerActivity> {
+    let data = std::fs::read(directory(paths, id).join("viewer.json")).ok()?;
+    serde_json::from_slice(&data).ok()
+}
+
+pub(crate) fn approval_candidate(paths: &Paths, id: &EventId) -> PathBuf {
+    directory(paths, id).join("approval-candidate")
+}
+
+struct Viewer {
+    path: PathBuf,
+    activity: ViewerActivity,
+}
+
+impl Viewer {
+    fn record(&self) {
+        let saved = (|| -> anyhow::Result<()> {
+            let staged = self.path.with_extension("tmp");
+            std::fs::write(&staged, serde_json::to_vec(&self.activity)?)?;
+            std::fs::rename(staged, &self.path)?;
+            Ok(())
+        })();
+        if let Err(error) = saved {
+            let _ = std::fs::remove_file(&self.path);
+            tracing::warn!(%error, "recording activity of the terminal viewer");
+        }
+    }
+
+    fn input(&mut self, at: u64) {
+        self.activity.input_at = at;
+        self.record();
+    }
 }
 
 fn open_lock(dir: &Path) -> io::Result<File> {
@@ -350,22 +394,19 @@ pub async fn run(
         tracing::warn!(%error, "clearing the host's startup marker");
     }
 
-    let (viewer_input, input_reports) = watch::channel(0);
-    let reporter = tokio::spawn(report_viewer_input(
-        paths.socket(),
-        session.session_id.to_owned(),
-        id.clone(),
-        input_reports,
-    ));
+    let mut viewer = Viewer {
+        path: dir.join("viewer.json"),
+        activity: ViewerActivity::default(),
+    };
+    viewer.record();
     let result = tokio::select! {
         status = child.wait() => status.context("wait for the coding TUI").and_then(|status| {
             ensure!(status.success(), "the coding TUI exited with {status}");
             Ok(())
         }),
-        served = serve(&listener, &mut pty_write, &output, &viewer_input) => served,
+        served = serve(&listener, &mut pty_write, &output, &mut viewer) => served,
         _ = terminate.recv() => stop_group(&mut child, pid).await,
     };
-    reporter.abort();
     pump.abort();
     // The runtime's normal SessionEnd hook usually gets there first. A
     // crash or stop without that hook must also retire this session.
@@ -411,7 +452,7 @@ fn runtime_command(
                 serde_json::json!([{
                     "matcher": matcher, "hooks": [{
                         "type": "command", "timeout": 4,
-                        "command": crate::install::hook_command(&exe.to_string_lossy(), "hosted-approval")
+                    "command": format!("{} >/dev/null 2>&1 || :", crate::install::hook_command(&exe.to_string_lossy(), "hosted-approval"))
                     }]
                 }])
             };
@@ -570,26 +611,33 @@ async fn serve(
     listener: &UnixListener,
     pty: &mut OwnedWritePty,
     output: &broadcast::Sender<Vec<u8>>,
-    viewer_input: &watch::Sender<u64>,
+    viewer: &mut Viewer,
 ) -> anyhow::Result<()> {
     loop {
         let (stream, _) = accept(listener).await;
-        let relay = relay(stream, pty, output.subscribe(), viewer_input);
-        tokio::pin!(relay);
-        loop {
-            tokio::select! {
-                biased;
-                result = &mut relay => {
-                    if let Err(error) = result {
-                        tracing::debug!(%error, "terminal attachment ended");
+        viewer.activity.attached = true;
+        viewer.record();
+        {
+            let relay = relay(stream, pty, output.subscribe(), viewer);
+            tokio::pin!(relay);
+            loop {
+                tokio::select! {
+                    biased;
+                    result = &mut relay => {
+                        if let Err(error) = result {
+                            tracing::debug!(%error, "terminal attachment ended");
+                        }
+                        break;
                     }
-                    break;
-                }
-                (other, _) = accept(listener) => {
-                    let _ = other.try_write(&[BUSY]);
+                    (other, _) = accept(listener) => {
+                        let _ = other.try_write(&[BUSY]);
+                    }
                 }
             }
         }
+        viewer.activity.attached = false;
+        viewer.activity.detached_at = observed_at();
+        viewer.record();
     }
 }
 
@@ -597,15 +645,26 @@ async fn relay(
     mut stream: UnixStream,
     pty: &mut OwnedWritePty,
     mut output: broadcast::Receiver<Vec<u8>>,
-    viewer_input: &watch::Sender<u64>,
+    viewer: &mut Viewer,
 ) -> anyhow::Result<()> {
     stream.write_u8(ATTACHED).await?;
     let (mut input, mut screen) = stream.into_split();
     let from_terminal = async {
         let mut first_resize = true;
         let mut keys = [0; IO_CHUNK];
+        let mut classify = input::Input::default();
         loop {
-            match input.read_u8().await? {
+            let tag = match input.read_u8().await {
+                Ok(tag) => tag,
+                Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                    if classify.end_of_input() {
+                        viewer.input(observed_at());
+                    }
+                    return Ok(());
+                }
+                Err(error) => return Err(error.into()),
+            };
+            match tag {
                 RESIZE => {
                     let rows = input.read_u16().await?;
                     let cols = input.read_u16().await?;
@@ -627,8 +686,11 @@ async fn relay(
                         // Timestamp before forwarding: these keys can cause
                         // the next prompt, whose episode they must not clear.
                         let at = observed_at();
+                        let human = classify.observe(&keys[..n]);
                         pty.write_all(&keys[..n]).await?;
-                        viewer_input.send_replace(at);
+                        if human {
+                            viewer.input(at);
+                        }
                     }
                 }
                 _ => bail!("unknown terminal input frame"),
@@ -644,38 +706,9 @@ async fn relay(
         }
     };
     tokio::select! {
+        biased;
         result = from_terminal => result,
         result = to_terminal => result,
-    }
-}
-
-async fn report_viewer_input(
-    socket: PathBuf,
-    session_id: String,
-    host_id: EventId,
-    mut reports: watch::Receiver<u64>,
-) {
-    // Coalesce typing while the daemon is unavailable. Reporting must never
-    // block the PTY or cause the host to retain any input bytes.
-    while reports.changed().await.is_ok() {
-        loop {
-            let at = *reports.borrow_and_update();
-            let result: Result<serde_json::Value, _> = ipc::request(
-                &socket,
-                &Request::HostedViewerInput {
-                    session_id: session_id.clone(),
-                    host_id: host_id.clone(),
-                    at,
-                },
-                Duration::from_millis(300),
-                Duration::from_secs(1),
-            )
-            .await;
-            if result.is_ok() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(250)).await;
-        }
     }
 }
 
@@ -684,40 +717,52 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn a_viewer_has_to_forward_nonempty_input_to_report_activity() {
+    async fn a_viewer_can_answer_a_tui_query_without_reporting_human_input() {
         let (pty, _pts) = pty_process::open().unwrap();
         let (_read, mut pty) = pty.into_split();
         let (output, _) = broadcast::channel(1);
-        let (events, mut reports) = watch::channel(0);
+        let dir = tempfile::tempdir().unwrap();
+        let mut activity = Viewer {
+            path: dir.path().join("viewer.json"),
+            activity: ViewerActivity::default(),
+        };
         let (host, mut viewer) = UnixStream::pair().unwrap();
         let view_only = async {
             assert_eq!(viewer.read_u8().await.unwrap(), ATTACHED);
+            output.send(b"\x1b[6n".to_vec()).unwrap();
+            let mut query = [0; 4];
+            viewer.read_exact(&mut query).await.unwrap();
+            assert_eq!(&query, b"\x1b[6n");
             viewer
-                .write_all(&[RESIZE, 0, 24, 0, 80, KEYS, 0, 0])
+                // The emulator's cursor position report, split into frames.
+                .write_all(b"\x01\0\x18\0P\x02\0\x02\x1b[\x02\0\x052;3;4")
                 .await
                 .unwrap();
+            viewer.write_all(&[KEYS, 0, 1, b'R']).await.unwrap();
             viewer.shutdown().await.unwrap();
         };
         let _ = tokio::join!(
-            relay(host, &mut pty, output.subscribe(), &events),
+            relay(host, &mut pty, output.subscribe(), &mut activity),
             view_only
         );
-        assert!(!reports.has_changed().unwrap());
+        assert_eq!(activity.activity.input_at, 0);
 
         let (host, mut viewer) = UnixStream::pair().unwrap();
         let with_input = async {
             assert_eq!(viewer.read_u8().await.unwrap(), ATTACHED);
             viewer.write_all(&[KEYS, 0, 1, b'x']).await.unwrap();
-            tokio::time::timeout(Duration::from_secs(2), reports.changed())
-                .await
-                .unwrap()
-                .unwrap();
-            assert_ne!(*reports.borrow(), 0);
             viewer.shutdown().await.unwrap();
         };
         let _ = tokio::join!(
-            relay(host, &mut pty, output.subscribe(), &events),
+            relay(host, &mut pty, output.subscribe(), &mut activity),
             with_input
+        );
+        let saved = std::fs::read(&activity.path).unwrap();
+        assert_ne!(
+            serde_json::from_slice::<ViewerActivity>(&saved)
+                .unwrap()
+                .input_at,
+            0
         );
     }
 

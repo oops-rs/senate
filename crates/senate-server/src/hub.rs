@@ -153,8 +153,8 @@ impl Fold for TaskBoard {
 }
 
 impl Fold for SpeakerDocket {
-    fn fresh(_: &CommitteeId, _: &People) -> Self {
-        SpeakerDocket::new()
+    fn fresh(_: &CommitteeId, people: &People) -> Self {
+        SpeakerDocket::with_people(people.clone())
     }
     fn head(&self) -> Seq {
         SpeakerDocket::head(self)
@@ -634,13 +634,14 @@ impl ServerHub {
         {
             // Carry the same open approval to the desk if its chair goes
             // away between the original notice and the viewer's input.
+            let people = self.seats.snapshot().people();
             items.extend(
                 self.folded(&self.chair_dockets, committee)
                     .await?
                     .fold
                     .items()
                     .into_iter()
-                    .filter(|item| item.event.is_hosted_approval()),
+                    .filter(|item| item.event.is_hosted_approval(&people)),
             );
         }
         // Covering for an absent agent is the desk's duty toward other

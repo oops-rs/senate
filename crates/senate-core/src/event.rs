@@ -187,10 +187,10 @@ impl Event {
     }
 
     /// A hosted terminal needs a person to attend to a permission prompt.
-    pub fn is_hosted_approval(&self) -> bool {
+    pub fn is_hosted_approval(&self, people: &crate::People) -> bool {
         self.kind == Kind::Question
             && self.thread.is_none()
-            && self.from.as_senator().is_some()
+            && people.is_agent_address(&self.from)
             && self.on_behalf_of.is_none()
             && matches!(self.to.as_slice(), [Address::Chair | Address::Speaker])
             && self

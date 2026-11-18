@@ -658,16 +658,19 @@ async fn check_status(
         })?;
     payload.check().map_err(ApiFailure::bad_request)?;
     let root = state.hub.get(&event.committee, thread).await?;
-    if let Some(root) = root.as_ref().filter(|r| r.is_hosted_approval()) {
-        if event.from == root.from
-            && roster.is_agent_address(&event.from)
+    if let Some(root) = root
+        .as_ref()
+        .filter(|r| r.is_hosted_approval(&roster.people()))
+    {
+        // Speaker writes have already passed AppState::preside.
+        if (event.from == root.from || event.from == Address::Speaker)
             && payload == StatusPayload::new(StatusState::Archived)
             && event.meta.get(meta::HOSTED_APPROVAL) == Some(&serde_json::json!(root.id))
         {
             return Ok(());
         }
         return Err(ApiFailure::forbidden(
-            "only the originating senator may archive this hosted approval notice",
+            "only the originating senator or the Speaker's office may archive this hosted approval notice",
         ));
     }
     let task = root.as_ref().filter(|r| {

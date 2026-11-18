@@ -104,6 +104,7 @@ impl ChairDocket {
             &mut self.open,
             event,
             by_chair || event.from == Address::Speaker,
+            &self.chair.people,
         );
     }
 

@@ -1,7 +1,7 @@
 //! Durable notice IDs and progress. A server retry must use the event IDs
 //! assigned before its first append, even across a daemon restart.
 
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use senate_core::EventId;
 
 use crate::host_approval::HostApprovalState;
@@ -13,15 +13,7 @@ impl Store {
         &self,
     ) -> Result<Vec<(EventId, HostApprovalState)>, StoreError> {
         let conn = self.conn();
-        let mut stmt = conn.prepare("SELECT host_id, state FROM hosted_approvals")?;
-        let mut rows = stmt.query([])?;
-        let mut states = Vec::new();
-        while let Some(row) = rows.next()? {
-            let id: String = row.get(0)?;
-            let raw: String = row.get(1)?;
-            states.push((parse_host_id(&id)?, from_json(&raw)?));
-        }
-        Ok(states)
+        states(&conn)
     }
 
     pub(crate) fn edit_hosted_approvals(
@@ -46,18 +38,52 @@ impl Store {
         if !edit(&mut state) {
             return Ok(false);
         }
-        if state.is_empty() {
-            conn.execute("DELETE FROM hosted_approvals WHERE host_id = ?1", [&id])?;
-        } else {
-            let raw = serde_json::to_string(&state).map_err(json_error)?;
-            conn.execute(
-                "INSERT INTO hosted_approvals (host_id, state) VALUES (?1, ?2)
-                 ON CONFLICT(host_id) DO UPDATE SET state = excluded.state",
-                params![id, raw],
-            )?;
-        }
+        save(&conn, &id, state)?;
         Ok(true)
     }
+}
+
+pub(super) fn reset_epoch(db: &Connection) -> Result<(), StoreError> {
+    for (id, mut state) in states(db)? {
+        // Old log receipts and archive targets are meaningless in the new
+        // epoch. Preserve the runtime's evidence that a prompt is pending.
+        state.notices.retain(|notice| notice.archive.is_none());
+        for notice in &mut state.notices {
+            notice.id = EventId::new();
+            notice.recipient = None;
+            notice.seq = None;
+            notice.append_attempted = false;
+            notice.failures = 0;
+        }
+        save(db, &id.to_string(), state)?;
+    }
+    Ok(())
+}
+
+fn states(db: &Connection) -> Result<Vec<(EventId, HostApprovalState)>, StoreError> {
+    let mut stmt = db.prepare("SELECT host_id, state FROM hosted_approvals")?;
+    let mut rows = stmt.query([])?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        let id: String = row.get(0)?;
+        let raw: String = row.get(1)?;
+        out.push((parse_host_id(&id)?, from_json(&raw)?));
+    }
+    Ok(out)
+}
+
+fn save(db: &Connection, id: &str, state: HostApprovalState) -> Result<(), StoreError> {
+    if state.is_empty() {
+        db.execute("DELETE FROM hosted_approvals WHERE host_id = ?1", [id])?;
+    } else {
+        let raw = serde_json::to_string(&state).map_err(json_error)?;
+        db.execute(
+            "INSERT INTO hosted_approvals (host_id, state) VALUES (?1, ?2)
+             ON CONFLICT(host_id) DO UPDATE SET state = excluded.state",
+            params![id, raw],
+        )?;
+    }
+    Ok(())
 }
 
 fn from_json(raw: &str) -> Result<HostApprovalState, StoreError> {

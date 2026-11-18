@@ -223,13 +223,22 @@ pub async fn run_as(
     runtime: Option<Runtime>,
     timeouts: HookTimeouts,
 ) -> Option<String> {
+    if kind == HookKind::HostedApproval {
+        // The candidate marker is checked before any IPC connection. Most
+        // PostToolUse hooks have no approval to finish.
+        let request = prepare(kind, daemon_socket, stdin, env, runtime, timeouts.git).await?;
+        let _: Value = ipc::request(daemon_socket, &request, timeouts.connect, timeouts.request)
+            .await
+            .ok()?;
+        return None;
+    }
     // Connect before asking git anything: a down daemon costs milliseconds.
     let mut client = ipc::IpcClient::connect(daemon_socket, timeouts.connect)
         .await
         .ok()?;
     let request = prepare(kind, daemon_socket, stdin, env, runtime, timeouts.git).await?;
     match kind {
-        HookKind::SessionEnd | HookKind::HostedApproval => {
+        HookKind::SessionEnd => {
             let _: serde_json::Value = client.call(&request, timeouts.request).await.ok()?;
             None
         }
@@ -275,11 +284,18 @@ pub async fn prepare(
             .parse()
             .ok()?;
         let hook: Value = serde_json::from_str(stdin).ok()?;
+        let signal = approval_signal(&hook)?;
+        if matches!(signal, ClaudeApprovalSignal::Finished { .. }) {
+            let paths = crate::paths::Paths::new(daemon_socket.parent()?);
+            if !crate::host::approval_candidate(&paths, &host_id).exists() {
+                return None;
+            }
+        }
         return Some(Request::HostedClaudeApproval {
             host_id,
             at: observed_at(),
             session_id: hook.get("session_id")?.as_str()?.to_owned(),
-            signal: approval_signal(&hook)?,
+            signal,
         });
     }
     let input: HookInput = if runtime == Some(Runtime::Agy) {

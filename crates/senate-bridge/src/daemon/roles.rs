@@ -923,8 +923,29 @@ impl Shared {
         if reason.trim().is_empty() {
             return Err(IpcError::bad_request("`reason` is empty"));
         }
-        let (item, _) = self.docket_item(&committee, seq).await?;
-        let root = item.event;
+        let people = self.people();
+        let root = match self.docket_item(&committee, seq).await {
+            Ok((item, _)) => item.event,
+            Err(error) => self
+                .fetch_event(&committee, seq)
+                .await
+                .ok()
+                .filter(|event| event.is_hosted_approval(&people))
+                .ok_or(error)?,
+        };
+        if root.is_hosted_approval(&people) {
+            let mut archived = Self::status_event(
+                committee,
+                Address::Speaker,
+                root.seq,
+                &StatusPayload::new(senate_core::StatusState::Archived),
+                id,
+            )
+            .with_meta(meta::ACTED_BY, serde_json::json!(acted_by.to_string()))
+            .with_meta(meta::HOSTED_APPROVAL, serde_json::json!(root.id));
+            archived.body = reason;
+            return self.post(archived).await;
+        }
         let asker = root.on_behalf_of.clone().unwrap_or(root.from.clone());
         let mut event = NewEvent::new(committee, Kind::Answer, Address::Speaker, reason)
             .to(asker)

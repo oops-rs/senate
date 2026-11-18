@@ -852,9 +852,6 @@ impl Shared {
         self.work.notify_one();
         if runtime == HostedRuntime::Codex {
             self.reconcile_approvals();
-            if restoring {
-                self.relay.observe_pending_on_restore(&session_id);
-            }
         }
         Ok(HostedLaunch {
             reply,

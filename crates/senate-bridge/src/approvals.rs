@@ -42,7 +42,7 @@ use tokio::task::JoinHandle;
 
 use crate::delivery::codex::ws::{Incoming, WsWriter};
 use crate::delivery::codex::{AppServer, CodexError, Transport};
-use crate::host_approval::{CodexApprovalSignal, observed_at, tool_label};
+use crate::host_approval::{CodexApprovalSignal, CodexPrompt, observed_at, tool_label};
 use crate::ipc::WatchEvent;
 
 /// Server-request methods relayed.
@@ -183,14 +183,6 @@ pub fn parse_request(thread: &str, msg: &Value) -> Option<(Value, Approval)> {
     let kind = ApprovalKind::of(method)?;
     let rpc_id = msg.get("id")?.clone();
     let params = msg.get("params").cloned().unwrap_or(Value::Null);
-    if params
-        .get("threadId")
-        .or_else(|| params.get("conversationId"))
-        .and_then(Value::as_str)
-        .is_some_and(|reported| reported != thread)
-    {
-        return None;
-    }
     let command = params.get("command").and_then(text);
     let cwd = params.get("cwd").and_then(text);
     let reason = params.get("reason").and_then(text);
@@ -233,7 +225,7 @@ pub fn parse_request(thread: &str, msg: &Value) -> Option<(Value, Approval)> {
 
 struct Pending {
     approval: Approval,
-    at: u64,
+    hosted: Option<CodexPrompt>,
     rpc_id: Value,
     writer: Arc<tokio::sync::Mutex<WsWriter>>,
 }
@@ -278,25 +270,23 @@ impl Relay {
         self
     }
 
-    fn observe_host(&self, approval: &Approval, at: u64, pending: bool) {
+    fn resolved_for_host(&self, session_id: &str, request_id: Option<String>) {
         if let Some(observer) = &self.hosted {
             let _ = observer.send(CodexApprovalSignal {
-                session_id: approval.session_id.clone(),
-                request_id: approval.id.clone(),
-                at,
-                tool: pending.then(|| tool_label(&approval.summary)),
+                session_id: session_id.to_owned(),
+                request_id,
+                at: observed_at(),
             });
         }
     }
 
-    /// A restore can publish a host over a Codex thread the relay already
-    /// follows. Hand its current requests to the now-hosted observer.
-    pub(crate) fn observe_pending_on_restore(&self, session: &str) {
-        for pending in lock(&self.pending).values() {
-            if pending.approval.session_id == session {
-                self.observe_host(&pending.approval, pending.at, true);
-            }
-        }
+    /// The host observer reconciles this read-only snapshot, including
+    /// requests first seen before a launch finished publishing.
+    pub(crate) fn hosted_prompts(&self) -> Vec<CodexPrompt> {
+        lock(&self.pending)
+            .values()
+            .filter_map(|pending| pending.hosted.clone())
+            .collect()
     }
 
     fn publish(&self, event: WatchEvent) {
@@ -449,6 +439,9 @@ impl Relay {
         let mut sub = tokio::time::timeout(SUBSCRIBE_TIMEOUT, connect)
             .await
             .map_err(|_| CodexError::Timeout)??;
+        if sub.approvals_clear {
+            self.resolved_for_host(thread, None);
+        }
         tracing::debug!(thread, "listening for Codex approvals");
         let writer = Arc::new(tokio::sync::Mutex::new(sub.writer));
         loop {
@@ -480,7 +473,9 @@ impl Relay {
             let id = approval_id(of, request);
             if let Some(p) = lock(&self.pending).remove(&id) {
                 tracing::info!(id, "a Codex approval was answered elsewhere");
-                self.observe_host(&p.approval, observed_at(), false);
+                if p.hosted.is_some() {
+                    self.resolved_for_host(of, Some(id.clone()));
+                }
                 self.publish(WatchEvent::ApprovalResolved {
                     id,
                     session_id: p.approval.session_id,
@@ -491,20 +486,38 @@ impl Relay {
             return;
         }
         if let Some((rpc_id, approval)) = parse_request(thread, &msg) {
-            use std::collections::btree_map::Entry;
             let mut pending = lock(&self.pending);
-            let Entry::Vacant(slot) = pending.entry(approval.id.clone()) else {
-                return;
-            };
-            tracing::info!(id = %approval.id, summary = %approval.summary, "a Codex approval is waiting");
-            let at = observed_at();
-            slot.insert(Pending {
-                approval: approval.clone(),
-                at,
-                rpc_id,
-                writer: writer.clone(),
+            let reported = approval
+                .params
+                .get("threadId")
+                .or_else(|| approval.params.get("conversationId"))
+                .and_then(Value::as_str);
+            let previous = pending
+                .get(&approval.id)
+                .and_then(|request| request.hosted.clone());
+            // The desktop path retains its existing replacement and
+            // notification behavior. Hosted observations keep the same
+            // evidence for duplicate IDs on this subscriber.
+            let hosted = previous.or_else(|| {
+                reported
+                    .is_none_or(|owner| owner == thread)
+                    .then(|| CodexPrompt {
+                        session_id: thread.into(),
+                        request_id: approval.id.clone(),
+                        at: observed_at(),
+                        tool: tool_label(&approval.summary),
+                    })
             });
-            self.observe_host(&approval, at, true);
+            tracing::info!(id = %approval.id, summary = %approval.summary, "a Codex approval is waiting");
+            pending.insert(
+                approval.id.clone(),
+                Pending {
+                    approval: approval.clone(),
+                    hosted,
+                    rpc_id,
+                    writer: writer.clone(),
+                },
+            );
             drop(pending);
             self.publish(WatchEvent::ApprovalRequested(Box::new(approval)));
         }
@@ -521,7 +534,6 @@ mod tests {
             "threadId": "t1", "turnId": "u", "itemId": "i", "startedAtMs": 1,
             "command": "cargo test", "cwd": "/w", "reason": null}});
         let (id, a) = parse_request("t1", &msg).unwrap();
-        assert!(parse_request("other-thread", &msg).is_none());
         assert_eq!(id, json!(7));
         assert_eq!(a.id, "t1:7");
         assert_eq!(a.summary, "run: cargo test");

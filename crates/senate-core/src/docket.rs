@@ -164,11 +164,19 @@ pub fn awaits_speaker(event: &Event) -> bool {
 pub struct SpeakerDocket {
     head: Seq,
     open: BTreeMap<Seq, Event>,
+    people: crate::People,
 }
 
 impl SpeakerDocket {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_people(people: crate::People) -> Self {
+        Self {
+            people,
+            ..Self::default()
+        }
     }
 
     pub fn head(&self) -> Seq {
@@ -184,7 +192,12 @@ impl SpeakerDocket {
             self.open.insert(event.seq, event.clone());
             return;
         }
-        close_docket_items(&mut self.open, event, event.from == Address::Speaker);
+        close_docket_items(
+            &mut self.open,
+            event,
+            event.from == Address::Speaker,
+            &self.people,
+        );
     }
 
     /// The open items, oldest first, each with why it waits.
@@ -208,7 +221,12 @@ impl SpeakerDocket {
 
 /// Both desks close a hosted approval notice on its archive. Discussing or
 /// forwarding it does not mean anyone attended to the terminal.
-pub fn close_docket_items(open: &mut BTreeMap<Seq, Event>, event: &Event, by_desk: bool) {
+pub fn close_docket_items(
+    open: &mut BTreeMap<Seq, Event>,
+    event: &Event,
+    by_desk: bool,
+    people: &crate::People,
+) {
     if let Some(root) = event.thread
         && StatusPayload::of(event).is_some_and(|s| s.state == StatusState::Archived)
     {
@@ -223,7 +241,7 @@ pub fn close_docket_items(open: &mut BTreeMap<Seq, Event>, event: &Event, by_des
         for root in event.thread.into_iter().chain(relayed) {
             if open
                 .get(&root)
-                .is_some_and(|item| !item.is_hosted_approval())
+                .is_some_and(|item| !item.is_hosted_approval(people))
             {
                 open.remove(&root);
             }

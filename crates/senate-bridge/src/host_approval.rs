@@ -14,7 +14,22 @@ pub(crate) fn observed_at() -> u64 {
 
 /// One bounded log line. Runtime tool arguments are untrusted text.
 pub(crate) fn tool_label(tool: &str) -> String {
-    let mut chars = tool.chars().map(|c| if c.is_control() { ' ' } else { c });
+    let mut chars = tool.chars().filter_map(|c| match c {
+        '\u{00ad}'
+        | '\u{034f}'
+        | '\u{061c}'
+        | '\u{180b}'..='\u{180f}'
+        | '\u{200b}'..='\u{200f}'
+        | '\u{202a}'..='\u{202e}'
+        | '\u{2060}'..='\u{206f}'
+        | '\u{fe00}'..='\u{fe0f}'
+        | '\u{feff}'
+        | '\u{fff9}'..='\u{fffb}'
+        | '\u{e0000}'..='\u{e0fff}' => None,
+        '\u{2028}' | '\u{2029}' => Some(' '),
+        c if c.is_control() => Some(' '),
+        c => Some(c),
+    });
     let mut label: String = chars.by_ref().take(600).collect();
     if chars.next().is_some() {
         label.push('…');
@@ -31,13 +46,20 @@ pub enum ClaudeApprovalSignal {
     Finished { fingerprint: String },
 }
 
-/// The existing Codex relay's read-only feed to the hosted notice worker.
-pub(crate) struct CodexApprovalSignal {
+/// One permission request currently confirmed by the Codex connection.
+#[derive(Clone)]
+pub(crate) struct CodexPrompt {
     pub session_id: String,
     pub request_id: String,
     pub at: u64,
-    /// The reported command or tool on receipt, and None on native resolution.
-    pub tool: Option<String>,
+    pub tool: String,
+}
+
+/// The relay's positive evidence that particular requests are no longer pending.
+pub(crate) struct CodexApprovalSignal {
+    pub session_id: String,
+    pub request_id: Option<String>,
+    pub at: u64,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -65,7 +87,8 @@ pub(crate) struct ApprovalNotice {
     pub id: EventId,
     pub prompt: String,
     pub at: u64,
-    pub tool: String,
+    pub tool: Option<String>,
+    pub runtime: crate::session::Runtime,
     pub agent: SenatorName,
     pub committee: CommitteeId,
     /// Fixed before posting so a retry keeps the same recipient and event ID.
@@ -73,4 +96,22 @@ pub(crate) struct ApprovalNotice {
     pub seq: Option<Seq>,
     /// The stable ID of its archive status once a handling fact arrives.
     pub archive: Option<EventId>,
+    /// The append may have reached the server even if its reply was lost.
+    #[serde(default)]
+    pub append_attempted: bool,
+    #[serde(default)]
+    pub failures: u8,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_labels_strip_invisible_formatting_and_keep_one_line() {
+        assert_eq!(
+            tool_label("printf\u{2028}input\u{2029}extra\u{202e}end\u{200d}\u{2066}\u{feff}"),
+            "printf input extraend"
+        );
+    }
 }

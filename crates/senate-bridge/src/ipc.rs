@@ -385,12 +385,6 @@ pub enum Request {
         session_id: String,
         host_id: EventId,
     },
-    /// The attached viewer forwarded nonempty input to the TUI.
-    HostedViewerInput {
-        session_id: String,
-        host_id: EventId,
-        at: u64,
-    },
     /// An observation from a Claude hook installed by its terminal host.
     HostedClaudeApproval {
         session_id: String,

@@ -31,10 +31,19 @@ async fn hosted_approval_stays_on_the_docket_until_its_senator_archives_it() {
     use serde_json::json;
 
     let dir = tempfile::tempdir().unwrap();
-    let mut desk = Desk::new(dir.path(), "alice", Locale::En, "[local]\n");
+    let mut desk = Desk::new(
+        dir.path(),
+        "alice",
+        Locale::En,
+        "[local]\nsecretaries = [\"office-agent\"]\n",
+    );
     desk.start().await;
     let chair_inbox = desk.inbox("chair");
     desk.session_start_as("live-chair", &chair_inbox, "claude")
+        .await
+        .unwrap();
+    let office_inbox = desk.inbox("office");
+    desk.session_start_as("office-session", &office_inbox, "office-agent")
         .await
         .unwrap();
     let _: senate_core::api::ChairInfo = desk
@@ -127,7 +136,9 @@ async fn hosted_approval_stays_on_the_docket_until_its_senator_archives_it() {
     ] {
         assert_eq!(api.append(&invalid).await.unwrap_err().status(), Some(403));
     }
-    api.append(&archive(waiting, &root.id)).await.unwrap();
+    api.append(&archive(waiting.clone(), &root.id))
+        .await
+        .unwrap();
     assert!(
         !hub.chair_docket(&committee())
             .await
@@ -144,6 +155,36 @@ async fn hosted_approval_stays_on_the_docket_until_its_senator_archives_it() {
             .iter()
             .any(|i| i.event.id == root.id)
     );
+    for (sender, final_kind) in [(waiting, Kind::Status), (person("alice"), Kind::Answer)] {
+        let stranded = api
+            .append(
+                &NewEvent::new(committee(), Kind::Question, sender, "Stranded notice")
+                    .to(Address::Speaker)
+                    .with_meta(meta::HOSTED_APPROVAL, json!(true)),
+            )
+            .await
+            .unwrap()
+            .event;
+        let refused: senate_bridge::ipc::Posted = desk
+            .ipc(Request::Refuse {
+                session: Laptop::session("office-session"),
+                committee: committee(),
+                seq: stranded.seq,
+                reason: "This terminal no longer needs attention.".into(),
+                id: None,
+            })
+            .await;
+        let event = hub.get(&committee(), refused.seq).await.unwrap().unwrap();
+        assert_eq!(event.kind, final_kind);
+        assert!(
+            !hub.docket(&committee())
+                .await
+                .unwrap()
+                .items
+                .iter()
+                .any(|i| i.event.id == stranded.id)
+        );
+    }
     desk.stop().await;
 }
 

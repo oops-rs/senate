@@ -5,6 +5,7 @@ use super::*;
 use crate::host;
 use crate::host_approval::{
     ApprovalNotice, ClaudeCandidate, CodexApprovalSignal, HostApprovalState, observed_at,
+    tool_label,
 };
 use crate::ipc::ClaudeApprovalSignal;
 use senate_core::StatusState;
@@ -12,10 +13,10 @@ use tokio::sync::mpsc;
 
 const RETRY: Duration = Duration::from_secs(1);
 const POST_TIMEOUT: Duration = Duration::from_secs(5);
+const POST_FAILURE_LIMIT: u8 = 6;
 
 #[derive(Default)]
 pub(super) struct Monitor {
-    inputs: Mutex<BTreeMap<EventId, u64>>,
     wake: Notify,
 }
 
@@ -38,29 +39,6 @@ impl Shared {
             .map(|session| (id, session)))
     }
 
-    pub(super) fn on_hosted_viewer_input(
-        &self,
-        session: &str,
-        host_id: &EventId,
-        at: u64,
-    ) -> Result<serde_json::Value, IpcError> {
-        if (1..=observed_at()).contains(&at)
-            && self
-                .approval_host(session)
-                .map_err(internal)?
-                .is_some_and(|(id, _)| id == *host_id)
-        {
-            let mut inputs = lock(&self.hosted_approvals.inputs);
-            let last = inputs.entry(host_id.clone()).or_default();
-            *last = (*last).max(at);
-            self.edit_approvals(host_id, |state| {
-                close_notices(state, |notice| notice.at <= *last)
-            })
-            .map_err(internal)?;
-        }
-        Ok(serde_json::json!({}))
-    }
-
     pub(super) fn on_hosted_claude_approval(
         &self,
         session_id: &str,
@@ -73,68 +51,71 @@ impl Shared {
             && id == *host_id
             && session.runtime == Runtime::Claude
         {
-            let inputs = lock(&self.hosted_approvals.inputs);
-            let last_input = inputs.get(host_id).copied().unwrap_or(0);
-            self.edit_approvals(host_id, |state| match signal {
-                ClaudeApprovalSignal::Requested { tool, fingerprint } => {
-                    if state.claude.as_ref().is_some_and(|pending| pending.at > at) {
-                        return false;
+            let paths = Paths::new(&self.home);
+            let input_at =
+                host::viewer_activity(&paths, host_id).map_or(0, |viewer| viewer.input_at);
+            self.edit_approvals(host_id, |state| {
+                let contextualized = set_context(state, session_id);
+                let attended = observe_input(state, input_at);
+                let observed = match signal {
+                    ClaudeApprovalSignal::Requested { tool, fingerprint } => {
+                        if at > input_at && state.claude.as_ref().is_none_or(|prior| prior.at <= at)
+                        {
+                            state.claude = Some(ClaudeCandidate {
+                                tool,
+                                fingerprint,
+                                at,
+                            });
+                            true
+                        } else {
+                            false
+                        }
                     }
-                    state.session_id = session_id.to_owned();
-                    state.claude = Some(ClaudeCandidate {
-                        tool,
-                        fingerprint,
-                        at,
-                    });
-                    true
-                }
-                ClaudeApprovalSignal::Pending => {
-                    let Some(candidate) = state.claude.as_ref().filter(|pending| pending.at <= at)
-                    else {
-                        return false;
-                    };
-                    let (prompt, tool) = (candidate.fingerprint.clone(), candidate.tool.clone());
-                    open_notice(state, &session, at, last_input, prompt, tool)
-                }
-                ClaudeApprovalSignal::Finished { fingerprint } => {
-                    let completed = state.claude.as_ref().is_some_and(|candidate| {
-                        candidate.fingerprint == fingerprint && candidate.at <= at
-                    });
-                    if completed {
-                        state.claude = None;
+                    ClaudeApprovalSignal::Pending => {
+                        let candidate = state.claude.as_ref().filter(|pending| pending.at <= at);
+                        let (prompt, tool) = candidate.map_or_else(
+                            || ("claude:unspecified".into(), None),
+                            |candidate| {
+                                (candidate.fingerprint.clone(), Some(candidate.tool.clone()))
+                            },
+                        );
+                        at > input_at && open_notice(state, &session, at, prompt, tool)
                     }
-                    close_notices(state, |notice| {
-                        notice.prompt == fingerprint && notice.at <= at
-                    }) || completed
-                }
+                    ClaudeApprovalSignal::Finished { fingerprint } => {
+                        let completed = state.claude.as_ref().is_some_and(|candidate| {
+                            candidate.fingerprint == fingerprint && candidate.at <= at
+                        });
+                        if completed {
+                            state.claude = None;
+                        }
+                        close_notices(state, |notice| {
+                            notice.prompt == fingerprint && notice.at <= at
+                        }) || completed
+                    }
+                };
+                contextualized || attended || observed
             })
             .map_err(internal)?;
         }
         Ok(serde_json::json!({}))
     }
 
-    fn observe_codex_approval(&self, signal: CodexApprovalSignal) -> Result<(), StoreError> {
+    fn observe_codex_resolution(&self, signal: CodexApprovalSignal) -> Result<(), StoreError> {
         let Some((id, session)) = self.approval_host(&signal.session_id)? else {
             return Ok(());
         };
-        if session.runtime != Runtime::Codex {
-            return Ok(());
+        if session.runtime == Runtime::Codex {
+            self.edit_approvals(&id, |state| {
+                close_notices(state, |notice| {
+                    notice.at <= signal.at
+                        && signal
+                            .request_id
+                            .as_ref()
+                            .is_none_or(|key| &notice.prompt == key)
+                })
+            })?;
         }
-        let inputs = lock(&self.hosted_approvals.inputs);
-        let last_input = inputs.get(&id).copied().unwrap_or(0);
-        self.edit_approvals(&id, |state| match signal.tool {
-            Some(tool) => open_notice(
-                state,
-                &session,
-                signal.at,
-                last_input,
-                signal.request_id,
-                tool,
-            ),
-            None => close_notices(state, |notice| {
-                notice.prompt == signal.request_id && notice.at <= signal.at
-            }),
-        })
+        Ok(())
     }
 
     fn edit_approvals(
@@ -142,31 +123,67 @@ impl Shared {
         host_id: &EventId,
         edit: impl FnOnce(&mut HostApprovalState) -> bool,
     ) -> Result<(), StoreError> {
-        if self.store.edit_hosted_approvals(host_id, edit)? {
+        let marker = host::approval_candidate(&Paths::new(&self.home), host_id);
+        // Change the marker in the same order as the serialized state edit.
+        // A stray marker only costs an unnecessary IPC until reconciliation.
+        let changed = self.store.edit_hosted_approvals(host_id, |state| {
+            let changed = edit(state);
+            if state.claude.is_some() {
+                if !marker.exists() {
+                    let _ = std::fs::write(&marker, []);
+                }
+            } else if marker.exists() {
+                let _ = std::fs::remove_file(&marker);
+            }
+            changed
+        })?;
+        if changed {
             self.hosted_approvals.wake.notify_one();
         }
         Ok(())
     }
 
-    fn retire_approval_hosts(&self) -> Result<(), StoreError> {
-        {
-            let mut inputs = lock(&self.hosted_approvals.inputs);
-            if !inputs.is_empty() {
-                let alive = host::running_ids(&Paths::new(&self.home))?;
-                inputs.retain(|id, _| alive.contains(id));
-            }
-        }
+    fn reconcile_approval_hosts(&self) -> Result<(), StoreError> {
+        let paths = Paths::new(&self.home);
         for (id, state) in self.store.hosted_approval_states()? {
-            if self
-                .approval_host(&state.session_id)?
-                .is_some_and(|(live, _)| live == id)
-            {
-                continue;
-            }
-            self.store.edit_hosted_approvals(&id, |state| {
+            let native = state.session_id;
+            let is_live = self
+                .approval_host(&native)?
+                .is_some_and(|(live, _)| live == id);
+            let viewer = host::viewer_activity(&paths, &id);
+            self.edit_approvals(&id, |state| {
+                if state.session_id != native {
+                    return false;
+                }
+                if is_live {
+                    return viewer
+                        .as_ref()
+                        .is_some_and(|viewer| observe_input(state, viewer.input_at));
+                }
                 let had_candidate = state.claude.take().is_some();
                 close_notices(state, |_| true) || had_candidate
             })?;
+        }
+        // Take the relay's live snapshot even if the native request arrived
+        // before the host was published. A disconnected relay supplies no
+        // positive pending evidence for an unattended notice.
+        for prompt in self.relay.hosted_prompts() {
+            let Some((id, session)) = self.approval_host(&prompt.session_id)? else {
+                continue;
+            };
+            if session.runtime != Runtime::Codex {
+                continue;
+            }
+            let Some(viewer) = host::viewer_activity(&paths, &id).filter(|viewer| !viewer.attached)
+            else {
+                continue;
+            };
+            let at = prompt.at.max(viewer.detached_at);
+            if at > viewer.input_at {
+                self.edit_approvals(&id, |state| {
+                    open_notice(state, &session, at, prompt.request_id, Some(prompt.tool))
+                })?;
+            }
         }
         Ok(())
     }
@@ -191,61 +208,93 @@ impl Shared {
         })
     }
 
+    fn can_append_approval(
+        &self,
+        host_id: &EventId,
+        native: &str,
+        notice: &ApprovalNotice,
+    ) -> bool {
+        if notice.archive.is_some() {
+            // Recover the receipt of an append that may already exist, so
+            // its archive can name the real seq.
+            return notice.append_attempted;
+        }
+        let unattended = host::viewer_activity(&Paths::new(&self.home), host_id)
+            .is_some_and(|viewer| !viewer.attached && viewer.input_at < notice.at);
+        unattended
+            && self
+                .approval_host(native)
+                .ok()
+                .flatten()
+                .is_some_and(|(id, _)| &id == host_id)
+            && (notice.runtime != Runtime::Codex
+                || self
+                    .relay
+                    .hosted_prompts()
+                    .iter()
+                    .any(|prompt| prompt.request_id == notice.prompt))
+    }
+
     async fn send_approval_notice(
         &self,
         host_id: &EventId,
-        notice: ApprovalNotice,
+        native: &str,
+        notice: &ApprovalNotice,
     ) -> Result<(), IpcError> {
         let sender = Address::senator(&notice.agent);
         match (notice.seq, notice.archive.as_ref()) {
             (None, _) => {
-                let recipient = match notice.recipient {
-                    Some(address) => address,
-                    None => {
-                        let address = self.approval_recipient(&notice).await?;
-                        let saved = self
-                            .store
-                            .edit_hosted_approvals(host_id, |state| {
-                                update_notice(state, &notice.id, |n| {
-                                    n.recipient = Some(address.clone())
-                                })
-                            })
-                            .map_err(internal)?;
-                        if !saved {
-                            return Ok(());
-                        }
-                        address
-                    }
+                if !self.can_append_approval(host_id, native, notice) {
+                    return Ok(());
+                }
+                let recipient = match &notice.recipient {
+                    Some(address) => address.clone(),
+                    None => self.approval_recipient(notice).await?,
                 };
-                let committee = &notice.committee;
-                let tool = &notice.tool;
-                let attach = format!("senate attach {}", notice.agent);
-                let who = sender.in_text();
-                let body = match self.locale {
-                    Locale::En => format!(
-                        "{who} is waiting for tool approval in committee `{committee}`. Tool or command: {tool}\nAsk a person to run `{attach}` and decide in the terminal."
-                    ),
-                    Locale::Zh => format!(
-                        "{who} 在委员会 `{committee}` 等待工具授权。工具或命令：{tool}\n请让人员运行 `{attach}`，在终端内决定。"
-                    ),
-                };
-                let event = NewEvent::new(notice.committee, Kind::Question, sender, body)
-                    .with_id(notice.id.clone())
-                    .to(recipient)
-                    .with_meta(meta::HOSTED_APPROVAL, serde_json::json!(true));
-                let posted = self.post(event).await?;
-                self.store
+                // While looking up the recipient the viewer or a Claude
+                // result may have handled this before its first append.
+                if !self.can_append_approval(host_id, native, notice) {
+                    return Ok(());
+                }
+                let started = self
+                    .store
                     .edit_hosted_approvals(host_id, |state| {
-                        update_notice(state, &notice.id, |n| n.seq = Some(posted.seq))
+                        let Some(current) = state.notices.iter_mut().find(|n| n.id == notice.id)
+                        else {
+                            return false;
+                        };
+                        if current.archive.is_some() && !current.append_attempted {
+                            return false;
+                        }
+                        current.recipient = Some(recipient.clone());
+                        current.append_attempted = true;
+                        true
                     })
                     .map_err(internal)?;
-                if notice.archive.is_some() {
-                    self.hosted_approvals.wake.notify_one();
+                if !started {
+                    return Ok(());
                 }
+                let event = NewEvent::new(
+                    notice.committee.clone(),
+                    Kind::Question,
+                    sender,
+                    approval_body(notice, self.locale),
+                )
+                .with_id(notice.id.clone())
+                .to(recipient)
+                .with_meta(meta::HOSTED_APPROVAL, serde_json::json!(true));
+                let posted = self.post(event).await?;
+                self.edit_approvals(host_id, |state| {
+                    update_notice(state, &notice.id, |n| {
+                        n.seq = Some(posted.seq);
+                        n.failures = 0;
+                    })
+                })
+                .map_err(internal)?;
             }
             (Some(seq), Some(id)) => {
                 let event = Self::status_event(
-                    notice.committee,
+                    notice.committee.clone(),
                     sender,
                     seq,
                     &StatusPayload::new(StatusState::Archived),
@@ -255,8 +304,9 @@ impl Shared {
                 self.post(event).await?;
                 self.store
                     .edit_hosted_approvals(host_id, |state| {
+                        let count = state.notices.len();
                         state.notices.retain(|n| n.id != notice.id);
-                        true
+                        state.notices.len() != count
                     })
                     .map_err(internal)?;
             }
@@ -264,24 +314,79 @@ impl Shared {
         }
         Ok(())
     }
+
+    fn failed_approval_post(&self, host_id: &EventId, notice: &ApprovalNotice) {
+        let updated = self.store.edit_hosted_approvals(host_id, |state| {
+            let Some(current) = state.notices.iter_mut().find(|n| n.id == notice.id) else {
+                return false;
+            };
+            if current.seq != notice.seq || current.archive != notice.archive {
+                return false;
+            }
+            current.failures += 1;
+            if current.failures == POST_FAILURE_LIMIT {
+                tracing::warn!(event = %notice.id, committee = %notice.committee, "hosted approval notice reached its retry limit");
+            }
+            true
+        });
+        if let Err(error) = updated {
+            tracing::warn!(%error, "saving hosted approval retry progress");
+        }
+    }
+}
+
+fn approval_body(notice: &ApprovalNotice, locale: Locale) -> String {
+    let committee = &notice.committee;
+    let attach = format!("senate attach {}", notice.agent);
+    let who = Address::senator(&notice.agent).in_text();
+    let tool = notice.tool.as_ref().map_or_else(String::new, |tool| {
+        let quoted = serde_json::json!(tool_label(tool));
+        match locale {
+            Locale::En => format!(" Tool or command {quoted}."),
+            Locale::Zh => format!(" 工具或命令 {quoted}。"),
+        }
+    });
+    match locale {
+        Locale::En => format!(
+            "{who} has a permission prompt waiting in committee \u{0060}{committee}\u{0060}.{tool}\nAsk a person to run \u{0060}{attach}\u{0060} and decide in the terminal."
+        ),
+        Locale::Zh => format!(
+            "{who} 在委员会 \u{0060}{committee}\u{0060} 等待工具授权。{tool}\n请让人员运行 \u{0060}{attach}\u{0060}，在终端内决定。"
+        ),
+    }
+}
+
+fn set_context(state: &mut HostApprovalState, session_id: &str) -> bool {
+    if state.session_id == session_id {
+        return false;
+    }
+    state.session_id = session_id.to_owned();
+    state.claude = None;
+    close_notices(state, |_| true);
+    true
+}
+
+fn observe_input(state: &mut HostApprovalState, at: u64) -> bool {
+    let candidate = state
+        .claude
+        .as_ref()
+        .is_some_and(|candidate| candidate.at <= at);
+    if candidate {
+        state.claude = None;
+    }
+    close_notices(state, |notice| notice.at <= at) || candidate
 }
 
 fn open_notice(
     state: &mut HostApprovalState,
     session: &Session,
     at: u64,
-    last_input: u64,
     prompt: String,
-    tool: String,
+    tool: Option<String>,
 ) -> bool {
     let Some(committee) = session.committee() else {
         return false;
     };
-    // An observation can cross an input report in transit. By the time
-    // that fact reaches this worker, the viewer is already attending to it.
-    if last_input >= at {
-        return false;
-    }
     if state
         .notices
         .iter()
@@ -289,17 +394,20 @@ fn open_notice(
     {
         return false;
     }
-    state.session_id.clone_from(&session.session_id);
+    set_context(state, &session.session_id);
     state.notices.push(ApprovalNotice {
         id: EventId::new(),
         prompt,
         at,
-        tool: crate::host_approval::tool_label(&tool),
+        tool,
+        runtime: session.runtime,
         agent: session.agent.clone(),
         committee: committee.clone(),
         recipient: None,
         seq: None,
         archive: None,
+        append_attempted: false,
+        failures: 0,
     });
     true
 }
@@ -309,9 +417,13 @@ fn close_notices(state: &mut HostApprovalState, applies: impl Fn(&ApprovalNotice
     for notice in &mut state.notices {
         if notice.archive.is_none() && applies(notice) {
             notice.archive = Some(EventId::new());
+            notice.failures = 0;
             changed = true;
         }
     }
+    state
+        .notices
+        .retain(|n| n.archive.is_none() || n.append_attempted || n.seq.is_some());
     changed
 }
 
@@ -338,13 +450,13 @@ pub(super) async fn observe(
         tokio::select! {
             _ = shutdown.changed() => break,
             Some(signal) = signals.recv() => {
-                if let Err(error) = shared.observe_codex_approval(signal) {
-                    tracing::warn!(%error, "recording Codex approval");
+                if let Err(error) = shared.observe_codex_resolution(signal) {
+                    tracing::warn!(%error, "recording Codex approval resolution");
                 }
                 continue;
             }
             _ = retry.tick() => {
-                if let Err(error) = shared.retire_approval_hosts() {
+                if let Err(error) = shared.reconcile_approval_hosts() {
                     tracing::warn!(%error, "checking hosted approvals");
                 }
             }
@@ -358,19 +470,23 @@ pub(super) async fn observe(
             }
         };
         for (host, state) in states {
-            for notice in state
-                .notices
-                .into_iter()
-                .filter(|n| n.seq.is_none() || n.archive.is_some())
-            {
+            for notice in state.notices.into_iter().filter(|n| {
+                n.failures < POST_FAILURE_LIMIT && (n.seq.is_none() || n.archive.is_some())
+            }) {
                 let result = tokio::select! {
                     _ = shutdown.changed() => return,
-                    result = tokio::time::timeout(POST_TIMEOUT, shared.send_approval_notice(&host, notice)) => result,
+                    result = tokio::time::timeout(POST_TIMEOUT, shared.send_approval_notice(&host, &state.session_id, &notice)) => result,
                 };
                 match result {
                     Ok(Ok(())) => {}
-                    Ok(Err(error)) => tracing::debug!(%error, "posting hosted approval notice"),
-                    Err(_) => tracing::debug!("timed out posting hosted approval notice"),
+                    Ok(Err(error)) => {
+                        tracing::debug!(%error, "posting hosted approval notice");
+                        shared.failed_approval_post(&host, &notice);
+                    }
+                    Err(_) => {
+                        tracing::debug!("timed out posting hosted approval notice");
+                        shared.failed_approval_post(&host, &notice);
+                    }
                 }
             }
         }

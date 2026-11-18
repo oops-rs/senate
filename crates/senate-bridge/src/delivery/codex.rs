@@ -475,6 +475,7 @@ impl AppServer {
 pub struct Subscription {
     pub reader: ws::WsReader,
     pub writer: ws::WsWriter,
+    pub(crate) approvals_clear: bool,
     _child: Option<Child>,
 }
 
@@ -483,16 +484,28 @@ impl AppServer {
     /// thread, so this connection hears its events and server requests
     /// ([`crate::approvals`]).
     pub async fn subscribe(mut self, thread: &str) -> Result<Subscription, CodexError> {
-        self.request(
-            "thread/resume",
-            thread,
-            json!({"threadId": thread, "excludeTurns": true}),
-        )
-        .await?;
+        let resumed = self
+            .request(
+                "thread/resume",
+                thread,
+                json!({"threadId": thread, "excludeTurns": true}),
+            )
+            .await?;
+        let approvals_clear = resumed
+            .pointer("/thread/status")
+            .is_some_and(|status| match status.get("type").and_then(Value::as_str) {
+                Some("idle") => true,
+                Some("active") => status
+                    .get("activeFlags")
+                    .and_then(Value::as_array)
+                    .is_some_and(|flags| !flags.iter().any(|flag| flag == "waitingOnApproval")),
+                _ => false,
+            });
         let (reader, writer) = self.ws.into_split();
         Ok(Subscription {
             reader,
             writer,
+            approvals_clear,
             _child: self._child,
         })
     }
