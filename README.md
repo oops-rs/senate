@@ -377,6 +377,24 @@ A worktree pin, Claude Code's `SENATE_AGENT`, or a custom `[agents]` setting can
 
 Known limits: a brand-new worktree on a brand-new branch starts unbound until `senate join` (a new worktree on a branch that already has a saved copy gets it back); the saved copies are keyed by the repository's real path, so moving a repository leaves its copies stale until `senate free` removes them. `senate free` removes: copies whose repository, branch or detached-HEAD worktree no longer exists (a copy for a branch that still exists is never removed, however old); session records that ended more than 7 days ago or whose process is gone; and queued items and cursors of agents with no session and no contact for `free_after_days` (default 30, in `senate.toml`). It only *lists* the data directory of a hosted Senate that `senate.toml` no longer names, because that is a log: `senate free --yes --delete-logs` removes it.
 
+### Secretary team work
+
+Use `senate status --full-ids` to find a native session's full ID. The session must already have a seat on the Senate. The `members` command lists team members by stable senator ID. Dismissal by senator ID also works from a machine that has never registered the session.
+
+```sh
+senate secretary-team appoint --session NATIVE_SESSION_ID
+senate secretary-team members
+senate secretary-team create "Review the delivery plan" --committee delivery --thread 1
+senate secretary-team assign ITEM_ID --to claude-NATIVE_SESSION_ID
+senate secretary-team remove --senator claude-NATIVE_SESSION_ID
+```
+
+The CLI defaults to your team. Use `--for` to select a team you manage. A work item belongs to one team in the Senate. Its optional thread link includes the committee and root sequence, so equal sequence numbers on different committees refer to different threads.
+
+Appointed sessions use the `secretary_work` MCP tool. Use `list` to find work and `read` with its item ID to see history. The returned `next` value can be passed as `after` for the list or `offset` for history. Use `principal` to choose among multiple teams. One member can claim any unowned item. The owner can record progress and hand off the item, and all members can leave notes.
+
+Assignments and handoffs notify the destination session. A Claude session that uses hooks for delivery receives its pending reminder on a later hook. Status, notes and handoff history remain available when a member joins or reconnects. Reappointing a session restores its access to history and leaves earlier assignments cleared.
+
 ### MCP Tools & Lifecycle Hooks
 
 When running `senate install --yes`, Senate registers an MCP server and session hooks into Claude Code and Codex:
@@ -391,6 +409,7 @@ When running `senate install --yes`, Senate registers an MCP server and session 
   - `checkpoint`: Records a durable git branch and commit checkpoint.
   - `join`: Switches or binds the session to a committee.
   - `secretary`: Lists, adds or removes this agent's secretaries.
+  - `secretary_work`: Reads or records work shared explicitly by this session's secretary team.
 - **Presiding Tools (only for a session whose agent works the Speaker's desk):**
   - `speaker_docket`: What awaits the desk: picks, messages for the Speaker, crossings, questions to away agents.
   - `speaker_route`, `speaker_cover`, `speaker_escalate`: Route a pick, answer for an away agent from its checkpoint, put it to the Speaker.
@@ -475,7 +494,7 @@ started terminal sessions can use their own native integration.
 - `senate take <thread>`: Claims an open thread.
 - `senate init --local --person <name>`: Initializes local configuration for standalone use (you as Speaker; a commented `secretary.toml`).
 - `senate chair <senator>`: Makes a senator the chair of the current committee.
-- `senate secretary add|remove|list`: Registers the secretaries of a senator.
+- `senate secretary-team`: Appoints or dismisses specific sessions and opens the team's work.
 
 ---
 

@@ -656,6 +656,25 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         secretary: Option<SenatorName>,
     },
+    /// The person's appointment of a specific registered native session.
+    SetSecretarySession {
+        #[serde(default)]
+        target_session: Option<String>,
+        #[serde(default)]
+        senator: Option<SenatorName>,
+        #[serde(default)]
+        principal: Option<SenatorName>,
+        appointed: bool,
+        #[serde(default)]
+        acted_by: Option<SenatorName>,
+    },
+    /// Explicit team work as this session, or as the person without a selector.
+    SecretaryWork {
+        session: SessionSelector,
+        #[serde(default)]
+        principal: Option<SenatorName>,
+        operation: senate_core::secretary_work::SecretaryWorkOp,
+    },
     /// The Speaker's office, the chairs, the child Senates.
     Roles,
     /// Codex approval requests waiting for an answer.

@@ -62,7 +62,8 @@ impl DeliveryOutcome {
 /// Directed events for one session, already rendered as one message.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Batch {
-    pub committee: CommitteeId,
+    /// Committee of the log events, when the push comes from a log.
+    pub committee: Option<CommitteeId>,
     /// In `seq` order.
     pub events: Vec<Event>,
     pub text: String,
@@ -248,7 +249,7 @@ mod tests {
 
     fn batch() -> Batch {
         Batch {
-            committee: CommitteeId::new("f").unwrap(),
+            committee: Some(CommitteeId::new("f").unwrap()),
             events: Vec::new(),
             text: "hi".into(),
         }

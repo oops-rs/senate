@@ -86,6 +86,8 @@ use crate::session::Runtime;
 
 use crate::routing;
 
+mod secretary_work;
+
 pub const SERVER_NAME: &str = "senate";
 
 /// Bound on one IPC call to the daemon.
@@ -2083,6 +2085,17 @@ impl SenateMcp {
         Ok(render_secretaries(&reply, self.locale))
     }
 
+    #[tool(name = "secretary_work", description = secretary_work::HELP)]
+    async fn secretary_work(
+        &self,
+        params: Parameters<secretary_work::SecretaryWorkParams>,
+    ) -> Result<String, String> {
+        let request = params.0.request(self.selector.clone())?;
+        let reply: senate_core::secretary_work::SecretaryWorkReply =
+            self.call_appending(&request).await?;
+        serde_json::to_string_pretty(&reply).map_err(|e| e.to_string())
+    }
+
     #[tool(name = "checkpoint", description = CHECKPOINT)]
     async fn checkpoint(&self, params: Parameters<CheckpointParams>) -> Result<String, String> {
         let p = params.0;
@@ -2683,6 +2696,7 @@ mod tests {
                 "search",
                 "secretary",
                 "secretary_cover",
+                "secretary_work",
                 "speaker_chair",
                 "speaker_cover",
                 "speaker_docket",

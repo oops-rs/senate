@@ -470,6 +470,57 @@ impl ApiClient {
         Ok(checked(resp).await?.json().await?)
     }
 
+    pub async fn set_secretary_session(
+        &self,
+        principal: &SenatorName,
+        request: &senate_core::secretary_work::SetSecretarySession,
+    ) -> Result<api::Secretaries, ApiClientError> {
+        let url = self.url(&api::secretary_session_path(principal));
+        let resp = self.authed(self.http.put(url)).json(request).send().await?;
+        Ok(checked(resp).await?.json().await?)
+    }
+
+    pub async fn secretary_work(
+        &self,
+        principal: &SenatorName,
+        request: &senate_core::secretary_work::SecretaryWorkRequest,
+    ) -> Result<senate_core::secretary_work::SecretaryWorkReply, ApiClientError> {
+        let url = self.url(&api::secretary_work_path(principal));
+        let resp = self
+            .authed(self.http.post(url))
+            .json(request)
+            .send()
+            .await?;
+        Ok(checked(resp).await?.json().await?)
+    }
+
+    pub async fn secretary_reminders(
+        &self,
+        senators: &[SenatorName],
+    ) -> Result<Vec<senate_core::secretary_work::SecretaryReminder>, ApiClientError> {
+        let url = self.url(api::SECRETARY_REMINDERS_PATH);
+        let resp = self
+            .authed(self.http.post(url))
+            .json(senators)
+            .send()
+            .await?;
+        Ok(checked(resp).await?.json().await?)
+    }
+
+    pub async fn ack_secretary_reminder(
+        &self,
+        reminder: &senate_core::secretary_work::SecretaryReminder,
+    ) -> Result<(), ApiClientError> {
+        let url = self.url(api::SECRETARY_REMINDERS_PATH);
+        let resp = self
+            .authed(self.http.put(url))
+            .json(reminder)
+            .send()
+            .await?;
+        checked(resp).await?;
+        Ok(())
+    }
+
     /// `PUT /v1/children/{name}`: register the child Senate `name`, its
     /// Speaker `speaker` (who this token must name).
     pub async fn register_child(

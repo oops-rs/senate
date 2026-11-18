@@ -170,6 +170,7 @@ use crate::stream::{self, CommitteeWorker};
 mod front;
 mod preside;
 mod roles;
+mod secretary_work;
 
 use front::Front;
 
@@ -2117,7 +2118,7 @@ impl Shared {
         }
         let now = keys_of(agent, &events);
         let batch = Batch {
-            committee: committee.clone(),
+            committee: Some(committee.clone()),
             events,
             text: rendered.text,
         };
@@ -2407,6 +2408,7 @@ impl Shared {
             Request::Checkpoint { session, .. } => ("checkpoint", session),
             Request::Send { session, .. } => ("send", session),
             Request::Secretaries { session, .. } => ("secretaries", session),
+            Request::SecretaryWork { session, .. } => ("secretary_work", session),
             Request::SetChair { session, .. } => ("set_chair", session),
             Request::ChairDocket { session } => ("chair_docket", session),
             Request::ChairRoute { session, .. } => ("chair_route", session),
@@ -2429,6 +2431,27 @@ impl Shared {
             return Reply::err(refused);
         }
         match request {
+            Request::SetSecretarySession {
+                target_session,
+                senator,
+                principal,
+                appointed,
+                acted_by,
+            } => wrap(
+                self.on_set_secretary_session(
+                    target_session,
+                    senator,
+                    principal,
+                    appointed,
+                    acted_by,
+                )
+                .await,
+            ),
+            Request::SecretaryWork {
+                session,
+                principal,
+                operation,
+            } => wrap(self.on_secretary_work(&session, principal, operation).await),
             Request::Ping => Reply::ok(&Pong {
                 protocol: ipc::PROTOCOL_VERSION,
                 pid: std::process::id(),
@@ -2806,7 +2829,18 @@ impl Shared {
             }
             _ => None,
         };
-        let (mut context, delivered) = self.hook_context(&session, report.event, brief.as_ref())?;
+        let reminder = self
+            .secretary_hook_reminder(&session)
+            .await
+            .map(|reminder| {
+                let text = secretary_work::reminder_text(self.locale, &reminder);
+                (reminder, text)
+            });
+        let reserved = reminder
+            .as_ref()
+            .map_or(0, |(_, text)| text.chars().count() + 2);
+        let (mut context, delivered) =
+            self.hook_context(&session, report.event, brief.as_ref(), reserved)?;
         if native && (source != AgentSource::Harness || hint.as_str() != report.runtime.as_str()) {
             let alias = tokio::time::timeout(
                 Duration::from_millis(600),
@@ -2854,7 +2888,7 @@ impl Shared {
         // The worktree's branch changed under this session since it last
         // spoke: say what it is bound to now.
         let rebound = lock(&self.rebinds).remove(&session.session_id);
-        let context = match rebound {
+        let mut context = match rebound {
             Some((branch, committee)) if session.joined_committee.is_none() => {
                 let note = rebind_note(self.locale, branch.as_deref(), committee.as_ref());
                 Some(match context {
@@ -2864,6 +2898,22 @@ impl Shared {
             }
             _ => context,
         };
+        if let Some((reminder, text)) = reminder
+            && context.as_ref().map_or(0, |body| body.chars().count()) + reserved
+                <= HOOK_CONTEXT_MAX
+        {
+            let ack = tokio::time::timeout(
+                secretary_work::HOOK_REMINDER_TIMEOUT,
+                self.api.ack_secretary_reminder(&reminder),
+            )
+            .await;
+            if !matches!(ack, Ok(Err(error)) if error.status() == Some(403)) {
+                context = Some(match context {
+                    Some(body) => format!("{body}\n\n{text}"),
+                    None => text,
+                });
+            }
+        }
         // The user is active in the session: a held backlog may try its
         // inbox again right away.
         self.note_delivered(&session.session_id);
@@ -2909,6 +2959,7 @@ impl Shared {
         session: &Session,
         event: HookEvent,
         brief: Option<&Brief>,
+        reserved: usize,
     ) -> Result<(Option<String>, usize), IpcError> {
         let Some(committee) = session.committee().cloned() else {
             return Ok((None, 0));
@@ -2936,7 +2987,7 @@ impl Shared {
         items.dedup_by_key(|i| i.key());
 
         let mut parts = Vec::new();
-        let mut budget = HOOK_CONTEXT_MAX;
+        let mut budget = HOOK_CONTEXT_MAX.saturating_sub(reserved);
         if event == HookEvent::SessionStart {
             let line = orientation(
                 &committee,
@@ -4637,6 +4688,9 @@ async fn supervise(shared: Arc<Shared>, mut shutdown: watch::Receiver<bool>) {
 async fn batcher(shared: Arc<Shared>, mut shutdown: watch::Receiver<bool>) {
     // When a session held back by spacing or a retry becomes ready.
     let mut due: Option<Instant> = None;
+    let mut team = tokio::time::interval(secretary_work::REMINDER_POLL);
+    team.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut sent = BTreeSet::new();
     loop {
         let ready = async {
             match due {
@@ -4647,6 +4701,12 @@ async fn batcher(shared: Arc<Shared>, mut shutdown: watch::Receiver<bool>) {
         let woken = tokio::select! {
             _ = shared.work.notified() => true,
             _ = ready => false,
+            _ = team.tick() => {
+                if let Err(e) = shared.push_secretary_reminders(&mut sent).await {
+                    tracing::debug!("secretary reminder delivery failed: {e}");
+                }
+                continue;
+            }
             _ = shutdown.changed() => return,
         };
         if woken {

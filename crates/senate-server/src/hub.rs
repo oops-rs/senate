@@ -52,6 +52,9 @@ use crate::registry;
 use crate::rules::check_may_change_state;
 use crate::seats::Seats;
 
+mod secretary_work;
+pub(crate) use secretary_work::SecretaryWorkError;
+
 /// Capacity of the process-wide broadcast behind [`Hub::subscribe`]. A
 /// receiver that falls further behind gets `Lagged` and recovers with
 /// [`Hub::read`].
@@ -105,6 +108,7 @@ pub struct ServerHub {
     notes: Vec<String>,
     children: RwLock<BTreeMap<Name, ChildSenate>>,
     aliases: tokio::sync::RwLock<senate_core::api::SenatorAliases>,
+    secretary_gate: tokio::sync::Mutex<()>,
     senate: Name,
     parent: RwLock<Option<SenatePath>>,
     next_conn: AtomicU64,
@@ -263,6 +267,7 @@ impl ServerHub {
             notes,
             children: RwLock::new(children),
             aliases: tokio::sync::RwLock::new(aliases),
+            secretary_gate: tokio::sync::Mutex::new(()),
             senate,
             parent: RwLock::new(parent),
             next_conn: AtomicU64::new(1),
@@ -354,7 +359,21 @@ impl ServerHub {
         principal: SenatorName,
         secretaries: Vec<SenatorName>,
     ) -> Result<Secretaries, HubError> {
+        let _guard = self.secretary_gate.lock().await;
+        self.store_secretaries(principal, secretaries).await
+    }
+
+    async fn store_secretaries(
+        &self,
+        principal: SenatorName,
+        secretaries: Vec<SenatorName>,
+    ) -> Result<Secretaries, HubError> {
         let mut check = self.seats.snapshot();
+        let added: Vec<_> = secretaries
+            .iter()
+            .filter(|name| !check.secretaries_of(&principal).contains(name))
+            .cloned()
+            .collect();
         for secretary in &secretaries {
             if !check.is_agent(secretary) && !check.is_person(secretary) {
                 return Err(HubError::Rejected(format!(
@@ -366,6 +385,7 @@ impl ServerHub {
         check
             .set_secretaries(principal.clone(), secretaries.clone())
             .map_err(|e| HubError::Rejected(e.to_string()))?;
+        self.clear_retired_assignments(&principal, &added).await?;
         registry::put_secretaries(self.store.as_ref(), &principal, &secretaries)
             .await
             .map_err(log_error)?;
@@ -902,6 +922,7 @@ impl ServerHub {
     /// is still listed stay seated; the named Speaker is kept. Refused,
     /// changing nothing, when the new people break the roster's rules.
     pub async fn set_principals(&self, principals: Vec<Principal>) -> Result<(), HubError> {
+        let _guard = self.secretary_gate.lock().await;
         let mut aliases = self.aliases.write().await;
         if let Some(p) = principals.iter().find(|p| aliases.contains_key(&p.path())) {
             return Err(HubError::Rejected(format!(
