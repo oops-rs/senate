@@ -37,7 +37,6 @@ impl Shared {
         senator: Option<SenatorName>,
         principal: Option<SenatorName>,
         appointed: bool,
-        acted_by: Option<SenatorName>,
     ) -> Result<Secretaries, IpcError> {
         let senator = match (target, senator) {
             (Some(id), None) => self
@@ -57,20 +56,10 @@ impl Shared {
             }
         };
         let principal = principal.unwrap_or(self.person_senator()?);
-        let result = self
-            .api
-            .set_secretary_session(
-                &principal,
-                &SetSecretarySession {
-                    senator,
-                    appointed,
-                    acted_by,
-                },
-            )
+        self.api
+            .set_secretary_session(&principal, &SetSecretarySession { senator, appointed })
             .await
-            .map_err(server_error)?;
-        self.refresh_me().await;
-        Ok(result)
+            .map_err(server_error)
     }
 
     pub(super) async fn on_secretary_work(
@@ -79,9 +68,8 @@ impl Shared {
         principal: Option<SenatorName>,
         operation: SecretaryWorkOp,
     ) -> Result<SecretaryWorkReply, IpcError> {
-        let (actor, principal) = if selector.session_id.is_none() && selector.claude_pid.is_none() {
-            let actor = self.person_senator()?;
-            (actor.clone(), principal.unwrap_or(actor))
+        let actor = if selector.session_id.is_none() && selector.claude_pid.is_none() {
+            self.person_senator()?
         } else {
             let session = self.resolve(selector)?;
             if !native_session(&session) {
@@ -89,38 +77,14 @@ impl Shared {
                     "team work needs a registered native coding session",
                 ));
             }
-            let principal = match principal {
-                Some(principal) => principal,
-                None if self
-                    .office()
-                    .is_some_and(|office| office.speaker_here() == Some(&session.agent)) =>
-                {
-                    session.agent.clone()
-                }
-                None => {
-                    let all = self.api.secretaries().await.map_err(server_error)?;
-                    let mut teams = all.into_iter().filter_map(|(team, members)| {
-                        members.contains(&session.agent).then_some(team)
-                    });
-                    match (teams.next(), teams.next()) {
-                        (Some(team), None) => team,
-                        (None, _) => {
-                            return Err(IpcError::bad_request(
-                                "this session has no secretary team",
-                            ));
-                        }
-                        _ => {
-                            return Err(IpcError::bad_request(
-                                "name a principal when this session belongs to several teams",
-                            ));
-                        }
-                    }
-                }
-            };
-            (session.agent, principal)
+            session.agent
         };
         self.api
-            .secretary_work(&principal, &SecretaryWorkRequest { actor, operation })
+            .secretary_work(&SecretaryWorkRequest {
+                actor,
+                principal,
+                operation,
+            })
             .await
             .map_err(server_error)
     }

@@ -59,7 +59,6 @@ async fn membership(desk: &Desk, session: &str, appointed: bool) -> senate_core:
         senator: None,
         principal: None,
         appointed,
-        acted_by: None,
     })
     .await
 }
@@ -377,7 +376,6 @@ async fn appointed_native_sessions_share_explicit_work_across_committees() {
             senator: Some(path("claude-work-b")),
             principal: None,
             appointed: false,
-            acted_by: None,
         },
         Duration::from_secs(1),
         Duration::from_secs(5),

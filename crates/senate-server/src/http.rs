@@ -81,10 +81,13 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/v1/secretaries", get(roles::secretaries))
         .route("/v1/secretaries/{senator}", put(roles::put_secretaries))
         .route(
-            "/v1/secretaries/{senator}/session",
+            "/v1/secretary-teams/{person}/session",
             put(secretary_work::put_session),
         )
-        .route("/v1/secretaries/{senator}/work", post(secretary_work::work))
+        .route(
+            senate_core::api::SECRETARY_WORK_PATH,
+            post(secretary_work::work),
+        )
         .route(
             senate_core::api::SECRETARY_REMINDERS_PATH,
             post(secretary_work::reminders).put(secretary_work::ack_reminder),

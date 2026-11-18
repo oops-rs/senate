@@ -359,21 +359,7 @@ impl ServerHub {
         principal: SenatorName,
         secretaries: Vec<SenatorName>,
     ) -> Result<Secretaries, HubError> {
-        let _guard = self.secretary_gate.lock().await;
-        self.store_secretaries(principal, secretaries).await
-    }
-
-    async fn store_secretaries(
-        &self,
-        principal: SenatorName,
-        secretaries: Vec<SenatorName>,
-    ) -> Result<Secretaries, HubError> {
         let mut check = self.seats.snapshot();
-        let added: Vec<_> = secretaries
-            .iter()
-            .filter(|name| !check.secretaries_of(&principal).contains(name))
-            .cloned()
-            .collect();
         for secretary in &secretaries {
             if !check.is_agent(secretary) && !check.is_person(secretary) {
                 return Err(HubError::Rejected(format!(
@@ -385,7 +371,6 @@ impl ServerHub {
         check
             .set_secretaries(principal.clone(), secretaries.clone())
             .map_err(|e| HubError::Rejected(e.to_string()))?;
-        self.clear_retired_assignments(&principal, &added).await?;
         registry::put_secretaries(self.store.as_ref(), &principal, &secretaries)
             .await
             .map_err(log_error)?;

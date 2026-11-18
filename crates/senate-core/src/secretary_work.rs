@@ -16,14 +16,15 @@ pub struct WorkThread {
 pub struct SetSecretarySession {
     pub senator: SenatorName,
     pub appointed: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub acted_by: Option<SenatorName>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecretaryWorkRequest {
     /// The principal speaking as itself, or a member's stable senator id.
     pub actor: SenatorName,
+    /// Defaults to the person, or to the session's sole team.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal: Option<SenatorName>,
     #[serde(flatten)]
     pub operation: SecretaryWorkOp,
 }

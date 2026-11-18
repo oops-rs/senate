@@ -2415,16 +2415,9 @@ impl Shared {
                 senator,
                 principal,
                 appointed,
-                acted_by,
             } => wrap(
-                self.on_set_secretary_session(
-                    target_session,
-                    senator,
-                    principal,
-                    appointed,
-                    acted_by,
-                )
-                .await,
+                self.on_set_secretary_session(target_session, senator, principal, appointed)
+                    .await,
             ),
             Request::SecretaryWork {
                 session,

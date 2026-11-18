@@ -22,26 +22,16 @@ impl From<SecretaryWorkError> for ApiFailure {
     }
 }
 
-async fn team(
-    state: &AppState,
-    path: Result<Path<String>, PathRejection>,
-) -> Result<SenatorName, ApiFailure> {
-    let Path(raw) = path.map_err(|error| ApiFailure::bad_request(error.body_text()))?;
-    let principal = raw
-        .parse()
-        .map_err(|error: senate_core::SenatorNameError| {
-            ApiFailure::bad_request(error.to_string())
-        })?;
-    Ok(state.hub.primary_name(&principal).await)
-}
-
 pub(super) async fn put_session(
     State(state): State<AppState>,
     person: Person,
     path: Result<Path<String>, PathRejection>,
     body: Result<Json<SetSecretarySession>, JsonRejection>,
 ) -> Result<Json<Secretaries>, ApiFailure> {
-    let principal = team(&state, path).await?;
+    let Path(raw) = path.map_err(|error| ApiFailure::bad_request(error.body_text()))?;
+    let principal = raw
+        .parse::<SenatorName>()
+        .map_err(|error| ApiFailure::bad_request(error.to_string()))?;
     Ok(Json(
         state
             .hub
@@ -53,10 +43,8 @@ pub(super) async fn put_session(
 pub(super) async fn work(
     State(state): State<AppState>,
     person: Person,
-    path: Result<Path<String>, PathRejection>,
     body: Result<Json<SecretaryWorkRequest>, JsonRejection>,
 ) -> Result<Json<SecretaryWorkReply>, ApiFailure> {
-    let principal = team(&state, path).await?;
     let mut request = json_body(body)?;
     if let SecretaryWorkOp::Change { update, .. } = &mut request.operation {
         let to = match update {
@@ -68,12 +56,7 @@ pub(super) async fn work(
             *to = state.hub.primary_name(to).await;
         }
     }
-    Ok(Json(
-        state
-            .hub
-            .secretary_work(&person.0, principal, request)
-            .await?,
-    ))
+    Ok(Json(state.hub.secretary_work(&person.0, request).await?))
 }
 
 pub(super) async fn reminders(

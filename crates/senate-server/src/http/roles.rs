@@ -380,15 +380,35 @@ pub(super) async fn put_secretaries(
         mut secretaries,
         acted_by,
     } = json_body(body)?;
+    let roster = state.hub.roster_now();
     for name in &mut secretaries {
         *name = state.hub.primary_name(name).await;
     }
-    Ok(Json(
-        state
-            .hub
-            .replace_secretaries(&person.0, senator, secretaries, acted_by)
-            .await?,
-    ))
+    let itself = senator == person.0;
+    let runs_it = roster.owner_of(&senator) == Some(&person.0);
+    let office = acted_by.as_ref().is_some_and(|acted_by| {
+        state.hub.built_in() != Some(acted_by) && roster.may_act_for_office(&person.0, acted_by)
+    });
+    if !(itself || runs_it || office) {
+        return Err(ApiFailure::forbidden(format!(
+            "{} may not register secretaries for {}: the senator itself, the principal that runs it, or the Speaker's office does",
+            person.0,
+            Address::senator(&senator)
+        )));
+    }
+    // A secretary not seated yet (a daemon-provided one, say) is seated now,
+    // run by whoever registers it, when they may act as it.
+    for secretary in &secretaries {
+        let fresh = !roster.knows(secretary) && state.hub.built_in() != Some(secretary);
+        if fresh {
+            state
+                .hub
+                .act_as(&person.0, secretary)
+                .await
+                .map_err(|e| ApiFailure::forbidden(e.to_string()))?;
+        }
+    }
+    Ok(Json(state.hub.set_secretaries(senator, secretaries).await?))
 }
 
 pub(super) async fn children(

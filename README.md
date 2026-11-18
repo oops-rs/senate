@@ -389,7 +389,7 @@ senate secretary-team assign ITEM_ID --to claude-NATIVE_SESSION_ID
 senate secretary-team remove --senator claude-NATIVE_SESSION_ID
 ```
 
-The CLI defaults to your team. Use `--for` to select a team you manage. A work item belongs to one team in the Senate. Its optional thread link includes the committee and root sequence, so equal sequence numbers on different committees refer to different threads.
+Each person manages their own team. Appointments made with `senate secretary-team` give sessions access to private team work. The Speaker's desk uses the existing secretary assignments in `[roster.secretaries]` or the secretary HTTP API. A work item's optional thread link includes the committee and root sequence, so equal sequence numbers on different committees refer to different threads.
 
 Appointed sessions use the `secretary_work` MCP tool. Use `list` to find work and `read` with its item ID to see history. The returned `next` value can be passed as `after` for the list or `offset` for history. Use `principal` to choose among multiple teams. One member can claim any unowned item. The owner can record progress and hand off the item, and all members can leave notes.
 
