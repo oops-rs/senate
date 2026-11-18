@@ -218,6 +218,42 @@ async fn an_unverified_hello_cannot_attach_a_surface() {
 }
 
 #[tokio::test]
+async fn reconnect_cannot_change_the_surfaces_capabilities() {
+    let surface = RemoteSurface::new("chat".into());
+    let (read, write, first) =
+        attach(surface.clone(), async { Ok(()) }, |_| async { Ok(()) }).await;
+    drop((read, write));
+    assert!(first.await.unwrap().is_err());
+
+    let (server, mut adapter) = UnixStream::pair().unwrap();
+    let changed = tokio::spawn(session(
+        server,
+        "gateway-token",
+        surface.clone(),
+        async { Ok(()) },
+        |_| async { Ok(()) },
+    ));
+    let mut frame = hello();
+    frame["capabilities"] = json!(["post"]);
+    send(&mut adapter, frame).await.unwrap();
+    let response = next(&mut BufReader::new(adapter.into_split().0)).await;
+    assert_eq!(response["type"], "error");
+    assert_eq!(response["error"]["kind"], "rejected");
+    assert!(
+        response["error"]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("restart senated")
+    );
+    assert!(changed.await.unwrap().is_err());
+    assert!(surface.peer().is_none());
+
+    let (read, write, same) = attach(surface, async { Ok(()) }, |_| async { Ok(()) }).await;
+    drop((read, write));
+    assert!(same.await.unwrap().is_err());
+}
+
+#[tokio::test]
 async fn recovery_posts_before_a_fresh_inbound_can_be_acknowledged() {
     use std::sync::atomic::{AtomicBool, Ordering};
 

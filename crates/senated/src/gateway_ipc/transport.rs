@@ -10,7 +10,7 @@ mod tests;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::Path;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail, ensure};
@@ -47,11 +47,12 @@ struct Call {
 
 struct Peer {
     calls: mpsc::Sender<Call>,
-    capabilities: HashSet<String>,
 }
 
 pub(super) struct RemoteSurface {
     platform: String,
+    // ChatGateway caches Unsupported for the lifetime of this surface.
+    capabilities: OnceLock<HashSet<String>>,
     peer: Mutex<Option<Arc<Peer>>>,
 }
 
@@ -59,6 +60,7 @@ impl RemoteSurface {
     pub(super) fn new(platform: String) -> Arc<Self> {
         Arc::new(Self {
             platform,
+            capabilities: OnceLock::new(),
             peer: Mutex::new(None),
         })
     }
@@ -78,7 +80,11 @@ impl RemoteSurface {
             .peer()
             .clone()
             .ok_or_else(|| unavailable("gateway offline"))?;
-        if !peer.capabilities.contains(op) {
+        if !self
+            .capabilities
+            .get()
+            .is_some_and(|caps| caps.contains(op))
+        {
             return Err(SurfaceError::Unsupported(op.into()));
         }
         let (tx, rx) = oneshot::channel();
@@ -298,13 +304,24 @@ where
     );
     ensure!(capabilities.contains("post"), "gateway must advertise post");
     let (tx, mut calls) = mpsc::channel(MAX_PENDING);
-    {
+    let attached = {
         let mut peer = surface.peer();
         ensure!(peer.is_none(), "another gateway adapter is connected");
-        *peer = Some(Arc::new(Peer {
-            calls: tx,
-            capabilities,
-        }));
+        if surface.capabilities.get_or_init(|| capabilities.clone()) == &capabilities {
+            *peer = Some(Arc::new(Peer { calls: tx }));
+            true
+        } else {
+            false
+        }
+    };
+    if !attached {
+        let detail = "gateway capabilities changed; restart senated to change adapter capabilities";
+        send(
+            &mut writer,
+            json!({"type":"error","error":{"kind":"rejected","detail":detail}}),
+        )
+        .await?;
+        bail!(detail);
     }
     let _attachment = Attachment(surface);
     send(&mut writer, json!({"type":"ready","version":VERSION})).await?;

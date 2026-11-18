@@ -11,7 +11,11 @@ The adapter connects to the Unix socket in its `[chat_gateway]` configuration. T
 {"type":"ready","version":1}
 ```
 
-The server validates the version, platform and bearer before accepting the connection. One adapter serves a platform at a time. Invalid credentials, versions and malformed frames close the connection. The adapter must advertise `post`. Grant operations are optional. The adapter keeps its platform credential separately.
+The server validates the version, platform and bearer before accepting the connection. One adapter serves a platform at a time. Invalid credentials, versions and malformed frames close the connection. The adapter must advertise `post`. Grant operations are optional. Every reconnect must advertise the same set of capabilities as the first authenticated connection. A changed set receives a terminal handshake error and the socket closes before `ready`. To change advertised operations, stop the old adapter, restart `senated`, then start the new adapter. The gateway caches an `unsupported` grant result for the lifetime of the daemon. An adapter should return `unavailable` for a temporary loss of a grant operation.
+
+```json
+{"type":"error","error":{"kind":"rejected","detail":"gateway capabilities changed; restart senated to change adapter capabilities"}}
+``` The adapter keeps its platform credential separately.
 
 ## Platform messages
 
