@@ -371,6 +371,11 @@ pub enum Request {
     },
     /// Separate operation so an older daemon cannot silently ignore the name.
     Aliases,
+    /// Read one recorded event and the local bridge's delivery observations.
+    Receipt {
+        committee: CommitteeId,
+        seq: Seq,
+    },
     SetCommitteeSeat {
         committee: CommitteeId,
         #[serde(flatten)]
@@ -1216,6 +1221,61 @@ impl CatchUpReply {
             Some(chair) => reader.with_chair(self.committee.clone(), chair.clone()),
             None => reader,
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalDelivery {
+    pub agent: SenatorName,
+    pub state: crate::state::ItemStatus,
+    pub via: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventReceipt {
+    pub committee: CommitteeId,
+    pub seq: Seq,
+    pub id: EventId,
+    pub thread: Seq,
+    pub kind: Kind,
+    pub from: Address,
+    pub to: Vec<Address>,
+    pub local_deliveries: Vec<LocalDelivery>,
+}
+
+impl EventReceipt {
+    pub fn render(&self, locale: Locale) -> String {
+        let mut lines = vec![match locale {
+            Locale::Zh => format!(
+                "{} 已记录 {}，seq {}，thread {}。",
+                self.committee, self.kind, self.seq, self.thread
+            ),
+            Locale::En => format!(
+                "{} recorded {} at seq {} in thread {}.",
+                self.committee, self.kind, self.seq, self.thread
+            ),
+        }];
+        if self.local_deliveries.is_empty() {
+            lines.push(
+                locale
+                    .pick(
+                        "此桥接器没有对应的投递记录。",
+                        "This bridge has no delivery record for this event.",
+                    )
+                    .to_owned(),
+            );
+        }
+        for delivery in &self.local_deliveries {
+            let state = delivery.state.as_str();
+            let agent = Address::senator(&delivery.agent).in_text();
+            let via = delivery
+                .via
+                .as_deref()
+                .map(|v| format!(" ({v})"))
+                .unwrap_or_default();
+            lines.push(format!("{agent}  {state}{via}"));
+        }
+        lines.join("\n")
     }
 }
 

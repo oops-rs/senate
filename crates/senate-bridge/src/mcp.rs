@@ -292,6 +292,15 @@ pub struct JoinParams {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
+pub struct ReceiptParams {
+    /// Committee named in the send result.
+    pub committee: String,
+    /// Event sequence number named in the send result.
+    pub seq: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
 pub struct SearchParams {
     /// Words that must all appear in a message.
     pub query: String,
@@ -1498,6 +1507,23 @@ impl SenateMcp {
         Ok(text)
     }
 
+    #[tool(
+        name = "receipt",
+        description = "Inspect an existing committee event by sequence number and its recorded local delivery state. Does not send a message, retry delivery, or move a read mark. Host approval happens before a write reaches Senate.",
+        annotations(read_only_hint = true)
+    )]
+    async fn receipt(&self, params: Parameters<ReceiptParams>) -> Result<String, String> {
+        let committee = CommitteeId::new(params.0.committee).map_err(|e| e.to_string())?;
+        let reply: ipc::EventReceipt = self
+            .call(&Request::Receipt {
+                committee,
+                seq: Seq(params.0.seq),
+            })
+            .await
+            .map_err(|e| describe(e, self.locale))?;
+        Ok(reply.render(self.locale))
+    }
+
     #[tool(name = "search", description = SEARCH)]
     async fn search(&self, params: Parameters<SearchParams>) -> Result<String, String> {
         let p = params.0;
@@ -2626,6 +2652,7 @@ mod tests {
                 "join",
                 "post",
                 "propose_decision",
+                "receipt",
                 "search",
                 "secretary",
                 "secretary_cover",

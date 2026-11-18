@@ -221,6 +221,15 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Inspect a recorded event and its local delivery state.
+    Receipt {
+        seq: u64,
+        /// Committee of the event. Defaults to this directory's committee.
+        #[arg(long)]
+        committee: Option<CommitteeId>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Print a thread: each event with who wrote it, when, and what.
     Thread {
         /// A seq in the thread.
@@ -1081,6 +1090,29 @@ fn run(command: Cmd) -> anyhow::Result<()> {
                     Ok(())
                 }
             })
+        }
+        Cmd::Receipt {
+            seq,
+            committee,
+            json,
+        } => {
+            let paths = Paths::from_env()?;
+            let reply: ipc::EventReceipt = runtime(false)?.block_on(async {
+                let committee = committee_here(committee).await?;
+                daemon_call(
+                    &paths,
+                    &Request::Receipt {
+                        committee,
+                        seq: Seq(seq),
+                    },
+                )
+                .await
+            })?;
+            if json {
+                return print_json(&reply);
+            }
+            println!("{}", reply.render(BridgeConfig::locale_at(&paths.config())));
+            Ok(())
         }
         Cmd::Thread {
             seq,

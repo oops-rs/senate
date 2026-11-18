@@ -169,7 +169,7 @@ pub enum ItemStatus {
 }
 
 impl ItemStatus {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
             Self::Inflight => "inflight",
@@ -1336,6 +1336,34 @@ impl Store {
             )?
             .into_iter()
             .next())
+    }
+
+    pub fn local_deliveries(
+        &self,
+        event: &Event,
+    ) -> Result<Vec<crate::ipc::LocalDelivery>, StoreError> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT agent, status, via FROM queue WHERE committee = ?1 AND seq = ?2
+             AND json_extract(event, '$.id') = ?3 ORDER BY agent",
+        )?;
+        let rows = stmt.query_map(
+            params![
+                event.committee.as_str(),
+                seq_sql(event.seq),
+                event.id.to_string()
+            ],
+            |row| {
+                let raw: String = row.get(1)?;
+                Ok(crate::ipc::LocalDelivery {
+                    agent: agent_col(row, 0)?,
+                    state: ItemStatus::parse(&raw)
+                        .ok_or_else(|| conversion(1, format!("unknown item status {raw}")))?,
+                    via: row.get(2)?,
+                })
+            },
+        )?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     pub fn counts(&self) -> Result<QueueCounts, StoreError> {
