@@ -88,6 +88,7 @@ pub(crate) enum CommitteeMsg {
     SetSeat {
         change: CommitteeSeatChange,
         id: EventId,
+        locale: Locale,
         reply: RpcReplyPort<Result<CommitteeSeatInfo, LogError>>,
     },
     /// Each agent's presence, lag measured against the head.
@@ -349,6 +350,41 @@ impl CommitteeState {
             seq,
             duplicate: appended.duplicate,
         })
+    }
+
+    fn seat_event(&self, change: &CommitteeSeatChange, id: EventId, locale: Locale) -> NewEvent {
+        let committee = &self.args.committee;
+        let mut event = change.event(committee.clone(), id);
+        if change.action == CommitteeSeatAction::Unseat
+            && self
+                .chair
+                .chair()
+                .is_some_and(|(chair, _)| chair == &change.senator)
+        {
+            // Use the same fold as commit. Keep the notice with the seat
+            // change so it also survives retries and writer restarts.
+            let mut next = self.chair.clone();
+            next.observe(
+                &event
+                    .clone()
+                    .into_event(next.head().next(), chrono::Utc::now()),
+            );
+            if let Some((successor, _)) = next.chair() {
+                let address = Address::senator(successor);
+                let new = address.in_text();
+                let old = Address::senator(&change.senator).in_text();
+                event.body = match locale {
+                    Locale::Zh => {
+                        format!("{old} 被除席后，{new} 接任委员会 `{committee}` 的主席（chair）。")
+                    }
+                    Locale::En => format!(
+                        "{new} now chairs the committee `{committee}` after {old} was unseated."
+                    ),
+                };
+                event.to.push(address);
+            }
+        }
+        event
     }
 
     /// Commit a presence transition and record it in the leases.
@@ -654,8 +690,13 @@ impl Actor for CommitteeActor {
             CommitteeMsg::Heartbeat(heartbeat, reply) => {
                 reply_or_log(reply, state.heartbeat(heartbeat).await);
             }
-            CommitteeMsg::SetSeat { change, id, reply } => {
-                let event = change.event(state.args.committee.clone(), id);
+            CommitteeMsg::SetSeat {
+                change,
+                id,
+                locale,
+                reply,
+            } => {
+                let event = state.seat_event(&change, id, locale);
                 match state.commit(event).await {
                     Ok(appended) => reply_or_log(reply, state.seat_receipt(change, appended)),
                     Err(error) => {

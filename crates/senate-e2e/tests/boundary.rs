@@ -660,6 +660,28 @@ async fn chair_handover_notifies_both_sessions_and_changes_their_tools() {
             .unwrap();
         assert!(context(&outgoing_ctx).contains(&member_text("codex")));
         assert!(context(&incoming_ctx).contains(chair_text));
+
+        let _: senate_core::api::CommitteeSeatInfo = desk
+            .ipc(Request::SetCommitteeSeat {
+                committee: committee(),
+                request: senate_core::api::SetCommitteeSeat {
+                    senator: path("codex"),
+                    action: senate_core::CommitteeSeatAction::Unseat,
+                    id: senate_core::EventId::new(),
+                    acted_by: None,
+                },
+            })
+            .await;
+        let succession = locale.pick(
+            "[senator::codex] 被除席后，[senator::claude] 接任委员会 `refund-v2` 的主席（chair）。",
+            "[senator::claude] now chairs the committee `refund-v2` after [senator::codex] was unseated.",
+        );
+        outgoing.wait_for(succession).await;
+        let fallback = hub.chair(&committee()).await.unwrap();
+        assert_eq!(fallback.chair, Some(path("claude")));
+        assert_eq!(fallback.source, Some(ChairSource::FirstAgent));
+        has_chair_tools(&outgoing_mcp, true).await;
+        has_chair_tools(&incoming_mcp, false).await;
         desk.stop().await;
     }
 }

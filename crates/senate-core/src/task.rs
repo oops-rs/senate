@@ -856,9 +856,8 @@ pub struct Attention {
 
 /// Whether `event` is addressed to `person` in a way that is news for them:
 /// not written by them, not a provisional answer, and either an escalation
-/// to them or an answer, note, question, request, decision or chat naming
-/// them in `to`. What is put to the Speaker is not: that is an agent's
-/// docket.
+/// to them or a message naming them in `to`, including a notice on a
+/// committee seat change. What is put to the Speaker is an agent's docket.
 pub fn attention(event: &Event, person: &Name) -> Option<Attention> {
     if person_of(&event.from).as_ref() == Some(person) || is_provisional(event) {
         return None;
@@ -876,7 +875,9 @@ pub fn attention(event: &Event, person: &Name) -> Option<Attention> {
     let kinds = matches!(
         event.kind,
         Kind::Answer | Kind::Question | Kind::Request | Kind::Note | Kind::Chat | Kind::Decision
-    );
+    ) || (event.kind == Kind::Presence
+        && !event.body.is_empty()
+        && crate::CommitteeSeatChange::of(event).is_some());
     (kinds
         && event
             .to

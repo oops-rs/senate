@@ -1075,6 +1075,7 @@ impl ServerHub {
         self.ask_writer(committee, |reply| CommitteeMsg::SetSeat {
             change: change.clone(),
             id: id.clone(),
+            locale: self.locale,
             reply,
         })
         .await?
