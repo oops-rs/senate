@@ -9,7 +9,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use common::{Harness, committee, fast_timing, path};
+use common::{Harness, committee, eventually, fast_timing, path};
 use senate_bridge::daemon::{DaemonOptions, start_with_host_binary};
 use senate_bridge::ipc::{self, HostedRuntime, Request, SpawnReply};
 use senate_bridge::testenv;
@@ -312,6 +312,8 @@ done
 
 #[tokio::test]
 async fn host_ready_without_publication_closes_its_tui_group() {
+    use rustix::io::Errno;
+    use rustix::process::{Pid, getpgid, test_kill_process_group};
     use std::process::Stdio;
 
     let root = tempfile::tempdir_in("/tmp").unwrap();
@@ -322,7 +324,7 @@ async fn host_ready_without_publication_closes_its_tui_group() {
     let program = root.path().join("fixture");
     std::fs::write(
         &program,
-        "#!/bin/sh\ntrap 'touch stopped; exit 0' TERM\nwhile :; do sleep 1; done\n",
+        "#!/bin/sh\nsleep 300 &\nprintf '%s %s\\n' \"$$\" \"$!\" > group.tmp\nmv group.tmp group\nwait\n",
     )
     .unwrap();
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -343,6 +345,17 @@ async fn host_ready_without_publication_closes_its_tui_group() {
         .unwrap()
         .unwrap();
     assert_eq!(ready, 1);
+    let (leader, helper) = eventually("the fixture's process group", TIMEOUT, || {
+        let pids = std::fs::read_to_string(root.path().join("group")).ok()?;
+        let (leader, helper) = pids.trim().split_once(' ')?;
+        Some((
+            Pid::from_raw(leader.parse().ok()?)?,
+            Pid::from_raw(helper.parse().ok()?)?,
+        ))
+    })
+    .await;
+    assert_eq!(getpgid(Some(helper)).unwrap(), leader);
+
     drop(child.stdin.take()); // The starting daemon stopped before publishing.
     let exit = tokio::time::timeout(TIMEOUT, child.wait())
         .await
@@ -350,10 +363,10 @@ async fn host_ready_without_publication_closes_its_tui_group() {
         .unwrap();
     assert!(!exit.success());
     assert!(!directory.exists());
-    assert!(
-        root.path().join("stopped").exists(),
-        "the TUI did not receive TERM"
-    );
+    eventually("the unpublished TUI group to exit", TIMEOUT, || {
+        (test_kill_process_group(leader) == Err(Errno::SRCH)).then_some(())
+    })
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
