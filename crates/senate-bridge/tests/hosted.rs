@@ -397,7 +397,7 @@ async fn restore_refuses_a_reachable_claude_and_keeps_the_servers_backlog() {
                 git_root: None,
                 branch: None,
                 inferred_committee: Some((committee.clone(), CommitteeSource::File)),
-                socket: Some(socket),
+                socket: Some(socket.clone()),
                 token: None,
                 claude_pid: None,
                 transcript_path: None,
@@ -445,6 +445,7 @@ async fn restore_refuses_a_reachable_claude_and_keeps_the_servers_backlog() {
         .unwrap_err();
     assert!(refused.to_string().contains("still running"), "{refused}");
     drop(manual);
+    std::fs::remove_file(socket).unwrap();
 
     let hosted: SpawnReply = call(&h, &restore).await;
     assert_eq!(hosted.senator, senator);
@@ -625,10 +626,26 @@ async fn codex_native_end_during_or_after_restore_does_not_leave_a_live_row() {
             result
         };
         assert_eq!(restored.session_id, id);
-        assert_eq!(
-            h.store().delivered_cursor(&senator, &committee).unwrap(),
-            prehistory.seq
+        h.wait_stream_of(committee.as_str(), senator.as_str()).await;
+        // The Ready audit itself adds a log event. Check the worker's
+        // initial offset rather than a cursor that intake can advance.
+        let opening = h
+            .server
+            .stream_opens()
+            .into_iter()
+            .find(|stream| {
+                stream.accepted
+                    && stream.committee == committee.as_str()
+                    && stream.senator.as_deref() == Some(senator.as_str())
+            })
+            .expect("the restored senator opened its stream");
+        assert!(
+            opening.after >= prehistory.seq.0,
+            "the stream should skip pre-existing history: {opening:?}"
         );
+        if native_end.is_none() {
+            assert_eq!(opening.after, prehistory.seq.0);
+        }
         let socket: PathBuf = call(&h, &Request::Attach { senator }).await;
         let pid = std::fs::read_to_string(socket.parent().unwrap().join("owner")).unwrap();
         let group = rustix::process::Pid::from_raw(pid.trim().parse().unwrap()).unwrap();
