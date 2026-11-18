@@ -35,7 +35,11 @@ const RESIZE: u8 = 1;
 const KEYS: u8 = 2;
 
 pub(crate) fn directory(paths: &Paths, id: &EventId) -> PathBuf {
-    paths.home().join("hosts").join(id.to_string())
+    hosts(paths).join(id.to_string())
+}
+
+fn hosts(paths: &Paths) -> PathBuf {
+    paths.home().join("hosts")
 }
 
 pub(crate) fn socket(paths: &Paths, id: &EventId) -> PathBuf {
@@ -63,6 +67,27 @@ pub(crate) fn running(paths: &Paths, id: &EventId) -> io::Result<bool> {
         Err(rustix::io::Errno::WOULDBLOCK) => Ok(true),
         Err(e) => Err(e.into()),
     }
+}
+
+/// A host can outlive a daemon that stops before committing SessionStart.
+/// Its lock still occupies a slot while it waits for registration.
+pub(crate) fn running_ids(paths: &Paths) -> io::Result<Vec<EventId>> {
+    let entries = match std::fs::read_dir(hosts(paths)) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(error) => return Err(error),
+    };
+    let mut live = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        if let Some(id) = name.to_str().and_then(|name| name.parse().ok())
+            && running(paths, &id)?
+        {
+            live.push(id);
+        }
+    }
+    Ok(live)
 }
 
 /// No terminal data or credentials are recorded. The marker contains the
@@ -342,5 +367,31 @@ async fn relay(
     tokio::select! {
         result = from_terminal => result,
         result = to_terminal => result,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unregistered_owner_lock_counts_until_the_host_exits() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::new(home.path());
+        assert!(running_ids(&paths).unwrap().is_empty());
+
+        let id = EventId::new();
+        let dir = directory(&paths, &id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let owner = open_lock(&dir).unwrap();
+        flock(&owner, FlockOperation::NonBlockingLockExclusive).unwrap();
+
+        let dead = directory(&paths, &EventId::new());
+        std::fs::create_dir_all(&dead).unwrap();
+        drop(open_lock(&dead).unwrap());
+
+        assert_eq!(running_ids(&paths).unwrap(), std::slice::from_ref(&id));
+        drop(owner);
+        assert!(running_ids(&paths).unwrap().is_empty());
     }
 }

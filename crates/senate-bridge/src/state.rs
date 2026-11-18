@@ -917,14 +917,6 @@ impl Store {
         id.flatten().as_deref().map(parse_host_id).transpose()
     }
 
-    pub(crate) fn session_hosts(&self) -> Result<Vec<EventId>, StoreError> {
-        let conn = self.conn();
-        let mut statement =
-            conn.prepare("SELECT host_id FROM sessions WHERE host_id IS NOT NULL")?;
-        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
-        rows.map(|row| parse_host_id(&row?)).collect()
-    }
-
     fn upsert(
         &self,
         s: &SessionUpsert,
@@ -2297,7 +2289,6 @@ mod tests {
         drop(store);
 
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.session_hosts().unwrap(), std::slice::from_ref(&host));
         let updated = store.upsert_session(&resumed).unwrap();
         assert_eq!(updated.committee(), Some(&committee));
         assert_eq!(store.session_host("a").unwrap(), Some(host));

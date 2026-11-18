@@ -307,7 +307,7 @@ impl Shared {
         {
             let mut launches = lock(&self.hosts.0);
             if let Some(limit) = limit {
-                self.check_host_capacity(&paths, &launches, limit)?;
+                Self::check_host_capacity(&paths, &launches, limit)?;
             }
             if let Some(id) = &resume {
                 if launches
@@ -376,20 +376,15 @@ impl Shared {
     }
 
     /// Count pending launches and running hosts once, under the same lock
-    /// used to reserve a launch. An already registered launch may be in both
-    /// the database and the pending map until its request returns.
+    /// used to reserve a launch. A host acquires its lock before registering,
+    /// so it may already be in both sets while its request waits for the hook.
     fn check_host_capacity(
-        &self,
         paths: &Paths,
         launches: &HashMap<String, Pending>,
         limit: usize,
     ) -> Result<(), IpcError> {
         let mut used: BTreeSet<EventId> = launches.values().map(|p| p.id.clone()).collect();
-        for id in self.store.session_hosts().map_err(internal)? {
-            if host::running(paths, &id).map_err(IpcError::internal)? {
-                used.insert(id);
-            }
-        }
+        used.extend(host::running_ids(paths).map_err(IpcError::internal)?);
         if used.len() >= limit {
             return Err(IpcError::bad_request(format!(
                 "the machine is at its hosted session limit ({limit})"
