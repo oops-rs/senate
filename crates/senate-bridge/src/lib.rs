@@ -88,6 +88,7 @@ pub mod speak;
 pub mod state;
 pub mod status;
 mod stream;
+pub mod terminal;
 pub mod testenv;
 
 pub use config::BridgeConfig;

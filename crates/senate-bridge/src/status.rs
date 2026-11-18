@@ -11,6 +11,8 @@
 //! known cursors and sessions are visible. It is written in the bridge's
 //! locale.
 
+mod terminal;
+
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -27,6 +29,8 @@ use crate::ipc::{
 use crate::paths::Paths;
 use crate::session::{Runtime, Session};
 use crate::state::{QueueCounts, Store};
+
+pub use terminal::render_terminal;
 
 /// Everything `status` prints.
 #[derive(Debug, Clone, PartialEq)]
@@ -281,6 +285,26 @@ fn home_relative(p: &Path) -> String {
             Err(_) => p.display().to_string(),
         },
         None => p.display().to_string(),
+    }
+}
+
+fn session_committee(session: &Session, locale: Locale) -> String {
+    match (session.committee(), session.effective_source()) {
+        (Some(f), Some(src)) => format!("{f} ({})", src.label(locale)),
+        (Some(f), None) => f.to_string(),
+        (None, _) => locale.pick("未加入", "unbound").into(),
+    }
+}
+
+fn session_push(session: &Session, locale: Locale) -> String {
+    match (session.runtime, &session.socket, session.socket_ok) {
+        (Runtime::Codex, _, None) => "codex".into(),
+        (Runtime::Codex, _, Some(true)) => "codex ok".into(),
+        (Runtime::Codex, _, Some(false)) => format!("codex {}", locale.pick("失败", "failed")),
+        (Runtime::Claude, None, _) => locale.pick("无", "none").into(),
+        (Runtime::Claude, Some(_), None) => locale.pick("未试过", "untested").into(),
+        (Runtime::Claude, Some(_), Some(true)) => "ok".into(),
+        (Runtime::Claude, Some(_), Some(false)) => locale.pick("失败", "failed").into(),
     }
 }
 
@@ -658,22 +682,6 @@ fn render_senate(
             .sessions
             .iter()
             .map(|s| {
-                let committee = match (s.committee(), s.effective_source()) {
-                    (Some(f), Some(src)) => format!("{f} ({})", src.label(l)),
-                    (Some(f), None) => f.to_string(),
-                    (None, _) => l.pick("未加入", "unbound").into(),
-                };
-                let socket = match (s.runtime, &s.socket, s.socket_ok) {
-                    (Runtime::Codex, _, None) => "codex".to_string(),
-                    (Runtime::Codex, _, Some(true)) => "codex ok".to_string(),
-                    (Runtime::Codex, _, Some(false)) => {
-                        format!("codex {}", l.pick("失败", "failed"))
-                    }
-                    (Runtime::Claude, None, _) => l.pick("无", "none").into(),
-                    (Runtime::Claude, Some(_), None) => l.pick("未试过", "untested").into(),
-                    (Runtime::Claude, Some(_), Some(true)) => "ok".into(),
-                    (Runtime::Claude, Some(_), Some(false)) => l.pick("失败", "failed").into(),
-                };
                 vec![
                     if full_ids {
                         s.session_id.clone()
@@ -686,11 +694,11 @@ fn render_senate(
                         s.agent_source
                     ),
                     s.state.as_str().to_string(),
-                    committee,
+                    session_committee(s, l),
                     s.branch.clone().unwrap_or_else(|| "—".into()),
                     home_relative(&s.cwd),
                     ago(s.last_seen, now, l),
-                    socket,
+                    session_push(s, l),
                 ]
             })
             .collect();
@@ -736,8 +744,10 @@ fn render_senate(
 #[cfg(test)]
 mod tests {
     use senate_core::{CommitteeId, SenatorName, Seq};
+    use textwrap::core::display_width;
 
     use super::*;
+    use crate::terminal::Terminal;
 
     fn view(locale: Locale) -> StatusView {
         let now = Utc::now();
@@ -1004,5 +1014,81 @@ mod tests {
         );
         assert!(text.contains("已连接，自 1 分钟前"), "{text}");
         assert!(text.contains("没有登记的会话"), "{text}");
+    }
+
+    #[test]
+    fn terminal_status_aligns_chinese_columns_and_wraps_details_without_losing_full_ids() {
+        let now = Utc::now();
+        let mut view = view(Locale::Zh);
+        view.roles = Some(child_roles(Registration::Registered, &[]));
+        view.committees[0].stream = Some(StreamState::Backoff {
+            attempt: 2,
+            retry_at: now + chrono::Duration::seconds(3),
+            error: "连接失败\n\x1b[31m本地苏醒后连接失败".into(),
+        });
+        let id = "01a1eafc-3ba0-7a21-85d4-1b1afa3e931d";
+        view.sessions.push(
+            serde_json::from_value(serde_json::json!({
+                "session_id": id,
+                "runtime": "codex",
+                "agent": "codex",
+                "agent_source": "session",
+                "cwd": "/项目/非常长的中文目录/同一个目录前缀/应用",
+                "state": "live",
+                "inferred_committee": "refund-v2",
+                "committee_source": "file",
+                "started_at": now,
+                "last_seen": now,
+                "socket_ok": true,
+            }))
+            .unwrap(),
+        );
+        let committee = CommitteeId::new("refund-v2").unwrap();
+        let wide = render_terminal(
+            &view,
+            now,
+            false,
+            Some(&committee),
+            Terminal::new(110, false),
+        );
+        let mut lines = wide.lines();
+        assert_eq!(lines.next(), Some("Senate  /acme/alice-desk"));
+        assert_eq!(lines.next(), Some("委员会  refund-v2"));
+        assert_eq!(lines.next(), Some("主席  [senator::codex]"));
+        let header = wide
+            .lines()
+            .find(|line| line.contains("已接收") && line.contains("已上报"))
+            .unwrap();
+        let row = wide
+            .lines()
+            .find(|line| line.contains("claude *") && line.contains("12"))
+            .unwrap();
+        assert_eq!(
+            display_width(&header[..header.find("已接收").unwrap()]),
+            display_width(&row[..row.find("12").unwrap()]),
+        );
+        assert!(wide.contains("01a1eafc-3ba…3e931d") && !wide.contains(id));
+        for columns in [24, 40] {
+            let narrow = render_terminal(
+                &view,
+                now,
+                true,
+                Some(&committee),
+                Terminal::new(columns, false),
+            );
+            assert!(
+                narrow.lines().all(|line| display_width(line) <= columns),
+                "{narrow}"
+            );
+            assert!(!narrow.contains('\x1b'));
+            assert!(
+                narrow.contains("已接收  12") && narrow.contains("codex ok"),
+                "{narrow}"
+            );
+            assert!(
+                narrow.split_whitespace().collect::<String>().contains(id),
+                "{narrow}"
+            );
+        }
     }
 }
