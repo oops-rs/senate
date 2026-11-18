@@ -6,6 +6,7 @@
 //! | --- | --- |
 //! | `seat:<agent>` | `{"owner": "<principal>"}`: who runs the agent |
 //! | `secretaries:<senator>` | `["<secretary>", ...]`, in order |
+//! | `secretary-team:<person>` | `["<coding-session>", ...]`, in order |
 //! | `child:<name>` | a [`ChildSenate`] |
 //! | `note:<key>` | `true`: a start note already said once |
 //!
@@ -22,6 +23,7 @@ use serde_json::Value;
 
 pub(crate) const SEAT: &str = "seat:";
 pub(crate) const SECRETARIES: &str = "secretaries:";
+const SECRETARY_TEAM: &str = "secretary-team:";
 pub(crate) const CHILD: &str = "child:";
 pub(crate) const NOTE: &str = "note:";
 
@@ -94,6 +96,42 @@ pub(crate) async fn put_secretaries(
     let value = serde_json::to_value(secretaries).unwrap_or(Value::Null);
     store
         .put_registry(&format!("{SECRETARIES}{principal}"), Some(value))
+        .await
+}
+
+pub(crate) async fn secretary_teams(
+    store: &dyn LogStore,
+) -> Result<Vec<(SenatorName, Vec<SenatorName>)>, LogError> {
+    entries(store, SECRETARY_TEAM).await
+}
+
+pub(crate) async fn team_members(
+    store: &dyn LogStore,
+    person: &SenatorName,
+) -> Result<Vec<SenatorName>, LogError> {
+    let key = format!("{SECRETARY_TEAM}{person}");
+    let Some((_, value)) = store
+        .registry(&key)
+        .await?
+        .into_iter()
+        .find(|(k, _)| k == &key)
+    else {
+        return Ok(Vec::new());
+    };
+    serde_json::from_value(value).map_err(|e| LogError::Invalid(e.to_string()))
+}
+
+pub(crate) async fn put_team_members(
+    store: &dyn LogStore,
+    person: &SenatorName,
+    members: &[SenatorName],
+) -> Result<(), LogError> {
+    let value = (!members.is_empty())
+        .then(|| serde_json::to_value(members))
+        .transpose()
+        .map_err(|e| LogError::Invalid(e.to_string()))?;
+    store
+        .put_registry(&format!("{SECRETARY_TEAM}{person}"), value)
         .await
 }
 

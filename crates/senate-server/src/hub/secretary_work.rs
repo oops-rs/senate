@@ -10,7 +10,7 @@ use senate_core::secretary_work::{
 use senate_core::{EventId, Hub, HubError, Name, Roster, SenatorName, StatusPayload, StatusState};
 use serde::{Deserialize, Serialize};
 
-use super::{ServerHub, log_error};
+use super::{ServerHub, log_error, registry};
 
 const PAGE_SIZE: usize = 16;
 const MAX_NOTE_BYTES: usize = 4096;
@@ -46,26 +46,17 @@ fn read_record(value: serde_json::Value) -> Result<Record, HubError> {
     serde_json::from_value(value).map_err(|e| HubError::Other(Box::new(e)))
 }
 
-fn team_exists(roster: &Roster, principal: &SenatorName) -> bool {
-    roster.is_person(principal)
-        || roster
-            .office()
-            .is_some_and(|office| office.speaker_here() == Some(principal))
+fn session_owner<'a>(roster: &'a Roster, session: &SenatorName) -> Option<&'a Name> {
+    if session.is_session_name() && roster.built_in() != Some(session) {
+        roster.owner_of(session)
+    } else {
+        None
+    }
 }
 
-fn owns(roster: &Roster, person: &Name, principal: &SenatorName) -> bool {
-    principal == person || roster.owner_of(principal) == Some(person)
-}
-
-fn member(roster: &Roster, principal: &SenatorName, senator: &SenatorName) -> bool {
-    senator.is_session_name()
-        && roster.owner_of(senator).is_some()
-        && roster.secretaries_of(principal).contains(senator)
-}
-
-fn visible_item(record: &Record, roster: &Roster, principal: &SenatorName) -> SecretaryWorkItem {
+fn visible_item(record: &Record, members: &[SenatorName]) -> SecretaryWorkItem {
     let mut item = record.item.clone();
-    item.owner = item.owner.filter(|owner| member(roster, principal, owner));
+    item.owner = item.owner.filter(|owner| members.contains(owner));
     item
 }
 
@@ -79,14 +70,11 @@ fn can_manage(owner: Option<&SenatorName>, actor: &SenatorName, principal: bool)
 
 impl ServerHub {
     /// Restore access while keeping assignments from an earlier tenure in history.
-    pub(super) async fn clear_retired_assignments(
+    async fn clear_retired_assignments(
         &self,
         principal: &SenatorName,
-        added: &[SenatorName],
+        returning: &SenatorName,
     ) -> Result<(), HubError> {
-        if added.is_empty() {
-            return Ok(());
-        }
         for (_, value) in self
             .store
             .registry(&prefix(principal))
@@ -94,12 +82,7 @@ impl ServerHub {
             .map_err(log_error)?
         {
             let mut record = read_record(value)?;
-            if record
-                .item
-                .owner
-                .as_ref()
-                .is_some_and(|owner| added.contains(owner))
-            {
+            if record.item.owner.as_ref() == Some(returning) {
                 record.item.owner = None;
                 record.pending = None;
                 self.save_work(principal, &record).await?;
@@ -108,44 +91,7 @@ impl ServerHub {
         Ok(())
     }
 
-    fn may_appoint(
-        &self,
-        roster: &Roster,
-        person: &Name,
-        principal: &SenatorName,
-        acted_by: Option<&SenatorName>,
-    ) -> bool {
-        owns(roster, person, principal)
-            || acted_by.is_some_and(|senator| {
-                self.built_in() != Some(senator) && roster.may_act_for_office(person, senator)
-            })
-    }
-
-    pub(crate) async fn replace_secretaries(
-        &self,
-        person: &Name,
-        principal: SenatorName,
-        secretaries: Vec<SenatorName>,
-        acted_by: Option<SenatorName>,
-    ) -> Result<Secretaries, SecretaryWorkError> {
-        let _guard = self.secretary_gate.lock().await;
-        let roster = self.roster_now();
-        if !self.may_appoint(&roster, person, &principal, acted_by.as_ref()) {
-            return Err(SecretaryWorkError::Forbidden(format!(
-                "{person} may not register secretaries for senator::{principal}: the senator itself, the principal that runs it, or the Speaker's office does"
-            )));
-        }
-        for secretary in &secretaries {
-            if !roster.knows(secretary) && self.built_in() != Some(secretary) {
-                self.act_as(person, secretary)
-                    .await
-                    .map_err(|error| SecretaryWorkError::Forbidden(error.to_string()))?;
-            }
-        }
-        Ok(self.store_secretaries(principal, secretaries).await?)
-    }
-
-    /// Change one entry of the existing ordered secretary list.
+    /// Change one entry on a person's private team.
     pub(crate) async fn set_secretary_session(
         &self,
         person: &Name,
@@ -154,9 +100,7 @@ impl ServerHub {
     ) -> Result<Secretaries, SecretaryWorkError> {
         let _guard = self.secretary_gate.lock().await;
         let roster = self.roster_now();
-        if !team_exists(&roster, &principal)
-            || !self.may_appoint(&roster, person, &principal, request.acted_by.as_ref())
-        {
+        if &principal != person || !roster.is_person(&principal) {
             return Err(SecretaryWorkError::Forbidden(format!(
                 "{person} may not appoint sessions for {principal}"
             )));
@@ -168,33 +112,56 @@ impl ServerHub {
             )
             .into());
         }
-        if request.appointed {
-            let Some(owner) = roster
-                .owner_of(&senator)
-                .filter(|_| roster.built_in() != Some(&senator))
-            else {
-                return Err(HubError::Rejected(
-                    "a member needs an established session owner".into(),
-                )
-                .into());
-            };
-            super::registry::put_seat(self.store.as_ref(), &senator, owner)
-                .await
-                .map_err(log_error)?;
+        if request.appointed && session_owner(&roster, &senator).is_none() {
+            return Err(
+                HubError::Rejected("a member needs an established session owner".into()).into(),
+            );
         }
-        let mut list = roster.secretaries_of(&principal).to_vec();
+        let mut list = registry::team_members(self.store.as_ref(), &principal)
+            .await
+            .map_err(log_error)?;
         if request.appointed && !list.contains(&senator) {
+            self.clear_retired_assignments(&principal, &senator).await?;
             list.push(senator);
         } else if !request.appointed {
             list.retain(|member| member != &senator);
         }
-        Ok(self.store_secretaries(principal, list).await?)
+        registry::put_team_members(self.store.as_ref(), &principal, &list)
+            .await
+            .map_err(log_error)?;
+        list.retain(|member| session_owner(&roster, member).is_some());
+        Ok(Secretaries::from_iter(
+            (!list.is_empty()).then_some((principal, list)),
+        ))
+    }
+
+    async fn default_team(
+        &self,
+        roster: &Roster,
+        actor: &SenatorName,
+    ) -> Result<SenatorName, SecretaryWorkError> {
+        let mut teams = registry::secretary_teams(self.store.as_ref())
+            .await
+            .map_err(log_error)?
+            .into_iter()
+            .filter(|(principal, members)| roster.is_person(principal) && members.contains(actor));
+        let Some((principal, _)) = teams.next() else {
+            return Err(SecretaryWorkError::Forbidden(
+                "this session has no secretary team".into(),
+            ));
+        };
+        if teams.next().is_some() {
+            return Err(HubError::Rejected(
+                "name a principal when this session belongs to several teams".into(),
+            )
+            .into());
+        }
+        Ok(principal)
     }
 
     pub(crate) async fn secretary_work(
         &self,
         person: &Name,
-        principal: SenatorName,
         request: SecretaryWorkRequest,
     ) -> Result<SecretaryWorkReply, SecretaryWorkError> {
         // Membership, the current owner and the durable operation are read
@@ -202,32 +169,29 @@ impl ServerHub {
         let _guard = self.secretary_gate.lock().await;
         let roster = self.roster_now();
         let actor = request.actor;
-        let as_owner = &actor == person && owns(&roster, person, &principal);
-        let as_speaker = actor == principal
-            && roster.owner_of(&actor) == Some(person)
-            && roster
-                .office()
-                .is_some_and(|office| office.speaker_here() == Some(&actor))
-            && self.built_in() != Some(&actor);
-        let manager = as_owner || as_speaker;
-        if !team_exists(&roster, &principal)
-            || !(manager
-                || (member(&roster, &principal, &actor) && roster.owner_of(&actor) == Some(person)))
-        {
+        let as_person = &actor == person;
+        if !as_person && session_owner(&roster, &actor) != Some(person) {
+            return Err(SecretaryWorkError::Forbidden(format!(
+                "{person} does not run {actor}"
+            )));
+        }
+        let principal = match request.principal {
+            Some(principal) => principal,
+            None if as_person => actor.clone(),
+            None => self.default_team(&roster, &actor).await?,
+        };
+        let manager = as_person && &principal == person;
+        let mut members = registry::team_members(self.store.as_ref(), &principal)
+            .await
+            .map_err(log_error)?;
+        members.retain(|member| session_owner(&roster, member).is_some());
+        if !roster.is_person(&principal) || !(manager || members.contains(&actor)) {
             return Err(SecretaryWorkError::Forbidden(format!(
                 "{actor} has no membership in {principal}'s secretary team"
             )));
         }
         match request.operation {
-            SecretaryWorkOp::Members => Ok(SecretaryWorkReply::Members {
-                members: roster
-                    .secretaries_of(&principal)
-                    .iter()
-                    .filter(|senator| member(&roster, &principal, senator))
-                    .cloned()
-                    .collect(),
-                principal,
-            }),
+            SecretaryWorkOp::Members => Ok(SecretaryWorkReply::Members { members, principal }),
             SecretaryWorkOp::List { after } => {
                 let list = self
                     .store
@@ -240,7 +204,7 @@ impl ServerHub {
                     .filter(|(key, _)| after.as_ref().is_none_or(|after| key > after))
                     .take(PAGE_SIZE + 1)
                     .map(|(_, value)| {
-                        read_record(value).map(|record| visible_item(&record, &roster, &principal))
+                        read_record(value).map(|record| visible_item(&record, &members))
                     })
                     .collect::<Result<Vec<_>, HubError>>()?;
                 let more = items.len() > PAGE_SIZE;
@@ -253,7 +217,7 @@ impl ServerHub {
                     .load_work(&principal, &item)
                     .await?
                     .ok_or_else(|| missing(&item))?;
-                let view = visible_item(&record, &roster, &principal);
+                let view = visible_item(&record, &members);
                 let mut entries: Vec<_> = record
                     .entries
                     .into_iter()
@@ -269,7 +233,7 @@ impl ServerHub {
                 })
             }
             SecretaryWorkOp::Create { id, title, thread } => {
-                self.create_work(&roster, principal, actor, id, title, thread)
+                self.create_work(&members, principal, actor, id, title, thread)
                     .await
             }
             SecretaryWorkOp::Change { item, id, update } => {
@@ -277,7 +241,7 @@ impl ServerHub {
                     .load_work(&principal, &item)
                     .await?
                     .ok_or_else(|| missing(&item))?;
-                self.change_work(&roster, principal, actor, manager, record, id, update)
+                self.change_work(&members, principal, actor, manager, record, id, update)
                     .await
             }
         }
@@ -309,7 +273,7 @@ impl ServerHub {
 
     async fn create_work(
         &self,
-        roster: &Roster,
+        members: &[SenatorName],
         principal: SenatorName,
         actor: SenatorName,
         id: EventId,
@@ -327,7 +291,7 @@ impl ServerHub {
                 ));
             }
             return Ok(SecretaryWorkReply::Saved {
-                item: visible_item(&record, roster, &principal),
+                item: visible_item(&record, members),
                 duplicate: true,
             });
         }
@@ -374,7 +338,7 @@ impl ServerHub {
     #[allow(clippy::too_many_arguments)]
     async fn change_work(
         &self,
-        roster: &Roster,
+        members: &[SenatorName],
         principal: SenatorName,
         actor: SenatorName,
         manager: bool,
@@ -389,7 +353,7 @@ impl ServerHub {
                 ));
             }
             return Ok(SecretaryWorkReply::Saved {
-                item: visible_item(&record, roster, &principal),
+                item: visible_item(&record, members),
                 duplicate: true,
             });
         }
@@ -402,7 +366,7 @@ impl ServerHub {
             .item
             .owner
             .as_ref()
-            .filter(|owner| member(roster, &principal, owner));
+            .filter(|owner| members.contains(owner));
         let manages = can_manage(owner, &actor, manager);
         let conflict = || {
             SecretaryWorkError::Conflict(match owner {
@@ -411,7 +375,7 @@ impl ServerHub {
             })
         };
         let assignment = match &update {
-            SecretaryWorkUpdate::Claim if member(roster, &principal, &actor) => {
+            SecretaryWorkUpdate::Claim if members.contains(&actor) => {
                 if owner.is_some_and(|owner| owner != &actor) {
                     return Err(conflict());
                 }
@@ -471,7 +435,7 @@ impl ServerHub {
             }
         };
         if let Some(next) = assignment {
-            if next.is_some_and(|to| !member(roster, &principal, to)) {
+            if next.is_some_and(|to| !members.contains(to)) {
                 return Err(HubError::Rejected(
                     "the destination must be a current secretary session on this team".into(),
                 )
@@ -495,7 +459,7 @@ impl ServerHub {
         });
         self.save_work(&principal, &record).await?;
         Ok(SecretaryWorkReply::Saved {
-            item: visible_item(&record, roster, &principal),
+            item: visible_item(&record, members),
             duplicate: false,
         })
     }
@@ -509,16 +473,22 @@ impl ServerHub {
         let roster = self.roster_now();
         let mut remaining: BTreeSet<_> = senators
             .into_iter()
-            .filter(|s| roster.owner_of(s) == Some(person))
+            .filter(|s| session_owner(&roster, s) == Some(person))
             .collect();
         let mut reminders = Vec::new();
-        for (principal, members) in roster.secretaries() {
-            if !team_exists(&roster, principal) || !members.iter().any(|s| remaining.contains(s)) {
+        if remaining.is_empty() {
+            return Ok(reminders);
+        }
+        for (principal, members) in registry::secretary_teams(self.store.as_ref())
+            .await
+            .map_err(log_error)?
+        {
+            if !roster.is_person(&principal) || !members.iter().any(|s| remaining.contains(s)) {
                 continue;
             }
             let rows = self
                 .store
-                .registry(&prefix(principal))
+                .registry(&prefix(&principal))
                 .await
                 .map_err(log_error)?;
             for (_, value) in rows {
@@ -529,7 +499,7 @@ impl ServerHub {
                         .map_err(|e| HubError::Other(Box::new(e)))?;
                     // Every session gets its next pending assignment in
                     // this poll, even while another inbox is refusing work.
-                    if member(&roster, principal, &reminder.to) && remaining.remove(&reminder.to) {
+                    if members.contains(&reminder.to) && remaining.remove(&reminder.to) {
                         reminders.push(reminder);
                         if remaining.is_empty() {
                             return Ok(reminders);
@@ -548,9 +518,12 @@ impl ServerHub {
     ) -> Result<(), SecretaryWorkError> {
         let _guard = self.secretary_gate.lock().await;
         let roster = self.roster_now();
-        if !team_exists(&roster, &reminder.principal)
-            || !member(&roster, &reminder.principal, &reminder.to)
-            || roster.owner_of(&reminder.to) != Some(person)
+        if !roster.is_person(&reminder.principal)
+            || session_owner(&roster, &reminder.to) != Some(person)
+            || !registry::team_members(self.store.as_ref(), &reminder.principal)
+                .await
+                .map_err(log_error)?
+                .contains(&reminder.to)
         {
             return Err(SecretaryWorkError::Forbidden(
                 "the destination session no longer belongs to this team".into(),

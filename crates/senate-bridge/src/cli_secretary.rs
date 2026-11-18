@@ -13,7 +13,7 @@ use super::{daemon_call, parse_seat_name, print_json, runtime};
 
 #[derive(Args)]
 pub(super) struct SecretaryTeam {
-    /// The principal that owns the team. Defaults to you.
+    /// Your Senate handle. Defaults to the signed-in person.
     #[arg(long = "for", global = true, value_parser = parse_seat_name)]
     principal: Option<SenatorName>,
     #[command(subcommand)]
@@ -25,9 +25,6 @@ struct Membership {
     /// Full ID of a registered native coding session.
     #[arg(long)]
     session: String,
-    /// The senator acting for the Speaker's office, when applicable.
-    #[arg(long, value_parser = parse_seat_name)]
-    acted_by: Option<SenatorName>,
 }
 
 #[derive(Args)]
@@ -38,9 +35,6 @@ struct Dismissal {
     /// A stable senator ID from the team's membership list.
     #[arg(long, value_parser = parse_seat_name)]
     senator: Option<SenatorName>,
-    /// The senator acting for the Speaker's office, when applicable.
-    #[arg(long, value_parser = parse_seat_name)]
-    acted_by: Option<SenatorName>,
 }
 
 #[derive(Subcommand)]
@@ -96,7 +90,6 @@ pub(super) fn run(args: SecretaryTeam) -> anyhow::Result<()> {
                     senator: None,
                     principal,
                     appointed: true,
-                    acted_by: member.acted_by,
                 },
             );
         }
@@ -108,7 +101,6 @@ pub(super) fn run(args: SecretaryTeam) -> anyhow::Result<()> {
                     senator: member.senator,
                     principal,
                     appointed: false,
-                    acted_by: member.acted_by,
                 },
             );
         }

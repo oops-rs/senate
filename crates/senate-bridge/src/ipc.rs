@@ -665,8 +665,6 @@ pub enum Request {
         #[serde(default)]
         principal: Option<SenatorName>,
         appointed: bool,
-        #[serde(default)]
-        acted_by: Option<SenatorName>,
     },
     /// Explicit team work as this session, or as the person without a selector.
     SecretaryWork {

@@ -482,10 +482,9 @@ impl ApiClient {
 
     pub async fn secretary_work(
         &self,
-        principal: &SenatorName,
         request: &senate_core::secretary_work::SecretaryWorkRequest,
     ) -> Result<senate_core::secretary_work::SecretaryWorkReply, ApiClientError> {
-        let url = self.url(&api::secretary_work_path(principal));
+        let url = self.url(api::SECRETARY_WORK_PATH);
         let resp = self
             .authed(self.http.post(url))
             .json(request)

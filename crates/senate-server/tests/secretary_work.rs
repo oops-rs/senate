@@ -22,10 +22,6 @@ const SPEAKER: &str = "codex-presider";
 fn configured(config: &mut ServerConfig) {
     config.roster.speaker = Some(format!("senator::{SPEAKER}").parse().unwrap());
     config.roster.agents = vec![seated(MEMBER, "alice"), seated(SPEAKER, "bob")];
-    config
-        .roster
-        .secretaries
-        .insert(path("alice"), vec![path(MEMBER)]);
 }
 
 async fn operation(
@@ -35,15 +31,44 @@ async fn operation(
     actor: &str,
     operation: SecretaryWorkOp,
 ) -> Response {
+    work(server, token, Some(principal), actor, operation).await
+}
+
+async fn work(
+    server: &TestServer,
+    token: &str,
+    principal: Option<&str>,
+    actor: &str,
+    operation: SecretaryWorkOp,
+) -> Response {
     server
-        .request(
-            Method::POST,
-            &api::secretary_work_path(&path(principal)),
-            token,
-        )
+        .request(Method::POST, api::SECRETARY_WORK_PATH, token)
         .json(&SecretaryWorkRequest {
             actor: path(actor),
+            principal: principal.map(path),
             operation,
+        })
+        .send()
+        .await
+        .unwrap()
+}
+
+async fn set_member(
+    server: &TestServer,
+    token: &str,
+    principal: &str,
+    senator: &str,
+    appointed: bool,
+) -> Response {
+    server
+        .request(
+            Method::PUT,
+            &api::secretary_session_path(&path(principal)),
+            token,
+        )
+        .json(&SetSecretarySession {
+            senator: path(senator),
+            appointed,
         })
         .send()
         .await
@@ -85,7 +110,6 @@ async fn private_work_and_reminders_follow_team_authority_after_restart() {
     let unknown = SetSecretarySession {
         senator: path("claude-unregistered"),
         appointed: true,
-        acted_by: None,
     };
     api_error(
         server
@@ -103,6 +127,12 @@ async fn private_work_and_reminders_follow_team_authority_after_restart() {
     )
     .await;
     assert!(!server.running.hub.roster_now().knows(&unknown.senator));
+    assert_eq!(
+        set_member(&server, ALICE, "alice", MEMBER, true)
+            .await
+            .status(),
+        StatusCode::OK
+    );
     let roster = reply(&server, ALICE, "alice", "alice", SecretaryWorkOp::Members).await;
     assert!(
         matches!(roster, SecretaryWorkReply::Members { members, .. } if members == [path(MEMBER)])
@@ -120,19 +150,38 @@ async fn private_work_and_reminders_follow_team_authority_after_restart() {
         create(item.clone(), "Private task"),
     )
     .await;
-    let office_item = EventId::new();
+    let bob_item = EventId::new();
     reply(
         &server,
         BOB,
-        SPEAKER,
         "bob",
-        create(office_item, "Speaker's work"),
+        "bob",
+        create(bob_item, "Bob's personal work"),
     )
     .await;
+    api_error(
+        work(
+            &server,
+            BOB,
+            None,
+            SPEAKER,
+            SecretaryWorkOp::List { after: None },
+        )
+        .await,
+        StatusCode::FORBIDDEN,
+        "forbidden",
+    )
+    .await;
+    assert_eq!(
+        set_member(&server, BOB, "bob", SPEAKER, true)
+            .await
+            .status(),
+        StatusCode::OK
+    );
     let as_speaker = reply(
         &server,
         BOB,
-        SPEAKER,
+        "bob",
         SPEAKER,
         SecretaryWorkOp::List { after: None },
     )
@@ -142,7 +191,7 @@ async fn private_work_and_reminders_follow_team_authority_after_restart() {
         operation(
             &server,
             ALICE,
-            SPEAKER,
+            "bob",
             "alice",
             SecretaryWorkOp::List { after: None },
         )
@@ -237,7 +286,6 @@ async fn private_work_and_reminders_follow_team_authority_after_restart() {
     let dismiss = SetSecretarySession {
         senator: path(MEMBER),
         appointed: false,
-        acted_by: None,
     };
     let path_string = api::secretary_session_path(&path("alice"));
     api_error(
@@ -308,10 +356,235 @@ async fn private_work_and_reminders_follow_team_authority_after_restart() {
     server.running.shutdown().await.unwrap();
 }
 
+async fn set_desk_member(server: &TestServer, appointed: bool) {
+    let secretaries = appointed.then(|| path(MEMBER)).into_iter().collect();
+    let response = server
+        .request(
+            Method::PUT,
+            &api::secretaries_of_path(&path("alice")),
+            ALICE,
+        )
+        .json(&api::SetSecretaries {
+            secretaries,
+            acted_by: None,
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+async fn assert_personal_team_and_desk(
+    server: &TestServer,
+    item: &EventId,
+    team: bool,
+    desk: bool,
+    pending: bool,
+) {
+    let members = reply(server, ALICE, "alice", "alice", SecretaryWorkOp::Members).await;
+    let expected: Vec<_> = team.then(|| path(MEMBER)).into_iter().collect();
+    assert!(matches!(members, SecretaryWorkReply::Members { members, .. } if members == expected));
+
+    let presiding = NewEvent::new(committee(), Kind::Note, Address::Speaker, "Desk note")
+        .with_meta(meta::ACTED_BY, MEMBER.into());
+    let response = server.post_event(BOB, &presiding).await;
+    if desk {
+        assert_eq!(response.status(), StatusCode::OK);
+        let posted: api::AppendResponse = response.json().await.unwrap();
+        assert_eq!(posted.event.meta[meta::ACTED_BY], MEMBER);
+    } else {
+        api_error(response, StatusCode::FORBIDDEN, "forbidden").await;
+    }
+    let stored: Secretaries = server
+        .request(Method::GET, api::SECRETARIES_PATH, ALICE)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        stored.get(&path("alice")),
+        desk.then(|| vec![path(MEMBER)]).as_ref()
+    );
+
+    let read = work(
+        server,
+        BOB,
+        None,
+        MEMBER,
+        SecretaryWorkOp::Read {
+            item: item.clone(),
+            offset: 0,
+        },
+    )
+    .await;
+    let write = operation(
+        server,
+        BOB,
+        "alice",
+        MEMBER,
+        SecretaryWorkOp::Change {
+            item: item.clone(),
+            id: EventId::new(),
+            update: SecretaryWorkUpdate::Note {
+                text: "Private team progress".into(),
+            },
+        },
+    )
+    .await;
+    if team {
+        assert_eq!(read.status(), StatusCode::OK);
+        assert!(
+            matches!(read.json().await.unwrap(), SecretaryWorkReply::History {
+            item: view, ..
+        } if &view.id == item)
+        );
+        assert_eq!(write.status(), StatusCode::OK);
+    } else {
+        api_error(read, StatusCode::FORBIDDEN, "forbidden").await;
+        api_error(write, StatusCode::FORBIDDEN, "forbidden").await;
+    }
+
+    let queued = reminders(server, BOB).await;
+    assert_eq!(queued.len(), usize::from(pending));
+    if let Some(reminder) = queued.first() {
+        assert_eq!(&reminder.item, item);
+        assert_eq!(reminder.to, path(MEMBER));
+        assert_eq!(reminder.principal, path("alice"));
+    }
+
+    api_error(
+        server
+            .request(
+                Method::PUT,
+                &api::secretary_session_path(&path("alice")),
+                BOB,
+            )
+            .json(&serde_json::json!({
+                "senator": MEMBER,
+                "appointed": !team,
+                "acted_by": MEMBER
+            }))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::FORBIDDEN,
+        "forbidden",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn personal_team_and_speaker_desk_are_independent_across_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("senate.db");
+    let start = || async {
+        TestServer::start_configured(Arc::new(SqliteStore::open(&db).await.unwrap()), |config| {
+            config.roster.speaker = Some("senator::alice".parse().unwrap());
+            config.roster.agents = vec![seated(MEMBER, "bob")];
+            config
+                .roster
+                .secretaries
+                .insert(path("alice"), vec![path(MEMBER)]);
+        })
+        .await
+    };
+    let server = start().await;
+    let item = EventId::new();
+    reply(
+        &server,
+        ALICE,
+        "alice",
+        "alice",
+        SecretaryWorkOp::Create {
+            id: item.clone(),
+            title: "Private work for the person who is Speaker".into(),
+            thread: None,
+        },
+    )
+    .await;
+    assert_personal_team_and_desk(&server, &item, false, true, false).await;
+    assert_eq!(
+        set_member(&server, ALICE, "alice", MEMBER, true)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    reply(
+        &server,
+        ALICE,
+        "alice",
+        "alice",
+        SecretaryWorkOp::Change {
+            item: item.clone(),
+            id: EventId::new(),
+            update: SecretaryWorkUpdate::Assign { to: path(MEMBER) },
+        },
+    )
+    .await;
+    let assignment = reminders(&server, BOB).await.remove(0);
+    server.running.shutdown().await.unwrap();
+
+    let server = start().await;
+    assert_personal_team_and_desk(&server, &item, true, true, true).await;
+    set_desk_member(&server, false).await;
+    server.running.shutdown().await.unwrap();
+
+    let server = start().await;
+    assert_personal_team_and_desk(&server, &item, true, false, true).await;
+    set_desk_member(&server, true).await;
+    assert_eq!(
+        set_member(&server, ALICE, "alice", MEMBER, false)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    server.running.shutdown().await.unwrap();
+
+    let server = start().await;
+    assert_personal_team_and_desk(&server, &item, false, true, false).await;
+    api_error(
+        server
+            .request(Method::PUT, api::SECRETARY_REMINDERS_PATH, BOB)
+            .json(&assignment)
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::FORBIDDEN,
+        "forbidden",
+    )
+    .await;
+    set_desk_member(&server, false).await;
+    server.running.shutdown().await.unwrap();
+
+    let server = start().await;
+    assert_personal_team_and_desk(&server, &item, false, false, false).await;
+    let history = reply(
+        &server,
+        ALICE,
+        "alice",
+        "alice",
+        SecretaryWorkOp::Read { item, offset: 0 },
+    )
+    .await;
+    assert!(
+        matches!(history, SecretaryWorkReply::History { item, entries, .. }
+        if item.owner.is_none() && entries.len() == 3)
+    );
+    server.running.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn members_can_resume_both_lists_and_history() {
     let server =
         TestServer::start_configured(Arc::new(senate_log::MemoryStore::new()), configured).await;
+    assert_eq!(
+        set_member(&server, ALICE, "alice", MEMBER, true)
+            .await
+            .status(),
+        StatusCode::OK
+    );
     let mut ids = Vec::new();
     for index in 0..18 {
         let id = EventId::new();
