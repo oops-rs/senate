@@ -391,7 +391,9 @@ mod tests {
         drop(open_lock(&dead).unwrap());
 
         assert_eq!(running_ids(&paths).unwrap(), std::slice::from_ref(&id));
-        drop(owner);
+        // Other tests can be forking while we run. Unlock explicitly so
+        // a descriptor inherited briefly before exec cannot delay release.
+        flock(&owner, FlockOperation::Unlock).unwrap();
         assert!(running_ids(&paths).unwrap().is_empty());
     }
 }
