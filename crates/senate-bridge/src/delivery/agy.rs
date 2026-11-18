@@ -267,7 +267,7 @@ esac
             socket_ok: None,
         };
         let batch = Batch {
-            committee: "committee".parse().unwrap(),
+            committee: Some("committee".parse().unwrap()),
             events: vec![],
             text: "test payload".into(),
         };

@@ -131,7 +131,10 @@ impl Shared {
         &self,
         session: &Session,
     ) -> Option<SecretaryReminder> {
-        if session.runtime != Runtime::Claude || session.can_push() || !native_session(session) {
+        if session.runtime != Runtime::Claude
+            || self.ladder.can_push(session)
+            || !native_session(session)
+        {
             return None;
         }
         let reminders = tokio::time::timeout(
@@ -158,7 +161,7 @@ impl Shared {
             .store
             .live_sessions()?
             .into_iter()
-            .filter(|s| native_session(s) && s.can_push())
+            .filter(|s| native_session(s) && self.ladder.can_push(s))
             .map(|s| (s.agent.clone(), s.session_id))
             .collect();
         if sessions.is_empty() {
@@ -178,7 +181,10 @@ impl Shared {
                 };
                 let _binding = self.session_bindings.read().await;
                 let Some(session) = self.store.session(sid)?.filter(|s| {
-                    s.agent == reminder.to && s.is_live() && native_session(s) && s.can_push()
+                    s.agent == reminder.to
+                        && s.is_live()
+                        && native_session(s)
+                        && self.ladder.can_push(s)
                 }) else {
                     continue;
                 };
