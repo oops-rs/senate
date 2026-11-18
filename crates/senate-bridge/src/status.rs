@@ -676,13 +676,24 @@ fn render_senate(
         }
     }
 
+    if view.sessions.iter().any(|session| {
+        session.runtime == Runtime::Codex && view.hosted.contains_key(&session.session_id)
+    }) {
+        let _ = writeln!(out, "  {}", l.pick(
+            "在托管 Codex 中执行 /new 或 /clear 后，界面切换到新线程，但 Senate 仍向原线程投递。退出当前终端，再用 senate restore 返回原线程。",
+            "After /new or /clear in hosted Codex, Senate still delivers to the original thread, which the TUI no longer shows. Exit the TUI and use senate restore to return.",
+        ));
+        let _ = writeln!(out, "  {}", l.pick(
+            "若恢复前 Codex 会话已在线，则关闭托管终端后该会话仍显示在线，因为守护进程无法判断是否还有原生客户端连接。",
+            "A Codex session that was live before restore stays live when the hosted terminal closes because the daemon cannot tell whether a native client remains.",
+        ));
+    }
     for session in &view.sessions {
         if let Some(Some(new)) = view.hosted.get(&session.session_id) {
-            let _ = writeln!(
-                out,
-                "  Hosted Claude session {} switched to native ID {new}. Run senate attach {} to inspect or exit the existing terminal.",
-                session.agent, session.agent
-            );
+            let _ = writeln!(out, "  {}", l.pick(
+                format!("托管 Claude 会话 {} 已切换到原生 ID {new}。退出该终端并运行 senate restore {} 后，别名才会恢复接收消息。期间的消息会暂存，并在恢复后投递。仅当 Claude Code 向钩子提供进程 ID 时，状态才会报告此切换。", session.agent, session.agent),
+                format!("Hosted Claude session {} switched to native ID {new}. Its alias stops receiving until you exit that terminal and run senate restore {}. Messages are held and arrive after restore. Status reports the switch only when Claude Code supplies its process ID to hooks.", session.agent, session.agent),
+            ));
         }
     }
     let _ = writeln!(out, "\n{}", l.pick("会话", "sessions"));

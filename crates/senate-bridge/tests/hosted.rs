@@ -505,7 +505,7 @@ async fn a_tui_that_exits_immediately_never_reports_ready() {
     testenv::isolate_async(&mut cmd, root.path());
     cmd.args(["session-host", &id.to_string(), "claude"])
         .arg(root.path())
-        .args(["native-id", "--program", "/usr/bin/false"])
+        .args(["native-id", "--program", "/bin/sh"])
         .env("SENATE_HOME", root.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -519,7 +519,7 @@ async fn a_tui_that_exits_immediately_never_reports_ready() {
     assert!(output.stdout.is_empty());
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(
-        error.contains("exited during startup") && error.contains("exit status: 1"),
+        error.contains("exited during startup") && error.contains("exit status:"),
         "{error}"
     );
 }

@@ -358,6 +358,16 @@ enum Cmd {
         dir: PathBuf,
     },
     /// Open a hosted senator's terminal. Press Ctrl-] to detach.
+    ///
+    /// After /new or /clear in hosted Codex, Senate still delivers to the
+    /// original thread, which the TUI no longer shows. Exit that TUI and use
+    /// senate restore to return. A Codex session that was live before restore
+    /// stays live on host close because a native client may remain.
+    ///
+    /// After /clear in hosted Claude Code, the alias stops receiving until
+    /// you exit that terminal and run senate restore. Messages are held and
+    /// arrive after restore. Status reports the switch only when Claude Code
+    /// supplies its process ID to hooks.
     Attach { senator: SenatorName },
     /// Resume a recorded Codex or Claude Code senator in a detached terminal.
     Restore { senator: SenatorName },
