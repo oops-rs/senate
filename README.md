@@ -444,8 +444,7 @@ The launch proof binds the token to the conversation even when multiple
 terminals share Antigravity's saved history. The bridge checks it and verifies
 the root at the loopback endpoint. It keeps the token in memory. Re-register after the bridge or native endpoint
 restarts. The daemon needs `agy` on its PATH, or an explicit
-`SENATE_AGY_BIN`. The native endpoint is experimental and was exercised
-with agy 1.5.9. For an isolated Senate, supply its `SENATE_HOME` to both
+`SENATE_AGY_BIN`. The native endpoint is experimental. Two native agy 1.5.9 terminals were tested with a local model fixture. With agy 1.5.11 and a live model, the addressed idle terminal recalled its earlier context and answered on the original Senate thread while the other terminal stayed idle. For an isolated Senate, supply its `SENATE_HOME` to both
 the hook command and the MCP server environment.
 
 Run an ACP server using the terminal client for a Senate-owned connection:
