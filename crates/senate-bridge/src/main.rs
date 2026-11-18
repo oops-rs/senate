@@ -366,8 +366,11 @@ enum Cmd {
         id: EventId,
         runtime: HostedRuntime,
         cwd: PathBuf,
+        session_id: String,
         #[arg(long)]
-        resume_id: Option<String>,
+        resume: bool,
+        #[arg(long)]
+        codex_remote: Option<String>,
     },
     /// Enable live push for a running Antigravity conversation. Reads its local API token from stdin.
     AgyRegister {
@@ -1279,7 +1282,9 @@ fn run(command: Cmd, terminal: Option<Terminal>) -> anyhow::Result<()> {
             id,
             runtime: harness,
             cwd,
-            resume_id,
+            session_id,
+            resume,
+            codex_remote,
         } => {
             let paths = Paths::from_env()?;
             runtime(false)?.block_on(senate_bridge::host::run(
@@ -1287,7 +1292,11 @@ fn run(command: Cmd, terminal: Option<Terminal>) -> anyhow::Result<()> {
                 &id,
                 harness,
                 &cwd,
-                resume_id.as_deref(),
+                &senate_bridge::host::SessionCommand {
+                    session_id: &session_id,
+                    resume,
+                    codex_remote: codex_remote.as_deref(),
+                },
             ))
         }
         Cmd::AgyRegister {

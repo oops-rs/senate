@@ -416,6 +416,7 @@ pub(crate) struct Shared {
     /// A manual rebind waits for pushes and hooks using the previous seat to finish.
     session_bindings: RwLock<()>,
     hosts: hosts::Launches,
+    codex_transport: crate::delivery::codex::Transport,
     pushes: Mutex<HashMap<String, PushState>>,
     /// Automatic checkpoints, per agent and worktree root.
     auto: Mutex<HashMap<(SenatorName, PathBuf), AutoCheckpoint>>,
@@ -696,6 +697,7 @@ impl Shared {
             resyncs,
             session_bindings: RwLock::new(()),
             hosts: hosts::Launches::default(),
+            codex_transport: common.codex.transport.clone(),
             pushes: Mutex::new(HashMap::new()),
             auto: Mutex::new(HashMap::new()),
             home: common.home.clone(),
@@ -2850,29 +2852,9 @@ impl Shared {
             agent,
             agent_source,
         };
-        let registration = if native {
-            self.hosts.claim(&report)?
-        } else {
-            None
-        };
-        let (_binding, before, session) = match registration {
-            Some(registration) => {
-                let binding = self.session_bindings.write().await;
-                let before = self.store.session(&report.session_id).map_err(internal)?;
-                let session = self.register_hosted(registration, &upsert).await?;
-                (
-                    tokio::sync::RwLockWriteGuard::downgrade(binding),
-                    before,
-                    session,
-                )
-            }
-            None => {
-                let binding = self.session_bindings.read().await;
-                let before = self.store.session(&report.session_id).map_err(internal)?;
-                let session = self.store.upsert_session(&upsert).map_err(internal)?;
-                (binding, before, session)
-            }
-        };
+        let _binding = self.session_bindings.read().await;
+        let before = self.store.session(&report.session_id).map_err(internal)?;
+        let session = self.store.upsert_session(&upsert).map_err(internal)?;
         if before.as_ref().is_some_and(|b| b.agent != session.agent) {
             let released = self
                 .store

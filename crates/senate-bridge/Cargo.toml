@@ -25,7 +25,7 @@ rmcp = { workspace = true }
 rusqlite = { workspace = true }
 dirs = { workspace = true }
 libc = { workspace = true }
-getrandom = { workspace = true }
+uuid = { workspace = true }
 pty-process = { workspace = true }
 rustix = { workspace = true }
 sha2 = { workspace = true }

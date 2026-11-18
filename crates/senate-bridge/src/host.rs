@@ -25,8 +25,7 @@ use crate::paths::{HOME_ENV, Paths, SOCKET_PATH_LIMIT};
 
 pub use terminal::attach;
 
-pub const LAUNCH_ENV: &str = "SENATE_HOST_LAUNCH_TOKEN";
-pub(crate) const START_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const START_TIMEOUT: Duration = Duration::from_secs(10);
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(75);
 const IO_CHUNK: usize = 8192;
 const ATTACHED: u8 = 1;
@@ -90,21 +89,21 @@ pub(crate) fn running_ids(paths: &Paths) -> io::Result<Vec<EventId>> {
     Ok(live)
 }
 
-/// No terminal data or credentials are recorded. The marker contains the
-/// session ID only, after the daemon has committed the binding.
-pub(crate) fn registered(paths: &Paths, id: &EventId, session_id: &str) -> io::Result<()> {
-    let dir = directory(paths, id);
-    std::fs::write(dir.join("registering"), session_id)?;
-    std::fs::rename(dir.join("registering"), dir.join("registered"))
+/// The daemon selects this native identity before the TUI is started.
+pub struct SessionCommand<'a> {
+    pub session_id: &'a str,
+    pub resume: bool,
+    pub codex_remote: Option<&'a str>,
 }
+
+pub(crate) const READY: u8 = 1;
 
 pub(crate) fn start(
     paths: &Paths,
     id: &EventId,
     runtime: HostedRuntime,
     cwd: &Path,
-    resume: Option<&str>,
-    token: &str,
+    session: &SessionCommand<'_>,
 ) -> anyhow::Result<(Child, File)> {
     let dir = directory(paths, id);
     let socket = socket(paths, id);
@@ -138,12 +137,15 @@ pub(crate) fn start(
         .arg(id.to_string())
         .arg(crate::session::Runtime::from(runtime).as_str())
         .arg(cwd)
+        .arg(session.session_id)
         .env(HOME_ENV, paths.home())
-        .env(LAUNCH_ENV, token)
         .stdin(Stdio::null())
-        .stdout(Stdio::null());
-    if let Some(resume) = resume {
-        command.arg("--resume-id").arg(resume);
+        .stdout(Stdio::piped());
+    if session.resume {
+        command.arg("--resume");
+    }
+    if let Some(remote) = session.codex_remote {
+        command.arg("--codex-remote").arg(remote);
     }
 
     std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
@@ -183,12 +185,8 @@ pub async fn run(
     id: &EventId,
     runtime: HostedRuntime,
     cwd: &Path,
-    resume: Option<&str>,
+    session: &SessionCommand<'_>,
 ) -> anyhow::Result<()> {
-    ensure!(
-        std::env::var_os(LAUNCH_ENV).is_some_and(|token| token.len() == 64),
-        "the terminal host must be started by the daemon"
-    );
     let dir = directory(paths, id);
     let file = open_lock(&dir).context("own the host directory")?;
     flock(&file, FlockOperation::NonBlockingLockExclusive)?;
@@ -200,7 +198,7 @@ pub async fn run(
     std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
     let (pty, pts) = pty_process::open()?;
     pty.resize(Size::new(24, 80))?;
-    let mut child = runtime_command(paths, runtime, cwd, resume)?
+    let mut child = runtime_command(paths, runtime, cwd, session)?
         .spawn(pts)
         .context("start coding TUI on its PTY")?;
 
@@ -215,15 +213,18 @@ pub async fn run(
         }
     });
 
-    let session_id = tokio::select! {
-        ready = tokio::time::timeout(START_TIMEOUT, wait_for_registration(&dir)) =>
-            ready.context("timed out waiting for the SessionStart hook")??,
-        status = child.wait() => bail!("the coding TUI exited before registration ({})", status?),
-        _ = terminate.recv() => return Ok(()),
-    };
+    // This pipe belongs to the launching daemon. When it has gone away,
+    // allow the already recorded session to keep running.
+    use std::io::Write as _;
+    let mut ready = std::io::stdout().lock();
+    let _ = ready.write_all(&[READY]).and_then(|()| ready.flush());
+    drop(ready);
 
     let result = tokio::select! {
-        status = child.wait() => status.map(|_| ()).context("wait for the coding TUI"),
+        status = child.wait() => status.context("wait for the coding TUI").and_then(|status| {
+            ensure!(status.success(), "the coding TUI exited with {status}");
+            Ok(())
+        }),
         served = serve(&listener, &mut pty_write, &output) => served,
         _ = terminate.recv() => child.kill().await.context("stop the coding TUI"),
     };
@@ -233,7 +234,7 @@ pub async fn run(
     let _: Result<serde_json::Value, _> = ipc::request(
         &paths.socket(),
         &Request::SessionEnd {
-            session_id,
+            session_id: session.session_id.to_owned(),
             reason: Some("terminal host ended".into()),
         },
         Duration::from_millis(300),
@@ -247,18 +248,34 @@ fn runtime_command(
     paths: &Paths,
     runtime: HostedRuntime,
     cwd: &Path,
-    resume: Option<&str>,
+    session: &SessionCommand<'_>,
 ) -> anyhow::Result<pty_process::Command> {
     let command = match runtime {
         HostedRuntime::Codex => {
             let config = crate::delivery::codex::CodexConfig::load(&paths.config())
                 .map_err(anyhow::Error::msg)?;
             pty_process::Command::new(config.bin.unwrap_or_else(|| PathBuf::from("codex")))
-                .arg("--no-daemon")
+                .args([
+                    "resume",
+                    "--remote",
+                    session
+                        .codex_remote
+                        .context("missing Codex app-server address")?,
+                ])
+                .arg("--cd")
+                .arg(cwd)
+                .arg(session.session_id)
         }
-        HostedRuntime::Claude => pty_process::Command::new("claude"),
+        HostedRuntime::Claude => pty_process::Command::new("claude").args([
+            if session.resume {
+                "--resume"
+            } else {
+                "--session-id"
+            },
+            session.session_id,
+        ]),
     };
-    let mut command = command
+    let command = command
         .current_dir(cwd)
         .env("TERM", "xterm-256color")
         .env_remove("CLAUDECODE")
@@ -271,27 +288,7 @@ fn runtime_command(
         .env_remove(crate::companion::ENV_COMPANION)
         .env_remove(crate::companion::ENV_SESSION)
         .kill_on_drop(true);
-    if let Some(id) = resume {
-        command = command.args([
-            match runtime {
-                HostedRuntime::Codex => "resume",
-                HostedRuntime::Claude => "--resume",
-            },
-            id,
-        ]);
-    }
     Ok(command)
-}
-
-async fn wait_for_registration(dir: &Path) -> io::Result<String> {
-    let marker = dir.join("registered");
-    loop {
-        match tokio::fs::read_to_string(&marker).await {
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            result => return result,
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
 }
 
 async fn serve(

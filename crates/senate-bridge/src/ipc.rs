@@ -287,9 +287,6 @@ pub struct HookReport {
     /// SessionStart's `source`: `startup`, `resume`, `clear`, `compact`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
-    /// Private one-use proof on the first SessionStart of a hosted launch.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub launch_token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1725,7 +1722,6 @@ mod tests {
             cwd: "/w".into(),
             transcript_path: None,
             source: Some("startup".into()),
-            launch_token: None,
             branch: None,
             git_root: None,
             committee_file: None,

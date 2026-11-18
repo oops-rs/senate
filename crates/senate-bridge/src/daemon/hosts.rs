@@ -1,9 +1,9 @@
-//! Correlate a detached launch with the native session that reports its
-//! one-use token. The long-lived binding is in the session row, so a daemon
-//! restart needs no memory of which request created the host.
+//! Launch hosted TUIs with a native identity and a committed Senate binding.
+//! The terminal owner outlives the daemon that launched it.
 
 use std::io::Read as _;
 
+use tokio::io::AsyncReadExt as _;
 use tokio::process::Child;
 use tokio::sync::oneshot;
 
@@ -12,34 +12,17 @@ use crate::host;
 use crate::ipc::{HostedRuntime, SpawnReply};
 
 #[derive(Default)]
-pub(super) struct Launches(Mutex<HashMap<String, Pending>>);
-
-struct Pending {
-    id: EventId,
-    runtime: HostedRuntime,
-    cwd: PathBuf,
-    committee: CommitteeId,
-    alias: Option<SenatorName>,
-    resume: Option<String>,
-    reply: Option<tokio::sync::oneshot::Sender<Result<SpawnReply, IpcError>>>,
-}
+pub(super) struct Launches(Mutex<BTreeMap<EventId, Option<String>>>);
 
 struct PendingGuard<'a> {
     launches: &'a Launches,
-    token: String,
+    id: EventId,
 }
 
 impl Drop for PendingGuard<'_> {
     fn drop(&mut self) {
-        lock(&self.launches.0).remove(&self.token);
+        lock(&self.launches.0).remove(&self.id);
     }
-}
-
-pub(super) struct Registration {
-    id: EventId,
-    committee: CommitteeId,
-    alias: Option<SenatorName>,
-    reply: tokio::sync::oneshot::Sender<Result<SpawnReply, IpcError>>,
 }
 
 pub(super) struct RestoreTarget {
@@ -106,42 +89,6 @@ async fn stop_child(child: &mut Child) -> Result<(), IpcError> {
     match tokio::time::timeout(Duration::from_secs(4), child.wait()).await {
         Ok(status) => status.map(|_| ()).map_err(IpcError::internal),
         Err(_) => child.kill().await.map_err(IpcError::internal),
-    }
-}
-
-impl Launches {
-    pub(super) fn claim(&self, report: &HookReport) -> Result<Option<Registration>, IpcError> {
-        if report.event != HookEvent::SessionStart {
-            return Ok(None);
-        }
-        let Some(token) = &report.launch_token else {
-            return Ok(None);
-        };
-        let mut launches = lock(&self.0);
-        let Some(pending) = launches.get_mut(token) else {
-            return Ok(None); // An ordinary hook, or this launch already completed.
-        };
-        if pending.reply.is_none() {
-            return Ok(None);
-        }
-        if report.runtime != Runtime::from(pending.runtime)
-            || report.cwd.canonicalize().ok().as_ref() != Some(&pending.cwd)
-            || pending
-                .resume
-                .as_ref()
-                .is_some_and(|id| id != &report.session_id)
-        {
-            return Err(IpcError::bad_request(
-                "SessionStart did not match the pending terminal launch",
-            ));
-        }
-
-        Ok(pending.reply.take().map(|reply| Registration {
-            id: pending.id.clone(),
-            committee: pending.committee.clone(),
-            alias: pending.alias.clone(),
-            reply,
-        }))
     }
 }
 
@@ -300,10 +247,6 @@ impl Shared {
         }
         let paths = Paths::new(self.home.canonicalize().map_err(IpcError::internal)?);
         let id = EventId::new();
-        let mut secret = [0u8; 32];
-        getrandom::fill(&mut secret).map_err(IpcError::internal)?;
-        let token = hex::encode(secret);
-        let (reply, result) = tokio::sync::oneshot::channel();
         {
             let mut launches = lock(&self.hosts.0);
             if let Some(limit) = limit {
@@ -312,78 +255,146 @@ impl Shared {
             if let Some(id) = &resume {
                 if launches
                     .values()
-                    .any(|pending| pending.resume.as_ref() == Some(id))
+                    .any(|pending| pending.as_ref() == Some(id))
                 {
                     return Err(IpcError::bad_request(
                         "this senator is already being restored",
                     ));
                 }
-                // Close the gap between the initial lookup and reserving
-                // this ID, if another restore completed in the meantime.
                 self.refuse_running_host(&paths, id)?;
             }
-            launches.insert(
-                token.clone(),
-                Pending {
-                    id: id.clone(),
-                    runtime,
-                    cwd: cwd.clone(),
-                    committee,
-                    alias,
-                    resume: resume.clone(),
-                    reply: Some(reply),
-                },
-            );
+            launches.insert(id.clone(), resume.clone());
         }
         let _pending = PendingGuard {
             launches: &self.hosts,
-            token: token.clone(),
+            id: id.clone(),
         };
-        let (mut child, errors) =
-            host::start(&paths, &id, runtime, &cwd, resume.as_deref(), &token)
+
+        // Keep the creating connection until the host has started. Delivery
+        // and the TUI use the same shared server for the life of the session.
+        let mut app_server = None;
+        let restoring = resume.is_some();
+        let session_id = match runtime {
+            HostedRuntime::Claude => resume.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            HostedRuntime::Codex => {
+                let (server, id) = tokio::time::timeout(CODEX_PUSH_TIMEOUT, async {
+                    let mut server =
+                        crate::delivery::codex::AppServer::connect(&self.codex_transport).await?;
+                    let id = match resume {
+                        Some(id) => id,
+                        None => server.start_hosted_thread(&cwd).await?,
+                    };
+                    Ok::<_, crate::delivery::codex::CodexError>((server, id))
+                })
+                .await
+                .map_err(|_| IpcError::bad_request("timed out starting the Codex thread"))?
                 .map_err(IpcError::internal)?;
-
-        let result = tokio::select! {
-            status = child.wait() => {
-                let mut details = String::new();
-                let _ = errors.take(4096).read_to_string(&mut details);
-                let status = status.map_err(IpcError::internal)?;
-                return Err(IpcError::bad_request(format!(
-                    "the terminal host exited before registration ({status}){}",
-                    if details.trim().is_empty() { String::new() } else { format!(": {}", details.trim()) }
-                )));
-            }
-            result = tokio::time::timeout(host::START_TIMEOUT, result) => {
-                result
-                    .map_err(|_| IpcError::bad_request(
-                        "the terminal host did not report SessionStart in time; check the runtime's Senate hooks and project trust",
-                    ))
-                    .and_then(|result| result.map_err(IpcError::internal))
-                    .and_then(|result| result)
+                app_server = Some(server);
+                id
             }
         };
-
-        let process = HostProcess::monitor(child);
+        let remote = (runtime == HostedRuntime::Codex).then(|| self.codex_transport.remote());
+        let launch = host::SessionCommand {
+            session_id: &session_id,
+            resume: restoring,
+            codex_remote: remote.as_deref(),
+        };
+        let session_runtime = Runtime::from(runtime);
+        let senator = agent::session_name(session_runtime, &session_id);
+        let facts = session::gather_git_facts(&cwd, Duration::from_secs(2)).await;
+        let inferred = session::infer_committee(
+            facts.branch.as_deref(),
+            facts.committee_file.as_deref(),
+            self.convention.as_ref(),
+        );
+        if let Some(alias) = &alias {
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                self.api.set_alias(&senator, alias, false),
+            )
+            .await
+            .map_err(|_| self.join_name_timeout())?
+            .map_err(server_error)?;
+        }
+        // A caller can send an assignment as soon as spawn returns. Seed
+        // now so the stream's first join cannot skip that assignment.
+        let generation = *self.generation.read().await;
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            self.ensure_seeded(&senator, &committee, generation),
+        )
+        .await
+        .map_err(|_| IpcError::bad_request("timed out preparing the senator's inbox"))?
+        .map_err(|error| match error {
+            Intake::Resync(reason) => IpcError::bad_request(reason.to_string()),
+            Intake::Failed(error) => IpcError::internal(error),
+        })?;
+        let child = {
+            let _binding = self.session_bindings.write().await;
+            self.store
+                .register_hosted_session(
+                    &SessionUpsert {
+                        session_id: session_id.clone(),
+                        cwd: cwd.clone(),
+                        git_root: facts.toplevel,
+                        branch: facts.branch,
+                        inferred_committee: inferred,
+                        socket: None,
+                        token: None,
+                        claude_pid: None,
+                        transcript_path: None,
+                        ancestor_pids: vec![],
+                        runtime: session_runtime,
+                        agent: senator.clone(),
+                        agent_source: AgentSource::Session,
+                    },
+                    &id,
+                    &committee,
+                )
+                .map_err(internal)?;
+            host::start(&paths, &id, runtime, &cwd, &launch)
+        };
+        let result = match child {
+            Ok((child, errors)) => await_ready(child, errors).await,
+            Err(error) => Err(IpcError::internal(error)),
+        };
+        drop(app_server);
         match result {
-            Ok(reply) => Ok(HostedLaunch { reply, process }),
-            Err(error) => {
-                if let Err(stop_error) = process.stop().await {
-                    tracing::warn!(%stop_error, "stopping a failed terminal launch");
+            Ok(process) => {
+                self.committees_changed.notify_one();
+                self.work.notify_one();
+                if runtime == HostedRuntime::Codex {
+                    self.reconcile_approvals();
                 }
+                Ok(HostedLaunch {
+                    reply: SpawnReply {
+                        senator,
+                        session_id,
+                        committee,
+                    },
+                    process,
+                })
+            }
+            Err(error) => {
+                let _binding = self.session_bindings.write().await;
+                self.store
+                    .set_session_state(&session_id, SessionState::Ended)
+                    .map_err(internal)?;
+                self.committees_changed.notify_one();
                 Err(error)
             }
         }
     }
 
     /// Count pending launches and running hosts once, under the same lock
-    /// used to reserve a launch. A host acquires its lock before registering,
-    /// so it may already be in both sets while its request waits for the hook.
+    /// used to reserve a launch. A host can hold its owner lock while the
+    /// reservation is still pending, including across daemon restarts.
     fn check_host_capacity(
         paths: &Paths,
-        launches: &HashMap<String, Pending>,
+        launches: &BTreeMap<EventId, Option<String>>,
         limit: usize,
     ) -> Result<(), IpcError> {
-        let mut used: BTreeSet<EventId> = launches.values().map(|p| p.id.clone()).collect();
+        let mut used: BTreeSet<EventId> = launches.keys().cloned().collect();
         used.extend(host::running_ids(paths).map_err(IpcError::internal)?);
         if used.len() >= limit {
             return Err(IpcError::bad_request(format!(
@@ -392,117 +403,40 @@ impl Shared {
         }
         Ok(())
     }
-
-    pub(super) async fn register_hosted(
-        &self,
-        registration: Registration,
-        upsert: &SessionUpsert,
-    ) -> Result<Session, IpcError> {
-        let session = self.bind_hosted(&registration, upsert).await;
-        let _ = registration.reply.send(
-            session
-                .as_ref()
-                .map(|s| SpawnReply {
-                    senator: s.agent.clone(),
-                    session_id: s.session_id.clone(),
-                    committee: registration.committee.clone(),
-                })
-                .map_err(Clone::clone),
-        );
-        session
-    }
-
-    async fn bind_hosted(
-        &self,
-        registration: &Registration,
-        upsert: &SessionUpsert,
-    ) -> Result<Session, IpcError> {
-        if registration.reply.is_closed() {
-            return Err(IpcError::bad_request("the terminal launch expired"));
-        }
-        if let Some(alias) = &registration.alias {
-            tokio::time::timeout(
-                Duration::from_secs(5),
-                self.api.set_alias(&upsert.agent, alias, false),
-            )
-            .await
-            .map_err(|_| self.join_name_timeout())?
-            .map_err(server_error)?;
-        }
-        if registration.reply.is_closed() {
-            return Err(IpcError::bad_request("the terminal launch expired"));
-        }
-        let session = self
-            .store
-            .register_hosted_session(upsert, &registration.id, &registration.committee)
-            .map_err(internal)?;
-        host::registered(
-            &Paths::new(&self.home),
-            &registration.id,
-            &session.session_id,
-        )
-        .map_err(IpcError::internal)?;
-        Ok(session)
-    }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn only_a_matching_start_hook_can_claim_a_launch_once() {
-        let temp = tempfile::tempdir().unwrap();
-        let cwd = temp.path().canonicalize().unwrap();
-        let launches = Launches::default();
-        let (reply, _receipt) = oneshot::channel();
-        let id = EventId::new();
-        lock(&launches.0).insert(
-            "launch-secret".into(),
-            Pending {
-                id: id.clone(),
-                runtime: HostedRuntime::Claude,
-                cwd: cwd.clone(),
-                committee: "review".parse().unwrap(),
-                alias: Some("reviewer".parse().unwrap()),
-                resume: Some("old-session".into()),
-                reply: Some(reply),
-            },
-        );
-        let report: HookReport = serde_json::from_value(serde_json::json!({
-            "event": "session_start",
-            "session_id": "old-session",
-            "launch_token": "launch-secret",
-            "runtime": "claude",
-            "cwd": cwd,
-            "source": "resume",
-        }))
-        .unwrap();
-
-        let mut wrong = report.clone();
-        wrong.launch_token = None;
-        assert!(launches.claim(&wrong).unwrap().is_none());
-
-        wrong = report.clone();
-        wrong.event = HookEvent::UserPromptSubmit;
-        assert!(launches.claim(&wrong).unwrap().is_none());
-
-        wrong = report.clone();
-        wrong.session_id = "different-session".into();
-        assert!(launches.claim(&wrong).is_err());
-
-        wrong = report.clone();
-        wrong.runtime = Runtime::Codex;
-        assert!(launches.claim(&wrong).is_err());
-
-        wrong = report.clone();
-        wrong.cwd = cwd.join("another-project");
-        assert!(launches.claim(&wrong).is_err());
-
-        let registered = launches.claim(&report).unwrap().unwrap();
-        assert_eq!(registered.id, id);
-        assert_eq!(registered.committee.as_str(), "review");
-        assert_eq!(registered.alias.unwrap().as_str(), "reviewer");
-        assert!(launches.claim(&report).unwrap().is_none());
+async fn await_ready(mut child: Child, errors: std::fs::File) -> Result<HostProcess, IpcError> {
+    let Some(mut ready) = child.stdout.take() else {
+        let _ = stop_child(&mut child).await;
+        return Err(IpcError::internal(
+            "the terminal host has no readiness pipe",
+        ));
+    };
+    let result = tokio::select! {
+        status = child.wait() => status.map_err(IpcError::internal).and_then(|status| {
+            Err(IpcError::bad_request(format!("the terminal host exited during startup ({status})")))
+        }),
+        marker = tokio::time::timeout(host::START_TIMEOUT, ready.read_u8()) => match marker {
+            Ok(Ok(host::READY)) => Ok(()),
+            Ok(_) => Err(IpcError::bad_request("the terminal host closed its startup pipe")),
+            Err(_) => Err(IpcError::bad_request("timed out starting the terminal host")),
+        },
+    };
+    let process = HostProcess::monitor(child);
+    if let Err(error) = result {
+        if let Err(stop_error) = process.stop().await {
+            tracing::warn!(%stop_error, "stopping a failed terminal launch");
+        }
+        let mut details = String::new();
+        let _ = errors.take(4096).read_to_string(&mut details);
+        return if details.trim().is_empty() {
+            Err(error)
+        } else {
+            Err(IpcError::bad_request(format!(
+                "{error}: {}",
+                details.trim()
+            )))
+        };
     }
+    Ok(process)
 }

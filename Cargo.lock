@@ -2263,7 +2263,6 @@ dependencies = [
  "dirs",
  "eventsource-stream",
  "futures",
- "getrandom 0.4.3",
  "hex",
  "libc",
  "pty-process",
@@ -2285,6 +2284,7 @@ dependencies = [
  "toml_edit",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

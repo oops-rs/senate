@@ -129,6 +129,15 @@ pub enum Transport {
     Unix(PathBuf),
 }
 
+impl Transport {
+    pub(crate) fn remote(&self) -> String {
+        match self {
+            Self::Unix(path) => format!("unix://{}", path.display()),
+            Self::Proxy { .. } => "unix://".into(),
+        }
+    }
+}
+
 impl std::fmt::Display for Transport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -316,6 +325,33 @@ impl AppServer {
             }
             return Ok(reply.get("result").cloned().unwrap_or(Value::Null));
         }
+    }
+
+    /// Create a resumable thread without sending a model turn.
+    pub(crate) async fn start_hosted_thread(&mut self, cwd: &Path) -> Result<String, CodexError> {
+        let result = self
+            .request("thread/start", "", json!({"cwd": cwd}))
+            .await?;
+        let id = result
+            .pointer("/thread/id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| CodexError::Protocol("thread/start returned no thread ID".into()))?;
+        // A newly created thread needs history for the TUI's resume bootstrap.
+        self.request(
+            "thread/inject_items",
+            id,
+            json!({
+                "threadId": id,
+                "items": [{
+                    "type": "message",
+                    "role": "developer",
+                    "content": [{"type": "input_text", "text": "Senate started this session."}]
+                }]
+            }),
+        )
+        .await?;
+        Ok(id.into())
     }
 
     pub async fn thread_state(&mut self, thread: &str) -> Result<ThreadState, CodexError> {
