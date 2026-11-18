@@ -901,8 +901,9 @@ impl Store {
         s: &SessionUpsert,
         id: &EventId,
         committee: &CommitteeId,
+        cursor: Option<Seq>,
     ) -> Result<Session, StoreError> {
-        self.upsert(s, Some((id, committee)))
+        self.upsert(s, Some((id, committee, cursor)))
     }
 
     pub(crate) fn session_host(&self, session_id: &str) -> Result<Option<EventId>, StoreError> {
@@ -917,10 +918,22 @@ impl Store {
         id.flatten().as_deref().map(parse_host_id).transpose()
     }
 
+    pub(crate) fn clear_session_host(
+        &self,
+        session_id: &str,
+        id: &EventId,
+    ) -> Result<(), StoreError> {
+        self.conn().execute(
+            "UPDATE sessions SET host_id = NULL WHERE session_id = ?1 AND host_id = ?2",
+            params![session_id, id.to_string()],
+        )?;
+        Ok(())
+    }
+
     fn upsert(
         &self,
         s: &SessionUpsert,
-        hosted: Option<(&EventId, &CommitteeId)>,
+        hosted: Option<(&EventId, &CommitteeId, Option<Seq>)>,
     ) -> Result<Session, StoreError> {
         let now = now_ms();
         let (inferred, source) = match &s.inferred_committee {
@@ -945,11 +958,11 @@ impl Store {
                      branch = excluded.branch,
                      inferred_committee = excluded.inferred_committee,
                      committee_source = excluded.committee_source,
-                     socket = CASE WHEN ?15 IS NOT NULL THEN excluded.socket
+                     socket = CASE WHEN ?15 IS NOT NULL AND excluded.runtime = 'claude' THEN excluded.socket
                                    ELSE COALESCE(excluded.socket, sessions.socket) END,
-                     token = CASE WHEN ?15 IS NOT NULL OR excluded.runtime = 'agy' THEN excluded.token
+                     token = CASE WHEN (?15 IS NOT NULL AND excluded.runtime = 'claude') OR excluded.runtime = 'agy' THEN excluded.token
                                   ELSE COALESCE(excluded.token, sessions.token) END,
-                     claude_pid = CASE WHEN ?15 IS NOT NULL THEN excluded.claude_pid
+                     claude_pid = CASE WHEN ?15 IS NOT NULL AND excluded.runtime = 'claude' THEN excluded.claude_pid
                                        ELSE COALESCE(excluded.claude_pid, sessions.claude_pid) END,
                      transcript_path = COALESCE(excluded.transcript_path, sessions.transcript_path),
                      socket_ok = CASE WHEN ?15 IS NULL AND sessions.state = 'live'
@@ -973,11 +986,11 @@ impl Store {
                     s.runtime.as_str(),
                     agent_text(&s.agent),
                     s.agent_source.as_str(),
-                    hosted.map(|(id, _)| id.to_string()),
-                    hosted.map(|(_, committee)| committee.as_str()),
+                    hosted.map(|(id, _, _)| id.to_string()),
+                    hosted.map(|(_, committee, _)| committee.as_str()),
                 ],
             )?;
-            if hosted.is_some() || !s.ancestor_pids.is_empty() {
+            if (hosted.is_some() && s.runtime == Runtime::Claude) || !s.ancestor_pids.is_empty() {
                 tx.execute(
                     "DELETE FROM session_ancestors WHERE session_id = ?1",
                     [&s.session_id],
@@ -989,17 +1002,25 @@ impl Store {
                     )?;
                 }
             }
-            if let Some((_, committee)) = hosted {
+            if let Some((_, committee, cursor)) = hosted {
+                if let Some(cursor) = cursor {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO cursors (agent, committee, delivered, reported, touched)
+                         VALUES (?1, ?2, ?3, 0, ?4)",
+                        params![agent_text(&s.agent), committee.as_str(), seq_sql(cursor), now],
+                    )?;
+                }
                 tx.execute(
                     "UPDATE queue SET status = 'pending', session_id = NULL
                      WHERE session_id = ?1 AND status = 'queued' AND (agent != ?2 OR committee != ?3)",
                     params![s.session_id, s.agent.as_str(), committee.as_str()],
                 )?;
             }
+            let sql = format!("SELECT {SESSION_COLS} FROM sessions WHERE session_id = ?1");
+            let session = tx.query_row(&sql, [&s.session_id], session_from_row)?;
             tx.commit()?;
+            Ok(session)
         }
-        self.session(&s.session_id)?
-            .ok_or_else(|| StoreError::Corrupt(format!("session {} vanished", s.session_id)))
     }
 
     pub fn session(&self, id: &str) -> Result<Option<Session>, StoreError> {
@@ -1133,6 +1154,29 @@ impl Store {
                 "UPDATE queue SET status = 'pending', session_id = NULL
                  WHERE session_id = ?1 AND status = 'queued'",
                 [id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(changed)
+    }
+
+    pub(crate) fn mark_host_gone(
+        &self,
+        session_id: &str,
+        id: &EventId,
+    ) -> Result<bool, StoreError> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let changed = tx.execute(
+            "UPDATE sessions SET state = 'stale'
+             WHERE session_id = ?1 AND host_id = ?2 AND state = 'live'",
+            params![session_id, id.to_string()],
+        )? > 0;
+        if changed {
+            tx.execute(
+                "UPDATE queue SET status = 'pending', session_id = NULL
+                 WHERE session_id = ?1 AND status = 'queued'",
+                [session_id],
             )?;
         }
         tx.commit()?;
@@ -2279,7 +2323,7 @@ mod tests {
         resumed.token = None;
         resumed.claude_pid = None;
         let session = store
-            .register_hosted_session(&resumed, &host, &committee)
+            .register_hosted_session(&resumed, &host, &committee, None)
             .unwrap();
         assert!(session.is_live());
         assert!(

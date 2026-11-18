@@ -203,7 +203,9 @@ pub fn systemd_unit(spec: &Spec, senated: &Path) -> String {
         "ExecStart={} --machine",
         systemd_quoted(&text(senated))
     );
-    out.push_str("Restart=always\nRestartSec=5\n");
+    // The detached terminal hosts stay in the unit's cgroup. Only
+    // senated should receive the service manager's stop signal.
+    out.push_str("KillMode=process\nRestart=always\nRestartSec=5\n");
     if let Some(path) = &spec.path {
         let _ = writeln!(
             out,
@@ -792,6 +794,7 @@ mod tests {
              [Service]\n\
              Type=simple\n\
              ExecStart=\"/home/alice/.cargo/bin/senated\" --machine\n\
+             KillMode=process\n\
              Restart=always\n\
              RestartSec=5\n\
              StandardOutput=append:/home/alice/.senate/senated.log\n\

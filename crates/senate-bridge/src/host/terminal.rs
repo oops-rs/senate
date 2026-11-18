@@ -16,7 +16,47 @@ use tokio::signal::unix::{SignalKind, signal};
 
 use super::{ATTACHED, BUSY, IO_CHUNK, KEYS, RESIZE};
 
-const DETACH: u8 = 0x1d; // Ctrl-]
+// Ctrl-] in the legacy and Kitty keyboard encodings. Kitty can also
+// include the event type when the terminal reports key presses separately.
+const DETACH: &[&[u8]] = &[b"\x1d", b"\x1b[93;5u", b"\x1b[93;5:1u"];
+const RESET_DISPLAY: &[u8] =
+    b"\x1b[0m\x1b[?2004l\x1b[?1004l\x1b[?2031l\x1b[?1000;1001;1002;1003;1005;1006;1015;1016l\x1b[?25h\x1b[?1049l";
+
+fn split_input(bytes: &[u8]) -> (usize, bool) {
+    if let Some(detach) = DETACH
+        .iter()
+        .filter_map(|key| bytes.windows(key.len()).position(|w| w == *key))
+        .min()
+    {
+        return (detach, true);
+    }
+    // A control sequence can straddle two reads. Keep only the suffix
+    // that might complete the detach key on the next read.
+    let max_prefix = DETACH
+        .iter()
+        .map(|key| key.len() - 1)
+        .max()
+        .unwrap_or(0)
+        .min(bytes.len());
+    let suffix = (1..=max_prefix)
+        .rev()
+        .find(|&len| {
+            DETACH
+                .iter()
+                .any(|key| key.starts_with(&bytes[bytes.len() - len..]))
+        })
+        .unwrap_or(0);
+    (bytes.len() - suffix, false)
+}
+
+async fn send_keys(out: &mut (impl AsyncWrite + Unpin), bytes: &[u8]) -> anyhow::Result<()> {
+    for chunk in bytes.chunks(IO_CHUNK) {
+        out.write_u8(KEYS).await?;
+        out.write_u16(u16::try_from(chunk.len())?).await?;
+        out.write_all(chunk).await?;
+    }
+    Ok(())
+}
 
 struct RawTerminal {
     input: AsyncFd<NonblockingFile>,
@@ -118,8 +158,6 @@ impl Drop for RawTerminal {
             OptionalActions::Now,
             &self.original,
         );
-        let _ = (&self.output.get_ref().file)
-            .write_all(b"\x1b[0m\x1b[?2004l\x1b[?1004l\x1b[?2031l\x1b[?25h\x1b[?1049l");
     }
 }
 
@@ -148,9 +186,15 @@ pub async fn attach(path: &Path) -> anyhow::Result<()> {
     let to_host = async {
         terminal.size(&mut keys).await?;
         let mut input = [0u8; IO_CHUNK];
+        let mut pending = Vec::with_capacity(IO_CHUNK + 10);
         loop {
             let n = tokio::select! {
                 n = terminal.input.async_io(Interest::READABLE, |fd| (&fd.file).read(&mut input)) => n?,
+                _ = tokio::time::sleep(Duration::from_millis(35)), if !pending.is_empty() => {
+                    send_keys(&mut keys, &pending).await?;
+                    pending.clear();
+                    continue;
+                }
                 _ = winch.recv() => {
                     terminal.size(&mut keys).await?;
                     continue;
@@ -159,16 +203,13 @@ pub async fn attach(path: &Path) -> anyhow::Result<()> {
             if n == 0 {
                 return Ok(());
             }
-            let detach = input[..n].iter().position(|byte| *byte == DETACH);
-            let send = &input[..detach.unwrap_or(n)];
-            if !send.is_empty() {
-                keys.write_u8(KEYS).await?;
-                keys.write_u16(u16::try_from(send.len())?).await?;
-                keys.write_all(send).await?;
-            }
-            if detach.is_some() {
+            pending.extend_from_slice(&input[..n]);
+            let (send, detach) = split_input(&pending);
+            send_keys(&mut keys, &pending[..send]).await?;
+            if detach {
                 return Ok(());
             }
+            pending.drain(..send);
         }
     };
     let to_screen = async {
@@ -181,11 +222,29 @@ pub async fn attach(path: &Path) -> anyhow::Result<()> {
             terminal.draw(&bytes[..n]).await?;
         }
     };
-    tokio::select! {
+    let result = tokio::select! {
         result = to_host => result,
         result = to_screen => result,
         _ = hup.recv() => Ok(()),
         _ = term.recv() => Ok(()),
         _ = interrupt.recv() => Ok(()),
+    };
+    // draw handles partial writes and waits for writable readiness. Bound
+    // cleanup in case the attached terminal has disappeared.
+    let _ = tokio::time::timeout(Duration::from_millis(250), terminal.draw(RESET_DISPLAY)).await;
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detach_recognizes_legacy_and_kitty_keys_without_consuming_escape() {
+        assert_eq!(split_input(b"hello\x1d"), (5, true));
+        assert_eq!(split_input(b"hello\x1b[93;5u"), (5, true));
+        assert_eq!(split_input(b"\x1b[93;5:1u"), (0, true));
+        assert_eq!(split_input(b"hello\x1b[93;"), (5, false));
+        assert_eq!(split_input(b"\x1b[D"), (3, false));
     }
 }

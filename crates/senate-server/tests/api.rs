@@ -1684,3 +1684,82 @@ async fn a_configured_senate_name_is_in_me_and_in_what_resolve_answers() {
     }
     server.running.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn alias_rollback_is_conditional_and_conflicts_do_not_register_a_new_owner() {
+    let server = TestServer::start().await;
+    let first = "/v1/aliases/claude-first";
+    let second = "/v1/aliases/claude-second";
+    let response = server
+        .request(Method::PUT, first, ALICE)
+        .json(&json!({"alias":"reviewer"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let conflict = server
+        .request(Method::PUT, second, ALICE)
+        .json(&json!({"alias":"reviewer"}))
+        .send()
+        .await
+        .unwrap();
+    assert!(!conflict.status().is_success());
+    let me: Me = server
+        .request(Method::GET, "/v1/me", ALICE)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        !me.agents
+            .iter()
+            .any(|agent| agent.as_str() == "claude-second")
+    );
+
+    let alias = format!("{first}/reviewer");
+    let forbidden = server
+        .request(Method::DELETE, &alias, BOB)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+    let wrong = server
+        .request(Method::DELETE, &format!("{second}/reviewer"), ALICE)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong.status(), StatusCode::NO_CONTENT);
+    let aliases: senate_core::api::SenatorAliases = server
+        .request(Method::GET, "/v1/aliases", ALICE)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        aliases
+            .get(&"reviewer".parse::<senate_core::SenatorName>().unwrap())
+            .unwrap()
+            .as_str(),
+        "claude-first"
+    );
+
+    let removed = server
+        .request(Method::DELETE, &alias, ALICE)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(removed.status(), StatusCode::NO_CONTENT);
+    let reused = server
+        .request(Method::PUT, second, ALICE)
+        .json(&json!({"alias":"reviewer"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reused.status(), StatusCode::OK);
+    server.running.shutdown().await.unwrap();
+}

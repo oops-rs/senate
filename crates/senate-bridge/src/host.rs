@@ -3,8 +3,9 @@
 
 mod terminal;
 
+use rustix::process::{Pid, Signal, kill_process_group};
 use std::fs::{File, OpenOptions};
-use std::io;
+use std::io::{self, Write as _};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -68,7 +69,7 @@ pub(crate) fn running(paths: &Paths, id: &EventId) -> io::Result<bool> {
     }
 }
 
-/// A host can outlive a daemon that stops before committing SessionStart.
+/// A host can outlive a daemon that stops during a launch.
 /// Its lock still occupies a slot while it waits for registration.
 pub(crate) fn running_ids(paths: &Paths) -> io::Result<Vec<EventId>> {
     let entries = match std::fs::read_dir(hosts(paths)) {
@@ -89,22 +90,62 @@ pub(crate) fn running_ids(paths: &Paths) -> io::Result<Vec<EventId>> {
     Ok(live)
 }
 
+/// Remove abandoned, old launch directories. A live lock or a recent
+/// directory can belong to a launch at any point in its startup.
+pub(crate) fn prune_abandoned(paths: &Paths, age: Duration) -> io::Result<()> {
+    let entries = match std::fs::read_dir(hosts(paths)) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let known_id = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.parse::<EventId>().is_ok());
+        if !known_id || !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let old = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|time| time.elapsed().ok())
+            .is_some_and(|elapsed| elapsed >= age);
+        if !old {
+            continue;
+        }
+        let path = entry.path();
+        let _lock = match File::open(path.join("owner")) {
+            Ok(file) => match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+                Ok(()) => Some(file),
+                Err(rustix::io::Errno::WOULDBLOCK) => continue,
+                Err(error) => return Err(error.into()),
+            },
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
 /// The daemon selects this native identity before the TUI is started.
 pub struct SessionCommand<'a> {
     pub session_id: &'a str,
+    pub program: &'a Path,
     pub resume: bool,
     pub codex_remote: Option<&'a str>,
 }
 
 pub(crate) const READY: u8 = 1;
 
-pub(crate) fn start(
-    paths: &Paths,
-    id: &EventId,
-    runtime: HostedRuntime,
-    cwd: &Path,
-    session: &SessionCommand<'_>,
-) -> anyhow::Result<(Child, File)> {
+pub(crate) fn preflight(paths: &Paths, id: &EventId, program: &Path) -> anyhow::Result<PathBuf> {
     let dir = directory(paths, id);
     let socket = socket(paths, id);
     ensure!(
@@ -130,14 +171,45 @@ pub(crate) fn start(
         Err(e) => return Err(e.into()),
     }
 
-    let exe = std::env::current_exe()?.with_file_name("senate");
-    let mut command = Command::new(exe);
+    let executable = |path: &Path| {
+        path.is_file() && rustix::fs::access(path, rustix::fs::Access::EXEC_OK).is_ok()
+    };
+    let found =
+        if program.components().count() == 1 && program.file_name() == Some(program.as_os_str()) {
+            std::env::var_os("PATH")
+                .iter()
+                .flat_map(std::env::split_paths)
+                .map(|path| path.join(program))
+                .find(|path| executable(path))
+        } else {
+            executable(program).then(|| program.to_owned())
+        };
+    // Make the path absolute while retaining symlinks, since executable
+    // shims can dispatch on the name under which they were invoked.
+    std::path::absolute(
+        found.with_context(|| format!("coding TUI executable not found: {}", program.display()))?,
+    )
+    .context("resolve the coding TUI executable")
+}
+
+pub(crate) fn start(
+    host_binary: &Path,
+    paths: &Paths,
+    id: &EventId,
+    runtime: HostedRuntime,
+    cwd: &Path,
+    session: &SessionCommand<'_>,
+) -> anyhow::Result<(Child, File)> {
+    let dir = directory(paths, id);
+    let mut command = Command::new(host_binary);
     command
         .arg("session-host")
         .arg(id.to_string())
         .arg(crate::session::Runtime::from(runtime).as_str())
         .arg(cwd)
         .arg(session.session_id)
+        .arg("--program")
+        .arg(session.program)
         .env(HOME_ENV, paths.home())
         .stdin(Stdio::null())
         .stdout(Stdio::piped());
@@ -189,7 +261,8 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     let dir = directory(paths, id);
     let file = open_lock(&dir).context("own the host directory")?;
-    flock(&file, FlockOperation::NonBlockingLockExclusive)?;
+    // A liveness reader may have opened the file just before we locked it.
+    flock(&file, FlockOperation::LockExclusive)?;
     let _cleanup = RemoveDirectory(dir.clone());
     rustix::process::setsid().context("detach the Senate terminal host")?;
     let mut terminate = signal(SignalKind::terminate())?;
@@ -198,13 +271,21 @@ pub async fn run(
     std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
     let (pty, pts) = pty_process::open()?;
     pty.resize(Size::new(24, 80))?;
-    let mut child = runtime_command(paths, runtime, cwd, session)?
+    let mut child = runtime_command(runtime, cwd, session)?
         .spawn(pts)
         .context("start coding TUI on its PTY")?;
 
+    let pid = child
+        .id()
+        .and_then(|pid| i32::try_from(pid).ok())
+        .and_then(Pid::from_raw)
+        .context("the coding TUI has no process ID")?;
+    let mut startup_pid = file.try_clone()?;
+    writeln!(startup_pid, "{pid}")?;
     let (mut pty_read, mut pty_write) = pty.into_split();
     // A slow or disconnected viewer must never stop the PTY being drained.
     let (output, _) = broadcast::channel(64);
+    let mut startup_output = output.subscribe();
     let feed = output.clone();
     let pump = tokio::spawn(async move {
         let mut buf = [0; IO_CHUNK];
@@ -213,9 +294,28 @@ pub async fn run(
         }
     });
 
+    // Catch early argument/bootstrap exits without storing terminal data on disk.
+    tokio::select! {
+        biased;
+        status = child.wait() => {
+            let mut detail = tokio::time::timeout(Duration::from_millis(50), startup_output.recv())
+                .await.ok().and_then(Result::ok).unwrap_or_default();
+            detail.truncate(4096);
+            while let Ok(bytes) = startup_output.try_recv() {
+                let open = 4096_usize.saturating_sub(detail.len());
+                detail.extend_from_slice(&bytes[..bytes.len().min(open)]);
+            }
+            let detail: String = String::from_utf8_lossy(&detail).chars()
+                .filter(|ch| !ch.is_control() || *ch == '\n').collect();
+            bail!("the coding TUI exited during startup ({}): {}", status?, detail.trim());
+        }
+        _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+        _ = terminate.recv() => return stop_group(&mut child, pid).await,
+    }
+    drop(startup_output);
+
     // This pipe belongs to the launching daemon. When it has gone away,
     // allow the already recorded session to keep running.
-    use std::io::Write as _;
     let mut ready = std::io::stdout().lock();
     let _ = ready.write_all(&[READY]).and_then(|()| ready.flush());
     drop(ready);
@@ -226,16 +326,16 @@ pub async fn run(
             Ok(())
         }),
         served = serve(&listener, &mut pty_write, &output) => served,
-        _ = terminate.recv() => child.kill().await.context("stop the coding TUI"),
+        _ = terminate.recv() => stop_group(&mut child, pid).await,
     };
     pump.abort();
     // The runtime's normal SessionEnd hook usually gets there first. A
     // crash or stop without that hook must also retire this session.
     let _: Result<serde_json::Value, _> = ipc::request(
         &paths.socket(),
-        &Request::SessionEnd {
+        &Request::HostedSessionEnd {
             session_id: session.session_id.to_owned(),
-            reason: Some("terminal host ended".into()),
+            host_id: id.clone(),
         },
         Duration::from_millis(300),
         Duration::from_secs(2),
@@ -245,35 +345,31 @@ pub async fn run(
 }
 
 fn runtime_command(
-    paths: &Paths,
     runtime: HostedRuntime,
     cwd: &Path,
     session: &SessionCommand<'_>,
 ) -> anyhow::Result<pty_process::Command> {
     let command = match runtime {
-        HostedRuntime::Codex => {
-            let config = crate::delivery::codex::CodexConfig::load(&paths.config())
-                .map_err(anyhow::Error::msg)?;
-            pty_process::Command::new(config.bin.unwrap_or_else(|| PathBuf::from("codex")))
-                .args([
-                    "resume",
-                    "--remote",
-                    session
-                        .codex_remote
-                        .context("missing Codex app-server address")?,
-                ])
-                .arg("--cd")
-                .arg(cwd)
-                .arg(session.session_id)
-        }
-        HostedRuntime::Claude => pty_process::Command::new("claude").args([
-            if session.resume {
+        HostedRuntime::Codex => pty_process::Command::new(session.program)
+            .args([
+                "resume",
+                "--remote",
+                session
+                    .codex_remote
+                    .context("missing Codex app-server address")?,
+            ])
+            .arg("--cd")
+            .arg(cwd)
+            .arg("--")
+            .arg(session.session_id),
+        HostedRuntime::Claude => {
+            let flag = if session.resume {
                 "--resume"
             } else {
                 "--session-id"
-            },
-            session.session_id,
-        ]),
+            };
+            pty_process::Command::new(session.program).arg(format!("{flag}={}", session.session_id))
+        }
     };
     let command = command
         .current_dir(cwd)
@@ -285,10 +381,72 @@ fn runtime_command(
         .env_remove("CLAUDE_CODE_MESSAGING_TOKEN")
         .env_remove("CLAUDE_PID")
         .env_remove("CODEX_THREAD_ID")
+        .env_remove(crate::agent::AGENT_ENV)
+        .env_remove(crate::delivery::agy::PROOF_ENV)
         .env_remove(crate::companion::ENV_COMPANION)
         .env_remove(crate::companion::ENV_SESSION)
         .kill_on_drop(true);
     Ok(command)
+}
+
+async fn stop_group(child: &mut Child, pid: Pid) -> anyhow::Result<()> {
+    fn send(pid: Pid, signal: Signal) -> io::Result<()> {
+        match kill_process_group(pid, signal) {
+            Ok(()) | Err(rustix::io::Errno::SRCH) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+    // pty-process creates the TUI's own session and process group.
+    // Keep the leader unreaped until both signals have gone to that group.
+    send(pid, Signal::TERM)?;
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    send(pid, Signal::KILL)?;
+    child.wait().await.context("stop the coding TUI group")?;
+    Ok(())
+}
+
+pub(crate) fn switched(paths: &Paths, id: &EventId) -> Option<String> {
+    std::fs::read_to_string(directory(paths, id).join("switched")).ok()
+}
+
+pub(crate) fn status(
+    paths: &Paths,
+    store: &crate::state::Store,
+    sessions: &[crate::session::Session],
+) -> Result<std::collections::BTreeMap<String, Option<String>>, crate::state::StoreError> {
+    let mut hosted = std::collections::BTreeMap::new();
+    for session in sessions {
+        if let Some(id) = store.session_host(&session.session_id)?
+            && running(paths, &id)?
+        {
+            hosted.insert(session.session_id.clone(), switched(paths, &id));
+        }
+    }
+    Ok(hosted)
+}
+
+pub(crate) fn note_switch(paths: &Paths, id: &EventId, session: &str) -> io::Result<()> {
+    std::fs::write(directory(paths, id).join("switched"), session)
+}
+
+pub(crate) fn child_pid(paths: &Paths, id: &EventId) -> Option<u32> {
+    std::fs::read_to_string(directory(paths, id).join("owner"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+async fn accept(listener: &UnixListener) -> (UnixStream, tokio::net::unix::SocketAddr) {
+    loop {
+        match listener.accept().await {
+            Ok(connection) => return connection,
+            Err(error) => {
+                tracing::warn!(%error, "accepting a terminal attachment");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
 }
 
 async fn serve(
@@ -297,7 +455,7 @@ async fn serve(
     output: &broadcast::Sender<Vec<u8>>,
 ) -> anyhow::Result<()> {
     loop {
-        let (stream, _) = listener.accept().await?;
+        let (stream, _) = accept(listener).await;
         let relay = relay(stream, pty, output.subscribe());
         tokio::pin!(relay);
         loop {
@@ -309,8 +467,7 @@ async fn serve(
                     }
                     break;
                 }
-                connection = listener.accept() => {
-                    let (other, _) = connection?;
+                (other, _) = accept(listener) => {
                     let _ = other.try_write(&[BUSY]);
                 }
             }
@@ -388,6 +545,9 @@ mod tests {
         drop(open_lock(&dead).unwrap());
 
         assert_eq!(running_ids(&paths).unwrap(), std::slice::from_ref(&id));
+        prune_abandoned(&paths, Duration::ZERO).unwrap();
+        assert!(dir.exists());
+        assert!(!dead.exists());
         // Other tests can be forking while we run. Unlock explicitly so
         // a descriptor inherited briefly before exec cannot delay release.
         flock(&owner, FlockOperation::Unlock).unwrap();

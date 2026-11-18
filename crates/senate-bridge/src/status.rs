@@ -45,6 +45,7 @@ pub struct StatusView {
     pub server_url: Option<String>,
     pub committees: Vec<CommitteeStatus>,
     pub sessions: Vec<Session>,
+    pub hosted: std::collections::BTreeMap<String, Option<String>>,
     pub queue: QueueCounts,
     pub locale: Locale,
     /// Who holds that Senate's Speaker's seat, as the daemon heard.
@@ -66,6 +67,7 @@ impl StatusView {
             server_url: Some(reply.server_url),
             committees: reply.committees,
             sessions: reply.sessions,
+            hosted: reply.hosted,
             queue: reply.queue,
             locale: reply.locale,
             speaker: reply.speaker,
@@ -193,6 +195,7 @@ fn offline(paths: &Paths) -> anyhow::Result<StatusView> {
         server_url: config.as_ref().map(|c| c.server_url.clone()),
         committees: Vec::new(),
         sessions: Vec::new(),
+        hosted: Default::default(),
         queue: QueueCounts::default(),
         locale: config
             .as_ref()
@@ -206,6 +209,7 @@ fn offline(paths: &Paths) -> anyhow::Result<StatusView> {
     }
     let store = Store::open_read_only(&paths.state_db())?;
     view.sessions = store.sessions()?;
+    view.hosted = crate::host::status(paths, &store, &view.sessions)?;
     let configured: Vec<_> = config.map(|c| c.committees).unwrap_or_default();
     view.committees = store
         .cursors()?
@@ -672,6 +676,15 @@ fn render_senate(
         }
     }
 
+    for session in &view.sessions {
+        if let Some(Some(new)) = view.hosted.get(&session.session_id) {
+            let _ = writeln!(
+                out,
+                "  Hosted Claude session {} switched to native ID {new}. Run senate attach {} to inspect or exit the existing terminal.",
+                session.agent, session.agent
+            );
+        }
+    }
     let _ = writeln!(out, "\n{}", l.pick("会话", "sessions"));
     if view.sessions.is_empty() {
         let _ = writeln!(
@@ -776,6 +789,7 @@ mod tests {
             server_url: Some("http://x".into()),
             committees: vec![row("claude", 1), row("codex", 0)],
             sessions: Vec::new(),
+            hosted: Default::default(),
             queue: QueueCounts::default(),
             locale,
             speaker: None,

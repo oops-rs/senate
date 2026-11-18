@@ -207,6 +207,22 @@ impl ApiClient {
         Ok(checked(response).await?.json().await?)
     }
 
+    pub(crate) async fn remove_alias(
+        &self,
+        primary: &SenatorName,
+        alias: &SenatorName,
+    ) -> Result<(), ApiClientError> {
+        let response = self
+            .authed(
+                self.http
+                    .delete(self.url(&format!("/v1/aliases/{primary}/{alias}"))),
+            )
+            .send()
+            .await?;
+        checked(response).await?;
+        Ok(())
+    }
+
     pub async fn aliases(&self) -> Result<senate_core::api::SenatorAliases, ApiClientError> {
         let response = self
             .authed(self.http.get(self.url("/v1/aliases")))

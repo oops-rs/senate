@@ -16,7 +16,7 @@ use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::map_response_with_state;
 use axum::response::{IntoResponse, Response, Sse};
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use senate_core::api::{
     AppendResponse, CheckpointQuery, Cursor, CursorQuery, DEFAULT_PAGE, DEFAULT_SEARCH,
@@ -51,6 +51,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/v1/me", get(me))
         .route("/v1/aliases", get(list_aliases))
         .route("/v1/aliases/{primary}", put(set_alias))
+        .route("/v1/aliases/{primary}/{alias}", delete(remove_alias))
         .route(
             "/v1/committees/{committee}/events",
             post(append).get(events),
@@ -306,10 +307,28 @@ async fn set_alias(
             "an alias needs a coding session's primary senator ID",
         ));
     }
-    state.act_as(&person, &primary).await?;
+    state
+        .hub
+        .roster_now()
+        .may_act_as(&person.0, &primary)
+        .map_err(|error| ApiFailure::forbidden(error.to_string()))?;
     Ok(Json(
         state.hub.set_alias(&person.0, &primary, request).await?,
     ))
+}
+
+async fn remove_alias(
+    State(state): State<AppState>,
+    person: Person,
+    Path((primary, alias)): Path<(SenatorName, SenatorName)>,
+) -> Result<StatusCode, ApiFailure> {
+    state
+        .hub
+        .roster_now()
+        .may_act_as(&person.0, &primary)
+        .map_err(|error| ApiFailure::forbidden(error.to_string()))?;
+    state.hub.remove_alias(&person.0, &primary, &alias).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn me(State(state): State<AppState>, person: Person) -> Result<Json<Me>, ApiFailure> {

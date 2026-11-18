@@ -564,6 +564,7 @@ async fn streams_follow_sessions_and_configured_committees() {
             server_url: Some(status.server_url.clone()),
             committees: status.committees.clone(),
             sessions: status.sessions.clone(),
+            hosted: Default::default(),
             queue: status.queue,
             locale: status.locale,
             speaker: status.speaker.clone(),

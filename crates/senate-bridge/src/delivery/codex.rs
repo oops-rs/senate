@@ -338,20 +338,33 @@ impl AppServer {
             .filter(|id| !id.is_empty())
             .ok_or_else(|| CodexError::Protocol("thread/start returned no thread ID".into()))?;
         // A newly created thread needs history for the TUI's resume bootstrap.
-        self.request(
-            "thread/inject_items",
-            id,
-            json!({
-                "threadId": id,
-                "items": [{
-                    "type": "message",
-                    "role": "developer",
-                    "content": [{"type": "input_text", "text": "Senate started this session."}]
-                }]
-            }),
-        )
-        .await?;
+        if let Err(error) = self
+            .request(
+                "thread/inject_items",
+                id,
+                json!({
+                    "threadId": id,
+                    "items": [{
+                        "type": "message",
+                        "role": "developer",
+                        "content": [{"type": "input_text", "text": "Senate started this session."}]
+                    }]
+                }),
+            )
+            .await
+        {
+            if let Err(archive) = self.archive_thread(id).await {
+                tracing::warn!(%archive, thread = %id, "could not archive a failed hosted thread");
+            }
+            return Err(error);
+        }
         Ok(id.into())
+    }
+
+    pub(crate) async fn archive_thread(&mut self, id: &str) -> Result<(), CodexError> {
+        self.request("thread/archive", id, json!({"threadId": id}))
+            .await?;
+        Ok(())
     }
 
     pub async fn thread_state(&mut self, thread: &str) -> Result<ThreadState, CodexError> {

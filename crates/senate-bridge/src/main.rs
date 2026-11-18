@@ -368,6 +368,8 @@ enum Cmd {
         cwd: PathBuf,
         session_id: String,
         #[arg(long)]
+        program: PathBuf,
+        #[arg(long)]
         resume: bool,
         #[arg(long)]
         codex_remote: Option<String>,
@@ -1283,6 +1285,7 @@ fn run(command: Cmd, terminal: Option<Terminal>) -> anyhow::Result<()> {
             runtime: harness,
             cwd,
             session_id,
+            program,
             resume,
             codex_remote,
         } => {
@@ -1294,6 +1297,7 @@ fn run(command: Cmd, terminal: Option<Terminal>) -> anyhow::Result<()> {
                 &cwd,
                 &senate_bridge::host::SessionCommand {
                     session_id: &session_id,
+                    program: &program,
                     resume,
                     codex_remote: codex_remote.as_deref(),
                 },

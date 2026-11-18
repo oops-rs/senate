@@ -417,6 +417,7 @@ pub(crate) struct Shared {
     session_bindings: RwLock<()>,
     hosts: hosts::Launches,
     codex_transport: crate::delivery::codex::Transport,
+    host_binary: PathBuf,
     pushes: Mutex<HashMap<String, PushState>>,
     /// Automatic checkpoints, per agent and worktree root.
     auto: Mutex<HashMap<(SenatorName, PathBuf), AutoCheckpoint>>,
@@ -523,6 +524,15 @@ pub async fn run(options: DaemonOptions) -> anyhow::Result<()> {
 }
 
 pub async fn start(options: DaemonOptions) -> anyhow::Result<DaemonHandle> {
+    let host_binary = std::env::current_exe()?.with_file_name("senate");
+    start_with_host_binary(options, host_binary).await
+}
+
+/// Start the bridge with a companion Senate CLI at an explicit path.
+pub async fn start_with_host_binary(
+    options: DaemonOptions,
+    host_binary: PathBuf,
+) -> anyhow::Result<DaemonHandle> {
     let DaemonOptions {
         paths,
         config,
@@ -586,6 +596,7 @@ pub async fn start(options: DaemonOptions) -> anyhow::Result<DaemonHandle> {
     ));
     tracing::debug!(transport = %codex.transport, "Codex sessions are pushed through the app-server");
     let common = Common {
+        host_binary,
         timing,
         codex,
         relay: relay.clone(),
@@ -631,6 +642,7 @@ pub async fn start(options: DaemonOptions) -> anyhow::Result<DaemonHandle> {
 /// What every Senate's half of the daemon shares: one Codex transport and
 /// approvals relay, one watch channel, one companion configuration.
 struct Common {
+    host_binary: PathBuf,
     timing: Timing,
     codex: CodexAppServerAdapter,
     relay: Arc<Relay>,
@@ -698,6 +710,7 @@ impl Shared {
             session_bindings: RwLock::new(()),
             hosts: hosts::Launches::default(),
             codex_transport: common.codex.transport.clone(),
+            host_binary: common.host_binary.clone(),
             pushes: Mutex::new(HashMap::new()),
             auto: Mutex::new(HashMap::new()),
             home: common.home.clone(),
@@ -1098,9 +1111,16 @@ impl Shared {
     fn desired_seats(&self) -> Result<BTreeSet<Seat>, StoreError> {
         let mut set: BTreeSet<Seat> = BTreeSet::new();
         let sessions = if self.companion_config.enabled {
-            self.store.all_sessions()?
+            let mut sessions = self.checked_live_sessions()?;
+            sessions.extend(
+                self.store
+                    .all_sessions()?
+                    .into_iter()
+                    .filter(|session| !session.is_live()),
+            );
+            sessions
         } else {
-            self.store.live_sessions()?
+            self.checked_live_sessions()?
         };
         for s in sessions {
             if let Some(f) = s.committee() {
@@ -1169,8 +1189,17 @@ impl Shared {
     fn checked_live_sessions(&self) -> Result<Vec<Session>, StoreError> {
         let mut live = Vec::new();
         let mut changed = false;
+        let paths = Paths::new(&self.home);
         for s in self.store.live_sessions()? {
-            if s.claude_pid.is_some_and(|pid| !session::pid_alive(pid)) {
+            if let Some(id) = self.store.session_host(&s.session_id)? {
+                if !crate::host::running(&paths, &id)? {
+                    changed |= self.store.mark_host_gone(&s.session_id, &id)?;
+                    continue;
+                }
+                if crate::host::switched(&paths, &id).is_some() {
+                    continue;
+                }
+            } else if s.claude_pid.is_some_and(|pid| !session::pid_alive(pid)) {
                 tracing::info!(session = %s.session_id, "session process is gone; marking stale");
                 changed |= self
                     .store
@@ -1191,6 +1220,11 @@ impl Shared {
         }
         if let Err(e) = self.store.prune(RETENTION) {
             tracing::warn!("pruning state failed: {e}");
+        }
+        if let Err(error) =
+            crate::host::prune_abandoned(&Paths::new(&self.home), Duration::from_secs(300))
+        {
+            tracing::warn!(%error, "pruning abandoned terminal hosts");
         }
         self.committees_changed.notify_one();
     }
@@ -2610,7 +2644,14 @@ impl Shared {
                 session_id,
                 endpoint,
             } => wrap(self.on_register_agy(&session_id, endpoint).await),
-            Request::SessionEnd { session_id, .. } => wrap(self.on_session_end(&session_id).await),
+            Request::SessionEnd { session_id, .. } => {
+                wrap(self.on_session_end(&session_id, None).await)
+            }
+            Request::HostedSessionEnd {
+                session_id,
+                host_id,
+            } => wrap(self.on_session_end(&session_id, Some(&host_id)).await),
+
             Request::Checkpoint {
                 session,
                 summary,
@@ -2794,6 +2835,8 @@ impl Shared {
             locale: self.locale,
             server_url: self.api.base_url().to_string(),
             committees,
+            hosted: crate::host::status(&Paths::new(&self.home), &self.store, &sessions)
+                .map_err(internal)?,
             sessions,
             queue: self.store.counts().map_err(internal)?,
             speaker: self.speaker_seat(),
@@ -2852,7 +2895,33 @@ impl Shared {
             agent,
             agent_source,
         };
+        if let Some(mut publication) = self.hosts.pending(&report.session_id) {
+            publication
+                .wait_for(|published| *published)
+                .await
+                .map_err(|_| IpcError::bad_request("the hosted launch was rolled back"))?;
+        }
         let _binding = self.session_bindings.read().await;
+        if native
+            && report.runtime == Runtime::Claude
+            && let Some(previous) = self.detect_host_switch(&report)?
+        {
+            return Err(IpcError::bad_request(hosts::switch_message(
+                &previous,
+                &report.session_id,
+            )));
+        }
+        if native
+            && let Some(id) = self
+                .store
+                .session_host(&report.session_id)
+                .map_err(internal)?
+            && !crate::host::running(&Paths::new(&self.home), &id).map_err(IpcError::internal)?
+        {
+            self.store
+                .clear_session_host(&report.session_id, &id)
+                .map_err(internal)?;
+        }
         let before = self.store.session(&report.session_id).map_err(internal)?;
         let session = self.store.upsert_session(&upsert).map_err(internal)?;
         if before.as_ref().is_some_and(|b| b.agent != session.agent) {
@@ -3195,8 +3264,25 @@ impl Shared {
     async fn on_session_end(
         self: &Arc<Self>,
         session_id: &str,
+        host_id: Option<&EventId>,
     ) -> Result<serde_json::Value, IpcError> {
+        // A child that never published must not touch a prior session row.
+        if self.hosts.pending(session_id).is_some_and(|p| !*p.borrow()) {
+            return Ok(serde_json::json!({}));
+        }
         let _binding = self.session_bindings.write().await;
+        let paths = Paths::new(&self.home);
+        let registered = self.store.session_host(session_id).map_err(internal)?;
+        let switched = match (host_id, registered.as_ref()) {
+            (Some(expected), actual) if Some(expected) != actual => {
+                return Ok(serde_json::json!({}));
+            }
+            (None, Some(id)) if crate::host::running(&paths, id).map_err(IpcError::internal)? => {
+                return Ok(serde_json::json!({}));
+            }
+            (Some(id), _) => crate::host::switched(&paths, id).is_some(),
+            _ => false,
+        };
         self.agy.forget(session_id);
         let before = self.store.session(session_id).map_err(internal)?;
         if self
@@ -3207,7 +3293,7 @@ impl Shared {
             self.committees_changed.notify_one();
             self.work.notify_one();
             // The hook waits for this reply; the checkpoint does not keep it.
-            if let Some(session) = before.filter(|s| s.committee().is_some()) {
+            if let Some(session) = before.filter(|s| !switched && s.committee().is_some()) {
                 let shared = self.clone();
                 tokio::spawn(async move {
                     shared

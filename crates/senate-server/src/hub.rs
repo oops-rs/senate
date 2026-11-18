@@ -396,9 +396,9 @@ impl ServerHub {
     ) -> Result<SenatorName, HubError> {
         let mut aliases = self.aliases.write().await;
         let roster = self.seats.snapshot();
-        if roster.owner_of(primary) != Some(person)
+        if roster.may_act_as(person, primary).is_err()
             || roster.built_in() == Some(primary)
-            || !roster.is_agent(primary)
+            || roster.is_person(primary)
             || !primary.is_session_name()
         {
             return Err(HubError::Rejected(format!(
@@ -426,8 +426,37 @@ impl ServerHub {
         registry::put_aliases(self.store.as_ref(), &next)
             .await
             .map_err(log_error)?;
+        self.seats
+            .act_as(person, primary)
+            .map_err(|error| HubError::Rejected(error.to_string()))?;
         *aliases = next;
         Ok(alias)
+    }
+
+    /// Conditional rollback: a newer alias, or one owned by another native
+    /// session after a retry, must not be removed by a failed launch.
+    pub(crate) async fn remove_alias(
+        &self,
+        person: &Name,
+        primary: &SenatorName,
+        alias: &SenatorName,
+    ) -> Result<(), HubError> {
+        let mut aliases = self.aliases.write().await;
+        if aliases.get(alias) != Some(primary) {
+            return Ok(());
+        }
+        if self.seats.snapshot().owner_of(primary) != Some(person) {
+            return Err(HubError::Rejected(format!(
+                "{person} cannot remove an alias for {primary}"
+            )));
+        }
+        let mut next = aliases.clone();
+        next.remove(alias);
+        registry::put_aliases(self.store.as_ref(), &next)
+            .await
+            .map_err(log_error)?;
+        *aliases = next;
+        Ok(())
     }
 
     /// The committee's chair, and how it was found ([`senate_core::chair`];

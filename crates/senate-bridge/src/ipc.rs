@@ -380,6 +380,10 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
+    HostedSessionEnd {
+        session_id: String,
+        host_id: EventId,
+    },
     Ask {
         session: SessionSelector,
         to: Vec<Address>,
@@ -1430,6 +1434,11 @@ pub struct StatusReply {
     pub server_url: String,
     pub committees: Vec<CommitteeStatus>,
     pub sessions: Vec<Session>,
+    /// Live terminal hosts by session ID. The value is a switched native
+    /// identity, if the hosted TUI is no longer showing the bound session.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub hosted: std::collections::BTreeMap<String, Option<String>>,
+
     pub queue: QueueCounts,
     /// Who holds the Speaker's seat of that Senate, as `/v1/me` said.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -12,7 +12,39 @@ use crate::host;
 use crate::ipc::{HostedRuntime, SpawnReply};
 
 #[derive(Default)]
-pub(super) struct Launches(Mutex<BTreeMap<EventId, Option<String>>>);
+pub(super) struct Launches(Mutex<BTreeMap<EventId, Pending>>);
+
+struct Pending {
+    session_id: Option<String>,
+    published: watch::Sender<bool>,
+}
+
+impl Launches {
+    pub(super) fn pending(&self, session_id: &str) -> Option<watch::Receiver<bool>> {
+        lock(&self.0)
+            .values()
+            .find(|pending| pending.session_id.as_deref() == Some(session_id))
+            .map(|pending| pending.published.subscribe())
+    }
+}
+
+pub(super) enum LaunchAudit {
+    Ready,
+    RolledBack { reason: String },
+}
+
+async fn no_audit(phase: LaunchAudit, _: SpawnReply, _: HostedRuntime) -> Result<(), IpcError> {
+    if let LaunchAudit::RolledBack { reason } = phase {
+        tracing::debug!(%reason, "rolling back an operator terminal launch");
+    }
+    Ok(())
+}
+
+pub(super) fn switch_message(old: &SenatorName, new: &str) -> String {
+    format!(
+        "hosted Claude session {old} switched to native ID {new}; attach to {old} to inspect or exit the existing terminal"
+    )
+}
 
 struct PendingGuard<'a> {
     launches: &'a Launches,
@@ -101,6 +133,22 @@ impl Shared {
         cwd: PathBuf,
         limit: Option<usize>,
     ) -> Result<HostedLaunch, IpcError> {
+        self.on_spawn_with(runtime, committee, alias, cwd, limit, no_audit)
+            .await
+    }
+
+    pub(super) async fn on_spawn_with<Fut>(
+        &self,
+        runtime: HostedRuntime,
+        committee: CommitteeId,
+        alias: Option<SenatorName>,
+        cwd: PathBuf,
+        limit: Option<usize>,
+        audit: impl Fn(LaunchAudit, SpawnReply, HostedRuntime) -> Fut + Send,
+    ) -> Result<HostedLaunch, IpcError>
+    where
+        Fut: std::future::Future<Output = Result<(), IpcError>> + Send,
+    {
         // Validate before starting a child, and never let spawn create a
         // committee merely by turning on a stream for an unknown name.
         let me = tokio::time::timeout(Duration::from_secs(5), self.api.me())
@@ -112,7 +160,7 @@ impl Shared {
                 "unknown committee {committee}"
             )));
         }
-        self.launch_host(runtime, committee, alias, cwd, None, limit)
+        self.launch_host(runtime, committee, alias, cwd, None, limit, audit)
             .await
     }
 
@@ -131,17 +179,51 @@ impl Shared {
                     IpcError::new(codes::NO_SESSION, format!("unknown alias {senator}"))
                 })?
         };
-        self.store
-            .all_sessions()
-            .map_err(internal)?
-            .into_iter()
-            .find(|s| s.agent == primary && s.agent_source == AgentSource::Session)
-            .ok_or_else(|| {
-                IpcError::new(
-                    codes::NO_SESSION,
-                    format!("no local session record for {senator}; its directory is unknown"),
-                )
-            })
+        for session in self.store.all_sessions().map_err(internal)? {
+            if session.agent == primary && session.agent_source == AgentSource::Session {
+                return Ok(session);
+            }
+            let paths = Paths::new(&self.home);
+            if let Some(id) = self
+                .store
+                .session_host(&session.session_id)
+                .map_err(internal)?
+                && let Some(new) = host::switched(&paths, &id)
+                && agent::session_name(Runtime::Claude, &new) == primary
+                && host::running(&paths, &id).map_err(IpcError::internal)?
+            {
+                return Err(IpcError::bad_request(switch_message(&session.agent, &new)));
+            }
+        }
+        Err(IpcError::new(
+            codes::NO_SESSION,
+            format!("no local session record for {senator}; its directory is unknown"),
+        ))
+    }
+
+    pub(super) fn detect_host_switch(
+        &self,
+        report: &HookReport,
+    ) -> Result<Option<SenatorName>, IpcError> {
+        let paths = Paths::new(&self.home);
+        for session in self.store.live_sessions().map_err(internal)? {
+            if session.runtime != Runtime::Claude || session.session_id == report.session_id {
+                continue;
+            }
+            if let Some(id) = self
+                .store
+                .session_host(&session.session_id)
+                .map_err(internal)?
+                && let Some(pid) = host::child_pid(&paths, &id)
+                && (Some(pid) == report.claude_pid || report.ancestor_pids.contains(&pid))
+                && host::running(&paths, &id).map_err(IpcError::internal)?
+            {
+                host::note_switch(&paths, &id, &report.session_id).map_err(IpcError::internal)?;
+                self.committees_changed.notify_one();
+                return Ok(Some(session.agent));
+            }
+        }
+        Ok(None)
     }
 
     pub(super) async fn resolve_restore(
@@ -150,7 +232,7 @@ impl Shared {
     ) -> Result<RestoreTarget, IpcError> {
         let session = self.find_local_senator(senator).await?;
         self.refuse_running_host(&Paths::new(&self.home), &session.session_id)?;
-        if session.is_live() && session.claude_pid.is_some_and(session::pid_alive) {
+        if session.runtime == Runtime::Claude && claude_reachable(&session).await {
             return Err(IpcError::bad_request(
                 "the original session is still running; exit it before restoring",
             ));
@@ -180,6 +262,18 @@ impl Shared {
         target: RestoreTarget,
         limit: Option<usize>,
     ) -> Result<HostedLaunch, IpcError> {
+        self.on_restore_with(target, limit, no_audit).await
+    }
+
+    pub(super) async fn on_restore_with<Fut>(
+        &self,
+        target: RestoreTarget,
+        limit: Option<usize>,
+        audit: impl Fn(LaunchAudit, SpawnReply, HostedRuntime) -> Fut + Send,
+    ) -> Result<HostedLaunch, IpcError>
+    where
+        Fut: std::future::Future<Output = Result<(), IpcError>> + Send,
+    {
         self.launch_host(
             target.runtime,
             target.committee,
@@ -187,6 +281,7 @@ impl Shared {
             target.cwd,
             Some(target.session_id),
             limit,
+            audit,
         )
         .await
     }
@@ -195,6 +290,10 @@ impl Shared {
         if let Some(id) = self.store.session_host(session_id).map_err(internal)?
             && host::running(paths, &id).map_err(IpcError::internal)?
         {
+            if let Some(new) = host::switched(paths, &id) {
+                let old = agent::session_name(Runtime::Claude, session_id);
+                return Err(IpcError::bad_request(switch_message(&old, &new)));
+            }
             return Err(IpcError::bad_request(
                 "this senator already has a running terminal host; use senate attach",
             ));
@@ -204,7 +303,7 @@ impl Shared {
 
     pub(super) async fn on_attach(&self, senator: SenatorName) -> Result<PathBuf, IpcError> {
         let session = self.find_local_senator(&senator).await?;
-        let paths = Paths::new(&self.home);
+        let paths = Paths::new(self.home.canonicalize().map_err(IpcError::internal)?);
         if let Some(id) = self
             .store
             .session_host(&session.session_id)
@@ -219,7 +318,8 @@ impl Shared {
         ))
     }
 
-    async fn launch_host(
+    #[allow(clippy::too_many_arguments)]
+    async fn launch_host<Fut>(
         &self,
         runtime: HostedRuntime,
         committee: CommitteeId,
@@ -227,7 +327,11 @@ impl Shared {
         cwd: PathBuf,
         resume: Option<String>,
         limit: Option<usize>,
-    ) -> Result<HostedLaunch, IpcError> {
+        audit: impl Fn(LaunchAudit, SpawnReply, HostedRuntime) -> Fut + Send,
+    ) -> Result<HostedLaunch, IpcError>
+    where
+        Fut: std::future::Future<Output = Result<(), IpcError>> + Send,
+    {
         if !cwd.is_absolute() {
             return Err(IpcError::bad_request(
                 "the project directory must be absolute",
@@ -247,6 +351,7 @@ impl Shared {
         }
         let paths = Paths::new(self.home.canonicalize().map_err(IpcError::internal)?);
         let id = EventId::new();
+        let (published, _) = watch::channel(false);
         {
             let mut launches = lock(&self.hosts.0);
             if let Some(limit) = limit {
@@ -255,7 +360,7 @@ impl Shared {
             if let Some(id) = &resume {
                 if launches
                     .values()
-                    .any(|pending| pending.as_ref() == Some(id))
+                    .any(|pending| pending.session_id.as_ref() == Some(id))
                 {
                     return Err(IpcError::bad_request(
                         "this senator is already being restored",
@@ -263,12 +368,35 @@ impl Shared {
                 }
                 self.refuse_running_host(&paths, id)?;
             }
-            launches.insert(id.clone(), resume.clone());
+            launches.insert(
+                id.clone(),
+                Pending {
+                    session_id: resume.clone(),
+                    published: published.clone(),
+                },
+            );
         }
         let _pending = PendingGuard {
             launches: &self.hosts,
             id: id.clone(),
         };
+
+        let executable = match runtime {
+            HostedRuntime::Claude => self.companion_config.claude_bin.clone(),
+            HostedRuntime::Codex => crate::delivery::codex::CodexConfig::load(&paths.config())
+                .map_err(IpcError::internal)?
+                .bin
+                .unwrap_or_else(|| PathBuf::from("codex")),
+        };
+        if !self.host_binary.is_file()
+            || rustix::fs::access(&self.host_binary, rustix::fs::Access::EXEC_OK).is_err()
+        {
+            return Err(IpcError::internal(format!(
+                "Senate CLI executable not found: {}",
+                self.host_binary.display()
+            )));
+        }
+        let program = host::preflight(&paths, &id, &executable).map_err(IpcError::internal)?;
 
         // Keep the creating connection until the host has started. Delivery
         // and the TUI use the same shared server for the life of the session.
@@ -287,55 +415,92 @@ impl Shared {
                     Ok::<_, crate::delivery::codex::CodexError>((server, id))
                 })
                 .await
-                .map_err(|_| IpcError::bad_request("timed out starting the Codex thread"))?
+                .map_err(|_| IpcError::new(codes::SERVER, "timed out preparing the Codex thread"))?
                 .map_err(IpcError::internal)?;
                 app_server = Some(server);
                 id
             }
         };
+        if let Some(pending) = lock(&self.hosts.0).get_mut(&id) {
+            pending.session_id = Some(session_id.clone());
+        }
         let remote = (runtime == HostedRuntime::Codex).then(|| self.codex_transport.remote());
         let launch = host::SessionCommand {
             session_id: &session_id,
+            program: &program,
             resume: restoring,
             codex_remote: remote.as_deref(),
         };
         let session_runtime = Runtime::from(runtime);
-        let senator = agent::session_name(session_runtime, &session_id);
+        let reply = SpawnReply {
+            senator: agent::session_name(session_runtime, &session_id),
+            session_id: session_id.clone(),
+            committee,
+        };
         let facts = session::gather_git_facts(&cwd, Duration::from_secs(2)).await;
         let inferred = session::infer_committee(
             facts.branch.as_deref(),
             facts.committee_file.as_deref(),
             self.convention.as_ref(),
         );
-        if let Some(alias) = &alias {
-            tokio::time::timeout(
-                Duration::from_secs(5),
-                self.api.set_alias(&senator, alias, false),
-            )
-            .await
-            .map_err(|_| self.join_name_timeout())?
-            .map_err(server_error)?;
-        }
-        // A caller can send an assignment as soon as spawn returns. Seed
-        // now so the stream's first join cannot skip that assignment.
-        let generation = *self.generation.read().await;
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            self.ensure_seeded(&senator, &committee, generation),
-        )
-        .await
-        .map_err(|_| IpcError::bad_request("timed out preparing the senator's inbox"))?
-        .map_err(|error| match error {
-            Intake::Resync(reason) => IpcError::bad_request(reason.to_string()),
-            Intake::Failed(error) => IpcError::internal(error),
-        })?;
-        let child = {
+        let mut process = None;
+        let mut audit_written = false;
+        let mut alias_attempted = false;
+        let result = async {
+            // No agent cursor GET here: that endpoint seats the senator.
+            // Snapshot the head without acting as the new senator.
+            let cursor = if self
+                .store
+                .has_cursor(&reply.senator, &reply.committee)
+                .map_err(internal)?
+            {
+                None
+            } else {
+                Some(
+                    tokio::time::timeout(Duration::from_secs(5), self.head(&reply.committee))
+                        .await
+                        .map_err(|_| {
+                            IpcError::new(codes::SERVER, "timed out preparing the senator's inbox")
+                        })?
+                        .map_err(|error| match error {
+                            Intake::Resync(reason) => {
+                                IpcError::new(codes::SERVER, reason.to_string())
+                            }
+                            Intake::Failed(error) => IpcError::internal(error),
+                        })?,
+                )
+            };
+            let (child, errors) =
+                host::start(&self.host_binary, &paths, &id, runtime, &cwd, &launch)
+                    .map_err(IpcError::internal)?;
+            process = Some(await_ready(child, errors).await?);
+            audit(LaunchAudit::Ready, reply.clone(), runtime).await?;
+            audit_written = true;
+            if let Some(alias) = &alias {
+                alias_attempted = true;
+                tokio::time::timeout(
+                    Duration::from_secs(5),
+                    self.api.set_alias(&reply.senator, alias, false),
+                )
+                .await
+                .map_err(|_| self.join_name_timeout())?
+                .map_err(server_error)?;
+            }
+            if !host::running(&paths, &id).map_err(IpcError::internal)?
+                || !host::child_pid(&paths, &id).is_some_and(session::pid_alive)
+            {
+                return Err(IpcError::internal(
+                    "terminal host exited before publication",
+                ));
+            }
+            // This launch's hook is waiting on its own publication
+            // channel; unrelated hooks and delivery can keep running.
             let _binding = self.session_bindings.write().await;
             self.store
                 .register_hosted_session(
                     &SessionUpsert {
                         session_id: session_id.clone(),
-                        cwd: cwd.clone(),
+                        cwd,
                         git_root: facts.toplevel,
                         branch: facts.branch,
                         inferred_committee: inferred,
@@ -345,45 +510,73 @@ impl Shared {
                         transcript_path: None,
                         ancestor_pids: vec![],
                         runtime: session_runtime,
-                        agent: senator.clone(),
+                        agent: reply.senator.clone(),
                         agent_source: AgentSource::Session,
                     },
                     &id,
-                    &committee,
+                    &reply.committee,
+                    cursor,
                 )
                 .map_err(internal)?;
-            host::start(&paths, &id, runtime, &cwd, &launch)
-        };
-        let result = match child {
-            Ok((child, errors)) => await_ready(child, errors).await,
-            Err(error) => Err(IpcError::internal(error)),
-        };
-        drop(app_server);
-        match result {
-            Ok(process) => {
-                self.committees_changed.notify_one();
-                self.work.notify_one();
-                if runtime == HostedRuntime::Codex {
-                    self.reconcile_approvals();
-                }
-                Ok(HostedLaunch {
-                    reply: SpawnReply {
-                        senator,
-                        session_id,
-                        committee,
-                    },
-                    process,
-                })
-            }
-            Err(error) => {
-                let _binding = self.session_bindings.write().await;
-                self.store
-                    .set_session_state(&session_id, SessionState::Ended)
-                    .map_err(internal)?;
-                self.committees_changed.notify_one();
-                Err(error)
-            }
+            published.send_replace(true);
+            Ok(())
         }
+        .await;
+        if let Err(error) = result {
+            let mut rollback = Vec::new();
+            if let Some(process) = process
+                && let Err(stop) = process.stop().await
+            {
+                rollback.push(format!("could not stop terminal host: {stop}"));
+            }
+            if alias_attempted && let Some(alias) = &alias {
+                record_rollback(
+                    &mut rollback,
+                    "remove alias",
+                    self.api.remove_alias(&reply.senator, alias),
+                )
+                .await;
+            }
+            if !restoring && let Some(server) = &mut app_server {
+                record_rollback(
+                    &mut rollback,
+                    "archive Codex thread",
+                    server.archive_thread(&session_id),
+                )
+                .await;
+            }
+            if audit_written {
+                record_rollback(
+                    &mut rollback,
+                    "record launch rollback",
+                    audit(
+                        LaunchAudit::RolledBack {
+                            reason: error.message.clone(),
+                        },
+                        reply,
+                        runtime,
+                    ),
+                )
+                .await;
+            }
+            return if rollback.is_empty() {
+                Err(error)
+            } else {
+                Err(IpcError::new(
+                    &error.code,
+                    format!("{error}. Rollback: {}", rollback.join(", ")),
+                ))
+            };
+        }
+        self.committees_changed.notify_one();
+        self.work.notify_one();
+        if runtime == HostedRuntime::Codex {
+            self.reconcile_approvals();
+        }
+        Ok(HostedLaunch {
+            reply,
+            process: process.ok_or_else(|| IpcError::internal("missing terminal host"))?,
+        })
     }
 
     /// Count pending launches and running hosts once, under the same lock
@@ -391,7 +584,7 @@ impl Shared {
     /// reservation is still pending, including across daemon restarts.
     fn check_host_capacity(
         paths: &Paths,
-        launches: &BTreeMap<EventId, Option<String>>,
+        launches: &BTreeMap<EventId, Pending>,
         limit: usize,
     ) -> Result<(), IpcError> {
         let mut used: BTreeSet<EventId> = launches.keys().cloned().collect();
@@ -405,6 +598,31 @@ impl Shared {
     }
 }
 
+async fn record_rollback<E: std::fmt::Display>(
+    errors: &mut Vec<String>,
+    action: &str,
+    operation: impl std::future::Future<Output = Result<(), E>>,
+) {
+    match tokio::time::timeout(Duration::from_secs(5), operation).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => errors.push(format!("could not {action}: {error}")),
+        Err(_) => errors.push(format!("timed out attempting to {action}")),
+    }
+}
+
+async fn claude_reachable(session: &Session) -> bool {
+    if session.is_live() && session.claude_pid.is_some_and(session::pid_alive) {
+        return true;
+    }
+    let Some(socket) = &session.socket else {
+        return false;
+    };
+    crate::testenv::confined(socket)
+        && tokio::time::timeout(Duration::from_millis(300), UnixStream::connect(socket))
+            .await
+            .is_ok_and(|result| result.is_ok())
+}
+
 async fn await_ready(mut child: Child, errors: std::fs::File) -> Result<HostProcess, IpcError> {
     let Some(mut ready) = child.stdout.take() else {
         let _ = stop_child(&mut child).await;
@@ -414,12 +632,12 @@ async fn await_ready(mut child: Child, errors: std::fs::File) -> Result<HostProc
     };
     let result = tokio::select! {
         status = child.wait() => status.map_err(IpcError::internal).and_then(|status| {
-            Err(IpcError::bad_request(format!("the terminal host exited during startup ({status})")))
+            Err(IpcError::internal(format!("the terminal host exited during startup ({status})")))
         }),
         marker = tokio::time::timeout(host::START_TIMEOUT, ready.read_u8()) => match marker {
             Ok(Ok(host::READY)) => Ok(()),
-            Ok(_) => Err(IpcError::bad_request("the terminal host closed its startup pipe")),
-            Err(_) => Err(IpcError::bad_request("timed out starting the terminal host")),
+            Ok(_) => Err(IpcError::internal("the terminal host closed its startup pipe")),
+            Err(_) => Err(IpcError::internal("timed out starting the terminal host")),
         },
     };
     let process = HostProcess::monitor(child);
