@@ -379,12 +379,67 @@ type Seat = (SenatorName, CommitteeId);
 /// The branch a session is on now and what it is bound to there.
 type Rebind = (Option<String>, Option<CommitteeId>);
 
-#[derive(Clone, Default)]
+#[derive(Default)]
 struct HookDrops {
     count: u64,
     last: Option<(chrono::DateTime<chrono::Utc>, HookDropReport)>,
-    /// Recent host ID hints, bounded even as terminals are replaced.
-    hosts: VecDeque<EventId>,
+    hosts: VecDeque<HostHookDrop>,
+    last_log: Option<Instant>,
+}
+
+struct HostHookDrop {
+    id: EventId,
+    received: Instant,
+    at: chrono::DateTime<chrono::Utc>,
+}
+
+impl HookDrops {
+    const HOST_WARNING_AGE: Duration = Duration::from_secs(5 * 60);
+    const LOG_INTERVAL: Duration = Duration::from_secs(60);
+
+    /// Returns whether to write a daemon log line. Status counts every report.
+    fn record(
+        &mut self,
+        report: &HookDropReport,
+        received: Instant,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> bool {
+        self.count = self.count.saturating_add(1);
+        self.last = Some((at, report.clone()));
+        if let Some(id) = &report.host_id {
+            self.hosts.retain(|drop| drop.id != *id);
+            if self.hosts.len() >= 64 {
+                self.hosts.pop_front();
+            }
+            self.hosts.push_back(HostHookDrop {
+                id: id.clone(),
+                received,
+                at,
+            });
+        }
+        if self
+            .last_log
+            .is_some_and(|last| received.duration_since(last) < Self::LOG_INTERVAL)
+        {
+            return false;
+        }
+        self.last_log = Some(received);
+        true
+    }
+
+    fn clear(&mut self, id: &EventId, began: Instant) {
+        // A hook already in progress cannot clear a report received after it started.
+        self.hosts
+            .retain(|drop| &drop.id != id || drop.received >= began);
+    }
+
+    fn active_hosts(&self, now: Instant) -> BTreeMap<EventId, chrono::DateTime<chrono::Utc>> {
+        self.hosts
+            .iter()
+            .filter(|drop| now.duration_since(drop.received) < Self::HOST_WARNING_AGE)
+            .map(|drop| (drop.id.clone(), drop.at))
+            .collect()
+    }
 }
 
 pub(crate) struct Shared {
@@ -2883,18 +2938,15 @@ impl Shared {
     fn on_hook_dropped(&self, report: HookDropReport) {
         // These are unverified diagnostic hints only. Keep session, seat,
         // binding and approval updates in the normal hook handlers.
-        tracing::warn!(kind = ?report.kind, runtime_hint = ?report.runtime_hint,
-            host_hint = ?report.host_id, parent_pid_hint = report.parent_pid, "hook stdin timed out");
-        let mut drops = lock(&self.hook_drops);
-        if let Some(host) = &report.host_id {
-            drops.hosts.retain(|known| known != host);
-            if drops.hosts.len() >= 64 {
-                drops.hosts.pop_front();
-            }
-            drops.hosts.push_back(host.clone());
+        let should_log = lock(&self.hook_drops).record(&report, Instant::now(), chrono::Utc::now());
+        if should_log {
+            tracing::warn!(kind = ?report.kind, runtime_hint = ?report.runtime_hint,
+                host_hint = ?report.host_id, parent_pid_hint = report.parent_pid, "hook stdin timed out");
         }
-        drops.count = drops.count.saturating_add(1);
-        drops.last = Some((chrono::Utc::now(), report));
+    }
+
+    fn on_host_hook_processed(&self, host: &EventId, began: Instant) {
+        lock(&self.hook_drops).clear(host, began);
     }
 
     fn hook_drop_status(
@@ -2902,12 +2954,15 @@ impl Shared {
         sessions: &[Session],
         hosted: &BTreeMap<String, Option<String>>,
     ) -> Result<Option<HookDropStatus>, IpcError> {
-        let drops = lock(&self.hook_drops).clone();
-        let Some((last_at, last)) = drops.last else {
+        let drops = lock(&self.hook_drops);
+        let Some((last_at, last)) = drops.last.clone() else {
             return Ok(None);
         };
-        let mut hosted_sessions = BTreeSet::new();
-        if !drops.hosts.is_empty() {
+        let count = drops.count;
+        let active = drops.active_hosts(Instant::now());
+        drop(drops);
+        let mut hosted_last_at = BTreeMap::new();
+        if !active.is_empty() {
             for session in sessions.iter().filter(|session| {
                 session.runtime == Runtime::Claude && hosted.contains_key(&session.session_id)
             }) {
@@ -2915,17 +2970,17 @@ impl Shared {
                     .store
                     .session_host(&session.session_id)
                     .map_err(internal)?
-                    && drops.hosts.contains(&host)
+                    && let Some(at) = active.get(&host)
                 {
-                    hosted_sessions.insert(session.session_id.clone());
+                    hosted_last_at.insert(session.session_id.clone(), *at);
                 }
             }
         }
         Ok(Some(HookDropStatus {
-            count: drops.count,
+            count,
             last_at,
             last,
-            hosted_sessions,
+            hosted_last_at,
         }))
     }
 
@@ -2990,6 +3045,7 @@ impl Shared {
     /// Native hooks bring their session ID. Older local bridge clients report
     /// a fixed senator selected by their harness, file or environment.
     async fn on_hook(&self, report: HookReport, native: bool) -> Result<HookReply, IpcError> {
+        let began = Instant::now();
         if report.runtime.native_id(&report.session_id).is_none()
             || (matches!(report.runtime, Runtime::Agy | Runtime::Acp) && !native)
             || (report.runtime == Runtime::Agy
@@ -3053,16 +3109,20 @@ impl Shared {
         } else {
             (self.session_bindings.read().await, None)
         };
-        if native
-            && let Some(id) = self
-                .store
+        let mut host = if native {
+            self.store
                 .session_host(&report.session_id)
                 .map_err(internal)?
-            && !crate::host::running(&Paths::new(&self.home), &id).map_err(IpcError::internal)?
+        } else {
+            None
+        };
+        if let Some(id) = &host
+            && !crate::host::running(&Paths::new(&self.home), id).map_err(IpcError::internal)?
         {
             self.store
-                .clear_session_host(&report.session_id, &id)
+                .clear_session_host(&report.session_id, id)
                 .map_err(internal)?;
+            host = None;
         }
         let before = self.store.session(&report.session_id).map_err(internal)?;
         if native && report.runtime == Runtime::Claude {
@@ -3236,6 +3296,11 @@ impl Shared {
         // inbox again right away.
         self.note_delivered(&session.session_id);
         self.work.notify_one();
+        if session.runtime == Runtime::Claude
+            && let Some(id) = &host
+        {
+            self.on_host_hook_processed(id, began);
+        }
         Ok(HookReply {
             session,
             context,
@@ -3438,6 +3503,7 @@ impl Shared {
         session_id: &str,
         host_id: Option<&EventId>,
     ) -> Result<serde_json::Value, IpcError> {
+        let began = Instant::now();
         // A child that never published must not touch a prior session row.
         if self.hosts.unpublished(session_id) {
             return Ok(serde_json::json!({}));
@@ -3468,6 +3534,7 @@ impl Shared {
             }
             (None, Some(id)) if crate::host::running(&paths, id).map_err(IpcError::internal)? => {
                 crate::host::clear_shared_codex_thread(&paths, id).map_err(IpcError::internal)?;
+                self.on_host_hook_processed(id, began);
                 return Ok(serde_json::json!({}));
             }
             _ => {}
@@ -5314,6 +5381,61 @@ fn answered_for_me_by_a_secretary(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_hook_warnings_expire_independently_of_the_drop_totals() {
+        let received = Instant::now();
+        let at = chrono::Utc::now();
+        let mut drops = HookDrops::default();
+        let host = EventId::new();
+        let first = HookDropReport {
+            kind: crate::hook::HookKind::SessionStart,
+            runtime_hint: Some(Runtime::Claude),
+            host_id: Some(host.clone()),
+            parent_pid: 1,
+        };
+        drops.record(&first, received, at);
+        let next_host = EventId::new();
+        let next = HookDropReport {
+            host_id: Some(next_host.clone()),
+            ..first
+        };
+        let next_at = at + chrono::TimeDelta::seconds(1);
+        drops.record(&next, received + Duration::from_secs(1), next_at);
+
+        // An earlier hook can finish after a timeout has been recorded.
+        drops.clear(&host, received - Duration::from_millis(1));
+        let expires = received + HookDrops::HOST_WARNING_AGE;
+        let active = drops.active_hosts(expires - Duration::from_millis(1));
+        assert_eq!(active.get(&host), Some(&at));
+        assert_eq!(active.get(&next_host), Some(&next_at));
+        assert_eq!(
+            drops.active_hosts(expires),
+            BTreeMap::from([(next_host, next_at)])
+        );
+        assert_eq!(drops.count, 2);
+        assert_eq!(drops.last, Some((next_at, next)));
+    }
+
+    #[test]
+    fn hook_drop_logging_is_throttled_without_losing_reports() {
+        let began = Instant::now();
+        let at = chrono::Utc::now();
+        let mut drops = HookDrops::default();
+        let mut report = HookDropReport {
+            kind: crate::hook::HookKind::SessionEnd,
+            runtime_hint: None,
+            host_id: None,
+            parent_pid: 1,
+        };
+        assert!(drops.record(&report, began, at));
+        report.parent_pid = 2;
+        assert!(!drops.record(&report, began + Duration::from_secs(1), at));
+        assert_eq!(drops.count, 2);
+        assert_eq!(drops.last, Some((at, report.clone())));
+        assert!(drops.record(&report, began + HookDrops::LOG_INTERVAL, at));
+        assert_eq!(drops.count, 3);
+    }
 
     #[test]
     fn retries_back_off_to_the_cap() {

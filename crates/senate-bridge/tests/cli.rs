@@ -94,6 +94,7 @@ async fn a_hook_timeout_leaves_a_bounded_local_trace_without_a_daemon_reply() {
 
     let dir = tempfile::tempdir().unwrap();
     let paths = senate_bridge::Paths::new(dir.path().join("senate"));
+    paths.ensure_home().unwrap();
 
     for stalled in [false, true] {
         let listener = if stalled {
@@ -153,6 +154,31 @@ async fn a_hook_timeout_leaves_a_bounded_local_trace_without_a_daemon_reply() {
             0o600
         );
     }
+}
+
+#[tokio::test]
+async fn a_hook_timeout_does_not_create_a_missing_senate_home() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("senate");
+    let mut cmd = tokio::process::Command::from(bridge(dir.path(), &home));
+    let mut child = cmd
+        .args(["hook", "session-start"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let _hold_stdin_open = child.stdin.take().unwrap();
+    let out = tokio::time::timeout(WAIT, child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        out.status.success() && out.stdout.is_empty() && out.stderr.is_empty(),
+        "{out:?}"
+    );
+    assert!(!home.exists());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

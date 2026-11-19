@@ -78,6 +78,7 @@ impl Shared {
         at: u64,
         signal: ClaudeApprovalSignal,
     ) -> Result<serde_json::Value, IpcError> {
+        let began = Instant::now();
         // The stable seat can switch its native ID between two hooks.
         // Validate and record a hook under the registry's binding lock.
         let _binding = self.session_bindings.read().await;
@@ -131,6 +132,7 @@ impl Shared {
                 contextualized || attended || observed
             })
             .map_err(internal)?;
+            self.on_host_hook_processed(host_id, began);
         }
         Ok(serde_json::json!({}))
     }

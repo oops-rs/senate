@@ -393,14 +393,15 @@ fn advisories(view: &StatusView) -> Vec<String> {
     }
     for session in &view.sessions {
         let seat = &session.agent;
-        if view
+        if let Some(at) = view
             .dropped_hooks
             .as_ref()
-            .is_some_and(|drops| drops.hosted_sessions.contains(&session.session_id))
+            .and_then(|drops| drops.hosted_last_at.get(&session.session_id))
         {
+            let last = at.format("%Y-%m-%d %H:%M:%S UTC");
             lines.push(l.pick(
-                format!("托管 Claude 席位 {seat} 可能漏掉了工具授权或上下文钩子。"),
-                format!("Hosted Claude seat {seat} may have missed an approval or context hook."),
+                format!("托管 Claude 席位 {seat} 可能漏掉了工具授权或上下文钩子。最近一次钩子上报丢弃于 {last}。"),
+                format!("Hosted Claude seat {seat} may have missed an approval or context hook. Its last hook report was dropped at {last}."),
             ));
         }
         if view.hosted_viewer_unavailable.contains(&session.session_id) {

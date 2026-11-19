@@ -174,12 +174,12 @@ impl Drop for Terminal {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stalled_hosted_hook_reports_a_warning_without_updating_the_seat() {
-    use senate_bridge::ipc::{HookDropReport, StatusReply};
+    use senate_bridge::ipc::{HookDropReport, HookReply, HookReport, StatusReply};
     use senate_bridge::session::Runtime;
 
     let (mut h, project) = fixture(false, Locale::En).await;
     start(&mut h).await;
-    let (launched, terminal) = Terminal::spawn(&h, project, HostedRuntime::Claude).await;
+    let (launched, terminal) = Terminal::spawn(&h, project.clone(), HostedRuntime::Claude).await;
     let before = h.store().session(&launched.session_id).unwrap().unwrap();
     let mut cmd = tokio::process::Command::new(BIN);
     testenv::isolate_async(&mut cmd, h.dir.path());
@@ -212,8 +212,8 @@ async fn a_stalled_hosted_hook_reports_a_warning_without_updating_the_seat() {
     assert_eq!(drops.last.host_id.unwrap().to_string(), terminal.host_id());
     assert_eq!(drops.last.parent_pid, std::process::id());
     assert_eq!(
-        drops.hosted_sessions.into_iter().collect::<Vec<_>>(),
-        vec![launched.session_id.clone()]
+        drops.hosted_last_at.get(&launched.session_id),
+        Some(&drops.last_at)
     );
     assert_eq!(
         h.store().session(&launched.session_id).unwrap().unwrap(),
@@ -227,6 +227,13 @@ async fn a_stalled_hosted_hook_reports_a_warning_without_updating_the_seat() {
     assert!(status.contains(terminal.host_id()), "{status}");
     assert!(
         status.contains("may have missed an approval or context hook"),
+        "{status}"
+    );
+    assert!(
+        status.contains(&format!(
+            "Its last hook report was dropped at {}",
+            drops.last_at.format("%Y-%m-%d %H:%M:%S UTC")
+        )),
         "{status}"
     );
     let _: () = ipc::request(
@@ -248,7 +255,31 @@ async fn a_stalled_hosted_hook_reports_a_warning_without_updating_the_seat() {
     let drops = status.dropped_hooks.unwrap();
     assert_eq!(drops.count, 2);
     assert!(drops.last.host_id.is_none());
-    assert!(drops.hosted_sessions.contains(&launched.session_id));
+    assert!(drops.hosted_last_at.contains_key(&launched.session_id));
+
+    let pid = terminal.group.as_raw_pid();
+    let hook: HookReport = serde_json::from_value(json!({
+        "event": "user_prompt_submit", "runtime": "claude", "session_id": launched.session_id,
+        "cwd": project, "claude_pid": pid, "ancestor_pids": [pid],
+    }))
+    .unwrap();
+    let reply: HookReply = ipc::request(&h.socket(), &Request::SessionHook(hook), WAIT, WAIT)
+        .await
+        .unwrap();
+    assert_eq!(reply.session.agent, launched.senator);
+    let view = senate_bridge::status::collect(&h.paths).await.unwrap();
+    let after = view.dropped_hooks.as_ref().unwrap();
+    assert!(after.hosted_last_at.is_empty());
+    assert_eq!(
+        (after.count, after.last_at, &after.last),
+        (drops.count, drops.last_at, &drops.last)
+    );
+    let status = senate_bridge::status::render(&view, chrono::Utc::now());
+    assert!(status.contains("Dropped hook reports"), "{status}");
+    assert!(
+        !status.contains("may have missed an approval or context hook"),
+        "{status}"
+    );
     terminal.stop();
     h.stop().await;
 }

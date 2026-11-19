@@ -370,9 +370,9 @@ pub struct HookDropStatus {
     pub count: u64,
     pub last_at: chrono::DateTime<chrono::Utc>,
     pub last: HookDropReport,
-    /// Current hosted Claude sessions with a matching reported host ID.
-    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
-    pub hosted_sessions: std::collections::BTreeSet<String>,
+    /// Last drop for each current hosted Claude session with an active warning.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub hosted_last_at: std::collections::BTreeMap<String, chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

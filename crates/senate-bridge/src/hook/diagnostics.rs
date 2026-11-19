@@ -1,6 +1,5 @@
 use std::fs::File;
-use std::io::Write as _;
-use std::os::unix::fs::DirBuilderExt as _;
+use std::io::{self, Write as _};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -87,27 +86,9 @@ fn report(kind: HookKind, runtime_hint: Option<Runtime>) {
     }
 }
 
-fn fallback(paths: &Paths, report: &HookDropReport) -> std::io::Result<()> {
+fn fallback(paths: &Paths, report: &HookDropReport) -> io::Result<()> {
     let path = paths.hook_drops_log();
     if !crate::testenv::confined(&path) {
-        return Ok(());
-    }
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(paths.home())?;
-    let fd = open(
-        path,
-        OFlags::WRONLY
-            | OFlags::APPEND
-            | OFlags::CREATE
-            | OFlags::CLOEXEC
-            | OFlags::NOFOLLOW
-            | OFlags::NONBLOCK,
-        Mode::RUSR | Mode::WUSR,
-    )?;
-    let mut file = File::from(fd);
-    if !file.metadata()?.is_file() {
         return Ok(());
     }
     let mut line = serde_json::to_vec(&serde_json::json!({
@@ -116,16 +97,57 @@ fn fallback(paths: &Paths, report: &HookDropReport) -> std::io::Result<()> {
         "report": report,
     }))?;
     line.push(b'\n');
-    flock(&file, FlockOperation::LockExclusive)?;
-    if file.metadata()?.len().saturating_add(line.len() as u64) > LOG_CAP {
-        file.set_len(0)?;
+
+    let create =
+        OFlags::WRONLY | OFlags::CREATE | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK;
+    let mode = Mode::RUSR | Mode::WUSR;
+    // Hold one lock across append and replacement. Opening it fails if the
+    // Senate home does not exist.
+    let lock = open(path.with_extension("lock"), create, mode)?;
+    flock(&lock, FlockOperation::LockExclusive)?;
+    let mut file = File::from(open(&path, create | OFlags::APPEND, mode)?);
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Ok(());
     }
-    file.write_all(&line)
+    if metadata.len().saturating_add(line.len() as u64) <= LOG_CAP {
+        return file.write_all(&line);
+    }
+
+    // A timed-out worker may be killed before it finishes writing. Replace
+    // the log only once the complete line is ready, using one staging path.
+    let staging = path.with_extension("tmp");
+    match std::fs::remove_file(&staging) {
+        Ok(()) => {}
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err),
+    }
+    let mut replacement = File::from(open(&staging, create | OFlags::EXCL, mode)?);
+    replacement.write_all(&line)?;
+    std::fs::rename(staging, path)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_replacement_preserves_the_full_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        let log = paths.hook_drops_log();
+        let old = vec![b'x'; LOG_CAP as usize];
+        std::fs::write(&log, &old).unwrap();
+        std::fs::create_dir(log.with_extension("tmp")).unwrap();
+        let report = HookDropReport {
+            kind: HookKind::SessionEnd,
+            runtime_hint: None,
+            host_id: None,
+            parent_pid: 1,
+        };
+        assert!(fallback(&paths, &report).is_err());
+        assert_eq!(std::fs::read(log).unwrap(), old);
+    }
 
     #[test]
     fn the_hook_releases_a_held_diagnostic_worker() {
