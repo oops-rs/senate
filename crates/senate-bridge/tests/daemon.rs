@@ -83,15 +83,38 @@ async fn directed_question_is_pushed_once_with_the_inbox_framing() {
             .iter()
             .all(|o| o.person == "alice" && o.senator.as_deref() == Some("claude"))
     );
-    let item = h.item(1).unwrap();
-    assert_eq!(item.status, ItemStatus::Delivered);
-    assert_eq!(
-        h.store().session("s1").unwrap().unwrap().socket_ok,
-        Some(true)
-    );
+    eventually(
+        "the inbox delivery and socket status are both recorded",
+        WAIT,
+        || {
+            let item = h.item(1)?;
+            let session = h.store().session("s1").unwrap()?;
+            (item.status == ItemStatus::Delivered && session.socket_ok == Some(true)).then_some(())
+        },
+    )
+    .await;
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert_eq!(inbox.connections().len(), 1, "delivered exactly once");
+    let marker = h
+        .server
+        .append(note(person("pm"), "Inbox delivery barrier.").to(claude("alice")));
+    eventually("a later inbox push was acknowledged", WAIT, || {
+        (h.item(marker.seq.0)?.status == ItemStatus::Delivered).then_some(())
+    })
+    .await;
+    let messages = inbox.messages();
+    assert!(
+        messages
+            .iter()
+            .any(|text| pos(text, marker.seq.0).is_some()),
+        "{messages:?}"
+    );
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|text| pos(text, 1).is_some())
+            .count(),
+        1
+    );
     h.stop().await;
 }
 
@@ -114,7 +137,16 @@ async fn a_burst_becomes_one_inbox_message_in_seq_order() {
     );
 
     let msgs = inbox.wait_messages(1).await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    eventually("the whole directed burst was acknowledged", WAIT, || {
+        [1, 2, 4]
+            .into_iter()
+            .all(|seq| {
+                h.item(seq)
+                    .is_some_and(|item| item.status == ItemStatus::Delivered)
+            })
+            .then_some(())
+    })
+    .await;
     assert_eq!(inbox.messages().len(), 1, "one message for the whole burst");
     let m = &msgs[0];
     let (p1, p2, p4) = (pos(m, 1).unwrap(), pos(m, 2).unwrap(), pos(m, 4).unwrap());
