@@ -9,7 +9,10 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
-use common::{Harness, RECORD_HOSTED_ARGV, WAIT, committee, eventually, fast_timing, hosted_fixture_argv, path};
+use common::{
+    Harness, RECORD_HOSTED_ARGV, WAIT, committee, eventually, fast_timing, hosted_fixture_argv,
+    path,
+};
 use rustix::process::{Pid, Signal, kill_process_group};
 use senate_bridge::approvals::Decision;
 use senate_bridge::daemon::{DaemonOptions, start_with_host_binary};
@@ -53,12 +56,18 @@ async fn fixture(chair_connected: bool, locale: Locale) -> (Harness, PathBuf) {
 }
 
 async fn start(h: &mut Harness) {
+    let mut timing = fast_timing();
+    // These fixtures observe actual posts and retry counts. Keep the
+    // ordering and backoff while avoiding seconds of idle test time.
+    timing.sweep = std::time::Duration::from_millis(50);
+    timing.retry_base = std::time::Duration::from_millis(50);
+    timing.retry_max = std::time::Duration::from_millis(150);
     h.daemon = Some(
         start_with_host_binary(
             DaemonOptions {
                 paths: h.paths.clone(),
                 config: h.config.clone(),
-                timing: fast_timing(),
+                timing,
                 desktop: None,
             },
             BIN.into(),

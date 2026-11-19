@@ -9,7 +9,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use common::{Harness, RECORD_HOSTED_ARGV, committee, eventually, fast_timing, hosted_fixture_argv, path};
+use common::{
+    Harness, RECORD_HOSTED_ARGV, committee, eventually, fast_timing, hosted_fixture_argv, path,
+};
 use senate_bridge::daemon::{DaemonOptions, start_with_host_binary};
 use senate_bridge::ipc::{self, HostedRuntime, Request, SpawnReply};
 use senate_bridge::testenv;
@@ -38,6 +40,18 @@ async fn call<T: serde::de::DeserializeOwned>(h: &Harness, request: &Request) ->
     ipc::request(&h.socket(), request, TIMEOUT, TIMEOUT)
         .await
         .unwrap_or_else(|error| panic!("{request:?}: {error}"))
+}
+
+async fn wait_for_session_end(h: &Harness, session_id: &str) {
+    eventually(
+        &format!("registry session {session_id} ended"),
+        TIMEOUT,
+        || {
+            let session = h.store().session(session_id).unwrap()?;
+            (session.state == senate_bridge::SessionState::Ended).then_some(())
+        },
+    )
+    .await;
 }
 
 async fn attach(h: &Harness, alias: &str, keys: &[u8]) {
@@ -95,7 +109,8 @@ async fn fixture_terminal_launch_detach_restart_and_restore() {
     let fixture = h.dir.path().join("fixture-claude");
     std::fs::write(
         &fixture,
-        format!(r#"#!/bin/sh
+        format!(
+            r#"#!/bin/sh
 case "$1" in --session-id=?*|--resume=?*) ;; *) exit 64 ;; esac
 {RECORD_HOSTED_ARGV}
 while IFS= read -r line; do
@@ -104,7 +119,8 @@ while IFS= read -r line; do
         q) exit 0 ;;
     esac
 done
-"#),
+"#
+        ),
     )
     .unwrap();
     std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -684,11 +700,7 @@ async fn codex_native_end_during_or_after_restore_does_not_leave_a_live_row() {
         })
         .await
         .unwrap();
-        assert_eq!(
-            h.store().session(id).unwrap().unwrap().state,
-            SessionState::Ended,
-            "the hosted terminal closed after {native_end:?}",
-        );
+        wait_for_session_end(&h, id).await;
         h.stop().await;
     }
 }
@@ -1295,10 +1307,7 @@ async fn claude_hook_changes_native_context_without_moving_the_seat_or_its_mail(
     );
 
     fixture.end_terminal().await;
-    assert_eq!(
-        h.store().session("resumed").unwrap().unwrap().state,
-        SessionState::Ended
-    );
+    wait_for_session_end(h, "resumed").await;
 
     let presides = |id: &str| Request::Presides {
         session: SessionSelector {

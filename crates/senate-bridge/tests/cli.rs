@@ -11,7 +11,6 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::time::{Duration, Instant};
 
 use common::*;
 use senate_bridge::state::ItemStatus;
@@ -48,32 +47,38 @@ fn hook_input(session: &str, cwd: &Path, event: &str) -> String {
 }
 
 #[test]
-fn hooks_exit_zero_fast_and_silent_without_a_daemon() {
+fn hooks_exit_zero_and_skip_git_without_a_daemon() {
     let dir = tempfile::tempdir().unwrap();
+    let git = dir.path().join("git");
+    let git_started = dir.path().join("git-started");
+    std::fs::write(&git, "#!/bin/sh\n: > \"$TEST_HOOK_GIT_WITNESS\"\nexit 1\n").unwrap();
+    std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let hook = |sub: &str| {
+        let mut cmd = bridge(dir.path(), &dir.path().join("senate"));
+        cmd.args(["hook", sub])
+            .env("PATH", dir.path())
+            .env("TEST_HOOK_GIT_WITNESS", &git_started);
+        cmd
+    };
     for (sub, event) in [
         ("session-start", "SessionStart"),
         ("user-prompt-submit", "UserPromptSubmit"),
         ("session-end", "SessionEnd"),
     ] {
-        let started = Instant::now();
-        let mut cmd = bridge(dir.path(), &dir.path().join("senate"));
-        cmd.args(["hook", sub]);
-        let out = run_with_stdin(cmd, &hook_input("s", dir.path(), event));
+        let out = run_with_stdin(hook(sub), &hook_input("s", dir.path(), event));
         assert!(out.status.success(), "{sub}: {out:?}");
         assert!(
             out.stdout.is_empty(),
             "{sub} printed {:?}",
             String::from_utf8_lossy(&out.stdout)
         );
+        assert!(out.stderr.is_empty(), "{sub}: {out:?}");
         assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "{sub} took {:?}",
-            started.elapsed()
+            !git_started.exists(),
+            "{sub} ran git before contacting the daemon"
         );
     }
-    let mut cmd = bridge(dir.path(), &dir.path().join("senate"));
-    cmd.args(["hook", "user-prompt-submit"]);
-    let out = run_with_stdin(cmd, "this is not json");
+    let out = run_with_stdin(hook("user-prompt-submit"), "this is not json");
     assert!(out.status.success() && out.stdout.is_empty());
 }
 

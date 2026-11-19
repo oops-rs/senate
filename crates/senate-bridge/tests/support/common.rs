@@ -157,15 +157,24 @@ fi
 "#;
 
 pub async fn hosted_fixture_argv(terminal: &Path, cwd: &Path, timeout: Duration) -> Vec<String> {
-    let host = terminal.parent().unwrap().file_name().unwrap().to_str().unwrap();
+    let host = terminal
+        .parent()
+        .unwrap()
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap();
     let witness = cwd.join(format!(".fixture-argv-{host}"));
-    let argv = eventually(&format!("TUI argv at {}", witness.display()), timeout, || {
-        match std::fs::read_to_string(&witness) {
+    let argv = eventually(
+        &format!("TUI argv at {}", witness.display()),
+        timeout,
+        || match std::fs::read_to_string(&witness) {
             Ok(argv) => Some(argv),
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
             Err(error) => panic!("reading {}: {error}", witness.display()),
-        }
-    }).await;
+        },
+    )
+    .await;
     argv.lines().map(str::to_owned).collect()
 }
 

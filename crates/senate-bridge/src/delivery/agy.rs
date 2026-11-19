@@ -208,7 +208,7 @@ mod tests {
     use crate::agent::AgentSource;
     use crate::session::SessionState;
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn only_an_authenticated_matching_native_endpoint_can_acknowledge_a_push() {
         let temp = tempfile::tempdir().unwrap();
         let helper = temp.path().join("agy");
@@ -238,13 +238,30 @@ esac
             address: "127.0.0.1:47120".parse().unwrap(),
             token: "ephemeral-test-value".into(),
         };
-        assert!(adapter.verify(&endpoint, "root").await.is_ok());
-        assert!(adapter.verify(&endpoint, "another").await.is_err());
+        // Inhibit Tokio's automatic clock advance while the real fixture
+        // executable does its I/O. The adapter's timeout stays at 2s.
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let (ready, clock_held) = tokio::sync::oneshot::channel();
+        let clock = tokio::task::spawn_blocking(move || {
+            ready.send(()).unwrap();
+            let _ = held.recv();
+        });
+        clock_held.await.unwrap();
+        adapter.verify(&endpoint, "root").await.unwrap();
+        let mismatch = adapter.verify(&endpoint, "another").await.unwrap_err();
+        assert!(
+            mismatch.to_string().contains("did not confirm"),
+            "{mismatch:#}"
+        );
         let invalid = Endpoint {
             token: "wrong".into(),
             ..endpoint.clone()
         };
-        assert!(adapter.verify(&invalid, "root").await.is_err());
+        let rejected = adapter.verify(&invalid, "root").await.unwrap_err();
+        assert!(
+            rejected.to_string().contains("rejected the request"),
+            "{rejected:#}"
+        );
         let now = Utc::now();
         let mut session = Session {
             session_id: "agy:root".into(),
@@ -289,5 +306,7 @@ esac
         assert!(!format!("{invalid:?}").contains("wrong"));
         session.token = None;
         assert!(!adapter.can_push(&session));
+        drop(release);
+        clock.await.unwrap();
     }
 }

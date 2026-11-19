@@ -337,6 +337,8 @@ async fn an_agent_secretary_covers_an_away_agents_questions_from_its_notes() {
 /// agent itself gets the question, and the secretary may not answer it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_secretarys_item_is_withdrawn_when_the_agent_returns_first() {
+    use senate_bridge::state::{ItemStatus, Store};
+
     let dir = tempfile::tempdir().unwrap();
     let mut desk = Desk::new(dir.path(), "alice", Locale::En, CONFIG);
     desk.git_init("feature/refund-v2/alice");
@@ -392,31 +394,75 @@ async fn the_secretarys_item_is_withdrawn_when_the_agent_returns_first() {
         (page.covered.get(&asked.seq) == Some(&path("codex"))).then_some(())
     })
     .await;
-    // The daemon queues it for codex within a batch window; the thread
-    // cannot take a push, so it waits there.
-    tokio::time::sleep(Duration::from_millis(1_000)).await;
+    // See the actual local cover enqueue and the adapter's attempt to
+    // deliver it to the still-unloaded thread.
+    let store = Store::open_read_only(&desk.paths.state_db()).unwrap();
+    let local = |agent: &str| store.item(&path(agent), &committee(), asked.seq).unwrap();
+    eventually("the local secretary cover was queued and tried", || {
+        let waiting = local("codex")
+            .is_some_and(|item| matches!(item.status, ItemStatus::Pending | ItemStatus::Queued));
+        let tried = codex.calls().iter().any(|(method, params)| {
+            method == "thread/read" && params["threadId"] == "thread-codex"
+        });
+        (waiting && tried).then_some(())
+    })
+    .await;
     assert!(codex_pushes(&codex).is_empty(), "the thread is not ready");
 
     // claude comes back before anything was pushed to codex.
     let again = desk.inbox("s-claude-2");
-    desk.session_start_as("s-claude-2", &again, "claude")
+    let hook = desk
+        .session_start_as("s-claude-2", &again, "claude")
         .await
         .unwrap();
     desk.wait_connected("claude", true).await;
-    let own = again.wait_for("Where does the idempotency key live?").await;
-    assert!(!own.contains("secretary"), "{own}");
+    let question = "Where does the idempotency key live?";
+    let owns = if context(&hook).contains(question) {
+        context(&hook).to_owned()
+    } else {
+        again.wait_for(question).await
+    };
+    assert!(
+        !owns.contains("↳ as [senator::claude]'s secretary"),
+        "{owns}"
+    );
+    eventually(
+        "the question was delivered to the returning native session",
+        || {
+            let item = local("claude")?;
+            (item.status == ItemStatus::Delivered
+                && item.session_id.as_deref() == Some("s-claude-2"))
+            .then_some(())
+        },
+    )
+    .await;
     eventually_async("the question is no longer the cover's", || async {
         let page = top.daemon.hub.docket(&committee()).await.unwrap();
         page.covered.is_empty().then_some(())
     })
     .await;
-    // Give the daemon its recheck, then let codex take pushes: nothing of
-    // this question is pushed to it.
-    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    eventually("the daemon withdrew the queued cover", || {
+        (local("codex")?.status == ItemStatus::Cancelled).then_some(())
+    })
+    .await;
     codex.idle("thread-codex");
     // Its next hook is what would flush anything held for it.
     desk.codex_start("thread-codex").await.unwrap();
-    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    let marker = "Codex can take ordinary mail again.";
+    speak(
+        &url,
+        &token,
+        &NewEvent::new(committee(), Kind::Note, person("alice"), marker).to(senator("codex")),
+    )
+    .await
+    .unwrap();
+    eventually("Codex received newer mail after the withdrawal", || {
+        codex_pushes(&codex)
+            .iter()
+            .any(|text| text.contains(marker))
+            .then_some(())
+    })
+    .await;
     assert!(
         codex_pushes(&codex)
             .iter()

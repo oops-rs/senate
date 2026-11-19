@@ -444,11 +444,11 @@ mod tests {
         assert_eq!(detect_runtime(&input(None)), Runtime::Claude);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn no_daemon_means_no_output() {
         let dir = tempfile::tempdir().unwrap();
         let stdin = r#"{"session_id":"s","cwd":"/","hook_event_name":"UserPromptSubmit"}"#;
-        let started = std::time::Instant::now();
+        let started = tokio::time::Instant::now();
         let out = run(
             HookKind::UserPromptSubmit,
             &dir.path().join("bridge.sock"),
@@ -458,7 +458,11 @@ mod tests {
         )
         .await;
         assert_eq!(out, None);
-        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(
+            started.elapsed(),
+            Duration::ZERO,
+            "missing socket spent the IPC deadline"
+        );
     }
 
     #[tokio::test]

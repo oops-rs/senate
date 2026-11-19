@@ -5,6 +5,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use senate_core::{BranchNaming, CommitteeId, Locale, Name};
 use senate_work::{
@@ -289,7 +290,7 @@ async fn the_branch_prefix_is_the_deployments() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn timeout_kills_container_and_pushes_partial_work() {
     let fx = Fixture::new();
     let runner = fx.runner(
@@ -301,13 +302,32 @@ exec sleep 30
     );
     let mut order = fx.order();
     order.budget.wall_secs = 1;
-    let started = std::time::Instant::now();
-    let (outcome, _) = run(&runner, &order).await;
-    assert!(
-        started.elapsed().as_secs() < 15,
-        "took {:?}",
-        started.elapsed()
-    );
+    let (progress, mut steps) = mpsc::channel::<RunProgress>(256);
+    let (recorded, witness) = tokio::sync::oneshot::channel();
+    let (release_clock, hold_clock) = std::sync::mpsc::channel::<()>();
+    // A blocking receiver inhibits the paused clock's auto-advance while
+    // git and the fake container do real I/O. The tool report follows the
+    // fixture's file write and is parsed inside the timed agent future.
+    let clock = tokio::task::spawn_blocking(move || {
+        while let Some(step) = steps.blocking_recv() {
+            if step.id == "tool-t1" {
+                recorded.send(()).unwrap();
+                let _ = hold_clock.recv();
+                break;
+            }
+        }
+    });
+    let run = runner.run(&order, progress);
+    tokio::pin!(run);
+    tokio::select! {
+        ready = witness => ready.expect("the fake container wrote its partial work"),
+        outcome = &mut run => panic!("the run finished before the tool report: {outcome:?}"),
+    }
+    tokio::time::advance(Duration::from_secs(order.budget.wall_secs)).await;
+    tokio::time::resume();
+    drop(release_clock);
+    let outcome = run.await;
+    clock.await.unwrap();
 
     assert_eq!(outcome.status, RunStatus::TimedOut, "{outcome:?}");
     let pushed = outcome.pushed_commit.clone().expect("partial work pushed");

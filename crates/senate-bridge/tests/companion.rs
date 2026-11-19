@@ -214,17 +214,80 @@ async fn a_question_with_no_session_is_answered_by_a_companion() {
     h.stop().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test]
 async fn a_companion_that_does_not_answer_is_killed_and_hands_the_question_back() {
+    use rustix::io::Errno;
+    use rustix::process::{Pid, test_kill_process};
+    use tokio::io::{AsyncBufReadExt as _, BufReader};
+    use tokio::net::unix::pipe;
+
     let mut h = Harness::new().await;
-    let dump = h.dir.path().join("claude-dump");
-    enable_companion(&h, &fake_claude(&dump), 1);
+    let ready = h.dir.path().join("ready");
+    let parked = h.dir.path().join("parked");
+    let starts = h.dir.path().join("starts");
+    for fifo in [&ready, &parked] {
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let mut witness = BufReader::new(pipe::OpenOptions::new().open_receiver(&ready).unwrap());
+    // The receiver stays open before the child connects, on macOS as well
+    // as Linux. The fixture is the only writer that sends data.
+    let _keep_open = pipe::OpenOptions::new().open_sender(&ready).unwrap();
+    let program = h.dir.path().join("timeout-claude");
+    std::fs::write(&program, format!(
+        "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' \"$$\" >> {starts:?}\nprintf '%s\\n' \"$$\" > {ready:?}\nexec /bin/cat {parked:?}\n",
+    )).unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    enable_companion(&h, &program, 1);
     h.start().await;
     let wd = left_a_session(&h).await;
+    tokio::time::pause();
+    let (release_clock, hold_clock) = std::sync::mpsc::channel::<()>();
+    let (clock_started, clock_held) = tokio::sync::oneshot::channel();
+    let clock = tokio::task::spawn_blocking(move || {
+        clock_started.send(()).unwrap();
+        let _ = hold_clock.recv_timeout(WAIT);
+    });
+    clock_held.await.unwrap();
     let q = h
         .server
         .append(question(claude("bob"), claude("alice"), "重试几次？"));
-    wait_file(&dump.join("sid")).await;
+    let deadline = std::time::Instant::now() + WAIT;
+    loop {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "companion never claimed the question"
+        );
+        match h.item(q.seq.0).map(|item| item.status) {
+            Some(ItemStatus::Inflight) => break,
+            // Drive the ordinary batch timer up to the claim. Stop
+            // advancing once the daemon starts the child.
+            Some(ItemStatus::Pending) => tokio::time::advance(Duration::from_millis(1)).await,
+            state => {
+                assert_eq!(state, None, "unexpected state before companion launch");
+                tokio::task::yield_now().await;
+            }
+        }
+    }
+    let mut child_pid = String::new();
+    assert_ne!(
+        tokio::time::timeout(WAIT, witness.read_line(&mut child_pid))
+            .await
+            .unwrap()
+            .unwrap(),
+        0
+    );
+    let pid = Pid::from_raw(child_pid.trim().parse().unwrap()).unwrap();
+    assert_eq!(test_kill_process(pid), Ok(()));
+    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::time::resume();
+    drop(release_clock);
+    clock.await.unwrap();
     eventually(
         "the question back in the queue",
         Duration::from_secs(5),
@@ -234,10 +297,10 @@ async fn a_companion_that_does_not_answer_is_killed_and_hands_the_question_back(
         },
     )
     .await;
-    // One try per question: no second companion.
-    std::fs::remove_file(dump.join("sid")).unwrap();
-    tokio::time::sleep(Duration::from_millis(800)).await;
-    assert!(!dump.join("sid").exists(), "not respawned");
+    eventually("the timed out companion is gone", WAIT, || {
+        (test_kill_process(pid) == Err(Errno::SRCH)).then_some(())
+    })
+    .await;
 
     // A session that opens gets it.
     let out = h
@@ -245,6 +308,7 @@ async fn a_companion_that_does_not_answer_is_killed_and_hands_the_question_back(
         .await
         .unwrap();
     assert!(context(&out).contains("重试几次？"), "{out}");
+    assert_eq!(std::fs::read_to_string(starts).unwrap(), child_pid);
     h.stop().await;
 }
 
