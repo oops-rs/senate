@@ -32,6 +32,7 @@ use senate_speaker::{
     BasisBrain, Brain, ModelCheck, SecretaryConfigs, SpeakerArgs, SpeakerConfig, SpeakerMsg,
 };
 use senate_work::{Forge, Runner};
+use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch};
 
 use crate::chat::{ChatGateway, ChatMount};
@@ -241,6 +242,13 @@ impl Assembly {
     /// Open the log, start the server, then the built-in session (when it
     /// runs: see the module docs) and every component.
     pub async fn start(self) -> Result<Senated, AssemblyError> {
+        self.start_with_listener(None).await
+    }
+
+    pub(crate) async fn start_with_listener(
+        self,
+        listener: Option<TcpListener>,
+    ) -> Result<Senated, AssemblyError> {
         let Self {
             config,
             store,
@@ -332,7 +340,10 @@ impl Assembly {
         if let Some(roster) = roster {
             server = server.roster(roster);
         }
-        let running = server.start().await?;
+        let running = match listener {
+            Some(listener) => server.start_with_listener(listener).await?,
+            None => server.start().await?,
+        };
         let hub: Arc<dyn Hub> = running.hub.clone();
 
         let slot = SpeakerSlot::default();

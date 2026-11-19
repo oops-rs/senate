@@ -63,7 +63,7 @@
 pub mod uplink;
 
 use std::io::Write;
-use std::net::{SocketAddr, TcpListener};
+use std::net::SocketAddr;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::Path;
 use std::sync::Arc;
@@ -76,7 +76,8 @@ use senate_bridge::{BridgeConfig, Paths};
 use senate_core::{
     EventId, Locale, Name, Principal, RosterConfig, SenatePath, SenatorName, SpeakerName,
 };
-use senate_server::{ServerConfig, TokenConfig};
+use senate_server::{ServerConfig, ServerError, TokenConfig};
+use tokio::net::TcpListener;
 
 use crate::assembly::{Assembly, AssemblyError, Senated};
 use crate::component::{Component, ComponentContext, GaveUp, Supervisor};
@@ -138,7 +139,8 @@ struct Plan {
     secretaries: Vec<SenatorName>,
     /// The Senate above, when it is a child and the parent answered.
     parent: Option<SenatePath>,
-    listen: String,
+    listen: SocketAddr,
+    listener: TcpListener,
     token: String,
     dir: std::path::PathBuf,
 }
@@ -231,7 +233,8 @@ impl Machine {
                 hosted.name(&config.person),
                 (speaker, secretaries, parent),
                 local.listen.as_deref(),
-            )?;
+            )
+            .await?;
             if let Some(note) = note {
                 notice_office(&p.dir, &note, locale);
             }
@@ -319,7 +322,7 @@ impl Machine {
                 assembly = assembly.component_arc(side.clone());
             }
             let daemon = assembly
-                .start()
+                .start_with_listener(Some(p.listener))
                 .await
                 .map_err(|source| MachineError::Senate {
                     key: p.key.clone(),
@@ -440,10 +443,10 @@ impl Machine {
 }
 
 /// Where one hosted Senate lives and how it is reached: its directory, its
-/// token (generated once), and its address (configured, or the one it had,
-/// or a free loopback port, kept for the next start so the
-/// developer-machine side finds the same Senate at the same address).
-fn plan(
+/// token (generated once), and its bound listener. Keep the listener from
+/// address selection through startup so no other process can claim the port.
+/// Record the actual address so the next start can reuse it.
+async fn plan(
     paths: &Paths,
     key: String,
     name: Name,
@@ -471,29 +474,36 @@ fn plan(
         }
     };
     let listen_file = dir.join("listen");
-    let listen = match listen {
-        Some(listen) => listen.to_owned(),
+    let listener = match listen {
+        Some(listen) => {
+            senate_bridge::config::check_loopback(listen).map_err(MachineError::Invalid)?;
+            TcpListener::bind(listen)
+                .await
+                .map_err(|source| MachineError::Senate {
+                    key: key.clone(),
+                    source: ServerError::Bind {
+                        addr: listen.to_owned(),
+                        source,
+                    }
+                    .into(),
+                })?
+        }
         None => {
             let kept = std::fs::read_to_string(&listen_file)
                 .ok()
-                .map(|l| l.trim().to_owned())
-                .filter(|l| {
-                    l.parse::<SocketAddr>()
-                        .is_ok_and(|a| a.ip().is_loopback() && TcpListener::bind(a).is_ok())
-                });
-            match kept {
-                Some(listen) => listen,
-                None => {
-                    let free = TcpListener::bind("127.0.0.1:0")
-                        .and_then(|l| l.local_addr())
-                        .map_err(io(&dir))?;
-                    free.to_string()
-                }
+                .and_then(|l| l.trim().parse::<SocketAddr>().ok())
+                .filter(|addr| addr.ip().is_loopback());
+            if let Some(addr) = kept
+                && let Ok(listener) = TcpListener::bind(addr).await
+            {
+                listener
+            } else {
+                TcpListener::bind("127.0.0.1:0").await.map_err(io(&dir))?
             }
         }
     };
-    senate_bridge::config::check_loopback(&listen).map_err(MachineError::Invalid)?;
-    write_private(&listen_file, &listen).map_err(io(&listen_file))?;
+    let listen = listener.local_addr().map_err(io(&dir))?;
+    write_private(&listen_file, &listen.to_string()).map_err(io(&listen_file))?;
     Ok(Plan {
         key,
         name,
@@ -501,6 +511,7 @@ fn plan(
         secretaries,
         parent,
         listen,
+        listener,
         token,
         dir,
     })
@@ -671,7 +682,7 @@ fn senate_config(plan: &Plan, machine: &BridgeConfig) -> Result<SenatedConfig, M
     );
     server.name = Some(plan.name.clone());
     server.parent = plan.parent.clone();
-    server.listen = plan.listen.clone();
+    server.listen = plan.listen.to_string();
     server.database_url = format!("sqlite:{}", plan.dir.join("log.db").display());
     server.data_dir = plan.dir.join("data");
     server.locale = machine.locale;
@@ -781,7 +792,15 @@ mod tests {
         let top = machine.senate().unwrap();
         assert_eq!(top.key, "top");
         assert_eq!(top.name.as_str(), "north-desk");
-        assert!(top.url.starts_with("http://127.0.0.1:"));
+        let listen_file = paths.hosted("top").join("listen");
+        let listen: SocketAddr = std::fs::read_to_string(&listen_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(listen.ip(), std::net::Ipv4Addr::LOCALHOST);
+        assert_ne!(listen.port(), 0);
+        assert_eq!(top.url, format!("http://{listen}"));
         // Its name is what the Senate says it is.
         let me = ApiClient::new(&top.url, &top.token)
             .unwrap()
@@ -830,9 +849,128 @@ mod tests {
         let again = Machine::start_with(paths, config, hosted, quiet())
             .await
             .unwrap();
-        assert_eq!(again.senate().unwrap().url, top_url);
-        assert_eq!(again.senate().unwrap().token, top_token);
+        assert_eq!(again.bridge_config().server_url, top_url);
+        let top = again.senate().unwrap();
+        assert_eq!(top.url, top_url);
+        assert_eq!(top.token, top_token);
+        let me = ApiClient::new(&top_url, &top_token)
+            .unwrap()
+            .me()
+            .await
+            .unwrap();
+        assert_eq!(me.person.as_str(), "alice");
         again.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn the_local_plan_holds_its_port_until_the_server_serves() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        let config: BridgeConfig = toml::from_str("person = \"alice\"\n").unwrap();
+        let plan = plan(
+            &paths,
+            HOSTED_KEY.into(),
+            Name::new("alice-desk").unwrap(),
+            (
+                SpeakerName::id("senator::alice".parse().unwrap()),
+                Vec::new(),
+                None,
+            ),
+            None,
+        )
+        .await
+        .unwrap();
+        // A successful competing bind would keep this port occupied until
+        // startup tried to use it.
+        let contender = TcpListener::bind(plan.listen).await;
+        let config = senate_config(&plan, &config).unwrap();
+        let daemon = Assembly::new(config)
+            .without_speaker()
+            .start_with_listener(Some(plan.listener))
+            .await
+            .unwrap();
+        assert_eq!(contender.unwrap_err().kind(), std::io::ErrorKind::AddrInUse);
+        assert_eq!(daemon.base_url(), format!("http://{}", plan.listen));
+        let me = ApiClient::new(&daemon.base_url(), &plan.token)
+            .unwrap()
+            .me()
+            .await
+            .unwrap();
+        assert_eq!(me.person.as_str(), "alice");
+        daemon.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_taken_explicit_local_port_is_refused_without_falling_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        let occupied = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = occupied.local_addr().unwrap();
+        let config: BridgeConfig = toml::from_str("person = \"alice\"\n").unwrap();
+        let hosted: Hosted = toml::from_str(&format!("[local]\nlisten = \"{address}\"\n")).unwrap();
+        let Err(MachineError::Senate {
+            key,
+            source: AssemblyError::Server(ServerError::Bind { addr, source }),
+        }) = Machine::start_with(paths.clone(), config, hosted, quiet()).await
+        else {
+            panic!("startup must refuse the configured address {address}");
+        };
+        assert_eq!(key, HOSTED_KEY);
+        assert_eq!(addr, address.to_string());
+        assert_eq!(source.kind(), std::io::ErrorKind::AddrInUse);
+        assert!(!paths.hosted(HOSTED_KEY).join("listen").exists());
+    }
+
+    #[tokio::test]
+    async fn an_explicit_ephemeral_local_port_records_the_bound_address() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        let config: BridgeConfig = toml::from_str("person = \"alice\"\n").unwrap();
+        let hosted: Hosted = toml::from_str("[local]\nlisten = \"127.0.0.1:0\"\n").unwrap();
+        let machine = Machine::start_with(paths.clone(), config, hosted, quiet())
+            .await
+            .unwrap();
+        let recorded = std::fs::read_to_string(paths.hosted(HOSTED_KEY).join("listen")).unwrap();
+        let address: SocketAddr = recorded.trim().parse().unwrap();
+        assert_eq!(address.ip(), std::net::Ipv4Addr::LOCALHOST);
+        assert_ne!(address.port(), 0);
+        assert_eq!(
+            machine.bridge_config().server_url,
+            format!("http://{address}")
+        );
+        assert_eq!(
+            machine.senate().unwrap().url,
+            machine.bridge_config().server_url
+        );
+        machine.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn an_occupied_saved_local_port_is_replaced_by_an_ephemeral_port() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        let occupied = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = occupied.local_addr().unwrap();
+        let listen_file = paths.hosted(HOSTED_KEY).join("listen");
+        std::fs::create_dir_all(listen_file.parent().unwrap()).unwrap();
+        std::fs::write(&listen_file, address.to_string()).unwrap();
+        let config: BridgeConfig = toml::from_str("person = \"alice\"\n").unwrap();
+        let hosted: Hosted = toml::from_str("[local]\n").unwrap();
+        let machine = Machine::start_with(paths, config, hosted, quiet())
+            .await
+            .unwrap();
+        let saved: SocketAddr = std::fs::read_to_string(listen_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(saved.ip(), address.ip());
+        assert_ne!(saved.port(), address.port());
+        assert_ne!(saved.port(), 0);
+        let url = format!("http://{saved}");
+        assert_eq!(machine.bridge_config().server_url, url);
+        assert_eq!(machine.senate().unwrap().url, url);
+        machine.shutdown().await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

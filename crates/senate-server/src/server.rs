@@ -140,6 +140,15 @@ impl ServerBuilder {
     /// serve the HTTP API. The returned [`Running::hub`] is the same hub the
     /// HTTP layer uses; attach the gateway and the Speaker to it.
     pub async fn start(self) -> Result<Running, ServerError> {
+        self.serve(None).await
+    }
+
+    /// Start on the listener already bound by a local embedded Senate.
+    pub async fn start_with_listener(self, listener: TcpListener) -> Result<Running, ServerError> {
+        self.serve(Some(listener)).await
+    }
+
+    async fn serve(self, listener: Option<TcpListener>) -> Result<Running, ServerError> {
         let Self {
             config,
             store,
@@ -251,16 +260,17 @@ impl ServerBuilder {
         // `/v1/me` lists, are complete from the first request.
         hub.clone().start_writers().await;
 
-        let listener = match TcpListener::bind(&config.listen).await {
-            Ok(listener) => listener,
-            Err(source) => {
-                supervisor.stop(None);
-                return Err(ServerError::Bind {
-                    addr: config.listen.clone(),
-                    source,
-                });
+        let listener = match listener {
+            Some(listener) => Ok(listener),
+            None => TcpListener::bind(&config.listen).await,
+        }
+        .map_err(|source| {
+            supervisor.stop(None);
+            ServerError::Bind {
+                addr: config.listen.clone(),
+                source,
             }
-        };
+        })?;
         let local_addr = listener.local_addr().map_err(|source| ServerError::Bind {
             addr: config.listen.clone(),
             source,
