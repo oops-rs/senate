@@ -9,7 +9,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
-use common::{Harness, WAIT, committee, eventually, fast_timing, path};
+use common::{Harness, RECORD_HOSTED_ARGV, WAIT, committee, eventually, fast_timing, hosted_fixture_argv, path};
 use rustix::process::{Pid, Signal, kill_process_group};
 use senate_bridge::approvals::Decision;
 use senate_bridge::daemon::{DaemonOptions, start_with_host_binary};
@@ -34,7 +34,7 @@ async fn fixture(chair_connected: bool, locale: Locale) -> (Harness, PathBuf) {
     let program = h.dir.path().join("tui");
     std::fs::write(
         &program,
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" > argv\nwhile IFS= read -r line; do :; done\n",
+        format!("#!/bin/sh\n{RECORD_HOSTED_ARGV}\nwhile IFS= read -r line; do :; done\n"),
     )
     .unwrap();
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -258,8 +258,7 @@ async fn claude_prompt_requires_a_notification_and_the_desk_covers_an_away_chair
     let (mut h, project) = fixture(false, Locale::Zh).await;
     start(&mut h).await;
     let (launch, terminal) = Terminal::spawn(&h, project.clone(), HostedRuntime::Claude).await;
-    let args = std::fs::read_to_string(project.join("argv")).unwrap();
-    let args: Vec<_> = args.lines().collect();
+    let args = hosted_fixture_argv(&terminal.socket, &project, WAIT).await;
     assert_eq!(
         args,
         [
@@ -272,7 +271,7 @@ async fn claude_prompt_requires_a_notification_and_the_desk_covers_an_away_chair
                 .unwrap()
         ]
     );
-    let overlay: Value = serde_json::from_slice(&std::fs::read(args[2]).unwrap()).unwrap();
+    let overlay: Value = serde_json::from_slice(&std::fs::read(&args[2]).unwrap()).unwrap();
     assert_eq!(overlay.as_object().unwrap().len(), 1);
     assert_eq!(overlay["hooks"].as_object().unwrap().len(), 4);
     for event in [

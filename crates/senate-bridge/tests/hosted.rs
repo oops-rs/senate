@@ -9,7 +9,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use common::{Harness, committee, eventually, fast_timing, path};
+use common::{Harness, RECORD_HOSTED_ARGV, committee, eventually, fast_timing, hosted_fixture_argv, path};
 use senate_bridge::daemon::{DaemonOptions, start_with_host_binary};
 use senate_bridge::ipc::{self, HostedRuntime, Request, SpawnReply};
 use senate_bridge::testenv;
@@ -50,17 +50,12 @@ async fn attach(h: &Harness, alias: &str, keys: &[u8]) {
     pty.resize(pty_process::Size::new(24, 80)).unwrap();
     let mut child = pty_process::Command::from(cmd).spawn(pts).unwrap();
     let (mut output, mut input) = pty.into_split();
-    let mut observed = Vec::new();
     tokio::time::timeout(TIMEOUT, async {
-        let mut buf = [0; 4096];
-        loop {
-            let n = output.read(&mut buf).await.unwrap();
-            assert_ne!(n, 0);
-            observed.extend_from_slice(&buf[..n]);
-            if String::from_utf8_lossy(&observed).contains("fixture TUI") {
-                return;
-            }
-        }
+        // The attach CLI enters the alternate screen after setting raw
+        // mode. Request fresh fixture output over the actual PTY.
+        wait_terminal_output(&mut output, b"\x1b[?1049h").await;
+        input.write_all(b"paint\r").await.unwrap();
+        wait_terminal_output(&mut output, b"fixture TUI").await;
     })
     .await
     .unwrap();
@@ -75,6 +70,21 @@ async fn attach(h: &Harness, alias: &str, keys: &[u8]) {
     );
 }
 
+async fn wait_terminal_output(output: &mut (impl tokio::io::AsyncRead + Unpin), marker: &[u8]) {
+    let mut observed = Vec::new();
+    let mut buf = [0; 4096];
+    loop {
+        let n = output.read(&mut buf).await.unwrap();
+        assert_ne!(n, 0, "terminal closed before {marker:?}");
+        observed.extend_from_slice(&buf[..n]);
+        if observed.windows(marker.len()).any(|bytes| bytes == marker) {
+            return;
+        }
+        let discard = observed.len().saturating_sub(marker.len() - 1);
+        observed.drain(..discard);
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fixture_terminal_launch_detach_restart_and_restore() {
     let mut h = Harness::new().await;
@@ -85,16 +95,16 @@ async fn fixture_terminal_launch_detach_restart_and_restore() {
     let fixture = h.dir.path().join("fixture-claude");
     std::fs::write(
         &fixture,
-        r#"#!/bin/sh
+        format!(r#"#!/bin/sh
 case "$1" in --session-id=?*|--resume=?*) ;; *) exit 64 ;; esac
-printf '%s\n' "$1" >> argv.log
-(while :; do printf 'fixture TUI\n'; sleep 0.1; done) &
-painter=$!
-trap 'kill "$painter" 2>/dev/null; wait "$painter" 2>/dev/null' EXIT
+{RECORD_HOSTED_ARGV}
 while IFS= read -r line; do
-    [ "$line" = q ] && exit 0
+    case "$line" in
+        paint) printf 'fixture TUI\n' ;;
+        q) exit 0 ;;
+    esac
 done
-"#,
+"#),
     )
     .unwrap();
     std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -215,18 +225,12 @@ done
 
     // Success at a limit of one verifies both failures released capacity.
     let launched: SpawnReply = call(&h, &request).await;
-    let expected_arg = format!("--session-id={}", launched.session_id);
-    assert_eq!(
-        std::fs::read_to_string(project.join("argv.log"))
-            .unwrap()
-            .lines()
-            .last(),
-        Some(expected_arg.as_str())
-    );
     let attach_target = Request::Attach {
         senator: launched.senator.clone(),
     };
     let socket: PathBuf = call(&h, &attach_target).await;
+    let args = hosted_fixture_argv(&socket, &project, TIMEOUT).await;
+    assert_eq!(args[0], format!("--session-id={}", launched.session_id));
     attach(&h, launched.senator.as_str(), b"\x1b[93;5u").await;
     assert!(socket.exists());
 
@@ -300,13 +304,9 @@ done
     )
     .await;
     assert_eq!(restored, launched);
-    assert!(
-        std::fs::read_to_string(project.join("argv.log"))
-            .unwrap()
-            .lines()
-            .any(|arg| arg == format!("--resume={}", restored.session_id))
-    );
     let socket: PathBuf = call(&h, &attach_target).await;
+    let args = hosted_fixture_argv(&socket, &project, TIMEOUT).await;
+    assert_eq!(args[0], format!("--resume={}", restored.session_id));
     attach(&h, restored.senator.as_str(), b"q\r").await;
     tokio::time::timeout(TIMEOUT, async {
         while socket.exists() {
@@ -738,14 +738,14 @@ case "$1" in
             printf 'this fixture has no saved history\n' >&2
             exit 1
         fi
-        printf '%s\n' "$1" > "$output/host-args"
         ;;
-    --session-id=*) printf '%s\n' "$1" > "$output/host-args" ;;
+    --session-id=*) ;;
     *) exit 1 ;;
 esac
-trap 'printf "fixture TUI\n"' WINCH
+{RECORD_HOSTED_ARGV}
 while :; do
     IFS= read -r line || continue
+    [ "$line" != "paint" ] || printf 'fixture TUI\n'
     if [ "$line" = "nested" ]; then
         /bin/sh -c '
             printf "%s" "$2" | CLAUDE_PID=$$ "$1" hook session-start > /dev/null
@@ -938,13 +938,9 @@ async fn stop_cli_protects_an_attending_viewer_and_releases_the_slot() {
     )
     .await;
     assert_eq!(restored, fixture.seat);
-    assert_eq!(
-        std::fs::read_to_string(h.dir.path().join("host-args"))
-            .unwrap()
-            .trim(),
-        format!("--session-id={}", restored.session_id)
-    );
     fixture.terminal = call(&fixture.h, &HostedClaude::attach_request()).await;
+    let args = hosted_fixture_argv(&fixture.terminal, &fixture.project, TIMEOUT).await;
+    assert_eq!(args[0], format!("--session-id={}", restored.session_id));
     // An attachment that has sent no human input does not prevent stop.
     let mut passive = tokio::net::UnixStream::connect(&fixture.terminal)
         .await
@@ -1356,13 +1352,9 @@ async fn claude_hook_changes_native_context_without_moving_the_seat_or_its_mail(
     .await;
     assert_eq!(restored.senator, *primary);
     assert_eq!(restored.session_id, "resumed");
-    assert_eq!(
-        std::fs::read_to_string(h.dir.path().join("host-args"))
-            .unwrap()
-            .trim(),
-        "--resume=resumed"
-    );
     fixture.terminal = call(&fixture.h, &HostedClaude::attach_request()).await;
+    let args = hosted_fixture_argv(&fixture.terminal, &fixture.project, TIMEOUT).await;
+    assert_eq!(args[0], "--resume=resumed");
     fixture.end_terminal().await;
     fixture.h.stop().await;
 }

@@ -21,6 +21,7 @@ mod fixed_seat;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::convert::Infallible;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -145,6 +146,28 @@ pub async fn eventually<T>(what: &str, timeout: Duration, mut f: impl FnMut() ->
 }
 
 pub const WAIT: Duration = Duration::from_secs(10);
+
+/// Publish a complete argv witness for the current Claude host. A restore
+/// can reuse the native ID but always gets a different host directory.
+pub const RECORD_HOSTED_ARGV: &str = r#"
+if [ -n "$SENATE_HOSTED_CLAUDE" ]; then
+    argv=".fixture-argv-$SENATE_HOSTED_CLAUDE"
+    printf '%s\n' "$@" > "$argv.tmp" && mv "$argv.tmp" "$argv" || exit 1
+fi
+"#;
+
+pub async fn hosted_fixture_argv(terminal: &Path, cwd: &Path, timeout: Duration) -> Vec<String> {
+    let host = terminal.parent().unwrap().file_name().unwrap().to_str().unwrap();
+    let witness = cwd.join(format!(".fixture-argv-{host}"));
+    let argv = eventually(&format!("TUI argv at {}", witness.display()), timeout, || {
+        match std::fs::read_to_string(&witness) {
+            Ok(argv) => Some(argv),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => panic!("reading {}: {error}", witness.display()),
+        }
+    }).await;
+    argv.lines().map(str::to_owned).collect()
+}
 
 // ---- fake server ------------------------------------------------------------
 
