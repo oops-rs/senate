@@ -545,10 +545,9 @@ async fn stopping_a_restored_codex_host_closes_its_notice_and_leaves_the_native_
         (fake.subscribers(thread) == 1).then_some(())
     })
     .await;
-    fake.request_approval(
-        thread, "item/commandExecution/requestApproval",
-        json!({"threadId":thread, "turnId":"turn", "itemId":"command", "command":"echo held-before-restore"}),
-    );
+    let method = "item/commandExecution/requestApproval";
+    let params = json!({"threadId":thread, "turnId":"turn", "itemId":"command", "command":"echo held-before-restore"});
+    let request_id = fake.request_approval(thread, method, params.clone());
     tokio::time::timeout(WAIT, async {
         loop {
             let list: ApprovalsReply = ipc::request(&h.socket(), &Request::Approvals, WAIT, WAIT)
@@ -563,6 +562,23 @@ async fn stopping_a_restored_codex_host_closes_its_notice_and_leaves_the_native_
     .await
     .unwrap();
     assert!(notices(&h).is_empty());
+    let resumed = || {
+        fake.calls()
+            .iter()
+            .filter(|(method, params)| method == "thread/resume" && params["threadId"] == thread)
+            .count()
+    };
+    let mut replayed_through = resumed();
+    // Make the reconnect path explicit. A real app-server retains and
+    // replays its unresolved request after thread/resume; the fake needs
+    // the test to supply that replay on each new relay subscription.
+    fake.disconnect_subscribers(thread);
+    eventually(
+        "the relay rejoined the still-pending manual thread",
+        WAIT,
+        || (resumed() > replayed_through && fake.subscribers(thread) == 1).then_some(()),
+    )
+    .await;
     let senator = h.store().session(thread).unwrap().unwrap().agent;
     h.server.state.inner.lock().unwrap().chair = Some((senator.clone(), true));
     let launch: SpawnReply = ipc::request(
@@ -577,7 +593,21 @@ async fn stopping_a_restored_codex_host_closes_its_notice_and_leaves_the_native_
     .await
     .unwrap();
     let terminal = Terminal::from_launch(&h, &launch).await;
-    let waiting = next_notice(&h, 1).await;
+    let waiting = eventually(
+        "the restored host's notice after the native replay",
+        WAIT,
+        || {
+            let generation = resumed();
+            if generation > replayed_through && fake.subscribers(thread) == 1 {
+                fake.replay_approval(thread, request_id, method, params.clone());
+                replayed_through = generation;
+            }
+            let mut found = notices(&h);
+            assert!(found.len() <= 1, "{found:?}");
+            found.pop()
+        },
+    )
+    .await;
     assert!(waiting.body.contains("echo held-before-restore"));
     assert_eq!(
         waiting.to,
