@@ -258,6 +258,7 @@ async fn restart_resumes_from_the_persisted_cursor() {
     h.wait_stream("refund-v2").await;
     h.server.append(relayed_question("one"));
     inbox.wait_messages(1).await;
+    h.wait_delivered_cursor("refund-v2", 1).await;
     h.stop().await;
     assert!(!h.socket().exists(), "shutdown removes the socket");
 
@@ -709,8 +710,11 @@ async fn a_new_log_epoch_resyncs_instead_of_dropping_the_new_log() {
     h.server.append(relayed_question("history 2"));
     let mark = h.server.stream_opens().len();
     h.start().await;
-    h.wait_stream("refund-v2").await;
-    let opens: Vec<StreamOpen> = h.server.stream_opens()[mark..].to_vec();
+    let opens: Vec<StreamOpen> = eventually("a stream opened since the restart", WAIT, || {
+        let opens = h.server.stream_opens()[mark..].to_vec();
+        opens.iter().any(|o| o.accepted).then_some(opens)
+    })
+    .await;
     assert!(opens.iter().all(|o| o.accepted), "{opens:?}");
     assert_eq!(opens[0].after, 2, "seeded at the head of the new log");
     assert_eq!(
@@ -910,6 +914,8 @@ async fn a_fresh_bridge_resumes_from_the_servers_delivered_cursor() {
         1,
         "delivered once: {both}"
     );
+    // Delivery on refund-v2 does not tell us when the other worker opens.
+    h.wait_stream("other").await;
     let opens = h.server.stream_opens();
     let first = |f: &str| {
         opens
