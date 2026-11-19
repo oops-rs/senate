@@ -540,7 +540,18 @@ async fn codex_native_end_during_or_after_restore_does_not_leave_a_live_row() {
     use senate_bridge::state::{SessionUpsert, Store};
     use senate_core::{Address, Kind, NewEvent};
 
-    for native_end in [Some(true), Some(false), None] {
+    #[derive(Debug, PartialEq, Eq)]
+    enum NativeEnd {
+        BeforePublication,
+        AfterPublication,
+        AlreadyEnded,
+    }
+
+    for native_end in [
+        NativeEnd::BeforePublication,
+        NativeEnd::AfterPublication,
+        NativeEnd::AlreadyEnded,
+    ] {
         let mut h = Harness::new().await;
         h.dir = tempfile::tempdir_in("/tmp").unwrap();
         h.paths = senate_bridge::Paths::new(h.dir.path().join("senate"));
@@ -593,7 +604,7 @@ async fn codex_native_end_during_or_after_restore_does_not_leave_a_live_row() {
                     agent_source: AgentSource::Session,
                 })
                 .unwrap();
-            if native_end != Some(false) {
+            if native_end != NativeEnd::AfterPublication {
                 // Keep the initial worker from seeding a cursor before this
                 // test opens the hosted terminal.
                 store.set_session_state(id, SessionState::Ended).unwrap();
@@ -608,43 +619,27 @@ async fn codex_native_end_during_or_after_restore_does_not_leave_a_live_row() {
             session: Default::default(),
             senator: senator.clone(),
         };
-        let restored: SpawnReply = if native_end == Some(true) {
+        let restored: SpawnReply = if native_end == NativeEnd::BeforePublication {
             h.store().set_session_state(id, SessionState::Live).unwrap();
+            // Restore posts its ready audit before binding the host. Hold the
+            // audit reply until the native end has been applied to the old row.
+            let (ready, release) = h.server.hold_next_append(&format!(
+                "restored {} (codex)",
+                Address::senator(&senator).in_text(),
+            ));
             let (result, ()) = tokio::join!(call(&h, &request), async {
-                tokio::time::timeout(TIMEOUT, async {
-                    loop {
-                        let base = h.paths.home().join("hosts");
-                        if std::fs::read_dir(base)
-                            .ok()
-                            .into_iter()
-                            .flatten()
-                            .flatten()
-                            .any(|dir| dir.path().join("owner").is_file())
-                        {
-                            break;
-                        }
-                        tokio::time::sleep(Duration::from_millis(5)).await;
-                    }
-                })
-                .await
-                .unwrap();
+                tokio::time::timeout(TIMEOUT, ready).await.unwrap().unwrap();
                 let _: serde_json::Value = call(&h, &session_end).await;
                 assert_eq!(
                     h.store().session(id).unwrap().unwrap().state,
-                    SessionState::Ended
+                    SessionState::Ended,
+                    "the native session ended while publication was held",
                 );
+                release.send(()).unwrap();
             });
             result
         } else {
-            let result = call(&h, &request).await;
-            if native_end == Some(false) {
-                let _: serde_json::Value = call(&h, &session_end).await;
-                assert_eq!(
-                    h.store().session(id).unwrap().unwrap().state,
-                    SessionState::Live
-                );
-            }
-            result
+            call(&h, &request).await
         };
         assert_eq!(restored.session_id, id);
         h.wait_stream_of(committee.as_str(), senator.as_str()).await;
@@ -664,10 +659,21 @@ async fn codex_native_end_during_or_after_restore_does_not_leave_a_live_row() {
             opening.after >= prehistory.seq.0,
             "the stream should skip pre-existing history: {opening:?}"
         );
-        if native_end.is_none() {
+        if native_end == NativeEnd::AlreadyEnded {
             assert_eq!(opening.after, prehistory.seq.0);
         }
         let socket: PathBuf = call(&h, &Request::Attach { senator }).await;
+        let shared = socket.with_file_name("shared-codex");
+        if native_end == NativeEnd::AfterPublication {
+            assert!(shared.is_file(), "publication should see the native client");
+            let _: serde_json::Value = call(&h, &session_end).await;
+            assert_eq!(
+                h.store().session(id).unwrap().unwrap().state,
+                SessionState::Live,
+                "the hosted session is still live after the native client exits",
+            );
+        }
+        assert!(!shared.exists(), "shared marker survived {native_end:?}");
         let pid = std::fs::read_to_string(socket.parent().unwrap().join("owner")).unwrap();
         let group = rustix::process::Pid::from_raw(pid.trim().parse().unwrap()).unwrap();
         rustix::process::kill_process_group(group, rustix::process::Signal::TERM).unwrap();
@@ -680,7 +686,8 @@ async fn codex_native_end_during_or_after_restore_does_not_leave_a_live_row() {
         .unwrap();
         assert_eq!(
             h.store().session(id).unwrap().unwrap().state,
-            SessionState::Ended
+            SessionState::Ended,
+            "the hosted terminal closed after {native_end:?}",
         );
         h.stop().await;
     }

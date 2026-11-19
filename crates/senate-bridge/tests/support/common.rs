@@ -48,7 +48,7 @@ use senate_core::{
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_stream::wrappers::ReceiverStream;
@@ -162,10 +162,17 @@ pub struct StreamOpen {
     pub ahead: bool,
 }
 
+struct AppendBarrier {
+    body_fragment: String,
+    arrived: oneshot::Sender<()>,
+    release: oneshot::Receiver<()>,
+}
+
 pub struct Inner {
     pub events: BTreeMap<String, Vec<Event>>,
     pub reject_appends: bool,
     pub reject_append_containing: Option<String>,
+    append_barrier: Option<AppendBarrier>,
     pub transient_append_delay: Option<Duration>,
     pub transient_append_attempts: usize,
     pub secretary_reminders: Vec<senate_core::secretary_work::SecretaryReminder>,
@@ -418,6 +425,22 @@ async fn append(
     };
     if ev.committee.as_str() != committee {
         return api_error(StatusCode::BAD_REQUEST, "bad_request", "committee mismatch");
+    }
+    let held = {
+        let mut inner = st.inner.lock().unwrap();
+        if inner
+            .append_barrier
+            .as_ref()
+            .is_some_and(|barrier| ev.body.contains(&barrier.body_fragment))
+        {
+            inner.append_barrier.take()
+        } else {
+            None
+        }
+    };
+    if let Some(barrier) = held {
+        let _ = barrier.arrived.send(());
+        let _ = barrier.release.await;
     }
     let temporary = {
         let mut inner = st.inner.lock().unwrap();
@@ -998,6 +1021,22 @@ async fn stream(
 }
 
 impl FakeServer {
+    pub fn hold_next_append(
+        &self,
+        body_fragment: &str,
+    ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (arrived, wait) = oneshot::channel();
+        let (resume, release) = oneshot::channel();
+        let mut inner = self.state.inner.lock().unwrap();
+        assert!(inner.append_barrier.is_none());
+        inner.append_barrier = Some(AppendBarrier {
+            body_fragment: body_fragment.into(),
+            arrived,
+            release,
+        });
+        (wait, resume)
+    }
+
     /// `people`: `(token, person)`. `committees`: what `/v1/me` lists. The
     /// people listed, plus `pm`, are the Senate's people; no agent is
     /// seated until it first connects.
@@ -1019,6 +1058,7 @@ impl FakeServer {
                 events: BTreeMap::new(),
                 reject_appends: false,
                 reject_append_containing: None,
+                append_barrier: None,
                 transient_append_delay: None,
                 transient_append_attempts: 0,
                 secretary_reminders: Vec::new(),
