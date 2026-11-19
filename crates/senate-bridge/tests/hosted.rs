@@ -731,6 +731,11 @@ impl HostedClaude {
         h.paths.ensure_home().unwrap();
         let project = h.workdir("switch", None);
         let program = h.dir.path().join("fixture");
+        std::fs::write(
+            h.dir.path().join("nested-input.json"),
+            r#"{"session_id":"fixture-nested","source":"startup"}"#,
+        )
+        .unwrap();
         let senate = BIN.replace('\'', "'\"'\"'");
         std::fs::write(
             &program,
@@ -760,8 +765,10 @@ while :; do
     [ "$line" != "paint" ] || printf 'fixture TUI\n'
     if [ "$line" = "nested" ]; then
         /bin/sh -c '
-            printf "%s" "$2" | CLAUDE_PID=$$ "$1" hook session-start > /dev/null
-        ' nested '{senate}' '{{"session_id":"fixture-nested","source":"startup"}}'
+            CLAUDE_PID=$$ "$1" hook session-start < "$2/nested-input.json" > "$2/nested-hook.log" 2>&1
+            printf "%s\n" "$?" > "$2/nested-hook-status.tmp"
+            mv "$2/nested-hook-status.tmp" "$2/nested-hook-status"
+        ' nested '{senate}' "$output"
     fi
 done
 "#
@@ -1118,9 +1125,20 @@ async fn claude_hook_changes_native_context_without_moving_the_seat_or_its_mail(
         .unwrap();
     assert_eq!(viewer.read_u8().await.unwrap(), 1);
     viewer.write_all(b"\x02\x00\x07nested\n").await.unwrap();
-    let nested = eventually("nested Claude hook", TIMEOUT, || {
-        h.store().session("fixture-nested").unwrap()
+    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    let status = eventually("the nested Claude CLI to finish", TIMEOUT, || {
+        std::fs::read_to_string(h.dir.path().join("nested-hook-status")).ok()
     })
+    .await;
+    let output = std::fs::read_to_string(h.dir.path().join("nested-hook.log")).unwrap();
+    assert_eq!(status.trim(), "0", "nested Claude CLI output: {output:?}");
+    // Exit zero is also the CLI's fail-open result. Independently observe
+    // the registration within the same deadline.
+    let nested = eventually(
+        &format!("nested Claude registration (CLI output: {output:?})"),
+        deadline.saturating_duration_since(tokio::time::Instant::now()),
+        || h.store().session("fixture-nested").unwrap(),
+    )
     .await;
     drop(viewer);
     assert_eq!(nested.agent, path("claude-fixture-nested"));
