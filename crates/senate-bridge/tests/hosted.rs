@@ -693,7 +693,12 @@ impl Drop for HostedClaude {
 
 impl HostedClaude {
     async fn launch(companion: bool) -> Self {
+        Self::launch_with_limit(companion, 4).await
+    }
+
+    async fn launch_with_limit(companion: bool, limit: usize) -> Self {
         let mut h = Harness::new().await;
+        h.config.hosted_session_limit = limit;
         h.dir = tempfile::tempdir_in("/tmp").unwrap();
         h.paths = senate_bridge::Paths::new(h.dir.path().join("senate"));
         h.paths.ensure_home().unwrap();
@@ -713,7 +718,14 @@ if [ "$1" = "-p" ]; then
     exit
 fi
 case "$1" in
-    --session-id=*|--resume=*) printf '%s\n' "$1" > "$output/host-args" ;;
+    --resume=*)
+        if [ -f "$output/empty-restore-fixture" ]; then
+            printf 'No conversation found with session ID: %s\n' "${{1#--resume=}}" >&2
+            exit 1
+        fi
+        printf '%s\n' "$1" > "$output/host-args"
+        ;;
+    --session-id=*) printf '%s\n' "$1" > "$output/host-args" ;;
     *) exit 1 ;;
 esac
 trap 'printf "fixture TUI\n"' WINCH
@@ -823,6 +835,150 @@ done
         })
         .await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_cli_protects_an_attending_viewer_and_releases_the_slot() {
+    use senate_bridge::SessionState;
+    use senate_bridge::ipc::StopReply;
+    use senate_core::Kind;
+
+    let mut fixture = HostedClaude::launch_with_limit(false, 1).await;
+    let h = &fixture.h;
+    let spare = Request::Spawn {
+        session: Default::default(),
+        runtime: HostedRuntime::Claude,
+        committee: committee(),
+        alias: None,
+        cwd: fixture.project.clone(),
+        chair: false,
+    };
+    fixture.reject(&spare, "hosted session limit (1)").await;
+    let mut viewer = tokio::net::UnixStream::connect(&fixture.terminal)
+        .await
+        .unwrap();
+    assert_eq!(viewer.read_u8().await.unwrap(), 1);
+    viewer.write_all(b"\x02\x00\x01x").await.unwrap();
+    eventually("the host to observe viewer input", TIMEOUT, || {
+        let fact: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(fixture.terminal.with_file_name("viewer.json")).ok()?,
+        )
+        .ok()?;
+        (fact["input_at"].as_u64()? > 0).then_some(())
+    })
+    .await;
+    let cli = |force| {
+        let mut cmd = tokio::process::Command::new(BIN);
+        testenv::isolate_async(&mut cmd, h.dir.path());
+        cmd.env("SENATE_HOME", h.paths.home())
+            .args(["stop", "seat-fixture"]);
+        if force {
+            cmd.arg("--force");
+        }
+        cmd
+    };
+    let refused = cli(false).output().await.unwrap();
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("a viewer is attending"));
+    assert!(fixture.terminal.exists());
+    let mut host_errors = std::fs::File::open(fixture.terminal.with_file_name("errors")).unwrap();
+    let stopped = cli(true).output().await.unwrap();
+    let mut host_details = String::new();
+    std::io::Read::read_to_string(&mut host_errors, &mut host_details).unwrap();
+    assert!(
+        stopped.status.success(),
+        "{}\n{host_details}",
+        String::from_utf8_lossy(&stopped.stderr),
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&stopped.stdout).trim(),
+        fixture.seat.senator.as_str()
+    );
+    assert!(!fixture.terminal.parent().unwrap().exists());
+    assert_eq!(
+        h.store()
+            .session(&fixture.seat.session_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        SessionState::Ended
+    );
+    let notes = h.server.events(committee().as_str());
+    let note = notes
+        .iter()
+        .find(|event| event.body.contains("stopped the hosted terminal"))
+        .unwrap();
+    assert_eq!(note.kind, Kind::Note);
+    assert_eq!(note.from, common::person("alice"));
+    assert!(note.body.contains(fixture.seat.senator.as_str()));
+
+    std::fs::write(h.dir.path().join("empty-restore-fixture"), "").unwrap();
+    let restored: SpawnReply = call(
+        h,
+        &Request::Restore {
+            session: Default::default(),
+            senator: path("seat-fixture"),
+        },
+    )
+    .await;
+    assert_eq!(restored, fixture.seat);
+    assert_eq!(
+        std::fs::read_to_string(h.dir.path().join("host-args"))
+            .unwrap()
+            .trim(),
+        format!("--session-id={}", restored.session_id)
+    );
+    fixture.terminal = call(&fixture.h, &HostedClaude::attach_request()).await;
+    // An attachment that has sent no human input does not prevent stop.
+    let mut passive = tokio::net::UnixStream::connect(&fixture.terminal)
+        .await
+        .unwrap();
+    assert_eq!(passive.read_u8().await.unwrap(), 1);
+    fixture
+        .h
+        .server
+        .state
+        .inner
+        .lock()
+        .unwrap()
+        .transient_append_delay = Some(Duration::ZERO);
+    let stopped: StopReply = call(
+        &fixture.h,
+        &Request::Stop {
+            session: Default::default(),
+            senator: restored.senator,
+            force: false,
+        },
+    )
+    .await;
+    assert_eq!(stopped.session_id, restored.session_id);
+    assert!(stopped.audit_pending);
+    assert!(!fixture.terminal.exists());
+    fixture
+        .h
+        .server
+        .state
+        .inner
+        .lock()
+        .unwrap()
+        .transient_append_delay = None;
+    eventually(
+        "the queued stop note to reach the committee log",
+        TIMEOUT,
+        || {
+            (fixture
+                .h
+                .server
+                .events(committee().as_str())
+                .iter()
+                .filter(|event| event.body.contains("stopped the hosted terminal"))
+                .count()
+                == 2)
+                .then_some(())
+        },
+    )
+    .await;
+    fixture.h.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

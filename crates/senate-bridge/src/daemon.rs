@@ -2618,6 +2618,11 @@ impl Shared {
             Request::Restore { session, senator } => {
                 wrap(self.on_hosted_restore(&session, &senator).await)
             }
+            Request::Stop {
+                session,
+                senator,
+                force,
+            } => wrap(self.on_hosted_stop(&session, &senator, force).await),
             Request::Attach { senator } => wrap(self.on_attach(senator).await),
             Request::Receipt { committee, seq } => wrap(self.receipt(&committee, seq).await),
             Request::SetCommitteeSeat { committee, request } => {
@@ -5157,7 +5162,7 @@ async fn host_notices(shared: Arc<Shared>, mut shutdown: watch::Receiver<bool>) 
                 _ = shared.host_notices_ready.notified() => {},
                 _ = retry.tick() => {},
             }
-            shared.flush_host_switch_notices().await;
+            shared.flush_host_notices().await;
         }
     };
     tokio::select! {

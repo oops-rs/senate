@@ -351,6 +351,7 @@ fn selector_of(request: &Request) -> Option<&SessionSelector> {
         | Request::Answer { session, .. }
         | Request::Spawn { session, .. }
         | Request::Restore { session, .. }
+        | Request::Stop { session, .. }
         | Request::CatchUp { session, .. }
         | Request::Join { session, .. }
         | Request::JoinAs { session, .. }

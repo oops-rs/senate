@@ -342,6 +342,16 @@ pub struct SpawnReply {
     pub committee: CommitteeId,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StopReply {
+    pub senator: SenatorName,
+    pub session_id: String,
+    pub committee: CommitteeId,
+    /// The stop note is queued after an uncertain append.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub audit_pending: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
@@ -366,6 +376,14 @@ pub enum Request {
         #[serde(default)]
         session: SessionSelector,
         senator: SenatorName,
+    },
+    Stop {
+        #[serde(default)]
+        session: SessionSelector,
+        senator: SenatorName,
+        /// Only the local operator may override an attending viewer.
+        #[serde(default, skip_serializing_if = "is_false")]
+        force: bool,
     },
     /// Resolve a locally hosted terminal for the person attaching to it.
     Attach {

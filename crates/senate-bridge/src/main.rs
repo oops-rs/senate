@@ -20,6 +20,7 @@ use senate_bridge::hook::{self, HookEnv, HookKind, HookTimeouts};
 use senate_bridge::ipc::SayKind;
 use senate_bridge::ipc::{
     self, DocketReply, HostedRuntime, InboxReply, Posted, Request, SessionSelector, SpawnReply,
+    StopReply,
 };
 use senate_bridge::session::Runtime;
 use senate_bridge::terminal::Terminal;
@@ -369,7 +370,16 @@ enum Cmd {
     /// The configured executable must be Claude itself or a wrapper that execs it.
     Attach { senator: SenatorName },
     /// Resume a recorded Codex or Claude Code senator in a detached terminal.
+    /// A hosted Claude session with no saved conversation opens with its original ID.
     Restore { senator: SenatorName },
+    /// End a Senate-hosted terminal and keep its session available for restore.
+    Stop {
+        /// The senator's primary name or alias.
+        senator: SenatorName,
+        /// Stop even when the attached viewer has typed in the past three minutes.
+        #[arg(long)]
+        force: bool,
+    },
     #[command(hide = true)]
     SessionHost {
         id: EventId,
@@ -650,14 +660,18 @@ async fn daemon_call<T: serde::de::DeserializeOwned>(
     .await?)
 }
 
-fn launch(request: &Request) -> anyhow::Result<()> {
+fn host_call<T: serde::de::DeserializeOwned>(request: &Request) -> anyhow::Result<T> {
     let paths = Paths::from_env()?;
-    let reply: SpawnReply = runtime(false)?.block_on(ipc::request(
+    Ok(runtime(false)?.block_on(ipc::request(
         &paths.socket(),
         request,
         Duration::from_secs(1),
         senate_bridge::host::REQUEST_TIMEOUT,
-    ))?;
+    ))?)
+}
+
+fn launch(request: &Request) -> anyhow::Result<()> {
+    let reply: SpawnReply = host_call(request)?;
     println!("{}", reply.senator);
     Ok(())
 }
@@ -1305,6 +1319,18 @@ fn run(command: Cmd, terminal: Option<Terminal>) -> anyhow::Result<()> {
             senator,
             session: SessionSelector::default(),
         }),
+        Cmd::Stop { senator, force } => {
+            let reply: StopReply = host_call(&Request::Stop {
+                session: SessionSelector::default(),
+                senator,
+                force,
+            })?;
+            println!("{}", reply.senator);
+            if reply.audit_pending {
+                eprintln!("The stop note is queued for the committee log.");
+            }
+            Ok(())
+        }
         Cmd::Attach { senator } => {
             let paths = Paths::from_env()?;
             runtime(false)?.block_on(async {

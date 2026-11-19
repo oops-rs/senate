@@ -60,6 +60,18 @@ pub(super) struct RestoreTarget {
     runtime: HostedRuntime,
 }
 
+pub(super) struct StopTarget {
+    pub(super) committee: CommitteeId,
+    pub(super) senator: SenatorName,
+    host_id: EventId,
+}
+
+struct HostResume {
+    session_id: String,
+    senator: SenatorName,
+    may_start_empty: bool,
+}
+
 /// A registered launch that the caller can still roll back if a subsequent
 /// Senate operation fails. The receipt sent to IPC clients has no process
 /// handle, and the wait task survives the caller dropping its handle.
@@ -343,11 +355,11 @@ impl Shared {
         }
     }
 
-    pub(super) async fn flush_host_switch_notices(&self) {
+    pub(super) async fn flush_host_notices(&self) {
         let notices = match self.store.hosted_switch_notices() {
             Ok(notices) => notices,
             Err(error) => {
-                tracing::warn!(%error, "reading hosted identity switch notices");
+                tracing::warn!(%error, "reading hosted session notices");
                 return;
             }
         };
@@ -361,17 +373,17 @@ impl Shared {
             {
                 Ok(Ok(_)) => {
                     if let Err(error) = self.store.remove_hosted_switch_notice(&id) {
-                        tracing::warn!(%error, "marking hosted identity switch as reported");
+                        tracing::warn!(%error, "marking hosted session notice as reported");
                     }
                     continue;
                 }
                 Ok(Err(error)) if error.definitive_notice_rejection() => error,
                 Ok(Err(error)) => {
-                    tracing::warn!(%id, %error, "posting hosted identity switch, will retry");
+                    tracing::warn!(%id, %error, "posting hosted session notice, will retry");
                     continue;
                 }
                 Err(_) => {
-                    tracing::warn!(%id, "posting hosted identity switch timed out, will retry");
+                    tracing::warn!(%id, "posting hosted session notice timed out, will retry");
                     continue;
                 }
             };
@@ -380,13 +392,13 @@ impl Shared {
                 .fail_hosted_switch_notice(&id, HOST_NOTICE_FAILURE_LIMIT)
             {
                 Ok(true) => {
-                    tracing::warn!(%id, %rejection, "dropping hosted identity switch notice after repeated rejections")
+                    tracing::warn!(%id, %rejection, "dropping hosted session notice notice after repeated rejections")
                 }
                 Ok(false) => {
-                    tracing::warn!(%id, %rejection, "posting hosted identity switch, will retry")
+                    tracing::warn!(%id, %rejection, "posting hosted session notice, will retry")
                 }
                 Err(error) => {
-                    tracing::warn!(%id, %error, %rejection, "recording hosted identity switch notice rejection")
+                    tracing::warn!(%id, %error, %rejection, "recording hosted session notice notice rejection")
                 }
             }
         }
@@ -416,6 +428,69 @@ impl Shared {
         })
     }
 
+    pub(super) async fn resolve_stop(&self, senator: &SenatorName) -> Result<StopTarget, IpcError> {
+        let session = self.find_local_senator(senator).await?;
+        let host_id = self
+            .store
+            .session_host(&session.session_id)
+            .map_err(internal)?
+            .ok_or_else(|| {
+                IpcError::bad_request(format!(
+                    "{senator} has no Senate-owned terminal. Exit it from its own terminal",
+                ))
+            })?;
+        let paths = Paths::new(&self.home);
+        if !host::running(&paths, &host_id).map_err(IpcError::internal)? {
+            return Err(IpcError::new(
+                codes::NO_SESSION,
+                format!("no running terminal host for {senator}. Use senate restore to resume it"),
+            ));
+        }
+        let committee = session.committee().cloned().ok_or_else(|| {
+            IpcError::bad_request(format!("no committee is recorded for {senator}"))
+        })?;
+        Ok(StopTarget {
+            committee,
+            senator: session.agent,
+            host_id,
+        })
+    }
+
+    pub(super) async fn stop_host(
+        &self,
+        target: &StopTarget,
+        force: bool,
+    ) -> Result<(String, bool), IpcError> {
+        let binding = self.session_bindings.read().await;
+        let current = self
+            .store
+            .session_for_host(&target.host_id)
+            .map_err(internal)?;
+        let session = match current {
+            Some(id) => self.store.session(&id).map_err(internal)?,
+            None => None,
+        };
+        let Some(session) = session.filter(|session| {
+            session.agent == target.senator
+                && session.committee() == Some(&target.committee)
+                && !self.hosts.unpublished(&session.session_id)
+        }) else {
+            return Err(IpcError::bad_request(
+                "the hosted session's binding changed. Retry stop",
+            ));
+        };
+        let paths = Paths::new(self.home.canonicalize().map_err(IpcError::internal)?);
+        if host::awaiting_publication(&paths, &target.host_id) {
+            return Err(IpcError::bad_request(
+                "this terminal host is still waiting for publication",
+            ));
+        }
+        let stop = host::control::begin_stop(&paths, &target.host_id, force).await?;
+        drop(binding);
+        let recorded = host::control::wait_stopped(stop).await?;
+        Ok((session.session_id, recorded))
+    }
+
     pub(super) async fn on_restore_with<Fut>(
         &self,
         target: RestoreTarget,
@@ -432,12 +507,26 @@ impl Shared {
                 "the original session is still running; exit it before restoring",
             ));
         }
+        let may_start_empty = session.runtime == Runtime::Claude
+            && self
+                .store
+                .session_host(&session.session_id)
+                .map_err(internal)?
+                .is_some()
+            && session.transcript_path.as_ref().is_none_or(|path| {
+                std::fs::metadata(path)
+                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+            });
         self.launch_host(
             target.runtime,
             target.committee,
             None,
             session.cwd,
-            Some((session.session_id, session.agent)),
+            Some(HostResume {
+                session_id: session.session_id,
+                senator: session.agent,
+                may_start_empty,
+            }),
             limit,
             audit,
         )
@@ -499,7 +588,7 @@ impl Shared {
         committee: CommitteeId,
         alias: Option<SenatorName>,
         cwd: PathBuf,
-        resume: Option<(String, SenatorName)>,
+        resume: Option<HostResume>,
         limit: Option<usize>,
         audit: impl Fn(LaunchAudit, SpawnReply, HostedRuntime) -> Fut + Send,
     ) -> Result<HostedLaunch, IpcError>
@@ -524,9 +613,13 @@ impl Shared {
             )));
         }
         let paths = Paths::new(self.home.canonicalize().map_err(IpcError::internal)?);
-        let (resume, seat) = match resume {
-            Some((id, agent)) => (Some(id), Some(agent)),
-            None => (None, None),
+        let (resume, seat, may_start_empty) = match resume {
+            Some(resume) => (
+                Some(resume.session_id),
+                Some(resume.senator),
+                resume.may_start_empty,
+            ),
+            None => (None, None, false),
         };
         let id = EventId::new();
         let (published, _) = watch::channel(false);
@@ -676,10 +769,23 @@ impl Shared {
                     .map_err(intake_error)?;
                 Some((generation, (delivered, reported)))
             };
-            let (child, errors) =
-                host::start(&self.host_binary, &paths, &id, runtime, &cwd, &launch)
+            let start = async |resume| {
+                let command = host::SessionCommand { resume, ..launch };
+                let (child, errors) = host::start(&self.host_binary, &paths, &id, runtime, &cwd, &command)
                     .map_err(IpcError::internal)?;
-            let (ready, ack) = await_ready(child, errors).await?;
+                await_ready(child, errors).await
+            };
+            let (ready, ack) = match start(restoring).await {
+                Err(error) if may_start_empty
+                    && error.message.contains(&format!("No conversation found with session ID: {session_id}")) =>
+                {
+                    // Claude does not save a conversation until its first turn.
+                    // Keep the Senate binding and reuse its native ID.
+                    tracing::info!(session = %session_id, "reopening a hosted Claude seat without a saved conversation");
+                    start(false).await
+                }
+                result => result,
+            }?;
             process = Some(ready);
             publication = Some(ack);
             // The hosted Claude hook can wait for this bounded phase within

@@ -513,7 +513,7 @@ async fn codex_hosted_notices_close_on_input_and_recur_on_native_replay() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_existing_codex_approval_is_observed_only_after_hosted_restore() {
+async fn stopping_a_restored_codex_host_closes_its_notice_and_leaves_the_native_session_live() {
     let (mut h, project) = fixture(true, Locale::En).await;
     std::fs::write(project.join(".senate/committee"), committee().as_str()).unwrap();
     let fake = h.codex();
@@ -576,7 +576,21 @@ async fn an_existing_codex_approval_is_observed_only_after_hosted_restore() {
         [Address::Speaker],
         "the stalled chair cannot attend to itself"
     );
-    terminal.stop();
+    let stopped: senate_bridge::ipc::StopReply = ipc::request(
+        &h.socket(),
+        &Request::Stop {
+            session: Default::default(),
+            senator: launch.senator,
+            force: false,
+        },
+        WAIT,
+        WAIT,
+    )
+    .await
+    .unwrap();
+    assert_eq!(stopped.session_id, thread);
+    assert!(!terminal.socket.parent().unwrap().exists());
+    assert!(h.store().session(thread).unwrap().unwrap().is_live());
     wait_archived(&h, waiting.seq).await;
     assert!(fake.responses().is_empty());
     h.stop().await;

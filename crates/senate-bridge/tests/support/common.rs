@@ -444,7 +444,22 @@ async fn append(
     if rejected {
         return api_error(StatusCode::FORBIDDEN, "forbidden", "injected log refusal");
     }
-    let Some(from) = ev.from.as_senator().cloned() else {
+    let from = if ev.from == Address::Speaker {
+        let inner = st.inner.lock().unwrap();
+        ev.meta
+            .get(senate_core::meta::ACTED_BY)
+            .and_then(Value::as_str)
+            .and_then(|value| value.parse::<SenatorName>().ok())
+            .filter(|actor| {
+                inner
+                    .roster
+                    .office()
+                    .is_some_and(|office| office.works_desk(actor))
+            })
+    } else {
+        ev.from.as_senator().cloned()
+    };
+    let Some(from) = from else {
         return api_error(StatusCode::FORBIDDEN, "forbidden", "not your address");
     };
     if let Err(r) = act_as(&st, &who, &from) {

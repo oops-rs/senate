@@ -4,7 +4,7 @@ use senate_core::SenatorKind;
 
 use super::hosts::LaunchAudit;
 use super::*;
-use crate::ipc::{HostedRuntime, SpawnReply};
+use crate::ipc::{HostedRuntime, SpawnReply, StopReply};
 
 const ROLE_TIMEOUT: Duration = Duration::from_secs(4);
 const AUDIT_TIMEOUT: Duration = Duration::from_secs(4);
@@ -27,7 +27,7 @@ impl HostAuthority {
         {
             return Err(IpcError::new(
                 codes::NOT_PRESIDING,
-                "only the Speaker's office may start a chair or start or restore a senator in another committee",
+                "only the Speaker's office may start a chair or manage a hosted senator in another committee",
             ));
         }
         if !self.committees.contains(committee) {
@@ -37,17 +37,32 @@ impl HostAuthority {
         }
         Ok(())
     }
+
+    fn actor(&self) -> String {
+        self.acted_by.as_ref().map_or_else(
+            || self.sender.in_text(),
+            |agent| Address::senator(agent).in_text(),
+        )
+    }
+
+    fn note(&self, committee: CommitteeId, body: String) -> NewEvent {
+        let event = NewEvent::new(committee, Kind::Note, self.sender.clone(), body);
+        match &self.acted_by {
+            Some(actor) => event.with_meta(meta::ACTED_BY, serde_json::json!(actor)),
+            None => event,
+        }
+    }
 }
 
 fn not_hosting() -> IpcError {
     IpcError::new(
         codes::NOT_CHAIRING,
-        "only the Speaker's office or this committee's chair may start or restore a senator",
+        "only the Speaker's office or this committee's chair may start, restore, or stop a hosted senator",
     )
 }
 
 impl Shared {
-    async fn authorize_host_launch(
+    async fn authorize_host_action(
         &self,
         selector: &SessionSelector,
     ) -> Result<HostAuthority, IpcError> {
@@ -56,7 +71,7 @@ impl Shared {
             .map_err(|_| IpcError::new(codes::SERVER, "could not verify Senate roles in time"))?
             .map_err(server_error)?;
         // The empty selector is the person's CLI. The MCP shim must supply
-        // its session identity, including when asking to restore a host.
+        // its session identity for every hosted-session action.
         if selector.session_id.is_none() && selector.claude_pid.is_none() {
             let speaker = me.office.is_some_and(|office| {
                 office.speaker.name().name() == &me.person
@@ -121,7 +136,7 @@ impl Shared {
         cwd: PathBuf,
         appoint_chair: bool,
     ) -> Result<SpawnReply, IpcError> {
-        let auth = self.authorize_host_launch(selector).await?;
+        let auth = self.authorize_host_action(selector).await?;
         auth.check_target(&committee, appoint_chair)?;
         let audit_auth = &auth;
         let launch = self
@@ -149,7 +164,7 @@ impl Shared {
         selector: &SessionSelector,
         senator: &SenatorName,
     ) -> Result<SpawnReply, IpcError> {
-        let auth = self.authorize_host_launch(selector).await?;
+        let auth = self.authorize_host_action(selector).await?;
         let target = self.resolve_restore(senator).await?;
         auth.check_target(&target.committee, false)?;
         self.check_restore_seat(&target.committee, &target.session.agent)
@@ -173,22 +188,7 @@ impl Shared {
         committee: &CommitteeId,
         senator: &SenatorName,
     ) -> Result<(), IpcError> {
-        let status = tokio::time::timeout(
-            ROLE_TIMEOUT,
-            self.api.committee_seat_status(committee, senator),
-        )
-        .await
-        .map_err(|_| {
-            IpcError::new(
-                codes::SERVER,
-                self.locale.pick(
-                    "查询委员会席位时服务器超时。",
-                    "The server timed out checking the committee seat.",
-                ),
-            )
-        })?
-        .map_err(server_error)?;
-        if status.unseated {
+        if self.seat_is_unseated(committee, senator).await? {
             let who = Address::senator(senator).in_text();
             let join = format!("senate seat join --committee {committee} --senator {senator}");
             let message = match self.locale {
@@ -204,6 +204,89 @@ impl Shared {
         Ok(())
     }
 
+    async fn seat_is_unseated(
+        &self,
+        committee: &CommitteeId,
+        senator: &SenatorName,
+    ) -> Result<bool, IpcError> {
+        let status = tokio::time::timeout(
+            ROLE_TIMEOUT,
+            self.api.committee_seat_status(committee, senator),
+        )
+        .await
+        .map_err(|_| {
+            IpcError::new(
+                codes::SERVER,
+                self.locale.pick(
+                    "查询委员会席位时服务器超时。",
+                    "The server timed out checking the committee seat.",
+                ),
+            )
+        })?
+        .map_err(server_error)?;
+        Ok(status.unseated)
+    }
+
+    pub(super) async fn on_hosted_stop(
+        &self,
+        selector: &SessionSelector,
+        senator: &SenatorName,
+        force: bool,
+    ) -> Result<StopReply, IpcError> {
+        if force && (selector.session_id.is_some() || selector.claude_pid.is_some()) {
+            return Err(IpcError::bad_request("only the local CLI may force a stop"));
+        }
+        let auth = self.authorize_host_action(selector).await?;
+        let target = self.resolve_stop(senator).await?;
+        auth.check_target(&target.committee, false)?;
+        let primary = &target.senator;
+        if auth.committee_scope.is_some() {
+            if auth.sender.as_senator() == Some(primary) {
+                return Err(IpcError::bad_request(format!(
+                    "a chair cannot stop its own terminal through this tool. Ask your operator to run senate stop {primary} or exit the terminal",
+                )));
+            }
+            if self.seat_is_unseated(&target.committee, primary).await? {
+                return Err(IpcError::new(
+                    codes::NOT_CHAIRING,
+                    "that senator is no longer a member of your committee",
+                ));
+            }
+        }
+        let (session_id, recorded) = self.stop_host(&target, force).await?;
+        let actor = auth.actor();
+        let who = Address::senator(primary).in_text();
+        let committee = &target.committee;
+        let body = self.locale.pick(
+            format!("{actor} 停止了委员会 `{committee}` 中 {who} 的托管终端。"),
+            format!("{actor} stopped the hosted terminal for {who} in committee `{committee}`."),
+        );
+        let event = auth.note(committee.clone(), body);
+        let audit_pending = !matches!(
+            tokio::time::timeout(AUDIT_TIMEOUT, self.post(event.clone())).await,
+            Ok(Ok(_))
+        );
+        if audit_pending {
+            self.store.queue_host_notice(&event).map_err(|error| {
+                IpcError::internal(format!(
+                    "the terminal for {who} stopped, but its log note could not be queued: {error}",
+                ))
+            })?;
+            self.host_notices_ready.notify_one();
+        }
+        if !recorded {
+            return Err(IpcError::internal(format!(
+                "the terminal for {who} stopped, but the daemon did not acknowledge its session end",
+            )));
+        }
+        Ok(StopReply {
+            senator: primary.clone(),
+            session_id,
+            committee: committee.clone(),
+            audit_pending,
+        })
+    }
+
     /// Attribute the ready host to its authorized caller before publication.
     /// A publication failure after this audit gets a matching rollback note.
     async fn audit_host_launch(
@@ -216,10 +299,7 @@ impl Shared {
     ) -> Result<(), IpcError> {
         let committee = &reply.committee;
         let target = Address::senator(&reply.senator).in_text();
-        let actor = auth.acted_by.as_ref().map_or_else(
-            || auth.sender.in_text(),
-            |agent| Address::senator(agent).in_text(),
-        );
+        let actor = auth.actor();
         let runtime = Runtime::from(runtime).as_str();
         let (body, timeout_message) = match phase {
             LaunchAudit::Ready => {
@@ -255,10 +335,7 @@ impl Shared {
                 (body, "the launch rollback audit was not acknowledged")
             }
         };
-        let mut event = NewEvent::new(committee.clone(), Kind::Note, auth.sender.clone(), body);
-        if let Some(actor) = &auth.acted_by {
-            event = event.with_meta(meta::ACTED_BY, serde_json::json!(actor));
-        }
+        let event = auth.note(committee.clone(), body);
         tokio::time::timeout(AUDIT_TIMEOUT, self.post(event))
             .await
             .map_err(|_| IpcError::new(codes::SERVER, timeout_message))??;

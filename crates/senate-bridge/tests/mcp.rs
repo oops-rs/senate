@@ -156,6 +156,213 @@ fn at(text: &str, needle: &str) -> usize {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stop_tool_enforces_authority_and_records_the_actor() {
+    use senate_bridge::daemon::{DaemonOptions, start_with_host_binary};
+    use senate_bridge::ipc::{HookReply, HostedRuntime, SpawnReply, StopReply};
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let mut h = Harness::new().await;
+    h.dir = tempfile::tempdir_in("/tmp").unwrap();
+    h.paths = senate_bridge::Paths::new(h.dir.path().join("senate"));
+    h.paths.ensure_home().unwrap();
+    let program = h.dir.path().join("fixture-tui");
+    std::fs::write(
+        &program,
+        "#!/bin/sh\nwhile [ -d \"$PWD\" ]; do sleep 0.1; done\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(
+        h.paths.config(),
+        format!(
+            "[companion]\nclaude_bin = {:?}\n",
+            program.to_str().unwrap()
+        ),
+    )
+    .unwrap();
+    h.daemon = Some(
+        start_with_host_binary(
+            DaemonOptions {
+                paths: h.paths.clone(),
+                config: h.config.clone(),
+                timing: fast_timing(),
+                desktop: None,
+            },
+            env!("CARGO_BIN_EXE_senate").into(),
+        )
+        .await
+        .unwrap(),
+    );
+    let project = h.workdir("tui", None);
+    let spawn = |alias, committee| Request::Spawn {
+        session: Default::default(),
+        runtime: HostedRuntime::Claude,
+        committee,
+        alias: Some(path(alias)),
+        cwd: project.clone(),
+        chair: false,
+    };
+    let socket = h.socket();
+    let launched = |request: Request| {
+        let socket = socket.clone();
+        async move {
+            ipc::request::<SpawnReply>(&socket, &request, WAIT, WAIT)
+                .await
+                .unwrap()
+        }
+    };
+    let chair = launched(spawn("hosted-chair", committee())).await;
+    let member = launched(spawn("hosted-member", committee())).await;
+    let other = launched(spawn("other-host", "other".parse().unwrap())).await;
+    let manual = |id: &str| {
+        Request::SessionHook(
+            serde_json::from_value(json!({
+                "event":"session_start", "runtime":"claude", "session_id":id,
+                "cwd":project, "committee_file":"refund-v2", "source":"startup",
+            }))
+            .unwrap(),
+        )
+    };
+    for id in ["office-fixture", "manual-fixture"] {
+        let _: HookReply = ipc::request(&h.socket(), &manual(id), WAIT, WAIT)
+            .await
+            .unwrap();
+    }
+    let office = path("claude-office-fixture");
+    {
+        let mut server = h.server.state.inner.lock().unwrap();
+        server.chair = Some((chair.senator.clone(), true));
+        server
+            .roster
+            .name_speaker(Some(path("alice").into()))
+            .unwrap();
+        server
+            .roster
+            .set_secretaries(path("alice"), vec![office.clone()])
+            .unwrap();
+    }
+
+    let mut from_member = McpClient::start(h.socket(), selector(&member.session_id)).await;
+    let mut from_chair = McpClient::start(h.socket(), selector(&chair.session_id)).await;
+    let mut from_office = McpClient::start(h.socket(), selector("office-fixture")).await;
+    let stop = |name| json!({"action":"stop", "senator":name});
+    let (error, message) = from_member.call("spawn", stop("hosted-chair")).await;
+    assert!(
+        error && message.contains("only the Speaker's office or this committee's chair"),
+        "{message}"
+    );
+    for (target, reason) in [
+        ("hosted-chair", "Ask your operator to run senate stop"),
+        ("other-host", "another committee"),
+        ("claude-manual-fixture", "has no Senate-owned terminal"),
+    ] {
+        let (error, message) = from_chair.call("spawn", stop(target)).await;
+        assert!(error && message.contains(reason), "{message}");
+    }
+    let forced = from_chair
+        .rpc(
+            "tools/call",
+            json!({"name":"spawn", "arguments":{
+                "action":"stop", "senator":"hosted-member", "force":true,
+            }}),
+        )
+        .await;
+    assert!(
+        forced.get("error").is_some() || forced["result"]["isError"] == true,
+        "{forced}"
+    );
+    assert!(
+        h.store()
+            .session(&member.session_id)
+            .unwrap()
+            .unwrap()
+            .is_live()
+    );
+
+    let terminal: PathBuf = ipc::request(
+        &h.socket(),
+        &Request::Attach {
+            senator: member.senator.clone(),
+        },
+        WAIT,
+        WAIT,
+    )
+    .await
+    .unwrap();
+    let mut viewer = tokio::net::UnixStream::connect(&terminal).await.unwrap();
+    use tokio::io::AsyncReadExt as _;
+    assert_eq!(viewer.read_u8().await.unwrap(), 1);
+    viewer.write_all(b"\x02\x00\x01x").await.unwrap();
+    let viewer_record = || -> Option<Value> {
+        serde_json::from_slice(&std::fs::read(terminal.with_file_name("viewer.json")).ok()?).ok()
+    };
+    eventually("the viewer to attend the hosted member", WAIT, || {
+        (viewer_record()?["input_at"].as_u64()? > 0).then_some(())
+    })
+    .await;
+    let (error, message) = from_chair.call("spawn", stop("hosted-member")).await;
+    assert!(
+        error && message.contains("a viewer is attending"),
+        "{message}"
+    );
+    drop(viewer);
+    eventually("the viewer to detach from the hosted member", WAIT, || {
+        (viewer_record()?["attached"] == false).then_some(())
+    })
+    .await;
+
+    for (client, target, launch, sender) in [
+        (
+            &mut from_chair,
+            "hosted-member",
+            &member,
+            Address::senator(&chair.senator),
+        ),
+        (&mut from_office, "other-host", &other, Address::Speaker),
+    ] {
+        let (error, message) = client.call("spawn", stop(target)).await;
+        assert!(!error, "{message}");
+        let stopped: StopReply = serde_json::from_str(&message).unwrap();
+        assert_eq!(stopped.senator, launch.senator);
+        assert_eq!(stopped.session_id, launch.session_id);
+        assert!(!stopped.audit_pending);
+        assert_eq!(
+            h.store()
+                .session(&launch.session_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            senate_bridge::SessionState::Ended
+        );
+        let notes = h.server.events(launch.committee.as_str());
+        let note = notes
+            .iter()
+            .find(|event| event.body.contains("stopped the hosted terminal"))
+            .unwrap();
+        assert_eq!(note.from, sender);
+        assert!(note.body.contains(launch.senator.as_str()));
+        if sender == Address::Speaker {
+            assert_eq!(note.meta.get(meta::ACTED_BY), Some(&json!(&office)));
+        } else {
+            assert!(note.body.contains(chair.senator.as_str()));
+        }
+    }
+    let _: StopReply = ipc::request(
+        &h.socket(),
+        &Request::Stop {
+            session: Default::default(),
+            senator: chair.senator,
+            force: false,
+        },
+        WAIT,
+        WAIT,
+    )
+    .await
+    .unwrap();
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ask_answer_and_catch_up_end_to_end() {
     let mut h = Harness::new().await;
     // This scenario binds by the branch name, which is off unless asked for.

@@ -370,6 +370,16 @@ fn parse_host_id(id: &str) -> Result<EventId, StoreError> {
         .map_err(|_| StoreError::Corrupt("invalid host ID".into()))
 }
 
+fn queue_host_notice(conn: &Connection, notice: &NewEvent) -> Result<(), StoreError> {
+    let body =
+        serde_json::to_string(notice).map_err(|error| StoreError::Corrupt(error.to_string()))?;
+    conn.execute(
+        "INSERT INTO hosted_switch_notices (id, event) VALUES (?1, ?2)",
+        params![notice.id.to_string(), body],
+    )?;
+    Ok(())
+}
+
 fn session_host(conn: &Connection, session_id: &str) -> Result<Option<EventId>, StoreError> {
     let id: Option<Option<String>> = conn
         .query_row(
@@ -1080,6 +1090,11 @@ impl Store {
         .collect()
     }
 
+    /// Retain the original event ID when a hosted-session log append is uncertain.
+    pub(crate) fn queue_host_notice(&self, notice: &NewEvent) -> Result<(), StoreError> {
+        queue_host_notice(&self.conn(), notice)
+    }
+
     pub(crate) fn remove_hosted_switch_notice(&self, id: &EventId) -> Result<(), StoreError> {
         self.conn().execute(
             "DELETE FROM hosted_switch_notices WHERE id = ?1",
@@ -1193,12 +1208,7 @@ impl Store {
                      WHERE session_id = ?1 AND agent = ?3",
                     params![first.session_id, s.session_id, agent_text(&first.agent)],
                 )?;
-                let body = serde_json::to_string(notice)
-                    .map_err(|error| StoreError::Corrupt(error.to_string()))?;
-                tx.execute(
-                    "INSERT INTO hosted_switch_notices (id, event) VALUES (?1, ?2)",
-                    params![notice.id.to_string(), body],
-                )?;
+                queue_host_notice(&tx, notice)?;
             }
             tx.execute(
                 "INSERT INTO sessions (session_id, cwd, git_root, branch, inferred_committee,

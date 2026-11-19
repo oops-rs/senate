@@ -1,16 +1,18 @@
 //! A detached terminal owner. The daemon records the session's identity, but
 //! only this process holds the master PTY and its child.
 
+pub(crate) mod control;
 mod input;
 mod terminal;
 
-use rustix::process::{Pid, Signal, kill_process_group};
+use rustix::process::{Pid, Signal, kill_process_group, test_kill_process_group};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write as _};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use anyhow::{Context, bail, ensure};
@@ -89,6 +91,10 @@ struct Viewer {
 }
 
 impl Viewer {
+    fn lock(viewer: &Mutex<Self>) -> MutexGuard<'_, Self> {
+        viewer.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
     fn record(&mut self) {
         self.dirty = false;
         let saved = (|| -> anyhow::Result<()> {
@@ -335,18 +341,20 @@ pub async fn run(
     let file = open_lock(&dir).context("own the host directory")?;
     // A liveness reader may have opened the file just before we locked it.
     flock(&file, FlockOperation::LockExclusive)?;
-    let _cleanup = RemoveDirectory(dir.clone());
+    let cleanup = RemoveDirectory(dir.clone());
     rustix::process::setsid().context("detach the Senate terminal host")?;
     let mut terminate = signal(SignalKind::terminate())?;
     let socket = socket(paths, id);
     let listener = UnixListener::bind(&socket).context("listen for terminal attachments")?;
     std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
-    let mut viewer = Viewer {
+    // The control socket has the same path length as the checked tty socket.
+    let controls = control::listen(paths, id).context("listen for terminal stop requests")?;
+    let viewer = Mutex::new(Viewer {
         path: dir.join("viewer.json"),
         activity: ViewerActivity::default(),
         dirty: false,
-    };
-    viewer.record();
+    });
+    Viewer::lock(&viewer).record();
     let (pty, pts) = pty_process::open()?;
     pty.resize(Size::new(24, 80))?;
     let mut child = runtime_command(runtime, cwd, session, id, &dir)?
@@ -360,6 +368,7 @@ pub async fn run(
         .context("the coding TUI has no process ID")?;
     let mut startup_pid = file.try_clone()?;
     writeln!(startup_pid, "{pid}")?;
+    drop(startup_pid);
     let (mut pty_read, mut pty_write) = pty.into_split();
     // A slow or disconnected viewer must never stop the PTY being drained.
     let (output, _) = broadcast::channel(64);
@@ -419,27 +428,52 @@ pub async fn run(
         tracing::warn!(%error, "clearing the host's startup marker");
     }
 
+    let mut stop = None;
     let result = tokio::select! {
+        biased;
         status = child.wait() => status.context("wait for the coding TUI").and_then(|status| {
             ensure!(status.success(), "the coding TUI exited with {status}");
             Ok(())
         }),
-        served = serve(&listener, &mut pty_write, &output, &mut viewer) => served,
         _ = terminate.recv() => stop_group(&mut child, pid).await,
+        served = serve(&listener, &mut pty_write, &output, &viewer) => served,
+        peer = control::next_stop(&controls, &viewer) => {
+            stop = Some(peer);
+            stop_group(&mut child, pid).await
+        }
     };
     pump.abort();
     // The runtime's normal SessionEnd hook usually gets there first. A
     // crash or stop without that hook must also retire this session.
-    let _: Result<serde_json::Value, _> = ipc::request(
-        &paths.socket(),
-        &Request::HostedSessionEnd {
-            session_id: session.session_id.to_owned(),
-            host_id: id.clone(),
-        },
-        Duration::from_millis(300),
-        Duration::from_secs(2),
-    )
-    .await;
+    let end = Request::HostedSessionEnd {
+        session_id: session.session_id.to_owned(),
+        host_id: id.clone(),
+    };
+    let mut recorded = false;
+    for _ in 0..if stop.is_some() { 2 } else { 1 } {
+        match ipc::request::<serde_json::Value>(
+            &paths.socket(),
+            &end,
+            Duration::from_millis(300),
+            Duration::from_secs(2),
+        )
+        .await
+        {
+            Ok(_) => {
+                recorded = true;
+                break;
+            }
+            Err(error) => {
+                tracing::debug!(%error, %id, "notifying the daemon that a terminal host ended")
+            }
+        }
+    }
+    if let Some(peer) = stop {
+        // Returning from stop means the owner lock and capacity are free.
+        drop(cleanup);
+        drop(file);
+        control::acknowledge(peer, result.is_ok(), recorded).await;
+    }
     result
 }
 
@@ -518,17 +552,30 @@ fn runtime_command(
 }
 
 async fn stop_group(child: &mut Child, pid: Pid) -> anyhow::Result<()> {
-    fn send(pid: Pid, signal: Signal) -> io::Result<()> {
+    fn send(pid: Pid, signal: Signal) -> rustix::io::Result<()> {
         match kill_process_group(pid, signal) {
             Ok(()) | Err(rustix::io::Errno::SRCH) => Ok(()),
-            Err(error) => Err(error.into()),
+            Err(error) => Err(error),
         }
     }
     // pty-process creates the TUI's own session and process group.
     // Keep the leader unreaped until both signals have gone to that group.
-    send(pid, Signal::TERM)?;
-    tokio::time::sleep(Duration::from_millis(350)).await;
-    send(pid, Signal::KILL)?;
+    let signals = async {
+        send(pid, Signal::TERM)?;
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        send(pid, Signal::KILL)
+    }
+    .await;
+    if let Err(error) = signals {
+        // macOS can return EPERM for a group containing only the unreaped
+        // leader. Reap it and confirm the group is gone before accepting it.
+        if error != rustix::io::Errno::PERM
+            || child.try_wait()?.is_none()
+            || test_kill_process_group(pid) != Err(rustix::io::Errno::SRCH)
+        {
+            return Err(error).context("signal the coding TUI group");
+        }
+    }
     child.wait().await.context("stop the coding TUI group")?;
     Ok(())
 }
@@ -624,7 +671,7 @@ async fn accept(listener: &UnixListener) -> (UnixStream, tokio::net::unix::Socke
         match listener.accept().await {
             Ok(connection) => return connection,
             Err(error) => {
-                tracing::warn!(%error, "accepting a terminal attachment");
+                tracing::warn!(%error, "accepting a terminal host connection");
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
@@ -635,12 +682,15 @@ async fn serve(
     listener: &UnixListener,
     pty: &mut OwnedWritePty,
     output: &broadcast::Sender<Vec<u8>>,
-    viewer: &mut Viewer,
+    viewer: &Mutex<Viewer>,
 ) -> anyhow::Result<()> {
     loop {
         let (stream, _) = accept(listener).await;
-        viewer.activity.attached = true;
-        viewer.record();
+        {
+            let mut viewer = Viewer::lock(viewer);
+            viewer.activity.attached = true;
+            viewer.record();
+        }
         {
             let relay = relay(stream, pty, output.subscribe(), viewer);
             tokio::pin!(relay);
@@ -659,6 +709,7 @@ async fn serve(
                 }
             }
         }
+        let mut viewer = Viewer::lock(viewer);
         viewer.activity.attached = false;
         viewer.activity.detached_at = observed_at();
         viewer.record();
@@ -669,7 +720,7 @@ async fn relay(
     mut stream: UnixStream,
     pty: &mut OwnedWritePty,
     mut output: broadcast::Receiver<Vec<u8>>,
-    viewer: &mut Viewer,
+    viewer: &Mutex<Viewer>,
 ) -> anyhow::Result<()> {
     stream.write_u8(ATTACHED).await?;
     let (mut input, mut screen) = stream.into_split();
@@ -682,16 +733,17 @@ async fn relay(
         writes.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             let deadline = classify.deadline();
+            let dirty = Viewer::lock(viewer).dirty;
             let mut tag = [0];
             let len = tokio::select! {
                 biased;
-                _ = writes.tick(), if viewer.dirty => {
-                    viewer.record();
+                _ = writes.tick(), if dirty => {
+                    Viewer::lock(viewer).record();
                     continue;
                 }
                 _ = tokio::time::sleep(Duration::from_nanos(deadline.unwrap_or_default().saturating_sub(observed_at()))), if deadline.is_some() => {
                     if let Some(at) = classify.expire(observed_at()) {
-                        viewer.input(at);
+                        Viewer::lock(viewer).input(at);
                     }
                     continue;
                 }
@@ -722,11 +774,14 @@ async fn relay(
                         // Timestamp before forwarding: these keys can cause
                         // the next prompt, whose episode they must not clear.
                         let at = observed_at();
-                        pty.write_all(&keys[..n]).await?;
-                        let mut queries = cursor.lock().unwrap_or_else(|error| error.into_inner());
-                        if let Some(human_at) = classify.observe(&keys[..n], at, &mut queries) {
-                            viewer.input(human_at);
+                        {
+                            let mut queries =
+                                cursor.lock().unwrap_or_else(|error| error.into_inner());
+                            if let Some(human_at) = classify.observe(&keys[..n], at, &mut queries) {
+                                Viewer::lock(viewer).input(human_at);
+                            }
                         }
+                        pty.write_all(&keys[..n]).await?;
                     }
                 }
                 _ => bail!("unknown terminal input frame"),
@@ -751,7 +806,7 @@ async fn relay(
         result = to_terminal => result,
     };
     if let Some(at) = classify.finish() {
-        viewer.input(at);
+        Viewer::lock(viewer).input(at);
     }
     // The enclosing attachment records its detach and the final input in
     // one snapshot. While attached, input snapshots are coalesced.
@@ -768,11 +823,11 @@ mod tests {
         let (_read, mut pty) = pty.into_split();
         let (output, _) = broadcast::channel(1);
         let dir = tempfile::tempdir().unwrap();
-        let mut activity = Viewer {
+        let activity = Mutex::new(Viewer {
             path: dir.path().join("viewer.json"),
             activity: ViewerActivity::default(),
             dirty: false,
-        };
+        });
         let (host, mut viewer) = UnixStream::pair().unwrap();
         let view_only = async {
             assert_eq!(viewer.read_u8().await.unwrap(), ATTACHED);
@@ -789,10 +844,10 @@ mod tests {
             viewer.shutdown().await.unwrap();
         };
         let _ = tokio::join!(
-            relay(host, &mut pty, output.subscribe(), &mut activity),
+            relay(host, &mut pty, output.subscribe(), &activity),
             view_only
         );
-        assert_eq!(activity.activity.input_at, 0);
+        assert_eq!(Viewer::lock(&activity).activity.input_at, 0);
 
         let (host, mut viewer) = UnixStream::pair().unwrap();
         let with_input = async {
@@ -801,10 +856,10 @@ mod tests {
             viewer.shutdown().await.unwrap();
         };
         let _ = tokio::join!(
-            relay(host, &mut pty, output.subscribe(), &mut activity),
+            relay(host, &mut pty, output.subscribe(), &activity),
             with_input
         );
-        assert_ne!(activity.activity.input_at, 0);
+        assert_ne!(Viewer::lock(&activity).activity.input_at, 0);
     }
 
     #[test]
