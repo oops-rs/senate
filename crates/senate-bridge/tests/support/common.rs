@@ -196,6 +196,7 @@ pub struct Inner {
     pub speaker: Option<senate_core::SpeakerSeat>,
     /// The chair and its connection, for tests that exercise role routing.
     pub chair: Option<(SenatorName, bool)>,
+    pub unseated: Option<SenatorName>,
     /// What `/v1/me` says about a Speaker judging roots here.
     pub triaged: bool,
     pub offline: bool,
@@ -511,11 +512,26 @@ async fn append(
     Json(AppendResponse { event, duplicate }).into_response()
 }
 
-async fn seat_status(State(st): St, headers: HeaderMap) -> Response {
+async fn seat_status(
+    State(st): St,
+    headers: HeaderMap,
+    Query(query): Query<BTreeMap<String, String>>,
+) -> Response {
     if let Err(error) = auth(&st, &headers) {
         return error;
     }
-    Json(senate_core::api::CommitteeSeatStatus { unseated: false }).into_response()
+    let unseated = st
+        .inner
+        .lock()
+        .unwrap()
+        .unseated
+        .as_ref()
+        .is_some_and(|seat| {
+            query
+                .get("senator")
+                .is_some_and(|name| name == seat.as_str())
+        });
+    Json(senate_core::api::CommitteeSeatStatus { unseated }).into_response()
 }
 
 async fn secretary_session(
@@ -1023,6 +1039,7 @@ impl FakeServer {
                 parent: None,
                 speaker: None,
                 chair: None,
+                unseated: None,
                 triaged: true,
                 offline: false,
                 epoch: "epoch-1".into(),

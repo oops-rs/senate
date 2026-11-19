@@ -311,6 +311,15 @@ async fn stop_tool_enforces_authority_and_records_the_actor() {
     })
     .await;
 
+    h.server.state.inner.lock().unwrap().unseated = Some(member.senator.clone());
+    let (error, message) = from_chair.call("spawn", stop("hosted-member")).await;
+    assert!(
+        error && message.contains("no longer a member of your committee"),
+        "{message}"
+    );
+    assert!(terminal.exists());
+    h.server.state.inner.lock().unwrap().unseated = None;
+
     for (client, target, launch, sender) in [
         (
             &mut from_chair,

@@ -259,6 +259,14 @@ done
     }
     assert_eq!(call::<PathBuf>(&h, &attach_target).await, socket);
     attach(&h, launched.senator.as_str(), b"\x1d").await;
+    let transcript = project.join("saved-fixture.jsonl");
+    std::fs::write(&transcript, "{}\n").unwrap();
+    let _: senate_bridge::ipc::HookReply = call(&h, &Request::SessionHook(
+        serde_json::from_value(serde_json::json!({
+            "event": "user_prompt_submit", "runtime": "claude", "session_id": launched.session_id,
+            "cwd": project, "transcript_path": transcript,
+        })).unwrap(),
+    )).await;
 
     // The runtime can exit while the daemon is unavailable. No SessionEnd
     // will reach the registry, so the restarted daemon must use the lock.
@@ -720,7 +728,7 @@ fi
 case "$1" in
     --resume=*)
         if [ -f "$output/empty-restore-fixture" ]; then
-            printf 'No conversation found with session ID: %s\n' "${{1#--resume=}}" >&2
+            printf 'this fixture has no saved history\n' >&2
             exit 1
         fi
         printf '%s\n' "$1" > "$output/host-args"
@@ -911,6 +919,7 @@ async fn stop_cli_protects_an_attending_viewer_and_releases_the_slot() {
     assert_eq!(note.kind, Kind::Note);
     assert_eq!(note.from, common::person("alice"));
     assert!(note.body.contains(fixture.seat.senator.as_str()));
+    assert!(note.body.contains("This was a forced stop."));
 
     std::fs::write(h.dir.path().join("empty-restore-fixture"), "").unwrap();
     let restored: SpawnReply = call(
@@ -982,6 +991,100 @@ async fn stop_cli_protects_an_attending_viewer_and_releases_the_slot() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unconfirmed_forced_stop_audits_the_ended_host() {
+    use senate_bridge::ipc::StopReply;
+
+    let mut fixture = HostedClaude::launch(false).await;
+    let h = &fixture.h;
+    let db = rusqlite::Connection::open(h.paths.state_db()).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER refuse_end BEFORE UPDATE OF state ON sessions
+         WHEN NEW.state = 'ended'
+         BEGIN SELECT RAISE(ABORT, 'injected session-end refusal'); END;",
+    )
+    .unwrap();
+    let refused = ipc::request::<StopReply>(
+        &h.socket(),
+        &Request::Stop {
+            session: Default::default(),
+            senator: path("seat-fixture"),
+            force: true,
+        },
+        TIMEOUT,
+        common::WAIT,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        refused
+            .to_string()
+            .contains("did not acknowledge its session end"),
+        "{refused}"
+    );
+    assert!(!fixture.terminal.parent().unwrap().exists());
+    let note = eventually("the unconfirmed stop audit", TIMEOUT, || {
+        h.server
+            .events(committee().as_str())
+            .into_iter()
+            .find(|event| {
+                event
+                    .body
+                    .contains("The host ended with the stop result unconfirmed")
+            })
+    })
+    .await;
+    assert_eq!(note.from, common::person("alice"));
+    assert!(note.body.contains("requested a forced stop"));
+    assert!(note.body.contains(fixture.seat.senator.as_str()));
+    fixture.h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_host_retains_an_accepted_stop_audit_without_its_daemon() {
+    use senate_core::{Kind, NewEvent};
+
+    let mut fixture = HostedClaude::launch(false).await;
+    let note = NewEvent::new(
+        committee(),
+        Kind::Note,
+        common::person("alice"),
+        "host ended after an unconfirmed stop",
+    );
+    // Deliver a prepared control request with the daemon offline. The host
+    // must keep the audit before ending on its own.
+    fixture.h.stop().await;
+    let mut control = tokio::net::UnixStream::connect(fixture.terminal.with_file_name("ctl"))
+        .await
+        .unwrap();
+    let mut request =
+        serde_json::to_vec(&serde_json::json!({"force":false, "unconfirmed_audit":note})).unwrap();
+    request.push(b'\n');
+    control.write_all(&request).await.unwrap();
+    assert_eq!(control.read_u8().await.unwrap(), 1);
+    drop(control);
+    eventually("the detached host to exit", TIMEOUT, || {
+        (!fixture.terminal.parent().unwrap().exists()).then_some(())
+    })
+    .await;
+    start(&mut fixture.h).await;
+    let posted = eventually(
+        "the restarted bridge to recover the stop audit",
+        TIMEOUT,
+        || {
+            fixture
+                .h
+                .server
+                .events(committee().as_str())
+                .into_iter()
+                .find(|event| event.id == note.id)
+        },
+    )
+    .await;
+    assert_eq!(posted.body, note.body);
+    fixture.h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn claude_hook_changes_native_context_without_moving_the_seat_or_its_mail() {
     use senate_bridge::ipc::{HookEvent, HookReply, PresidesReply, SessionSelector, StatusReply};
     use senate_bridge::state::ItemStatus;
@@ -995,11 +1098,16 @@ async fn claude_hook_changes_native_context_without_moving_the_seat_or_its_mail(
     let primary = &spawned.senator;
 
     // The nested process runs the actual hook CLI under the fixture's TUI.
-    attach(h, "seat-fixture", b"nested\n\x1d").await;
+    let mut viewer = tokio::net::UnixStream::connect(&fixture.terminal)
+        .await
+        .unwrap();
+    assert_eq!(viewer.read_u8().await.unwrap(), 1);
+    viewer.write_all(b"\x02\x00\x07nested\n").await.unwrap();
     let nested = eventually("nested Claude hook", TIMEOUT, || {
         h.store().session("fixture-nested").unwrap()
     })
     .await;
+    drop(viewer);
     assert_eq!(nested.agent, path("claude-fixture-nested"));
     assert!(
         nested
@@ -1229,6 +1337,7 @@ async fn claude_hook_changes_native_context_without_moving_the_seat_or_its_mail(
         args.lines().take(4).collect::<Vec<_>>(),
         ["-p", "--resume", "resumed", "--fork-session"]
     );
+    std::fs::write(fixture.project.join("resumed.jsonl"), "{}\n").unwrap();
 
     let restored: SpawnReply = call(
         h,

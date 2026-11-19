@@ -137,6 +137,17 @@ async fn a_question_with_no_session_is_answered_by_a_companion() {
     .await
     .unwrap_err();
     assert!(refused.to_string().contains("companion"), "{refused}");
+    let refused = call(Request::Stop {
+        session: selector(&sid),
+        senator: path("claude"),
+        force: false,
+    })
+    .await
+    .unwrap_err();
+    assert!(
+        refused.to_string().contains("`stop` is not for it"),
+        "{refused}"
+    );
     let read_before = h.server.cursor("refund-v2", "claude", "read");
     let caught: CatchUpReply = ipc::request(
         &h.socket(),

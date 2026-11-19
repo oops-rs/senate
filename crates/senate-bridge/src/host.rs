@@ -437,7 +437,7 @@ pub async fn run(
         }),
         _ = terminate.recv() => stop_group(&mut child, pid).await,
         served = serve(&listener, &mut pty_write, &output, &viewer) => served,
-        peer = control::next_stop(&controls, &viewer) => {
+        peer = control::next_stop(&controls, &viewer, paths, id) => {
             stop = Some(peer);
             stop_group(&mut child, pid).await
         }

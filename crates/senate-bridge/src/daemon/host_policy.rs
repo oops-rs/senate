@@ -253,31 +253,49 @@ impl Shared {
                 ));
             }
         }
-        let (session_id, recorded) = self.stop_host(&target, force).await?;
         let actor = auth.actor();
         let who = Address::senator(primary).in_text();
         let committee = &target.committee;
-        let body = self.locale.pick(
+        let mut body = self.locale.pick(
             format!("{actor} 停止了委员会 `{committee}` 中 {who} 的托管终端。"),
             format!("{actor} stopped the hosted terminal for {who} in committee `{committee}`."),
         );
+        if force {
+            body.push_str(
+                self.locale
+                    .pick(" 此操作为强制停止。", " This was a forced stop."),
+            );
+        }
         let event = auth.note(committee.clone(), body);
+        let mut unconfirmed = event.clone();
+        let verb = if force {
+            self.locale.pick("强制停止", "forced stop")
+        } else {
+            self.locale.pick("停止", "stop")
+        };
+        unconfirmed.body = self.locale.pick(
+            format!("{actor} 请求{verb}委员会 `{committee}` 中 {who} 的托管终端。终端主机已退出，停止结果未获确认。"),
+            format!("{actor} requested a {verb} of the hosted terminal for {who} in committee `{committee}`. The host ended with the stop result unconfirmed."),
+        );
+        let _audit = self.track_stop_notice(event.id.clone());
+        let (session_id, recorded) = self.stop_host(&target, force, unconfirmed).await?;
+        if !recorded {
+            return Err(IpcError::internal(format!(
+                "the terminal for {who} stopped, but the daemon did not acknowledge its session end",
+            )));
+        }
         let audit_pending = !matches!(
             tokio::time::timeout(AUDIT_TIMEOUT, self.post(event.clone())).await,
             Ok(Ok(_))
         );
         if audit_pending {
-            self.store.queue_host_notice(&event).map_err(|error| {
+            self.store.publish_stop_notice(&event.id, Some(&event)).map_err(|error| {
                 IpcError::internal(format!(
                     "the terminal for {who} stopped, but its log note could not be queued: {error}",
                 ))
             })?;
-            self.host_notices_ready.notify_one();
-        }
-        if !recorded {
-            return Err(IpcError::internal(format!(
-                "the terminal for {who} stopped, but the daemon did not acknowledge its session end",
-            )));
+        } else if let Err(error) = self.store.remove_hosted_switch_notice(&event.id) {
+            tracing::warn!(%error, id = %event.id, "clearing a posted terminal stop notice");
         }
         Ok(StopReply {
             senator: primary.clone(),

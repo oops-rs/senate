@@ -106,7 +106,8 @@ CREATE TABLE IF NOT EXISTS hosted_native_seats (
 CREATE TABLE IF NOT EXISTS hosted_switch_notices (
     id TEXT PRIMARY KEY,
     event TEXT NOT NULL,
-    failures INTEGER NOT NULL DEFAULT 0
+    failures INTEGER NOT NULL DEFAULT 0,
+    stop_host_id TEXT
 );
 CREATE TABLE IF NOT EXISTS session_ancestors (
     session_id TEXT NOT NULL,
@@ -370,12 +371,20 @@ fn parse_host_id(id: &str) -> Result<EventId, StoreError> {
         .map_err(|_| StoreError::Corrupt("invalid host ID".into()))
 }
 
-fn queue_host_notice(conn: &Connection, notice: &NewEvent) -> Result<(), StoreError> {
+fn queue_host_notice(
+    conn: &Connection,
+    notice: &NewEvent,
+    stop_host: Option<&EventId>,
+) -> Result<(), StoreError> {
     let body =
         serde_json::to_string(notice).map_err(|error| StoreError::Corrupt(error.to_string()))?;
     conn.execute(
-        "INSERT INTO hosted_switch_notices (id, event) VALUES (?1, ?2)",
-        params![notice.id.to_string(), body],
+        "INSERT INTO hosted_switch_notices (id, event, stop_host_id) VALUES (?1, ?2, ?3)",
+        params![
+            notice.id.to_string(),
+            body,
+            stop_host.map(ToString::to_string)
+        ],
     )?;
     Ok(())
 }
@@ -661,6 +670,15 @@ impl Store {
         if !counts_failures {
             conn.execute(
                 "ALTER TABLE hosted_switch_notices ADD COLUMN failures INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+        let stop_notices = conn
+            .prepare("SELECT 1 FROM pragma_table_info('hosted_switch_notices') WHERE name = 'stop_host_id'")?
+            .exists([])?;
+        if !stop_notices {
+            conn.execute(
+                "ALTER TABLE hosted_switch_notices ADD COLUMN stop_host_id TEXT",
                 [],
             )?;
         }
@@ -1081,8 +1099,9 @@ impl Store {
 
     pub(crate) fn hosted_switch_notices(&self) -> Result<Vec<NewEvent>, StoreError> {
         let conn = self.conn();
-        let mut query =
-            conn.prepare("SELECT event FROM hosted_switch_notices ORDER BY failures, id LIMIT 16")?;
+        let mut query = conn.prepare(
+            "SELECT event FROM hosted_switch_notices WHERE stop_host_id IS NULL ORDER BY failures, id LIMIT 16",
+        )?;
         let rows = query.query_map([], |row| row.get::<_, String>(0))?;
         rows.map(|event| {
             serde_json::from_str(&event?).map_err(|error| StoreError::Corrupt(error.to_string()))
@@ -1090,9 +1109,49 @@ impl Store {
         .collect()
     }
 
-    /// Retain the original event ID when a hosted-session log append is uncertain.
-    pub(crate) fn queue_host_notice(&self, notice: &NewEvent) -> Result<(), StoreError> {
-        queue_host_notice(&self.conn(), notice)
+    /// The host records acceptance before shutting down, even if its daemon
+    /// connection is lost. The daemon has already initialized this database.
+    pub(crate) fn accept_host_stop(
+        path: &Path,
+        host: &EventId,
+        notice: &NewEvent,
+    ) -> Result<(), StoreError> {
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        conn.busy_timeout(Duration::from_millis(250))?;
+        conn.pragma_update(None, "synchronous", "FULL")?;
+        queue_host_notice(&conn, notice, Some(host))
+    }
+
+    pub(crate) fn awaiting_stop_notices(&self) -> Result<Vec<(EventId, EventId)>, StoreError> {
+        let conn = self.conn();
+        let mut query = conn.prepare(
+            "SELECT id, stop_host_id FROM hosted_switch_notices WHERE stop_host_id IS NOT NULL",
+        )?;
+        let rows = query.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.map(|row| {
+            let (notice, host) = row?;
+            Ok((parse_host_id(&notice)?, parse_host_id(&host)?))
+        })
+        .collect()
+    }
+
+    pub(crate) fn publish_stop_notice(
+        &self,
+        id: &EventId,
+        confirmed: Option<&NewEvent>,
+    ) -> Result<(), StoreError> {
+        let body = confirmed
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+        self.conn().execute(
+            "UPDATE hosted_switch_notices SET stop_host_id = NULL, event = COALESCE(?2, event)
+             WHERE id = ?1 AND stop_host_id IS NOT NULL",
+            params![id.to_string(), body],
+        )?;
+        Ok(())
     }
 
     pub(crate) fn remove_hosted_switch_notice(&self, id: &EventId) -> Result<(), StoreError> {
@@ -1208,7 +1267,7 @@ impl Store {
                      WHERE session_id = ?1 AND agent = ?3",
                     params![first.session_id, s.session_id, agent_text(&first.agent)],
                 )?;
-                queue_host_notice(&tx, notice)?;
+                queue_host_notice(&tx, notice, None)?;
             }
             tx.execute(
                 "INSERT INTO sessions (session_id, cwd, git_root, branch, inferred_committee,

@@ -66,10 +66,22 @@ pub(super) struct StopTarget {
     host_id: EventId,
 }
 
+pub(super) struct StopAuditGuard<'a> {
+    shared: &'a Shared,
+    notice: EventId,
+}
+
+impl Drop for StopAuditGuard<'_> {
+    fn drop(&mut self) {
+        lock(&self.shared.active_stop_notices).remove(&self.notice);
+        self.shared.host_notices_ready.notify_one();
+    }
+}
+
 struct HostResume {
     session_id: String,
     senator: SenatorName,
-    may_start_empty: bool,
+    start_empty: bool,
 }
 
 /// A registered launch that the caller can still roll back if a subsequent
@@ -356,6 +368,9 @@ impl Shared {
     }
 
     pub(super) async fn flush_host_notices(&self) {
+        if let Err(error) = self.recover_stop_notices() {
+            tracing::warn!(%error, "recovering unconfirmed terminal stops");
+        }
         let notices = match self.store.hosted_switch_notices() {
             Ok(notices) => notices,
             Err(error) => {
@@ -401,6 +416,31 @@ impl Shared {
                     tracing::warn!(%id, %error, %rejection, "recording hosted session notice notice rejection")
                 }
             }
+        }
+    }
+
+    fn recover_stop_notices(&self) -> Result<(), StoreError> {
+        let paths = Paths::new(&self.home);
+        for (notice, host) in self.store.awaiting_stop_notices()? {
+            if lock(&self.active_stop_notices).contains(&notice) {
+                continue;
+            }
+            match host::running(&paths, &host) {
+                Ok(false) => self.store.publish_stop_notice(&notice, None)?,
+                Ok(true) => {}
+                Err(error) => {
+                    tracing::warn!(%error, %host, "checking a host with an unconfirmed stop")
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn track_stop_notice(&self, notice: EventId) -> StopAuditGuard<'_> {
+        lock(&self.active_stop_notices).insert(notice.clone());
+        StopAuditGuard {
+            shared: self,
+            notice,
         }
     }
 
@@ -460,6 +500,7 @@ impl Shared {
         &self,
         target: &StopTarget,
         force: bool,
+        unconfirmed_audit: NewEvent,
     ) -> Result<(String, bool), IpcError> {
         let binding = self.session_bindings.read().await;
         let current = self
@@ -485,7 +526,8 @@ impl Shared {
                 "this terminal host is still waiting for publication",
             ));
         }
-        let stop = host::control::begin_stop(&paths, &target.host_id, force).await?;
+        let stop =
+            host::control::begin_stop(&paths, &target.host_id, force, unconfirmed_audit).await?;
         drop(binding);
         let recorded = host::control::wait_stopped(stop).await?;
         Ok((session.session_id, recorded))
@@ -507,16 +549,13 @@ impl Shared {
                 "the original session is still running; exit it before restoring",
             ));
         }
-        let may_start_empty = session.runtime == Runtime::Claude
+        let start_empty = session.runtime == Runtime::Claude
             && self
                 .store
                 .session_host(&session.session_id)
                 .map_err(internal)?
                 .is_some()
-            && session.transcript_path.as_ref().is_none_or(|path| {
-                std::fs::metadata(path)
-                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
-            });
+            && !claude_has_transcript(&session)?;
         self.launch_host(
             target.runtime,
             target.committee,
@@ -525,7 +564,7 @@ impl Shared {
             Some(HostResume {
                 session_id: session.session_id,
                 senator: session.agent,
-                may_start_empty,
+                start_empty,
             }),
             limit,
             audit,
@@ -613,11 +652,11 @@ impl Shared {
             )));
         }
         let paths = Paths::new(self.home.canonicalize().map_err(IpcError::internal)?);
-        let (resume, seat, may_start_empty) = match resume {
+        let (resume, seat, start_empty) = match resume {
             Some(resume) => (
                 Some(resume.session_id),
                 Some(resume.senator),
-                resume.may_start_empty,
+                resume.start_empty,
             ),
             None => (None, None, false),
         };
@@ -733,7 +772,7 @@ impl Shared {
         let launch = host::SessionCommand {
             session_id: &session_id,
             program: &program,
-            resume: restoring,
+            resume: restoring && !start_empty,
             codex_remote: remote.as_deref(),
         };
         let session_runtime = Runtime::from(runtime);
@@ -769,23 +808,9 @@ impl Shared {
                     .map_err(intake_error)?;
                 Some((generation, (delivered, reported)))
             };
-            let start = async |resume| {
-                let command = host::SessionCommand { resume, ..launch };
-                let (child, errors) = host::start(&self.host_binary, &paths, &id, runtime, &cwd, &command)
-                    .map_err(IpcError::internal)?;
-                await_ready(child, errors).await
-            };
-            let (ready, ack) = match start(restoring).await {
-                Err(error) if may_start_empty
-                    && error.message.contains(&format!("No conversation found with session ID: {session_id}")) =>
-                {
-                    // Claude does not save a conversation until its first turn.
-                    // Keep the Senate binding and reuse its native ID.
-                    tracing::info!(session = %session_id, "reopening a hosted Claude seat without a saved conversation");
-                    start(false).await
-                }
-                result => result,
-            }?;
+            let (child, errors) = host::start(&self.host_binary, &paths, &id, runtime, &cwd, &launch)
+                .map_err(IpcError::internal)?;
+            let (ready, ack) = await_ready(child, errors).await?;
             process = Some(ready);
             publication = Some(ack);
             // The hosted Claude hook can wait for this bounded phase within
@@ -1019,6 +1044,57 @@ fn owns_claude_hook(tui: u32, reported: Option<u32>, ancestors: &[u32]) -> bool 
     reported == Some(tui) && ancestors.contains(&tui)
 }
 
+fn claude_has_transcript(session: &Session) -> Result<bool, IpcError> {
+    let recorded = session
+        .transcript_path
+        .as_ref()
+        .map(|path| session.cwd.join(path));
+    if let Some(path) = &recorded
+        && path.try_exists().map_err(IpcError::internal)?
+    {
+        return Ok(true);
+    }
+    let native = uuid::Uuid::parse_str(&session.session_id)
+        .map_err(|_| IpcError::bad_request("the hosted Claude session has an invalid native ID"))?;
+    let profile = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".claude")))
+        .ok_or_else(|| IpcError::internal("cannot locate Claude Code's profile"))?;
+    let projects = session.cwd.join(profile).join("projects");
+    let recorded_projects = recorded
+        .as_deref()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .filter(|path| path.ends_with("projects") && *path != projects);
+    // Claude 2.1.327 accepts a duplicate UUID in another project. Search
+    // the profile before opening a fresh conversation with a recorded ID.
+    for root in std::iter::once(projects.as_path()).chain(recorded_projects) {
+        if profile_has_transcript(root, native).map_err(IpcError::internal)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn profile_has_transcript(projects: &Path, native: uuid::Uuid) -> std::io::Result<bool> {
+    let dirs = match std::fs::read_dir(projects) {
+        Ok(dirs) => dirs,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let name = format!("{native}.jsonl");
+    for dir in dirs {
+        match dir?.path().join(&name).try_exists() {
+            Ok(true) => return Ok(true),
+            Ok(false) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotADirectory => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(false)
+}
+
 async fn record_rollback<E: std::fmt::Display>(
     errors: &mut Vec<String>,
     action: &str,
@@ -1091,7 +1167,7 @@ async fn await_ready(
 
 #[cfg(test)]
 mod tests {
-    use super::owns_claude_hook;
+    use super::{owns_claude_hook, profile_has_transcript};
 
     #[test]
     fn clear_from_the_tui_matches_but_a_nested_claude_does_not() {
@@ -1099,5 +1175,22 @@ mod tests {
         assert!(!owns_claude_hook(10, Some(12), &[12, 11, 10]));
         assert!(!owns_claude_hook(10, Some(10), &[12, 11]));
         assert!(!owns_claude_hook(10, None, &[10]));
+    }
+
+    #[test]
+    fn a_saved_claude_id_is_found_across_project_directories() {
+        let profile = tempfile::tempdir().unwrap();
+        let id = uuid::Uuid::new_v4();
+        let root = profile.path().join("projects");
+        let a = root.join("project-a");
+        let b = root.join("project-b");
+        assert!(!profile_has_transcript(&root, id).unwrap());
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(root.join("index.json"), "{}").unwrap();
+        assert!(!profile_has_transcript(&root, id).unwrap());
+        std::fs::write(a.join(format!("{id}.jsonl")), "{}\n").unwrap();
+        assert!(!b.join(format!("{id}.jsonl")).exists());
+        assert!(profile_has_transcript(&root, id).unwrap());
     }
 }

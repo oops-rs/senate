@@ -419,6 +419,7 @@ pub(crate) struct Shared {
     session_bindings: RwLock<()>,
     hosts: hosts::Launches,
     host_notices_ready: Notify,
+    active_stop_notices: Mutex<BTreeSet<EventId>>,
     hosted_approvals: hosted_approvals::Monitor,
     codex_transport: crate::delivery::codex::Transport,
     host_binary: PathBuf,
@@ -722,6 +723,7 @@ impl Shared {
             session_bindings: RwLock::new(()),
             hosts: hosts::Launches::default(),
             host_notices_ready: Notify::new(),
+            active_stop_notices: Mutex::new(BTreeSet::new()),
             hosted_approvals: hosted_approvals::Monitor::default(),
             codex_transport: common.codex.transport.clone(),
             host_binary: common.host_binary.clone(),
@@ -2566,6 +2568,7 @@ impl Shared {
             Request::ChairEscalate { session, .. } => ("chair_escalate", session),
             Request::Spawn { session, .. } => ("spawn", session),
             Request::Restore { session, .. } => ("restore", session),
+            Request::Stop { session, .. } => ("stop", session),
             _ => return None,
         };
         self.companion_session(session).map(|_| {
