@@ -172,6 +172,87 @@ impl Drop for Terminal {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stalled_hosted_hook_reports_a_warning_without_updating_the_seat() {
+    use senate_bridge::ipc::{HookDropReport, StatusReply};
+    use senate_bridge::session::Runtime;
+
+    let (mut h, project) = fixture(false, Locale::En).await;
+    start(&mut h).await;
+    let (launched, terminal) = Terminal::spawn(&h, project, HostedRuntime::Claude).await;
+    let before = h.store().session(&launched.session_id).unwrap().unwrap();
+    let mut cmd = tokio::process::Command::new(BIN);
+    testenv::isolate_async(&mut cmd, h.dir.path());
+    cmd.args(["hook", "hosted-approval"])
+        .env("SENATE_HOME", h.paths.home())
+        .env(senate_bridge::host::HOSTED_CLAUDE_ENV, terminal.host_id())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let began = chrono::Utc::now();
+    let mut child = cmd.spawn().unwrap();
+    let _hold_stdin_open = child.stdin.take().unwrap();
+    let out = tokio::time::timeout(WAIT, child.wait_with_output())
+        .await
+        .expect("the timed-out hook exited within the watchdog")
+        .unwrap();
+    assert!(
+        out.status.success() && out.stdout.is_empty() && out.stderr.is_empty(),
+        "{out:?}"
+    );
+    let status: StatusReply = ipc::request(&h.socket(), &Request::Status, WAIT, WAIT)
+        .await
+        .unwrap();
+    let drops = status.dropped_hooks.unwrap();
+    assert_eq!(drops.count, 1);
+    assert!(drops.last_at >= began);
+    assert_eq!(drops.last.kind, HookKind::HostedApproval);
+    assert_eq!(drops.last.runtime_hint, Some(Runtime::Claude));
+    assert_eq!(drops.last.host_id.unwrap().to_string(), terminal.host_id());
+    assert_eq!(drops.last.parent_pid, std::process::id());
+    assert_eq!(
+        drops.hosted_sessions.into_iter().collect::<Vec<_>>(),
+        vec![launched.session_id.clone()]
+    );
+    assert_eq!(
+        h.store().session(&launched.session_id).unwrap().unwrap(),
+        before
+    );
+    assert!(notices(&h).is_empty());
+    assert!(!h.paths.hook_drops_log().exists());
+    let view = senate_bridge::status::collect(&h.paths).await.unwrap();
+    let status = senate_bridge::status::render(&view, chrono::Utc::now());
+    assert!(status.contains("Dropped hook reports"), "{status}");
+    assert!(status.contains(terminal.host_id()), "{status}");
+    assert!(
+        status.contains("may have missed an approval or context hook"),
+        "{status}"
+    );
+    let _: () = ipc::request(
+        &h.socket(),
+        &Request::HookDropped(HookDropReport {
+            kind: HookKind::SessionStart,
+            runtime_hint: Some(Runtime::Codex),
+            host_id: None,
+            parent_pid: 0,
+        }),
+        WAIT,
+        WAIT,
+    )
+    .await
+    .unwrap();
+    let status: StatusReply = ipc::request(&h.socket(), &Request::Status, WAIT, WAIT)
+        .await
+        .unwrap();
+    let drops = status.dropped_hooks.unwrap();
+    assert_eq!(drops.count, 2);
+    assert!(drops.last.host_id.is_none());
+    assert!(drops.hosted_sessions.contains(&launched.session_id));
+    terminal.stop();
+    h.stop().await;
+}
+
 fn notices(h: &Harness) -> Vec<Event> {
     let people = h.server.state.inner.lock().unwrap().roster.people();
     h.server

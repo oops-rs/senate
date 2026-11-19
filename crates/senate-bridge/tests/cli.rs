@@ -80,6 +80,79 @@ fn hooks_exit_zero_and_skip_git_without_a_daemon() {
     }
     let out = run_with_stdin(hook("user-prompt-submit"), "this is not json");
     assert!(out.status.success() && out.stdout.is_empty());
+    assert!(
+        !senate_bridge::Paths::new(dir.path().join("senate"))
+            .hook_drops_log()
+            .exists()
+    );
+}
+
+#[tokio::test]
+async fn a_hook_timeout_leaves_a_bounded_local_trace_without_a_daemon_reply() {
+    use senate_bridge::hook::STDIN_BUDGET;
+    use tokio::io::AsyncBufReadExt as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let paths = senate_bridge::Paths::new(dir.path().join("senate"));
+
+    for stalled in [false, true] {
+        let listener = if stalled {
+            // The next append must stay under the cap even if the file is full.
+            std::fs::write(paths.hook_drops_log(), vec![b'x'; 64 * 1024]).unwrap();
+            Some(tokio::net::UnixListener::bind(paths.socket()).unwrap())
+        } else {
+            None
+        };
+        let mut cmd = tokio::process::Command::from(bridge(dir.path(), paths.home()));
+        cmd.args(["hook", "session-end", "--codex"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let began = std::time::Instant::now();
+        let mut child = cmd.spawn().unwrap();
+        let _hold_stdin_open = child.stdin.take().unwrap();
+        // The unit test pins the internal deadlines. This watchdog keeps an
+        // unresponsive child from holding the subprocess fixture open.
+        let out = tokio::time::timeout(WAIT, async {
+            let _unanswered = if let Some(listener) = listener {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut reader = tokio::io::BufReader::new(socket);
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let request: Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["op"], "hook_dropped");
+                Some(reader)
+            } else {
+                None
+            };
+            child.wait_with_output().await.unwrap()
+        })
+        .await
+        .expect("the hook exited with stdin held open");
+        assert!(began.elapsed() >= STDIN_BUDGET);
+        assert!(
+            out.status.success() && out.stdout.is_empty() && out.stderr.is_empty(),
+            "{out:?}"
+        );
+        let log = std::fs::read_to_string(paths.hook_drops_log()).unwrap();
+        assert!(log.len() <= 64 * 1024);
+        let lines: Vec<_> = log.lines().collect();
+        assert_eq!(lines.len(), 1);
+        let drop: Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(drop["reason"], "stdin_timeout");
+        assert_eq!(drop["report"]["kind"], "session_end");
+        assert_eq!(drop["report"]["runtime_hint"], "codex");
+        assert_eq!(drop["report"]["parent_pid"], std::process::id());
+        assert_eq!(
+            std::fs::metadata(paths.hook_drops_log())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -105,6 +178,16 @@ async fn the_hook_binary_registers_and_returns_queued_items() {
     let s = h.store().session("b1").unwrap().unwrap();
     assert_eq!(s.claude_pid, Some(std::process::id()));
     assert_eq!(s.socket, None, "no inbox socket in this environment");
+    let status: senate_bridge::ipc::StatusReply = senate_bridge::ipc::request(
+        &h.socket(),
+        &senate_bridge::ipc::Request::Status,
+        WAIT,
+        WAIT,
+    )
+    .await
+    .unwrap();
+    assert!(status.dropped_hooks.is_none());
+    assert!(!h.paths.hook_drops_log().exists());
 
     h.wait_stream_of("refund-v2", "claude-b1").await;
     h.server

@@ -9,6 +9,7 @@
 //! | `state.<presider>.db` | the daemon | the same, for each further Senate the machine serves |
 //! | `branches/<repository>/<branch>/` | `senate` and the daemon | the saved copy of a worktree's `.senate/` files for each branch ([`crate::follow`]) |
 //! | `bridge.sock` | the daemon | local IPC ([`crate::ipc`]), mode 0600 |
+//! | `hook-drops.log` | `senate hook` | stdin timeouts whose IPC could not be acknowledged |
 //!
 //! The directory itself is created with mode 0700: it holds the person's token
 //! and every session's inbox token.
@@ -94,6 +95,10 @@ impl Paths {
 
     pub fn home(&self) -> &Path {
         &self.home
+    }
+
+    pub fn hook_drops_log(&self) -> PathBuf {
+        self.home.join("hook-drops.log")
     }
 
     /// The machine's configuration: `senate.toml`, or `bridge.toml` (its

@@ -23,8 +23,8 @@ use senate_core::{Address, Locale, SenatePath};
 use crate::config::BridgeConfig;
 use crate::daemon::senate_words;
 use crate::ipc::{
-    self, ClientError, CommitteeStatus, Registration, Request, RolesReply, SecretaryProblem,
-    SecretaryProblems, StatusReply, StreamState, UplinkStatus,
+    self, ClientError, CommitteeStatus, HookDropStatus, Registration, Request, RolesReply,
+    SecretaryProblem, SecretaryProblems, StatusReply, StreamState, UplinkStatus,
 };
 use crate::paths::Paths;
 use crate::session::{Runtime, Session};
@@ -48,6 +48,7 @@ pub struct StatusView {
     pub hosted: std::collections::BTreeMap<String, Option<String>>,
     pub hosted_unbound: std::collections::BTreeMap<String, String>,
     pub hosted_viewer_unavailable: std::collections::BTreeSet<String>,
+    pub dropped_hooks: Option<HookDropStatus>,
     pub queue: QueueCounts,
     pub locale: Locale,
     /// Who holds that Senate's Speaker's seat, as the daemon heard.
@@ -72,6 +73,7 @@ impl StatusView {
             hosted: reply.hosted,
             hosted_unbound: reply.hosted_unbound,
             hosted_viewer_unavailable: reply.hosted_viewer_unavailable,
+            dropped_hooks: reply.dropped_hooks,
             queue: reply.queue,
             locale: reply.locale,
             speaker: reply.speaker,
@@ -202,6 +204,7 @@ fn offline(paths: &Paths) -> anyhow::Result<StatusView> {
         hosted: Default::default(),
         hosted_unbound: Default::default(),
         hosted_viewer_unavailable: Default::default(),
+        dropped_hooks: None,
         queue: QueueCounts::default(),
         locale: config
             .as_ref()
@@ -355,9 +358,27 @@ fn table(headers: &[&str], rows: &[Vec<String>]) -> String {
     out
 }
 
-fn hosted_advisories(view: &StatusView) -> Vec<String> {
+fn advisories(view: &StatusView) -> Vec<String> {
     let l = view.locale;
     let mut lines = Vec::new();
+    if let Some(drops) = &view.dropped_hooks {
+        let count = drops.count;
+        let kind = drops.last.kind.event_name();
+        let last = drops.last_at.format("%Y-%m-%d %H:%M:%S UTC");
+        let mut summary = l.pick(
+            format!("守护进程启动后丢弃了 {count} 个钩子上报。最近一次为 {last} 的 {kind}。"),
+            format!(
+                "Dropped hook reports since daemon start ({count}). Last was {kind} at {last}."
+            ),
+        );
+        if let Some(host) = &drops.last.host_id {
+            summary.push_str(&l.pick(
+                format!(" 上报的托管主机 ID 为 {host}。"),
+                format!(" Reported host ID {host}."),
+            ));
+        }
+        lines.push(summary);
+    }
     if view.sessions.iter().any(|session| {
         session.runtime == Runtime::Codex && view.hosted.contains_key(&session.session_id)
     }) {
@@ -372,6 +393,16 @@ fn hosted_advisories(view: &StatusView) -> Vec<String> {
     }
     for session in &view.sessions {
         let seat = &session.agent;
+        if view
+            .dropped_hooks
+            .as_ref()
+            .is_some_and(|drops| drops.hosted_sessions.contains(&session.session_id))
+        {
+            lines.push(l.pick(
+                format!("托管 Claude 席位 {seat} 可能漏掉了工具授权或上下文钩子。"),
+                format!("Hosted Claude seat {seat} may have missed an approval or context hook."),
+            ));
+        }
         if view.hosted_viewer_unavailable.contains(&session.session_id) {
             lines.push(l.pick(
                 format!("托管席位 {seat} 的终端无法提供查看者活动，工具授权提醒不可用。"),
@@ -727,7 +758,7 @@ fn render_senate(
         }
     }
 
-    for advisory in hosted_advisories(view) {
+    for advisory in advisories(view) {
         let _ = writeln!(out, "  {advisory}");
     }
     let _ = writeln!(out, "\n{}", l.pick("会话", "sessions"));
@@ -837,6 +868,7 @@ mod tests {
             hosted: Default::default(),
             hosted_unbound: Default::default(),
             hosted_viewer_unavailable: Default::default(),
+            dropped_hooks: None,
             queue: QueueCounts::default(),
             locale,
             speaker: None,

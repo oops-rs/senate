@@ -233,6 +233,7 @@ use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
 use crate::catch_up::CatchUpItem;
+use crate::hook::HookKind;
 pub use crate::host_approval::ClaudeApprovalSignal;
 use crate::session::{Runtime, Session};
 use crate::state::QueueCounts;
@@ -352,11 +353,35 @@ pub struct StopReply {
     pub audit_pending: bool,
 }
 
+/// The hints available when a hook times out before reading its payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HookDropReport {
+    pub kind: HookKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_hint: Option<Runtime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_id: Option<EventId>,
+    pub parent_pid: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HookDropStatus {
+    /// Reports received since this daemon started.
+    pub count: u64,
+    pub last_at: chrono::DateTime<chrono::Utc>,
+    pub last: HookDropReport,
+    /// Current hosted Claude sessions with a matching reported host ID.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub hosted_sessions: std::collections::BTreeSet<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
     Ping,
     Status,
+    /// A diagnostic for a stalled read, with no native hook payload.
+    HookDropped(HookDropReport),
     /// Fixed-seat registrations from previous bridge clients.
     Hook(HookReport),
     /// Native coding session. Its immutable senator ID is derived on the daemon.
@@ -1469,6 +1494,8 @@ pub struct StatusReply {
     /// Running hosts without a readable viewer activity record.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub hosted_viewer_unavailable: std::collections::BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dropped_hooks: Option<HookDropStatus>,
 
     pub queue: QueueCounts,
     /// Who holds the Speaker's seat of that Senate, as `/v1/me` said.

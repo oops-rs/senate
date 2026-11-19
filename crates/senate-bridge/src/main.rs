@@ -521,21 +521,26 @@ fn runtime(multi: bool) -> anyhow::Result<tokio::runtime::Runtime> {
 
 /// Read stdin to the end, giving up after `timeout` (Claude closes it, but a
 /// hook must never hang on a stdin that stays open).
-fn read_stdin(timeout: Duration) -> Option<String> {
+fn read_stdin(timeout: Duration) -> Result<Option<String>, std::sync::mpsc::RecvTimeoutError> {
     let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
+    let _ = std::thread::Builder::new().spawn(move || {
         let mut s = String::new();
         let r = std::io::stdin().read_to_string(&mut s).map(|_| s);
         // The receiver is gone if we already timed out; nothing to do then.
         let _ = tx.send(r);
     });
-    rx.recv_timeout(timeout).ok()?.ok()
+    rx.recv_timeout(timeout).map(Result::ok)
 }
 
 /// Hooks never fail and never print anything but their one JSON line.
 fn run_hook(kind: HookKind, runtime_override: Option<Runtime>) {
-    let Some(stdin) = read_stdin(Duration::from_secs(1)) else {
-        return;
+    let stdin = match read_stdin(hook::STDIN_BUDGET) {
+        Ok(Some(stdin)) => stdin,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            hook::report_stdin_timeout(kind, runtime_override);
+            return;
+        }
+        Ok(None) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
     };
     let Ok(paths) = Paths::from_env() else {
         return;

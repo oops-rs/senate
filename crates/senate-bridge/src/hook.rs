@@ -28,15 +28,15 @@
 //! the app-server, since Codex leaves hook context unanswered. Without `--codex` a Codex hook
 //! is recognised by its rollout transcript ([`detect_runtime`]).
 //!
-//! It must never get in the user's way: every failure (daemon down, bad
-//! input, timeout) ends in exit 0 with no output, within about a second.
+//! Hook failures exit 0 with no output. A stalled stdin read has one
+//! second, followed by up to 200 ms of best-effort diagnostics.
 //! In a companion session (`SENATE_COMPANION` set, [`crate::companion`])
 //! it does nothing at all.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -44,10 +44,14 @@ use crate::host_approval::observed_at;
 use crate::ipc::{self, ClaudeApprovalSignal, HookEvent, HookReply, HookReport, Request};
 use crate::session::{self, Runtime};
 
+mod diagnostics;
+pub use diagnostics::{DROP_REPORT_BUDGET, STDIN_BUDGET, report_stdin_timeout};
+
 /// How many pids above the hook are reported when measuring ancestry.
 pub const ANCESTOR_DEPTH: usize = 3;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
 pub enum HookKind {
     SessionStart,
     UserPromptSubmit,

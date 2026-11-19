@@ -120,7 +120,7 @@
 //! the next push says how many. Ended and stale sessions, and delivered
 //! items, are forgotten after 7 days.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -156,9 +156,9 @@ use crate::delivery::{Batch, DeliveryOutcome, Ladder, agy::AgyAdapter};
 use crate::format;
 use crate::ipc::{
     self, ApprovalsReply, ApproveReply, BoundReply, CatchUpReply, CheckpointReply, CommitteeStatus,
-    EscalateReply, HookEvent, HookReply, HookReport, InboxReply, IpcError, JoinReply, Pong, Posted,
-    Reply, Request, SayKind, SearchReply, SessionSelector, StatusReply, ThreadReply, ThreadSeen,
-    WatchEvent, codes,
+    EscalateReply, HookDropReport, HookDropStatus, HookEvent, HookReply, HookReport, InboxReply,
+    IpcError, JoinReply, Pong, Posted, Reply, Request, SayKind, SearchReply, SessionSelector,
+    StatusReply, ThreadReply, ThreadSeen, WatchEvent, codes,
 };
 use crate::notify::{News, Notifications, NotifyConfig};
 use crate::paths::Paths;
@@ -379,6 +379,14 @@ type Seat = (SenatorName, CommitteeId);
 /// The branch a session is on now and what it is bound to there.
 type Rebind = (Option<String>, Option<CommitteeId>);
 
+#[derive(Clone, Default)]
+struct HookDrops {
+    count: u64,
+    last: Option<(chrono::DateTime<chrono::Utc>, HookDropReport)>,
+    /// Recent host ID hints, bounded even as terminals are replaced.
+    hosts: VecDeque<EventId>,
+}
+
 pub(crate) struct Shared {
     pub(crate) config: BridgeConfig,
     /// Everything written for people and agents is in this language.
@@ -421,6 +429,7 @@ pub(crate) struct Shared {
     host_notices_ready: Notify,
     active_stop_notices: Mutex<BTreeSet<EventId>>,
     hosted_approvals: hosted_approvals::Monitor,
+    hook_drops: Mutex<HookDrops>,
     codex_transport: crate::delivery::codex::Transport,
     host_binary: PathBuf,
     pushes: Mutex<HashMap<String, PushState>>,
@@ -725,6 +734,7 @@ impl Shared {
             host_notices_ready: Notify::new(),
             active_stop_notices: Mutex::new(BTreeSet::new()),
             hosted_approvals: hosted_approvals::Monitor::default(),
+            hook_drops: Mutex::new(HookDrops::default()),
             codex_transport: common.codex.transport.clone(),
             host_binary: common.host_binary.clone(),
             pushes: Mutex::new(HashMap::new()),
@@ -2636,6 +2646,10 @@ impl Shared {
                 wrap(result.map_err(server_error))
             }
             Request::Status => wrap(self.on_status()),
+            Request::HookDropped(report) => {
+                self.on_hook_dropped(report);
+                Reply::ok(&())
+            }
             Request::Hook(report) => wrap(self.on_hook(report, false).await),
             Request::SessionHook(report) => {
                 let codex = report.runtime == Runtime::Codex;
@@ -2866,6 +2880,55 @@ impl Shared {
         }
     }
 
+    fn on_hook_dropped(&self, report: HookDropReport) {
+        // These are unverified diagnostic hints only. Keep session, seat,
+        // binding and approval updates in the normal hook handlers.
+        tracing::warn!(kind = ?report.kind, runtime_hint = ?report.runtime_hint,
+            host_hint = ?report.host_id, parent_pid_hint = report.parent_pid, "hook stdin timed out");
+        let mut drops = lock(&self.hook_drops);
+        if let Some(host) = &report.host_id {
+            drops.hosts.retain(|known| known != host);
+            if drops.hosts.len() >= 64 {
+                drops.hosts.pop_front();
+            }
+            drops.hosts.push_back(host.clone());
+        }
+        drops.count = drops.count.saturating_add(1);
+        drops.last = Some((chrono::Utc::now(), report));
+    }
+
+    fn hook_drop_status(
+        &self,
+        sessions: &[Session],
+        hosted: &BTreeMap<String, Option<String>>,
+    ) -> Result<Option<HookDropStatus>, IpcError> {
+        let drops = lock(&self.hook_drops).clone();
+        let Some((last_at, last)) = drops.last else {
+            return Ok(None);
+        };
+        let mut hosted_sessions = BTreeSet::new();
+        if !drops.hosts.is_empty() {
+            for session in sessions.iter().filter(|session| {
+                session.runtime == Runtime::Claude && hosted.contains_key(&session.session_id)
+            }) {
+                if let Some(host) = self
+                    .store
+                    .session_host(&session.session_id)
+                    .map_err(internal)?
+                    && drops.hosts.contains(&host)
+                {
+                    hosted_sessions.insert(session.session_id.clone());
+                }
+            }
+        }
+        Ok(Some(HookDropStatus {
+            count: drops.count,
+            last_at,
+            last,
+            hosted_sessions,
+        }))
+    }
+
     fn on_status(&self) -> Result<StatusReply, IpcError> {
         let mut sessions = self.store.sessions().map_err(internal)?;
         sessions.retain(|session| !self.hosts.unpublished(&session.session_id));
@@ -2903,6 +2966,7 @@ impl Shared {
             .collect();
         let host_status = crate::host::status(&Paths::new(&self.home), &self.store, &sessions)
             .map_err(internal)?;
+        let dropped_hooks = self.hook_drop_status(&sessions, &host_status.hosted)?;
         Ok(StatusReply {
             pid: std::process::id(),
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -2915,6 +2979,7 @@ impl Shared {
             hosted: host_status.hosted,
             hosted_unbound: host_status.unbound,
             hosted_viewer_unavailable: host_status.viewer_unavailable,
+            dropped_hooks,
             sessions,
             queue: self.store.counts().map_err(internal)?,
             speaker: self.speaker_seat(),
