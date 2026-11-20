@@ -645,11 +645,13 @@ async fn stream_sends_pings() {
     let server =
         TestServer::start_with(std::sync::Arc::new(senate_log::MemoryStore::new()), Some(1)).await;
     let mut stream = server.stream(ALICE, None, None).await;
+    // The office is said first, then nothing but pings on an empty log.
+    assert!(matches!(stream.frame().await.unwrap(), Frame::Office(_)));
     match stream.frame().await.unwrap() {
         Frame::Ping(data) => {
             DateTime::parse_from_rfc3339(&data).expect("ping data is RFC 3339");
         }
-        Frame::Event(event) => panic!("unexpected event {event:?}"),
+        other => panic!("unexpected frame {other:?}"),
     }
     server.append("after a ping").await;
     assert_eq!(stream.event().await.unwrap().body, "after a ping");

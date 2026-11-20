@@ -9,10 +9,17 @@
 //!
 //! The daemon's built-in session is a senator of the roster too, but nobody
 //! acts as it over HTTP: it writes in process.
+//!
+//! The Speaker's office ([`Roster::office`]) is a fact of the roster and of
+//! no committee's log, so nothing in a log says when it changes. [`Seats`]
+//! says: every change of the roster that leaves another office is told to
+//! whoever follows [`Seats::office_changes`] (every open stream, which
+//! passes it on).
 
 use std::sync::{PoisonError, RwLock};
 
-use senate_core::{Name, Principal, Roster, RosterConfig, RosterError, SenatorName};
+use senate_core::{Name, Office, Principal, Roster, RosterConfig, RosterError, SenatorName};
+use tokio::sync::watch;
 
 /// What [`Seats::act_as`] changed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -26,13 +33,34 @@ pub(crate) struct Seated {
 
 pub(crate) struct Seats {
     roster: RwLock<Roster>,
+    /// The Speaker's office of `roster` as it is now.
+    office: watch::Sender<Option<Office>>,
 }
 
 impl Seats {
     pub(crate) fn new(roster: Roster) -> Self {
         Self {
+            office: watch::Sender::new(roster.office()),
             roster: RwLock::new(roster),
         }
+    }
+
+    /// The Speaker's office, and every later change of it.
+    pub(crate) fn office_changes(&self) -> watch::Receiver<Option<Office>> {
+        self.office.subscribe()
+    }
+
+    /// `roster` was changed (its lock is still held, so two changes are
+    /// told in their order): tell the office if it is another one now.
+    fn changed(&self, roster: &Roster) {
+        let now = roster.office();
+        self.office.send_if_modified(|office| {
+            let moved = *office != now;
+            if moved {
+                *office = now;
+            }
+            moved
+        });
     }
 
     /// The roster as it is now.
@@ -46,7 +74,9 @@ impl Seats {
     /// Change the roster under its lock.
     pub(crate) fn update<R>(&self, change: impl FnOnce(&mut Roster) -> R) -> R {
         let mut roster = self.roster.write().unwrap_or_else(PoisonError::into_inner);
-        change(&mut roster)
+        let out = change(&mut roster);
+        self.changed(&roster);
+        out
     }
 
     /// Whether `person`, authenticated, may act as `senator`; if it is an
@@ -70,6 +100,9 @@ impl Seats {
         }
         let had_owner = roster.owner_of(senator).is_some();
         let new = roster.seat(senator.clone(), person)?;
+        if new {
+            self.changed(&roster);
+        }
         Ok(Seated {
             new,
             owner_set: !had_owner,
@@ -80,10 +113,12 @@ impl Seats {
     /// a restarted server seats again the agents it finds in the log (their
     /// principals come from the store's registry, seated before this).
     pub(crate) fn seat_again(&self, agent: SenatorName) -> Result<bool, RosterError> {
-        self.roster
-            .write()
-            .unwrap_or_else(PoisonError::into_inner)
-            .seat_again(agent)
+        let mut roster = self.roster.write().unwrap_or_else(PoisonError::into_inner);
+        let new = roster.seat_again(agent)?;
+        if new {
+            self.changed(&roster);
+        }
+        Ok(new)
     }
 
     /// Replace the people, keeping the Speaker, the built-in session, the
@@ -99,6 +134,7 @@ impl Seats {
         });
         config.principals = principals;
         *roster = rebuild(config, roster.built_in().cloned())?;
+        self.changed(&roster);
         Ok(())
     }
 }

@@ -1372,6 +1372,69 @@ async fn an_answer_where_the_desk_forwarded_goes_back_to_the_asking_thread() {
 
 // Secretaries.
 
+/// The Speaker's office is in no log, so a stream says it: as it is when
+/// the stream opens, before any event, and again when the secretaries of
+/// the Speaker are set. Another senator's secretaries are not the office,
+/// and say nothing.
+#[tokio::test]
+async fn a_stream_says_the_office_when_it_opens_and_when_the_desk_changes() {
+    let server = TestServer::start_configured(Arc::new(MemoryStore::new()), |c| {
+        c.roster.speaker = speaker_id("senator::alice");
+        c.roster.agents = vec![seated("claude", "alice"), seated("codex", "bob")];
+    })
+    .await;
+    server.append("before the stream").await;
+    let set = |list: &[&str]| SetSecretaries {
+        secretaries: list.iter().map(|s| path(s)).collect(),
+        acted_by: None,
+    };
+    let route = |senator: &str| senate_core::api::secretaries_of_path(&path(senator));
+    let me = |token: &'static str| {
+        let request = server.request(Method::GET, senate_core::api::ME_PATH, token);
+        async move { request.send().await.unwrap().json::<Me>().await.unwrap() }
+    };
+
+    // Open: the office of now, first, and it is what `/v1/me` says.
+    let mut stream = server.stream(BOB, None, None).await;
+    match stream.frame().await.unwrap() {
+        Frame::Office(office) => {
+            let office = office.expect("alice presides");
+            assert!(office.desk.is_empty(), "{office:?}");
+            assert_eq!(Some(office), me(BOB).await.office);
+        }
+        other => panic!("the office comes before {other:?}"),
+    }
+    assert_eq!(stream.event().await.unwrap().body, "before the stream");
+
+    // codex's secretaries are not the office: nothing is said.
+    let response = put(&server, BOB, &route("codex"), &set(&["claude"])).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    // Alice puts claude on her desk: every open stream says so.
+    let response = put(&server, ALICE, &route("alice"), &set(&["claude"])).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    match stream.frame().await.unwrap() {
+        Frame::Office(office) => {
+            let office = office.expect("alice presides");
+            assert_eq!(office.desk, [path("claude")]);
+            assert_eq!(Some(office), me(BOB).await.office);
+        }
+        other => panic!("only the Speaker's desk changed, not {other:?}"),
+    }
+    // Set to what it is already: nothing more, the log goes on.
+    let response = put(&server, ALICE, &route("alice"), &set(&["claude"])).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    server.append("after the desk changed").await;
+    match stream.frame().await.unwrap() {
+        Frame::Event(event) => assert_eq!(event.body, "after the desk changed"),
+        other => panic!("the office did not change, yet {other:?}"),
+    }
+
+    // A stream opened now is told the desk as it is now.
+    let mut late = server.stream(ALICE, Some(2), None).await;
+    assert_eq!(late.office().await.unwrap().desk, [path("claude")]);
+    server.running.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn secretaries_are_registered_by_whom_the_rules_allow_and_kept_across_a_restart() {
     let dir = tempfile::tempdir().unwrap();

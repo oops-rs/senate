@@ -137,6 +137,14 @@
 //! (directed) and what waits for catch-up. A stream opened with `senator`
 //! naming an agent is that agent's connection, and counts for its presence.
 //!
+//! The Speaker's office is in no committee's log, so the stream says it
+//! beside the events: an `event: office` message with no `id` and
+//! `data: <Office JSON, or null>`, first when the stream opens and again
+//! whenever the office changes (the Speaker's secretaries set). It is what
+//! [`Me::office`] would say at that moment; a client that keeps the rest of
+//! `/v1/me` asks for it again when the office it is told differs from the
+//! one it has. A client ignores the message types it does not know.
+//!
 //! # Epochs and cursors
 //!
 //! Every `/v1` response carries the log's epoch in the [`EPOCH_HEADER`]
@@ -172,6 +180,8 @@ pub const EPOCH_HEADER: &str = "x-senate-epoch";
 
 pub const SSE_EVENT: &str = "event";
 pub const SSE_PING: &str = "ping";
+/// The Speaker's office, on every stream (see the module docs).
+pub const SSE_OFFICE: &str = "office";
 pub const SSE_PING_SECS: u64 = 15;
 /// Upper bound the server applies to `limit`.
 pub const MAX_PAGE: usize = 500;

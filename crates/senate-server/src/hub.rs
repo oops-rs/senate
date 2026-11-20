@@ -301,6 +301,12 @@ impl ServerHub {
         self.seats.snapshot().office()
     }
 
+    /// The Speaker's office, and every later change of it (the secretaries
+    /// set, a Speaker seated): what every stream tells its client.
+    pub fn office_changes(&self) -> tokio::sync::watch::Receiver<Option<Office>> {
+        self.seats.office_changes()
+    }
+
     /// The built-in session's name, when the daemon runs it.
     pub fn built_in(&self) -> Option<&SenatorName> {
         self.built_in.as_ref()

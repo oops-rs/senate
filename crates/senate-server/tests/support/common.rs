@@ -259,6 +259,8 @@ pub struct Sse(pub Frames);
 pub enum Frame {
     Event(Box<Event>),
     Ping(String),
+    /// The Speaker's office, as the stream says it beside the log.
+    Office(Option<senate_core::Office>),
 }
 
 impl Sse {
@@ -269,6 +271,11 @@ impl Sse {
             .expect("timed out waiting for an SSE frame");
         match next? {
             Ok(frame) if frame.event == senate_core::api::SSE_PING => Some(Frame::Ping(frame.data)),
+            // It carries no id of its own, so the reader's last event id
+            // (the last event's seq) stays what it was.
+            Ok(frame) if frame.event == senate_core::api::SSE_OFFICE => {
+                Some(Frame::Office(serde_json::from_str(&frame.data).unwrap()))
+            }
             Ok(frame) => {
                 assert_eq!(frame.event, senate_core::api::SSE_EVENT);
                 let event: Event = serde_json::from_str(&frame.data).unwrap();
@@ -284,7 +291,18 @@ impl Sse {
         loop {
             match self.frame().await? {
                 Frame::Event(event) => return Some(*event),
-                Frame::Ping(_) => continue,
+                Frame::Ping(_) | Frame::Office(_) => continue,
+            }
+        }
+    }
+
+    /// The next thing the stream says of the Speaker's office, skipping
+    /// pings and events.
+    pub async fn office(&mut self) -> Option<senate_core::Office> {
+        loop {
+            match self.frame().await.expect("stream ended early") {
+                Frame::Office(office) => return office,
+                Frame::Event(_) | Frame::Ping(_) => continue,
             }
         }
     }
