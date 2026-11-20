@@ -539,6 +539,10 @@ pub mod meta {
     /// its owner person or the committee's chair; the server refuses anyone
     /// else. See [`crate::duty`].
     pub const DUTY: &str = "duty";
+    /// On what the Speaker's office writes in the thread of a message for
+    /// a child Senate that was offline: the note that it is held, or the
+    /// answer given on the child's behalf. The child Senate's name.
+    pub const CHILD_OFFLINE: &str = "child_offline";
 }
 
 fn flag(event: &Event, key: &str) -> bool {

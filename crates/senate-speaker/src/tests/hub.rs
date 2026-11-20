@@ -163,6 +163,17 @@ impl MemoryHub {
             .duty = Some(duty.to_owned());
     }
 
+    /// When the child Senate `child` last declared its seats.
+    pub(crate) fn child_seen(&self, child: &str, seen: Option<chrono::DateTime<chrono::Utc>>) {
+        let mut inner = self.lock();
+        inner
+            .children
+            .iter_mut()
+            .find(|c| c.name.as_str() == child)
+            .expect("a registered child Senate")
+            .last_seen = seen;
+    }
+
     pub(crate) fn disconnect(&self, committee: &CommitteeId, agent: &SenatorName) {
         self.lock()
             .connected

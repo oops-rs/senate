@@ -63,7 +63,9 @@
 //! changes.
 //!
 //! `decide_crossing` is a typed turn without tools (`speaker_crossing`:
-//! forward, refuse with a reason, or leave), under the triage deadline.
+//! forward, refuse with a reason, or leave), under the triage deadline. So
+//! is `decide_offline` (`speaker_offline`: answer with its text, or hold),
+//! for a question put to a child Senate that is offline.
 //!
 //! **History is durable**, under `<data_dir>/speaker/history`
 //! (`RuntimeBuilder::with_store_dir`). No run is ever resumed — each call is a
@@ -90,13 +92,13 @@ use senate_core::{Brief, CommitteeId, Hub, Locale, TriagePayload};
 use tokio::sync::Mutex;
 
 use crate::brain::{
-    AgentTurn, Answer, Brain, BrainError, Conversation, Crossing, CrossingInput, Intent, Pick,
-    PickInput, Question, TriageInput, Utterance,
+    AgentTurn, Answer, Brain, BrainError, Conversation, Crossing, CrossingInput, Intent, Offline,
+    OfflineInput, Pick, PickInput, Question, TriageInput, Utterance,
 };
 use crate::config::SpeakerConfig;
 use crate::secretary::{Effective, ModelSettings, SecretaryConfigs};
 use agent_tools::{Checkpoint, CommitteeBrief, CommitteeStatus, Presence, Tasks};
-use prompt::{AgentTurnWire, CrossingWire, IntentWire, PickWire, TriageWire};
+use prompt::{AgentTurnWire, CrossingWire, IntentWire, OfflineWire, PickWire, TriageWire};
 use tools::{LogRead, LogSearch};
 
 /// The two tool names the Speaker's model is offered.
@@ -506,6 +508,24 @@ impl Brain for BasisBrain {
             .await
             .map_err(|failure| BrainError::Unavailable(failure.error.to_string()))?;
         output.value.into_crossing()
+    }
+
+    async fn decide_offline(&self, input: OfflineInput) -> Result<Offline, BrainError> {
+        let workspace = self.workspace(Some(&input.committee)).await?;
+        let spec = self.quick("speaker-offline", &input.committee, input.locale);
+        let mut run = workspace
+            .prepare(spec)
+            .map_err(|e| BrainError::Unavailable(e.to_string()))?;
+        let output = run
+            .output::<OfflineWire, _, _>(
+                prompt::offline(&input, chrono::Utc::now()),
+                prompt::offline_spec(),
+                NullSink,
+                AllowAll,
+            )
+            .await
+            .map_err(|failure| BrainError::Unavailable(failure.error.to_string()))?;
+        output.value.into_offline()
     }
 }
 

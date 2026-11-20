@@ -105,8 +105,9 @@ pub use basis_brain::{
 };
 pub use brain::{
     AgentCandidate, AgentTurn, Answer, Brain, BrainError, Conversation, Crossing, CrossingInput,
-    GroupRef, Intent, Pick, PickInput, Question, RelayKind, Takeover, TriageInput, Turn, Utterance,
-    apply_threshold, rule_crossing, rule_pick, triage_verdict,
+    GroupRef, Intent, Offline, OfflineInput, Pick, PickInput, Question, RelayKind, Takeover,
+    TriageInput, Turn, Utterance, apply_threshold, rule_crossing, rule_offline, rule_pick,
+    triage_verdict,
 };
 pub use config::{DEFAULT_BOT_NAME, SpeakerConfig, SpeakerMode, WorkConfig};
 pub use engine::{CURSOR, TAKEOVER_META};

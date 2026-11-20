@@ -23,7 +23,8 @@ use serde_json::{Value, json};
 
 use crate::brain::{
     AgentCandidate, AgentTurn, Answer, BrainError, Conversation, Crossing, CrossingInput, Intent,
-    Pick, PickInput, Question, RelayKind, Takeover, TriageInput, Utterance, apply_threshold,
+    Offline, OfflineInput, Pick, PickInput, Question, RelayKind, Takeover, TriageInput, Utterance,
+    apply_threshold,
 };
 
 /// How much of one event body a prompt or tool result shows.
@@ -1135,9 +1136,145 @@ impl CrossingWire {
     }
 }
 
+// ---- A question for a child Senate that is offline -------------------------
+
+/// The offline answering tool's description; also how a scripted test finds it.
+pub(crate) const OFFLINE_DESCRIPTION: &str = "Report what the Speaker's office does with a question for a child Senate that is \
+     offline. Call this exactly once.";
+
+pub(crate) fn offline_spec() -> OutputSpec {
+    OutputSpec::new("speaker_offline", OFFLINE_DESCRIPTION, offline_schema())
+}
+
+fn offline_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "decision": {
+                "type": "string",
+                "enum": ["answer", "hold"],
+                "description": "answer: the material in the prompt answers the question, and you answer it on the child Senate's behalf. hold: it does not (or you are unsure); the asker is told the child Senate is offline and the question waits for it."
+            },
+            "answer": {
+                "type": "string",
+                "description": "Required for answer: the answer itself, in the language the prompt names, saying what it relies on. No pleasantries."
+            }
+        },
+        "required": ["decision"],
+        "additionalProperties": false
+    })
+}
+
+pub(crate) fn offline(input: &OfflineInput, now: DateTime<Utc>) -> String {
+    let child = &input.child.name;
+    let asker = input
+        .event
+        .on_behalf_of
+        .as_ref()
+        .unwrap_or(&input.event.from);
+    let meant = input.intended.as_ref().map_or_else(String::new, |seat| {
+        format!(", meant for the seat {}", seat.in_text())
+    });
+    let away = input.child.last_seen.map_or_else(
+        || "at a time this Senate does not know".to_owned(),
+        |seen| {
+            format!(
+                "{} ago",
+                age_words((now - seen).to_std().unwrap_or_default())
+            )
+        },
+    );
+    let seats = if input.child.seats.is_empty() {
+        "(it declared no seats)".to_owned()
+    } else {
+        input
+            .child
+            .seats
+            .iter()
+            .map(|seat| {
+                format!(
+                    "- {} on {} · {} when last declared · duty: {}",
+                    Address::senator(&seat.senator).in_text(),
+                    seat.committee,
+                    seat.presence,
+                    seat.duty
+                        .as_deref()
+                        .map_or_else(|| "none set".to_owned(), |duty| cut(duty, 300)),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let brief = input.brief.as_ref().map_or_else(
+        || "(the brief could not be read)".to_owned(),
+        |b| b.to_markdown(input.locale, TAKEOVER_BRIEF_CHARS),
+    );
+    format!(
+        "In committee {committee}, {asker} asked the child Senate {child} this question{meant}:\n\n\
+         {body}\n\n\
+         {child} is offline: it last declared itself here {away}. The question stays in the log \
+         and reaches {child} when it reconnects, whatever you decide.\n\n\
+         The seats {child} declared here, which is all this Senate knows of what is inside it:\n\
+         {seats}\n\n\
+         The committee's brief here:\n{brief}\n\n\
+         Recent log:\n{context}\n\n\
+         Decide. Answer on {child}'s behalf only when the brief (its decisions and checkpoints), \
+         the declared seats and duties, or the log above answer the question; say what you \
+         relied on, do not speculate about anything inside {child}, and promise nothing in its \
+         name. Otherwise hold: the asker is told {child} is offline and the question waits for \
+         it. When in doubt, hold. Write an answer in {language}. Call the speaker_offline tool \
+         exactly once.",
+        committee = input.committee,
+        asker = asker.in_text(),
+        body = input.event.body,
+        context = render_context(&input.context),
+        language = language(input.locale),
+    )
+}
+
+/// The offline tool's payload.
+#[derive(Debug, Deserialize)]
+pub(crate) struct OfflineWire {
+    decision: String,
+    #[serde(default)]
+    answer: Option<String>,
+}
+
+impl OfflineWire {
+    pub(crate) fn into_offline(self) -> Result<Offline, BrainError> {
+        let answer = self
+            .answer
+            .map(|a| a.trim().to_owned())
+            .filter(|a| !a.is_empty());
+        match self.decision.trim() {
+            "hold" => Ok(Offline::Hold),
+            "answer" => answer
+                .map(Offline::Answer)
+                .ok_or_else(|| BrainError::Invalid("an answer needs its text".into())),
+            other => Err(BrainError::Invalid(format!("unknown decision {other:?}"))),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_offline_wire_is_an_answer_with_its_text_or_a_hold() {
+        let wire = |value: Value| {
+            serde_json::from_value::<OfflineWire>(value)
+                .expect("wire")
+                .into_offline()
+        };
+        assert_eq!(wire(json!({"decision": "hold"})), Ok(Offline::Hold));
+        assert_eq!(
+            wire(json!({"decision": "answer", "answer": " 30 days, per the brief "})),
+            Ok(Offline::Answer("30 days, per the brief".into()))
+        );
+        assert!(wire(json!({"decision": "answer", "answer": "  "})).is_err());
+        assert!(wire(json!({"decision": "forward"})).is_err());
+    }
 
     fn wire(value: Value) -> Result<Intent, BrainError> {
         serde_json::from_value::<IntentWire>(value)

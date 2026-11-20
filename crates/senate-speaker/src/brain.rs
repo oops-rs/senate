@@ -14,8 +14,8 @@ use async_trait::async_trait;
 use std::time::Duration;
 
 use senate_core::{
-    Address, Brief, CheckpointRecord, CommitteeId, Event, Kind, Locale, Locator, Name, OutputLevel,
-    Roster, SenatorName, Seq, ThreadSummary, TriagePayload, TriageVerdict,
+    Address, Brief, CheckpointRecord, ChildSenate, CommitteeId, Event, Kind, Locale, Locator, Name,
+    OutputLevel, Roster, SenatorName, Seq, ThreadSummary, TriagePayload, TriageVerdict,
 };
 use serde::{Deserialize, Serialize};
 
@@ -386,6 +386,56 @@ pub trait Brain: Send + Sync + 'static {
     async fn decide_crossing(&self, input: CrossingInput) -> Result<Crossing, BrainError> {
         Ok(rule_crossing(&input))
     }
+
+    /// A question for a child Senate that is offline: answer it on the
+    /// child's behalf from what this Senate can see, or hold it. Held, the
+    /// asker is told the child is offline, and the question reaches the
+    /// child when it reconnects either way. The default is
+    /// [`rule_offline`]: hold. An error, or no answer within the triage
+    /// deadline, holds it too.
+    async fn decide_offline(&self, input: OfflineInput) -> Result<Offline, BrainError> {
+        Ok(rule_offline(&input))
+    }
+}
+
+/// A question addressed to a child Senate that is not online.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OfflineInput {
+    /// The committee it was written in.
+    pub committee: CommitteeId,
+    /// The question itself: a root addressed to the child Senate's desk.
+    pub event: Event,
+    /// The child Senate as it last declared itself here: its seats, each
+    /// with its duty and presence, and when it was last seen. This is all
+    /// this Senate knows of what is inside it.
+    pub child: ChildSenate,
+    /// The seat there the question was meant for, when one was named.
+    pub intended: Option<Locator>,
+    /// The committee's brief here (decisions in force, open questions,
+    /// the latest checkpoints), when it could be read.
+    pub brief: Option<Brief>,
+    /// The committee's most recent events before the question, oldest
+    /// first.
+    pub context: Vec<Event>,
+    /// The language of an answer.
+    pub locale: Locale,
+}
+
+/// What the Speaker's office does with a question for an offline child
+/// Senate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Offline {
+    /// Answer it on the child's behalf, with this text.
+    Answer(String),
+    /// Say the child is offline; the question waits for it.
+    Hold,
+}
+
+/// The decision without a model: hold. Nothing here says what the child
+/// would answer.
+pub fn rule_offline(input: &OfflineInput) -> Offline {
+    let _ = input;
+    Offline::Hold
 }
 
 /// A message an agent wrote for a seat outside its committee, on the

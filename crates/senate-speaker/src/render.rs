@@ -1762,6 +1762,36 @@ pub(crate) fn crossing_forwarded(l: Locale, to: &senate_core::Locator) -> String
     }
 }
 
+/// The office's note in the thread of a message for a child Senate that
+/// is offline: it is held. `away`: how long the child has not been seen.
+pub(crate) fn child_offline_held(l: Locale, child: &Name, away: chrono::Duration) -> String {
+    let away = age(l, away);
+    match l {
+        Locale::Zh => format!(
+            "[{child}] 目前离线（最后一次连接在 {away}前）。这条消息已保留，它重新连接后会收到。"
+        ),
+        Locale::En => format!(
+            "[{child}] is offline (last seen {away} ago). This is held for it and reaches it \
+             when it reconnects."
+        ),
+    }
+}
+
+/// The office's answer for a child Senate that is offline: `text`, under a
+/// line saying whose answer it is.
+pub(crate) fn child_offline_answer(l: Locale, child: &Name, text: &str) -> String {
+    let text = text.trim();
+    match l {
+        Locale::Zh => format!(
+            "[{child}] 目前离线，以下由 Speaker 的办公室代答；它重新连接后仍会收到这个问题。\n{text}"
+        ),
+        Locale::En => format!(
+            "[{child}] is offline; the Speaker's office answers for it below. It still gets \
+             the question when it reconnects.\n{text}"
+        ),
+    }
+}
+
 /// The desk's answer in the asker's thread: it will not go there, and why.
 pub(crate) fn crossing_refused(l: Locale, to: &senate_core::Locator, reason: &str) -> String {
     let to = to.in_text();

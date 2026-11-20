@@ -1957,3 +1957,175 @@ async fn a_senator_here_wins_over_a_child_senates_seat_of_the_same_name() {
         Some("north-desk::refund-v2::senator::claude")
     );
 }
+
+// ----- a child Senate that is offline -----------------------------------------------------
+
+use crate::Offline;
+
+/// carol's child Senate with one seat, last seen `minutes` ago (`None`:
+/// never since this Senate started).
+async fn hub_with_child_seen(minutes: Option<i64>) -> std::sync::Arc<MemoryHub> {
+    let hub = bound_hub().await;
+    hub.set_roster(roster_with_carol());
+    hub.add_child("north-desk", "carol");
+    hub.declare_seats(
+        "north-desk",
+        &refund(),
+        &[("responder", PresenceState::Disconnected)],
+    );
+    hub.child_seen(
+        "north-desk",
+        minutes.map(|m| chrono::Utc::now() - chrono::Duration::minutes(m)),
+    );
+    hub
+}
+
+/// What the office wrote in the relay's thread about the child being
+/// offline.
+fn offline_lines(rig: &Rig, relay: &Event) -> Vec<Event> {
+    rig.hub
+        .events(&refund())
+        .into_iter()
+        .filter(|e| e.thread == Some(relay.seq) && e.meta.contains_key(meta::CHILD_OFFLINE))
+        .collect()
+}
+
+/// The relay the Speaker wrote for `text`, which must be to north-desk.
+async fn relayed_to_north(rig: &Rig, text: &str, message_ref: &str) -> Event {
+    rig.append(mention("pm", text, message_ref)).await;
+    rig.settle().await;
+    let relay = rig
+        .hub
+        .events(&refund())
+        .into_iter()
+        .rev()
+        .find(|e| e.thread.is_none() && e.to == vec![desk_of("north-desk")])
+        .expect("a relay to north-desk");
+    assert_eq!(relay.from, Address::Speaker);
+    relay
+}
+
+/// A question relayed to a child Senate that is offline is still written
+/// for it, seat and all; the rules hold it, and the one who asked is told
+/// it is offline, once.
+#[tokio::test]
+async fn a_question_for_an_offline_child_senate_is_held_and_the_asker_told() {
+    let rig = Rig::start(hub_with_child_seen(Some(5)).await).await;
+    let relay = relayed_to_north(&rig, "/tell carol 退款文档更新了吗？", "m_o1").await;
+    assert_eq!(relay.kind, Kind::Question);
+    assert_eq!(
+        intended(&relay).as_deref(),
+        Some("north-desk::refund-v2::senator::responder"),
+        "an offline seat is still named"
+    );
+
+    let lines = offline_lines(&rig, &relay);
+    assert_eq!(lines.len(), 1, "{lines:#?}");
+    let held = &lines[0];
+    assert_eq!(held.kind, Kind::Note);
+    assert_eq!(held.from, Address::Speaker);
+    assert_eq!(
+        held.to,
+        vec![user("pm")],
+        "the one the relay was written for"
+    );
+    assert_eq!(held.on_behalf_of, None);
+    assert_eq!(held.meta[meta::CHILD_OFFLINE], json!("north-desk"));
+    assert_eq!(
+        held.body,
+        "[north-desk] 目前离线（最后一次连接在 5 分钟前）。这条消息已保留，它重新连接后会收到。"
+    );
+    assert!(
+        rig.surface.texts().iter().any(|t| t.contains("目前离线")),
+        "said where it was asked: {:#?}",
+        rig.surface.texts()
+    );
+    for text in rig.surface.texts() {
+        assert_senate_vocabulary(&text);
+    }
+
+    // The Brain was asked, with what this Senate knows of the child.
+    let asked = rig.brain.offline_inputs();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].event.seq, relay.seq);
+    assert_eq!(asked[0].child.name, name("north-desk"));
+    assert_eq!(asked[0].child.seats.len(), 1);
+    assert_eq!(
+        asked[0]
+            .intended
+            .as_ref()
+            .map(ToString::to_string)
+            .as_deref(),
+        Some("north-desk::refund-v2::senator::responder")
+    );
+    assert!(asked[0].brief.is_some());
+
+    // In English.
+    assert_eq!(
+        render::child_offline_held(
+            Locale::En,
+            &name("north-desk"),
+            chrono::Duration::minutes(90)
+        ),
+        "[north-desk] is offline (last seen 1 hour ago). This is held for it and reaches it \
+         when it reconnects."
+    );
+}
+
+/// The Brain may answer on the child's behalf: its answer goes to the one
+/// who asked, in the child's name, and the question still waits for the
+/// child. A Brain that fails holds.
+#[tokio::test]
+async fn the_brain_may_answer_for_an_offline_child_senate() {
+    let rig = Rig::start(hub_with_child_seen(Some(120)).await).await;
+    rig.brain
+        .decides_offline(Ok(Offline::Answer("已更新，见 brief 的检查点。".into())));
+    let relay = relayed_to_north(&rig, "/tell carol 退款文档更新了吗？", "m_o1").await;
+    let lines = offline_lines(&rig, &relay);
+    assert_eq!(lines.len(), 1, "{lines:#?}");
+    let answer = &lines[0];
+    assert_eq!(answer.kind, Kind::Answer);
+    assert_eq!(answer.from, Address::Speaker);
+    assert_eq!(answer.on_behalf_of, Some(desk_of("north-desk")));
+    assert_eq!(answer.to, vec![user("pm")]);
+    assert_eq!(
+        answer.body,
+        "[north-desk] 目前离线，以下由 Speaker 的办公室代答；它重新连接后仍会收到这个问题。\n\
+         已更新，见 brief 的检查点。"
+    );
+    assert_eq!(relay.to, vec![desk_of("north-desk")], "the question stands");
+
+    rig.brain
+        .decides_offline(Err(BrainError::Unavailable("down".into())));
+    let relay = relayed_to_north(&rig, "/tell carol 网关用哪个 header？", "m_o2").await;
+    let lines = offline_lines(&rig, &relay);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0].kind, Kind::Note, "no decision: held");
+}
+
+/// A note is never answered for the child: it is held, and the Brain is
+/// not asked.
+#[tokio::test]
+async fn a_note_for_an_offline_child_senate_is_only_held() {
+    let rig = Rig::start(hub_with_child_seen(Some(5)).await).await;
+    rig.brain
+        .decides_offline(Ok(Offline::Answer("不该用到".into())));
+    let relay = relayed_to_north(&rig, "/tell carol 记得更新退款文档", "m_o1").await;
+    assert_eq!(relay.kind, Kind::Note);
+    let lines = offline_lines(&rig, &relay);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0].kind, Kind::Note);
+    assert!(rig.brain.offline_inputs().is_empty());
+}
+
+/// A child Senate that is online, or that has not declared itself since
+/// this Senate started, is not known to be offline: nothing is said.
+#[tokio::test]
+async fn a_child_senate_not_known_to_be_offline_gets_no_line() {
+    for seen in [Some(0), None] {
+        let rig = Rig::start(hub_with_child_seen(seen).await).await;
+        let relay = relayed_to_north(&rig, "/tell carol 退款文档更新了吗？", "m_o1").await;
+        assert!(offline_lines(&rig, &relay).is_empty(), "{seen:?}");
+        assert!(rig.brain.offline_inputs().is_empty(), "{seen:?}");
+    }
+}

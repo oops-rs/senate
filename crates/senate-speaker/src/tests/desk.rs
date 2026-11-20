@@ -538,3 +538,109 @@ fn the_configuration_notice_reads_in_both_languages() {
         );
     }
 }
+
+// ----- a child Senate that is offline ---------------------------------------------------
+
+/// pm's child Senate, last seen ten minutes ago.
+fn offline_child(hub: &MemoryHub) -> Address {
+    hub.add_child("north-desk", "pm");
+    hub.declare_seats(
+        "north-desk",
+        &refund(),
+        &[("responder", PresenceState::Disconnected)],
+    );
+    hub.child_seen(
+        "north-desk",
+        Some(chrono::Utc::now() - chrono::Duration::minutes(10)),
+    );
+    Address::Child {
+        senate: name("north-desk"),
+        committee: refund(),
+    }
+}
+
+/// With a person presiding, what to do about a question for an offline
+/// child Senate falls to the desk in its order: the built-in session
+/// decides only as the first present worker, and signs what it writes.
+#[tokio::test]
+async fn for_an_offline_child_senate_it_decides_only_as_the_first_present_worker() {
+    let hub = hub_with(office(&["codex", "secretary"], &[])).await;
+    let desk = offline_child(&hub);
+    hub.connect(&refund(), &path("codex"));
+    let rig = Rig::start(hub).await;
+
+    rig.append(
+        NewEvent::new(refund(), Kind::Question, agent("alice"), "退款上限是多少？")
+            .to(desk.clone()),
+    )
+    .await;
+    rig.settle().await;
+    assert!(
+        rig.brain.offline_inputs().is_empty(),
+        "left to codex, which is present"
+    );
+    assert!(by_office(&rig.hub.events(&refund())).is_empty());
+
+    // codex gone: the built-in session is the first present worker.
+    rig.hub.disconnect(&refund(), &path("codex"));
+    let asked = rig
+        .append(
+            NewEvent::new(
+                refund(),
+                Kind::Question,
+                agent("alice"),
+                "网关用哪个 header？",
+            )
+            .to(desk),
+        )
+        .await;
+    rig.settle().await;
+    assert_eq!(rig.brain.offline_inputs().len(), 1);
+    let events = rig.hub.events(&refund());
+    let said = by_office(&events);
+    assert_eq!(said.len(), 1, "{said:#?}");
+    assert_eq!(said[0].kind, Kind::Note, "the rules hold it");
+    assert_eq!(said[0].thread, Some(asked.seq));
+    assert_eq!(said[0].to, vec![agent("alice")]);
+    assert_eq!(said[0].meta[meta::CHILD_OFFLINE], json!("north-desk"));
+    assert_eq!(acted_by(said[0]), Some("secretary"));
+    rig.stop().await;
+}
+
+/// Answering for an absent senator is the cover duty: without it the
+/// built-in session holds the question and does not ask the Brain.
+#[tokio::test]
+async fn without_the_cover_duty_a_question_for_an_offline_child_senate_is_held_unasked() {
+    let hub = hub_with(office(&["secretary"], &[])).await;
+    let desk = offline_child(&hub);
+    let mut config = super::rig::config();
+    config.locale = senate_core::Locale::Zh;
+    let dir = tempfile::tempdir().expect("dir");
+    std::fs::write(
+        dir.path().join("refund-v2.secretary.toml"),
+        "duties = [\"route\", \"forward\", \"triage\"]\n",
+    )
+    .expect("write");
+    let secretary = Arc::new(crate::SecretaryConfigs::new(
+        Some(dir.path().into()),
+        crate::BaseLayer::of_config(&config),
+    ));
+    let (unbound, rx) = tokio::sync::mpsc::channel(4);
+    let surface = super::surface::FakeSurface::new();
+    let brain = crate::ScriptedBrain::new();
+    brain.decides_offline(Ok(crate::Offline::Answer("不该用到".into())));
+    let args = crate::SpeakerArgs::new(hub.clone(), surface.clone(), brain.clone(), config, rx)
+        .with_secretary(secretary);
+    let rig = Rig::spawn(hub, surface, brain, args, unbound).await;
+    rig.append(
+        NewEvent::new(refund(), Kind::Question, agent("alice"), "退款上限是多少？").to(desk),
+    )
+    .await;
+    rig.settle().await;
+    assert!(rig.brain.offline_inputs().is_empty(), "no cover duty");
+    let events = rig.hub.events(&refund());
+    let said = by_office(&events);
+    assert_eq!(said.len(), 1, "{said:#?}");
+    assert_eq!(said[0].kind, Kind::Note);
+    rig.stop().await;
+}

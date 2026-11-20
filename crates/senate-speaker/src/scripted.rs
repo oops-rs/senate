@@ -10,8 +10,9 @@ use async_trait::async_trait;
 use senate_core::{Brief, Locale, TriagePayload, TriageVerdict};
 
 use crate::brain::{
-    AgentTurn, Answer, Brain, BrainError, Conversation, Crossing, CrossingInput, Intent, Pick,
-    PickInput, Question, TriageInput, Utterance, rule_crossing, rule_pick,
+    AgentTurn, Answer, Brain, BrainError, Conversation, Crossing, CrossingInput, Intent, Offline,
+    OfflineInput, Pick, PickInput, Question, TriageInput, Utterance, rule_crossing, rule_offline,
+    rule_pick,
 };
 
 /// One scripted result, and how long the "model" takes to produce it.
@@ -37,14 +38,16 @@ struct Script {
     pick_inputs: Vec<PickInput>,
     crossings: VecDeque<Step<Crossing>>,
     crossing_inputs: Vec<CrossingInput>,
+    offlines: VecDeque<Step<Offline>>,
+    offline_inputs: Vec<OfflineInput>,
 }
 
 /// Plays queued answers in order and records every call. An unscripted call
 /// is [`BrainError::Unavailable`], which is exactly the "model is down" path,
 /// except [`Brain::triage`]: unscripted, it judges *agent* (p 1.0) at once,
 /// so a test that does not care about triage sees deliveries unchanged;
-/// [`Brain::pick_agent`] and [`Brain::decide_crossing`]: unscripted, they
-/// are the rule-based defaults.
+/// [`Brain::pick_agent`], [`Brain::decide_crossing`] and
+/// [`Brain::decide_offline`]: unscripted, they are the rule-based defaults.
 #[derive(Default)]
 pub struct ScriptedBrain {
     script: Mutex<Script>,
@@ -200,6 +203,21 @@ impl ScriptedBrain {
         self.lock().crossing_inputs.clone()
     }
 
+    /// Queue the next [`Brain::decide_offline`] result.
+    pub fn decides_offline(&self, result: Result<Offline, BrainError>) -> &Self {
+        self.lock().offlines.push_back(Step {
+            delay: Duration::ZERO,
+            result,
+        });
+        self
+    }
+
+    /// Every decision for an offline child Senate asked for so far
+    /// (recorded when the call starts).
+    pub fn offline_inputs(&self) -> Vec<OfflineInput> {
+        self.lock().offline_inputs.clone()
+    }
+
     fn lock(&self) -> MutexGuard<'_, Script> {
         self.script
             .lock()
@@ -281,6 +299,18 @@ impl Brain for ScriptedBrain {
         match step {
             Some(step) => play(Some(step), "").await,
             None => Ok(rule_crossing(&input)),
+        }
+    }
+
+    async fn decide_offline(&self, input: OfflineInput) -> Result<Offline, BrainError> {
+        let step = {
+            let mut script = self.lock();
+            script.offline_inputs.push(input.clone());
+            script.offlines.pop_front()
+        };
+        match step {
+            Some(step) => play(Some(step), "").await,
+            None => Ok(rule_offline(&input)),
         }
     }
 

@@ -177,6 +177,7 @@ mod agent;
 mod agents;
 mod cards;
 mod desk;
+mod offline;
 mod route;
 mod takeover;
 mod tasks;
@@ -391,6 +392,9 @@ struct CommitteeState {
     /// Crossing decisions back from the Brain, by desk item seq, until the
     /// step that uses them is done.
     crossings: HashMap<Seq, crate::brain::Crossing>,
+    /// What was decided for a question to a child Senate that is offline,
+    /// by the question's seq, until it is carried out.
+    offline: HashMap<Seq, crate::brain::Offline>,
 }
 
 /// An agent's latest presence transition in the log.
@@ -902,6 +906,13 @@ pub(crate) enum ThoughtKind {
         seq: Seq,
         crossing: Result<crate::brain::Crossing, BrainError>,
     },
+    /// The decision for the question at `seq`, put to a child Senate that
+    /// is offline.
+    OfflineDecided {
+        committee: CommitteeId,
+        seq: Seq,
+        decision: Result<crate::brain::Offline, BrainError>,
+    },
     /// A triage verdict for the task root, or the relaying `chat`, at
     /// `seq`.
     Triaged {
@@ -927,6 +938,7 @@ impl ThoughtKind {
             | Self::Conversed { committee, .. }
             | Self::Answered { committee, .. }
             | Self::Crossed { committee, .. }
+            | Self::OfflineDecided { committee, .. }
             | Self::Triaged { committee, .. }
             | Self::TopWritten { committee, .. } => Some(committee),
             Self::UnboundConversed { .. } | Self::UnboundInterpreted { .. } => None,
@@ -1248,6 +1260,7 @@ impl Engine {
                     state.decisions.remove(&event.seq);
                     state.triage.remove(&event.seq);
                     state.crossings.remove(&event.seq);
+                    state.offline.remove(&event.seq);
                     state.picks.retain(|(seq, _, _), _| *seq != event.seq);
                     state.seat_picks.retain(|(seq, _, _), _| *seq != event.seq);
                     self.agent_progress.remove(&(committee.clone(), event.seq));
@@ -1623,6 +1636,11 @@ impl Engine {
                 seq,
                 crossing,
             } => self.on_crossed(committee, seq, crossing).await,
+            ThoughtKind::OfflineDecided {
+                committee,
+                seq,
+                decision,
+            } => self.on_offline_decided(committee, seq, decision).await,
             ThoughtKind::TopWritten {
                 committee,
                 basis,
@@ -1695,6 +1713,11 @@ impl Engine {
                 self.fallback_on_arrival(event).await;
                 Flow::Done
             }
+        };
+        // Put to a child Senate that is offline: said, or answered for it.
+        let flow = match flow {
+            Flow::Done => self.on_child_offline(event).await?,
+            flow => flow,
         };
         if matches!(flow, Flow::Done) {
             self.after(event).await;
@@ -1869,7 +1892,8 @@ impl Engine {
     /// A reply in a thread, to each copy of its root that should see it.
     ///
     /// Never as text: a `status` (the card shows it), the Speaker's own notes
-    /// (triage verdicts and acknowledgements it already said), and a
+    /// (triage verdicts and acknowledgements it already said; not the note
+    /// that a child Senate is offline, which nothing else says), and a
     /// person's approval the Speaker wrote for them. In a task thread of a
     /// committee with an Agent group, the Agent group's copy gets answers
     /// (everything at output level "everything") and a people group's copy
@@ -1884,10 +1908,12 @@ impl Engine {
         let l = self.locale(&event.committee);
         let approval = self.roster.is_person_address(&event.from)
             && event.meta.contains_key(meta::RELAYED_FROM);
-        if event.kind == Kind::Status
-            || (event.from == Address::Speaker && event.kind == Kind::Note)
-            || approval
-        {
+        // What the office says of an offline child Senate is news to the
+        // one who asked, not something already said in chat.
+        let own_note = event.from == Address::Speaker
+            && event.kind == Kind::Note
+            && !event.meta.contains_key(meta::CHILD_OFFLINE);
+        if event.kind == Kind::Status || own_note || approval {
             return Ok(Vec::new());
         }
         let covering = self.covering_for(event, root).await?;
