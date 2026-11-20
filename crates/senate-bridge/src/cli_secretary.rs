@@ -1,8 +1,8 @@
-use clap::{Args, Subcommand};
-use senate_bridge::{
+use crate::{
     Paths,
     ipc::{Request, SessionSelector},
 };
+use clap::{Args, Subcommand};
 use senate_core::api::Secretaries;
 use senate_core::secretary_work::{
     SecretaryWorkOp, SecretaryWorkReply, SecretaryWorkUpdate, WorkThread,

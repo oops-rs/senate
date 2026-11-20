@@ -6,8 +6,8 @@
 use std::fmt::Write as _;
 use std::io::{Write, stdout};
 
+use crate::terminal::Terminal;
 use clap::{Command, CommandFactory, FromArgMatches, error::ErrorKind};
-use senate_bridge::terminal::Terminal;
 
 use super::Cli;
 

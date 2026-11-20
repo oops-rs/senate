@@ -1,0 +1,29 @@
+# The `senate` name on crates.io. The command people run is `senate`, and it
+# is built by the `senate-bridge` package; without this package the name
+# `senate` would be free for anyone to publish something else under, and
+# `cargo install senate` would install it.
+#
+# It stands outside the repository's workspace on purpose: it builds a binary
+# with the same name as `senate-bridge`'s, and two members of one workspace
+# may not write the same file under target/.
+
+[package]
+name = "senate"
+version = "0.1.1"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+repository = "https://github.com/oops-rs/senate"
+description = "The `senate` command: reach your coding agents through Senate. Installs the same command as the `senate-bridge` package."
+readme = "README.md"
+keywords = ["agents", "cli", "senate"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "senate"
+path = "src/main.rs"
+
+[dependencies]
+senate-bridge = { path = "../../crates/senate-bridge", version = "0.1.1" }
+
+[workspace]

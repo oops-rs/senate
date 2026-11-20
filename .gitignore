@@ -10,3 +10,5 @@
 /apps/macos/*.xcodeproj/
 /apps/macos/Senate/Info.plist
 .grapha
+# The standalone `senate` package builds on its own.
+/shim/senate/target

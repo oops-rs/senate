@@ -1,6 +1,8 @@
 [package]
 name = "senate-bridge"
-version.workspace = true
+# Ahead of the workspace: 0.1.1 adds `senate_bridge::cli`, which the `senate`
+# package (shim/senate) needs from the registry.
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
