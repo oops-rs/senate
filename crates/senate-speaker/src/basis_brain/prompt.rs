@@ -947,6 +947,10 @@ fn render_candidate(candidate: &AgentCandidate, now: DateTime<Utc>) -> String {
     if candidate.owns_thread {
         out.push_str(" · the thread this was asked in is this agent's");
     }
+    match &candidate.duty {
+        Some(duty) => out.push_str(&format!("\n  duty: {}", cut(duty, 300))),
+        None => out.push_str("\n  duty: none set"),
+    }
     match &candidate.checkpoint {
         Some(record) => {
             let age = (now - record.ts).to_std().unwrap_or_default();
@@ -1008,7 +1012,9 @@ pub(crate) fn pick(input: &PickInput, now: DateTime<Utc>) -> String {
          saying {which}:\n\n{task}\n\n\
          {thread}\n\n\
          {listed}:\n{candidates}\n\n\
-         Pick the agent this belongs to. Weigh the task against what each agent is working on: \
+         Pick the agent this belongs to. First read each agent's duty, what it does on this \
+         committee: when the task falls within exactly one agent's duty, pick that agent. When \
+         it fits several duties or none, weigh the task against what each agent is working on: \
          its latest checkpoint (summary, branch) and its open task threads. Prefer the agent \
          whose thread it was asked in, or whose current work it continues. When it fits two \
          agents equally, prefer one that is online, since it answers now. Do not pick by an \
@@ -1444,6 +1450,7 @@ mod tests {
             checkpoint: None,
             open_threads: Vec::new(),
             owns_thread: false,
+            duty: None,
         };
         let candidates = [candidate("claude"), candidate("codex")];
         let pick = |value: Value| {

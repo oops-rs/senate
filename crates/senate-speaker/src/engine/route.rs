@@ -206,6 +206,13 @@ impl Engine {
     ) -> Result<Vec<AgentCandidate>, Stall> {
         let committee = self.acting_committee(chat);
         let board = self.committees.get(&committee).map(|state| &state.board);
+        let duties = match self.hub.presence(&committee).await {
+            Ok(page) => page.duties,
+            Err(error) => {
+                tracing::debug!(%committee, %error, "picking without the seats' duties");
+                Default::default()
+            }
+        };
         let mut out = Vec::with_capacity(candidates.len());
         for agent in candidates {
             let open_threads = board
@@ -229,6 +236,7 @@ impl Engine {
                 checkpoint: self.hub.latest_checkpoint(&committee, agent).await?,
                 open_threads,
                 owns_thread,
+                duty: duties.get(agent).cloned(),
             });
         }
         Ok(out)

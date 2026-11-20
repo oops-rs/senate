@@ -274,6 +274,7 @@ mod tests {
             checkpoint: None,
             open_threads: Vec::new(),
             owns_thread: false,
+            duty: None,
         }
     }
 

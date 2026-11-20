@@ -347,10 +347,15 @@ fn seat_line(seat: &SeatFacts, locale: Locale) -> String {
             (None, Locale::En) => "no session open".to_owned(),
         }
     };
-    match (seat.presence, locale) {
+    let line = match (seat.presence, locale) {
         (Some(p), Locale::Zh) => format!("{now}，presence：{}", p.label(locale)),
         (Some(p), Locale::En) => format!("{now}, presence: {}", p.label(locale)),
         (None, _) => now,
+    };
+    match (&seat.duty, locale) {
+        (Some(duty), Locale::Zh) => format!("{line}，职责：{duty}"),
+        (Some(duty), Locale::En) => format!("{line}, duty: {duty}"),
+        (None, _) => line,
     }
 }
 
@@ -565,5 +570,17 @@ mod tests {
         );
         assert_eq!(seat_line(&seat(true, None, None), Locale::En), "connected");
         assert_eq!(seat_line(&seat(true, None, None), Locale::Zh), "已连接");
+        let with_duty = SeatFacts {
+            duty: Some("reviews the server".into()),
+            ..seat(true, online, seen)
+        };
+        assert_eq!(
+            seat_line(&with_duty, Locale::En),
+            "connected, presence: online, duty: reviews the server"
+        );
+        assert_eq!(
+            seat_line(&with_duty, Locale::Zh),
+            "已连接，presence：在线，职责：reviews the server"
+        );
     }
 }

@@ -510,6 +510,36 @@ async fn an_unnamed_agent_of_several_is_the_connected_one() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn the_pick_weighs_each_seats_duty() {
+    let hub = two_agents_hub().await;
+    hub.append(
+        senate_core::DutyPayload {
+            senator: path("codex"),
+            duty: "owns the retry path".into(),
+        }
+        .note(refund(), Address::senator(&path("codex"))),
+    )
+    .await
+    .expect("append");
+    let runner = FakeRunner::new();
+    let rig = start(hub, Some(&runner), Some(&FakeForge::new())).await;
+    ask(&rig, "bob", "/work alice 把重试路径做完", "m_w1").await;
+    let picks = rig.brain.pick_inputs();
+    assert_eq!(picks.len(), 1);
+    let duty = |who: &str| {
+        picks[0]
+            .candidates
+            .iter()
+            .find(|c| c.agent == path(who))
+            .expect("a candidate")
+            .duty
+            .clone()
+    };
+    assert_eq!(duty("codex").as_deref(), Some("owns the retry path"));
+    assert_eq!(duty("claude"), None);
+}
+
+#[tokio::test(start_paused = true)]
 async fn when_the_speaker_cannot_tell_it_asks_and_the_answer_carries_the_order_on() {
     let runner = FakeRunner::new();
     let rig = start(

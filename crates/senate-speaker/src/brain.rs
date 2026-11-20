@@ -369,8 +369,9 @@ pub trait Brain: Send + Sync + 'static {
 
     /// Which of a person's several agents a message for "that person's
     /// agent" should reach, when the one who asked did not say. The default
-    /// is [`rule_pick`]; an implementation may weigh the task against what
-    /// each agent is working on instead, and answers [`Pick::Ask`] when it
+    /// is [`rule_pick`], which reads no duty; an implementation may weigh
+    /// the task against each agent's duty and what it is working on instead
+    /// (picking the one agent whose duty the task falls within), and answers [`Pick::Ask`] when it
     /// cannot tell, so the Speaker asks in the thread. An error, or no
     /// answer within the triage deadline, falls back to [`rule_pick`].
     async fn pick_agent(&self, input: PickInput) -> Result<Pick, BrainError> {
@@ -440,6 +441,9 @@ pub struct AgentCandidate {
     /// The thread the request was made in is this agent's: its root was
     /// addressed to it, or it claimed it.
     pub owns_thread: bool,
+    /// What it does on the committee ([`senate_core::duty`]), when its seat
+    /// has a duty: the first thing a pick weighs the task against.
+    pub duty: Option<String>,
 }
 
 /// Several agents could be meant and the one who asked did not name one:
@@ -499,6 +503,7 @@ mod tests {
             checkpoint: None,
             open_threads: Vec::new(),
             owns_thread,
+            duty: None,
         }
     }
 
