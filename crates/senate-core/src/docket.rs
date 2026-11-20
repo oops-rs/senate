@@ -29,7 +29,9 @@
 //!   is in the thread, the child has replied there, or the child is back.
 //!
 //! An item leaves the docket when the Speaker writes in its thread, relays
-//! it, or the thread is archived. Folding is pure ([`SpeakerDocket`]); which
+//! it, or the thread is archived; and an item that came from the Senate
+//! above, when an answer from there lands under it ([`answered_above`]):
+//! the office above answered in this Senate's name while it was offline. Folding is pure ([`SpeakerDocket`]); which
 //! agents are away is the server's knowledge, added when the docket is
 //! served ([`DocketPage`]).
 //!
@@ -276,6 +278,15 @@ impl SpeakerDocket {
             self.open.insert(event.seq, event.clone());
             return;
         }
+        if let Some(root) = event.thread
+            && self
+                .open
+                .get(&root)
+                .is_some_and(|item| answered_above(item, event))
+        {
+            self.open.remove(&root);
+            return;
+        }
         close_docket_items(
             &mut self.open,
             event,
@@ -309,6 +320,28 @@ impl SpeakerDocket {
                 event: event.clone(),
             })
             .collect()
+    }
+}
+
+/// Whether `reply` answers the desk item `root` from where the item came
+/// from: both were brought down from the same thread of the Senate above
+/// ([`meta::ORIGIN`]), and `reply` is an `answer`. The Speaker's office
+/// above answered in this Senate's name while it was offline, so the item
+/// is answered and nothing is left for this desk to do with it.
+pub fn answered_above(root: &Event, reply: &Event) -> bool {
+    if reply.kind != Kind::Answer || reply.thread != Some(root.seq) {
+        return false;
+    }
+    match (
+        crate::locator::Origin::of(root),
+        crate::locator::Origin::of(reply),
+    ) {
+        (Some(asked), Some(answered)) => {
+            asked.thread == answered.thread
+                && asked.locator.senate() == answered.locator.senate()
+                && asked.locator.committee() == answered.locator.committee()
+        }
+        _ => false,
     }
 }
 
@@ -455,6 +488,49 @@ mod tests {
             "[north-desk] is offline; the Speaker's office answers for it below. It still gets \
              the question when it reconnects.\n30 days."
         );
+    }
+
+    /// A desk item brought down from the Senate above leaves the docket
+    /// when an answer from the same thread above lands under it; an answer
+    /// from another thread, or a note, leaves it.
+    #[test]
+    fn an_item_from_above_leaves_when_it_was_answered_there() {
+        let origin = |thread: u64| {
+            crate::locator::Origin {
+                locator: "/acme::refund-v2::senator::carol".parse().unwrap(),
+                thread: Seq(thread),
+            }
+            .value()
+        };
+        let item = |seq: u64, thread: u64| {
+            at(
+                seq,
+                NewEvent::new(c(), Kind::Question, Address::Committee, "is the cap 3?")
+                    .to(Address::Speaker)
+                    .with_meta(meta::ORIGIN, origin(thread)),
+            )
+        };
+        let reply = |seq: u64, kind: Kind, root: u64, thread: u64| {
+            at(
+                seq,
+                NewEvent::new(c(), kind, Address::Committee, "3, per the brief")
+                    .to(Address::Speaker)
+                    .in_thread(Seq(root))
+                    .with_meta(meta::ORIGIN, origin(thread)),
+            )
+        };
+        let mut docket = SpeakerDocket::new();
+        docket.observe(&item(1, 7));
+        docket.observe(&item(2, 9));
+        docket.observe(&item(3, 11));
+        // Answered above, in the thread the item came from.
+        docket.observe(&reply(4, Kind::Answer, 1, 7));
+        // A later note from above on the same thread is not an answer.
+        docket.observe(&reply(5, Kind::Note, 2, 9));
+        // An answer that names another thread above is not this item's.
+        docket.observe(&reply(6, Kind::Answer, 3, 12));
+        let open: Vec<u64> = docket.items().iter().map(|i| i.event.seq.0).collect();
+        assert_eq!(open, [2, 3]);
     }
 
     #[test]

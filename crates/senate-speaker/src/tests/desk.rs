@@ -644,3 +644,55 @@ async fn without_the_cover_duty_a_question_for_an_offline_child_senate_is_held_u
     assert_eq!(said[0].kind, Kind::Note);
     rig.stop().await;
 }
+
+// ----- a desk item answered above -------------------------------------------------------
+
+/// An item that came down from the Senate above, with the answer the
+/// office there gave in this Senate's name already under it (this Senate
+/// was offline): the desk has nothing to do with it. It is not forwarded
+/// to the seat it was meant for, and the Brain is not asked.
+#[tokio::test]
+async fn a_desk_item_answered_above_is_not_forwarded() {
+    let hub = hub_with(office(&["secretary"], &[])).await;
+    hub.connect(&billing(), &path("copilot"));
+    let from_above = Origin {
+        locator: "/acme::refund-v2::senator::carol".parse().expect("locator"),
+        thread: Seq(7),
+    }
+    .value();
+    let item = hub
+        .append(
+            crossing(
+                Kind::Question,
+                Address::Committee,
+                &copilot_on_billing(),
+                "账单接口的超时是多少？",
+            )
+            .with_meta(meta::ORIGIN, from_above.clone()),
+        )
+        .await
+        .expect("the item")
+        .event;
+    hub.append(
+        NewEvent::new(
+            refund(),
+            Kind::Answer,
+            Address::Committee,
+            "30 秒，见 brief。",
+        )
+        .to(Address::Speaker)
+        .in_thread(item.seq)
+        .with_meta(meta::ORIGIN, from_above),
+    )
+    .await
+    .expect("the answer from above");
+    let rig = Rig::start(hub).await;
+    rig.settle().await;
+    assert!(
+        rig.brain.crossing_inputs().is_empty(),
+        "answered above: nothing to decide"
+    );
+    assert!(by_office(&rig.hub.events(&refund())).is_empty());
+    assert!(rig.hub.events(&billing()).is_empty(), "not forwarded");
+    rig.stop().await;
+}

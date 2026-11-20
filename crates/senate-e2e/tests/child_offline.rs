@@ -252,6 +252,14 @@ async fn an_answer_given_for_an_offline_child_senate_reaches_it_once_and_is_not_
     assert_eq!(brought.kind, Kind::Answer);
     assert_eq!(brought.from, Address::Committee);
     assert_eq!(brought.to, [Address::Speaker]);
+    // The desk item is answered: it does not await alice's desk, so no
+    // secretary of hers covers or forwards it.
+    let docket = desk.senate().daemon.hub.docket(&committee()).await.unwrap();
+    assert!(
+        docket.items.iter().all(|item| item.event.seq != root.seq),
+        "answered above, yet on the desk: {:#?}",
+        docket.items
+    );
 
     // A few more polls: it came down once, and nothing went back up as the
     // child's own answer.

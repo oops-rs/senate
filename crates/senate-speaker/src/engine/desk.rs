@@ -307,14 +307,20 @@ impl Engine {
                     }
                     DeskTurn::Off => return Ok(Flow::Done),
                 }
+                // A replay (forwarded or refused already), or an item from
+                // the Senate above that was answered there in this Senate's
+                // name while it was offline: nothing is left to do with it.
                 let dealt = self
                     .hub
                     .thread(&committee, event.seq)
                     .await?
                     .iter()
-                    .any(|e| e.from == Address::Speaker && e.thread == Some(event.seq));
+                    .any(|e| {
+                        (e.from == Address::Speaker && e.thread == Some(event.seq))
+                            || senate_core::docket::answered_above(event, e)
+                    });
                 if dealt {
-                    return Ok(Flow::Done); // a replay: forwarded or refused already
+                    return Ok(Flow::Done);
                 }
                 let input = CrossingInput {
                     committee: committee.clone(),
@@ -338,6 +344,16 @@ impl Engine {
                 return Ok(Flow::Await);
             }
         };
+        // It may have been answered above while the Brain was deciding.
+        let answered = self
+            .hub
+            .thread(&committee, event.seq)
+            .await?
+            .iter()
+            .any(|e| senate_core::docket::answered_above(event, e));
+        if answered {
+            return Ok(Flow::Done);
+        }
         let decision = match decision {
             Crossing::Forward if !self.may(&committee, Duty::Forward) => Crossing::Leave,
             Crossing::Refuse(_) if !self.may(&committee, Duty::Refuse) => Crossing::Leave,
