@@ -1,8 +1,6 @@
 [package]
 name = "senate-server"
-# Ahead of the workspace: 0.1.1 lets the built-in Speaker see the child
-# Senates (`Hub::children`), which commons needs from the registry.
-version = "0.1.1"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
