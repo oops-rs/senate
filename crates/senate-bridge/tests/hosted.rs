@@ -2014,3 +2014,100 @@ async fn diagnostic_only_reports_do_not_stop_pushes_to_an_idle_host() {
     fixture.end_terminal().await;
     fixture.h.stop().await;
 }
+
+/// Every process whose command line names `root`: a host started there (its
+/// cwd and program are under it) or the TUI it runs.
+fn processes_under(root: &std::path::Path) -> Vec<String> {
+    // `/tmp` is a link to `/private/tmp` on macOS: match either spelling.
+    let names: Vec<String> = [root.to_path_buf(), root.canonicalize().unwrap_or_default()]
+        .iter()
+        .map(|p| p.display().to_string())
+        .filter(|p| !p.is_empty())
+        .collect();
+    let out = std::process::Command::new("ps")
+        .args(["-axww", "-o", "pid=,command="])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|line| names.iter().any(|n| line.contains(n.as_str())))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// A harness in a temporary home with one hosted session running (its
+/// host and TUI), and that home.
+async fn one_hosted_session() -> (Harness, PathBuf) {
+    let mut h = Harness::new().await;
+    h.config.hosted_session_limit = 1;
+    h.dir = tempfile::tempdir_in("/tmp").unwrap();
+    h.paths = senate_bridge::Paths::new(h.dir.path().join("senate"));
+    h.paths.ensure_home().unwrap();
+    let project = h.workdir("leak", None);
+    let fixture = h.dir.path().join("fixture-claude");
+    std::fs::write(
+        &fixture,
+        format!("#!/bin/sh\n{RECORD_HOSTED_ARGV}\nwhile IFS= read -r line; do :; done\n"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(
+        h.paths.config(),
+        format!(
+            "[companion]\nclaude_bin = {:?}\n",
+            fixture.to_str().unwrap()
+        ),
+    )
+    .unwrap();
+    h.config.committees.push(committee());
+    start(&mut h).await;
+    let _: SpawnReply = call(
+        &h,
+        &Request::Spawn {
+            session: Default::default(),
+            runtime: HostedRuntime::Claude,
+            committee: committee(),
+            alias: None,
+            cwd: project,
+            chair: false,
+        },
+    )
+    .await;
+    let root = h.dir.path().to_path_buf();
+    assert!(
+        processes_under(&root).len() >= 2,
+        "a host and its TUI run: {:?}",
+        processes_under(&root)
+    );
+    (h, root)
+}
+
+/// Waits until no process names `root`, failing after `within`.
+async fn none_left_under(root: &std::path::Path, within: Duration) {
+    let deadline = std::time::Instant::now() + within;
+    while !processes_under(root).is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "left behind: {:#?}",
+            processes_under(root)
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_finished_test_leaves_no_host_or_tui_behind() {
+    let (h, root) = one_hosted_session().await;
+    // The test ends: the harness, and its temporary home, are dropped.
+    drop(h);
+    none_left_under(&root, Duration::from_secs(10)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_host_whose_directory_is_gone_stops_with_its_tui() {
+    let (h, root) = one_hosted_session().await;
+    // The harness lives on; the host's home goes, as a deleted test home does.
+    std::fs::remove_dir_all(h.paths.home().join("hosts")).unwrap();
+    none_left_under(&root, Duration::from_secs(5)).await;
+    drop(h);
+}

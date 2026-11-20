@@ -380,6 +380,9 @@ pub async fn run(
     flock(&file, FlockOperation::LockExclusive)?;
     let cleanup = RemoveDirectory(dir.clone());
     rustix::process::setsid().context("detach the Senate terminal host")?;
+    // As session leader the host leads its own process group, under its pid.
+    std::fs::write(dir.join(HOST_PID), std::process::id().to_string())
+        .context("record the host's process ID")?;
     let mut terminate = signal(SignalKind::terminate())?;
     let socket = socket(paths, id);
     let listener = UnixListener::bind(&socket).context("listen for terminal attachments")?;
@@ -457,6 +460,7 @@ pub async fn run(
         }
         _ = tokio::time::sleep(Duration::from_millis(500)) => {}
         _ = terminate.recv() => return stop_group(&mut child, pid).await,
+        _ = vanished(&dir) => return stop_group(&mut child, pid).await,
     }
     drop(startup_output);
     if let Some(status) = child.try_wait().context("check coding TUI startup")? {
@@ -476,6 +480,7 @@ pub async fn run(
             matches!(result, Ok(Ok(PUBLISHED))),
         status = child.wait() => bail!("the coding TUI exited before publication ({})", status?),
         _ = terminate.recv() => false,
+        _ = vanished(&dir) => false,
     };
     if !published {
         stop_group(&mut child, pid).await?;
@@ -495,6 +500,10 @@ pub async fn run(
             Ok(())
         }),
         _ = terminate.recv() => stop_group(&mut child, pid).await,
+        _ = vanished(&dir) => {
+            tracing::warn!(dir = %dir.display(), "the host's directory is gone; stopping its TUI");
+            stop_group(&mut child, pid).await
+        }
         served = serve(&listener, &tty, &output, &viewer) => served,
         peer = control::next_stop(&controls, &viewer, paths, id) => {
             stop = Some(peer);
@@ -621,6 +630,28 @@ fn runtime_command(
     Ok(command)
 }
 
+/// How often a host checks that its directory is still there.
+const DIRECTORY_POLL: Duration = Duration::from_secs(1);
+
+/// Resolves once the host's directory is gone: its home was deleted (a
+/// test's temporary home, a removed `SENATE_HOME`), or someone removed the
+/// directory. Without it nobody can attach to the host, stop it or see it
+/// running, so the host stops its TUI and exits.
+///
+/// The host does not watch its daemon: a hosted session is meant to
+/// outlive a daemon restart, which finds it again by its directory and
+/// lock (`senate restore`).
+async fn vanished(dir: &Path) {
+    loop {
+        tokio::time::sleep(DIRECTORY_POLL).await;
+        if let Err(error) = std::fs::symlink_metadata(dir)
+            && error.kind() == io::ErrorKind::NotFound
+        {
+            return;
+        }
+    }
+}
+
 async fn stop_group(child: &mut Child, pid: Pid) -> anyhow::Result<()> {
     fn send(pid: Pid, signal: Signal) -> rustix::io::Result<()> {
         match kill_process_group(pid, signal) {
@@ -724,6 +755,42 @@ pub(crate) fn clear_context_reports(paths: &Paths, id: &EventId) {
             && error.kind() != io::ErrorKind::NotFound
         {
             tracing::warn!(%error, %id, file, "clearing a hosted Claude context report");
+        }
+    }
+}
+
+/// The file in a host's directory naming the host's own process (and
+/// process group) ID.
+const HOST_PID: &str = "host-pid";
+
+/// Kills every host under `paths`' home at once, with its TUI: each TUI's
+/// process group, then each host's. No graceful stop, no record of it:
+/// this is for a test's temporary home as the test ends (a test harness
+/// calls it when dropped, even when the test panics), not for a person's
+/// sessions, which `senate stop` ends.
+pub fn kill_all(paths: &Paths) {
+    let Ok(entries) = std::fs::read_dir(hosts(paths)) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        // Only a host that still holds its lock: the pids it recorded are
+        // its own, not ones the system has since given to someone else.
+        let Some(id) = entry.file_name().to_str().and_then(|n| n.parse().ok()) else {
+            continue;
+        };
+        if !running(paths, &id).unwrap_or(false) {
+            continue;
+        }
+        let dir = entry.path();
+        for file in ["owner", HOST_PID] {
+            let pid = std::fs::read_to_string(dir.join(file))
+                .ok()
+                .and_then(|pid| pid.trim().parse::<i32>().ok())
+                .and_then(Pid::from_raw);
+            if let Some(pid) = pid {
+                // Gone already (ESRCH) is what was wanted.
+                let _ = kill_process_group(pid, Signal::KILL);
+            }
         }
     }
 }
