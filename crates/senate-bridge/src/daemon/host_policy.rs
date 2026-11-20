@@ -145,7 +145,7 @@ impl Shared {
                 committee,
                 alias,
                 cwd,
-                Some(self.config.hosted_session_limit),
+                self.config.hosted_session_limit,
                 move |phase, reply, runtime| async move {
                     self.audit_host_launch(audit_auth, false, phase, reply, runtime)
                         .await
@@ -173,7 +173,7 @@ impl Shared {
         let launch = self
             .on_restore_with(
                 target,
-                Some(self.config.hosted_session_limit),
+                self.config.hosted_session_limit,
                 move |phase, reply, runtime| async move {
                     self.audit_host_launch(audit_auth, true, phase, reply, runtime)
                         .await

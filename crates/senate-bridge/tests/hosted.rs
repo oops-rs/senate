@@ -120,7 +120,7 @@ async fn wait_terminal_output(output: &mut (impl tokio::io::AsyncRead + Unpin), 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fixture_terminal_launch_detach_restart_and_restore() {
     let mut h = Harness::new().await;
-    h.config.hosted_session_limit = 1;
+    h.config.hosted_session_limit = Some(1);
     h.dir = tempfile::tempdir_in("/tmp").unwrap();
     h.paths = senate_bridge::Paths::new(h.dir.path().join("senate"));
     let project = h.workdir("terminal", None);
@@ -286,7 +286,7 @@ done
     h.stop().await;
     assert!(socket.exists());
     // Give the conflict attempt a slot beside the surviving host.
-    h.config.hosted_session_limit = 2;
+    h.config.hosted_session_limit = Some(2);
     start(&mut h).await;
     // This second child starts successfully and reaches Ready. Failure of
     // the final alias operation must unwind its staged session and cursor.
@@ -882,7 +882,7 @@ impl HostedClaude {
 
     async fn launch_with_limit(companion: bool, limit: usize) -> Self {
         let mut h = Harness::new().await;
-        h.config.hosted_session_limit = limit;
+        h.config.hosted_session_limit = Some(limit);
         h.dir = tempfile::tempdir_in("/tmp").unwrap();
         h.paths = senate_bridge::Paths::new(h.dir.path().join("senate"));
         h.paths.ensure_home().unwrap();

@@ -23,6 +23,7 @@
 //! # agent with no session and no contact for this many days.
 //! free_after_days = 30
 //! # Optional: at most this many Senate-hosted sessions on the machine.
+//! # Absent: no limit. 0: none may start.
 //! hosted_session_limit = 4
 //!
 //! # Optional: the agent each kind of coding session speaks as. These are
@@ -100,10 +101,11 @@ pub struct BridgeConfig {
     /// for this many days left in the daemon's state.
     #[serde(default = "default_free_after_days")]
     pub free_after_days: u64,
-    /// Maximum running or starting Senate-hosted sessions. Zero disables
-    /// starting and restoring hosted sessions.
-    #[serde(default = "default_hosted_session_limit")]
-    pub hosted_session_limit: usize,
+    /// Maximum running or starting Senate-hosted sessions. `None` (the
+    /// key absent): no limit. Zero disables starting and restoring hosted
+    /// sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hosted_session_limit: Option<usize>,
     /// First segment of a developer branch, `<prefix>/<committee>/<person>`.
     #[serde(default = "default_branch_prefix")]
     pub branch_prefix: String,
@@ -236,10 +238,6 @@ fn default_brief_chars() -> usize {
 
 fn default_free_after_days() -> u64 {
     crate::binding::DEFAULT_FREE_AFTER_DAYS
-}
-
-fn default_hosted_session_limit() -> usize {
-    4
 }
 
 fn default_branch_prefix() -> String {
@@ -709,7 +707,7 @@ impl BridgeConfig {
             brief_chars: DEFAULT_BRIEF_CHARS,
             committee_from_branch: false,
             free_after_days: default_free_after_days(),
-            hosted_session_limit: default_hosted_session_limit(),
+            hosted_session_limit: None,
             branch_prefix: default_branch_prefix(),
             agents: AgentNames::default(),
             agent: AgentDefaults::default(),
@@ -823,6 +821,27 @@ mod tests {
         )
         .unwrap();
         assert_eq!(c.brief_chars, 0);
+    }
+
+    #[test]
+    fn the_hosted_session_limit_is_none_unless_set() {
+        let base = "server_url = \"http://x\"\ntoken = \"t\"\nperson = \"a\"\n";
+        let limit = |extra: &str| {
+            toml::from_str::<BridgeConfig>(&format!("{base}{extra}"))
+                .unwrap()
+                .hosted_session_limit
+        };
+        assert_eq!(limit(""), None, "absent: no limit");
+        assert_eq!(limit("hosted_session_limit = 6\n"), Some(6));
+        assert_eq!(
+            limit("hosted_session_limit = 0\n"),
+            Some(0),
+            "0: none allowed"
+        );
+        assert_eq!(
+            BridgeConfig::new("http://x", "t", Name::new("a").unwrap()).hosted_session_limit,
+            None
+        );
     }
 
     #[test]

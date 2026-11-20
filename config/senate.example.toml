@@ -58,7 +58,8 @@ person = "alice"
 # free_after_days = 30
 
 # Optional maximum for running and starting Senate-hosted sessions on
-# this machine. The default is 4. Set it to 0 to disable spawn and restore.
+# this machine. Absent (the default): no limit. Set it to 0 to disable
+# spawn and restore.
 # hosted_session_limit = 4
 
 # Optional: the first segment of a developer branch,
