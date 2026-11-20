@@ -985,7 +985,8 @@ impl Shared {
                 record_rollback(
                     &mut rollback,
                     "remove alias",
-                    self.api.remove_alias(&reply.senator, alias, &committee),
+                    self.api
+                        .remove_alias(&reply.senator, alias, Some(&committee)),
                 )
                 .await;
             }

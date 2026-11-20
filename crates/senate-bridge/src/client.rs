@@ -14,7 +14,7 @@
 
 use std::time::Duration;
 
-use senate_core::alias::CommitteeAliases;
+use senate_core::alias::KnownAliases;
 use senate_core::api::{
     self, AppendResponse, CheckpointQuery, Cursor, CursorQuery, Heartbeat, Me, PresencePage,
     SearchQuery, ThreadsPage, ThreadsQuery,
@@ -220,15 +220,16 @@ impl ApiClient {
         Ok(checked(response).await?.json().await?)
     }
 
-    /// Remove `alias` from `committee` while it stands for `primary`.
+    /// Remove `alias` while it stands for `primary`: from `committee`, or,
+    /// with none, wherever it is (all an older server knows).
     pub(crate) async fn remove_alias(
         &self,
         primary: &SenatorName,
         alias: &SenatorName,
-        committee: &CommitteeId,
+        committee: Option<&CommitteeId>,
     ) -> Result<(), ApiClientError> {
         let query = senate_core::api::RemoveAlias {
-            committee: Some(committee.clone()),
+            committee: committee.cloned(),
             acted_by: None,
         };
         let response = self
@@ -243,13 +244,24 @@ impl ApiClient {
         Ok(())
     }
 
-    /// Every committee's aliases.
-    pub async fn aliases(&self) -> Result<CommitteeAliases, ApiClientError> {
+    /// The Senate's aliases: the per-committee table, or the Senate-wide
+    /// map of a server older than per-committee aliases (one with no
+    /// `/v1/committee-aliases`).
+    pub async fn aliases(&self) -> Result<KnownAliases, ApiClientError> {
         let response = self
             .authed(self.http.get(self.url("/v1/committee-aliases")))
             .send()
             .await?;
-        Ok(checked(response).await?.json().await?)
+        if response.status() != StatusCode::NOT_FOUND {
+            return Ok(KnownAliases::Scoped(checked(response).await?.json().await?));
+        }
+        let response = self
+            .authed(self.http.get(self.url("/v1/aliases")))
+            .send()
+            .await?;
+        Ok(KnownAliases::Unscoped(
+            checked(response).await?.json().await?,
+        ))
     }
 
     pub async fn me(&self) -> Result<Me, ApiClientError> {

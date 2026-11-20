@@ -227,6 +227,9 @@ pub struct Inner {
     pub roster: Roster,
     pub aliases: senate_core::alias::CommitteeAliases,
     pub alias_delay: Duration,
+    /// Answer as a server older than per-committee aliases: no
+    /// `/v1/committee-aliases`, only the Senate-wide `/v1/aliases`.
+    pub old_aliases: bool,
     /// The Senate's name `/v1/me` gives.
     pub senate: Name,
     /// The Senate above, as `/v1/me` gives it.
@@ -380,7 +383,18 @@ async fn aliases(State(st): St, headers: HeaderMap) -> Response {
     if let Err(error) = auth(&st, &headers) {
         return error;
     }
-    Json(st.inner.lock().unwrap().aliases.clone()).into_response()
+    let inner = st.inner.lock().unwrap();
+    if inner.old_aliases {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    Json(inner.aliases.clone()).into_response()
+}
+
+async fn flat_aliases(State(st): St, headers: HeaderMap) -> Response {
+    if let Err(error) = auth(&st, &headers) {
+        return error;
+    }
+    Json(st.inner.lock().unwrap().aliases.flat()).into_response()
 }
 
 async fn alias(
@@ -1129,6 +1143,7 @@ impl FakeServer {
                 raw: HashMap::new(),
                 aliases: Default::default(),
                 alias_delay: Duration::ZERO,
+                old_aliases: false,
                 cursors: HashMap::new(),
                 heartbeats: Vec::new(),
                 stream_opens: Vec::new(),
@@ -1162,6 +1177,7 @@ impl FakeServer {
             .route("/healthz", get(|| async { "ok" }))
             .route("/v1/me", get(me))
             .route("/v1/committee-aliases", get(aliases))
+            .route("/v1/aliases", get(flat_aliases))
             .route("/v1/aliases/{primary}", axum::routing::put(alias))
             .route(senate_core::api::RESOLVE_PATH, get(resolve))
             .route(

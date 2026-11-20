@@ -28,7 +28,7 @@ use crate::terminal::Terminal;
 use crate::{BridgeConfig, Paths, init, install, mcp, person, preside, service, speak, status};
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
-use senate_core::alias::{AliasMatch, AliasName, CommitteeAliases, QualifiedAlias};
+use senate_core::alias::{AliasMatch, AliasName, KnownAliases, QualifiedAlias};
 use senate_core::{CommitteeId, CommitteeSeatAction, EventId, Locale, Name, SenatorName, Seq};
 
 #[derive(Parser)]
@@ -890,9 +890,8 @@ fn pick_alias(name: AliasName) -> anyhow::Result<AliasName> {
         return Ok(name);
     }
     let paths = Paths::from_env()?;
-    let table: CommitteeAliases =
-        runtime(false)?.block_on(daemon_call(&paths, &Request::Aliases))?;
-    match table.resolve(&name, None) {
+    let known: KnownAliases = runtime(false)?.block_on(daemon_call(&paths, &Request::Aliases))?;
+    match known.resolve(&name, None) {
         AliasMatch::Ambiguous { candidates, .. } => {
             let chosen = choose_alias(&name, candidates)?;
             Ok(AliasName::bare(chosen.primary))
@@ -1263,19 +1262,36 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
         }
         Cmd::Aliases => {
             let paths = Paths::from_env()?;
-            let table: CommitteeAliases =
+            let locale = BridgeConfig::locale_at(&paths.config());
+            let known: KnownAliases =
                 runtime(false)?.block_on(daemon_call(&paths, &Request::Aliases))?;
-            if table.is_empty() {
+            let rows: Vec<(String, SenatorName)> = match &known {
+                KnownAliases::Scoped(table) => {
+                    table.iter().map(|q| (q.to_string(), q.primary)).collect()
+                }
+                KnownAliases::Unscoped(map) => {
+                    eprintln!(
+                        "{}",
+                        locale.pick(
+                            "这个 Senate 的服务器较旧：别名不分委员会，在整个 Senate 内有效。",
+                            "This Senate's server is older: its aliases are Senate-wide, not per committee.",
+                        )
+                    );
+                    map.iter()
+                        .map(|(alias, primary)| (alias.to_string(), primary.clone()))
+                        .collect()
+                }
+            };
+            if rows.is_empty() {
                 println!(
                     "{}",
-                    BridgeConfig::locale_at(&paths.config())
-                        .pick("尚无 senator 别名。", "No senator aliases registered.")
+                    locale.pick("尚无 senator 别名。", "No senator aliases registered.")
                 );
             }
-            for q in table.iter() {
+            for (alias, primary) in rows {
                 output.print(&format!(
-                    "{q} -> {}",
-                    senate_core::Address::senator(&q.primary).in_text()
+                    "{alias} -> {}",
+                    senate_core::Address::senator(&primary).in_text()
                 ));
             }
             Ok(())
@@ -1285,35 +1301,47 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
         } => {
             let paths = Paths::from_env()?;
             let rt = runtime(false)?;
-            let table: CommitteeAliases = rt.block_on(daemon_call(&paths, &Request::Aliases))?;
-            let found: Vec<QualifiedAlias> = match &alias.committee {
-                Some(committee) => table
-                    .get(committee, &alias.alias)
-                    .map(|primary| QualifiedAlias {
-                        committee: committee.clone(),
-                        alias: alias.alias.clone(),
-                        primary: primary.clone(),
-                    })
-                    .into_iter()
-                    .collect(),
-                None => table.matches(&alias.alias),
+            let known: KnownAliases = rt.block_on(daemon_call(&paths, &Request::Aliases))?;
+            // What goes: (shown name, primary, committee). An older
+            // server's alias is on no committee.
+            let target: (String, SenatorName, Option<CommitteeId>) = match &known {
+                KnownAliases::Unscoped(map) => match map.get(&alias.alias) {
+                    Some(primary) => (alias.alias.to_string(), primary.clone(), None),
+                    None => anyhow::bail!("no alias {alias}"),
+                },
+                KnownAliases::Scoped(table) => {
+                    let found: Vec<QualifiedAlias> = match &alias.committee {
+                        Some(committee) => table
+                            .get(committee, &alias.alias)
+                            .map(|primary| QualifiedAlias {
+                                committee: committee.clone(),
+                                alias: alias.alias.clone(),
+                                primary: primary.clone(),
+                            })
+                            .into_iter()
+                            .collect(),
+                        None => table.matches(&alias.alias),
+                    };
+                    let one = match found.as_slice() {
+                        [] => anyhow::bail!("no alias {alias}"),
+                        [one] => one.clone(),
+                        _ => choose_alias(&alias, found)?,
+                    };
+                    (one.to_string(), one.primary, Some(one.committee))
+                }
             };
-            let target = match found.as_slice() {
-                [] => anyhow::bail!("no alias {alias}"),
-                [one] => one.clone(),
-                _ => choose_alias(&alias, found)?,
-            };
+            let (shown, primary, committee) = target;
             let _: serde_json::Value = rt.block_on(daemon_call(
                 &paths,
                 &Request::RemoveAlias {
-                    primary: target.primary.clone(),
-                    alias: target.alias.clone(),
-                    committee: target.committee.clone(),
+                    primary: primary.clone(),
+                    alias: alias.alias.clone(),
+                    committee,
                 },
             ))?;
             output.print(&format!(
-                "removed {target} -> {}",
-                senate_core::Address::senator(&target.primary).in_text()
+                "removed {shown} -> {}",
+                senate_core::Address::senator(&primary).in_text()
             ));
             Ok(())
         }

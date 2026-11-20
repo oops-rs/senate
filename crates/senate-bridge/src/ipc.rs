@@ -26,8 +26,8 @@
 //! | `spawn` | `session?`, `runtime`, `committee`, `alias?`, `cwd`, `chair?` | [`SpawnReply`] |
 //! | `restore` | `session?`, `senator` | [`SpawnReply`] |
 //! | `attach` | `senator` (an alias may be `committee::alias`) | Local terminal socket path |
-//! | `aliases` | — | [`CommitteeAliases`](senate_core::alias::CommitteeAliases) |
-//! | `remove_alias` | `primary`, `alias`, `committee` | `{}` |
+//! | `aliases` | — | [`KnownAliases`](senate_core::alias::KnownAliases) |
+//! | `remove_alias` | `primary`, `alias`, `committee?` | `{}` |
 //! | `session_end` | `session_id`, `reason?` | `{}` |
 //! | `ask` | `session`, `to` (addresses), `body`, `refs?`, `id?`, `request?` | [`Posted`] |
 //! | `answer` | `session`, `thread` (root seq), `body`, `id?` | [`Posted`] |
@@ -482,13 +482,15 @@ pub enum Request {
         committee: CommitteeId,
     },
     /// Separate operation so an older daemon cannot silently ignore the name.
-    /// Every committee's aliases ([`CommitteeAliases`](senate_core::alias::CommitteeAliases)).
+    /// The Senate's aliases ([`KnownAliases`](senate_core::alias::KnownAliases)).
     Aliases,
-    /// Remove `alias` from `committee` while it stands for `primary`.
+    /// Remove `alias` while it stands for `primary`: from `committee`, or
+    /// (an older server's Senate-wide alias) wherever it is.
     RemoveAlias {
         primary: SenatorName,
         alias: SenatorName,
-        committee: CommitteeId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        committee: Option<CommitteeId>,
     },
     /// Read one recorded event and the local bridge's delivery observations.
     Receipt {

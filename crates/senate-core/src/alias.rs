@@ -266,6 +266,46 @@ impl CommitteeAliases {
     }
 }
 
+/// The aliases a bridge reads from one Senate's server: the per-committee
+/// table, or, from a server older than per-committee aliases, its
+/// Senate-wide map (`GET /v1/aliases`), resolved as it was then: an alias
+/// stands for one agent everywhere, and a committee written with it is not
+/// checked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnownAliases {
+    Scoped(CommitteeAliases),
+    Unscoped(BTreeMap<SenatorName, SenatorName>),
+}
+
+impl KnownAliases {
+    /// Whether these came from an older server, which keeps them Senate-wide.
+    pub fn is_unscoped(&self) -> bool {
+        matches!(self, Self::Unscoped(_))
+    }
+
+    /// See [`CommitteeAliases::resolve`].
+    pub fn resolve(&self, name: &AliasName, writer: Option<&CommitteeId>) -> AliasMatch {
+        match self {
+            Self::Scoped(table) => table.resolve(name, writer),
+            Self::Unscoped(map) => map
+                .get(&name.alias)
+                .map_or(AliasMatch::NotAlias, |p| AliasMatch::One(p.clone())),
+        }
+    }
+
+    /// The alias `primary` goes by on `committee` (on an older server, its
+    /// one alias).
+    pub fn alias_of(&self, committee: &CommitteeId, primary: &SenatorName) -> Option<&SenatorName> {
+        match self {
+            Self::Scoped(table) => table.alias_of(committee, primary),
+            Self::Unscoped(map) => map
+                .iter()
+                .find_map(|(alias, target)| (target == primary).then_some(alias)),
+        }
+    }
+}
+
 /// A name as written where an alias may be: `alias` or `committee::alias`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AliasName {
@@ -465,6 +505,25 @@ mod tests {
             ("senate", "lead", "claude-c"),
         ]);
         assert_eq!(t.flat(), BTreeMap::from([(n("lead"), n("claude-c"))]));
+    }
+
+    #[test]
+    fn an_older_servers_map_resolves_senate_wide() {
+        let known = KnownAliases::Unscoped(BTreeMap::from([(n("main"), n("claude-a"))]));
+        let qualified: AliasName = "nous::main".parse().unwrap();
+        assert_eq!(
+            known.resolve(&qualified, None),
+            AliasMatch::One(n("claude-a"))
+        );
+        assert_eq!(known.resolve_bare_for_test("other"), AliasMatch::NotAlias);
+        assert_eq!(known.alias_of(&c("x"), &n("claude-a")), Some(&n("main")));
+        assert!(known.is_unscoped());
+    }
+
+    impl KnownAliases {
+        fn resolve_bare_for_test(&self, name: &str) -> AliasMatch {
+            self.resolve(&AliasName::bare(n(name)), None)
+        }
     }
 
     #[test]

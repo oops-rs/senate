@@ -1767,3 +1767,48 @@ async fn the_default_duty_is_posted_once_where_the_seat_has_none() {
         .collect();
     assert_eq!(duties.len(), 1, "{duties:?}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_older_servers_aliases_are_read_senate_wide_and_cannot_be_removed() {
+    use senate_core::alias::KnownAliases;
+
+    let mut h = Harness::new().await;
+    {
+        let mut inner = h.server.state.inner.lock().unwrap();
+        inner.old_aliases = true;
+        inner
+            .aliases
+            .set(
+                &senate_core::CommitteeId::new("refund-v2").unwrap(),
+                "main".parse().unwrap(),
+                "claude-old".parse().unwrap(),
+            )
+            .unwrap();
+    }
+    h.start().await;
+    let timeout = Duration::from_secs(5);
+    let known: KnownAliases = ipc::request(&h.socket(), &Request::Aliases, timeout, timeout)
+        .await
+        .unwrap();
+    let KnownAliases::Unscoped(map) = known else {
+        panic!("an older server's aliases are Senate-wide: {known:?}");
+    };
+    assert_eq!(map[&"main".parse().unwrap()].as_str(), "claude-old");
+
+    // This server has no route to remove an alias.
+    let refused = ipc::request::<Value>(
+        &h.socket(),
+        &Request::RemoveAlias {
+            primary: "claude-old".parse().unwrap(),
+            alias: "main".parse().unwrap(),
+            committee: None,
+        },
+        timeout,
+        timeout,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(refused.contains("too old for alias rm"), "{refused}");
+    h.stop().await;
+}

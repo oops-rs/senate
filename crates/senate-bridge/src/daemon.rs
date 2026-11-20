@@ -2721,10 +2721,17 @@ impl Shared {
                 committee,
             } => wrap(
                 self.api
-                    .remove_alias(&primary, &alias, &committee)
+                    .remove_alias(&primary, &alias, committee.as_ref())
                     .await
                     .map(|()| serde_json::json!({}))
-                    .map_err(server_error),
+                    .map_err(|error| match error.status() {
+                        // No such route: a server from before aliases could be removed.
+                        Some(404 | 405) => IpcError::bad_request(self.locale.pick(
+                            "这个 Senate 的服务器版本太旧，不支持 alias rm；请先升级它。",
+                            "This Senate's server is too old for alias rm; upgrade it first.",
+                        )),
+                        _ => server_error(error),
+                    }),
             ),
             Request::Spawn {
                 session,

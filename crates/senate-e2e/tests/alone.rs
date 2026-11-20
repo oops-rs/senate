@@ -774,7 +774,9 @@ async fn two_codex_threads_in_one_worktree_choose_separate_seats() {
     assert_eq!(renamed.agent, path("codex-review-thread"));
     let reused: JoinReply = desk.ipc(conflict).await;
     assert_eq!(reused.agent, path("codex-author-thread"));
-    let aliases: senate_core::alias::CommitteeAliases = desk.ipc(Request::Aliases).await;
+    let senate_core::alias::KnownAliases::Scoped(aliases) = desk.ipc(Request::Aliases).await else {
+        panic!("a current server keeps aliases per committee");
+    };
     let flat = aliases.flat();
     assert_eq!(flat[&path("editor")], path("codex-review-thread"));
     assert_eq!(flat[&path("reviewer")], path("codex-author-thread"));
@@ -784,7 +786,7 @@ async fn two_codex_threads_in_one_worktree_choose_separate_seats() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn one_alias_on_two_committees_asks_which_until_one_is_removed() {
     use senate_bridge::ipc::JoinReply;
-    use senate_core::alias::CommitteeAliases;
+    use senate_core::alias::KnownAliases;
 
     let dir = tempfile::tempdir().unwrap();
     let mut desk = Desk::new(dir.path(), "alice", Locale::En, ALONE);
@@ -821,7 +823,9 @@ async fn one_alias_on_two_committees_asks_which_until_one_is_removed() {
             .await;
         assert_eq!(reply.alias, Some(path("main")));
     }
-    let aliases: CommitteeAliases = desk.ipc(Request::Aliases).await;
+    let KnownAliases::Scoped(aliases) = desk.ipc(Request::Aliases).await else {
+        panic!("a current server keeps aliases per committee");
+    };
     assert_eq!(
         aliases.get(&committee(), &path("main")),
         Some(&path("codex-review-thread"))
@@ -850,10 +854,12 @@ async fn one_alias_on_two_committees_asks_which_until_one_is_removed() {
         .ipc(Request::RemoveAlias {
             primary: path("codex-author-thread"),
             alias: path("main"),
-            committee: other.clone(),
+            committee: Some(other.clone()),
         })
         .await;
-    let aliases: CommitteeAliases = desk.ipc(Request::Aliases).await;
+    let KnownAliases::Scoped(aliases) = desk.ipc(Request::Aliases).await else {
+        panic!("a current server keeps aliases per committee");
+    };
     assert_eq!(aliases.get(&other, &path("main")), None);
     assert_eq!(
         aliases.flat().get(&path("main")),
