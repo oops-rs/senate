@@ -357,6 +357,13 @@ impl AppServer {
         Ok(())
     }
 
+    /// Give the thread the name the TUI and `codex resume` show for it.
+    pub(crate) async fn name_thread(&mut self, id: &str, name: &str) -> Result<(), CodexError> {
+        self.request("thread/name/set", id, json!({"threadId": id, "name": name}))
+            .await?;
+        Ok(())
+    }
+
     pub(crate) async fn archive_thread(&mut self, id: &str) -> Result<(), CodexError> {
         self.request("thread/archive", id, json!({"threadId": id}))
             .await?;

@@ -550,6 +550,8 @@ Without --wait it returns at once: read the answer with `senate inbox`,
         resume: bool,
         #[arg(long)]
         codex_remote: Option<String>,
+        #[arg(long)]
+        name: Option<String>,
     },
     /// Enable live push for a running Antigravity conversation.
     ///
@@ -1623,6 +1625,7 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             program,
             resume,
             codex_remote,
+            name,
         } => {
             let paths = Paths::from_env()?;
             runtime(false)?.block_on(senate_bridge::host::run(
@@ -1635,6 +1638,7 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
                     program: &program,
                     resume,
                     codex_remote: codex_remote.as_deref(),
+                    name: name.as_deref(),
                 },
             ))
         }

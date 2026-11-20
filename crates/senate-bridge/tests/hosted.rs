@@ -255,6 +255,8 @@ done
     let socket: PathBuf = call(&h, &attach_target).await;
     let args = hosted_fixture_argv(&socket, &project, TIMEOUT).await;
     assert_eq!(args[0], format!("--session-id={}", launched.session_id));
+    // The TUI is told the senator's alias as its own session name.
+    assert!(args.contains(&"--name=fixture".to_owned()), "{args:?}");
     attach(&h, launched.senator.as_str(), b"\x1b[93;5u").await;
     // The attach client recorded what its terminal said, for hosts that
     // start later with nobody attached.
@@ -344,6 +346,8 @@ done
     let socket: PathBuf = call(&h, &attach_target).await;
     let args = hosted_fixture_argv(&socket, &project, TIMEOUT).await;
     assert_eq!(args[0], format!("--resume={}", restored.session_id));
+    // Restored by its primary name, it is still named by its alias.
+    assert!(args.contains(&"--name=fixture".to_owned()), "{args:?}");
     attach(&h, restored.senator.as_str(), b"q\r").await;
     tokio::time::timeout(TIMEOUT, async {
         while socket.exists() {

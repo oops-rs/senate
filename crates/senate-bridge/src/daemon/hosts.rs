@@ -709,6 +709,23 @@ impl Shared {
         }
         let program = host::preflight(&paths, &id, &executable).map_err(IpcError::internal)?;
 
+        // The TUI shows the senator's alias as its own name. A restored
+        // seat is named by whichever alias points at it; not finding one
+        // only leaves the session unnamed.
+        let name = match (&alias, &seat) {
+            (Some(alias), _) => Some(alias.to_string()),
+            (None, Some(seat)) => tokio::time::timeout(Duration::from_secs(2), self.api.aliases())
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .and_then(|aliases| {
+                    aliases
+                        .into_iter()
+                        .find_map(|(alias, senator)| (senator == *seat).then_some(alias))
+                })
+                .map(|alias| alias.to_string()),
+            (None, None) => None,
+        };
         // Keep the creating connection until the host has started. Delivery
         // and the TUI use the same shared server for the life of the session.
         let mut app_server = None;
@@ -759,6 +776,15 @@ impl Shared {
                             ))
                         };
                     }
+                    if let Some(name) = &name {
+                        // The name is for people; a thread without one works.
+                        let named =
+                            tokio::time::timeout(CODEX_PUSH_TIMEOUT, server.name_thread(&id, name))
+                                .await;
+                        if !matches!(named, Ok(Ok(()))) {
+                            tracing::debug!(%id, name, "the Codex thread could not be named");
+                        }
+                    }
                     id
                 };
                 app_server = Some(server);
@@ -774,6 +800,7 @@ impl Shared {
             program: &program,
             resume: restoring && !start_empty,
             codex_remote: remote.as_deref(),
+            name: name.as_deref(),
         };
         let session_runtime = Runtime::from(runtime);
         let reply = SpawnReply {

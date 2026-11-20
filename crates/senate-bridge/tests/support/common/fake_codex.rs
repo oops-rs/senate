@@ -426,6 +426,7 @@ fn answer(st: &mut CodexState, method: &str, params: &Value) -> Result<Value, St
             Ok(json!({"thread": {"id": id}}))
         }
         "thread/inject_items" if thread.is_some() => Ok(json!({})),
+        "thread/name/set" if thread.is_some() => Ok(json!({})),
         "thread/read" => {
             let t = thread.ok_or(format!("thread not loaded: {thread_id}"))?;
             let status = match (&t.active, t.loaded) {

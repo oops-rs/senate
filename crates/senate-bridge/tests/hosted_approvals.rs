@@ -514,6 +514,38 @@ async fn claude_prompt_requires_a_notification_and_the_desk_covers_an_away_chair
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hosted_codex_thread_is_named_after_the_senators_alias() {
+    let (mut h, project) = fixture(true, Locale::En).await;
+    let fake = h.codex();
+    start(&mut h).await;
+    let named = |thread: &str| {
+        fake.calls()
+            .into_iter()
+            .filter(|(method, params)| method == "thread/name/set" && params["threadId"] == thread)
+            .map(|(_, params)| params["name"].clone())
+            .collect::<Vec<_>>()
+    };
+    let spawn = |alias: Option<&str>| Request::Spawn {
+        session: Default::default(),
+        runtime: HostedRuntime::Codex,
+        committee: committee(),
+        alias: alias.map(path),
+        cwd: project.clone(),
+        chair: false,
+    };
+    let reviewer: SpawnReply = ipc::request(&h.socket(), &spawn(Some("reviewer")), WAIT, WAIT)
+        .await
+        .unwrap();
+    assert_eq!(named(&reviewer.session_id), [json!("reviewer")]);
+    // Without an alias there is no name to give.
+    let plain: SpawnReply = ipc::request(&h.socket(), &spawn(None), WAIT, WAIT)
+        .await
+        .unwrap();
+    assert!(named(&plain.session_id).is_empty());
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn codex_hosted_notices_close_on_input_and_recur_on_native_replay() {
     let (mut h, project) = fixture(true, Locale::En).await;
     let fake = h.codex();

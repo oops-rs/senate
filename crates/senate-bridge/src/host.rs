@@ -244,6 +244,8 @@ pub struct SessionCommand<'a> {
     pub program: &'a Path,
     pub resume: bool,
     pub codex_remote: Option<&'a str>,
+    /// The senator's alias, shown by the TUI as the session's own name.
+    pub name: Option<&'a str>,
 }
 
 pub(crate) const READY: u8 = 1;
@@ -323,6 +325,9 @@ pub(crate) fn start(
     }
     if let Some(remote) = session.codex_remote {
         command.arg("--codex-remote").arg(remote);
+    }
+    if let Some(name) = session.name {
+        command.arg("--name").arg(name);
     }
 
     std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
@@ -576,10 +581,16 @@ fn runtime_command(
             } else {
                 "--session-id"
             };
-            pty_process::Command::new(session.program)
+            let command = pty_process::Command::new(session.program)
                 .arg(format!("{flag}={}", session.session_id))
                 .arg("--settings")
-                .arg(settings)
+                .arg(settings);
+            // Claude Code shows this in its prompt and the window title, so
+            // an attached terminal says which senator it is.
+            match session.name {
+                Some(name) => command.arg(format!("--name={name}")),
+                None => command,
+            }
         }
     };
     let command = if runtime == HostedRuntime::Claude {
