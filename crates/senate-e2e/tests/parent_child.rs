@@ -505,3 +505,292 @@ async fn the_desk_forwards_an_agents_question_above_and_the_answer_comes_back_do
     desk.stop().await;
     world.stop().await;
 }
+
+// ---- a log above that was reset ---------------------------------------------
+
+/// Bob, above, asks alice's desk; the question as stored above.
+async fn ask_desk(world: &World, body: &str) -> senate_core::Event {
+    speak(
+        &world.server_url(),
+        "tok-bob",
+        &NewEvent::new(refund(), Kind::Question, person("bob"), body).to(alice_desk()),
+    )
+    .await
+    .unwrap()
+}
+
+/// The item on alice's desk whose body is `body`, once it is there.
+async fn on_desk(desk: &Desk, body: &str) -> senate_core::Event {
+    eventually_async(&format!("{body:?} on alice's desk"), || async {
+        desk.events_of(&refund())
+            .await
+            .into_iter()
+            .find(|e| e.body == body)
+    })
+    .await
+}
+
+/// What the uplink keeps in the hosted Senate's registry, by key. The
+/// machine is stopped while `f` has the store.
+async fn uplink_registry<T, F, Fut>(desk: &mut Desk, f: F) -> T
+where
+    F: FnOnce(std::sync::Arc<dyn senate_log::LogStore>) -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    desk.stop().await;
+    let db = desk
+        .paths
+        .hosted(senate_bridge::paths::HOSTED_KEY)
+        .join("log.db");
+    let store = senate_log::connect(&format!("sqlite:{}", db.display()))
+        .await
+        .unwrap();
+    let out = f(store).await;
+    desk.start().await;
+    out
+}
+
+/// The parent's log is wiped under a running machine: the uplink's cursor
+/// is beyond the new log, and the thread it remembers bringing down has
+/// the seq a new, unrelated thread gets. The uplink drops what it kept,
+/// registers again and reads the new log from the start; the desk's answer
+/// reaches the new thread.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_parent_whose_log_was_wiped_is_registered_with_and_read_again() {
+    let mut world = team_above().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut desk = Desk::new(
+        dir.path(),
+        "alice",
+        Locale::En,
+        &under(&world, "tok-alice", ""),
+    );
+    desk.start().await;
+    assert_eq!(
+        desk.wait_registration().await.registration,
+        Registration::Registered
+    );
+    let old_epoch = me_at(&world.server_url(), "tok-bob").await.epoch;
+
+    // Before the wipe: a question for the desk, then enough above for the
+    // uplink's cursor to be well past where the new log will be.
+    let before = ask_desk(&world, "Asked before the wipe").await;
+    for n in 0..3 {
+        speak(
+            &world.server_url(),
+            "tok-bob",
+            &NewEvent::new(refund(), Kind::Note, person("bob"), format!("note {n}")),
+        )
+        .await
+        .unwrap();
+    }
+    ask_desk(&world, "Asked last before the wipe").await;
+    let old_root = on_desk(&desk, "Asked before the wipe").await;
+    on_desk(&desk, "Asked last before the wipe").await;
+
+    // The wipe: the same Senate at the same address, on an empty log.
+    world.restart().await;
+    let new_epoch = me_at(&world.server_url(), "tok-bob").await.epoch;
+    assert_ne!(new_epoch, old_epoch, "a new log has a new epoch");
+    assert!(world.events_of(&refund()).await.is_empty());
+
+    // The machine registers again without being restarted.
+    eventually_async("the child registered above again", || async {
+        (world.daemon().hub.children().len() == 1).then_some(())
+    })
+    .await;
+
+    // A question in the new log, at a seq the old log had too.
+    let after = ask_desk(&world, "Asked after the wipe").await;
+    assert_eq!(after.seq, before.seq, "the seqs of the two logs collide");
+    let new_root = on_desk(&desk, "Asked after the wipe").await;
+    assert_eq!(
+        new_root.thread, None,
+        "a root of its own, not a reply where the old thread {} was brought",
+        old_root.seq
+    );
+    assert_eq!(Origin::of(&new_root).unwrap().thread, after.seq);
+
+    // Alice answers it, and the answer reaches the new thread above.
+    let top = desk.senate();
+    speak(
+        &top.url,
+        &top.token,
+        &NewEvent::new(
+            refund(),
+            Kind::Answer,
+            person("alice"),
+            "Answered after the wipe",
+        )
+        .to(Address::Committee)
+        .in_thread(new_root.seq),
+    )
+    .await
+    .unwrap();
+    let answer = eventually_async("the answer above", || async {
+        world
+            .events_of(&refund())
+            .await
+            .into_iter()
+            .find(|e| e.body == "Answered after the wipe")
+    })
+    .await;
+    assert_eq!(answer.thread, Some(after.seq));
+    assert_eq!(answer.from, alice_desk());
+
+    // What is kept is about the new log only.
+    let kept = uplink_registry(&mut desk, |store| async move {
+        store.registry("uplink:").await.unwrap()
+    })
+    .await;
+    let value = |key: &str| kept.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
+    assert_eq!(value("uplink:epoch"), Some(serde_json::json!(new_epoch)));
+    let downs: Vec<&String> = kept
+        .iter()
+        .map(|(k, _)| k)
+        .filter(|k| k.starts_with("uplink:down:"))
+        .collect();
+    assert_eq!(
+        downs,
+        [&format!("uplink:down:{}:{}", refund(), after.seq)],
+        "only the new thread"
+    );
+    // Brought down once each, the old ones still there.
+    let below = desk.events_of(&refund()).await;
+    for body in [
+        "Asked before the wipe",
+        "Asked last before the wipe",
+        "Asked after the wipe",
+    ] {
+        assert_eq!(below.iter().filter(|e| e.body == body).count(), 1, "{body}");
+    }
+    desk.stop().await;
+    world.stop().await;
+}
+
+/// A cursor beyond the committee's log with no change of epoch to explain
+/// it (as a Senate above from before epochs would leave it): the Senate
+/// above answers 409 `cursor_ahead`, the uplink drops what it kept about
+/// that committee and reads it from the start, storing nothing twice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cursor_beyond_the_parents_log_is_dropped_and_the_committee_read_again() {
+    let world = team_above().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut desk = Desk::new(
+        dir.path(),
+        "alice",
+        Locale::En,
+        &under(&world, "tok-alice", ""),
+    );
+    desk.start().await;
+    desk.wait_registration().await;
+    let first = ask_desk(&world, "The first question").await;
+    let first_root = on_desk(&desk, "The first question").await;
+
+    let cursor = format!("uplink:cursor:{}", refund());
+    let stale = format!("uplink:down:{}:900", refund());
+    uplink_registry(&mut desk, |store| {
+        let (cursor, stale) = (cursor.clone(), stale.clone());
+        async move {
+            let put = |key: String, value: serde_json::Value| {
+                let store = store.clone();
+                async move { store.put_registry(&key, Some(value)).await.unwrap() }
+            };
+            put(cursor, serde_json::json!(999)).await;
+            put(
+                stale,
+                serde_json::json!({ "committee": refund(), "seq": 1 }),
+            )
+            .await;
+        }
+    })
+    .await;
+
+    let second = ask_desk(&world, "The second question").await;
+    let second_root = on_desk(&desk, "The second question").await;
+    assert_eq!(second_root.thread, None);
+
+    let kept = uplink_registry(&mut desk, |store| async move {
+        store.registry("uplink:").await.unwrap()
+    })
+    .await;
+    let value = |key: &str| kept.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
+    assert_eq!(value(&cursor), Some(serde_json::json!(second.seq)));
+    assert_eq!(
+        value(&stale),
+        None,
+        "what was kept about the committee went"
+    );
+    // The first question's thread is where it was.
+    assert_eq!(
+        value(&format!("uplink:down:{}:{}", refund(), first.seq)),
+        Some(serde_json::json!({ "committee": refund(), "seq": first_root.seq }))
+    );
+    let below = desk.events_of(&refund()).await;
+    for body in ["The first question", "The second question"] {
+        assert_eq!(below.iter().filter(|e| e.body == body).count(), 1, "{body}");
+    }
+    desk.stop().await;
+    world.stop().await;
+}
+
+/// Entries kept by a build from before the epoch was recorded: nothing
+/// says which log they are about, so they are dropped and the log above is
+/// read from the start, which stores nothing twice and puts every thread
+/// back where it was.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn entries_kept_with_no_epoch_are_dropped_and_the_parents_log_read_again() {
+    let world = team_above().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut desk = Desk::new(
+        dir.path(),
+        "alice",
+        Locale::En,
+        &under(&world, "tok-alice", ""),
+    );
+    desk.start().await;
+    desk.wait_registration().await;
+    let first = ask_desk(&world, "The first question").await;
+    let first_root = on_desk(&desk, "The first question").await;
+    let epoch = me_at(&world.server_url(), "tok-bob").await.epoch;
+
+    // As an older build left it after a wipe above: no epoch, and a thread
+    // of the old log at the seq the next question will have.
+    let next = senate_core::Seq(first.seq.0 + 1);
+    let stale = format!("uplink:down:{}:{next}", refund());
+    uplink_registry(&mut desk, |store| {
+        let stale = stale.clone();
+        async move {
+            store.put_registry("uplink:epoch", None).await.unwrap();
+            let wrong = serde_json::json!({ "committee": refund(), "seq": first_root.seq });
+            store.put_registry(&stale, Some(wrong)).await.unwrap();
+        }
+    })
+    .await;
+
+    let second = ask_desk(&world, "The second question").await;
+    assert_eq!(second.seq, next);
+    let second_root = on_desk(&desk, "The second question").await;
+    assert_eq!(second_root.thread, None, "not a reply in the stale thread");
+
+    let kept = uplink_registry(&mut desk, |store| async move {
+        store.registry("uplink:").await.unwrap()
+    })
+    .await;
+    let value = |key: &str| kept.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
+    assert_eq!(value("uplink:epoch"), Some(serde_json::json!(epoch)));
+    assert_eq!(
+        value(&format!("uplink:down:{}:{}", refund(), first.seq)),
+        Some(serde_json::json!({ "committee": refund(), "seq": first_root.seq }))
+    );
+    assert_eq!(
+        value(&stale),
+        Some(serde_json::json!({ "committee": refund(), "seq": second_root.seq }))
+    );
+    let below = desk.events_of(&refund()).await;
+    for body in ["The first question", "The second question"] {
+        assert_eq!(below.iter().filter(|e| e.body == body).count(), 1, "{body}");
+    }
+    desk.stop().await;
+    world.stop().await;
+}
