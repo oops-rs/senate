@@ -416,10 +416,19 @@ pub async fn run(
                 // before anyone can have attached to answer.
                 let attached = tty.attached.load(Ordering::Acquire);
                 let answer = tty.emulation().output(&buf[..n], attached);
-                if !answer.is_empty()
-                    && let Err(error) = tty.write.lock().await.write_all(&answer).await
-                {
-                    tracing::debug!(%error, "answering the coding TUI for an absent terminal");
+                if !answer.is_empty() {
+                    // An answer the TUI does not read must not stop its
+                    // output being drained.
+                    let write = async { tty.write.lock().await.write_all(&answer).await };
+                    match tokio::time::timeout(Duration::from_millis(250), write).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => {
+                            tracing::debug!(%error, "answering the coding TUI for an absent terminal")
+                        }
+                        Err(_) => {
+                            tracing::debug!("the coding TUI did not take its terminal's answer")
+                        }
+                    }
                 }
                 let _ = feed.send(buf[..n].to_vec());
             }

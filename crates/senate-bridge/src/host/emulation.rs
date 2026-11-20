@@ -82,7 +82,8 @@ impl Colors {
             return Ok(());
         }
         let file = Self::file(paths);
-        let staged = file.with_extension("tmp");
+        // Several CLIs can be recording at once; each stages its own file.
+        let staged = file.with_extension(format!("{}.tmp", std::process::id()));
         std::fs::write(&staged, serde_json::to_vec(self)?)?;
         std::fs::rename(staged, file)
     }
@@ -109,8 +110,6 @@ impl Colors {
 pub(crate) struct Emulation {
     modes: BTreeSet<u16>,
     colors: Colors,
-    /// The scheme the TUI was last told, so it is told only of a change.
-    told: Option<Scheme>,
     carry: Vec<u8>,
 }
 
@@ -159,6 +158,10 @@ impl Emulation {
                     .count();
                 let end = 3 + params;
                 let last = *data.get(end)?;
+                if last == 0x1b {
+                    // Not a sequence after all; the ESC starts the next one.
+                    return Some(end);
+                }
                 let numbers = || {
                     std::str::from_utf8(&data[3..end])
                         .unwrap_or_default()
@@ -175,7 +178,6 @@ impl Emulation {
                     b'n' if !attached && numbers().eq([996]) => {
                         if let Some(scheme) = self.colors.scheme {
                             answers.extend_from_slice(scheme.report());
-                            self.told = Some(scheme);
                         }
                     }
                     _ => {}
@@ -186,16 +188,15 @@ impl Emulation {
                 // Only `OSC 10 ; ?` and `OSC 11 ; ?` matter, so look no
                 // further than their length for the terminator.
                 let body = &data[2..data.len().min(2 + 8)];
-                let (len, terminator): (usize, &[u8]) =
-                    if let Some(i) = body.iter().position(|b| *b == 0x07) {
-                        (i, b"\x07")
-                    } else if let Some(i) = body.windows(2).position(|w| w == b"\x1b\\") {
-                        (i, b"\x1b\\")
-                    } else if body.len() < 8 {
-                        return None;
-                    } else {
-                        return Some(2);
-                    };
+                let bel = body.iter().position(|b| *b == 0x07);
+                let st = body.windows(2).position(|w| w == b"\x1b\\");
+                let (len, terminator): (usize, &[u8]) = match (bel, st) {
+                    (Some(bel), Some(st)) if st < bel => (st, b"\x1b\\"),
+                    (Some(bel), _) => (bel, b"\x07"),
+                    (None, Some(st)) => (st, b"\x1b\\"),
+                    (None, None) if body.len() < 8 => return None,
+                    (None, None) => return Some(2),
+                };
                 let color = match &body[..len] {
                     b"10;?" => self.colors.foreground.as_deref().map(|spec| ("10", spec)),
                     b"11;?" => self.colors.background.as_deref().map(|spec| ("11", spec)),
@@ -222,10 +223,13 @@ impl Emulation {
     }
 
     /// The attached viewer's terminal has said what it looks like. Returns
-    /// what to tell the TUI: a theme report, if it asked for those and the
-    /// theme is not the one it was last told.
+    /// what to tell the TUI: that terminal's theme, if the TUI asked for
+    /// theme reports and the terminal could say. A report the TUI already
+    /// knows costs nothing; the terminal's own later reports go straight to
+    /// the TUI and are not seen here, so nothing here can tell.
     pub(crate) fn viewer(&mut self, colors: Colors) -> &'static [u8] {
         let colors = colors.checked();
+        let shown = colors.scheme;
         if colors.foreground.is_some() {
             self.colors.foreground = colors.foreground;
         }
@@ -235,11 +239,8 @@ impl Emulation {
         if colors.scheme.is_some() {
             self.colors.scheme = colors.scheme;
         }
-        match self.colors.scheme {
-            Some(scheme) if self.modes.contains(&THEME_NOTIFY) && self.told != Some(scheme) => {
-                self.told = Some(scheme);
-                scheme.report()
-            }
+        match shown {
+            Some(scheme) if self.modes.contains(&THEME_NOTIFY) => scheme.report(),
             _ => b"",
         }
     }
@@ -285,6 +286,14 @@ mod tests {
         assert!(tui.output(asked, true).is_empty());
         // Nothing is on record: stay silent, as a host always did.
         assert!(Emulation::default().output(asked, false).is_empty());
+        // The nearer terminator ends the question.
+        assert_eq!(
+            tui.output(b"\x1b]11;?\x1b\\\x07", false),
+            b"\x1b]11;rgb:efef/f1f1/f5f5\x1b\\"
+        );
+        // An ESC where a final byte should be starts the next sequence.
+        tui.output(b"\x1b[?12\x1b[?2004h", false);
+        assert_eq!(tui.attach_preamble(), b"\x1b[?2004h");
         // Other OSC traffic, long or short, is left alone.
         assert!(
             tui.output(b"\x1b]0;a long window title\x07", false)
@@ -307,19 +316,21 @@ mod tests {
     }
 
     #[test]
-    fn a_tui_that_asked_for_theme_reports_is_told_of_a_change_once() {
+    fn a_tui_that_asked_for_theme_reports_is_told_what_each_viewer_shows() {
         let mut tui = Emulation::default();
         // No theme reports requested: the viewer's colours are only kept.
         assert!(tui.viewer(latte()).is_empty());
         tui.output(b"\x1b[?2031h", false);
         assert_eq!(tui.viewer(latte()), b"\x1b[?997;2n");
-        assert!(tui.viewer(latte()).is_empty());
+        // The terminal may have changed theme and back while attached, which
+        // is not seen here, so every viewer's theme is passed on.
+        assert_eq!(tui.viewer(latte()), b"\x1b[?997;2n");
         let mocha = Colors {
             scheme: Some(Scheme::Dark),
             ..Colors::default()
         };
         assert_eq!(tui.viewer(mocha), b"\x1b[?997;1n");
-        // A viewer that could not say keeps what is known.
+        // A viewer that could not say reports nothing and keeps what is known.
         assert!(tui.viewer(Colors::default()).is_empty());
         assert_eq!(
             tui.output(b"\x1b]11;?\x07", false),

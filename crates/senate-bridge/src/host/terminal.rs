@@ -61,11 +61,19 @@ const ASK_COLORS: &[u8] = b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[?996n\x1b[c";
 fn report(bytes: &[u8], colors: &mut Colors) -> Option<usize> {
     match *bytes.get(1)? {
         b']' => {
-            let (len, end) = bytes[2..].iter().enumerate().find_map(|(i, b)| match b {
-                0x07 => Some((i, i + 1)),
-                0x1b if bytes.get(2 + i + 1) == Some(&b'\\') => Some((i, i + 2)),
-                _ => None,
-            })?;
+            // A colour answer is short. Without a nearby end this is a key
+            // the person pressed (Alt+]), not the start of an answer.
+            let (len, end) = bytes[2..]
+                .iter()
+                .enumerate()
+                .take(48)
+                .find_map(|(i, b)| match b {
+                    0x07 => Some((i, i + 1)),
+                    0x1b if bytes.get(2 + i + 1) == Some(&b'\\') => Some((i, i + 2)),
+                    0x1b => Some((0, 0)),
+                    _ => None,
+                })
+                .filter(|(_, end)| *end != 0)?;
             let body = std::str::from_utf8(&bytes[2..2 + len]).ok();
             match body.and_then(|body| body.split_once(';')) {
                 Some(("10", spec)) => colors.foreground = Some(spec.to_owned()),
@@ -259,9 +267,23 @@ impl Drop for RawTerminal {
 /// Record what the calling terminal looks like, for a host that starts with
 /// nobody attached. Does nothing when not run from a terminal.
 pub async fn remember_terminal(paths: &Paths) {
+    let stdin = io::stdin();
+    // Leave the terminal alone unless this is a person's foreground command
+    // on a terminal that can answer: changing its modes from the background
+    // would stop the job.
+    let foreground =
+        rustix::termios::tcgetpgrp(&stdin).is_ok_and(|group| group == rustix::process::getpgrp());
+    if !foreground || std::env::var_os("TERM").is_some_and(|term| term == "dumb") {
+        return;
+    }
     let Ok(terminal) = RawTerminal::open(false).await else {
         return;
     };
+    // Anything already typed or pasted belongs to the shell. Reading the
+    // answers would take it too, so do without them this once.
+    if rustix::io::ioctl_fionread(&terminal.input.get_ref().file).unwrap_or(1) != 0 {
+        return;
+    }
     let (colors, _) = terminal.colors().await;
     drop(terminal);
     if let Err(error) = colors.save(paths) {
@@ -375,6 +397,11 @@ mod tests {
         let (colors, typed, complete) = read_colors(b"\x1b[?1;2c");
         assert_eq!(colors, Colors::default());
         assert!(typed.is_empty() && complete);
+
+        // Alt+] is a key, even with an answer right behind it.
+        let (colors, typed, _) = read_colors(b"\x1b]\x1b]10;rgb:4c4c/4f4f/6969\x1b\\\x1b[?62c");
+        assert_eq!(colors.foreground.as_deref(), Some("rgb:4c4c/4f4f/6969"));
+        assert_eq!(typed, b"\x1b]");
 
         // Cut short: nothing is claimed and the wait goes on.
         let (colors, _, complete) = read_colors(b"\x1b]11;rgb:1e1e/1e1e/2e2e");

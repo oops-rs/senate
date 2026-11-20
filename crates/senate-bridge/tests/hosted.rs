@@ -65,9 +65,17 @@ async fn attach(h: &Harness, alias: &str, keys: &[u8]) {
     let mut child = pty_process::Command::from(cmd).spawn(pts).unwrap();
     let (mut output, mut input) = pty.into_split();
     tokio::time::timeout(TIMEOUT, async {
-        // The attach CLI enters the alternate screen after setting raw
-        // mode. Request fresh fixture output over the actual PTY.
-        wait_terminal_output(&mut output, b"\x1b[?1049h").await;
+        // The attach CLI sets raw mode, enters the alternate screen and
+        // asks this terminal for its colours, the device attributes last.
+        // Answer as a light Ghostty does, then type straight on and
+        // request fresh fixture output over the actual PTY.
+        wait_terminal_output(&mut output, b"\x1b[c").await;
+        input
+            .write_all(
+                b"\x1b]10;rgb:4c4c/4f4f/6969\x1b\\\x1b]11;rgb:efef/f1f1/f5f5\x1b\\\x1b[?997;2n\x1b[?62;22c",
+            )
+            .await
+            .unwrap();
         input.write_all(b"paint\r").await.unwrap();
         wait_terminal_output(&mut output, b"fixture TUI").await;
     })
@@ -248,6 +256,19 @@ done
     let args = hosted_fixture_argv(&socket, &project, TIMEOUT).await;
     assert_eq!(args[0], format!("--session-id={}", launched.session_id));
     attach(&h, launched.senator.as_str(), b"\x1b[93;5u").await;
+    // The attach client recorded what its terminal said, for hosts that
+    // start later with nobody attached.
+    let recorded: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(h.paths.home().join("terminal.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        recorded,
+        serde_json::json!({
+            "foreground": "rgb:4c4c/4f4f/6969",
+            "background": "rgb:efef/f1f1/f5f5",
+            "scheme": "light",
+        })
+    );
     assert!(socket.exists());
 
     h.stop().await;
