@@ -55,6 +55,14 @@ pub const MIN_TILE_COLS: u16 = 40;
 pub const MIN_TILE_ROWS: u16 = 10;
 /// How often the grid asks which sessions there are.
 const RELIST: Duration = Duration::from_secs(2);
+/// A note may run over several rows of its tile.
+fn wrapped(note: &str, width: usize) -> Vec<String> {
+    textwrap::wrap(note, width.max(1))
+        .into_iter()
+        .map(std::borrow::Cow::into_owned)
+        .collect()
+}
+
 /// The least time between two paints: a busy session repaints often.
 const FRAME: Duration = Duration::from_millis(40);
 /// How long one paint may take before the keys are looked at again.
@@ -63,8 +71,10 @@ const STUCK: Duration = Duration::from_millis(250);
 /// One hosted session, as the viewer needs it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Session {
-    /// What tells this session from every other: its host's id.
+    /// What tells this session from every other.
     pub key: String,
+    /// The name a command takes for it: its alias, else its senator name.
+    pub alias: String,
     /// What the header says of it: alias, committee, runtime, state.
     pub title: String,
     /// The host's attach socket (`tty`).
@@ -119,6 +129,7 @@ impl Tile {
         let watching = tokio::spawn({
             let state = shown_.clone();
             let socket = session.watch_socket();
+            let alias = session.alias.clone();
             async move {
                 let note = match Watch::open(&socket).await {
                     Ok(mut watch) => {
@@ -137,7 +148,7 @@ impl Tile {
                         }
                     }
                     Err(_) if !socket.exists() && socket.with_file_name("tty").exists() => {
-                        "started before sessions could be watched: stop and restore it".to_owned()
+                        cannot_watch(&alias)
                     }
                     Err(error) => format!("{error:#}"),
                 };
@@ -356,9 +367,10 @@ fn paint_screen(
 
 /// Paint lines of plain text into `area`, the rest of it blank.
 fn paint_note(out: &mut String, area: Rect, note: &str) {
+    let lines = wrapped(note, usize::from(area.cols));
     for line in 0..area.rows {
         at(out, area.row + line, area.col);
-        let text = if line == 0 { note } else { "" };
+        let text = lines.get(usize::from(line)).map_or("", String::as_str);
         let _ = write!(out, "\x1b[0;2m{}\x1b[0m", fit(text, usize::from(area.cols)));
     }
 }
@@ -687,7 +699,7 @@ pub async fn watch_one(session: Session) -> anyhow::Result<()> {
     anyhow::ensure!(
         session.watch_socket().exists() || !session.tty.exists(),
         "{}",
-        cannot_watch(&session.key)
+        cannot_watch(&session.alias)
     );
     let mut viewer = Viewer {
         mode: Mode::One,
@@ -845,6 +857,129 @@ mod tests {
         assert!(
             !terminal.screen().cell(1, 0).unwrap().bold(),
             "line 1 is plain"
+        );
+    }
+
+    /// A tile showing `text`, with no host behind it.
+    fn tile(alias: &str, text: &str, dim: bool) -> Tile {
+        let mut mirror = Mirror::default();
+        mirror.apply(&crate::host::watch::Frame::Output(text.as_bytes().to_vec()));
+        Tile {
+            session: Session {
+                key: alias.to_owned(),
+                alias: alias.to_owned(),
+                title: format!("{alias} · refund-v2 · claude · live"),
+                tty: PathBuf::from(format!("/nowhere/{alias}/tty")),
+                dim,
+            },
+            shown: Arc::new(Mutex::new(Shown {
+                mirror: Some(mirror),
+                note: None,
+            })),
+            watching: tokio::spawn(async {}),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_grid_pages_names_each_tile_and_marks_the_focused_one() {
+        let mut viewer = Viewer {
+            mode: Mode::Grid,
+            tiles: ["a", "b", "c", "d", "e"]
+                .into_iter()
+                .map(|alias| tile(alias, &format!("screen of {alias}"), alias == "c"))
+                .collect(),
+            focus: 1,
+            changed: Arc::new(Notify::new()),
+        };
+        // 21 x 80: two tiles across, two down, so two pages of the five.
+        let (rows, cols) = (21, 80);
+        let terminal = shows(rows, cols, &viewer.paint(rows, cols));
+        let lines: Vec<String> = terminal.screen().rows(0, cols).collect();
+        assert!(
+            lines[0].starts_with("  a · refund-v2 · claude · live"),
+            "{:?}",
+            lines[0]
+        );
+        assert_eq!(
+            &lines[0][lines[0].find('▶').unwrap()..][..5],
+            "▶ b",
+            "{:?}",
+            lines[0]
+        );
+        assert!(lines[1].starts_with("screen of a"), "{:?}", lines[1]);
+        assert!(lines[1].contains("screen of b"), "{:?}", lines[1]);
+        assert!(lines[10].starts_with("  c · refund-v2"), "{:?}", lines[10]);
+        assert!(lines[11].starts_with("screen of c"));
+        assert!(lines[11].contains("screen of d"));
+        assert!(
+            !lines.iter().any(|l| l.contains("screen of e")),
+            "on the next page"
+        );
+        assert!(
+            lines[20].contains("5 sessions · page 1/2"),
+            "{:?}",
+            lines[20]
+        );
+        // The focused header stands out; a dimmed session is dim all over.
+        let focused = terminal.screen().cell(0, 42).unwrap();
+        assert!(focused.inverse() && focused.bold());
+        assert!(!terminal.screen().cell(0, 2).unwrap().inverse());
+        assert!(terminal.screen().cell(10, 2).unwrap().dim());
+        assert!(terminal.screen().cell(11, 0).unwrap().dim());
+        assert!(!terminal.screen().cell(1, 0).unwrap().dim());
+
+        // The next page: the fifth alone, the rest of the page blank.
+        viewer.step(Key::PageDown, 2, 4);
+        assert_eq!(viewer.focus, 4, "no further than the last");
+        let terminal = shows(rows, cols, &viewer.paint(rows, cols));
+        let lines: Vec<String> = terminal.screen().rows(0, cols).collect();
+        assert!(lines[0].starts_with("▶ e · refund-v2"), "{:?}", lines[0]);
+        assert!(lines[1].starts_with("screen of e"));
+        assert!(!lines.iter().any(|l| l.contains("screen of a")));
+        assert!(lines[20].contains("page 2/2"));
+
+        // Moving: down a row, left, up; never off either end.
+        viewer.focus = 0;
+        viewer.step(Key::Down, 2, 4);
+        assert_eq!(viewer.focus, 2);
+        viewer.step(Key::Right, 2, 4);
+        viewer.step(Key::Up, 2, 4);
+        assert_eq!(viewer.focus, 1);
+        viewer.step(Key::Up, 2, 4);
+        viewer.step(Key::Left, 2, 4);
+        viewer.step(Key::Left, 2, 4);
+        assert_eq!(viewer.focus, 0);
+
+        // The list changes: the focus stays on its session, sessions that
+        // went are dropped, and the order is the list's.
+        viewer.focus = 3;
+        let listed = |alias: &str| viewer_session(alias);
+        viewer.list(vec![listed("d"), listed("a")]);
+        let order: Vec<&str> = viewer
+            .tiles
+            .iter()
+            .map(|t| t.session.alias.as_str())
+            .collect();
+        assert_eq!(order, ["d", "a"]);
+        assert_eq!(viewer.focus, 0, "still on d");
+    }
+
+    fn viewer_session(alias: &str) -> Session {
+        Session {
+            key: alias.to_owned(),
+            alias: alias.to_owned(),
+            title: alias.to_owned(),
+            tty: PathBuf::from(format!("/nowhere/{alias}/tty")),
+            dim: false,
+        }
+    }
+
+    #[test]
+    fn a_host_from_before_watching_is_named_with_the_commands_to_restart_it() {
+        assert_eq!(
+            cannot_watch("north"),
+            "this session's terminal host was started before sessions could be watched; \
+             restart it with `senate stop north` then `senate restore north`"
         );
     }
 

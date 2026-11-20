@@ -730,6 +730,8 @@ pub(crate) fn unbound_context(paths: &Paths, id: &EventId) -> Option<String> {
 #[derive(Default)]
 pub(crate) struct HostStatus {
     pub(crate) hosted: BTreeMap<String, Option<String>>,
+    /// Each live host's attach socket, by session ID.
+    pub(crate) tty: BTreeMap<String, PathBuf>,
     pub(crate) unbound: BTreeMap<String, String>,
     pub(crate) viewer_unavailable: BTreeSet<String>,
 }
@@ -748,6 +750,9 @@ pub(crate) fn status(
                 session.session_id.clone(),
                 unverified_switch(paths, &id).filter(|new| new != &session.session_id),
             );
+            status
+                .tty
+                .insert(session.session_id.clone(), socket(paths, &id));
             if let Some(native) = unbound_context(paths, &id) {
                 status.unbound.insert(session.session_id.clone(), native);
             }

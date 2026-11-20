@@ -3107,6 +3107,7 @@ impl Shared {
             hosted: host_status.hosted,
             hosted_unbound: host_status.unbound,
             hosted_viewer_unavailable: host_status.viewer_unavailable,
+            hosted_tty: host_status.tty,
             dropped_hooks,
             sessions,
             queue: self.store.counts().map_err(internal)?,

@@ -30,6 +30,7 @@ const GROUPS: &[(&str, &[&str])] = &[
         &[
             "spawn",
             "attach",
+            "watch-all",
             "stop",
             "restore",
             "aliases",

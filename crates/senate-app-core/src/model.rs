@@ -690,6 +690,7 @@ mod tests {
             hosted: Default::default(),
             hosted_unbound: Default::default(),
             hosted_viewer_unavailable: Default::default(),
+            hosted_tty: Default::default(),
             dropped_hooks: None,
             queue: Default::default(),
             speaker: None,

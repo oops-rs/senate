@@ -152,6 +152,16 @@ enum Cmd {
         #[arg(long)]
         duty: Option<String>,
     },
+    /// Watch every hosted senator's terminal, side by side.
+    ///
+    /// A full-screen grid of read-only views of the sessions hosted on this
+    /// machine, one tile a session, in pages when they do not all fit.
+    /// Nothing typed here reaches a session. Arrows or h j k l move
+    /// between tiles, PgUp and PgDn between pages; Enter attaches to the
+    /// tile's session (detaching comes back to the grid); q or Ctrl-]
+    /// leaves.
+    #[command(name = "watch-all")]
+    WatchAll,
     /// List senator aliases by committee, with the IDs they stand for.
     Aliases,
     /// Manage senator aliases.
@@ -856,6 +866,55 @@ fn settings_here() -> (Paths, Settings) {
     (paths, settings)
 }
 
+/// The hosted sessions of this machine whose terminal host is running, as
+/// `senate watch-all` shows them: the sessions of the daemon's status that
+/// have a host, each named by its alias when it has one.
+async fn hosted_sessions(paths: &Paths) -> anyhow::Result<Vec<crate::host::view::Session>> {
+    let status: crate::ipc::StatusReply = daemon_call(paths, &Request::Status).await?;
+    // The aliases are the Senate's to say; a Senate that does not answer
+    // leaves each session under its senator's own name.
+    let aliases: Option<KnownAliases> = daemon_call(paths, &Request::Aliases).await.ok();
+    let mut sessions: Vec<crate::host::view::Session> = status
+        .sessions
+        .iter()
+        .filter_map(|session| {
+            let tty = status.hosted_tty.get(&session.session_id)?.clone();
+            // An alias belongs to a committee: the session's alias is the
+            // one it has on the committee it works on.
+            let alias = session.committee().and_then(|committee| {
+                let alias = aliases.as_ref()?.alias_of(committee, &session.agent)?;
+                Some((alias.to_string(), committee))
+            });
+            let committee = session
+                .committee()
+                .map_or_else(|| "-".to_owned(), ToString::to_string);
+            let name = alias
+                .as_ref()
+                .map_or_else(|| session.agent.to_string(), |(alias, _)| alias.clone());
+            Some(crate::host::view::Session {
+                key: session.session_id.clone(),
+                title: format!(
+                    "{name} · {committee} · {} · {}",
+                    session.runtime.as_str(),
+                    session.state.as_str()
+                ),
+                // What a command takes: the alias with its committee, so
+                // it names one session whatever other committees call
+                // theirs.
+                alias: alias.map_or_else(
+                    || session.agent.to_string(),
+                    |(alias, committee)| format!("{committee}::{alias}"),
+                ),
+                tty,
+                dim: session.state != crate::session::SessionState::Live,
+            })
+        })
+        .collect();
+    // The same place for each session from one look to the next.
+    sessions.sort_by(|a, b| a.alias.cmp(&b.alias).then_with(|| a.key.cmp(&b.key)));
+    Ok(sessions)
+}
+
 async fn daemon_call<T: serde::de::DeserializeOwned>(
     paths: &Paths,
     request: &Request,
@@ -1266,6 +1325,13 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             let path = init::init_local(&paths, &profile)?;
             println!("{}", path.display());
             Ok(())
+        }
+        Cmd::WatchAll => {
+            let paths = Paths::from_env()?;
+            runtime(false)?.block_on(crate::host::view::watch_all(&paths, || {
+                let paths = paths.clone();
+                Box::pin(async move { hosted_sessions(&paths).await })
+            }))
         }
         Cmd::Aliases => {
             let paths = Paths::from_env()?;
@@ -1766,7 +1832,8 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
                     let alias = senator.to_string();
                     return crate::host::view::watch_one(crate::host::view::Session {
                         title: alias.clone(),
-                        key: alias,
+                        key: alias.clone(),
+                        alias,
                         tty: socket,
                         dim: false,
                     })

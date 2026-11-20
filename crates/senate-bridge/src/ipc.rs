@@ -1540,6 +1540,10 @@ pub struct StatusReply {
     /// Running hosts without a readable viewer activity record.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub hosted_viewer_unavailable: std::collections::BTreeSet<String>,
+    /// The attach socket of each live terminal host, by session ID: what
+    /// `senate attach` connects to, with the watch socket beside it.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub hosted_tty: std::collections::BTreeMap<String, PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dropped_hooks: Option<HookDropStatus>,
 

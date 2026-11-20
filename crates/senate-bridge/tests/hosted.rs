@@ -2153,8 +2153,14 @@ async fn a_host_whose_directory_is_gone_stops_with_its_tui() {
 /// A hosted session whose TUI paints a line as it starts, answers `paint`
 /// with `fixture TUI`, and records every other line it is typed.
 async fn watched_session() -> (Harness, String, PathBuf) {
+    let (h, typed) = watched_sessions(&["watched"]).await;
+    (h, "watched".to_owned(), typed)
+}
+
+/// One such session for each of `aliases`.
+async fn watched_sessions(aliases: &[&str]) -> (Harness, PathBuf) {
     let mut h = Harness::new().await;
-    h.config.hosted_session_limit = Some(1);
+    h.config.hosted_session_limit = Some(aliases.len());
     h.dir = tempfile::tempdir_in("/tmp").unwrap();
     h.paths = senate_bridge::Paths::new(h.dir.path().join("senate"));
     h.paths.ensure_home().unwrap();
@@ -2184,19 +2190,21 @@ async fn watched_session() -> (Harness, String, PathBuf) {
     .unwrap();
     h.config.committees.push(committee());
     start(&mut h).await;
-    let launched: SpawnReply = call(
-        &h,
-        &Request::Spawn {
-            session: Default::default(),
-            runtime: HostedRuntime::Claude,
-            committee: committee(),
-            alias: Some(path("watched")),
-            cwd: project,
-            chair: false,
-        },
-    )
-    .await;
-    (h, launched.senator.to_string(), typed)
+    for alias in aliases {
+        let _: SpawnReply = call(
+            &h,
+            &Request::Spawn {
+                session: Default::default(),
+                runtime: HostedRuntime::Claude,
+                committee: committee(),
+                alias: Some(path(alias)),
+                cwd: project.clone(),
+                chair: false,
+            },
+        )
+        .await;
+    }
+    (h, typed)
 }
 
 /// `senate attach --read-only` shows the screen as it is, though it was
@@ -2257,4 +2265,63 @@ async fn a_read_only_attach_shows_the_screen_and_types_nothing() {
     );
     draining.abort();
     attach(&h, &alias, b"\x1d").await;
+}
+
+/// `senate watch-all` shows every hosted session side by side, each under
+/// its name. Enter attaches to the focused one as `senate attach` does,
+/// detaching comes back to the grid, and `q` leaves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn watch_all_shows_every_session_and_enter_attaches_to_one() {
+    let (h, typed) = watched_sessions(&["north", "south"]).await;
+    let mut cmd = tokio::process::Command::new(BIN);
+    testenv::isolate_async(&mut cmd, h.dir.path());
+    cmd.arg("watch-all")
+        .env("SENATE_HOME", h.paths.home())
+        .kill_on_drop(true);
+    let (pty, pts) = pty_process::open().unwrap();
+    pty.resize(pty_process::Size::new(30, 120)).unwrap();
+    let mut child = pty_process::Command::from(cmd).spawn(pts).unwrap();
+    let (mut output, mut input) = pty.into_split();
+    tokio::time::timeout(TIMEOUT, async {
+        // One paint holds both tiles: each session's header and screen.
+        wait_terminal_output(&mut output, b"north \xc2\xb7 refund-v2 \xc2\xb7 claude").await;
+        wait_terminal_output(&mut output, b"painted before anyone looked").await;
+        wait_terminal_output(&mut output, b"south \xc2\xb7 refund-v2 \xc2\xb7 claude").await;
+        wait_terminal_output(&mut output, b"painted before anyone looked").await;
+        wait_terminal_output(&mut output, b"2 sessions").await;
+    })
+    .await
+    .expect("both sessions in the grid");
+
+    // Typing in the grid reaches no session; the arrow moves to `south`,
+    // and Enter attaches there.
+    input.write_all(b"xyz\x1b[C\r").await.unwrap();
+    tokio::time::timeout(TIMEOUT, async {
+        // A normal attach: it asks this terminal for its colours first.
+        wait_terminal_output(&mut output, b"\x1b[c").await;
+        input.write_all(b"\x1b[?62;22c").await.unwrap();
+        input.write_all(b"from the grid\rpaint\r").await.unwrap();
+        wait_terminal_output(&mut output, b"fixture TUI").await;
+        // Detaching comes back to the grid.
+        input.write_all(b"\x1d").await.unwrap();
+        wait_terminal_output(&mut output, b"2 sessions").await;
+    })
+    .await
+    .expect("attached from the grid, and back");
+    let reached = std::fs::read_to_string(&typed).unwrap_or_default();
+    assert_eq!(reached, "from the grid\n", "only what the attach typed");
+
+    let draining = tokio::spawn(async move {
+        let mut buf = [0; 4096];
+        while output.read(&mut buf).await.is_ok_and(|n| n > 0) {}
+    });
+    input.write_all(b"q").await.unwrap();
+    assert!(
+        tokio::time::timeout(TIMEOUT, child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+    draining.abort();
 }
