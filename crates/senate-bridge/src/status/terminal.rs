@@ -108,6 +108,175 @@ pub fn render_terminal(
     terminal.line(&mut out, &title, 0, true);
     sessions(view, now, full_ids, scope.is_none(), terminal, &mut out);
     connection(view, scope, terminal, &mut out);
+    problems(view, terminal, &mut out);
+    out
+}
+
+/// The everyday view: whether the daemon runs, and the sessions that are
+/// here. It leaves out each agent's delivery counters, ended sessions (it
+/// says how many), bindings and branches, and the connection details;
+/// [`render_terminal`] has them all.
+pub fn render_brief(
+    view: &StatusView,
+    now: DateTime<Utc>,
+    full_ids: bool,
+    scope: Option<&CommitteeId>,
+    terminal: Terminal,
+) -> String {
+    let l = view.locale;
+    let roles = view.roles.as_ref();
+    let name = |id: &str| {
+        if full_ids {
+            id.to_owned()
+        } else {
+            crate::terminal::brief_name(id).into_owned()
+        }
+    };
+    let senate = roles
+        .and_then(|r| r.senate.as_ref())
+        .or(view.senate.as_ref())
+        .map_or_else(|| l.pick("未知", "unknown").into(), ToString::to_string);
+    let mut rows = vec![
+        ("Senate", senate),
+        (
+            l.pick("委员会", "Committee"),
+            scope.map_or_else(|| l.pick("全部", "all").into(), ToString::to_string),
+        ),
+    ];
+    if let Some(committee) = scope {
+        let chair = roles
+            .and_then(|r| r.chairs.iter().find(|c| &c.committee == committee))
+            .map_or_else(
+                || l.pick("未知", "unknown").to_owned(),
+                |info| {
+                    info.chair.as_ref().map_or_else(
+                        || l.pick("暂无", "none").to_owned(),
+                        |chair| name(chair.as_str()),
+                    )
+                },
+            );
+        rows.push((l.pick("主席", "Chair"), chair));
+    }
+    rows.push((
+        l.pick("守护进程", "Daemon"),
+        match view.daemon {
+            Some(_) => l.pick("运行中", "running"),
+            None => l.pick(
+                "未运行 · 启动命令 senated --machine",
+                "offline · start with senated --machine",
+            ),
+        }
+        .to_owned(),
+    ));
+    let q = &view.queue;
+    let retrying = view
+        .committees
+        .iter()
+        .filter(|f| matches!(f.stream, Some(StreamState::Backoff { .. })))
+        .count();
+    let mut delivery = l.pick(
+        format!(
+            "{} 待投递 · {} 投递中 · {} 留给钩子",
+            q.pending, q.inflight, q.queued
+        ),
+        format!(
+            "{} pending · {} in flight · {} held for hooks",
+            q.pending, q.inflight, q.queued
+        ),
+    );
+    if retrying > 0 {
+        delivery.push_str(&l.pick(
+            format!(" · {retrying} 个连接在重试"),
+            format!(" · {retrying} stream(s) retrying"),
+        ));
+    }
+    rows.push((l.pick("投递", "Delivery"), delivery));
+    let mut out = crate::terminal::fields(Some(terminal), &rows);
+    for advisory in advisories(view) {
+        terminal.line(&mut out, &advisory, 0, false);
+    }
+
+    out.push('\n');
+    let count = |state| view.sessions.iter().filter(|s| s.state == state).count();
+    let (live, stale, ended) = (
+        count(SessionState::Live),
+        count(SessionState::Stale),
+        count(SessionState::Ended),
+    );
+    let mut title = l.pick(
+        format!("会话  {live} 活跃"),
+        format!("Sessions  {live} live"),
+    );
+    if stale > 0 {
+        title.push_str(&l.pick(format!(" · {stale} 失联"), format!(" · {stale} stale")));
+    }
+    if ended > 0 {
+        title.push_str(&l.pick(
+            format!(" · {ended} 已结束（未列出）"),
+            format!(" · {ended} ended (not listed)"),
+        ));
+    }
+    terminal.line(&mut out, &title, 0, true);
+    let cwd = l.pick("目录", "CWD");
+    let mut headers = l.pick(
+        vec!["Agent", "状态", "最近活动"],
+        vec!["Agent", "State", "Last seen"],
+    );
+    if scope.is_none() {
+        headers.insert(1, l.pick("委员会", "Committee"));
+    }
+    let rows: Vec<Row> = view
+        .sessions
+        .iter()
+        .filter(|s| s.state != SessionState::Ended)
+        .map(|s| {
+            let mut state = match s.state {
+                SessionState::Live => l.pick("活跃", "live"),
+                SessionState::Stale => l.pick("失联", "stale"),
+                SessionState::Ended => l.pick("已结束", "ended"),
+            }
+            .to_owned();
+            if s.socket_ok == Some(false) {
+                state.push_str(l.pick(" · 推送失败", " · push failed"));
+            }
+            let mut cells = vec![
+                Cell::Text(name(s.agent.as_str())),
+                Cell::Text(state),
+                Cell::Text(ago(s.last_seen, now, l)),
+            ];
+            if scope.is_none() {
+                cells.insert(1, Cell::Text(session_committee(s, l)));
+            }
+            Row {
+                cells,
+                details: vec![(cwd, home_relative(&s.cwd))],
+            }
+        })
+        .collect();
+    if rows.is_empty() {
+        terminal.line(
+            &mut out,
+            l.pick(
+                "没有活跃的会话 · 配置钩子见 senate install",
+                "No live sessions · see senate install",
+            ),
+            2,
+            false,
+        );
+    } else {
+        records(terminal, &mut out, headers, rows, full_ids, &[cwd]);
+    }
+    problems(view, terminal, &mut out);
+    out.push('\n');
+    terminal.line(
+        &mut out,
+        l.pick(
+            "--verbose 显示每个 agent 的投递、会话细节和连接信息。",
+            "--verbose adds each agent's delivery, session details and the connection.",
+        ),
+        0,
+        false,
+    );
     out
 }
 
@@ -451,8 +620,11 @@ fn connection(
             terminal.line(out, &parent_line(uplink, l), 2, false);
         }
     }
+}
+
+fn problems(view: &StatusView, terminal: Terminal, out: &mut String) {
     let mut problems = String::new();
-    render_secretary_problems(&view.secretary_problems, l, &mut problems);
+    render_secretary_problems(&view.secretary_problems, view.locale, &mut problems);
     for line in problems.lines() {
         if line.is_empty() {
             out.push('\n');

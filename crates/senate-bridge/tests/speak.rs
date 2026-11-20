@@ -25,6 +25,7 @@ async fn senate(h: &Harness, args: &[&str], stdin: Option<&str>, cwd: Option<&Pa
     senate_bridge::testenv::isolate(&mut cmd, h.dir.path());
     cmd.env("HOME", h.dir.path())
         .env("SENATE_HOME", h.paths.home())
+        .env("SENATE_VERBOSE", "1")
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1003,6 +1004,7 @@ impl Watcher {
         senate_bridge::testenv::isolate(&mut cmd, h.dir.path());
         cmd.env("HOME", h.dir.path())
             .env("SENATE_HOME", h.paths.home())
+            .env("SENATE_VERBOSE", "1")
             .arg("watch")
             .args(args)
             .stdin(Stdio::null())

@@ -491,6 +491,68 @@ fn display_cli(opts: &InstallOptions, args: &[String]) -> String {
     out
 }
 
+/// The everyday report of a dry run: each part's state on one line.
+/// [`render`] says what every change is and why.
+pub fn render_brief(
+    plan: &InstallPlan,
+    opts: &InstallOptions,
+    terminal: Option<crate::terminal::Terminal>,
+) -> String {
+    let l = opts.locale;
+    let current = || l.pick("已是最新", "up to date").to_owned();
+    let changes = |n: usize| match n {
+        0 => current(),
+        n => l.pick(format!("{n} 处改动"), format!("{n} change(s)")),
+    };
+    let mut rows = vec![
+        (
+            "MCP server",
+            match &plan.mcp {
+                McpPlan::Present => l.pick("已注册", "registered").to_owned(),
+                McpPlan::Add => l.pick("将注册", "will be registered").to_owned(),
+                McpPlan::Replace { current } => l.pick(
+                    format!("将替换 `{current}`"),
+                    format!("will replace `{current}`"),
+                ),
+            },
+        ),
+        (
+            l.pick("Claude Code 设置", "Claude Code settings"),
+            changes(plan.settings_changes.len()),
+        ),
+        (
+            l.pick("/senate 命令", "/senate command"),
+            match plan.command {
+                CommandPlan::Present => current(),
+                CommandPlan::Write => l.pick("将写入", "will be written").to_owned(),
+                CommandPlan::Foreign => l
+                    .pick(
+                        "保留：不是 Senate 的文件",
+                        "kept: the file there is not Senate's",
+                    )
+                    .to_owned(),
+            },
+        ),
+    ];
+    if let Some(codex) = &plan.codex {
+        rows.push(("Codex", changes(codex.changes.len())));
+    }
+    let mut out = crate::terminal::fields(terminal, &rows);
+    let _ = writeln!(
+        out,
+        "{}",
+        if plan.is_noop() {
+            l.pick("无需改动：已经安装。", "Nothing to do: already installed.")
+        } else {
+            l.pick(
+                "这是预演。加 --yes 执行；--verbose 显示每处改动。",
+                "This is a dry run. Add --yes to apply; --verbose shows each change.",
+            )
+        }
+    );
+    out
+}
+
 /// The report: what will change (or changed, when `applied`), in the
 /// options' locale.
 pub fn render(plan: &InstallPlan, opts: &InstallOptions, applied: bool) -> String {

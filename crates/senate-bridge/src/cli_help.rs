@@ -249,7 +249,7 @@ mod tests {
             "See what is happening:\n  status",
             "Speak as yourself:\n  ask",
             "Plumbing, run by coding agents and installers:\n  mcp",
-            "Options:\n  -h, --help",
+            "Options:\n  -v, --verbose",
             "senate help <command>",
         ] {
             assert!(piped.contains(needle), "{needle:?} in:\n{piped}");

@@ -653,6 +653,56 @@ pub fn render_uninstall(plan: &UninstallPlan, applied: bool, l: Locale) -> Strin
     out
 }
 
+/// The everyday `senate service status`: whether it runs, and its log.
+pub fn render_status_brief(
+    s: &Status,
+    l: Locale,
+    terminal: Option<crate::terminal::Terminal>,
+) -> String {
+    let manager = s.platform.manager_name();
+    let state = match (s.file_exists, s.loaded, s.running) {
+        (_, _, Some(true)) => l.pick(
+            format!("运行中（{manager}，登录时启动）"),
+            format!("running ({manager}, starts at login)"),
+        ),
+        (false, Some(false) | None, _) => l
+            .pick(
+                "未安装 · senate service install --yes",
+                "not installed · senate service install --yes",
+            )
+            .to_owned(),
+        (_, Some(true), Some(false)) => l.pick(
+            format!("已加载但未运行（{manager}）· 查看日志"),
+            format!("loaded but not running ({manager}) · see the log"),
+        ),
+        (true, Some(false), _) => l
+            .pick(
+                "已安装但未加载 · senate service install --yes",
+                "installed but not loaded · senate service install --yes",
+            )
+            .to_owned(),
+        _ => l.pick(
+            format!("无法查询 {manager}"),
+            format!("{manager} could not be asked"),
+        ),
+    };
+    let log = if s.log_exists {
+        crate::status::home_relative(&s.log)
+    } else {
+        l.pick(
+            format!("{}（还没有）", crate::status::home_relative(&s.log)),
+            format!("{} (not yet)", crate::status::home_relative(&s.log)),
+        )
+    };
+    crate::terminal::fields(
+        terminal,
+        &[
+            (l.pick("服务", "Service"), state),
+            (l.pick("日志", "Log"), log),
+        ],
+    )
+}
+
 pub fn render_status(s: &Status, l: Locale) -> String {
     let mut out = String::new();
     let _ = writeln!(
@@ -716,6 +766,32 @@ pub fn current_uid() -> u32 {
 mod tests {
     use super::*;
     use std::cell::RefCell;
+
+    #[test]
+    fn the_brief_status_says_whether_it_runs_and_what_to_do_when_it_does_not() {
+        let status = |file_exists, loaded, running| Status {
+            platform: Platform::Macos,
+            file: "/nowhere/dev.senate.senated.plist".into(),
+            file_exists,
+            loaded,
+            running,
+            log: "/nowhere/senated.log".into(),
+            log_exists: false,
+        };
+        let brief = |s: &Status| render_status_brief(s, Locale::En, None);
+        assert_eq!(
+            brief(&status(true, Some(true), Some(true))),
+            "Service  running (launchd, starts at login)\nLog      /nowhere/senated.log (not yet)\n"
+        );
+        assert!(
+            brief(&status(false, Some(false), Some(false)))
+                .contains("not installed · senate service install --yes")
+        );
+        assert!(brief(&status(true, Some(true), Some(false))).contains("loaded but not running"));
+        assert!(brief(&status(true, None, None)).contains("could not be asked"));
+        let zh = render_status_brief(&status(true, Some(true), Some(true)), Locale::Zh, None);
+        assert!(zh.contains("运行中"), "{zh}");
+    }
 
     fn spec(platform: Platform, user: &str, home: &str) -> Spec {
         Spec {

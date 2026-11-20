@@ -335,7 +335,7 @@ A coding session resolves its active **committee** from the first of these that 
 
 `senate status` and `senate watch` default to the directory's committee. Use `--global` for every committee or `--committee <id>` to select one. Outside a bound directory their default is global. Scoped status counts only that committee's queue. For deployment, check the machine-wide queue with `senate status --global`.
 
-In a terminal, `senate status` expands IDs as space allows and moves binding, branch, and working directory into the session table when they fit. Narrow terminals wrap the details below each session. Use `--full-ids` to show complete IDs at any width, or set `NO_COLOR=1` to turn off color. Piping or redirecting status and help preserves their plain-text format.
+With `--verbose` in a terminal, `senate status` expands IDs as space allows and moves binding, branch, and working directory into the session table when they fit. Narrow terminals wrap the details below each session. Use `--full-ids` to show complete IDs at any width, or set `NO_COLOR=1` to turn off color. Piping or redirecting status and help preserves their plain-text format.
 
 `senate status` says which one bound each session (`join`, `branch name`, `file`).
 
@@ -487,6 +487,8 @@ started terminal sessions can use their own native integration.
 ### The `senate` CLI
 
 `senate --help` lists the commands under headings (what is happening, speaking as yourself, this worktree, senators and sessions, setup, plumbing) with one line each; `senate help <command>` gives a command's details and examples. A command that needs the daemon says how to start it when it is not running.
+
+By default every command prints the everyday view: `senate status` shows the daemon and the live sessions; `where`, `list`, `free`, `install` (dry run) and `service status` print a few aligned lines; and senators are written short (`claude-6d8b2e5d…4382` for `[senator::claude-6d8b2e5d-4a60-486b-b3d8-21f2d82e4382]`), except inside quoted messages. `--verbose` (`-v`, before or after the command, or `SENATE_VERBOSE=1`) prints everything: each agent's delivery counters, ended sessions, bindings, connection details, every step of a plan and full IDs. `--json`, where a command has it, is unaffected. To address a senator, use an alias or the full ID from `--verbose` or `senate status --full-ids`: the short form is for reading.
 
 - `senate install`: Dry-run configuration updates for Claude Code and Codex (`--yes` to apply).
 - `senate receipt <seq> --committee <id> [--json]`: inspect an event's log receipt and any matching delivery records on this machine. Agents can use the read-only MCP tool `receipt(committee, seq)`. A recorded event has a sequence number; a bridge delivery record identifies a subsequent transport or read action. If the host blocks publication before Senate receives it, that attempt produces no receipt. Independent tasks can continue using their existing authorization.

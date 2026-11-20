@@ -30,7 +30,7 @@ use crate::paths::Paths;
 use crate::session::{Runtime, Session};
 use crate::state::{QueueCounts, Store};
 
-pub use terminal::render_terminal;
+pub use terminal::{render_brief, render_terminal};
 
 /// Everything `status` prints.
 #[derive(Debug, Clone, PartialEq)]
@@ -294,7 +294,7 @@ fn stream_text(state: Option<&StreamState>, now: DateTime<Utc>, locale: Locale) 
     }
 }
 
-fn home_relative(p: &Path) -> String {
+pub(crate) fn home_relative(p: &Path) -> String {
     match dirs::home_dir() {
         Some(home) => match p.strip_prefix(&home) {
             Ok(rest) => format!("~/{}", rest.display()),

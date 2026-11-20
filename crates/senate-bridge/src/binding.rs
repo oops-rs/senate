@@ -26,6 +26,7 @@ use crate::joinname::{self, BranchPart, Cannot, Choice, Derived, NameFrom};
 use crate::paths::Paths;
 use crate::session::{self, CommitteeSource, GitFacts, Runtime};
 use crate::state::Store;
+use crate::terminal::Terminal;
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Sessions that ended (or went stale) are forgotten after this long.
@@ -747,6 +748,66 @@ pub fn render_where(
     out
 }
 
+/// The everyday `senate where`: the committee, the branch and the names
+/// sessions here speak as. [`render_where`] adds the directory, where
+/// `.senate/` belongs and the other branches' saved copies.
+pub fn render_where_brief(
+    r: &Resolved,
+    would_join: Option<&Result<Derived, Cannot>>,
+    l: Locale,
+    terminal: Option<Terminal>,
+) -> String {
+    let committee = match &r.committee {
+        Some((c, src)) => format!("{c}  ({})", src.label(l)),
+        None => l.pick("未绑定", "unbound").to_string(),
+    };
+    let branch = match (&r.facts.branch, r.facts.toplevel.is_some()) {
+        (Some(b), _) => b.clone(),
+        (None, true) => l.pick("（HEAD 已分离）", "(detached HEAD)").to_string(),
+        (None, false) => l
+            .pick("（不是 git 仓库）", "(not a git repository)")
+            .to_string(),
+    };
+    let agents: Vec<String> = r
+        .agents
+        .iter()
+        .map(|a| {
+            if a.source == AgentSource::Harness && a.rel.as_str() == a.runtime.as_str() {
+                format!("{}-<session-id>", a.runtime.as_str())
+            } else {
+                format!(
+                    "{} ({}, {})",
+                    a.path.as_ref().unwrap_or(&a.rel),
+                    a.runtime.display_name(),
+                    a.source
+                )
+            }
+        })
+        .collect();
+    let mut out = crate::terminal::fields(
+        terminal,
+        &[
+            (l.pick("委员会", "Committee"), committee),
+            (l.pick("分支", "Branch"), branch),
+            (l.pick("会话身份", "Sessions join as"), agents.join(" · ")),
+        ],
+    );
+    if r.committee.is_none() {
+        if let Some(w) = would_join {
+            let _ = writeln!(out, "{}", would_join_line(w, l));
+        }
+        let _ = writeln!(
+            out,
+            "{}",
+            l.pick(
+                "用 `senate join <committee>` 绑定这个工作区（在当前分支上）。",
+                "`senate join <committee>` binds this worktree on this branch."
+            )
+        );
+    }
+    out
+}
+
 // ---- list -------------------------------------------------------------------
 
 /// One saved copy, as `senate list --json` prints it.
@@ -795,6 +856,44 @@ pub fn list(paths: &Paths) -> Vec<Row> {
             dir: s.dir,
         })
         .collect()
+}
+
+/// The everyday `senate list`: one aligned row per saved copy.
+pub fn render_list_brief(rows: &[Row], l: Locale, terminal: Option<Terminal>) -> String {
+    if rows.is_empty() {
+        return render_list(rows, l);
+    }
+    let cells: Vec<Vec<String>> = rows
+        .iter()
+        .map(|row| {
+            vec![
+                crate::status::home_relative(&row.worktree),
+                row.branch
+                    .clone()
+                    .unwrap_or_else(|| "(detached)".to_string()),
+                row.committee
+                    .clone()
+                    .unwrap_or_else(|| l.pick("未绑定", "unbound").to_string()),
+                row.saved_at.format("%Y-%m-%d").to_string(),
+                row.stale.map_or(String::new(), |why| {
+                    let s = match why {
+                        "repository gone" => Stale::RepositoryGone,
+                        "branch gone" => Stale::BranchGone,
+                        _ => Stale::WorktreeGone,
+                    };
+                    format!("{}: {}", l.pick("已过期", "stale"), stale_words_l(s, l))
+                }),
+            ]
+        })
+        .collect();
+    crate::terminal::table(
+        terminal,
+        &l.pick(
+            ["工作区", "分支", "委员会", "保存于", ""],
+            ["Worktree", "Branch", "Committee", "Saved", ""],
+        ),
+        &cells,
+    )
 }
 
 pub fn render_list(rows: &[Row], l: Locale) -> String {
@@ -1013,6 +1112,79 @@ fn human_bytes(n: u64) -> String {
     } else {
         format!("{n} B")
     }
+}
+
+/// The everyday `senate free`: only what there is to free.
+pub fn render_free_brief(r: &FreeReport, l: Locale, terminal: Option<Terminal>) -> String {
+    let items: usize = r.agents.iter().map(|(_, a)| a.items).sum();
+    let logs: u64 = r.logs.iter().map(|(_, size)| size).sum();
+    let mut rows = Vec::new();
+    if !r.slots.is_empty() {
+        rows.push((
+            l.pick("保存的副本", "Saved copies"),
+            r.slots.len().to_string(),
+        ));
+    }
+    if !r.sessions.is_empty() {
+        rows.push((
+            l.pick("会话记录", "Session records"),
+            r.sessions.len().to_string(),
+        ));
+    }
+    if !r.agents.is_empty() {
+        rows.push((
+            l.pick("失联的 agent", "Idle agents"),
+            l.pick(
+                format!("{}（{items} 条排队项）", r.agents.len()),
+                format!("{} ({items} queued items)", r.agents.len()),
+            ),
+        ));
+    }
+    if !r.logs.is_empty() {
+        let fate = match (r.logs_deleted, r.applied) {
+            (true, _) => l.pick("已删除", "deleted"),
+            (false, _) => l.pick(
+                "保留；--yes --delete-logs 才删除",
+                "kept; --yes --delete-logs removes them",
+            ),
+        };
+        rows.push((
+            l.pick("不再列出的 Senate 日志", "Logs of unlisted Senates"),
+            format!("{} ({}) · {fate}", r.logs.len(), human_bytes(logs)),
+        ));
+    }
+    let mut out = String::new();
+    if rows.is_empty() {
+        let _ = writeln!(
+            out,
+            "{}",
+            l.pick("没有过期的数据。", "Nothing has expired.")
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "{}",
+            match (r.applied, l) {
+                (true, _) => l.pick("已清理：", "Freed:"),
+                (false, _) => l.pick("将清理（预演）：", "Would free (dry run):"),
+            }
+        );
+        out.push_str(&crate::terminal::fields(terminal, &rows));
+        if !r.applied {
+            let _ = writeln!(
+                out,
+                "{}",
+                l.pick(
+                    "加 --yes 执行；--verbose 逐项列出。",
+                    "Add --yes to do it; --verbose lists each item."
+                )
+            );
+        }
+    }
+    for error in &r.errors {
+        let _ = writeln!(out, "{}: {error}", l.pick("错误", "error"));
+    }
+    out
 }
 
 pub fn render_free(r: &FreeReport, l: Locale) -> String {

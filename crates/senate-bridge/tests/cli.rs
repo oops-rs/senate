@@ -21,7 +21,17 @@ const BIN: &str = env!("CARGO_BIN_EXE_senate");
 fn bridge(home: &Path, senate_home: &Path) -> Command {
     let mut cmd = Command::new(BIN);
     senate_bridge::testenv::isolate(&mut cmd, home);
-    cmd.env("HOME", home).env("SENATE_HOME", senate_home);
+    // The full form, which most of these tests read; `brief` is the default.
+    cmd.env("HOME", home)
+        .env("SENATE_HOME", senate_home)
+        .env("SENATE_VERBOSE", "1");
+    cmd
+}
+
+/// As a person runs it day to day: the brief output.
+fn brief(home: &Path, senate_home: &Path) -> Command {
+    let mut cmd = bridge(home, senate_home);
+    cmd.env_remove("SENATE_VERBOSE");
     cmd
 }
 
@@ -676,6 +686,66 @@ fn help_groups_the_commands_and_gives_each_one_line_when_piped() {
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(text.contains("whichever agent (`*`)"), "{text}");
     assert!(text.contains("Examples:\n  senate ask claude"), "{text}");
+}
+
+#[test]
+fn the_default_output_is_brief_and_verbose_says_everything() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("senate");
+    let run = |args: &[&str]| {
+        let out = brief(dir.path(), &home)
+            .current_dir(dir.path())
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}: {out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+
+    let status = run(&["status"]);
+    assert!(
+        status.contains("Daemon     offline · start with senated --machine"),
+        "{status}"
+    );
+    assert!(status.contains("No live sessions"), "{status}");
+    assert!(status.contains("--verbose adds"), "{status}");
+    assert!(
+        !status.contains("Socket") && !status.contains("queue:"),
+        "{status}"
+    );
+    // The flag goes before or after the command, and has a short form.
+    for args in [["status", "--verbose"], ["-v", "status"]] {
+        let full = run(&args);
+        assert!(full.contains("daemon: not running"), "{full}");
+        assert!(full.contains("queue: 0 pending"), "{full}");
+    }
+
+    let here = run(&["where"]);
+    assert!(here.starts_with("Committee         unbound\n"), "{here}");
+    assert!(
+        here.contains("Sessions join as  claude-<session-id> · codex-<session-id>"),
+        "{here}"
+    );
+    assert!(here.contains("senate join <committee>"), "{here}");
+    assert!(!here.contains("directory "), "{here}");
+    assert!(run(&["where", "-v"]).starts_with("directory "));
+
+    // The variable takes any spelling of yes or no, and never fails to parse.
+    for (value, verbose) in [("true", true), ("yes", true), ("0", false), ("", false)] {
+        let out = brief(dir.path(), &home)
+            .current_dir(dir.path())
+            .env("SENATE_VERBOSE", value)
+            .arg("where")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{value:?}: {out:?}");
+        let text = String::from_utf8(out.stdout).unwrap();
+        assert_eq!(text.starts_with("directory "), verbose, "{value:?}: {text}");
+    }
+
+    assert_eq!(run(&["free"]), "Nothing has expired.\n");
+    let free = run(&["free", "--verbose"]);
+    assert!(free.contains("Session records would free 0"), "{free}");
 }
 
 #[test]

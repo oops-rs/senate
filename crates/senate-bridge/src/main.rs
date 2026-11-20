@@ -36,8 +36,46 @@ use senate_core::{CommitteeId, CommitteeSeatAction, EventId, Locale, Name, Senat
     about = "Reach your coding agents through Senate, and see what waits for you."
 )]
 struct Cli {
+    /// Print every detail and full IDs (also: SENATE_VERBOSE=1).
+    #[arg(
+        short,
+        long,
+        global = true,
+        env = "SENATE_VERBOSE",
+        hide_env = true,
+        action = clap::ArgAction::SetTrue,
+        // Any value but an empty one, `0`, `false`, `no` or `off` turns it
+        // on, so no setting of the variable can make a hook fail to parse.
+        value_parser = clap::builder::FalseyValueParser::new()
+    )]
+    verbose: bool,
     #[command(subcommand)]
     command: Cmd,
+}
+
+/// How much a command prints: the everyday view, or with `--verbose`
+/// everything there is.
+#[derive(Clone, Copy)]
+struct Output {
+    terminal: Option<Terminal>,
+    verbose: bool,
+}
+
+impl Output {
+    /// What a person reads: senators written short unless `--verbose`, and
+    /// no blank lines trailing.
+    fn text(self, text: &str) -> String {
+        let text = text.trim_end_matches('\n');
+        if self.verbose {
+            text.to_owned()
+        } else {
+            senate_bridge::terminal::brief_names(text)
+        }
+    }
+
+    fn print(self, text: &str) {
+        println!("{}", self.text(text));
+    }
 }
 
 // The first paragraph of each doc comment is the one-line summary that
@@ -842,6 +880,7 @@ async fn inbox(
     all: bool,
     mark_read: bool,
     locale: Locale,
+    verbose: bool,
 ) -> anyhow::Result<String> {
     let committee = committee_here(committee).await?;
     // The daemon's language, as every command that speaks as the person.
@@ -883,7 +922,20 @@ async fn inbox(
         },
     )
     .await?;
-    if !docket.senates.is_empty() {
+    let awaiting: usize = docket
+        .senates
+        .iter()
+        .flat_map(|senate| &senate.pages)
+        .map(|page| page.items.len())
+        .sum();
+    // `--all` and `--verbose` both show every seat; only `--all` adds the
+    // answered threads.
+    let all = all || verbose;
+    if !docket.senates.is_empty() && !all && awaiting == 0 {
+        // Day to day, who is seated is `senate status`'s to say.
+        out.push('\n');
+        out.push_str(locale.pick("没有等待 Speaker 的事项。", "Nothing awaits the Speaker."));
+    } else if !docket.senates.is_empty() {
         let idle = if all { 0 } else { drop_idle_seats(&mut docket) };
         out.push_str("\n\n");
         out.push_str(&preside::render_docket(&docket, locale));
@@ -916,7 +968,12 @@ fn drop_idle_seats(docket: &mut DocketReply) -> usize {
 }
 
 /// `senate watch`: what is addressed to the person, as it arrives.
-async fn watch(paths: &Paths, committee: Option<CommitteeId>, json: bool) -> anyhow::Result<()> {
+async fn watch(
+    paths: &Paths,
+    committee: Option<CommitteeId>,
+    json: bool,
+    output: Output,
+) -> anyhow::Result<()> {
     let pong: ipc::Pong = daemon_call(paths, &Request::Ping).await?;
     let mut stream = ipc::IpcClient::connect(&paths.socket(), Duration::from_secs(1))
         .await?
@@ -952,7 +1009,7 @@ async fn watch(paths: &Paths, committee: Option<CommitteeId>, json: bool) -> any
             writeln!(
                 out,
                 "{}\n",
-                person::render_news(news, *escalated, text, pong.locale)
+                output.text(&person::render_news(news, *escalated, text, pong.locale))
             )?;
         }
         out.flush()?;
@@ -988,6 +1045,7 @@ fn speak_new(
     committee: Option<CommitteeId>,
     wait: Option<u64>,
     json: bool,
+    output: Output,
 ) -> anyhow::Result<()> {
     let paths = Paths::from_env()?;
     let text = message_text(text)?;
@@ -999,11 +1057,11 @@ fn speak_new(
             if json {
                 return print_json(&sent.posted);
             }
-            println!("{}", sent.render(false));
+            output.print(&sent.render(false));
             return Ok(());
         };
         if !json {
-            println!("{}", sent.render(true));
+            output.print(&sent.render(true));
             std::io::stdout().flush()?;
         }
         match speak::wait_answer(&socket, &sent, Duration::from_secs(secs)).await? {
@@ -1011,7 +1069,7 @@ fn speak_new(
                 print_json(&serde_json::json!({ "posted": sent.posted, "answer": answer }))
             }
             Some(answer) => {
-                println!("{}", speak::render_arrival(&answer, sent.locale));
+                output.print(&speak::render_arrival(&answer, sent.locale));
                 Ok(())
             }
             None => anyhow::bail!(speak::render_timeout(sent.posted.seq, secs, sent.locale)),
@@ -1038,7 +1096,7 @@ fn service_spec() -> anyhow::Result<(service::Spec, Locale)> {
     ))
 }
 
-fn run_service(command: ServiceCmd) -> anyhow::Result<()> {
+fn run_service(command: ServiceCmd, output: Output) -> anyhow::Result<()> {
     let (spec, locale) = service_spec()?;
     match command {
         ServiceCmd::Install { yes, senated } => {
@@ -1069,7 +1127,14 @@ fn run_service(command: ServiceCmd) -> anyhow::Result<()> {
         }
         ServiceCmd::Status => {
             let status = service::status(&spec, &service::SystemManager);
-            print!("{}", service::render_status(&status, locale));
+            if output.verbose {
+                print!("{}", service::render_status(&status, locale));
+            } else {
+                print!(
+                    "{}",
+                    service::render_status_brief(&status, locale, output.terminal)
+                );
+            }
             if spec.platform == service::Platform::Linux
                 && status.file_exists
                 && std::fs::read_to_string(&status.file)
@@ -1085,7 +1150,8 @@ fn run_service(command: ServiceCmd) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run(command: Cmd, terminal: Option<Terminal>) -> anyhow::Result<()> {
+fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
+    let Output { terminal, verbose } = output;
     match command {
         Cmd::Hook { .. } => Ok(()),
         Cmd::Init {
@@ -1134,11 +1200,11 @@ fn run(command: Cmd, terminal: Option<Terminal>) -> anyhow::Result<()> {
                 );
             }
             for (alias, primary) in rows {
-                println!(
+                output.print(&format!(
                     "{} -> {}",
                     senate_core::Address::senator(&alias).in_text(),
                     senate_core::Address::senator(&primary).in_text()
-                );
+                ));
             }
             Ok(())
         }
@@ -1169,23 +1235,17 @@ fn run(command: Cmd, terminal: Option<Terminal>) -> anyhow::Result<()> {
             let locale = BridgeConfig::locale_at(&paths.config());
             let seat = senate_core::Address::senator(&reply.senator).in_text();
             match reply.action {
-                CommitteeSeatAction::Unseat => println!(
-                    "{}",
-                    locale.pick(
-                        format!("{seat} 已从 {} 除席（seq {}）", reply.committee, reply.seq),
-                        format!(
-                            "{seat} unseated from {} (seq {})",
-                            reply.committee, reply.seq
-                        ),
+                CommitteeSeatAction::Unseat => output.print(&locale.pick(
+                    format!("{seat} 已从 {} 除席（seq {}）", reply.committee, reply.seq),
+                    format!(
+                        "{seat} unseated from {} (seq {})",
+                        reply.committee, reply.seq
                     ),
-                ),
-                CommitteeSeatAction::Join => println!(
-                    "{}",
-                    locale.pick(
-                        format!("{seat} 已加入 {}（seq {}）", reply.committee, reply.seq),
-                        format!("{seat} joined {} (seq {})", reply.committee, reply.seq),
-                    ),
-                ),
+                )),
+                CommitteeSeatAction::Join => output.print(&locale.pick(
+                    format!("{seat} 已加入 {}（seq {}）", reply.committee, reply.seq),
+                    format!("{seat} joined {} (seq {})", reply.committee, reply.seq),
+                )),
             }
             Ok(())
         }
@@ -1254,12 +1314,12 @@ fn run(command: Cmd, terminal: Option<Terminal>) -> anyhow::Result<()> {
                         "The daemon did not confirm the alias."
                     )
                 );
-                println!(
+                output.print(&format!(
                     "{} -> {} ({})",
                     senate_core::Address::senator(&alias).in_text(),
                     senate_core::Address::senator(&reply.agent).in_text(),
                     reply.committee
-                );
+                ));
                 Ok(())
             })
         }
@@ -1329,7 +1389,16 @@ fn run(command: Cmd, terminal: Option<Terminal>) -> anyhow::Result<()> {
             };
             print!(
                 "{}",
-                binding::render_where(&resolved, would.as_ref(), settings.locale)
+                if verbose {
+                    binding::render_where(&resolved, would.as_ref(), settings.locale)
+                } else {
+                    binding::render_where_brief(
+                        &resolved,
+                        would.as_ref(),
+                        settings.locale,
+                        terminal,
+                    )
+                }
             );
             Ok(())
         }
@@ -1338,15 +1407,28 @@ fn run(command: Cmd, terminal: Option<Terminal>) -> anyhow::Result<()> {
             let rows = binding::list(&paths);
             if json {
                 print_json(&rows)
-            } else {
+            } else if verbose {
                 print!("{}", binding::render_list(&rows, settings.locale));
+                Ok(())
+            } else {
+                print!(
+                    "{}",
+                    binding::render_list_brief(&rows, settings.locale, terminal)
+                );
                 Ok(())
             }
         }
         Cmd::Free { yes, delete_logs } => {
             let (paths, settings) = settings_here();
             let report = binding::free(&paths, &settings, yes, delete_logs)?;
-            print!("{}", binding::render_free(&report, settings.locale));
+            print!(
+                "{}",
+                if verbose {
+                    binding::render_free(&report, settings.locale)
+                } else {
+                    binding::render_free_brief(&report, settings.locale, terminal)
+                }
+            );
             Ok(())
         }
         Cmd::Inbox {
@@ -1356,9 +1438,9 @@ fn run(command: Cmd, terminal: Option<Terminal>) -> anyhow::Result<()> {
         } => {
             let paths = Paths::from_env()?;
             let locale = BridgeConfig::locale_at(&paths.config());
-            let text =
-                runtime(false)?.block_on(inbox(&paths, committee, all, mark_read, locale))?;
-            println!("{text}");
+            let text = runtime(false)?
+                .block_on(inbox(&paths, committee, all, mark_read, locale, verbose))?;
+            output.print(&text);
             Ok(())
         }
         Cmd::Ask {
@@ -1367,20 +1449,20 @@ fn run(command: Cmd, terminal: Option<Terminal>) -> anyhow::Result<()> {
             committee,
             wait,
             json,
-        } => speak_new(SayKind::Question, to, text, committee, wait, json),
+        } => speak_new(SayKind::Question, to, text, committee, wait, json, output),
         Cmd::Tell {
             to,
             text,
             committee,
             json,
-        } => speak_new(SayKind::Note, to, text, committee, None, json),
+        } => speak_new(SayKind::Note, to, text, committee, None, json, output),
         Cmd::Request {
             to,
             text,
             committee,
             wait,
             json,
-        } => speak_new(SayKind::Request, to, text, committee, wait, json),
+        } => speak_new(SayKind::Request, to, text, committee, wait, json, output),
         Cmd::Reply {
             thread,
             text,
@@ -1396,7 +1478,7 @@ fn run(command: Cmd, terminal: Option<Terminal>) -> anyhow::Result<()> {
                 if json {
                     print_json(&posted)
                 } else {
-                    println!("{}", speak::render_replied(Seq(thread), &posted, locale));
+                    output.print(&speak::render_replied(Seq(thread), &posted, locale));
                     Ok(())
                 }
             })
@@ -1421,7 +1503,7 @@ fn run(command: Cmd, terminal: Option<Terminal>) -> anyhow::Result<()> {
             if json {
                 return print_json(&reply);
             }
-            println!("{}", reply.render(BridgeConfig::locale_at(&paths.config())));
+            output.print(&reply.render(BridgeConfig::locale_at(&paths.config())));
             Ok(())
         }
         Cmd::Thread {
@@ -1436,7 +1518,7 @@ fn run(command: Cmd, terminal: Option<Terminal>) -> anyhow::Result<()> {
                 if json {
                     print_json(&reply)
                 } else {
-                    println!("{}", speak::render_thread(&reply, locale));
+                    output.print(&speak::render_thread(&reply, locale));
                     Ok(())
                 }
             })
@@ -1445,7 +1527,7 @@ fn run(command: Cmd, terminal: Option<Terminal>) -> anyhow::Result<()> {
             let paths = Paths::from_env()?;
             runtime(false)?.block_on(async {
                 let committee = scope.resolve(&paths).await?;
-                watch(&paths, committee, json).await
+                watch(&paths, committee, json, output).await
             })
         }
         Cmd::Take { thread, committee } => {
@@ -1464,19 +1546,16 @@ fn run(command: Cmd, terminal: Option<Terminal>) -> anyhow::Result<()> {
                 )
                 .await
             })?;
-            println!(
-                "{}",
-                match locale {
-                    Locale::Zh => format!(
-                        "你接管了 {} 上的 thread {thread}（seq {}）。",
-                        posted.committee, posted.seq
-                    ),
-                    Locale::En => format!(
-                        "You took thread {thread} on {} over (seq {}).",
-                        posted.committee, posted.seq
-                    ),
-                }
-            );
+            output.print(&match locale {
+                Locale::Zh => format!(
+                    "你接管了 {} 上的 thread {thread}（seq {}）。",
+                    posted.committee, posted.seq
+                ),
+                Locale::En => format!(
+                    "You took thread {thread} on {} over (seq {}).",
+                    posted.committee, posted.seq
+                ),
+            });
             Ok(())
         }
         Cmd::Acp { command } => {
@@ -1648,7 +1727,12 @@ fn run(command: Cmd, terminal: Option<Terminal>) -> anyhow::Result<()> {
             if apply {
                 install::apply(&plan, &opts)?;
             }
-            print!("{}", install::render(&plan, &opts, apply));
+            // Applying is rare and its by-hand steps matter: say it all.
+            if apply || verbose {
+                print!("{}", install::render(&plan, &opts, apply));
+            } else {
+                print!("{}", install::render_brief(&plan, &opts, terminal));
+            }
             Ok(())
         }
         Cmd::CodexSmoke {
@@ -1665,7 +1749,7 @@ fn run(command: Cmd, terminal: Option<Terminal>) -> anyhow::Result<()> {
             let transport = config.transport().map_err(anyhow::Error::msg)?;
             runtime(false)?.block_on(codex_smoke(&transport, &thread, text.as_deref()))
         }
-        Cmd::Service { command } => run_service(command),
+        Cmd::Service { command } => run_service(command, output),
         Cmd::Status { scope, full_ids } => {
             let paths = Paths::from_env()?;
             let (view, committee) = runtime(false)?.block_on(async {
@@ -1674,11 +1758,19 @@ fn run(command: Cmd, terminal: Option<Terminal>) -> anyhow::Result<()> {
                 Ok::<_, anyhow::Error>((view, scope))
             })?;
             let now = chrono::Utc::now();
-            let text = match terminal {
-                Some(terminal) => {
+            let text = match (verbose, terminal) {
+                (true, Some(terminal)) => {
                     status::render_terminal(&view, now, full_ids, committee.as_ref(), terminal)
                 }
-                None => status::render_scope(&view, now, full_ids, committee.as_ref()),
+                (true, None) => status::render_scope(&view, now, full_ids, committee.as_ref()),
+                // Piped, the everyday view is the terminal's without colour.
+                (false, _) => status::render_brief(
+                    &view,
+                    now,
+                    full_ids,
+                    committee.as_ref(),
+                    terminal.unwrap_or(Terminal::new(100, false)),
+                ),
             };
             print!("{text}");
             Ok(())
@@ -1777,7 +1869,11 @@ fn main() -> ExitCode {
         run_hook(event, harness);
         return ExitCode::SUCCESS;
     }
-    match run(cli.command, terminal) {
+    let output = Output {
+        terminal,
+        verbose: cli.verbose,
+    };
+    match run(cli.command, output) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("senate: {}", describe_error(&e));

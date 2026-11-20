@@ -171,6 +171,7 @@ fn senate(dir: &Path, cwd: &Path, args: &[&str]) -> Output {
     senate_bridge::testenv::isolate(&mut cmd, dir);
     cmd.env("HOME", dir)
         .env("SENATE_HOME", dir.join("home"))
+        .env("SENATE_VERBOSE", "1")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .current_dir(cwd)
