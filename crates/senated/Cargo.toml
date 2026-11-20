@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-publish.workspace = true
+repository.workspace = true
 description = "The Senate daemon, and the assembly library a private layer builds its own daemon from: the log server, the built-in Speaker, chat surfaces and extra components on one Hub."
 
 [[bin]]

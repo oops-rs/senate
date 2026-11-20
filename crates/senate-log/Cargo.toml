@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-publish.workspace = true
+repository.workspace = true
 description = "The committee log: one append-only log per committee, kept in memory, in Postgres or in an embedded SQLite file, with cursors, mirror refs and heartbeats."
 
 [dependencies]

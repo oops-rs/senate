@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-publish.workspace = true
+publish = false
 description = "The shared core of the native Senate apps: a client of the developer-machine daemon, exposed to Swift over UniFFI."
 
 [lib]

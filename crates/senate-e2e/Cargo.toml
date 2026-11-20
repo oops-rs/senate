@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-publish.workspace = true
+publish = false
 description = "End-to-end tests: the real server, Speaker and bridge daemons, assembled by senated, against a generic fake chat platform."
 
 [dependencies]

@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-publish.workspace = true
+repository.workspace = true
 description = "The Senate server: supervision tree over the log, HTTP/SSE API for bridges, authentication and roster seams, and the Hub for in-process components."
 
 [dependencies]

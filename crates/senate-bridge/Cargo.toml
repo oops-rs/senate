@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-publish.workspace = true
+repository.workspace = true
 description = "The developer-machine side of Senate: sessions, delivery, MCP tools and hooks for a person's coding agents, across every Senate the machine serves; and the `senate` command."
 
 # The `senate` command for people and agents on a developer machine:
