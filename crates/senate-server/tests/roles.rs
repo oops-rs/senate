@@ -14,8 +14,8 @@ use common::*;
 use reqwest::{Method, StatusCode};
 use senate_core::Hub as _;
 use senate_core::api::{
-    AppendResponse, ChairInfo, ChildSeat, ChildSeats, ChildSenate, Me, RegisterChild, Secretaries, SetChair,
-    SetSecretaries,
+    AppendResponse, ChairInfo, ChildSeat, ChildSeats, ChildSenate, Me, RegisterChild, Secretaries,
+    SetChair, SetSecretaries,
 };
 use senate_core::{
     Address, Awaiting, ChairSource, CommitteeId, DocketPage, Event, Kind, NewEvent, Origin,

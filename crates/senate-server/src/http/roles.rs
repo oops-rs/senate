@@ -5,7 +5,8 @@ use axum::Json;
 use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{Path, Query, State};
 use senate_core::api::{
-    ChairInfo, ChildSeats, ChildSenate, RegisterChild, Resolved, Secretaries, SetChair, SetSecretaries,
+    ChairInfo, ChildSeats, ChildSenate, RegisterChild, Resolved, Secretaries, SetChair,
+    SetSecretaries,
 };
 use senate_core::{
     Address, Appended, CommitteeId, DocketPage, Hub, Kind, Locator, Name, NewEvent, PickPayload,

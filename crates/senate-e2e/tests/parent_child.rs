@@ -75,6 +75,28 @@ async fn the_parent_reaches_alices_desk_and_hears_back_in_its_own_thread() {
     // Her agents are not seated above.
     let roster = world.hub().roster().await.unwrap();
     assert!(!roster.knows(&path("claude")), "claude sits below only");
+    // Its seat is declared above, now that the committee exists there: who sits on it, and
+    // that the child is online. Nothing of the log goes with it.
+    let child = eventually("claude's seat declared above", || {
+        world
+            .daemon()
+            .hub
+            .children()
+            .into_iter()
+            .find(|c| c.seats.iter().any(|s| s.senator == path("claude")))
+    })
+    .await;
+    let seat = child
+        .seats
+        .iter()
+        .find(|s| s.senator == path("claude"))
+        .unwrap();
+    assert_eq!(seat.committee, refund());
+    assert_eq!(
+        seat.presence,
+        senate_core::continuity::PresenceState::Online
+    );
+    assert!(child.is_online(chrono::Utc::now()));
 
     // Bob asks the seat on alice's desk by its qualified name.
     let asked = speak(

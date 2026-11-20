@@ -30,7 +30,8 @@ use async_trait::async_trait;
 use ractor::rpc::CallResult;
 use ractor::{ActorRef, MessagingErr};
 use senate_core::api::{
-    ChairInfo, ChildSeat, ChildSenate, CommitteeSeatInfo, Heartbeat, PresencePage, Resolved, Secretaries,
+    ChairInfo, ChildSeat, ChildSenate, CommitteeSeatInfo, Heartbeat, PresencePage, Resolved,
+    Secretaries,
 };
 use senate_core::hub::SCAN_PAGE;
 use senate_core::{
@@ -357,7 +358,10 @@ impl ServerHub {
         registry::put_child(self.store.as_ref(), &child)
             .await
             .map_err(log_error)?;
-        let mut children = self.children.write().unwrap_or_else(PoisonError::into_inner);
+        let mut children = self
+            .children
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
         // Registering again (a reconnect) keeps what it last declared.
         let child = match children.get(&child.name) {
             Some(known) if known.speaker == child.speaker => ChildSenate {
@@ -377,7 +381,10 @@ impl ServerHub {
     /// offline until it declares them again, on its next poll. `None`: no
     /// such child.
     pub fn set_child_seats(&self, name: &Name, seats: Vec<ChildSeat>) -> Option<ChildSenate> {
-        let mut children = self.children.write().unwrap_or_else(PoisonError::into_inner);
+        let mut children = self
+            .children
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
         let child = children.get_mut(name)?;
         child.seats = seats;
         child.last_seen = Some(chrono::Utc::now());

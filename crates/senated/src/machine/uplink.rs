@@ -74,8 +74,8 @@ use std::time::Duration;
 use senate_bridge::client::{ApiClient, ApiClientError, Decoded, decode_event};
 use senate_bridge::ipc::{Registration, UplinkStatus};
 use senate_core::{
-    Address, CommitteeId, Event, EventId, Hub, Kind, Locale, Locator, Name, NewEvent, Origin,
-    SenatePath, SenatorId, Seq, is_provisional, meta,
+    Address, ChildSeat, ChildSeats, CommitteeId, Event, EventId, Hub, Kind, Locale, Locator, Name,
+    NewEvent, Origin, SenatePath, SenatorId, Seq, is_provisional, meta,
 };
 use senate_log::LogStore;
 use senate_server::ServerHub;
@@ -142,6 +142,7 @@ impl Uplink {
             above,
             config,
             registered: false,
+            shared: Vec::new(),
             last: None,
             backoff: Duration::ZERO,
         };
@@ -178,6 +179,9 @@ struct Worker {
     above: ApiClient,
     config: UplinkConfig,
     registered: bool,
+    /// The committees the Senate above shares with this one, as its last
+    /// `/v1/me` listed them: the ones whose seats are declared up.
+    shared: Vec<CommitteeId>,
     /// The registration last written, to log a change once.
     last: Option<Registration>,
     /// How long to wait before the next try to register: the poll period
@@ -439,7 +443,42 @@ impl Worker {
         if !self.registered {
             return Ok(());
         }
+        self.declare().await?;
         self.up().await
+    }
+
+    /// Declare this Senate's seats above: every senator on each committee
+    /// the Senate above shares with it, with its duty and presence here.
+    /// The whole set every pass; it also tells the Senate above this one
+    /// is online. Only seats cross, never content.
+    async fn declare(&self) -> Result<(), Pass> {
+        let here = self
+            .hub
+            .committees()
+            .await
+            .map_err(|e| Pass::Failed(format!("listing the committees here: {e}")))?;
+        let mut seats = Vec::new();
+        for committee in self.shared.iter().filter(|c| here.contains(c)) {
+            let page =
+                self.hub.presence(committee).await.map_err(|e| {
+                    Pass::Failed(format!("reading the presence on {committee}: {e}"))
+                })?;
+            seats.extend(page.agents.into_iter().map(|p| ChildSeat {
+                committee: committee.clone(),
+                senator: p.agent,
+                duty: None,
+                presence: p.state,
+            }));
+        }
+        tokio::time::timeout(
+            TIMEOUT,
+            self.above
+                .put_child_seats(&self.config.name, &ChildSeats { seats }),
+        )
+        .await
+        .map_err(|_| Pass::Lost("timed out".into()))?
+        .map_err(|e| lost_or_failed(&e))?;
+        Ok(())
     }
 
     /// This Senate's path.
@@ -459,6 +498,7 @@ impl Worker {
         let Some(parent) = self.parent().cloned() else {
             return Ok(());
         };
+        self.shared.clone_from(&me.committees);
         for committee in me.committees {
             let key = format!("{CURSOR}{committee}");
             let mut cursor: Seq = self.get(&key).await.unwrap_or(Seq::ZERO);

@@ -598,6 +598,18 @@ impl ApiClient {
         Ok(checked(resp).await?.json().await?)
     }
 
+    /// `PUT /v1/children/{name}/seats`: declare the child Senate `name`'s
+    /// seats (the whole set), as its Speaker.
+    pub async fn put_child_seats(
+        &self,
+        name: &senate_core::Name,
+        seats: &api::ChildSeats,
+    ) -> Result<api::ChildSenate, ApiClientError> {
+        let url = self.url(&api::child_seats_path(name));
+        let resp = self.authed(self.http.put(url)).json(seats).send().await?;
+        Ok(checked(resp).await?.json().await?)
+    }
+
     /// `GET /v1/children`: the child Senates registered here.
     pub async fn children(&self) -> Result<Vec<api::ChildSenate>, ApiClientError> {
         let url = self.url(api::CHILDREN_PATH);
