@@ -240,6 +240,7 @@ fn why_chair(item: &DocketItem, locale: Locale) -> String {
              checkpoint with chair_cover, or put it to the Speaker's desk with chair_escalate.",
             mentions(agents)
         ),
+        (Awaiting::ChildOffline { child }, _) => child_offline(child, locale),
     }
 }
 
@@ -282,6 +283,25 @@ fn why(item: &DocketItem, locale: Locale) -> String {
             "a question to {}, who is away, not answered yet. Answer on its behalf from its own \
              checkpoint with speaker_cover, or put it to the person with speaker_escalate.",
             mentions(agents)
+        ),
+        (Awaiting::ChildOffline { child }, _) => child_offline(child, locale),
+    }
+}
+
+/// Why a question for an offline child Senate awaits the office, and the
+/// tools for it.
+fn child_offline(child: &Name, locale: Locale) -> String {
+    match locale {
+        Locale::Zh => format!(
+            "问子 Senate [{child}] 的问题，它目前离线，还没人说明。能从这里看到的内容（brief、\
+             检查点、它申报的席位）回答时用 speaker_cover 代答；否则用 speaker_hold 告诉提问者\
+             已保留。它重新连接后都会收到这个问题。"
+        ),
+        Locale::En => format!(
+            "a question for the child Senate [{child}], which is offline, with nothing said of \
+             it yet. Answer on its behalf with speaker_cover when what this Senate sees (the \
+             brief, checkpoints, the seats it declared) answers it; otherwise tell the asker \
+             it is held with speaker_hold. It gets the question when it reconnects either way."
         ),
     }
 }

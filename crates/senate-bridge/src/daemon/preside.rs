@@ -114,6 +114,12 @@ impl Shared {
                     self.locale,
                 )));
             }
+            Awaiting::ChildOffline { child } => {
+                return Err(IpcError::bad_request(preside_text::for_an_offline_child(
+                    child,
+                    self.locale,
+                )));
+            }
             _ if self.people().is_person(&to) || &to == speaker => {
                 return Err(IpcError::bad_request(preside_text::route_to_an_agent(
                     &to,
@@ -163,6 +169,12 @@ impl Shared {
             )));
         }
         let (item, _) = self.docket_item(&committee, thread).await?;
+        if let Awaiting::ChildOffline { child } = &item.awaiting {
+            let body = senate_core::docket::child_offline_answer(self.locale, child, &body);
+            return self
+                .say_of_offline_child(speaker, item.event, child, Kind::Answer, body, id)
+                .await;
+        }
         let Awaiting::Away { agents } = &item.awaiting else {
             return Err(IpcError::bad_request(preside_text::not_away(self.locale)));
         };
@@ -210,6 +222,75 @@ impl Shared {
             })
             .with_meta(meta::TAKEOVER, serde_json::json!(true))
             .with_meta(meta::ACTED_BY, serde_json::json!(speaker.to_string()));
+        if let Some(id) = id {
+            event = event.with_id(id);
+        }
+        self.post(event).await
+    }
+
+    /// Tell the one who asked a child Senate that is offline that their
+    /// question is held for it.
+    pub(crate) async fn on_hold(
+        &self,
+        speaker: &SenatorName,
+        committee: CommitteeId,
+        seq: Seq,
+        id: Option<EventId>,
+    ) -> Result<Posted, IpcError> {
+        let (item, _) = self.docket_item(&committee, seq).await?;
+        let Awaiting::ChildOffline { child } = &item.awaiting else {
+            return Err(IpcError::bad_request(
+                preside_text::not_for_an_offline_child(self.locale),
+            ));
+        };
+        // As the Senate says now: this side's copy is from its last `/v1/me`.
+        let seen = self
+            .api
+            .children()
+            .await
+            .map_err(server_error)?
+            .into_iter()
+            .find(|c| c.name == *child)
+            .and_then(|c| c.last_seen);
+        let away = seen.map_or_else(chrono::Duration::zero, |seen| chrono::Utc::now() - seen);
+        let body = senate_core::docket::child_offline_held(self.locale, child, away);
+        self.say_of_offline_child(speaker, item.event, child, Kind::Note, body, id)
+            .await
+    }
+
+    /// The office's line in the thread of `root`, a question for the child
+    /// Senate `child` that is offline: an `answer` on the child's behalf,
+    /// or the `note` that it is held. To the one who asked; the question
+    /// itself still reaches the child when it reconnects.
+    async fn say_of_offline_child(
+        &self,
+        speaker: &SenatorName,
+        root: Event,
+        child: &Name,
+        kind: Kind,
+        body: String,
+        id: Option<EventId>,
+    ) -> Result<Posted, IpcError> {
+        let asker = root
+            .on_behalf_of
+            .clone()
+            .unwrap_or_else(|| root.from.clone());
+        let desk = root
+            .to
+            .iter()
+            .find(|a| matches!(a, Address::Child { senate, .. } if senate == child))
+            .cloned();
+        let answered = kind == Kind::Answer;
+        let mut event = NewEvent::new(root.committee.clone(), kind, Address::Speaker, body)
+            .in_thread(root.seq)
+            .with_meta(meta::CHILD_OFFLINE, serde_json::json!(child.as_str()))
+            .with_meta(meta::ACTED_BY, serde_json::json!(speaker.to_string()));
+        if asker != Address::Speaker {
+            event = event.to(asker);
+        }
+        if let (true, Some(desk)) = (answered, desk) {
+            event = event.on_behalf_of(desk);
+        }
         if let Some(id) = id {
             event = event.with_id(id);
         }
@@ -400,6 +481,30 @@ mod preside_text {
                  for: a question to it waits for its own session."
             ),
         }
+    }
+
+    pub(super) fn for_an_offline_child(child: &senate_core::Name, locale: Locale) -> String {
+        match locale {
+            Locale::Zh => format!(
+                "这是问子 Senate [{child}] 的问题，它目前离线，不能转给这里的 agent。用 \
+                 speaker_cover 代答，或 speaker_hold 告诉提问者已保留。"
+            ),
+            Locale::En => format!(
+                "This is a question for the child Senate [{child}], which is offline; it is not \
+                 rerouted to an agent here. Answer on its behalf with speaker_cover, or tell the \
+                 asker it is held with speaker_hold."
+            ),
+        }
+    }
+
+    pub(super) fn not_for_an_offline_child(locale: Locale) -> String {
+        locale
+            .pick(
+                "这件事不是问某个离线子 Senate 的问题，没有什么可保留的。",
+                "This item is not a question for a child Senate that is offline, so there is \
+                 nothing to hold.",
+            )
+            .to_owned()
     }
 
     pub(super) fn not_away(locale: Locale) -> String {

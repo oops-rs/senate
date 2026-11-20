@@ -564,7 +564,9 @@ fn reject_speaker_keys(event: &NewEvent) -> Result<(), ApiFailure> {
 /// work runs (the built-in Speaker's hands alone) and decisions (people
 /// decide). It speaks `on_behalf_of` a senator of this Senate (a listed
 /// person, or an agent: the away agent it covers, which need not have
-/// connected yet; the person whose message it relays) or a guest.
+/// connected yet; the person whose message it relays) or a guest; and, in
+/// an answer for a child Senate that is offline
+/// ([`meta::CHILD_OFFLINE`]), of that child's desk.
 fn check_speaker_write(event: &NewEvent) -> Result<(), ApiFailure> {
     if event.meta.contains_key(meta::WORK) {
         return Err(ApiFailure::forbidden(format!(
@@ -579,6 +581,12 @@ fn check_speaker_write(event: &NewEvent) -> Result<(), ApiFailure> {
     }
     match &event.on_behalf_of {
         None | Some(Address::Guest(_)) | Some(Address::Senator(_)) => Ok(()),
+        // The office answering for a child Senate that is offline.
+        Some(Address::Child { .. })
+            if event.kind == Kind::Answer && event.meta.contains_key(meta::CHILD_OFFLINE) =>
+        {
+            Ok(())
+        }
         Some(other) => Err(ApiFailure::bad_request(format!(
             "the Speaker speaks on behalf of a senator or a guest, not {other}"
         ))),

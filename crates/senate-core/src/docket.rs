@@ -19,6 +19,14 @@
 //!   another agent's, or escalates it to the person. Not an item while an
 //!   agent that is the away agent's secretary has a live connection:
 //!   that one covers it first ([`DocketPage::covered`]).
+//! - **A child Senate that is offline.** A root question addressed to a
+//!   child Senate's desk while that child is offline, with nothing said of
+//!   it yet ([`Awaiting::ChildOffline`]). The office answers it on the
+//!   child's behalf from what this Senate sees, or tells the one who asked
+//!   that it is held ([`child_offline_answer`], [`child_offline_held`]);
+//!   both lines carry [`meta::CHILD_OFFLINE`]. The question itself reaches
+//!   the child when it reconnects either way. Not an item once such a line
+//!   is in the thread, the child has replied there, or the child is back.
 //!
 //! An item leaves the docket when the Speaker writes in its thread, relays
 //! it, or the thread is archived. Folding is pure ([`SpeakerDocket`]); which
@@ -37,6 +45,7 @@ use crate::address::Address;
 use crate::continuity::PresenceState;
 use crate::event::{Event, Kind, StatusState, meta};
 use crate::ids::{CommitteeId, Name, Seq};
+use crate::locale::Locale;
 use crate::locator::Locator;
 use crate::roster::SpeakerSeat;
 use crate::senator::SenatorName;
@@ -80,6 +89,59 @@ pub enum Awaiting {
     /// A question to `agents`, none of which is connected, with no answer:
     /// cover for one of them from its own checkpoint.
     Away { agents: Vec<SenatorName> },
+    /// A question to the child Senate `child`, which is offline, with
+    /// nothing said of it yet: answer it on the child's behalf, or tell
+    /// the one who asked that it is held.
+    ChildOffline { child: Name },
+}
+
+/// The office's note in the thread of a message for a child Senate that
+/// is offline: it is held. `away`: how long the child has not been seen.
+pub fn child_offline_held(locale: Locale, child: &Name, away: chrono::Duration) -> String {
+    let minutes = away.num_minutes().max(0);
+    let (n, zh, en) = if minutes < 60 {
+        (minutes, "分钟", "minute")
+    } else if minutes < 48 * 60 {
+        (minutes / 60, "小时", "hour")
+    } else {
+        (minutes / (24 * 60), "天", "day")
+    };
+    match locale {
+        Locale::Zh => format!(
+            "[{child}] 目前离线（最后一次连接在 {n} {zh}前）。这条消息已保留，它重新连接后会收到。"
+        ),
+        Locale::En => format!(
+            "[{child}] is offline (last seen {n} {en}{s} ago). This is held for it and reaches \
+             it when it reconnects.",
+            s = if n == 1 { "" } else { "s" },
+        ),
+    }
+}
+
+/// The office's answer for a child Senate that is offline: `text`, under a
+/// line saying whose answer it is.
+pub fn child_offline_answer(locale: Locale, child: &Name, text: &str) -> String {
+    let text = text.trim();
+    match locale {
+        Locale::Zh => format!(
+            "[{child}] 目前离线，以下由 Speaker 的办公室代答；它重新连接后仍会收到这个问题。\n{text}"
+        ),
+        Locale::En => format!(
+            "[{child}] is offline; the Speaker's office answers for it below. It still gets \
+             the question when it reconnects.\n{text}"
+        ),
+    }
+}
+
+/// The child Senate a root question is put to, when it is put to one.
+fn asked_of_child(event: &Event) -> Option<&Name> {
+    if event.thread.is_some() || event.kind != Kind::Question {
+        return None;
+    }
+    event.to.iter().find_map(|address| match address {
+        Address::Child { senate, .. } => Some(senate),
+        _ => None,
+    })
 }
 
 /// One item awaiting the Speaker: the root event and why.
@@ -167,6 +229,10 @@ pub fn awaits_speaker(event: &Event) -> bool {
 pub struct SpeakerDocket {
     head: Seq,
     open: BTreeMap<Seq, Event>,
+    /// Root questions put to a child Senate that nothing in their thread
+    /// settles yet, with the child. Whether the child is offline is the
+    /// server's to say when the docket is served.
+    of_children: BTreeMap<Seq, (Event, Name)>,
     people: crate::People,
 }
 
@@ -191,6 +257,21 @@ impl SpeakerDocket {
             return;
         }
         self.head = event.seq;
+        if let Some(child) = asked_of_child(event) {
+            self.of_children
+                .insert(event.seq, (event.clone(), child.clone()));
+        } else if let Some(root) = event.thread
+            && let Some((_, child)) = self.of_children.get(&root)
+        {
+            // The office said it is held or answered for the child, the
+            // child replied, or the thread is closed.
+            let settled = event.meta.contains_key(meta::CHILD_OFFLINE)
+                || matches!(&event.from, Address::Child { senate, .. } if senate == child)
+                || StatusPayload::of(event).is_some_and(|s| s.state == StatusState::Archived);
+            if settled {
+                self.of_children.remove(&root);
+            }
+        }
         if awaits_speaker(event) {
             self.open.insert(event.seq, event.clone());
             return;
@@ -201,6 +282,15 @@ impl SpeakerDocket {
             event.from == Address::Speaker,
             &self.people,
         );
+    }
+
+    /// The root questions put to a child Senate that nothing settles yet,
+    /// oldest first, each with the child: items while that child is
+    /// offline ([`Awaiting::ChildOffline`]).
+    pub fn of_children(&self) -> impl Iterator<Item = (&Event, &Name)> {
+        self.of_children
+            .values()
+            .map(|(event, child)| (event, child))
     }
 
     /// The open items, oldest first, each with why it waits.
@@ -286,6 +376,85 @@ mod tests {
             .to(Address::Speaker)
             .with_meta(meta::PICK, payload.value()),
         )
+    }
+
+    /// A root question put to a child Senate is the office's to settle
+    /// while the child is offline, until a line says so, the child
+    /// replies, or the thread is archived.
+    #[test]
+    fn a_question_for_a_child_senate_is_tracked_until_something_settles_it() {
+        let child = Name::new("north-desk").unwrap();
+        let desk = Address::child(child.clone(), c());
+        let asked = |seq: u64| {
+            at(
+                seq,
+                NewEvent::new(c(), Kind::Question, Address::Speaker, "is the cap 3?")
+                    .to(desk.clone())
+                    .on_behalf_of(addr("senator::alice")),
+            )
+        };
+        let mut docket = SpeakerDocket::new();
+        docket.observe(&asked(1));
+        docket.observe(&asked(2));
+        docket.observe(&asked(3));
+        docket.observe(&asked(4));
+        // A note or a request is not answered for anyone: never tracked.
+        docket.observe(&at(
+            5,
+            NewEvent::new(c(), Kind::Note, addr("senator::alice"), "fyi").to(desk.clone()),
+        ));
+        let open = |docket: &SpeakerDocket| -> Vec<u64> {
+            docket.of_children().map(|(event, _)| event.seq.0).collect()
+        };
+        assert_eq!(open(&docket), [1, 2, 3, 4]);
+        assert!(docket.items().is_empty(), "not addressed to the Speaker");
+        assert_eq!(docket.of_children().next().unwrap().1, &child);
+
+        // The office's line, held or answered.
+        docket.observe(&at(
+            6,
+            NewEvent::new(c(), Kind::Note, Address::Speaker, "held")
+                .in_thread(Seq(1))
+                .with_meta(meta::CHILD_OFFLINE, serde_json::json!("north-desk")),
+        ));
+        // The child's own reply.
+        docket.observe(&at(
+            7,
+            NewEvent::new(c(), Kind::Answer, desk.clone(), "yes").in_thread(Seq(2)),
+        ));
+        // Anything else in the thread settles nothing.
+        docket.observe(&at(
+            8,
+            NewEvent::new(c(), Kind::Note, addr("senator::alice"), "ping").in_thread(Seq(3)),
+        ));
+        assert_eq!(open(&docket), [3, 4]);
+        let archived = StatusPayload::new(StatusState::Archived);
+        docket.observe(&at(
+            9,
+            NewEvent::new(c(), Kind::Status, Address::Speaker, "")
+                .in_thread(Seq(4))
+                .with_meta(meta::STATUS, archived.value()),
+        ));
+        assert_eq!(open(&docket), [3]);
+    }
+
+    #[test]
+    fn the_lines_for_an_offline_child_senate_read_in_both_languages() {
+        let child = Name::new("north-desk").unwrap();
+        assert_eq!(
+            child_offline_held(Locale::Zh, &child, chrono::Duration::minutes(5)),
+            "[north-desk] 目前离线（最后一次连接在 5 分钟前）。这条消息已保留，它重新连接后会收到。"
+        );
+        assert_eq!(
+            child_offline_held(Locale::En, &child, chrono::Duration::minutes(90)),
+            "[north-desk] is offline (last seen 1 hour ago). This is held for it and reaches \
+             it when it reconnects."
+        );
+        assert_eq!(
+            child_offline_answer(Locale::En, &child, " 30 days. "),
+            "[north-desk] is offline; the Speaker's office answers for it below. It still gets \
+             the question when it reconnects.\n30 days."
+        );
     }
 
     #[test]

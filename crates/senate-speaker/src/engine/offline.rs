@@ -39,7 +39,7 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use senate_core::ChildSenate;
+use senate_core::{ChildSenate, docket};
 
 use super::desk::DeskTurn;
 use super::{
@@ -47,7 +47,6 @@ use super::{
     debug, derived_event_id, json, meta, warn,
 };
 use crate::brain::{Offline, OfflineInput};
-use crate::render;
 use crate::secretary::Duty;
 
 impl Engine {
@@ -65,7 +64,7 @@ impl Engine {
             };
             self.children
                 .iter()
-                .find(|c| c.name == *senate && c.last_seen.is_some() && !c.is_online(now))
+                .find(|c| c.name == *senate && c.is_offline(now))
                 .map(|child| (child.clone(), address.clone()))
         })
     }
@@ -136,13 +135,13 @@ impl Engine {
         let (kind, body) = match &decision {
             Offline::Answer(text) if !text.trim().is_empty() => (
                 Kind::Answer,
-                render::child_offline_answer(l, &child.name, text),
+                docket::child_offline_answer(l, &child.name, text),
             ),
             Offline::Answer(_) | Offline::Hold => {
                 let away = child
                     .last_seen
                     .map_or_else(chrono::Duration::zero, |seen| Utc::now() - seen);
-                (Kind::Note, render::child_offline_held(l, &child.name, away))
+                (Kind::Note, docket::child_offline_held(l, &child.name, away))
             }
         };
         let answered = kind == Kind::Answer;

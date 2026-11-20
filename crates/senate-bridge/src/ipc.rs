@@ -47,6 +47,7 @@
 //! | `docket` | `session`, `committee?` | [`DocketReply`] |
 //! | `route` | `session`, `committee`, `seq`, `to`, `id?` | [`Posted`] |
 //! | `cover` | `session`, `committee`, `thread`, `body`, `agent?`, `id?` | [`Posted`] |
+//! | `hold` | `session`, `committee`, `seq`, `id?` | [`Posted`] |
 //! | `refer` | `session`, `committee`, `seq`, `reason`, `id?` | [`Posted`] |
 //! | `forward` | `session`, `committee`, `seq`, `id?` | [`Forwarded`] |
 //! | `refuse` | `session`, `committee`, `seq`, `reason`, `id?` | [`Posted`] |
@@ -662,7 +663,8 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<EventId>,
     },
-    /// Answer a question to an away agent on its behalf.
+    /// Answer a question to an away agent on its behalf, or one for a
+    /// child Senate that is offline on the child's.
     Cover {
         session: SessionSelector,
         committee: CommitteeId,
@@ -670,6 +672,15 @@ pub enum Request {
         body: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent: Option<SenatorName>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<EventId>,
+    },
+    /// Tell the one who asked a child Senate that is offline that the
+    /// question is held for it.
+    Hold {
+        session: SessionSelector,
+        committee: CommitteeId,
+        seq: Seq,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<EventId>,
     },

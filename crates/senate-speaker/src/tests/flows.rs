@@ -2059,17 +2059,6 @@ async fn a_question_for_an_offline_child_senate_is_held_and_the_asker_told() {
         Some("north-desk::refund-v2::senator::responder")
     );
     assert!(asked[0].brief.is_some());
-
-    // In English.
-    assert_eq!(
-        render::child_offline_held(
-            Locale::En,
-            &name("north-desk"),
-            chrono::Duration::minutes(90)
-        ),
-        "[north-desk] is offline (last seen 1 hour ago). This is held for it and reaches it \
-         when it reconnects."
-    );
 }
 
 /// The Brain may answer on the child's behalf: its answer goes to the one

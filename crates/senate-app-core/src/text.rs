@@ -181,6 +181,15 @@ pub fn awaiting_away(locale: Locale, agents: &[String]) -> String {
     }
 }
 
+pub fn awaiting_child_offline(locale: Locale, child: &str) -> String {
+    match locale {
+        Locale::Zh => format!("问了子 Senate [{child}]，它离线：代答，或告知已保留"),
+        Locale::En => format!(
+            "asked of the child Senate [{child}], which is offline: answer for it, or say it is held"
+        ),
+    }
+}
+
 fn list(locale: Locale, items: &[String]) -> String {
     items.join(locale.pick("、", ", "))
 }

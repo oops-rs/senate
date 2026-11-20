@@ -617,6 +617,11 @@ fn docket_entry(item: &DocketItem, locale: Locale) -> DocketEntry {
             let why = text::awaiting_away(locale, &agents);
             ("away", agents, why)
         }
+        Awaiting::ChildOffline { child } => (
+            "child_offline",
+            Vec::new(),
+            text::awaiting_child_offline(locale, child.as_str()),
+        ),
     };
     DocketEntry {
         committee: e.committee.to_string(),

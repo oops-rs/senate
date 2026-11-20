@@ -699,6 +699,29 @@ impl ServerHub {
                     .filter(|item| item.event.is_hosted_approval(&people)),
             );
         }
+        // A question put to a child Senate that is offline, with nothing
+        // said of it yet, is the office's: answered for the child, or said
+        // held. Whoever works the desk sees it, the person presiding too.
+        let now = chrono::Utc::now();
+        let children = self.children();
+        items.extend(
+            self.folded(&self.dockets, committee)
+                .await?
+                .fold
+                .of_children()
+                .filter(|(_, child)| {
+                    children
+                        .iter()
+                        .any(|c| c.name == **child && c.is_offline(now))
+                })
+                .map(|(event, child)| DocketItem {
+                    awaiting: Awaiting::ChildOffline {
+                        child: child.clone(),
+                    },
+                    intended: senate_core::locator::intended(event),
+                    event: event.clone(),
+                }),
+        );
         // Covering for an absent agent is the desk's duty toward other
         // agents: what is addressed to the seat's holder is that agent's
         // own question, delivered when its session opens.

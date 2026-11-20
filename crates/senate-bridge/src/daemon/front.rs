@@ -148,6 +148,15 @@ impl Front {
                 ),
                 Err(e) => Reply::err(e),
             },
+            Request::Hold {
+                session,
+                committee,
+                seq,
+                id,
+            } => match self.presiding(&session) {
+                Ok((seat, speaker)) => wrap(seat.on_hold(&speaker, committee, seq, id).await),
+                Err(e) => Reply::err(e),
+            },
             Request::Refer {
                 session,
                 committee,

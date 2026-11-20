@@ -1370,6 +1370,87 @@ async fn an_answer_where_the_desk_forwarded_goes_back_to_the_asking_thread() {
     server.running.shutdown().await.unwrap();
 }
 
+// A child Senate that is offline.
+
+/// A root question put to a child Senate that is offline is the Speaker's
+/// office's to settle, so it is on the desk's docket: until the office
+/// says it is held (or answers for the child), the child replies, or the
+/// child is back. A child that never declared itself is not known to be
+/// offline.
+#[tokio::test]
+async fn a_question_for_an_offline_child_senate_awaits_the_office() {
+    let server = TestServer::start_configured(Arc::new(MemoryStore::new()), |c| {
+        c.roster.speaker = speaker_id("senator::alice");
+        c.roster.agents = vec![seated("claude", "alice")];
+    })
+    .await;
+    let hub = &server.running.hub;
+    let child = |name: &str, seen: Option<i64>| {
+        let mut child = ChildSenate::new(common::name(name), path("bob"));
+        child.last_seen = seen.map(|m| chrono::Utc::now() - chrono::Duration::minutes(m));
+        child
+    };
+    hub.register_child(child("north-desk", Some(10)))
+        .await
+        .unwrap();
+    hub.register_child(child("south-desk", None)).await.unwrap();
+    let ask = |desk: &str, body: &str| {
+        let event = NewEvent::new(committee(), Kind::Question, person_addr("carol"), body)
+            .to(Address::child(common::name(desk), committee()));
+        let server = &server;
+        async move {
+            let response = server.post_event(CAROL, &event).await;
+            assert!(response.status().is_success(), "{}", response.status());
+            response.json::<AppendResponse>().await.unwrap().event
+        }
+    };
+    let offline = |page: &DocketPage| -> Vec<(u64, String)> {
+        page.items
+            .iter()
+            .filter_map(|item| match &item.awaiting {
+                Awaiting::ChildOffline { child } => Some((item.event.seq.0, child.to_string())),
+                _ => None,
+            })
+            .collect()
+    };
+
+    let first = ask("north-desk", "Is the cap 3?").await;
+    let second = ask("north-desk", "Which header carries the key?").await;
+    // south-desk has not declared itself: not known to be offline.
+    ask("south-desk", "Anyone there?").await;
+    // A note is never answered for anyone.
+    let note = NewEvent::new(committee(), Kind::Note, person_addr("carol"), "fyi")
+        .to(Address::child(common::name("north-desk"), committee()));
+    assert!(server.post_event(CAROL, &note).await.status().is_success());
+    let page = docket(&server, &committee(), "speaker").await;
+    assert_eq!(
+        offline(&page),
+        [
+            (first.seq.0, "north-desk".to_owned()),
+            (second.seq.0, "north-desk".to_owned())
+        ]
+    );
+
+    // The office says the first is held: it leaves the docket.
+    hub.append(
+        NewEvent::new(committee(), Kind::Note, Address::Speaker, "held")
+            .in_thread(first.seq)
+            .to(person_addr("carol"))
+            .with_meta(meta::CHILD_OFFLINE, json!("north-desk")),
+    )
+    .await
+    .unwrap();
+    let page = docket(&server, &committee(), "speaker").await;
+    assert_eq!(offline(&page), [(second.seq.0, "north-desk".to_owned())]);
+
+    // The child declares itself again: nothing of it awaits the office.
+    hub.set_child_seats(&common::name("north-desk"), Vec::new())
+        .unwrap();
+    let page = docket(&server, &committee(), "speaker").await;
+    assert_eq!(offline(&page), []);
+    server.running.shutdown().await.unwrap();
+}
+
 // Secretaries.
 
 /// The Speaker's office is in no log, so a stream says it: as it is when

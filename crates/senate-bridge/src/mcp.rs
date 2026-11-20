@@ -8,8 +8,8 @@
 //! A session whose agent works the Speaker's desk (the Speaker itself when
 //! it is an agent, or one of the Speaker's secretaries) also gets the
 //! presiding tools ([`PRESIDING_TOOLS`]: `speaker_docket`, `speaker_route`,
-//! `speaker_cover`, `speaker_escalate`, `speaker_forward`, `speaker_refuse`,
-//! `speaker_chair`; see [`crate::preside`]): each acts for the Speaker's
+//! `speaker_cover`, `speaker_hold`, `speaker_escalate`, `speaker_forward`,
+//! `speaker_refuse`, `speaker_chair`; see [`crate::preside`]): each acts for the Speaker's
 //! office, recorded with the agent that acted. A session whose agent chairs
 //! its committee gets the chair tools ([`CHAIR_TOOLS`]). The tool list asks
 //! the daemon (`presides`, with the session's own agent pins, so it works
@@ -110,10 +110,11 @@ const MARKDOWN: &str = "text/markdown";
 
 /// The tools only a session working the Speaker's desk is given: each acts
 /// for the Speaker's office.
-pub const PRESIDING_TOOLS: [&str; 7] = [
+pub const PRESIDING_TOOLS: [&str; 8] = [
     "speaker_docket",
     "speaker_route",
     "speaker_cover",
+    "speaker_hold",
     "speaker_escalate",
     "speaker_forward",
     "speaker_refuse",
@@ -149,11 +150,13 @@ const CHAIR_ESCALATE: &str = "As chair of this session's committee, put an item 
 
 const SECRETARY: &str = "List, add or remove the secretaries of this session's agent: senators (another agent of this Senate, or the built-in session) that act for it while it is away, in order, the first present acting. A secretary answers a question to your agent from your agent's own checkpoint and notes (a secretary that is an agent does it with secretary_cover), labelled as your agent's answer given by its secretary; it never performs a request. `action`: `list`, `add` or `remove`. `secretary`: the agent to add or remove, e.g. `codex`. Only your agent itself, the principal that runs it, or the Speaker's office may change its secretaries; anyone else is refused.";
 
-const SPEAKER_DOCKET: &str = "You preside over a Senate as its Speaker (this tool is only given to the session that does). List what awaits the Speaker there: messages written to whichever agent (`senator::*`) when several agents could get them (pick one with speaker_route), messages addressed to the Speaker, and questions to agents of that Senate that are away and unanswered (answer for them from their own checkpoint with speaker_cover). For each agent seated there it shows its presence, latest checkpoint and open threads, the facts to pick by; for each away agent an item names, its latest checkpoint in full. `committee`: one committee only; by default every committee of that Senate.";
+const SPEAKER_DOCKET: &str = "You preside over a Senate as its Speaker (this tool is only given to the session that does). List what awaits the Speaker there: messages written to whichever agent (`senator::*`) when several agents could get them (pick one with speaker_route), messages addressed to the Speaker, questions to agents of that Senate that are away and unanswered (answer for them from their own checkpoint with speaker_cover), and questions for a child Senate that is offline (answer on its behalf with speaker_cover, or say it is held with speaker_hold). For each agent seated there it shows its presence, latest checkpoint and open threads, the facts to pick by; for each away agent an item names, its latest checkpoint in full. `committee`: one committee only; by default every committee of that Senate.";
 
 const SPEAKER_ROUTE: &str = "As Speaker of the Senate you preside over, route an item from speaker_docket to one agent seated there. The message is relayed to that agent in the original sender's name and the item leaves the docket. For a message written to whichever agent, `to` must be one of its candidates; pick by the task and by what each agent is working on (presence, checkpoint, open threads), and escalate with speaker_escalate when unsure. A question to an away agent is never rerouted to a sibling: answer for it with speaker_cover. `committee` and `seq`: as speaker_docket lists the item. `to`: the agent, e.g. `senator::reviewer` or `reviewer`.";
 
-const SPEAKER_COVER: &str = "As Speaker of the Senate you preside over, answer a question to an away agent of that Senate on that agent's behalf, from that agent's own latest checkpoint (speaker_docket shows it in full). The answer is labelled as the Speaker answering for that agent, with the takeover word, and points at the checkpoint's branch and commit; the agent's own answer later still counts. Answer only from what the checkpoint says; when it does not cover the question, use speaker_escalate instead. `committee` and `thread`: the question's, as speaker_docket lists it. `body`: the answer, self-contained. `agent`: which of the agents the question went to, when it went to several.";
+const SPEAKER_COVER: &str = "As Speaker of the Senate you preside over, answer a question to an away agent of that Senate on that agent's behalf, from that agent's own latest checkpoint (speaker_docket shows it in full). The answer is labelled as the Speaker answering for that agent, with the takeover word, and points at the checkpoint's branch and commit; the agent's own answer later still counts. Answer only from what the checkpoint says; when it does not cover the question, use speaker_escalate instead. `committee` and `thread`: the question's, as speaker_docket lists it. `body`: the answer, self-contained. `agent`: which of the agents the question went to, when it went to several. The same tool answers a question for a child Senate that is offline on that child's behalf: answer only from what this Senate sees (the brief, checkpoints, the seats the child declared), say what you relied on, and promise nothing in its name; when that does not answer it, use speaker_hold instead.";
+
+const SPEAKER_HOLD: &str = "As Speaker of the Senate you preside over, tell the one who asked a child Senate that is offline that their question is held for it: one line in the question's thread saying the child Senate is offline and since when. Use it when what this Senate sees does not answer the question (otherwise answer on the child's behalf with speaker_cover). The question itself is untouched and reaches the child Senate when it reconnects. `committee` and `seq`: as speaker_docket lists the item.";
 
 const SPEAKER_ESCALATE: &str = "As Speaker of the Senate you preside over, put an item from speaker_docket that you cannot settle to the person: the one whose agent was meant, else your own person. A question to an agent is suspended on them; anything else becomes a question to them in its thread. The item leaves the docket. `committee` and `seq`: as speaker_docket lists the item. `reason`: one or two sentences the person reads: what is needed and why you could not settle it.";
 
@@ -382,6 +385,15 @@ pub struct ForwardParams {
     /// The item's committee, as speaker_docket lists it.
     pub committee: String,
     /// The item's seq.
+    pub seq: u64,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct HoldParams {
+    /// The question's committee.
+    pub committee: String,
+    /// The question's seq, as speaker_docket lists it.
     pub seq: u64,
 }
 
@@ -2001,6 +2013,34 @@ impl SenateMcp {
         })
     }
 
+    #[tool(name = "speaker_hold", description = SPEAKER_HOLD)]
+    async fn speaker_hold(&self, params: Parameters<HoldParams>) -> Result<String, String> {
+        let p = params.0;
+        let l = self.locale;
+        let committee = committee_arg(Some(p.committee))?.ok_or("`committee` is empty")?;
+        let posted = self
+            .append(Request::Hold {
+                session: self.selector.clone(),
+                committee,
+                seq: Seq(p.seq),
+                id: Some(EventId::new()),
+            })
+            .await?;
+        let (c, seq, again) = (&posted.committee, posted.seq, already(&posted, l));
+        let to = mentions(&posted.to);
+        Ok(match l {
+            Locale::Zh => format!(
+                "已告诉 {to}：{c} 上 seq {} 要问的子 Senate 目前离线，问题已保留（seq {seq}）{again}。",
+                p.seq
+            ),
+            Locale::En => format!(
+                "Told {to} that the child Senate seq {} on {c} is for is offline and that the \
+                 question is held for it (seq {seq}){again}.",
+                p.seq
+            ),
+        })
+    }
+
     #[tool(name = "speaker_escalate", description = SPEAKER_ESCALATE)]
     async fn speaker_escalate(
         &self,
@@ -2930,6 +2970,7 @@ mod tests {
                 "speaker_docket",
                 "speaker_escalate",
                 "speaker_forward",
+                "speaker_hold",
                 "speaker_refuse",
                 "speaker_route",
                 "status",

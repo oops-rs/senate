@@ -9,12 +9,14 @@ use senate_core::{Kind, NewEvent, meta};
 
 /// Keys only the Speaker writes. A senator carrying one, whatever its value,
 /// is refused, so no event in the log looks like one the Speaker wrote.
-pub(crate) const SPEAKER_KEYS: [&str; 5] = [
+pub(crate) const SPEAKER_KEYS: [&str; 6] = [
     meta::BRIEF_TOP,
     meta::TRIAGE,
     meta::OUTPUT_LEVEL,
     meta::WORK,
     meta::PROVISIONAL,
+    // It takes a question for an offline child Senate off the desk.
+    meta::CHILD_OFFLINE,
 ];
 
 /// Kinds that change state: a binding, a decision, a presence transition, a

@@ -2761,6 +2761,7 @@ impl Shared {
             | Request::Docket { .. }
             | Request::Route { .. }
             | Request::Cover { .. }
+            | Request::Hold { .. }
             | Request::Refer { .. }
             | Request::Forward { .. }
             | Request::Refuse { .. } => Reply::err(IpcError::bad_request(

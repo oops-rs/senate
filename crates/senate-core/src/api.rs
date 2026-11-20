@@ -374,6 +374,14 @@ impl ChildSenate {
                 < crate::continuity::PRESENCE_DISCONNECTED_SECS as i64
         })
     }
+
+    /// Whether the child is known to be offline at `now`: it declared its
+    /// seats once and has not for too long. One that never has (since this
+    /// server started, or because it runs a build from before seats were
+    /// declared) is neither online nor known to be offline.
+    pub fn is_offline(&self, now: chrono::DateTime<chrono::Utc>) -> bool {
+        self.last_seen.is_some() && !self.is_online(now)
+    }
 }
 
 /// One seat a child Senate declares to its parent: a senator on one of
