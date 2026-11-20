@@ -53,7 +53,7 @@ pub(super) async fn work(
             _ => None,
         };
         if let Some(to) = to {
-            *to = state.hub.primary_name(to).await;
+            *to = state.hub.primary_name(to, None).await?;
         }
     }
     Ok(Json(state.hub.secretary_work(&person.0, request).await?))

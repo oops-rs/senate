@@ -18,6 +18,7 @@ use axum::middleware::map_response_with_state;
 use axum::response::{IntoResponse, Response, Sse};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
+use senate_core::alias::CommitteeAliases;
 use senate_core::api::{
     AppendResponse, CheckpointQuery, Cursor, CursorQuery, DEFAULT_PAGE, DEFAULT_SEARCH,
     EPOCH_HEADER, EventsPage, EventsQuery, Heartbeat, MAX_PAGE, MAX_SEARCH, Me, PresencePage,
@@ -50,6 +51,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/healthz", get(|| async { "ok" }))
         .route("/v1/me", get(me))
         .route("/v1/aliases", get(list_aliases))
+        .route("/v1/committee-aliases", get(committee_aliases))
         .route("/v1/aliases/{primary}", put(set_alias))
         .route("/v1/aliases/{primary}/{alias}", delete(remove_alias))
         .route(
@@ -289,10 +291,20 @@ fn query<T>(query: Result<Query<T>, QueryRejection>) -> Result<T, ApiFailure> {
         .map_err(|e| ApiFailure::bad_request(e.body_text()))
 }
 
+/// The Senate-wide view older bridges read: each alias that stands for
+/// one agent ([`CommitteeAliases::flat`]).
 async fn list_aliases(
     State(state): State<AppState>,
     _person: Person,
 ) -> Json<senate_core::api::SenatorAliases> {
+    Json(state.hub.aliases().await.flat())
+}
+
+/// Every committee's aliases.
+async fn committee_aliases(
+    State(state): State<AppState>,
+    _person: Person,
+) -> Json<CommitteeAliases> {
     Json(state.hub.aliases().await)
 }
 
@@ -313,22 +325,38 @@ async fn set_alias(
         .roster_now()
         .may_act_as(&person.0, &primary)
         .map_err(|error| ApiFailure::forbidden(error.to_string()))?;
-    Ok(Json(
-        state.hub.set_alias(&person.0, &primary, request).await?,
-    ))
+    let set = state.hub.set_alias(&person.0, &primary, request).await?;
+    Ok(Json(set.alias))
 }
 
+/// `DELETE /v1/aliases/{primary}/{alias}`: the alias while it stands for
+/// `primary`, on `committee` or (an older bridge) on every committee.
 async fn remove_alias(
     State(state): State<AppState>,
     person: Person,
     Path((primary, alias)): Path<(SenatorName, SenatorName)>,
+    params: Result<Query<senate_core::api::RemoveAlias>, QueryRejection>,
 ) -> Result<StatusCode, ApiFailure> {
+    let params = query(params)?;
+    if !state
+        .hub
+        .may_remove_alias(&person.0, &primary, params.acted_by.as_ref())
+    {
+        return Err(ApiFailure::forbidden(format!(
+            "{} cannot remove an alias for {primary}",
+            person.0
+        )));
+    }
     state
         .hub
-        .roster_now()
-        .may_act_as(&person.0, &primary)
-        .map_err(|error| ApiFailure::forbidden(error.to_string()))?;
-    state.hub.remove_alias(&person.0, &primary, &alias).await?;
+        .remove_alias(
+            &person.0,
+            &primary,
+            &alias,
+            params.committee.as_ref(),
+            params.acted_by.as_ref(),
+        )
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -952,7 +980,10 @@ async fn latest_checkpoint(
     params: Result<Query<CheckpointQuery>, QueryRejection>,
 ) -> Result<Json<CheckpointRecord>, ApiFailure> {
     let committee = committee_path(path)?;
-    let agent = state.hub.primary_name(&query(params)?.agent).await;
+    let agent = state
+        .hub
+        .primary_name(&query(params)?.agent, Some(&committee))
+        .await?;
     state
         .hub
         .latest_checkpoint(&committee, &agent)
@@ -976,7 +1007,10 @@ async fn threads(
     let params = query(params)?;
     let board = state.hub.tasks(&committee).await?;
     let threads = match &params.agent {
-        Some(agent) => board.threads_for(&state.hub.primary_name(agent).await, params.state),
+        Some(agent) => board.threads_for(
+            &state.hub.primary_name(agent, Some(&committee)).await?,
+            params.state,
+        ),
         None => board.threads(params.state),
     };
     Ok(Json(ThreadsPage {

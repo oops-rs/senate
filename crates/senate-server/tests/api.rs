@@ -1694,7 +1694,7 @@ async fn alias_rollback_is_conditional_and_conflicts_do_not_register_a_new_owner
     let second = "/v1/aliases/claude-second";
     let response = server
         .request(Method::PUT, first, ALICE)
-        .json(&json!({"alias":"reviewer"}))
+        .json(&json!({"alias":"reviewer","committee":"refund-v2"}))
         .send()
         .await
         .unwrap();
@@ -1702,7 +1702,7 @@ async fn alias_rollback_is_conditional_and_conflicts_do_not_register_a_new_owner
 
     let conflict = server
         .request(Method::PUT, second, ALICE)
-        .json(&json!({"alias":"reviewer"}))
+        .json(&json!({"alias":"reviewer","committee":"refund-v2"}))
         .send()
         .await
         .unwrap();
@@ -1758,7 +1758,7 @@ async fn alias_rollback_is_conditional_and_conflicts_do_not_register_a_new_owner
     assert_eq!(removed.status(), StatusCode::NO_CONTENT);
     let reused = server
         .request(Method::PUT, second, ALICE)
-        .json(&json!({"alias":"reviewer"}))
+        .json(&json!({"alias":"reviewer","committee":"refund-v2"}))
         .send()
         .await
         .unwrap();

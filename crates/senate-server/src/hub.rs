@@ -29,6 +29,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use ractor::rpc::CallResult;
 use ractor::{ActorRef, MessagingErr};
+use senate_core::alias::{AliasMatch, AliasName, CommitteeAliases, QualifiedAlias};
 use senate_core::api::{
     ChairInfo, ChildSeat, ChildSenate, CommitteeSeatInfo, Heartbeat, PresencePage, Resolved,
     Secretaries,
@@ -88,7 +89,7 @@ pub(crate) struct HubParts {
     pub built_in: Option<SenatorName>,
     pub notes: Vec<String>,
     pub children: BTreeMap<Name, ChildSenate>,
-    pub aliases: senate_core::api::SenatorAliases,
+    pub aliases: CommitteeAliases,
     pub senate: Name,
     pub parent: Option<SenatePath>,
 }
@@ -108,7 +109,7 @@ pub struct ServerHub {
     built_in: Option<SenatorName>,
     notes: Vec<String>,
     children: RwLock<BTreeMap<Name, ChildSenate>>,
-    aliases: tokio::sync::RwLock<senate_core::api::SenatorAliases>,
+    aliases: tokio::sync::RwLock<CommitteeAliases>,
     secretary_gate: tokio::sync::Mutex<()>,
     senate: Name,
     parent: RwLock<Option<SenatePath>>,
@@ -427,20 +428,64 @@ impl ServerHub {
         Ok(self.secretaries())
     }
 
-    pub(crate) async fn aliases(&self) -> senate_core::api::SenatorAliases {
+    pub(crate) async fn aliases(&self) -> CommitteeAliases {
         self.aliases.read().await.clone()
     }
 
-    pub(crate) async fn primary_name(&self, name: &SenatorName) -> SenatorName {
-        self.aliases.read().await.get(name).unwrap_or(name).clone()
+    /// The agent `name` stands for, written from `committee` (the writer's
+    /// own, when there is one): the rule for callers that cannot ask a
+    /// person ([`AliasMatch::non_interactive`]). A name that is no alias
+    /// stands for itself; an alias several agents have, none of them on
+    /// `committee`, is refused with the qualified candidates.
+    pub(crate) async fn primary_name(
+        &self,
+        name: &SenatorName,
+        committee: Option<&CommitteeId>,
+    ) -> Result<SenatorName, HubError> {
+        self.aliases
+            .read()
+            .await
+            .resolve_bare(name, committee)
+            .non_interactive(name)
+            .map_err(|e| HubError::Rejected(e.to_string()))
     }
 
+    /// The committees `agent` sits in ([`Hub::committee_agents`]: seen
+    /// there and not unseated).
+    pub(crate) async fn committees_of(
+        &self,
+        agent: &SenatorName,
+    ) -> Result<Vec<CommitteeId>, HubError> {
+        let mut sits = Vec::new();
+        for committee in self.committees().await? {
+            if self.committee_agents(&committee).await?.contains(agent) {
+                sits.push(committee);
+            }
+        }
+        Ok(sits)
+    }
+
+    /// Give `primary` the alias `request.alias` on a committee. An older
+    /// bridge names no committee: the agent's only committee is used, and
+    /// one that sits in several (or none) is told to upgrade.
     pub(crate) async fn set_alias(
         &self,
         person: &Name,
         primary: &SenatorName,
         request: senate_core::api::SetAlias,
-    ) -> Result<SenatorName, HubError> {
+    ) -> Result<QualifiedAlias, HubError> {
+        let committee = match request.committee {
+            Some(committee) => committee,
+            None => match self.committees_of(primary).await?.as_slice() {
+                [only] => only.clone(),
+                _ => {
+                    return Err(HubError::Rejected(format!(
+                        "aliases are now per committee and {primary} does not sit in exactly \
+                         one; upgrade this bridge so it names the committee"
+                    )));
+                }
+            },
+        };
         let mut aliases = self.aliases.write().await;
         let roster = self.seats.snapshot();
         if roster.may_act_as(person, primary).is_err()
@@ -453,19 +498,24 @@ impl ServerHub {
             )));
         }
         let alias = request.alias;
-        if let Some((current, _)) = aliases.iter().find(|(_, target)| *target == primary)
+        let qualified = |alias: &SenatorName| QualifiedAlias {
+            committee: committee.clone(),
+            alias: alias.clone(),
+            primary: primary.clone(),
+        };
+        if let Some(current) = aliases.alias_of(&committee, primary)
             && (request.initial || current == &alias)
         {
-            return Ok(current.clone());
+            return Ok(qualified(current));
         }
-        if roster.knows(&alias) || aliases.contains_key(&alias) || alias.is_session_name() {
+        if roster.knows(&alias) || alias.is_session_name() {
             return Err(HubError::Rejected(format!(
                 "senator name {alias} is already in use or reserved"
             )));
         }
         let mut next = aliases.clone();
-        next.retain(|_, target| target != primary);
-        next.insert(alias.clone(), primary.clone());
+        next.set(&committee, alias.clone(), primary.clone())
+            .map_err(|e| HubError::Rejected(e.to_string()))?;
         // The server must keep the owner before publishing a durable alias.
         registry::put_seat(self.store.as_ref(), primary, person)
             .await
@@ -477,31 +527,124 @@ impl ServerHub {
             .act_as(person, primary)
             .map_err(|error| HubError::Rejected(error.to_string()))?;
         *aliases = next;
-        Ok(alias)
+        Ok(qualified(&alias))
     }
 
-    /// Conditional rollback: a newer alias, or one owned by another native
-    /// session after a retry, must not be removed by a failed launch.
+    /// Remove `alias` while it stands for `primary`: on `committee`, or on
+    /// every committee when none is named (an older bridge rolling back a
+    /// failed launch). Conditional: a newer alias, or one now standing for
+    /// another agent, is left alone, so a retry cannot remove it. Allowed
+    /// to the principal that runs the agent and to the Speaker's office
+    /// (`acted_by` naming who in it acts; a person in it may name itself).
     pub(crate) async fn remove_alias(
         &self,
         person: &Name,
         primary: &SenatorName,
         alias: &SenatorName,
+        committee: Option<&CommitteeId>,
+        acted_by: Option<&SenatorName>,
     ) -> Result<(), HubError> {
         let mut aliases = self.aliases.write().await;
-        if aliases.get(alias) != Some(primary) {
+        let found: Vec<QualifiedAlias> = aliases
+            .matches(alias)
+            .into_iter()
+            .filter(|q| &q.primary == primary && committee.is_none_or(|c| *c == q.committee))
+            .collect();
+        if found.is_empty() {
             return Ok(());
         }
-        if self.seats.snapshot().owner_of(primary) != Some(person) {
+        if !self.may_remove_alias(person, primary, acted_by) {
             return Err(HubError::Rejected(format!(
                 "{person} cannot remove an alias for {primary}"
             )));
         }
         let mut next = aliases.clone();
-        next.remove(alias);
+        for q in &found {
+            next.remove(&q.committee, &q.alias);
+        }
         registry::put_aliases(self.store.as_ref(), &next)
             .await
             .map_err(log_error)?;
+        *aliases = next;
+        Ok(())
+    }
+
+    /// Whether `person` may remove `primary`'s aliases: it runs the agent,
+    /// or acts for the Speaker's office (`acted_by`, or itself).
+    pub(crate) fn may_remove_alias(
+        &self,
+        person: &Name,
+        primary: &SenatorName,
+        acted_by: Option<&SenatorName>,
+    ) -> bool {
+        let roster = self.seats.snapshot();
+        let office = |by: &SenatorName| roster.may_act_for_office(person, by);
+        roster.may_act_as(person, primary).is_ok()
+            || acted_by.is_some_and(office)
+            || SenatorName::try_from(person.clone()).is_ok_and(|me| office(&me))
+    }
+
+    /// Carry the Senate-wide aliases of before over to the committees each
+    /// agent sits in, once the writers have seated the agents their logs
+    /// have seen. The per-committee table is written before the old map is
+    /// dropped, so an interrupted migration runs again at the next start.
+    /// An alias whose agent sits nowhere, is no agent of this Senate any
+    /// more, or would take a name already used on a committee, is dropped
+    /// and named in the log.
+    pub(crate) async fn migrate_global_aliases(&self) -> Result<(), HubError> {
+        let Some(global) = registry::global_aliases(self.store.as_ref())
+            .await
+            .map_err(log_error)?
+        else {
+            return Ok(());
+        };
+        let roster = self.seats.snapshot();
+        let mut sits = BTreeMap::new();
+        for primary in global.values() {
+            let committees = if roster.is_agent(primary) {
+                self.committees_of(primary).await?
+            } else {
+                Vec::new()
+            };
+            sits.insert(primary.clone(), committees);
+        }
+        let (moved, mut dropped) = CommitteeAliases::from_global(&global, |primary| {
+            sits.get(primary).cloned().unwrap_or_default()
+        });
+        let mut aliases = self.aliases.write().await;
+        let mut next = aliases.clone();
+        for q in moved.iter() {
+            if roster.knows(&q.alias)
+                || next
+                    .set(&q.committee, q.alias.clone(), q.primary.clone())
+                    .is_err()
+            {
+                dropped.push((q.alias, q.primary));
+            }
+        }
+        registry::put_aliases(self.store.as_ref(), &next)
+            .await
+            .map_err(log_error)?;
+        registry::drop_global_aliases(self.store.as_ref())
+            .await
+            .map_err(log_error)?;
+        let kept: Vec<String> = next
+            .iter()
+            .map(|q| format!("{q} -> {}", q.primary))
+            .collect();
+        let dropped: Vec<String> = dropped
+            .iter()
+            .map(|(alias, primary)| format!("{alias} -> {primary}"))
+            .collect();
+        if dropped.is_empty() {
+            tracing::info!(?kept, "senator aliases moved to their committees");
+        } else {
+            tracing::warn!(
+                ?kept,
+                ?dropped,
+                "senator aliases moved to their committees; some dropped"
+            );
+        }
         *aliases = next;
         Ok(())
     }
@@ -546,7 +689,7 @@ impl ServerHub {
         senator: SenatorName,
         by: Address,
     ) -> Result<ChairInfo, HubError> {
-        let senator = self.primary_name(&senator).await;
+        let senator = self.primary_name(&senator, Some(committee)).await?;
         if !self.seats.snapshot().knows(&senator) {
             return Err(HubError::Rejected(format!(
                 "{} is not a senator of this Senate",
@@ -652,9 +795,21 @@ impl ServerHub {
                 Resolved::Elsewhere
             });
         }
+        // A committee written in the name is where its alias is; without
+        // one, the alias resolves from the writer's committee.
         let mut address = name.address().clone();
         if let Address::Senator(senator) = &mut address {
-            *senator = self.primary_name(senator).await;
+            let written = AliasName {
+                committee: name.committee().cloned(),
+                alias: senator.clone(),
+            };
+            *senator = self
+                .aliases
+                .read()
+                .await
+                .resolve(&written, committee)
+                .non_interactive(senator)
+                .map_err(|e| HubError::Rejected(e.to_string()))?;
         }
         if let Some(senator) = address.as_senator()
             && !self.seats.snapshot().knows(senator)
@@ -1012,7 +1167,7 @@ impl ServerHub {
     /// server seats it again under the same principal.
     pub async fn act_as(&self, person: &Name, senator: &SenatorName) -> Result<bool, RosterError> {
         let aliases = self.aliases.read().await;
-        if aliases.contains_key(senator) {
+        if aliases.is_alias(senator) {
             return Err(RosterError::NameTaken {
                 name: senator.name().clone(),
                 taken: "an alias",
@@ -1056,7 +1211,7 @@ impl ServerHub {
     pub async fn set_principals(&self, principals: Vec<Principal>) -> Result<(), HubError> {
         let _guard = self.secretary_gate.lock().await;
         let mut aliases = self.aliases.write().await;
-        if let Some(p) = principals.iter().find(|p| aliases.contains_key(&p.path())) {
+        if let Some(p) = principals.iter().find(|p| aliases.is_alias(&p.path())) {
             return Err(HubError::Rejected(format!(
                 "{} is already a senator alias",
                 p.handle
@@ -1068,7 +1223,7 @@ impl ServerHub {
             .map_err(|e| HubError::Rejected(e.to_string()))?;
         let next_roster = preview.snapshot();
         let mut next = aliases.clone();
-        next.retain(|_, primary| next_roster.owner_of(primary).is_some());
+        next.retain(|primary| next_roster.owner_of(primary).is_some());
         if next != *aliases {
             registry::put_aliases(self.store.as_ref(), &next)
                 .await
@@ -1290,20 +1445,23 @@ impl Hub for ServerHub {
     /// or a meta key that does.
     async fn append(&self, mut event: NewEvent) -> Result<Appended, HubError> {
         {
+            // An alias stands for its agent, resolved from the committee the
+            // event is written on; one several agents have, none of them
+            // here, is refused with its candidates.
             let aliases = self.aliases.read().await;
-            if event
-                .to
-                .iter()
-                .filter_map(Address::as_senator)
-                .any(|s| aliases.contains_key(s))
-            {
-                for recipient in &mut event.to {
-                    if let Address::Senator(name) = recipient
-                        && let Some(primary) = aliases.get(name)
-                    {
-                        name.clone_from(primary);
+            let mut changed = false;
+            for recipient in &mut event.to {
+                if let Address::Senator(name) = recipient {
+                    let resolved = aliases.resolve_bare(name, Some(&event.committee));
+                    if resolved != AliasMatch::NotAlias {
+                        *name = resolved
+                            .non_interactive(name)
+                            .map_err(|e| HubError::Rejected(e.to_string()))?;
+                        changed = true;
                     }
                 }
+            }
+            if changed {
                 let mut seen = std::collections::BTreeSet::new();
                 event.to.retain(|address| seen.insert(address.clone()));
             }

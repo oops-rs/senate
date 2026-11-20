@@ -201,10 +201,11 @@ impl ServerBuilder {
         let aliases = registry::aliases(store.as_ref())
             .await
             .map_err(|e| ServerError::Aliases(e.to_string()))?;
-        for (alias, primary) in &aliases {
-            if roster.knows(alias) || !roster.is_agent(primary) {
+        for q in aliases.iter() {
+            if roster.knows(&q.alias) || !roster.is_agent(&q.primary) {
                 return Err(ServerError::Aliases(format!(
-                    "invalid stored alias {alias} for {primary}"
+                    "invalid stored alias {q} for {}",
+                    q.primary
                 )));
             }
         }
@@ -259,6 +260,11 @@ impl ServerBuilder {
         // served: the roster the hub hands the Speaker, and the agents
         // `/v1/me` lists, are complete from the first request.
         hub.clone().start_writers().await;
+        // Seats are known once the writers run: only now can the
+        // Senate-wide aliases of before move to their agents' committees.
+        hub.migrate_global_aliases()
+            .await
+            .map_err(|e| ServerError::Aliases(e.to_string()))?;
 
         let listener = match listener {
             Some(listener) => Ok(listener),

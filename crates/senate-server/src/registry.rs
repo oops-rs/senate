@@ -9,12 +9,15 @@
 //! | `secretary-team:<person>` | `["<coding-session>", ...]`, in order |
 //! | `child:<name>` | a [`ChildSenate`] |
 //! | `note:<key>` | `true`: a start note already said once |
+//! | `committee-aliases` | `{"<committee>": {"<alias>": "<agent>"}}` ([`CommitteeAliases`]) |
+//! | `senator-aliases` | `{"<alias>": "<agent>"}`: the Senate-wide aliases of before, until migrated |
 //!
 //! Configuration seeds the roster; what was registered at runtime is
 //! loaded over it at start.
 
 use std::collections::BTreeMap;
 
+use senate_core::alias::CommitteeAliases;
 use senate_core::api::ChildSenate;
 use senate_core::{Name, SenatorName};
 use senate_log::{LogError, LogStore};
@@ -168,25 +171,44 @@ pub(crate) async fn first_time(store: &dyn LogStore, key: &str) -> bool {
     }
 }
 
-/// One registry write replaces the complete mapping, including release of the previous alias.
-pub(crate) async fn aliases(
-    store: &dyn LogStore,
-) -> Result<senate_core::api::SenatorAliases, LogError> {
-    let Some((_, value)) = store
-        .registry("senator-aliases")
-        .await?
-        .into_iter()
-        .find(|(key, _)| key == "senator-aliases")
-    else {
-        return Ok(BTreeMap::new());
-    };
-    serde_json::from_value(value).map_err(|e| LogError::Invalid(e.to_string()))
+const COMMITTEE_ALIASES: &str = "committee-aliases";
+const GLOBAL_ALIASES: &str = "senator-aliases";
+
+/// Every committee's senator aliases. One registry write replaces the whole
+/// table, so a changed alias and the release of the one it replaced land
+/// together.
+pub(crate) async fn aliases(store: &dyn LogStore) -> Result<CommitteeAliases, LogError> {
+    match entry(store, COMMITTEE_ALIASES).await? {
+        Some(value) => serde_json::from_value(value).map_err(|e| LogError::Invalid(e.to_string())),
+        None => Ok(CommitteeAliases::new()),
+    }
 }
 
 pub(crate) async fn put_aliases(
     store: &dyn LogStore,
-    aliases: &senate_core::api::SenatorAliases,
+    aliases: &CommitteeAliases,
 ) -> Result<(), LogError> {
     let value = serde_json::to_value(aliases).map_err(|e| LogError::Invalid(e.to_string()))?;
-    store.put_registry("senator-aliases", Some(value)).await
+    store.put_registry(COMMITTEE_ALIASES, Some(value)).await
+}
+
+/// The Senate-wide aliases kept before aliases were per committee, while
+/// they wait to be migrated (see [`crate::hub::ServerHub::migrate_global_aliases`]).
+pub(crate) async fn global_aliases(
+    store: &dyn LogStore,
+) -> Result<Option<BTreeMap<SenatorName, SenatorName>>, LogError> {
+    entry(store, GLOBAL_ALIASES)
+        .await?
+        .map(|value| serde_json::from_value(value).map_err(|e| LogError::Invalid(e.to_string())))
+        .transpose()
+}
+
+/// Forget the Senate-wide aliases, once the per-committee table holding
+/// them is written.
+pub(crate) async fn drop_global_aliases(store: &dyn LogStore) -> Result<(), LogError> {
+    store.put_registry(GLOBAL_ALIASES, None).await
+}
+
+async fn entry(store: &dyn LogStore, key: &str) -> Result<Option<Value>, LogError> {
+    store.registry_value(key).await
 }

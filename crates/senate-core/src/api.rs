@@ -556,15 +556,35 @@ pub struct SearchResults {
     pub events: Vec<Event>,
 }
 
-/// Senate-wide human-readable addresses, keyed by alias with the primary senator as value.
+/// `GET /v1/aliases`, the Senate-wide view older bridges read: each alias
+/// that stands for one agent, wherever it is
+/// ([`crate::alias::CommitteeAliases::flat`]). `GET /v1/committee-aliases`
+/// is the whole table.
 pub type SenatorAliases = std::collections::BTreeMap<SenatorName, SenatorName>;
 
+/// `PUT /v1/aliases/{primary}`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetAlias {
     pub alias: SenatorName,
     /// A configured pin supplies an initial alias. An explicit choice takes precedence.
     #[serde(default)]
     pub initial: bool,
+    /// The committee the alias is on. An older bridge sends none: the
+    /// agent's only committee is used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committee: Option<CommitteeId>,
+}
+
+/// `DELETE /v1/aliases/{primary}/{alias}` query.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RemoveAlias {
+    /// Only on this committee; without one, on every committee.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committee: Option<CommitteeId>,
+    /// Who in the Speaker's office removes it, for an alias of an agent
+    /// someone else runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acted_by: Option<SenatorName>,
 }
 
 /// `GET /v1/me`: who the token is, and which Senate answered.

@@ -102,6 +102,7 @@ async fn unseating_an_alias_retires_one_seat_until_an_explicit_join() {
     let alias = api::SetAlias {
         alias: path("reviewer"),
         initial: false,
+        committee: Some(committee.clone()),
     };
     let response = server
         .request(Method::PUT, &format!("/v1/aliases/{primary}"), ALICE)

@@ -19,7 +19,10 @@ pub(super) async fn get_seat(
     params: Result<Query<SeatQuery>, QueryRejection>,
 ) -> Result<Json<CommitteeSeatStatus>, ApiFailure> {
     let committee = committee_path(path)?;
-    let senator = state.hub.primary_name(&query(params)?.senator).await;
+    let senator = state
+        .hub
+        .primary_name(&query(params)?.senator, Some(&committee))
+        .await?;
     let unseated = state
         .hub
         .is_explicitly_unseated(&committee, &senator)
@@ -40,7 +43,7 @@ pub(super) async fn put_seat(
         id,
         acted_by,
     } = json_body(body)?;
-    let senator = state.hub.primary_name(&senator).await;
+    let senator = state.hub.primary_name(&senator, Some(&committee)).await?;
     let roster = state.hub.roster_now();
     if !roster.is_agent(&senator) {
         return Err(ApiFailure::bad_request(format!(
