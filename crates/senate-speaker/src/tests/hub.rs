@@ -113,6 +113,56 @@ impl MemoryHub {
         ));
     }
 
+    /// The child Senate `child` declares `seats` on `committee` (replacing
+    /// what it declared there), which also marks it seen now.
+    pub(crate) fn declare_seats(
+        &self,
+        child: &str,
+        committee: &CommitteeId,
+        seats: &[(&str, senate_core::PresenceState)],
+    ) {
+        let mut inner = self.lock();
+        let child = inner
+            .children
+            .iter_mut()
+            .find(|c| c.name.as_str() == child)
+            .expect("a registered child Senate");
+        child.seats.retain(|seat| seat.committee != *committee);
+        child.seats.extend(
+            seats
+                .iter()
+                .map(|(senator, presence)| senate_core::ChildSeat {
+                    committee: committee.clone(),
+                    senator: senator.parse().expect("senator"),
+                    duty: None,
+                    presence: *presence,
+                }),
+        );
+        child.last_seen = Some(chrono::Utc::now());
+    }
+
+    /// The duty the seat `senator` of `child` declares on `committee`.
+    pub(crate) fn declare_duty(
+        &self,
+        child: &str,
+        committee: &CommitteeId,
+        senator: &str,
+        duty: &str,
+    ) {
+        let senator: SenatorName = senator.parse().expect("senator");
+        let mut inner = self.lock();
+        inner
+            .children
+            .iter_mut()
+            .find(|c| c.name.as_str() == child)
+            .expect("a registered child Senate")
+            .seats
+            .iter_mut()
+            .find(|seat| seat.committee == *committee && seat.senator == senator)
+            .expect("a declared seat")
+            .duty = Some(duty.to_owned());
+    }
+
     pub(crate) fn disconnect(&self, committee: &CommitteeId, agent: &SenatorName) {
         self.lock()
             .connected

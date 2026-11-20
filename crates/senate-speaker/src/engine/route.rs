@@ -43,11 +43,43 @@
 //! Senates). None: the person herself, as before. A person who runs agents
 //! here keeps the lookup above; `senator::alice` written out is always the
 //! person.
+//!
+//! # A seat in a child Senate
+//!
+//! A child Senate declares its seats here: who sits on each committee the
+//! two share, and whether it is online
+//! ([`ChildSenate::seats`](senate_core::ChildSenate)). A relay that goes
+//! down to a child is meant for one of them when that can be told
+//! ([`Engine::seat_in`]): the only seat it declares on the committee, or,
+//! among several, the one the Brain picks, as among a person's agents
+//! here, weighing the task against the duty each seat declares. The relay still goes to the child's desk, and names the seat in
+//! [`meta::INTENDED`]; the desk there delivers it. When the child declares
+//! no seat on the committee, or the pick cannot tell, no seat is named and
+//! the desk decides, as before: no question is asked up here about seats
+//! only the child knows. A seat that is not online is still named: what
+//! is meant for it is the child's desk's to handle.
+//!
+//! A seat may also be named outright ([`Engine::child_named`],
+//! [`Engine::declared_seat`]), when the name is no senator here:
+//!
+//! | said | means |
+//! | --- | --- |
+//! | `<child>::<committee>::senator::responder` | that seat, declared or not |
+//! | `<child>::responder` | that seat on the committee, when the child declares it |
+//! | `responder` | the same, when one child alone declares it on the committee |
+//! | `<child>::speaker`, `<child>::<committee>::speaker` | the desk, no seat named |
+//! | `<child>::*` | whichever seat there, told as for a person's agent |
+//!
+//! One message carries one intended name, so a relay to several recipients
+//! names no seat.
 
-use senate_core::{AgentOf, Mention, Name, Roster, SenatorName, StatusState};
+use senate_core::{
+    AgentOf, Locator, Mention, Name, PresenceState, Roster, SenatePath, SenatorName, StatusState,
+};
 
 use super::{
-    Address, Engine, Event, Flow, GroupRef, Instant, Intent, Origin, Seq, Stall, Value, meta, warn,
+    Address, CommitteeId, Engine, Event, Flow, GroupRef, Instant, Intent, Origin, Seq, Stall,
+    Value, meta, warn,
 };
 use crate::brain::{AgentCandidate, Pick, PickInput, rule_pick};
 use crate::render;
@@ -137,9 +169,31 @@ pub(super) enum Settled {
     /// The Speaker asked in the thread which agent; the request waits for
     /// the answer.
     Asked,
-    /// A child Senate's Speaker's desk: a person's agent one level down
-    /// ([`Engine::settle_reach`]).
-    Child(Name),
+    /// A child Senate's Speaker's desk, and the seat there when one could
+    /// be told: a person's agent one level down ([`Engine::settle_reach`]).
+    Child(ChildTarget),
+}
+
+/// Where a message goes in a child Senate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ChildTarget {
+    /// The child Senate: the message goes to its Speaker's desk.
+    pub(super) senate: Name,
+    /// The committee there.
+    pub(super) committee: CommitteeId,
+    /// The seat it is meant for; `None`: the desk there decides.
+    pub(super) seat: Option<SenatorName>,
+}
+
+/// What a name said outright means in a child Senate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Seat {
+    /// The Speaker's desk, no seat named.
+    Desk,
+    /// This seat.
+    Named(SenatorName),
+    /// Whichever seat there ([`Engine::seat_in`]).
+    Any,
 }
 
 /// What a pick, or the question the Speaker asks, is among.
@@ -151,9 +205,10 @@ pub(super) enum Among {
     Senates,
 }
 
-/// How a child Senate is named in a request carried on after a choice.
+/// How a child Senate is named in a request carried on after a choice:
+/// whichever seat there, as when the person had one child Senate.
 fn child_target(child: &str) -> String {
-    format!("{child}::speaker")
+    format!("{child}::*")
 }
 
 /// Whether `raw` names a senator written out (`senator::alice`,
@@ -310,19 +365,157 @@ impl Engine {
             .collect()
     }
 
-    /// `raw` names a registered child Senate's desk (`<child>::speaker`,
-    /// as a choice carries it on).
-    fn child_named(&self, raw: &str) -> Option<Name> {
-        let child = raw.trim().strip_suffix("::speaker")?;
-        self.children
-            .iter()
-            .find(|c| c.name.as_str() == child)
-            .map(|c| c.name.clone())
+    /// The registered child Senate a Senate path names: its name alone, or
+    /// its whole path from the root.
+    fn child_at(&self, path: &SenatePath) -> Option<&senate_core::ChildSenate> {
+        let child = self.children.iter().find(|c| c.name == *path.name())?;
+        let whole = path.depth() == 1
+            || self
+                .hub
+                .senate_path()
+                .and_then(|here| here.child(child.name.clone()).ok())
+                .is_some_and(|there| there.same_names(path));
+        whole.then_some(child)
+    }
+
+    /// What `raw` names in a registered child Senate, when it names the
+    /// Senate (see the module docs): the Senate, the committee there
+    /// (`acting` when none is said) and the desk or seat.
+    fn child_named(&self, raw: &str, acting: &CommitteeId) -> Option<(Name, CommitteeId, Seat)> {
+        let raw = raw.trim().trim_start_matches('@');
+        let raw = raw
+            .strip_prefix('[')
+            .and_then(|r| r.strip_suffix(']'))
+            .unwrap_or(raw);
+        if let Some((child, seat)) = raw.split_once("::")
+            && !seat.contains("::")
+            && let Some(child) = self.children.iter().find(|c| c.name.as_str() == child)
+        {
+            let seat = match seat {
+                "speaker" => Seat::Desk,
+                "*" => Seat::Any,
+                seat => {
+                    let seat: SenatorName = seat.parse().ok()?;
+                    let declared = child
+                        .seats
+                        .iter()
+                        .any(|s| s.committee == *acting && s.senator == seat);
+                    if !declared {
+                        return None;
+                    }
+                    Seat::Named(seat)
+                }
+            };
+            return Some((child.name.clone(), acting.clone(), seat));
+        }
+        let locator: Locator = raw.parse().ok()?;
+        let child = self.child_at(locator.senate()?)?;
+        let seat = match locator.address() {
+            Address::Speaker => Seat::Desk,
+            Address::AnyAgent => Seat::Any,
+            Address::Senator(seat) => Seat::Named(seat.clone()),
+            _ => return None,
+        };
+        let committee = locator
+            .committee()
+            .cloned()
+            .unwrap_or_else(|| acting.clone());
+        Some((child.name.clone(), committee, seat))
+    }
+
+    /// `raw` is one name, no senator here, that one child Senate alone
+    /// declares a seat for on `committee`: that seat.
+    fn declared_seat(&self, raw: &str, committee: &CommitteeId) -> Option<ChildTarget> {
+        let raw = raw.trim().trim_start_matches('@');
+        let seat: SenatorName = match raw.parse::<Mention>() {
+            Ok(Mention::Senator(seat)) => seat,
+            Ok(_) => return None,
+            Err(_) => raw.strip_prefix("senator::").unwrap_or(raw).parse().ok()?,
+        };
+        let mut declaring = self.children.iter().filter(|c| {
+            c.seats
+                .iter()
+                .any(|s| s.committee == *committee && s.senator == seat)
+        });
+        match (declaring.next(), declaring.next()) {
+            (Some(child), None) => Some(ChildTarget {
+                senate: child.name.clone(),
+                committee: committee.clone(),
+                seat: Some(seat),
+            }),
+            _ => None,
+        }
+    }
+
+    /// The seat of the child Senate `senate` that a message for its
+    /// Speaker's agent is meant for on `committee`: the only one it
+    /// declares there, or among several the one the Brain picks
+    /// ([`Brain::pick_agent`](crate::Brain::pick_agent), the same pick as
+    /// among a person's agents here). `None` when it declares none there
+    /// or the pick cannot tell: the message goes to the desk with no seat
+    /// named. A seat that is not online is still a seat.
+    ///
+    /// What was told is kept for the chat step, so a step repeated after a
+    /// stall or a triage wait names the same seat.
+    async fn seat_in(
+        &mut self,
+        chat: &Event,
+        senate: &Name,
+        committee: &CommitteeId,
+        task: &str,
+    ) -> Option<SenatorName> {
+        let child = self.children.iter().find(|c| c.name == *senate)?;
+        let candidates = seat_candidates(child, committee);
+        match candidates.as_slice() {
+            [] => return None,
+            [one] => return Some(one.agent.clone()),
+            _ => {}
+        }
+        let key = (chat.seq, super::agent::event_key(chat), senate.clone());
+        if let Some(told) = self
+            .committees
+            .get(&chat.committee)
+            .and_then(|state| state.seat_picks.get(&key))
+        {
+            return told.clone();
+        }
+        let input = PickInput {
+            committee: committee.clone(),
+            owner: Some(child.speaker.name().clone()),
+            asker: chat.from.clone(),
+            task: task.to_owned(),
+            thread: chat.thread,
+            candidates,
+            locale: self.locale(committee),
+        };
+        let told = match self.pick(input).await {
+            Pick::Agent(seat) => Some(seat),
+            Pick::Ask => None,
+        };
+        if let Some(state) = self.committees.get_mut(&chat.committee) {
+            state.seat_picks.insert(key, told.clone());
+        }
+        told
+    }
+
+    /// The qualified name of `seat` in the child Senate `target` names.
+    pub(super) fn seat_locator(&self, target: &ChildTarget, seat: &SenatorName) -> Option<Locator> {
+        let senate = match self.hub.senate_path() {
+            Some(here) => here.child(target.senate.clone()),
+            None => SenatePath::new(vec![target.senate.clone()]),
+        }
+        .ok()?;
+        Some(Locator::at(
+            senate,
+            target.committee.clone(),
+            Address::Senator(seat.clone()),
+        ))
     }
 
     /// [`Engine::settle`] for a message to be delivered (a relay): a person
     /// with no agent here is reached through their child Senates, one
-    /// level down, when they have any (see the module docs).
+    /// level down, when they have any, and a seat a child Senate declares
+    /// may be named outright (see the module docs).
     pub(super) async fn settle_reach(
         &mut self,
         chat: &Event,
@@ -330,20 +523,37 @@ impl Engine {
         task: &str,
         waiting: Waiting,
     ) -> Result<Settled, Stall> {
-        if let Some(child) = self.child_named(raw) {
-            return Ok(Settled::Child(child));
+        let acting = self.acting_committee(chat);
+        if let Some((senate, committee, seat)) = self.child_named(raw, &acting) {
+            let seat = match seat {
+                Seat::Desk => None,
+                Seat::Named(seat) => Some(seat),
+                Seat::Any => self.seat_in(chat, &senate, &committee, task).await,
+            };
+            return Ok(Settled::Child(ChildTarget {
+                senate,
+                committee,
+                seat,
+            }));
         }
         let settled = self.settle(chat, raw, task, waiting.clone()).await?;
-        let Settled::To(person) = &settled else {
-            return Ok(settled);
+        let person = match &settled {
+            Settled::To(person) => person.clone(),
+            // Nobody here: a seat one child Senate declares, named alone.
+            Settled::Unknown => {
+                return Ok(self
+                    .declared_seat(raw, &acting)
+                    .map_or(settled, Settled::Child));
+            }
+            Settled::Asked | Settled::Child(_) => return Ok(settled),
         };
-        if !self.roster.is_person(person) || written_out(raw) {
+        if !self.roster.is_person(&person) || written_out(raw) {
             return Ok(settled);
         }
-        let children = self.child_senates_of(person);
-        match children.as_slice() {
-            [] => Ok(settled),
-            [one] => Ok(Settled::Child(one.clone())),
+        let children = self.child_senates_of(&person);
+        let senate = match children.as_slice() {
+            [] => return Ok(settled),
+            [one] => one.clone(),
             several => {
                 let named: Vec<SenatorName> = several
                     .iter()
@@ -354,11 +564,17 @@ impl Engine {
                     .settle_among(chat, Some(owner), named, task, waiting, Among::Senates)
                     .await?
                 {
-                    Settled::To(child) => Ok(Settled::Child(child.name().clone())),
-                    other => Ok(other),
+                    Settled::To(child) => child.name().clone(),
+                    other => return Ok(other),
                 }
             }
-        }
+        };
+        let seat = self.seat_in(chat, &senate, &acting, task).await;
+        Ok(Settled::Child(ChildTarget {
+            senate,
+            committee: acting,
+            seat,
+        }))
     }
 
     /// Pick one of `candidates`, or ask which: `owner`'s agents, or (with
@@ -526,9 +742,31 @@ impl Engine {
     }
 }
 
+/// The seats `child` declares on `committee`, as candidates of a pick: what
+/// a child Senate says of a seat is who it is, its duty there and whether
+/// it is online.
+fn seat_candidates(
+    child: &senate_core::ChildSenate,
+    committee: &CommitteeId,
+) -> Vec<AgentCandidate> {
+    child
+        .seats
+        .iter()
+        .filter(|seat| seat.committee == *committee)
+        .map(|seat| AgentCandidate {
+            agent: seat.senator.clone(),
+            present: seat.presence == PresenceState::Online,
+            checkpoint: None,
+            open_threads: Vec::new(),
+            owns_thread: false,
+            duty: seat.duty.clone(),
+        })
+        .collect()
+}
+
 /// `intent` with the name `said` replaced by `target` (an agent's name, or
-/// a child Senate's desk) wherever it stands for a senator, so running it
-/// again settles at once.
+/// a child Senate) wherever it stands for a senator, so running it again
+/// settles at once.
 fn named(intent: Intent, said: &str, target: &str) -> Intent {
     let swap = |name: String| {
         if name == said {

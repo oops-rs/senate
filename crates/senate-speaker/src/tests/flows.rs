@@ -1633,3 +1633,327 @@ async fn a_person_with_an_agent_here_keeps_it_over_a_child_senate() {
     rig.settle().await;
     assert_eq!(last_relay(&rig).to, vec![agent("alice")]);
 }
+
+// ----- a seat in a child Senate ---------------------------------------------------------
+
+use senate_core::PresenceState;
+
+/// The seat a relay is meant for, as its `meta.intended` names it.
+fn intended(relay: &Event) -> Option<String> {
+    senate_core::locator::intended(relay).map(|seat| seat.to_string())
+}
+
+/// carol's child Senate declares one seat on the committee: a relay for
+/// carol's agent goes to that Senate's desk and names the seat, online or
+/// not. Nothing is picked and nothing is asked.
+#[tokio::test]
+async fn a_relay_to_a_persons_child_senate_names_its_only_seat() {
+    for presence in [PresenceState::Online, PresenceState::Absent] {
+        let hub = bound_hub().await;
+        hub.set_roster(roster_with_carol());
+        hub.add_child("north-desk", "carol");
+        hub.declare_seats("north-desk", &refund(), &[("responder", presence)]);
+        // A seat on another committee is not one of this committee's.
+        let other = senate_core::CommitteeId::new("billing").expect("committee");
+        hub.declare_seats("north-desk", &other, &[("auditor", PresenceState::Online)]);
+        let rig = Rig::start(hub).await;
+
+        rig.append(mention("pm", "/tell carol 退款文档更新了吗？", "m_s1"))
+            .await;
+        rig.settle().await;
+        let relay = last_relay(&rig);
+        assert_eq!(relay.kind, Kind::Question);
+        assert_eq!(relay.to, vec![desk_of("north-desk")], "by way of the desk");
+        assert_eq!(
+            intended(&relay).as_deref(),
+            Some("north-desk::refund-v2::senator::responder"),
+            "{presence:?}"
+        );
+        assert!(
+            rig.brain.pick_inputs().is_empty(),
+            "one seat: nothing to pick"
+        );
+        assert_eq!(
+            rig.surface.texts().last().map(String::as_str),
+            Some(
+                format!(
+                    "已转给 [north-desk::refund-v2::senator::responder]（seq {}）",
+                    relay.seq
+                )
+                .as_str()
+            )
+        );
+    }
+}
+
+/// Several seats on the committee: the same pick as among a person's
+/// agents, with what the child declared of each seat. A pick names the
+/// seat; a pick that cannot tell names none, and nothing is asked up here.
+#[tokio::test]
+async fn among_several_seats_of_a_child_senate_the_brain_picks_or_the_desk_decides() {
+    let seats = [
+        ("responder", PresenceState::Online),
+        ("reviewer", PresenceState::Online),
+        ("archivist", PresenceState::Absent),
+    ];
+    // The Brain picks one, online or not.
+    for picked in ["reviewer", "archivist"] {
+        let hub = bound_hub().await;
+        hub.set_roster(roster_with_carol());
+        hub.add_child("north-desk", "carol");
+        hub.declare_seats("north-desk", &refund(), &seats);
+        hub.declare_duty("north-desk", &refund(), "reviewer", "审阅退款文档");
+        let rig = Rig::start(hub).await;
+        rig.brain.picks(Ok(Pick::Agent(path(picked))));
+        rig.append(mention("pm", "/tell carol 退款文档更新了吗？", "m_s1"))
+            .await;
+        rig.settle().await;
+        let relay = last_relay(&rig);
+        assert_eq!(relay.to, vec![desk_of("north-desk")]);
+        assert_eq!(
+            intended(&relay),
+            Some(format!("north-desk::refund-v2::senator::{picked}"))
+        );
+        let asked = rig.brain.pick_inputs();
+        assert_eq!(
+            asked.len(),
+            1,
+            "asked once, though the relay waits on triage"
+        );
+        assert_eq!(asked[0].owner, Some(name("carol")));
+        assert_eq!(asked[0].task, "退款文档更新了吗？");
+        let seen: Vec<(String, bool, Option<&str>)> = asked[0]
+            .candidates
+            .iter()
+            .map(|c| (c.agent.to_string(), c.present, c.duty.as_deref()))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                ("responder".to_owned(), true, None),
+                ("reviewer".to_owned(), true, Some("审阅退款文档")),
+                ("archivist".to_owned(), false, None),
+            ],
+            "each seat as the child declared it: presence and duty"
+        );
+    }
+
+    // The Brain cannot tell (so do the rules, with two seats online): the
+    // desk, no seat named, and no question about seats only the child knows.
+    for pick in [Some(Ok(Pick::Ask)), None] {
+        let hub = bound_hub().await;
+        hub.set_roster(roster_with_carol());
+        hub.add_child("north-desk", "carol");
+        hub.declare_seats("north-desk", &refund(), &seats);
+        let rig = Rig::start(hub).await;
+        if let Some(pick) = pick {
+            rig.brain.picks(pick);
+        }
+        rig.append(mention("pm", "/tell carol 退款文档更新了吗？", "m_s1"))
+            .await;
+        rig.settle().await;
+        let relay = last_relay(&rig);
+        assert_eq!(relay.to, vec![desk_of("north-desk")]);
+        assert_eq!(intended(&relay), None);
+        let texts = rig.surface.texts();
+        assert_eq!(
+            texts,
+            [format!(
+                "已转给 [north-desk::refund-v2::speaker]（seq {}）",
+                relay.seq
+            )],
+            "only the acknowledgement"
+        );
+    }
+
+    // The rules alone: the only seat online.
+    let hub = bound_hub().await;
+    hub.set_roster(roster_with_carol());
+    hub.add_child("north-desk", "carol");
+    hub.declare_seats(
+        "north-desk",
+        &refund(),
+        &[
+            ("responder", PresenceState::Disconnected),
+            ("reviewer", PresenceState::Online),
+        ],
+    );
+    let rig = Rig::start(hub).await;
+    rig.append(mention("pm", "/tell carol 退款文档更新了吗？", "m_s1"))
+        .await;
+    rig.settle().await;
+    assert_eq!(
+        intended(&last_relay(&rig)).as_deref(),
+        Some("north-desk::refund-v2::senator::reviewer")
+    );
+}
+
+/// Two child Senates: the person says which, and the relay then names the
+/// seat of the one chosen.
+#[tokio::test]
+async fn a_chosen_child_senate_is_reached_at_its_seat() {
+    let hub = bound_hub().await;
+    hub.set_roster(roster_with_carol());
+    hub.add_child("north-desk", "carol");
+    hub.add_child("south-desk", "carol");
+    hub.declare_seats(
+        "north-desk",
+        &refund(),
+        &[("responder", PresenceState::Online)],
+    );
+    hub.declare_seats("south-desk", &refund(), &[("clerk", PresenceState::Online)]);
+    let rig = Rig::start(hub).await;
+    let ask = rig
+        .append(mention("pm", "/tell carol 记得更新退款文档", "m_s1"))
+        .await;
+    rig.settle().await;
+    let posts = rig.surface.posts();
+    assert_eq!(posts.len(), 1, "which Senate is asked, as before");
+    rig.append(in_thread(
+        "pm",
+        "2",
+        "m_s2",
+        ask.seq,
+        posts[0].thread_ref.clone(),
+        &posts[0].message_ref,
+    ))
+    .await;
+    rig.settle().await;
+    let relay = last_relay(&rig);
+    assert_eq!(relay.to, vec![desk_of("south-desk")]);
+    assert_eq!(
+        intended(&relay).as_deref(),
+        Some("south-desk::refund-v2::senator::clerk")
+    );
+}
+
+/// A seat a child Senate declares is named outright in three ways; each
+/// resolves to that seat when the name is no senator here.
+#[tokio::test]
+async fn a_child_senates_seat_named_outright_is_that_seat() {
+    let hub = bound_hub().await;
+    hub.set_roster(roster_with_carol());
+    hub.add_child("north-desk", "carol");
+    hub.add_child("south-desk", "bob");
+    hub.declare_seats(
+        "north-desk",
+        &refund(),
+        &[
+            ("responder", PresenceState::Online),
+            ("reviewer", PresenceState::Online),
+        ],
+    );
+    hub.declare_seats(
+        "south-desk",
+        &refund(),
+        &[("reviewer", PresenceState::Online)],
+    );
+    let rig = Rig::start(hub).await;
+    let relayed = |n: usize, target: &str| {
+        let text = format!("/tell {target} 记得更新退款文档 {n}");
+        let message_ref = format!("m_n{n}");
+        let rig = &rig;
+        async move {
+            let before = rig.hub.events(&refund()).len();
+            rig.append(mention("pm", &text, &message_ref)).await;
+            rig.settle().await;
+            let events = rig.hub.events(&refund());
+            // The chat and, when the target was understood, the relay.
+            (events.len() > before + 1).then(|| last_relay(rig))
+        }
+    };
+    for (n, target) in [
+        "responder",
+        "senator::responder",
+        "north-desk::responder",
+        "north-desk::refund-v2::senator::responder",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let relay = relayed(n, target)
+            .await
+            .unwrap_or_else(|| panic!("{target}"));
+        assert_eq!(relay.to, vec![desk_of("north-desk")], "{target}");
+        assert_eq!(
+            intended(&relay).as_deref(),
+            Some("north-desk::refund-v2::senator::responder"),
+            "{target}"
+        );
+    }
+    assert!(rig.brain.pick_inputs().is_empty(), "named: nothing to pick");
+
+    // Two Senates declare `reviewer`: alone it names neither; with its
+    // Senate it is that one's.
+    assert_eq!(relayed(10, "reviewer").await, None);
+    let relay = relayed(11, "south-desk::reviewer").await.expect("named");
+    assert_eq!(relay.to, vec![desk_of("south-desk")]);
+    assert_eq!(
+        intended(&relay).as_deref(),
+        Some("south-desk::refund-v2::senator::reviewer")
+    );
+    // A seat the Senate does not declare is nobody; in full it is taken
+    // as said, and the desk there deals with it.
+    assert_eq!(relayed(12, "north-desk::stranger").await, None);
+    let relay = relayed(13, "north-desk::refund-v2::senator::stranger")
+        .await
+        .expect("named in full");
+    assert_eq!(
+        intended(&relay).as_deref(),
+        Some("north-desk::refund-v2::senator::stranger")
+    );
+    // The desk named outright stays the desk, and several recipients name
+    // no seat: one message carries one intended name.
+    let relay = relayed(14, "north-desk::speaker").await.expect("the desk");
+    assert_eq!(relay.to, vec![desk_of("north-desk")]);
+    assert_eq!(intended(&relay), None);
+    rig.brain.interprets(Ok(Intent::Relay {
+        targets: vec!["north-desk::responder".into(), "alice".into()],
+        kind: RelayKind::Note,
+        body: "记得更新退款文档".into(),
+    }));
+    rig.append(mention(
+        "pm",
+        "告诉 north-desk 的 responder 和 alice 记得更新退款文档",
+        "m_n16",
+    ))
+    .await;
+    rig.settle().await;
+    let relay = last_relay(&rig);
+    assert_eq!(relay.to, vec![desk_of("north-desk"), agent("alice")]);
+    assert_eq!(intended(&relay), None);
+}
+
+/// A senator of this Senate keeps its name: a child Senate's seat of the
+/// same name is reached by saying whose it is.
+#[tokio::test]
+async fn a_senator_here_wins_over_a_child_senates_seat_of_the_same_name() {
+    let hub = bound_hub().await;
+    hub.add_child("north-desk", "alice");
+    hub.declare_seats(
+        "north-desk",
+        &refund(),
+        &[("claude", PresenceState::Online)],
+    );
+    let rig = Rig::start(hub).await;
+    rig.append(mention("pm", "/tell claude 记得更新退款文档", "m_w1"))
+        .await;
+    rig.settle().await;
+    let relay = last_relay(&rig);
+    assert_eq!(relay.to, vec![agent("alice")]);
+    assert_eq!(intended(&relay), None);
+
+    rig.append(mention(
+        "pm",
+        "/tell north-desk::claude 记得更新退款文档",
+        "m_w2",
+    ))
+    .await;
+    rig.settle().await;
+    let relay = last_relay(&rig);
+    assert_eq!(relay.to, vec![desk_of("north-desk")]);
+    assert_eq!(
+        intended(&relay).as_deref(),
+        Some("north-desk::refund-v2::senator::claude")
+    );
+}

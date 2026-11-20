@@ -90,9 +90,13 @@ fn more(l: Locale, n: usize) -> String {
 /// `已转给 [senator::claude]（seq 120）` /
 /// `Passed to [senator::claude] (seq 120)`.
 pub(crate) fn relay_ack(l: Locale, targets: &[Address], seq: Seq) -> String {
+    relay_ack_to(l, &mentions(l, targets), seq)
+}
+
+fn relay_ack_to(l: Locale, whom: &str, seq: Seq) -> String {
     match l {
-        Locale::Zh => format!("已转给 {}（seq {seq}）", mentions(l, targets)),
-        Locale::En => format!("Passed to {} (seq {seq})", mentions(l, targets)),
+        Locale::Zh => format!("已转给 {whom}（seq {seq}）"),
+        Locale::En => format!("Passed to {whom} (seq {seq})"),
     }
 }
 
@@ -1058,8 +1062,14 @@ pub(crate) fn excerpt(text: &str) -> String {
 /// the person: `。Speaker 判断这条需要 [senator::alice] 本人处理，已提醒 [senator::alice]`.
 /// The person is the first recipient's: a person themselves, or the person
 /// the roster says answers for an agent.
+///
+/// A relay meant for one seat in a child Senate names the seat, not the
+/// desk it goes through: `已转给 [north-desk::refund-v2::senator::codex]（seq 120）`.
 pub(crate) fn relay_ack_for(l: Locale, event: &Event, roster: &Roster) -> String {
-    let ack = relay_ack(l, &event.to, event.seq);
+    let ack = match (event.to.as_slice(), senate_core::locator::intended(event)) {
+        ([Address::Child { .. }], Some(seat)) => relay_ack_to(l, &seat.in_text(), event.seq),
+        _ => relay_ack(l, &event.to, event.seq),
+    };
     let parked = TriagePayload::of(event).is_some_and(|t| t.verdict == TriageVerdict::NeedsHuman);
     let owner = event.to.iter().find_map(|a| {
         let senator = a.as_senator()?;

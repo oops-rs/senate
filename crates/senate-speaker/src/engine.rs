@@ -365,6 +365,10 @@ struct CommitteeState {
     /// (chat seq, step key, person), so a step repeated after a stall or a
     /// triage wait acts on the same agent.
     picks: HashMap<(Seq, String, Option<Name>), SenatorName>,
+    /// The seat told in a child Senate for a relay going down to it
+    /// (`None`: it could not be told, the desk there decides), by (chat
+    /// seq, step key, child Senate), kept like `picks`.
+    seat_picks: HashMap<(Seq, String, Name), Option<SenatorName>>,
     /// Debounced card updates, per task root.
     cards: HashMap<Seq, Timer>,
     pinned: Pinned,
@@ -1245,6 +1249,7 @@ impl Engine {
                     state.triage.remove(&event.seq);
                     state.crossings.remove(&event.seq);
                     state.picks.retain(|(seq, _, _), _| *seq != event.seq);
+                    state.seat_picks.retain(|(seq, _, _), _| *seq != event.seq);
                     self.agent_progress.remove(&(committee.clone(), event.seq));
                 }
                 if let Err(error) = self.hub.set_cursor(&committee, CURSOR, event.seq).await {
@@ -2769,6 +2774,8 @@ impl Engine {
         }
         let mut to: Vec<Address> = Vec::new();
         let mut unknown = Vec::new();
+        // The seats named in child Senates, as qualified names.
+        let mut seats: Vec<senate_core::Locator> = Vec::new();
         for target in targets {
             let waiting = Waiting::Intent {
                 intent: Intent::Relay {
@@ -2786,14 +2793,22 @@ impl Engine {
                         to.push(address);
                     }
                 }
-                Settled::Child(senate) => {
-                    // That Senate's Speaker's desk, on the same committee.
+                Settled::Child(target) => {
+                    // That Senate's Speaker's desk, which delivers to the
+                    // seat when one is named.
                     let address = Address::Child {
-                        senate,
-                        committee: self.acting_committee(chat),
+                        senate: target.senate.clone(),
+                        committee: target.committee.clone(),
                     };
                     if !to.contains(&address) {
                         to.push(address);
+                    }
+                    if let Some(seat) = target
+                        .seat
+                        .as_ref()
+                        .and_then(|seat| self.seat_locator(&target, seat))
+                    {
+                        seats.push(seat);
                     }
                 }
                 Settled::Unknown => unknown.push(target.clone()),
@@ -2819,6 +2834,11 @@ impl Engine {
             // Acknowledged under the chat when processed; a relay on another
             // committee (after a Bind) is acknowledged in the plan's result.
             relay = relay.with_meta(meta::RELAYED_FROM, json!(chat.seq.0));
+        }
+        // One message carries one intended name: a relay to several
+        // recipients names no seat, and the desk there decides.
+        if let ([_], [seat]) = (to.as_slice(), seats.as_slice()) {
+            relay = relay.with_meta(meta::INTENDED, json!(seat.to_string()));
         }
         if kind == Kind::Question {
             // A task: judged before it is written, and the verdict travels
