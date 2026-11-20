@@ -2053,7 +2053,7 @@ fn processes_under(root: &std::path::Path) -> Vec<String> {
 /// host and TUI), and that home.
 async fn one_hosted_session() -> (Harness, PathBuf) {
     let mut h = Harness::new().await;
-    h.config.hosted_session_limit = 1;
+    h.config.hosted_session_limit = Some(1);
     h.dir = tempfile::tempdir_in("/tmp").unwrap();
     h.paths = senate_bridge::Paths::new(h.dir.path().join("senate"));
     h.paths.ensure_home().unwrap();
