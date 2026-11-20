@@ -2076,7 +2076,11 @@ async fn the_brain_may_answer_for_an_offline_child_senate() {
     assert_eq!(answer.kind, Kind::Answer);
     assert_eq!(answer.from, Address::Speaker);
     assert_eq!(answer.on_behalf_of, Some(desk_of("north-desk")));
-    assert_eq!(answer.to, vec![user("pm")]);
+    assert_eq!(
+        answer.to,
+        vec![user("pm"), desk_of("north-desk")],
+        "to the asker, and to the child for when it is back"
+    );
     assert_eq!(
         answer.body,
         "[north-desk] 目前离线，以下由 Speaker 的办公室代答；它重新连接后仍会收到这个问题。\n\

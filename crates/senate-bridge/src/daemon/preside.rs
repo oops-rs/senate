@@ -260,8 +260,9 @@ impl Shared {
 
     /// The office's line in the thread of `root`, a question for the child
     /// Senate `child` that is offline: an `answer` on the child's behalf,
-    /// or the `note` that it is held. To the one who asked; the question
-    /// itself still reaches the child when it reconnects.
+    /// or the `note` that it is held. To the one who asked, and an answer
+    /// to the child's desk as well; the question itself still reaches the
+    /// child when it reconnects.
     async fn say_of_offline_child(
         &self,
         speaker: &SenatorName,
@@ -289,7 +290,9 @@ impl Shared {
             event = event.to(asker);
         }
         if let (true, Some(desk)) = (answered, desk) {
-            event = event.on_behalf_of(desk);
+            // To the child's desk too: it finds the answer under the
+            // question when it reconnects.
+            event = event.on_behalf_of(desk.clone()).to(desk);
         }
         if let Some(id) = id {
             event = event.with_id(id);

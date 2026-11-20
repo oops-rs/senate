@@ -12,7 +12,9 @@
 //!   ([`Brain::decide_offline`](crate::Brain::decide_offline): the brief
 //!   and its checkpoints, the seats and duties the child declared, the
 //!   thread): an `answer` in the question's thread, `from: speaker`,
-//!   `on_behalf_of` the child's desk;
+//!   `on_behalf_of` the child's desk, addressed to the one who asked and
+//!   to that desk, so the child finds it under the question when it is
+//!   back;
 //! - **holds it and says so**: a `note` in the thread to the one who asked,
 //!   saying the child is offline and since when. This is what the rules
 //!   decide, what a Brain that fails or is late comes to, and all a
@@ -155,14 +157,17 @@ impl Engine {
             ]))
             .in_thread(event.seq)
             .with_meta(meta::CHILD_OFFLINE, json!(child.name.as_str()));
-        if answered {
-            line = line.on_behalf_of(desk);
-        }
         // The one who asked: the person a relay was written for, else the
         // sender. The office's own forward has nobody here to tell.
         let asker = event.on_behalf_of.as_ref().unwrap_or(&event.from);
         if *asker != Address::Speaker {
             line = line.to(asker.clone());
+        }
+        if answered {
+            // To the child's desk too: its uplink brings the answer down
+            // into the question's thread there when it reconnects, so the
+            // child knows what was said in its name.
+            line = line.on_behalf_of(desk.clone()).to(desk);
         }
         self.append(line).await?;
         Ok(Flow::Done)

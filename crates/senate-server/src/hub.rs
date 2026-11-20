@@ -377,9 +377,10 @@ impl ServerHub {
     }
 
     /// The seats a registered child declares, replacing the last ones; the
-    /// child is seen now. Kept in memory only: after a restart a child is
-    /// offline until it declares them again, on its next poll. `None`: no
-    /// such child.
+    /// child is seen now. Kept in memory only: after a restart nothing is
+    /// known of a child (it is neither online nor known to be offline,
+    /// [`ChildSenate::is_offline`]) until it declares them again, on its
+    /// next poll. `None`: no such child.
     pub fn set_child_seats(&self, name: &Name, seats: Vec<ChildSeat>) -> Option<ChildSenate> {
         let mut children = self
             .children

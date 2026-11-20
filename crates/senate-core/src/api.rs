@@ -348,9 +348,9 @@ pub struct ChildSenate {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub seats: Vec<ChildSeat>,
     /// When the child last declared its seats; `None` since this server
-    /// started until it does. Older than
+    /// started until it does, and nothing is known of it then. Older than
     /// [`PRESENCE_DISCONNECTED_SECS`](crate::continuity::PRESENCE_DISCONNECTED_SECS),
-    /// the child is offline ([`ChildSenate::is_online`]).
+    /// the child is offline ([`ChildSenate::is_offline`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_seen: Option<chrono::DateTime<chrono::Utc>>,
 }
