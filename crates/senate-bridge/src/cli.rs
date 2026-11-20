@@ -173,17 +173,17 @@ enum Cmd {
     SecretaryTeam(cli_secretary::SecretaryTeam),
     /// Remove this worktree's committee binding on the current branch.
     Leave,
-    /// List the Senate-hosted sessions on this machine; stop or prune them.
+    /// List, stop or prune this machine's hosted sessions.
     ///
     /// With no subcommand: each session's name (`committee::alias`, else
     /// its senator), committee, runtime, state, uptime, who is at its
     /// terminal, and directory.
     #[command(after_help = "Examples:
-  senate sessions                      List them
-  senate sessions stop reviewer        Stop one (its TUI ends; senate restore reopens it)
-  senate sessions stop --idle          Stop every one nobody is attached to
-  senate sessions stop --all --force   Stop all, even one typed into in the last 5 minutes
-  senate sessions prune                Stop hosts with no session; clear ended ones")]
+  senate sessions                     List them
+  senate sessions stop reviewer       Stop one (senate restore reopens it)
+  senate sessions stop --idle         Stop each one nobody is attached to
+  senate sessions stop --all --force  Stop all, even if typed into lately
+  senate sessions prune               Stop hosts with no session")]
     Sessions {
         #[command(subcommand)]
         command: Option<SessionsCmd>,
@@ -919,52 +919,33 @@ fn settings_here() -> (Paths, Settings) {
 }
 
 /// The hosted sessions of this machine whose terminal host is running, as
-/// `senate watch-all` shows them: the sessions of the daemon's status that
-/// have a host, each named by its alias when it has one.
+/// `senate watch-all` shows them: `senate sessions`' rows, each named as
+/// a command takes it.
 async fn hosted_sessions(paths: &Paths) -> anyhow::Result<Vec<crate::host::view::Session>> {
-    let status: crate::ipc::StatusReply = daemon_call(paths, &Request::Status).await?;
-    // The aliases are the Senate's to say; a Senate that does not answer
-    // leaves each session under its senator's own name.
-    let aliases: Option<KnownAliases> = daemon_call(paths, &Request::Aliases).await.ok();
-    let mut sessions: Vec<crate::host::view::Session> = status
-        .sessions
-        .iter()
-        .filter_map(|session| {
-            let tty = status.hosted_tty.get(&session.session_id)?.clone();
-            // An alias belongs to a committee: the session's alias is the
-            // one it has on the committee it works on.
-            let alias = session.committee().and_then(|committee| {
-                let alias = aliases.as_ref()?.alias_of(committee, &session.agent)?;
-                Some((alias.to_string(), committee))
-            });
-            let committee = session
-                .committee()
-                .map_or_else(|| "-".to_owned(), ToString::to_string);
-            let name = alias
-                .as_ref()
-                .map_or_else(|| session.agent.to_string(), |(alias, _)| alias.clone());
-            Some(crate::host::view::Session {
-                key: session.session_id.clone(),
-                title: format!(
-                    "{name} · {committee} · {} · {}",
-                    session.runtime.as_str(),
-                    session.state.as_str()
-                ),
-                // What a command takes: the alias with its committee, so
-                // it names one session whatever other committees call
-                // theirs.
-                alias: alias.map_or_else(
-                    || session.agent.to_string(),
-                    |(alias, committee)| format!("{committee}::{alias}"),
-                ),
-                tty,
-                dim: session.state != crate::session::SessionState::Live,
-            })
+    let reply: crate::ipc::SessionsReply = daemon_call(paths, &Request::Sessions).await?;
+    // Only a running host can be watched; the rows come ordered by name.
+    Ok(reply
+        .rows
+        .into_iter()
+        .filter(crate::ipc::SessionRow::is_running)
+        .map(|row| crate::host::view::Session {
+            key: row.session_id.clone(),
+            title: format!(
+                "{} · {} · {} · {}",
+                row.label(),
+                row.committee
+                    .as_ref()
+                    .map_or_else(|| "-".to_owned(), ToString::to_string),
+                row.runtime.as_str(),
+                row.state.as_str()
+            ),
+            // What a command takes: `committee::alias`, so it names one
+            // session whatever other committees call theirs.
+            alias: row.label(),
+            dim: !row.is_running(),
+            tty: row.tty,
         })
-        .collect();
-    // The same place for each session from one look to the next.
-    sessions.sort_by(|a, b| a.alias.cmp(&b.alias).then_with(|| a.key.cmp(&b.key)));
-    Ok(sessions)
+        .collect())
 }
 
 async fn daemon_call<T: serde::de::DeserializeOwned>(
