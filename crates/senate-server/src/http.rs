@@ -98,6 +98,7 @@ pub(crate) fn router(state: AppState) -> Router {
             "/v1/children/{name}",
             get(roles::get_child).put(roles::put_child),
         )
+        .route("/v1/children/{name}/seats", put(roles::put_child_seats))
         .route("/v1/resolve", get(resolve))
         .fallback(|| async { ApiFailure::not_found("no such route") })
         .method_not_allowed_fallback(|| async { ApiFailure::method_not_allowed() })

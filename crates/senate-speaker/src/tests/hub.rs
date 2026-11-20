@@ -107,10 +107,10 @@ impl MemoryHub {
     /// Register the child Senate `name`, whose Speaker is `speaker` (a
     /// person here).
     pub(crate) fn add_child(&self, name: &str, speaker: &str) {
-        self.lock().children.push(senate_core::ChildSenate {
-            name: Name::new(name).expect("name"),
-            speaker: speaker.parse().expect("senator"),
-        });
+        self.lock().children.push(senate_core::ChildSenate::new(
+            Name::new(name).expect("name"),
+            speaker.parse().expect("senator"),
+        ));
     }
 
     pub(crate) fn disconnect(&self, committee: &CommitteeId, agent: &SenatorName) {

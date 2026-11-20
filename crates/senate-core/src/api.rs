@@ -47,6 +47,7 @@
 //! | POST | `/v1/secretary-teams/work` | [`SecretaryWorkRequest`](crate::secretary_work::SecretaryWorkRequest) → [`SecretaryWorkReply`](crate::secretary_work::SecretaryWorkReply) |
 //! | GET  | `/v1/children` | → [`Vec<ChildSenate>`](ChildSenate) |
 //! | PUT  | `/v1/children/{name}` | [`RegisterChild`] → [`ChildSenate`] |
+//! | PUT  | `/v1/children/{name}/seats` | [`ChildSeats`] → [`ChildSenate`] |
 //!
 //! A senator is named in a query, never in a path segment: `?agent=claude`.
 //!
@@ -165,7 +166,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::address::Address;
 use crate::chair::ChairSource;
-use crate::continuity::AgentPresence;
+use crate::continuity::{AgentPresence, PresenceState};
 use crate::event::{Event, NewEvent, StatusState};
 use crate::ids::{CommitteeId, Name, Seq};
 use crate::locator::Locator;
@@ -270,6 +271,10 @@ pub fn child_path(name: &Name) -> String {
     format!("{CHILDREN_PATH}/{name}")
 }
 
+pub fn child_seats_path(name: &Name) -> String {
+    format!("{CHILDREN_PATH}/{name}/seats")
+}
+
 /// `GET` / `PUT .../chair`: a committee's chair and how it was found
 /// ([`crate::chair`]). `chair` is `None` for a committee with no event yet.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -337,6 +342,57 @@ pub struct SetSecretaries {
 pub struct ChildSenate {
     pub name: Name,
     pub speaker: SenatorName,
+    /// The seats the child last declared ([`ChildSeats`]): every senator
+    /// on each committee it shares with this Senate, with its duty and
+    /// presence there. Only seats cross upward, never content.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub seats: Vec<ChildSeat>,
+    /// When the child last declared its seats; `None` since this server
+    /// started until it does. Older than
+    /// [`PRESENCE_DISCONNECTED_SECS`](crate::continuity::PRESENCE_DISCONNECTED_SECS),
+    /// the child is offline ([`ChildSenate::is_online`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl ChildSenate {
+    /// A child just registered: no seats declared yet.
+    pub fn new(name: Name, speaker: SenatorName) -> Self {
+        Self {
+            name,
+            speaker,
+            seats: Vec::new(),
+            last_seen: None,
+        }
+    }
+
+    /// Whether the child has declared its seats recently enough to count
+    /// as online at `now`.
+    pub fn is_online(&self, now: chrono::DateTime<chrono::Utc>) -> bool {
+        self.last_seen.is_some_and(|seen| {
+            now.signed_duration_since(seen).num_seconds()
+                < crate::continuity::PRESENCE_DISCONNECTED_SECS as i64
+        })
+    }
+}
+
+/// One seat a child Senate declares to its parent: a senator on one of
+/// its committees, with its duty and presence there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChildSeat {
+    pub committee: CommitteeId,
+    pub senator: SenatorName,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duty: Option<String>,
+    pub presence: PresenceState,
+}
+
+/// `PUT /v1/children/{name}/seats`: the child's whole set of declared
+/// seats, sent by its machine on every poll, authenticated as its Speaker.
+/// It replaces the last one and marks the child seen.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ChildSeats {
+    pub seats: Vec<ChildSeat>,
 }
 
 /// `PUT /v1/children/{name}`: register a child Senate, authenticated as

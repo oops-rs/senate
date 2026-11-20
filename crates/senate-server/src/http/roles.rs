@@ -5,7 +5,7 @@ use axum::Json;
 use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{Path, Query, State};
 use senate_core::api::{
-    ChairInfo, ChildSenate, RegisterChild, Resolved, Secretaries, SetChair, SetSecretaries,
+    ChairInfo, ChildSeats, ChildSenate, RegisterChild, Resolved, Secretaries, SetChair, SetSecretaries,
 };
 use senate_core::{
     Address, Appended, CommitteeId, DocketPage, Hub, Kind, Locator, Name, NewEvent, PickPayload,
@@ -468,6 +468,35 @@ pub(super) async fn get_child(
         .ok_or_else(|| ApiFailure::not_found(format!("no child Senate {name} is registered here")))
 }
 
+/// A registered child declares its seats, authenticated as its Speaker:
+/// the whole set, replacing the last one, and the child is seen now.
+pub(super) async fn put_child_seats(
+    State(state): State<AppState>,
+    person: Person,
+    path: Result<Path<String>, PathRejection>,
+    body: Result<Json<ChildSeats>, JsonRejection>,
+) -> Result<Json<ChildSenate>, ApiFailure> {
+    let name = child_name(path)?;
+    let ChildSeats { seats } = json_body(body)?;
+    let Some(child) = state.hub.child(&name) else {
+        return Err(ApiFailure::not_found(format!(
+            "no child Senate {name} is registered here; register it first"
+        )));
+    };
+    if child.speaker != person.0 {
+        return Err(ApiFailure::forbidden(format!(
+            "{} may not declare the seats of {name}: its Speaker {} does",
+            person.0,
+            Address::senator(&child.speaker)
+        )));
+    }
+    state
+        .hub
+        .set_child_seats(&name, seats)
+        .map(Json)
+        .ok_or_else(|| ApiFailure::not_found(format!("no child Senate {name} is registered here")))
+}
+
 /// A child Senate registers authenticated as its Speaker: `speaker` is
 /// `/<this Senate's path>::senator::<x>`, `x` a principal here and the one
 /// who authenticated. A child whose Speaker would be an agent of this
@@ -517,9 +546,6 @@ pub(super) async fn put_child(
             Address::senator(&existing.speaker)
         )));
     }
-    let child = ChildSenate {
-        name,
-        speaker: x.clone(),
-    };
+    let child = ChildSenate::new(name, x.clone());
     Ok(Json(state.hub.register_child(child).await?))
 }

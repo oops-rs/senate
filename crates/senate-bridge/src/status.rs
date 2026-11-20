@@ -986,10 +986,10 @@ mod tests {
                 chair: Some(name("codex")),
                 source: None,
             }],
-            children: vec![senate_core::api::ChildSenate {
-                name: senate_core::Name::new("bob-desk").unwrap(),
-                speaker: name("bob"),
-            }],
+            children: vec![senate_core::api::ChildSenate::new(
+                senate_core::Name::new("bob-desk").unwrap(),
+                name("bob"),
+            )],
             uplink: Some(UplinkStatus {
                 url: "https://senate.example.com".into(),
                 parent: Some("/acme".parse().unwrap()),

@@ -14,7 +14,7 @@ use common::*;
 use reqwest::{Method, StatusCode};
 use senate_core::Hub as _;
 use senate_core::api::{
-    AppendResponse, ChairInfo, ChildSenate, Me, RegisterChild, Secretaries, SetChair,
+    AppendResponse, ChairInfo, ChildSeat, ChildSeats, ChildSenate, Me, RegisterChild, Secretaries, SetChair,
     SetSecretaries,
 };
 use senate_core::{
@@ -1645,6 +1645,56 @@ async fn a_child_senate_registers_as_its_speaker() {
     // Kept across a restart.
     let server = try_start(store, None, |_| {}).await.unwrap();
     assert_eq!(me(&server, BOB).await.children, [child]);
+    server.running.shutdown().await.unwrap();
+}
+
+/// A child declares its seats as its Speaker: the whole set, each time,
+/// and the declaration marks it seen. The Speaker reads them through the
+/// `Hub` trait; registering again keeps them.
+#[tokio::test]
+async fn a_child_senate_declares_its_seats_as_its_speaker() {
+    let server = try_start(Arc::new(MemoryStore::new()), None, |c| {
+        c.roster.agents = vec![seated("claude", "alice")];
+    })
+    .await
+    .unwrap();
+    let child = name("north-desk");
+    let seats_route = senate_core::api::child_seats_path(&child);
+    let seats = |duty: &str| ChildSeats {
+        seats: vec![ChildSeat {
+            committee: committee(),
+            senator: path("responder"),
+            duty: Some(duty.into()),
+            presence: senate_core::continuity::PresenceState::Online,
+        }],
+    };
+    // Not registered yet.
+    let response = put(&server, ALICE, &seats_route, &seats("refunds")).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let route = senate_core::api::child_path(&child);
+    put(&server, ALICE, &route, &register("/senate::senator::alice")).await;
+    let hub: Arc<dyn senate_core::Hub> = server.running.hub.clone();
+    assert!(!hub.children().await.unwrap()[0].is_online(chrono::Utc::now()));
+
+    // Only its Speaker declares them.
+    let response = put(&server, BOB, &seats_route, &seats("refunds")).await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    let response = put(&server, ALICE, &seats_route, &seats("refunds")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let declared: ChildSenate = response.json().await.unwrap();
+    assert_eq!(declared.seats, seats("refunds").seats);
+    assert!(declared.is_online(chrono::Utc::now()));
+    let listed = hub.children().await.unwrap();
+    assert_eq!(listed, std::slice::from_ref(&declared));
+
+    // The next declaration replaces it; registering again keeps it.
+    put(&server, ALICE, &seats_route, &seats("billing")).await;
+    put(&server, ALICE, &route, &register("/senate::senator::alice")).await;
+    let one: ChildSenate = get(&server, BOB, &route).await;
+    assert_eq!(one.seats, seats("billing").seats);
+    assert!(one.is_online(chrono::Utc::now()));
     server.running.shutdown().await.unwrap();
 }
 
