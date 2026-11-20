@@ -1,97 +1,128 @@
+//! `senate --help`: the commands under headings, in the order a person
+//! meets them, the same whether it is read in a terminal or through a pipe.
+//! The words come from the doc comments in `main.rs`; a terminal adds
+//! wrapping to its width and emphasis on the headings.
+
+use std::fmt::Write as _;
 use std::io::{Write, stdout};
 
-use clap::{Command, CommandFactory, FromArgMatches, Parser, error::ErrorKind};
+use clap::{Command, CommandFactory, FromArgMatches, error::ErrorKind};
 use senate_bridge::terminal::Terminal;
 
 use super::Cli;
 
-const FIRST_COMMANDS: [&str; 5] = ["status", "where", "inbox", "watch", "thread"];
-const SUMMARIES: &[(&str, &str)] = &[
-    ("where", "Show this directory's committee."),
-    ("inbox", "Read unread messages and open threads."),
-    ("watch", "Follow new messages."),
-    ("thread", "Read the messages in one thread."),
-    ("init", "Create a profile for a local Senate."),
-    ("join", "Bind this worktree or set a session alias."),
-    ("aliases", "List senator aliases."),
-    ("leave", "Remove this worktree's committee binding."),
-    ("seat", "Change a senator's committee membership."),
-    ("pin", "Set the worktree's suggested agent name."),
-    ("unpin", "Clear the worktree's suggested agent name."),
-    ("list", "List saved worktree bindings."),
-    ("free", "List expired local data (dry run)."),
-    ("ask", "Send a question as yourself."),
-    ("tell", "Send a note as yourself."),
-    ("request", "Ask an agent to do work."),
-    ("reply", "Reply in an existing thread."),
-    ("take", "Take over a thread as yourself."),
-    ("mcp", "Run the MCP server over stdio."),
-    ("hook", "Run a coding session's hook."),
-    ("install", "Set up MCP and hooks for coding agents."),
-    ("service", "Manage the background daemon."),
-    ("codex-smoke", "Check the Codex app-server connection."),
+/// Every visible command, once, under its heading.
+const GROUPS: &[(&str, &[&str])] = &[
+    (
+        "See what is happening",
+        &["status", "inbox", "watch", "thread", "receipt"],
+    ),
+    (
+        "Speak as yourself",
+        &["ask", "tell", "request", "reply", "take"],
+    ),
+    (
+        "This worktree",
+        &["where", "join", "leave", "pin", "unpin", "list", "free"],
+    ),
+    (
+        "Senators and sessions",
+        &[
+            "spawn",
+            "attach",
+            "stop",
+            "restore",
+            "aliases",
+            "seat",
+            "secretary-team",
+        ],
+    ),
+    ("Set up this machine", &["init", "install", "service"]),
+    (
+        "Plumbing, run by coding agents and installers",
+        &[
+            "mcp",
+            "hook",
+            "acp",
+            "agy-register",
+            "agy-unregister",
+            "codex-smoke",
+            "debug",
+        ],
+    ),
 ];
 
+const FOOTER: &str = "\
+Run `senate help <command>` for a command's details and examples.
+
+Start here:
+  senate status                   Is the daemon up, and who is connected?
+  senate inbox                    What waits for you?
+  senate ask claude \"...\" --wait  Ask an agent and stay for the answer
+
+First time on this machine:
+  senate init --local --person <you>  Only to use Senate alone, without a team
+  senate install --yes                Register Senate with Claude Code and Codex
+  senate service install --yes        Keep the daemon running, from login
+  senate join                         In each repository: bind it to a committee
+";
+
 pub(super) fn parse(terminal: Option<Terminal>) -> Cli {
-    let Some(terminal) = terminal else {
-        return Cli::parse();
-    };
     let mut command = command(terminal);
     let parsed = command
         .try_get_matches_from_mut(std::env::args_os())
         .and_then(|mut matches| {
             Cli::from_arg_matches_mut(&mut matches).map_err(|error| error.format(&mut command))
         });
-    match parsed {
-        Ok(cli) => cli,
-        Err(error) if error.kind() == ErrorKind::DisplayHelp => {
+    match (parsed, terminal) {
+        (Ok(cli), _) => cli,
+        (Err(error), Some(terminal)) if error.kind() == ErrorKind::DisplayHelp => {
             let help = render(&error.to_string(), terminal);
             let _ = stdout().lock().write_all(help.as_bytes());
             std::process::exit(error.exit_code());
         }
-        Err(error) => error.exit(),
+        (Err(error), _) => error.exit(),
     }
 }
 
-fn command(terminal: Terminal) -> Command {
-    Cli::command()
-        .about("Read and reply on your Senate from the terminal.")
-        .term_width(terminal.columns())
-        .next_line_help(terminal.columns() < 72)
-        .after_help("Examples:\n  senate status\n  senate inbox\n  senate help status")
-        .mut_subcommands(orient)
+fn command(terminal: Option<Terminal>) -> Command {
+    let command = Cli::command();
+    let template = format!(
+        "{{about}}\n\n{{usage-heading}} {{usage}}\n\n{}Options:\n{{options}}\n\n{FOOTER}",
+        grouped(&command)
+    );
+    let command = command.help_template(template);
+    match terminal {
+        Some(terminal) => command
+            .term_width(terminal.columns())
+            .next_line_help(terminal.columns() < 72),
+        None => command,
+    }
 }
 
-fn orient(mut command: Command) -> Command {
-    let order = FIRST_COMMANDS
+/// The command list of the top-level help: each group's heading, then its
+/// commands with their one-line summaries in one column.
+fn grouped(command: &Command) -> String {
+    let width = GROUPS
         .iter()
-        .position(|name| *name == command.get_name())
-        .unwrap_or_else(|| {
-            command
-                .get_display_order()
-                .saturating_add(FIRST_COMMANDS.len())
-        });
-    command = command.display_order(order);
-    if command.get_name() == "status" {
-        return command
-            .about("Show the Senate, committee, chair, sessions, and delivery.")
-            .mut_arg("full_ids", |arg| arg.help("Show complete session and senator IDs"))
-            .after_help(
-                "Examples:\n  senate status\n  senate status --global\n  senate status --committee refund-v2",
-            );
-    }
-    if let Some((_, summary)) = SUMMARIES
-        .iter()
-        .find(|(name, _)| *name == command.get_name())
-    {
-        if command.get_long_about().is_none()
-            && let Some(about) = command.get_about().cloned()
-        {
-            command = command.long_about(about);
+        .flat_map(|(_, names)| names.iter())
+        .map(|name| name.len())
+        .max()
+        .unwrap_or(0);
+    let mut out = String::new();
+    for (heading, names) in GROUPS {
+        let _ = writeln!(out, "{heading}:");
+        for name in *names {
+            let about = command
+                .find_subcommand(name)
+                .and_then(Command::get_about)
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            let _ = writeln!(out, "  {name:width$}  {about}");
         }
-        command = command.about(*summary);
+        out.push('\n');
     }
-    command
+    out
 }
 
 fn render(help: &str, terminal: Terminal) -> String {
@@ -109,7 +140,146 @@ fn render(help: &str, terminal: Terminal) -> String {
             natural
         };
         let heading = indent == 0 && (text.ends_with(':') || text.starts_with("Usage:"));
-        terminal.line(&mut out, text, indent, heading);
+        terminal.line_hanging(
+            &mut out,
+            text,
+            indent,
+            hang(text, indent, terminal.columns()),
+            heading,
+        );
     }
     out
+}
+
+/// Where the wrapped rest of a line starts. A row of two columns (a
+/// command and its summary, an example and its note) continues under the
+/// second one when that leaves room to read it.
+fn hang(text: &str, indent: usize, columns: usize) -> usize {
+    let second = text.find("  ").map(|gap| {
+        let rest = &text[gap..];
+        indent + gap + (rest.len() - rest.trim_start_matches(' ').len())
+    });
+    match second {
+        Some(column) if indent > 0 && column + 24 <= columns => column,
+        _ => indent + 2,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn visible(command: &Command) -> Vec<&Command> {
+        command
+            .get_subcommands()
+            .filter(|sub| !sub.is_hide_set())
+            .collect()
+    }
+
+    #[test]
+    fn every_visible_command_is_listed_once_with_a_one_line_summary() {
+        let command = Cli::command();
+        let listed: Vec<&str> = GROUPS
+            .iter()
+            .flat_map(|(_, names)| names.iter().copied())
+            .collect();
+        for sub in visible(&command) {
+            let name = sub.get_name();
+            assert_eq!(
+                listed.iter().filter(|n| **n == name).count(),
+                1,
+                "`{name}` needs exactly one place in GROUPS"
+            );
+            let about = sub.get_about().map(ToString::to_string).unwrap_or_default();
+            assert!(!about.is_empty(), "`{name}` has no summary");
+            assert!(
+                about.len() <= 62 && !about.contains(['{', '}', '\n']),
+                "the summary of `{name}` must fit one line of an 80-column terminal: {about}"
+            );
+        }
+        for name in &listed {
+            assert!(
+                command.find_subcommand(name).is_some(),
+                "GROUPS lists `{name}`, which is not a command"
+            );
+        }
+    }
+
+    fn walk<'a>(command: &'a Command, path: String, each: &mut impl FnMut(&str, &'a Command)) {
+        each(&path, command);
+        for sub in command.get_subcommands() {
+            walk(sub, format!("{path} {}", sub.get_name()), each);
+        }
+    }
+
+    #[test]
+    fn every_argument_is_described_and_examples_fit_80_columns() {
+        let command = Cli::command();
+        walk(&command, "senate".to_owned(), &mut |path, command| {
+            if command.is_hide_set() {
+                return;
+            }
+            for arg in command.get_arguments() {
+                assert!(
+                    arg.is_hide_set() || arg.get_help().is_some(),
+                    "`{path}`: `{}` has no help",
+                    arg.get_id()
+                );
+            }
+            let examples = command
+                .get_after_help()
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            for line in examples.lines() {
+                assert!(
+                    line.chars().count() <= 80,
+                    "`{path}`: this example is wider than 80 columns: {line}"
+                );
+            }
+        });
+        for line in FOOTER.lines().chain(grouped(&command).lines()) {
+            assert!(line.chars().count() <= 80, "wider than 80 columns: {line}");
+        }
+    }
+
+    #[test]
+    fn the_top_level_help_groups_the_commands_piped_or_in_a_terminal() {
+        let piped = command(None).render_help().to_string();
+        for needle in [
+            "See what is happening:\n  status",
+            "Speak as yourself:\n  ask",
+            "Plumbing, run by coding agents and installers:\n  mcp",
+            "Options:\n  -h, --help",
+            "senate help <command>",
+        ] {
+            assert!(piped.contains(needle), "{needle:?} in:\n{piped}");
+        }
+        assert!(!piped.contains("session-host"), "{piped}");
+
+        let narrow = Terminal::new(60, false);
+        let text = render(&command(Some(narrow)).render_help().to_string(), narrow);
+        assert!(
+            text.lines().all(|line| line.chars().count() <= 60),
+            "{text}"
+        );
+        // A wrapped summary continues under the summary column.
+        let wrapped = render(
+            "  free            Forget expired local data. Dry run without --yes, as ever it was\n",
+            Terminal::new(60, false),
+        );
+        let lines: Vec<&str> = wrapped.lines().collect();
+        assert!(lines.len() > 1, "{wrapped}");
+        assert!(lines[1].starts_with("                  ") && !lines[1][18..].starts_with(' '));
+    }
+
+    #[test]
+    fn a_command_help_carries_its_details_and_examples() {
+        let mut command = command(None);
+        let ask = command.find_subcommand_mut("ask").unwrap();
+        let short = ask.render_help().to_string();
+        let long = ask.render_long_help().to_string();
+        assert!(short.starts_with("Ask a question\n"), "{short}");
+        assert!(long.contains("`senator::…` address"), "{long}");
+        assert!(long.contains("Examples:\n  senate ask claude"), "{long}");
+    }
 }

@@ -33,7 +33,7 @@ impl Terminal {
         Some(Self::new(columns, color))
     }
 
-    pub(crate) fn new(columns: usize, color: bool) -> Self {
+    pub fn new(columns: usize, color: bool) -> Self {
         Self {
             columns: columns.max(2),
             color,
@@ -53,10 +53,22 @@ impl Terminal {
     }
 
     pub fn line(self, out: &mut String, text: &str, indent: usize, emphasis: bool) {
+        self.line_hanging(out, text, indent, indent.saturating_add(2), emphasis);
+    }
+
+    /// As [`Self::line`], with the wrapped rest starting at column `hang`.
+    pub fn line_hanging(
+        self,
+        out: &mut String,
+        text: &str,
+        indent: usize,
+        hang: usize,
+        emphasis: bool,
+    ) {
         let text = printable(text);
         let max_indent = self.columns.saturating_sub(2);
         let initial = " ".repeat(indent.min(max_indent));
-        let continued = " ".repeat(indent.saturating_add(2).min(max_indent));
+        let continued = " ".repeat(hang.min(max_indent));
         let options = Options::new(self.columns)
             .initial_indent(&initial)
             .subsequent_indent(&continued);

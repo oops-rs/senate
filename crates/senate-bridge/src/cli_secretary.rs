@@ -47,20 +47,26 @@ enum Action {
     Members,
     /// List the team's work items.
     List {
+        /// Continue the listing after this item ID.
         #[arg(long)]
         after: Option<EventId>,
     },
     /// Read an item and its history.
     Read {
+        /// The item's ID, as `list` prints it.
         item: EventId,
+        /// Skip this many history entries.
         #[arg(long, default_value_t)]
         offset: usize,
     },
     /// Record a new work item and optionally link a committee thread.
     Create {
+        /// What the item is about.
         title: String,
+        /// The committee of the thread to link (with --thread).
         #[arg(long, requires = "thread")]
         committee: Option<CommitteeId>,
+        /// The root seq of the thread to link (with --committee).
         #[arg(long, requires = "committee")]
         thread: Option<Seq>,
         /// Reuse the ID to retry the same creation.
@@ -69,7 +75,9 @@ enum Action {
     },
     /// Assign an item and notify its new owner.
     Assign {
+        /// The item's ID, as `list` prints it.
         item: EventId,
+        /// The new owner: a senator ID from `members`.
         #[arg(long, value_parser = parse_seat_name)]
         to: SenatorName,
         /// Reuse the ID to retry the same assignment.

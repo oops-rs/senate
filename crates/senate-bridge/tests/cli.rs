@@ -646,6 +646,76 @@ fn status_without_a_daemon_says_so() {
 }
 
 #[test]
+fn help_groups_the_commands_and_gives_each_one_line_when_piped() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = bridge(dir.path(), &dir.path().join("senate"))
+        .arg("--help")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8(out.stdout).unwrap();
+    for needle in [
+        "See what is happening:\n  status ",
+        "Speak as yourself:\n  ask ",
+        "This worktree:\n  where ",
+        "Set up this machine:\n  init ",
+        "Start here:\n  senate status",
+    ] {
+        assert!(text.contains(needle), "{needle:?} in:\n{text}");
+    }
+    assert!(
+        text.lines().all(|line| line.chars().count() <= 80),
+        "{text}"
+    );
+
+    // The details and the examples are a command's own help.
+    let out = bridge(dir.path(), &dir.path().join("senate"))
+        .args(["help", "ask"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("whichever agent (`*`)"), "{text}");
+    assert!(text.contains("Examples:\n  senate ask claude"), "{text}");
+}
+
+#[test]
+fn a_command_that_needs_the_daemon_says_how_to_start_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = bridge(dir.path(), &dir.path().join("senate"))
+        .args(["thread", "1", "--committee", "refund-v2"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let text = String::from_utf8(out.stderr).unwrap();
+    for needle in [
+        "senate: the Senate daemon is not running",
+        "senated --machine",
+        "senate service install --yes",
+        "senate status",
+    ] {
+        assert!(text.contains(needle), "{needle:?} in:\n{text}");
+    }
+    // The cause is said once.
+    assert_eq!(text.matches("No such file").count(), 0, "{text}");
+}
+
+#[test]
+fn spawn_defaults_to_the_directory_committee_and_says_so_when_there_is_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = bridge(dir.path(), &dir.path().join("senate"))
+        .current_dir(dir.path())
+        .args(["spawn", "claude"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let text = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        text.contains("--committee") && text.contains("senate join"),
+        "{text}"
+    );
+}
+
+#[test]
 fn init_local_writes_one_profile_and_never_overwrites_it() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("senate");

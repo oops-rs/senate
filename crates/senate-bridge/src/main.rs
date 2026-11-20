@@ -33,18 +33,27 @@ use senate_core::{CommitteeId, CommitteeSeatAction, EventId, Locale, Name, Senat
 #[command(
     name = "senate",
     version,
-    about = "Senate on a developer machine: install, status, inbox, take, init, and the MCP server and hooks coding agents run. The daemon is `senated --machine`."
+    about = "Reach your coding agents through Senate, and see what waits for you."
 )]
 struct Cli {
     #[command(subcommand)]
     command: Cmd,
 }
 
+// The first paragraph of each doc comment is the one-line summary that
+// `senate --help` and `-h` print; the rest is shown by `senate help <command>`.
+// A new command also needs a place in `cli_help::GROUPS`.
 #[derive(Subcommand)]
 enum Cmd {
-    /// Write the profile for using Senate alone on this machine:
-    /// `senate.toml` in the Senate home, with a local top Senate whose
-    /// Speaker is one of your agents. Writes nothing else; never overwrites.
+    /// Write the profile for using Senate alone on this machine.
+    ///
+    /// Writes `senate.toml` in the Senate home, with a local top Senate
+    /// whose Speaker is you or one of your agents. Writes nothing else and
+    /// never overwrites an existing profile. Under a team Senate, write
+    /// senate.toml from config/senate.example.toml instead.
+    #[command(after_help = "Examples:
+  senate init --local --person alice
+  senate init --local --person alice --speaker claude --locale zh")]
     Init {
         /// The local profile (the only one `init` writes).
         #[arg(long)]
@@ -63,11 +72,11 @@ enum Cmd {
         #[arg(long, default_value = init::DEFAULT_LOCAL_LISTEN)]
         listen: String,
     },
-    /// Bind a worktree to a committee, or give one session a persistent alias with --alias.
-    /// The worktree form
-    /// writes `.senate/committee` (untracked, kept per branch: switching
-    /// branches swaps in that branch's own copy). Live sessions here pick it
-    /// up at their next prompt. No daemon needed.
+    /// Bind this worktree to a committee, or give a session an alias.
+    ///
+    /// The worktree form writes `.senate/committee` (untracked, kept per
+    /// branch: switching branches swaps in that branch's own copy). Live
+    /// sessions here pick it up at their next prompt. No daemon needed.
     ///
     /// Without a name, the committee is derived from where this is run, and
     /// printed with how: the repository's name (the last segment of the
@@ -76,6 +85,16 @@ enum Cmd {
     /// branch (what `origin/HEAD` points at, else main, master or trunk) or
     /// detached; lowercased, other characters becoming `-`, at most 63
     /// characters (a longer one ends in `-` and a short hash). Read-only.
+    ///
+    /// With --alias, one coding session gets a persistent name instead, and
+    /// the worktree is left alone.
+    #[command(after_help = "Examples:
+  senate join                    Derive the committee from repository and branch
+  senate join refund-v2          Bind this worktree to refund-v2
+  senate join --alias reviewer   Inside a coding session: name it reviewer
+  senate join --alias reviewer --session <id>
+                                 Name a session from another terminal
+                                 (`senate status --full-ids` prints the ids)")]
     Join {
         /// The committee. With --alias, omit to use the session's current committee.
         committee: Option<CommitteeId>,
@@ -86,41 +105,49 @@ enum Cmd {
         #[arg(long, requires = "alias")]
         session: Option<String>,
     },
-    /// List the registered aliases and their primary senator IDs.
+    /// List senator aliases and the primary IDs they stand for.
     Aliases,
-    /// Appoint session secretaries and manage explicit shared work.
+    /// Appoint session secretaries and manage their shared work.
     SecretaryTeam(cli_secretary::SecretaryTeam),
     /// Remove this worktree's committee binding on the current branch.
     Leave,
-    /// Change one senator's membership of a committee.
+    /// Remove a senator from a committee, or seat it again.
     Seat {
         #[command(subcommand)]
         command: SeatCmd,
     },
-    /// Suggest a flat initial senator alias to sessions on this worktree's current branch.
+    /// Suggest an alias for sessions in this worktree.
+    ///
+    /// Writes `.senate/agent` for the current branch: a session started here
+    /// is offered this flat name as its initial alias.
     Pin {
         /// Initial alias, e.g. reviewer.
         agent: String,
     },
-    /// Remove this worktree's agent pin on the current branch.
+    /// Remove this worktree's alias suggestion on the current branch.
     Unpin,
-    /// Print the committee this directory resolves to and where it comes
-    /// from, the agent a session here would speak as, the branch `.senate/`
-    /// belongs to, and whether other branches have saved copies.
+    /// Show the committee and agent names this directory resolves to.
+    ///
+    /// Prints the committee and where it comes from, the agent a session
+    /// here would speak as, the branch `.senate/` belongs to, and whether
+    /// other branches have saved copies.
     Where,
-    /// List every saved `.senate/` copy, by repository: its branch,
-    /// committee, when it was saved, and whether it has expired.
+    /// List saved worktree bindings, by repository.
+    ///
+    /// Every saved `.senate/` copy: its branch, committee, when it was
+    /// saved, and whether it has expired.
     List {
         /// Print JSON.
         #[arg(long)]
         json: bool,
     },
-    /// Forget what has expired: saved copies whose repository, branch or
-    /// detached worktree is gone; session records of sessions that ended
-    /// long ago or whose process is gone; queued items and cursors of
-    /// agents with no session and no contact for `free_after_days`
-    /// (senate.toml, default 30). A hosted Senate's log is only listed.
-    /// Dry run without --yes.
+    /// Forget expired local data. Dry run without --yes.
+    ///
+    /// Removes saved copies whose repository, branch or detached worktree is
+    /// gone; session records of sessions that ended long ago or whose
+    /// process is gone; queued items and cursors of agents with no session
+    /// and no contact for `free_after_days` (senate.toml, default 30). A
+    /// hosted Senate's log is only listed.
     Free {
         /// Do it.
         #[arg(long)]
@@ -130,17 +157,23 @@ enum Cmd {
         #[arg(long, requires = "yes")]
         delete_logs: bool,
     },
-    /// What waits for you: first what was said to you that you have not
-    /// seen (an answer, a note, an escalation with its reason), then open
-    /// task threads on a committee for your agents or escalated to you, and
-    /// what awaits the Speaker of every Senate one of your agents presides
-    /// over here.
+    /// Show what waits for you.
+    ///
+    /// First what was said to you that you have not seen (an answer, a
+    /// note, an escalation with its reason), then open task threads on a
+    /// committee for your agents or escalated to you, and what awaits the
+    /// Speaker of every Senate one of your agents presides over here.
+    #[command(after_help = "Examples:
+  senate inbox                Open threads on this directory's committee
+  senate inbox --all          Also answered threads and idle seats
+  senate inbox --mark-read    List, then mark what was new as read
+  senate thread 12            Read one of the threads listed")]
     Inbox {
         /// The committee (default: the one `senate where` shows for this directory).
         #[arg(long)]
         committee: Option<CommitteeId>,
-        /// Also list threads whose last word is an answer (left out by
-        /// default: they wait on no one).
+        /// Also list threads whose last word is an answer (they wait on no
+        /// one) and seated senators with nothing going on.
         #[arg(long)]
         all: bool,
         /// Mark every thread listed as new for you as read, after listing
@@ -148,12 +181,22 @@ enum Cmd {
         #[arg(long)]
         mark_read: bool,
     },
-    /// Ask a question as yourself. `<to>` is a senator's name (an agent
-    /// such as `claude`, or a person such as `bob`), whichever agent (`*`),
-    /// `speaker`, a `senator::…` address, or a qualified name on another
-    /// committee (`ibot::codex`).
-    /// Text `-` is read from stdin; put `--` before text that starts with `-`.
-    /// Goes to the primary Senate of this machine.
+    /// Ask a question.
+    ///
+    /// You speak as yourself. `<TO>` is a senator's name (an agent such as `claude`, or a person
+    /// such as `bob`), whichever agent (`*`), `speaker`, a `senator::…`
+    /// address, or a qualified name on another committee (`ibot::codex`).
+    /// Text `-` is read from stdin; put `--` before text that starts with
+    /// `-`. Goes to the primary Senate of this machine.
+    #[command(after_help = "Examples:
+  senate ask claude \"Where is the retry limit set?\"
+  senate ask '*' \"Which header carries the key?\" --wait
+  senate ask ibot::codex \"Is the schema frozen?\"
+  git diff | senate ask reviewer -
+
+Without --wait it returns at once: read the answer with `senate inbox`,
+`senate watch` or `senate thread <seq>`. `'*'` is whichever agent is free,
+`ibot::codex` an agent on another committee, `-` the text on stdin.")]
     Ask {
         /// Who to ask.
         to: String,
@@ -177,7 +220,12 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Tell something as yourself (a note: no answer expected); `<to>` as for `ask`.
+    /// Leave a note (no answer expected).
+    ///
+    /// You speak as yourself. `<TO>` as for `ask`. Text `-` is read from stdin.
+    #[command(after_help = "Examples:
+  senate tell codex \"The retry limit is 3 now.\"
+  senate tell '*' \"main is frozen until the release is cut.\"")]
     Tell {
         /// Who to tell.
         to: String,
@@ -191,7 +239,13 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Ask an agent to do something, as yourself (a request); `<to>` as for `ask`.
+    /// Ask an agent to do work.
+    ///
+    /// You speak as yourself. `<TO>` as for `ask`. Text `-` is read from stdin. The agent reports
+    /// on the thread and answers when it is done.
+    #[command(after_help = "Examples:
+  senate request codex \"Add a test for the empty-queue case.\"
+  senate request claude \"Review the diff on this branch.\" --wait=600")]
     Request {
         /// Who to ask.
         to: String,
@@ -215,8 +269,12 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Say something as yourself in an existing thread (a follow-up or a
-    /// correction), to whoever took part in it.
+    /// Say something in an existing thread.
+    ///
+    /// You speak as yourself: a follow-up or a correction, to whoever took part in the thread.
+    #[command(after_help = "Examples:
+  senate reply 12 \"No: I meant the webhook retry.\"
+  senate reply 12 - < notes.txt")]
     Reply {
         /// A seq in the thread (its root's, as `inbox` lists).
         thread: u64,
@@ -230,16 +288,21 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Inspect a recorded event and its local delivery state.
+    /// Show how one event was recorded and delivered on this machine.
     Receipt {
+        /// The event's seq.
         seq: u64,
-        /// Committee of the event. Defaults to this directory's committee.
+        /// The committee (default: the one `senate where` shows for this directory).
         #[arg(long)]
         committee: Option<CommitteeId>,
+        /// Print the daemon's result as JSON.
         #[arg(long)]
         json: bool,
     },
     /// Print a thread: each event with who wrote it, when, and what.
+    #[command(after_help = "Examples:
+  senate thread 12
+  senate thread 12 --committee refund-v2 --json")]
     Thread {
         /// A seq in the thread.
         seq: u64,
@@ -250,11 +313,16 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Stay in the foreground and print, as they arrive, the events addressed
-    /// to you (answers, notes, questions, escalations with their reason) on
-    /// the committees this machine's sessions are on, or the one named. Not
-    /// what is put to the Speaker: that is the agent's docket. It marks
-    /// nothing as read.
+    /// Print what is addressed to you as it arrives.
+    ///
+    /// Stays in the foreground and prints answers, notes, questions and
+    /// escalations (with their reason) on the committees this machine's
+    /// sessions are on, or the one named. Not what is put to the Speaker:
+    /// that is the agent's docket. It marks nothing as read.
+    #[command(after_help = "Examples:
+  senate watch
+  senate watch --global
+  senate watch --json")]
     Watch {
         #[command(flatten)]
         scope: DisplayScope,
@@ -262,7 +330,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Take a thread over as yourself: nothing more of it goes to agents.
+    /// Take a thread over: nothing more of it goes to agents.
     Take {
         /// The thread's root seq.
         thread: u64,
@@ -279,8 +347,12 @@ enum Cmd {
         #[arg(long, hide = true)]
         acp_session: Option<String>,
     },
-    /// Claude Code / Codex hook entry point; reads the hook JSON on stdin. Always exits 0.
+    /// Run a coding session's hook.
+    ///
+    /// Claude Code / Codex hook entry point; reads the hook JSON on stdin.
+    /// Always exits 0.
     Hook {
+        /// The hook event.
         #[arg(value_enum)]
         event: HookKind,
         /// Run as a Codex hook (the session is a Codex thread).
@@ -290,8 +362,14 @@ enum Cmd {
         #[arg(long)]
         agy: bool,
     },
-    /// Register the MCP server and hooks with Claude Code, and with Codex
-    /// when `codex` is on PATH. Dry run without --yes.
+    /// Set up Claude Code and Codex. Dry run without --yes.
+    ///
+    /// Registers the MCP server and the session hooks. Codex is set up when
+    /// `codex` is on PATH. Without --yes it prints what it would change and
+    /// writes nothing.
+    #[command(after_help = "Examples:
+  senate install          Show what would change
+  senate install --yes    Write it")]
     Install {
         /// Set up Codex even when `codex` is not on PATH.
         #[arg(long, conflicts_with = "no_codex")]
@@ -312,20 +390,38 @@ enum Cmd {
         #[arg(long, value_name = "PATH")]
         claude_bin: Option<PathBuf>,
     },
-    /// Keep `senated --machine` running without a terminal: a launchd user
-    /// agent on macOS, a systemd user unit on Linux.
+    /// Keep the daemon running in the background, from login.
+    ///
+    /// Runs `senated --machine` without a terminal: a launchd user agent on
+    /// macOS, a systemd user unit on Linux.
+    #[command(after_help = "Examples:
+  senate service install --yes
+  senate service status
+  senate service uninstall --yes")]
     Service {
         #[command(subcommand)]
         command: ServiceCmd,
     },
-    /// Show the daemon, the Senate it is connected to, each agent's committees, and registered sessions.
+    /// Show the daemon, the Senate, sessions and delivery.
+    ///
+    /// The daemon and the Senate it is connected to, the committee's chair,
+    /// each agent's delivery state, and the registered sessions. Scoped to
+    /// this directory's committee unless --global or --committee is given;
+    /// outside a bound directory it shows every committee.
+    #[command(after_help = "Examples:
+  senate status
+  senate status --global
+  senate status --committee refund-v2
+  senate status --full-ids    Complete IDs, e.g. for `senate join --session`")]
     Status {
         #[command(flatten)]
         scope: DisplayScope,
-        /// Print full session IDs for use with join --session.
+        /// Show complete session and senator IDs.
         #[arg(long)]
         full_ids: bool,
     },
+    /// Check the Codex app-server connection.
+    ///
     /// Smoke test of the Codex app-server adapter: connect, initialize, read
     /// a thread's status and, with --text, start or steer a turn with it.
     CodexSmoke {
@@ -342,16 +438,31 @@ enum Cmd {
         listen: Option<String>,
     },
     /// Run a local ACP agent in a Senate-owned terminal session.
+    #[command(after_help = "Examples:
+  senate acp -- agy acp")]
     Acp {
         /// Command and arguments of the ACP stdio server.
         #[arg(last = true, required = true, num_args = 1..)]
         command: Vec<std::ffi::OsString>,
     },
-    /// Start a coding TUI as a senator and leave it running in the background.
+    /// Start a coding agent in the background as a senator.
+    ///
+    /// Starts the Codex or Claude Code TUI in a Senate-owned terminal,
+    /// seats it on the committee and prints its senator name. Open its
+    /// terminal with `senate attach`.
+    #[command(after_help = "Examples:
+  senate spawn claude                    On this directory's committee
+  senate spawn codex --alias reviewer    With a name to address it by
+  senate spawn claude --committee refund-v2 --dir ../refund
+  senate attach reviewer                 Open its terminal (Ctrl-] detaches)")]
     Spawn {
+        /// The coding agent to start.
         runtime: HostedRuntime,
+        /// The committee to seat it on (default: the one `senate where`
+        /// shows for this directory).
         #[arg(long)]
-        committee: CommitteeId,
+        committee: Option<CommitteeId>,
+        /// A name to address the senator by, e.g. reviewer.
         #[arg(long)]
         alias: Option<SenatorName>,
         /// The directory where the coding session will run.
@@ -368,11 +479,20 @@ enum Cmd {
     /// Hosted Claude keeps the senator when the same process reports a new
     /// session after /clear or /resume. A refused change appears in status.
     /// The configured executable must be Claude itself or a wrapper that execs it.
-    Attach { senator: SenatorName },
-    /// Resume a recorded Codex or Claude Code senator in a detached terminal.
-    /// A hosted Claude session with no saved conversation opens with its original ID.
-    Restore { senator: SenatorName },
-    /// End a Senate-hosted terminal and keep its session available for restore.
+    Attach {
+        /// The senator's primary name or alias.
+        senator: SenatorName,
+    },
+    /// Resume a stopped hosted senator in the background.
+    ///
+    /// The recorded session reopens in a detached Senate-owned terminal. A
+    /// hosted Claude session with no saved conversation opens with its
+    /// original ID.
+    Restore {
+        /// The senator's primary name or alias.
+        senator: SenatorName,
+    },
+    /// End a hosted senator's terminal (`senate restore` resumes it).
     Stop {
         /// The senator's primary name or alias.
         senator: SenatorName,
@@ -393,15 +513,21 @@ enum Cmd {
         #[arg(long)]
         codex_remote: Option<String>,
     },
-    /// Enable live push for a running Antigravity conversation. Reads its local API token from stdin.
+    /// Enable live push for a running Antigravity conversation.
+    ///
+    /// Reads the conversation's local API token from stdin.
     AgyRegister {
+        /// The conversation's UUID.
         conversation: String,
         /// Antigravity's HTTP language-server endpoint on loopback.
         endpoint: std::net::SocketAddr,
     },
     /// Close the Senate registration of an Antigravity conversation.
-    AgyUnregister { conversation: String },
-    /// Manual checks.
+    AgyUnregister {
+        /// The conversation's UUID.
+        conversation: String,
+    },
+    /// Manual checks of the delivery plumbing.
     Debug {
         #[command(subcommand)]
         command: DebugCmd,
@@ -431,9 +557,10 @@ impl DisplayScope {
 
 #[derive(Subcommand)]
 enum ServiceCmd {
-    /// Write the service file and load the service: it runs `senated
-    /// --machine` from login, restarts it if it dies and logs to
-    /// `senated.log` in the Senate home. Dry run without --yes.
+    /// Write the service file and load the service. Dry run without --yes.
+    ///
+    /// The service runs `senated --machine` from login, restarts it if it
+    /// dies and logs to `senated.log` in the Senate home.
     Install {
         /// Write the file and load the service.
         #[arg(long)]
@@ -449,8 +576,7 @@ enum ServiceCmd {
         #[arg(long)]
         yes: bool,
     },
-    /// Whether the service file exists, whether the service manager has the
-    /// service loaded and running, and where its log is.
+    /// Show whether the service is installed, loaded and running, and where it logs.
     Status,
 }
 
@@ -474,12 +600,13 @@ enum DebugCmd {
 enum SeatCmd {
     /// Remove the senator's seat and end its connection on this committee.
     Unseat(SeatArgs),
-    /// Explicitly join the committee again under the same senator id.
+    /// Seat the senator on the committee again under the same senator id.
     Join(SeatArgs),
 }
 
 #[derive(Args)]
 struct SeatArgs {
+    /// The committee the seat is on.
     #[arg(long)]
     committee: CommitteeId,
     /// A primary senator id or alias in this Senate.
@@ -683,9 +810,29 @@ fn remember_terminal() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn launch(request: &Request) -> anyhow::Result<()> {
+/// `spawn` and `restore`: stdout carries the senator's name alone, for a
+/// script to capture; a person at a terminal is also told the next step.
+fn launch(request: &Request, terminal: Option<Terminal>) -> anyhow::Result<()> {
     let reply: SpawnReply = host_call(request)?;
     println!("{}", reply.senator);
+    if terminal.is_some() {
+        let locale = Paths::from_env()
+            .map(|p| BridgeConfig::locale_at(&p.config()))
+            .unwrap_or_default();
+        eprintln!(
+            "{}",
+            locale.pick(
+                format!(
+                    "已在后台运行。用 `senate attach {}` 打开它的终端（Ctrl-] 脱离）。",
+                    reply.senator
+                ),
+                format!(
+                    "Running in the background. Open its terminal with `senate attach {}` (Ctrl-] detaches).",
+                    reply.senator
+                ),
+            )
+        );
+    }
     Ok(())
 }
 
@@ -728,7 +875,7 @@ async fn inbox(
         out.push('\n');
         out.push_str(&person::render_marked(marks.len(), locale));
     }
-    let docket: DocketReply = daemon_call(
+    let mut docket: DocketReply = daemon_call(
         paths,
         &Request::Docket {
             session: SessionSelector::default(),
@@ -737,10 +884,35 @@ async fn inbox(
     )
     .await?;
     if !docket.senates.is_empty() {
+        let idle = if all { 0 } else { drop_idle_seats(&mut docket) };
         out.push_str("\n\n");
         out.push_str(&preside::render_docket(&docket, locale));
+        if idle > 0 {
+            out.push_str(&locale.pick(
+                format!(
+                    "另有 {idle} 个席位没有会话、checkpoint 和未结 thread，未列出；--all 会列出。\n"
+                ),
+                format!(
+                    "{idle} more seat(s) with no session, checkpoint or open thread are not listed; --all lists them.\n"
+                ),
+            ));
+        }
     }
     Ok(out)
+}
+
+/// Leave out the seats nothing is happening on (no live session, no
+/// checkpoint to cover from, no open thread) and say how many they were: a
+/// committee keeps a seat for every session that ever joined it.
+fn drop_idle_seats(docket: &mut DocketReply) -> usize {
+    let mut idle = 0;
+    for page in docket.senates.iter_mut().flat_map(|s| s.pages.iter_mut()) {
+        let before = page.seats.len();
+        page.seats
+            .retain(|seat| seat.connected || seat.checkpoint.is_some() || seat.open_threads > 0);
+        idle += before - page.seats.len();
+    }
+    idle
 }
 
 /// `senate watch`: what is addressed to the person, as it arrives.
@@ -1321,22 +1493,29 @@ fn run(command: Cmd, terminal: Option<Terminal>) -> anyhow::Result<()> {
             alias,
             dir,
         } => {
+            let committee = runtime(false)?.block_on(committee_here(committee))?;
             remember_terminal()?;
-            launch(&Request::Spawn {
-                runtime: harness,
-                committee,
-                chair: false,
-                alias,
-                cwd: std::path::absolute(dir)?,
-                session: SessionSelector::default(),
-            })
+            launch(
+                &Request::Spawn {
+                    runtime: harness,
+                    committee,
+                    chair: false,
+                    alias,
+                    cwd: std::path::absolute(dir)?,
+                    session: SessionSelector::default(),
+                },
+                terminal,
+            )
         }
         Cmd::Restore { senator } => {
             remember_terminal()?;
-            launch(&Request::Restore {
-                senator,
-                session: SessionSelector::default(),
-            })
+            launch(
+                &Request::Restore {
+                    senator,
+                    session: SessionSelector::default(),
+                },
+                terminal,
+            )
         }
         Cmd::Stop { senator, force } => {
             let reply: StopReply = host_call(&Request::Stop {
@@ -1536,6 +1715,58 @@ fn run(command: Cmd, terminal: Option<Terminal>) -> anyhow::Result<()> {
     }
 }
 
+/// What went wrong and, when the daemon cannot be reached, what to do next.
+fn describe_error(error: &anyhow::Error) -> String {
+    let client = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<ipc::ClientError>());
+    let locale = || {
+        Paths::from_env()
+            .map(|p| BridgeConfig::locale_at(&p.config()))
+            .unwrap_or_default()
+    };
+    match client {
+        Some(ipc::ClientError::Connect { path, source })
+            if matches!(
+                source.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            ) =>
+        {
+            let socket = path.display();
+            locale().pick(
+                format!(
+                    "Senate daemon 没有运行（{socket} 上没有监听）。\n  \
+                     启动：senated --machine\n  \
+                     保持运行：senate service install --yes\n  \
+                     查看：senate status、senate service status"
+                ),
+                format!(
+                    "the Senate daemon is not running (nothing listens on {socket}).\n  \
+                     Start it:        senated --machine\n  \
+                     Keep it running: senate service install --yes\n  \
+                     Check:           senate status, senate service status"
+                ),
+            )
+        }
+        Some(ipc::ClientError::Connect { path, source }) => {
+            let socket = path.display();
+            locale().pick(
+                format!("无法连接 {socket} 上的 Senate daemon：{source}"),
+                format!("cannot reach the Senate daemon on {socket}: {source}"),
+            )
+        }
+        Some(ipc::ClientError::Timeout) => locale().pick(
+            format!(
+                "{error:#}\n  `senate status` 显示 daemon 的状态；`senate service status` 给出日志位置。"
+            ),
+            format!(
+                "{error:#}\n  `senate status` shows the daemon's state; `senate service status` says where its log is."
+            ),
+        ),
+        _ => format!("{error:#}"),
+    }
+}
+
 fn main() -> ExitCode {
     let terminal = Terminal::stdout();
     let cli = cli_help::parse(terminal);
@@ -1549,7 +1780,7 @@ fn main() -> ExitCode {
     match run(cli.command, terminal) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("senate: {e:#}");
+            eprintln!("senate: {}", describe_error(&e));
             ExitCode::FAILURE
         }
     }

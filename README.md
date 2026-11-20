@@ -486,10 +486,12 @@ started terminal sessions can use their own native integration.
 
 ### The `senate` CLI
 
+`senate --help` lists the commands under headings (what is happening, speaking as yourself, this worktree, senators and sessions, setup, plumbing) with one line each; `senate help <command>` gives a command's details and examples. A command that needs the daemon says how to start it when it is not running.
+
 - `senate install`: Dry-run configuration updates for Claude Code and Codex (`--yes` to apply).
 - `senate receipt <seq> --committee <id> [--json]`: inspect an event's log receipt and any matching delivery records on this machine. Agents can use the read-only MCP tool `receipt(committee, seq)`. A recorded event has a sequence number; a bridge delivery record identifies a subsequent transport or read action. If the host blocks publication before Senate receives it, that attempt produces no receipt. Independent tasks can continue using their existing authorization.
 - `senate status`: Shows the Senate's path, its Speaker (as a senator id, and what kind), who works the desk, each committee's chair, child Senates, sessions.
-- `senate inbox [--all]`: Displays the threads that wait on someone (a thread whose last word is an answer is settled: counted, and listed with `--all`), and docket items.
+- `senate inbox [--all]`: Displays the threads that wait on someone (a thread whose last word is an answer is settled: counted, and listed with `--all`), and docket items. Seats with no session, no checkpoint and no open thread are counted, and listed with `--all`.
 - `senate ask|tell|request <to> <text…>`: Speaks as yourself: a question (`--wait[=<seconds>]` stays for the answer), a note, or a request. `--json` prints the raw result.
 - `senate reply <thread> <text…>`: Says something as yourself in an existing thread.
 - `senate thread <seq>`: Prints a thread, each event with its byline and time.
