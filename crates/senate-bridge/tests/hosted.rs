@@ -446,14 +446,18 @@ async fn a_hosted_tui_learns_the_colours_of_the_persons_terminal() {
     let directory = root.path().join("hosts").join(id.to_string());
     std::fs::create_dir_all(&directory).unwrap();
     let program = root.path().join("fixture");
-    // Ask for the background as Codex does at startup, then turn on paste
-    // and theme reports as Claude Code does and wait for a theme report.
+    // Ask for the background and then for device attributes, as Claude
+    // Code does at startup: it keeps the colour only once the second
+    // answer is in. Then turn on paste and theme reports and wait for a
+    // theme report.
     std::fs::write(
         &program,
         r#"#!/bin/sh
 stty raw -echo
 printf '\033]11;?\033\\'
 dd bs=1 count=25 of=background.tmp 2>/dev/null && mv background.tmp background
+printf '\033[c'
+dd bs=1 count=9 of=attributes.tmp 2>/dev/null && mv attributes.tmp attributes
 printf '\033[?2004h\033[?2031h'
 dd bs=1 count=9 of=scheme.tmp 2>/dev/null && mv scheme.tmp scheme
 sleep 300
@@ -488,6 +492,11 @@ sleep 300
     })
     .await;
     assert_eq!(background, b"\x1b]11;rgb:efef/f1f1/f5f5\x1b\\");
+    let attributes = eventually("the device attributes answer", TIMEOUT, || {
+        std::fs::read(root.path().join("attributes")).ok()
+    })
+    .await;
+    assert_eq!(attributes, b"\x1b[?62;22c");
 
     // A viewer attaching later is told which reports the TUI turned on.
     let socket = directory.join("tty");

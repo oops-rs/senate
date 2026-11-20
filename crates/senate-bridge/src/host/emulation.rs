@@ -12,7 +12,11 @@
 //! - A colour question asked while unattended gets no answer, and a TUI
 //!   that asks only at startup (Codex) never learns the theme.
 //!   [`Emulation::output`] answers from [`Colors`], what the person's
-//!   terminal last said about itself.
+//!   terminal last said about itself. It also answers the request for
+//!   device attributes, which every terminal answers: a TUI sends it last
+//!   and takes its answer to mean the others are in. Claude Code discards
+//!   a colour answer that is not followed by it, and then stops listening
+//!   for theme changes altogether.
 //!
 //! Nothing here interprets or stores what is on the screen.
 
@@ -31,6 +35,27 @@ const REPLAYED: [u16; 8] = [1000, 1002, 1003, 1004, 1006, 1016, 2004, 2031];
 const THEME_NOTIFY: u16 = 2031;
 /// Longest unfinished sequence kept between two chunks of output.
 const CARRY: usize = 32;
+/// Primary device attributes of a VT220 with ANSI colour, as common
+/// terminals report them. It claims nothing a viewer's terminal lacks.
+const DEVICE_ATTRIBUTES: &[u8] = b"\x1b[?62;22c";
+
+/// What to write back to the TUI for one chunk of its output.
+#[derive(Default)]
+struct Answers {
+    colors: Vec<u8>,
+    attributes: bool,
+}
+
+impl Answers {
+    /// The device attributes go last whatever order they were asked in:
+    /// they tell the TUI that no more answers are coming.
+    fn finish(mut self) -> Vec<u8> {
+        if self.attributes {
+            self.colors.extend_from_slice(DEVICE_ATTRIBUTES);
+        }
+        self.colors
+    }
+}
 
 /// Whether the person's terminal is showing a light or a dark theme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,7 +152,7 @@ impl Emulation {
     pub(crate) fn output(&mut self, bytes: &[u8], attached: bool) -> Vec<u8> {
         let mut data = std::mem::take(&mut self.carry);
         data.extend_from_slice(bytes);
-        let mut answers = Vec::new();
+        let mut answers = Answers::default();
         let mut at = 0;
         while let Some(start) = data[at..].iter().position(|b| *b == 0x1b).map(|i| at + i) {
             match self.sequence(&data[start..], attached, &mut answers) {
@@ -137,20 +162,29 @@ impl Emulation {
                     if data.len() - start <= CARRY {
                         self.carry = data[start..].to_vec();
                     }
-                    return answers;
+                    break;
                 }
             }
         }
-        answers
+        answers.finish()
     }
 
     /// Length of the sequence at the start of `data` (an ESC), having acted
     /// on it if it is one this module follows. `None` if it is cut short.
-    fn sequence(&mut self, data: &[u8], attached: bool, answers: &mut Vec<u8>) -> Option<usize> {
+    fn sequence(&mut self, data: &[u8], attached: bool, answers: &mut Answers) -> Option<usize> {
         match *data.get(1)? {
             b'[' => {
-                if *data.get(2)? != b'?' {
-                    return Some(2);
+                // `CSI c` or `CSI 0 c`: the request for device attributes.
+                let request = match (*data.get(2)?, data.get(3)) {
+                    (b'?', _) => None,
+                    (b'c', _) => Some(3),
+                    (b'0', None) => return None,
+                    (b'0', Some(b'c')) => Some(4),
+                    _ => return Some(2),
+                };
+                if let Some(len) = request {
+                    answers.attributes |= !attached;
+                    return Some(len);
                 }
                 let params = data[3..]
                     .iter()
@@ -177,7 +211,7 @@ impl Emulation {
                     }),
                     b'n' if !attached && numbers().eq([996]) => {
                         if let Some(scheme) = self.colors.scheme {
-                            answers.extend_from_slice(scheme.report());
+                            answers.colors.extend_from_slice(scheme.report());
                         }
                     }
                     _ => {}
@@ -203,8 +237,10 @@ impl Emulation {
                     _ => None,
                 };
                 if let (false, Some((code, spec))) = (attached, color) {
-                    answers.extend_from_slice(format!("\x1b]{code};{spec}").as_bytes());
-                    answers.extend_from_slice(terminator);
+                    answers
+                        .colors
+                        .extend_from_slice(format!("\x1b]{code};{spec}").as_bytes());
+                    answers.colors.extend_from_slice(terminator);
                 }
                 Some(2 + len + terminator.len())
             }
@@ -301,6 +337,38 @@ mod tests {
         );
         assert!(
             tui.output(b"\x1b]11;rgb:0000/0000/0000\x07", false)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_device_attributes_answer_closes_what_was_asked() {
+        // Claude Code asks for the background, then for device attributes,
+        // and keeps the colour only if the second answer arrives.
+        let mut tui = Emulation::new(latte());
+        assert_eq!(
+            tui.output(b"\x1b]11;?\x07", false),
+            b"\x1b]11;rgb:efef/f1f1/f5f5\x07"
+        );
+        assert_eq!(tui.output(b"\x1b[c", false), DEVICE_ATTRIBUTES);
+        // Codex asks for everything at once, attributes first or last.
+        assert_eq!(
+            tui.output(b"\x1b[c\x1b[?u\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[6n", false),
+            b"\x1b]10;rgb:4c4c/4f4f/6969\x1b\\\x1b]11;rgb:efef/f1f1/f5f5\x1b\\\x1b[?62;22c"
+        );
+        // `CSI 0 c` is the same request, also when a read ends inside it.
+        assert!(tui.output(b"\x1b[0", false).is_empty());
+        assert_eq!(tui.output(b"c", false), DEVICE_ATTRIBUTES);
+        // A terminal with nothing on record is still a terminal.
+        assert_eq!(
+            Emulation::default().output(b"\x1b[c", false),
+            DEVICE_ATTRIBUTES
+        );
+        // An attached viewer's terminal answers for itself.
+        assert!(tui.output(b"\x1b[c\x1b[0c", true).is_empty());
+        // Neither the secondary request nor ordinary output is one.
+        assert!(
+            tui.output(b"\x1b[>c\x1b[>0q\x1b[0m\x1b[0;1mc", false)
                 .is_empty()
         );
     }
