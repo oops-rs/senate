@@ -572,8 +572,9 @@ Without --wait it returns at once: read the answer with `senate inbox`,
     /// look at once, beside whoever is attached. Ctrl-] leaves.
     Attach {
         /// The senator's primary name or alias (`committee::alias` for an
-        /// alias on one committee).
-        senator: AliasName,
+        /// alias on one committee). Without one, choose a running session
+        /// from a list.
+        senator: Option<AliasName>,
         /// Look without typing: every key but Ctrl-] is dropped.
         #[arg(long)]
         read_only: bool,
@@ -1084,26 +1085,84 @@ async fn stop_sessions(
     Ok(())
 }
 
-/// Let the person pick one of an alias's `candidates`.
-// TODO(feat/sessions): open `picker::pick_session` over the matching
-// session rows, labelled `committee::alias`, once it lands.
+/// `senate attach` with no name: the running hosted sessions, in the
+/// picker; `None` when the person cancels.
+fn pick_running_session() -> anyhow::Result<Option<SenatorName>> {
+    let paths = Paths::from_env()?;
+    let rt = runtime(false)?;
+    let reply: crate::ipc::SessionsReply = rt.block_on(daemon_call(&paths, &Request::Sessions))?;
+    let running: Vec<crate::ipc::SessionRow> =
+        reply.rows.into_iter().filter(|r| r.is_running()).collect();
+    anyhow::ensure!(
+        !running.is_empty(),
+        "no hosted session is running; `senate spawn` starts one, `senate sessions` lists them"
+    );
+    rt.block_on(crate::host::pick_session(
+        &running,
+        "Attach to which session?",
+    ))
+}
+
+/// Let the person pick one of an alias's `candidates`: on a terminal,
+/// in the picker, each line with what `senate sessions` knows of that
+/// senator here; elsewhere, an error listing them to name one.
 fn choose_alias(
     name: &AliasName,
     candidates: Vec<QualifiedAlias>,
 ) -> anyhow::Result<QualifiedAlias> {
-    let listed: Vec<String> = candidates
+    use std::io::IsTerminal as _;
+    if !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
+        let listed: Vec<String> = candidates
+            .iter()
+            .map(|q| {
+                format!(
+                    "  {q} -> {}",
+                    senate_core::Address::senator(&q.primary).in_text()
+                )
+            })
+            .collect();
+        anyhow::bail!(
+            "{name} is an alias on several committees; name one as committee::alias:\n{}",
+            listed.join("\n")
+        );
+    }
+    let paths = Paths::from_env()?;
+    let rt = runtime(false)?;
+    // Sessions this machine hosts say more; any other senator is listed by
+    // its alias alone.
+    let rows = rt
+        .block_on(daemon_call::<crate::ipc::SessionsReply>(
+            &paths,
+            &Request::Sessions,
+        ))
+        .map(|reply| reply.rows)
+        .unwrap_or_default();
+    let choices: Vec<crate::host::Choice> = candidates
         .iter()
-        .map(|q| {
-            format!(
-                "  {q} -> {}",
-                senate_core::Address::senator(&q.primary).in_text()
-            )
+        .map(|q| match rows.iter().find(|row| row.primary == q.primary) {
+            Some(row) => crate::host::Choice {
+                label: q.to_string(),
+                ..crate::host::Choice::of_row(row)
+            },
+            None => crate::host::Choice {
+                label: q.to_string(),
+                detail: format!(
+                    "{} · not hosted here",
+                    senate_core::Address::senator(&q.primary).in_text()
+                ),
+                primary: q.primary.clone(),
+                dim: false,
+            },
         })
         .collect();
-    anyhow::bail!(
-        "{name} is an alias on several committees; name one as committee::alias:\n{}",
-        listed.join("\n")
-    )
+    let prompt = format!("{name} is an alias on several committees: which one?");
+    match rt.block_on(crate::host::pick(&choices, &prompt))? {
+        Some(primary) => candidates
+            .into_iter()
+            .find(|q| q.primary == primary)
+            .ok_or_else(|| anyhow::anyhow!("the choice is not one of {name}'s")),
+        None => anyhow::bail!("cancelled"),
+    }
 }
 
 fn launch(request: &Request, terminal: Option<Terminal>) -> anyhow::Result<()> {
@@ -2028,7 +2087,13 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Attach { senator, read_only } => {
-            let senator = pick_alias(senator)?;
+            let senator = match senator {
+                Some(senator) => pick_alias(senator)?,
+                None => match pick_running_session()? {
+                    Some(primary) => AliasName::bare(primary),
+                    None => return Ok(()),
+                },
+            };
             let paths = Paths::from_env()?;
             runtime(false)?.block_on(async {
                 let request = Request::Attach {

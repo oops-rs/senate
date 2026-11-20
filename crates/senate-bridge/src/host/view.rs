@@ -411,7 +411,7 @@ fn paint_tile(out: &mut String, tile: &Tile, area: Rect, focused: bool) -> Optio
 // ----- keys ------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Key {
+pub(super) enum Key {
     Left,
     Right,
     Up,
@@ -427,7 +427,7 @@ enum Key {
 
 /// The keys in `pending`, leaving behind only the start of one that may
 /// still be arriving. Anything that is no key of the viewer is dropped.
-fn keys(pending: &mut Vec<u8>) -> Vec<Key> {
+pub(super) fn keys(pending: &mut Vec<u8>) -> Vec<Key> {
     let mut out = Vec::new();
     // The detach key ends everything, wherever it stands.
     let (before, detach) = split_input(pending);
@@ -435,7 +435,8 @@ fn keys(pending: &mut Vec<u8>) -> Vec<Key> {
     while at < before {
         let rest = &pending[at..before];
         let (key, len) = match rest {
-            [b'q', ..] => (Some(Key::Quit), 1),
+            // Ctrl-C, in raw mode a plain byte.
+            [b'q' | 0x03, ..] => (Some(Key::Quit), 1),
             [b'\r' | b'\n', ..] => (Some(Key::Open), 1),
             [b'h', ..] => (Some(Key::Left), 1),
             [b'l', ..] => (Some(Key::Right), 1),

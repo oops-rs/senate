@@ -2491,3 +2491,127 @@ async fn sessions_lists_stops_by_name_and_prunes_an_orphan() {
     none_left_under(&root, Duration::from_secs(5)).await;
     h.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn attach_without_a_name_picks_from_the_running_sessions() {
+    let (mut h, root) = one_hosted_session().await;
+    let reply: ipc::SessionsReply = call(&h, &Request::Sessions).await;
+    let label = reply.rows[0].label();
+    let open = || {
+        let mut cmd = tokio::process::Command::new(BIN);
+        testenv::isolate_async(&mut cmd, h.dir.path());
+        cmd.arg("attach")
+            .env("SENATE_HOME", h.paths.home())
+            .kill_on_drop(true);
+        let (pty, pts) = pty_process::open().unwrap();
+        pty.resize(pty_process::Size::new(24, 80)).unwrap();
+        let child = pty_process::Command::from(cmd).spawn(pts).unwrap();
+        let (output, input) = pty.into_split();
+        (child, output, input)
+    };
+
+    // Cancelled: nothing attaches.
+    let (mut child, mut output, mut input) = open();
+    tokio::time::timeout(TIMEOUT, async {
+        wait_terminal_output(&mut output, b"Attach to which session?").await;
+    })
+    .await
+    .unwrap();
+    input.write_all(b"q").await.unwrap();
+    assert!(
+        tokio::time::timeout(TIMEOUT, child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+
+    // Enter on the one listed attaches to it: the attach asks the terminal
+    // for its colours, then Ctrl-] detaches.
+    let (mut child, mut output, mut input) = open();
+    tokio::time::timeout(TIMEOUT, async {
+        wait_terminal_output(&mut output, label.as_bytes()).await;
+        input.write_all(b"\r").await.unwrap();
+        wait_terminal_output(&mut output, b"\x1b[c").await;
+        input
+            .write_all(b"\x1b]11;rgb:efef/f1f1/f5f5\x1b\\\x1b[?62;22c")
+            .await
+            .unwrap();
+    })
+    .await
+    .unwrap();
+    // Attached once it has the answer; then Ctrl-] detaches.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    input.write_all(b"\x1d").await.unwrap();
+    assert!(
+        tokio::time::timeout(TIMEOUT, child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+    h.stop().await;
+    drop(h);
+    none_left_under(&root, Duration::from_secs(5)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bare_alias_on_several_committees_opens_the_picker_on_a_terminal() {
+    let (mut h, root) = one_hosted_session().await;
+    let reply: ipc::SessionsReply = call(&h, &Request::Sessions).await;
+    let primary = reply.rows[0].primary.clone();
+    {
+        let mut inner = h.server.state.inner.lock().unwrap();
+        inner
+            .aliases
+            .set(&committee(), path("reviewer"), primary.clone())
+            .unwrap();
+        inner
+            .aliases
+            .set(
+                &senate_core::CommitteeId::new("other").unwrap(),
+                path("reviewer"),
+                path("codex"),
+            )
+            .unwrap();
+    }
+
+    // Not on a terminal: an error that lists them to name one.
+    let (ok, text) = senate(&h, &["attach", "reviewer"]).await;
+    assert!(!ok, "{text}");
+    assert!(
+        text.contains("reviewer is an alias on several committees"),
+        "{text}"
+    );
+    assert!(
+        text.contains("refund-v2::reviewer") && text.contains("other::reviewer"),
+        "{text}"
+    );
+
+    // On a terminal: the picker, the hosted one described, the other not.
+    let mut cmd = tokio::process::Command::new(BIN);
+    testenv::isolate_async(&mut cmd, h.dir.path());
+    cmd.args(["attach", "reviewer"])
+        .env("SENATE_HOME", h.paths.home())
+        .kill_on_drop(true);
+    let (pty, pts) = pty_process::open().unwrap();
+    pty.resize(pty_process::Size::new(24, 100)).unwrap();
+    let mut child = pty_process::Command::from(cmd).spawn(pts).unwrap();
+    let (mut output, mut input) = pty.into_split();
+    tokio::time::timeout(TIMEOUT, async {
+        // The prompt, then each choice: the other committee's ends its line
+        // saying it is not hosted here.
+        wait_terminal_output(&mut output, b"not hosted here").await;
+    })
+    .await
+    .unwrap();
+    input.write_all(b"\x1b").await.unwrap();
+    let status = tokio::time::timeout(TIMEOUT, child.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!status.success(), "cancelled");
+    h.stop().await;
+    drop(h);
+    none_left_under(&root, Duration::from_secs(5)).await;
+}

@@ -4,6 +4,7 @@
 pub(crate) mod control;
 mod emulation;
 mod input;
+mod picker;
 mod terminal;
 pub mod view;
 pub(crate) mod watch;
@@ -34,6 +35,7 @@ use crate::ipc::{self, HostedRuntime, Request};
 use crate::paths::{HOME_ENV, Paths, SOCKET_PATH_LIMIT};
 
 use emulation::{Colors, Emulation};
+pub use picker::{Choice, pick, pick_session};
 pub use terminal::{attach, remember_terminal};
 
 pub(crate) const START_TIMEOUT: Duration = Duration::from_secs(10);
