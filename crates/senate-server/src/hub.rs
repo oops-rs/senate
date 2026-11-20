@@ -34,11 +34,11 @@ use senate_core::api::{
 };
 use senate_core::hub::SCAN_PAGE;
 use senate_core::{
-    Address, Appended, Awaiting, Brief, BriefBuilder, ChairSource, CheckpointFacts,
-    CheckpointRecord, Checkpoints, CommitteeId, CommitteeSeatChange, DocketItem, DocketPage, Event,
-    EventId, Hub, HubError, Kind, Locale, Locator, MirrorRef, Name, NewEvent, Office, Origin,
-    People, Principal, Roster, RosterError, SeatFacts, SenatePath, SenatorName, Seq, SpeakerDocket,
-    SpeakerSeat, StatusState, TaskBoard, meta,
+    Address, AgentPresence, Appended, Awaiting, Brief, BriefBuilder, ChairSource, CheckpointFacts,
+    CheckpointRecord, Checkpoints, CommitteeId, CommitteeSeatChange, DocketItem, DocketPage,
+    DutyFold, Event, EventId, Hub, HubError, Kind, Locale, Locator, MirrorRef, Name, NewEvent,
+    Office, Origin, People, Principal, Roster, RosterError, SeatFacts, SenatePath, SenatorName,
+    Seq, SpeakerDocket, SpeakerSeat, StatusState, TaskBoard, meta,
 };
 use senate_log::{CursorOwner, LogError, LogStore};
 use tokio::sync::{broadcast, mpsc};
@@ -118,6 +118,7 @@ pub struct ServerHub {
     dockets: Caches<SpeakerDocket>,
     chairs: Caches<ChairView>,
     chair_dockets: Caches<ChairDocket>,
+    duties: Caches<DutyFold>,
 }
 
 /// Something folded from a committee's log, in seq order, that ignores what it
@@ -185,6 +186,18 @@ impl Fold for ChairDocket {
     }
     fn observe(&mut self, event: &Event) {
         ChairDocket::observe(self, event);
+    }
+}
+
+impl Fold for DutyFold {
+    fn fresh(_: &CommitteeId, _: &People) -> Self {
+        DutyFold::new()
+    }
+    fn head(&self) -> Seq {
+        DutyFold::head(self)
+    }
+    fn observe(&mut self, event: &Event) {
+        DutyFold::observe(self, event);
     }
 }
 
@@ -277,6 +290,7 @@ impl ServerHub {
             dockets: Mutex::default(),
             chairs: Mutex::default(),
             chair_dockets: Mutex::default(),
+            duties: Mutex::default(),
         }
     }
 
@@ -463,6 +477,15 @@ impl ServerHub {
             .map_err(log_error)?;
         *aliases = next;
         Ok(())
+    }
+
+    /// Each seat's duty on `committee` now, from its log
+    /// ([`senate_core::duty`]): the latest one set per senator.
+    pub async fn duties(
+        &self,
+        committee: &CommitteeId,
+    ) -> Result<BTreeMap<SenatorName, String>, HubError> {
+        Ok(self.folded(&self.duties, committee).await?.fold.duties())
     }
 
     /// The committee's chair, and how it was found ([`senate_core::chair`];
@@ -706,6 +729,7 @@ impl ServerHub {
                 Vec::new()
             }
         };
+        let duties = self.duties(committee).await?;
         let mut seats = Vec::new();
         for agent in &roster.agents() {
             if self.presence.is_unseated(committee, agent) {
@@ -725,6 +749,7 @@ impl ServerHub {
                     .into_iter()
                     .filter(|t| t.waits().is_some())
                     .count(),
+                duty: duties.get(agent).cloned(),
             });
         }
         let mut covered = BTreeMap::new();
@@ -1416,9 +1441,15 @@ impl Hub for ServerHub {
         Ok(cached.fold.latest(agent).cloned())
     }
 
-    /// The writer's leases, `lag` measured against its head now.
+    /// The writer's leases, `lag` measured against its head now, with each
+    /// seat's duty from the log.
     async fn presence(&self, committee: &CommitteeId) -> Result<PresencePage, HubError> {
-        let (head, agents) = self.ask_writer(committee, CommitteeMsg::Presence).await?;
+        let (head, mut agents): (Seq, Vec<AgentPresence>) =
+            self.ask_writer(committee, CommitteeMsg::Presence).await?;
+        let duties = self.duties(committee).await?;
+        for p in &mut agents {
+            p.duty = duties.get(&p.agent).cloned();
+        }
         Ok(PresencePage { agents, head })
     }
 

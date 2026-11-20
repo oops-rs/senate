@@ -445,6 +445,10 @@ pub struct AgentPresence {
     pub lag: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new_owner: Option<SenatorName>,
+    /// The seat's duty ([`crate::duty`]), filled by whoever lists
+    /// presence from the committee's log; no `presence` event carries it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duty: Option<String>,
 }
 
 impl AgentPresence {
@@ -459,6 +463,7 @@ impl AgentPresence {
             cursor: payload.cursor,
             lag: payload.lag,
             new_owner: payload.new_owner.clone(),
+            duty: None,
         }
     }
 

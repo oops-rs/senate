@@ -242,6 +242,7 @@ pub fn docket() -> DocketReply {
                         branch: "feature/refund-v2/alice".into(),
                     }),
                     open_threads: 1,
+                    duty: None,
                 }],
                 head: Seq(44),
             }],

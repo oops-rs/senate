@@ -111,6 +111,9 @@ pub struct SeatFacts {
     pub checkpoint: Option<CheckpointFacts>,
     /// Task threads addressed to it that are not archived.
     pub open_threads: usize,
+    /// Its duty on the committee ([`crate::duty`]), the latest one set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duty: Option<String>,
 }
 
 /// An agent's latest checkpoint, as far as picking needs it.
@@ -376,6 +379,7 @@ mod tests {
                 last_seen: None,
                 checkpoint: None,
                 open_threads: 1,
+                duty: Some("reviews".into()),
             }],
             head: Seq(1),
         };

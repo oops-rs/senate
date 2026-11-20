@@ -397,6 +397,7 @@ impl Leases {
                     cursor: a.cursor,
                     lag: lag(head, a.cursor),
                     new_owner: a.new_owner.clone(),
+                    duty: None,
                 })
             })
             .collect()

@@ -24,8 +24,8 @@ use senate_core::api::{
     ResolveQuery, Resolved, SearchQuery, SearchResults, StreamQuery, ThreadsPage, ThreadsQuery,
 };
 use senate_core::{
-    Address, Brief, CheckpointPayload, CheckpointRecord, CommitteeId, Hub, Kind, Name, NewEvent,
-    Roster, SenatorName, Seq, StatusPayload, StatusState, meta,
+    Address, Brief, CheckpointPayload, CheckpointRecord, CommitteeId, DutyPayload, Hub, Kind, Name,
+    NewEvent, Roster, SenatorName, Seq, StatusPayload, StatusState, meta,
 };
 
 use crate::auth::{Authenticate, bearer_token};
@@ -431,6 +431,7 @@ async fn append(
             reject_speaker_keys(&event)?;
         }
     }
+    check_duty(&state, &roster, sender, &event).await?;
     check_checkpoint(&roster, &event)?;
     check_companion(&roster, &event)?;
     check_status(&state, &roster, &event).await?;
@@ -612,6 +613,58 @@ fn check_checkpoint(roster: &Roster, event: &NewEvent) -> Result<(), ApiFailure>
             })
         })?;
     payload.check().map_err(ApiFailure::bad_request)
+}
+
+/// A seat's duty ([`meta::DUTY`]) rides on a `note` from a senator: the
+/// senator itself, the person who owns it, or the committee's chair. The
+/// Speaker's office, a child Senate and anyone else are refused.
+async fn check_duty(
+    state: &AppState,
+    roster: &Roster,
+    sender: Sender,
+    event: &NewEvent,
+) -> Result<(), ApiFailure> {
+    let Some(value) = event.meta.get(meta::DUTY) else {
+        return Ok(());
+    };
+    let (Sender::Senator, Some(from)) = (sender, event.from.as_senator()) else {
+        return Err(ApiFailure::forbidden(format!(
+            "meta.{} is set by the senator, its owner or the committee's chair, not by {}",
+            meta::DUTY,
+            event.from
+        )));
+    };
+    if event.kind != Kind::Note {
+        return Err(ApiFailure::bad_request(format!(
+            "meta.{} rides on a note, not a {}",
+            meta::DUTY,
+            event.kind
+        )));
+    }
+    let payload = DutyPayload::from_value(value).ok_or_else(|| {
+        ApiFailure::bad_request(format!(
+            "meta.{} is {{\"senator\": <name>, \"duty\": <text>}}",
+            meta::DUTY
+        ))
+    })?;
+    payload.check().map_err(ApiFailure::bad_request)?;
+    if from == &payload.senator || roster.owner_of(&payload.senator) == Some(from.name()) {
+        return Ok(());
+    }
+    let chair = state
+        .hub
+        .chair(&event.committee)
+        .await
+        .map_err(ApiFailure::from)?
+        .chair;
+    if chair.as_ref() == Some(from) {
+        return Ok(());
+    }
+    Err(ApiFailure::forbidden(format!(
+        "{} may not set the duty of {}: only that senator, its owner or the committee's chair",
+        event.from,
+        Address::senator(&payload.senator)
+    )))
 }
 
 /// [`meta::COMPANION`] labels an agent's answer as its companion session's;

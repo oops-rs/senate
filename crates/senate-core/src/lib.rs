@@ -27,6 +27,7 @@
 //! - [`surface`]: the seam between the Speaker and a chat-platform gateway.
 //! - [`brief`]: the committee brief, derived from the log.
 //! - [`continuity`]: checkpoints, presence and leases, kept per agent.
+//! - [`duty`]: what each seat does on a committee, folded from the log.
 //! - [`docket`]: what awaits a Speaker held by a senator: picks, messages
 //!   addressed to it, questions to away agents.
 //! - [`task`]: task threads: status, triage, and the board derived from
@@ -82,6 +83,7 @@ pub mod chair;
 pub mod committee_seat;
 pub mod continuity;
 pub mod docket;
+pub mod duty;
 pub mod event;
 pub mod flatten;
 pub mod hub;
@@ -111,6 +113,7 @@ pub use docket::{
     Awaiting, CheckpointFacts, DocketItem, DocketPage, PickPayload, SeatFacts, SpeakerDocket,
     awaits_speaker,
 };
+pub use duty::{DutyFold, DutyPayload};
 pub use event::{
     BindingAction, BindingPayload, Event, GroupRole, Kind, Mirror, NewEvent, PROPOSAL_DECISION,
     Refs, Source, StatusState, is_companion, is_provisional, is_takeover, meta,

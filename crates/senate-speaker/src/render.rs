@@ -2086,6 +2086,7 @@ mod tests {
             cursor: None,
             lag: Some(14),
             new_owner: None,
+            duty: None,
         };
         let since = chrono::Duration::hours(3);
         assert_eq!(
@@ -2373,6 +2374,7 @@ mod tests {
             cursor: None,
             lag: Some(1),
             new_owner: None,
+            duty: None,
         };
         let today = Today {
             date: chrono::NaiveDate::from_ymd_opt(2026, 4, 12).expect("date"),

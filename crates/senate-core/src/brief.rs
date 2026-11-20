@@ -26,6 +26,7 @@ use crate::continuity::{
     AgentPresence, CheckpointPayload, CheckpointTrigger, PresenceBoard, PresenceState, lag_words,
     short_commit,
 };
+use crate::duty::DutyFold;
 use crate::event::{BindingAction, Event, Kind, Refs, meta};
 use crate::ids::{CommitteeId, Seq};
 use crate::locale::Locale;
@@ -151,6 +152,7 @@ pub struct BriefBuilder {
     groups: Vec<BriefGroup>,
     checkpoints: HashMap<SenatorName, BriefCheckpoint>,
     presence: PresenceBoard,
+    duties: DutyFold,
     participants: HashMap<Address, (Seq, DateTime<Utc>)>,
 }
 
@@ -166,6 +168,7 @@ impl BriefBuilder {
             groups: Vec::new(),
             checkpoints: HashMap::new(),
             presence: PresenceBoard::new(),
+            duties: DutyFold::new(),
             participants: HashMap::new(),
         }
     }
@@ -187,6 +190,7 @@ impl BriefBuilder {
         }
         self.head = event.seq;
         self.presence.observe(event);
+        self.duties.observe(event);
 
         if matches!(event.from, Address::Senator(_) | Address::Guest(_)) {
             self.participants
@@ -297,7 +301,15 @@ impl BriefBuilder {
             open_questions,
             groups: self.groups.clone(),
             checkpoints,
-            presence: self.presence.agents(),
+            presence: self
+                .presence
+                .agents()
+                .into_iter()
+                .map(|mut p| {
+                    p.duty = self.duties.duty(&p.agent).map(str::to_owned);
+                    p
+                })
+                .collect(),
             participants,
         }
     }
@@ -469,6 +481,12 @@ impl Brief {
                 let _ = match locale {
                     Locale::Zh => write!(out, " · 在 {} 上{behind}", self.committee),
                     Locale::En => write!(out, " · {behind} on {}", self.committee),
+                };
+            }
+            if let Some(duty) = &p.duty {
+                let _ = match locale {
+                    Locale::Zh => write!(out, " · 职责：{duty}"),
+                    Locale::En => write!(out, " · duty: {duty}"),
                 };
             }
             out.push('\n');

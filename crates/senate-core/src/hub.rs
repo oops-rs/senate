@@ -721,6 +721,7 @@ mod tests {
             cursor: Some(Seq(4)),
             lag: None,
             new_owner: owner.map(path),
+            duty: None,
         }
     }
 

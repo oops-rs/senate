@@ -534,6 +534,11 @@ pub mod meta {
     /// On an answer relayed back into an asker's thread: who answered
     /// where the message was forwarded, as a qualified name.
     pub const ANSWERED_BY: &str = "answered_by";
+    /// `note` from a senator: a seat's duty, a
+    /// [`DutyPayload`](crate::duty::DutyPayload). Set by the senator itself,
+    /// its owner person or the committee's chair; the server refuses anyone
+    /// else. See [`crate::duty`].
+    pub const DUTY: &str = "duty";
 }
 
 fn flag(event: &Event, key: &str) -> bool {

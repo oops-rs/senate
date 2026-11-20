@@ -30,11 +30,12 @@ const STATE_KINDS: [Kind; 6] = [
 ];
 
 /// Meta keys that carry or cause a state change: bindings, status, decision
-/// proposals and what they supersede, checkpoints, presence, and everything
+/// proposals and what they supersede, checkpoints, presence, duties, and everything
 /// the Speaker writes (triage, level, work runs, provisional answers,
 /// takeover).
-const STATE_KEYS: [&str; 13] = [
+const STATE_KEYS: [&str; 14] = [
     meta::BINDING,
+    meta::DUTY,
     meta::STATUS,
     meta::PROPOSAL,
     meta::PROPOSED_BY,

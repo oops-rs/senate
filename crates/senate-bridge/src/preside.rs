@@ -534,6 +534,7 @@ mod tests {
             last_seen,
             checkpoint: None,
             open_threads: 0,
+            duty: None,
         };
         let seen = Some(Utc.with_ymd_and_hms(2026, 11, 16, 10, 3, 0).unwrap());
         let online = Some(PresenceState::Online);

@@ -860,6 +860,7 @@ async fn docket(
             last_seen: None,
             checkpoint: None,
             open_threads: 0,
+            duty: None,
         }],
     })
     .into_response()
