@@ -731,6 +731,16 @@ impl Worker {
         if from_above(meta::ANSWERED_BY) {
             return Ok(());
         }
+        // Nor is anything the uplink itself brought down (it carries where
+        // it started above): an answer given above in this Senate's name
+        // while it was offline lands in the desk's thread as an answer,
+        // and is not this Senate's to say again.
+        let brought = Origin::of(event)
+            .and_then(|origin| origin.locator.senate().cloned())
+            .is_some_and(|senate| !self.here().ends_with(&senate));
+        if brought {
+            return Ok(());
+        }
         let Some(root) = self
             .hub
             .get(&event.committee, root)
