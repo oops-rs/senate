@@ -225,7 +225,7 @@ pub struct Inner {
     pub active: HashMap<(String, String), usize>,
     /// Who sits here; agents are seated on first contact.
     pub roster: Roster,
-    pub aliases: senate_core::api::SenatorAliases,
+    pub aliases: senate_core::alias::CommitteeAliases,
     pub alias_delay: Duration,
     /// The Senate's name `/v1/me` gives.
     pub senate: Name,
@@ -397,12 +397,13 @@ async fn alias(
         Ok(person) => person,
         Err(error) => return error,
     };
+    let on = request.committee.clone().unwrap_or_else(committee);
     {
         let inner = st.inner.lock().unwrap();
         if inner.roster.knows(&request.alias)
             || inner
                 .aliases
-                .get(&request.alias)
+                .get(&on, &request.alias)
                 .is_some_and(|p| p != &primary)
         {
             return api_error(StatusCode::CONFLICT, "conflict", "name is already taken");
@@ -412,8 +413,9 @@ async fn alias(
         return error;
     }
     let mut inner = st.inner.lock().unwrap();
-    inner.aliases.retain(|_, p| p != &primary);
-    inner.aliases.insert(request.alias.clone(), primary);
+    if let Err(error) = inner.aliases.set(&on, request.alias.clone(), primary) {
+        return api_error(StatusCode::CONFLICT, "conflict", &error.to_string());
+    }
     Json(request.alias).into_response()
 }
 
@@ -1125,7 +1127,7 @@ impl FakeServer {
                 reject_approval_archive: false,
                 approval_archive_attempts: 0,
                 raw: HashMap::new(),
-                aliases: BTreeMap::new(),
+                aliases: Default::default(),
                 alias_delay: Duration::ZERO,
                 cursors: HashMap::new(),
                 heartbeats: Vec::new(),
@@ -1159,7 +1161,7 @@ impl FakeServer {
         let app = Router::new()
             .route("/healthz", get(|| async { "ok" }))
             .route("/v1/me", get(me))
-            .route("/v1/aliases", get(aliases))
+            .route("/v1/committee-aliases", get(aliases))
             .route("/v1/aliases/{primary}", axum::routing::put(alias))
             .route(senate_core::api::RESOLVE_PATH, get(resolve))
             .route(

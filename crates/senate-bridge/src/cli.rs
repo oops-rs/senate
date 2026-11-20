@@ -28,6 +28,7 @@ use crate::terminal::Terminal;
 use crate::{BridgeConfig, Paths, init, install, mcp, person, preside, service, speak, status};
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
+use senate_core::alias::{AliasMatch, AliasName, CommitteeAliases, QualifiedAlias};
 use senate_core::{CommitteeId, CommitteeSeatAction, EventId, Locale, Name, SenatorName, Seq};
 
 #[derive(Parser)]
@@ -151,8 +152,13 @@ enum Cmd {
         #[arg(long)]
         duty: Option<String>,
     },
-    /// List senator aliases and the primary IDs they stand for.
+    /// List senator aliases by committee, with the IDs they stand for.
     Aliases,
+    /// Manage senator aliases.
+    Alias {
+        #[command(subcommand)]
+        command: AliasCmd,
+    },
     /// Appoint session secretaries and manage their shared work.
     SecretaryTeam(cli_secretary::SecretaryTeam),
     /// Remove this worktree's committee binding on the current branch.
@@ -526,8 +532,9 @@ Without --wait it returns at once: read the answer with `senate inbox`,
     /// session after /clear or /resume. A refused change appears in status.
     /// The configured executable must be Claude itself or a wrapper that execs it.
     Attach {
-        /// The senator's primary name or alias.
-        senator: SenatorName,
+        /// The senator's primary name or alias (`committee::alias` for an
+        /// alias on one committee).
+        senator: AliasName,
     },
     /// Resume a stopped hosted senator in the background.
     ///
@@ -535,13 +542,15 @@ Without --wait it returns at once: read the answer with `senate inbox`,
     /// hosted Claude session with no saved conversation opens with its
     /// original ID.
     Restore {
-        /// The senator's primary name or alias.
-        senator: SenatorName,
+        /// The senator's primary name or alias (`committee::alias` for an
+        /// alias on one committee).
+        senator: AliasName,
     },
     /// End a hosted senator's terminal (`senate restore` resumes it).
     Stop {
-        /// The senator's primary name or alias.
-        senator: SenatorName,
+        /// The senator's primary name or alias (`committee::alias` for an
+        /// alias on one committee).
+        senator: AliasName,
         /// Stop even when the attached viewer has typed in the past three minutes.
         #[arg(long)]
         force: bool,
@@ -641,6 +650,19 @@ enum DebugCmd {
         /// The message text.
         #[arg(long)]
         text: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum AliasCmd {
+    /// Remove an alias. A bare alias on several committees asks which;
+    /// `committee::alias` names one.
+    #[command(after_help = "Examples:
+  senate alias rm smoke          Remove the alias smoke
+  senate alias rm nous::main     Remove main from the committee nous")]
+    Rm {
+        /// The alias, or `committee::alias`.
+        alias: AliasName,
     },
 }
 
@@ -860,6 +882,47 @@ fn remember_terminal() -> anyhow::Result<()> {
 
 /// `spawn` and `restore`: stdout carries the senator's name alone, for a
 /// script to capture; a person at a terminal is also told the next step.
+/// What an interactive command names: a bare alias several agents have is
+/// the person's to pick among its candidates, even when one is on their
+/// own committee. Anything else goes to the daemon as written.
+fn pick_alias(name: AliasName) -> anyhow::Result<AliasName> {
+    if name.committee.is_some() || name.alias.is_session_name() {
+        return Ok(name);
+    }
+    let paths = Paths::from_env()?;
+    let table: CommitteeAliases =
+        runtime(false)?.block_on(daemon_call(&paths, &Request::Aliases))?;
+    match table.resolve(&name, None) {
+        AliasMatch::Ambiguous { candidates, .. } => {
+            let chosen = choose_alias(&name, candidates)?;
+            Ok(AliasName::bare(chosen.primary))
+        }
+        _ => Ok(name),
+    }
+}
+
+/// Let the person pick one of an alias's `candidates`.
+// TODO(feat/sessions): open `picker::pick_session` over the matching
+// session rows, labelled `committee::alias`, once it lands.
+fn choose_alias(
+    name: &AliasName,
+    candidates: Vec<QualifiedAlias>,
+) -> anyhow::Result<QualifiedAlias> {
+    let listed: Vec<String> = candidates
+        .iter()
+        .map(|q| {
+            format!(
+                "  {q} -> {}",
+                senate_core::Address::senator(&q.primary).in_text()
+            )
+        })
+        .collect();
+    anyhow::bail!(
+        "{name} is an alias on several committees; name one as committee::alias:\n{}",
+        listed.join("\n")
+    )
+}
+
 fn launch(request: &Request, terminal: Option<Terminal>) -> anyhow::Result<()> {
     let reply: SpawnReply = host_call(request)?;
     println!("{}", reply.senator);
@@ -1200,22 +1263,58 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
         }
         Cmd::Aliases => {
             let paths = Paths::from_env()?;
-            let rows: senate_core::api::SenatorAliases =
+            let table: CommitteeAliases =
                 runtime(false)?.block_on(daemon_call(&paths, &Request::Aliases))?;
-            if rows.is_empty() {
+            if table.is_empty() {
                 println!(
                     "{}",
                     BridgeConfig::locale_at(&paths.config())
                         .pick("尚无 senator 别名。", "No senator aliases registered.")
                 );
             }
-            for (alias, primary) in rows {
+            for q in table.iter() {
                 output.print(&format!(
-                    "{} -> {}",
-                    senate_core::Address::senator(&alias).in_text(),
-                    senate_core::Address::senator(&primary).in_text()
+                    "{q} -> {}",
+                    senate_core::Address::senator(&q.primary).in_text()
                 ));
             }
+            Ok(())
+        }
+        Cmd::Alias {
+            command: AliasCmd::Rm { alias },
+        } => {
+            let paths = Paths::from_env()?;
+            let rt = runtime(false)?;
+            let table: CommitteeAliases = rt.block_on(daemon_call(&paths, &Request::Aliases))?;
+            let found: Vec<QualifiedAlias> = match &alias.committee {
+                Some(committee) => table
+                    .get(committee, &alias.alias)
+                    .map(|primary| QualifiedAlias {
+                        committee: committee.clone(),
+                        alias: alias.alias.clone(),
+                        primary: primary.clone(),
+                    })
+                    .into_iter()
+                    .collect(),
+                None => table.matches(&alias.alias),
+            };
+            let target = match found.as_slice() {
+                [] => anyhow::bail!("no alias {alias}"),
+                [one] => one.clone(),
+                _ => choose_alias(&alias, found)?,
+            };
+            let _: serde_json::Value = rt.block_on(daemon_call(
+                &paths,
+                &Request::RemoveAlias {
+                    primary: target.primary.clone(),
+                    alias: target.alias.clone(),
+                    committee: target.committee.clone(),
+                },
+            ))?;
+            output.print(&format!(
+                "removed {target} -> {}",
+                senate_core::Address::senator(&target.primary).in_text()
+            ));
             Ok(())
         }
         Cmd::SecretaryTeam(args) => cli_secretary::run(args),
@@ -1597,6 +1696,7 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             )
         }
         Cmd::Restore { senator } => {
+            let senator = pick_alias(senator)?;
             remember_terminal()?;
             launch(
                 &Request::Restore {
@@ -1607,6 +1707,7 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             )
         }
         Cmd::Stop { senator, force } => {
+            let senator = pick_alias(senator)?;
             let reply: StopReply = host_call(&Request::Stop {
                 session: SessionSelector::default(),
                 senator,
@@ -1619,6 +1720,7 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Attach { senator } => {
+            let senator = pick_alias(senator)?;
             let paths = Paths::from_env()?;
             runtime(false)?.block_on(async {
                 let socket: PathBuf = daemon_call(&paths, &Request::Attach { senator }).await?;

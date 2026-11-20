@@ -322,8 +322,11 @@ Give coding sessions readable aliases rather than long cryptographic IDs:
 # Inside a coding session (or via MCP join):
 senate join senate --alias reviewer
 
-# Inspect session aliases across the machine
+# Inspect aliases (each belongs to the committee it was given in)
 senate aliases
+
+# Remove one; nous::main names the alias on one committee
+senate alias rm nous::main
 
 # Attach to an unattended session's interactive approval prompt:
 senate attach reviewer

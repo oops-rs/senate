@@ -550,11 +550,25 @@ suffix. Session records can expire without changing a resumed session's identity
 
 The session's MCP `join` accepts a `senator` alias. The CLI equivalent is
 `senate join <committee> --alias <name>`. A pin (Claude environment, then worktree
-file, then a custom harness setting) can suggest an initial alias. The server
-records the Senate-wide alias → primary map in the log store's registry. It
-serializes competing claims, checks the principal that owns the primary, and
-resolves recipients before storing events. Changing an alias keeps the same
-inbox, byline, and roles. Use `senate aliases` to inspect the current map.
+file, then a custom harness setting) can suggest an initial alias. An alias
+belongs to the committee it was given in, so the same alias can stand for
+different agents on different committees (`nous::main`, `nous-ios::main`); a
+person's handle is Senate-wide and is never an alias. The server records the
+committee → alias → primary table in the log store's registry
+(`senate_core::alias`). It serializes competing claims, checks the principal
+that owns the primary, and resolves recipients before storing events.
+
+A bare alias is matched on every committee. One match (or several standing for
+the same agent) resolves from anywhere. With several agents, interactive CLI
+commands (`attach`, `restore`, `stop`, `alias rm`) let the person pick one;
+non-interactive callers (MCP tools, `ask`/`tell`, the server's resolution) take
+the match on the writer's own committee and otherwise refuse, listing the
+qualified candidates. `committee::alias` always names one. Changing an alias
+keeps the same inbox, byline, and roles. `senate aliases` lists the table and
+`senate alias rm <alias>` removes one (the agent's person or the Speaker's
+office). Aliases kept Senate-wide by an older server move, at its first start
+after the upgrade, to every committee their agent sits in; one whose agent sits
+nowhere is dropped and named in the server log.
 
 ### A home written when senators were paths
 

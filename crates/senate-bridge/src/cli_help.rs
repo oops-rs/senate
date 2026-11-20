@@ -33,6 +33,7 @@ const GROUPS: &[(&str, &[&str])] = &[
             "stop",
             "restore",
             "aliases",
+            "alias",
             "seat",
             "secretary-team",
         ],

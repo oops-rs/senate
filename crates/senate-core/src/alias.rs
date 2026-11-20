@@ -282,12 +282,34 @@ impl AliasName {
     }
 }
 
+impl From<SenatorName> for AliasName {
+    fn from(alias: SenatorName) -> Self {
+        Self::bare(alias)
+    }
+}
+
 impl fmt::Display for AliasName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.committee {
             Some(committee) => write!(f, "{committee}{SEPARATOR}{}", self.alias),
             None => write!(f, "{}", self.alias),
         }
+    }
+}
+
+impl Serialize for AliasName {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+/// A bare alias reads as a plain senator name does, so a field that held a
+/// [`SenatorName`] can hold an [`AliasName`] with no change on the wire.
+impl<'de> Deserialize<'de> for AliasName {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -429,6 +451,9 @@ mod tests {
         assert_eq!(t.resolve(&missing, None), AliasMatch::NotAlias);
         assert!("Bad::main".parse::<AliasName>().is_err());
         assert_eq!(q.to_string(), "nous-ios::main");
+        assert_eq!(serde_json::to_value(&q).unwrap(), "nous-ios::main");
+        let bare: AliasName = serde_json::from_value("main".into()).unwrap();
+        assert_eq!(bare, AliasName::bare(n("main")));
     }
 
     #[test]

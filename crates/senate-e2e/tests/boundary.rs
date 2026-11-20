@@ -1017,7 +1017,7 @@ async fn restoring_an_unseated_senator_requires_explicit_rejoin_before_capacity(
             let error = desk
                 .try_ipc::<SpawnReply>(Request::Restore {
                     session,
-                    senator: alias.clone(),
+                    senator: alias.clone().into(),
                 })
                 .await
                 .unwrap_err();
@@ -1033,7 +1033,7 @@ async fn restoring_an_unseated_senator_requires_explicit_rejoin_before_capacity(
         let error = desk
             .try_ipc::<SpawnReply>(Request::Restore {
                 session: Laptop::session("chair"),
-                senator: alias.clone(),
+                senator: alias.clone().into(),
             })
             .await
             .unwrap_err();

@@ -320,7 +320,7 @@ async fn stop_tool_enforces_authority_and_records_the_actor() {
     let terminal: PathBuf = ipc::request(
         &h.socket(),
         &Request::Attach {
-            senator: member.senator.clone(),
+            senator: member.senator.clone().into(),
         },
         WAIT,
         WAIT,
@@ -398,7 +398,7 @@ async fn stop_tool_enforces_authority_and_records_the_actor() {
         &h.socket(),
         &Request::Stop {
             session: Default::default(),
-            senator: chair.senator,
+            senator: chair.senator.into(),
             force: false,
         },
         WAIT,

@@ -260,7 +260,7 @@ done
     // Success at a limit of one verifies both failures released capacity.
     let launched: SpawnReply = call(&h, &request).await;
     let attach_target = Request::Attach {
-        senator: launched.senator.clone(),
+        senator: launched.senator.clone().into(),
     };
     let socket: PathBuf = call(&h, &attach_target).await;
     let args = hosted_fixture_argv(&socket, &project, TIMEOUT).await;
@@ -299,7 +299,7 @@ done
     {
         let server = h.server.state.inner.lock().unwrap();
         assert_eq!(
-            server.aliases.get(&path("fixture")),
+            server.aliases.get(&committee(), &path("fixture")),
             Some(&launched.senator)
         );
         assert!(
@@ -348,7 +348,7 @@ done
         &h,
         &Request::Restore {
             session: Default::default(),
-            senator: launched.senator.clone(),
+            senator: launched.senator.clone().into(),
         },
     )
     .await;
@@ -632,7 +632,7 @@ async fn restore_refuses_a_reachable_claude_and_keeps_the_servers_backlog() {
     start(&mut h).await;
     let restore = Request::Restore {
         session: Default::default(),
-        senator: senator.clone(),
+        senator: senator.clone().into(),
     };
     let refused = ipc::request::<SpawnReply>(&h.socket(), &restore, TIMEOUT, TIMEOUT)
         .await
@@ -658,7 +658,13 @@ async fn restore_refuses_a_reachable_claude_and_keeps_the_servers_backlog() {
     .await
     .unwrap();
     assert!(waiting.seq > Seq::ZERO);
-    let binding: PathBuf = call(&h, &Request::Attach { senator }).await;
+    let binding: PathBuf = call(
+        &h,
+        &Request::Attach {
+            senator: senator.into(),
+        },
+    )
+    .await;
     let child_pid = std::fs::read_to_string(binding.parent().unwrap().join("owner"))
         .unwrap()
         .trim()
@@ -790,7 +796,7 @@ async fn codex_native_end_during_or_after_restore_does_not_leave_a_live_row() {
         };
         let request = Request::Restore {
             session: Default::default(),
-            senator: senator.clone(),
+            senator: senator.clone().into(),
         };
         let restored: SpawnReply = if native_end == NativeEnd::BeforePublication {
             h.store().set_session_state(id, SessionState::Live).unwrap();
@@ -835,7 +841,13 @@ async fn codex_native_end_during_or_after_restore_does_not_leave_a_live_row() {
         if native_end == NativeEnd::AlreadyEnded {
             assert_eq!(opening.after, prehistory.seq.0);
         }
-        let socket: PathBuf = call(&h, &Request::Attach { senator }).await;
+        let socket: PathBuf = call(
+            &h,
+            &Request::Attach {
+                senator: senator.into(),
+            },
+        )
+        .await;
         let shared = socket.with_file_name("shared-codex");
         if native_end == NativeEnd::AfterPublication {
             assert!(shared.is_file(), "publication should see the native client");
@@ -966,7 +978,7 @@ done
 
     fn attach_request() -> Request {
         Request::Attach {
-            senator: path("seat-fixture"),
+            senator: path("seat-fixture").into(),
         }
     }
 
@@ -1109,7 +1121,7 @@ async fn stop_cli_protects_an_attending_viewer_and_releases_the_slot() {
         h,
         &Request::Restore {
             session: Default::default(),
-            senator: path("seat-fixture"),
+            senator: path("seat-fixture").into(),
         },
     )
     .await;
@@ -1134,7 +1146,7 @@ async fn stop_cli_protects_an_attending_viewer_and_releases_the_slot() {
         &fixture.h,
         &Request::Stop {
             session: Default::default(),
-            senator: restored.senator,
+            senator: restored.senator.into(),
             force: false,
         },
     )
@@ -1186,7 +1198,7 @@ async fn an_unconfirmed_forced_stop_audits_the_ended_host() {
         &h.socket(),
         &Request::Stop {
             session: Default::default(),
-            senator: path("seat-fixture"),
+            senator: path("seat-fixture").into(),
             force: true,
         },
         TIMEOUT,
@@ -1530,7 +1542,7 @@ async fn claude_hook_changes_native_context_without_moving_the_seat_or_its_mail(
         h,
         &Request::Restore {
             session: Default::default(),
-            senator: path("seat-fixture"),
+            senator: path("seat-fixture").into(),
         },
     )
     .await;

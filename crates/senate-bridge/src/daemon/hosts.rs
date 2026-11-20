@@ -172,22 +172,36 @@ impl Shared {
             .await
     }
 
-    /// Aliases are Senate-wide. The runtime, path and committee must come
-    /// from the local registry, including for a session started by hand.
-    async fn find_local_senator(&self, senator: &SenatorName) -> Result<Session, IpcError> {
-        let primary = if senator.is_session_name() {
+    /// The local session `name` stands for: its primary ID, or an alias
+    /// resolved from `writer` (the caller's own committee, when it has one;
+    /// an alias several agents have is refused with its candidates there).
+    /// The runtime, path and committee must come from the local registry,
+    /// including for a session started by hand.
+    async fn find_local_senator(
+        &self,
+        name: &AliasName,
+        writer: Option<&CommitteeId>,
+    ) -> Result<Session, IpcError> {
+        let senator = &name.alias;
+        let primary = if name.committee.is_none() && senator.is_session_name() {
             senator.clone()
         } else {
-            tokio::time::timeout(Duration::from_secs(5), self.api.aliases())
+            let resolved = tokio::time::timeout(Duration::from_secs(5), self.api.aliases())
                 .await
                 .map_err(|_| {
                     IpcError::new(codes::SERVER, "could not resolve the senator alias in time")
                 })?
                 .map_err(server_error)?
-                .remove(senator)
-                .ok_or_else(|| {
-                    IpcError::new(codes::NO_SESSION, format!("unknown alias {senator}"))
-                })?
+                .resolve(name, writer);
+            if resolved == AliasMatch::NotAlias {
+                return Err(IpcError::new(
+                    codes::NO_SESSION,
+                    format!("unknown alias {name}"),
+                ));
+            }
+            resolved
+                .non_interactive(senator)
+                .map_err(|e| IpcError::bad_request(e.to_string()))?
         };
         for session in self.store.current_sessions().map_err(internal)? {
             if session.agent == primary && session.agent_source == AgentSource::Session {
@@ -446,9 +460,10 @@ impl Shared {
 
     pub(super) async fn resolve_restore(
         &self,
-        senator: &SenatorName,
+        senator: &AliasName,
+        writer: Option<&CommitteeId>,
     ) -> Result<RestoreTarget, IpcError> {
-        let session = self.find_local_senator(senator).await?;
+        let session = self.find_local_senator(senator, writer).await?;
         let runtime = match session.runtime {
             Runtime::Codex => HostedRuntime::Codex,
             Runtime::Claude => HostedRuntime::Claude,
@@ -468,8 +483,12 @@ impl Shared {
         })
     }
 
-    pub(super) async fn resolve_stop(&self, senator: &SenatorName) -> Result<StopTarget, IpcError> {
-        let session = self.find_local_senator(senator).await?;
+    pub(super) async fn resolve_stop(
+        &self,
+        senator: &AliasName,
+        writer: Option<&CommitteeId>,
+    ) -> Result<StopTarget, IpcError> {
+        let session = self.find_local_senator(senator, writer).await?;
         let host_id = self
             .store
             .session_host(&session.session_id)
@@ -588,8 +607,8 @@ impl Shared {
         Ok(())
     }
 
-    pub(super) async fn on_attach(&self, senator: SenatorName) -> Result<PathBuf, IpcError> {
-        let session = self.find_local_senator(&senator).await?;
+    pub(super) async fn on_attach(&self, senator: AliasName) -> Result<PathBuf, IpcError> {
+        let session = self.find_local_senator(&senator, None).await?;
         let paths = Paths::new(self.home.canonicalize().map_err(IpcError::internal)?);
         if let Some(id) = self
             .store
@@ -710,7 +729,7 @@ impl Shared {
         let program = host::preflight(&paths, &id, &executable).map_err(IpcError::internal)?;
 
         // The TUI shows the senator's alias as its own name. A restored
-        // seat is named by whichever alias points at it; not finding one
+        // seat is named by its alias on this committee; not finding one
         // only leaves the session unnamed.
         let name = match (&alias, &seat) {
             (Some(alias), _) => Some(alias.to_string()),
@@ -718,12 +737,7 @@ impl Shared {
                 .await
                 .ok()
                 .and_then(Result::ok)
-                .and_then(|aliases| {
-                    aliases
-                        .into_iter()
-                        .find_map(|(alias, senator)| (senator == *seat).then_some(alias))
-                })
-                .map(|alias| alias.to_string()),
+                .and_then(|aliases| aliases.alias_of(&committee, seat).map(ToString::to_string)),
             (None, None) => None,
         };
         // Keep the creating connection until the host has started. Delivery
@@ -806,7 +820,7 @@ impl Shared {
         let reply = SpawnReply {
             senator: seat.unwrap_or_else(|| agent::session_name(session_runtime, &session_id)),
             session_id: session_id.clone(),
-            committee,
+            committee: committee.clone(),
         };
         let facts = session::gather_git_facts(&cwd, Duration::from_secs(2)).await;
         let inferred = session::infer_committee(
@@ -917,7 +931,7 @@ impl Shared {
                 alias_may_have_landed = true;
                 match tokio::time::timeout(
                     Duration::from_secs(5),
-                    self.api.set_alias(&reply.senator, alias, false),
+                    self.api.set_alias(&reply.senator, alias, Some(&committee), false),
                 )
                 .await
                 {
@@ -971,7 +985,7 @@ impl Shared {
                 record_rollback(
                     &mut rollback,
                     "remove alias",
-                    self.api.remove_alias(&reply.senator, alias),
+                    self.api.remove_alias(&reply.senator, alias, &committee),
                 )
                 .await;
             }

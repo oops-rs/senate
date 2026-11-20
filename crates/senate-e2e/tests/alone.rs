@@ -774,8 +774,90 @@ async fn two_codex_threads_in_one_worktree_choose_separate_seats() {
     assert_eq!(renamed.agent, path("codex-review-thread"));
     let reused: JoinReply = desk.ipc(conflict).await;
     assert_eq!(reused.agent, path("codex-author-thread"));
-    let aliases: senate_core::api::SenatorAliases = desk.ipc(Request::Aliases).await;
-    assert_eq!(aliases[&path("editor")], path("codex-review-thread"));
-    assert_eq!(aliases[&path("reviewer")], path("codex-author-thread"));
+    let aliases: senate_core::alias::CommitteeAliases = desk.ipc(Request::Aliases).await;
+    let flat = aliases.flat();
+    assert_eq!(flat[&path("editor")], path("codex-review-thread"));
+    assert_eq!(flat[&path("reviewer")], path("codex-author-thread"));
+    desk.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_alias_on_two_committees_asks_which_until_one_is_removed() {
+    use senate_bridge::ipc::JoinReply;
+    use senate_core::alias::CommitteeAliases;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut desk = Desk::new(dir.path(), "alice", Locale::En, ALONE);
+    let codex = desk.codex_app_server();
+    desk.start().await;
+    for id in ["author-thread", "review-thread"] {
+        codex.idle(id);
+        desk.codex_start_with_identity(id, true).await.unwrap();
+    }
+    desk.wait_connected("codex-author-thread", true).await;
+    // A second committee, known to the server once something is said there.
+    let other = senate_core::CommitteeId::new("other").unwrap();
+    desk.senate()
+        .daemon
+        .hub
+        .append(NewEvent::new(
+            other.clone(),
+            Kind::Note,
+            senator("alice"),
+            "opening",
+        ))
+        .await
+        .unwrap();
+    for (id, on) in [
+        ("review-thread", committee()),
+        ("author-thread", other.clone()),
+    ] {
+        let reply: JoinReply = desk
+            .ipc(Request::JoinAs {
+                session: Laptop::session(id),
+                committee: on,
+                senator: path("main"),
+            })
+            .await;
+        assert_eq!(reply.alias, Some(path("main")));
+    }
+    let aliases: CommitteeAliases = desk.ipc(Request::Aliases).await;
+    assert_eq!(
+        aliases.get(&committee(), &path("main")),
+        Some(&path("codex-review-thread"))
+    );
+    assert_eq!(
+        aliases.get(&other, &path("main")),
+        Some(&path("codex-author-thread"))
+    );
+
+    // A bare alias of two agents is not guessed: the candidates are named.
+    let ambiguous = desk
+        .try_ipc::<std::path::PathBuf>(Request::Attach {
+            senator: path("main").into(),
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        ambiguous.contains("other::main") && ambiguous.contains(&format!("{}::main", committee())),
+        "{ambiguous}"
+    );
+
+    // `alias rm` takes one committee's alias away; the other one is then
+    // the only match, from any committee.
+    let _: serde_json::Value = desk
+        .ipc(Request::RemoveAlias {
+            primary: path("codex-author-thread"),
+            alias: path("main"),
+            committee: other.clone(),
+        })
+        .await;
+    let aliases: CommitteeAliases = desk.ipc(Request::Aliases).await;
+    assert_eq!(aliases.get(&other, &path("main")), None);
+    assert_eq!(
+        aliases.flat().get(&path("main")),
+        Some(&path("codex-review-thread"))
+    );
     desk.stop().await;
 }

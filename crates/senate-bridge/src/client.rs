@@ -14,6 +14,7 @@
 
 use std::time::Duration;
 
+use senate_core::alias::CommitteeAliases;
 use senate_core::api::{
     self, AppendResponse, CheckpointQuery, Cursor, CursorQuery, Heartbeat, Me, PresencePage,
     SearchQuery, ThreadsPage, ThreadsQuery,
@@ -197,15 +198,19 @@ impl ApiClient {
         req.bearer_auth(&self.token)
     }
 
+    /// Give `primary` the alias `alias` on `committee` (none: the server
+    /// uses the agent's only committee).
     pub async fn set_alias(
         &self,
         primary: &SenatorName,
         alias: &SenatorName,
+        committee: Option<&CommitteeId>,
         initial: bool,
     ) -> Result<SenatorName, ApiClientError> {
         let request = senate_core::api::SetAlias {
             alias: alias.clone(),
             initial,
+            committee: committee.cloned(),
         };
         let response = self
             .authed(self.http.put(self.url(&format!("/v1/aliases/{primary}"))))
@@ -215,15 +220,22 @@ impl ApiClient {
         Ok(checked(response).await?.json().await?)
     }
 
+    /// Remove `alias` from `committee` while it stands for `primary`.
     pub(crate) async fn remove_alias(
         &self,
         primary: &SenatorName,
         alias: &SenatorName,
+        committee: &CommitteeId,
     ) -> Result<(), ApiClientError> {
+        let query = senate_core::api::RemoveAlias {
+            committee: Some(committee.clone()),
+            acted_by: None,
+        };
         let response = self
             .authed(
                 self.http
-                    .delete(self.url(&format!("/v1/aliases/{primary}/{alias}"))),
+                    .delete(self.url(&format!("/v1/aliases/{primary}/{alias}")))
+                    .query(&query),
             )
             .send()
             .await?;
@@ -231,9 +243,10 @@ impl ApiClient {
         Ok(())
     }
 
-    pub async fn aliases(&self) -> Result<senate_core::api::SenatorAliases, ApiClientError> {
+    /// Every committee's aliases.
+    pub async fn aliases(&self) -> Result<CommitteeAliases, ApiClientError> {
         let response = self
-            .authed(self.http.get(self.url("/v1/aliases")))
+            .authed(self.http.get(self.url("/v1/committee-aliases")))
             .send()
             .await?;
         Ok(checked(response).await?.json().await?)

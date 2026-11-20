@@ -129,6 +129,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use anyhow::{Context, bail};
+use senate_core::alias::{AliasMatch, AliasName};
 use senate_core::api::{self, Heartbeat};
 use senate_core::continuity::{DECISIONS_FILE, OPEN_FILE, PROGRESS_FILE};
 use senate_core::{
@@ -2714,6 +2715,17 @@ impl Shared {
                 version: env!("CARGO_PKG_VERSION").to_string(),
             }),
             Request::Aliases => wrap(self.api.aliases().await.map_err(server_error)),
+            Request::RemoveAlias {
+                primary,
+                alias,
+                committee,
+            } => wrap(
+                self.api
+                    .remove_alias(&primary, &alias, &committee)
+                    .await
+                    .map(|()| serde_json::json!({}))
+                    .map_err(server_error),
+            ),
             Request::Spawn {
                 session,
                 runtime,
@@ -3276,7 +3288,8 @@ impl Shared {
         {
             let alias = tokio::time::timeout(
                 Duration::from_millis(600),
-                self.api.set_alias(&session.agent, &hint, true),
+                self.api
+                    .set_alias(&session.agent, &hint, session.committee(), true),
             )
             .await;
             let note = match alias {
@@ -4933,7 +4946,8 @@ impl Shared {
             Some(
                 tokio::time::timeout(
                     Duration::from_secs(5),
-                    self.api.set_alias(&session.agent, name, false),
+                    self.api
+                        .set_alias(&session.agent, name, Some(&committee), false),
                 )
                 .await
                 .map_err(|_| self.join_name_timeout())?

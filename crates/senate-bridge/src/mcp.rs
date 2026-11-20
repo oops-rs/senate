@@ -437,11 +437,13 @@ enum SpawnParams {
         chair: bool,
     },
     Restore {
-        /// Primary senator name or alias of a previously recorded local session.
+        /// Primary senator name or alias of a previously recorded local session
+        /// (`committee::alias` names the alias on one committee).
         senator: String,
     },
     Stop {
-        /// Primary senator name or alias of the hosted terminal to stop.
+        /// Primary senator name or alias of the hosted terminal to stop
+        /// (`committee::alias` names the alias on one committee).
         senator: String,
     },
 }
@@ -2169,13 +2171,13 @@ impl SenateMcp {
             },
             SpawnParams::Restore { senator } => Request::Restore {
                 session,
-                senator: parse_senator(&senator)?,
+                senator: parse_alias_name(&senator)?,
             },
             SpawnParams::Stop { senator } => {
                 let reply: crate::ipc::StopReply = client
                     .call(&Request::Stop {
                         session,
-                        senator: parse_senator(&senator)?,
+                        senator: parse_alias_name(&senator)?,
                         force: false,
                     })
                     .await
@@ -2399,6 +2401,20 @@ pub fn parse_senator(raw: &str) -> Result<senate_core::SenatorName, String> {
     match parse_address(raw)? {
         Address::Senator(name) => Ok(name),
         other => Err(format!("{} is not one senator; name one", other.in_text())),
+    }
+}
+
+/// A senator as a tool names it, where an alias may be qualified by its
+/// committee: `main`, `[senator::main]` or `nous::main`.
+pub fn parse_alias_name(raw: &str) -> Result<senate_core::alias::AliasName, String> {
+    match parse_senator(raw) {
+        Ok(name) => Ok(senate_core::alias::AliasName::bare(name)),
+        Err(error) => raw
+            .trim()
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse()
+            .map_err(|_| error),
     }
 }
 
@@ -2784,6 +2800,20 @@ fn brief_resource(committee: &CommitteeId) -> Resource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tool_names_an_alias_bare_or_on_its_committee() {
+        for (raw, shown) in [
+            ("main", "main"),
+            ("[senator::main]", "main"),
+            ("senator::main", "main"),
+            ("nous::main", "nous::main"),
+            ("[nous::main]", "nous::main"),
+        ] {
+            assert_eq!(parse_alias_name(raw).unwrap().to_string(), shown, "{raw}");
+        }
+        assert!(parse_alias_name("Not A Name").is_err());
+    }
 
     #[test]
     fn recipients_parse_in_every_form_an_agent_writes() {

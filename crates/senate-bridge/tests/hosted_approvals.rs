@@ -107,7 +107,7 @@ impl Terminal {
         let socket: PathBuf = ipc::request(
             &h.socket(),
             &Request::Attach {
-                senator: launch.senator.clone(),
+                senator: launch.senator.clone().into(),
             },
             WAIT,
             WAIT,
@@ -729,7 +729,7 @@ async fn stopping_a_restored_codex_host_closes_its_notice_and_leaves_the_native_
         &h.socket(),
         &Request::Restore {
             session: Default::default(),
-            senator,
+            senator: senator.into(),
         },
         WAIT,
         WAIT,
@@ -762,7 +762,7 @@ async fn stopping_a_restored_codex_host_closes_its_notice_and_leaves_the_native_
         &h.socket(),
         &Request::Stop {
             session: Default::default(),
-            senator: launch.senator,
+            senator: launch.senator.into(),
             force: false,
         },
         WAIT,
@@ -982,7 +982,7 @@ async fn a_verified_claude_clear_keeps_approval_notices_on_the_same_seat() {
     let same_terminal: PathBuf = ipc::request(
         &h.socket(),
         &Request::Attach {
-            senator: launch.senator.clone(),
+            senator: launch.senator.clone().into(),
         },
         WAIT,
         WAIT,

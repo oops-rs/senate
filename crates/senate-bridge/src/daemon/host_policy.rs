@@ -162,10 +162,12 @@ impl Shared {
     pub(super) async fn on_hosted_restore(
         &self,
         selector: &SessionSelector,
-        senator: &SenatorName,
+        senator: &AliasName,
     ) -> Result<SpawnReply, IpcError> {
         let auth = self.authorize_host_action(selector).await?;
-        let target = self.resolve_restore(senator).await?;
+        let target = self
+            .resolve_restore(senator, auth.committee_scope.as_ref())
+            .await?;
         auth.check_target(&target.committee, false)?;
         self.check_restore_seat(&target.committee, &target.session.agent)
             .await?;
@@ -230,14 +232,16 @@ impl Shared {
     pub(super) async fn on_hosted_stop(
         &self,
         selector: &SessionSelector,
-        senator: &SenatorName,
+        senator: &AliasName,
         force: bool,
     ) -> Result<StopReply, IpcError> {
         if force && (selector.session_id.is_some() || selector.claude_pid.is_some()) {
             return Err(IpcError::bad_request("only the local CLI may force a stop"));
         }
         let auth = self.authorize_host_action(selector).await?;
-        let target = self.resolve_stop(senator).await?;
+        let target = self
+            .resolve_stop(senator, auth.committee_scope.as_ref())
+            .await?;
         auth.check_target(&target.committee, false)?;
         let primary = &target.senator;
         if auth.committee_scope.is_some() {
