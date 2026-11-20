@@ -1450,7 +1450,11 @@ impl Hub for ServerHub {
         for p in &mut agents {
             p.duty = duties.get(&p.agent).cloned();
         }
-        Ok(PresencePage { agents, head })
+        Ok(PresencePage {
+            agents,
+            head,
+            duties,
+        })
     }
 
     async fn mark_taken_over(

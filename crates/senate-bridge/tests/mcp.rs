@@ -443,6 +443,7 @@ async fn ask_answer_and_catch_up_end_to_end() {
             "ask",
             "catch_up",
             "checkpoint",
+            "duty",
             "escalate",
             "inbox",
             "join",
@@ -1012,6 +1013,35 @@ async fn search_post_and_propose_decision_end_to_end() {
     let (err, text) = mcp.call("post", json!({"body": " "})).await;
     assert!(err);
     assert!(text.contains("`body` is empty"), "{text}");
+
+    // A seat's duty: its own by default, another seat's by name.
+    let (err, text) = mcp
+        .call("duty", json!({"duty": "  reviews\n the gateway "}))
+        .await;
+    assert!(!err, "{text}");
+    assert!(text.contains("Set the duty on refund-v2"), "{text}");
+    let set = h.server.last_event("refund-v2");
+    assert_eq!(set.kind, Kind::Note);
+    assert_eq!(set.from, claude("alice"));
+    assert_eq!(
+        set.meta[meta::DUTY],
+        json!({"senator": "claude", "duty": "reviews the gateway"})
+    );
+    let (err, text) = mcp
+        .call(
+            "duty",
+            json!({"duty": "ships", "senator": "senator::codex"}),
+        )
+        .await;
+    assert!(!err, "{text}");
+    assert_eq!(
+        h.server.last_event("refund-v2").meta[meta::DUTY]["senator"],
+        json!("codex")
+    );
+    let (err, text) = mcp.call("duty", json!({"duty": ""})).await;
+    assert!(!err && text.contains("Cleared the duty"), "{text}");
+    let (err, text) = mcp.call("duty", json!({"duty": "x".repeat(301)})).await;
+    assert!(err && text.contains("at most 300"), "{text}");
 
     // A named, unregistered caller must resolve its identity even when it supplies a committee.
     let mut ghost = McpClient::start(h.socket(), selector("ghost")).await;

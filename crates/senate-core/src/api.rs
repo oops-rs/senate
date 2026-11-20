@@ -385,6 +385,10 @@ pub struct PresencePage {
     pub agents: Vec<AgentPresence>,
     /// The committee's head the lags are measured against.
     pub head: Seq,
+    /// Every seat's duty on the committee ([`crate::duty`]), including
+    /// seats with no presence yet.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub duties: std::collections::BTreeMap<SenatorName, String>,
 }
 
 /// `GET .../threads`. Without `state`, every task thread; with `agent`, only

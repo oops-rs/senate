@@ -793,6 +793,30 @@ async fn brief(State(st): St, UrlPath(committee): UrlPath<String>, headers: Head
     Json(Brief::from_events(id, &events)).into_response()
 }
 
+/// `GET .../presence`: no live presence here, only each seat's duty
+/// folded from the committee's events.
+async fn presence(
+    State(st): St,
+    UrlPath(committee): UrlPath<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(r) = auth(&st, &headers) {
+        return r;
+    }
+    let inner = st.inner.lock().unwrap();
+    let events = inner.events.get(&committee).cloned().unwrap_or_default();
+    let mut duties = senate_core::DutyFold::new();
+    for event in &events {
+        duties.observe(event);
+    }
+    Json(senate_core::api::PresencePage {
+        agents: Vec::new(),
+        head: events.last().map_or(Seq::ZERO, |e| e.seq),
+        duties: duties.duties(),
+    })
+    .into_response()
+}
+
 async fn threads(
     State(st): St,
     UrlPath(committee): UrlPath<String>,
@@ -1161,6 +1185,7 @@ impl FakeServer {
             .route("/v1/committees/{committee}/docket", get(docket))
             .route("/v1/committees/{committee}/search", get(search))
             .route("/v1/committees/{committee}/brief", get(brief))
+            .route("/v1/committees/{committee}/presence", get(presence))
             .route("/v1/committees/{committee}/threads", get(threads))
             .route(
                 "/v1/committees/{committee}/checkpoints/latest",

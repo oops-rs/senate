@@ -314,9 +314,26 @@ pub trait Hub: Send + Sync + 'static {
             PresenceBoard::observe,
         )
         .await?;
+        let duties = scan(
+            self,
+            committee,
+            crate::duty::DutyFold::new(),
+            crate::duty::DutyFold::observe,
+        )
+        .await?
+        .duties();
+        let agents = board
+            .agents()
+            .into_iter()
+            .map(|mut p| {
+                p.duty = duties.get(&p.agent).cloned();
+                p
+            })
+            .collect();
         Ok(PresencePage {
             head: board.head(),
-            agents: board.agents(),
+            agents,
+            duties,
         })
     }
 

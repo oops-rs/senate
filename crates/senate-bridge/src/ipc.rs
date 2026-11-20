@@ -517,6 +517,23 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<EventId>,
     },
+    /// Set a seat's duty on a committee ([`senate_core::duty`]): by
+    /// default the session's own; `senator` names another seat (the
+    /// committee's chair, or its owner with `as_person`). An empty `duty`
+    /// clears it.
+    Duty {
+        session: SessionSelector,
+        duty: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        senator: Option<SenatorName>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        committee: Option<CommitteeId>,
+        /// As the person rather than the session's agent.
+        #[serde(default, skip_serializing_if = "is_false")]
+        as_person: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<EventId>,
+    },
     Brief {
         session: SessionSelector,
         #[serde(default, skip_serializing_if = "Option::is_none")]

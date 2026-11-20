@@ -178,7 +178,10 @@ async fn a_duty_must_be_sound_and_ride_on_a_note() {
 async fn presence_the_brief_and_the_seat_facts_show_the_duty() {
     let server = seated_pair().await;
     let _claude = server.stream_as(BOB, Some("claude"), None, None).await;
-    assert_eq!(server.heartbeat(BOB, "claude").await.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        server.heartbeat(BOB, "claude").await.status(),
+        StatusCode::NO_CONTENT
+    );
     accepted(
         &server,
         BOB,

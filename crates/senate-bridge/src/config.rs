@@ -30,6 +30,12 @@
 //! [agents]
 //! claude = "claude"
 //! codex = "codex"
+//!
+//! # Optional: what this machine's agents do, by default, on a committee
+//! # (one line). Posted as a seat's duty when it joins a committee where it
+//! # has none; a duty set on the seat wins.
+//! [agent]
+//! duty = "reviews the server crate"
 //! ```
 //!
 //! # A machine is a person running agents
@@ -104,6 +110,9 @@ pub struct BridgeConfig {
     /// The agent name each kind of session speaks as.
     #[serde(default)]
     pub agents: AgentNames,
+    /// Defaults for every agent this machine seats.
+    #[serde(default, skip_serializing_if = "AgentDefaults::is_empty")]
+    pub agent: AgentDefaults,
     /// The Senate above the one this bridge serves, when the machine hosts
     /// its own Senate under a parent (`[local]` with `server_url` and
     /// `token`): `senated --machine` sets it, it is never read from the
@@ -112,6 +121,30 @@ pub struct BridgeConfig {
     /// them, and the desk's forward to a seat above as the child's office.
     #[serde(skip)]
     pub uplink: Option<Uplink>,
+}
+
+/// `[agent]`: defaults for every agent this machine seats.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentDefaults {
+    /// The seat's duty ([`senate_core::duty`]) the bridge posts when an
+    /// agent joins a committee where its seat has none. A duty set on the
+    /// seat (by the agent, its person or the chair) wins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duty: Option<String>,
+}
+
+impl AgentDefaults {
+    pub fn is_empty(&self) -> bool {
+        self.duty.is_none()
+    }
+
+    /// The default duty, normalized; `None` when unset or blank.
+    pub fn duty(&self) -> Option<String> {
+        self.duty
+            .as_deref()
+            .map(senate_core::duty::normalize)
+            .filter(|d| !d.is_empty())
+    }
 }
 
 /// The Senate above, as the machine reaches it: its address and the
@@ -227,6 +260,7 @@ impl fmt::Debug for BridgeConfig {
             .field("hosted_session_limit", &self.hosted_session_limit)
             .field("branch_prefix", &self.branch_prefix)
             .field("agents", &self.agents)
+            .field("agent", &self.agent)
             .field("uplink", &self.uplink)
             .finish()
     }
@@ -678,6 +712,7 @@ impl BridgeConfig {
             hosted_session_limit: default_hosted_session_limit(),
             branch_prefix: default_branch_prefix(),
             agents: AgentNames::default(),
+            agent: AgentDefaults::default(),
             uplink: None,
         }
     }

@@ -133,9 +133,9 @@ use senate_core::api::{self, Heartbeat};
 use senate_core::continuity::{DECISIONS_FILE, OPEN_FILE, PROGRESS_FILE};
 use senate_core::{
     Address, BranchNaming, Brief, CheckpointFiles, CheckpointPayload, CheckpointTrigger,
-    CommitteeId, Event, EventId, Kind, Locale, Locator, Name, NewEvent, PROPOSAL_DECISION, People,
-    Refs, SenatePath, SenatorName, Seq, SpeakerSeat, StatusPayload, TaskOwner, TriagePayload,
-    TriageVerdict, is_provisional, meta, needs_triage,
+    CommitteeId, DutyPayload, Event, EventId, Kind, Locale, Locator, Name, NewEvent,
+    PROPOSAL_DECISION, People, Refs, SenatePath, SenatorName, Seq, SpeakerSeat, StatusPayload,
+    TaskOwner, TriagePayload, TriageVerdict, is_provisional, meta, needs_triage,
 };
 use serde::Serialize;
 use tokio::net::{UnixListener, UnixStream};
@@ -912,7 +912,7 @@ fn orientation(
              {reach_zh}会以 `[senate · …]` 消息在这里找到你。工具：\
              mcp__senate__join（可用 senator 参数为当前会话选择名称），mcp__senate__ask（问队友，也可用 <委员会>::chair 直接咨询同一 Senate 的其他委员会），mcp__senate__answer（在 thread 里回复），\
              mcp__senate__catch_up（读你错过的），mcp__senate__search（搜索整个日志），\
-             mcp__senate__post（给团队留言），mcp__senate__propose_decision（提议一个决定，由人确认），\
+             mcp__senate__post（给团队留言），mcp__senate__propose_decision（提议一个决定，由人确认），mcp__senate__duty（设置你在委员会的职责），\
              mcp__senate__checkpoint（留交接记录：保持 .senate/PROGRESS.md、DECISIONS.md 和 \
              OPEN.md 是最新的）。你的用户也能在终端里用 `senate ask`、`senate tell`、\
              `senate reply` 以本人的身份对你们说话。你回答或转给你的用户的内容，会以桌面通知、`senate inbox` \
@@ -927,7 +927,7 @@ fn orientation(
              mcp__senate__answer (reply in a thread), mcp__senate__catch_up (read what you \
              missed), mcp__senate__search (search the whole log), mcp__senate__post (leave a note \
              for the team), mcp__senate__propose_decision (propose a decision for a person to \
-             confirm), mcp__senate__checkpoint (leave a handover note: keep .senate/PROGRESS.md, \
+             confirm), mcp__senate__duty (set your duty on the committee), mcp__senate__checkpoint (leave a handover note: keep .senate/PROGRESS.md, \
              DECISIONS.md and OPEN.md current). Your user can also speak to you in their own \
              name from a terminal with `senate ask`, `senate tell` and `senate reply`. What you answer \
              or escalate to your user reaches them as a desktop notification, in `senate inbox` and \
@@ -1258,9 +1258,45 @@ impl Shared {
             if let std::collections::btree_map::Entry::Vacant(slot) = streams.entry(seat) {
                 let (agent, committee) = slot.key().clone();
                 tracing::info!(%agent, %committee, "joining committee");
+                if let Some(duty) = self.config.agent.duty() {
+                    let shared = self.clone();
+                    let (agent, committee) = (agent.clone(), committee.clone());
+                    tokio::spawn(async move {
+                        if let Err(e) = shared.default_duty(&agent, &committee, duty).await {
+                            tracing::warn!(%agent, %committee, "posting the default duty: {e}");
+                        }
+                    });
+                }
                 slot.insert(stream::spawn(self.clone(), agent, committee));
             }
         }
+    }
+
+    /// Posts `duty`, this machine's default (`[agent] duty`), as `agent`'s
+    /// duty on `committee` when its seat has none there yet: a duty set on
+    /// the seat wins over the default.
+    async fn default_duty(
+        &self,
+        agent: &SenatorName,
+        committee: &CommitteeId,
+        duty: String,
+    ) -> Result<(), String> {
+        let page = self
+            .api
+            .presence(committee)
+            .await
+            .map_err(|e| e.to_string())?;
+        if page.duties.contains_key(agent) {
+            return Ok(());
+        }
+        let event = DutyPayload {
+            senator: agent.clone(),
+            duty,
+        }
+        .note(committee.clone(), Address::senator(agent));
+        self.api.append(&event).await.map_err(|e| e.to_string())?;
+        tracing::info!(%agent, %committee, "posted the default duty");
+        Ok(())
     }
 
     fn stop_all(&self) -> Vec<JoinHandle<()>> {
@@ -2622,6 +2658,7 @@ impl Shared {
             Request::Ask { session, .. } => ("ask", session),
             Request::Join { session, .. } | Request::JoinAs { session, .. } => ("join", session),
             Request::Post { session, .. } => ("post", session),
+            Request::Duty { session, .. } => ("duty", session),
             Request::Task { session, .. } => ("status", session),
             Request::Escalate { session, .. } => ("escalate", session),
             Request::Take { session, .. } => ("take", session),
@@ -2865,6 +2902,17 @@ impl Shared {
                 id,
             } => wrap(
                 self.on_post(&session, committee, agent, body, proposal, id)
+                    .await,
+            ),
+            Request::Duty {
+                session,
+                duty,
+                senator,
+                committee,
+                as_person,
+                id,
+            } => wrap(
+                self.on_duty(&session, committee, senator, duty, as_person, id)
                     .await,
             ),
             Request::Brief { session, committee } => wrap(self.on_brief(&session, committee).await),
@@ -4996,6 +5044,41 @@ impl Shared {
         if proposal {
             event = event.with_meta(meta::PROPOSAL, serde_json::json!(PROPOSAL_DECISION));
         }
+        if let Some(id) = id {
+            event = event.with_id(id);
+        }
+        self.post(event).await
+    }
+
+    async fn on_duty(
+        &self,
+        selector: &SessionSelector,
+        committee: Option<CommitteeId>,
+        senator: Option<SenatorName>,
+        duty: String,
+        as_person: bool,
+        id: Option<EventId>,
+    ) -> Result<Posted, IpcError> {
+        let (session, committee) = self.session_and_committee(selector, committee)?;
+        let acting = Acting {
+            committee: None,
+            agent: None,
+            as_person,
+        };
+        let from = self.speaker_for(session.as_ref(), &committee, &acting)?;
+        let senator = match (senator, from.as_senator()) {
+            (Some(s), _) => s,
+            (None, Some(me)) if !as_person => me.clone(),
+            _ => {
+                return Err(IpcError::bad_request("name the senator whose duty this is"));
+            }
+        };
+        let payload = DutyPayload {
+            senator,
+            duty: senate_core::duty::normalize(&duty),
+        };
+        payload.check().map_err(IpcError::bad_request)?;
+        let mut event = payload.note(committee, from);
         if let Some(id) = id {
             event = event.with_id(id);
         }

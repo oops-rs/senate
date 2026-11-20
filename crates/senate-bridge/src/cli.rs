@@ -131,6 +131,8 @@ enum Cmd {
   senate join                    Derive the committee from repository and branch
   senate join refund-v2          Bind this worktree to refund-v2
   senate join --alias reviewer   Inside a coding session: name it reviewer
+  senate join refund-v2 --duty 'reviews the server crate'
+                                 Also set this session's duty there
   senate join --alias reviewer --session <id>
                                  Name a session from another terminal
                                  (`senate status --full-ids` prints the ids)")]
@@ -143,6 +145,11 @@ enum Cmd {
         /// Full session ID. Defaults to the calling coding session.
         #[arg(long, requires = "alias")]
         session: Option<String>,
+        /// Also set this session's duty on the committee: one line saying
+        /// what it does there. An empty string clears it. Run inside a
+        /// coding session, or with --session.
+        #[arg(long)]
+        duty: Option<String>,
     },
     /// List senator aliases and the primary IDs they stand for.
     Aliases,
@@ -1256,29 +1263,11 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             committee,
             alias: Some(alias),
             session,
+            duty,
         } => {
             let paths = Paths::from_env()?;
             let locale = BridgeConfig::locale_at(&paths.config());
-            let env_id = |key| std::env::var(key).ok().filter(|id| !id.is_empty());
-            let id = match (
-                session,
-                env_id("CODEX_THREAD_ID"),
-                env_id("CLAUDE_CODE_SESSION_ID"),
-            ) {
-                (Some(id), _, _) => id,
-                (None, Some(id), None) | (None, None, Some(id)) => id,
-                _ => anyhow::bail!(
-                    "{}",
-                    locale.pick(
-                        "请用 --session 指定完整的会话 ID。",
-                        "Specify the full session ID with --session."
-                    )
-                ),
-            };
-            let session = SessionSelector {
-                session_id: Some(id),
-                claude_pid: None,
-            };
+            let session = calling_session(session, locale)?;
             runtime(false)?.block_on(async {
                 let committee = match committee {
                     Some(c) => c,
@@ -1303,7 +1292,7 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
                 let reply: ipc::JoinReply = daemon_call(
                     &paths,
                     &Request::JoinAs {
-                        session,
+                        session: session.clone(),
                         committee,
                         senator: alias.clone(),
                     },
@@ -1323,22 +1312,40 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
                     senate_core::Address::senator(&reply.agent).in_text(),
                     reply.committee
                 ));
+                if let Some(duty) = duty {
+                    let line = set_duty(&paths, session, reply.committee, duty, locale).await?;
+                    output.print(&line);
+                }
                 Ok(())
             })
         }
         Cmd::Join {
             committee,
             alias: None,
+            duty,
             ..
         } => {
             let (paths, settings) = settings_here();
             let cwd = std::env::current_dir()?;
-            let (change, choice) = runtime(false)?
-                .block_on(binding::join_choosing(&paths, &cwd, committee, &settings))?;
+            // The session is found before anything is written, so a duty
+            // that cannot be set leaves the worktree as it was.
+            let session = duty
+                .as_ref()
+                .map(|_| calling_session(None, settings.locale))
+                .transpose()?;
+            let rt = runtime(false)?;
+            let (change, choice) =
+                rt.block_on(binding::join_choosing(&paths, &cwd, committee, &settings))?;
             if let crate::joinname::Choice::Derived(d) = &choice {
                 println!("{}", binding::render_derived(d, settings.locale));
             }
             println!("{}", binding::render_join(&change, settings.locale));
+            if let (Some(duty), Some(session), Some(committee)) = (duty, session, &change.value) {
+                let committee = CommitteeId::new(committee)?;
+                let line =
+                    rt.block_on(set_duty(&paths, session, committee, duty, settings.locale))?;
+                println!("{line}");
+            }
             Ok(())
         }
         Cmd::Leave => {
@@ -1888,4 +1895,59 @@ pub fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// The coding session `senate` runs in: `explicit`, or the one its
+/// environment names (`CODEX_THREAD_ID`, `CLAUDE_CODE_SESSION_ID`).
+fn calling_session(explicit: Option<String>, locale: Locale) -> anyhow::Result<SessionSelector> {
+    let env_id = |key| std::env::var(key).ok().filter(|id: &String| !id.is_empty());
+    let id = match (
+        explicit,
+        env_id("CODEX_THREAD_ID"),
+        env_id("CLAUDE_CODE_SESSION_ID"),
+    ) {
+        (Some(id), _, _) => id,
+        (None, Some(id), None) | (None, None, Some(id)) => id,
+        _ => anyhow::bail!(
+            "{}",
+            locale.pick(
+                "请用 --session 指定完整的会话 ID。",
+                "Specify the full session ID with --session."
+            )
+        ),
+    };
+    Ok(SessionSelector {
+        session_id: Some(id),
+        claude_pid: None,
+    })
+}
+
+/// Sets `session`'s duty on `committee` through the daemon, and says so.
+async fn set_duty(
+    paths: &Paths,
+    session: SessionSelector,
+    committee: CommitteeId,
+    duty: String,
+    locale: Locale,
+) -> anyhow::Result<String> {
+    let cleared = senate_core::duty::normalize(&duty).is_empty();
+    let posted: ipc::Posted = daemon_call(
+        paths,
+        &Request::Duty {
+            session,
+            duty,
+            senator: None,
+            committee: Some(committee),
+            as_person: false,
+            id: Some(senate_core::EventId::new()),
+        },
+    )
+    .await?;
+    let (c, seq) = (&posted.committee, posted.seq);
+    Ok(match (locale, cleared) {
+        (Locale::Zh, false) => format!("已在 {c} 上设置职责（seq {seq}）。"),
+        (Locale::Zh, true) => format!("已在 {c} 上清除职责（seq {seq}）。"),
+        (Locale::En, false) => format!("Set the duty on {c} (seq {seq})."),
+        (Locale::En, true) => format!("Cleared the duty on {c} (seq {seq})."),
+    })
 }

@@ -244,6 +244,13 @@ address on this committee (`codex`, `senator::alice`, `chair`, `speaker`) or one
 committee's chair in this Senate reaches that chair directly; other crossings go to the Speaker's desk. `body`: self-contained; readers have none of your \
 context. `committee`: defaults to this session's committee.";
 
+const DUTY: &str = "Set a seat's duty on a Senate committee: one line saying what it does there \
+(\"reviews the server crate\", \"owns the macOS app\"). The Speaker and chair route unaddressed \
+questions by it, and the brief and presence listings show it. By default it sets your own seat's \
+duty; `senator` names another seat, which only that seat's owner or the committee's chair may \
+set. An empty `duty` clears it. The latest duty set wins. `committee`: defaults to this \
+session's committee.";
+
 const PROPOSE_DECISION: &str = "Propose a decision for the team on a Senate committee: an API \
 contract, a naming rule, a limit your user settled on. You cannot record a decision yourself: \
 the Speaker posts the proposal in the committee's chat, when it has one, and a person confirms \
@@ -343,6 +350,20 @@ pub struct PostParams {
     /// one qualified name (`ibot::codex`, `ibot::speaker`).
     #[serde(default)]
     pub to: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct DutyParams {
+    /// One line: what the seat does on the committee. Empty clears it.
+    pub duty: String,
+    /// Whose seat; defaults to your own. Another seat's duty is set only
+    /// by the committee's chair.
+    #[serde(default)]
+    pub senator: Option<String>,
+    /// Committee id; defaults to this session's committee.
+    #[serde(default)]
+    pub committee: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -1722,6 +1743,46 @@ impl SenateMcp {
         Ok(render_sent(&reply, kind, self.locale))
     }
 
+    #[tool(name = "duty", description = DUTY)]
+    async fn duty(&self, params: Parameters<DutyParams>) -> Result<String, String> {
+        let p = params.0;
+        let l = self.locale;
+        let senator = p
+            .senator
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                s.trim_start_matches("senator::")
+                    .parse::<senate_core::SenatorName>()
+                    .map_err(|e| {
+                        format!(
+                            "{} {e}",
+                            l.pick("senator 名称无效。", "Invalid senator name.")
+                        )
+                    })
+            })
+            .transpose()?;
+        let posted = self
+            .append(Request::Duty {
+                session: self.selector.clone(),
+                duty: p.duty.clone(),
+                senator,
+                committee: committee_arg(p.committee)?,
+                as_person: false,
+                id: Some(EventId::new()),
+            })
+            .await?;
+        let (c, seq, again) = (&posted.committee, posted.seq, already(&posted, l));
+        let cleared = senate_core::duty::normalize(&p.duty).is_empty();
+        Ok(match (l, cleared) {
+            (Locale::Zh, false) => format!("已在 {c} 上设置职责（seq {seq}）{again}。"),
+            (Locale::Zh, true) => format!("已在 {c} 上清除职责（seq {seq}）{again}。"),
+            (Locale::En, false) => format!("Set the duty on {c} (seq {seq}){again}."),
+            (Locale::En, true) => format!("Cleared the duty on {c} (seq {seq}){again}."),
+        })
+    }
+
     #[tool(name = "propose_decision", description = PROPOSE_DECISION)]
     async fn propose_decision(&self, params: Parameters<ProposeParams>) -> Result<String, String> {
         let p = params.0;
@@ -2852,6 +2913,7 @@ mod tests {
                 "chair_escalate",
                 "chair_route",
                 "checkpoint",
+                "duty",
                 "escalate",
                 "inbox",
                 "join",

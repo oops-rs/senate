@@ -1718,3 +1718,52 @@ async fn call<T: serde::de::DeserializeOwned>(h: &Harness, request: Request) -> 
     .await
     .unwrap()
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_default_duty_is_posted_once_where_the_seat_has_none() {
+    let mut h = Harness::new().await;
+    h.config.agent.duty = Some("  reviews\nthe gateway ".into());
+    // claude's seat already has a duty on `other`, and none on refund-v2.
+    h.server.append(
+        senate_core::DutyPayload {
+            senator: "claude".parse().unwrap(),
+            duty: "owns the app".into(),
+        }
+        .note(
+            senate_core::CommitteeId::new("other").unwrap(),
+            claude("alice"),
+        ),
+    );
+    h.start().await;
+    let inbox = h.inbox("s1");
+    let wd = h.workdir("w1", Some("refund-v2"));
+    h.hook(HookKind::SessionStart, "s1", &wd, Some(&inbox))
+        .await;
+    h.wait_stream("refund-v2").await;
+    let posted = eventually("the default duty", WAIT, || {
+        h.server
+            .events("refund-v2")
+            .into_iter()
+            .find(|e| e.meta.contains_key(senate_core::meta::DUTY))
+    })
+    .await;
+    assert_eq!(posted.from, claude("alice"));
+    assert_eq!(
+        posted.meta[senate_core::meta::DUTY],
+        json!({"senator": "claude", "duty": "reviews the gateway"})
+    );
+
+    // On `other`, the seat's own duty wins: nothing is posted.
+    let wd2 = h.workdir("w2", Some("other"));
+    h.hook(HookKind::SessionStart, "s2", &wd2, Some(&h.inbox("s2")))
+        .await;
+    h.wait_stream("other").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let duties: Vec<_> = h
+        .server
+        .events("other")
+        .into_iter()
+        .filter(|e| e.meta.contains_key(senate_core::meta::DUTY))
+        .collect();
+    assert_eq!(duties.len(), 1, "{duties:?}");
+}
