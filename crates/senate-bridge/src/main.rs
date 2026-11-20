@@ -675,6 +675,14 @@ fn host_call<T: serde::de::DeserializeOwned>(request: &Request) -> anyhow::Resul
     ))?)
 }
 
+/// A host starts with nobody attached. Leave it what this terminal looks
+/// like, so the TUI's first questions about colours have an answer.
+fn remember_terminal() -> anyhow::Result<()> {
+    let paths = Paths::from_env()?;
+    runtime(false)?.block_on(senate_bridge::host::remember_terminal(&paths));
+    Ok(())
+}
+
 fn launch(request: &Request) -> anyhow::Result<()> {
     let reply: SpawnReply = host_call(request)?;
     println!("{}", reply.senator);
@@ -1312,18 +1320,24 @@ fn run(command: Cmd, terminal: Option<Terminal>) -> anyhow::Result<()> {
             committee,
             alias,
             dir,
-        } => launch(&Request::Spawn {
-            runtime: harness,
-            committee,
-            chair: false,
-            alias,
-            cwd: std::path::absolute(dir)?,
-            session: SessionSelector::default(),
-        }),
-        Cmd::Restore { senator } => launch(&Request::Restore {
-            senator,
-            session: SessionSelector::default(),
-        }),
+        } => {
+            remember_terminal()?;
+            launch(&Request::Spawn {
+                runtime: harness,
+                committee,
+                chair: false,
+                alias,
+                cwd: std::path::absolute(dir)?,
+                session: SessionSelector::default(),
+            })
+        }
+        Cmd::Restore { senator } => {
+            remember_terminal()?;
+            launch(&Request::Restore {
+                senator,
+                session: SessionSelector::default(),
+            })
+        }
         Cmd::Stop { senator, force } => {
             let reply: StopReply = host_call(&Request::Stop {
                 session: SessionSelector::default(),
@@ -1340,7 +1354,7 @@ fn run(command: Cmd, terminal: Option<Terminal>) -> anyhow::Result<()> {
             let paths = Paths::from_env()?;
             runtime(false)?.block_on(async {
                 let socket: PathBuf = daemon_call(&paths, &Request::Attach { senator }).await?;
-                senate_bridge::host::attach(&socket).await
+                senate_bridge::host::attach(&socket, &paths).await
             })
         }
         Cmd::SessionHost {

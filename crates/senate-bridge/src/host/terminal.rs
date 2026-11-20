@@ -14,7 +14,9 @@ use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, Interest, unix::AsyncFd
 use tokio::net::UnixStream;
 use tokio::signal::unix::{SignalKind, signal};
 
-use super::{ATTACHED, BUSY, IO_CHUNK, KEYS, RESIZE};
+use super::emulation::{Colors, Scheme};
+use super::{ATTACHED, ATTACHED_PLAIN, BUSY, COLORS, IO_CHUNK, KEYS, RESIZE};
+use crate::paths::Paths;
 
 // Ctrl-] in the legacy and Kitty keyboard encodings. Kitty can also
 // include the event type when the terminal reports key presses separately.
@@ -47,6 +49,72 @@ fn split_input(bytes: &[u8]) -> (usize, bool) {
         })
         .unwrap_or(0);
     (bytes.len() - suffix, false)
+}
+
+// Foreground, background and light-or-dark, then primary device attributes.
+// Every terminal answers the last one, so its answer ends the wait whether
+// or not the terminal knew the others.
+const ASK_COLORS: &[u8] = b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[?996n\x1b[c";
+
+/// The length of the control sequence at the start of `bytes` (an ESC) if
+/// it is a terminal's report, and what it reports when that is a colour.
+fn report(bytes: &[u8], colors: &mut Colors) -> Option<usize> {
+    match *bytes.get(1)? {
+        b']' => {
+            let (len, end) = bytes[2..].iter().enumerate().find_map(|(i, b)| match b {
+                0x07 => Some((i, i + 1)),
+                0x1b if bytes.get(2 + i + 1) == Some(&b'\\') => Some((i, i + 2)),
+                _ => None,
+            })?;
+            let body = std::str::from_utf8(&bytes[2..2 + len]).ok();
+            match body.and_then(|body| body.split_once(';')) {
+                Some(("10", spec)) => colors.foreground = Some(spec.to_owned()),
+                Some(("11", spec)) => colors.background = Some(spec.to_owned()),
+                _ => {}
+            }
+            Some(2 + end)
+        }
+        b'[' if bytes.get(2) == Some(&b'?') => {
+            let params = bytes[3..]
+                .iter()
+                .take_while(|b| b.is_ascii_digit() || **b == b';')
+                .count();
+            match (&bytes[3..3 + params], *bytes.get(3 + params)?) {
+                (b"997;1", b'n') => colors.scheme = Some(Scheme::Dark),
+                (b"997;2", b'n') => colors.scheme = Some(Scheme::Light),
+                (_, b'c' | b'n') => {}
+                _ => return None,
+            }
+            Some(3 + params + 1)
+        }
+        _ => None,
+    }
+}
+
+/// Split what arrived after [`ASK_COLORS`] into the terminal's answers and
+/// anything the person typed meanwhile. The flag says whether the device
+/// attributes, the last answer, are in.
+fn read_colors(bytes: &[u8]) -> (Colors, Vec<u8>, bool) {
+    let mut colors = Colors::default();
+    let mut typed = Vec::new();
+    let mut complete = false;
+    let mut at = 0;
+    while at < bytes.len() {
+        let known = (bytes[at] == 0x1b)
+            .then(|| report(&bytes[at..], &mut colors))
+            .flatten();
+        match known {
+            Some(len) => {
+                complete |= bytes[at + len - 1] == b'c';
+                at += len;
+            }
+            None => {
+                typed.push(bytes[at]);
+                at += 1;
+            }
+        }
+    }
+    (colors.checked(), typed, complete)
 }
 
 async fn send_keys(out: &mut (impl AsyncWrite + Unpin), bytes: &[u8]) -> anyhow::Result<()> {
@@ -97,7 +165,7 @@ impl Drop for NonblockingFile {
 }
 
 impl RawTerminal {
-    async fn open() -> anyhow::Result<Self> {
+    async fn open(alternate_screen: bool) -> anyhow::Result<Self> {
         let stdin = io::stdin();
         let stdout = io::stdout();
         ensure!(
@@ -120,8 +188,35 @@ impl RawTerminal {
             output,
             original,
         };
-        terminal.draw(b"\x1b[?1049h\x1b[2J\x1b[H").await?;
+        if alternate_screen {
+            terminal.draw(b"\x1b[?1049h\x1b[2J\x1b[H").await?;
+        }
         Ok(terminal)
+    }
+
+    /// What this terminal says its colours are, and what the person typed
+    /// while it was being asked.
+    async fn colors(&self) -> (Colors, Vec<u8>) {
+        let mut answers = Vec::new();
+        if self.draw(ASK_COLORS).await.is_ok() {
+            let mut chunk = [0u8; 256];
+            let read = async {
+                while let Ok(n @ 1..) = self
+                    .input
+                    .async_io(Interest::READABLE, |fd| (&fd.file).read(&mut chunk))
+                    .await
+                {
+                    answers.extend_from_slice(&chunk[..n]);
+                    if read_colors(&answers).2 {
+                        break;
+                    }
+                }
+            };
+            // A terminal that answers nothing at all must not hold us up.
+            let _ = tokio::time::timeout(Duration::from_millis(300), read).await;
+        }
+        let (colors, typed, _) = read_colors(&answers);
+        (colors, typed)
     }
 
     async fn draw(&self, mut bytes: &[u8]) -> io::Result<()> {
@@ -161,8 +256,21 @@ impl Drop for RawTerminal {
     }
 }
 
+/// Record what the calling terminal looks like, for a host that starts with
+/// nobody attached. Does nothing when not run from a terminal.
+pub async fn remember_terminal(paths: &Paths) {
+    let Ok(terminal) = RawTerminal::open(false).await else {
+        return;
+    };
+    let (colors, _) = terminal.colors().await;
+    drop(terminal);
+    if let Err(error) = colors.save(paths) {
+        tracing::debug!(%error, "recording the terminal's colours");
+    }
+}
+
 /// Attach until Ctrl-], the person closes the terminal, or the host exits.
-pub async fn attach(path: &Path) -> anyhow::Result<()> {
+pub async fn attach(path: &Path, paths: &Paths) -> anyhow::Result<()> {
     ensure!(
         crate::testenv::confined(path),
         "terminal socket is outside the test directory"
@@ -170,23 +278,35 @@ pub async fn attach(path: &Path) -> anyhow::Result<()> {
     let mut stream = UnixStream::connect(path)
         .await
         .context("connect to the hosted terminal")?;
-    match tokio::time::timeout(Duration::from_secs(3), stream.read_u8()).await?? {
-        ATTACHED => {}
-        BUSY => bail!("the senator already has an attached terminal"),
-        _ => bail!("unrecognized terminal host reply"),
-    }
+    let takes_colors =
+        match tokio::time::timeout(Duration::from_secs(3), stream.read_u8()).await?? {
+            ATTACHED => true,
+            ATTACHED_PLAIN => false,
+            BUSY => bail!("the senator already has an attached terminal"),
+            _ => bail!("unrecognized terminal host reply"),
+        };
 
     let mut winch = signal(SignalKind::window_change())?;
     let mut hup = signal(SignalKind::hangup())?;
     let mut term = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
-    let terminal = RawTerminal::open().await?;
+    let terminal = RawTerminal::open(true).await?;
+    let (colors, typed) = terminal.colors().await;
+    if let Err(error) = colors.save(paths) {
+        tracing::debug!(%error, "recording the terminal's colours");
+    }
     let (mut screen, mut keys) = stream.into_split();
 
     let to_host = async {
         terminal.size(&mut keys).await?;
+        if takes_colors {
+            let colors = serde_json::to_vec(&colors)?;
+            keys.write_u8(COLORS).await?;
+            keys.write_u16(u16::try_from(colors.len())?).await?;
+            keys.write_all(&colors).await?;
+        }
         let mut input = [0u8; IO_CHUNK];
-        let mut pending = Vec::with_capacity(IO_CHUNK + 10);
+        let mut pending = typed;
         loop {
             let n = tokio::select! {
                 n = terminal.input.async_io(Interest::READABLE, |fd| (&fd.file).read(&mut input)) => n?,
@@ -238,6 +358,29 @@ pub async fn attach(path: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_terminals_answers_are_told_apart_from_what_was_typed() {
+        // Ghostty, light theme, with a key pressed while it was being asked.
+        let (colors, typed, complete) = read_colors(
+            b"\x1b]10;rgb:4c4c/4f4f/6969\x1b\\q\x1b]11;rgb:efef/f1f1/f5f5\x07\x1b[?997;2n\x1b[A\x1b[?62;22c",
+        );
+        assert_eq!(colors.foreground.as_deref(), Some("rgb:4c4c/4f4f/6969"));
+        assert_eq!(colors.background.as_deref(), Some("rgb:efef/f1f1/f5f5"));
+        assert_eq!(colors.scheme, Some(Scheme::Light));
+        assert_eq!(typed, b"q\x1b[A");
+        assert!(complete);
+
+        // A terminal that knows none of the colour questions still ends the wait.
+        let (colors, typed, complete) = read_colors(b"\x1b[?1;2c");
+        assert_eq!(colors, Colors::default());
+        assert!(typed.is_empty() && complete);
+
+        // Cut short: nothing is claimed and the wait goes on.
+        let (colors, _, complete) = read_colors(b"\x1b]11;rgb:1e1e/1e1e/2e2e");
+        assert_eq!(colors, Colors::default());
+        assert!(!complete);
+    }
 
     #[test]
     fn detach_recognizes_legacy_and_kitty_keys_without_consuming_escape() {

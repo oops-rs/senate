@@ -292,7 +292,7 @@ done
     // will reach the registry, so the restarted daemon must use the lock.
     h.stop().await;
     let mut terminal = tokio::net::UnixStream::connect(&socket).await.unwrap();
-    assert_eq!(terminal.read_u8().await.unwrap(), 1);
+    assert_eq!(terminal.read_u8().await.unwrap(), 2);
     terminal.write_all(b"\x02\x00\x02q\r").await.unwrap();
     tokio::time::timeout(TIMEOUT, async {
         while socket.exists() {
@@ -399,6 +399,107 @@ async fn host_ready_without_publication_closes_its_tui_group() {
         (test_kill_process_group(leader) == Err(Errno::SRCH)).then_some(())
     })
     .await;
+}
+
+/// A TUI asks its terminal for colours as it starts, when nobody can have
+/// attached yet, and turns on reports a later viewer's terminal never saw.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hosted_tui_learns_the_colours_of_the_persons_terminal() {
+    use rustix::process::{Pid, Signal, kill_process};
+    use std::process::Stdio;
+    use tokio::io::AsyncWriteExt as _;
+
+    let root = tempfile::tempdir_in("/tmp").unwrap();
+    let paths = senate_bridge::Paths::new(root.path());
+    // What `senate spawn` or an earlier `senate attach` left on record.
+    std::fs::write(
+        root.path().join("terminal.json"),
+        r#"{"foreground":"rgb:4c4c/4f4f/6969","background":"rgb:efef/f1f1/f5f5","scheme":"light"}"#,
+    )
+    .unwrap();
+    let id = senate_core::EventId::new();
+    let directory = root.path().join("hosts").join(id.to_string());
+    std::fs::create_dir_all(&directory).unwrap();
+    let program = root.path().join("fixture");
+    // Ask for the background as Codex does at startup, then turn on paste
+    // and theme reports as Claude Code does and wait for a theme report.
+    std::fs::write(
+        &program,
+        r#"#!/bin/sh
+stty raw -echo
+printf '\033]11;?\033\\'
+dd bs=1 count=25 of=background.tmp 2>/dev/null && mv background.tmp background
+printf '\033[?2004h\033[?2031h'
+dd bs=1 count=9 of=scheme.tmp 2>/dev/null && mv scheme.tmp scheme
+sleep 300
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut cmd = tokio::process::Command::new(BIN);
+    testenv::isolate_async(&mut cmd, root.path());
+    cmd.args(["session-host", &id.to_string(), "claude"])
+        .arg(root.path())
+        .args(["native-id", "--program"])
+        .arg(program)
+        .env("SENATE_HOME", paths.home())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let mut child = cmd.spawn().unwrap();
+    let ready = tokio::time::timeout(TIMEOUT, child.stdout.as_mut().unwrap().read_u8())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(ready, 1);
+    // Publish, as the daemon does, so the host starts taking viewers.
+    let mut publication = child.stdin.take().unwrap();
+    publication.write_all(&[1]).await.unwrap();
+
+    // Nobody was attached: the host answered from the record.
+    let background = eventually("the startup colour answer", TIMEOUT, || {
+        std::fs::read(root.path().join("background")).ok()
+    })
+    .await;
+    assert_eq!(background, b"\x1b]11;rgb:efef/f1f1/f5f5\x1b\\");
+
+    // A viewer attaching later is told which reports the TUI turned on.
+    let socket = directory.join("tty");
+    let expected = b"\x1b[?2004;2031h";
+    let start = std::time::Instant::now();
+    let mut viewer = loop {
+        let mut viewer = tokio::net::UnixStream::connect(&socket).await.unwrap();
+        assert_eq!(viewer.read_u8().await.unwrap(), 2);
+        let mut preamble = [0; 13];
+        let read =
+            tokio::time::timeout(Duration::from_millis(200), viewer.read_exact(&mut preamble))
+                .await;
+        if matches!(read, Ok(Ok(_))) && &preamble == expected {
+            break viewer;
+        }
+        // The TUI had not yet turned them on when this viewer attached.
+        assert!(start.elapsed() < TIMEOUT, "no mode replay: {preamble:?}");
+        drop(viewer);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert!(!root.path().join("scheme").exists());
+
+    // This viewer's terminal is dark: the TUI, which asked for theme
+    // reports, is told so in the terminal's own words.
+    let colors = br#"{"background":"rgb:1e1e/1e1e/2e2e","scheme":"dark"}"#;
+    viewer.write_all(&[3, 0, colors.len() as u8]).await.unwrap();
+    viewer.write_all(colors).await.unwrap();
+    let scheme = eventually("the theme report", TIMEOUT, || {
+        std::fs::read(root.path().join("scheme")).ok()
+    })
+    .await;
+    assert_eq!(scheme, b"\x1b[?997;1n");
+
+    let host = Pid::from_raw(child.id().unwrap().cast_signed()).unwrap();
+    kill_process(host, Signal::TERM).unwrap();
+    let _ = tokio::time::timeout(TIMEOUT, child.wait()).await.unwrap();
+    assert!(!directory.exists());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -899,7 +1000,7 @@ async fn stop_cli_protects_an_attending_viewer_and_releases_the_slot() {
     let mut viewer = tokio::net::UnixStream::connect(&fixture.terminal)
         .await
         .unwrap();
-    assert_eq!(viewer.read_u8().await.unwrap(), 1);
+    assert_eq!(viewer.read_u8().await.unwrap(), 2);
     viewer.write_all(b"\x02\x00\x01x").await.unwrap();
     eventually("the host to observe viewer input", TIMEOUT, || {
         let fact: serde_json::Value = serde_json::from_slice(
@@ -972,7 +1073,7 @@ async fn stop_cli_protects_an_attending_viewer_and_releases_the_slot() {
     let mut passive = tokio::net::UnixStream::connect(&fixture.terminal)
         .await
         .unwrap();
-    assert_eq!(passive.read_u8().await.unwrap(), 1);
+    assert_eq!(passive.read_u8().await.unwrap(), 2);
     fixture
         .h
         .server
@@ -1131,7 +1232,7 @@ async fn claude_hook_changes_native_context_without_moving_the_seat_or_its_mail(
     let mut viewer = tokio::net::UnixStream::connect(&fixture.terminal)
         .await
         .unwrap();
-    assert_eq!(viewer.read_u8().await.unwrap(), 1);
+    assert_eq!(viewer.read_u8().await.unwrap(), 2);
     viewer.write_all(b"\x02\x00\x07nested\n").await.unwrap();
     let deadline = tokio::time::Instant::now() + TIMEOUT;
     let status = eventually("the nested Claude CLI to finish", TIMEOUT, || {

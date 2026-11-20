@@ -2,6 +2,7 @@
 //! only this process holds the master PTY and its child.
 
 pub(crate) mod control;
+mod emulation;
 mod input;
 mod terminal;
 
@@ -12,7 +13,8 @@ use std::io::{self, Write as _};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use anyhow::{Context, bail, ensure};
@@ -29,15 +31,45 @@ use crate::host_approval::observed_at;
 use crate::ipc::{self, HostedRuntime, Request};
 use crate::paths::{HOME_ENV, Paths, SOCKET_PATH_LIMIT};
 
-pub use terminal::attach;
+use emulation::{Colors, Emulation};
+pub use terminal::{attach, remember_terminal};
 
 pub(crate) const START_TIMEOUT: Duration = Duration::from_secs(10);
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 const IO_CHUNK: usize = 8192;
-const ATTACHED: u8 = 1;
+/// The host's greeting. A host from before terminal colours greets with
+/// [`ATTACHED_PLAIN`] and takes only resize and key frames.
+const ATTACHED: u8 = 2;
+const ATTACHED_PLAIN: u8 = 1;
 const BUSY: u8 = 0;
 const RESIZE: u8 = 1;
 const KEYS: u8 = 2;
+/// What the viewer's terminal says about its colours, as JSON.
+const COLORS: u8 = 3;
+
+/// The TUI's side of the PTY, shared by the output pump, which answers for
+/// an absent viewer, and the relay of an attached one.
+struct Tty {
+    write: tokio::sync::Mutex<OwnedWritePty>,
+    emulation: Mutex<Emulation>,
+    attached: AtomicBool,
+}
+
+impl Tty {
+    fn new(write: OwnedWritePty, colors: Colors) -> Self {
+        Self {
+            write: tokio::sync::Mutex::new(write),
+            emulation: Mutex::new(Emulation::new(colors)),
+            attached: AtomicBool::new(false),
+        }
+    }
+
+    fn emulation(&self) -> MutexGuard<'_, Emulation> {
+        self.emulation
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
+}
 
 pub(crate) fn directory(paths: &Paths, id: &EventId) -> PathBuf {
     hosts(paths).join(id.to_string())
@@ -369,15 +401,28 @@ pub async fn run(
     let mut startup_pid = file.try_clone()?;
     writeln!(startup_pid, "{pid}")?;
     drop(startup_pid);
-    let (mut pty_read, mut pty_write) = pty.into_split();
+    let (mut pty_read, pty_write) = pty.into_split();
+    let tty = Arc::new(Tty::new(pty_write, Colors::load(paths)));
     // A slow or disconnected viewer must never stop the PTY being drained.
     let (output, _) = broadcast::channel(64);
     let mut startup_output = output.subscribe();
     let feed = output.clone();
-    let pump = tokio::spawn(async move {
-        let mut buf = [0; IO_CHUNK];
-        while let Ok(n @ 1..) = pty_read.read(&mut buf).await {
-            let _ = feed.send(buf[..n].to_vec());
+    let pump = tokio::spawn({
+        let tty = tty.clone();
+        async move {
+            let mut buf = [0; IO_CHUNK];
+            while let Ok(n @ 1..) = pty_read.read(&mut buf).await {
+                // A TUI asks its terminal for its colours as it starts,
+                // before anyone can have attached to answer.
+                let attached = tty.attached.load(Ordering::Acquire);
+                let answer = tty.emulation().output(&buf[..n], attached);
+                if !answer.is_empty()
+                    && let Err(error) = tty.write.lock().await.write_all(&answer).await
+                {
+                    tracing::debug!(%error, "answering the coding TUI for an absent terminal");
+                }
+                let _ = feed.send(buf[..n].to_vec());
+            }
         }
     });
 
@@ -436,7 +481,7 @@ pub async fn run(
             Ok(())
         }),
         _ = terminate.recv() => stop_group(&mut child, pid).await,
-        served = serve(&listener, &mut pty_write, &output, &viewer) => served,
+        served = serve(&listener, &tty, &output, &viewer) => served,
         peer = control::next_stop(&controls, &viewer, paths, id) => {
             stop = Some(peer);
             stop_group(&mut child, pid).await
@@ -685,7 +730,7 @@ async fn accept(listener: &UnixListener) -> (UnixStream, tokio::net::unix::Socke
 
 async fn serve(
     listener: &UnixListener,
-    pty: &mut OwnedWritePty,
+    tty: &Tty,
     output: &broadcast::Sender<Vec<u8>>,
     viewer: &Mutex<Viewer>,
 ) -> anyhow::Result<()> {
@@ -696,8 +741,9 @@ async fn serve(
             viewer.activity.attached = true;
             viewer.record();
         }
+        tty.attached.store(true, Ordering::Release);
         {
-            let relay = relay(stream, pty, output.subscribe(), viewer);
+            let relay = relay(stream, tty, output.subscribe(), viewer);
             tokio::pin!(relay);
             loop {
                 tokio::select! {
@@ -714,6 +760,7 @@ async fn serve(
                 }
             }
         }
+        tty.attached.store(false, Ordering::Release);
         let mut viewer = Viewer::lock(viewer);
         viewer.activity.attached = false;
         viewer.activity.detached_at = observed_at();
@@ -723,11 +770,14 @@ async fn serve(
 
 async fn relay(
     mut stream: UnixStream,
-    pty: &mut OwnedWritePty,
+    tty: &Tty,
     mut output: broadcast::Receiver<Vec<u8>>,
     viewer: &Mutex<Viewer>,
 ) -> anyhow::Result<()> {
     stream.write_u8(ATTACHED).await?;
+    // The viewer's terminal did not see what the TUI turned on before now.
+    let preamble = tty.emulation().attach_preamble();
+    stream.write_all(&preamble).await?;
     let (mut input, mut screen) = stream.into_split();
     let mut classify = input::Input::default();
     let cursor = std::sync::Mutex::new(input::CursorQueries::default());
@@ -765,11 +815,24 @@ async fn relay(
                     if first_resize {
                         // A same-size ioctl does not wake the TUI. Change
                         // the size briefly so returning to it is a resize.
-                        pty.resize(Size::new(rows.saturating_add(1), cols))?;
+                        let taller = Size::new(rows.saturating_add(1), cols);
+                        tty.write.lock().await.resize(taller)?;
                         tokio::time::sleep(Duration::from_millis(75)).await;
                         first_resize = false;
                     }
-                    pty.resize(Size::new(rows, cols))?;
+                    tty.write.lock().await.resize(Size::new(rows, cols))?;
+                }
+                COLORS => {
+                    // The viewer's terminal describing itself: no one typed.
+                    let n = usize::from(input.read_u16().await?);
+                    ensure!(n <= keys.len(), "oversized terminal colours");
+                    input.read_exact(&mut keys[..n]).await?;
+                    let colors: Colors = serde_json::from_slice(&keys[..n])
+                        .context("unreadable terminal colours")?;
+                    let report = tty.emulation().viewer(colors);
+                    if !report.is_empty() {
+                        tty.write.lock().await.write_all(report).await?;
+                    }
                 }
                 KEYS => {
                     let n = usize::from(input.read_u16().await?);
@@ -786,7 +849,7 @@ async fn relay(
                                 Viewer::lock(viewer).input(human_at);
                             }
                         }
-                        pty.write_all(&keys[..n]).await?;
+                        tty.write.lock().await.write_all(&keys[..n]).await?;
                     }
                 }
                 _ => bail!("unknown terminal input frame"),
@@ -825,7 +888,8 @@ mod tests {
     #[tokio::test]
     async fn a_viewer_can_answer_a_tui_query_without_reporting_human_input() {
         let (pty, _pts) = pty_process::open().unwrap();
-        let (_read, mut pty) = pty.into_split();
+        let (_read, write) = pty.into_split();
+        let tty = Tty::new(write, Colors::default());
         let (output, _) = broadcast::channel(1);
         let dir = tempfile::tempdir().unwrap();
         let activity = Mutex::new(Viewer {
@@ -848,10 +912,7 @@ mod tests {
             viewer.write_all(&[KEYS, 0, 1, b'R']).await.unwrap();
             viewer.shutdown().await.unwrap();
         };
-        let _ = tokio::join!(
-            relay(host, &mut pty, output.subscribe(), &activity),
-            view_only
-        );
+        let _ = tokio::join!(relay(host, &tty, output.subscribe(), &activity), view_only);
         assert_eq!(Viewer::lock(&activity).activity.input_at, 0);
 
         let (host, mut viewer) = UnixStream::pair().unwrap();
@@ -860,10 +921,7 @@ mod tests {
             viewer.write_all(&[KEYS, 0, 1, b'x']).await.unwrap();
             viewer.shutdown().await.unwrap();
         };
-        let _ = tokio::join!(
-            relay(host, &mut pty, output.subscribe(), &activity),
-            with_input
-        );
+        let _ = tokio::join!(relay(host, &tty, output.subscribe(), &activity), with_input);
         assert_ne!(Viewer::lock(&activity).activity.input_at, 0);
     }
 

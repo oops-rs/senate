@@ -291,7 +291,7 @@ async fn stop_tool_enforces_authority_and_records_the_actor() {
     .unwrap();
     let mut viewer = tokio::net::UnixStream::connect(&terminal).await.unwrap();
     use tokio::io::AsyncReadExt as _;
-    assert_eq!(viewer.read_u8().await.unwrap(), 1);
+    assert_eq!(viewer.read_u8().await.unwrap(), 2);
     viewer.write_all(b"\x02\x00\x01x").await.unwrap();
     let viewer_record = || -> Option<Value> {
         serde_json::from_slice(&std::fs::read(terminal.with_file_name("viewer.json")).ok()?).ok()
