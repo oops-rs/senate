@@ -352,6 +352,90 @@ pub struct SpawnReply {
     pub request: Option<Seq>,
 }
 
+/// `Request::Sessions`: the hosted sessions on this machine, the running
+/// first, then by name.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SessionsReply {
+    pub rows: Vec<SessionRow>,
+    /// Hosts running with no session on record: what `senate sessions
+    /// prune` stops.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub orphans: Vec<EventId>,
+}
+
+/// One hosted session: what `senate sessions` lists, the picker offers
+/// and `senate watch-all` shows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRow {
+    /// The host's id: its directory under `hosts/`.
+    pub host_id: EventId,
+    pub session_id: String,
+    /// The senator it speaks as.
+    pub primary: SenatorName,
+    /// Its alias on its committee, when it has one and the Senate said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<SenatorName>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committee: Option<CommitteeId>,
+    pub runtime: crate::session::Runtime,
+    pub dir: PathBuf,
+    pub state: HostState,
+    /// When its host started; `None` when it is not running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
+    /// Someone is attached to its terminal now.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub attached: bool,
+    /// Seconds since a person last typed into its terminal; `None`: never
+    /// (since its host started).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub typed_secs_ago: Option<u64>,
+    /// The host's attach socket.
+    pub tty: PathBuf,
+}
+
+impl SessionRow {
+    /// What a command takes to name it: `committee::alias`, else its
+    /// senator name.
+    pub fn label(&self) -> String {
+        match (&self.committee, &self.alias) {
+            (Some(committee), Some(alias)) => format!("{committee}::{alias}"),
+            _ => self.primary.to_string(),
+        }
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.state == HostState::Running
+    }
+}
+
+/// `Request::PruneHosts`: what it stopped and what it removed.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PruneReply {
+    /// Orphaned hosts stopped, with their TUIs.
+    pub stopped: Vec<EventId>,
+    /// Directories of ended hosts removed.
+    pub removed: Vec<EventId>,
+}
+
+/// Whether a hosted session's terminal is up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostState {
+    Running,
+    /// Its host has ended; `senate restore` reopens it.
+    Stopped,
+}
+
+impl HostState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Stopped => "stopped",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StopReply {
     pub senator: SenatorName,
@@ -424,6 +508,13 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "is_false")]
         force: bool,
     },
+    /// Every Senate-hosted session this machine has a record of, and every
+    /// host running with none ([`SessionsReply`]).
+    Sessions,
+    /// Stop every host running with no session on record, and remove the
+    /// directories of hosts that have ended ([`PruneReply`]). The local
+    /// operator's: the CLI only.
+    PruneHosts,
     /// Resolve a locally hosted terminal for the person attaching to it.
     Attach {
         senator: AliasName,

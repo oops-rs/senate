@@ -87,6 +87,7 @@ pub mod preside;
 pub mod routing;
 pub mod service;
 pub mod session;
+pub mod sessions;
 pub mod speak;
 pub mod state;
 pub mod status;

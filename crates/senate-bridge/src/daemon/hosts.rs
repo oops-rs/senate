@@ -32,6 +32,12 @@ impl Launches {
             .map(|pending| pending.published.subscribe())
     }
 
+    /// Whether host `id` is still starting: not an orphan, whatever the
+    /// session registry says yet.
+    pub(super) fn launching(&self, id: &EventId) -> bool {
+        lock(&self.0).contains_key(id)
+    }
+
     pub(super) fn unpublished(&self, session_id: &str) -> bool {
         self.hook_gate(session_id)
             .is_some_and(|publication| !*publication.borrow())

@@ -1385,6 +1385,29 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// The sessions a Senate-owned terminal has run, with its host's id,
+    /// leaving out native IDs retired by a hosted seat; most recently
+    /// active first.
+    pub(crate) fn hosted_sessions(&self) -> Result<Vec<(Session, EventId)>, StoreError> {
+        let sql = format!(
+            "SELECT {SESSION_COLS}, host_id FROM sessions
+             WHERE host_id IS NOT NULL
+               AND session_id NOT IN (SELECT session_id FROM hosted_native_seats WHERE retired = 1)
+             ORDER BY last_seen DESC"
+        );
+        let conn = self.conn();
+        let mut query = conn.prepare(&sql)?;
+        let rows = query.query_map([], |row| {
+            Ok((session_from_row(row)?, row.get::<_, String>(18)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (session, host) = row?;
+            out.push((session, parse_host_id(&host)?));
+        }
+        Ok(out)
+    }
+
     /// Session registry rows other than native IDs retired by a hosted seat.
     pub(crate) fn current_sessions(&self) -> Result<Vec<Session>, StoreError> {
         let sql = format!(

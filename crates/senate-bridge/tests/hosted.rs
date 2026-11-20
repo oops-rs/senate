@@ -2392,3 +2392,102 @@ async fn a_spawn_prompt_is_an_ordinary_request_to_the_new_seat() {
 
     h.stop().await;
 }
+
+/// `senate <args>` against the harness's daemon; its output and success.
+async fn senate(h: &Harness, args: &[&str]) -> (bool, String) {
+    let mut cmd = tokio::process::Command::new(BIN);
+    testenv::isolate_async(&mut cmd, h.dir.path());
+    let out = cmd
+        .args(args)
+        .env("SENATE_HOME", h.paths.home())
+        .output()
+        .await
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    (out.status.success(), text)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sessions_lists_stops_by_name_and_prunes_an_orphan() {
+    let (mut h, root) = one_hosted_session().await;
+    let reply: ipc::SessionsReply = call(&h, &Request::Sessions).await;
+    assert_eq!(reply.rows.len(), 1, "{reply:?}");
+    let row = &reply.rows[0];
+    assert_eq!(row.state, ipc::HostState::Running);
+    assert_eq!(row.committee.as_ref(), Some(&committee()));
+    assert!(row.tty.exists(), "the attach socket: {}", row.tty.display());
+    assert!(row.started_at.is_some());
+    assert!(reply.orphans.is_empty());
+    let (ok, listed) = senate(&h, &["sessions"]).await;
+    assert!(ok, "{listed}");
+    assert!(
+        listed.contains(&row.label()) && listed.contains("running"),
+        "{listed}"
+    );
+
+    // A host that no session owns: started by hand under the same home.
+    let orphan = senate_core::EventId::new();
+    std::fs::create_dir_all(h.paths.home().join("hosts").join(orphan.to_string())).unwrap();
+    let mut cmd = tokio::process::Command::new(BIN);
+    testenv::isolate_async(&mut cmd, h.dir.path());
+    cmd.args(["session-host", &orphan.to_string(), "claude"])
+        .arg(h.dir.path())
+        .args(["orphan-native", "--program"])
+        .arg(h.dir.path().join("fixture-claude"))
+        .env("SENATE_HOME", h.paths.home())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    let mut host = cmd.spawn().unwrap();
+    let ready = tokio::time::timeout(TIMEOUT, host.stdout.as_mut().unwrap().read_u8())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(ready, 1);
+    host.stdin.take().unwrap().write_all(&[1]).await.unwrap();
+    let reply: ipc::SessionsReply = call(&h, &Request::Sessions).await;
+    assert_eq!(reply.orphans, vec![orphan.clone()]);
+
+    let (ok, pruned) = senate(&h, &["sessions", "prune"]).await;
+    assert!(ok, "{pruned}");
+    assert!(
+        pruned.contains(&format!("stopped orphaned host {orphan}")),
+        "{pruned}"
+    );
+    let _ = tokio::time::timeout(TIMEOUT, host.wait()).await.unwrap();
+    let reply: ipc::SessionsReply = call(&h, &Request::Sessions).await;
+    assert!(reply.orphans.is_empty());
+    assert!(
+        !h.paths
+            .home()
+            .join("hosts")
+            .join(orphan.to_string())
+            .exists()
+    );
+    assert_eq!(
+        reply.rows[0].state,
+        ipc::HostState::Running,
+        "prune leaves owned hosts"
+    );
+
+    // Stop by name, as listed; nobody typed into it, so no --force.
+    let (ok, stopped) = senate(&h, &["sessions", "stop", &row.label()]).await;
+    assert!(ok, "{stopped}");
+    assert!(
+        stopped.contains(&format!("stopped {}", row.label())),
+        "{stopped}"
+    );
+    let reply: ipc::SessionsReply = call(&h, &Request::Sessions).await;
+    assert_eq!(reply.rows[0].state, ipc::HostState::Stopped, "{reply:?}");
+    let (ok, again) = senate(&h, &["sessions", "stop", &row.label()]).await;
+    assert!(
+        !ok && again.contains("no running hosted session"),
+        "{again}"
+    );
+    none_left_under(&root, Duration::from_secs(5)).await;
+    h.stop().await;
+}

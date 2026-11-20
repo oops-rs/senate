@@ -205,6 +205,51 @@ pub(crate) fn running_ids(paths: &Paths) -> io::Result<Vec<EventId>> {
     Ok(live)
 }
 
+/// Removes the directory of every host that is not running, except those
+/// `keep` names (a launch still starting): what `senate sessions prune`
+/// clears. Returns the ids removed.
+pub(crate) fn remove_ended(
+    paths: &Paths,
+    keep: impl Fn(&EventId) -> bool,
+) -> io::Result<Vec<EventId>> {
+    let entries = match std::fs::read_dir(hosts(paths)) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(error) => return Err(error),
+    };
+    let mut removed = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let Some(id) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<EventId>().ok())
+        else {
+            continue;
+        };
+        if !entry.file_type()?.is_dir() || keep(&id) {
+            continue;
+        }
+        let path = entry.path();
+        // Held while removing: a host taking it now waits, then finds it gone.
+        let _lock = match File::open(path.join("owner")) {
+            Ok(file) => match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+                Ok(()) => Some(file),
+                Err(rustix::io::Errno::WOULDBLOCK) => continue,
+                Err(error) => return Err(error.into()),
+            },
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => removed.push(id),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(removed)
+}
+
 /// Remove abandoned, old launch directories. A live lock or a recent
 /// directory can belong to a launch at any point in its startup.
 pub(crate) fn prune_abandoned(paths: &Paths, age: Duration) -> io::Result<()> {
@@ -727,6 +772,41 @@ pub(crate) fn unbound_context(paths: &Paths, id: &EventId) -> Option<String> {
     std::fs::read_to_string(directory(paths, id).join("unbound-context")).ok()
 }
 
+/// What `senate sessions` says of one host.
+pub(crate) struct HostFacts {
+    pub(crate) running: bool,
+    /// When it started: its owner lock's last write, the TUI's pid.
+    pub(crate) started_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub(crate) attached: bool,
+    /// Seconds since a person last typed into it.
+    pub(crate) typed_secs_ago: Option<u64>,
+}
+
+pub(crate) fn facts(paths: &Paths, id: &EventId) -> io::Result<HostFacts> {
+    let running = running(paths, id)?;
+    if !running {
+        return Ok(HostFacts {
+            running,
+            started_at: None,
+            attached: false,
+            typed_secs_ago: None,
+        });
+    }
+    let started_at = std::fs::metadata(directory(paths, id).join("owner"))
+        .and_then(|meta| meta.modified())
+        .ok()
+        .map(chrono::DateTime::<chrono::Utc>::from);
+    let viewer = viewer_activity(paths, id).unwrap_or_default();
+    let typed_secs_ago = (viewer.input_at > 0)
+        .then(|| observed_at().saturating_sub(viewer.input_at) / 1_000_000_000);
+    Ok(HostFacts {
+        running,
+        started_at,
+        attached: viewer.attached,
+        typed_secs_ago,
+    })
+}
+
 #[derive(Default)]
 pub(crate) struct HostStatus {
     pub(crate) hosted: BTreeMap<String, Option<String>>,
@@ -786,6 +866,40 @@ pub(crate) fn clear_context_reports(paths: &Paths, id: &EventId) {
 /// The file in a host's directory naming the host's own process (and
 /// process group) ID.
 const HOST_PID: &str = "host-pid";
+
+fn recorded_pid(dir: &Path, file: &str) -> Option<Pid> {
+    std::fs::read_to_string(dir.join(file))
+        .ok()
+        .and_then(|pid| pid.trim().parse::<i32>().ok())
+        .and_then(Pid::from_raw)
+}
+
+/// Ends host `id`, which no session on record owns: asks it to stop (it
+/// stops its TUI's group and removes its directory), and kills both
+/// groups if it is still running after `grace`. Nothing to do for a host
+/// that is not running.
+pub(crate) async fn terminate(paths: &Paths, id: &EventId, grace: Duration) -> io::Result<()> {
+    if !running(paths, id)? {
+        return Ok(());
+    }
+    let dir = directory(paths, id);
+    if let Some(host) = recorded_pid(&dir, HOST_PID) {
+        let _ = rustix::process::kill_process(host, Signal::TERM);
+    }
+    let deadline = tokio::time::Instant::now() + grace;
+    while running(paths, id)? {
+        if tokio::time::Instant::now() >= deadline {
+            for file in ["owner", HOST_PID] {
+                if let Some(pid) = recorded_pid(&dir, file) {
+                    let _ = kill_process_group(pid, Signal::KILL);
+                }
+            }
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    Ok(())
+}
 
 /// Kills every host under `paths`' home at once, with its TUI: each TUI's
 /// process group, then each host's. No graceful stop, no record of it:

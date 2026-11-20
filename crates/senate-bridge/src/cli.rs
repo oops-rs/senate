@@ -173,6 +173,21 @@ enum Cmd {
     SecretaryTeam(cli_secretary::SecretaryTeam),
     /// Remove this worktree's committee binding on the current branch.
     Leave,
+    /// List the Senate-hosted sessions on this machine; stop or prune them.
+    ///
+    /// With no subcommand: each session's name (`committee::alias`, else
+    /// its senator), committee, runtime, state, uptime, who is at its
+    /// terminal, and directory.
+    #[command(after_help = "Examples:
+  senate sessions                      List them
+  senate sessions stop reviewer        Stop one (its TUI ends; senate restore reopens it)
+  senate sessions stop --idle          Stop every one nobody is attached to
+  senate sessions stop --all --force   Stop all, even one typed into in the last 5 minutes
+  senate sessions prune                Stop hosts with no session; clear ended ones")]
+    Sessions {
+        #[command(subcommand)]
+        command: Option<SessionsCmd>,
+    },
     /// Remove a senator from a committee, or seat it again.
     Seat {
         #[command(subcommand)]
@@ -694,6 +709,32 @@ enum AliasCmd {
 }
 
 #[derive(Subcommand)]
+enum SessionsCmd {
+    /// End hosted sessions' terminals (`senate restore` reopens one).
+    ///
+    /// Each TUI is asked to end, then killed. A session someone typed into
+    /// in the last 5 minutes is skipped unless --force.
+    Stop {
+        /// Sessions by name (`committee::alias` or senator name).
+        #[arg(required_unless_present_any = ["idle", "all"])]
+        names: Vec<String>,
+        /// Every running session nobody is attached to.
+        #[arg(long, conflicts_with_all = ["names", "all"])]
+        idle: bool,
+        /// Every running session.
+        #[arg(long, conflicts_with = "names")]
+        all: bool,
+        /// Stop even a session typed into in the last 5 minutes, or with a
+        /// viewer attending it.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Stop terminal hosts that no session owns, and clear ended hosts'
+    /// leftovers.
+    Prune,
+}
+
+#[derive(Subcommand)]
 enum SeatCmd {
     /// Remove the senator's seat and end its connection on this committee.
     Unseat(SeatArgs),
@@ -974,6 +1015,73 @@ fn pick_alias(name: AliasName) -> anyhow::Result<AliasName> {
         }
         _ => Ok(name),
     }
+}
+
+/// `senate sessions stop`: stops each chosen session as `senate stop`
+/// does, one after another, and says what it left and why. Fails when
+/// any stop failed.
+async fn stop_sessions(
+    paths: &Paths,
+    selector: &crate::sessions::StopSelector,
+    force: bool,
+    locale: Locale,
+) -> anyhow::Result<()> {
+    let reply: crate::ipc::SessionsReply = daemon_call(paths, &Request::Sessions).await?;
+    let crate::sessions::StopPlan { stop, kept } =
+        crate::sessions::select_for_stop(&reply.rows, selector, force)
+            .map_err(anyhow::Error::msg)?;
+    for (row, ago) in &kept {
+        eprintln!(
+            "{}",
+            locale.pick(
+                format!(
+                    "跳过 {}：{} 秒前有人在它的终端输入（加 --force 也停止）",
+                    row.label(),
+                    ago
+                ),
+                format!(
+                    "skipped {}: someone typed into it {ago}s ago (--force stops it too)",
+                    row.label()
+                ),
+            )
+        );
+    }
+    let mut failed = 0;
+    for row in &stop {
+        let request = Request::Stop {
+            session: SessionSelector::default(),
+            senator: AliasName::bare(row.primary.clone()),
+            force,
+        };
+        let result: Result<StopReply, _> = ipc::request(
+            &paths.socket(),
+            &request,
+            Duration::from_secs(1),
+            crate::host::REQUEST_TIMEOUT,
+        )
+        .await;
+        match result {
+            Ok(_) => println!(
+                "{}",
+                locale.pick(
+                    format!("已停止 {}", row.label()),
+                    format!("stopped {}", row.label())
+                )
+            ),
+            Err(error) => {
+                failed += 1;
+                eprintln!("{}: {error}", row.label());
+            }
+        }
+    }
+    if stop.is_empty() && kept.is_empty() {
+        println!(
+            "{}",
+            locale.pick("没有要停止的会话。", "No session to stop.")
+        );
+    }
+    anyhow::ensure!(failed == 0, "{failed} session(s) could not be stopped");
+    Ok(())
 }
 
 /// Let the person pick one of an alias's `candidates`.
@@ -1347,6 +1455,70 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             let path = init::init_local(&paths, &profile)?;
             println!("{}", path.display());
             Ok(())
+        }
+        Cmd::Sessions { command } => {
+            let paths = Paths::from_env()?;
+            let locale = BridgeConfig::locale_at(&paths.config());
+            let rt = runtime(false)?;
+            match command {
+                None => {
+                    let reply: crate::ipc::SessionsReply =
+                        rt.block_on(daemon_call(&paths, &Request::Sessions))?;
+                    println!(
+                        "{}",
+                        crate::sessions::render(&reply, chrono::Utc::now(), locale)
+                    );
+                    Ok(())
+                }
+                Some(SessionsCmd::Stop {
+                    names,
+                    idle,
+                    all,
+                    force,
+                }) => {
+                    let selector = if all {
+                        crate::sessions::StopSelector::All
+                    } else if idle {
+                        crate::sessions::StopSelector::Idle
+                    } else {
+                        crate::sessions::StopSelector::Named(names)
+                    };
+                    rt.block_on(stop_sessions(&paths, &selector, force, locale))
+                }
+                Some(SessionsCmd::Prune) => {
+                    let reply: crate::ipc::PruneReply = rt.block_on(ipc::request(
+                        &paths.socket(),
+                        &Request::PruneHosts,
+                        Duration::from_secs(1),
+                        crate::host::REQUEST_TIMEOUT,
+                    ))?;
+                    for id in &reply.stopped {
+                        println!(
+                            "{}",
+                            locale.pick(
+                                format!("已停止孤立的终端宿主 {id}"),
+                                format!("stopped orphaned host {id}"),
+                            )
+                        );
+                    }
+                    println!(
+                        "{}",
+                        locale.pick(
+                            format!(
+                                "停止了 {} 个孤立宿主，清理了 {} 个已结束宿主的目录。",
+                                reply.stopped.len(),
+                                reply.removed.len()
+                            ),
+                            format!(
+                                "Stopped {} orphaned host(s); cleared {} ended host director(ies).",
+                                reply.stopped.len(),
+                                reply.removed.len()
+                            ),
+                        )
+                    );
+                    Ok(())
+                }
+            }
         }
         Cmd::WatchAll => {
             let paths = Paths::from_env()?;

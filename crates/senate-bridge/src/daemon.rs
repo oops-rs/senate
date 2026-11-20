@@ -2770,6 +2770,8 @@ impl Shared {
                 wrap(result.map_err(server_error))
             }
             Request::Status => wrap(self.on_status()),
+            Request::Sessions => wrap(self.on_sessions().await),
+            Request::PruneHosts => wrap(self.on_prune_hosts().await),
             Request::HookDropped(report) => {
                 self.on_hook_dropped(report);
                 Reply::ok(&())
@@ -3063,6 +3065,80 @@ impl Shared {
             last,
             hosted_last_at,
         }))
+    }
+
+    /// `senate sessions`: each hosted session on record, with its host's
+    /// state now, and each host running with no session.
+    async fn on_sessions(&self) -> Result<crate::ipc::SessionsReply, IpcError> {
+        use crate::ipc::{HostState, SessionRow, SessionsReply};
+        let paths = Paths::new(&self.home);
+        // An alias is the Senate's to say; one that does not answer in time
+        // leaves each session under its senator's own name.
+        let aliases = tokio::time::timeout(Duration::from_secs(2), self.api.aliases())
+            .await
+            .ok()
+            .and_then(Result::ok);
+        let mut rows = Vec::new();
+        let mut known = BTreeSet::new();
+        for (session, host_id) in self.store.hosted_sessions().map_err(internal)? {
+            if !known.insert(host_id.clone()) {
+                continue;
+            }
+            let facts = crate::host::facts(&paths, &host_id).map_err(IpcError::internal)?;
+            let committee = session.committee().cloned();
+            let alias = committee
+                .as_ref()
+                .and_then(|c| aliases.as_ref()?.alias_of(c, &session.agent).cloned());
+            rows.push(SessionRow {
+                tty: crate::host::socket(&paths, &host_id),
+                host_id,
+                session_id: session.session_id.clone(),
+                primary: session.agent.clone(),
+                alias,
+                committee,
+                runtime: session.runtime,
+                dir: session.cwd.clone(),
+                state: if facts.running {
+                    HostState::Running
+                } else {
+                    HostState::Stopped
+                },
+                started_at: facts.started_at,
+                attached: facts.attached,
+                typed_secs_ago: facts.typed_secs_ago,
+            });
+        }
+        rows.sort_by(|a, b| {
+            b.is_running()
+                .cmp(&a.is_running())
+                .then_with(|| a.label().cmp(&b.label()))
+                .then_with(|| a.session_id.cmp(&b.session_id))
+        });
+        let orphans = crate::host::running_ids(&paths)
+            .map_err(IpcError::internal)?
+            .into_iter()
+            .filter(|id| !known.contains(id) && !self.hosts.launching(id))
+            .collect();
+        Ok(SessionsReply { rows, orphans })
+    }
+
+    /// `senate sessions prune`: stop each orphaned host, then remove the
+    /// directories of hosts that have ended. A launch still starting is
+    /// neither.
+    async fn on_prune_hosts(&self) -> Result<crate::ipc::PruneReply, IpcError> {
+        let paths = Paths::new(&self.home);
+        let orphans = self.on_sessions().await?.orphans;
+        for id in &orphans {
+            crate::host::terminate(&paths, id, Duration::from_secs(5))
+                .await
+                .map_err(IpcError::internal)?;
+        }
+        let removed = crate::host::remove_ended(&paths, |id| self.hosts.launching(id))
+            .map_err(IpcError::internal)?;
+        Ok(crate::ipc::PruneReply {
+            stopped: orphans,
+            removed,
+        })
     }
 
     fn on_status(&self) -> Result<StatusReply, IpcError> {
