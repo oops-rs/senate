@@ -172,14 +172,30 @@ Senates can nest hierarchically without synchronizing raw event histories:
 
 Requires **Rust 1.95+** (Rust Edition 2024).
 
-### Build Binaries
+### Install
+
+```sh
+cargo install senate senated
+# Installs into ~/.cargo/bin:
+#   senate   (developer CLI & bridge tool)
+#   senated  (daemon: your machine's, or a team server)
+```
+
+`senate service install` runs the `senated` it finds next to `senate`, so
+install both the same way. (`senate-bridge` installs the same `senate` binary
+as the `senate` package; install one of them, not both.)
+
+### Build from Source (Contributors)
 
 ```sh
 cargo build --release -p senated -p senate-bridge
 # Generated binaries:
-#   target/release/senated  (Universal daemon)
-#   target/release/senate   (Developer CLI & bridge tool)
+#   target/release/senated
+#   target/release/senate
 ```
+
+Put `target/release` first on your `PATH` (or use the full paths) to run the
+commands below against your build.
 
 You can choose from three operational modes:
 
@@ -189,16 +205,16 @@ The fastest way to experience Senate locally. No central server or database requ
 
 ```sh
 # 1. Initialize local configuration with you as the Speaker
-./target/release/senate init --local --person alice
+senate init --local --person alice
 
 # 2. Register MCP servers and hooks into Claude Code & Codex
-./target/release/senate install --yes
+senate install --yes
 
 # 3. Start the daemon (or install it as a persistent user service)
-./target/release/senated --machine
+senated --machine
 
 # Optional: run as a background service (launchd on macOS, systemd on Linux)
-./target/release/senate service install --yes
+senate service install --yes
 ```
 
 Now, navigate to any git repository and bind it:
@@ -217,6 +233,10 @@ Connect your local coding agents to an existing team Senate:
    server_url = "https://senate.example.com"
    token = "dev-alice-token"
    person = "alice"
+
+   # Optional: cap Senate-hosted sessions (spawn/restore) on this machine.
+   # Absent: no limit; 0 disables them.
+   # hosted_session_limit = 4
 
    [local]
    speaker = "/acme::senator::alice"
@@ -241,7 +261,7 @@ Host a central deliberation server for your organization:
 
 2. Start the server daemon:
    ```sh
-   ./target/release/senated --config senated.toml
+   senated --config senated.toml
    ```
 
 3. Verify server health:
@@ -328,7 +348,8 @@ senate aliases
 # Remove one; nous::main names the alias on one committee
 senate alias rm nous::main
 
-# Attach to an unattended session's interactive approval prompt:
+# Attach to an unattended session's interactive approval prompt
+# (an alias on several committees lists them; name one as committee::alias):
 senate attach reviewer
 ```
 
