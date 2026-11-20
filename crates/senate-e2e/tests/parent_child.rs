@@ -97,6 +97,25 @@ async fn the_parent_reaches_alices_desk_and_hears_back_in_its_own_thread() {
         senate_core::continuity::PresenceState::Online
     );
     assert!(child.is_online(chrono::Utc::now()));
+    // alice gives claude a duty below; it goes up with the seat.
+    speak(
+        &url,
+        &token,
+        &NewEvent::new(refund(), Kind::Note, person("alice"), "claude's duty").with_meta(
+            meta::DUTY,
+            serde_json::json!({"senator": "claude", "duty": "refund callbacks"}),
+        ),
+    )
+    .await
+    .unwrap();
+    eventually("claude's duty declared above", || {
+        world.daemon().hub.children().into_iter().find(|c| {
+            c.seats.iter().any(|s| {
+                s.senator == path("claude") && s.duty.as_deref() == Some("refund callbacks")
+            })
+        })
+    })
+    .await;
 
     // Bob asks the seat on alice's desk by its qualified name.
     let asked = speak(

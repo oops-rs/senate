@@ -463,10 +463,11 @@ impl Worker {
                 self.hub.presence(committee).await.map_err(|e| {
                     Pass::Failed(format!("reading the presence on {committee}: {e}"))
                 })?;
+            let duties = page.duties;
             seats.extend(page.agents.into_iter().map(|p| ChildSeat {
                 committee: committee.clone(),
+                duty: p.duty.or_else(|| duties.get(&p.agent).cloned()),
                 senator: p.agent,
-                duty: None,
                 presence: p.state,
             }));
         }
