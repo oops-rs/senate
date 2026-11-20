@@ -46,6 +46,27 @@
 //! | `uplink:child-cursor:<committee>` | the last seq read here |
 //! | `uplink:down:<committee>:<thread>` | the root here a thread above was brought to (`{committee, seq}`) |
 //! | `uplink:up:<committee>:<seq>` | a root above the desk forwarded, and where it was asked here ([`Origin`]) |
+//! | `uplink:epoch` | the epoch of the log above that the `cursor`, `down` and `up` entries belong to |
+//!
+//! # A log above that was reset
+//!
+//! A seq above means something within one epoch of that log only
+//! ([`senate_core::api`]), and the cursor, `down` and `up` entries are all
+//! seqs above. So the uplink follows the epoch the way the bridge daemon
+//! does for its own cursors: every answer of the Senate above names its
+//! epoch, and one that is not the recorded one means the log there was
+//! reset. Everything kept about the old log is dropped, the new epoch is
+//! recorded, and the uplink registers again (the registration went with
+//! the log) and reads from the start. The first epoch seen is recorded as
+//! it is, unless entries are already on file with no epoch beside them
+//! (kept by a build from before this): nothing says which log those are
+//! about, so that counts as a reset too. Reading a log again brings
+//! nothing down twice, the ids being derived.
+//!
+//! A cursor beyond a committee's head (409 `cursor_ahead`) is the same
+//! fact found from the other side, by a Senate above that names no epoch:
+//! what is kept about that committee is dropped and it is read from the
+//! start.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -76,6 +97,9 @@ const CURSOR: &str = "uplink:cursor:";
 const CHILD_CURSOR: &str = "uplink:child-cursor:";
 const DOWN: &str = "uplink:down:";
 const UP: &str = "uplink:up:";
+/// The epoch of the log above that the [`CURSOR`], [`DOWN`] and [`UP`]
+/// entries belong to.
+const EPOCH: &str = "uplink:epoch";
 
 /// What the uplink needs to run.
 pub struct UplinkConfig {
@@ -324,9 +348,97 @@ impl Worker {
             .map_err(|e| Pass::Failed(format!("keeping {key}: {e}")))
     }
 
-    /// One pass: down, then up.
+    /// Remove every registry entry whose key starts with `prefix`; how
+    /// many there were.
+    async fn forget(&self, prefix: &str) -> Result<usize, Pass> {
+        let found = self
+            .store()
+            .registry(prefix)
+            .await
+            .map_err(|e| Pass::Failed(format!("reading {prefix}*: {e}")))?;
+        for (key, _) in &found {
+            self.store()
+                .put_registry(key, None)
+                .await
+                .map_err(|e| Pass::Failed(format!("dropping {key}: {e}")))?;
+        }
+        Ok(found.len())
+    }
+
+    /// Compare an epoch the Senate above named with the recorded one, and
+    /// when its log is another one now, drop what is kept about the old
+    /// one. True when it was: this pass is over, and the next registers
+    /// again and reads from the start.
+    ///
+    /// The first epoch seen is recorded, unless entries about the log
+    /// above are on file with no epoch (then it counts as a change).
+    /// `None` (a Senate from before epochs) tells nothing.
+    async fn follow(&mut self, observed: Option<&str>) -> Result<bool, Pass> {
+        let Some(observed) = observed.filter(|e| !e.is_empty()) else {
+            return Ok(false);
+        };
+        let known = self
+            .store()
+            .registry_value(EPOCH)
+            .await
+            .map_err(|e| Pass::Failed(format!("reading {EPOCH}: {e}")))?
+            .and_then(|v| v.as_str().map(String::from));
+        if known.as_deref() == Some(observed) {
+            return Ok(false);
+        }
+        // The entries go first and the epoch is recorded last: stopped in
+        // between, the next pass finds entries with no epoch and finishes.
+        let mut dropped = 0;
+        for prefix in [CURSOR, DOWN, UP] {
+            dropped += self.forget(prefix).await?;
+        }
+        self.put(EPOCH, &observed).await?;
+        if known.is_none() && dropped == 0 {
+            tracing::info!(
+                epoch = observed,
+                "recorded the log epoch of the Senate above"
+            );
+            return Ok(false);
+        }
+        tracing::warn!(
+            old = known.as_deref().unwrap_or("none recorded"),
+            new = observed,
+            dropped,
+            "the log of the Senate above was reset (its epoch changed): dropped what was kept \
+             about the old one; registering again and reading from the start"
+        );
+        // The registration there went with the log.
+        self.registered = false;
+        Ok(true)
+    }
+
+    /// The Senate above says the cursor on `committee` is beyond its log:
+    /// drop what is kept about that committee.
+    async fn forget_committee(&self, committee: &CommitteeId) -> Result<(), Pass> {
+        let mut dropped = self.forget(&format!("{DOWN}{committee}:")).await?;
+        dropped += self.forget(&format!("{UP}{committee}:")).await?;
+        let key = format!("{CURSOR}{committee}");
+        self.store()
+            .put_registry(&key, None)
+            .await
+            .map_err(|e| Pass::Failed(format!("dropping {key}: {e}")))?;
+        tracing::warn!(
+            %committee,
+            dropped,
+            "the Senate above says the uplink's cursor is beyond the committee's log \
+             (cursor_ahead), so the log was reset: dropped the committee's cursor and what was \
+             kept about its threads; reading it from the start"
+        );
+        Ok(())
+    }
+
+    /// One pass: down, then up. Nothing goes up to a Senate this one has
+    /// to register with again first.
     async fn pass(&mut self) -> Result<(), Pass> {
         self.down().await?;
+        if !self.registered {
+            return Ok(());
+        }
         self.up().await
     }
 
@@ -341,6 +453,9 @@ impl Worker {
             .await
             .map_err(|_| Pass::Lost("timed out".into()))?
             .map_err(|e| lost_or_failed(&e))?;
+        if self.follow(Some(&me.epoch)).await? {
+            return Ok(());
+        }
         let Some(parent) = self.parent().cloned() else {
             return Ok(());
         };
@@ -348,13 +463,29 @@ impl Worker {
             let key = format!("{CURSOR}{committee}");
             let mut cursor: Seq = self.get(&key).await.unwrap_or(Seq::ZERO);
             loop {
-                let page = tokio::time::timeout(
+                let page = match tokio::time::timeout(
                     TIMEOUT,
                     self.above.events(&committee, cursor, Some(PAGE)),
                 )
                 .await
-                .map_err(|_| Pass::Lost("timed out".into()))?
-                .map_err(|e| lost_or_failed(&e))?;
+                {
+                    Err(_) => return Err(Pass::Lost("timed out".into())),
+                    Ok(Ok(page)) => page,
+                    Ok(Err(e)) => {
+                        if self.follow(e.epoch()).await? {
+                            return Ok(());
+                        }
+                        if e.is_cursor_ahead() && cursor > Seq::ZERO {
+                            self.forget_committee(&committee).await?;
+                            cursor = Seq::ZERO;
+                            continue;
+                        }
+                        return Err(lost_or_failed(&e));
+                    }
+                };
+                if self.follow(page.epoch.as_deref()).await? {
+                    return Ok(());
+                }
                 for raw in page.events {
                     let seq = match decode_event(raw) {
                         Decoded::Event(event) => {
@@ -462,9 +593,11 @@ impl Worker {
             .await
             .map_err(|e| Pass::Failed(format!("bringing {} down: {e}", event.id)))?;
         if brought.is_none() {
+            // Read again after a reset, it is stored already, and where it
+            // was put then is where its thread stays.
             let b = Brought {
                 committee,
-                seq: stored.event.seq,
+                seq: stored.event.thread.unwrap_or(stored.event.seq),
             };
             self.put(&down_key, &b).await?;
         }
