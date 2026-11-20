@@ -565,6 +565,7 @@ pub(crate) fn presence_status(
             if let Some(lag) = p.lag.filter(|lag| *lag > 0) {
                 let _ = write!(line, " · {}", lag_words(l, lag));
             }
+            duty_suffix(l, &mut line, p.duty.as_deref());
         }
         None => line.push_str(l.pick(" 在场未知", " presence unknown")),
     }
@@ -578,6 +579,16 @@ pub(crate) fn presence_status(
         (_, None) => line.push_str(l.pick(" · 没有检查点", " · no checkpoint")),
     }
     line
+}
+
+/// ` · 职责：<duty>` / ` · duty: <duty>`, when the seat has one.
+fn duty_suffix(l: Locale, line: &mut String, duty: Option<&str>) {
+    if let Some(duty) = duty {
+        let _ = match l {
+            Locale::Zh => write!(line, " · 职责：{duty}"),
+            Locale::En => write!(line, " · duty: {duty}"),
+        };
+    }
 }
 
 /// The Agent group's line for a checkpoint:
@@ -1691,6 +1702,7 @@ pub(crate) fn today_card(l: Locale, today: &Today<'_>) -> Card {
                     if let Some(lag) = p.lag.filter(|lag| *lag > 0) {
                         let _ = write!(line, " · {}", lag_words(l, lag));
                     }
+                    duty_suffix(l, &mut line, p.duty.as_deref());
                     line
                 })
                 .collect(),
@@ -2111,6 +2123,18 @@ mod tests {
             presence_status(Locale::En, &path("copilot"), None, None),
             "[senator::copilot] presence unknown · no checkpoint"
         );
+        let with_duty = AgentPresence {
+            duty: Some("reviews the server".into()),
+            ..presence.clone()
+        };
+        assert_eq!(
+            presence_status(Locale::En, &path("claude"), Some(&with_duty), None),
+            "[senator::claude] absent (lease expired) · 14 events behind · duty: reviews the server · no checkpoint"
+        );
+        assert_eq!(
+            presence_status(Locale::Zh, &path("claude"), Some(&with_duty), None),
+            "[senator::claude] 缺席（租约过期） · 落后 14 条事件 · 职责：reviews the server · 没有检查点"
+        );
         assert_eq!(age(Locale::En, chrono::Duration::minutes(1)), "1 minute");
         assert_eq!(age(Locale::Zh, chrono::Duration::days(3)), "3 天");
 
@@ -2374,7 +2398,7 @@ mod tests {
             cursor: None,
             lag: Some(1),
             new_owner: None,
-            duty: None,
+            duty: Some("reviews".into()),
         };
         let today = Today {
             date: chrono::NaiveDate::from_ymd_opt(2026, 4, 12).expect("date"),
@@ -2388,7 +2412,7 @@ mod tests {
         assert_eq!(card.title, "Today · 04-12");
         assert_eq!(
             card.markdown,
-            "**Today's decisions**\n- seq 5: cap is 90 days\n\n**Open questions**\n- seq 6 · [senator::copilot]: Which header?\n\n**Today's tasks**\n- seq 118 · Which header? · waiting on a person\n\n**What each agent did last**\n- [senator::copilot] · seq 7 · answer: 90 days\n\n**Agent presence**\n- [senator::claude] online · 1 event behind"
+            "**Today's decisions**\n- seq 5: cap is 90 days\n\n**Open questions**\n- seq 6 · [senator::copilot]: Which header?\n\n**Today's tasks**\n- seq 118 · Which header? · waiting on a person\n\n**What each agent did last**\n- [senator::copilot] · seq 7 · answer: 90 days\n\n**Agent presence**\n- [senator::claude] online · 1 event behind · duty: reviews"
         );
         let card = today_card(Locale::Zh, &today);
         assert_eq!(card.title, "今天的摘要 · 04-12");
