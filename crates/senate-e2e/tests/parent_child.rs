@@ -835,3 +835,124 @@ async fn entries_kept_with_no_epoch_are_dropped_and_the_parents_log_read_again()
     desk.stop().await;
     world.stop().await;
 }
+
+// ---- the parent's Speaker and a child Senate's seat -------------------------
+
+/// The parent's built-in Speaker is asked in chat for alice's agent. Alice
+/// runs no agent above; her machine's Senate has declared claude's seat
+/// on the committee, so the relay goes to her desk and names that seat.
+/// It lands on her desk meant for claude, claude's session is told and
+/// answers, and the answer comes back up into the relay's thread and the
+/// chat it was asked in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_parents_speaker_relays_to_a_child_senates_seat_and_hears_back() {
+    let world = Setup::new()
+        .server(|c| c.name = Some(name("acme")))
+        .start()
+        .await;
+    world.bind().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut desk = Desk::new(
+        dir.path(),
+        "alice",
+        Locale::En,
+        &under(&world, "tok-alice", "secretaries = [\"claude\"]\n"),
+    );
+    desk.start().await;
+    assert_eq!(
+        desk.wait_registration().await.registration,
+        Registration::Registered
+    );
+    let claude = desk.inbox("s-claude");
+    desk.session_start("s-claude", &claude).await.unwrap();
+    desk.wait_connected("claude", true).await;
+    // Her Senate declares the seat above, online.
+    eventually("claude's seat declared above", || {
+        world.daemon().hub.children().into_iter().find(|c| {
+            c.seats.iter().any(|s| {
+                s.senator == path("claude")
+                    && s.committee == refund()
+                    && s.presence == senate_core::continuity::PresenceState::Online
+            })
+        })
+    })
+    .await;
+    let roster = world.hub().roster().await.unwrap();
+    assert!(!roster.knows(&path("claude")), "claude sits below only");
+
+    // pm asks the Speaker for alice's agent.
+    world
+        .say(senated::testing::Message::mention(
+            GROUP,
+            "u_pm",
+            "m_seat1",
+            "/tell alice Which retry limit does the refund callback use?",
+        ))
+        .await;
+    let relay = eventually_async("the Speaker's relay", || async {
+        world
+            .events_of(&refund())
+            .await
+            .into_iter()
+            .find(|e| e.from == Address::Speaker && e.to == [alice_desk()])
+    })
+    .await;
+    assert_eq!(relay.kind, Kind::Question);
+    assert_eq!(relay.on_behalf_of, Some(person("pm")));
+    assert_eq!(
+        senate_core::locator::intended(&relay).unwrap().to_string(),
+        "/acme/alice-desk::refund-v2::senator::claude",
+        "the seat her Senate declared"
+    );
+    world
+        .wait_post("the acknowledgement naming the seat", |p| {
+            p.markdown
+                .contains("[/acme/alice-desk::refund-v2::senator::claude]")
+        })
+        .await;
+
+    // Below: on alice's desk, meant for claude, whose session is told.
+    let root = on_desk(&desk, "Which retry limit does the refund callback use?").await;
+    assert_eq!(root.to, [Address::Speaker]);
+    assert_eq!(
+        senate_core::locator::intended(&root).unwrap().to_string(),
+        "/acme/alice-desk::refund-v2::senator::claude"
+    );
+    assert_eq!(Origin::of(&root).unwrap().thread, relay.seq);
+    claude.wait_for("Which retry limit").await;
+
+    // claude answers in that thread; the answer goes back up.
+    desk.answer("s-claude", root.seq, "Three times, see retry.rs")
+        .await;
+    let answer = eventually_async("the answer above", || async {
+        world
+            .events_of(&refund())
+            .await
+            .into_iter()
+            .find(|e| e.body == "Three times, see retry.rs")
+    })
+    .await;
+    assert_eq!(answer.kind, Kind::Answer);
+    assert_eq!(answer.from, alice_desk());
+    assert_eq!(answer.thread, Some(relay.seq));
+    assert_eq!(
+        answer.meta[meta::ANSWERED_BY],
+        serde_json::json!("/acme/alice-desk::refund-v2::senator::claude")
+    );
+    // And into the chat it was asked in. Nothing said the child was
+    // offline: it was not.
+    world
+        .wait_post("the answer in chat", |p| {
+            p.markdown.contains("Three times, see retry.rs")
+        })
+        .await;
+    assert!(
+        world
+            .events_of(&refund())
+            .await
+            .iter()
+            .all(|e| !e.meta.contains_key(meta::CHILD_OFFLINE))
+    );
+    desk.stop().await;
+    world.stop().await;
+}

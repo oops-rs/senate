@@ -1417,6 +1417,13 @@ impl Hub for ServerHub {
         Ok(ServerHub::children(self))
     }
 
+    /// This Senate's path from the root: the built-in session names a seat
+    /// in a child Senate in full with it, so the trait's `None` must not
+    /// stand here either.
+    fn senate_path(&self) -> Option<SenatePath> {
+        Some(ServerHub::senate_path(self))
+    }
+
     async fn put_mirror(&self, mirror: MirrorRef) -> Result<(), HubError> {
         self.store.put_mirror(mirror).await.map_err(log_error)
     }
