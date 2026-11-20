@@ -348,7 +348,7 @@ async fn host_ready_without_publication_closes_its_tui_group() {
     let program = root.path().join("fixture");
     std::fs::write(
         &program,
-        "#!/bin/sh\nsleep 300 &\nprintf '%s %s\\n' \"$$\" \"$!\" > group.tmp\nmv group.tmp group\nwait\n",
+        "#!/bin/sh\nprintf '%s %s\\n' \"$TERM\" \"$COLORTERM\" > term\nsleep 300 &\nprintf '%s %s\\n' \"$$\" \"$!\" > group.tmp\nmv group.tmp group\nwait\n",
     )
     .unwrap();
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -359,6 +359,10 @@ async fn host_ready_without_publication_closes_its_tui_group() {
         .args(["native-id", "--program"])
         .arg(program)
         .env("SENATE_HOME", paths.home())
+        // A daemon started by launchd has no terminal in its environment.
+        // The host is the TUI's terminal and must say what it can show.
+        .env("TERM", "dumb")
+        .env_remove("COLORTERM")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -379,6 +383,10 @@ async fn host_ready_without_publication_closes_its_tui_group() {
     })
     .await;
     assert_eq!(getpgid(Some(helper)).unwrap(), leader);
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("term")).unwrap(),
+        "xterm-256color truecolor\n"
+    );
 
     drop(child.stdin.take()); // The starting daemon stopped before publishing.
     let exit = tokio::time::timeout(TIMEOUT, child.wait())

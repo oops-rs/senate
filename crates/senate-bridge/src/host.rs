@@ -536,6 +536,11 @@ fn runtime_command(
     let command = command
         .current_dir(cwd)
         .env("TERM", "xterm-256color")
+        // The daemon's own environment has no terminal in it (launchd gives
+        // it none), and no viewer exists yet to ask. The PTY relays bytes
+        // unchanged, so advertise 24-bit colour: without it the TUIs fall
+        // back to the 256-colour palette and their themes look wrong.
+        .env("COLORTERM", "truecolor")
         .env_remove("CLAUDECODE")
         .env_remove("CLAUDE_CODE_ENTRYPOINT")
         .env_remove("CLAUDE_CODE_SESSION_ID")
