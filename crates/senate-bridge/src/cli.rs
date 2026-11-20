@@ -531,10 +531,17 @@ Without --wait it returns at once: read the answer with `senate inbox`,
     /// Hosted Claude keeps the senator when the same process reports a new
     /// session after /clear or /resume. A refused change appears in status.
     /// The configured executable must be Claude itself or a wrapper that execs it.
+    ///
+    /// With --read-only the terminal is only shown: nothing typed reaches
+    /// the session, its size is left as it is, and any number of people can
+    /// look at once, beside whoever is attached. Ctrl-] leaves.
     Attach {
         /// The senator's primary name or alias (`committee::alias` for an
         /// alias on one committee).
         senator: AliasName,
+        /// Look without typing: every key but Ctrl-] is dropped.
+        #[arg(long)]
+        read_only: bool,
     },
     /// Resume a stopped hosted senator in the background.
     ///
@@ -1747,11 +1754,24 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Cmd::Attach { senator } => {
+        Cmd::Attach { senator, read_only } => {
             let senator = pick_alias(senator)?;
             let paths = Paths::from_env()?;
             runtime(false)?.block_on(async {
-                let socket: PathBuf = daemon_call(&paths, &Request::Attach { senator }).await?;
+                let request = Request::Attach {
+                    senator: senator.clone(),
+                };
+                let socket: PathBuf = daemon_call(&paths, &request).await?;
+                if read_only {
+                    let alias = senator.to_string();
+                    return crate::host::view::watch_one(crate::host::view::Session {
+                        title: alias.clone(),
+                        key: alias,
+                        tty: socket,
+                        dim: false,
+                    })
+                    .await;
+                }
                 crate::host::attach(&socket, &paths).await
             })
         }

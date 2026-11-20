@@ -5,6 +5,8 @@ pub(crate) mod control;
 mod emulation;
 mod input;
 mod terminal;
+pub mod view;
+pub(crate) mod watch;
 
 use rustix::process::{Pid, Signal, kill_process_group, test_kill_process_group};
 use std::collections::{BTreeMap, BTreeSet};
@@ -53,15 +55,25 @@ struct Tty {
     write: tokio::sync::Mutex<OwnedWritePty>,
     emulation: Mutex<Emulation>,
     attached: AtomicBool,
+    /// The screen as watchers are shown it, at the PTY's size.
+    screen: Arc<watch::Screen>,
 }
 
 impl Tty {
-    fn new(write: OwnedWritePty, colors: Colors) -> Self {
+    fn new(write: OwnedWritePty, colors: Colors, rows: u16, cols: u16) -> Self {
         Self {
             write: tokio::sync::Mutex::new(write),
             emulation: Mutex::new(Emulation::new(colors)),
             attached: AtomicBool::new(false),
+            screen: Arc::new(watch::Screen::new(rows, cols)),
         }
+    }
+
+    /// Set the PTY's size, the viewer's doing; watchers are told.
+    async fn resize(&self, rows: u16, cols: u16) -> anyhow::Result<()> {
+        self.write.lock().await.resize(Size::new(rows, cols))?;
+        self.screen.resize(rows, cols);
+        Ok(())
     }
 
     fn emulation(&self) -> MutexGuard<'_, Emulation> {
@@ -396,7 +408,8 @@ pub async fn run(
     });
     Viewer::lock(&viewer).record();
     let (pty, pts) = pty_process::open()?;
-    pty.resize(Size::new(24, 80))?;
+    let (rows, cols) = (24, 80);
+    pty.resize(Size::new(rows, cols))?;
     let mut child = runtime_command(runtime, cwd, session, id, &dir)?
         .spawn(pts)
         .context("start coding TUI on its PTY")?;
@@ -410,7 +423,11 @@ pub async fn run(
     writeln!(startup_pid, "{pid}")?;
     drop(startup_pid);
     let (mut pty_read, pty_write) = pty.into_split();
-    let tty = Arc::new(Tty::new(pty_write, Colors::load(paths)));
+    let tty = Arc::new(Tty::new(pty_write, Colors::load(paths), rows, cols));
+    // Watchers come and go beside the one viewer; see `watch`.
+    let watch_socket = dir.join(watch::SOCKET);
+    let watchers = UnixListener::bind(&watch_socket).context("listen for terminal watchers")?;
+    std::fs::set_permissions(&watch_socket, std::fs::Permissions::from_mode(0o600))?;
     // A slow or disconnected viewer must never stop the PTY being drained.
     let (output, _) = broadcast::channel(64);
     let mut startup_output = output.subscribe();
@@ -438,6 +455,7 @@ pub async fn run(
                         }
                     }
                 }
+                tty.screen.output(&buf[..n]);
                 let _ = feed.send(buf[..n].to_vec());
             }
         }
@@ -505,6 +523,7 @@ pub async fn run(
             stop_group(&mut child, pid).await
         }
         served = serve(&listener, &tty, &output, &viewer) => served,
+        served = watch::serve(&watchers, &tty.screen) => served,
         peer = control::next_stop(&controls, &viewer, paths, id) => {
             stop = Some(peer);
             stop_group(&mut child, pid).await
@@ -902,12 +921,11 @@ async fn relay(
                     if first_resize {
                         // A same-size ioctl does not wake the TUI. Change
                         // the size briefly so returning to it is a resize.
-                        let taller = Size::new(rows.saturating_add(1), cols);
-                        tty.write.lock().await.resize(taller)?;
+                        tty.resize(rows.saturating_add(1), cols).await?;
                         tokio::time::sleep(Duration::from_millis(75)).await;
                         first_resize = false;
                     }
-                    tty.write.lock().await.resize(Size::new(rows, cols))?;
+                    tty.resize(rows, cols).await?;
                 }
                 COLORS => {
                     // The viewer's terminal describing itself: no one typed.
@@ -976,7 +994,7 @@ mod tests {
     async fn a_viewer_can_answer_a_tui_query_without_reporting_human_input() {
         let (pty, _pts) = pty_process::open().unwrap();
         let (_read, write) = pty.into_split();
-        let tty = Tty::new(write, Colors::default());
+        let tty = Tty::new(write, Colors::default(), 24, 80);
         let (output, _) = broadcast::channel(1);
         let dir = tempfile::tempdir().unwrap();
         let activity = Mutex::new(Viewer {

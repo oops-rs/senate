@@ -21,10 +21,10 @@ use crate::paths::Paths;
 // Ctrl-] in the legacy and Kitty keyboard encodings. Kitty can also
 // include the event type when the terminal reports key presses separately.
 const DETACH: &[&[u8]] = &[b"\x1d", b"\x1b[93;5u", b"\x1b[93;5:1u"];
-const RESET_DISPLAY: &[u8] =
+pub(super) const RESET_DISPLAY: &[u8] =
     b"\x1b[0m\x1b[?2004l\x1b[?1004l\x1b[?2031l\x1b[?1000;1001;1002;1003;1005;1006;1015;1016l\x1b[?25h\x1b[?1049l";
 
-fn split_input(bytes: &[u8]) -> (usize, bool) {
+pub(super) fn split_input(bytes: &[u8]) -> (usize, bool) {
     if let Some(detach) = DETACH
         .iter()
         .filter_map(|key| bytes.windows(key.len()).position(|w| w == *key))
@@ -134,7 +134,7 @@ async fn send_keys(out: &mut (impl AsyncWrite + Unpin), bytes: &[u8]) -> anyhow:
     Ok(())
 }
 
-struct RawTerminal {
+pub(super) struct RawTerminal {
     input: AsyncFd<NonblockingFile>,
     output: AsyncFd<NonblockingFile>,
     original: Termios,
@@ -173,7 +173,7 @@ impl Drop for NonblockingFile {
 }
 
 impl RawTerminal {
-    async fn open(alternate_screen: bool) -> anyhow::Result<Self> {
+    pub(super) async fn open(alternate_screen: bool) -> anyhow::Result<Self> {
         let stdin = io::stdin();
         let stdout = io::stdout();
         ensure!(
@@ -227,7 +227,24 @@ impl RawTerminal {
         (colors, typed)
     }
 
-    async fn draw(&self, mut bytes: &[u8]) -> io::Result<()> {
+    /// Read what was typed into `buf`; 0 when the terminal is gone.
+    pub(super) async fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
+        self.input
+            .async_io(Interest::READABLE, |fd| (&fd.file).read(buf))
+            .await
+    }
+
+    /// The terminal's size, rows then columns.
+    pub(super) fn window(&self) -> anyhow::Result<(u16, u16)> {
+        let size = tcgetwinsize(&self.input.get_ref().file)?;
+        ensure!(
+            size.ws_row > 0 && size.ws_col > 0,
+            "cannot read terminal size"
+        );
+        Ok((size.ws_row, size.ws_col))
+    }
+
+    pub(super) async fn draw(&self, mut bytes: &[u8]) -> io::Result<()> {
         while !bytes.is_empty() {
             let written = self
                 .output

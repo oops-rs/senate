@@ -2147,3 +2147,114 @@ async fn a_host_whose_directory_is_gone_stops_with_its_tui() {
     none_left_under(&root, Duration::from_secs(5)).await;
     drop(h);
 }
+
+// ---- looking without typing ---------------------------------------------------
+
+/// A hosted session whose TUI paints a line as it starts, answers `paint`
+/// with `fixture TUI`, and records every other line it is typed.
+async fn watched_session() -> (Harness, String, PathBuf) {
+    let mut h = Harness::new().await;
+    h.config.hosted_session_limit = Some(1);
+    h.dir = tempfile::tempdir_in("/tmp").unwrap();
+    h.paths = senate_bridge::Paths::new(h.dir.path().join("senate"));
+    h.paths.ensure_home().unwrap();
+    let project = h.workdir("watched", None);
+    let typed = project.join(".typed");
+    let fixture = h.dir.path().join("fixture-claude");
+    std::fs::write(
+        &fixture,
+        format!(
+            "#!/bin/sh\n{RECORD_HOSTED_ARGV}\n\
+             printf '\\033[2J\\033[H\\033[32mpainted before anyone looked\\033[m\\r\\n'\n\
+             while IFS= read -r line; do\n\
+             \x20 if [ \"$line\" = paint ]; then printf 'fixture TUI\\r\\n'\n\
+             \x20 else printf '%s\\n' \"$line\" >> {typed:?}; fi\n\
+             done\n",
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(
+        h.paths.config(),
+        format!(
+            "[companion]\nclaude_bin = {:?}\n",
+            fixture.to_str().unwrap()
+        ),
+    )
+    .unwrap();
+    h.config.committees.push(committee());
+    start(&mut h).await;
+    let launched: SpawnReply = call(
+        &h,
+        &Request::Spawn {
+            session: Default::default(),
+            runtime: HostedRuntime::Claude,
+            committee: committee(),
+            alias: Some(path("watched")),
+            cwd: project,
+            chair: false,
+        },
+    )
+    .await;
+    (h, launched.senator.to_string(), typed)
+}
+
+/// `senate attach --read-only` shows the screen as it is, though it was
+/// painted before the viewer came, and what the session writes after. What
+/// is typed into it goes nowhere and is no activity of the session's
+/// viewer; it runs beside a normal attach, and Ctrl-] ends it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_read_only_attach_shows_the_screen_and_types_nothing() {
+    let (h, alias, typed) = watched_session().await;
+    let mut cmd = tokio::process::Command::new(BIN);
+    testenv::isolate_async(&mut cmd, h.dir.path());
+    cmd.args(["attach", "--read-only", &alias])
+        .env("SENATE_HOME", h.paths.home())
+        .kill_on_drop(true);
+    let (pty, pts) = pty_process::open().unwrap();
+    pty.resize(pty_process::Size::new(30, 100)).unwrap();
+    let mut child = pty_process::Command::from(cmd).spawn(pts).unwrap();
+    let (mut output, mut input) = pty.into_split();
+    tokio::time::timeout(TIMEOUT, async {
+        // The screen the session painted before anyone looked, and the
+        // viewer's own line saying this is read-only.
+        wait_terminal_output(&mut output, b"painted before anyone looked").await;
+        wait_terminal_output(&mut output, b"read-only").await;
+    })
+    .await
+    .expect("the session's screen");
+
+    // Typing into it: a line, an arrow, and `q`.
+    input.write_all(b"hello there\r\x1b[Aq").await.unwrap();
+    // A normal attach beside it types `paint`, which the session answers;
+    // the read-only viewer shows the answer.
+    attach(&h, &alias, b"\x1d").await;
+    tokio::time::timeout(TIMEOUT, wait_terminal_output(&mut output, b"fixture TUI"))
+        .await
+        .expect("what the session wrote next");
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "`q` is typing, not leaving"
+    );
+    // Nothing the read-only viewer typed reached the session.
+    let reached = std::fs::read_to_string(&typed).unwrap_or_default();
+    assert!(!reached.contains("hello"), "{reached:?}");
+    assert!(!reached.contains('q'), "{reached:?}");
+
+    // A terminal goes on taking what is painted on it.
+    let draining = tokio::spawn(async move {
+        let mut buf = [0; 4096];
+        while output.read(&mut buf).await.is_ok_and(|n| n > 0) {}
+    });
+    // Ctrl-] leaves, and the session runs on.
+    input.write_all(b"\x1d").await.unwrap();
+    assert!(
+        tokio::time::timeout(TIMEOUT, child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+    draining.abort();
+    attach(&h, &alias, b"\x1d").await;
+}
