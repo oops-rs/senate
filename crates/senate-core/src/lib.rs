@@ -16,6 +16,8 @@
 //!   seat or a Speaker from anywhere.
 //! - [`mention`]: the same ids as written in running text, in brackets:
 //!   `[senator::claude]`, `[speaker::claude]`, `[ibot::senator::codex]`.
+//! - [`alias`]: senator aliases, each on the committee it was given in,
+//!   and how a bare or qualified alias resolves.
 //! - [`roster`]: who sits in one Senate, the rules that hold for it, who may
 //!   act as whom, and what "whichever agent" resolves to.
 //! - [`locale`]: the language a text for people is rendered in.
@@ -77,6 +79,7 @@
 //! [`Address::Other`].
 
 pub mod address;
+pub mod alias;
 pub mod api;
 pub mod brief;
 pub mod chair;
