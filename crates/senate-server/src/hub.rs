@@ -1331,6 +1331,12 @@ impl Hub for ServerHub {
         Ok(self.epoch.clone())
     }
 
+    /// The registered child Senates: the built-in Speaker reads them to
+    /// relay to a child, so the trait's empty default must not stand here.
+    async fn children(&self) -> Result<Vec<ChildSenate>, HubError> {
+        Ok(ServerHub::children(self))
+    }
+
     async fn put_mirror(&self, mirror: MirrorRef) -> Result<(), HubError> {
         self.store.put_mirror(mirror).await.map_err(log_error)
     }

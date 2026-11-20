@@ -1497,6 +1497,11 @@ async fn a_child_senate_registers_as_its_speaker() {
     );
     let one: ChildSenate = get(&server, BOB, &route).await;
     assert_eq!(one, child);
+    // The built-in Speaker reads the children through the `Hub` trait, not
+    // the HTTP route: it must see the same list, or a relay to a person's
+    // child Senate falls back to the person.
+    let hub: Arc<dyn senate_core::Hub> = server.running.hub.clone();
+    assert_eq!(hub.children().await.unwrap(), std::slice::from_ref(&child));
 
     for (token, child_name, speaker, status) in [
         // Not on this Senate's roster.
