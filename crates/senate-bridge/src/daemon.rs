@@ -1094,11 +1094,16 @@ impl Shared {
 
     /// Record who holds this Senate's Speaker's seat, as `/v1/me` named it.
     pub(crate) fn note_speaker(&self, speaker: Option<SpeakerSeat>) {
-        let mut current = lock(&self.speaker);
-        if *current != speaker {
+        {
+            let mut current = lock(&self.speaker);
+            if *current == speaker {
+                return;
+            }
             tracing::info!(speaker = ?speaker, senate = %self.senate_label(), "the Speaker's seat");
             *current = speaker;
         }
+        // With a Senate that names no office, the seat says who presides.
+        self.publish(WatchEvent::Roles);
     }
 
     /// The Speaker's seat of this Senate, as last heard.

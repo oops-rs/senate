@@ -252,6 +252,9 @@ impl Model {
             WatchEvent::ApprovalResolved { id, .. } => {
                 self.approvals.remove(&id);
             }
+            // Who works the desk changed: the docket may be another one.
+            // What this machine's agents are comes with the next status.
+            WatchEvent::Roles => fx.refresh.push(Refresh::Docket),
             WatchEvent::Inbox {
                 agent, committee, ..
             } => {

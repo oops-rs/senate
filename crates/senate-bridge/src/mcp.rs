@@ -17,6 +17,13 @@
 //! session; the daemon refuses them from such a session anyway. Every
 //! session has `secretary` (its own agent's secretaries).
 //!
+//! A client lists the tools once, when it starts, and what an agent is can
+//! change under a running session: it is put on the Speaker's desk, or made
+//! the chair. The server follows the daemon's `watch` stream for that
+//! ([`SenateMcp::follow_roles`]) and sends `notifications/tools/list_changed`, on which
+//! the client lists the tools again (Claude Code does, 2.1.329 measured:
+//! the new tools are callable in the same session, with no restart).
+//!
 //! Tool names, parameters and JSON fields are identifiers and the same in
 //! every language; tool descriptions are English. The text a tool returns
 //! for the agent to read is written in the bridge's locale (`locale` in
@@ -54,6 +61,7 @@
 //! twice: the server keeps one event per id.
 
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -64,7 +72,7 @@ use rmcp::model::{
     ResourceContents, ResourceTemplate, ServerCapabilities, ServerConfig,
 };
 use rmcp::schemars::JsonSchema;
-use rmcp::service::RequestContext;
+use rmcp::service::{Peer, RequestContext};
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler, ServiceExt, tool, tool_handler, tool_router,
 };
@@ -81,7 +89,7 @@ use crate::ipc::{
     self, BoundReply, CatchUpReply, ChairDocketReply, CheckpointReply, ClientError, DocketReply,
     EscalateReply, EscalatedTo, Forwarded, HostedRuntime, InboxReply, JoinReply, Posted,
     PresidesReply, Request, SayKind, SearchReply, SecretariesReply, SecretaryOp, SendReply,
-    SessionSelector, SpawnReply,
+    SessionSelector, SpawnReply, WatchEvent,
 };
 use crate::session::Runtime;
 
@@ -905,6 +913,9 @@ pub struct SenateMcp {
     /// What this process knows of its session's agent before the session
     /// registers: `SENATE_AGENT`, `.senate/agent`.
     pins: Pins,
+    /// What the session's agent was (`presides`, `chairs`) when the client
+    /// last listed the tools; `None` until it has.
+    listed: Arc<Mutex<Option<(bool, bool)>>>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -974,14 +985,21 @@ pub async fn serve_stdio(
 ) -> anyhow::Result<()> {
     let mut pins = Pins::from_process().await;
     pins.runtime = runtime;
-    let service = SenateMcp::new(daemon_socket, selector)
+    let mcp = SenateMcp::new(daemon_socket, selector)
         .with_locale(locale)
-        .with_pins(pins)
-        .serve(rmcp::transport::stdio())
-        .await?;
-    service.waiting().await?;
+        .with_pins(pins);
+    let service = mcp.clone().serve(rmcp::transport::stdio()).await?;
+    let roles = tokio::spawn(mcp.follow_roles(service.peer().clone()));
+    let served = service.waiting().await;
+    roles.abort();
+    served?;
     Ok(())
 }
+
+/// The first wait before asking a daemon that is not there again; doubled
+/// by each next one up to [`ROLES_RETRY_MAX`].
+const ROLES_RETRY: Duration = Duration::from_secs(1);
+const ROLES_RETRY_MAX: Duration = Duration::from_secs(30);
 
 /// `senator::codex, *` → addresses an `ask` may go to: agents, or whichever
 /// agent on the committee; anything else is refused
@@ -1292,6 +1310,7 @@ impl SenateMcp {
             call_timeout: CALL_TIMEOUT,
             locale: Locale::default(),
             pins: Pins::default(),
+            listed: Arc::default(),
             tool_router: Self::tool_router(),
         }
     }
@@ -1335,6 +1354,7 @@ impl SenateMcp {
     /// its committee, and spawn for either role.
     pub async fn tools(&self) -> Vec<rmcp::model::Tool> {
         let (presides, chairs) = self.roles().await;
+        *self.listed.lock().unwrap_or_else(PoisonError::into_inner) = Some((presides, chairs));
         self.tool_router
             .list_all()
             .into_iter()
@@ -1342,6 +1362,61 @@ impl SenateMcp {
             .filter(|t| chairs || !CHAIR_TOOLS.contains(&t.name.as_ref()))
             .filter(|t| presides || chairs || t.name != SPAWN_TOOL)
             .collect()
+    }
+
+    /// Whether the session's tools are other ones than the client last
+    /// listed. A client that has listed none yet has nothing to list again.
+    async fn tools_moved(&self) -> bool {
+        if self.selector.session_id.is_none() && self.selector.claude_pid.is_none() {
+            // One server for every thread (Codex): only a call says whose
+            // it is, so nothing here can tell. The client lists again.
+            return true;
+        }
+        let listed = *self.listed.lock().unwrap_or_else(PoisonError::into_inner);
+        match listed {
+            Some(listed) => self.roles().await != listed,
+            None => false,
+        }
+    }
+
+    /// Tell the client when the session's tools are other ones than it
+    /// listed, until the client is gone: it then lists them again.
+    ///
+    /// The daemon says when the roles it knows changed
+    /// ([`WatchEvent::Roles`] on its `watch` stream); this asks what the
+    /// session's agent is now and tells the client only when that is not
+    /// what it listed. It asks once when the stream opens too, for what
+    /// changed while nothing was heard: this server was starting, or the
+    /// daemon was away (it is asked again less and less often). A daemon
+    /// from before `roles` says nothing, and the tools stay as listed.
+    pub async fn follow_roles(self, peer: Peer<RoleServer>) {
+        let mut wait = ROLES_RETRY;
+        while !peer.is_transport_closed() {
+            let stream = match ipc::IpcClient::connect(&self.daemon_socket, ROLES_RETRY).await {
+                Ok(client) => client.watch(false, self.call_timeout).await,
+                Err(e) => Err(e),
+            };
+            if let Ok(mut stream) = stream {
+                wait = ROLES_RETRY;
+                let mut ask = true;
+                loop {
+                    if ask
+                        && self.tools_moved().await
+                        && peer.notify_tool_list_changed().await.is_err()
+                    {
+                        return;
+                    }
+                    match stream.next().await {
+                        Ok(Some(event)) => {
+                            ask = matches!(event, WatchEvent::Roles | WatchEvent::Lagged { .. });
+                        }
+                        Ok(None) | Err(_) => break,
+                    }
+                }
+            }
+            tokio::time::sleep(wait).await;
+            wait = (wait * 2).min(ROLES_RETRY_MAX);
+        }
     }
 
     /// Bound each daemon call by `timeout` instead of the default.
@@ -2518,6 +2593,7 @@ impl ServerHandler for SenateMcp {
             ServerCapabilities::builder()
                 .enable_resources()
                 .enable_tools()
+                .enable_tool_list_changed()
                 .build(),
         )
         .with_server_info(Implementation::new(SERVER_NAME, env!("CARGO_PKG_VERSION")))

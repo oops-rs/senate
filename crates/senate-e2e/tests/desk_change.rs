@@ -10,7 +10,7 @@ mod common;
 
 use common::*;
 use senate_bridge::client::ApiClient;
-use senate_bridge::ipc::{ClientError, DocketReply, Request, codes};
+use senate_bridge::ipc::{ClientError, DocketReply, IpcClient, Request, WatchEvent, codes};
 use senate_core::{Address, Kind, NewEvent};
 
 /// claude's session asks for the desk's docket, as `speaker_docket` does.
@@ -39,6 +39,14 @@ async fn a_desk_changed_elsewhere_is_known_on_the_machine_at_once() {
     world.wait_connected("claude", true).await;
     let refused = docket(&alice).await;
     assert!(not_presiding(&refused), "{refused:?}");
+    // What the session's MCP server follows, to tell the client when its
+    // tools change.
+    let mut watch = IpcClient::connect(&alice.paths.socket(), std::time::Duration::from_secs(2))
+        .await
+        .unwrap()
+        .watch(false, std::time::Duration::from_secs(5))
+        .await
+        .unwrap();
 
     // Bob puts claude on his desk, from his own machine: nothing of it
     // passes through alice's daemon, and no committee's log says so.
@@ -53,6 +61,18 @@ async fn a_desk_changed_elsewhere_is_known_on_the_machine_at_once() {
     })
     .await;
     assert_eq!(reply.speaker, Some(path("claude")));
+    // And says so to whoever watches it.
+    loop {
+        let event = tokio::time::timeout(WAIT, watch.next()).await;
+        match event
+            .expect("the roles to be said changed in time")
+            .unwrap()
+        {
+            Some(WatchEvent::Roles) => break,
+            Some(_) => continue,
+            None => panic!("the daemon closed the watch"),
+        }
+    }
     // What is put to the Speaker is pushed to it.
     speak(
         &world.server_url(),

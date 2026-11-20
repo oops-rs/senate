@@ -146,7 +146,9 @@
 //! elsewhere first. `watch` turns the connection into a one-way stream:
 //! after its reply, every line is a [`WatchEvent`], starting with a
 //! `status` and an `approval_requested` per pending approval; the client
-//! sends nothing more and closes the connection to stop.
+//! sends nothing more and closes the connection to stop. The MCP server of
+//! a session watches too, for `roles` alone: a session's tools follow what
+//! its agent is ([`crate::mcp::SenateMcp::follow_roles`]).
 //!
 //! `inbox`, `answer`, `take`, `post` and `status` (the `task` op) also take
 //! an optional `committee`: with it they need no registered session (a
@@ -1200,6 +1202,10 @@ pub enum WatchEvent {
         /// The body, or an escalation's reason.
         text: String,
     },
+    /// The Speaker's office or a committee's chair is another one now, as
+    /// this side knows them: what a session may do (`presides`, and so the
+    /// tools it is given) may have changed with it. Ask again.
+    Roles,
     /// The watcher fell behind and missed `missed` events: read everything
     /// again.
     Lagged { missed: u64 },

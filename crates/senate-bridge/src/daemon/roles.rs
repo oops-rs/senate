@@ -100,12 +100,23 @@ impl Shared {
 
     /// Record the Speaker's office and the child Senates `/v1/me` named.
     pub(crate) fn note_office(&self, me: &senate_core::api::Me) {
-        let mut office = lock(&self.office);
-        if *office != me.office {
-            tracing::info!(office = ?me.office, "the Speaker's office");
-            office.clone_from(&me.office);
-        }
+        self.set_office(me.office.clone());
         *lock(&self.children) = me.children.clone();
+    }
+
+    /// Record the Speaker's office. Another one than before is told to
+    /// whoever watches ([`WatchEvent::Roles`]): the sessions of the agents
+    /// on the desk, and of those off it now, have other tools.
+    fn set_office(&self, now: Option<Office>) {
+        {
+            let mut office = lock(&self.office);
+            if *office == now {
+                return;
+            }
+            tracing::info!(office = ?now, "the Speaker's office");
+            *office = now;
+        }
+        self.publish(WatchEvent::Roles);
     }
 
     /// The Speaker's office, as `/v1/me` last said.
@@ -143,8 +154,7 @@ impl Shared {
         if self.office() == told || self.refresh_me().await {
             return;
         }
-        tracing::info!(office = ?told, "the Speaker's office, as a stream said it");
-        *lock(&self.office) = told;
+        self.set_office(told);
     }
 
     /// How `agent`, one this machine runs, works the Speaker's desk, if it
@@ -255,10 +265,18 @@ impl Shared {
 
     /// Follow the log for `event`'s committee's chair.
     pub(crate) fn observe_chair(&self, event: &Event) -> bool {
-        lock(&self.chairs)
-            .entry(event.committee.clone())
-            .or_default()
-            .observe(event)
+        let (seats_changed, moved) = {
+            let mut chairs = lock(&self.chairs);
+            let cache = chairs.entry(event.committee.clone()).or_default();
+            let before = cache.chair();
+            let seats_changed = cache.observe(event);
+            (seats_changed, cache.chair() != before)
+        };
+        if moved {
+            // The old chair's session and the new one's have other tools.
+            self.publish(WatchEvent::Roles);
+        }
+        seats_changed
     }
 
     /// Ask the server who chairs `committee` (a stream opened).
@@ -273,12 +291,19 @@ impl Shared {
     }
 
     fn note_chair(&self, info: &ChairInfo) {
-        let mut chairs = lock(&self.chairs);
-        let cache = chairs.entry(info.committee.clone()).or_default();
-        cache.known = info
-            .chair
-            .clone()
-            .map(|c| (c, info.source.unwrap_or(ChairSource::Set)));
+        let moved = {
+            let mut chairs = lock(&self.chairs);
+            let cache = chairs.entry(info.committee.clone()).or_default();
+            let before = cache.chair();
+            cache.known = info
+                .chair
+                .clone()
+                .map(|c| (c, info.source.unwrap_or(ChairSource::Set)));
+            cache.chair() != before
+        };
+        if moved {
+            self.publish(WatchEvent::Roles);
+        }
     }
 
     /// The chair of `committee`, as far as this side knows.

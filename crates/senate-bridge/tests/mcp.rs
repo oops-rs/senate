@@ -30,6 +30,8 @@ struct McpClient {
     lines: Lines<BufReader<ReadHalf<DuplexStream>>>,
     writer: WriteHalf<DuplexStream>,
     next_id: u64,
+    /// `notifications/tools/list_changed` read so far.
+    list_changes: usize,
 }
 
 impl McpClient {
@@ -50,22 +52,25 @@ impl McpClient {
     ) -> Self {
         let (client, server) = tokio::io::duplex(1 << 20);
         tokio::spawn(async move {
-            let running = SenateMcp::new(daemon_socket, selector)
+            // As `senate mcp` serves: the server, and beside it what tells
+            // the client when the session's tools change.
+            let mcp = SenateMcp::new(daemon_socket, selector)
                 .with_locale(locale)
                 .with_pins(senate_bridge::mcp::Pins {
                     runtime,
                     ..Default::default()
-                })
-                .serve(server)
-                .await
-                .unwrap();
+                });
+            let running = mcp.clone().serve(server).await.unwrap();
+            let roles = tokio::spawn(mcp.follow_roles(running.peer().clone()));
             let _ = running.waiting().await;
+            roles.abort();
         });
         let (r, w) = tokio::io::split(client);
         let mut c = Self {
             lines: BufReader::new(r).lines(),
             writer: w,
             next_id: 1,
+            list_changes: 0,
         };
         let init = c
             .request(
@@ -78,6 +83,10 @@ impl McpClient {
             )
             .await;
         assert_eq!(init["serverInfo"]["name"], "senate");
+        assert_eq!(
+            init["capabilities"]["tools"]["listChanged"], true,
+            "the tools change with what the session's agent is"
+        );
         assert!(
             init["instructions"]
                 .as_str()
@@ -117,7 +126,36 @@ impl McpClient {
             if v.get("id") == Some(&json!(id)) {
                 return v;
             }
+            if v["method"] == "notifications/tools/list_changed" {
+                self.list_changes += 1;
+            }
         }
+    }
+
+    /// Wait for the server to say the tool list changed.
+    async fn list_changed(&mut self) {
+        loop {
+            let line = tokio::time::timeout(WAIT, self.lines.next_line())
+                .await
+                .expect("the tool list to be said changed in time")
+                .unwrap()
+                .expect("MCP stream open");
+            let v: Value = serde_json::from_str(&line).unwrap();
+            if v["method"] == "notifications/tools/list_changed" {
+                self.list_changes += 1;
+                return;
+            }
+        }
+    }
+
+    /// The names of the tools the server lists now.
+    async fn tool_names(&mut self) -> Vec<String> {
+        self.request("tools/list", json!({})).await["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_owned())
+            .collect()
     }
 
     /// `(is_error, text)`.
@@ -1562,6 +1600,72 @@ async fn tool_results_follow_the_locale() {
     assert!(
         err && text.contains("Senate bridge daemon 没有运行"),
         "{text}"
+    );
+}
+
+/// A client lists the tools once. When the session's agent is put on the
+/// Speaker's desk under a running session, the server says the list
+/// changed and the next listing has the presiding tools; the same when it
+/// is taken off. A session whose agent stays what it was is told nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_session_whose_role_changes_is_told_its_tools_changed() {
+    let mut h = Harness::new().await;
+    h.start().await;
+    let wd = h.workdir("a", Some("refund-v2"));
+    h.hook(HookKind::SessionStart, "c1", &wd, None)
+        .await
+        .unwrap();
+    let mut env = h.env_for("x1", None);
+    env.agent = Some("codex".into());
+    h.hook_with(HookKind::SessionStart, "x1", &wd, &env)
+        .await
+        .unwrap();
+    let presiding = |listed: &[String]| {
+        senate_bridge::mcp::PRESIDING_TOOLS
+            .iter()
+            .filter(|tool| listed.iter().any(|n| n == *tool))
+            .count()
+    };
+    let mut claude = McpClient::start(h.socket(), selector("c1")).await;
+    let mut codex = McpClient::start(h.socket(), selector("x1")).await;
+    assert_eq!(presiding(&claude.tool_names().await), 0);
+    assert_eq!(presiding(&codex.tool_names().await), 0);
+
+    // claude is named the Speaker, and the daemon hears of it (asked for
+    // its status it asks the Senate again; a Senate that says its office on
+    // the stream needs no asking).
+    let learn = || async {
+        ipc::request::<Value>(
+            &h.socket(),
+            &Request::Status,
+            Duration::from_secs(1),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap()
+    };
+    h.server.set_speaker("claude");
+    learn().await;
+    claude.list_changed().await;
+    assert_eq!(
+        presiding(&claude.tool_names().await),
+        senate_bridge::mcp::PRESIDING_TOOLS.len()
+    );
+    // codex is what it was: its session is told nothing.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(presiding(&codex.tool_names().await), 0);
+    assert_eq!(codex.list_changes, 0);
+
+    // codex is named instead: claude's session loses the tools, codex's
+    // gets them, and each is told once.
+    h.server.set_speaker("codex");
+    learn().await;
+    claude.list_changed().await;
+    codex.list_changed().await;
+    assert_eq!(presiding(&claude.tool_names().await), 0);
+    assert_eq!(
+        presiding(&codex.tool_names().await),
+        senate_bridge::mcp::PRESIDING_TOOLS.len()
     );
 }
 
