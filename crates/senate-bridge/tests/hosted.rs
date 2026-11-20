@@ -20,6 +20,16 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 const BIN: &str = env!("CARGO_BIN_EXE_senate");
 const TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Kills every host under a home, and its TUI, when dropped: for a test
+/// that starts `session-host` itself rather than through a [`Harness`].
+struct KillHosts(senate_bridge::Paths);
+
+impl Drop for KillHosts {
+    fn drop(&mut self) {
+        senate_bridge::host::kill_all(&self.0);
+    }
+}
+
 async fn start(h: &mut Harness) {
     h.daemon = Some(
         start_with_host_binary(
@@ -393,6 +403,8 @@ async fn host_ready_without_publication_closes_its_tui_group() {
         .stderr(Stdio::null())
         .kill_on_drop(true);
     let mut child = cmd.spawn().unwrap();
+    // Dropped before `child`: the host's TUI goes with it, not only the host.
+    let _hosts = KillHosts(paths.clone());
     let ready = tokio::time::timeout(TIMEOUT, child.stdout.as_mut().unwrap().read_u8())
         .await
         .unwrap()
@@ -477,6 +489,8 @@ sleep 300
         .stderr(Stdio::null())
         .kill_on_drop(true);
     let mut child = cmd.spawn().unwrap();
+    // Dropped before `child`: the host's TUI goes with it, not only the host.
+    let _hosts = KillHosts(paths.clone());
     let ready = tokio::time::timeout(TIMEOUT, child.stdout.as_mut().unwrap().read_u8())
         .await
         .unwrap()
@@ -2101,6 +2115,16 @@ async fn a_finished_test_leaves_no_host_or_tui_behind() {
     // The test ends: the harness, and its temporary home, are dropped.
     drop(h);
     none_left_under(&root, Duration::from_secs(10)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dropped_harness_kills_its_hosts_while_their_home_remains() {
+    let (mut h, root) = one_hosted_session().await;
+    // Keep the home: only the harness's own guard can end the host here.
+    let home = std::mem::replace(&mut h.dir, tempfile::tempdir_in("/tmp").unwrap());
+    drop(h);
+    none_left_under(&root, Duration::from_secs(3)).await;
+    assert!(home.path().exists());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

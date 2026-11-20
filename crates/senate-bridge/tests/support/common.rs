@@ -1501,6 +1501,15 @@ pub struct Harness {
     pub desktop: Option<senate_bridge::notify::Desktop>,
 }
 
+/// A test that spawned hosted sessions leaves none behind: every host
+/// under the harness's home, and its TUI, is killed as the harness drops,
+/// whether the test passed or panicked.
+impl Drop for Harness {
+    fn drop(&mut self) {
+        senate_bridge::host::kill_all(&self.paths);
+    }
+}
+
 impl Harness {
     /// alice's machine; the server knows alice and bob and two committees.
     pub async fn new() -> Self {
