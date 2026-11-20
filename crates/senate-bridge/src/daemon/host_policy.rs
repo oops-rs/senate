@@ -46,12 +46,30 @@ impl HostAuthority {
     }
 
     fn note(&self, committee: CommitteeId, body: String) -> NewEvent {
-        let event = NewEvent::new(committee, Kind::Note, self.sender.clone(), body);
+        self.event(committee, Kind::Note, body)
+    }
+
+    /// An event of `kind` from whoever acts, naming the secretary who acts
+    /// for the Speaker's office.
+    fn event(&self, committee: CommitteeId, kind: Kind, body: String) -> NewEvent {
+        let event = NewEvent::new(committee, kind, self.sender.clone(), body);
         match &self.acted_by {
             Some(actor) => event.with_meta(meta::ACTED_BY, serde_json::json!(actor)),
             None => event,
         }
     }
+}
+
+/// What a hosted spawn asks for ([`Request::Spawn`](crate::ipc::Request::Spawn)).
+pub(super) struct SpawnOrder {
+    pub(super) runtime: HostedRuntime,
+    pub(super) committee: CommitteeId,
+    pub(super) alias: Option<SenatorName>,
+    pub(super) cwd: PathBuf,
+    /// Appoint the new senator as the committee's chair.
+    pub(super) chair: bool,
+    /// The new seat's first request, if any.
+    pub(super) prompt: Option<String>,
 }
 
 fn not_hosting() -> IpcError {
@@ -130,12 +148,17 @@ impl Shared {
     pub(super) async fn on_hosted_spawn(
         &self,
         selector: &SessionSelector,
-        runtime: HostedRuntime,
-        committee: CommitteeId,
-        alias: Option<SenatorName>,
-        cwd: PathBuf,
-        appoint_chair: bool,
+        order: SpawnOrder,
     ) -> Result<SpawnReply, IpcError> {
+        let SpawnOrder {
+            runtime,
+            committee,
+            alias,
+            cwd,
+            chair: appoint_chair,
+            prompt,
+        } = order;
+        let prompt = prompt.filter(|p| !p.trim().is_empty());
         let auth = self.authorize_host_action(selector).await?;
         auth.check_target(&committee, appoint_chair)?;
         let audit_auth = &auth;
@@ -152,9 +175,38 @@ impl Shared {
                 },
             )
             .await?;
-        let reply = launch.finish();
+        let mut reply = launch.finish();
         if appoint_chair {
             self.appoint_hosted_chair(&auth, &reply).await?;
+        }
+        if let Some(prompt) = prompt {
+            // The seat is published: an ordinary request reaches it through
+            // its bridge like any other, held for triage as any other.
+            let event = auth
+                .event(reply.committee.clone(), Kind::Request, prompt)
+                .to(Address::senator(&reply.senator));
+            let posted = tokio::time::timeout(AUDIT_TIMEOUT, self.post(event))
+                .await
+                .map_err(|_| {
+                    IpcError::new(
+                        codes::SERVER,
+                        format!(
+                            "{} started, but its prompt was not acknowledged",
+                            Address::senator(&reply.senator).in_text()
+                        ),
+                    )
+                })?
+                .map_err(|e| {
+                    IpcError::new(
+                        &e.code,
+                        format!(
+                            "{} started, but its prompt was not sent: {}",
+                            Address::senator(&reply.senator).in_text(),
+                            e.message
+                        ),
+                    )
+                })?;
+            reply.request = Some(posted.seq);
         }
         Ok(reply)
     }

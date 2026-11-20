@@ -901,6 +901,7 @@ async fn spawning_checks_scope_and_capacity_on_the_daemon() {
         alias: None,
         cwd: dir.path().to_path_buf(),
         chair,
+        prompt: None,
     };
     for (session, committee, chair, code, message) in [
         (

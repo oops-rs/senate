@@ -821,6 +821,7 @@ impl Shared {
             senator: seat.unwrap_or_else(|| agent::session_name(session_runtime, &session_id)),
             session_id: session_id.clone(),
             committee: committee.clone(),
+            request: None,
         };
         let facts = session::gather_git_facts(&cwd, Duration::from_secs(2)).await;
         let inferred = session::infer_committee(

@@ -516,6 +516,8 @@ Without --wait it returns at once: read the answer with `senate inbox`,
   senate spawn claude                    On this directory's committee
   senate spawn codex --alias reviewer    With a name to address it by
   senate spawn claude --committee refund-v2 --dir ../refund
+  senate spawn codex --prompt 'Review the open PR'
+                                         Send it a first request once seated
   senate attach reviewer                 Open its terminal (Ctrl-] detaches)")]
     Spawn {
         /// The coding agent to start.
@@ -530,6 +532,14 @@ Without --wait it returns at once: read the answer with `senate inbox`,
         /// The directory where the coding session will run.
         #[arg(long, default_value = ".")]
         dir: PathBuf,
+        /// A first instruction for the new senator, sent once it is seated
+        /// as an ordinary Senate request from you. It is never typed into
+        /// the terminal.
+        #[arg(long, conflicts_with = "prompt_file")]
+        prompt: Option<String>,
+        /// Like --prompt, read from a file.
+        #[arg(long, value_name = "PATH")]
+        prompt_file: Option<PathBuf>,
     },
     /// Open a hosted senator's terminal. Press Ctrl-] to detach.
     ///
@@ -991,10 +1001,22 @@ fn choose_alias(
 fn launch(request: &Request, terminal: Option<Terminal>) -> anyhow::Result<()> {
     let reply: SpawnReply = host_call(request)?;
     println!("{}", reply.senator);
+    let locale = Paths::from_env()
+        .map(|p| BridgeConfig::locale_at(&p.config()))
+        .unwrap_or_default();
+    if let Some(seq) = reply.request {
+        eprintln!(
+            "{}",
+            locale.pick(
+                format!("已把提示作为请求发给它（{} seq {seq}）。", reply.committee),
+                format!(
+                    "Sent it the prompt as a request ({} seq {seq}).",
+                    reply.committee
+                ),
+            )
+        );
+    }
     if terminal.is_some() {
-        let locale = Paths::from_env()
-            .map(|p| BridgeConfig::locale_at(&p.config()))
-            .unwrap_or_default();
         eprintln!(
             "{}",
             locale.pick(
@@ -1781,7 +1803,19 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             committee,
             alias,
             dir,
+            prompt,
+            prompt_file,
         } => {
+            let prompt = match prompt_file {
+                Some(path) => Some(
+                    std::fs::read_to_string(&path)
+                        .with_context(|| format!("read the prompt file {}", path.display()))?,
+                ),
+                None => prompt,
+            };
+            if prompt.as_deref().is_some_and(|p| p.trim().is_empty()) {
+                anyhow::bail!("the prompt is empty");
+            }
             let committee = runtime(false)?.block_on(committee_here(committee))?;
             remember_terminal()?;
             launch(
@@ -1792,6 +1826,7 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
                     alias,
                     cwd: std::path::absolute(dir)?,
                     session: SessionSelector::default(),
+                    prompt,
                 },
                 terminal,
             )

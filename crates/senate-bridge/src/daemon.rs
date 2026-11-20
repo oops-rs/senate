@@ -2740,10 +2740,18 @@ impl Shared {
                 alias,
                 cwd,
                 chair,
-            } => wrap(
-                self.on_hosted_spawn(&session, runtime, committee, alias, cwd, chair)
-                    .await,
-            ),
+                prompt,
+            } => {
+                let order = host_policy::SpawnOrder {
+                    runtime,
+                    committee,
+                    alias,
+                    cwd,
+                    chair,
+                    prompt,
+                };
+                wrap(self.on_hosted_spawn(&session, order).await)
+            }
             Request::Restore { session, senator } => {
                 wrap(self.on_hosted_restore(&session, &senator).await)
             }

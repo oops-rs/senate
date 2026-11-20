@@ -347,6 +347,9 @@ pub struct SpawnReply {
     pub senator: SenatorName,
     pub session_id: String,
     pub committee: CommitteeId,
+    /// The request carrying the spawn's prompt, when it had one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<Seq>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -402,6 +405,11 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         alias: Option<SenatorName>,
         cwd: PathBuf,
+        /// A first instruction for the new seat: sent, once it is seated,
+        /// as an ordinary Senate request from whoever spawned it. Never
+        /// typed into its terminal.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt: Option<String>,
     },
     Restore {
         #[serde(default)]

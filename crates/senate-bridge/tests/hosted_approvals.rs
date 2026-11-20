@@ -93,6 +93,7 @@ impl Terminal {
                 alias: None,
                 cwd,
                 chair: false,
+                prompt: None,
             },
             WAIT,
             WAIT,
@@ -532,6 +533,7 @@ async fn a_hosted_codex_thread_is_named_after_the_senators_alias() {
         alias: alias.map(path),
         cwd: project.clone(),
         chair: false,
+        prompt: None,
     };
     let reviewer: SpawnReply = ipc::request(&h.socket(), &spawn(Some("reviewer")), WAIT, WAIT)
         .await

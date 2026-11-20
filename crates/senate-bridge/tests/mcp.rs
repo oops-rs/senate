@@ -239,6 +239,7 @@ async fn stop_tool_enforces_authority_and_records_the_actor() {
         alias: Some(path(alias)),
         cwd: project.clone(),
         chair: false,
+        prompt: None,
     };
     let socket = h.socket();
     let launched = |request: Request| {

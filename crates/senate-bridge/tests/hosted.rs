@@ -167,6 +167,7 @@ done
         alias,
         cwd: project.clone(),
         chair: false,
+        prompt: None,
     };
     let request = spawn(Some(path("fixture")));
     let error = ipc::request::<SpawnReply>(&h.socket(), &request, TIMEOUT, TIMEOUT)
@@ -964,6 +965,7 @@ done
                 alias: Some(path("seat-fixture")),
                 cwd: project.clone(),
                 chair: false,
+                prompt: None,
             },
         )
         .await;
@@ -1055,6 +1057,7 @@ async fn stop_cli_protects_an_attending_viewer_and_releases_the_slot() {
         alias: None,
         cwd: fixture.project.clone(),
         chair: false,
+        prompt: None,
     };
     fixture.reject(&spare, "hosted session limit (1)").await;
     let mut viewer = tokio::net::UnixStream::connect(&fixture.terminal)
@@ -2096,6 +2099,7 @@ async fn one_hosted_session() -> (Harness, PathBuf) {
             alias: None,
             cwd: project,
             chair: false,
+            prompt: None,
         },
     )
     .await;
@@ -2200,6 +2204,7 @@ async fn watched_sessions(aliases: &[&str]) -> (Harness, PathBuf) {
                 alias: Some(path(alias)),
                 cwd: project.clone(),
                 chair: false,
+                prompt: None,
             },
         )
         .await;
@@ -2324,4 +2329,66 @@ async fn watch_all_shows_every_session_and_enter_attaches_to_one() {
             .success()
     );
     draining.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_spawn_prompt_is_an_ordinary_request_to_the_new_seat() {
+    let mut h = Harness::new().await;
+    h.config.hosted_session_limit = Some(1);
+    h.dir = tempfile::tempdir_in("/tmp").unwrap();
+    h.paths = senate_bridge::Paths::new(h.dir.path().join("senate"));
+    h.paths.ensure_home().unwrap();
+    let project = h.workdir("prompted", None);
+    // The TUI records every line typed into it.
+    let fixture = h.dir.path().join("fixture-claude");
+    std::fs::write(
+        &fixture,
+        format!(
+            "#!/bin/sh\n{RECORD_HOSTED_ARGV}\nwhile IFS= read -r line; do printf '%s\\n' \"$line\" >> typed; done\n"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(
+        h.paths.config(),
+        format!(
+            "[companion]\nclaude_bin = {:?}\n",
+            fixture.to_str().unwrap()
+        ),
+    )
+    .unwrap();
+    h.config.committees.push(committee());
+    start(&mut h).await;
+    let reply: SpawnReply = call(
+        &h,
+        &Request::Spawn {
+            session: Default::default(),
+            runtime: HostedRuntime::Claude,
+            committee: committee(),
+            alias: Some(path("reviewer")),
+            cwd: project.clone(),
+            chair: false,
+            prompt: Some("Review the open PR on the gateway".into()),
+        },
+    )
+    .await;
+    let seq = reply.request.expect("the prompt's request");
+    let sent = h
+        .server
+        .events(committee().as_str())
+        .into_iter()
+        .find(|e| e.seq.0 == seq.0)
+        .expect("the request in the log");
+    assert_eq!(sent.kind, senate_core::Kind::Request);
+    // From the person who spawned it (the CLI), to the new seat.
+    assert_eq!(sent.from, common::person("alice"));
+    assert_eq!(sent.to, vec![senate_core::Address::senator(&reply.senator)]);
+    assert_eq!(sent.body, "Review the open PR on the gateway");
+    assert!(sent.thread.is_none());
+    // Nothing was typed into its terminal.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let typed = std::fs::read_to_string(project.join("typed")).unwrap_or_default();
+    assert!(!typed.contains("Review the open PR"), "{typed}");
+
+    h.stop().await;
 }
