@@ -9,7 +9,11 @@
 //!   is put to the Speaker is pushed to the first desk worker this machine
 //!   runs that has a live session (else the first one it runs), so it is
 //!   pushed once. Everything a desk worker writes as `speaker` carries
-//!   `meta.acted_by`.
+//!   `meta.acted_by`. The office is in no committee's log, so the Senate
+//!   says it on every stream, when the stream opens and whenever the desk
+//!   changes ([`senate_core::api::SSE_OFFICE`]); this side then asks
+//!   `/v1/me` again ([`Shared::on_office`]). A desk changed from anywhere
+//!   is known here at once, with no request of this machine's.
 //! - **The chair.** One per committee, a fact of its log
 //!   ([`senate_core::ChairFold`]); this side asks `GET .../chair` when a
 //!   stream opens and follows the log after. What is addressed to `chair`
@@ -109,14 +113,38 @@ impl Shared {
         lock(&self.office).clone()
     }
 
-    /// Ask `/v1/me` again (bounded), and record what it says.
-    pub(crate) async fn refresh_me(&self) {
-        if let Ok(Ok(me)) = tokio::time::timeout(ROLE_TIMEOUT, self.api.me()).await {
-            self.note_triaged(me.triaged);
-            self.note_senate(&me);
-            self.note_office(&me);
-            self.note_speaker(me.speaker);
+    /// Ask `/v1/me` again (bounded), and record what it says. False when
+    /// it did not answer: what was known stays.
+    pub(crate) async fn refresh_me(&self) -> bool {
+        let Ok(Ok(me)) = tokio::time::timeout(ROLE_TIMEOUT, self.api.me()).await else {
+            return false;
+        };
+        self.note_triaged(me.triaged);
+        self.note_senate(&me);
+        self.note_office(&me);
+        self.note_speaker(me.speaker);
+        true
+    }
+
+    /// The Senate said its Speaker's office on a stream (`data`: the
+    /// office as JSON, or `null`), as it does when a stream opens and when
+    /// the desk changes. When that is not the office known here, the rest
+    /// of what `/v1/me` says may have moved with it (who works the desk
+    /// first, whether roots are triaged), so `/v1/me` is asked again; when
+    /// it does not answer, the office told is kept as it was told.
+    pub(crate) async fn on_office(&self, data: &str) {
+        let told: Option<Office> = match serde_json::from_str(data) {
+            Ok(office) => office,
+            Err(e) => {
+                tracing::debug!("an office this build cannot read: {e}");
+                return;
+            }
+        };
+        if self.office() == told || self.refresh_me().await {
+            return;
         }
+        tracing::info!(office = ?told, "the Speaker's office, as a stream said it");
+        *lock(&self.office) = told;
     }
 
     /// How `agent`, one this machine runs, works the Speaker's desk, if it

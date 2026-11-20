@@ -230,6 +230,10 @@ async fn consume(
             Ok(Some(Err(e))) => return Ended::Lost(anyhow!("reading the stream: {e}")),
             Ok(Some(Ok(m))) => m,
         };
+        if message.event == api::SSE_OFFICE {
+            shared.on_office(&message.data).await;
+            continue;
+        }
         if message.event != api::SSE_EVENT {
             continue; // `ping` and anything newer only prove liveness.
         }
