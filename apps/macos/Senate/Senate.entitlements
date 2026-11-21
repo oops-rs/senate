@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Open Codex and hosted sessions in Terminal (Apple Events), under the
+	     hardened runtime. The app is not sandboxed: it talks to the daemon over
+	     ~/.senate/bridge.sock and runs nothing else. -->
+	<key>com.apple.security.automation.apple-events</key>
+	<true/>
+</dict>
+</plist>
