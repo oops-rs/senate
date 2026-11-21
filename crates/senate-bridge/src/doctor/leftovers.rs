@@ -1,6 +1,6 @@
 //! Leftovers: hooks and MCP servers of a bridge that are still in Claude
 //! Code's, Codex's or agy's files once `setup install` has done its work.
-//! These are another bridge (`commons-bridge`), or Senate under an old
+//! These are another bridge (`acme-bridge`), or Senate under an old
 //! name or at an old path. Each one runs on every prompt, or offers a
 //! second set of tools, beside Senate's own.
 //!
@@ -271,7 +271,7 @@ mod tests {
 
     #[test]
     fn bridges_are_senate_or_named_bridge() {
-        assert!(is_bridge(Path::new("/x/commons-bridge")));
+        assert!(is_bridge(Path::new("/x/acme-bridge")));
         assert!(is_bridge(Path::new("senate-bridge")));
         assert!(is_bridge(Path::new("/old/senate")));
         assert!(!is_bridge(Path::new("/usr/bin/npx")));

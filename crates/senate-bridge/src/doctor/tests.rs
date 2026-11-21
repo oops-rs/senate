@@ -288,29 +288,29 @@ fn another_bridge_and_an_old_senate_path_are_leftovers() {
     let opts = options(tmp.path());
     installed(&opts);
     let exe = opts.exe.to_string_lossy().to_string();
-    // Claude: commons-bridge's hook and MCP server, and a second Senate MCP
+    // Claude: acme-bridge's hook and MCP server, and a second Senate MCP
     // server under another name at an old path.
     let mut settings: Value =
         serde_json::from_str(&std::fs::read_to_string(opts.settings_path()).unwrap()).unwrap();
     settings["hooks"]["SessionStart"]
         .as_array_mut()
         .unwrap()
-        .push(json!({"hooks": [{"type": "command", "command": "/u/.cargo/bin/commons-bridge hook session-start"}]}));
+        .push(json!({"hooks": [{"type": "command", "command": "/u/.cargo/bin/acme-bridge hook session-start"}]}));
     write_json(&opts.settings_path(), &settings);
     write_json(
         &opts.user_config,
         &json!({"mcpServers": {
             "senate": {"command": exe, "args": ["mcp"]},
-            "commons": {"command": "/u/.cargo/bin/commons-bridge", "args": ["mcp"]},
+            "acme": {"command": "/u/.cargo/bin/acme-bridge", "args": ["mcp"]},
             "senate-old": {"command": "/old/senate-bridge", "args": ["mcp"]},
             "github": {"command": "npx", "args": ["github-mcp"]},
         }}),
     );
-    // Codex: commons-bridge's server.
+    // Codex: acme-bridge's server.
     let codex = opts.codex_config.clone().unwrap();
     let mut text = std::fs::read_to_string(&codex).unwrap();
     text.push_str(
-        "\n[mcp_servers.commons]\ncommand = \"/u/.cargo/bin/commons-bridge\"\nargs = [\"mcp\"]\n",
+        "\n[mcp_servers.acme]\ncommand = \"/u/.cargo/bin/acme-bridge\"\nargs = [\"mcp\"]\n",
     );
     std::fs::write(&codex, text).unwrap();
     // agy: a second named hook running an old Senate.
@@ -324,29 +324,29 @@ fn another_bridge_and_an_old_senate_path_are_leftovers() {
     assert_eq!(
         ids,
         [
-            "leftovers.claude.mcp.commons",
+            "leftovers.claude.mcp.acme",
             "leftovers.claude.mcp.senate-old",
             "leftovers.claude.hook.SessionStart",
-            "leftovers.codex.mcp.commons",
+            "leftovers.codex.mcp.acme",
             "leftovers.agy.hook.old.SessionStart",
         ],
         "{checks:#?}"
     );
     assert!(checks.iter().all(|c| c.status == Status::Warn));
     assert_eq!(
-        by_id(&checks, "leftovers.claude.mcp.commons")
+        by_id(&checks, "leftovers.claude.mcp.acme")
             .fix
             .as_deref(),
-        Some("claude mcp remove --scope user commons")
+        Some("claude mcp remove --scope user acme")
     );
     assert_eq!(
-        by_id(&checks, "leftovers.codex.mcp.commons").fix.as_deref(),
-        Some("codex mcp remove commons")
+        by_id(&checks, "leftovers.codex.mcp.acme").fix.as_deref(),
+        Some("codex mcp remove acme")
     );
     let hook = by_id(&checks, "leftovers.claude.hook.SessionStart");
     assert_eq!(hook.fix, None);
     assert!(
-        hook.found.contains("commons-bridge hook session-start"),
+        hook.found.contains("acme-bridge hook session-start"),
         "{hook:?}"
     );
     assert!(hook.found.contains("its program is gone"), "{hook:?}");

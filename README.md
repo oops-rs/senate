@@ -557,7 +557,7 @@ nothing. What it checks, and what usually fixes it:
 | `service.program.*` | the daemon cannot find `claude`, `codex` or `agy` on the service's `PATH`, a recorded path is gone, or it is a Windows program | `senate setup service install --yes` |
 | `install.*` | Claude Code, Codex or agy is not registered the way `setup install` would register it now (another `senate` path, hooks without `--runtime`) | `senate setup install --yes` |
 | `install.codex.approval`, `install.agy.grant` | Codex lacks `default_tools_approval_mode = "approve"`, or agy lacks `mcp(senate/*)`: a hosted session blocks on its first Senate tool call | `senate setup install --yes` |
-| `leftovers.*` | another bridge (e.g. `commons-bridge`) or an old Senate still has hooks or an MCP server registered | `claude mcp remove --scope user <name>`, `codex mcp remove <name>`, or remove the hook from the file named |
+| `leftovers.*` | another bridge (e.g. `acme-bridge`) or an old Senate still has hooks or an MCP server registered | `claude mcp remove --scope user <name>`, `codex mcp remove <name>`, or remove the hook from the file named |
 | `daemon`, `daemon.version` | the daemon is down, or runs another version than this `senate` | `senate setup service install --yes` (restarts it) |
 | `sessions.*` | hosted terminals run with no session (`senate session prune`), or a session waits on a permission prompt (`senate attach <name>`) | as shown |
 | `uplink.*` | the Senate above does not answer, refused the registration, or runs a newer minor release | `cargo install senate senated` for a newer parent |
