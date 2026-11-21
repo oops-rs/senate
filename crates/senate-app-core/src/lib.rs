@@ -8,6 +8,8 @@
 //!   current and runs actions.
 //! - [`state`]: the flat snapshot the app renders, with its sentences
 //!   written in the app's language ([`text`]).
+//! - [`reads`]: what the app reads on demand and shows as it comes back
+//!   (a thread), outside the snapshot.
 //! - [`ffi`]: the UI-agnostic facade the apps call: [`AppCore`] owns a
 //!   tokio runtime and a driver, and pushes [`AppState`] snapshots to a
 //!   foreign [`CoreListener`].
@@ -37,6 +39,7 @@
 pub mod ffi;
 pub mod link;
 pub mod model;
+pub mod reads;
 pub mod state;
 pub mod text;
 
@@ -44,6 +47,7 @@ pub use ffi::{
     AppCore, ApprovalDecision, CoreError, CoreListener, MentionKind, TerminalCommand, TextPart,
     split_mentions,
 };
+pub use reads::{ThreadEvent, ThreadView};
 pub use state::{
     AgentInfo, AppState, ApprovalRequest, CodexThreadInfo, CommitteeLine, Counts, DocketCommittee,
     DocketEntry, DocketSenate, InboxThread, MenuState, SeatLine, SenateInfo,

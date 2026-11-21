@@ -387,21 +387,40 @@ impl<S: Sink> Driver<S> {
             Action::MarkRead { .. } => self.link.call::<Value>(&request).await,
         };
         if let Some(committee) = action.committee() {
-            let agents: Vec<SenatorName> = self
-                .model()
-                .targets()
-                .into_iter()
-                .filter(|(_, c)| c == committee)
-                .map(|(a, _)| a)
-                .collect();
-            for agent in agents {
-                self.refresh_inbox(agent, committee.clone()).await;
-            }
+            self.refresh_committee(committee).await;
         }
         let result = result.map_err(|e| Failure::Daemon(message(&e)));
         self.model().last_error = result.as_ref().err().cloned();
         self.changed();
         result
+    }
+}
+
+impl<S: Sink> Driver<S> {
+    /// A read that is not state (a thread, the hosted sessions, the roles):
+    /// its reply goes back to the caller, nothing is folded.
+    pub async fn read<T: DeserializeOwned>(&self, request: &Request) -> Result<T, Failure> {
+        self.link
+            .call::<T>(request)
+            .await
+            .map_err(|e| Failure::Daemon(message(&e)))
+    }
+
+    /// Re-read every inbox of the primary Senate on `committee`, then
+    /// re-render: after an action there, or reading a thread (which marks
+    /// it seen).
+    pub async fn refresh_committee(&self, committee: &CommitteeId) {
+        let agents: Vec<SenatorName> = self
+            .model()
+            .targets()
+            .into_iter()
+            .filter(|(_, c)| c == committee)
+            .map(|(a, _)| a)
+            .collect();
+        for agent in agents {
+            self.refresh_inbox(agent, committee.clone()).await;
+        }
+        self.changed();
     }
 }
 

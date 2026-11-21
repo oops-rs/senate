@@ -153,3 +153,34 @@ async fn snapshots_and_actions_through_the_facade() {
         }
     )));
 }
+
+#[tokio::test]
+async fn reading_a_thread_returns_its_events_and_marks_it_seen() {
+    let (dir, socket, world) = setup();
+    let daemon = FakeDaemon::start(&socket, world);
+    let core = AppCore::new(Some(dir.path().display().to_string()), Some("en".into())).unwrap();
+    let listener = Arc::new(Listener::default());
+    core.start(listener.clone()).unwrap();
+    until(&listener, "online", |s| s.online && s.inbox.len() == 2).await;
+
+    let view = core.thread("refund-v2".into(), 131).await.unwrap();
+    assert_eq!(view.root, 131);
+    assert_eq!(view.committee, "refund-v2");
+    assert_eq!(view.events[0].body, "which env?");
+    assert_eq!(view.events[0].kind_label, "question");
+    assert_eq!(view.events[1].kind, "note");
+    assert!(view.events.iter().all(|e| !e.mine));
+
+    assert!(matches!(
+        core.thread("refund-v2".into(), 999).await,
+        Err(CoreError::Failed { message }) if message.contains("no thread 999")
+    ));
+    assert!(daemon.requests().iter().any(|r| matches!(
+        r,
+        Request::Thread {
+            thread: Seq(131),
+            mark_seen: true,
+            ..
+        }
+    )));
+}

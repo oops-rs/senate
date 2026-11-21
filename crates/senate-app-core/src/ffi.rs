@@ -16,12 +16,14 @@ use chrono::Utc;
 use senate_bridge::Paths;
 use senate_bridge::approvals::{Approval, Decision};
 use senate_bridge::delivery::codex::CodexConfig;
+use senate_bridge::ipc::{Request, SessionSelector, ThreadReply};
 use senate_core::{CommitteeId, Locale, Mention, Seq};
 use tokio::runtime::{Handle, Runtime};
 
 use crate::link::{Backoff, Driver, Link, Sink};
 use crate::model::{self, Action, Failure, Model, Refresh};
 use crate::state::{AppState, ApprovalRequest};
+use crate::reads::{self, ThreadView};
 use crate::text;
 
 /// Why a call failed.
@@ -379,6 +381,36 @@ impl AppCore {
         .await
     }
 
+    /// One thread, root first, read as the person: showing it marks it
+    /// seen up to its last event, and the inboxes on its committee are read
+    /// again (the result arrives as state too).
+    pub async fn thread(&self, committee: String, thread: u64) -> Result<ThreadView, CoreError> {
+        let committee = self.committee_id(&committee)?;
+        let request = Request::Thread {
+            session: SessionSelector::default(),
+            committee: Some(committee.clone()),
+            thread: Seq(thread),
+            mark_seen: true,
+        };
+        let locale = self.locale();
+        let reply: ThreadReply = self
+            .on_runtime(move |driver| async move {
+                let reply = driver.read::<ThreadReply>(&request).await;
+                if reply.is_ok() {
+                    driver.refresh_committee(&committee).await;
+                }
+                reply
+            })
+            .await?;
+        let person = self
+            .driver()?
+            .model()
+            .senates()
+            .next()
+            .map(|s| s.person.clone());
+        Ok(reads::thread_view(reply, person.as_ref(), locale))
+    }
+
     /// What to run to open Codex in a terminal: resuming `thread_id` in its
     /// directory, or a new Codex when `None`. Reads `[codex]` from
     /// `senate.toml` for the binary and the `--remote` address.
@@ -417,16 +449,27 @@ impl AppCore {
     }
 
     async fn act(&self, action: Action) -> Result<(), CoreError> {
+        self.on_runtime(move |driver| async move { driver.act(action).await })
+            .await
+            .map(drop)
+    }
+
+    /// Run `op` with the driver on the core's runtime (the caller's
+    /// executor is not tokio); a failure in the app's language.
+    async fn on_runtime<T, F, Fut>(&self, op: F) -> Result<T, CoreError>
+    where
+        T: Send + 'static,
+        F: FnOnce(Arc<Driver<ListenerSink>>) -> Fut,
+        Fut: std::future::Future<Output = Result<T, Failure>> + Send + 'static,
+    {
         let driver = Arc::clone(self.driver()?);
         let locale = self.locale();
-        // Run on the core's runtime: the caller's executor is not tokio.
         self.handle
-            .spawn(async move { driver.act(action).await })
+            .spawn(op(driver))
             .await
             .map_err(|e| CoreError::Failed {
                 message: format!("the action did not finish: {e}"),
             })?
-            .map(drop)
             .map_err(|failure: Failure| CoreError::Failed {
                 message: failure.text(locale),
             })

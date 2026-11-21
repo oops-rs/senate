@@ -19,7 +19,7 @@ use senate_bridge::agent::AgentSource;
 use senate_bridge::approvals::{Approval, ApprovalKind, ResolvedBy};
 use senate_bridge::ipc::{
     ApprovalsReply, ApproveReply, CommitteeStatus, DocketReply, InboxReply, IpcError, Posted,
-    Reply, Request, SenateDocket, StatusReply, StreamState, WatchEvent,
+    Reply, Request, SenateDocket, StatusReply, StreamState, ThreadReply, WatchEvent,
 };
 use senate_bridge::session::{Runtime, Session, SessionState};
 use senate_bridge::state::QueueCounts;
@@ -469,6 +469,18 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
             assert_eq!(committee, None);
             Reply::ok(&w.docket)
         }
+        Request::Thread {
+            thread,
+            committee: Some(c),
+            ..
+        } => match w.threads.iter().find(|t| t.root == thread) {
+            Some(t) => Reply::ok(&ThreadReply {
+                committee: c,
+                root: t.root,
+                events: thread_events(t),
+            }),
+            None => Reply::err(IpcError::bad_request(format!("no thread {thread}"))),
+        },
         Request::Approvals => Reply::ok(&ApprovalsReply {
             approvals: w.approvals.clone(),
         }),
@@ -489,6 +501,40 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
         },
         other => Reply::err(IpcError::bad_request(format!("fake: {other:?}"))),
     }
+}
+
+/// What a canned thread says: its question, and the agent's note on it.
+pub fn thread_events(t: &ThreadSummary) -> Vec<Event> {
+    let event = |seq: u64, kind: Kind, from: Address, body: String| Event {
+        seq: Seq(seq),
+        committee: committee(),
+        id: EventId::new(),
+        ts: t.since_ts,
+        kind,
+        from,
+        to: t.to.clone(),
+        thread: (seq != t.root.0).then_some(t.root),
+        on_behalf_of: None,
+        source: None,
+        body,
+        refs: None,
+        mirror: None,
+        meta: Default::default(),
+    };
+    let agent = t.agents.first().cloned().unwrap_or_else(|| path("claude"));
+    let mut events = vec![Event {
+        on_behalf_of: t.on_behalf_of.clone(),
+        ..event(t.root.0, t.kind.clone(), t.from.clone(), t.title.clone())
+    }];
+    if let Some(reason) = &t.reason {
+        events.push(event(
+            t.root.0 + 1,
+            Kind::Note,
+            Address::senator(&agent),
+            format!("Waiting on a person: {reason}."),
+        ));
+    }
+    events
 }
 
 /// A socket path in a fresh temp dir (short enough to bind), and a world.
