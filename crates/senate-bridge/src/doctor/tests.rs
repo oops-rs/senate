@@ -334,9 +334,7 @@ fn another_bridge_and_an_old_senate_path_are_leftovers() {
     );
     assert!(checks.iter().all(|c| c.status == Status::Warn));
     assert_eq!(
-        by_id(&checks, "leftovers.claude.mcp.acme")
-            .fix
-            .as_deref(),
+        by_id(&checks, "leftovers.claude.mcp.acme").fix.as_deref(),
         Some("claude mcp remove --scope user acme")
     );
     assert_eq!(

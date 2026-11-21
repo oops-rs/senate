@@ -372,7 +372,11 @@ async fn guest_and_action_limits_model_failure_and_fixed_syntax_hold() {
         .converses(Err(BrainError::Unavailable("model offline".into())));
     // A model failure gets one short line, never the fixed-syntax dump.
     let fallback = say(&world, "u_pm", "m_failed", "记个决策", "模型暂时不可用").await;
-    assert!(!fallback.markdown.contains("/tell"), "{}", fallback.markdown);
+    assert!(
+        !fallback.markdown.contains("/tell"),
+        "{}",
+        fallback.markdown
+    );
     let calls = world.brain.conversations().len();
     say(&world, "u_pm", "m_fixed", "/bind refund-v3", "refund-v3").await;
     let target = CommitteeId::new("refund-v3").unwrap();
