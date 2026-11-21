@@ -24,6 +24,10 @@ struct SenateApp: App {
         .defaultSize(width: 980, height: 660)
         .windowToolbarStyle(.unified)
         .defaultLaunchBehavior(.suppressed)
+
+        Settings {
+            SettingsView(store: store)
+        }
     }
 }
 
@@ -31,6 +35,7 @@ struct SenateApp: App {
 struct MenuBarLabel: View {
     let store: CoreStore
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         HStack(spacing: 3) {
@@ -45,7 +50,7 @@ struct MenuBarLabel: View {
         .task {
             // The label is the one view alive from launch: hand the store
             // the window opener, for notifications and `SENATE_APP_SHOW`.
-            store.attach(openWindow: openWindow)
+            store.attach(openWindow: openWindow, openSettings: openSettings)
         }
     }
 }
@@ -87,7 +92,27 @@ struct MenuContent: View {
                 .keyboardShortcut("d")
         }
         Divider()
+        SettingsLink { Text(verbatim: L("menu.settings")) }
+            .keyboardShortcut(",")
+        Button(L("menu.about")) { About.show() }
+        Divider()
         Button(L("menu.quit")) { NSApplication.shared.terminate(nil) }
             .keyboardShortcut("q")
+    }
+}
+
+/// The standard About panel, with what Senate is.
+enum About {
+    static func show() {
+        NSApplication.shared.activate()
+        NSApplication.shared.orderFrontStandardAboutPanel(options: [
+            .credits: NSAttributedString(
+                string: L("about.credits"),
+                attributes: [
+                    .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
+                    .foregroundColor: NSColor.secondaryLabelColor,
+                ]
+            ),
+        ])
     }
 }

@@ -9,9 +9,19 @@ enum Terminal {
     }
 
     /// macOS asks once to let Senate control Terminal.
-    @MainActor
     static func run(_ command: TerminalCommand) throws {
-        guard let script = NSAppleScript(source: command.appleScript) else {
+        try run(script: command.appleScript)
+    }
+
+    /// A shell line of the app's own (the log stream).
+    static func run(shell line: String) throws {
+        let escaped = line.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        try run(script: "tell application \"Terminal\"\n  activate\n  do script \"\(escaped)\"\nend tell")
+    }
+
+    private static func run(script source: String) throws {
+        guard let script = NSAppleScript(source: source) else {
             throw Failure(message: L("terminal.no_script"))
         }
         var error: NSDictionary?

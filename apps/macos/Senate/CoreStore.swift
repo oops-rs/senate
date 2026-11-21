@@ -55,6 +55,7 @@ final class CoreStore {
     @ObservationIgnored private(set) var core: (any AppCoreProtocol)?
     @ObservationIgnored private var events: Task<Void, Never>?
     @ObservationIgnored private var openWindow: OpenWindowAction?
+    @ObservationIgnored private(set) var openSettings: OpenSettingsAction?
     @ObservationIgnored private let notifier = Notifier()
     @ObservationIgnored private let defaults: UserDefaults
     private static let draftsKey = "drafts"
@@ -74,10 +75,43 @@ final class CoreStore {
         connect()
     }
 
-    /// The real core. The language is the one the bundle was localized
-    /// into, so the core's sentences and the app's labels agree.
+    /// Settings' Senate home; empty or unset is `$SENATE_HOME`, else
+    /// `~/.senate`.
+    nonisolated static let homeKey = "senateHome"
+
+    /// The real core. The Senate home: `$SENATE_HOME` when set (development
+    /// runs), else the one chosen in Settings, else `~/.senate`. The
+    /// language is the one the bundle was localized into, so the core's
+    /// sentences and the app's labels agree.
     nonisolated static func realCore() throws -> any AppCoreProtocol {
-        try AppCore(senateHome: nil, language: appLanguage())
+        let env = ProcessInfo.processInfo.environment["SENATE_HOME"].flatMap { $0.isEmpty ? nil : $0 }
+        let chosen = UserDefaults.standard.string(forKey: homeKey).flatMap { $0.isEmpty ? nil : $0 }
+        return try AppCore(senateHome: env == nil ? chosen : nil, language: appLanguage())
+    }
+
+    /// The Senate home the core uses.
+    var senateHome: String? { core?.senateHome() }
+
+    /// Start over with another Senate home (Settings): the old core and its
+    /// connection go, a new one connects.
+    func restart() {
+        events?.cancel()
+        events = nil
+        core = nil
+        state = .placeholder
+        thread = nil
+        selectedThread = nil
+        connect()
+    }
+
+    /// The app's and the core's unified log, live, in Terminal.
+    func openLogStream() {
+        let line = "log stream --info --predicate 'subsystem == \"\(Log.subsystem)\"'"
+        do {
+            try Terminal.run(shell: line)
+        } catch {
+            actionError = describe(error)
+        }
     }
 
     /// Make and start the core. After a setup error, tries again.
@@ -231,9 +265,10 @@ final class CoreStore {
 
     // MARK: Window
 
-    func attach(openWindow: OpenWindowAction) {
+    func attach(openWindow: OpenWindowAction, openSettings: OpenSettingsAction) {
         let first = self.openWindow == nil
         self.openWindow = openWindow
+        self.openSettings = openSettings
         guard first else { return }
         if let v = ProcessInfo.processInfo.environment[Self.showEnv], !v.isEmpty {
             show(.inbox)

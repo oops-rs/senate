@@ -30,6 +30,12 @@ enum Snapshot {
                 try? await Task.sleep(for: .seconds(1.5))
                 await capture(dir.appendingPathComponent("\(prefix)\(section.rawValue).png"))
             }
+            // Settings, in its own window.
+            store.openSettings?()
+            try? await Task.sleep(for: .seconds(1.5))
+            await capture(dir.appendingPathComponent("\(prefix)settings.png")) { window in
+                window.identifier?.rawValue.contains(CoreStore.windowID) != true
+            }
             NSApplication.shared.terminate(nil)
         }
     }
@@ -37,13 +43,16 @@ enum Snapshot {
     /// ScreenCaptureKit's view of this process's own windows needs no
     /// screen-recording permission, and draws what the screen shows (Liquid
     /// Glass included), which `cacheDisplay` does not.
-    private static func capture(_ url: URL) async {
+    private static func capture(
+        _ url: URL,
+        which: (NSWindow) -> Bool = { $0.identifier?.rawValue.contains(CoreStore.windowID) == true }
+    ) async {
         do {
-            // Exactly the app's main window, by its window number: never
-            // anything else on the screen.
+            // Exactly one of the app's own windows, by its window number:
+            // never anything else on the screen.
             guard let mine = NSApplication.shared.windows.first(where: {
-                $0.isVisible && $0.identifier?.rawValue.contains(CoreStore.windowID) == true
-            }) ?? NSApplication.shared.windows.first(where: { $0.isVisible && $0.frame.width > 400 })
+                $0.isVisible && $0.frame.width > 300 && which($0)
+            })
             else {
                 print("snapshot: no window for \(url.lastPathComponent)")
                 return
