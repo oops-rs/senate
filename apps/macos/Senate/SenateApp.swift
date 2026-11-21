@@ -10,6 +10,10 @@ import SenateCore
 struct SenateApp: App {
     @State private var store = CoreStore()
 
+    init() {
+        Diagnostics.shared.start()
+    }
+
     var body: some Scene {
         MenuBarExtra {
             MenuContent(store: store)

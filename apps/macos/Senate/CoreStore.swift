@@ -127,6 +127,7 @@ final class CoreStore {
         } catch {
             continuation.finish()
             setupError = describe(error)
+            Log.app.error("the core could not start: \(self.setupError ?? "", privacy: .public)")
             return
         }
         // The core's callbacks, in the order it made them, on the main actor.
@@ -415,6 +416,7 @@ final class CoreStore {
             return true
         } catch {
             actionError = describe(error)
+            Log.app.notice("\(key, privacy: .public): \(self.actionError ?? "", privacy: .public)")
             return false
         }
     }
