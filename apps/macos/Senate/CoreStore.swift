@@ -254,6 +254,15 @@ final class CoreStore {
 
     // MARK: Actions
 
+    /// Try to reach the daemon now rather than after the current wait.
+    func reconnect() {
+        guard let core else {
+            connect()
+            return
+        }
+        do { try core.reconnect() } catch { actionError = describe(error) }
+    }
+
     func refresh() {
         guard let core else { return }
         do { try core.refresh() } catch { actionError = describe(error) }

@@ -66,6 +66,9 @@ struct MenuContent: View {
         if let setup = store.setupError {
             Text(verbatim: L("menu.setup", setup))
         }
+        if !store.state.online {
+            Button(L("offline.retry")) { store.reconnect() }
+        }
         if !store.state.menu.lines.isEmpty {
             Divider()
             ForEach(store.state.menu.lines, id: \.self) { line in

@@ -121,3 +121,12 @@
 "senates.children" = "下级 Senate";
 "senates.child_speaker" = "Speaker";
 "senates.seen" = "%@ 前在线";
+"offline.title" = "Senate 离线";
+"offline.retrying" = "应用会自动重试连接守护进程。";
+"offline.start_hint" = "如果守护进程尚未作为服务安装，请在终端中启动它：";
+"offline.copy" = "复制";
+"offline.copied" = "已复制";
+"offline.retry" = "立即重试";
+"setup.title" = "Senate 无法启动";
+"setup.retry" = "重试";
+"setup.settings" = "设置…";

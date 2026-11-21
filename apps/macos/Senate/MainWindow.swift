@@ -14,7 +14,7 @@ struct MainWindow: View {
             detail
                 .navigationTitle((store.section ?? .inbox).title)
                 .safeAreaInset(edge: .top, spacing: 0) {
-                    if let error = store.shownError {
+                    if store.state.online, let error = store.shownError {
                         ErrorBar(message: error) { store.actionError = nil }
                     }
                 }
@@ -40,6 +40,16 @@ struct MainWindow: View {
     }
 
     @ViewBuilder private var detail: some View {
+        if let problem = store.setupError {
+            SetupProblemView(store: store, message: problem)
+        } else if !store.state.online {
+            OfflineView(store: store)
+        } else {
+            section
+        }
+    }
+
+    @ViewBuilder private var section: some View {
         switch store.section {
         case .inbox, nil: InboxView(store: store)
         case .approvals: ApprovalsView(store: store)

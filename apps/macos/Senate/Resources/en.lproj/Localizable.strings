@@ -121,3 +121,12 @@
 "senates.children" = "Senates below";
 "senates.child_speaker" = "Speaker";
 "senates.seen" = "seen %@ ago";
+"offline.title" = "Senate is offline";
+"offline.retrying" = "The app keeps trying to reach the daemon on its own.";
+"offline.start_hint" = "If the daemon is not installed as a service, start it from a terminal:";
+"offline.copy" = "Copy";
+"offline.copied" = "Copied";
+"offline.retry" = "Try Now";
+"setup.title" = "Senate could not start";
+"setup.retry" = "Try Again";
+"setup.settings" = "Settings…";
