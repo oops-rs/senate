@@ -961,6 +961,55 @@ async fn daemon_call<T: serde::de::DeserializeOwned>(
     .await?)
 }
 
+/// Open the joined committee on the server when it has no event there
+/// yet, so sessions can be spawned on it; the line to print. Never fails
+/// the join: without the daemon or the server it says when the committee
+/// opens instead.
+async fn open_committee(paths: &Paths, committee: CommitteeId, locale: Locale) -> String {
+    let request = Request::OpenCommittee {
+        committee: committee.clone(),
+    };
+    let opened = tokio::time::timeout(
+        Duration::from_secs(10),
+        ipc::request::<ipc::OpenCommitteeReply>(
+            &paths.socket(),
+            &request,
+            Duration::from_secs(1),
+            Duration::from_secs(8),
+        ),
+    )
+    .await;
+    match opened {
+        Ok(Ok(ipc::OpenCommitteeReply { opened: Some(seq) })) => locale.pick(
+            format!("已在服务器上开设委员会 {committee}（seq {seq}）。"),
+            format!("Opened committee {committee} on the server (seq {seq})."),
+        ),
+        Ok(Ok(ipc::OpenCommitteeReply { opened: None })) => locale.pick(
+            format!("服务器上已有委员会 {committee}。"),
+            format!("Committee {committee} is already open on the server."),
+        ),
+        Ok(Err(error)) => {
+            tracing::debug!(%error, %committee, "opening the joined committee on the server");
+            not_open_yet(&committee, locale)
+        }
+        Err(_) => not_open_yet(&committee, locale),
+    }
+}
+
+fn not_open_yet(committee: &CommitteeId, locale: Locale) -> String {
+    locale.pick(
+        format!(
+            "暂时连不上 Senate 服务器，委员会 {committee} 还没在服务器上开设：下次有会话在那里启动，\
+             或再运行一次 `senate join {committee}`，它就会开设。"
+        ),
+        format!(
+            "Could not reach the Senate server, so committee {committee} is not open there yet: it \
+             opens the next time a session starts there, or when you run `senate join {committee}` \
+             again."
+        ),
+    )
+}
+
 fn host_call<T: serde::de::DeserializeOwned>(request: &Request) -> anyhow::Result<T> {
     let paths = Paths::from_env()?;
     Ok(runtime(false)?.block_on(ipc::request(
@@ -1774,6 +1823,13 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
                 println!("{}", binding::render_derived(d, settings.locale));
             }
             println!("{}", binding::render_join(&change, settings.locale));
+            if let Some(committee) = &change.value {
+                let committee = CommitteeId::new(committee)?;
+                println!(
+                    "{}",
+                    rt.block_on(open_committee(&paths, committee, settings.locale))
+                );
+            }
             if let (Some(duty), Some(session), Some(committee)) = (duty, session, &change.value) {
                 let committee = CommitteeId::new(committee)?;
                 let line =

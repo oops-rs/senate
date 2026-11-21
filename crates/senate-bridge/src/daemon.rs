@@ -2715,6 +2715,7 @@ impl Shared {
                 version: env!("CARGO_PKG_VERSION").to_string(),
             }),
             Request::Aliases => wrap(self.api.aliases().await.map_err(server_error)),
+            Request::OpenCommittee { committee } => wrap(self.on_open_committee(committee).await),
             Request::RemoveAlias {
                 primary,
                 alias,
@@ -4629,6 +4630,30 @@ impl Shared {
         let mut posted = self.post(event).await?;
         posted.unseen_escalation = self.mark_after_speaking(&posted, &spoke_in, &seen).await?;
         Ok(posted)
+    }
+
+    /// Open `committee` on the server when it has no event there yet: one
+    /// note from the person, with an id derived from the committee and the
+    /// person, so a repeated join never posts it twice.
+    async fn on_open_committee(
+        &self,
+        committee: CommitteeId,
+    ) -> Result<ipc::OpenCommitteeReply, IpcError> {
+        let me = self.api.me().await.map_err(server_error)?;
+        if me.committees.contains(&committee) {
+            return Ok(ipc::OpenCommitteeReply { opened: None });
+        }
+        let person = &self.config.person;
+        let body = self.locale.pick(
+            format!("{person} 开设了委员会 {committee}"),
+            format!("{person} opened committee {committee}"),
+        );
+        let id = EventId::derived(0, &format!("open-committee\0{committee}\0{person}"));
+        let event = NewEvent::new(committee, Kind::Note, self.person(), body).with_id(id);
+        let posted = self.post(event).await?;
+        Ok(ipc::OpenCommitteeReply {
+            opened: Some(posted.seq),
+        })
     }
 
     /// The Senates a qualified name is looked for in, nearest first: the

@@ -580,6 +580,12 @@ pub enum Request {
         session: SessionSelector,
         committee: CommitteeId,
     },
+    /// `senate join` on a committee the server has no event of yet: open
+    /// it there with one note from the person, so `spawn` (which never
+    /// creates a committee) can start sessions on it.
+    OpenCommittee {
+        committee: CommitteeId,
+    },
     /// Separate operation so an older daemon cannot silently ignore the name.
     /// The Senate's aliases ([`KnownAliases`](senate_core::alias::KnownAliases)).
     Aliases,
@@ -1568,6 +1574,14 @@ pub struct SearchReply {
     pub query: String,
     /// Best match first, as the server ranks them.
     pub events: Vec<Event>,
+}
+
+/// What [`Request::OpenCommittee`] did: the note's seq when it opened the
+/// committee, `None` when the server already had it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenCommitteeReply {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opened: Option<Seq>,
 }
 
 /// The committee a session is bound to, if any.

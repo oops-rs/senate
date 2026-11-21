@@ -451,7 +451,19 @@ async fn me(State(st): St, headers: HeaderMap) -> Response {
                     .into_iter()
                     .cloned()
                     .collect(),
-                committees: st.committees.clone(),
+                // Like the server: the committees configured, and every
+                // committee with an event.
+                committees: {
+                    let mut committees = st.committees.clone();
+                    for committee in inner.events.keys() {
+                        if let Ok(id) = CommitteeId::new(committee)
+                            && !committees.contains(&id)
+                        {
+                            committees.push(id);
+                        }
+                    }
+                    committees
+                },
                 epoch: inner.epoch.clone(),
                 triaged: inner.triaged,
             })

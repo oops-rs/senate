@@ -2161,10 +2161,12 @@ async fn watched_session() -> (Harness, String, PathBuf) {
     (h, "watched".to_owned(), typed)
 }
 
-/// One such session for each of `aliases`.
-async fn watched_sessions(aliases: &[&str]) -> (Harness, PathBuf) {
+/// A running daemon whose hosted Claude is the fixture TUI, with room for
+/// `limit` hosted sessions: the harness, the project, and the file the
+/// fixture records typed lines in.
+async fn fixture_daemon(limit: usize) -> (Harness, PathBuf, PathBuf) {
     let mut h = Harness::new().await;
-    h.config.hosted_session_limit = Some(aliases.len());
+    h.config.hosted_session_limit = Some(limit);
     h.dir = tempfile::tempdir_in("/tmp").unwrap();
     h.paths = senate_bridge::Paths::new(h.dir.path().join("senate"));
     h.paths.ensure_home().unwrap();
@@ -2195,6 +2197,12 @@ async fn watched_sessions(aliases: &[&str]) -> (Harness, PathBuf) {
     .unwrap();
     h.config.committees.push(committee());
     start(&mut h).await;
+    (h, project, typed)
+}
+
+/// One such session for each of `aliases`.
+async fn watched_sessions(aliases: &[&str]) -> (Harness, PathBuf) {
+    let (h, project, typed) = fixture_daemon(aliases.len()).await;
     for alias in aliases {
         let _: SpawnReply = call(
             &h,
@@ -2591,6 +2599,71 @@ async fn senate(h: &Harness, args: &[&str]) -> (bool, String) {
     (out.status.success(), text)
 }
 
+/// `senate join` on a name the server has no event of opens the committee
+/// there with one note from the person, so a spawn right after it works;
+/// spawn itself still refuses a committee nobody opened, and joining again
+/// posts nothing more.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn joining_a_new_committee_opens_it_so_a_spawn_works() {
+    let (h, project, _typed) = fixture_daemon(1).await;
+    let fresh = senate_core::CommitteeId::new("fresh-work").unwrap();
+    let spawn = Request::Spawn {
+        session: Default::default(),
+        runtime: HostedRuntime::Claude,
+        committee: fresh.clone(),
+        alias: Some(path("main")),
+        cwd: project.clone(),
+        chair: false,
+        prompt: None,
+    };
+    let refused = ipc::request::<SpawnReply>(
+        &h.paths.socket(),
+        &spawn,
+        Duration::from_secs(1),
+        Duration::from_secs(20),
+    )
+    .await
+    .expect_err("spawn never creates a committee");
+    assert!(
+        refused.to_string().contains("unknown committee fresh-work"),
+        "{refused}"
+    );
+
+    let join = || {
+        let mut cmd = tokio::process::Command::new(BIN);
+        testenv::isolate_async(&mut cmd, h.dir.path());
+        cmd.args(["join", "fresh-work"])
+            .current_dir(&project)
+            .env("SENATE_HOME", h.paths.home());
+        cmd
+    };
+    let out = join().output().await.unwrap();
+    let said = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        out.status.success(),
+        "{said}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        said.contains("Opened committee fresh-work on the server"),
+        "{said}"
+    );
+    let opened = h.server.events("fresh-work");
+    assert_eq!(opened.len(), 1, "{opened:#?}");
+    assert_eq!(opened[0].kind, senate_core::Kind::Note);
+    assert_eq!(opened[0].body, "alice opened committee fresh-work");
+    assert_eq!(opened[0].from, common::person("alice"), "from the person");
+
+    // Joining again posts nothing more.
+    let out = join().output().await.unwrap();
+    let said = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(said.contains("is already open on the server"), "{said}");
+    assert_eq!(h.server.events("fresh-work").len(), 1);
+
+    let spawned: SpawnReply = call(&h, &spawn).await;
+    assert_eq!(spawned.committee, fresh);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sessions_lists_stops_by_name_and_prunes_an_orphan() {
     let (mut h, root) = one_hosted_session().await;
@@ -2794,4 +2867,41 @@ async fn a_bare_alias_on_several_committees_opens_the_picker_on_a_terminal() {
     h.stop().await;
     drop(h);
     none_left_under(&root, Duration::from_secs(5)).await;
+}
+
+/// Offline, `senate join` still binds the worktree, and says when the
+/// committee will be opened on the server instead of failing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn joining_offline_binds_and_says_when_the_committee_opens() {
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let home = dir.path().join("senate");
+    let work = dir.path().join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let mut cmd = tokio::process::Command::new(BIN);
+    testenv::isolate_async(&mut cmd, dir.path());
+    let out = cmd
+        .args(["join", "fresh-work"])
+        .current_dir(&work)
+        .env("SENATE_HOME", &home)
+        .output()
+        .await
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        out.status.success(),
+        "{said}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(said.contains("Bound"), "{said}");
+    assert!(
+        said.contains(
+            "committee fresh-work is not open there yet: it opens the next time a session starts \
+             there, or when you run `senate join fresh-work` again"
+        ),
+        "{said}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(work.join(".senate/committee")).unwrap(),
+        "fresh-work\n"
+    );
 }
