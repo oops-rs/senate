@@ -10,9 +10,9 @@ use async_trait::async_trait;
 use senate_core::{Brief, Locale, TriagePayload, TriageVerdict};
 
 use crate::brain::{
-    AgentTurn, Answer, Brain, BrainError, Conversation, Crossing, CrossingInput, DigestInput,
-    DigestOut, Intent, Offline, OfflineInput, Pick, PickInput, Question, TriageInput, Utterance,
-    rule_crossing, rule_offline, rule_pick,
+    AgentTurn, Agreement, AgreementInput, Answer, Brain, BrainError, Conversation, Crossing,
+    CrossingInput, DigestInput, DigestOut, Intent, Offline, OfflineInput, Pick, PickInput,
+    Question, TriageInput, Utterance, rule_crossing, rule_offline, rule_pick,
 };
 
 /// One scripted result, and how long the "model" takes to produce it.
@@ -42,6 +42,8 @@ struct Script {
     offline_inputs: Vec<OfflineInput>,
     digests: VecDeque<Step<DigestOut>>,
     digest_inputs: Vec<DigestInput>,
+    agreements: VecDeque<Step<Option<Agreement>>>,
+    agreement_inputs: Vec<AgreementInput>,
 }
 
 /// Plays queued answers in order and records every call. An unscripted call
@@ -234,6 +236,21 @@ impl ScriptedBrain {
         self.lock().digest_inputs.clone()
     }
 
+    /// Queue the next [`Brain::spot_agreement`] result.
+    pub fn spots(&self, result: Result<Option<Agreement>, BrainError>) -> &Self {
+        self.lock().agreements.push_back(Step {
+            delay: Duration::ZERO,
+            result,
+        });
+        self
+    }
+
+    /// Every burst checked for an agreement so far (recorded when the call
+    /// starts).
+    pub fn agreement_inputs(&self) -> Vec<AgreementInput> {
+        self.lock().agreement_inputs.clone()
+    }
+
     fn lock(&self) -> MutexGuard<'_, Script> {
         self.script
             .lock()
@@ -358,5 +375,18 @@ impl Brain for ScriptedBrain {
             script.digests.pop_front()
         };
         play(step, "no scripted digest").await
+    }
+
+    /// Unscripted, finds no agreement.
+    async fn spot_agreement(&self, input: AgreementInput) -> Result<Option<Agreement>, BrainError> {
+        let step = {
+            let mut script = self.lock();
+            script.agreement_inputs.push(input);
+            script.agreements.pop_front()
+        };
+        match step {
+            Some(step) => play(Some(step), "").await,
+            None => Ok(None),
+        }
     }
 }

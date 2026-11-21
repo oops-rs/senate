@@ -554,6 +554,13 @@ pub mod meta {
     /// Speaker's; a correction or deletion is a person's, written by them or
     /// by the Speaker on their behalf. See [`crate::memory`].
     pub const MEMORY: &str = "memory";
+    /// The seqs of the messages something was drawn from, a list: on the
+    /// Speaker's proposal of a decision people agreed on in discussion, and
+    /// on the decision that confirms it.
+    pub const SOURCES: &str = "sources";
+    /// The Speaker's proposal of a decision from discussion: what it is
+    /// about, a few words, so the same topic is proposed once.
+    pub const TOPIC: &str = "topic";
     /// On an answer relayed back into an asker's thread: who answered
     /// where the message was forwarded, as a qualified name.
     pub const ANSWERED_BY: &str = "answered_by";

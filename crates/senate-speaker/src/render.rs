@@ -206,6 +206,19 @@ pub(crate) fn proposal_root(l: Locale, names: SeatNames<'_>, event: &Event) -> S
     }
 }
 
+/// The Speaker asking a group whether to record what its people agreed on:
+/// `要记成决定吗？…（seq 140）回复「对」确认`.
+pub(crate) fn discussion_proposal(l: Locale, event: &Event) -> String {
+    let seq = event.seq;
+    let statement = item(&event.body);
+    match l {
+        Locale::Zh => format!("要记成决定吗？{statement}（seq {seq}）回复「对」确认"),
+        Locale::En => {
+            format!("Record this as a decision? {statement} (seq {seq}). Reply \"yes\" to confirm.")
+        }
+    }
+}
+
 /// `已记录决策（seq 131）` / `Decision recorded (seq 131)`.
 pub(crate) fn decision_ack(l: Locale, seq: Seq) -> String {
     match l {

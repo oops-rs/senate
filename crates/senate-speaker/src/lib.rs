@@ -106,10 +106,10 @@ pub use basis_brain::{
     RuntimeRecipe, TierReport, basis_runtime,
 };
 pub use brain::{
-    AgentCandidate, AgentTurn, Answer, Brain, BrainError, CommitteeSeat, Conversation, Crossing,
-    CrossingInput, DigestInput, DigestOut, GroupRef, Intent, MemoryDraft, Offline, OfflineInput,
-    Pick, PickInput, Question, RelayKind, Takeover, TriageInput, Turn, Utterance, apply_threshold,
-    rule_crossing, rule_offline, rule_pick, triage_verdict,
+    AgentCandidate, AgentTurn, Agreement, AgreementInput, Answer, Brain, BrainError, CommitteeSeat,
+    Conversation, Crossing, CrossingInput, DigestInput, DigestOut, GroupRef, Intent, MemoryDraft,
+    Offline, OfflineInput, Pick, PickInput, Question, RelayKind, Takeover, TriageInput, Turn,
+    Utterance, apply_threshold, rule_crossing, rule_offline, rule_pick, triage_verdict,
 };
 pub use config::{DEFAULT_BOT_NAME, MemorySettings, SpeakerConfig, SpeakerMode, WorkConfig};
 pub use engine::{CURSOR, TAKEOVER_META};

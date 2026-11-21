@@ -30,8 +30,8 @@ use super::rig::{
     roster, runner_of, user,
 };
 use crate::basis_brain::prompt::{
-    AGENT_TURN_DESCRIPTION, DIGEST_DESCRIPTION, INTENT_DESCRIPTION, PICK_DESCRIPTION,
-    TRIAGE_DESCRIPTION,
+    AGENT_TURN_DESCRIPTION, AGREEMENT_DESCRIPTION, DIGEST_DESCRIPTION, INTENT_DESCRIPTION,
+    PICK_DESCRIPTION, TRIAGE_DESCRIPTION,
 };
 use crate::basis_brain::{
     AGENT_TOOLS, CHECKPOINT, COMMITTEE_BRIEF, COMMITTEE_STATUS, PRESENCE, TASKS,
@@ -106,6 +106,7 @@ impl Provider for ScriptedModel {
                             | AGENT_TURN_DESCRIPTION
                             | PICK_DESCRIPTION
                             | DIGEST_DESCRIPTION
+                            | AGREEMENT_DESCRIPTION
                     )
                 )
             })
@@ -1894,4 +1895,46 @@ async fn digest_is_one_typed_turn_that_cites_seqs_and_marks_a_persons_points() {
         "{prompt}"
     );
     assert!(prompt.contains("Write in English"), "{prompt}");
+}
+
+#[tokio::test]
+async fn spot_agreement_reads_who_agreed_as_addresses_or_finds_none() {
+    let spotted = fixture(vec![
+        Round::Answer(json!({ "agreement": {
+            "statement": "Retries are capped at three",
+            "topic": "retry cap",
+            "refs": [1, 2],
+            "agreeing": ["[senator::alice]", "senator::bob"]
+        }})),
+        Round::Answer(json!({ "agreement": null })),
+    ])
+    .await;
+    let input = crate::AgreementInput {
+        committee: refund(),
+        locale: Locale::En,
+        events: spotted.log.clone(),
+        proposed: vec!["release day".into()],
+        decisions: Vec::new(),
+    };
+    let found = spotted
+        .brain
+        .spot_agreement(input.clone())
+        .await
+        .expect("an answer")
+        .expect("an agreement");
+    assert_eq!(found.agreeing, [user("alice"), user("bob")]);
+    assert_eq!(found.refs, [Seq(1), Seq(2)]);
+    assert!(
+        spotted
+            .brain
+            .spot_agreement(input)
+            .await
+            .expect("an answer")
+            .is_none()
+    );
+    let prompt = format!("{:?}", spotted.model.requests()[0].messages);
+    assert!(
+        prompt.contains("Topics already proposed as decisions: release day"),
+        "{prompt}"
+    );
 }

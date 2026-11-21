@@ -4,6 +4,7 @@
 
 mod agent;
 mod agents;
+mod agreement;
 mod announcement;
 mod basis_brain;
 mod continuity;

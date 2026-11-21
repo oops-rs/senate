@@ -108,15 +108,17 @@ use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 use crate::brain::{
-    AgentTurn, Answer, Brain, BrainError, Conversation, Crossing, CrossingInput, DigestInput,
-    DigestOut, Intent, Offline, OfflineInput, Pick, PickInput, Question, TriageInput, Utterance,
+    AgentTurn, Agreement, AgreementInput, Answer, Brain, BrainError, Conversation, Crossing,
+    CrossingInput, DigestInput, DigestOut, Intent, Offline, OfflineInput, Pick, PickInput,
+    Question, TriageInput, Utterance,
 };
 use crate::config::SpeakerConfig;
 use crate::secretary::{Effective, ModelSettings, SecretaryConfigs, Tier};
 use agent_tools::{Checkpoint, CommitteeBrief, CommitteeStatus, Presence, Tasks};
 pub use probe::{CheckResult, ModelReport, PROBE_DEADLINE, TierReport};
 use prompt::{
-    AgentTurnWire, CrossingWire, DigestWire, IntentWire, OfflineWire, PickWire, TriageWire,
+    AgentTurnWire, AgreementWire, CrossingWire, DigestWire, IntentWire, OfflineWire, PickWire,
+    TriageWire,
 };
 use tools::{LogRead, LogSearch};
 
@@ -542,6 +544,32 @@ impl BasisBrain {
         })
     }
 
+    async fn agreement_on(
+        &self,
+        model: &ModelSettings,
+        input: &AgreementInput,
+    ) -> Result<Option<Agreement>, BrainError> {
+        let committee = Some(&input.committee);
+        let workspace = self.workspace(committee, model).await?;
+        let spec = self
+            .bounded(RunSpec::default(), "speaker-agreement", committee, model)
+            .with_tool_budget(1)
+            .with_profile(self.speaking(committee, input.locale));
+        let mut run = workspace
+            .prepare(spec)
+            .map_err(|e| BrainError::Unavailable(e.to_string()))?;
+        let output = run
+            .output::<AgreementWire, _, _>(
+                prompt::agreement(input),
+                prompt::agreement_spec(),
+                NullSink,
+                AllowAll,
+            )
+            .await
+            .map_err(output_error)?;
+        Ok(output.value.into_agreement())
+    }
+
     async fn digest_on(
         &self,
         model: &ModelSettings,
@@ -796,6 +824,14 @@ impl Brain for BasisBrain {
         self.tiered("crossing", Some(&input.committee), within, |tier| {
             let input = &input;
             async move { self.crossing_on(&tier.model, input).await }
+        })
+        .await
+    }
+
+    async fn spot_agreement(&self, input: AgreementInput) -> Result<Option<Agreement>, BrainError> {
+        self.tiered("agreement", Some(&input.committee), None, |tier| {
+            let input = &input;
+            async move { self.agreement_on(&tier.model, input).await }
         })
         .await
     }

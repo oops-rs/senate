@@ -176,6 +176,7 @@
 
 mod agent;
 mod agents;
+mod agreement;
 pub(crate) mod announcement;
 mod cards;
 mod desk;
@@ -415,6 +416,9 @@ struct CommitteeState {
     /// What was said since the last digest, and the digest timers
     /// ([`memory`]).
     discussion: memory::Discussion,
+    /// Each group's latest burst of discussion, and the decisions proposed
+    /// from discussion before ([`agreement`]).
+    bursts: agreement::Bursts,
 }
 
 /// The seat in a child Senate an event is about, as a relay names it
@@ -472,6 +476,7 @@ impl CommitteeState {
             .get_or_insert_with(|| BriefBuilder::new(event.committee.clone()))
             .observe(event);
         self.discussion.observe(event);
+        self.bursts.observe(event);
         let simulated = event.is_simulated()
             || event
                 .thread
@@ -1017,6 +1022,12 @@ pub(crate) enum ThoughtKind {
         shown: std::collections::BTreeSet<Seq>,
         out: Result<crate::brain::DigestOut, BrainError>,
     },
+    /// What the Brain found in a burst of discussion.
+    Spotted {
+        committee: CommitteeId,
+        burst: Vec<Event>,
+        agreement: Result<Option<crate::brain::Agreement>, BrainError>,
+    },
 }
 
 impl ThoughtKind {
@@ -1031,7 +1042,8 @@ impl ThoughtKind {
             | Self::OfflineDecided { committee, .. }
             | Self::Triaged { committee, .. }
             | Self::TopWritten { committee, .. }
-            | Self::Digested { committee, .. } => Some(committee),
+            | Self::Digested { committee, .. }
+            | Self::Spotted { committee, .. } => Some(committee),
             Self::UnboundConversed { .. } | Self::UnboundInterpreted { .. } => None,
         }
     }
@@ -1229,6 +1241,7 @@ impl Engine {
                 timer.abort();
             }
             state.discussion.shutdown();
+            state.bursts.shutdown();
             for timer in [state.pinned.timer.take(), state.pinned.midnight.take()]
                 .into_iter()
                 .flatten()
@@ -1363,6 +1376,7 @@ impl Engine {
                 }
                 if memory::is_discussion(&event) {
                     self.arm_quiet(&committee);
+                    self.arm_agreement(&committee, &event);
                 }
                 if let Err(error) = self.hub.set_cursor(&committee, CURSOR, event.seq).await {
                     // Harmless: a restart reprocesses idempotently.
@@ -1774,6 +1788,11 @@ impl Engine {
                 self.on_digested(committee, trigger, (from, through), shown, out)
                     .await;
             }
+            ThoughtKind::Spotted {
+                committee,
+                burst,
+                agreement,
+            } => self.on_spotted(committee, burst, agreement).await,
         }
     }
 
@@ -1971,6 +1990,22 @@ impl Engine {
         }
         if let Some(root) = event.thread {
             return self.reply_plans(event, root, platform).await;
+        }
+        if agreement::is_discussion_proposal(event) {
+            // Asked in the group it was agreed in, as a new root: a reply in
+            // its thread is the answer.
+            let Some(source) = event.source.as_ref().filter(|s| s.platform == platform) else {
+                return Ok(Vec::new());
+            };
+            return Ok(vec![MirrorPlan {
+                to: PostTarget::NewRoot {
+                    group_id: source.group_id.clone(),
+                },
+                text: render::discussion_proposal(l, event),
+                target: source.group_id.clone(),
+                record_as: None,
+                card: None,
+            }]);
         }
         if event.from != Address::Speaker
             && matches!(
@@ -3236,6 +3271,9 @@ impl Engine {
         .on_behalf_of(chat.from.clone())
         .with_meta(meta::RELAYED_FROM, json!(chat.seq.0))
         .with_meta(meta::PROPOSED_BY, json!(proposal.from.to_string()));
+        if let Some(sources) = proposal.meta.get(meta::SOURCES) {
+            decision = decision.with_meta(meta::SOURCES, sources.clone());
+        }
         if let Some(source) = &chat.source {
             decision = decision.with_source(source.clone());
         }
@@ -3851,12 +3889,14 @@ fn is_brief_top(event: &Event) -> bool {
     event.meta.get(meta::BRIEF_TOP).and_then(Value::as_bool) == Some(true)
 }
 
-/// An agent's root `note` proposing a decision.
+/// A root `note` proposing a decision: an agent's, or the Speaker's for
+/// what people agreed on in discussion ([`agreement`]).
 fn is_proposal(event: &Event, people: &People) -> bool {
-    event.kind == Kind::Note
-        && people.is_agent_address(&event.from)
-        && event.thread.is_none()
-        && event.meta.get(meta::PROPOSAL).and_then(Value::as_str) == Some(PROPOSAL_DECISION)
+    agreement::is_discussion_proposal(event)
+        || (event.kind == Kind::Note
+            && people.is_agent_address(&event.from)
+            && event.thread.is_none()
+            && event.meta.get(meta::PROPOSAL).and_then(Value::as_str) == Some(PROPOSAL_DECISION))
 }
 
 fn decision_of(intent: Result<Intent, BrainError>, l: Locale) -> Decision {

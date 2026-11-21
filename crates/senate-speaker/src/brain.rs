@@ -465,6 +465,46 @@ pub trait Brain: Send + Sync + 'static {
         let _ = input;
         Err(BrainError::Unavailable("this brain does not digest".into()))
     }
+
+    /// Whether a burst of discussion holds a clear agreement: two people or
+    /// more agreeing on one concrete statement, and nobody objecting in the
+    /// burst. `None` when it does not, which is the usual answer. The
+    /// Speaker checks who agreed and what is cited against the burst, and
+    /// only asks people whether to record it: people decide. The default
+    /// finds none.
+    async fn spot_agreement(&self, input: AgreementInput) -> Result<Option<Agreement>, BrainError> {
+        let _ = input;
+        Ok(None)
+    }
+}
+
+/// A burst of discussion in one group, to check for an agreement worth
+/// recording as a decision.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgreementInput {
+    pub committee: CommitteeId,
+    pub locale: Locale,
+    /// The burst, oldest first: the only seqs an agreement may cite.
+    pub events: Vec<Event>,
+    /// The topics already proposed on this committee, which are not
+    /// proposed again.
+    pub proposed: Vec<String>,
+    /// The decisions in force, which are not proposed again.
+    pub decisions: Vec<BriefDecision>,
+}
+
+/// Two people or more agreeing on one concrete statement, with nobody
+/// objecting in the burst.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Agreement {
+    /// What was agreed, as the decision would read.
+    pub statement: String,
+    /// What it is about, a few words.
+    pub topic: String,
+    /// The messages that show the agreement.
+    pub refs: Vec<Seq>,
+    /// Who agreed.
+    pub agreeing: Vec<Address>,
 }
 
 /// A window of a committee's discussion to digest, from its own log only.

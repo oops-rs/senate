@@ -22,9 +22,10 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::brain::{
-    AgentCandidate, AgentTurn, Answer, BrainError, CommitteeSeat, Conversation, Crossing,
-    CrossingInput, DigestInput, DigestOut, Intent, MemoryDraft, Offline, OfflineInput, Pick,
-    PickInput, Question, RelayKind, Takeover, TriageInput, Utterance, apply_threshold,
+    AgentCandidate, AgentTurn, Agreement, AgreementInput, Answer, BrainError, CommitteeSeat,
+    Conversation, Crossing, CrossingInput, DigestInput, DigestOut, Intent, MemoryDraft, Offline,
+    OfflineInput, Pick, PickInput, Question, RelayKind, Takeover, TriageInput, Utterance,
+    apply_threshold,
 };
 
 /// How much of one event body a prompt or tool result shows.
@@ -1991,5 +1992,115 @@ impl DigestWire {
                 })
                 .collect(),
         }
+    }
+}
+
+// ---- Agreements in discussion -----------------------------------------
+
+/// The agreement tool's description; also how a scripted test finds it.
+pub(crate) const AGREEMENT_DESCRIPTION: &str = "Report the one clear agreement in this discussion, or null when there is none. Call this exactly once.";
+
+pub(crate) fn agreement_spec() -> OutputSpec {
+    OutputSpec::new(
+        "speaker_agreement",
+        AGREEMENT_DESCRIPTION,
+        agreement_schema(),
+    )
+}
+
+fn agreement_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "agreement": {
+                "type": ["object", "null"],
+                "properties": {
+                    "statement": { "type": "string", "description": "What was agreed, as one concrete sentence a decision would read, in the language asked for." },
+                    "topic": { "type": "string", "description": "What it is about, two to four words." },
+                    "refs": { "type": "array", "items": { "type": "integer" }, "description": "The seq of each message above that shows the agreement." },
+                    "agreeing": { "type": "array", "items": { "type": "string" }, "description": "Who agreed, as written above, e.g. \"[senator::ana]\"." }
+                },
+                "required": ["statement", "topic", "refs", "agreeing"],
+                "additionalProperties": false,
+                "description": "null unless two people or more clearly agreed on one concrete statement and nobody objected or hesitated."
+            }
+        },
+        "required": ["agreement"],
+        "additionalProperties": false
+    })
+}
+
+pub(crate) fn agreement(input: &AgreementInput) -> String {
+    let discussion: Vec<String> = input.events.iter().map(render_event).collect();
+    let proposed = if input.proposed.is_empty() {
+        "(none)".to_owned()
+    } else {
+        input.proposed.join("; ")
+    };
+    let decisions = if input.decisions.is_empty() {
+        "(none)".to_owned()
+    } else {
+        input
+            .decisions
+            .iter()
+            .map(|d| format!("- {}", cut(&d.body, 200)))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    format!(
+        "Below is a burst of discussion in a group of committee {committee}, oldest first.\n\n\
+         {discussion}\n\n\
+         Topics already proposed as decisions: {proposed}\n\
+         Decisions already recorded:\n{decisions}\n\n\
+         Is there one clear agreement here: two people or more agreeing on one concrete \
+         statement (a choice, a number, a rule, an owner), with nobody objecting, hesitating or \
+         asking to wait? A question, an idea one person floated, a vague \"sounds good\" to \
+         nothing specific, or anything already proposed or recorded is not one. When in doubt, \
+         answer null: people are asked only when it is clear. Write the statement in \
+         {language}; keep names and numbers as written.",
+        committee = input.committee,
+        discussion = discussion.join("\n"),
+        language = language(input.locale),
+    )
+}
+
+/// The agreement tool's payload.
+#[derive(Debug, Deserialize)]
+pub(crate) struct AgreementWire {
+    #[serde(default)]
+    agreement: Option<AgreementBody>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgreementBody {
+    statement: String,
+    topic: String,
+    #[serde(default)]
+    refs: Vec<u64>,
+    #[serde(default)]
+    agreeing: Vec<String>,
+}
+
+impl AgreementWire {
+    /// As the Brain's answer; who agreed is read as addresses, and the
+    /// engine checks them against the burst.
+    pub(crate) fn into_agreement(self) -> Option<Agreement> {
+        let body = self.agreement?;
+        Some(Agreement {
+            statement: body.statement,
+            topic: body.topic,
+            refs: body.refs.into_iter().map(Seq).collect(),
+            agreeing: body
+                .agreeing
+                .iter()
+                .filter_map(|who| {
+                    who.trim()
+                        .trim_start_matches('[')
+                        .trim_end_matches(']')
+                        .parse()
+                        .ok()
+                })
+                .collect(),
+        })
     }
 }
