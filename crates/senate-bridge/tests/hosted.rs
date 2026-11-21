@@ -2614,7 +2614,7 @@ async fn a_watcher_fits_an_unattached_session_and_never_an_attached_one() {
     watcher.until((9, 40), "resized to 9 40").await;
 }
 
-/// `senate watch-all` shows every hosted session side by side, each under
+/// `senate session watch` shows every hosted session side by side, each under
 /// its name. Enter attaches to the focused one as `senate attach` does,
 /// detaching comes back to the grid, and `q` leaves.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3066,7 +3066,7 @@ async fn joining_offline_binds_and_says_when_the_committee_opens() {
     );
 }
 
-/// A message for a stopped hosted senator waits; once `senate restore`
+/// A message for a stopped hosted senator waits; once `senate session restore`
 /// brings it back and its terminal reports in, it is pushed into the
 /// session's inbox with nothing new arriving for it, not left as start
 /// context in a conversation nobody is typing in.

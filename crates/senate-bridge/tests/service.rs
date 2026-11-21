@@ -1,4 +1,4 @@
-//! `senate service` through the built binary: the dry runs only. Install
+//! `senate setup service` through the built binary: the dry runs only. Install
 //! and uninstall with `--yes`, and `status`, would ask the real service
 //! manager, so they are tested through the seam in the module's own tests.
 //! Every spawn has a temp HOME and SENATE_HOME.

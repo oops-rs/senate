@@ -1,15 +1,15 @@
-//! `senate sessions`: the Senate-hosted sessions on this machine.
+//! `senate session list`: the Senate-hosted sessions on this machine.
 //!
 //! One listing ([`crate::ipc::SessionRow`], from the daemon's
 //! `Request::Sessions`) serves every command that names a hosted session:
-//! `senate sessions` prints it, `sessions stop` picks from it, the picker
-//! ([`crate::host::picker`]) offers it, and `senate watch-all` tiles it.
+//! `senate session list` prints it, `session stop` picks from it, the picker
+//! ([`crate::host::picker`]) offers it, and `senate session watch` tiles it.
 //!
 //! # Stopping
 //!
-//! `senate sessions stop <name>… | --idle | --all` ends each chosen
-//! session's terminal as `senate stop` does: its TUI's process group is
-//! asked to end, then killed. A session someone typed into in the last
+//! `senate session stop <name>… | --idle | --all` ends each chosen
+//! session's terminal: its TUI's process group is asked to end, then
+//! killed. A session someone typed into in the last
 //! [`TYPED_WINDOW_SECS`] is left alone unless `--force`: it may be in use.
 //! `--idle` takes only the running sessions nobody is attached to.
 
@@ -20,11 +20,11 @@ use senate_core::Locale;
 
 use crate::ipc::{SessionRow, SessionsReply};
 
-/// A session typed into this recently is in use: `sessions stop` skips it
+/// A session typed into this recently is in use: `session stop` skips it
 /// unless forced.
 pub const TYPED_WINDOW_SECS: u64 = 5 * 60;
 
-/// Which sessions `sessions stop` is for.
+/// Which sessions `session stop` is for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StopSelector {
     /// These, by label or senator name.
@@ -35,7 +35,7 @@ pub enum StopSelector {
     All,
 }
 
-/// What `sessions stop` takes from the listing: the rows to stop, and the
+/// What `session stop` takes from the listing: the rows to stop, and the
 /// ones it leaves because someone typed into them recently.
 #[derive(Debug, Default)]
 pub struct StopPlan<'a> {
@@ -44,7 +44,7 @@ pub struct StopPlan<'a> {
     pub kept: Vec<(&'a SessionRow, u64)>,
 }
 
-/// What `sessions stop` does with the listing. A name that matches no
+/// What `session stop` does with the listing. A name that matches no
 /// running session is an error.
 pub fn select_for_stop<'a>(
     rows: &'a [SessionRow],
@@ -101,7 +101,7 @@ pub fn uptime(since: DateTime<Utc>, now: DateTime<Utc>) -> String {
     }
 }
 
-/// `senate sessions`: one line per session, the running first, then the
+/// `senate session list`: one line per session, the running first, then the
 /// hosts running with no session.
 pub fn render(reply: &SessionsReply, now: DateTime<Utc>, locale: Locale) -> String {
     if reply.rows.is_empty() && reply.orphans.is_empty() {
@@ -171,9 +171,9 @@ pub fn render(reply: &SessionsReply, now: DateTime<Utc>, locale: Locale) -> Stri
             "{}",
             match locale {
                 Locale::Zh =>
-                    format!("孤立的终端宿主 {id}：没有会话记录（`senate sessions prune` 会停止它）"),
+                    format!("孤立的终端宿主 {id}：没有会话记录（`senate session prune` 会停止它）"),
                 Locale::En => format!(
-                    "orphaned host {id}: no session on record (`senate sessions prune` stops it)"
+                    "orphaned host {id}: no session on record (`senate session prune` stops it)"
                 ),
             }
         );

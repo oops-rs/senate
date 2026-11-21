@@ -322,7 +322,7 @@ impl CommitteeState {
         }
         if heartbeat.left {
             // Its bridge says no session of it is bound here any more (its
-            // last session ended, `senate stop` say): away now, not once
+            // last session ended, `senate session stop` say): away now, not once
             // the threshold passes.
             self.args.presence.leave(&self.args.committee, agent);
             self.leases.leave(agent, Instant::now());

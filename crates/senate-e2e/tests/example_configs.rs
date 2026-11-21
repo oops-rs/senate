@@ -122,7 +122,7 @@ fn the_machine_example_parses_into_what_the_machine_reads() {
     assert_eq!(companion.max_secs, 300);
 }
 
-/// Alone on one machine: exactly what `senate init --local` writes.
+/// Alone on one machine: exactly what `senate setup init --local` writes.
 #[test]
 fn the_local_example_is_what_init_writes() {
     let path = example("local.example.toml");

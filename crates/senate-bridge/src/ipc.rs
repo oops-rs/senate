@@ -370,14 +370,14 @@ pub struct SpawnReply {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct SessionsReply {
     pub rows: Vec<SessionRow>,
-    /// Hosts running with no session on record: what `senate sessions
+    /// Hosts running with no session on record: what `senate session list
     /// prune` stops.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub orphans: Vec<EventId>,
 }
 
-/// One hosted session: what `senate sessions` lists, the picker offers
-/// and `senate watch-all` shows.
+/// One hosted session: what `senate session list` lists, the picker offers
+/// and `senate session watch` shows.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionRow {
     /// The host's id: its directory under `hosts/`.
@@ -439,7 +439,7 @@ pub struct PruneReply {
 #[serde(rename_all = "snake_case")]
 pub enum HostState {
     Running,
-    /// Its host has ended; `senate restore` reopens it.
+    /// Its host has ended; `senate session restore` reopens it.
     Stopped,
 }
 
@@ -1360,7 +1360,7 @@ pub enum WatchEvent {
     },
     /// An event arrived that is news for the person: addressed to them
     /// (an answer, a note, a question) or an escalation to them. What
-    /// `senate watch` prints. Each event is announced once, whichever
+    /// `senate inbox --follow` prints. Each event is announced once, whichever
     /// agent's stream carried it.
     ForPerson {
         /// The event itself.

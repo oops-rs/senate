@@ -24,7 +24,7 @@
 //!
 //! Without `"crossSessionInbound": "accept"` in Claude's settings, a message
 //! from a process that is not a child of the session may be held for the
-//! user's approval and dropped after 5 minutes (see `senate install`).
+//! user's approval and dropped after 5 minutes (see `senate setup install`).
 
 use std::io;
 use std::path::{Path, PathBuf};

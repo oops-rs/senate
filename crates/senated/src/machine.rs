@@ -730,12 +730,12 @@ pub fn nested_notice(agent: &str, dir: &Path, locale: Locale) -> String {
         Locale::Zh => format!(
             "[[preside]] agent = \"{agent}\"：嵌套在 agent 之下的 Senate 不再托管。一个 agent \
              自己的团队是一个子 Senate。它的日志原样留在 {dir}，不会被改动；不再需要时用 \
-             `senate free --yes --delete-logs` 删除。把 [[preside]] 从 senate.toml 去掉，这条提示就不再出现。"
+             `senate setup clean --yes --delete-logs` 删除。把 [[preside]] 从 senate.toml 去掉，这条提示就不再出现。"
         ),
         Locale::En => format!(
             "[[preside]] agent = \"{agent}\": Senates nested under an agent are no longer hosted. \
              An agent's own team is a child Senate. Its log stays untouched in {dir}; remove it \
-             with `senate free --yes --delete-logs` when it is no longer needed. Drop [[preside]] \
+             with `senate setup clean --yes --delete-logs` when it is no longer needed. Drop [[preside]] \
              from senate.toml and this notice stops."
         ),
     }

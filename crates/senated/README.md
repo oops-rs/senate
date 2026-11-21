@@ -8,7 +8,7 @@ The Senate daemon, `senated`, and the library a private layer builds its own dae
 
 ```sh
 cargo install senate senated
-senated --machine            # on a developer machine (usually via `senate service install`)
+senated --machine            # on a developer machine (usually via `senate setup service install`)
 senated --config server.toml # one Senate on a server
 ```
 

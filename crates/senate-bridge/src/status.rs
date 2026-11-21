@@ -383,8 +383,8 @@ fn advisories(view: &StatusView) -> Vec<String> {
         session.runtime == Runtime::Codex && view.hosted.contains_key(&session.session_id)
     }) {
         lines.push(l.pick(
-            "在托管 Codex 中执行 /new 或 /clear 后，界面切换到新线程，但 Senate 仍向原线程投递。退出当前终端，再用 senate restore 返回原线程。",
-            "After /new or /clear in hosted Codex, Senate still delivers to the original thread, which the TUI no longer shows. Exit the TUI and use senate restore to return.",
+            "在托管 Codex 中执行 /new 或 /clear 后，界面切换到新线程，但 Senate 仍向原线程投递。退出当前终端，再用 senate session restore 返回原线程。",
+            "After /new or /clear in hosted Codex, Senate still delivers to the original thread, which the TUI no longer shows. Exit the TUI and use senate session restore to return.",
         ).into());
         lines.push(l.pick(
             "若恢复前 Codex 会话已在线，则关闭托管终端后该会话仍显示在线，因为守护进程无法判断是否还有原生客户端连接。",
@@ -413,8 +413,8 @@ fn advisories(view: &StatusView) -> Vec<String> {
         let unbound = view.hosted_unbound.get(&session.session_id);
         if let Some(new) = unbound {
             lines.push(l.pick(
-                format!("托管 Claude 席位 {seat} 无法绑定原生会话 {new}。消息暂存于原会话。运行 senate attach {seat} 检查终端，或退出终端后运行 senate restore {seat}。"),
-                format!("Hosted Claude seat {seat} could not bind native session {new}. Messages wait for the original session. Run senate attach {seat} to inspect the terminal, or exit it and run senate restore {seat}."),
+                format!("托管 Claude 席位 {seat} 无法绑定原生会话 {new}。消息暂存于原会话。运行 senate attach {seat} 检查终端，或退出终端后运行 senate session restore {seat}。"),
+                format!("Hosted Claude seat {seat} could not bind native session {new}. Messages wait for the original session. Run senate attach {seat} to inspect the terminal, or exit it and run senate session restore {seat}."),
             ));
         }
         if let Some(Some(refused)) = view.hosted.get(&session.session_id)
@@ -768,8 +768,8 @@ fn render_senate(
             out,
             "  {}",
             l.pick(
-                "没有登记的会话（会话由钩子上报；见 `senate install`）",
-                "none registered (hooks report sessions; see `senate install`)"
+                "没有登记的会话（会话由钩子上报；见 `senate setup install`）",
+                "none registered (hooks report sessions; see `senate setup install`)"
             )
         );
     } else {

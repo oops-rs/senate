@@ -19,7 +19,7 @@
 //!
 //! # The grid
 //!
-//! `senate watch-all` lays the sessions out in as even a grid as the
+//! `senate session watch` lays the sessions out in as even a grid as the
 //! terminal has room for, each tile at least [`MIN_TILE_COLS`] columns
 //! and [`MIN_TILE_ROWS`] rows; when they do not all fit, in pages. Each
 //! tile has a header naming its session; a paused or ended one is dimmed.
@@ -124,7 +124,7 @@ fn shown(shown: &Mutex<Shown>) -> MutexGuard<'_, Shown> {
 pub fn cannot_watch(alias: &str) -> String {
     format!(
         "this session's terminal host was started before sessions could be watched; \
-         restart it with `senate stop {alias}` then `senate restore {alias}`"
+         restart it with `senate session stop {alias}` then `senate session restore {alias}`"
     )
 }
 
@@ -517,7 +517,7 @@ pub(super) fn keys(pending: &mut Vec<u8>) -> Vec<Key> {
 enum Mode {
     /// `senate attach --read-only`: the one session, nothing but detach.
     One,
-    /// `senate watch-all`.
+    /// `senate session watch`.
     Grid,
 }
 
@@ -760,7 +760,7 @@ pub async fn watch_one(session: Session) -> anyhow::Result<()> {
     stay(&mut viewer, &mut None).await.map(drop)
 }
 
-/// `senate watch-all`: every session `sessions` lists, asked again every
+/// `senate session watch`: every session `session list` lists, asked again every
 /// couple of seconds, until `q` or Ctrl-]. Enter attaches to the focused
 /// one and comes back when that detaches.
 pub async fn watch_all(
@@ -1064,7 +1064,7 @@ mod tests {
         assert_eq!(
             cannot_watch("north"),
             "this session's terminal host was started before sessions could be watched; \
-             restart it with `senate stop north` then `senate restore north`"
+             restart it with `senate session stop north` then `senate session restore north`"
         );
     }
 

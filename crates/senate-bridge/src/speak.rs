@@ -200,9 +200,9 @@ pub fn render_sent(
 /// How the person hears back, in the words `ask`, `request` and the session
 /// start use.
 pub const HEAR_BACK_ZH: &str = "回复和转给你的事项会通过桌面通知（`senate.toml` 的 `[notify]`）、\
-`senate inbox` 找到你，`senate watch` 会实时打印；也可以加 `--wait` 等在这里。";
+`senate inbox` 找到你，`senate inbox --follow` 会实时打印；也可以加 `--wait` 等在这里。";
 pub const HEAR_BACK_EN: &str = "You will hear back through a desktop notification (`[notify]` in \
-senate.toml), in `senate inbox`, and live in `senate watch`; or add `--wait` to stay here for it.";
+senate.toml), in `senate inbox`, and live in `senate inbox --follow`; or add `--wait` to stay here for it.";
 
 /// What `reply` prints.
 pub fn render_replied(thread: Seq, posted: &Posted, locale: Locale) -> String {

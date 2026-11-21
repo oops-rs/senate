@@ -104,7 +104,7 @@ pub(crate) async fn begin_stop(
         match stream.read_u8().await {
             Ok(ACCEPTED) => Ok(stream),
             Ok(ATTENDED) => Err(IpcError::bad_request(
-                "a viewer is attending this terminal. Ask them to detach or have the operator run senate stop --force",
+                "a viewer is attending this terminal. Ask them to detach or have the operator run senate session stop --force",
             )),
             Ok(FAILED) => Err(IpcError::internal("the terminal host could not record the stop request")),
             Ok(_) => Err(IpcError::internal("the host sent an invalid stop reply")),

@@ -1,22 +1,23 @@
 # Senate alone on one machine: one person, no Senate above. This is what
-# `senate init --local --person alice` writes to ~/.senate/senate.toml (or
+# `senate setup init --local --person alice` writes to ~/.senate/senate.toml (or
 # $SENATE_HOME/senate.toml), with a commented secretary.toml beside it.
 #
-#   senated --machine        # the daemon: this Senate, and your sessions' side
-#   senate install --yes     # once: the MCP server and hooks for Claude Code / Codex
+#   senated --machine           # the daemon: this Senate, and your sessions' side
+#   senate setup install --yes  # once: the MCP server and hooks for Claude Code / Codex
 #   senate status
 #
 # In each repository you work in (everything Senate keeps there is the
 # untracked .senate/ directory; it follows the branch):
-#   senate join <committee>  # bind this worktree, on this branch, to a committee
-#   senate where             # what a session here would get, and from where
-#   senate list / senate free  # the saved per-branch copies; forget what expired
+#   senate join <committee>     # bind this worktree, on this branch, to a committee
+#   senate where                # what a session here would get, and from where
+#   senate where --all          # the saved per-branch copies
+#   senate setup clean          # forget what expired
 #
 # To keep the daemon running without a terminal (a launchd agent on macOS, a
 # systemd user unit on Linux; each is a dry run until you add --yes):
-#   senate service install --yes
-#   senate service status
-#   senate service uninstall --yes
+#   senate setup service install --yes
+#   senate setup service status
+#   senate setup service uninstall --yes
 #
 # Everything senated keeps for this Senate is under senates/top/ here: its
 # log (SQLite), the token only this machine uses, the address it serves.

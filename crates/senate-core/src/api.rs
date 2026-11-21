@@ -542,7 +542,7 @@ pub struct Heartbeat {
     /// The agent's delivered cursor for the committee.
     pub cursor: Seq,
     /// The bridge stopped following the committee for the agent: no
-    /// session of it is bound there any more (it ended, or `senate stop`
+    /// session of it is bound there any more (it ended, or `senate session stop`
     /// stopped it). The agent is away from now on, not once the presence
     /// threshold passes; its next ordinary heartbeat brings it back.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

@@ -1,6 +1,6 @@
-//! `senate join`, `senate leave`, `senate pin`, `senate unpin`, `senate
-//! where`, `senate list` and `senate free`: binding the worktree you are in
-//! to a committee, and seeing and cleaning what Senate keeps. None needs the
+//! `senate join [--alias]`, `senate leave [--alias]`, `senate where
+//! [--all]` and `senate setup clean`: binding the worktree you are in to a
+//! committee, and seeing and cleaning what Senate keeps. None needs the
 //! daemon; a live session in the worktree reads a change at its next prompt.
 //!
 //! `join` and `pin` write `.senate/committee` and `.senate/agent` in the
@@ -90,7 +90,7 @@ impl Settings {
     /// The directories under `senates/` that `senate.toml` still hosts:
     /// the machine's one Senate, kept under `top/`. A Senate once nested
     /// under an agent (`under-<agent>/`) is no longer hosted, so its log is
-    /// listed by `senate free` and removed only with `--delete-logs`.
+    /// listed by `senate setup clean` and removed only with `--delete-logs`.
     fn hosted_keys(&self) -> BTreeSet<String> {
         let mut keys = BTreeSet::new();
         if self.local.is_some() {
@@ -583,7 +583,7 @@ fn agent_here_line(c: &Change, l: Locale) -> String {
     }
 }
 
-/// What `senate pin` prints.
+/// What `senate join --alias` prints.
 pub fn render_pin(c: &Change, l: Locale) -> String {
     let value = c.value.clone().unwrap_or_default();
     format!(
@@ -600,7 +600,7 @@ pub fn render_pin(c: &Change, l: Locale) -> String {
     )
 }
 
-/// What `senate unpin` prints.
+/// What `senate leave --alias` prints.
 pub fn render_unpin(c: &Change, l: Locale) -> String {
     format!(
         "{}\n{}",
@@ -810,7 +810,7 @@ pub fn render_where_brief(
 
 // ---- list -------------------------------------------------------------------
 
-/// One saved copy, as `senate list --json` prints it.
+/// One saved copy, as `senate where --all --json` prints it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Row {
     pub repository: PathBuf,
@@ -858,7 +858,7 @@ pub fn list(paths: &Paths) -> Vec<Row> {
         .collect()
 }
 
-/// The everyday `senate list`: one aligned row per saved copy.
+/// The everyday `senate where --all`: one aligned row per saved copy.
 pub fn render_list_brief(rows: &[Row], l: Locale, terminal: Option<Terminal>) -> String {
     if rows.is_empty() {
         return render_list(rows, l);
@@ -950,7 +950,7 @@ pub fn render_list(rows: &[Row], l: Locale) -> String {
 
 // ---- free -------------------------------------------------------------------
 
-/// What `senate free` found.
+/// What `senate setup clean` found.
 #[derive(Debug, Default)]
 pub struct FreeReport {
     pub applied: bool,
@@ -1114,7 +1114,7 @@ fn human_bytes(n: u64) -> String {
     }
 }
 
-/// The everyday `senate free`: only what there is to free.
+/// The everyday `senate setup clean`: only what there is to free.
 pub fn render_free_brief(r: &FreeReport, l: Locale, terminal: Option<Terminal>) -> String {
     let items: usize = r.agents.iter().map(|(_, a)| a.items).sum();
     let logs: u64 = r.logs.iter().map(|(_, size)| size).sum();

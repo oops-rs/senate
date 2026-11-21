@@ -1,4 +1,4 @@
-//! `senate service`: keep `senated --machine` running without a terminal.
+//! `senate setup service`: keep `senated --machine` running without a terminal.
 //!
 //! On macOS a launchd user agent (`~/Library/LaunchAgents/dev.senate.senated.plist`),
 //! on Linux a systemd user unit (`~/.config/systemd/user/senated.service`).
@@ -23,7 +23,7 @@
 //! there is kept. The shell's `PATH` is still written into the service, but
 //! only as the fallback, for `git` and what the agents run themselves.
 //!
-//! Like `senate install`, `senate service install` and `uninstall` are dry
+//! Like `senate setup install`, `senate setup service install` and `uninstall` are dry
 //! runs that print the file and the commands unless told `--yes`.
 
 use std::fmt::Write as _;
@@ -681,7 +681,7 @@ fn yes_no(l: Locale, v: bool) -> &'static str {
     l.pick(if v { "是" } else { "否" }, if v { "yes" } else { "no" })
 }
 
-/// What `senate service install` prints; `applied` once it was done.
+/// What `senate setup service install` prints; `applied` once it was done.
 pub fn render_install(plan: &InstallPlan, platform: Platform, applied: bool, l: Locale) -> String {
     let mut out = String::new();
     let _ = writeln!(
@@ -848,7 +848,7 @@ pub fn render_uninstall(plan: &UninstallPlan, applied: bool, l: Locale) -> Strin
     out
 }
 
-/// The everyday `senate service status`: whether it runs, and its log.
+/// The everyday `senate setup service status`: whether it runs, and its log.
 pub fn render_status_brief(
     s: &Status,
     l: Locale,
@@ -862,8 +862,8 @@ pub fn render_status_brief(
         ),
         (false, Some(false) | None, _) => l
             .pick(
-                "未安装 · senate service install --yes",
-                "not installed · senate service install --yes",
+                "未安装 · senate setup service install --yes",
+                "not installed · senate setup service install --yes",
             )
             .to_owned(),
         (_, Some(true), Some(false)) => l.pick(
@@ -872,8 +872,8 @@ pub fn render_status_brief(
         ),
         (true, Some(false), _) => l
             .pick(
-                "已安装但未加载 · senate service install --yes",
-                "installed but not loaded · senate service install --yes",
+                "已安装但未加载 · senate setup service install --yes",
+                "installed but not loaded · senate setup service install --yes",
             )
             .to_owned(),
         _ => l.pick(
@@ -941,8 +941,8 @@ pub fn render_status(s: &Status, l: Locale) -> String {
             out,
             "{}",
             l.pick(
-                "没有安装：`senate service install --yes`。",
-                "Not installed: `senate service install --yes`."
+                "没有安装：`senate setup service install --yes`。",
+                "Not installed: `senate setup service install --yes`."
             )
         );
     }
@@ -980,7 +980,7 @@ mod tests {
         );
         assert!(
             brief(&status(false, Some(false), Some(false)))
-                .contains("not installed · senate service install --yes")
+                .contains("not installed · senate setup service install --yes")
         );
         assert!(brief(&status(true, Some(true), Some(false))).contains("loaded but not running"));
         assert!(brief(&status(true, None, None)).contains("could not be asked"));

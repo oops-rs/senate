@@ -972,9 +972,13 @@ async fn without_wait_ask_and_request_say_how_the_person_will_hear_back() {
             .await;
             let text = out(&o);
             for needle in if zh {
-                ["桌面通知", "`senate inbox`", "`senate watch`"]
+                ["桌面通知", "`senate inbox`", "`senate inbox --follow`"]
             } else {
-                ["desktop notification", "`senate inbox`", "`senate watch`"]
+                [
+                    "desktop notification",
+                    "`senate inbox`",
+                    "`senate inbox --follow`",
+                ]
             } {
                 assert!(text.contains(needle), "{needle}: {text}");
             }
@@ -987,11 +991,11 @@ async fn without_wait_ask_and_request_say_how_the_person_will_hear_back() {
             None,
         )
         .await;
-        assert!(!out(&o).contains("senate watch"), "{}", out(&o));
+        assert!(!out(&o).contains("senate inbox --follow"), "{}", out(&o));
     }
 }
 
-/// A running `senate watch`, its stdout read on a thread.
+/// A running `senate inbox --follow`, its stdout read on a thread.
 struct Watcher {
     child: std::process::Child,
     lines: std::sync::mpsc::Receiver<String>,
@@ -1047,7 +1051,7 @@ impl Watcher {
     fn ready(&self) {
         self.subscribed
             .recv_timeout(Duration::from_secs(30))
-            .expect("senate watch never said it was watching");
+            .expect("senate inbox --follow never said it was watching");
     }
 
     /// Lines until `n` blocks (each ends at a blank line) or the timeout.
@@ -1304,7 +1308,7 @@ async fn the_daemon_stays_quiet_while_the_app_is_connected_and_when_it_is_turned
         .append(answer_to_alice(root.seq, "while the app is open"));
     tokio::time::sleep(Duration::from_millis(1200)).await;
     assert!(rec.posted().is_empty(), "{:?}", rec.posted());
-    // A plain `senate watch` does not show notifications: it does not count.
+    // A plain `senate inbox --follow` does not show notifications: it does not count.
     drop(app);
     tokio::time::sleep(Duration::from_millis(300)).await;
     h.server

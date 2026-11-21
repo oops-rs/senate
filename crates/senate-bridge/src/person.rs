@@ -1,5 +1,5 @@
 //! What comes back to the person, in words: their inbox, and (below) what
-//! `senate watch`, `--wait` and the desktop notification say.
+//! `senate inbox --follow`, `--wait` and the desktop notification say.
 //!
 //! The decision is core's ([`senate_core::ThreadSummary::waits_on_person`]);
 //! this module only writes it down, in either language, with ids as
@@ -222,7 +222,7 @@ pub fn render_marked(n: usize, locale: Locale) -> String {
 /// Most lines of an event's text a `watch` block shows.
 const NEWS_LINES: usize = 6;
 
-/// One event addressed to the person, as `senate watch` prints it: the
+/// One event addressed to the person, as `senate inbox --follow` prints it: the
 /// byline, what it did, when, where; the first lines of what it says; the
 /// commands to read and reply.
 pub fn render_news(
@@ -270,7 +270,7 @@ pub fn render_news(
     out
 }
 
-/// What `senate watch` says on stderr when it starts.
+/// What `senate inbox --follow` says on stderr when it starts.
 pub fn render_watching(committee: Option<&senate_core::CommitteeId>, locale: Locale) -> String {
     match (committee, locale) {
         (Some(c), Locale::Zh) => format!("正在看 {c} 上给你的消息（Ctrl-C 结束）……"),
@@ -285,10 +285,10 @@ pub fn render_watching(committee: Option<&senate_core::CommitteeId>, locale: Loc
     }
 }
 
-/// `senate watch` lost the daemon.
+/// `senate inbox --follow` lost the daemon.
 pub fn render_watch_closed(locale: Locale) -> &'static str {
     locale.pick(
-        "守护进程关闭了连接；重新运行 `senate watch`。",
-        "the daemon closed the connection; run `senate watch` again.",
+        "守护进程关闭了连接；重新运行 `senate inbox --follow`。",
+        "the daemon closed the connection; run `senate inbox --follow` again.",
     )
 }

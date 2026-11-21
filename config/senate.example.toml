@@ -1,7 +1,7 @@
 # A developer machine under a team's Senate. Copy to ~/.senate/senate.toml
 # (or $SENATE_HOME/senate.toml) and keep it private: chmod 600. Then:
 #
-#   senate install --yes     # once: the MCP server and hooks for Claude Code / Codex
+#   senate setup install --yes     # once: the MCP server and hooks for Claude Code / Codex
 #   senated --machine        # the daemon
 #   senate status
 #
@@ -53,7 +53,7 @@ person = "alice"
 # `branch_prefix` alone does not turn this on.
 # committee_from_branch = true
 
-# Optional: `senate free` forgets the queued items and cursors of an agent
+# Optional: `senate setup clean` forgets the queued items and cursors of an agent
 # with no session and no contact for this many days. Default 30.
 # free_after_days = 30
 

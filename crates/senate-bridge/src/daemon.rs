@@ -917,7 +917,7 @@ fn orientation(
              mcp__senate__checkpoint（留交接记录：保持 .senate/PROGRESS.md、DECISIONS.md 和 \
              OPEN.md 是最新的）。你的用户也能在终端里用 `senate ask`、`senate tell`、\
              `senate reply` 以本人的身份对你们说话。你回答或转给你的用户的内容，会以桌面通知、`senate inbox` \
-             和实时的 `senate watch` 送到他们面前；转给他们的事项会一直留在他们那里，直到他们回复或接管，\
+             和实时的 `senate inbox --follow` 送到他们面前；转给他们的事项会一直留在他们那里，直到他们回复或接管，\
              所以把你需要他们决定的写进 reason。"
         ),
         Locale::En => format!(
@@ -932,7 +932,7 @@ fn orientation(
              DECISIONS.md and OPEN.md current). Your user can also speak to you in their own \
              name from a terminal with `senate ask`, `senate tell` and `senate reply`. What you answer \
              or escalate to your user reaches them as a desktop notification, in `senate inbox` and \
-             live in `senate watch`; an escalation stays with them until they reply or take the \
+             live in `senate inbox --follow`; an escalation stays with them until they reply or take the \
              thread, so put what you need from them in its reason."
         ),
     }
@@ -2754,8 +2754,8 @@ impl Shared {
                     .map_err(|error| match error.status() {
                         // No such route: a server from before aliases could be removed.
                         Some(404 | 405) => IpcError::bad_request(self.locale.pick(
-                            "这个 Senate 的服务器版本太旧，不支持 alias rm；请先升级它。",
-                            "This Senate's server is too old for alias rm; upgrade it first.",
+                            "这个 Senate 的服务器版本太旧，不支持 senator unalias；请先升级它。",
+                            "This Senate's server is too old for senator unalias; upgrade it first.",
                         )),
                         _ => server_error(error),
                     }),
@@ -3098,7 +3098,7 @@ impl Shared {
         }))
     }
 
-    /// `senate sessions`: each hosted session on record, with its host's
+    /// `senate session list`: each hosted session on record, with its host's
     /// state now, and each host running with no session.
     async fn on_sessions(&self) -> Result<crate::ipc::SessionsReply, IpcError> {
         use crate::ipc::{HostState, SessionRow, SessionsReply};
@@ -3157,7 +3157,7 @@ impl Shared {
         Ok(SessionsReply { rows, orphans })
     }
 
-    /// `senate sessions prune`: stop each orphaned host, then remove the
+    /// `senate session prune`: stop each orphaned host, then remove the
     /// directories of hosts that have ended. A launch still starting is
     /// neither.
     async fn on_prune_hosts(&self) -> Result<crate::ipc::PruneReply, IpcError> {
@@ -4041,11 +4041,11 @@ impl Shared {
                 codes::NO_SESSION,
                 self.locale.pick(
                     "这个会话还没有在 Senate bridge 登记。bridge 通过会话的 SessionStart / \
-                     UserPromptSubmit 钩子知道它：确认已运行过 `senate install` 且 daemon \
+                     UserPromptSubmit 钩子知道它：确认已运行过 `senate setup install` 且 daemon \
                      在运行，在这个会话里随便发一条消息，然后再试。",
                     "This session is not registered with the Senate bridge. The bridge learns \
                      about a session from its SessionStart / UserPromptSubmit hooks: make sure \
-                     `senate install` was run and the daemon is up, send any prompt in this \
+                     `senate setup install` was run and the daemon is up, send any prompt in this \
                      session, then try again.",
                 ),
             ));

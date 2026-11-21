@@ -225,7 +225,7 @@ pub(crate) fn running_ids(paths: &Paths) -> io::Result<Vec<EventId>> {
 }
 
 /// Removes the directory of every host that is not running, except those
-/// `keep` names (a launch still starting): what `senate sessions prune`
+/// `keep` names (a launch still starting): what `senate session prune`
 /// clears. Returns the ids removed.
 pub(crate) fn remove_ended(
     paths: &Paths,
@@ -832,7 +832,7 @@ const DIRECTORY_POLL: Duration = Duration::from_secs(1);
 ///
 /// The host does not watch its daemon: a hosted session is meant to
 /// outlive a daemon restart, which finds it again by its directory and
-/// lock (`senate restore`).
+/// lock (`senate session restore`).
 async fn vanished(dir: &Path) {
     loop {
         tokio::time::sleep(DIRECTORY_POLL).await;
@@ -900,7 +900,7 @@ pub(crate) fn unbound_context(paths: &Paths, id: &EventId) -> Option<String> {
     std::fs::read_to_string(directory(paths, id).join("unbound-context")).ok()
 }
 
-/// What `senate sessions` says of one host.
+/// What `senate session list` says of one host.
 pub(crate) struct HostFacts {
     pub(crate) running: bool,
     /// When it started: its owner lock's last write, the TUI's pid.
@@ -1028,7 +1028,7 @@ pub(crate) async fn terminate(paths: &Paths, id: &EventId, grace: Duration) -> i
 /// process group, then each host's. No graceful stop, no record of it:
 /// this is for a test's temporary home as the test ends (a test harness
 /// calls it when dropped, even when the test panics), not for a person's
-/// sessions, which `senate stop` ends.
+/// sessions, which `senate session stop` ends.
 pub fn kill_all(paths: &Paths) {
     let Ok(entries) = std::fs::read_dir(hosts(paths)) else {
         return;

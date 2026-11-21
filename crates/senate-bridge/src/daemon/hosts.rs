@@ -517,7 +517,9 @@ impl Shared {
         if !host::running(&paths, &host_id).map_err(IpcError::internal)? {
             return Err(IpcError::new(
                 codes::NO_SESSION,
-                format!("no running terminal host for {senator}. Use senate restore to resume it"),
+                format!(
+                    "no running terminal host for {senator}. Use senate session restore to resume it"
+                ),
             ));
         }
         let committee = session.committee().cloned().ok_or_else(|| {
@@ -652,7 +654,9 @@ impl Shared {
         }
         Err(IpcError::new(
             codes::NO_SESSION,
-            format!("no running terminal host for {senator}; use senate restore to resume it"),
+            format!(
+                "no running terminal host for {senator}; use senate session restore to resume it"
+            ),
         ))
     }
 

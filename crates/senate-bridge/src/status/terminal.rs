@@ -257,8 +257,8 @@ pub fn render_brief(
         terminal.line(
             &mut out,
             l.pick(
-                "没有活跃的会话 · 配置钩子见 senate install",
-                "No live sessions · see senate install",
+                "没有活跃的会话 · 配置钩子见 senate setup install",
+                "No live sessions · see senate setup install",
             ),
             2,
             false,
@@ -522,8 +522,8 @@ fn sessions(
         terminal.line(
             out,
             l.pick(
-                "没有登记的会话 · 配置钩子见 senate install",
-                "No registered sessions · see senate install",
+                "没有登记的会话 · 配置钩子见 senate setup install",
+                "No registered sessions · see senate setup install",
             ),
             2,
             false,

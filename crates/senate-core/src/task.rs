@@ -843,7 +843,7 @@ impl TaskBoard {
     }
 }
 
-/// Something an event says to a person: what `senate watch` prints and the
+/// Something an event says to a person: what `senate inbox --follow` prints and the
 /// desktop notification announces. The same rule as
 /// [`ThreadSummary::directed`] uses, for one event.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

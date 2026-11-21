@@ -1809,6 +1809,6 @@ async fn an_older_servers_aliases_are_read_senate_wide_and_cannot_be_removed() {
     .await
     .unwrap_err()
     .to_string();
-    assert!(refused.contains("too old for alias rm"), "{refused}");
+    assert!(refused.contains("too old for senator unalias"), "{refused}");
     h.stop().await;
 }

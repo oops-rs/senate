@@ -68,7 +68,7 @@
 //!
 //! Known limits: a brand-new worktree on a brand-new branch starts unbound
 //! until `senate join`; moving a repository leaves its slots stale (their
-//! recorded path is gone) until `senate free`.
+//! recorded path is gone) until `senate setup clean`.
 
 use std::fs::File;
 use std::io::{self, Write};

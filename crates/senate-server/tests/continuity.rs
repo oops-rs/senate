@@ -624,7 +624,7 @@ async fn leave(server: &TestServer, token: &str, agent: &str, cursor: u64) {
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
 }
 
-/// `senate stop` (or the agent's last session ending) makes its bridge stop
+/// `senate session stop` (or the agent's last session ending) makes its bridge stop
 /// following the committee and say so: the agent is away at once, not once
 /// the two-minute threshold passes, and its next heartbeat brings it back.
 #[tokio::test]

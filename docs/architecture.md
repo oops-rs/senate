@@ -190,7 +190,7 @@ committee's chair, and the chair handles it directly.
 
 Each person in a Senate can appoint specific coding sessions to a team that
 spans committees. The team owner manages membership through
-`senate secretary-team`. The server persists these appointments by person
+`senate secretary`. The server persists these appointments by person
 and stable session senator ID. A session can hold a personal appointment,
 a Speaker desk appointment, or both. Each membership can be granted and
 revoked independently, including when the team owner is the Speaker.
@@ -398,7 +398,7 @@ With no chat platform the person would learn nothing unless they polled.
   thread or escalates it to the asker (printed with its reason), then marks
   what it showed as read. Without `--wait`, the output says how they will
   hear back.
-- `senate watch [--committee ID] [--json]` stays in the foreground and prints,
+- `senate inbox --follow [--committee ID] [--json]` stays in the foreground and prints,
   as they arrive, the events addressed to the person on the committees the
   machine's sessions are on (`senate_core::attention`: answers, notes,
   questions, requests, escalations; not what is put to the Speaker, which is
@@ -549,8 +549,10 @@ address limit or contain unsupported characters use a deterministic SHA-256-deri
 suffix. Session records can expire without changing a resumed session's identity.
 
 The session's MCP `join` accepts a `senator` alias. The CLI equivalent is
-`senate join <committee> --alias <name>`. A pin (Claude environment, then worktree
-file, then a custom harness setting) can suggest an initial alias. An alias
+`senate senator alias <name>` (`--session <id>` from another terminal);
+`senate join --alias <name>` also writes the worktree's suggestion. A pin
+(Claude environment, then worktree file, then a custom harness setting) can
+suggest an initial alias. An alias
 belongs to the committee it was given in, so the same alias can stand for
 different agents on different committees (`nous::main`, `nous-ios::main`); a
 person's handle is Senate-wide and is never an alias. The server records the
@@ -564,8 +566,8 @@ commands (`attach`, `restore`, `stop`, `alias rm`) let the person pick one;
 non-interactive callers (MCP tools, `ask`/`tell`, the server's resolution) take
 the match on the writer's own committee and otherwise refuse, listing the
 qualified candidates. `committee::alias` always names one. Changing an alias
-keeps the same inbox, byline, and roles. `senate aliases` lists the table and
-`senate alias rm <alias>` removes one (the agent's person or the Speaker's
+keeps the same inbox, byline, and roles. `senate senator list` lists the table and
+`senate senator unalias <alias>` removes one (the agent's person or the Speaker's
 office). Aliases kept Senate-wide by an older server move, at its first start
 after the upgrade, to every committee their agent sits in; one whose agent sits
 nowhere is dropped and named in the server log.
@@ -645,8 +647,8 @@ when it was saved), and swaps them when the branch changes.
 
 Known limits: a brand-new worktree on a brand-new branch starts unbound until
 `senate join`; a repository that is moved leaves its saved copies stale until
-`senate free` removes them (a copy for a branch that still exists is never
-stale). `senate free` never deletes the data of a hosted Senate that
+`senate setup clean` removes them (a copy for a branch that still exists is never
+stale). `senate setup clean` never deletes the data of a hosted Senate that
 `senate.toml` no longer names without an explicit `--delete-logs`: that is a
 log.
 

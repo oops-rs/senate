@@ -258,7 +258,7 @@ impl Shared {
     ) -> Result<(), IpcError> {
         if self.seat_is_unseated(committee, senator).await? {
             let who = Address::senator(senator).in_text();
-            let join = format!("senate seat join --committee {committee} --senator {senator}");
+            let join = format!("senate senator seat {senator} --committee {committee}");
             let message = match self.locale {
                 Locale::En => format!(
                     "{who} was unseated from committee `{committee}`. Run `{join}` before restoring."
@@ -313,7 +313,7 @@ impl Shared {
         if auth.committee_scope.is_some() {
             if auth.sender.as_senator() == Some(primary) {
                 return Err(IpcError::bad_request(format!(
-                    "a chair cannot stop its own terminal through this tool. Ask your operator to run senate stop {primary} or exit the terminal",
+                    "a chair cannot stop its own terminal through this tool. Ask your operator to run senate session stop {primary} or exit the terminal",
                 )));
             }
             if self.seat_is_unseated(&target.committee, primary).await? {

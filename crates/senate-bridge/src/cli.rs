@@ -1,7 +1,7 @@
 //! `senate`: the command for people and their coding agents on a developer
 //! machine. It installs Senate into Claude Code and Codex, is the MCP server
 //! and the hooks they run, shows what the daemon is doing and what waits for
-//! the person, and writes the local profile (`senate init --local`). The
+//! the person, and writes the local profile (`senate setup init --local`). The
 //! daemon itself is `senated` (`senated --machine` on a developer machine).
 
 // These two stay beside this file under their own names.
@@ -225,9 +225,10 @@ enum Cmd {
   senate ask ibot::codex \"Is the schema frozen?\"
   git diff | senate ask reviewer -
 
-Without --wait it returns at once: read the answer with `senate inbox`,
-`senate watch` or `senate thread <seq>`. `'*'` is whichever agent is free,
-`ibot::codex` an agent on another committee, `-` the text on stdin.")]
+Without --wait it returns at once: read the answer with `senate inbox`
+(`--follow` to see it arrive) or `senate thread <seq>`. `'*'` is whichever
+agent is free, `ibot::codex` an agent on another committee, `-` the text on
+stdin.")]
     Ask {
         /// Who to ask.
         to: String,
@@ -377,7 +378,7 @@ Without --wait it returns at once: read the answer with `senate inbox`,
   senate status
   senate status --global
   senate status --committee refund-v2
-  senate status --full-ids    Complete IDs, e.g. for `senate join --session`")]
+  senate status --full-ids    Complete IDs, e.g. for `senator alias --session`")]
     Status {
         #[command(flatten)]
         scope: DisplayScope,
@@ -456,7 +457,7 @@ Without --wait it returns at once: read the answer with `senate inbox`,
     ///
     /// After /new or /clear in hosted Codex, Senate still delivers to the
     /// original thread, which the TUI no longer shows. Exit that TUI and use
-    /// senate restore to return. A Codex session that was live before restore
+    /// senate session restore to return. A Codex session that was live before restore
     /// stays live on host close because a native client may remain.
     ///
     /// Hosted Claude keeps the senator when the same process reports a new
@@ -987,7 +988,7 @@ fn settings_here() -> (Paths, Settings) {
 }
 
 /// The hosted sessions of this machine whose terminal host is running, as
-/// `senate watch-all` shows them: `senate sessions`' rows, each named as
+/// `senate session watch` shows them: `senate session list`' rows, each named as
 /// a command takes it.
 async fn hosted_sessions(paths: &Paths) -> anyhow::Result<Vec<crate::host::view::Session>> {
     let reply: crate::ipc::SessionsReply = daemon_call(paths, &Request::Sessions).await?;
@@ -1117,7 +1118,7 @@ fn pick_alias(name: AliasName) -> anyhow::Result<AliasName> {
     }
 }
 
-/// `senate sessions stop`: stops each chosen session as `senate stop`
+/// `senate session stop`: stops each chosen session as the daemon's `Stop`
 /// does, one after another, and says what it left and why. Fails when
 /// any stop failed.
 async fn stop_sessions(
@@ -1210,7 +1211,7 @@ fn pick_running_session() -> anyhow::Result<Option<SenatorName>> {
         reply.rows.into_iter().filter(|r| r.is_running()).collect();
     anyhow::ensure!(
         !running.is_empty(),
-        "no hosted session is running; `senate spawn` starts one, `senate sessions` lists them"
+        "no hosted session is running; `senate spawn` starts one, `senate session list` lists them"
     );
     rt.block_on(crate::host::pick_session(
         &running,
@@ -1219,7 +1220,7 @@ fn pick_running_session() -> anyhow::Result<Option<SenatorName>> {
 }
 
 /// Let the person pick one of an alias's `candidates`: on a terminal,
-/// in the picker, each line with what `senate sessions` knows of that
+/// in the picker, each line with what `senate session list` knows of that
 /// senator here; elsewhere, an error listing them to name one.
 fn choose_alias(
     name: &AliasName,
@@ -1409,7 +1410,7 @@ fn drop_idle_seats(docket: &mut DocketReply) -> usize {
     idle
 }
 
-/// `senate watch`: what is addressed to the person, as it arrives.
+/// `senate inbox --follow`: what is addressed to the person, as it arrives.
 async fn watch(
     paths: &Paths,
     committee: Option<CommitteeId>,
@@ -1521,7 +1522,7 @@ fn speak_new(
 
 fn service_spec() -> anyhow::Result<(service::Spec, Locale)> {
     let platform = service::Platform::current()
-        .context("`senate service` supports macOS (launchd) and Linux (systemd)")?;
+        .context("`senate setup service` supports macOS (launchd) and Linux (systemd)")?;
     let user_home = dirs::home_dir().context("cannot find the home directory")?;
     let paths = Paths::from_env()?;
     let senate_home = std::path::absolute(paths.home()).context("resolving the Senate home")?;
@@ -1584,8 +1585,8 @@ fn run_service(command: ServiceCmd, output: Output) -> anyhow::Result<()> {
                     .is_ok_and(|unit| !unit.lines().any(|line| line.trim() == "KillMode=process"))
             {
                 println!("{}", locale.pick(
-                    "请重新运行 senate service install --yes，以便托管终端在 systemd 重启 Senate 守护进程时继续运行。",
-                    "Run senate service install --yes to update the systemd unit so hosted terminals survive a daemon restart.",
+                    "请重新运行 senate setup service install --yes，以便托管终端在 systemd 重启 Senate 守护进程时继续运行。",
+                    "Run senate setup service install --yes to update the systemd unit so hosted terminals survive a daemon restart.",
                 ));
             }
         }
@@ -2364,7 +2365,7 @@ fn run_setup(command: SetupCmd, output: Output) -> anyhow::Result<()> {
         } => {
             if !local {
                 anyhow::bail!(
-                    "`senate init` writes the local profile only: run `senate init --local`. \
+                    "`senate setup init` writes the local profile only: run `senate setup init --local`. \
                      Under a team Senate, write senate.toml from config/senate.example.toml."
                 );
             }
@@ -2467,14 +2468,14 @@ fn describe_error(error: &anyhow::Error) -> String {
                 format!(
                     "Senate daemon 没有运行（{socket} 上没有监听）。\n  \
                      启动：senated --machine\n  \
-                     保持运行：senate service install --yes\n  \
-                     查看：senate status、senate service status"
+                     保持运行：senate setup service install --yes\n  \
+                     查看：senate status、senate setup service status"
                 ),
                 format!(
                     "the Senate daemon is not running (nothing listens on {socket}).\n  \
                      Start it:        senated --machine\n  \
-                     Keep it running: senate service install --yes\n  \
-                     Check:           senate status, senate service status"
+                     Keep it running: senate setup service install --yes\n  \
+                     Check:           senate status, senate setup service status"
                 ),
             )
         }
@@ -2487,10 +2488,10 @@ fn describe_error(error: &anyhow::Error) -> String {
         }
         Some(ipc::ClientError::Timeout) => locale().pick(
             format!(
-                "{error:#}\n  `senate status` 显示 daemon 的状态；`senate service status` 给出日志位置。"
+                "{error:#}\n  `senate status` 显示 daemon 的状态；`senate setup service status` 给出日志位置。"
             ),
             format!(
-                "{error:#}\n  `senate status` shows the daemon's state; `senate service status` says where its log is."
+                "{error:#}\n  `senate status` shows the daemon's state; `senate setup service status` says where its log is."
             ),
         ),
         _ => format!("{error:#}"),

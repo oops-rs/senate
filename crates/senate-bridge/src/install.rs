@@ -1,4 +1,4 @@
-//! `senate install [--yes]`: wire the bridge into Claude Code.
+//! `senate setup install [--yes]`: wire the bridge into Claude Code.
 //!
 //! 1. Register the MCP server `senate` at user scope through the `claude`
 //!    CLI (`claude mcp add --scope user senate -- <abs exe> mcp`).
@@ -567,7 +567,7 @@ pub fn render(plan: &InstallPlan, opts: &InstallOptions, applied: bool) -> Strin
     };
     let _ = writeln!(
         out,
-        "senate install{}",
+        "senate setup install{}",
         match (applied, zh) {
             (true, _) => "",
             (false, true) => "（演练：不加 --yes 什么都不写）",
@@ -674,11 +674,11 @@ pub fn render(plan: &InstallPlan, opts: &InstallOptions, applied: bool) -> Strin
         ),
         (CommandPlan::Foreign, true) => writeln!(
             out,
-            "   保持不动：它已存在且不是 senate install 写的，所以 /senate 归你自己"
+            "   保持不动：它已存在且不是 senate setup install 写的，所以 /senate 归你自己"
         ),
         (CommandPlan::Foreign, false) => writeln!(
             out,
-            "   left alone: it exists and senate install did not write it, so /senate is yours"
+            "   left alone: it exists and senate setup install did not write it, so /senate is yours"
         ),
     };
     match &plan.codex {
@@ -1022,7 +1022,7 @@ mod tests {
         let p = plan(&opts).unwrap();
         let text = render(&p, &opts, false);
         assert!(
-            text.starts_with("senate install（演练：不加 --yes 什么都不写）"),
+            text.starts_with("senate setup install（演练：不加 --yes 什么都不写）"),
             "{text}"
         );
         assert!(

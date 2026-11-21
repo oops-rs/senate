@@ -461,7 +461,7 @@ fn install_reports_in_the_bridges_locale() {
     };
     let text = install(false);
     assert!(
-        text.starts_with("senate install（演练：不加 --yes 什么都不写）"),
+        text.starts_with("senate setup install（演练：不加 --yes 什么都不写）"),
         "{text}"
     );
     assert!(text.contains(&format!(
@@ -845,7 +845,7 @@ fn a_command_that_needs_the_daemon_says_how_to_start_it() {
     for needle in [
         "senate: the Senate daemon is not running",
         "senated --machine",
-        "senate service install --yes",
+        "senate setup service install --yes",
         "senate status",
     ] {
         assert!(text.contains(needle), "{needle:?} in:\n{text}");

@@ -971,7 +971,7 @@ async fn restoring_an_unseated_senator_requires_explicit_rejoin_before_capacity(
     let primary = path(&format!("codex-{SESSION}"));
     let alias = path("restore-target");
     let committee = committee();
-    let join = format!("senate seat join --committee {committee} --senator {primary}");
+    let join = format!("senate senator seat {primary} --committee {committee}");
     for locale in [Locale::En, Locale::Zh] {
         let dir = tempfile::tempdir().unwrap();
         // The cap would refuse a seated target. The seat refusal must

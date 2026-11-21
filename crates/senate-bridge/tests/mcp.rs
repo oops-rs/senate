@@ -314,7 +314,10 @@ async fn stop_tool_enforces_authority_and_records_the_actor() {
         "{message}"
     );
     for (target, reason) in [
-        ("hosted-chair", "Ask your operator to run senate stop"),
+        (
+            "hosted-chair",
+            "Ask your operator to run senate session stop",
+        ),
         ("other-host", "another committee"),
         ("claude-manual-fixture", "has no Senate-owned terminal"),
     ] {

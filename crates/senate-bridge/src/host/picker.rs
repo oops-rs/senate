@@ -8,7 +8,7 @@
 //! | Enter | choose |
 //! | `q`, Esc, Ctrl-C, Ctrl-] | cancel |
 //!
-//! `senate attach` with no name opens it over `senate sessions`' rows
+//! `senate attach` with no name opens it over `senate session list`' rows
 //! ([`pick_session`]); a bare alias that several committees use opens it
 //! over those senators ([`pick`]).
 
@@ -35,7 +35,7 @@ pub struct Choice {
 }
 
 impl Choice {
-    /// A session as `senate sessions` lists it.
+    /// A session as `senate session list` lists it.
     pub fn of_row(row: &SessionRow) -> Self {
         let mut detail = format!("{} · {}", row.runtime.as_str(), row.state.as_str());
         if row.attached {

@@ -1003,7 +1003,7 @@ async fn the_parents_speaker_relays_to_a_child_senates_seat_and_hears_back() {
     world.stop().await;
 }
 
-/// claude's session ends (as `senate stop` ends a hosted one): its seat is
+/// claude's session ends (as `senate session stop` ends a hosted one): its seat is
 /// away at once, here and as declared above, not once the two-minute
 /// presence threshold passes. A question then meant for it goes to alice's
 /// desk, which holds it for claude.

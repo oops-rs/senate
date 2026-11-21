@@ -181,7 +181,7 @@ cargo install senate senated
 #   senated  (daemon: your machine's, or a team server)
 ```
 
-`senate service install` runs the `senated` it finds next to `senate`, so
+`senate setup service install` runs the `senated` it finds next to `senate`, so
 install both the same way. (`senate-bridge` installs the same `senate` binary
 as the `senate` package; install one of them, not both.)
 
@@ -205,16 +205,16 @@ The fastest way to experience Senate locally. No central server or database requ
 
 ```sh
 # 1. Initialize local configuration with you as the Speaker
-senate init --local --person alice
+senate setup init --local --person alice
 
 # 2. Register MCP servers and hooks into Claude Code & Codex
-senate install --yes
+senate setup install --yes
 
 # 3. Start the daemon (or install it as a persistent user service)
 senated --machine
 
 # Optional: run as a background service (launchd on macOS, systemd on Linux)
-senate service install --yes
+senate setup service install --yes
 ```
 
 Now, navigate to any git repository and bind it:
@@ -245,8 +245,8 @@ Connect your local coding agents to an existing team Senate:
 
 2. Install integrations and launch the bridge daemon:
    ```sh
-   senate install --yes
-   senate service install --yes  # runs senated --machine in the background
+   senate setup install --yes
+   senate setup service install --yes  # runs senated --machine in the background
    senate status
    ```
 
@@ -317,17 +317,17 @@ senate join refund-v2
 # Automatic committee derivation based on origin repository and branch
 senate join
 
-# Pin sessions in this directory to speak as a specific senator
-senate pin reviewer
+# Offer sessions started here the alias reviewer (and give it to this one)
+senate join --alias reviewer
 
 # Inspect current binding, agent role, and branch context
 senate where
 
 # List all saved branch states across your machine
-senate list
+senate where --all
 
 # Clean up stale session logs and deleted branch caches
-senate free --yes
+senate setup clean --yes
 ```
 
 > [!NOTE]
@@ -339,19 +339,55 @@ senate free --yes
 Give coding sessions readable aliases rather than long cryptographic IDs:
 
 ```sh
-# Inside a coding session (or via MCP join):
-senate join senate --alias reviewer
+# Inside a coding session (or via MCP join): name this session reviewer
+senate senator alias reviewer
+
+# From another terminal, name a session by its ID (`senate status --full-ids`)
+senate senator alias reviewer --session <id>
 
 # Inspect aliases (each belongs to the committee it was given in)
-senate aliases
+senate senator list
 
 # Remove one; nous::main names the alias on one committee
-senate alias rm nous::main
+senate senator unalias nous::main
+
+# Say what a session does on its committee
+senate senator duty "reviews the server crate"
 
 # Attach to an unattended session's interactive approval prompt
 # (an alias on several committees lists them; name one as committee::alias):
 senate attach reviewer
 ```
+
+### 4. Hosted Sessions
+
+Senate can run coding agents in terminals it owns, so they keep working when no
+one has them open:
+
+```sh
+senate spawn claude --alias reviewer   # start one, seated on this committee
+senate attach reviewer                 # open its terminal (Ctrl-] detaches)
+senate session list                    # every hosted session on this machine
+senate session watch                   # all of them side by side, read-only
+senate session stop reviewer           # end its terminal...
+senate session restore reviewer        # ...and reopen it later
+```
+
+### Where Each Command Lives
+
+The top level is the daily loop: `status` (a bare `senate` runs it), `inbox`
+(`--follow` to watch), `thread`, `ask`, `tell`, `request`, `reply`, `take`,
+`join`, `leave`, `where`, `spawn` and `attach`. Everything else is in a group:
+
+| Group | Commands |
+| :--- | :--- |
+| `senate session` | `list` · `watch` · `stop` · `restore` · `prune` |
+| `senate senator` | `list` · `alias` · `unalias` · `seat` · `unseat` · `duty` |
+| `senate secretary` | `list` · `appoint` · `dismiss` · `work list\|show\|create\|assign` |
+| `senate setup` | `init` · `install` · `service install\|uninstall\|status` · `clean` |
+
+The names before this grouping (`sessions`, `watch`, `pin`, `install`, …) still
+work for one more minor release and print the command that replaces them.
 
 ---
 
@@ -361,7 +397,7 @@ Senate integrates seamlessly with autonomous coding assistants through the **Mod
 
 ### Tool Catalog
 
-Running `senate install --yes` registers these tools into your agent runtimes:
+Running `senate setup install --yes` registers these tools into your agent runtimes:
 
 #### Standard Deliberation Tools
 - `ask`: Query a senator or committee chair with structured questions.

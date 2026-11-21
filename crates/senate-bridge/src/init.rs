@@ -1,9 +1,9 @@
-//! `senate init --local`: Senate alone on one machine, in one command.
+//! `senate setup init --local`: Senate alone on one machine, in one command.
 //!
 //! It writes two files in the Senate home (`~/.senate`, or `$SENATE_HOME`):
 //! `senate.toml`, and beside it a `secretary.toml` whose every key is
 //! commented out; nothing else: no service, no Claude Code or Codex
-//! configuration (that is `senate install`). The profile is a root Senate
+//! configuration (that is `senate setup install`). The profile is a root Senate
 //! hosted by `senated --machine` on loopback, with no Senate above, the
 //! person alone on its roster and its Speaker (`senator::<person>`). No
 //! agent is named Speaker: an agent the person names in `secretaries`
@@ -28,7 +28,7 @@ pub const SECRETARY_FILE: &str = "secretary.toml";
 /// Where the local Senate listens unless told otherwise.
 pub const DEFAULT_LOCAL_LISTEN: &str = "127.0.0.1:7979";
 
-/// What `senate init --local` writes.
+/// What `senate setup init --local` writes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalProfile {
     pub person: Name,
@@ -56,23 +56,24 @@ impl LocalProfile {
     /// examples in `config/`).
     pub fn to_toml(&self) -> String {
         format!(
-            r#"# Senate alone on this machine, written by `senate init --local`.
+            r#"# Senate alone on this machine, written by `senate setup init --local`.
 #
-#   senated --machine        # the daemon: this Senate, and your sessions' side
-#   senate install --yes     # once: the MCP server and hooks for Claude Code / Codex
+#   senated --machine           # the daemon: this Senate, and your sessions' side
+#   senate setup install --yes  # once: the MCP server and hooks for Claude Code / Codex
 #   senate status
 #
 # In each repository you work in (everything Senate keeps there is the
 # untracked .senate/ directory; it follows the branch):
-#   senate join <committee>  # bind this worktree, on this branch, to a committee
-#   senate where             # what a session here would get, and from where
-#   senate list / senate free  # the saved per-branch copies; forget what expired
+#   senate join <committee>     # bind this worktree, on this branch, to a committee
+#   senate where                # what a session here would get, and from where
+#   senate where --all          # the saved per-branch copies
+#   senate setup clean          # forget what expired
 #
 # To keep the daemon running without a terminal (a launchd agent on macOS, a
 # systemd user unit on Linux; each is a dry run until you add --yes):
-#   senate service install --yes
-#   senate service status
-#   senate service uninstall --yes
+#   senate setup service install --yes
+#   senate setup service status
+#   senate setup service uninstall --yes
 #
 # Everything senated keeps for this Senate is under senates/top/ here: its
 # log (SQLite), the token only this machine uses, the address it serves.
@@ -121,7 +122,7 @@ listen = "{listen}"
 pub fn secretary_toml() -> String {
     r#"# The built-in secretary: a session on a model that works the Speaker's
 # desk (and, when named, any senator's) while they are away. Written by
-# `senate init --local`; every key is optional, and with no model
+# `senate setup init --local`; every key is optional, and with no model
 # configured there is no built-in secretary. A change takes effect without
 # a restart, before it next acts (a changed `name` at the next start).
 # A file <committee>.secretary.toml beside this one overrides any key but
@@ -155,7 +156,7 @@ pub fn secretary_toml() -> String {
 
 #[derive(Debug, thiserror::Error)]
 pub enum InitError {
-    #[error("{0} already exists; senate init writes a new configuration only")]
+    #[error("{0} already exists; senate setup init writes a new configuration only")]
     Exists(PathBuf),
     #[error("{0}")]
     Invalid(String),

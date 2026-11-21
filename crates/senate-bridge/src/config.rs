@@ -19,7 +19,7 @@
 //! # Optional: the first segment of `<prefix>/<committee>/<person>` branches
 //! # (the convention above, and the Speaker's work branches).
 //! branch_prefix = "feature"
-//! # Optional: `senate free` forgets the queued items and cursors of an
+//! # Optional: `senate setup clean` forgets the queued items and cursors of an
 //! # agent with no session and no contact for this many days.
 //! free_after_days = 30
 //! # Optional: at most this many Senate-hosted sessions on the machine.
@@ -97,7 +97,7 @@ pub struct BridgeConfig {
     /// enable it.
     #[serde(default)]
     pub committee_from_branch: bool,
-    /// `senate free` forgets what an agent with no session and no contact
+    /// `senate setup clean` forgets what an agent with no session and no contact
     /// for this many days left in the daemon's state.
     #[serde(default = "default_free_after_days")]
     pub free_after_days: u64,
@@ -678,7 +678,7 @@ pub fn check_loopback(listen: &str) -> Result<(), String> {
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     #[error(
-        "no configuration at {0}; write one with server_url, token and person (under a team's Senate), or run `senate init --local` (alone)"
+        "no configuration at {0}; write one with server_url, token and person (under a team's Senate), or run `senate setup init --local` (alone)"
     )]
     Missing(PathBuf),
     #[error("reading {path}: {source}")]
