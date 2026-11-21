@@ -94,7 +94,7 @@ pub mod testing;
 pub use assembly::{Assembly, AssemblyError, Senated};
 pub use chat::{
     Addressing, ChatGateway, ChatMount, Delivered, GatewayError, Inbound, MembershipPolicy,
-    PlatformMention, UNBOUND_CAPACITY, sender_address,
+    ParkedGroup, ParkedReason, PlatformMention, UNBOUND_CAPACITY, sender_address,
 };
 pub use component::{Component, ComponentContext, GaveUp, component_fn};
 pub use config::{ForgeSection, SenatedConfig, SenatedConfigError, WorkSection};

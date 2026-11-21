@@ -14,6 +14,11 @@
 //! - a failed adopt or release is retried with a doubling pause (from
 //!   [`MembershipPolicy::retry_initial`] up to [`MembershipPolicy::retry_max`], with no
 //!   end) until it succeeds or the log's bindings make it unwanted;
+//! - but one the platform refuses outright ([`SurfaceError::Rejected`]: it
+//!   does not know the message the group was named by, say) is *parked*:
+//!   not tried again until something changes (a new real message from the
+//!   group, a rebind, the log wanting the opposite, or a restart), logged
+//!   once, and listed by [`ChatGateway::parked_groups`](super::ChatGateway::parked_groups);
 //! - calls for one group are made one at a time and in the order wanted, and
 //!   each is bounded by [`MembershipPolicy::call_timeout`], so a call that never
 //!   returns is a failure like any other;
@@ -76,6 +81,28 @@ pub(super) enum Want {
     Released,
 }
 
+/// Why a bound group's membership is stuck until someone acts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParkedReason {
+    /// The platform refused the call outright; it is not tried again until
+    /// something changes.
+    Rejected {
+        /// What the platform said.
+        error: String,
+    },
+    /// No real message names the group yet (the log holds only simulated
+    /// ones, or none): the adopt waits for one.
+    NoRealMessage,
+}
+
+/// A group the gateway cannot bring in line with the log by itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParkedGroup {
+    pub group_id: String,
+    pub reason: ParkedReason,
+    pub since: chrono::DateTime<chrono::Utc>,
+}
+
 struct GroupMembership {
     /// What the log wants now; `epoch` changes whenever this does.
     want: Option<Want>,
@@ -86,6 +113,8 @@ struct GroupMembership {
     driver: Option<u64>,
     /// Held across each call for this group, so calls are made in turn.
     gate: Arc<AsyncMutex<()>>,
+    /// Why nothing is being tried for `want`, when that is so.
+    parked: Option<(ParkedReason, chrono::DateTime<chrono::Utc>)>,
 }
 
 impl GroupMembership {
@@ -96,6 +125,7 @@ impl GroupMembership {
             confirmed: None,
             driver: None,
             gate: Arc::new(AsyncMutex::new(())),
+            parked: None,
         }
     }
 }
@@ -127,8 +157,10 @@ impl Memberships {
         if g.want != Some(want) {
             g.want = Some(want);
             g.epoch += 1;
+            g.parked = None;
         }
-        if unsupported || g.confirmed == Some(want) || g.driver == Some(g.epoch) {
+        let refused = matches!(g.parked, Some((ParkedReason::Rejected { .. }, _)));
+        if unsupported || refused || g.confirmed == Some(want) || g.driver == Some(g.epoch) {
             return None;
         }
         g.driver = Some(g.epoch);
@@ -137,6 +169,38 @@ impl Memberships {
 
     fn is_current(&self, group: &str, epoch: u64) -> bool {
         self.groups.get(group).is_some_and(|g| g.epoch == epoch)
+    }
+
+    /// Something changed for `group` (a real message from it, a rebind):
+    /// what was parked may be tried again.
+    pub(super) fn unpark(&mut self, group: &str) {
+        if let Some(g) = self.groups.get_mut(group) {
+            g.parked = None;
+        }
+    }
+
+    fn refused(&self, group: &str) -> bool {
+        self.groups
+            .get(group)
+            .is_some_and(|g| matches!(g.parked, Some((ParkedReason::Rejected { .. }, _))))
+    }
+
+    /// The groups parked now, by id.
+    pub(super) fn parked(&self) -> Vec<ParkedGroup> {
+        let mut parked: Vec<ParkedGroup> = self
+            .groups
+            .iter()
+            .filter_map(|(group_id, g)| {
+                let (reason, since) = g.parked.clone()?;
+                Some(ParkedGroup {
+                    group_id: group_id.clone(),
+                    reason,
+                    since,
+                })
+            })
+            .collect();
+        parked.sort_by(|a, b| a.group_id.cmp(&b.group_id));
+        parked
     }
 }
 
@@ -238,8 +302,8 @@ impl Inner {
                 None => match self.derive_ref(group).await {
                     Ok(Some(by)) => Some(by),
                     Ok(None) => {
-                        // Nothing names the group yet: its first message will.
-                        tracing::debug!(%group, "no message known to adopt the group by yet");
+                        // Nothing names the group yet: its first real message will.
+                        self.park(group, epoch, ParkedReason::NoRealMessage);
                         return Attempt::Done;
                     }
                     Err(error) => {
@@ -272,6 +336,11 @@ impl Inner {
             }
             Called::Failed(SurfaceError::Unsupported(reason)) => {
                 self.unsupported(want, &reason);
+                Attempt::Done
+            }
+            Called::Failed(SurfaceError::Rejected(error)) => {
+                // Asking again the same way would be refused the same way.
+                self.park(group, epoch, ParkedReason::Rejected { error });
                 Attempt::Done
             }
             Called::Failed(error) => {
@@ -324,6 +393,31 @@ impl Inner {
         if let Some(g) = lock(&self.state).memberships.groups.get_mut(group) {
             g.confirmed = Some(state);
         }
+    }
+
+    /// Nothing more is tried for `group` until it is unparked; logged once.
+    fn park(&self, group: &str, epoch: u64, reason: ParkedReason) {
+        let mut state = lock(&self.state);
+        let Some(g) = state.memberships.groups.get_mut(group) else {
+            return;
+        };
+        if g.epoch != epoch || g.parked.as_ref().is_some_and(|(r, _)| *r == reason) {
+            return;
+        }
+        let want = g.want;
+        match &reason {
+            ParkedReason::Rejected { error } => tracing::warn!(
+                %group,
+                %error,
+                ?want,
+                "the platform refused to join or leave the group; not retrying until a new message from it, a rebind, or a restart"
+            ),
+            ParkedReason::NoRealMessage => tracing::info!(
+                %group,
+                "no real message names the bound group yet (simulated ones cannot); joining on its first"
+            ),
+        }
+        g.parked = Some((reason, chrono::Utc::now()));
     }
 
     fn unsupported(&self, want: Want, reason: &str) {
@@ -385,7 +479,10 @@ impl Inner {
         let policy = *lock(&self.policy);
         let (gate, by) = {
             let mut state = lock(&self.state);
-            if state.table.committee_of(group).is_none() || state.memberships.adopt_unsupported {
+            if state.table.committee_of(group).is_none()
+                || state.memberships.adopt_unsupported
+                || state.memberships.refused(group)
+            {
                 return false;
             }
             let Some(by) = state.latest_ref.get(group).cloned() else {
@@ -418,6 +515,11 @@ impl Inner {
             Called::Adopted(_) => {
                 self.confirm(group, Want::Held);
                 true
+            }
+            Called::Failed(SurfaceError::Rejected(error)) => {
+                let epoch = lock(&self.state).memberships.groups[group].epoch;
+                self.park(group, epoch, ParkedReason::Rejected { error });
+                false
             }
             _ => false,
         }

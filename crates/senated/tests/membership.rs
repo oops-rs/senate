@@ -885,3 +885,86 @@ async fn a_simulated_message_never_names_its_group_for_an_adopt() {
     assert!(rig.fake.joined().contains(&GROUP.to_owned()));
     rig.stop().await;
 }
+
+/// A restart that names the bound group by a message the platform does not
+/// know: its adopt is refused.
+async fn refused_on_restart() -> Rig {
+    let hub = MemoryHub::new();
+    binding(&hub, "alpha", GROUP, BindingAction::Bind).await;
+    chat(&hub, "alpha", GROUP, "m_unknown").await;
+    let rig = rig_on(hub, |_| {}).await;
+    pass(Duration::from_secs(1)).await;
+    let adopts = rig.adopts();
+    assert_eq!(adopts.len(), 1, "{adopts:?}");
+    assert_eq!(adopts[0].outcome, MembershipOutcome::Rejected);
+    rig
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_rejected_adopt_is_not_retried_until_a_new_real_message() {
+    let rig = refused_on_restart().await;
+    pass(Duration::from_secs(3_600)).await;
+    assert_eq!(rig.adopts().len(), 1, "no retry loop on a refusal");
+    let parked = rig.gateway.parked_groups();
+    assert_eq!(parked.len(), 1, "{parked:?}");
+    assert_eq!(parked[0].group_id, GROUP);
+    assert!(
+        matches!(parked[0].reason, senated::ParkedReason::Rejected { .. }),
+        "{parked:?}"
+    );
+
+    // A simulated message changes nothing.
+    rig.gateway.simulate(simulated("hello")).await.unwrap();
+    pass(Duration::from_secs(60)).await;
+    assert_eq!(rig.adopts().len(), 1);
+
+    rig.hear("m_real").await;
+    pass(Duration::from_secs(1)).await;
+    let adopts = rig.adopts();
+    assert_eq!(adopts.len(), 2, "{adopts:?}");
+    assert_eq!(adopts[1].subject, "m_real");
+    assert_eq!(adopts[1].outcome, MembershipOutcome::Done);
+    assert_eq!(rig.gateway.parked_groups(), []);
+    rig.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_rebind_tries_a_rejected_adopt_once_more() {
+    let rig = refused_on_restart().await;
+    rig.bind("alpha").await;
+    pass(Duration::from_secs(3_600)).await;
+    assert_eq!(rig.adopts().len(), 2, "once more, then parked again");
+    assert_eq!(rig.gateway.parked_groups().len(), 1);
+    rig.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_unavailable_platform_keeps_being_retried_and_parks_nothing() {
+    let rig = rig().await;
+    rig.hear("m1").await;
+    rig.fake.fail_adopts(1_000);
+    rig.bind("alpha").await;
+    pass(Duration::from_secs(120)).await;
+    let tries = rig.adopts().len();
+    assert!(tries > 10, "{tries} tries");
+    assert_eq!(rig.gateway.parked_groups(), []);
+    pass(Duration::from_secs(120)).await;
+    assert!(rig.adopts().len() > tries, "still retrying");
+    rig.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_group_with_only_simulated_messages_is_listed_as_waiting() {
+    let hub = MemoryHub::new();
+    binding(&hub, "alpha", GROUP, BindingAction::Bind).await;
+    chat_marked(&hub, "alpha", GROUP, "sim:01abc", true).await;
+    let rig = rig_on(hub, |_| {}).await;
+    pass(Duration::from_secs(1)).await;
+    let parked = rig.gateway.parked_groups();
+    assert_eq!(parked.len(), 1, "{parked:?}");
+    assert_eq!(parked[0].reason, senated::ParkedReason::NoRealMessage);
+    rig.hear("m_first").await;
+    pass(Duration::from_secs(1)).await;
+    assert_eq!(rig.gateway.parked_groups(), []);
+    rig.stop().await;
+}

@@ -36,7 +36,10 @@
 //!     a pause that doubles from 1 second to 30, with no end, until it
 //!     succeeds or the log's bindings no longer want it (an unbind stops the
 //!     retries of an adopt; a bind cancels a release). A failure is logged,
-//!     never fatal.
+//!     never fatal. A call the platform refuses outright
+//!     ([`SurfaceError::Rejected`]) is *parked* instead: logged once, listed
+//!     by [`ChatGateway::parked_groups`], and tried again only after a new
+//!     real message from the group, a rebind, or a restart.
 //!   - *Never in the way.* Every call runs in a task of its own and is cut
 //!     off after [`MembershipPolicy::call_timeout`]. A slow or hanging platform
 //!     delays no append, no delivery, and not the Speaker. Calls for one
@@ -91,7 +94,7 @@ use crate::component::{Component, ComponentContext};
 mod membership;
 mod sim;
 
-pub use membership::MembershipPolicy;
+pub use membership::{MembershipPolicy, ParkedGroup, ParkedReason};
 use membership::{Memberships, Want};
 
 /// Capacity of the channel of mentions in unbound groups, gateway to
@@ -337,6 +340,13 @@ impl ChatGateway {
         })
     }
 
+    /// The groups whose membership the gateway has stopped trying to fix by
+    /// itself: refused by the platform, or with no real message to name them
+    /// by. A new message in the group or a rebind tries again.
+    pub fn parked_groups(&self) -> Vec<ParkedGroup> {
+        lock(&self.inner.state).memberships.parked()
+    }
+
     /// Whether the gateway currently has `group_id` bound to a committee.
     pub fn committee_of(&self, group_id: &str) -> Option<CommitteeId> {
         self.inner.drain_fresh();
@@ -372,6 +382,8 @@ impl ChatGateway {
         state
             .latest_ref
             .insert(inbound.group_id.clone(), inbound.message_ref.clone());
+        // A new name for the group: a refused join may be tried by it.
+        state.memberships.unpark(&inbound.group_id);
         if committee.is_some() {
             // A message from a bound group: if its membership is not
             // confirmed yet and nothing is working on it (a restart
@@ -548,6 +560,10 @@ impl Inner {
         };
         let group = binding.group_id;
         let bound = state.table.committee_of(&group).is_some();
+        if binding.action == BindingAction::Bind {
+            // A rebind: a refused join may be tried again.
+            state.memberships.unpark(&group);
+        }
         let want = match binding.action {
             BindingAction::Bind if bound => Want::Held,
             BindingAction::Unbind if !bound => Want::Released,
