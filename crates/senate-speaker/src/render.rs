@@ -2049,6 +2049,95 @@ mod tests {
             "senate-dev (dark-conclave)"
         );
     }
+
+    /// An answer from the `wyak` child's desk on `commons-demo`, given by
+    /// `by` when set.
+    fn child_answer(by: Option<&str>) -> Event {
+        let mut e = event(
+            Kind::Answer,
+            Address::child(name("wyak"), CommitteeId::new("commons-demo").unwrap()),
+            vec![sen("claude")],
+            Some(Seq(117)),
+        );
+        e.body = "ok".into();
+        if let Some(by) = by {
+            e.meta
+                .insert(meta::ANSWERED_BY.into(), Value::String(by.into()));
+        }
+        e
+    }
+
+    fn wyak(alias: Option<&str>) -> Vec<senate_core::ChildSenate> {
+        let mut child = senate_core::ChildSenate::new(name("wyak"), path("speaker-wyak"));
+        child.seats.push(senate_core::ChildSeat {
+            committee: CommitteeId::new("commons-demo").unwrap(),
+            senator: path("codex-01a1fc99"),
+            alias: alias.map(path),
+            duty: None,
+            presence: senate_core::PresenceState::Online,
+        });
+        vec![child]
+    }
+
+    #[test]
+    fn a_child_seats_answer_is_credited_to_the_seat() {
+        let by = Some("/senate/wyak::commons-demo::senator::codex-01a1fc99");
+        let aliases = senate_core::alias::CommitteeAliases::default();
+        let children = wyak(Some("commons-dev"));
+        let names = SeatNames {
+            aliases: &aliases,
+            children: &children,
+        };
+        assert_eq!(
+            thread_mirror(Locale::Zh, names, &child_answer(by)),
+            "commons-dev（wyak） ok"
+        );
+        assert_eq!(
+            thread_mirror(Locale::En, names, &child_answer(by)),
+            "commons-dev (wyak) ok"
+        );
+        assert_eq!(
+            signature(Locale::En, names, &child_answer(by)),
+            "Answered by commons-dev (wyak) · from the refund-v2 Agent group"
+        );
+
+        // With no alias declared, its id with the child.
+        let children = wyak(None);
+        let names = SeatNames {
+            aliases: &aliases,
+            children: &children,
+        };
+        assert_eq!(
+            thread_mirror(Locale::Zh, names, &child_answer(by)),
+            "codex-01a1fc99（wyak） ok"
+        );
+        assert_eq!(
+            thread_mirror(Locale::En, no_names(), &child_answer(by)),
+            "codex-01a1fc99 (wyak) ok"
+        );
+
+        // A seat of another Senate is not this child's to credit.
+        let other = Some("/senate/elsewhere::commons-demo::senator::codex-01a1fc99");
+        assert_eq!(
+            thread_mirror(Locale::En, names, &child_answer(other)),
+            thread_mirror(Locale::En, names, &child_answer(None)),
+        );
+    }
+
+    #[test]
+    fn a_child_desks_own_answer_stays_the_desk() {
+        let children = wyak(Some("commons-dev"));
+        let aliases = senate_core::alias::CommitteeAliases::default();
+        let names = SeatNames {
+            aliases: &aliases,
+            children: &children,
+        };
+        let desk = Address::child(name("wyak"), CommitteeId::new("commons-demo").unwrap());
+        assert_eq!(
+            thread_mirror(Locale::Zh, names, &child_answer(None)),
+            format!("{} ok", desk.in_text())
+        );
+    }
     use chrono::Utc;
     use senate_core::brief::{BriefDecision, BriefQuestion};
     use senate_core::{EventId, Principal, SeatedAgent, Step, TaskOwner, meta};
