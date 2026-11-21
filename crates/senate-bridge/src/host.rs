@@ -71,11 +71,28 @@ impl Tty {
         }
     }
 
-    /// Set the PTY's size, the viewer's doing; watchers are told.
+    /// Set the PTY's size, the viewer's doing or a watcher's fit; watchers
+    /// are told.
     async fn resize(&self, rows: u16, cols: u16) -> anyhow::Result<()> {
         self.write.lock().await.resize(Size::new(rows, cols))?;
         self.screen.resize(rows, cols);
         Ok(())
+    }
+
+    /// Fit the PTY to what watchers last asked, whenever that may be due,
+    /// as long as no viewer is attached: an attached viewer's size wins.
+    async fn fit(&self) -> anyhow::Result<()> {
+        loop {
+            self.screen.fit_due().await;
+            if self.attached.load(Ordering::Acquire) {
+                continue;
+            }
+            if let Some((rows, cols)) = self.screen.wanted_fit()
+                && (rows, cols) != self.screen.size()
+            {
+                self.resize(rows, cols).await?;
+            }
+        }
     }
 
     fn emulation(&self) -> MutexGuard<'_, Emulation> {
@@ -571,6 +588,7 @@ pub async fn run(
         }
         served = serve(&listener, &tty, &output, &viewer) => served,
         served = watch::serve(&watchers, &tty.screen) => served,
+        fitted = tty.fit() => fitted,
         peer = control::next_stop(&controls, &viewer, paths, id) => {
             stop = Some(peer);
             stop_group(&mut child, pid).await
@@ -983,6 +1001,8 @@ async fn serve(
             }
         }
         tty.attached.store(false, Ordering::Release);
+        // The viewer held the size; what watchers asked for applies again.
+        tty.screen.refit();
         let mut viewer = Viewer::lock(viewer);
         viewer.activity.attached = false;
         viewer.activity.detached_at = observed_at();

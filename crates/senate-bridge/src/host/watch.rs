@@ -3,11 +3,19 @@
 //! An attached viewer ([`super::attach`]) drives the session: it types, it
 //! sets the terminal's size, and there is one of it. A watcher only looks.
 //! Any number of them connect to the host's second socket (`see`, beside
-//! `tty`), alongside the viewer or with nobody attached, and nothing a
-//! watcher does reaches the session: the host never reads from one (what a
-//! watcher sends is dropped), never resizes for one, and never records one
-//! as activity of the viewer, so a watcher can never count as someone
-//! having typed.
+//! `tty`), alongside the viewer or with nobody attached. Nothing a watcher
+//! types reaches the session, and a watcher is never recorded as activity
+//! of the viewer, so it can never count as someone having typed.
+//!
+//! # Fitting
+//!
+//! The one thing a watcher may ask is that the session be fitted to its
+//! tile ([`FIT`]), so the TUI repaints at that size. The host keeps the
+//! latest such request (the most recent wins; one is forgotten when the
+//! watcher that sent it leaves) and resizes the PTY to it only while no
+//! viewer is attached on `tty`. An attached viewer's size wins, as before;
+//! when it detaches, the latest request standing applies again. Anything
+//! else a watcher sends is dropped.
 //!
 //! # The screen
 //!
@@ -39,16 +47,26 @@
 //!
 //! The watcher holds its own emulator at the size it was told
 //! ([`Mirror`]), and shows as much of that screen as it has room for.
+//!
+//! A watcher may send one frame back, the same way:
+//!
+//! | tag | payload | meaning |
+//! | --- | --- | --- |
+//! | [`FIT`] | rows `u16`, columns `u16` | fit the session to this, while nobody is attached |
+//!
+//! A host from before fitting drops it, as it dropped everything a watcher
+//! sent.
 
 use std::num::NonZeroU16;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use anyhow::{Context, bail, ensure};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::broadcast;
+use tokio::sync::{Notify, broadcast};
 use tokio::task::JoinSet;
 
 use super::IO_CHUNK;
@@ -58,6 +76,10 @@ const WATCHING: u8 = 1;
 const SIZE: u8 = 1;
 const OUTPUT: u8 = 2;
 const SCREEN: u8 = 3;
+/// The one frame a watcher sends: fit the session to rows × columns.
+const FIT: u8 = 1;
+/// The largest side a fit request is believed for.
+const MAX_FIT: u16 = 1000;
 /// The most a host is believed about its screen: a watcher reads the
 /// length from the socket before the bytes.
 const MAX_SCREEN: usize = 8 << 20;
@@ -80,10 +102,22 @@ enum Change {
     Output(Arc<[u8]>),
 }
 
+/// The latest fit a watcher asked for, and which watcher asked.
+#[derive(Clone, Copy)]
+struct Fit {
+    watcher: u64,
+    rows: u16,
+    cols: u16,
+}
+
 /// The session's screen as the host keeps it, and those watching it.
 pub(super) struct Screen {
     parser: Mutex<vt100::Parser>,
     changes: broadcast::Sender<Change>,
+    fit: Mutex<Option<Fit>>,
+    /// A new fit was asked for, or the viewer left: the latest applies.
+    fit_due: Notify,
+    watchers: AtomicU64,
 }
 
 impl Screen {
@@ -92,6 +126,53 @@ impl Screen {
             // No scrollback: the visible screen is all a watcher is shown.
             parser: Mutex::new(vt100::Parser::new(dimension(rows), dimension(cols), 0)),
             changes: broadcast::channel(BACKLOG).0,
+            fit: Mutex::new(None),
+            fit_due: Notify::new(),
+            watchers: AtomicU64::new(0),
+        }
+    }
+
+    fn fit_slot(&self) -> MutexGuard<'_, Option<Fit>> {
+        self.fit.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
+    /// The size the latest watcher still watching asked the session to
+    /// be, rows then columns.
+    pub(super) fn wanted_fit(&self) -> Option<(u16, u16)> {
+        self.fit_slot().map(|fit| (fit.rows, fit.cols))
+    }
+
+    /// Until a fit may be due: a watcher asked for one, or [`Self::refit`].
+    pub(super) async fn fit_due(&self) {
+        self.fit_due.notified().await;
+    }
+
+    /// The latest fit applies again: the viewer that held the size left.
+    pub(super) fn refit(&self) {
+        self.fit_due.notify_one();
+    }
+
+    /// The PTY's size as the screen is kept at, rows then columns.
+    pub(super) fn size(&self) -> (u16, u16) {
+        let (rows, cols) = self.parser().screen().size();
+        (rows.get(), cols.get())
+    }
+
+    /// `watcher` asks for the session to be `rows` × `cols`.
+    fn ask_fit(&self, watcher: u64, rows: u16, cols: u16) {
+        *self.fit_slot() = Some(Fit {
+            watcher,
+            rows,
+            cols,
+        });
+        self.fit_due.notify_one();
+    }
+
+    /// `watcher` left: what it asked for no longer stands.
+    fn forget_fit(&self, watcher: u64) {
+        let mut slot = self.fit_slot();
+        if slot.is_some_and(|fit| fit.watcher == watcher) {
+            *slot = None;
         }
     }
 
@@ -158,17 +239,60 @@ async fn send_screen(
 }
 
 async fn watch(stream: UnixStream, screen: &Screen) -> anyhow::Result<()> {
+    let me = screen.watchers.fetch_add(1, Ordering::Relaxed);
+    let watched = watching(stream, screen, me).await;
+    screen.forget_fit(me);
+    watched
+}
+
+/// The fit requests in what a watcher sent, leaving behind only the start
+/// of one that may still be arriving. Anything else is dropped.
+fn fits(said: &mut Vec<u8>) -> Vec<(u16, u16)> {
+    let mut fits = Vec::new();
+    let mut at = 0;
+    while at < said.len() {
+        if said[at] != FIT {
+            at += 1;
+            continue;
+        }
+        let Some(frame) = said.get(at + 1..at + 5) else {
+            break;
+        };
+        let rows = u16::from_be_bytes([frame[0], frame[1]]);
+        let cols = u16::from_be_bytes([frame[2], frame[3]]);
+        if (1..=MAX_FIT).contains(&rows) && (1..=MAX_FIT).contains(&cols) {
+            fits.push((rows, cols));
+            at += 5;
+        } else {
+            at += 1;
+        }
+    }
+    said.drain(..at);
+    fits
+}
+
+async fn watching(stream: UnixStream, screen: &Screen, me: u64) -> anyhow::Result<()> {
     let (mut from, mut to) = stream.into_split();
     to.write_u8(WATCHING).await?;
     let mut changes = send_screen(&mut to, screen).await?;
     let mut said = [0u8; 64];
+    let mut pending = Vec::new();
     loop {
         tokio::select! {
-            // A watcher has nothing to say: what it sends is dropped, and
-            // reading only tells when it is gone.
+            // A watcher has nothing to say but a fit: the rest is dropped,
+            // and reading also tells when it is gone.
             n = from.read(&mut said) => {
-                if n? == 0 {
+                let n = n?;
+                if n == 0 {
                     return Ok(());
+                }
+                pending.extend_from_slice(&said[..n]);
+                if let Some(&(rows, cols)) = fits(&mut pending).last() {
+                    screen.ask_fit(me, rows, cols);
+                }
+                // Junk that never becomes a frame is not kept.
+                if pending.len() > 64 {
+                    pending.clear();
                 }
             }
             change = changes.recv() => match change {
@@ -245,8 +369,24 @@ impl Mirror {
 /// An open watch of one hosted terminal.
 pub(crate) struct Watch {
     from: tokio::net::unix::OwnedReadHalf,
-    // Closing this half would tell the host the watcher is gone.
-    _to: tokio::net::unix::OwnedWriteHalf,
+    /// Where fit requests go ([`Fitter`]); closing it would tell the host
+    /// the watcher is gone.
+    to: Option<tokio::net::unix::OwnedWriteHalf>,
+}
+
+/// What asks the host to fit the session to a tile.
+pub(crate) struct Fitter {
+    to: tokio::net::unix::OwnedWriteHalf,
+}
+
+impl Fitter {
+    /// Ask for the session to be `rows` × `cols`.
+    pub(crate) async fn fit(&mut self, rows: u16, cols: u16) -> std::io::Result<()> {
+        let mut frame = [FIT, 0, 0, 0, 0];
+        frame[1..3].copy_from_slice(&rows.to_be_bytes());
+        frame[3..5].copy_from_slice(&cols.to_be_bytes());
+        self.to.write_all(&frame).await
+    }
 }
 
 impl Watch {
@@ -264,7 +404,13 @@ impl Watch {
             _ => bail!("unrecognized terminal host reply"),
         }
         let (from, to) = stream.into_split();
-        Ok(Self { from, _to: to })
+        Ok(Self { from, to: Some(to) })
+    }
+
+    /// The watch's [`Fitter`], once. Keep it as long as the watch: dropping
+    /// it ends the watch.
+    pub(crate) fn fitter(&mut self) -> Option<Fitter> {
+        self.to.take().map(|to| Fitter { to })
     }
 
     /// The next thing the host says; `None` when the host is gone (the
@@ -355,6 +501,70 @@ mod tests {
             screen.parser().screen().contents(),
             "ready\n> hello\nwider!"
         );
+    }
+
+    fn fit_frame(rows: u16, cols: u16) -> Vec<u8> {
+        let mut frame = vec![FIT];
+        frame.extend_from_slice(&rows.to_be_bytes());
+        frame.extend_from_slice(&cols.to_be_bytes());
+        frame
+    }
+
+    #[test]
+    fn fit_requests_are_read_from_what_a_watcher_sends_and_the_rest_dropped() {
+        let mut said = b"rm -rf /\r".to_vec();
+        said.extend(fit_frame(20, 60));
+        said.extend(fit_frame(0, 60)); // no such size
+        said.extend(fit_frame(24, 80));
+        said.extend(&fit_frame(30, 100)[..3]); // still arriving
+        assert_eq!(fits(&mut said), [(20, 60), (24, 80)]);
+        assert_eq!(said, fit_frame(30, 100)[..3]);
+        said.extend(&fit_frame(30, 100)[3..]);
+        assert_eq!(fits(&mut said), [(30, 100)]);
+        assert!(said.is_empty());
+    }
+
+    /// Wait until the screen wants `size`.
+    async fn wants(screen: &Screen, size: Option<(u16, u16)>) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while screen.wanted_fit() != size {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("never wanted {size:?}"));
+    }
+
+    #[tokio::test]
+    async fn the_latest_fit_wins_and_leaves_with_its_watcher() {
+        let screen = Arc::new(Screen::new(24, 80));
+        let open = |screen: &Arc<Screen>| {
+            let (host, watcher) = UnixStream::pair().unwrap();
+            let screen = screen.clone();
+            (
+                tokio::spawn(async move { watch(host, &screen).await }),
+                watcher,
+            )
+        };
+        let (first, mut one) = open(&screen);
+        let (second, mut two) = open(&screen);
+        assert_eq!(one.read_u8().await.unwrap(), WATCHING);
+        assert_eq!(two.read_u8().await.unwrap(), WATCHING);
+        assert_eq!(screen.wanted_fit(), None, "watching alone asks nothing");
+
+        one.write_all(&fit_frame(20, 60)).await.unwrap();
+        wants(&screen, Some((20, 60))).await;
+        two.write_all(&fit_frame(12, 50)).await.unwrap();
+        wants(&screen, Some((12, 50))).await;
+        // The first watcher leaving takes nothing with it: the latest was
+        // the second's.
+        drop(one);
+        first.await.unwrap().unwrap();
+        assert_eq!(screen.wanted_fit(), Some((12, 50)));
+        // The second leaving takes its request with it.
+        drop(two);
+        second.await.unwrap().unwrap();
+        assert_eq!(screen.wanted_fit(), None);
     }
 
     #[tokio::test]

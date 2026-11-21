@@ -2175,6 +2175,7 @@ async fn watched_sessions(aliases: &[&str]) -> (Harness, PathBuf) {
         &fixture,
         format!(
             "#!/bin/sh\n{RECORD_HOSTED_ARGV}\n\
+             trap 'printf \"resized to %s\\r\\n\" \"$(stty size)\"' WINCH\n\
              printf '\\033[2J\\033[H\\033[32mpainted before anyone looked\\033[m\\r\\n'\n\
              while IFS= read -r line; do\n\
              \x20 if [ \"$line\" = paint ]; then printf 'fixture TUI\\r\\n'\n\
@@ -2208,6 +2209,18 @@ async fn watched_sessions(aliases: &[&str]) -> (Harness, PathBuf) {
             },
         )
         .await;
+    }
+    // Every fixture has painted, so its WINCH trap is set: a fit from here
+    // on is answered with a repaint.
+    eventually("every session's watch socket", TIMEOUT, || {
+        (watched_hosts(&h).len() == aliases.len()).then_some(())
+    })
+    .await;
+    for dir in watched_hosts(&h) {
+        RawWatcher::at(&dir)
+            .await
+            .until_said("painted before anyone looked")
+            .await;
     }
     (h, typed)
 }
@@ -2272,6 +2285,169 @@ async fn a_read_only_attach_shows_the_screen_and_types_nothing() {
     attach(&h, &alias, b"\x1d").await;
 }
 
+/// A raw watcher of a host's `see` socket: the sizes it was told and the
+/// text the TUI wrote, as they come.
+struct RawWatcher {
+    stream: tokio::net::UnixStream,
+    sizes: Vec<(u16, u16)>,
+    text: Vec<u8>,
+}
+
+/// Every host's directory with a watch socket.
+fn watched_hosts(h: &Harness) -> Vec<PathBuf> {
+    std::fs::read_dir(h.paths.home().join("hosts"))
+        .map(|entries| {
+            entries
+                .map(|entry| entry.unwrap().path())
+                .filter(|dir| dir.join("see").exists())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+impl RawWatcher {
+    async fn open(h: &Harness) -> Self {
+        let dir = watched_hosts(h)
+            .into_iter()
+            .next()
+            .expect("a host with a watch socket");
+        Self::at(&dir).await
+    }
+
+    async fn at(dir: &std::path::Path) -> Self {
+        let mut stream = tokio::net::UnixStream::connect(dir.join("see"))
+            .await
+            .unwrap();
+        assert_eq!(stream.read_u8().await.unwrap(), 1, "the watch greeting");
+        Self {
+            stream,
+            sizes: Vec::new(),
+            text: Vec::new(),
+        }
+    }
+
+    async fn fit(&mut self, rows: u16, cols: u16) {
+        let mut frame = vec![1u8];
+        frame.extend_from_slice(&rows.to_be_bytes());
+        frame.extend_from_slice(&cols.to_be_bytes());
+        self.stream.write_all(&frame).await.unwrap();
+    }
+
+    async fn frame(&mut self) {
+        match self.stream.read_u8().await.unwrap() {
+            1 => {
+                let rows = self.stream.read_u16().await.unwrap();
+                let cols = self.stream.read_u16().await.unwrap();
+                self.sizes.push((rows, cols));
+            }
+            2 => {
+                let n = usize::from(self.stream.read_u16().await.unwrap());
+                let mut bytes = vec![0; n];
+                self.stream.read_exact(&mut bytes).await.unwrap();
+                self.text.extend(bytes);
+            }
+            3 => {
+                let n = usize::try_from(self.stream.read_u32().await.unwrap()).unwrap();
+                let mut bytes = vec![0; n];
+                self.stream.read_exact(&mut bytes).await.unwrap();
+                self.text.extend(bytes);
+            }
+            tag => panic!("unknown watch frame {tag}"),
+        }
+    }
+
+    /// Read frames until the TUI has said `text`.
+    async fn until_said(&mut self, text: &str) {
+        let wait = async {
+            while !self.text.windows(text.len()).any(|w| w == text.as_bytes()) {
+                self.frame().await;
+            }
+        };
+        tokio::time::timeout(TIMEOUT, wait)
+            .await
+            .unwrap_or_else(|_| panic!("never said {text:?}"));
+        self.text.clear();
+    }
+
+    /// Read frames until the session is `size` and the TUI has said `text`.
+    async fn until(&mut self, size: (u16, u16), text: &str) {
+        let wait = async {
+            while self.sizes.last() != Some(&size)
+                || !self.text.windows(text.len()).any(|w| w == text.as_bytes())
+            {
+                self.frame().await;
+            }
+        };
+        tokio::time::timeout(TIMEOUT, wait)
+            .await
+            .unwrap_or_else(|_| panic!("never {size:?} with {text:?}: {:?}", self.sizes));
+        self.text.clear();
+    }
+
+    /// Read whatever comes for `how_long`.
+    async fn drain_for(&mut self, how_long: Duration) {
+        let _ = tokio::time::timeout(how_long, async {
+            loop {
+                self.frame().await;
+            }
+        })
+        .await;
+    }
+}
+
+/// With nobody attached, a watcher's fit resizes the session and the TUI
+/// repaints at that size; the latest fit wins. An attached viewer's size
+/// wins instead, and the fit standing applies again when it detaches.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_watcher_fits_an_unattached_session_and_never_an_attached_one() {
+    let (h, alias, _typed) = watched_session().await;
+    let mut watcher = RawWatcher::open(&h).await;
+    watcher.fit(12, 50).await;
+    watcher.until((12, 50), "resized to 12 50").await;
+    // The latest fit wins: a re-fit, as a tile does on a terminal resize.
+    watcher.fit(15, 70).await;
+    watcher.until((15, 70), "resized to 15 70").await;
+
+    // Attached: the viewer's size, and a fit asked meanwhile is not applied.
+    let mut cmd = tokio::process::Command::new(BIN);
+    testenv::isolate_async(&mut cmd, h.dir.path());
+    cmd.args(["attach", &alias])
+        .env("SENATE_HOME", h.paths.home())
+        .kill_on_drop(true);
+    let (pty, pts) = pty_process::open().unwrap();
+    pty.resize(pty_process::Size::new(24, 80)).unwrap();
+    let mut child = pty_process::Command::from(cmd).spawn(pts).unwrap();
+    let (mut output, mut input) = pty.into_split();
+    tokio::time::timeout(TIMEOUT, wait_terminal_output(&mut output, b"\x1b[c"))
+        .await
+        .unwrap();
+    input.write_all(b"\x1b[?62;22c").await.unwrap();
+    watcher.until((24, 80), "resized to 24 80").await;
+    watcher.fit(9, 40).await;
+    watcher.drain_for(Duration::from_millis(600)).await;
+    assert_eq!(
+        watcher.sizes.last(),
+        Some(&(24, 80)),
+        "the attached viewer's size stands: {:?}",
+        watcher.sizes
+    );
+    let draining = tokio::spawn(async move {
+        let mut buf = [0; 4096];
+        while output.read(&mut buf).await.is_ok_and(|n| n > 0) {}
+    });
+    input.write_all(b"\x1d").await.unwrap();
+    assert!(
+        tokio::time::timeout(TIMEOUT, child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+    draining.abort();
+    // Detached: the fit standing applies again.
+    watcher.until((9, 40), "resized to 9 40").await;
+}
+
 /// `senate watch-all` shows every hosted session side by side, each under
 /// its name. Enter attaches to the focused one as `senate attach` does,
 /// detaching comes back to the grid, and `q` leaves.
@@ -2294,9 +2470,13 @@ async fn watch_all_shows_every_session_and_enter_attaches_to_one() {
         wait_terminal_output(&mut output, b"south \xc2\xb7 refund-v2 \xc2\xb7 claude").await;
         wait_terminal_output(&mut output, b"painted before anyone looked").await;
         wait_terminal_output(&mut output, b"2 sessions").await;
+        // Nobody is attached, so each session is fitted to its tile and
+        // repaints: two tiles side by side under the status line, each
+        // body its tile less the header row and the blank column.
+        wait_terminal_output(&mut output, b"resized to 28 59").await;
     })
     .await
-    .expect("both sessions in the grid");
+    .expect("both sessions in the grid, fitted to their tiles");
 
     // Typing in the grid reaches no session; the arrow moves to `south`,
     // and Enter attaches there.

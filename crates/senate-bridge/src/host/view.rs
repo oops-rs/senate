@@ -8,12 +8,14 @@
 //!
 //! # What a tile shows
 //!
-//! A session's terminal is as large as whoever attached to it last made
-//! it, and a tile is usually smaller. No session is resized for being
-//! watched, so a tile shows a part of the screen: its left edge, and the
-//! rows that end at the last line with anything on it (or the cursor's
-//! line), since a TUI keeps its prompt and its newest output at the
-//! bottom.
+//! In the grid, each tile asks its session's host to fit the session to
+//! the tile ([`super::watch`]'s fit), whenever the tile's size changes, so
+//! the TUI repaints to fill it. The host does so only while nobody is
+//! attached: an attached session keeps its viewer's size, and its tile
+//! shows a part of the screen, its left edge and the rows that end at the
+//! last line with anything on it (or the cursor's line), since a TUI keeps
+//! its prompt and its newest output at the bottom. `senate attach
+//! --read-only` asks for no fit: it only looks at the one session.
 //!
 //! # The grid
 //!
@@ -101,6 +103,9 @@ struct Shown {
 struct Tile {
     session: Session,
     shown: Arc<Mutex<Shown>>,
+    /// The size this tile asks its session to be fitted to, rows then
+    /// columns; `None` for a tile that asks for no fit (a read-only attach).
+    fit: Option<tokio::sync::watch::Sender<Option<(u16, u16)>>>,
     watching: JoinHandle<()>,
 }
 
@@ -124,8 +129,11 @@ pub fn cannot_watch(alias: &str) -> String {
 }
 
 impl Tile {
-    fn open(session: Session, changed: Arc<Notify>) -> Self {
+    /// Watch `session`; a tile that `fits` asks for its session to be
+    /// fitted to it ([`Tile::fit_to`]).
+    fn open(session: Session, changed: Arc<Notify>, fits: bool) -> Self {
         let shown_ = Arc::new(Mutex::new(Shown::default()));
+        let (fit, mut wanted) = tokio::sync::watch::channel(None);
         let watching = tokio::spawn({
             let state = shown_.clone();
             let socket = session.watch_socket();
@@ -134,17 +142,39 @@ impl Tile {
                 let note = match Watch::open(&socket).await {
                     Ok(mut watch) => {
                         shown(&state).mirror = Some(Mirror::default());
-                        loop {
-                            match watch.next().await {
-                                Ok(Some(frame)) => {
-                                    if let Some(mirror) = shown(&state).mirror.as_mut() {
-                                        mirror.apply(&frame);
-                                    }
-                                    changed.notify_one();
+                        // Kept as long as the watch: dropping it ends it.
+                        let mut fitter = watch.fitter();
+                        let fitting = async {
+                            loop {
+                                if wanted.changed().await.is_err() {
+                                    std::future::pending::<()>().await;
                                 }
-                                Ok(None) => break "the session ended".to_owned(),
-                                Err(error) => break format!("the watch broke: {error:#}"),
+                                let size = *wanted.borrow_and_update();
+                                if let (Some(fitter), Some((rows, cols))) = (fitter.as_mut(), size)
+                                    && fitter.fit(rows, cols).await.is_err()
+                                {
+                                    // The host is gone; the reading says so.
+                                    std::future::pending::<()>().await;
+                                }
                             }
+                        };
+                        let reading = async {
+                            loop {
+                                match watch.next().await {
+                                    Ok(Some(frame)) => {
+                                        if let Some(mirror) = shown(&state).mirror.as_mut() {
+                                            mirror.apply(&frame);
+                                        }
+                                        changed.notify_one();
+                                    }
+                                    Ok(None) => break "the session ended".to_owned(),
+                                    Err(error) => break format!("the watch broke: {error:#}"),
+                                }
+                            }
+                        };
+                        tokio::select! {
+                            note = reading => note,
+                            () = fitting => unreachable!("fitting never ends"),
                         }
                     }
                     Err(_) if !socket.exists() && socket.with_file_name("tty").exists() => {
@@ -159,7 +189,23 @@ impl Tile {
         Self {
             session,
             shown: shown_,
+            fit: fits.then_some(fit),
             watching,
+        }
+    }
+
+    /// Ask for the session to be fitted to `rows` × `cols`, when this tile
+    /// fits and that is not what it asked for last.
+    fn fit_to(&self, rows: u16, cols: u16) {
+        if let Some(fit) = &self.fit
+            && rows > 0
+            && cols > 0
+        {
+            fit.send_if_modified(|asked| {
+                let changed = *asked != Some((rows, cols));
+                *asked = Some((rows, cols));
+                changed
+            });
         }
     }
 }
@@ -396,6 +442,7 @@ fn paint_tile(out: &mut String, tile: &Tile, area: Rect, focused: bool) -> Optio
         cols: area.cols.saturating_sub(1).max(1),
         ..area
     };
+    tile.fit_to(body.rows, body.cols);
     match (&state.mirror, &state.note) {
         (Some(mirror), None) => {
             let screen = mirror.screen();
@@ -466,6 +513,7 @@ pub(super) fn keys(pending: &mut Vec<u8>) -> Vec<Key> {
 
 // ----- the viewer ------------------------------------------------------------
 
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
     /// `senate attach --read-only`: the one session, nothing but detach.
     One,
@@ -495,7 +543,7 @@ impl Viewer {
                     tile.session = session;
                     tile
                 }
-                None => Tile::open(session, self.changed.clone()),
+                None => Tile::open(session, self.changed.clone(), self.mode == Mode::Grid),
             };
             self.tiles.push(tile);
         }
@@ -877,8 +925,44 @@ mod tests {
                 mirror: Some(mirror),
                 note: None,
             })),
+            fit: Some(tokio::sync::watch::channel(None).0),
             watching: tokio::spawn(async {}),
         }
+    }
+
+    /// What a tile last asked its session to be fitted to.
+    fn asked(tile: &Tile) -> Option<(u16, u16)> {
+        *tile.fit.as_ref().expect("a fitting tile").borrow()
+    }
+
+    #[tokio::test]
+    async fn the_grid_asks_each_tile_shown_to_be_fitted_and_again_on_a_resize() {
+        let viewer = Viewer {
+            mode: Mode::Grid,
+            tiles: vec![tile("north", "n", false), tile("south", "s", false)],
+            focus: 0,
+            changed: Arc::new(Notify::new()),
+        };
+        viewer.paint(30, 120);
+        // Two tiles side by side under the status line; each body is its
+        // tile less the header row and the blank column.
+        assert_eq!(asked(&viewer.tiles[0]), Some((28, 59)));
+        assert_eq!(asked(&viewer.tiles[1]), Some((28, 59)));
+        viewer.paint(40, 100);
+        assert_eq!(asked(&viewer.tiles[0]), Some((38, 49)));
+        assert_eq!(asked(&viewer.tiles[1]), Some((38, 49)));
+
+        // A read-only attach asks for no fit at all.
+        let mut one = tile("north", "n", false);
+        one.fit = None;
+        let viewer = Viewer {
+            mode: Mode::One,
+            tiles: vec![one],
+            focus: 0,
+            changed: Arc::new(Notify::new()),
+        };
+        viewer.paint(30, 120);
+        assert!(viewer.tiles[0].fit.is_none());
     }
 
     #[tokio::test]
