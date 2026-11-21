@@ -88,6 +88,31 @@ impl Output {
 // The first paragraph of each doc comment is the one-line summary that
 // `senate --help` and `-h` print; the rest is shown by `senate help <command>`.
 // A new command also needs a place in `cli_help::GROUPS`.
+/// `senate memory forget|correct`.
+#[derive(Subcommand)]
+enum MemoryCmd {
+    /// Delete points (by seq) from what the committee knows.
+    Forget {
+        /// The points' seqs, as `senate memory` shows them.
+        #[arg(required = true)]
+        seqs: Vec<u64>,
+        /// The committee (default: the one `senate where` shows for this directory).
+        #[arg(long)]
+        committee: Option<CommitteeId>,
+    },
+    /// Correct a point to read <text>.
+    Correct {
+        /// The point's seq, as `senate memory` shows it.
+        seq: u64,
+        /// What it should say instead.
+        #[arg(required = true)]
+        text: Vec<String>,
+        /// The committee (default: the one `senate where` shows for this directory).
+        #[arg(long)]
+        committee: Option<CommitteeId>,
+    },
+}
+
 #[derive(Subcommand)]
 enum Cmd {
     /// Bind this worktree to a committee, and suggest a session alias.
@@ -320,6 +345,37 @@ stdin.")]
         /// What to say (`-`: read stdin).
         #[arg(required = true, num_args = 1..)]
         text: Vec<String>,
+        /// The committee (default: the one `senate where` shows for this directory).
+        #[arg(long)]
+        committee: Option<CommitteeId>,
+        /// Print the daemon's result as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// What the committee knows: list or search its memory, or correct or
+    /// delete a point.
+    ///
+    /// The Speaker distils the committee's discussion into short points,
+    /// each with the seqs it came from; a newer point replaces an older one.
+    /// Without words, the newest points; with them, the best matches. A
+    /// correction or deletion is written in your own name.
+    #[command(
+        args_conflicts_with_subcommands = true,
+        after_help = "Examples:
+  senate memory
+  senate memory release day
+  senate memory --all --committee refund-v2
+  senate memory correct 140 Releases go out on Tuesdays
+  senate memory forget 140 152"
+    )]
+    Memory {
+        #[command(subcommand)]
+        action: Option<MemoryCmd>,
+        /// Words to look for (default: the newest points).
+        words: Vec<String>,
+        /// Include points that were replaced or deleted.
+        #[arg(long)]
+        all: bool,
         /// The committee (default: the one `senate where` shows for this directory).
         #[arg(long)]
         committee: Option<CommitteeId>,
@@ -1925,6 +1981,75 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
                     Ok(())
                 }
             })
+        }
+        Cmd::Memory {
+            action,
+            words,
+            all,
+            committee,
+            json,
+        } => {
+            let paths = Paths::from_env()?;
+            let locale = BridgeConfig::locale_at(&paths.config());
+            let edit = match action {
+                None => None,
+                Some(MemoryCmd::Forget { seqs, committee }) => Some((
+                    committee,
+                    seqs.into_iter().map(Seq).collect::<Vec<_>>(),
+                    None,
+                )),
+                Some(MemoryCmd::Correct {
+                    seq,
+                    text,
+                    committee,
+                }) => Some((committee, vec![Seq(seq)], Some(text.join(" ")))),
+            };
+            if let Some((at, targets, text)) = edit {
+                let posted: Posted = runtime(false)?.block_on(async {
+                    let committee = committee_here(at.or(committee)).await?;
+                    daemon_call(
+                        &paths,
+                        &Request::MemoryEdit {
+                            session: SessionSelector::default(),
+                            committee: Some(committee),
+                            targets,
+                            text,
+                            id: Some(EventId::new()),
+                        },
+                    )
+                    .await
+                })?;
+                output.print(&match locale {
+                    Locale::Zh => {
+                        format!("已更新 {} 的记忆（seq {}）。", posted.committee, posted.seq)
+                    }
+                    Locale::En => format!(
+                        "Memory updated on {} (seq {}).",
+                        posted.committee, posted.seq
+                    ),
+                });
+                return Ok(());
+            }
+            let reply: ipc::MemoryReply = runtime(false)?.block_on(async {
+                let committee = committee_here(committee).await?;
+                daemon_call(
+                    &paths,
+                    &Request::Memory {
+                        session: SessionSelector::default(),
+                        query: words.join(" "),
+                        limit: None,
+                        all,
+                        committee: Some(committee),
+                    },
+                )
+                .await
+            })?;
+            if json {
+                print_json(&reply)
+            } else {
+                output.print(&mcp::render_memory(&reply, locale));
+                Ok(())
+            }
         }
         Cmd::Take { thread, committee } => {
             let paths = Paths::from_env()?;

@@ -806,6 +806,28 @@ async fn search(
     Json(SearchResults { events }).into_response()
 }
 
+/// What the committee knows, folded from its events like the server's.
+async fn memory(
+    State(st): St,
+    UrlPath(committee): UrlPath<String>,
+    Query(q): Query<senate_core::api::MemoryQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(r) = auth(&st, &headers) {
+        return r;
+    }
+    let inner = st.inner.lock().unwrap();
+    let mut fold = senate_core::MemoryFold::new();
+    for event in inner.events.get(&committee).into_iter().flatten() {
+        fold.observe(event);
+    }
+    let limit = q.limit.unwrap_or(DEFAULT_SEARCH).min(MAX_SEARCH);
+    Json(senate_core::api::MemoryResults {
+        points: fold.search(&q.q, limit, q.all),
+    })
+    .into_response()
+}
+
 async fn brief(State(st): St, UrlPath(committee): UrlPath<String>, headers: HeaderMap) -> Response {
     if let Err(r) = auth(&st, &headers) {
         return r;
@@ -1248,6 +1270,7 @@ impl FakeServer {
             .route("/v1/committees/{committee}/docket", get(docket))
             .route("/v1/committees/{committee}/search", get(search))
             .route("/v1/committees/{committee}/brief", get(brief))
+            .route("/v1/committees/{committee}/memory", get(memory))
             .route("/v1/committees/{committee}/presence", get(presence))
             .route("/v1/committees/{committee}/threads", get(threads))
             .route(

@@ -69,8 +69,7 @@ pub const ENV_SESSION: &str = "SENATE_SESSION_ID";
 /// Set in a companion's environment: its hooks do nothing.
 pub const ENV_COMPANION: &str = "SENATE_COMPANION";
 /// What a companion may use.
-pub const ALLOWED_TOOLS: &str =
-    "Read,Grep,Glob,LS,mcp__senate__answer,mcp__senate__catch_up,mcp__senate__search";
+pub const ALLOWED_TOOLS: &str = "Read,Grep,Glob,LS,mcp__senate__answer,mcp__senate__catch_up,mcp__senate__search,mcp__senate__memory_search";
 /// Refused outright, so nothing it does changes the worktree or reaches out.
 pub const DISALLOWED_TOOLS: &str = "Bash,Edit,MultiEdit,Write,NotebookEdit,WebFetch,WebSearch,Task";
 /// Prefix of companion session ids.

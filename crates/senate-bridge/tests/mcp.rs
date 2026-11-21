@@ -476,6 +476,7 @@ async fn ask_answer_and_catch_up_end_to_end() {
             "escalate",
             "inbox",
             "join",
+            "memory_search",
             "post",
             "propose_decision",
             "receipt",
@@ -2083,5 +2084,109 @@ async fn antigravity_hooks_and_mcp_use_the_same_exact_root_session() {
         wrong_role,
         Err(ClientError::Remote(e)) if e.code == ipc::codes::NOT_CHAIRING
     ));
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn memory_search_shows_what_the_committee_knows_with_its_sources() {
+    let mut h = Harness::new().await;
+    h.start().await;
+    let wd = h.workdir("s", Some("refund-v2"));
+    h.hook(HookKind::SessionStart, "s1", &wd, None).await;
+    let mut mcp = McpClient::start(h.socket(), selector("s1")).await;
+    let point = |text: &str, refs: Vec<Seq>, supersedes: Vec<Seq>| {
+        NewEvent::new(committee(), Kind::Note, Address::Speaker, text).with_meta(
+            meta::MEMORY,
+            senate_core::MemoryPayload::Point {
+                refs,
+                supersedes,
+                digest: None,
+            }
+            .to_value(),
+        )
+    };
+    h.server
+        .append(point("Deploys happen at noon", vec![Seq(1)], vec![]));
+    h.server
+        .append(point("Deploys happen at night", vec![Seq(2)], vec![Seq(1)]));
+
+    let (err, text) = mcp.call("memory_search", json!({"query": "deploys"})).await;
+    assert!(!err, "{text}");
+    assert!(
+        text.starts_with("[senate] What refund-v2 knows (1 point(s)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("- seq 2 · Deploys happen at night (from seq 2)"),
+        "{text}"
+    );
+    assert!(!text.contains("noon"), "{text}");
+
+    let (err, text) = mcp
+        .call("memory_search", json!({"query": "deploys", "all": true}))
+        .await;
+    assert!(!err, "{text}");
+    assert!(
+        text.contains("- seq 1 · Deploys happen at noon (from seq 1) · replaced by seq 2"),
+        "{text}"
+    );
+    let (_, text) = mcp.call("memory_search", json!({"query": "billing"})).await;
+    assert!(
+        text.contains("Nothing refund-v2 remembers matches"),
+        "{text}"
+    );
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_person_corrects_and_deletes_memory_in_their_own_name() {
+    use senate_bridge::ipc::{self, Posted, Request};
+    let mut h = Harness::new().await;
+    h.start().await;
+    let edit = |targets: Vec<Seq>, text: Option<&str>| Request::MemoryEdit {
+        session: Default::default(),
+        committee: Some(committee()),
+        targets,
+        text: text.map(Into::into),
+        id: None,
+    };
+    let posted: Posted = ipc::request(
+        &h.socket(),
+        &edit(vec![Seq(7)], Some("Deploys happen at night")),
+        WAIT,
+        WAIT,
+    )
+    .await
+    .unwrap();
+    let event = h.server.last_event("refund-v2");
+    assert_eq!(event.seq, posted.seq);
+    assert_eq!(event.kind, Kind::Note);
+    assert_eq!(event.body, "Deploys happen at night");
+    assert!(event.on_behalf_of.is_none());
+    assert_eq!(
+        senate_core::MemoryPayload::of(&event),
+        Some(senate_core::MemoryPayload::Correct {
+            target: Seq(7),
+            refs: vec![]
+        })
+    );
+    let _: Posted = ipc::request(&h.socket(), &edit(vec![Seq(7), Seq(9)], None), WAIT, WAIT)
+        .await
+        .unwrap();
+    assert_eq!(
+        senate_core::MemoryPayload::of(&h.server.last_event("refund-v2")),
+        Some(senate_core::MemoryPayload::Delete {
+            targets: vec![Seq(7), Seq(9)]
+        })
+    );
+    // A correction names one point.
+    let refused: Result<Posted, _> = ipc::request(
+        &h.socket(),
+        &edit(vec![Seq(7), Seq(9)], Some("x")),
+        WAIT,
+        WAIT,
+    )
+    .await;
+    assert!(refused.is_err());
     h.stop().await;
 }

@@ -660,6 +660,31 @@ pub enum Request {
         committee: CommitteeId,
         senator: SenatorName,
     },
+    /// What the committee knows: its memory points matching `query`
+    /// (empty: the newest), only those in force unless `all`.
+    Memory {
+        session: SessionSelector,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        query: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        all: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        committee: Option<CommitteeId>,
+    },
+    /// The person corrects (`text` set) or deletes memory points, in their
+    /// own name.
+    MemoryEdit {
+        session: SessionSelector,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        committee: Option<CommitteeId>,
+        targets: Vec<Seq>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<EventId>,
+    },
     Search {
         session: SessionSelector,
         query: String,
@@ -1650,6 +1675,14 @@ pub struct JoinReply {
     /// Set when the server could not confirm the committee.
     #[serde(default)]
     pub warning: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MemoryReply {
+    pub committee: CommitteeId,
+    pub query: String,
+    /// Best match first; the newest first without a query.
+    pub points: Vec<senate_core::MemoryHit>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

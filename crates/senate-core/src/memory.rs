@@ -267,6 +267,16 @@ impl MemoryFold {
                 if by == Address::Speaker {
                     return;
                 }
+                // Written without sources (a person typing it): the point it
+                // corrects came from the same discussion.
+                let refs = if refs.is_empty() {
+                    self.points
+                        .get(&target)
+                        .map(|p| p.refs.clone())
+                        .unwrap_or_default()
+                } else {
+                    refs
+                };
                 self.add(event, refs, vec![target], by);
             }
             MemoryPayload::Delete { targets } => {
@@ -557,6 +567,25 @@ mod tests {
         );
         assert!(fold.is_deleted_ref(Seq(5)));
         assert!(!fold.is_deleted_ref(Seq(15)));
+    }
+
+    #[test]
+    fn a_correction_typed_without_sources_keeps_its_targets() {
+        let typed = note(
+            12,
+            person(),
+            "Deploys happen at night",
+            meta::MEMORY,
+            MemoryPayload::Correct {
+                target: Seq(10),
+                refs: vec![],
+            }
+            .to_value(),
+        );
+        let fold = fold(&[point(10, "Deploys happen at noon", &[3, 4], &[]), typed]);
+        let point = fold.get(Seq(12)).unwrap().point;
+        assert_eq!(point.refs, [Seq(3), Seq(4)]);
+        assert_eq!(point.supersedes, [Seq(10)]);
     }
 
     #[test]

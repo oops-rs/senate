@@ -216,6 +216,10 @@ pub fn search_path(committee: &CommitteeId) -> String {
     format!("/v1/committees/{committee}/search")
 }
 
+pub fn memory_path(committee: &CommitteeId) -> String {
+    format!("/v1/committees/{committee}/memory")
+}
+
 pub fn brief_path(committee: &CommitteeId) -> String {
     format!("/v1/committees/{committee}/brief")
 }

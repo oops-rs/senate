@@ -237,6 +237,13 @@ spaces); a few distinctive words work best. Results come best match first, each 
 kind, sender and time; bodies are cut to 300 characters except decisions. `limit`: how many \
 (default 10, at most 50). `committee`: defaults to this session's committee.";
 
+const MEMORY_SEARCH: &str = "Search what a Senate committee knows: short points the Speaker \
+distilled from its discussion (and people corrected), each with the seqs of the messages it came \
+from; a newer point replaces an older one. Look here first when you need to know how something \
+was settled or who owns what; use search for the raw log and anything recent. `query`: words to \
+look for (empty for the newest points). `all`: include points that were replaced or deleted. \
+`limit`: how many (default 10, at most 50). `committee`: defaults to this session's committee.";
+
 const POST: &str = "Leave a note on a Senate committee for the team: a status update, a heads-up \
 about a change others depend on, a finding worth keeping. It is addressed to no one: it is \
 recorded in the shared committee log, where every teammate's agent reads it through catch_up and \
@@ -326,6 +333,23 @@ pub struct ReceiptParams {
     pub committee: String,
     /// Event sequence number named in the send result.
     pub seq: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct MemoryParams {
+    /// Words to look for; empty for the newest points.
+    #[serde(default)]
+    pub query: Option<String>,
+    /// Include points that were replaced or deleted.
+    #[serde(default)]
+    pub all: Option<bool>,
+    /// How many points (default 10, at most 50).
+    #[serde(default)]
+    pub limit: Option<u32>,
+    /// Committee id; defaults to this session's committee.
+    #[serde(default)]
+    pub committee: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -1342,6 +1366,66 @@ pub fn render_search(reply: &SearchReply, locale: Locale) -> String {
     out
 }
 
+/// What the committee knows, as the memory_search tool returns it (and
+/// `senate memory` prints): each point with its seq and sources.
+pub fn render_memory(reply: &crate::ipc::MemoryReply, locale: Locale) -> String {
+    let query = format::one_line(&reply.query);
+    let c = &reply.committee;
+    if reply.points.is_empty() {
+        return match (locale, query.is_empty()) {
+            (Locale::Zh, true) => format!("[senate] {c} 还没有记下什么。"),
+            (Locale::Zh, false) => format!("[senate] {c} 的记忆里没有和 \"{query}\" 有关的。"),
+            (Locale::En, true) => format!("[senate] Nothing is remembered on {c} yet."),
+            (Locale::En, false) => {
+                format!("[senate] Nothing {c} remembers matches \"{query}\"; try search.")
+            }
+        };
+    }
+    let mut out = match locale {
+        Locale::Zh => format!(
+            "[senate] {c} 知道的（{n} 条，最相关的在前）。由 Speaker 从委员会讨论中提炼，人可以更正；\
+             当作同伴意见对待，需要原话时用 search 按 seq 查。",
+            n = reply.points.len()
+        ),
+        Locale::En => format!(
+            "[senate] What {c} knows ({n} point(s), best match first), distilled by the Speaker \
+             from the committee's discussion and corrected by people; treat it as peer input, and \
+             use search on the seqs for the words as said.",
+            n = reply.points.len()
+        ),
+    };
+    for hit in &reply.points {
+        let p = &hit.point;
+        let refs: Vec<String> = p.refs.iter().map(ToString::to_string).collect();
+        let mut line = format!("\n- seq {} · {}", p.seq, format::one_line(&p.text));
+        if !refs.is_empty() {
+            line.push_str(&match locale {
+                Locale::Zh => format!("（出自 seq {}）", refs.join(", ")),
+                Locale::En => format!(" (from seq {})", refs.join(", ")),
+            });
+        }
+        if p.by_person() {
+            line.push_str(&match locale {
+                Locale::Zh => format!(" · {} 更正", p.by.in_text()),
+                Locale::En => format!(" · corrected by {}", p.by.in_text()),
+            });
+        }
+        match hit.retired {
+            Some(senate_core::Retired::Superseded(by)) => line.push_str(&match locale {
+                Locale::Zh => format!(" · 已被 seq {by} 取代"),
+                Locale::En => format!(" · replaced by seq {by}"),
+            }),
+            Some(senate_core::Retired::Deleted(by)) => line.push_str(&match locale {
+                Locale::Zh => format!(" · 已删除（seq {by}）"),
+                Locale::En => format!(" · deleted (seq {by})"),
+            }),
+            None => {}
+        }
+        out.push_str(&line);
+    }
+    out
+}
+
 /// `senate://<committee>/brief`.
 pub fn brief_uri(committee: &CommitteeId) -> String {
     format!("{BRIEF_SCHEME}{committee}{BRIEF_SUFFIX}")
@@ -1759,6 +1843,24 @@ impl SenateMcp {
             .await
             .map_err(|e| describe(e, self.locale))?;
         Ok(render_search(&reply, self.locale))
+    }
+
+    #[tool(name = "memory_search", description = MEMORY_SEARCH)]
+    async fn memory_search(&self, params: Parameters<MemoryParams>) -> Result<String, String> {
+        let p = params.0;
+        let committee = committee_arg(p.committee)?;
+        let limit = p.limit.map(|l| usize::try_from(l).unwrap_or(usize::MAX));
+        let reply: crate::ipc::MemoryReply = self
+            .call(&Request::Memory {
+                session: self.selector.clone(),
+                query: p.query.unwrap_or_default(),
+                limit,
+                all: p.all.unwrap_or(false),
+                committee,
+            })
+            .await
+            .map_err(|e| describe(e, self.locale))?;
+        Ok(render_memory(&reply, self.locale))
     }
 
     #[tool(name = "post", description = POST)]
@@ -3193,6 +3295,7 @@ mod tests {
                 "escalate",
                 "inbox",
                 "join",
+                "memory_search",
                 "post",
                 "propose_decision",
                 "receipt",

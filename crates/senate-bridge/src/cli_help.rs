@@ -13,7 +13,10 @@ use super::Cli;
 
 /// Every visible command, once, under its heading.
 const GROUPS: &[(&str, &[&str])] = &[
-    ("See what is happening", &["status", "inbox", "thread"]),
+    (
+        "See what is happening",
+        &["status", "inbox", "thread", "memory"],
+    ),
     (
         "Speak as yourself",
         &["ask", "tell", "request", "reply", "take", "chat"],

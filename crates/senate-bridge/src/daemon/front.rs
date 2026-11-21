@@ -373,6 +373,8 @@ fn selector_of(request: &Request) -> Option<&SessionSelector> {
         | Request::Join { session, .. }
         | Request::JoinAs { session, .. }
         | Request::Search { session, .. }
+        | Request::Memory { session, .. }
+        | Request::MemoryEdit { session, .. }
         | Request::Post { session, .. }
         | Request::Brief { session, .. }
         | Request::Bound { session }

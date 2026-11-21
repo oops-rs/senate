@@ -458,6 +458,17 @@ impl ApiClient {
     }
 
     /// `GET .../brief`: the committee's brief, derived from its whole log.
+    /// `GET .../memory`: what the committee knows matching `query.q`.
+    pub async fn memory(
+        &self,
+        committee: &CommitteeId,
+        query: &api::MemoryQuery,
+    ) -> Result<api::MemoryResults, ApiClientError> {
+        let url = self.url(&api::memory_path(committee));
+        let resp = self.authed(self.http.get(url)).query(query).send().await?;
+        Ok(checked(resp).await?.json().await?)
+    }
+
     pub async fn brief(&self, committee: &CommitteeId) -> Result<Brief, ApiClientError> {
         let url = self.url(&api::brief_path(committee));
         let resp = self.authed(self.http.get(url)).send().await?;
