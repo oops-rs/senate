@@ -178,8 +178,10 @@ Platform user ids (`user`, `users`, `invite`, `not_added`) are the people's acco
 - **invite**: add `users` to `group_id`. Users who are already members are not an error.
 - **rename_group**: rename `group_id` to `name`. Senate does this to mark a group archived, for example.
 - **set_announcement**: replace the Speaker's own section of `group_id`'s announcement (its standing notice) with `section`, adding the section if the announcement has none. Leave the rest of the announcement exactly as it is. How the adapter marks off the Speaker's section, and how the platform stores an announcement, is up to the adapter. If the platform has no announcements, or the bot may not edit this group's, answer `unsupported`. The Speaker then says so once in the group and stops trying until the group is bound again or `senated` restarts. The Speaker sets announcements only in groups bound for people, never in the Agent group, and at most once an hour per group, when the content changed.
-- **adopt_group**: ask the platform for full use of an existing group (unmentioned chat, proactive posts) because a person bound it. The group is identified by `message_ref`, a message the adapter delivered from it. Return the group's unchanged `group_id`, and set `already_granted` if the adapter already had the grant. Adopting twice is not an error.
-- **release_group**: give back what `adopt_group` or `create_group` was granted, once the group is bound to nothing. Return whether a grant was removed. Releasing a group without a grant returns `false` and is not an error.
+- **adopt_group**: join an existing group because a person bound it: ask the platform to let the bot see and post in this group (unmentioned chat as well as mentions, posts of its own). The group is identified by `message_ref`, a message the adapter delivered from it. Return the group's unchanged `group_id`, and set `already_granted` if the bot was already in the group. Joining twice is not an error.
+- **release_group**: leave a group joined by `adopt_group` or created by `create_group`, once it is bound to nothing. Return whether the bot left anything. Leaving a group the bot is not in returns `false` and is not an error.
+
+`adopt_group`, `release_group` and `already_granted` are historical names, kept on the wire. They mean joining a group, leaving it, and already being in it.
 
 ```json
 {"type":"call","id":"s3","op":"post_card","args":{"target":{"kind":"new_root","group_id":"g-agents"},"card":{"title":"Refund retries","state":"processing","markdown":"asked by **alice**","steps":[],"links":[]},"operation_id":"7f1e…"}}
@@ -202,11 +204,11 @@ Platform user ids (`user`, `users`, `invite`, `not_added`) are the people's acco
 
 | `kind` | Meaning | What Senate does |
 |---|---|---|
-| `rejected` | The platform refused, and retrying the same request won't help. | Gives up on that operation. A post rejected for lack of a grant may first be healed (the group adopted again) and then tried once more. |
+| `rejected` | The platform refused, and retrying the same request won't help. | Gives up on that operation. A post rejected because the bot is not in the group may first be healed (the group joined again) and then tried once more. |
 | `unavailable` | Transient: the platform or adapter can't be reached right now. | Retries later with the same `operation_id`. |
-| `unsupported` | This adapter, or its grants, can't do this kind of thing at all. | Treats it as permanent, does not retry, and falls back. For `adopt_group` and `release_group`, it stops asking for the daemon's lifetime. |
+| `unsupported` | This adapter, or what the platform lets the bot do, can't do this kind of thing at all. | Treats it as permanent, does not retry, and falls back. For `adopt_group` and `release_group`, it stops asking for the daemon's lifetime. |
 
-Use `unavailable`, not `unsupported`, for a temporary loss (for example, a grant that is being re-authorized), because an `unsupported` answer is not retried.
+Use `unavailable`, not `unsupported`, for a temporary loss (for example, a bot permission that is being re-authorized), because an `unsupported` answer is not retried.
 
 ## Retry and idempotency
 

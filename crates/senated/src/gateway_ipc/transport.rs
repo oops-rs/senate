@@ -156,6 +156,7 @@ fn wire_target(target: PostTarget) -> Value {
 #[derive(Deserialize)]
 struct AdoptedReply {
     group_id: String,
+    /// The bot was already in the group (a historical wire name).
     already_granted: bool,
 }
 
