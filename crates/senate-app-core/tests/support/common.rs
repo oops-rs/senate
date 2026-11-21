@@ -91,6 +91,43 @@ pub fn status(sessions: Vec<Session>) -> StatusReply {
     }
 }
 
+/// The Senate's roles: `claude` chairs refund-v2, and one child Senate,
+/// `dark-conclave`, declares its `senate-dev` seat there; this Senate is
+/// registered with the one above.
+pub fn roles() -> senate_bridge::ipc::RolesReply {
+    use senate_bridge::ipc::{Registration, RolesReply, UplinkStatus};
+    use senate_core::{ChildSeat, ChildSenate, PresenceState, api::ChairInfo};
+    RolesReply {
+        senate: Some(SENATE.parse().unwrap()),
+        office: None,
+        present: Vec::new(),
+        chairs: vec![ChairInfo {
+            committee: committee(),
+            chair: Some(path("claude")),
+            source: None,
+        }],
+        children: vec![ChildSenate {
+            seats: vec![ChildSeat {
+                committee: committee(),
+                senator: path("claude-c222"),
+                alias: Some(path("senate-dev")),
+                duty: Some("reviews refunds".into()),
+                presence: PresenceState::Online,
+            }],
+            last_seen: Some(Utc::now()),
+            ..ChildSenate::new(Name::new("dark-conclave").unwrap(), path("claude-d333"))
+        }],
+        uplink: Some(UplinkStatus {
+            url: "https://senate.example".into(),
+            parent: Some("/acme".parse().unwrap()),
+            name: Name::new("alice-desk").unwrap(),
+            speaker: "/acme::senator::claude-e444".parse().unwrap(),
+            registration: Registration::Registered,
+            at: Utc::now(),
+        }),
+    }
+}
+
 /// `status` with nobody presiding: no agent holds the seat.
 pub fn status_alone(sessions: Vec<Session>) -> StatusReply {
     let mut s = status(sessions);

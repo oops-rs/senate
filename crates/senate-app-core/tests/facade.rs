@@ -270,3 +270,29 @@ async fn hosted_sessions_show_their_waiting_prompt_and_stop_and_restore() {
             .any(|r| matches!(r, Request::Stop { force: false, .. }))
     );
 }
+
+#[tokio::test]
+async fn the_senate_shows_its_chairs_children_and_uplink() {
+    let (dir, socket, world) = setup();
+    world.lock().unwrap().status.roles = Some(common::roles());
+    let _daemon = FakeDaemon::start(&socket, world);
+    let core = AppCore::new(Some(dir.path().display().to_string()), Some("en".into())).unwrap();
+    let listener = Arc::new(Listener::default());
+    core.start(listener.clone()).unwrap();
+    let s = until(&listener, "roles", |s| {
+        s.senates.first().is_some_and(|x| !x.chairs.is_empty())
+    })
+    .await;
+    let senate = &s.senates[0];
+    assert_eq!(senate.chairs[0].committee, "refund-v2");
+    assert_eq!(senate.chairs[0].chair.as_deref(), Some("[senator::claude]"));
+    let child = &senate.children[0];
+    assert_eq!(child.name, "dark-conclave");
+    assert!(child.online);
+    assert_eq!(child.seats[0].name, "senate-dev (dark-conclave)");
+    assert_eq!(child.seats[0].duty.as_deref(), Some("reviews refunds"));
+    assert_eq!(
+        senate.uplink.as_deref(),
+        Some("registered as alice-desk with /acme")
+    );
+}

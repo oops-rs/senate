@@ -151,6 +151,46 @@ pub struct SenateInfo {
     /// The person's agent holding the seat, when it is one of theirs.
     pub presiding_agent: Option<String>,
     pub committees: Vec<CommitteeLine>,
+    /// Each committee's chair, as this Senate's roles say.
+    pub chairs: Vec<ChairLine>,
+    /// The Senates registered below this one.
+    pub children: Vec<ChildLine>,
+    /// This Senate's registration with the Senate above, when it has one:
+    /// `registered as dark-conclave with https://…`.
+    pub uplink: Option<String>,
+}
+
+/// One committee's chair.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ChairLine {
+    pub committee: String,
+    /// The chair as a mention; `None`: the committee has none.
+    pub chair: Option<String>,
+}
+
+/// A Senate registered below this one, and the seats it declares.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ChildLine {
+    pub name: String,
+    /// Its Speaker, as a mention.
+    pub speaker: String,
+    /// It declared its seats recently.
+    pub online: bool,
+    pub last_seen: Option<SystemTime>,
+    pub seats: Vec<ChildSeatLine>,
+}
+
+/// A seat a child Senate declares: who, where, with what duty.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ChildSeatLine {
+    pub committee: String,
+    /// As people are shown it: `senate-dev（dark-conclave）`.
+    pub name: String,
+    /// Its id in the child.
+    pub senator: String,
+    pub duty: Option<String>,
+    /// `online`, `disconnected`, `absent`, ….
+    pub presence: String,
 }
 
 /// One agent's stream on one committee.
@@ -483,6 +523,50 @@ fn senate_info(s: &StatusReply, primary: bool, locale: Locale, now: DateTime<Utc
                 live: matches!(c.stream, Some(StreamState::Connected { .. })),
                 delivered: c.delivered.0,
                 sessions: count(c.sessions),
+            })
+            .collect(),
+        chairs: s
+            .roles
+            .iter()
+            .flat_map(|r| &r.chairs)
+            .map(|c| ChairLine {
+                committee: c.committee.to_string(),
+                chair: c.chair.as_ref().map(|p| Address::senator(p).in_text()),
+            })
+            .collect(),
+        children: s
+            .roles
+            .iter()
+            .flat_map(|r| &r.children)
+            .map(|c| child_line(c, locale, now))
+            .collect(),
+        uplink: s
+            .roles
+            .as_ref()
+            .and_then(|r| r.uplink.as_ref())
+            .map(|u| text::uplink(locale, u)),
+    }
+}
+
+fn child_line(c: &senate_core::ChildSenate, locale: Locale, now: DateTime<Utc>) -> ChildLine {
+    ChildLine {
+        name: c.name.to_string(),
+        speaker: Address::senator(&c.speaker).in_text(),
+        online: c.is_online(now),
+        last_seen: c.last_seen.map(Into::into),
+        seats: c
+            .seats
+            .iter()
+            .map(|seat| ChildSeatLine {
+                committee: seat.committee.to_string(),
+                name: crate::names::seat_name(
+                    locale,
+                    seat.alias.as_ref().unwrap_or(&seat.senator).as_str(),
+                    c.name.as_str(),
+                ),
+                senator: seat.senator.to_string(),
+                duty: seat.duty.clone(),
+                presence: seat.presence.as_str().to_string(),
             })
             .collect(),
     }

@@ -34,6 +34,7 @@ async fn main() {
     let socket = paths.socket();
     let mut w = common::World::new();
     w.sessions = common::hosted_sessions();
+    w.status.roles = Some(common::roles());
     let world = Arc::new(Mutex::new(w));
     let daemon = common::FakeDaemon::start(&socket, Arc::clone(&world));
     println!("fake daemon on {}", socket.display());

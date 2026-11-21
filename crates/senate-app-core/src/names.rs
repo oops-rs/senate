@@ -148,6 +148,12 @@ impl Names {
     }
 }
 
+/// A seat in a child Senate as people are shown it: `senate-dev
+/// (dark-conclave)` / `senate-dev（dark-conclave）`.
+pub fn seat_name(l: Locale, name: &str, child: &str) -> String {
+    role(l, name, child)
+}
+
 /// `name (what)` / `name（what）`.
 fn role(l: Locale, name: &str, what: &str) -> String {
     match l {

@@ -50,8 +50,9 @@ pub use ffi::{
 };
 pub use reads::{ThreadEvent, ThreadView};
 pub use state::{
-    AgentInfo, AppState, ApprovalRequest, CodexThreadInfo, CommitteeLine, Counts, DocketCommittee,
-    DocketEntry, DocketSenate, HostedSession, InboxThread, MenuState, SeatLine, SenateInfo,
+    AgentInfo, AppState, ApprovalRequest, ChairLine, ChildLine, ChildSeatLine, CodexThreadInfo,
+    CommitteeLine, Counts, DocketCommittee, DocketEntry, DocketSenate, HostedSession, InboxThread,
+    MenuState, SeatLine, SenateInfo,
 };
 
 uniffi::setup_scaffolding!();

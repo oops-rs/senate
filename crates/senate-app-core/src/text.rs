@@ -230,6 +230,31 @@ pub fn approvals_word(locale: Locale) -> &'static str {
     locale.pick("审批", "approvals")
 }
 
+/// This Senate's registration with the Senate above.
+pub fn uplink(locale: Locale, u: &senate_bridge::ipc::UplinkStatus) -> String {
+    use senate_bridge::ipc::Registration;
+    let above = u
+        .parent
+        .as_ref()
+        .map_or_else(|| u.url.clone(), ToString::to_string);
+    match (&u.registration, locale) {
+        (Registration::Registered, Locale::Zh) => format!("已作为 {} 注册到 {above}", u.name),
+        (Registration::Registered, Locale::En) => format!("registered as {} with {above}", u.name),
+        (Registration::Pending, Locale::Zh) => format!("正在以 {} 注册到 {above}", u.name),
+        (Registration::Pending, Locale::En) => format!("registering as {} with {above}", u.name),
+        (Registration::Refused { reason }, Locale::Zh) => {
+            format!("{above} 拒绝了注册 {}：{reason}", u.name)
+        }
+        (Registration::Refused { reason }, Locale::En) => {
+            format!("{above} refused {}: {reason}", u.name)
+        }
+        (Registration::Unreachable { error }, Locale::Zh) => format!("无法连接 {above}：{error}"),
+        (Registration::Unreachable { error }, Locale::En) => {
+            format!("{above} is unreachable: {error}")
+        }
+    }
+}
+
 pub fn sessions_word(locale: Locale) -> &'static str {
     locale.pick("托管会话", "hosted sessions")
 }
