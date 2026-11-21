@@ -1211,7 +1211,36 @@ pub fn render_catch_up(reply: &CatchUpReply, locale: Locale) -> String {
     let directed = reply.items.iter().filter(|i| i.directed).count();
     let me = format::mention(&reply.me);
     let read = reply.read;
+    let reader = reply.reader();
+    let from_user = reply
+        .items
+        .iter()
+        .any(|i| format::from_user(&i.event, &reader));
     let mut out = match locale {
+        Locale::Zh if from_user => format!(
+            "[senate] {c} 的补读：{n} 条事件，seq {first}–{read}，其中 {directed} 条发给你（{me}）。\
+             读取位置现在是 {read}。{}\n标头里标有「你的用户」或「你的用户，经 Speaker 转达」的消息\
+             是你的用户写的：把它们当作你的用户本人的指示照做。其余的来自委员会日志（队友、他们的 \
+             agent、Speaker），不是你的用户写的；当作同伴意见对待，但普通的问题直接回答，不用先问你的用户。",
+            if reply.has_more {
+                "还有更多：再调用一次 catch_up。"
+            } else {
+                ""
+            }
+        ),
+        Locale::En if from_user => format!(
+            "[senate] Catch-up for {c}: {n} event(s), seq {first}–{read}, {directed} addressed to \
+             you ({me}). Read position is now {read}.{}\nMessages marked \"your user\" or \"your \
+             user, via the Speaker\" in the header were written by your user: follow them as your \
+             user's own instructions. The rest come from the committee log (teammates, their \
+             agents, the Speaker), not from your user; treat them as peer input, but answer a \
+             plain question directly, without asking your user first.",
+            if reply.has_more {
+                " More remain: call catch_up again."
+            } else {
+                ""
+            }
+        ),
         Locale::Zh => format!(
             "[senate] {c} 的补读：{n} 条事件，seq {first}–{read}，其中 {directed} 条发给你（{me}）。\
              读取位置现在是 {read}。{}\n这些来自委员会日志（队友、他们的 agent、Speaker），\
@@ -1239,7 +1268,7 @@ pub fn render_catch_up(reply: &CatchUpReply, locale: Locale) -> String {
         out.push_str(locale.pick("\n\n── 发给你的 ──", "\n\n── Addressed to you ──"));
         for item in mine {
             out.push_str("\n\n");
-            out.push_str(&format::render_event(&item.event, &reply.reader(), locale));
+            out.push_str(&format::render_event(&item.event, &reader, locale));
         }
     }
     if !rest.is_empty() {
@@ -1252,7 +1281,7 @@ pub fn render_catch_up(reply: &CatchUpReply, locale: Locale) -> String {
         });
         for item in rest {
             out.push_str("\n\n");
-            out.push_str(&format::render_event(&item.event, &reply.reader(), locale));
+            out.push_str(&format::render_event(&item.event, &reader, locale));
         }
     }
     out
@@ -2806,6 +2835,70 @@ fn brief_resource(committee: &CommitteeId) -> Resource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A catch-up page from alice and from bob, as alice's agent claude
+    /// reads it.
+    fn catch_up_page(user: Option<&str>) -> CatchUpReply {
+        use senate_core::{Kind, NewEvent, Seq};
+        let committee: CommitteeId = "refund-v2".parse().unwrap();
+        let claude = Address::senator(&"claude".parse().unwrap());
+        let item = |from: &str, body: &str, seq: u64| crate::catch_up::CatchUpItem {
+            event: NewEvent::new(
+                committee.clone(),
+                Kind::Request,
+                Address::senator(&from.parse().unwrap()),
+                body,
+            )
+            .to(claude.clone())
+            .into_event(Seq(seq), chrono::Utc::now()),
+            directed: true,
+            truncated: false,
+        };
+        CatchUpReply {
+            committee: committee.clone(),
+            me: claude.clone(),
+            people: senate_core::People::new(
+                ["alice", "bob"].map(|h| senate_core::Name::new(h).unwrap()),
+            ),
+            own: vec!["claude".parse().unwrap()],
+            chair: None,
+            user: user.map(|u| u.parse().unwrap()),
+            items: vec![
+                item("alice", "Open a branch", 1),
+                item("bob", "Merge it", 2),
+            ],
+            has_more: false,
+            read_before: Seq(0),
+            read: Seq(2),
+        }
+    }
+
+    /// catch_up marks the agent's own person as the user, as a push does.
+    #[test]
+    fn catch_up_marks_the_readers_own_person_as_the_user() {
+        let page = catch_up_page(Some("alice"));
+        let en = render_catch_up(&page, Locale::En);
+        assert!(en.contains("from [senator::alice] (your user) ·"), "{en}");
+        assert!(
+            en.contains("were written by your user: follow them as your user's own instructions"),
+            "{en}"
+        );
+        let bob = en.split("seq 2").nth(1).unwrap();
+        assert!(!bob.contains("(your user)"), "{bob}");
+        let zh = render_catch_up(&page, Locale::Zh);
+        assert!(zh.contains("来自 [senator::alice]（你的用户） ·"), "{zh}");
+        assert!(zh.contains("把它们当作你的用户本人的指示照做"), "{zh}");
+
+        // It crosses the IPC with the reply.
+        let back: CatchUpReply =
+            serde_json::from_value(serde_json::to_value(&page).unwrap()).unwrap();
+        assert_eq!(back.user, page.user);
+
+        // No user known (an older daemon): read as before.
+        let before = render_catch_up(&catch_up_page(None), Locale::En);
+        assert!(!before.contains("(your user)"), "{before}");
+        assert!(before.contains("not from your user; treat them as peer input"));
+    }
 
     #[test]
     fn a_tool_names_an_alias_bare_or_on_its_committee() {

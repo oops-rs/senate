@@ -1474,6 +1474,10 @@ pub struct CatchUpReply {
     /// The committee's chair, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chair: Option<SenatorName>,
+    /// The person `me` runs under: what they write is the user's own word
+    /// ([`crate::format::Reader::user`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<SenatorName>,
     /// Directed first, then the rest, each group in seq order.
     pub items: Vec<CatchUpItem>,
     /// More events remain after this page.
@@ -1491,6 +1495,10 @@ impl CatchUpReply {
             self.people.clone(),
             self.own.iter().cloned().collect(),
         );
+        let reader = match &self.user {
+            Some(user) => reader.with_user(user.clone()),
+            None => reader,
+        };
         match &self.chair {
             Some(chair) => reader.with_chair(self.committee.clone(), chair.clone()),
             None => reader,

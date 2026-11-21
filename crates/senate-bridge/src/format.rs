@@ -612,7 +612,7 @@ fn sender_mark(event: &Event, me: &Reader, locale: Locale) -> &'static str {
 
 /// Whether `event` is the reader's own person speaking, directly or
 /// through the Speaker.
-fn from_user(event: &Event, me: &Reader) -> bool {
+pub fn from_user(event: &Event, me: &Reader) -> bool {
     matches!(sender_of(event, me), Sender::User | Sender::UserViaSpeaker)
 }
 
