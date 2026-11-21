@@ -4149,6 +4149,8 @@ impl Shared {
         if body.trim().is_empty() {
             return Err(IpcError::bad_request("`body` is empty"));
         }
+        let mut to = to;
+        self.check_senators(&mut to, &committee).await?;
         let mut refs = refs.unwrap_or_default();
         if refs.branch.is_none() {
             refs.branch = session.branch.clone();
@@ -4641,18 +4643,8 @@ impl Shared {
                 bad.in_text()
             )));
         }
-        // A senator named here must be one: a person, a seated agent or an
-        // alias. Otherwise the message would wait for someone who does not
-        // exist (a mistyped name, or a prefix of a session's id).
-        for address in to.iter_mut().filter(|_| bare) {
-            if matches!(address, Address::Senator(_)) {
-                let (level, there, resolved) = self
-                    .resolve_seat(&Locator::here(address.clone()), &committee)
-                    .await?;
-                if level == 0 && there == committee {
-                    *address = resolved;
-                }
-            }
+        if bare {
+            self.check_senators(&mut to, &committee).await?;
         }
         let mut spoke_in = Vec::new();
         let thread = match thread {
@@ -4692,6 +4684,29 @@ impl Shared {
         let mut posted = self.post(event).await?;
         posted.unseen_escalation = self.mark_after_speaking(&posted, &spoke_in, &seen).await?;
         Ok(posted)
+    }
+
+    /// Each senator named in `to`, written on `committee`, must be one: a
+    /// person, a seated agent or an alias (resolved to the agent it stands
+    /// for). Otherwise the message would wait for someone who does not
+    /// exist (a mistyped name, or a prefix of a session's id); the server's
+    /// refusal names the closest senators.
+    async fn check_senators(
+        &self,
+        to: &mut [Address],
+        committee: &CommitteeId,
+    ) -> Result<(), IpcError> {
+        for address in to.iter_mut() {
+            if matches!(address, Address::Senator(_)) {
+                let (level, there, resolved) = self
+                    .resolve_seat(&Locator::here(address.clone()), committee)
+                    .await?;
+                if level == 0 && &there == committee {
+                    *address = resolved;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Open `committee` on the server when it has no event there yet: one

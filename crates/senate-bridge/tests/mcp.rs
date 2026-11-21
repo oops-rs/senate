@@ -442,6 +442,8 @@ async fn ask_answer_and_catch_up_end_to_end() {
     // This scenario binds by the branch name, which is off unless asked for.
     h.config.committee_from_branch = true;
     h.start().await;
+    // bob's agent has connected before: a senator of this Senate.
+    h.server.seat("copilot", "bob");
     let repo = h.dir.path().join("work/repo");
     git_repo(&repo, "feature/refund-v2/alice");
     h.hook(HookKind::SessionStart, "m1", &repo, None)
@@ -853,6 +855,8 @@ async fn ask_refuses_recipients_that_would_never_answer() {
 async fn a_resent_request_with_the_same_id_posts_once() {
     let mut h = Harness::new().await;
     h.start().await;
+    // bob's agent has connected before: a senator of this Senate.
+    h.server.seat("copilot", "bob");
     let wd = h.workdir("a", Some("refund-v2"));
     h.hook(HookKind::SessionStart, "a1", &wd, None).await;
     let id = EventId::new();
@@ -903,6 +907,8 @@ async fn a_resent_request_with_the_same_id_posts_once() {
 async fn a_session_is_found_by_a_pid_above_its_hook() {
     let mut h = Harness::new().await;
     h.start().await;
+    // bob's agent has connected before: a senator of this Senate.
+    h.server.seat("copilot", "bob");
     let wd = h.workdir("p", Some("refund-v2"));
     let env = HookEnv {
         socket: None,
@@ -1627,6 +1633,8 @@ async fn each_agent_has_its_own_inbox_and_read_position() {
 async fn tool_results_follow_the_locale() {
     let mut h = Harness::new().await;
     h.start().await;
+    // bob's agent has connected before: a senator of this Senate.
+    h.server.seat("copilot", "bob");
     let wd = h.workdir("z", Some("refund-v2"));
     h.hook(HookKind::SessionStart, "z1", &wd, None).await;
     let mut mcp = McpClient::start_in(h.socket(), selector("z1"), Locale::Zh).await;
