@@ -3128,6 +3128,10 @@ impl Shared {
                 alias,
                 committee,
                 runtime: session.runtime,
+                model: self
+                    .store
+                    .hosted_model(&session.session_id)
+                    .map_err(internal)?,
                 dir: session.cwd.clone(),
                 state: if facts.running {
                     HostState::Running

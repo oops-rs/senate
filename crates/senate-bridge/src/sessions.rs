@@ -107,12 +107,13 @@ pub fn render(reply: &SessionsReply, now: DateTime<Utc>, locale: Locale) -> Stri
         locale.pick("名称", "NAME"),
         locale.pick("委员会", "COMMITTEE"),
         locale.pick("运行时", "RUNTIME"),
+        locale.pick("模型", "MODEL"),
         locale.pick("状态", "STATE"),
         locale.pick("运行", "UPTIME"),
         locale.pick("查看者", "VIEWER"),
         locale.pick("目录", "DIR"),
     ];
-    let lines: Vec<[String; 7]> = reply
+    let lines: Vec<[String; 8]> = reply
         .rows
         .iter()
         .map(|row| {
@@ -122,6 +123,7 @@ pub fn render(reply: &SessionsReply, now: DateTime<Utc>, locale: Locale) -> Stri
                     .as_ref()
                     .map_or_else(|| "-".to_owned(), ToString::to_string),
                 row.runtime.as_str().to_owned(),
+                row.model.label(),
                 row.state.as_str().to_owned(),
                 row.started_at
                     .map_or_else(|| "-".to_owned(), |at| uptime(at, now)),
@@ -205,6 +207,7 @@ mod tests {
             alias: alias.map(|a| a.parse().unwrap()),
             committee: Some(CommitteeId::new("refund-v2").unwrap()),
             runtime: Runtime::Codex,
+            model: crate::ipc::HostedModel::default(),
             dir: "/work/refund".into(),
             state,
             started_at: None,
@@ -261,6 +264,7 @@ mod tests {
         running.started_at = Some(now - chrono::Duration::minutes(90));
         running.attached = true;
         running.typed_secs_ago = Some(120);
+        running.model = crate::ipc::HostedModel::new(Some("opus".into()), Some("high".into()));
         let stopped = row("codex-2", None, HostState::Stopped);
         let orphan = EventId::new();
         let reply = SessionsReply {
@@ -270,7 +274,11 @@ mod tests {
         let text = render(&reply, now, Locale::En);
         let lines: Vec<&str> = text.lines().collect();
         assert!(lines[0].starts_with("NAME"), "{text}");
+        let column = lines[0].find("MODEL").unwrap();
+        assert_eq!(lines[0].find("STATE"), Some(column + "opus/high  ".len()));
         assert!(lines[1].starts_with("refund-v2::reviewer"), "{text}");
+        assert_eq!(&lines[1][column..column + 9], "opus/high", "{text}");
+        assert_eq!(&lines[2][column..column + 7], "default", "{text}");
         assert!(lines[1].contains("running"), "{text}");
         assert!(lines[1].contains("1h"), "{text}");
         assert!(lines[1].contains("attached · typed 2m ago"), "{text}");

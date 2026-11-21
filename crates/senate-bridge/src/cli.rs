@@ -963,12 +963,13 @@ async fn hosted_sessions(paths: &Paths) -> anyhow::Result<Vec<crate::host::view:
         .map(|row| crate::host::view::Session {
             key: row.session_id.clone(),
             title: format!(
-                "{} · {} · {} · {}",
+                "{} · {} · {} · {} · {}",
                 row.label(),
                 row.committee
                     .as_ref()
                     .map_or_else(|| "-".to_owned(), ToString::to_string),
                 row.runtime.as_str(),
+                row.model.label(),
                 row.state.as_str()
             ),
             // What a command takes: `committee::alias`, so it names one

@@ -1062,6 +1062,20 @@ async fn a_chosen_model_and_effort_reach_the_tui_and_are_kept_for_restore() {
     let args = hosted_fixture_argv(&fixture.terminal, &fixture.project, TIMEOUT).await;
     assert!(args.contains(&"--model=opus".to_owned()), "{args:?}");
     assert!(args.contains(&"--effort=high".to_owned()), "{args:?}");
+    let listed = |h: &Harness| {
+        let h = h.socket();
+        async move {
+            let reply: senate_bridge::ipc::SessionsReply =
+                ipc::request(&h, &Request::Sessions, TIMEOUT, TIMEOUT)
+                    .await
+                    .unwrap();
+            let [row] = reply.rows.as_slice() else {
+                panic!("one hosted session: {reply:?}");
+            };
+            row.model.label()
+        }
+    };
+    assert_eq!(listed(&fixture.h).await, "opus/high");
 
     // An effort Claude Code does not take is refused before anything
     // starts, even with no slot left, naming the ones it does take.
@@ -1124,6 +1138,7 @@ async fn a_chosen_model_and_effort_reach_the_tui_and_are_kept_for_restore() {
     let args = restore(HostedModel::default()).await;
     assert!(args.contains(&"--effort=low".to_owned()), "{args:?}");
     assert!(!args.contains(&"--effort=high".to_owned()), "{args:?}");
+    assert_eq!(listed(&fixture.h).await, "opus/low");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

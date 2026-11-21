@@ -391,6 +391,9 @@ pub struct SessionRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub committee: Option<CommitteeId>,
     pub runtime: crate::session::Runtime,
+    /// The model and effort it was last started with.
+    #[serde(default, skip_serializing_if = "HostedModel::is_default")]
+    pub model: HostedModel,
     pub dir: PathBuf,
     pub state: HostState,
     /// When its host started; `None` when it is not running.
