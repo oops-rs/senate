@@ -778,15 +778,19 @@ impl Shared {
             .await
             .map_err(|_| anyhow::anyhow!("the server was slow"))??;
         let mut queued = false;
+        let cap = self.unbound_cap(&chair, committee)?;
         for item in page.items {
             let event = item.event;
-            if self.for_chair(&chair, &event) && self.store.enqueue_for_chair(&chair, &event)? {
+            if !self.for_chair(&chair, &event) {
+                continue;
+            }
+            if let Some(dropped) = self.store.enqueue_for_chair(&chair, &event, cap)? {
                 tracing::info!(%committee, seq = %event.seq, %chair, "the chair moved; handed to the new chair");
+                self.note_capped(&chair, committee, dropped);
                 queued = true;
             }
         }
         if queued {
-            self.cap_unbound(&chair, committee)?;
             self.work.notify_one();
         }
         Ok(())

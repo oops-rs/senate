@@ -24,7 +24,8 @@
 //!   by `(agent, committee, seq)`. An event addressed to two agents of the
 //!   person is two rows.
 //! - `dropped` — per (agent, committee), how many pending items were dropped
-//!   by the cap ([`Store::cap_pending`]) and not yet announced in a push.
+//!   by the cap (applied with the intake, [`Store::ingest`]) and not yet
+//!   announced in a push.
 //! - `person_seen` — per (committee, thread root), the highest `seq` of the
 //!   thread the person has seen on this machine (`senate thread`, a reply,
 //!   a take, `senate inbox --mark-read`): this machine's view, not a fact of
@@ -43,8 +44,9 @@
 //! it). Every transition is a conditional update on the current status, so a
 //! hook and the batcher racing for one item cannot both deliver it.
 //!
-//! The cursor and the queue row for an event are written in one transaction
-//! ([`Store::ingest`]), so the cursor never passes an event that was not kept.
+//! The cursor, the queue row for an event and the pending cap are written in
+//! one transaction ([`Store::ingest`]), so the cursor never passes an event
+//! that was not kept and the queue is never left over its cap.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -465,6 +467,40 @@ fn item_from_row(row: &Row<'_>) -> rusqlite::Result<QueueItem> {
     })
 }
 
+/// Keep only the newest `keep` pending items of `agent` on `committee`,
+/// inside the caller's transaction; the dropped ones are counted for
+/// [`Store::dropped`]. Returns how many were dropped. Only the intake that
+/// adds an item applies it ([`Store::ingest`], [`Store::enqueue_for_chair`]),
+/// so the queue is never over the cap once that transaction commits.
+fn cap_pending(
+    tx: &Transaction<'_>,
+    agent: &SenatorName,
+    committee: &CommitteeId,
+    keep: usize,
+) -> Result<usize, StoreError> {
+    let keep = i64::try_from(keep).unwrap_or(i64::MAX);
+    let agent = agent_text(agent);
+    let n = tx.execute(
+        "DELETE FROM queue WHERE agent = ?1 AND committee = ?2 AND status = 'pending'
+           AND seq NOT IN (
+             SELECT seq FROM queue WHERE agent = ?1 AND committee = ?2 AND status = 'pending'
+             ORDER BY seq DESC LIMIT ?3)",
+        params![agent, committee.as_str(), keep],
+    )?;
+    if n > 0 {
+        tx.execute(
+            "INSERT INTO dropped (agent, committee, count) VALUES (?1, ?2, ?3)
+             ON CONFLICT(agent, committee) DO UPDATE SET count = count + excluded.count",
+            params![
+                agent,
+                committee.as_str(),
+                i64::try_from(n).unwrap_or(i64::MAX)
+            ],
+        )?;
+    }
+    Ok(n)
+}
+
 /// Move `agent`'s cursor on `committee` to `seq`, enqueueing `event` for it
 /// first when given. `false` (and nothing written) when `seq` is at or
 /// behind the cursor.
@@ -822,26 +858,36 @@ impl Store {
     }
 
     /// Take in one event from `agent`'s stream: enqueue it for that agent if
-    /// `directed`, then move the agent's cursor to it, atomically. Returns
-    /// `false` (and changes nothing) when the event is at or behind the
+    /// `directed`, then move the agent's cursor to it, and, given a `cap`,
+    /// keep only the agent's newest `cap` pending items on the committee
+    /// ([`cap_pending`]), all in one transaction, so a crash can never leave
+    /// the queue over its cap. Returns how many items the cap dropped, or
+    /// `None` (and changes nothing) when the event is at or behind the
     /// cursor.
     pub fn ingest(
         &self,
         agent: &SenatorName,
         event: &Event,
         directed: bool,
-    ) -> Result<bool, StoreError> {
+        cap: Option<usize>,
+    ) -> Result<Option<usize>, StoreError> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
-        let moved = take(
+        if !take(
             &tx,
             agent,
             &event.committee,
             event.seq,
             directed.then_some(event),
-        )?;
+        )? {
+            return Ok(None);
+        }
+        let dropped = match cap {
+            Some(keep) if directed => cap_pending(&tx, agent, &event.committee, keep)?,
+            _ => 0,
+        };
         tx.commit()?;
-        Ok(moved)
+        Ok(Some(dropped))
     }
 
     /// Queue `event` for `agent` without touching its cursor: an item the
@@ -867,15 +913,21 @@ impl Store {
 
     /// Queue `event`, addressed to `chair`, for `agent` now that it chairs:
     /// as [`Store::enqueue`], and an item the agent lost when the chair
-    /// last moved away from it ([`CHAIR_MOVED`]) is pending again. `false`
-    /// when the agent has the item in any other state.
+    /// last moved away from it ([`CHAIR_MOVED`]) is pending again. Given a
+    /// `cap`, the agent's pending items on the committee are trimmed to it
+    /// in the same transaction ([`cap_pending`]). Returns how many the cap
+    /// dropped, or `None` (and changes nothing) when the agent has the item
+    /// in any other state.
     pub fn enqueue_for_chair(
         &self,
         agent: &SenatorName,
         event: &Event,
-    ) -> Result<bool, StoreError> {
+        cap: Option<usize>,
+    ) -> Result<Option<usize>, StoreError> {
         let json = serde_json::to_string(event).map_err(|e| StoreError::Corrupt(e.to_string()))?;
-        let added = self.conn().execute(
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let added = tx.execute(
             "INSERT INTO queue (agent, committee, seq, event, status, enqueued_at)
              VALUES (?1, ?2, ?3, ?4, 'pending', ?5)
              ON CONFLICT (agent, committee, seq) DO UPDATE SET
@@ -891,7 +943,15 @@ impl Store {
                 CHAIR_MOVED,
             ],
         )?;
-        Ok(added > 0)
+        if added == 0 {
+            return Ok(None);
+        }
+        let dropped = match cap {
+            Some(keep) => cap_pending(&tx, agent, &event.committee, keep)?,
+            None => 0,
+        };
+        tx.commit()?;
+        Ok(Some(dropped))
     }
 
     /// Everything on `committee` not yet pushed (pending, or held for
@@ -2170,42 +2230,7 @@ impl Store {
         )?)
     }
 
-    // ---- the pending cap -------------------------------------------------
-
-    /// Keep only the newest `keep` pending items of `agent` on `committee`;
-    /// the dropped ones are counted for [`Store::dropped`]. Returns how many
-    /// were dropped.
-    pub fn cap_pending(
-        &self,
-        agent: &SenatorName,
-        committee: &CommitteeId,
-        keep: usize,
-    ) -> Result<usize, StoreError> {
-        let keep = i64::try_from(keep).unwrap_or(i64::MAX);
-        let agent = agent_text(agent);
-        let mut conn = self.conn();
-        let tx = conn.transaction()?;
-        let n = tx.execute(
-            "DELETE FROM queue WHERE agent = ?1 AND committee = ?2 AND status = 'pending'
-               AND seq NOT IN (
-                 SELECT seq FROM queue WHERE agent = ?1 AND committee = ?2 AND status = 'pending'
-                 ORDER BY seq DESC LIMIT ?3)",
-            params![agent, committee.as_str(), keep],
-        )?;
-        if n > 0 {
-            tx.execute(
-                "INSERT INTO dropped (agent, committee, count) VALUES (?1, ?2, ?3)
-                 ON CONFLICT(agent, committee) DO UPDATE SET count = count + excluded.count",
-                params![
-                    agent,
-                    committee.as_str(),
-                    i64::try_from(n).unwrap_or(i64::MAX)
-                ],
-            )?;
-        }
-        tx.commit()?;
-        Ok(n)
-    }
+    // ---- the pending cap (applied by `ingest`, see `cap_pending`) -------
 
     /// Items of `agent` on `committee` dropped by the cap and not yet
     /// announced.
@@ -2467,10 +2492,26 @@ mod tests {
     #[test]
     fn ingest_moves_cursor_and_dedupes() {
         let s = Store::in_memory().unwrap();
-        assert!(s.ingest(&claude(), &event(1), true).unwrap());
-        assert!(s.ingest(&claude(), &event(2), false).unwrap());
-        assert!(!s.ingest(&claude(), &event(2), true).unwrap());
-        assert!(!s.ingest(&claude(), &event(1), true).unwrap());
+        assert!(
+            s.ingest(&claude(), &event(1), true, None)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            s.ingest(&claude(), &event(2), false, None)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            s.ingest(&claude(), &event(2), true, None)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            s.ingest(&claude(), &event(1), true, None)
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(s.delivered_cursor(&claude(), &committee()).unwrap(), Seq(2));
         let pending = s.pending().unwrap();
         assert_eq!(pending.len(), 1);
@@ -2494,9 +2535,13 @@ mod tests {
                 Address::senator(&codex()),
             ])
             .into_event(Seq(1), Utc::now());
-        assert!(s.ingest(&claude(), &both, true).unwrap());
-        assert!(s.ingest(&codex(), &both, true).unwrap());
-        assert!(s.ingest(&claude(), &event(2), true).unwrap());
+        assert!(s.ingest(&claude(), &both, true, None).unwrap().is_some());
+        assert!(s.ingest(&codex(), &both, true, None).unwrap().is_some());
+        assert!(
+            s.ingest(&claude(), &event(2), true, None)
+                .unwrap()
+                .is_some()
+        );
         assert_eq!(s.delivered_cursor(&claude(), &committee()).unwrap(), Seq(2));
         assert_eq!(s.delivered_cursor(&codex(), &committee()).unwrap(), Seq(1));
         let seqs = |a: &SenatorName| -> Vec<u64> {
@@ -2530,9 +2575,15 @@ mod tests {
             s.cursor(&codex(), &committee()).unwrap().reported,
             Seq::ZERO
         );
-        s.cap_pending(&claude(), &committee(), 0).unwrap();
+        // An intake of a later event for claude with a cap of 1 drops its
+        // older item, not codex's.
+        assert_eq!(
+            s.ingest(&claude(), &event(3), true, Some(1)).unwrap(),
+            Some(1)
+        );
         assert_eq!(s.dropped(&claude(), &committee()).unwrap(), 1);
         assert_eq!(s.dropped(&codex(), &committee()).unwrap(), 0);
+        assert_eq!(seqs(&claude()), [3]);
         assert_eq!(seqs(&codex()), [1]);
         let all: Vec<(String, u64)> = s
             .cursors()
@@ -2540,7 +2591,7 @@ mod tests {
             .into_iter()
             .map(|(a, _, c)| (a.to_string(), c.delivered.0))
             .collect();
-        assert_eq!(all, [("claude".to_string(), 2), ("codex".to_string(), 1)]);
+        assert_eq!(all, [("claude".to_string(), 3), ("codex".to_string(), 1)]);
     }
 
     #[test]
@@ -2566,9 +2617,9 @@ mod tests {
         let s = Store::in_memory().unwrap();
         assert_eq!(s.epoch("http://a").unwrap(), None);
         s.set_epoch("http://a", "e1").unwrap();
-        s.ingest(&claude(), &event(1), true).unwrap();
-        s.ingest(&claude(), &event(2), true).unwrap();
-        s.ingest(&codex(), &event(1), false).unwrap();
+        s.ingest(&claude(), &event(1), true, None).unwrap();
+        s.ingest(&claude(), &event(2), true, None).unwrap();
+        s.ingest(&codex(), &event(1), false, None).unwrap();
         s.claim_for_hook(&[key(&claude(), 2)], "x").unwrap();
         let summary = s.reset_for_epoch("http://a", "e2").unwrap();
         assert_eq!(
@@ -2585,7 +2636,11 @@ mod tests {
         assert!(s.item(&claude(), &committee(), Seq(2)).unwrap().is_none());
         s.seed_cursor(&claude(), &committee(), Seq::ZERO, Seq::ZERO)
             .unwrap();
-        assert!(s.ingest(&claude(), &event(2), true).unwrap());
+        assert!(
+            s.ingest(&claude(), &event(2), true, None)
+                .unwrap()
+                .is_some()
+        );
         assert!(!s.has_other_epochs("http://a").unwrap());
         assert!(s.has_other_epochs("http://b").unwrap());
     }
@@ -2594,8 +2649,8 @@ mod tests {
     fn a_committee_reset_leaves_other_committees_and_agents_alone() {
         let s = Store::in_memory().unwrap();
         let other = CommitteeId::new("other").unwrap();
-        s.ingest(&claude(), &event(1), true).unwrap();
-        s.ingest(&codex(), &event(1), true).unwrap();
+        s.ingest(&claude(), &event(1), true, None).unwrap();
+        s.ingest(&codex(), &event(1), true, None).unwrap();
         s.advance(&claude(), &other, Seq(5)).unwrap();
         s.record_verdict(&committee(), Seq(1), TriageVerdict::Agent)
             .unwrap();
@@ -2674,7 +2729,7 @@ mod tests {
     #[test]
     fn claims_are_exclusive() {
         let s = Store::in_memory().unwrap();
-        s.ingest(&claude(), &event(1), true).unwrap();
+        s.ingest(&claude(), &event(1), true, None).unwrap();
         let key = key(&claude(), 1);
         assert_eq!(
             s.claim_inflight(std::slice::from_ref(&key), "a")
@@ -2737,8 +2792,8 @@ mod tests {
     fn items_for_a_session_nothing_can_be_pushed_to_are_never_in_flight() {
         let s = Store::in_memory().unwrap();
         s.upsert_session(&upsert("a")).unwrap();
-        s.ingest(&claude(), &event(1), true).unwrap();
-        s.ingest(&claude(), &event(2), true).unwrap();
+        s.ingest(&claude(), &event(1), true, None).unwrap();
+        s.ingest(&claude(), &event(2), true, None).unwrap();
         let (one, two) = (key(&claude(), 1), key(&claude(), 2));
         // One is already in flight (somebody's push): not this call's.
         s.claim_inflight(std::slice::from_ref(&two), "a").unwrap();
@@ -2767,7 +2822,7 @@ mod tests {
     fn stale_session_releases_held_items() {
         let s = Store::in_memory().unwrap();
         s.upsert_session(&upsert("a")).unwrap();
-        s.ingest(&claude(), &event(1), true).unwrap();
+        s.ingest(&claude(), &event(1), true, None).unwrap();
         let key = key(&claude(), 1);
         s.claim_inflight(std::slice::from_ref(&key), "a").unwrap();
         s.hold_for_hooks(std::slice::from_ref(&key), "a").unwrap();
@@ -2810,7 +2865,7 @@ mod tests {
     fn a_session_that_changes_agent_lets_go_of_the_old_agents_items() {
         let s = Store::in_memory().unwrap();
         s.upsert_session(&upsert("a")).unwrap();
-        s.ingest(&claude(), &event(1), true).unwrap();
+        s.ingest(&claude(), &event(1), true, None).unwrap();
         let k = key(&claude(), 1);
         s.claim_inflight(std::slice::from_ref(&k), "a").unwrap();
         s.hold_for_hooks(std::slice::from_ref(&k), "a").unwrap();
@@ -2998,7 +3053,7 @@ mod tests {
         a.ancestor_pids = vec![5];
         s.upsert_session(&a).unwrap();
         s.upsert_session(&upsert("live")).unwrap();
-        s.ingest(&claude(), &event(1), true).unwrap();
+        s.ingest(&claude(), &event(1), true, None).unwrap();
         let key = key(&claude(), 1);
         s.claim_inflight(std::slice::from_ref(&key), "a").unwrap();
         s.set_session_state("a", SessionState::Stale).unwrap();
@@ -3025,17 +3080,45 @@ mod tests {
     #[test]
     fn the_cap_keeps_the_newest_and_counts_the_rest() {
         let s = Store::in_memory().unwrap();
-        for i in 1..=5 {
-            s.ingest(&claude(), &event(i), true).unwrap();
+        for i in 1..=4 {
+            s.ingest(&claude(), &event(i), true, None).unwrap();
         }
-        assert_eq!(s.cap_pending(&claude(), &committee(), 2).unwrap(), 3);
+        // The intake itself applies the cap: nothing else is called.
+        assert_eq!(
+            s.ingest(&claude(), &event(5), true, Some(2)).unwrap(),
+            Some(3)
+        );
         let left: Vec<u64> = s.pending().unwrap().iter().map(|i| i.event.seq.0).collect();
         assert_eq!(left, [4, 5]);
         assert_eq!(s.dropped(&claude(), &committee()).unwrap(), 3);
-        assert_eq!(s.cap_pending(&claude(), &committee(), 2).unwrap(), 0);
-        s.consume_dropped(&claude(), &committee(), 2).unwrap();
+        assert_eq!(
+            s.ingest(&claude(), &event(6), true, Some(2)).unwrap(),
+            Some(1)
+        );
+        let left: Vec<u64> = s.pending().unwrap().iter().map(|i| i.event.seq.0).collect();
+        assert_eq!(left, [5, 6]);
+        assert_eq!(s.dropped(&claude(), &committee()).unwrap(), 4);
+        // An undirected event moves the cursor and leaves the queue alone.
+        assert_eq!(
+            s.ingest(&claude(), &event(7), false, Some(0)).unwrap(),
+            Some(0)
+        );
+        assert_eq!(s.pending().unwrap().len(), 2);
+        s.consume_dropped(&claude(), &committee(), 3).unwrap();
         assert_eq!(s.dropped(&claude(), &committee()).unwrap(), 1);
         s.consume_dropped(&claude(), &committee(), 5).unwrap();
+        assert_eq!(s.dropped(&claude(), &committee()).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_rejected_intake_does_not_cap() {
+        let s = Store::in_memory().unwrap();
+        for i in 1..=3 {
+            s.ingest(&claude(), &event(i), true, None).unwrap();
+        }
+        // At the cursor: nothing is taken in, so nothing is trimmed either.
+        assert_eq!(s.ingest(&claude(), &event(3), true, Some(0)).unwrap(), None);
+        assert_eq!(s.pending().unwrap().len(), 3);
         assert_eq!(s.dropped(&claude(), &committee()).unwrap(), 0);
     }
 
@@ -3064,8 +3147,8 @@ mod tests {
     #[test]
     fn a_cancel_can_be_narrowed_to_one_agent() {
         let s = Store::in_memory().unwrap();
-        s.ingest(&claude(), &event(1), true).unwrap();
-        s.ingest(&codex(), &event(1), true).unwrap();
+        s.ingest(&claude(), &event(1), true, None).unwrap();
+        s.ingest(&codex(), &event(1), true, None).unwrap();
         let mine = s
             .cancel(Some(&codex()), &committee(), Seq(1), true, "answered")
             .unwrap();

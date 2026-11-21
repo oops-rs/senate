@@ -1844,7 +1844,13 @@ impl Shared {
         } || self.for_speaker(agent, event)
             || self.for_chair(agent, event)
             || self.answered_in_my_name(agent, event);
-        if self.store.ingest(agent, event, directed)? {
+        let cap = if directed {
+            self.unbound_cap(agent, &event.committee)?
+        } else {
+            None
+        };
+        if let Some(dropped) = self.store.ingest(agent, event, directed, cap)? {
+            self.note_capped(agent, &event.committee, dropped);
             dirty.notify_one();
             self.announce_to_person(event);
             if matches!(
@@ -1863,7 +1869,6 @@ impl Shared {
             }
             if directed {
                 tracing::debug!(%agent, committee = %event.committee, seq = %event.seq, "directed event queued");
-                self.cap_unbound(agent, &event.committee)?;
                 self.work.notify_one();
             } else if event.is_directed_to(&Address::senator(agent))
                 && routing::names_unknown_address(event)
@@ -2128,18 +2133,24 @@ impl Shared {
         Ok(())
     }
 
-    /// With no live session of `agent` bound to `committee`, keep only the
-    /// agent's newest [`PENDING_CAP`] items there.
-    fn cap_unbound(&self, agent: &SenatorName, committee: &CommitteeId) -> Result<(), StoreError> {
+    /// The pending cap for an item of `agent` on `committee` taken in now:
+    /// [`PENDING_CAP`] with no live session of the agent bound there, none
+    /// otherwise. The store applies it in the intake's own transaction.
+    pub(crate) fn unbound_cap(
+        &self,
+        agent: &SenatorName,
+        committee: &CommitteeId,
+    ) -> Result<Option<usize>, StoreError> {
         let bound = self
             .store
             .live_sessions()?
             .iter()
             .any(|s| &s.agent == agent && s.committee() == Some(committee));
-        if bound {
-            return Ok(());
-        }
-        let dropped = self.store.cap_pending(agent, committee, PENDING_CAP)?;
+        Ok((!bound).then_some(PENDING_CAP))
+    }
+
+    /// Log what the cap dropped at an intake.
+    pub(crate) fn note_capped(&self, agent: &SenatorName, committee: &CommitteeId, dropped: usize) {
         if dropped > 0 {
             tracing::warn!(
                 %agent,
@@ -2149,7 +2160,6 @@ impl Shared {
                  the next push says so"
             );
         }
-        Ok(())
     }
 
     /// `PUT` `agent`'s `delivered` cursor on `committee` when it moved.
