@@ -780,10 +780,10 @@ enum SetupCmd {
         #[arg(long, default_value = init::DEFAULT_LOCAL_LISTEN)]
         listen: String,
     },
-    /// Set up Claude Code and Codex. Dry run without --yes.
+    /// Set up Claude Code, Codex and agy. Dry run without --yes.
     ///
-    /// Registers the MCP server and the session hooks. Codex is set up when
-    /// `codex` is on PATH. Without --yes it prints what it would change and
+    /// Registers the MCP server and the session hooks. Codex and the
+    /// Antigravity CLI are each set up when they are on PATH. Without --yes it prints what it would change and
     /// writes nothing.
     #[command(after_help = "Examples:
   senate setup install          Show what would change
@@ -798,6 +798,15 @@ enum SetupCmd {
         /// Codex home holding config.toml (default: $CODEX_HOME, else ~/.codex).
         #[arg(long, value_name = "DIR")]
         codex_home: Option<PathBuf>,
+        /// Set up the Antigravity CLI even when `agy` is not on PATH.
+        #[arg(long, conflicts_with = "no_agy")]
+        agy: bool,
+        /// Leave the Antigravity CLI alone.
+        #[arg(long)]
+        no_agy: bool,
+        /// agy's directory holding config/ and antigravity-cli/ (default: ~/.gemini).
+        #[arg(long, value_name = "DIR")]
+        gemini_dir: Option<PathBuf>,
         /// Write the changes.
         #[arg(long)]
         yes: bool,
@@ -2439,6 +2448,9 @@ fn run_setup(command: SetupCmd, output: Output) -> anyhow::Result<()> {
             codex,
             no_codex,
             codex_home,
+            agy,
+            no_agy,
+            gemini_dir,
             yes,
             claude_dir,
             claude_bin,
@@ -2446,21 +2458,30 @@ fn run_setup(command: SetupCmd, output: Output) -> anyhow::Result<()> {
             let exe = std::env::current_exe()
                 .and_then(|p| p.canonicalize())
                 .context("locating this binary")?;
-            let choice = if no_codex {
-                install::CodexChoice::No
-            } else if codex {
-                install::CodexChoice::Yes
-            } else {
-                install::CodexChoice::Auto
+            let choice = |no: bool, yes: bool| {
+                if no {
+                    install::Choice::No
+                } else if yes {
+                    install::Choice::Yes
+                } else {
+                    install::Choice::Auto
+                }
             };
             // The report is in the bridge's language; before senate.toml
             // exists, the default.
             let locale = Paths::from_env()
                 .map(|p| BridgeConfig::locale_at(&p.config()))
                 .unwrap_or_default();
-            let opts =
-                install::InstallOptions::resolve(exe, claude_dir, claude_bin, choice, codex_home)?
-                    .with_locale(locale);
+            let opts = install::InstallOptions::resolve(
+                exe,
+                claude_dir,
+                claude_bin,
+                choice(no_codex, codex),
+                codex_home,
+                choice(no_agy, agy),
+                gemini_dir,
+            )?
+            .with_locale(locale);
             let plan = install::plan(&opts)?;
             let apply = yes && !plan.is_noop();
             if apply {

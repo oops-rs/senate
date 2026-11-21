@@ -15,6 +15,10 @@
 //!    ([`codex`]), and what to do once by hand (trust the hooks, run the
 //!    managed app-server and `codex --remote`).
 //!
+//! 6. With the Antigravity CLI (`agy` on PATH, or `--agy`; `--no-agy`
+//!    skips it): the MCP server, the hooks and the approval of Senate's
+//!    tools in agy's own files under `~/.gemini` ([`agy`]).
+//!
 //! What `install` prints, and the slash command it writes (which the agent
 //! reads), are in the locale of `senate.toml` (English when there is none
 //! yet). The hooks and the MCP server are the same in every language.
@@ -45,6 +49,7 @@ use serde_json::{Map, Value, json};
 
 use crate::mcp::SERVER_NAME;
 
+pub mod agy;
 pub mod codex;
 mod order;
 
@@ -157,14 +162,16 @@ pub struct InstallOptions {
     pub claude_bin: PathBuf,
     /// Codex's `config.toml`, when Codex is set up too.
     pub codex_config: Option<PathBuf>,
+    /// agy's `~/.gemini`, when the Antigravity CLI is set up too.
+    pub gemini_dir: Option<PathBuf>,
     /// The language of the report and of the slash command.
     pub locale: Locale,
 }
 
-/// Whether `install` sets up Codex.
+/// Whether `install` sets up a runtime beside Claude Code (Codex, agy).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CodexChoice {
-    /// When `codex` is on PATH.
+pub enum Choice {
+    /// When its executable is on PATH.
     Auto,
     Yes,
     No,
@@ -217,14 +224,16 @@ impl InstallOptions {
         exe: PathBuf,
         claude_dir: Option<PathBuf>,
         claude_bin: Option<PathBuf>,
-        codex: CodexChoice,
+        codex: Choice,
         codex_home: Option<PathBuf>,
+        agy: Choice,
+        gemini_dir: Option<PathBuf>,
     ) -> anyhow::Result<Self> {
         let mut opts = Self::resolve_claude(exe, claude_dir, claude_bin)?;
         let wanted = match codex {
-            CodexChoice::Yes => true,
-            CodexChoice::No => false,
-            CodexChoice::Auto => codex_home.is_some() || on_path("codex"),
+            Choice::Yes => true,
+            Choice::No => false,
+            Choice::Auto => codex_home.is_some() || on_path("codex"),
         };
         if wanted {
             let home = match codex_home.or_else(|| {
@@ -238,6 +247,19 @@ impl InstallOptions {
                     .join(".codex"),
             };
             opts.codex_config = Some(home.join("config.toml"));
+        }
+        let wanted = match agy {
+            Choice::Yes => true,
+            Choice::No => false,
+            Choice::Auto => gemini_dir.is_some() || on_path("agy"),
+        };
+        if wanted {
+            opts.gemini_dir = Some(match gemini_dir {
+                Some(dir) => dir,
+                None => dirs::home_dir()
+                    .context("cannot find the home directory")?
+                    .join(".gemini"),
+            });
         }
         Ok(opts)
     }
@@ -265,6 +287,7 @@ impl InstallOptions {
                 claude_dir: dir,
                 claude_bin,
                 codex_config: None,
+                gemini_dir: None,
                 locale: Locale::default(),
             },
             None => {
@@ -276,6 +299,7 @@ impl InstallOptions {
                     user_config: home.join(".claude.json"),
                     claude_bin,
                     codex_config: None,
+                    gemini_dir: None,
                     locale: Locale::default(),
                 }
             }
@@ -468,6 +492,7 @@ pub struct InstallPlan {
     pub mcp: McpPlan,
     pub command: CommandPlan,
     pub codex: Option<codex::CodexPlan>,
+    pub agy: Option<agy::AgyPlan>,
 }
 
 impl InstallPlan {
@@ -476,6 +501,7 @@ impl InstallPlan {
             && self.mcp == McpPlan::Present
             && self.command != CommandPlan::Write
             && self.codex.as_ref().is_none_or(|c| c.changes.is_empty())
+            && self.agy.as_ref().is_none_or(|a| a.changes() == 0)
     }
 }
 
@@ -523,6 +549,11 @@ pub fn plan(opts: &InstallOptions) -> anyhow::Result<InstallPlan> {
             .codex_config
             .as_deref()
             .map(|path| codex::plan(path, &opts.exe_str()))
+            .transpose()?,
+        agy: opts
+            .gemini_dir
+            .as_deref()
+            .map(|dir| agy::plan(dir, &opts.exe_str()))
             .transpose()?,
     })
 }
@@ -589,6 +620,9 @@ pub fn render_brief(
     ];
     if let Some(codex) = &plan.codex {
         rows.push(("Codex", changes(codex.changes.len())));
+    }
+    if let Some(agy) = &plan.agy {
+        rows.push(("Antigravity CLI", changes(agy.changes())));
     }
     let mut out = crate::terminal::fields(terminal, &rows);
     let _ = writeln!(
@@ -746,6 +780,22 @@ pub fn render(plan: &InstallPlan, opts: &InstallOptions, applied: bool) -> Strin
                 l.pick(
                     "Codex：未设置（`codex` 不在 PATH 上，或用了 --no-codex；--codex 会设置它）",
                     "Codex: not set up (`codex` is not on PATH, or --no-codex; --codex sets it up)"
+                )
+            );
+        }
+    }
+    match &plan.agy {
+        Some(a) => {
+            let _ = writeln!(out, "\n5. Antigravity CLI (agy)");
+            agy::render(a, applied, l, &mut out);
+        }
+        None => {
+            let _ = writeln!(
+                out,
+                "\n5. {}",
+                l.pick(
+                    "Antigravity CLI：未设置（`agy` 不在 PATH 上，或用了 --no-agy；--agy 会设置它）",
+                    "Antigravity CLI: not set up (`agy` is not on PATH, or --no-agy; --agy sets it up)"
                 )
             );
         }
@@ -910,6 +960,9 @@ pub fn apply(plan: &InstallPlan, opts: &InstallOptions) -> anyhow::Result<()> {
     if let Some(c) = plan.codex.as_ref().filter(|c| !c.changes.is_empty()) {
         write_config(&c.path, c.existed, &c.after)?;
     }
+    if let Some(a) = &plan.agy {
+        agy::apply(a)?;
+    }
     match &plan.mcp {
         McpPlan::Present => {}
         McpPlan::Add => run_claude(opts, &add_args(opts))?,
@@ -1027,6 +1080,7 @@ mod tests {
             user_config: claude.join(".claude.json"),
             claude_bin: "/nonexistent/claude".into(),
             codex_config: None,
+            gemini_dir: None,
             locale: Locale::default(),
         };
         let plan = plan(&opts).unwrap();
@@ -1084,6 +1138,7 @@ mod tests {
             user_config: claude.join(".claude.json"),
             claude_bin: "/nonexistent/claude".into(),
             codex_config: None,
+            gemini_dir: None,
             locale: Locale::Zh,
         };
         let zh = command_md(Locale::Zh);

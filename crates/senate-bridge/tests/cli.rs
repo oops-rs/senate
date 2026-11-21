@@ -492,7 +492,7 @@ fn install_sets_up_codex_in_its_config_toml() {
     let exe = std::fs::canonicalize(BIN).unwrap();
     let install = |yes: bool| {
         let mut cmd = bridge(dir.path(), &dir.path().join("senate"));
-        cmd.args(["setup", "install", "--codex", "--codex-home"])
+        cmd.args(["setup", "install", "--no-agy", "--codex", "--codex-home"])
             .arg(&codex_home)
             .arg("--claude-dir")
             .arg(&claude_dir)
@@ -564,6 +564,66 @@ fn install_sets_up_codex_in_its_config_toml() {
     let text = install(true);
     assert!(text.contains("Nothing to do: already installed."), "{text}");
     assert_eq!(std::fs::read_to_string(&config).unwrap(), written);
+}
+
+#[test]
+fn install_sets_up_agy_in_its_global_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let claude_dir = dir.path().join("claude");
+    let gemini = dir.path().join("gemini");
+    std::fs::create_dir_all(&claude_dir).unwrap();
+    std::fs::create_dir_all(gemini.join("config")).unwrap();
+    std::fs::write(gemini.join("config/mcp_config.json"), "").unwrap();
+    let (claude_bin, _log) = fake_claude(dir.path());
+    let exe = std::fs::canonicalize(BIN).unwrap();
+    let install = |yes: bool| {
+        let mut cmd = bridge(dir.path(), &dir.path().join("senate"));
+        cmd.args(["setup", "install", "--no-codex", "--verbose", "--gemini-dir"])
+            .arg(&gemini)
+            .arg("--claude-dir")
+            .arg(&claude_dir)
+            .arg("--claude-bin")
+            .arg(&claude_bin);
+        if yes {
+            cmd.arg("--yes");
+        }
+        let out = cmd.output().unwrap();
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let text = install(false);
+    assert!(text.contains("5. Antigravity CLI (agy)"), "{text}");
+    assert!(
+        text.contains(&format!(
+            "+ senate.SessionStart: {} hook session-start --runtime agy",
+            exe.display()
+        )),
+        "{text}"
+    );
+    assert!(text.contains("+ permissions.allow: mcp(senate/*)"), "{text}");
+    assert_eq!(
+        std::fs::read_to_string(gemini.join("config/mcp_config.json")).unwrap(),
+        ""
+    );
+    assert!(!gemini.join("config/hooks.json").exists());
+
+    install(true);
+    let read = |path: &str| -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(gemini.join(path)).unwrap()).unwrap()
+    };
+    assert_eq!(
+        read("config/mcp_config.json")["mcpServers"]["senate"]["args"],
+        json!(["mcp", "--runtime", "agy"])
+    );
+    assert_eq!(
+        read("config/hooks.json")["senate"]["PreInvocation"][0]["command"],
+        format!("{} hook user-prompt-submit --runtime agy", exe.display())
+    );
+    assert_eq!(
+        read("antigravity-cli/settings.json")["permissions"]["allow"],
+        json!(["mcp(senate/*)"])
+    );
+    assert!(install(false).contains("already up to date"));
 }
 
 #[test]
