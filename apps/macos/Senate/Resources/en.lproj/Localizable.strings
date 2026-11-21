@@ -66,8 +66,8 @@
 "docket.seated" = "Agents seated";
 "docket.checkpoint" = "checkpoint: %@";
 "senates.empty" = "No Senate is served. Start the daemon with `senated --machine`.";
-"senates.you" = "You are %@";
-"senates.speaker" = "Speaker: %@";
+"senates.you" = "You";
+"senates.speaker" = "Speaker";
 "senates.no_speaker" = "Nobody presides.";
 "senates.agents" = "Your agents";
 "senates.presiding" = "presiding";
@@ -112,3 +112,12 @@
 "menu.open_sessions" = "Open Sessions";
 "notify.prompt" = "%@ waits for your permission";
 "notify.prompt_body" = "A permission prompt is waiting in its terminal.";
+"senates.address" = "Address";
+"senates.above" = "Above";
+"senates.primary" = "yours";
+"senates.chairs" = "Chairs";
+"senates.no_chair" = "no chair";
+"senates.streams" = "Streams";
+"senates.children" = "Senates below";
+"senates.child_speaker" = "Speaker";
+"senates.seen" = "seen %@ ago";

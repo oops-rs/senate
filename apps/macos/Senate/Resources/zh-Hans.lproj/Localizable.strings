@@ -66,8 +66,8 @@
 "docket.seated" = "已就座的 agent";
 "docket.checkpoint" = "检查点：%@";
 "senates.empty" = "没有正在服务的 Senate。用 `senated --machine` 启动守护进程。";
-"senates.you" = "你是 %@";
-"senates.speaker" = "Speaker：%@";
+"senates.you" = "你";
+"senates.speaker" = "Speaker";
 "senates.no_speaker" = "无人主持。";
 "senates.agents" = "你的 agent";
 "senates.presiding" = "主持中";
@@ -112,3 +112,12 @@
 "menu.open_sessions" = "打开会话";
 "notify.prompt" = "%@ 在等你授权";
 "notify.prompt_body" = "它的终端中有一个权限提示在等待。";
+"senates.address" = "地址";
+"senates.above" = "上级";
+"senates.primary" = "你的";
+"senates.chairs" = "主席";
+"senates.no_chair" = "无主席";
+"senates.streams" = "消息流";
+"senates.children" = "下级 Senate";
+"senates.child_speaker" = "Speaker";
+"senates.seen" = "%@ 前在线";
