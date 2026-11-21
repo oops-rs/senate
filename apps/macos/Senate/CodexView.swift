@@ -1,4 +1,5 @@
 import SwiftUI
+import SenateCore
 
 /// The Codex threads registered with the daemon, each openable in Terminal.
 struct CodexView: View {

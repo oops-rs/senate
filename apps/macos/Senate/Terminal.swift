@@ -1,4 +1,5 @@
 import Foundation
+import SenateCore
 
 /// Runs a Codex command line from the core in a new Terminal.app window.
 enum Terminal {

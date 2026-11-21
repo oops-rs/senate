@@ -1,4 +1,5 @@
 import SwiftUI
+import SenateCore
 
 /// Codex approval requests the daemon relays. The first answer wins across
 /// the TUI, this app and any chat platform.

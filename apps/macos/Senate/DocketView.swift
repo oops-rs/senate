@@ -1,4 +1,5 @@
 import SwiftUI
+import SenateCore
 
 /// What awaits the Speaker of a Senate one of your agents presides over.
 ///

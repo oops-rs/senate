@@ -1,5 +1,6 @@
 import Foundation
 import UserNotifications
+import SenateCore
 
 /// macOS notifications for Codex approval requests. Clicking one opens the
 /// Approvals tab.

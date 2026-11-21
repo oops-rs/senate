@@ -1,4 +1,5 @@
 import SwiftUI
+import SenateCore
 
 /// Every Senate the daemon serves: who you are in it, who holds the
 /// Speaker's seat, your agents there and their streams.

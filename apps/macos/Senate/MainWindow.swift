@@ -1,4 +1,5 @@
 import SwiftUI
+import SenateCore
 
 /// The window: a connection header, the last error, and the tabs.
 struct MainWindow: View {

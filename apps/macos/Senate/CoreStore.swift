@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import Observation
 import SwiftUI
+import SenateCore
 
 /// The app's one source of truth: the latest `AppState` snapshot from the
 /// Rust core, plus what only the UI knows (the tab, the agent filter, reply
@@ -267,42 +268,42 @@ extension AppState {
     )
 }
 
-extension InboxThread: Identifiable {
+extension InboxThread: @retroactive Identifiable {
     /// Unique across committees: what drafts and busy rows are keyed by.
     var key: String { "\(committee):\(root)" }
     public var id: String { key }
 }
 
-extension ApprovalRequest: Identifiable {}
+extension ApprovalRequest: @retroactive Identifiable {}
 
-extension CodexThreadInfo: Identifiable {
+extension CodexThreadInfo: @retroactive Identifiable {
     public var id: String { thread }
 }
 
-extension SenateInfo: Identifiable {
+extension SenateInfo: @retroactive Identifiable {
     public var id: String { key }
 }
 
-extension AgentInfo: Identifiable {
+extension AgentInfo: @retroactive Identifiable {
     public var id: String { "\(senate)|\(path)" }
 }
 
-extension CommitteeLine: Identifiable {
+extension CommitteeLine: @retroactive Identifiable {
     public var id: String { "\(agent)|\(committee)" }
 }
 
-extension DocketSenate: Identifiable {
+extension DocketSenate: @retroactive Identifiable {
     public var id: String { senate }
 }
 
-extension DocketCommittee: Identifiable {
+extension DocketCommittee: @retroactive Identifiable {
     public var id: String { committee }
 }
 
-extension DocketEntry: Identifiable {
+extension DocketEntry: @retroactive Identifiable {
     public var id: String { "\(committee):\(seq)" }
 }
 
-extension SeatLine: Identifiable {
+extension SeatLine: @retroactive Identifiable {
     public var id: String { agent }
 }

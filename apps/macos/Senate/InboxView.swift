@@ -1,4 +1,5 @@
 import SwiftUI
+import SenateCore
 
 /// The open threads waiting on you, merged across your agents or narrowed to
 /// one: reply as yourself, take over, or close.

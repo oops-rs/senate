@@ -1,4 +1,5 @@
 import SwiftUI
+import SenateCore
 
 /// A text with its bracketed ids set apart: `[senator::alice/claude]` is shown
 /// in a monospaced face and a colour for what it names, so it reads as an id
@@ -14,7 +15,7 @@ struct MentionText: View {
 
     var body: some View {
         parts.reduce(Text(verbatim: "")) { sum, part in
-            sum + piece(part)
+            Text("\(sum)\(piece(part))")
         }
     }
 

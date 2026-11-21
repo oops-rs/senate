@@ -25,11 +25,21 @@ export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 # release-mode proc-macro dylibs fail to load ("mis-aligned LINKEDIT string
 # pool"). Rust code keeps rustc's default (older, links fine); the C in the
 # dependencies (sqlite, ring) gets it through per-target CFLAGS, else clang
-# targets the SDK's version and ld warns.
-min_macos=14.0
+# targets the SDK's version and ld warns. Keep it the app's
+# (project.yml `deploymentTarget`).
+min_macos=26.0
 unset MACOSX_DEPLOYMENT_TARGET
 export CFLAGS_aarch64_apple_darwin="-mmacosx-version-min=$min_macos"
 export CFLAGS_x86_64_apple_darwin="-mmacosx-version-min=$min_macos"
+
+# The app's version is the workspace's: project.yml says it, Cargo.toml
+# owns it.
+cargo_version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version *= *"\(.*\)"/\1/p' "$root/Cargo.toml")"
+app_version="$(sed -n 's/^ *MARKETING_VERSION: *"\(.*\)"/\1/p' "$app_dir/project.yml")"
+if [[ "$cargo_version" != "$app_version" ]]; then
+  echo "build-core.sh: project.yml MARKETING_VERSION is $app_version, Cargo.toml says $cargo_version" >&2
+  exit 1
+fi
 
 profile=debug
 if [[ "${1:-}" == "--release" || "${CONFIGURATION:-}" == "Release" ]]; then

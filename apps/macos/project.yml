@@ -5,23 +5,31 @@ options:
   bundleIdPrefix: dev.senate
   developmentLanguage: en
   deploymentTarget:
-    macOS: "14.0"
+    macOS: "26.0"
   createIntermediateGroups: true
 settings:
   base:
+    # The app's version: the workspace's (Cargo.toml `[workspace.package]
+    # version`). scripts/build-core.sh fails the build when they differ.
+    MARKETING_VERSION: "0.4.0"
+    CURRENT_PROJECT_VERSION: "1"
     SWIFT_VERSION: "6.0"
-    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    MACOSX_DEPLOYMENT_TARGET: "26.0"
     # The pre-build phase writes into the source tree (Generated/).
     ENABLE_USER_SCRIPT_SANDBOXING: NO
     DEAD_CODE_STRIPPING: YES
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: "-"
 targets:
-  Senate:
-    type: application
+  # The Rust core's UniFFI bindings, as their own module. Kept apart from
+  # the app because the app's code is MainActor by default and the bindings
+  # are called on the core's threads. This module is the app's one door to
+  # the daemon.
+  SenateCore:
+    type: framework.static
     platform: macOS
     sources:
-      - path: Senate
-        excludes:
-          - Info.plist
       # Written by scripts/build-core.sh (the pre-build phase), so it may
       # be missing when the project is generated.
       - path: Generated/senate_app_core.swift
@@ -36,34 +44,55 @@ targets:
           - $(PROJECT_DIR)/Generated/libsenate_app_core.a
           - $(PROJECT_DIR)/Generated/senate_app_core.swift
           - $(PROJECT_DIR)/Generated/senate_app_coreFFI.h
+    settings:
+      base:
+        PRODUCT_NAME: SenateCore
+        PRODUCT_BUNDLE_IDENTIFIER: dev.senate.core
+        GENERATE_INFOPLIST_FILE: YES
+        SKIP_INSTALL: YES
+        # The C side, as the clang module the bindings import.
+        OTHER_SWIFT_FLAGS: -Xcc -fmodule-map-file=$(PROJECT_DIR)/Generated/senate_app_coreFFI.modulemap
+        HEADER_SEARCH_PATHS: $(PROJECT_DIR)/Generated
+  Senate:
+    type: application
+    platform: macOS
+    dependencies:
+      - target: SenateCore
+    sources:
+      - path: Senate
+        excludes:
+          - Info.plist
     info:
       path: Senate/Info.plist
       properties:
         CFBundleDisplayName: Senate
-        CFBundleShortVersionString: "0.1.0"
-        CFBundleVersion: "1"
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         # The languages the app is written in; the system language picks one
         # and English is the fallback.
         CFBundleLocalizations:
           - en
           - zh-Hans
-        LSMinimumSystemVersion: "14.0"
+        LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
+        LSApplicationCategoryType: public.app-category.developer-tools
         # Menu bar only: no Dock icon, no app menu.
         LSUIElement: true
-        NSAppleEventsUsageDescription: Senate opens Codex in Terminal.
+        NSAppleEventsUsageDescription: Senate opens Codex and hosted sessions in Terminal.
         NSHumanReadableCopyright: MIT
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.senate.app
         PRODUCT_NAME: Senate
         GENERATE_INFOPLIST_FILE: NO
-        SWIFT_OBJC_BRIDGING_HEADER: Senate/Senate-Bridging-Header.h
+        # The app's own code runs on the main actor unless it says otherwise.
+        SWIFT_DEFAULT_ACTOR_ISOLATION: MainActor
+        SWIFT_APPROACHABLE_CONCURRENCY: YES
+        SWIFT_UPCOMING_FEATURE_NONISOLATED_NONSENDING_BY_DEFAULT: YES
+        OTHER_SWIFT_FLAGS: -Xcc -fmodule-map-file=$(PROJECT_DIR)/Generated/senate_app_coreFFI.modulemap
         HEADER_SEARCH_PATHS: $(PROJECT_DIR)/Generated
         LIBRARY_SEARCH_PATHS: $(PROJECT_DIR)/Generated
         # What the Rust static library needs from the system
         # (`cargo rustc --print native-static-libs`).
         OTHER_LDFLAGS: -lsenate_app_core -liconv -framework CoreFoundation -framework Security -framework SystemConfiguration
-        CODE_SIGN_STYLE: Manual
-        CODE_SIGN_IDENTITY: "-"
         ENABLE_HARDENED_RUNTIME: NO
         COMBINE_HIDPI_IMAGES: YES
