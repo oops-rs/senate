@@ -6,6 +6,7 @@ import SenateCore
 /// or close it.
 struct InboxView: View {
     @Bindable var store: CoreStore
+    @FocusState private var searching: Bool
 
     var body: some View {
         HSplitView {
@@ -15,6 +16,15 @@ struct InboxView: View {
                 .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity)
         }
         .searchable(text: $store.search, placement: .toolbar, prompt: L("inbox.search"))
+        .searchFocused($searching)
+        .background {
+            // ⌘F: to the search field.
+            Button(L("inbox.search")) { searching = true }
+                .keyboardShortcut("f")
+                .opacity(0)
+                .frame(width: 0, height: 0)
+                .accessibilityHidden(true)
+        }
         .toolbar {
             if store.inboxAgents.count > 1 {
                 ToolbarItem {

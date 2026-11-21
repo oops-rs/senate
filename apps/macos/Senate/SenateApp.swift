@@ -51,6 +51,9 @@ struct MenuBarLabel: View {
             }
         }
         .help(store.state.menu.tooltip)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Senate")
+        .accessibilityValue(store.state.menu.tooltip)
         .task {
             // The label is the one view alive from launch: hand the store
             // the window opener, for notifications and `SENATE_APP_SHOW`.

@@ -34,6 +34,7 @@ struct MainWindow: View {
                 SessionsToolbar(store: store)
             }
         }
+        .background { SectionShortcuts(store: store) }
         .onChange(of: store.state.menu.docket == nil) { _, gone in
             if gone && store.section == .docket { store.section = .inbox }
         }
@@ -57,6 +58,24 @@ struct MainWindow: View {
         case .docket: DocketView(store: store)
         case .senates: SenatesView(store: store)
         }
+    }
+}
+
+/// ⌘1…⌘5 open the sections in sidebar order. Invisible buttons: the app
+/// has no menu bar of its own (it lives in the status item).
+private struct SectionShortcuts: View {
+    let store: CoreStore
+
+    var body: some View {
+        ZStack {
+            ForEach(Array(store.sections.enumerated()), id: \.element) { index, section in
+                Button(section.title) { store.section = section }
+                    .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: .command)
+            }
+        }
+        .opacity(0)
+        .frame(width: 0, height: 0)
+        .accessibilityHidden(true)
     }
 }
 
