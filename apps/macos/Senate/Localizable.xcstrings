@@ -1022,6 +1022,41 @@
         }
       }
     },
+    "inbox.show_earlier": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "Show earlier (%lld more)"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "Show earlier (%lld more)"
+                }
+              }
+            }
+          }
+        },
+        "zh-Hans": {
+          "variations": {
+            "plural": {
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "显示更早的（还有 %lld 条）"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "inbox.take": {
       "extractionState": "manual",
       "localizations": {

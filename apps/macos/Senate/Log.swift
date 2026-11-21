@@ -1,3 +1,4 @@
+import Foundation
 import os
 
 /// The app's unified-log subsystem. The Rust core logs under the same one

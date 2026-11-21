@@ -56,6 +56,7 @@ struct InboxView: View {
     @ViewBuilder private var pane: some View {
         if let row = store.selectedRow {
             ThreadPane(store: store, row: row)
+                .id(row.key)
                 .environment(\.mentionCommittee, row.committee)
                 // Read again when something new is said in it.
                 .task(id: "\(row.key)@\(row.updated)") { await store.loadThread(row) }
@@ -167,12 +168,25 @@ private struct ThreadPane: View {
         }
     }
 
+    /// How many of the latest events are drawn; "Show earlier" adds more.
+    /// A thread of thousands opens as fast as a short one.
+    @State private var shown = ThreadPane.page
+    static let page = 300
+
     @ViewBuilder private var events: some View {
         if let view = store.threadView(for: row) {
+            let hidden = max(0, view.events.count - shown)
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 10) {
-                        ForEach(view.events, id: \.seq) { event in
+                        if hidden > 0 {
+                            Button(L("inbox.show_earlier", Int64(hidden))) {
+                                shown += ThreadPane.page
+                            }
+                            .buttonStyle(.link)
+                            .frame(maxWidth: .infinity)
+                        }
+                        ForEach(view.events.suffix(shown), id: \.seq) { event in
                             EventBubble(event: event).id(event.seq)
                         }
                     }

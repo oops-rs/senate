@@ -12,6 +12,7 @@ struct SenateApp: App {
 
     init() {
         Diagnostics.shared.start()
+        Perf.watchMainThread()
     }
 
     var body: some Scene {

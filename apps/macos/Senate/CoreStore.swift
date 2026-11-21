@@ -205,7 +205,7 @@ final class CoreStore {
 
     func handle(_ event: CoreEvent) {
         switch event {
-        case let .state(next): apply(next)
+        case let .state(next): Perf.measure("apply", "\(next.inbox.count) threads") { apply(next) }
         case let .approval(approval): notifier.approvalRequested(approval)
         case let .person(note): notifier.forPerson(note)
         case let .prompt(session): notifier.promptWaiting(session)
@@ -274,6 +274,7 @@ final class CoreStore {
         if let v = ProcessInfo.processInfo.environment[Self.showEnv], !v.isEmpty {
             show(.inbox)
         }
+        Perf.tour(self)
         #if DEBUG
         if let dir = Snapshot.directory {
             show(.inbox)
@@ -309,7 +310,9 @@ final class CoreStore {
     func loadThread(_ row: InboxThread) async {
         guard let core else { return }
         do {
-            let view = try await core.thread(committee: row.committee, thread: row.root)
+            let view = try await Perf.measure("thread", "#\(row.root)") {
+                try await core.thread(committee: row.committee, thread: row.root)
+            }
             guard selectedThread == row.key else { return }
             thread = view
             threadError = nil
