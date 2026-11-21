@@ -8,8 +8,8 @@
 //! - **`tool_round_trip`**: an ordinary run with one probe-only tool,
 //!   `probe_digest`, whose result the model cannot make up; the run must
 //!   call it and repeat what it returned. A gateway that rejects the tool
-//!   call ids the client sends back (LiteLLM's `gpt-6.x` over Chat
-//!   Completions, refusing `call_…`) fails here.
+//!   call ids the client sends back (some OpenAI-compatible gateways do,
+//!   over Chat Completions, refusing `call_…`) fails here.
 //! - **`terminal_tool`**: a typed turn with nothing but its answering tool;
 //!   a model that ends the run without calling it ("run completed without
 //!   invoking the expected terminal tool") fails here.
