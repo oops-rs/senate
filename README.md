@@ -272,6 +272,128 @@ Host a central deliberation server for your organization:
 > [!TIP]
 > For production deployments with persistent storage, point `database_url` to PostgreSQL (`database_url = "postgres://senate:senate@127.0.0.1:5432/senate"`). A turnkey setup is available in [deploy/docker-compose.yml](deploy/docker-compose.yml).
 
+### Windows (WSL)
+
+On Windows, Senate runs inside WSL 2 and works there as it does on Linux.
+That includes hosted sessions (`senate spawn`, `attach`, `session watch`).
+Native Windows is not supported yet; [docs/windows-plan.md](docs/windows-plan.md)
+describes what it would take.
+
+**Everything inside the distro.** Install the build tools, Rust, Senate,
+Claude Code and Codex inside WSL (an Ubuntu distro is assumed below):
+
+```sh
+sudo apt-get install -y build-essential pkg-config git curl
+curl -sSf https://sh.rustup.rs | sh
+cargo install senate senated
+curl -fsSL https://claude.ai/install.sh | bash          # Claude Code, Linux build
+# Codex needs a Linux Node, for example through nvm:
+nvm install --lts && npm install -g @openai/codex
+```
+
+- **Use the Linux agents, not the Windows ones.** WSL appends the Windows
+  `PATH`, so `claude`, `codex`, `npm` or `node` can resolve to Windows
+  programs under `/mnt/c` (npm wrappers that run Windows Node). Check with
+  `command -v claude codex node`: each must be under `/home` or `/usr`. nvm
+  sets itself up in `~/.bashrc`, which login shells do not read, so also add
+  it to `~/.profile`. In WSL, `senate setup` leaves `/mnt/<drive>`
+  directories out when it looks for programs and when it writes the
+  service's `PATH`. `senate setup install` refuses when the only `claude`
+  is a Windows one, and `setup service install` flags a configured agent
+  under `/mnt/`.
+- **Keep repositories on the WSL filesystem** (`~/src/...`), not under
+  `/mnt/c`. Access across the Windows boundary is slow, and file watching
+  and locking behave differently there.
+- **Editors.** Run Claude Code and Codex in a WSL terminal (Windows Terminal
+  → Ubuntu). Or open the folder with VS Code's WSL remote (`code .` from
+  WSL, or "WSL: Open Folder in WSL"): its terminals and extensions then run
+  inside the distro and use the Linux `claude`, `codex` and `senate`.
+- **Logins carry over as files.** To reuse a Windows setup, copy
+  `~/.claude/settings.json` and `~/.codex/{auth.json,config.toml}` from
+  `/mnt/c/Users/<you>/` into the distro and `chmod 600` them. Drop the
+  Windows-only parts: `projects`, `hooks` and `[windows]` in Codex's config.
+  Then run `senate setup install --yes`.
+
+Then set up Senate as in Mode 1. `senate setup init` and
+`senate setup service install` notice WSL, and print the steps below.
+
+**Keeping the daemon alive.** A systemd user unit runs the daemon. WSL,
+though, stops a distro once no Windows process is attached to it, and the
+daemon goes with it.
+
+1. Inside the distro, turn on systemd and lingering, and install the
+   service:
+   ```sh
+   printf '[boot]\nsystemd=true\n' | sudo tee -a /etc/wsl.conf   # then `wsl --shutdown` once, from Windows
+   sudo loginctl enable-linger "$USER"
+   senate setup service install --yes
+   ```
+   With lingering on, the daemon starts whenever the distro boots, before
+   anyone opens a terminal. A restart of the daemon keeps hosted sessions
+   running (`KillMode=process`).
+2. On Windows, keep the distro running from logon with a per-user
+   scheduled task that holds one `wsl.exe` open. Save the task below as
+   `senate-wsl-keepalive.xml`, with your `DOMAIN\user` and distro name in
+   it, then register it from PowerShell:
+   `Register-ScheduledTask -TaskName 'Senate WSL keepalive' -Xml (Get-Content -Raw .\senate-wsl-keepalive.xml)`.
+   `conhost --headless` keeps a console window from opening at logon.
+   ```xml
+   <?xml version="1.0" encoding="UTF-16"?>
+   <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+     <RegistrationInfo>
+       <Description>Keeps the Ubuntu WSL distro, and the Senate daemon in it, running while this user is logged on.</Description>
+     </RegistrationInfo>
+     <Triggers>
+       <LogonTrigger>
+         <Enabled>true</Enabled>
+         <UserId>DOMAIN\user</UserId>
+       </LogonTrigger>
+     </Triggers>
+     <Principals>
+       <Principal id="Author">
+         <UserId>DOMAIN\user</UserId>
+         <LogonType>InteractiveToken</LogonType>
+         <RunLevel>LeastPrivilege</RunLevel>
+       </Principal>
+     </Principals>
+     <Settings>
+       <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+       <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+       <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+       <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+       <RestartOnFailure>
+         <Interval>PT1M</Interval>
+         <Count>999</Count>
+       </RestartOnFailure>
+       <IdleSettings>
+         <StopOnIdleEnd>false</StopOnIdleEnd>
+         <RestartOnIdle>false</RestartOnIdle>
+       </IdleSettings>
+       <Enabled>true</Enabled>
+       <Hidden>true</Hidden>
+     </Settings>
+     <Actions Context="Author">
+       <Exec>
+         <Command>C:\Windows\System32\conhost.exe</Command>
+         <Arguments>--headless C:\Windows\System32\wsl.exe -d Ubuntu --exec sleep infinity</Arguments>
+       </Exec>
+     </Actions>
+   </Task>
+   ```
+   Stopping the task (`schtasks /End`) ends only `conhost`; the `wsl.exe`
+   under it keeps running. To really stop the keepalive, run
+   `wsl -d Ubuntu --exec pkill -fx "sleep infinity"`, or disable the task
+   and log off.
+3. **Docker Desktop.** With its WSL integration on for the distro, Docker
+   Desktop keeps its own `wsl.exe` processes attached, so the distro stays
+   up and the keepalive is not needed.
+
+`vmIdleTimeout` in `.wslconfig` does not replace the keepalive. It only
+delays shutting down the VM after the distros have stopped. Logging off
+Windows ends your processes, `wsl.exe` included, so the daemon runs only
+while you are logged on. At the next logon the task starts the distro, and
+lingering starts the daemon.
+
 ---
 
 ## 💻 Everyday Developer Workflow
