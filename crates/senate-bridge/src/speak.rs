@@ -16,9 +16,9 @@
 //! | `claude` | `senator::claude`: that senator, here (this committee) |
 //! | `*` | `senator::*`: whichever agent on this committee |
 //! | `speaker` | the Speaker |
-//! | `ibot::claude` | `senator::claude` on the committee `ibot` (the nearest Senate that has it) |
-//! | `ibot::speaker` | the Speaker of `ibot` |
-//! | `/acme::ibot::claude` | that seat in the Senate `/acme` |
+//! | `ledger::claude` | `senator::claude` on the committee `ledger` (the nearest Senate that has it) |
+//! | `ledger::speaker` | the Speaker of `ledger` |
+//! | `/acme::ledger::claude` | that seat in the Senate `/acme` |
 //! | `senator::…`, `[…]` | the full forms, as stored or bracketed |
 //!
 //! A name is one flat senator name: a person's handle or an agent's name,
@@ -62,9 +62,9 @@ impl TargetError {
             Self::Empty => locale
                 .pick(
                     "没有写发给谁：写某个 senator（claude、bob）、*、speaker，或带委员会的名字\
-                     （ibot::claude）。",
+                     （ledger::claude）。",
                     "name who it is for: a senator (claude, bob), *, speaker, or a name on \
-                     another committee (ibot::claude).",
+                     another committee (ledger::claude).",
                 )
                 .to_string(),
             Self::NotReachable(what) => match locale {
@@ -78,11 +78,11 @@ impl TargetError {
             },
             Self::Malformed(text) => match locale {
                 Locale::Zh => format!(
-                    "看不懂 `{text}`：写 claude、bob、*、speaker、ibot::claude，或 senator::… \
+                    "看不懂 `{text}`：写 claude、bob、*、speaker、ledger::claude，或 senator::… \
                      的完整地址。名字里没有路径：一个 agent 自己的团队是一个子 Senate。"
                 ),
                 Locale::En => format!(
-                    "cannot read `{text}`: write claude, bob, *, speaker, ibot::claude, or a \
+                    "cannot read `{text}`: write claude, bob, *, speaker, ledger::claude, or a \
                      full senator::… address. A name holds no path: an agent's own team is a \
                      child Senate."
                 ),
@@ -676,14 +676,14 @@ mod tests {
 
     #[test]
     fn a_name_on_another_committee_is_qualified() {
-        assert_eq!(ok("ibot::claude"), "ibot::senator::claude");
-        assert_eq!(ok("ibot::speaker"), "ibot::speaker");
-        assert_eq!(ok("ibot::*"), "ibot::senator::*");
-        assert_eq!(ok("acme::ibot::codex"), "acme::ibot::senator::codex");
-        assert_eq!(ok("[ibot::senator::codex]"), "ibot::senator::codex");
-        assert!(parse("ibot::claude").unwrap().as_address().is_none());
+        assert_eq!(ok("ledger::claude"), "ledger::senator::claude");
+        assert_eq!(ok("ledger::speaker"), "ledger::speaker");
+        assert_eq!(ok("ledger::*"), "ledger::senator::*");
+        assert_eq!(ok("acme::ledger::codex"), "acme::ledger::senator::codex");
+        assert_eq!(ok("[ledger::senator::codex]"), "ledger::senator::codex");
+        assert!(parse("ledger::claude").unwrap().as_address().is_none());
         // Yourself elsewhere is someone else's committee: not refused here.
-        assert_eq!(ok("ibot::alice"), "ibot::senator::alice");
+        assert_eq!(ok("ledger::alice"), "ledger::senator::alice");
     }
 
     #[test]

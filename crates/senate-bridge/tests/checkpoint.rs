@@ -31,10 +31,10 @@ fn git(dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
-/// A worktree on `feature/refund-v2/alice` with one commit.
+/// A worktree on `senate/refund-v2/alice` with one commit.
 fn repo(h: &Harness, name: &str) -> std::path::PathBuf {
     let wd = h.workdir(name, Some("refund-v2"));
-    git(&wd, &["init", "-q", "-b", "feature/refund-v2/alice"]);
+    git(&wd, &["init", "-q", "-b", "senate/refund-v2/alice"]);
     std::fs::write(wd.join("README.md"), "hi\n").unwrap();
     git(&wd, &["add", "README.md"]);
     git(&wd, &["commit", "-q", "-m", "first"]);
@@ -89,7 +89,7 @@ async fn the_tool_writes_the_files_and_a_handoff_pushes() {
 
     let reply = checkpoint(&h, "s1", Some("## 完成\n- 幂等键"), false).await;
     assert_eq!(reply.commit, head);
-    assert_eq!(reply.branch, "feature/refund-v2/alice");
+    assert_eq!(reply.branch, "senate/refund-v2/alice");
     assert!(!reply.pushed);
     assert_eq!(reply.written, ["PROGRESS.md", "OPEN.md"]);
     assert_eq!(reply.files, ["PROGRESS.md", "OPEN.md"]);
@@ -139,7 +139,7 @@ async fn the_tool_writes_the_files_and_a_handoff_pushes() {
     assert!(payload.pushed);
     assert_eq!(payload.remote_url.as_deref(), remote.to_str());
     assert_eq!(
-        git(&remote, &["rev-parse", "feature/refund-v2/alice"]),
+        git(&remote, &["rev-parse", "senate/refund-v2/alice"]),
         head,
         "the branch is on origin"
     );
@@ -242,7 +242,7 @@ async fn two_agents_in_one_worktree_checkpoint_as_themselves() {
     assert!(both.contains(&"senator::reviewer".to_string()), "{both:?}");
     // Both sessions run on the person's one branch.
     for (p, _) in checkpoints(&h) {
-        assert_eq!(p.branch, "feature/refund-v2/alice");
+        assert_eq!(p.branch, "senate/refund-v2/alice");
     }
     h.stop().await;
 }

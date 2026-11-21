@@ -1150,7 +1150,6 @@ mod tests {
                 md.contains("`senate ask`, `senate tell` and `senate reply`")
                     || md.contains("`senate ask`、`senate tell` 和 `senate reply`")
             );
-            assert!(!md.to_lowercase().contains(&["fei", "shu"].concat()));
         }
         assert!(zh.contains("告诉我这个 thread 现在归我了"));
         assert!(en.contains("tell me the thread is mine now"));

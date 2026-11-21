@@ -445,12 +445,12 @@ async fn ask_answer_and_catch_up_end_to_end() {
     // bob's agent has connected before: a senator of this Senate.
     h.server.seat("copilot", "bob");
     let repo = h.dir.path().join("work/repo");
-    git_repo(&repo, "feature/refund-v2/alice");
+    git_repo(&repo, "senate/refund-v2/alice");
     h.hook(HookKind::SessionStart, "m1", &repo, None)
         .await
         .unwrap();
     let s = h.store().session("m1").unwrap().unwrap();
-    assert_eq!(s.branch.as_deref(), Some("feature/refund-v2/alice"));
+    assert_eq!(s.branch.as_deref(), Some("senate/refund-v2/alice"));
     assert_eq!(s.committee(), Some(&committee()));
     assert_eq!(s.effective_source(), Some(CommitteeSource::Branch));
     h.wait_stream("refund-v2").await;
@@ -544,7 +544,7 @@ async fn ask_answer_and_catch_up_end_to_end() {
     assert_eq!(q.thread, None);
     let refs = q.refs.unwrap();
     assert_eq!(refs.path.as_deref(), Some("gateway/src/idem.rs"));
-    assert_eq!(refs.branch.as_deref(), Some("feature/refund-v2/alice"));
+    assert_eq!(refs.branch.as_deref(), Some("senate/refund-v2/alice"));
 
     // answer a relayed question: to the person the Speaker spoke for.
     let relay = h.server.append(relayed_question("退款上限是多少天？"));
@@ -800,7 +800,7 @@ async fn ask_refuses_recipients_that_would_never_answer() {
         assert!(err, "{to}");
         assert!(text.contains("only reach a teammate's agent"), "{text}");
     }
-    // The predecessor's forms are not addresses.
+    // Legacy single-colon forms are not addresses.
     for to in ["agent:bob", "user:pm"] {
         let (err, text) = mcp.call("ask", json!({"to": to, "body": "?"})).await;
         assert!(err && text.contains("is not an address"), "{to}: {text}");
@@ -816,7 +816,7 @@ async fn ask_refuses_recipients_that_would_never_answer() {
     assert!(
         description.contains("A person is not reached through `ask`")
             && description.contains("senator::*")
-            && description.contains("ibot::codex"),
+            && description.contains("ledger::codex"),
         "{description}"
     );
 

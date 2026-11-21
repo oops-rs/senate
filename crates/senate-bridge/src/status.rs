@@ -1173,7 +1173,7 @@ mod tests {
                 "session_id": id,
                 "runtime": "codex",
                 "agent": format!("codex-{id}"),
-                "branch": "feature/终端",
+                "branch": "senate/终端",
                 "agent_source": "session",
                 "cwd": "/项目/非常长的中文目录/同一个目录前缀/应用",
                 "state": "live",
@@ -1211,7 +1211,7 @@ mod tests {
         );
         let session = wide
             .lines()
-            .find(|line| line.contains("feature/终端"))
+            .find(|line| line.contains("senate/终端"))
             .unwrap();
         assert!(session.contains(id) && session.contains(&format!("codex-{id}")));
         assert!(session.contains("/项目/非常长的中文目录/同一个目录前缀/应用"));

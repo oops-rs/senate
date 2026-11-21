@@ -133,7 +133,7 @@
 //! the committee, or puts to the Speaker to pick where a senator presides;
 //! with several agents and nobody to pick it is refused with
 //! [`codes::AMBIGUOUS_RECIPIENT`]. `at` instead of `to` is a qualified name
-//! (`ibot::senator::codex`): the daemon resolves it through the server and
+//! (`ledger::senator::codex`): the daemon resolves it through the server and
 //! posts on the committee it names. With
 //! `thread` (any seq in it) the event is written in that thread, and an
 //! empty `to` addresses whoever took part in it other than the person. A

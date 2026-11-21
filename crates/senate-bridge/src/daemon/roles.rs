@@ -1816,15 +1816,15 @@ mod tests {
     fn a_non_chair_is_told_who_chairs_in_both_languages() {
         let me: SenatorName = "codex".parse().unwrap();
         let chair: SenatorName = "claude".parse().unwrap();
-        let c = CommitteeId::new("ibot").unwrap();
+        let c = CommitteeId::new("ledger").unwrap();
         let en = roles_text::not_chairing(&me, &c, Some(&chair), Locale::En);
-        assert!(en.contains("[senator::codex] does not chair the committee `ibot`"));
+        assert!(en.contains("[senator::codex] does not chair the committee `ledger`"));
         assert!(
-            en.contains("the chair of `ibot` is [senator::claude]"),
+            en.contains("the chair of `ledger` is [senator::claude]"),
             "{en}"
         );
         assert!(en.contains("chair_docket"), "{en}");
         let zh = roles_text::not_chairing(&me, &c, None, Locale::Zh);
-        assert!(zh.starts_with("[senator::codex] 不是委员会 `ibot` 的主席"));
+        assert!(zh.starts_with("[senator::codex] 不是委员会 `ledger` 的主席"));
     }
 }

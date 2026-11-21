@@ -2489,7 +2489,7 @@ mod tests {
             session_id: id.into(),
             cwd: "/w".into(),
             git_root: None,
-            branch: Some("feature/refund-v2/alice".into()),
+            branch: Some("senate/refund-v2/alice".into()),
             inferred_committee: Some((committee(), CommitteeSource::Branch)),
             socket: Some("/tmp/x.sock".into()),
             token: Some("tok".into()),

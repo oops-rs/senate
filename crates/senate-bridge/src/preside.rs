@@ -477,7 +477,7 @@ fn render_items(docket: &SenateDocket, chair: bool, locale: Locale, out: &mut St
     }
 }
 
-/// ` · meant for [ibot::senator::codex]` for an item with an intended
+/// ` · meant for [ledger::senator::codex]` for an item with an intended
 /// recipient.
 fn meant_for(item: &DocketItem, locale: Locale) -> String {
     match (&item.intended, locale) {
@@ -553,7 +553,6 @@ mod tests {
             ] {
                 assert!(text.contains(needle), "{needle} in {text}");
             }
-            assert!(!text.to_lowercase().contains("steward"));
         }
         let alone = orientation(&path("claude"), None, &[], 0, Locale::En);
         assert!(alone.contains("this Senate") && alone.contains("Nothing awaits"));

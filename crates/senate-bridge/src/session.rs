@@ -8,7 +8,7 @@
 //!
 //! 1. an explicit `join` (the agent or its user said so; this session only),
 //! 2. the git branch, when it is `<prefix>/<committee>/<person>`
-//!    ([`BranchNaming`], prefix `feature` unless `senate.toml` says
+//!    ([`BranchNaming`], prefix `senate` unless `senate.toml` says
 //!    otherwise) **and** `senate.toml` turns the convention on with
 //!    `committee_from_branch = true`. It is off by default: a branch name is
 //!    other tools' business too, and `branch_prefix` alone does not enable
@@ -19,7 +19,7 @@
 //! [`CommitteeSource`] says which one decided.
 //!
 //! The branch is the person's, not an agent's: two agents of one person
-//! working on one committee share `feature/<committee>/<person>`, and both
+//! working on one committee share `senate/<committee>/<person>`, and both
 //! are bound to that committee by it. Which agent a session is comes from
 //! its harness or its pin, never from the branch.
 //!
@@ -604,12 +604,12 @@ mod tests {
     fn branch_inference_needs_three_segments() {
         let naming = BranchNaming::default();
         let of = |b: &str| committee_from_branch(b, &naming).map(|f| f.to_string());
-        assert_eq!(of("feature/refund-v2/alice"), Some("refund-v2".into()));
-        assert_eq!(of("feature/refund-v2"), None);
-        assert_eq!(of("feature/refund-v2/alice/x"), None);
-        assert_eq!(of("feature/Refund/alice"), None);
+        assert_eq!(of("senate/refund-v2/alice"), Some("refund-v2".into()));
+        assert_eq!(of("senate/refund-v2"), None);
+        assert_eq!(of("senate/refund-v2/alice/x"), None);
+        assert_eq!(of("senate/Refund/alice"), None);
         assert_eq!(of("main"), None);
-        assert_eq!(of("feature/refund-v2/"), None);
+        assert_eq!(of("senate/refund-v2/"), None);
         assert_eq!(of("featurex/refund-v2/alice"), None);
     }
 
@@ -620,10 +620,7 @@ mod tests {
             committee_from_branch("team/work/refund-v2/alice", &team).map(|f| f.to_string()),
             Some("refund-v2".into())
         );
-        assert_eq!(
-            committee_from_branch("feature/refund-v2/alice", &team),
-            None
-        );
+        assert_eq!(committee_from_branch("senate/refund-v2/alice", &team), None);
         let bare = BranchNaming::new("");
         assert_eq!(
             committee_from_branch("refund-v2/alice", &bare).map(|f| f.to_string()),
@@ -655,15 +652,15 @@ mod tests {
             infer_committee(b, f, on).map(|(c, s)| (c.to_string(), s))
         };
         assert_eq!(
-            of(Some("feature/a/me"), Some("b"), Some(&n)),
+            of(Some("senate/a/me"), Some("b"), Some(&n)),
             Some(("a".into(), CommitteeSource::Branch))
         );
         // Off (the default): the file, or nothing.
         assert_eq!(
-            of(Some("feature/a/me"), Some("b"), None),
+            of(Some("senate/a/me"), Some("b"), None),
             Some(("b".into(), CommitteeSource::File))
         );
-        assert_eq!(of(Some("feature/a/me"), None, None), None);
+        assert_eq!(of(Some("senate/a/me"), None, None), None);
         // On, but the branch is not the convention's shape.
         assert_eq!(
             of(Some("main"), Some("b"), Some(&n)),

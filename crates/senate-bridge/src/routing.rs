@@ -328,7 +328,7 @@ mod tests {
         let odd_from = NewEvent::new(
             committee(),
             Kind::Question,
-            Address::Other("group:oc_1".into()),
+            Address::Other("group:g-1".into()),
             "x",
         )
         .to(Address::senator(&me()))

@@ -279,7 +279,7 @@ fn as_speaker(event: &Event, locale: Locale) -> Option<String> {
 /// [`SPEAKER_META`].
 pub const CHAIR_META: &str = "bridge_as_chair";
 
-/// ` · for you as chair of `ibot`` for an event addressed to `chair`.
+/// ` · for you as chair of `ledger`` for an event addressed to `chair`.
 fn as_chair(event: &Event, locale: Locale) -> Option<String> {
     let committee = one_line(event.meta.get(CHAIR_META)?.as_str()?);
     Some(match locale {
@@ -1390,21 +1390,12 @@ mod tests {
         }
     }
 
-    /// No platform's name is baked into what the bridge writes.
+    /// What the bridge writes uses Senate's addresses, never a legacy
+    /// single-colon form (`user:<name>`, `agent:<name>`).
     fn assert_neutral(text: &str) {
         let lower = text.to_lowercase();
-        // The old platform's names are spelled in pieces, so that they
-        // appear nowhere in the repository.
-        let old_platform = [
-            ["fei", "shu"].concat(),
-            ["la", "rk"].concat(),
-            ["飞", "书"].concat(),
-        ];
-        for word in ["user:", "agent:", "steward"]
-            .into_iter()
-            .chain(old_platform.iter().map(String::as_str))
-        {
-            assert!(!lower.contains(word), "{word:?} in {text}");
+        for prefix in ["user:", "agent:"] {
+            assert!(!lower.contains(prefix), "{prefix:?} in {text}");
         }
     }
 
@@ -1618,8 +1609,8 @@ mod tests {
     fn an_item_brought_down_from_above_says_whose_committee_it_answers_for() {
         let me = reader("senator::claude");
         let down = on_the_desk(
-            "/top::commons-demo::speaker",
-            "/top/dark-conclave::refund-v2::senator::claude",
+            "/top::payments::speaker",
+            "/top/carol-desk::refund-v2::senator::claude",
         );
         let en = render_event(&down, &me, EN);
         let mut lines = en.lines();
@@ -1631,13 +1622,13 @@ mod tests {
         );
         assert_eq!(
             lines.next().unwrap(),
-            "↳ This comes from the Senate above, `/top::commons-demo`: you are answering for that \
+            "↳ This comes from the Senate above, `/top::payments`: you are answering for that \
              committee. Your roster and presence here are only this Senate's, not the whole \
              picture there."
         );
         let zh = render_event(&down, &me, ZH);
         assert!(
-            zh.contains("↳ 这条来自上级 Senate 的 `/top::commons-demo`：你在为那个委员会回答。"),
+            zh.contains("↳ 这条来自上级 Senate 的 `/top::payments`：你在为那个委员会回答。"),
             "{zh}"
         );
 
@@ -1645,12 +1636,12 @@ mod tests {
         // it (a child's question carried up): no such line.
         for (origin, intended) in [
             (
-                "/top/dark-conclave::billing::senator::codex",
-                "/top/dark-conclave::refund-v2::senator::claude",
+                "/top/carol-desk::billing::senator::codex",
+                "/top/carol-desk::refund-v2::senator::claude",
             ),
             (
-                "/top/dark-conclave/inner::refund-v2::senator::codex",
-                "/top/dark-conclave::refund-v2::senator::claude",
+                "/top/carol-desk/inner::refund-v2::senator::codex",
+                "/top/carol-desk::refund-v2::senator::claude",
             ),
         ] {
             let text = render_event(&on_the_desk(origin, intended), &me, EN);
@@ -1842,7 +1833,7 @@ mod tests {
                 .with_source(chat_source()),
             NewEvent::new(committee(), Kind::Chat, pm(), "不对，是 30 天").with_mirror(Mirror {
                 platform: "chat".into(),
-                message_ref: "om_1".into(),
+                message_ref: "m-1".into(),
                 thread_ref: None,
             }),
         ] {
@@ -1894,7 +1885,7 @@ mod tests {
                 ts: Utc::now(),
                 body: "retry work".into(),
                 checkpoint: senate_core::CheckpointPayload {
-                    branch: "feature/refund-v2/alice".into(),
+                    branch: "senate/refund-v2/alice".into(),
                     commit: "a41f9c2e0000000000000000000000000000beef".into(),
                     pushed: true,
                     remote_url: None,
@@ -1928,10 +1919,7 @@ mod tests {
             en.contains("[senator::codex] is away and you are its secretary"),
             "{en}"
         );
-        assert!(
-            en.contains("branch feature/refund-v2/alice@a41f9c2"),
-            "{en}"
-        );
+        assert!(en.contains("branch senate/refund-v2/alice@a41f9c2"), "{en}");
         // The notes are the agent's own text: fenced; an empty note is left out.
         assert!(en.contains("│ retry limit: 3 attempts"), "{en}");
         assert!(!en.contains("OPEN.md"), "{en}");

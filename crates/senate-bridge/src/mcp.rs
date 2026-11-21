@@ -36,8 +36,8 @@
 //! committee should get it), or just `codex` (the same as
 //! `senator::codex`: a bare name is that senator); a bracketed mention
 //! copied from a message (`[senator::codex]`) works too. `ask` and `post`
-//! (with `to`) also take one qualified name: `ibot::codex`,
-//! `/acme::ibot::codex`, `ibot::speaker`, `ibot::chair`. One on another
+//! (with `to`) also take one qualified name: `ledger::codex`,
+//! `/acme::ledger::codex`, `ledger::speaker`, `ledger::chair`. One on another
 //! committee is written on the session's own committee to the Speaker's
 //! desk (the boundary rule), and the tool says so. When several
 //! agents are on the committee the server refuses `senator::*` with the
@@ -188,8 +188,8 @@ answer from its checkpoint on its behalf. `to`: who to ask, several separated by
 Address forms: `senator::codex` or just `codex` (that agent), `senator::*` (whichever agent on \
 this committee should get it), `chair` (your committee's chair), `speaker` (the Speaker's \
 desk); a bracketed id copied from a message works too. One qualified name reaches another \
-committee or Senate: `ibot::codex` (the agent codex on the committee ibot), \
-`/acme::ibot::codex` (in the Senate /acme), `ibot::speaker`, `ibot::chair`. A question to \
+committee or Senate: `ledger::codex` (the agent codex on the committee ledger), \
+`/acme::ledger::codex` (in the Senate /acme), `ledger::speaker`, `ledger::chair`. A question to \
 another committee's chair in this Senate goes directly to that chair. Stay on your own committee \
 and use its thread number to continue the discussion. Requests and other crossings go to the Speaker's desk. If several \
 agents could get `senator::*`, the result lists them: pick one and ask again. A person is not \
@@ -243,7 +243,7 @@ recorded in the shared committee log, where every teammate's agent reads it thro
 search, and nobody is interrupted. To get an answer from someone use ask instead; to settle \
 something for the team use propose_decision. `to` (optional) tells someone instead: an \
 address on this committee (`codex`, `senator::alice`, `chair`, `speaker`) or one qualified name \
-(`ibot::codex`, `/acme::ibot::codex`, `ibot::speaker`, `ibot::chair`). A note to another \
+(`ledger::codex`, `/acme::ledger::codex`, `ledger::speaker`, `ledger::chair`). A note to another \
 committee's chair in this Senate reaches that chair directly; other crossings go to the Speaker's desk. `body`: self-contained; readers have none of your \
 context. `committee`: defaults to this session's committee.";
 
@@ -350,7 +350,7 @@ pub struct PostParams {
     #[serde(default)]
     pub committee: Option<String>,
     /// Tell someone instead of the whole committee: an address here, or
-    /// one qualified name (`ibot::codex`, `ibot::speaker`).
+    /// one qualified name (`ledger::codex`, `ledger::speaker`).
     #[serde(default)]
     pub to: Option<String>,
 }
@@ -1090,8 +1090,8 @@ pub enum Targets {
 }
 
 /// `to` as `ask` and `post` take it: addresses here in any form
-/// [`parse_address`] reads, or one qualified name (`ibot::codex`,
-/// `/acme::ibot::codex`, `ibot::speaker`, `ibot::chair`) on its own.
+/// [`parse_address`] reads, or one qualified name (`ledger::codex`,
+/// `/acme::ledger::codex`, `ledger::speaker`, `ledger::chair`) on its own.
 pub fn parse_targets(to: &str) -> Result<Targets, String> {
     let raws: Vec<&str> = to
         .split(|c: char| c == ',' || c.is_whitespace())
@@ -1109,7 +1109,7 @@ pub fn parse_targets(to: &str) -> Result<Targets, String> {
             Locator::parse_short(raw).map_err(|e| {
                 format!(
                     "`{raw}` is not an address ({e}); write senator::<name> (or just the name), \
-                     * for whichever agent, or a qualified name such as ibot::codex"
+                     * for whichever agent, or a qualified name such as ledger::codex"
                 )
             })?
         };
@@ -3050,7 +3050,7 @@ mod tests {
             assert!(parse_recipients(bad).is_err(), "{bad}");
         }
         // A seat on another committee is not for this tool.
-        let err = parse_recipients("ibot::codex").unwrap_err();
+        let err = parse_recipients("ledger::codex").unwrap_err();
         assert!(err.contains("names a seat on another committee"), "{err}");
         // The label of the Speaker answering for an agent is reached at the agent.
         assert_eq!(
@@ -3239,8 +3239,7 @@ mod tests {
             SECRETARY_COVER,
         ] {
             let lower = text.to_lowercase();
-            assert!(!lower.contains(&["fei", "shu"].concat()), "{text}");
-            // The predecessor's address forms: `agent:bob`, `user:<handle>`.
+            // Legacy single-colon address forms: `agent:bob`, `user:<handle>`.
             for old in ["agent:", "user:"] {
                 for (i, _) in lower.match_indices(old) {
                     let next = lower[i + old.len()..].chars().next();

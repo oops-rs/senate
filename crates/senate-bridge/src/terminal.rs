@@ -210,10 +210,10 @@ mod tests {
 
     #[test]
     fn brief_names_shorten_session_ids_and_leave_quoted_lines_alone() {
-        let text = "[seq 3] [senator::claude-6d8b2e5d-4a60-486b-b3d8-21f2d82e4382] · to [senator::alice], [ibot::senator::codex]\n  ask [senator::alice] about it\n│ [senator::bob]\n";
+        let text = "[seq 3] [senator::claude-6d8b2e5d-4a60-486b-b3d8-21f2d82e4382] · to [senator::alice], [ledger::senator::codex]\n  ask [senator::alice] about it\n│ [senator::bob]\n";
         assert_eq!(
             brief_names(text),
-            "[seq 3] claude-6d8b2e5d…4382 · to alice, [ibot::senator::codex]\n  ask [senator::alice] about it\n│ [senator::bob]\n"
+            "[seq 3] claude-6d8b2e5d…4382 · to alice, [ledger::senator::codex]\n  ask [senator::alice] about it\n│ [senator::bob]\n"
         );
         assert_eq!(
             brief_names("[senator::] [senator::a b] [senator::x"),

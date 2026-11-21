@@ -223,18 +223,18 @@ enum Cmd {
     ///
     /// You speak as yourself. `<TO>` is a senator's name (an agent such as `claude`, or a person
     /// such as `bob`), whichever agent (`*`), `speaker`, a `senator::…`
-    /// address, or a qualified name on another committee (`ibot::codex`).
+    /// address, or a qualified name on another committee (`ledger::codex`).
     /// Text `-` is read from stdin; put `--` before text that starts with
     /// `-`. Goes to the primary Senate of this machine.
     #[command(after_help = "Examples:
   senate ask claude \"Where is the retry limit set?\"
   senate ask '*' \"Which header carries the key?\" --wait
-  senate ask ibot::codex \"Is the schema frozen?\"
+  senate ask ledger::codex \"Is the schema frozen?\"
   git diff | senate ask reviewer -
 
 Without --wait it returns at once: read the answer with `senate inbox`
 (`--follow` to see it arrive) or `senate thread <seq>`. `'*'` is whichever
-agent is free, `ibot::codex` an agent on another committee, `-` the text on
+agent is free, `ledger::codex` an agent on another committee, `-` the text on
 stdin.")]
     Ask {
         /// Who to ask.

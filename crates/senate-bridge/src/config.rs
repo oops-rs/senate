@@ -18,7 +18,7 @@
 //! committee_from_branch = true
 //! # Optional: the first segment of `<prefix>/<committee>/<person>` branches
 //! # (the convention above, and the Speaker's work branches).
-//! branch_prefix = "feature"
+//! branch_prefix = "senate"
 //! # Optional: `senate setup clean` forgets the queued items and cursors of an
 //! # agent with no session and no contact for this many days.
 //! free_after_days = 30
@@ -851,7 +851,7 @@ mod tests {
         assert_eq!(c.committees, vec![CommitteeId::new("refund-v2").unwrap()]);
         assert_eq!(c.brief_chars, DEFAULT_BRIEF_CHARS);
         assert_eq!(c.locale, Locale::default());
-        assert_eq!(c.branches().prefix(), "feature");
+        assert_eq!(c.branches().prefix(), "senate");
         assert_eq!(c.agents, AgentNames::default());
         assert!(!format!("{c:?}").contains("secret"));
         let c: BridgeConfig = toml::from_str(

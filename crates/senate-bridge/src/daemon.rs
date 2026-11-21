@@ -6023,9 +6023,6 @@ mod tests {
             ),
             "{zh}"
         );
-        for text in [en, zh] {
-            assert!(!text.to_lowercase().contains(&["fei", "shu"].concat()));
-        }
     }
 
     #[test]

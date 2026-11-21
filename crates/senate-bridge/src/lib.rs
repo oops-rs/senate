@@ -12,7 +12,7 @@
 //! the one `senated --machine` hosts). Its agents are flat names in it
 //! ([`agent`]); a pinned path (`claude/reviewer`) is not a name and is
 //! ignored. A seat on another committee or in another Senate is reached by
-//! a qualified name (`ibot::codex`), which the server resolves.
+//! a qualified name (`ledger::codex`), which the server resolves.
 //!
 //! # Presiding
 //!

@@ -1643,7 +1643,7 @@ async fn one_daemon_serves_one_senate_and_a_pinned_path_is_ignored() {
     h.stop().await;
 }
 
-/// The person writes to a qualified name (`ibot::senator::codex`): the
+/// The person writes to a qualified name (`ledger::senator::codex`): the
 /// daemon asks the server where it is (`GET /v1/resolve`, standing on the
 /// committee the person named) and posts on that committee, to that seat.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1652,10 +1652,10 @@ async fn a_qualified_name_is_resolved_by_the_server_and_posted_on_its_committee(
     h.start().await;
     h.server.seat("codex", "alice");
     h.server.append(NewEvent::new(
-        senate_core::CommitteeId::new("ibot").unwrap(),
+        senate_core::CommitteeId::new("ledger").unwrap(),
         Kind::Note,
         person("bob"),
-        "ibot starts",
+        "ledger starts",
     ));
     let posted: ipc::Posted = call(
         &h,
@@ -1664,27 +1664,27 @@ async fn a_qualified_name_is_resolved_by_the_server_and_posted_on_its_committee(
             committee: Some(committee()),
             kind: ipc::SayKind::Question,
             to: Vec::new(),
-            at: Some("ibot::senator::codex".parse().unwrap()),
-            body: "is the ibot hook on?".into(),
+            at: Some("ledger::senator::codex".parse().unwrap()),
+            body: "is the ledger hook on?".into(),
             thread: None,
             id: None,
         },
     )
     .await;
-    assert_eq!(posted.committee.as_str(), "ibot");
+    assert_eq!(posted.committee.as_str(), "ledger");
     assert_eq!(posted.to, [senator("codex")]);
     assert_eq!(
         h.server.resolves(),
         [(
-            "ibot::senator::codex".to_string(),
+            "ledger::senator::codex".to_string(),
             Some("refund-v2".to_string())
         )]
     );
-    let sent = h.server.last_event("ibot");
+    let sent = h.server.last_event("ledger");
     assert_eq!(sent.kind, Kind::Question);
     assert_eq!(sent.from, person("alice"));
     assert_eq!(sent.to, [senator("codex")]);
-    assert_eq!(sent.body, "is the ibot hook on?");
+    assert_eq!(sent.body, "is the ledger hook on?");
     assert!(
         h.server.events("refund-v2").is_empty(),
         "nothing on the committee written from"
@@ -1703,10 +1703,10 @@ async fn a_qualified_name_that_is_elsewhere_or_unknown_is_refused_readably() {
         h.config.locale = locale;
         h.start().await;
         h.server.append(NewEvent::new(
-            senate_core::CommitteeId::new("ibot").unwrap(),
+            senate_core::CommitteeId::new("ledger").unwrap(),
             Kind::Note,
             person("bob"),
-            "ibot starts",
+            "ledger starts",
         ));
         let say = |at: &str| Request::Say {
             session: ipc::SessionSelector::default(),
@@ -1735,17 +1735,17 @@ async fn a_qualified_name_that_is_elsewhere_or_unknown_is_refused_readably() {
                 e.message
             }
         };
-        let elsewhere = refused(say("elsewhere::ibot::senator::codex")).await;
-        let unknown = refused(say("ibot::senator::nobody")).await;
+        let elsewhere = refused(say("elsewhere::ledger::senator::codex")).await;
+        let unknown = refused(say("ledger::senator::nobody")).await;
         match locale {
             senate_core::Locale::En => {
                 assert_eq!(
                     elsewhere,
-                    "[elsewhere::ibot::senator::codex] is not in this Senate, nor in any \
+                    "[elsewhere::ledger::senator::codex] is not in this Senate, nor in any \
                      Senate above it knows of."
                 );
                 assert!(
-                    unknown.starts_with("[ibot::senator::nobody] cannot be reached: ")
+                    unknown.starts_with("[ledger::senator::nobody] cannot be reached: ")
                         && unknown.contains("has no senator nobody"),
                     "{unknown}"
                 );
@@ -1753,15 +1753,15 @@ async fn a_qualified_name_that_is_elsewhere_or_unknown_is_refused_readably() {
             senate_core::Locale::Zh => {
                 assert_eq!(
                     elsewhere,
-                    "[elsewhere::ibot::senator::codex] 不在这个 Senate，也不在它知道的任何上一级 Senate 里。"
+                    "[elsewhere::ledger::senator::codex] 不在这个 Senate，也不在它知道的任何上一级 Senate 里。"
                 );
                 assert!(
-                    unknown.starts_with("[ibot::senator::nobody] 无法送达："),
+                    unknown.starts_with("[ledger::senator::nobody] 无法送达："),
                     "{unknown}"
                 );
             }
         }
-        assert_eq!(h.server.events("ibot").len(), 1, "nothing posted");
+        assert_eq!(h.server.events("ledger").len(), 1, "nothing posted");
         assert!(h.server.events("refund-v2").is_empty(), "nothing posted");
         h.stop().await;
     }
