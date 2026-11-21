@@ -258,7 +258,8 @@ async fn a_group_is_adopted_with_the_fixed_syntax_or_restated_and_confirmed() {
         Some(root_in("random"))
     );
 
-    // In words, in the people group: restated, then confirmed.
+    // In words, in the people group: restated (it stops being a people
+    // group), then confirmed.
     rig.brain
         .interprets(Ok(Intent::AdoptAgentGroup { committee: None }));
     let ask = rig.append(mention("pm", "这个群是 agent 群", "m_h1")).await;
@@ -266,7 +267,7 @@ async fn a_group_is_adopted_with_the_fixed_syntax_or_restated_and_confirmed() {
     assert_eq!(
         rig.surface.texts().last().map(String::as_str),
         Some(
-            "我理解为：把本群设为委员会 refund-v2 的 Agent 群（agent 之间的往来和任务卡片都发在这里）。回复「对」确认"
+            "我理解为：把本群从委员会 refund-v2 的普通群改为它的 Agent 群：之后 agent 之间的往来和任务卡片都发在这里，本群不再是普通群。回复「对」确认"
         )
     );
     assert_eq!(agents_bindings(&rig).len(), 1, "not yet");
@@ -882,5 +883,119 @@ async fn a_parked_request_replayed_after_a_crash_changes_nothing() {
     assert_eq!(surface.posts(), posts, "no post twice");
     assert_eq!(surface.cards().len(), cards.len(), "no card twice");
     assert!(brain.triage_inputs().is_empty());
+    rig.stop().await;
+}
+
+// ----- repurposing a group (thread 797, item 10) ------------------------------------
+
+/// The latest binding of `group`, as `(action, role)`.
+fn latest_binding(rig: &Rig, group: &str) -> Option<(BindingAction, GroupRole)> {
+    rig.hub
+        .events(&refund())
+        .iter()
+        .filter_map(senate_core::Event::binding)
+        .rfind(|b| b.group_id == group)
+        .map(|b| (b.action, b.role))
+}
+
+/// A yes to the Speaker's last post, said in `group`.
+fn yes_in(rig: &Rig, group: &str, root: Seq, message_ref: &str) -> NewEvent {
+    let posts = rig.surface.posts();
+    let asked = posts.last().expect("the Speaker asked");
+    let mut yes = in_thread(
+        "pm",
+        "对",
+        message_ref,
+        root,
+        asked.thread_ref.clone(),
+        &asked.message_ref,
+    );
+    if let Some(source) = yes.source.as_mut() {
+        source.group_id = group.into();
+    }
+    yes
+}
+
+/// `/agents <committee>` in the committee's people group no longer turns it
+/// into the Agent group at once: the Speaker says what changes and waits
+/// for a yes, fixed syntax or not.
+#[tokio::test]
+async fn agents_in_a_people_group_asks_before_repurposing_it() {
+    let hub = MemoryHub::new();
+    hub.append(bind_event(&refund(), GROUP)).await.unwrap();
+    let rig = Rig::start(hub).await;
+    let ask = rig.append(mention("pm", "/agents refund-v2", "m_r1")).await;
+    rig.settle().await;
+    assert_eq!(
+        latest_binding(&rig, GROUP),
+        Some((BindingAction::Bind, GroupRole::People)),
+        "nothing changed yet"
+    );
+    let asked = rig.surface.texts().last().cloned().expect("asked");
+    assert_eq!(
+        asked,
+        "我理解为：把本群从委员会 refund-v2 的普通群改为它的 Agent 群：之后 agent 之间的往来和任务卡片都发在这里，本群不再是普通群。回复「对」确认"
+    );
+    rig.append(yes_in(&rig, GROUP, ask.seq, "m_r2")).await;
+    rig.settle().await;
+    assert_eq!(
+        latest_binding(&rig, GROUP),
+        Some((BindingAction::Bind, GroupRole::Agents))
+    );
+    rig.stop().await;
+}
+
+/// `/bind <committee>` in that committee's Agent group says what the group
+/// is and offers to make it a people group again; a yes does.
+#[tokio::test]
+async fn bind_in_the_agent_group_says_so_and_offers_to_switch_back() {
+    let rig = Rig::start(agents_hub().await).await;
+    let ask = rig
+        .append(mention_in(
+            &refund(),
+            AGENTS,
+            "pm",
+            "/bind refund-v2",
+            "m_b1",
+        ))
+        .await;
+    rig.settle().await;
+    let asked = rig.surface.texts().last().cloned().expect("asked");
+    assert_eq!(
+        asked,
+        "本群已经绑定在委员会 refund-v2，是它的 Agent 群（agent 之间的往来和任务卡片发在这里），不是普通群。要把它改回 refund-v2 的普通群吗？回复「对」确认"
+    );
+    assert_eq!(
+        latest_binding(&rig, AGENTS),
+        Some((BindingAction::Bind, GroupRole::Agents))
+    );
+    rig.append(yes_in(&rig, AGENTS, ask.seq, "m_b2")).await;
+    rig.settle().await;
+    assert_eq!(
+        latest_binding(&rig, AGENTS),
+        Some((BindingAction::Bind, GroupRole::People))
+    );
+    assert!(
+        rig.surface
+            .texts()
+            .iter()
+            .any(|t| t == "本群现在是委员会 refund-v2 的普通群。"),
+        "{:?}",
+        rig.surface.texts()
+    );
+    rig.stop().await;
+}
+
+/// In a people group, `/bind` to its own committee is still just "already
+/// bound".
+#[tokio::test]
+async fn bind_in_a_people_group_to_its_committee_is_already_bound() {
+    let rig = Rig::start(agents_hub().await).await;
+    rig.append(mention("pm", "/bind refund-v2", "m_b3")).await;
+    rig.settle().await;
+    assert_eq!(
+        rig.surface.texts().last().map(String::as_str),
+        Some("本群已经绑定在委员会 refund-v2。")
+    );
     rig.stop().await;
 }

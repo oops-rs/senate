@@ -316,7 +316,10 @@ impl Engine {
             Intent::AdoptAgentGroup {
                 committee: Some(raw),
             } if !raw.trim().is_empty() => CommitteeId::new(raw.trim())
-                .map(|committee| PendingAction::AdoptAgents { committee })
+                .map(|committee| PendingAction::AdoptAgents {
+                    committee,
+                    from_people: false,
+                })
                 .map_err(|_| render::invalid_committee(l, &raw)),
             Intent::None { reply } => Err(reply),
             _ => Err(render::step_after_unbind(l)),
@@ -568,7 +571,10 @@ impl Engine {
                         match raw.as_deref().map(str::trim) {
                             None | Some("") => Err(render::adopt_needs_committee(l)),
                             Some(raw) => CommitteeId::new(raw)
-                                .map(|committee| PendingAction::AdoptAgents { committee })
+                                .map(|committee| PendingAction::AdoptAgents {
+                                    committee,
+                                    from_people: false,
+                                })
                                 .map_err(|_| render::invalid_committee(l, raw)),
                         }
                     }

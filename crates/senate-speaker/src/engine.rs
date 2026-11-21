@@ -726,8 +726,15 @@ enum PendingAction {
     Unbind {
         committee: CommitteeId,
     },
-    /// Make the group `committee`'s Agent group.
+    /// Make the group `committee`'s Agent group; `from_people` when it is
+    /// that committee's people group now, which it then stops being.
     AdoptAgents {
+        committee: CommitteeId,
+        from_people: bool,
+    },
+    /// Make the group, now `committee`'s Agent group, its people group
+    /// again.
+    ToPeople {
         committee: CommitteeId,
     },
     /// Record a decision said in `chat` of `committee`; `chat` is `None` when
@@ -782,6 +789,7 @@ impl PendingAction {
     fn restate(&self, l: Locale) -> String {
         match self {
             Self::Work { run, .. } => render::confirm_work(l, run),
+            Self::ToPeople { committee } => render::offer_back_to_people(l, committee),
             _ => render::confirm_action(l, &self.describe(l)),
         }
     }
@@ -794,7 +802,8 @@ impl PendingAction {
         match self {
             Self::Bind { to, .. } => to,
             Self::Unbind { committee }
-            | Self::AdoptAgents { committee }
+            | Self::AdoptAgents { committee, .. }
+            | Self::ToPeople { committee }
             | Self::Decide { committee, .. }
             | Self::Invite { committee, .. }
             | Self::OutputLevel { committee, .. }
@@ -808,7 +817,10 @@ impl PendingAction {
 
     fn unnamed_committee(&self) -> Option<&CommitteeId> {
         match self {
-            Self::Bind { .. } | Self::Unbind { .. } | Self::AdoptAgents { .. } => None,
+            Self::Bind { .. }
+            | Self::Unbind { .. }
+            | Self::AdoptAgents { .. }
+            | Self::ToPeople { .. } => None,
             Self::Decide { committee, .. }
             | Self::Invite { committee, .. }
             | Self::OutputLevel { committee, .. }
@@ -840,7 +852,11 @@ impl PendingAction {
                 to,
             } => render::describe_rebind(l, from, to),
             Self::Unbind { committee } => render::describe_unbind(l, committee),
-            Self::AdoptAgents { committee } => render::describe_adopt(l, committee),
+            Self::AdoptAgents {
+                committee,
+                from_people,
+            } => render::describe_adopt(l, committee, *from_people),
+            Self::ToPeople { committee } => render::describe_back_to_people(l, committee),
             Self::Invite { handles, .. } => render::describe_invite(l, handles),
             Self::OutputLevel { level, .. } => render::describe_output_level(l, *level),
             Self::Relay { event } => render::describe_relay(l, &event.to, &event.body),
@@ -2692,6 +2708,13 @@ impl Engine {
                     return self.say(chat, &render::invalid_committee(l, &raw)).await;
                 };
                 if target == committee {
+                    if self.group_role(&committee, &group_of(chat)) == Some(GroupRole::Agents) {
+                        // The Agent group: say so, and offer to make it the
+                        // people group again.
+                        self.restate_or_run(chat, PendingAction::ToPeople { committee }, true)
+                            .await?;
+                        return Ok(Flow::Done);
+                    }
                     return self.say(chat, &render::already_bound(l, &committee)).await;
                 }
                 self.restate_or_run(
@@ -2753,7 +2776,15 @@ impl Engine {
                         .say(chat, &render::adopt_other_committee(l, &committee, &asked))
                         .await;
                 }
-                self.restate_or_run(chat, PendingAction::AdoptAgents { committee }, confirm)
+                // A people group stops being one: never without a yes, even
+                // by fixed syntax.
+                let from_people =
+                    self.group_role(&committee, &group_of(chat)) == Some(GroupRole::People);
+                let action = PendingAction::AdoptAgents {
+                    committee,
+                    from_people,
+                };
+                self.restate_or_run(chat, action, confirm || from_people)
                     .await?;
                 Ok(Flow::Done)
             }
@@ -2765,6 +2796,17 @@ impl Engine {
             } => self.request_work(chat, &target, &instruction).await,
             Intent::Reassign { from, to } => self.request_reassign(chat, &from, &to).await,
         }
+    }
+
+    /// The role `group` is bound in on `committee`, as observed.
+    fn group_role(&self, committee: &CommitteeId, group: &Option<String>) -> Option<GroupRole> {
+        let group = group.as_deref()?;
+        self.committees
+            .get(committee)?
+            .groups
+            .iter()
+            .find(|g| g.group.group_id == group)
+            .map(|g| g.role)
     }
 
     /// Reply to `chat` and be done with it.
@@ -3124,7 +3166,15 @@ impl Engine {
                 .await?;
                 Ok(render::unbound(l, committee))
             }
-            PendingAction::AdoptAgents { committee } => {
+            PendingAction::ToPeople { committee } => {
+                self.append_action(
+                    binding_event(l, committee, group, BindingAction::Bind, requester, trigger),
+                    strict,
+                )
+                .await?;
+                Ok(render::back_to_people(l, committee))
+            }
+            PendingAction::AdoptAgents { committee, .. } => {
                 let id = derived_event_id(&[
                     "binding",
                     "bind",
@@ -3412,7 +3462,10 @@ impl Engine {
             Intent::AdoptAgentGroup { committee: raw } => match raw.as_deref().map(str::trim) {
                 None | Some("") => Err(render::adopt_needs_committee(l)),
                 Some(raw) => CommitteeId::new(raw)
-                    .map(|committee| PendingAction::AdoptAgents { committee })
+                    .map(|committee| PendingAction::AdoptAgents {
+                        committee,
+                        from_people: false,
+                    })
                     .map_err(|_| render::invalid_committee(l, raw)),
             },
             Intent::Unbind => Err(render::nothing_to_unbind(l)),
@@ -3737,6 +3790,11 @@ fn binding_event(
         Some(requester),
         id,
     )
+}
+
+/// The group `chat` was said in, by id.
+fn group_of(chat: &Event) -> Option<String> {
+    chat.source.as_ref().map(|s| s.group_id.clone())
 }
 
 /// A `binding` of `group` in `role`, from the Speaker.

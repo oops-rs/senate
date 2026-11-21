@@ -1372,14 +1372,49 @@ pub(crate) fn no_agents_group_hint(l: Locale, committee: &CommitteeId, bot_name:
     }
 }
 
-pub(crate) fn describe_adopt(l: Locale, committee: &CommitteeId) -> String {
-    match l {
-        Locale::Zh => format!(
+/// `from_people`: the group is the committee's people group now, and stops
+/// being one.
+pub(crate) fn describe_adopt(l: Locale, committee: &CommitteeId, from_people: bool) -> String {
+    match (l, from_people) {
+        (Locale::Zh, true) => format!(
+            "把本群从委员会 {committee} 的普通群改为它的 Agent 群：之后 agent 之间的往来和任务卡片都发在这里，本群不再是普通群。"
+        ),
+        (Locale::En, true) => format!(
+            "Change this group from a people group of committee {committee} into its Agent group: traffic between agents and the task cards are posted here from then on, and it is no longer a people group."
+        ),
+        (Locale::Zh, false) => format!(
             "把本群设为委员会 {committee} 的 Agent 群（agent 之间的往来和任务卡片都发在这里）。"
         ),
-        Locale::En => format!(
+        (Locale::En, false) => format!(
             "Make this group the Agent group of committee {committee} (traffic between agents and the task cards are posted here)."
         ),
+    }
+}
+
+/// `/bind` to the committee its Agent group is already bound to: what the
+/// group is, and the offer to make it a people group again.
+pub(crate) fn offer_back_to_people(l: Locale, committee: &CommitteeId) -> String {
+    match l {
+        Locale::Zh => format!(
+            "本群已经绑定在委员会 {committee}，是它的 Agent 群（agent 之间的往来和任务卡片发在这里），不是普通群。要把它改回 {committee} 的普通群吗？回复「对」确认"
+        ),
+        Locale::En => format!(
+            "This group is already bound to committee {committee} as its Agent group (traffic between agents and the task cards are posted here), not as a people group. Make it a people group of {committee} again? Reply \"yes\" to confirm."
+        ),
+    }
+}
+
+pub(crate) fn describe_back_to_people(l: Locale, committee: &CommitteeId) -> String {
+    match l {
+        Locale::Zh => format!("把本群改回委员会 {committee} 的普通群。"),
+        Locale::En => format!("Make this group a people group of committee {committee} again."),
+    }
+}
+
+pub(crate) fn back_to_people(l: Locale, committee: &CommitteeId) -> String {
+    match l {
+        Locale::Zh => format!("本群现在是委员会 {committee} 的普通群。"),
+        Locale::En => format!("This group is now a people group of committee {committee}."),
     }
 }
 
@@ -2687,7 +2722,9 @@ mod tests {
                 confirm_action(l, &describe_bind(l, &c)),
                 describe_rebind(l, &c, &c),
                 describe_unbind(l, &c),
-                describe_adopt(l, &c),
+                describe_adopt(l, &c, false),
+                describe_adopt(l, &c, true),
+                offer_back_to_people(l, &c),
                 describe_invite(l, &["alice".into()]),
                 describe_output_level(l, OutputLevel::All),
                 describe_status(l),
