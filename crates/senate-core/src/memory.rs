@@ -235,6 +235,11 @@ impl MemoryFold {
             return;
         }
         self.head = event.seq;
+        // A test of the Speaker (`senate chat send`) changes nothing it
+        // knows.
+        if event.is_simulated() {
+            return;
+        }
         if let Some(digest) = DigestPayload::of(event) {
             self.through = self.through.max(digest.through);
             self.digest = Some(Digest {

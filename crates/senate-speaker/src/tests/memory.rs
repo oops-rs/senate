@@ -422,3 +422,54 @@ async fn people_list_correct_and_delete_what_the_committee_knows_by_command() {
     );
     rig.stop().await;
 }
+
+#[tokio::test]
+async fn a_simulated_forget_changes_nothing_the_committee_knows() {
+    use super::rig::mention_in;
+    let rig = bound(config_in(senate_core::Locale::En)).await;
+    let kept = rig
+        .append(
+            NewEvent::new(
+                orchard(),
+                Kind::Note,
+                Address::Speaker,
+                "The cache is shared",
+            )
+            .with_meta(
+                meta::MEMORY,
+                MemoryPayload::Point {
+                    refs: vec![Seq(1)],
+                    supersedes: vec![],
+                    digest: None,
+                }
+                .to_value(),
+            ),
+        )
+        .await;
+    rig.settle().await;
+    rig.append(
+        mention_in(
+            &orchard(),
+            GROUP,
+            "alice",
+            &format!("/forget {}", kept.seq),
+            "m_sim",
+        )
+        .with_source(Source {
+            simulated: true,
+            ..source()
+        }),
+    )
+    .await;
+    rig.settle().await;
+    let edits: Vec<Event> = memory_points(&rig.hub)
+        .into_iter()
+        .map(|(e, _)| e)
+        .filter(|e| e.on_behalf_of.is_some())
+        .collect();
+    assert_eq!(edits.len(), 1, "recorded, as simulated");
+    assert!(edits[0].is_simulated());
+    let brief = rig.hub.brief(&orchard()).await.unwrap();
+    assert_eq!(brief.memory.len(), 1, "and it deleted nothing");
+    rig.stop().await;
+}

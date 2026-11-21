@@ -218,6 +218,7 @@ fn announcement_section(
     seats: &[CommitteeSeat],
 ) -> AnnouncementSection {
     let brief = state.brief.as_ref().map(BriefBuilder::brief);
+    let memory = state.brief.as_ref().map(BriefBuilder::memory);
     let parts = render::AnnouncementParts {
         committee,
         seats,
@@ -226,8 +227,25 @@ fn announcement_section(
             .as_ref()
             .map(|b| b.decisions.iter().rev().collect())
             .unwrap_or_default(),
-        lately: Vec::new(),
-        known: Vec::new(),
+        lately: memory
+            .and_then(|m| m.latest_digest())
+            .map(|d| {
+                d.payload
+                    .points
+                    .iter()
+                    .map(|p| render::announcement_point(&p.text))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        // Newest first: the section shows the latest few.
+        known: memory
+            .map(|m| {
+                m.in_force()
+                    .rev()
+                    .map(|p| render::announcement_point(&p.text))
+                    .collect()
+            })
+            .unwrap_or_default(),
     };
     render::announcement(state.locale, &parts)
 }

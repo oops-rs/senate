@@ -191,3 +191,61 @@ async fn a_surface_without_it_says_so_once_and_stops_until_a_rebind_or_restart()
     assert_eq!(notices(&surface), 2);
     rig.stop().await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn the_latest_digest_and_what_we_know_join_the_section() {
+    use senate_core::{
+        Address, DigestPayload, DigestPoint, DigestTrigger, MemoryPayload, Seq, meta,
+    };
+    let hub = hub_with_groups().await;
+    let surface = FakeSurface::with(Caps::ADOPTED);
+    let rig = Rig::start_with(hub, surface.clone(), ScriptedBrain::new()).await;
+    pass(&rig, DEBOUNCE).await;
+    assert!(!surface.announcements()[0].1.markdown.contains("近况"));
+
+    let note = |body: &str| NewEvent::new(refund(), Kind::Note, Address::Speaker, body);
+    rig.append(
+        note("发布改到周一").with_meta(
+            meta::MEMORY,
+            MemoryPayload::Point {
+                refs: vec![Seq(1)],
+                supersedes: vec![],
+                digest: None,
+            }
+            .to_value(),
+        ),
+    )
+    .await;
+    rig.append(
+        note("- 讨论了发布日期").with_meta(
+            meta::DIGEST,
+            DigestPayload {
+                trigger: DigestTrigger::Daily,
+                from: Seq(1),
+                through: Seq(2),
+                points: vec![DigestPoint {
+                    text: "讨论了发布日期，倾向周一".into(),
+                    refs: vec![Seq(1)],
+                }],
+            }
+            .to_value(),
+        ),
+    )
+    .await;
+    pass(&rig, ANNOUNCEMENT_INTERVAL + DEBOUNCE).await;
+    let sent = surface.announcements();
+    let latest = &sent.last().unwrap().1.markdown;
+    assert!(
+        latest.contains("**近况**\n- 讨论了发布日期，倾向周一"),
+        "{latest}"
+    );
+    assert!(
+        latest.contains("**我们知道的**\n- 发布改到周一"),
+        "{latest}"
+    );
+    assert!(
+        latest.find("**最近的决策**") < latest.find("**近况**"),
+        "after the decisions: {latest}"
+    );
+    rig.stop().await;
+}

@@ -3488,7 +3488,15 @@ impl Engine {
                 let edit = NewEvent::new(committee.clone(), Kind::Note, Address::Speaker, body)
                     .with_id(derived_event_id(&["memory-edit", committee.as_str(), key]))
                     .on_behalf_of(requester.clone())
-                    .with_meta(meta::MEMORY, payload.to_value());
+                    .with_meta(meta::MEMORY, payload.to_value())
+                    // Where it was asked: a simulated `/forget` changes
+                    // nothing the committee knows.
+                    .with_source(Source {
+                        platform: group.platform.clone(),
+                        group_id: group.group_id.clone(),
+                        group_name: group.group_name.clone(),
+                        simulated: group.simulated,
+                    });
                 let recorded = self.append_action(edit, strict).await?;
                 Ok(recorded
                     .map(|event| render::memory_edited(l, event.seq))

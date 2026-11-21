@@ -2089,6 +2089,11 @@ pub(crate) struct AnnouncementParts<'a> {
     pub(crate) known: Vec<String>,
 }
 
+/// One digest or memory point as an announcement line: one line, cut.
+pub(crate) fn announcement_point(text: &str) -> String {
+    item(text)
+}
+
 /// The Speaker's section of a people group's announcement: the committee,
 /// how to reach the Speaker, the seats, what waits on people, recent
 /// decisions. Built from the lines `/status` and the pinned cards use.
