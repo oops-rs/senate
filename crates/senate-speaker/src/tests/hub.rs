@@ -20,6 +20,7 @@ struct State {
     connected: HashSet<(CommitteeId, SenatorName)>,
     roster: Roster,
     children: Vec<senate_core::ChildSenate>,
+    aliases: senate_core::alias::CommitteeAliases,
     last_ts: Option<DateTime<Utc>>,
     gets: usize,
     reads: usize,
@@ -134,6 +135,7 @@ impl MemoryHub {
                 .map(|(senator, presence)| senate_core::ChildSeat {
                     committee: committee.clone(),
                     senator: senator.parse().expect("senator"),
+                    alias: None,
                     duty: None,
                     presence: *presence,
                 }),
@@ -161,6 +163,40 @@ impl MemoryHub {
             .find(|seat| seat.committee == *committee && seat.senator == senator)
             .expect("a declared seat")
             .duty = Some(duty.to_owned());
+    }
+
+    /// The alias the seat `senator` of `child` declares on `committee`.
+    pub(crate) fn declare_alias(
+        &self,
+        child: &str,
+        committee: &CommitteeId,
+        senator: &str,
+        alias: &str,
+    ) {
+        let senator: SenatorName = senator.parse().expect("senator");
+        let mut inner = self.lock();
+        inner
+            .children
+            .iter_mut()
+            .find(|c| c.name.as_str() == child)
+            .expect("a registered child Senate")
+            .seats
+            .iter_mut()
+            .find(|seat| seat.committee == *committee && seat.senator == senator)
+            .expect("a declared seat")
+            .alias = Some(alias.parse().expect("alias"));
+    }
+
+    /// Give the agent `primary` here the alias `alias` on `committee`.
+    pub(crate) fn set_alias(&self, committee: &CommitteeId, alias: &str, primary: &str) {
+        self.lock()
+            .aliases
+            .set(
+                committee,
+                alias.parse().expect("alias"),
+                primary.parse().expect("primary"),
+            )
+            .expect("a free alias");
     }
 
     /// When the child Senate `child` last declared its seats.
@@ -290,6 +326,10 @@ impl Hub for MemoryHub {
 
     async fn children(&self) -> Result<Vec<senate_core::ChildSenate>, HubError> {
         Ok(self.lock().children.clone())
+    }
+
+    async fn aliases(&self) -> Result<senate_core::alias::CommitteeAliases, HubError> {
+        Ok(self.lock().aliases.clone())
     }
 
     /// The agents connected on `committee`, in roster order: like the

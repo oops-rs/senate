@@ -116,6 +116,39 @@ async fn the_parent_reaches_alices_desk_and_hears_back_in_its_own_thread() {
         })
     })
     .await;
+    // A coding session of alice's joins below with an alias; the seat goes
+    // up with it, so the Senate above shows people the seat by its alias
+    // (`refund-dev（alice-desk）`) while a relay still names its id.
+    let codex = desk.codex_app_server();
+    codex.idle("refund-thread");
+    desk.codex_start_with_identity("refund-thread", true)
+        .await
+        .unwrap();
+    desk.wait_connected("codex-refund-thread", true).await;
+    let joined: senate_bridge::ipc::JoinReply = desk
+        .ipc(senate_bridge::ipc::Request::JoinAs {
+            session: Laptop::session("refund-thread"),
+            committee: refund(),
+            senator: path("refund-dev"),
+        })
+        .await;
+    assert_eq!(joined.alias, Some(path("refund-dev")));
+    eventually("the alias declared above with the seat", || {
+        world.daemon().hub.children().into_iter().find(|c| {
+            c.seats.iter().any(|s| {
+                s.senator == path("codex-refund-thread")
+                    && s.alias.as_ref() == Some(&path("refund-dev"))
+            })
+        })
+    })
+    .await;
+    let unaliased = world.daemon().hub.children()[0]
+        .seats
+        .iter()
+        .find(|s| s.senator == path("claude"))
+        .cloned()
+        .unwrap();
+    assert_eq!(unaliased.alias, None, "a seat with no alias declares none");
 
     // Bob asks the seat on alice's desk by its qualified name.
     let asked = speak(

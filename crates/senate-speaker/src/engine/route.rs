@@ -272,9 +272,14 @@ impl Engine {
                 Vec::new()
             }
         };
+        let l = self.locale(committee);
         let mut seats = Vec::new();
         for agent in agents.into_iter().filter(|a| *a != self.me) {
             seats.push(CommitteeSeat {
+                shown: self
+                    .aliases
+                    .alias_of(committee, &agent)
+                    .map(ToString::to_string),
                 target: agent.to_string(),
                 duty: duties.get(&agent).cloned(),
                 online: self.hub.is_agent_connected(committee, &agent).await,
@@ -286,6 +291,10 @@ impl Engine {
             for seat in child.seats.iter().filter(|s| s.committee == *committee) {
                 seats.push(CommitteeSeat {
                     target: format!("{}::{}", child.name, seat.senator),
+                    shown: seat
+                        .alias
+                        .as_ref()
+                        .map(|alias| crate::render::child_seat_name(l, alias, &child.name)),
                     duty: seat.duty.clone(),
                     online: child_online && seat.presence == PresenceState::Online,
                 });

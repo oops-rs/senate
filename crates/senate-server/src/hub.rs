@@ -1576,6 +1576,10 @@ impl Hub for ServerHub {
         Ok(ServerHub::children(self))
     }
 
+    async fn aliases(&self) -> Result<CommitteeAliases, HubError> {
+        Ok(ServerHub::aliases(self).await)
+    }
+
     /// This Senate's path from the root: the built-in session names a seat
     /// in a child Senate in full with it, so the trait's `None` must not
     /// stand here either.

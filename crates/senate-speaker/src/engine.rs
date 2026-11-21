@@ -1045,6 +1045,9 @@ pub(crate) struct Engine {
     me: SenatorName,
     /// The child Senates registered here, as the hub said last.
     children: Vec<senate_core::ChildSenate>,
+    /// Every committee's aliases here, as the hub said last: how people
+    /// are shown an agent.
+    aliases: senate_core::alias::CommitteeAliases,
     /// The configuration errors the Speaker was last told of (`None`: none
     /// outstanding).
     told_problems: Option<String>,
@@ -1115,6 +1118,7 @@ impl Engine {
             applied: None,
             me,
             children: Vec::new(),
+            aliases: Default::default(),
             told_problems: None,
         }
     }
@@ -1323,6 +1327,18 @@ impl Engine {
         match self.hub.children().await {
             Ok(children) => self.children = children,
             Err(error) => debug!(%error, "cannot read the child Senates; using the last list"),
+        }
+        match self.hub.aliases().await {
+            Ok(aliases) => self.aliases = aliases,
+            Err(error) => debug!(%error, "cannot read the aliases; using the last ones"),
+        }
+    }
+
+    /// How people are shown a seat, from what the hub said last.
+    fn seat_names(&self) -> render::SeatNames<'_> {
+        render::SeatNames {
+            aliases: &self.aliases,
+            children: &self.children,
         }
     }
 
@@ -2007,7 +2023,7 @@ impl Engine {
                     message_ref: mirror.message_ref.clone(),
                     in_thread: true,
                 },
-                text: render::relay_ack_for(l, event, &self.roster),
+                text: render::relay_ack_for(l, event, &self.roster, self.seat_names()),
                 target: group,
                 record_as: Some(mirror.message_ref),
                 card: None,
@@ -3121,7 +3137,7 @@ impl Engine {
             PendingAction::Relay { event } => {
                 let relayed = self.append_action((**event).clone(), strict).await?;
                 Ok(relayed
-                    .map(|event| render::relay_ack_for(l, &event, &self.roster))
+                    .map(|event| render::relay_ack_for(l, &event, &self.roster, self.seat_names()))
                     .unwrap_or_default())
             }
             PendingAction::Status { committee } => Ok(self.status_text(committee).await),

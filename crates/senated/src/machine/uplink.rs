@@ -457,6 +457,9 @@ impl Worker {
             .committees()
             .await
             .map_err(|e| Pass::Failed(format!("listing the committees here: {e}")))?;
+        let aliases = Hub::aliases(self.hub.as_ref())
+            .await
+            .map_err(|e| Pass::Failed(format!("reading the aliases here: {e}")))?;
         let mut seats = Vec::new();
         for committee in self.shared.iter().filter(|c| here.contains(c)) {
             let page =
@@ -467,6 +470,7 @@ impl Worker {
             seats.extend(page.agents.into_iter().map(|p| ChildSeat {
                 committee: committee.clone(),
                 duty: p.duty.or_else(|| duties.get(&p.agent).cloned()),
+                alias: aliases.alias_of(committee, &p.agent).cloned(),
                 senator: p.agent,
                 presence: p.state,
             }));

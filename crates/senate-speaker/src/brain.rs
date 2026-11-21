@@ -60,6 +60,10 @@ pub struct CommitteeSeat {
     /// How a relay names it: the agent's own name (`codex`) here, or
     /// `<child>::<senator>` for a child's seat.
     pub target: String,
+    /// How people are shown it, when it has an alias: the alias for an
+    /// agent here, `senate-dev（dark-conclave）` for a child's seat. Display
+    /// only; a relay names `target`.
+    pub shown: Option<String>,
     /// What it does on the committee ([`senate_core::duty`]), when set.
     pub duty: Option<String>,
     /// It can be reached now: the agent is connected here, or the child is

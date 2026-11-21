@@ -250,8 +250,11 @@ pub(crate) fn render_seats(seats: &[CommitteeSeat]) -> String {
                 .duty
                 .as_deref()
                 .map_or_else(|| "none set".to_owned(), |duty| cut(duty, 300));
+            let shown = seat.shown.as_deref().map_or_else(String::new, |shown| {
+                format!(" · shown to people as {shown}")
+            });
             format!(
-                "- {} · {} · duty: {duty}",
+                "- {}{shown} · {} · duty: {duty}",
                 seat.target,
                 if seat.online { "online" } else { "away" }
             )
@@ -261,8 +264,9 @@ pub(crate) fn render_seats(seats: &[CommitteeSeat]) -> String {
 }
 
 const SEATS_HEADING: &str = "Seats on this committee, written as a relay target (an agent of \
-     this Senate by its name; a seat in a child Senate as <child>::<senator>), with presence and \
-     duty:";
+     this Senate by its name; a seat in a child Senate as <child>::<senator>). Whenever you name \
+     a seat to people, write the name it is shown to people as, never its relay target or id; a \
+     relay still names the relay target. Each with presence and duty:";
 
 fn render_binding(committee: Option<&CommitteeId>) -> String {
     match committee {

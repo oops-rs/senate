@@ -176,6 +176,13 @@ pub trait Hub: Send + Sync + 'static {
         Ok(Vec::new())
     }
 
+    /// Every committee's aliases: how people are shown an agent. The
+    /// default is none: a hub that keeps aliases (the server) answers with
+    /// them.
+    async fn aliases(&self) -> Result<crate::alias::CommitteeAliases, HubError> {
+        Ok(Default::default())
+    }
+
     /// This Senate's path from the root, when the hub knows it. The
     /// default is `None`: a caller then takes the Senate a complete
     /// qualified name was resolved to as its own.

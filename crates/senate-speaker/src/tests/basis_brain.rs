@@ -1582,16 +1582,19 @@ fn seats() -> Vec<crate::CommitteeSeat> {
     vec![
         crate::CommitteeSeat {
             target: "codex".into(),
+            shown: None,
             duty: Some("owns the retry path".into()),
             online: true,
         },
         crate::CommitteeSeat {
             target: "dark-conclave::responder".into(),
+            shown: Some("senate-dev（dark-conclave）".into()),
             duty: Some(DEPLOY_DUTY.into()),
             online: true,
         },
         crate::CommitteeSeat {
             target: "dark-conclave::archivist".into(),
+            shown: None,
             duty: None,
             online: false,
         },
@@ -1606,7 +1609,12 @@ fn assert_seats_and_rule(fixture: &Fixture) {
     for needle in [
         "Seats on this committee, written as a relay target",
         "- codex · online · duty: owns the retry path",
-        &format!("- dark-conclave::responder · online · duty: {DEPLOY_DUTY}"),
+        &format!(
+            "- dark-conclave::responder · shown to people as senate-dev（dark-conclave） · \
+             online · duty: {DEPLOY_DUTY}"
+        ),
+        "Whenever you name a seat to people, write the name it is shown to people as, never its \
+         relay target or id",
         "- dark-conclave::archivist · away · duty: none set",
     ] {
         assert!(prompt.contains(needle), "{needle} in {prompt}");

@@ -390,6 +390,11 @@ impl ChildSenate {
 pub struct ChildSeat {
     pub committee: CommitteeId,
     pub senator: SenatorName,
+    /// The senator's alias on that committee in the child, when it has
+    /// one: how people are shown the seat. Display only; a relay still
+    /// names `senator`. A child from before aliases crossed sends none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<SenatorName>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duty: Option<String>,
     pub presence: PresenceState,
@@ -747,6 +752,25 @@ mod tests {
 
     fn path(s: &str) -> SenatorName {
         s.parse().unwrap()
+    }
+
+    #[test]
+    fn a_child_seat_alias_is_additive_on_the_wire() {
+        let old = json!({"committee": "refund-v2", "senator": "claude-1", "presence": "online"});
+        let seat: ChildSeat = serde_json::from_value(old.clone()).unwrap();
+        assert_eq!(seat.alias, None, "a child from before aliases sends none");
+        assert_eq!(
+            serde_json::to_value(&seat).unwrap(),
+            old,
+            "none is not sent"
+        );
+        let aliased = ChildSeat {
+            alias: Some(path("senate-dev")),
+            ..seat
+        };
+        let wire = serde_json::to_value(&aliased).unwrap();
+        assert_eq!(wire["alias"], "senate-dev");
+        assert_eq!(serde_json::from_value::<ChildSeat>(wire).unwrap(), aliased);
     }
 
     #[test]

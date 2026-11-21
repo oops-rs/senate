@@ -2300,3 +2300,72 @@ async fn several_seats_whose_duty_fits_are_not_routed() {
         Some("这件事 responder 和 operator 都负责，请直接问其中一位。")
     );
 }
+
+/// Thread 767: people are shown seats by alias, never by primary id. The
+/// seats the model sees carry the name people are shown (the alias here,
+/// `<alias>（<child>）` for a child's seat), the relay still names the
+/// target, and the acknowledgement in chat names the seat as shown.
+#[tokio::test]
+async fn seats_are_shown_to_people_by_alias() {
+    let hub = duty_hub(&[
+        ("responder", PresenceState::Online, Some(DEPLOY_DUTY)),
+        ("archivist", PresenceState::Absent, None),
+    ])
+    .await;
+    hub.declare_alias("dark-conclave", &refund(), "responder", "senate-dev");
+    hub.set_alias(&refund(), "retry-desk", "codex");
+    let rig = Rig::start(hub).await;
+    rig.brain.interprets(Ok(Intent::Relay {
+        targets: vec!["dark-conclave::responder".into()],
+        kind: RelayKind::Question,
+        body: "Commons 是怎么部署的？".into(),
+    }));
+    rig.append(mention("pm", "Commons 是怎么部署的？", "m_a1"))
+        .await;
+    rig.settle().await;
+
+    let utterances = rig.brain.utterances();
+    let shown: Vec<(String, Option<String>)> = utterances
+        .last()
+        .expect("interpreted")
+        .seats
+        .iter()
+        .map(|s| (s.target.clone(), s.shown.clone()))
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            ("codex".to_owned(), Some("retry-desk".to_owned())),
+            (
+                "dark-conclave::responder".to_owned(),
+                Some("senate-dev（dark-conclave）".to_owned())
+            ),
+            ("dark-conclave::archivist".to_owned(), None),
+        ]
+    );
+    let relay = last_relay(&rig);
+    assert_eq!(
+        intended(&relay).as_deref(),
+        Some("dark-conclave::refund-v2::senator::responder"),
+        "the relay still names the seat's id"
+    );
+    assert_eq!(
+        rig.surface.texts().last().map(String::as_str),
+        Some(format!("已转给 senate-dev（dark-conclave）（seq {}）", relay.seq).as_str())
+    );
+
+    rig.brain.interprets(Ok(Intent::Relay {
+        targets: vec!["codex".into()],
+        kind: RelayKind::Question,
+        body: "重试路径现在是怎么做的？".into(),
+    }));
+    rig.append(mention("pm", "重试路径现在是怎么做的？", "m_a2"))
+        .await;
+    rig.settle().await;
+    let relay = last_relay(&rig);
+    assert_eq!(relay.to, vec![Address::senator(&path("codex"))]);
+    assert_eq!(
+        rig.surface.texts().last().map(String::as_str),
+        Some(format!("已转给 [senator::retry-desk]（seq {}）", relay.seq).as_str())
+    );
+}

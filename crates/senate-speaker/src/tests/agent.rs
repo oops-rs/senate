@@ -1177,6 +1177,7 @@ async fn an_unaddressed_question_reaches_a_child_seat_by_duty_in_agent_mode() {
     assert_eq!(
         seats,
         &vec![crate::CommitteeSeat {
+            shown: None,
             target: "dark-conclave::responder".into(),
             duty: Some("部署和架构问题".into()),
             online: true,

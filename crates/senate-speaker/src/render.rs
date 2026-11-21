@@ -50,6 +50,50 @@ fn mentions(l: Locale, to: &[Address]) -> String {
     join(l, to.iter().map(Address::in_text))
 }
 
+/// A child Senate's seat as people are shown it: its alias there with the
+/// child's name, `senate-dev（dark-conclave）` / `senate-dev (dark-conclave)`.
+pub(crate) fn child_seat_name(l: Locale, alias: &SenatorName, child: &Name) -> String {
+    match l {
+        Locale::Zh => format!("{alias}（{child}）"),
+        Locale::En => format!("{alias} ({child})"),
+    }
+}
+
+/// What the Speaker knows of how people are shown a seat: the aliases
+/// here and the seats child Senates declare with theirs. A seat with no
+/// alias is shown by its id.
+#[derive(Clone, Copy)]
+pub(crate) struct SeatNames<'a> {
+    pub aliases: &'a senate_core::alias::CommitteeAliases,
+    pub children: &'a [senate_core::ChildSenate],
+}
+
+impl SeatNames<'_> {
+    /// An agent here as people are shown it on `committee`: its alias
+    /// there as a mention, else its id.
+    fn local(&self, committee: &CommitteeId, address: &Address) -> String {
+        address
+            .as_senator()
+            .and_then(|agent| self.aliases.alias_of(committee, agent))
+            .map_or_else(|| address.in_text(), senator)
+    }
+
+    /// A seat in a child Senate, when the child declares an alias for it.
+    fn child(&self, l: Locale, seat: &senate_core::Locator) -> Option<String> {
+        let child = seat.senate()?.name();
+        let committee = seat.committee()?;
+        let senator = seat.address().as_senator()?;
+        let declared = self
+            .children
+            .iter()
+            .find(|c| c.name == *child)?
+            .seats
+            .iter()
+            .find(|s| s.committee == *committee && s.senator == *senator)?;
+        Some(child_seat_name(l, declared.alias.as_ref()?, child))
+    }
+}
+
 /// A senator (person or agent) as a mention: `[senator::claude]`.
 fn senator(path: &SenatorName) -> String {
     Address::senator(path).in_text()
@@ -89,6 +133,7 @@ fn more(l: Locale, n: usize) -> String {
 
 /// `已转给 [senator::claude]（seq 120）` /
 /// `Passed to [senator::claude] (seq 120)`.
+#[cfg(test)]
 pub(crate) fn relay_ack(l: Locale, targets: &[Address], seq: Seq) -> String {
     relay_ack_to(l, &mentions(l, targets), seq)
 }
@@ -1065,10 +1110,25 @@ pub(crate) fn excerpt(text: &str) -> String {
 ///
 /// A relay meant for one seat in a child Senate names the seat, not the
 /// desk it goes through: `已转给 [north-desk::refund-v2::senator::codex]（seq 120）`.
-pub(crate) fn relay_ack_for(l: Locale, event: &Event, roster: &Roster) -> String {
+/// A seat with an alias is shown by it (`已转给 senate-dev（dark-conclave）`,
+/// `已转给 [senator::reviewer]`), never by its primary id.
+pub(crate) fn relay_ack_for(
+    l: Locale,
+    event: &Event,
+    roster: &Roster,
+    names: SeatNames<'_>,
+) -> String {
     let ack = match (event.to.as_slice(), senate_core::locator::intended(event)) {
-        ([Address::Child { .. }], Some(seat)) => relay_ack_to(l, &seat.in_text(), event.seq),
-        _ => relay_ack(l, &event.to, event.seq),
+        ([Address::Child { .. }], Some(seat)) => relay_ack_to(
+            l,
+            &names.child(l, &seat).unwrap_or_else(|| seat.in_text()),
+            event.seq,
+        ),
+        _ => relay_ack_to(
+            l,
+            &join(l, event.to.iter().map(|a| names.local(&event.committee, a))),
+            event.seq,
+        ),
     };
     let parked = TriagePayload::of(event).is_some_and(|t| t.verdict == TriageVerdict::NeedsHuman);
     let owner = event.to.iter().find_map(|a| {
@@ -1775,6 +1835,30 @@ pub(crate) fn crossing_refused(l: Locale, to: &senate_core::Locator, reason: &st
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// No aliases known: every seat is shown by its id.
+    fn no_names() -> SeatNames<'static> {
+        static NONE: std::sync::LazyLock<senate_core::alias::CommitteeAliases> =
+            std::sync::LazyLock::new(Default::default);
+        SeatNames {
+            aliases: &NONE,
+            children: &[],
+        }
+    }
+
+    #[test]
+    fn a_child_seat_is_shown_by_its_alias_and_child() {
+        let alias: SenatorName = "senate-dev".parse().unwrap();
+        let child = Name::new("dark-conclave").unwrap();
+        assert_eq!(
+            child_seat_name(Locale::Zh, &alias, &child),
+            "senate-dev（dark-conclave）"
+        );
+        assert_eq!(
+            child_seat_name(Locale::En, &alias, &child),
+            "senate-dev (dark-conclave)"
+        );
+    }
     use chrono::Utc;
     use senate_core::brief::{BriefDecision, BriefQuestion};
     use senate_core::{EventId, Principal, SeatedAgent, Step, TaskOwner, meta};
@@ -2260,11 +2344,11 @@ mod tests {
         )
         .expect("roster");
         assert_eq!(
-            relay_ack_for(Locale::Zh, &relay, &roster),
+            relay_ack_for(Locale::Zh, &relay, &roster, no_names()),
             "已转给 [senator::claude]（seq 120）。Speaker 判断这条需要 [senator::alice] 本人处理，已提醒 [senator::alice]"
         );
         assert_eq!(
-            relay_ack_for(Locale::En, &relay, &roster),
+            relay_ack_for(Locale::En, &relay, &roster, no_names()),
             "Passed to [senator::claude] (seq 120). The Speaker judged that this needs [senator::alice] in person and has let [senator::alice] know."
         );
     }
@@ -2533,7 +2617,7 @@ mod tests {
                 fallback_unavailable(l, &agent),
                 fallback_pending(l, &agent),
                 super::brief(l, &brief),
-                relay_ack_for(l, &question, &roster),
+                relay_ack_for(l, &question, &roster, no_names()),
                 triage_note(l, &triage),
                 triage_reason(l, &triage),
                 request_rule_reason(l),
