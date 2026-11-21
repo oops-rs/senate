@@ -466,6 +466,7 @@ async fn me(State(st): St, headers: HeaderMap) -> Response {
                 },
                 epoch: inner.epoch.clone(),
                 triaged: inner.triaged,
+                version: None,
             })
             .into_response()
         }

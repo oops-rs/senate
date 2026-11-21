@@ -378,6 +378,7 @@ async fn me(State(state): State<AppState>, person: Person) -> Result<Json<Me>, A
         person: person.0,
         committees,
         epoch: state.hub.epoch().await?,
+        version: Some(env!("CARGO_PKG_VERSION").to_owned()),
     }))
 }
 

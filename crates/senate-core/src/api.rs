@@ -651,6 +651,10 @@ pub struct Me {
     /// taken to judge, as every server once did.
     #[serde(default = "judged_by_default")]
     pub triaged: bool,
+    /// The version of Senate the server runs (`0.4.0`). Absent from a
+    /// server older than the field: its version is unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 impl Me {
@@ -866,6 +870,7 @@ mod tests {
             committees: vec![c()],
             epoch: "e1".into(),
             triaged: false,
+            version: Some("0.4.0".into()),
         };
         let value = serde_json::to_value(&me).unwrap();
         assert_eq!(value["senate"], "north-desk");
@@ -873,6 +878,7 @@ mod tests {
         assert_eq!(value["people"], json!(["wendell"]));
         assert_eq!(value["speaker"], json!({ "senator": "claude" }));
         assert_eq!(value["triaged"], false);
+        assert_eq!(value["version"], "0.4.0");
         assert_eq!(me.senate_path().to_string(), "/acme/north-desk");
         assert_eq!(old.senate_path().to_string(), "/senate");
         assert_eq!(serde_json::from_value::<Me>(value).unwrap(), me);
