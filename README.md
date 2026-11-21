@@ -529,6 +529,7 @@ The top level is the daily loop: `status` (a bare `senate` runs it), `inbox`
 | `senate session` | `list` · `watch` · `stop` · `restore` · `prune` |
 | `senate senator` | `list` · `alias` · `unalias` · `seat` · `unseat` · `duty` |
 | `senate secretary` | `list` · `appoint` · `dismiss` · `work list\|show\|create\|assign` |
+| `senate chat` | `send` · `thread` (simulated chat; see [Testing](#-testing--verification)) |
 | `senate setup` | `init` · `install` · `service install\|uninstall\|status` · `doctor` · `clean` |
 
 The names before this grouping (`sessions`, `watch`, `pin`, `install`, …) still
@@ -780,6 +781,51 @@ cargo test --workspace
 # Run integration tests against a live PostgreSQL database
 SENATE_TEST_DATABASE_URL="postgres://senate:senate@127.0.0.1:5432/senate" cargo test -p senate-log
 ```
+
+### Simulated Chat
+
+A chat flow can be a script instead of clicks in the chat platform. `senate
+chat send` injects a message into a group bound to a committee, as if you had
+written it there. It enters at the chat gateway, where the platform's messages
+enter, so the Speaker interprets it, relays it and answers it exactly as it
+would a real message. `senate chat thread` reads the conversation back,
+including what the Speaker posted.
+
+```sh
+# Ask through the Speaker; prints the message's ref (sim:…)
+ref=$(senate chat send --committee refund-v2 "ask bob's agent how long refunds take")
+
+# Wait for the Speaker's acknowledgement, then for the next thing it posts
+senate chat thread "$ref" --wait
+senate chat thread "$ref" --wait --since 2 --json | jq -r '.entries[-1].text'
+
+# Answer in the same thread (a confirmation, a correction)
+senate chat send --committee refund-v2 --in "$ref" "yes, record that"
+```
+
+- **Log only by default.** Whatever the Speaker posts for a simulated message
+  is recorded in the conversation and never reaches the platform. That
+  covers replies under it, its relay's task card in the Agent group, and
+  everything under those. With `--live`, the message is posted into the real
+  group, marked *(simulated)*, and the answers go there as well. The group
+  must actually be bound.
+- **Marked.** The `chat` event is from you, as a real message from you would
+  be, and its `source` is marked `simulated`. The Speaker carries a chat's
+  source onto the relay, task or decision it makes from it, so those are
+  marked too. Agents and `senate thread` see *(simulated)*, and the brief and
+  the "today" card leave simulated work out. What happens in the log is
+  real: a simulated `/bind` binds, and a simulated decision is recorded.
+- **Who may.** A person may simulate as themselves (their own token), and the
+  Speaker's office may simulate as any person (`--office --as alice`). The
+  server refuses a caller that is an agent (the command run inside a coding
+  session), and it never simulates a message from a guest: a person with no
+  account on the platform is refused.
+- `--group` names the bound group (default: the committee's only people
+  group). `--ambient` sends plain chat that does not mention the Speaker.
+  Conversations are held in the daemon's memory until `senated` restarts.
+
+End-to-end tests drive the same path in-process: see
+[`crates/senate-e2e/tests/chat_sim.rs`](crates/senate-e2e/tests/chat_sim.rs).
 
 ---
 
