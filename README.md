@@ -314,6 +314,23 @@ nvm install --lts && npm install -g @openai/codex
   Windows-only parts: `projects`, `hooks` and `[windows]` in Codex's config.
   Then run `senate setup install --yes`.
 
+- **Codex says "Reconnecting… waiting for network" while `curl` works.**
+  Codex resolves host names itself, not through the system's resolver, and
+  it gives up on a name when the DNS server answers the IPv6 (`AAAA`) query
+  with REFUSED instead of an empty answer. `curl` and Node ignore that
+  refusal and use the IPv4 address. Some company DNS servers do refuse
+  `AAAA`. To check, query the server in `/etc/resolv.conf` for `AAAA`
+  (`dig AAAA <gateway host>`) and look for `status: REFUSED`. The real fix
+  is on the DNS server: it should answer NOERROR with no records. Until
+  then, pin the gateway's IPv4 address in the distro's `/etc/hosts`, and
+  stop WSL from rewriting that file at boot:
+  ```sh
+  printf '[network]\ngenerateHosts=false\n' | sudo tee -a /etc/wsl.conf
+  echo "$(getent ahostsv4 <gateway host> | awk 'NR==1{print $1}') <gateway host>" | sudo tee -a /etc/hosts
+  ```
+  The pin goes stale if the gateway's address changes. Windows Codex is not
+  affected, since it uses Windows' resolver.
+
 Then set up Senate as in Mode 1. `senate setup init` and
 `senate setup service install` notice WSL, and print the steps below.
 
