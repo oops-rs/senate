@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use senate_core::{
-    Card, ChatSurface, CreatedGroup, Link, Locale, NewGroup, PostTarget, StatusState, Step,
-    SurfaceError,
+    AnnouncementSection, Card, ChatSurface, CreatedGroup, Link, Locale, NewGroup, PostTarget,
+    StatusState, Step, SurfaceError,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -24,7 +24,7 @@ use super::transport::{self, RemoteSurface};
 use crate::{Assembly, ChatGateway, SenatedConfig};
 
 const TOKEN: &str = "conformance-token";
-const EVERY_OP: [&str; 10] = [
+const EVERY_OP: [&str; 11] = [
     "post",
     "post_mentioning",
     "post_card",
@@ -33,6 +33,7 @@ const EVERY_OP: [&str; 10] = [
     "create_group",
     "invite",
     "rename_group",
+    "set_announcement",
     "adopt_group",
     "release_group",
 ];
@@ -81,16 +82,16 @@ async fn fake_adapter(path: &Path, capabilities: &[&str], calls: Calls) {
                 serial += 1;
                 let value = match op.as_str() {
                     "post" | "post_mentioning" | "post_card" => json!({
-                        "message_ref": format!("om_{serial}"),
+                        "message_ref": format!("m-{serial}"),
                         "thread_ref": null,
                         "duplicate": false,
                     }),
                     "create_group" => json!({
-                        "group_id": format!("oc_{serial}"),
+                        "group_id": format!("g-{serial}"),
                         "not_added": args["group"]["invite"].as_array().unwrap()
-                            .iter().filter(|u| *u == "u_stranger").collect::<Vec<_>>(),
+                            .iter().filter(|u| *u == "u-stranger").collect::<Vec<_>>(),
                     }),
-                    "adopt_group" => json!({"group_id":"oc_bound","already_granted":false}),
+                    "adopt_group" => json!({"group_id":"g-bound","already_granted":false}),
                     "release_group" => json!(true),
                     "rename_group" if args["name"] == "" => {
                         let error = json!({"kind":"rejected","detail":"empty name"});
@@ -222,10 +223,10 @@ async fn an_adapter_with_every_op_serves_every_surface_method() {
     let served = serve(&EVERY_OP).await;
     let surface = &served.surface;
     let root = PostTarget::NewRoot {
-        group_id: "oc_agents".into(),
+        group_id: "g-agents".into(),
     };
     let reply = PostTarget::Reply {
-        message_ref: "om_ask".into(),
+        message_ref: "m-ask".into(),
         in_thread: true,
     };
 
@@ -238,20 +239,20 @@ async fn an_adapter_with_every_op_serves_every_surface_method() {
         served.last(),
         (
             "post".into(),
-            json!({"target":{"kind":"new_root","group_id":"oc_agents"},"markdown":"hello","operation_id":"op-post"})
+            json!({"target":{"kind":"new_root","group_id":"g-agents"},"markdown":"hello","operation_id":"op-post"})
         )
     );
 
     let mentioned = surface
-        .post_mentioning(reply.clone(), "your turn", "u_alice", "op-mention")
+        .post_mentioning(reply.clone(), "your turn", "u-alice", "op-mention")
         .await
         .unwrap();
-    assert!(mentioned.message_ref.starts_with("om_"));
+    assert!(mentioned.message_ref.starts_with("m-"));
     assert_eq!(
         served.last(),
         (
             "post_mentioning".into(),
-            json!({"target":{"kind":"reply","message_ref":"om_ask","in_thread":true},"markdown":"your turn","user":"u_alice","operation_id":"op-mention"})
+            json!({"target":{"kind":"reply","message_ref":"m-ask","in_thread":true},"markdown":"your turn","user":"u-alice","operation_id":"op-mention"})
         )
     );
 
@@ -268,7 +269,7 @@ async fn an_adapter_with_every_op_serves_every_surface_method() {
         served.last(),
         (
             "post_card".into(),
-            json!({"target":{"kind":"new_root","group_id":"oc_agents"},"card":wire_card,"operation_id":"op-card"})
+            json!({"target":{"kind":"new_root","group_id":"g-agents"},"card":wire_card,"operation_id":"op-card"})
         )
     );
 
@@ -295,27 +296,27 @@ async fn an_adapter_with_every_op_serves_every_surface_method() {
 
     let group = NewGroup {
         name: "refund · agents".into(),
-        invite: vec!["u_alice".into(), "u_stranger".into()],
+        invite: vec!["u-alice".into(), "u-stranger".into()],
     };
     let created = surface.create_group(&group, "op-create").await.unwrap();
-    assert_eq!(created.not_added, vec!["u_stranger".to_owned()]);
+    assert_eq!(created.not_added, vec!["u-stranger".to_owned()]);
     assert_eq!(
         served.last(),
         (
             "create_group".into(),
-            json!({"group":{"name":"refund · agents","invite":["u_alice","u_stranger"]},"operation_id":"op-create"})
+            json!({"group":{"name":"refund · agents","invite":["u-alice","u-stranger"]},"operation_id":"op-create"})
         )
     );
 
     surface
-        .invite(&created.group_id, &["u_bob".into()], "op-invite")
+        .invite(&created.group_id, &["u-bob".into()], "op-invite")
         .await
         .unwrap();
     assert_eq!(
         served.last(),
         (
             "invite".into(),
-            json!({"group_id":created.group_id,"users":["u_bob"],"operation_id":"op-invite"})
+            json!({"group_id":created.group_id,"users":["u-bob"],"operation_id":"op-invite"})
         )
     );
 
@@ -331,16 +332,32 @@ async fn an_adapter_with_every_op_serves_every_surface_method() {
         )
     );
 
-    let adopted = surface.adopt_group("om_bind").await.unwrap();
-    assert_eq!(adopted.group_id, "oc_bound");
+    let section = AnnouncementSection {
+        title: "Committee refund".into(),
+        markdown: "**Seats**\n- senate-dev (dark-conclave) online".into(),
+    };
+    surface
+        .set_announcement("g-people", &section, "op-announce")
+        .await
+        .unwrap();
     assert_eq!(
         served.last(),
-        ("adopt_group".into(), json!({"message_ref":"om_bind"}))
+        (
+            "set_announcement".into(),
+            json!({"group_id":"g-people","section":{"title":"Committee refund","markdown":"**Seats**\n- senate-dev (dark-conclave) online"},"operation_id":"op-announce"})
+        )
     );
-    assert!(surface.release_group("oc_bound").await.unwrap());
+
+    let adopted = surface.adopt_group("m-bind").await.unwrap();
+    assert_eq!(adopted.group_id, "g-bound");
     assert_eq!(
         served.last(),
-        ("release_group".into(), json!({"group_id":"oc_bound"}))
+        ("adopt_group".into(), json!({"message_ref":"m-bind"}))
+    );
+    assert!(surface.release_group("g-bound").await.unwrap());
+    assert_eq!(
+        served.last(),
+        ("release_group".into(), json!({"group_id":"g-bound"}))
     );
 
     // A retry with the same operation_id is the same operation.
@@ -363,10 +380,10 @@ async fn an_adapter_from_before_the_new_ops_keeps_working() {
     let served = serve(&["post", "adopt_group", "release_group"]).await;
     let surface = &served.surface;
     let root = PostTarget::NewRoot {
-        group_id: "oc_bound".into(),
+        group_id: "g-bound".into(),
     };
     let reply = PostTarget::Reply {
-        message_ref: "om_ask".into(),
+        message_ref: "m-ask".into(),
         in_thread: false,
     };
     surface
@@ -374,10 +391,10 @@ async fn an_adapter_from_before_the_new_ops_keeps_working() {
         .await
         .unwrap();
     assert_eq!(
-        surface.adopt_group("om_bind").await.unwrap().group_id,
-        "oc_bound"
+        surface.adopt_group("m-bind").await.unwrap().group_id,
+        "g-bound"
     );
-    assert!(surface.release_group("oc_bound").await.unwrap());
+    assert!(surface.release_group("g-bound").await.unwrap());
     let before = served.calls.lock().unwrap().len();
 
     let unsupported = |result: Result<(), SurfaceError>| {
@@ -385,20 +402,25 @@ async fn an_adapter_from_before_the_new_ops_keeps_working() {
     };
     unsupported(
         surface
-            .post_mentioning(reply, "hi", "u_alice", "a")
+            .post_mentioning(reply, "hi", "u-alice", "a")
             .await
             .map(drop),
     );
     unsupported(surface.post_card(root, &card(), "b").await.map(drop));
-    unsupported(surface.update_card("om_1", &card(), "c").await);
-    unsupported(surface.pin("om_1", "d").await);
+    unsupported(surface.update_card("m-1", &card(), "c").await);
+    unsupported(surface.pin("m-1", "d").await);
     let group = NewGroup {
         name: "agents".into(),
         invite: vec![],
     };
     unsupported(surface.create_group(&group, "e").await.map(drop));
-    unsupported(surface.invite("oc_bound", &["u_bob".into()], "f").await);
-    unsupported(surface.rename_group("oc_bound", "archived", "g").await);
+    unsupported(surface.invite("g-bound", &["u-bob".into()], "f").await);
+    unsupported(surface.rename_group("g-bound", "archived", "g").await);
+    let section = AnnouncementSection {
+        title: "Committee refund".into(),
+        markdown: String::new(),
+    };
+    unsupported(surface.set_announcement("g-bound", &section, "h").await);
     assert_eq!(
         served.calls.lock().unwrap().len(),
         before,

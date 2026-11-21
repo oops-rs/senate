@@ -99,6 +99,16 @@ impl CreatedGroup {
     }
 }
 
+/// The Speaker's own section of a group's announcement: a title and its
+/// markdown, in the committee's language. A surface keeps it apart from the
+/// rest of the announcement (how is the surface's own business), so setting
+/// it never touches what people wrote there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnnouncementSection {
+    pub title: String,
+    pub markdown: String,
+}
+
 /// A group the surface was granted at runtime by
 /// [`adopt_group`](ChatSurface::adopt_group).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -200,6 +210,19 @@ pub trait ChatSurface: Send + Sync + 'static {
         unsupported("renames")
     }
 
+    /// Replace the Speaker's section of `group_id`'s announcement with
+    /// `section`, adding it if the announcement has none. The rest of the
+    /// announcement is left as it is. `Unsupported` when the platform has no
+    /// announcements or the bot may not edit this group's.
+    async fn set_announcement(
+        &self,
+        _group_id: &str,
+        _section: &AnnouncementSection,
+        _operation_id: &str,
+    ) -> Result<(), SurfaceError> {
+        unsupported("announcements")
+    }
+
     /// Ask the platform for the full use of an existing group (unmentioned
     /// chat, proactive posts) because a person bound it. The group is named
     /// by `message_ref`, a message the platform delivered from it; it keeps
@@ -290,6 +313,14 @@ mod tests {
         ));
         assert!(matches!(
             surface.post_mentioning(target, "hi", "u_1", "op3").await,
+            Err(SurfaceError::Unsupported(_))
+        ));
+        let section = AnnouncementSection {
+            title: "t".into(),
+            markdown: String::new(),
+        };
+        assert!(matches!(
+            surface.set_announcement("backend", &section, "op4").await,
             Err(SurfaceError::Unsupported(_))
         ));
         assert!(matches!(

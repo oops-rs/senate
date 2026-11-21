@@ -6,6 +6,18 @@ Senate owns identity, group bindings, the committee log and addressing. The adap
 
 You can write an adapter from this document alone. `crates/senated/src/gateway_ipc/conformance.rs` is an example adapter and the test that holds `senated` to this document.
 
+## Platform neutrality
+
+Every frame and operation here is platform-neutral. None is shaped after any one chat platform, and none couples Senate to a particular adapter or downstream project. Senate speaks only in:
+
+- opaque handles: `group_id`, `message_ref` and `thread_ref`, which are whatever strings the adapter chooses and are never parsed,
+- platform user ids, as the roster records people's accounts,
+- markdown, a `card` and an announcement `section` (`title` and `markdown`),
+- `operation_id`, for idempotency,
+- the error kinds `rejected`, `unavailable` and `unsupported`.
+
+Platform document models, block structures, revision numbers, platform id formats and platform error classes stay inside the adapter. Mapping onto the platform is the adapter's job. Where a platform can't do something, the adapter answers `unsupported`, and the Speaker falls back. A proposed new operation must be expressible in these terms. The ids in this document's examples (`g-refund`, `m-card`, `u-alice`) are placeholders, not any platform's format.
+
 ## Configuration
 
 ```toml
@@ -36,7 +48,7 @@ Each frame is one UTF-8 JSON object followed by LF (`\n`). A frame is at most 1 
 ## Handshake
 
 ```json
-{"type":"hello","version":1,"platform":"chat","token":"<gateway credential>","capabilities":["post","post_mentioning","post_card","update_card","pin","create_group","invite","rename_group","adopt_group","release_group"]}
+{"type":"hello","version":1,"platform":"chat","token":"<gateway credential>","capabilities":["post","post_mentioning","post_card","update_card","pin","create_group","invite","rename_group","set_announcement","adopt_group","release_group"]}
 {"type":"ready","version":1}
 ```
 
@@ -66,7 +78,7 @@ To change the advertised ops, stop the old adapter, restart `senated`, then star
 ## Platform messages (`inbound` / `ack`)
 
 ```json
-{"type":"inbound","id":"i1","message":{"group_id":"oc_group","group_name":"Refund","sender":"ou_alice","message_ref":"om_bind","thread_ref":null,"thread_root":null,"reply_to":null,"addressing":"mention","mentions":[],"text":"/bind refund-v2"}}
+{"type":"inbound","id":"i1","message":{"group_id":"g-refund","group_name":"Refund","sender":"u-alice","message_ref":"m-bind","thread_ref":null,"thread_root":null,"reply_to":null,"addressing":"mention","mentions":[],"text":"/bind refund-v2"}}
 {"type":"ack","id":"i1"}
 ```
 
@@ -97,8 +109,8 @@ Redelivery is safe. Ordinary bound messages are deduplicated by platform, commit
 ## Operations (`call` / `result`)
 
 ```json
-{"type":"call","id":"s1","op":"post","args":{"target":{"kind":"reply","message_ref":"om_bind","in_thread":true},"markdown":"Bound.","operation_id":"0b6c…"}}
-{"type":"result","id":"s1","value":{"message_ref":"om_post","thread_ref":"omt_thread","duplicate":false}}
+{"type":"call","id":"s1","op":"post","args":{"target":{"kind":"reply","message_ref":"m-bind","in_thread":true},"markdown":"Bound.","operation_id":"0b6c…"}}
+{"type":"result","id":"s1","value":{"message_ref":"m-post","thread_ref":"t-1","duplicate":false}}
 {"type":"result","id":"s2","error":{"kind":"unavailable","detail":"platform unavailable"}}
 ```
 
@@ -111,8 +123,8 @@ Up to 32 calls may be outstanding at once, and the adapter may answer them in an
 **target**: where a post goes.
 
 ```json
-{"kind":"new_root","group_id":"oc_group"}
-{"kind":"reply","message_ref":"om_123","in_thread":true}
+{"kind":"new_root","group_id":"g-refund"}
+{"kind":"reply","message_ref":"m-123","in_thread":true}
 ```
 
 `new_root` is a new root message in a group. `reply` replies to a message. With `in_thread: true` the reply goes inside the message's thread, and the adapter opens a thread if the message has none.
@@ -120,7 +132,7 @@ Up to 32 calls may be outstanding at once, and the adapter may answer them in an
 **posted**: what a post returns.
 
 ```json
-{"message_ref":"om_post","thread_ref":"omt_thread","duplicate":false}
+{"message_ref":"m-post","thread_ref":"t-1","duplicate":false}
 ```
 
 `thread_ref` is the thread the post is in, or null. `duplicate` is true when the platform or adapter had already carried out this `operation_id`. In that case `message_ref` and `thread_ref` are the original post's. `thread_ref` may be left out.
@@ -153,6 +165,7 @@ Platform user ids (`user`, `users`, `invite`, `not_added`) are the people's acco
 | `create_group` | `group: {"name", "invite": [user ids]}`, `operation_id` | `{"group_id", "not_added": [user ids]}` |
 | `invite` | `group_id`, `users: [user ids]`, `operation_id` | null |
 | `rename_group` | `group_id`, `name`, `operation_id` | null |
+| `set_announcement` | `group_id`, `section: {"title", "markdown"}`, `operation_id` | null |
 | `adopt_group` | `message_ref` | `{"group_id", "already_granted": bool}` |
 | `release_group` | `group_id` | bool |
 
@@ -164,22 +177,25 @@ Platform user ids (`user`, `users`, `invite`, `not_added`) are the people's acco
 - **create_group**: create a group named `name`, with the bot as owner, and invite `invite`. `group_id` is the new group's stable id, the same id its messages will carry in `inbound`. Invitees the platform didn't add go in `not_added` (for example, the app lacks permission to add members or doesn't know the id). That isn't an error, because the group exists anyway. `not_added` may be left out when it's empty.
 - **invite**: add `users` to `group_id`. Users who are already members are not an error.
 - **rename_group**: rename `group_id` to `name`. Senate does this to mark a group archived, for example.
+- **set_announcement**: replace the Speaker's own section of `group_id`'s announcement (its standing notice) with `section`, adding the section if the announcement has none. Leave the rest of the announcement exactly as it is. How the adapter marks off the Speaker's section, and how the platform stores an announcement, is up to the adapter. If the platform has no announcements, or the bot may not edit this group's, answer `unsupported`. The Speaker then says so once in the group and stops trying until the group is bound again or `senated` restarts. The Speaker sets announcements only in groups bound for people, never in the Agent group, and at most once an hour per group, when the content changed.
 - **adopt_group**: ask the platform for full use of an existing group (unmentioned chat, proactive posts) because a person bound it. The group is identified by `message_ref`, a message the adapter delivered from it. Return the group's unchanged `group_id`, and set `already_granted` if the adapter already had the grant. Adopting twice is not an error.
 - **release_group**: give back what `adopt_group` or `create_group` was granted, once the group is bound to nothing. Return whether a grant was removed. Releasing a group without a grant returns `false` and is not an error.
 
 ```json
-{"type":"call","id":"s3","op":"post_card","args":{"target":{"kind":"new_root","group_id":"oc_agents"},"card":{"title":"Refund retries","state":"processing","markdown":"asked by **alice**","steps":[],"links":[]},"operation_id":"7f1e…"}}
-{"type":"result","id":"s3","value":{"message_ref":"om_card","thread_ref":null,"duplicate":false}}
-{"type":"call","id":"s4","op":"create_group","args":{"group":{"name":"refund · agents","invite":["ou_alice","ou_bob"]},"operation_id":"c2d9…"}}
-{"type":"result","id":"s4","value":{"group_id":"oc_agents","not_added":["ou_bob"]}}
-{"type":"call","id":"s5","op":"pin","args":{"message_ref":"om_card","operation_id":"9a40…"}}
+{"type":"call","id":"s3","op":"post_card","args":{"target":{"kind":"new_root","group_id":"g-agents"},"card":{"title":"Refund retries","state":"processing","markdown":"asked by **alice**","steps":[],"links":[]},"operation_id":"7f1e…"}}
+{"type":"result","id":"s3","value":{"message_ref":"m-card","thread_ref":null,"duplicate":false}}
+{"type":"call","id":"s4","op":"create_group","args":{"group":{"name":"refund · agents","invite":["u-alice","u-bob"]},"operation_id":"c2d9…"}}
+{"type":"result","id":"s4","value":{"group_id":"g-agents","not_added":["u-bob"]}}
+{"type":"call","id":"s5","op":"pin","args":{"message_ref":"m-card","operation_id":"9a40…"}}
 {"type":"result","id":"s5","value":null}
+{"type":"call","id":"s6","op":"set_announcement","args":{"group_id":"g-refund","section":{"title":"Committee refund","markdown":"**Seats**\n- senate-dev (dark-conclave) online · duty: Senate development"},"operation_id":"5e21…"}}
+{"type":"result","id":"s6","value":null}
 ```
 
 ## Errors
 
 ```json
-{"type":"result","id":"s6","error":{"kind":"rejected","detail":"bot is not in the group"}}
+{"type":"result","id":"s7","error":{"kind":"rejected","detail":"bot is not in the group"}}
 ```
 
 `kind` maps one-to-one onto `senate_core::SurfaceError`. `detail` is free text for logs.
@@ -200,7 +216,7 @@ A lost reply, a timeout or a dropped connection leaves the outcome unknown. Sena
 
 - `post`, `post_mentioning`, `post_card`: don't post again. Return the original `message_ref` and `thread_ref` with `duplicate: true`.
 - `create_group`: don't create a second group. Return the original `group_id` and `not_added`.
-- `update_card`, `pin`, `invite`, `rename_group`: succeed without repeating a visible side effect, or repeat one that is harmless and already idempotent. Re-applying the same card content, pinning a pinned message, inviting members, or setting the same name all count.
+- `update_card`, `pin`, `invite`, `rename_group`, `set_announcement`: succeed without repeating a visible side effect, or repeat one that is harmless and already idempotent. Re-applying the same card content, pinning a pinned message, inviting members, setting the same name, or setting the same announcement section all count.
 
 Keep the `operation_id` table durable, because a retry can arrive after the adapter or `senated` restarts. Pass the `operation_id` through as the platform's own idempotency key where the platform has one. Otherwise record it in the adapter's store.
 
@@ -212,6 +228,7 @@ The `version` in `hello` and `ready` changes only when a frame changes. A new op
 |---|---|---|
 | initial | 1 | frames; ops `post`, `adopt_group`, `release_group` |
 | full surface | 1 | ops `post_mentioning`, `post_card`, `update_card`, `pin`, `create_group`, `invite`, `rename_group` |
+| announcements | 1 | op `set_announcement` |
 
 ## Acceptance
 

@@ -138,8 +138,8 @@ pub use senate::{KEYWORDS, KeywordError, SenatePath, SenatePathError, check_not_
 pub use senator::{SenatorName, SenatorNameError};
 pub use senator_id::{SenatorId, SenatorIdParseError};
 pub use surface::{
-    AdoptedGroup, Card, ChatSurface, CreatedGroup, NewGroup, PostTarget, Posted, SurfaceError,
-    UnboundMention,
+    AdoptedGroup, AnnouncementSection, Card, ChatSurface, CreatedGroup, NewGroup, PostTarget,
+    Posted, SurfaceError, UnboundMention,
 };
 pub use task::{
     Attention, Directed, Escalation, Link, OutputLevel, PersonWait, StatusPayload, Step, TaskBoard,

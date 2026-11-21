@@ -16,7 +16,8 @@ use std::time::Duration;
 use anyhow::{Result, anyhow, bail, ensure};
 use async_trait::async_trait;
 use senate_core::{
-    AdoptedGroup, Card, ChatSurface, CreatedGroup, NewGroup, PostTarget, Posted, SurfaceError,
+    AdoptedGroup, AnnouncementSection, Card, ChatSurface, CreatedGroup, NewGroup, PostTarget,
+    Posted, SurfaceError,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -249,6 +250,19 @@ impl ChatSurface for RemoteSurface {
         self.call(
             "rename_group",
             json!({"group_id":group_id,"name":name,"operation_id":operation_id}),
+        )
+        .await
+    }
+
+    async fn set_announcement(
+        &self,
+        group_id: &str,
+        section: &AnnouncementSection,
+        operation_id: &str,
+    ) -> Result<(), SurfaceError> {
+        self.call(
+            "set_announcement",
+            json!({"group_id":group_id,"section":section,"operation_id":operation_id}),
         )
         .await
     }

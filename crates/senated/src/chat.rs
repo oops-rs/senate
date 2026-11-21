@@ -76,10 +76,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use senate_core::{
-    Address, AdoptedGroup, BindingAction, BindingPayload, Card, ChatSurface, CommitteeId,
-    CreatedGroup, Event, EventId, Guest, Hub, HubError, Kind, Mirror, NewEvent, NewGroup,
-    PostTarget, Posted, Roster, Seq, Source, SurfaceError, UnboundMention, is_provisional, meta,
-    thread_participants,
+    Address, AdoptedGroup, AnnouncementSection, BindingAction, BindingPayload, Card, ChatSurface,
+    CommitteeId, CreatedGroup, Event, EventId, Guest, Hub, HubError, Kind, Mirror, NewEvent,
+    NewGroup, PostTarget, Posted, Roster, Seq, Source, SurfaceError, UnboundMention,
+    is_provisional, meta, thread_participants,
 };
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, mpsc, watch};
@@ -995,6 +995,18 @@ impl ChatSurface for RecordingSurface {
         self.inner
             .surface
             .rename_group(group_id, name, operation_id)
+            .await
+    }
+
+    async fn set_announcement(
+        &self,
+        group_id: &str,
+        section: &AnnouncementSection,
+        operation_id: &str,
+    ) -> Result<(), SurfaceError> {
+        self.inner
+            .surface
+            .set_announcement(group_id, section, operation_id)
             .await
     }
 
