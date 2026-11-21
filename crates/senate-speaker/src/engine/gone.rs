@@ -11,14 +11,15 @@
 //! decides whether to ask again.
 //!
 //! The same test tells the Brain which earlier relays in its context went
-//! to a seat that is gone, so a message sent again is not taken for a
-//! duplicate of one of them.
+//! to a seat that is gone ([`Utterance::gone_relays`](crate::Utterance)),
+//! so a message sent again is not taken for a duplicate of one of them.
 
 use senate_core::{Locator, brief::BriefQuestion};
 
 use super::desk::DeskTurn;
 use super::{
-    Address, CommitteeId, Engine, Kind, NewEvent, Stall, debug, derived_event_id, json, meta,
+    Address, CommitteeId, Engine, Event, Kind, NewEvent, Seq, Stall, debug, derived_event_id, json,
+    meta,
 };
 
 impl Engine {
@@ -67,6 +68,22 @@ impl Engine {
             gone.get_or_insert(seat);
         }
         gone
+    }
+
+    /// The seqs of `context`'s relays put to a seat that is gone
+    /// ([`Self::gone_seat`]), for the Brain: a message sent again is not a
+    /// duplicate of one of them.
+    pub(super) fn gone_relays(&self, context: &[Event]) -> Vec<Seq> {
+        context
+            .iter()
+            .filter(|e| matches!(e.kind, Kind::Question | Kind::Request | Kind::Note))
+            .filter(|e| {
+                let intended = senate_core::locator::intended(e);
+                self.gone_seat(&e.committee, &e.to, intended.as_ref())
+                    .is_some()
+            })
+            .map(|e| e.seq)
+            .collect()
     }
 
     /// Close every open question on `committee` whose seat is gone: one

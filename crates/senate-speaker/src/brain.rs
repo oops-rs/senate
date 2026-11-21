@@ -54,6 +54,10 @@ pub struct Utterance {
     /// This Senate does coding work itself (`[speaker.work]` and a runner
     /// are configured): the `work` action is offered.
     pub work: bool,
+    /// The seqs of relays in `context` put to a seat that is gone since
+    /// (unseated, or no longer declared by its child Senate): a message
+    /// sent again is not a duplicate of one of them.
+    pub gone_relays: Vec<Seq>,
 }
 
 /// One seat on the acting committee, as a relay can reach it: an agent of

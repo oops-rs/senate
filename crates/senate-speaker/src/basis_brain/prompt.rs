@@ -85,7 +85,10 @@ macro_rules! duty_rule {
          Senate sees only its own Senate, so it cannot answer for this one. For example, \
          「@Speaker 现在有哪些 agent，他们的职责是什么」 (\"@Speaker which agents are here and \
          what are their duties?\") is answered by you from the seats on this committee, never \
-         relayed to a seat whose duty mentions committees."
+         relayed to a seat whose duty mentions committees.\n\
+         - An earlier relay in the log is not a reason to skip a message sent again when that \
+         relay is marked as put to a seat that is gone: that seat is no longer on this \
+         committee, nothing will answer there, and the message is routed as if new."
     };
 }
 
@@ -195,12 +198,29 @@ pub(crate) fn render_event(event: &Event) -> String {
 }
 
 fn render_context(events: &[Event]) -> String {
+    render_context_gone(events, &[])
+}
+
+/// What marks a relay in the context put to a seat that is gone.
+const GONE_MARK: &str = "  [put to a seat that is gone: no longer on this committee, nothing will \
+     answer there; not a duplicate of a message sent again]";
+
+/// [`render_context`], each relay in `gone` marked as put to a seat that is
+/// gone since.
+fn render_context_gone(events: &[Event], gone: &[Seq]) -> String {
     if events.is_empty() {
         return "(none)".to_owned();
     }
     events
         .iter()
-        .map(render_event)
+        .map(|event| {
+            let line = render_event(event);
+            if gone.contains(&event.seq) {
+                format!("{line}\n{GONE_MARK}")
+            } else {
+                line
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -301,7 +321,7 @@ pub(crate) fn interpret(utterance: &Utterance) -> String {
         binding = render_binding(utterance.committee.as_ref()),
         roster = render_roster(&utterance.roster),
         seats = render_seats(&utterance.seats),
-        context = render_context(&utterance.context),
+        context = render_context_gone(&utterance.context, &utterance.gone_relays),
     )
 }
 
@@ -810,7 +830,7 @@ pub(crate) fn converse(conversation: &Conversation, max_actions: usize) -> Strin
         binding = render_binding(utterance.committee.as_ref()),
         roster = render_roster(&utterance.roster),
         seats = render_seats(&utterance.seats),
-        context = render_context(&utterance.context),
+        context = render_context_gone(&utterance.context, &utterance.gone_relays),
     )
 }
 
@@ -1586,6 +1606,7 @@ mod tests {
             "kind request for a change or a task to carry out",
             "Route only questions and change requests by duty",
             "A question about this Senate's own state is yours to answer",
+            "marked as put to a seat that is gone",
         ] {
             assert!(text.contains(rule), "{rule}");
         }

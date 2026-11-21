@@ -2600,12 +2600,14 @@ impl Engine {
             None => match parse_command(&chat.body, l) {
                 Some(parsed) => command_decision(parsed),
                 None => {
+                    let context = self.context(&chat.committee, chat.seq).await?;
                     let utterance = Utterance {
                         text: chat.body.clone(),
                         speaker: chat.from.clone(),
                         committee: Some(chat.committee.clone()),
                         group,
-                        context: self.context(&chat.committee, chat.seq).await?,
+                        gone_relays: self.gone_relays(&context),
+                        context,
                         roster: self.roster.clone(),
                         seats: self.committee_seats(&chat.committee).await,
                         locale: l,
@@ -3368,6 +3370,7 @@ impl Engine {
                     locale: l,
                     // Work needs a bound committee.
                     work: false,
+                    gone_relays: Vec::new(),
                 };
                 if self.mode == SpeakerMode::Agent {
                     self.start_unbound_conversation(mention, utterance);

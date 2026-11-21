@@ -167,3 +167,23 @@ async fn a_question_to_an_unseated_agent_closes_with_a_note_to_the_asker() {
     assert!(open.contains(&to_pm), "a question to a person stays open");
     rig.stop().await;
 }
+
+/// Item 9: a message sent again after the seat it first went to is gone is
+/// not a duplicate: the Brain is told which relays in its context went to
+/// a seat that is gone.
+#[tokio::test]
+async fn the_brain_is_told_which_earlier_relays_went_to_a_seat_that_is_gone() {
+    let (rig, question) = relayed_to_a_child_seat().await;
+    rig.hub.declare_seats("wyak", &refund(), &[]);
+    rig.brain.interprets(Ok(crate::Intent::None {
+        reply: String::new(),
+    }));
+    rig.append(mention("pm", "Commons 怎么部署？", "again"))
+        .await;
+    rig.settle().await;
+    let utterances = rig.brain.utterances();
+    let said = utterances.last().unwrap();
+    assert!(said.context.iter().any(|e| e.seq == question));
+    assert_eq!(said.gone_relays, vec![question]);
+    rig.stop().await;
+}

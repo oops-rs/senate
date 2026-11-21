@@ -232,6 +232,7 @@ fn utterance(fixture: &Fixture, text: &str) -> Utterance {
         seats: Vec::new(),
         locale: Locale::Zh,
         work: true,
+        gone_relays: Vec::new(),
     }
 }
 
@@ -1382,6 +1383,7 @@ async fn live_interpret_understands_a_relay() {
             seats: Vec::new(),
             locale: Locale::Zh,
             work: false,
+            gone_relays: Vec::new(),
         })
         .await
         .expect("the live model answers");
@@ -1753,6 +1755,46 @@ async fn interpret_shows_the_seats_and_their_duties_and_relays_by_duty() {
         }
     );
     assert_seats_and_rule(&fixture);
+}
+
+/// Thread 797 item 9: a relay in the context put to a seat that is gone is
+/// marked so, and only that one, in both modes; the system prompt says
+/// such a relay is no reason to skip a message sent again.
+#[tokio::test]
+async fn relays_to_a_gone_seat_are_marked_in_the_context() {
+    const MARK: &str = "[put to a seat that is gone";
+    let fixture = fixture(vec![
+        Round::Answer(json!({ "action": "none", "reply": "" })),
+        Round::Answer(json!({ "reply": "", "actions": [], "awaiting_reply": false })),
+    ])
+    .await;
+    let gone = fixture.log[0].seq;
+    let said = Utterance {
+        gone_relays: vec![gone],
+        ..utterance(&fixture, "Commons 怎么部署？")
+    };
+    fixture.brain.interpret(said.clone()).await.expect("intent");
+    fixture
+        .brain
+        .converse(crate::Conversation {
+            utterance: said,
+            turns: Vec::new(),
+        })
+        .await
+        .expect("turn");
+    for request in fixture.model.requests() {
+        let prompt = format!("{:?}", request.messages);
+        assert_eq!(prompt.matches(MARK).count(), 1, "{prompt}");
+        let at = prompt.find(MARK).expect("marked");
+        let line = format!("seq {gone} ·");
+        let event = prompt.find(&line).expect("the gone relay is listed");
+        assert!(event < at, "the mark follows its relay");
+        let system = request.system.as_deref().unwrap_or_default();
+        assert!(
+            system.contains("marked as put to a seat that is gone"),
+            "{system}"
+        );
+    }
 }
 
 #[tokio::test]
