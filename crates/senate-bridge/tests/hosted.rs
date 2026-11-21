@@ -2918,3 +2918,100 @@ async fn joining_offline_binds_and_says_when_the_committee_opens() {
         "fresh-work\n"
     );
 }
+
+/// A message for a stopped hosted senator waits; once `senate restore`
+/// brings it back and its terminal reports in, it is pushed into the
+/// session's inbox with nothing new arriving for it, not left as start
+/// context in a conversation nobody is typing in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mail_held_while_stopped_is_pushed_once_restored() {
+    use senate_bridge::ipc::{HookEvent, HookReply, StopReply};
+    use senate_core::{Address, Kind, NewEvent};
+
+    let fixture = HostedClaude::launch(false).await;
+    let h = &fixture.h;
+    let native = fixture.seat.session_id.clone();
+    let report = |pid: u32, event, source, inbox: &common::FakeInbox| {
+        let mut hook = fixture.hook(&native, event, source, Some(pid), &[pid]);
+        let Request::SessionHook(report) = &mut hook else {
+            unreachable!()
+        };
+        report.socket = Some(inbox.path.clone());
+        hook
+    };
+    let first = common::FakeInbox::bind(h.dir.path().join("first-inbox.sock"));
+    let _: HookReply = call(
+        h,
+        &report(fixture.pid(), HookEvent::UserPromptSubmit, None, &first),
+    )
+    .await;
+
+    let _: StopReply = call(
+        h,
+        &Request::Stop {
+            session: Default::default(),
+            senator: fixture.seat.senator.clone().into(),
+            force: false,
+        },
+    )
+    .await;
+    // Its Claude Code is gone with the terminal.
+    std::fs::remove_file(&first.path).unwrap();
+    drop(first);
+    let body = "a note for the stopped senator";
+    h.server.append(
+        NewEvent::new(
+            committee(),
+            Kind::Note,
+            Address::senior(&h.config.person),
+            body,
+        )
+        .to(Address::senator(&fixture.seat.senator)),
+    );
+    let restored: SpawnReply = call(
+        h,
+        &Request::Restore {
+            session: Default::default(),
+            senator: path("seat-fixture").into(),
+        },
+    )
+    .await;
+    assert_eq!(restored, fixture.seat);
+    let terminal: PathBuf = call(h, &HostedClaude::attach_request()).await;
+    let pid: u32 = std::fs::read_to_string(terminal.with_file_name("owner"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    // The resumed terminal reports in, as Claude Code does on resume.
+    let inbox = common::FakeInbox::bind(h.dir.path().join("restored-inbox.sock"));
+    let started: HookReply = call(
+        h,
+        &report(pid, HookEvent::SessionStart, Some("resume"), &inbox),
+    )
+    .await;
+    // Not as hook context: a resumed hosted terminal is idle, and nothing
+    // would act on it until something new arrived.
+    assert!(
+        !started.context.unwrap_or_default().contains(body),
+        "not left in the idle session's start context"
+    );
+    // Pushed into its inbox, which starts a turn.
+    eventually(
+        "the held note pushed into the restored session",
+        TIMEOUT,
+        || {
+            inbox
+                .messages()
+                .into_iter()
+                .find(|text| text.contains(body))
+        },
+    )
+    .await;
+    rustix::process::kill_process_group(
+        rustix::process::Pid::from_raw(pid as i32).unwrap(),
+        rustix::process::Signal::TERM,
+    )
+    .unwrap();
+    drop(fixture);
+}

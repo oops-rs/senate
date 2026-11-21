@@ -3537,6 +3537,12 @@ impl Shared {
     /// way is never answered. Its backlog stays queued, and the delivery
     /// pass the hook wakes pushes it through the app-server as a turn of
     /// its own (a steer while the user's turn runs), like any live push.
+    ///
+    /// Nor does a hosted session at SessionStart (a spawn, or `senate
+    /// restore` resuming it): nobody types in its terminal, so what the
+    /// hook hands over sits in an idle conversation until something new
+    /// arrives. Its backlog is pushed into its inbox instead, which starts
+    /// a turn; the delivery pass this hook wakes does it.
     fn hook_context(
         &self,
         session: &Session,
@@ -3551,7 +3557,9 @@ impl Shared {
         let sid = session.session_id.as_str();
         let agent = &session.agent;
         let mut items = Vec::new();
-        if session.runtime == Runtime::Claude {
+        let hosted_start = event == HookEvent::SessionStart
+            && self.store.session_host(sid).map_err(internal)?.is_some();
+        if session.runtime == Runtime::Claude && !hosted_start {
             items = self.store.queued_for(sid).map_err(internal)?;
             let live = self.checked_live_sessions().map_err(internal)?;
             let cands = routing::candidates(&live, agent, &committee);
