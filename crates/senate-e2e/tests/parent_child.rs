@@ -953,6 +953,10 @@ async fn the_parents_speaker_relays_to_a_child_senates_seat_and_hears_back() {
     );
     assert_eq!(Origin::of(&root).unwrap().thread, relay.seq);
     claude.wait_for("Which retry limit").await;
+    // It says whose committee it answers for: the parent's, not her own.
+    claude
+        .wait_for("This comes from the Senate above, `/acme::refund-v2`")
+        .await;
 
     // claude answers in that thread; the answer goes back up.
     desk.answer("s-claude", root.seq, "Three times, see retry.rs")

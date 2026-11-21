@@ -579,6 +579,38 @@ fn own_agent_mark(event: &Event, me: &Reader, locale: Locale) -> &'static str {
     }
 }
 
+/// The Senate above and its committee an item was brought down from: its
+/// [`meta::ORIGIN`] names a Senate the item's [`meta::INTENDED`] seat sits
+/// under. `None` for anything that started in this Senate or below it.
+fn above_of(event: &Event) -> Option<(senate_core::SenatePath, CommitteeId)> {
+    let origin = Origin::of(event)?;
+    let there = origin.locator.senate()?;
+    let intended = senate_core::locator::intended(event)?;
+    let here = intended.senate()?;
+    if there.depth() >= here.depth() || !here.names().starts_with(there.names()) {
+        return None;
+    }
+    Some((there.clone(), origin.locator.committee()?.clone()))
+}
+
+/// One line under the header of an item brought down from the Senate
+/// above, so the agent answers for that committee and does not present
+/// its own Senate's roster as the whole picture.
+fn from_above(event: &Event, locale: Locale) -> Option<String> {
+    let (there, committee) = above_of(event)?;
+    let at = format!("{there}::{committee}");
+    Some(match locale {
+        Locale::Zh => format!(
+            "↳ 这条来自上级 Senate 的 `{at}`：你在为那个委员会回答。你这里的名单和在线情况只是本 \
+             Senate 的，不是它的全貌。"
+        ),
+        Locale::En => format!(
+            "↳ This comes from the Senate above, `{at}`: you are answering for that committee. \
+             Your roster and presence here are only this Senate's, not the whole picture there."
+        ),
+    })
+}
+
 /// `[senate · refund-v2 · seq 120 · from [speaker::pm] · question]`, or
 /// for a platform message `… · from [senator::pm] in chat group「后端群」 ·
 /// chat]`. A message for an agent whose work this one took over ends
@@ -946,6 +978,10 @@ fn render_block(
     locale: Locale,
 ) -> String {
     let mut out = header_for(event, me, locale);
+    if let Some(above) = from_above(event, locale) {
+        out.push('\n');
+        out.push_str(&above);
+    }
     if let Some(refs) = refs_line(event) {
         out.push('\n');
         out.push_str(&refs);
@@ -1417,6 +1453,75 @@ mod tests {
             "↳ 直接回答，不用先问你的用户，用 mcp__senate__answer(thread=118) 回复——会发回给 \
              [senator::cursor]"
         );
+    }
+
+    /// An item on a desk, started at `origin` and meant for `intended`, as
+    /// the bridge delivers it to that seat.
+    fn on_the_desk(origin: &str, intended: &str) -> Event {
+        let origin = Origin {
+            locator: origin.parse().unwrap(),
+            thread: Seq(767),
+        };
+        NewEvent::new(
+            committee(),
+            Kind::Question,
+            Address::Committee,
+            "现在有哪些 agent，他们的职责是什么",
+        )
+        .to(Address::Speaker)
+        .with_meta(meta::ORIGIN, origin.value())
+        .with_meta(meta::INTENDED, serde_json::json!(intended))
+        .into_event(Seq(31), Utc::now())
+    }
+
+    #[test]
+    fn an_item_brought_down_from_above_says_whose_committee_it_answers_for() {
+        let me = reader("senator::claude");
+        let down = on_the_desk(
+            "/top::commons-demo::speaker",
+            "/top/dark-conclave::refund-v2::senator::claude",
+        );
+        let en = render_event(&down, &me, EN);
+        let mut lines = en.lines();
+        assert!(
+            lines
+                .next()
+                .unwrap()
+                .starts_with("[senate · refund-v2 · seq 31")
+        );
+        assert_eq!(
+            lines.next().unwrap(),
+            "↳ This comes from the Senate above, `/top::commons-demo`: you are answering for that \
+             committee. Your roster and presence here are only this Senate's, not the whole \
+             picture there."
+        );
+        let zh = render_event(&down, &me, ZH);
+        assert!(
+            zh.contains("↳ 这条来自上级 Senate 的 `/top::commons-demo`：你在为那个委员会回答。"),
+            "{zh}"
+        );
+
+        // Started in this Senate (a crossing the desk forwarded) or below
+        // it (a child's question carried up): no such line.
+        for (origin, intended) in [
+            (
+                "/top/dark-conclave::billing::senator::codex",
+                "/top/dark-conclave::refund-v2::senator::claude",
+            ),
+            (
+                "/top/dark-conclave/inner::refund-v2::senator::codex",
+                "/top/dark-conclave::refund-v2::senator::claude",
+            ),
+        ] {
+            let text = render_event(&on_the_desk(origin, intended), &me, EN);
+            assert!(!text.contains("the Senate above"), "{origin}: {text}");
+        }
+        let plain = render_event(
+            &from_to(Kind::Question, "senator::bob", "senator::claude"),
+            &me,
+            EN,
+        );
+        assert!(!plain.contains("the Senate above"), "{plain}");
     }
 
     fn from_to(kind: Kind, from: &str, to: &str) -> Event {
