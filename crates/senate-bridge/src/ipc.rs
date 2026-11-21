@@ -305,7 +305,7 @@ pub struct HookReport {
     /// A Claude inbox socket or a Senate-owned ACP listener.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub socket: Option<PathBuf>,
-    /// Claude inbox token, or agy's SHA-256 launch proof.
+    /// Claude inbox token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -541,11 +541,6 @@ pub enum Request {
     /// Resolve a locally hosted terminal for the person attaching to it.
     Attach {
         senator: AliasName,
-    },
-    /// Operator registration for one previously reported Antigravity session.
-    RegisterAgy {
-        session_id: String,
-        endpoint: crate::delivery::agy::Endpoint,
     },
     SessionEnd {
         session_id: String,

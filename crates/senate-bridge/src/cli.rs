@@ -502,22 +502,6 @@ stdin.")]
         #[arg(long)]
         effort: Option<String>,
     },
-    /// Enable live push for a running Antigravity conversation.
-    ///
-    /// Reads the conversation's local API token from stdin.
-    #[command(hide = true)]
-    AgyRegister {
-        /// The conversation's UUID.
-        conversation: String,
-        /// Antigravity's HTTP language-server endpoint on loopback.
-        endpoint: std::net::SocketAddr,
-    },
-    /// Close the Senate registration of an Antigravity conversation.
-    #[command(hide = true)]
-    AgyUnregister {
-        /// The conversation's UUID.
-        conversation: String,
-    },
     /// Manual checks of the delivery plumbing.
     #[command(hide = true)]
     Debug {
@@ -924,10 +908,7 @@ fn run_hook(kind: HookKind, runtime_override: Option<Runtime>) {
         return;
     };
     let env = if runtime_override == Some(Runtime::Agy) {
-        HookEnv {
-            token: std::env::var(crate::delivery::agy::PROOF_ENV).ok(),
-            ..HookEnv::default()
-        }
+        HookEnv::default()
     } else {
         HookEnv::from_process()
     };
@@ -1992,41 +1973,6 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
                     model: &model,
                 },
             ))
-        }
-        Cmd::AgyRegister {
-            conversation,
-            endpoint,
-        } => {
-            let paths = Paths::from_env()?;
-            let mut token = String::new();
-            std::io::stdin().take(515).read_to_string(&mut token)?;
-            let endpoint = crate::delivery::agy::Endpoint {
-                address: endpoint,
-                token: token.trim_end_matches(['\r', '\n']).to_owned(),
-            };
-            endpoint.validate()?;
-            let reply: serde_json::Value = runtime(false)?.block_on(daemon_call(
-                &paths,
-                &Request::RegisterAgy {
-                    session_id: conversation,
-                    endpoint,
-                },
-            ))?;
-            println!("{reply}");
-            Ok(())
-        }
-        Cmd::AgyUnregister { conversation } => {
-            let paths = Paths::from_env()?;
-            let key = crate::session::agy_session_key(&conversation)
-                .context("invalid Antigravity conversation UUID")?;
-            let _: serde_json::Value = runtime(false)?.block_on(daemon_call(
-                &paths,
-                &Request::SessionEnd {
-                    session_id: key,
-                    reason: None,
-                },
-            ))?;
-            Ok(())
         }
         Cmd::Mcp {
             runtime: flag,

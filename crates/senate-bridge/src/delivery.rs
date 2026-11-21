@@ -9,7 +9,7 @@
 //! 2. [`codex::CodexAppServerAdapter`] — a Codex session: start a turn in
 //!    its thread, or steer the running one, through the app-server
 //!    ([`codex`]). → `Injected`.
-//! 3. Antigravity agentapi or an ACP session owned by Senate. → `Injected`.
+//! 3. An ACP session owned by Senate. → `Injected`.
 //! 4. [`HookQueueAdapter`] — hold it for a future push, or for a runtime
 //!    whose hooks consume the backlog. → `Queued`.
 //!
@@ -22,7 +22,6 @@
 //! Claude Channels would be a further implementation of [`DeliveryAdapter`].
 
 pub mod acp;
-pub mod agy;
 pub mod codex;
 pub mod inbox;
 

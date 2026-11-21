@@ -1812,3 +1812,70 @@ async fn an_older_servers_aliases_are_read_senate_wide_and_cannot_be_removed() {
     assert!(refused.contains("too old for senator unalias"), "{refused}");
     h.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agy_session_takes_its_messages_as_a_user_message_before_its_next_model_call() {
+    use senate_bridge::session::Runtime;
+    let mut h = Harness::with_committees(&["refund-v2"]).await;
+    h.start().await;
+    let wd = h.workdir("agy", Some("refund-v2"));
+    let id = "5d0f8e8e-56b4-4c3a-8d0e-2b2f3c4d5e6f";
+    let input = json!({"conversationId": id, "cwd": wd}).to_string();
+    let hook = |kind| {
+        let input = input.clone();
+        let socket = h.socket();
+        async move {
+            senate_bridge::hook::run_as(
+                kind,
+                &socket,
+                &input,
+                &Default::default(),
+                Some(Runtime::Agy),
+                Default::default(),
+            )
+            .await
+            .map(|out| serde_json::from_str::<Value>(&out).unwrap())
+        }
+    };
+    let start = hook(HookKind::SessionStart).await.unwrap();
+    let steps = start["injectSteps"].as_array().unwrap();
+    // Only Senate's own identity line has system authority.
+    assert!(
+        steps[0]["systemMessage"]["systemMessage"]
+            .as_str()
+            .unwrap()
+            .starts_with("[senate] refund-v2 · [senator::agy-"),
+        "{start}"
+    );
+    assert!(
+        steps[1]["userMessage"]
+            .as_str()
+            .unwrap()
+            .starts_with("[senate] This session is joined"),
+        "{start}"
+    );
+    h.wait_stream("refund-v2").await;
+    let agent = format!("agy-{id}");
+    let asked = h.server.append(relayed_to(
+        Address::senator(&path(&agent)),
+        "waiting for your next model call",
+    ));
+    eventually("the item held for hooks", WAIT, || {
+        let item = h.item_of(&agent, asked.seq.0)?;
+        (item.status == ItemStatus::Queued).then_some(())
+    })
+    .await;
+    let out = hook(HookKind::UserPromptSubmit)
+        .await
+        .expect("the queue comes back");
+    let steps = out["injectSteps"].as_array().unwrap();
+    assert_eq!(steps.len(), 1, "{out}");
+    let text = steps[0]["userMessage"].as_str().unwrap();
+    assert!(text.starts_with("[senate] The messages below"), "{text}");
+    assert!(text.contains("waiting for your next model call"), "{text}");
+    assert!(
+        hook(HookKind::UserPromptSubmit).await.is_none(),
+        "handed over once"
+    );
+    h.stop().await;
+}

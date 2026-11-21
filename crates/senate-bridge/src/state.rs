@@ -1023,8 +1023,7 @@ impl Store {
 
     /// Register a session or refresh it. Marks it live and active now. Keeps
     /// an earlier explicit join, and keeps socket/token/pid/ancestors when
-    /// the hook did not see them this time. Each agy hook supplies the
-    /// current launch proof, or clears it if the launch has no proof.
+    /// the hook did not see them this time.
     pub fn upsert_session(&self, s: &SessionUpsert) -> Result<Session, StoreError> {
         self.upsert(s, None)
     }
@@ -1371,7 +1370,7 @@ impl Store {
                      committee_source = excluded.committee_source,
                      socket = CASE WHEN ?15 IS NOT NULL AND excluded.runtime = 'claude' THEN excluded.socket
                                    ELSE COALESCE(excluded.socket, sessions.socket) END,
-                     token = CASE WHEN (?15 IS NOT NULL AND excluded.runtime = 'claude') OR excluded.runtime = 'agy' THEN excluded.token
+                     token = CASE WHEN (?15 IS NOT NULL AND excluded.runtime = 'claude') THEN excluded.token
                                   ELSE COALESCE(excluded.token, sessions.token) END,
                      claude_pid = CASE WHEN ?15 IS NOT NULL AND excluded.runtime = 'claude' THEN excluded.claude_pid
                                        ELSE COALESCE(excluded.claude_pid, sessions.claude_pid) END,

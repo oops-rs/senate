@@ -121,7 +121,8 @@ pub enum Runtime {
     /// Codex: pushes go through the Codex app-server the session's TUI is
     /// attached to. The session id is the Codex thread id.
     Codex,
-    /// Local Antigravity CLI with an explicitly registered agentapi endpoint.
+    /// The Antigravity CLI (agy): it takes what is waiting for it at its
+    /// hooks. The session id is the root conversation id.
     Agy,
     /// An ACP session on a connection opened by the Senate client.
     Acp,
@@ -180,7 +181,7 @@ impl Runtime {
     }
 }
 
-/// The Antigravity hooks and native agentapi use a canonical UUID.
+/// Antigravity hooks and MCP metadata name the root conversation by UUID.
 pub fn agy_session_key(id: &str) -> Option<String> {
     (id.len() == 36
         && id.bytes().enumerate().all(|(i, b)| {
@@ -221,7 +222,7 @@ pub struct Session {
     /// A Claude inbox socket or a Senate-owned ACP listener.
     #[serde(default)]
     pub socket: Option<PathBuf>,
-    /// Claude inbox token, or agy's SHA-256 launch proof.
+    /// Claude inbox token.
     #[serde(skip)]
     pub token: Option<String>,
     #[serde(default)]

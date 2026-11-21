@@ -204,6 +204,27 @@ pub fn output_for(kind: HookKind, context: &str) -> String {
     .to_string()
 }
 
+/// What an agy hook prints: `injectSteps` for agy to add to the
+/// conversation. A `systemMessage` step carries system authority there, so
+/// only the identity Senate itself constructs goes in one. Everything else
+/// the daemon hands back (the brief, messages from the log) is one
+/// `userMessage` step, already framed as peer input, the way agy's own
+/// `send-message` would put it.
+fn agy_output(kind: HookKind, reply: &HookReply) -> Option<String> {
+    let mut steps = Vec::new();
+    if kind == HookKind::SessionStart
+        && let Some(committee) = reply.session.committee()
+    {
+        let seat = senate_core::Address::senator(&reply.session.agent).in_text();
+        let identity = format!("[senate] {committee} · {seat}");
+        steps.push(json!({"systemMessage": {"systemMessage": identity}}));
+    }
+    if let Some(context) = reply.context.as_deref().filter(|c| !c.is_empty()) {
+        steps.push(json!({"userMessage": context}));
+    }
+    (!steps.is_empty()).then(|| json!({"injectSteps": steps}).to_string())
+}
+
 /// Run one hook against the daemon at `daemon_socket`. Returns the line to
 /// print on stdout, or `None` (print nothing). Never fails.
 pub async fn run(
@@ -249,19 +270,7 @@ pub async fn run_as(
         _ => {
             let reply: HookReply = client.call(&request, timeouts.request).await.ok()?;
             if reply.session.runtime == Runtime::Agy {
-                // Antigravity runs this step with system authority. Only locally
-                // constructed identity fields belong here; the committee brief
-                // and peer messages remain available through their ordinary channels.
-                if kind != HookKind::SessionStart {
-                    return None;
-                }
-                let committee = reply.session.committee()?;
-                let seat = senate_core::Address::senator(&reply.session.agent).in_text();
-                let identity = format!("[senate] {committee} · {seat}");
-                return Some(
-                    json!({"injectSteps": [{"systemMessage": {"systemMessage": identity}}]})
-                        .to_string(),
-                );
+                return agy_output(kind, &reply);
             }
             reply.context.map(|context| output_for(kind, &context))
         }
@@ -319,14 +328,7 @@ pub async fn prepare(
     // none of them describe this session.
     let env = match runtime {
         Runtime::Claude => env.clone(),
-        Runtime::Agy => HookEnv {
-            token: env
-                .token
-                .clone()
-                .filter(|t| crate::delivery::agy::is_proof(t)),
-            ..HookEnv::default()
-        },
-        Runtime::Codex | Runtime::Acp => HookEnv::default(),
+        Runtime::Codex | Runtime::Agy | Runtime::Acp => HookEnv::default(),
     };
     let session_id = input.session_id.or_else(|| env.session_id.clone())?;
     // The Senate home is where the daemon's socket is.

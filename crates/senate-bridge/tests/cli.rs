@@ -578,12 +578,18 @@ fn install_sets_up_agy_in_its_global_files() {
     let exe = std::fs::canonicalize(BIN).unwrap();
     let install = |yes: bool| {
         let mut cmd = bridge(dir.path(), &dir.path().join("senate"));
-        cmd.args(["setup", "install", "--no-codex", "--verbose", "--gemini-dir"])
-            .arg(&gemini)
-            .arg("--claude-dir")
-            .arg(&claude_dir)
-            .arg("--claude-bin")
-            .arg(&claude_bin);
+        cmd.args([
+            "setup",
+            "install",
+            "--no-codex",
+            "--verbose",
+            "--gemini-dir",
+        ])
+        .arg(&gemini)
+        .arg("--claude-dir")
+        .arg(&claude_dir)
+        .arg("--claude-bin")
+        .arg(&claude_bin);
         if yes {
             cmd.arg("--yes");
         }
@@ -600,7 +606,10 @@ fn install_sets_up_agy_in_its_global_files() {
         )),
         "{text}"
     );
-    assert!(text.contains("+ permissions.allow: mcp(senate/*)"), "{text}");
+    assert!(
+        text.contains("+ permissions.allow: mcp(senate/*)"),
+        "{text}"
+    );
     assert_eq!(
         std::fs::read_to_string(gemini.join("config/mcp_config.json")).unwrap(),
         ""

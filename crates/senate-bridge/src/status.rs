@@ -314,7 +314,10 @@ fn session_committee(session: &Session, locale: Locale) -> String {
 
 fn session_push(session: &Session, locale: Locale) -> String {
     match (session.runtime, &session.socket, session.socket_ok) {
-        (Runtime::Codex | Runtime::Agy | Runtime::Acp, _, health) => {
+        // agy has no channel Senate can push into: it takes what is
+        // waiting at its next hook.
+        (Runtime::Agy, _, _) => locale.pick("钩子时", "at hooks").into(),
+        (Runtime::Codex | Runtime::Acp, _, health) => {
             let runtime = session.runtime.as_str();
             match health {
                 None => runtime.into(),
@@ -1116,7 +1119,7 @@ mod tests {
     }
 
     #[test]
-    fn agy_and_acp_show_the_last_push_result_in_both_status_views() {
+    fn acp_shows_the_last_push_result_and_agy_its_hooks_in_both_status_views() {
         let now = Utc::now();
         for locale in [Locale::En, Locale::Zh] {
             let mut view = view(locale);
@@ -1134,7 +1137,11 @@ mod tests {
                 ] {
                     view.sessions[0].runtime = runtime;
                     view.sessions[0].socket_ok = health;
-                    let expected = format!("{}{suffix}", runtime.as_str());
+                    let expected = if runtime == Runtime::Agy {
+                        locale.pick("钩子时", "at hooks").to_owned()
+                    } else {
+                        format!("{}{suffix}", runtime.as_str())
+                    };
                     let pipe = render(&view, now);
                     let tty = render_terminal(&view, now, false, None, Terminal::new(24, false));
                     assert!(

@@ -815,7 +815,6 @@ fn runtime_command(
         .env_remove("CLAUDE_PID")
         .env_remove("CODEX_THREAD_ID")
         .env_remove(crate::agent::AGENT_ENV)
-        .env_remove(crate::delivery::agy::PROOF_ENV)
         .env_remove(crate::companion::ENV_COMPANION)
         .env_remove(crate::companion::ENV_SESSION)
         .kill_on_drop(true);

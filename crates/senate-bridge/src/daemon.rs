@@ -153,7 +153,7 @@ use crate::companion::{self, CompanionConfig};
 
 use crate::config::BridgeConfig;
 use crate::delivery::codex::{CodexAppServerAdapter, CodexConfig};
-use crate::delivery::{Batch, DeliveryOutcome, Ladder, agy::AgyAdapter};
+use crate::delivery::{Batch, DeliveryOutcome, Ladder};
 use crate::format;
 use crate::ipc::{
     self, ApprovalsReply, ApproveReply, BoundReply, CatchUpReply, CheckpointReply, CommitteeStatus,
@@ -466,7 +466,6 @@ pub(crate) struct Shared {
     /// resolved, written to with the person's token there.
     pub(crate) uplink: Option<ApiClient>,
     pub(crate) ladder: Ladder,
-    agy: AgyAdapter,
     pub(crate) timing: Timing,
     streams: Mutex<BTreeMap<Seat, CommitteeWorker>>,
     /// Wakes the batcher.
@@ -759,19 +758,15 @@ impl Shared {
             .transpose()?;
         let seating = Seating::new(config.person.clone());
         let (resyncs, _) = watch::channel(0);
-        let agy = AgyAdapter::new(common.timing.inbox_timeout);
         Ok(Arc::new(Shared {
             ladder: Ladder::new_default(
                 common.timing.inbox_timeout,
                 common.codex.clone(),
-                [
-                    Arc::new(agy.clone()) as Arc<dyn crate::delivery::DeliveryAdapter>,
-                    Arc::new(crate::delivery::acp::AcpAdapter {
-                        timeout: common.timing.inbox_timeout,
-                    }),
-                ],
+                [Arc::new(crate::delivery::acp::AcpAdapter {
+                    timeout: common.timing.inbox_timeout,
+                })
+                    as Arc<dyn crate::delivery::DeliveryAdapter>],
             ),
-            agy,
             locale: config.locale,
             convention: config.branch_convention(),
             seating: Mutex::new(seating),
@@ -2325,10 +2320,7 @@ impl Shared {
         let agent = &session.agent;
         // The routing pass may have selected this session before a join committed.
         if !self.store.session(sid)?.is_some_and(|s| {
-            s.is_live()
-                && s.agent == *agent
-                && s.committee() == session.committee()
-                && (s.runtime != Runtime::Agy || s.token == session.token)
+            s.is_live() && s.agent == *agent && s.committee() == session.committee()
         }) {
             return Ok(true);
         }
@@ -2883,10 +2875,6 @@ impl Shared {
                 secretary,
             } => wrap(self.on_secretaries(&session, action, for_, secretary).await),
             Request::Roles => wrap(self.on_roles().await),
-            Request::RegisterAgy {
-                session_id,
-                endpoint,
-            } => wrap(self.on_register_agy(&session_id, endpoint).await),
             Request::SessionEnd { session_id, .. } => {
                 wrap(self.on_session_end(&session_id, None).await)
             }
@@ -3245,11 +3233,6 @@ impl Shared {
         let began = Instant::now();
         if report.runtime.native_id(&report.session_id).is_none()
             || (matches!(report.runtime, Runtime::Agy | Runtime::Acp) && !native)
-            || (report.runtime == Runtime::Agy
-                && report
-                    .token
-                    .as_deref()
-                    .is_some_and(|t| !crate::delivery::agy::is_proof(t)))
         {
             return Err(IpcError::bad_request(
                 "invalid session key for this runtime",
@@ -3385,13 +3368,7 @@ impl Shared {
 
         let (brief, chair) = match (context_event, session.committee()) {
             (HookEvent::SessionStart, Some(committee)) => tokio::join!(
-                async {
-                    if session.runtime == Runtime::Agy {
-                        None
-                    } else {
-                        self.hook_brief(committee).await
-                    }
-                },
+                self.hook_brief(committee),
                 self.hook_chair(committee, &session.agent),
             ),
             _ => (None, None),
@@ -3572,7 +3549,9 @@ impl Shared {
         let mut items = Vec::new();
         let hosted_start = event == HookEvent::SessionStart
             && self.store.session_host(sid).map_err(internal)?.is_some();
-        if session.runtime == Runtime::Claude && !hosted_start {
+        // Claude Code and agy take what is waiting for them in the hook's
+        // reply; Codex is pushed through its app-server instead.
+        if matches!(session.runtime, Runtime::Claude | Runtime::Agy) && !hosted_start {
             items = self.store.queued_for(sid).map_err(internal)?;
             let live = self.checked_live_sessions().map_err(internal)?;
             let cands = routing::candidates(&live, agent, &committee);
@@ -3661,49 +3640,6 @@ impl Shared {
         Ok(((!text.is_empty()).then_some(text), delivered))
     }
 
-    async fn on_register_agy(
-        &self,
-        session_id: &str,
-        endpoint: crate::delivery::agy::Endpoint,
-    ) -> Result<serde_json::Value, IpcError> {
-        let key = session::agy_session_key(session_id)
-            .ok_or_else(|| IpcError::bad_request("invalid Antigravity conversation UUID"))?;
-        let id = Runtime::Agy
-            .native_id(&key)
-            .ok_or_else(|| IpcError::bad_request("invalid Antigravity session key"))?;
-        let check_proof = || {
-            let live = self
-                .store
-                .session(&key)
-                .map_err(internal)?
-                .filter(|s| s.runtime == Runtime::Agy && s.is_live())
-                .ok_or_else(|| {
-                    IpcError::new(
-                        codes::NO_SESSION,
-                        "start the Antigravity conversation with Senate hooks first",
-                    )
-                })?;
-            if !endpoint.matches_proof(live.token.as_deref()) {
-                return Err(IpcError::bad_request(
-                    "Antigravity endpoint token does not match this conversation's launch proof",
-                ));
-            }
-            Ok(())
-        };
-        check_proof()?;
-        self.agy
-            .verify(&endpoint, id)
-            .await
-            .map_err(|e| IpcError::bad_request(e.to_string()))?;
-
-        let _binding = self.session_bindings.write().await;
-        check_proof()?;
-        self.agy.register(key.clone(), endpoint);
-        self.note_delivered(&key);
-        self.work.notify_one();
-        Ok(serde_json::json!({ "session_id": key }))
-    }
-
     async fn on_session_end(
         self: &Arc<Self>,
         session_id: &str,
@@ -3745,7 +3681,6 @@ impl Shared {
             }
             _ => {}
         }
-        self.agy.forget(session_id);
         let before = self.store.session(session_id).map_err(internal)?;
         if self
             .store
