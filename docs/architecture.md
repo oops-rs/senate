@@ -41,9 +41,9 @@ to one Senate.**
 | Thing | Scope | Shape | Example |
 | --- | --- | --- | --- |
 | Senate | its parent Senate | a path of names, parent first, `/` between | `/acme/north-desk` |
-| Committee | one Senate | flat id | `ibot` |
+| Committee | one Senate | flat id | `ledger` |
 | Senator | one Senate | flat name | `wendell`, `codex`, `claude` |
-| Seat | one committee | committee × senator | `ibot::senator::codex` |
+| Seat | one committee | committee × senator | `ledger::senator::codex` |
 
 1. **A senator belongs to a Senate, not to a committee.** `codex` is one
    senator who may serve on several committees.
@@ -100,17 +100,17 @@ positional and read from the right, with no labels:
 
 ```
 [<senate path>::][<committee>::]<address>
-/acme/north-desk::ibot::senator::codex
-ibot::senator::codex          the nearest Senate with ibot, committee ibot
-ibot::speaker                 the Speaker for ibot
+/acme/north-desk::ledger::senator::codex
+ledger::senator::codex          the nearest Senate with ledger, committee ledger
+ledger::speaker                 the Speaker for ledger
 senator::codex                here, this committee
 ```
 
 One name before the address is a committee; two are a Senate path and a
 committee; a part with a `/` is a Senate path, and there is no form with
 a Senate and no committee. In running text it is bracketed:
-`[ibot::senator::codex]`. Tools also take a short form where a bare last
-name is a senator (`codex`, `ibot::codex`, `*`).
+`[ledger::senator::codex]`. Tools also take a short form where a bare last
+name is a senator (`codex`, `ledger::codex`, `*`).
 
 A **senator id** (`senate_core::SenatorId`) says who someone is, with no
 committee: `senator::wendell` (of this Senate) or `/acme::senator::wendell`
@@ -704,7 +704,7 @@ any gateway reach the log only through the `Hub` seam in `senate-core`. Only
 | Seam | Type | Purpose |
 | --- | --- | --- |
 | Chat surface | `senate_core::ChatSurface`, with `senate_core::UnboundMention` | The Speaker speaking on a chat platform, and mentions in groups bound to no committee. |
-| Chat gateway | `senated::ChatGateway` (`Inbound`, `deliver`) | The platform-neutral half of a gateway: senders to senators or guests, messages in bound groups to `chat` events, unbound mentions, bind = grant (a 3-second grace before a release, bounded retries, reconciliation from the log after a restart; `GrantPolicy`). A layer writes only the platform's transport. |
+| Chat gateway | `senated::ChatGateway` (`Inbound`, `deliver`) | The platform-neutral half of a gateway: senders to senators or guests, messages in bound groups to `chat` events, unbound mentions, bind = join (a 3-second grace before a release, bounded retries, reconciliation from the log after a restart; `MembershipPolicy`). A layer writes only the platform's transport. |
 | Hub | `senate_core::Hub` | Appending to and observing the log in process. |
 | Brain | `senate_speaker::Brain` | The Speaker's model. Default `BasisBrain`. |
 | Log store | `senate_log::LogStore` | Where the log is kept: `memory:`, `sqlite:<path>`, `postgres://…`. |
@@ -718,15 +718,15 @@ any gateway reach the log only through the `Hub` seam in `senate-core`. Only
 | Assembly | `senated::Assembly` | The builder that takes all of the above and starts a daemon: at most one chat surface, any number of components. |
 | Machine | `senated::Machine` | A developer machine's daemon: its hosted Senates and its side of every Senate it serves. A layer embeds it to run that side within its own process. |
 
-### Bind = grant in the chat gateway
+### Bind = join in the chat gateway
 
-The log decides which groups the platform should have granted: bound groups
-are adopted, groups bound to nothing are released. `ChatGateway` makes the
+The log decides which groups the bot should be in: bound groups are joined
+(`adopt_group`), groups bound to nothing are left (`release_group`). `ChatGateway` makes the
 platform follow, without ever holding the log or the Speaker up:
 
 - A release is delayed by a grace (3 seconds by default) and cancelled when
   the group is bound again within it, so moving a group between committees
-  does not drop and re-create its grant.
+  does not leave and rejoin it.
 - A failed or unanswered adopt or release is retried, pausing 1 second and
   doubling to at most 30, until it succeeds or the bindings change so it is
   no longer wanted. Each call is bounded by a timeout, runs in its own task,
@@ -736,10 +736,10 @@ platform follow, without ever holding the log or the Speaker up:
   chat the log holds from it (or by its first new message when nobody has
   spoken since), and every group once bound and now bound to nothing is
   released again. Both calls are idempotent.
-- A post refused (`SurfaceError::Rejected`) into a bound group whose grant is
-  not confirmed adopts the group (waiting for an adopt already under way) and
+- A post refused (`SurfaceError::Rejected`) into a bound group the bot is not
+  confirmed to be in adopts the group (waiting for an adopt already under way) and
   is tried once more; posts otherwise never wait for an adopt, and a post
-  whose group is already granted is never delayed. A root post names its
+  into a group already joined is never delayed. A root post names its
   group. A reply names only the message it replies to, so the gateway finds
   the group from what Senate records: the log's mirror refs for a message the
   Speaker posted (the copy's `target` is the group, with an optional `#role`
@@ -753,21 +753,4 @@ platform follow, without ever holding the log or the Speaker up:
   heal of its own, for roots or for replies.
 - A surface that answers `Unsupported` is not asked again.
 
-`GrantPolicy` (`ChatGateway::with_grant_policy`) holds the numbers.
-
-## Lineage
-
-Senate is rebuilt from a private predecessor, Feature Commons. The model
-above differs from it in these ways, which matter when carrying code over:
-
-| Commons | Senate |
-| --- | --- |
-| feature | committee |
-| Steward, `steward` | Speaker, `speaker` (its office's work: the secretary) |
-| `user:alice` | `senator::alice` |
-| `agent:alice`, one per person | `senator::<name>`, any number per principal, flat |
-| `user:feishu-<hash>` | `guest::<platform>/<id>` |
-| `Member.feishu_ids` | `Principal.accounts` (platform, id) |
-| `Directory` | `Roster` |
-| text hard-coded in Chinese | rendered per locale |
-| `[steward 代 agent:x]` in text | `on_behalf_of` field, shown as `[speaker::<name>]` (the desk), or `[senator::<name>] (answered by its secretary [senator::<secretary>])` |
+`MembershipPolicy` (`ChatGateway::with_membership_policy`) holds the numbers.

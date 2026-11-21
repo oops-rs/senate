@@ -140,7 +140,7 @@ token_sha256 = "5b88a3d16b92cd96dd5a2cf692e1c84fc3df64bbc2a56df44877f33b980b60ea
 # model = "claude-sonnet-4-5"
 # api_key_env = "ANTHROPIC_API_KEY"
 # # An OpenAI-compatible endpoint, for a gateway.
-# # base_url = "http://model-gateway.internal:4000"
+# # base_url = "http://model-gateway.internal:8080"
 # # wire = "responses"   # only with base_url: the gateway serves OpenAI's v1/responses (default "chat_completions")
 # deadline_secs = 45
 # triage_deadline_secs = 5
@@ -217,7 +217,7 @@ token_sha256 = "5b88a3d16b92cd96dd5a2cf692e1c84fc3df64bbc2a56df44877f33b980b60ea
 # # What a run's PR merges into.
 # pr_base = "main"
 # # Branches are <branch_prefix>/<committee>/speaker-<n>.
-# branch_prefix = "feature"
+# branch_prefix = "senate"
 # # Wall clock and turn cap for one run.
 # budget = { wall_secs = 1800, max_turns = 200 }
 # [speaker.work.developers]
@@ -235,7 +235,7 @@ token_sha256 = "5b88a3d16b92cd96dd5a2cf692e1c84fc3df64bbc2a56df44877f33b980b60ea
 # allowed_repos = ["example/project"]
 # git_credential = { kind = "ssh_key", key_file = "/run/secrets/deploy-key" }
 # # model = "claude-sonnet-4-5"
-# # gateway_base_url = "http://model-gateway.internal:4000"
+# # gateway_base_url = "http://model-gateway.internal:8080"
 # # gateway_key_file = "/run/secrets/runner-model-key"
 # # docker_args = ["--memory", "4g", "--cpus", "2"]
 # #

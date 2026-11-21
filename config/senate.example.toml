@@ -64,8 +64,8 @@ person = "alice"
 
 # Optional: the first segment of a developer branch,
 # `<branch_prefix>/<committee>/<person>`: what `committee_from_branch`
-# reads, and how the Speaker names its work branches. Default "feature".
-# branch_prefix = "feature"
+# reads, and how the Speaker names its work branches. Default "senate".
+# branch_prefix = "senate"
 
 # Checkpoints need no configuration. The agent keeps
 # .senate/{PROGRESS,DECISIONS,OPEN}.md in the worktree with the `checkpoint`
@@ -118,7 +118,7 @@ person = "alice"
 # in the team's; the team reaches your desk as
 # `<name>::<committee>::speaker` (`alice-desk::refund-v2::speaker`), and
 # you reach the team's seats by their qualified names
-# (`senate ask /acme::ibot::bob`). `senate status` shows the full path
+# (`senate ask /acme::ledger::bob`). `senate status` shows the full path
 # (`/acme/alice-desk`), the parent and whether the registration was taken.
 # [local]
 # name = "alice-desk"                     # default: <person>-desk

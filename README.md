@@ -59,7 +59,7 @@ In Senate, work is organized into **committees** (e.g. per-repository, feature, 
 | ⚡ **Dual-Mode `senated` Daemon** | The exact same binary operates as a lightweight local developer daemon (`senated --machine`) or a high-concurrency production team server (`senated --config`). |
 | 🍏 **Native macOS Menu-Bar App** | SwiftUI status-bar application built with UniFFI and Rust, delivering real-time notification badges, approval prompts, and merged inboxes without network overhead. |
 | 🛠️ **Autonomous Hands (`senate-work`)** | Safe containerized execution (`DockerRunner`) and automated GitHub Pull Request creation (`GhForge`) on dedicated committee branches. |
-| 🧩 **Extensible Assembly Library** | Embed `senated` directly into enterprise Rust services to mount custom chat platforms (Slack, Discord, Lark/Feishu), custom authentication, and custom supervisors. |
+| 🧩 **Extensible Assembly Library** | Embed `senated` directly into enterprise Rust services to mount custom chat platforms (Slack, Discord, …), custom authentication, and custom supervisors. |
 
 ---
 
@@ -149,7 +149,7 @@ Senates can nest hierarchically without synchronizing raw event histories:
  │ Principals: alice, bob     Speaker: senator::alice            │
  │ Children:   alice-desk (Speaker alice), bob-desk (Speaker bob)│
  └──────────────────────────────┬───────────────────────────────┘
-                                │ alice-desk::ibot::speaker
+                                │ alice-desk::ledger::speaker
                                 ▼
  CHILD SENATE /acme/alice-desk (alice's workstation)
  ┌──────────────────────────────────────────────────────────────┐
@@ -161,7 +161,7 @@ Senates can nest hierarchically without synchronizing raw event histories:
 - **Independent event logs:** Each Senate maintains its own isolated database.
 - **Upward registration:** Workstations register upward authenticated as their Speaker (a principal on the parent).
 - **Encapsulated agent identities:** The parent knows only the child Senate name and its Speaker—individual local agents remain private to the workstation.
-- **Clean escalation:** Inquiries from the parent target the child Speaker's office (`alice-desk::ibot::speaker`); the child desk triages and answers directly.
+- **Clean escalation:** Inquiries from the parent target the child Speaker's office (`alice-desk::ledger::speaker`); the child desk triages and answers directly.
 
 > [!TIP]
 > For a comprehensive walkthrough of supervision trees, log monotonic sequencing, presence leases, and cross-committee boundary rules, see [docs/architecture.md](docs/architecture.md).
@@ -479,6 +479,9 @@ senate setup clean --yes
 > **Branch Swapping Without Git Hooks:**
 > Senate saves branch notes into `~/.senate/branches/<repo>/<branch>/`. When you run `git switch`, Senate automatically swaps `.senate/` to match the target branch at the next command or hook execution. Nothing is ever added to `.git` or committed to your repo!
 
+> [!IMPORTANT]
+> **Branch prefix default changed:** branches Senate reads and writes are named `<branch_prefix>/<committee>/<person>` (and `<branch_prefix>/<committee>/speaker-<n>` for work runs). The default `branch_prefix` is now `senate`; it used to be `feature`. If your branches follow `feature/<committee>/<person>`, set `branch_prefix = "feature"` in `senate.toml` and under `[speaker.work]` in `senated.toml` to keep the old names.
+
 ### 3. Session Aliases & TUI Approvals
 
 Give coding sessions readable aliases rather than long cryptographic IDs:
@@ -661,17 +664,17 @@ Type one-time confirmation or `/deny` to grant/block permission requests interac
 
 ```text
  Senate (/acme/north-desk)
-  └── Committee (ibot)
+  └── Committee (ledger)
        └── Senator (wendell, claude, codex)
-            └── Seat (ibot::senator::codex)
+            └── Seat (ledger::senator::codex)
 ```
 
 | Concept | Scope | Description | Example |
 | :--- | :--- | :--- | :--- |
 | **Senate** | Nested | Top-level deliberation instance. Senates nest hierarchically. | `/acme/north-desk` |
-| **Committee** | One Senate | Scoped working group sharing one append-only event log. | `ibot`, `refund-v2` |
+| **Committee** | One Senate | Scoped working group sharing one append-only event log. | `ledger`, `refund-v2` |
 | **Senator** | One Senate | Participant identity (principal person or automated agent). | `wendell`, `claude` |
-| **Seat** | One Committee | Unique combination of Committee × Senator. | `ibot::senator::codex` |
+| **Seat** | One Committee | Unique combination of Committee × Senator. | `ledger::senator::codex` |
 
 ### Key Roles
 
@@ -726,7 +729,7 @@ use senated::{Assembly, ChatGateway, SenatedConfig, component_fn};
 async fn main() -> anyhow::Result<()> {
     let config = SenatedConfig::load("senated.toml".as_ref())?;
     
-    // Mount custom chat surface (Slack, Discord, Lark/Feishu)
+    // Mount custom chat surface (Slack, Discord, …)
     let platform: Arc<dyn senate_core::ChatSurface> = Arc::new(MyChatPlatform::connect(&config)?);
     let gateway = ChatGateway::new(platform);
 
