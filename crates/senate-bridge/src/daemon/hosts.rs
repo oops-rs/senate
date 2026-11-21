@@ -821,6 +821,7 @@ impl Shared {
             resume: restoring && !start_empty,
             codex_remote: remote.as_deref(),
             name: name.as_deref(),
+            model: &crate::ipc::HostedModel::default(),
         };
         let session_runtime = Runtime::from(runtime);
         let reply = SpawnReply {

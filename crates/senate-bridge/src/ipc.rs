@@ -333,6 +333,19 @@ pub enum HostedRuntime {
     Claude,
 }
 
+/// The model and reasoning effort a hosted session was started with, as the
+/// runtime's own flags take them. Either left out is the runtime's own
+/// default. Senate keeps no model catalogue: a model name is passed through
+/// as given, and an effort is checked only against the runtime's documented
+/// levels ([`HostedRuntime::efforts`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostedModel {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+}
+
 impl From<HostedRuntime> for Runtime {
     fn from(runtime: HostedRuntime) -> Self {
         match runtime {

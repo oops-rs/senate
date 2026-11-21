@@ -31,7 +31,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::broadcast;
 
 use crate::host_approval::observed_at;
-use crate::ipc::{self, HostedRuntime, Request};
+use crate::ipc::{self, HostedModel, HostedRuntime, Request};
 use crate::paths::{HOME_ENV, Paths, SOCKET_PATH_LIMIT};
 
 use emulation::{Colors, Emulation};
@@ -322,6 +322,8 @@ pub struct SessionCommand<'a> {
     pub codex_remote: Option<&'a str>,
     /// The senator's alias, shown by the TUI as the session's own name.
     pub name: Option<&'a str>,
+    /// The model and effort the TUI is started with.
+    pub model: &'a HostedModel,
 }
 
 pub(crate) const READY: u8 = 1;
@@ -404,6 +406,12 @@ pub(crate) fn start(
     }
     if let Some(name) = session.name {
         command.arg("--name").arg(name);
+    }
+    if let Some(model) = &session.model.model {
+        command.arg(format!("--model={model}"));
+    }
+    if let Some(effort) = &session.model.effort {
+        command.arg(format!("--effort={effort}"));
     }
 
     std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
@@ -629,6 +637,104 @@ pub async fn run(
     result
 }
 
+impl HostedRuntime {
+    /// The reasoning efforts the runtime documents, the only ones a hosted
+    /// session may ask for. Claude Code: `claude --help` (2.1.330). Codex:
+    /// the named `ReasoningEffort` levels of its protocol
+    /// (`codex-rs/protocol/src/openai_models.rs`, the values its
+    /// `model_reasoning_effort` setting takes).
+    pub fn efforts(self) -> &'static [&'static str] {
+        match self {
+            Self::Claude => &["low", "medium", "high", "xhigh", "max"],
+            Self::Codex => &[
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra",
+                "persistent",
+            ],
+        }
+    }
+}
+
+impl HostedModel {
+    /// A choice as given: a blank value is no choice, leaving the
+    /// runtime's default.
+    pub fn new(model: Option<String>, effort: Option<String>) -> Self {
+        let given = |value: Option<String>| {
+            value
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+        };
+        Self {
+            model: given(model),
+            effort: given(effort),
+        }
+    }
+
+    /// Refuse an effort `runtime` does not document, naming the ones it
+    /// does. A model name is the runtime's to judge.
+    pub fn check(&self, runtime: HostedRuntime) -> Result<(), String> {
+        match &self.effort {
+            Some(effort) if !runtime.efforts().contains(&effort.as_str()) => Err(format!(
+                "{} does not take the effort {effort:?}; use one of: {}",
+                crate::session::Runtime::from(runtime).as_str(),
+                runtime.efforts().join(", ")
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    /// `self`, with what `other` sets in its place.
+    #[must_use]
+    pub fn overridden_by(&self, other: &Self) -> Self {
+        Self {
+            model: other.model.clone().or_else(|| self.model.clone()),
+            effort: other.effort.clone().or_else(|| self.effort.clone()),
+        }
+    }
+
+    pub fn is_default(&self) -> bool {
+        self.model.is_none() && self.effort.is_none()
+    }
+
+    /// How a listing shows it: `default` for the runtime's own model, the
+    /// effort after a slash (`opus/high`, `default/high`).
+    pub fn label(&self) -> String {
+        let model = self.model.as_deref().unwrap_or("default");
+        match &self.effort {
+            Some(effort) => format!("{model}/{effort}"),
+            None => model.to_owned(),
+        }
+    }
+
+    /// The runtime's own flags for this choice. Claude Code: `--model`,
+    /// `--effort`. Codex: `--model` (`-m`) and the `model_reasoning_effort`
+    /// setting through `-c`. Joined with `=` so a value is never read as a
+    /// flag of its own.
+    fn runtime_args(&self, runtime: HostedRuntime) -> Vec<String> {
+        let mut args = Vec::new();
+        if let Some(model) = &self.model {
+            args.push(format!("--model={model}"));
+        }
+        if let Some(effort) = &self.effort {
+            match runtime {
+                HostedRuntime::Claude => args.push(format!("--effort={effort}")),
+                // A checked effort is a bare word: quoted, it is a TOML string.
+                HostedRuntime::Codex => {
+                    args.push("-c".to_owned());
+                    args.push(format!("model_reasoning_effort=\"{effort}\""));
+                }
+            }
+        }
+        args
+    }
+}
+
 fn runtime_command(
     runtime: HostedRuntime,
     cwd: &Path,
@@ -647,6 +753,7 @@ fn runtime_command(
             ])
             .arg("--cd")
             .arg(cwd)
+            .args(session.model.runtime_args(runtime))
             .arg("--")
             .arg(session.session_id),
         HostedRuntime::Claude => {
@@ -677,7 +784,8 @@ fn runtime_command(
             let command = pty_process::Command::new(session.program)
                 .arg(format!("{flag}={}", session.session_id))
                 .arg("--settings")
-                .arg(settings);
+                .arg(settings)
+                .args(session.model.runtime_args(runtime));
             // Claude Code shows this in its prompt and the window title, so
             // an attached terminal says which senator it is.
             match session.name {
@@ -1125,6 +1233,89 @@ async fn relay(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn choice(model: Option<&str>, effort: Option<&str>) -> HostedModel {
+        HostedModel::new(model.map(str::to_owned), effort.map(str::to_owned))
+    }
+
+    #[test]
+    fn a_model_and_effort_become_each_runtimes_own_flags() {
+        let both = choice(Some("opus"), Some("high"));
+        assert_eq!(
+            both.runtime_args(HostedRuntime::Claude),
+            ["--model=opus", "--effort=high"]
+        );
+        assert_eq!(
+            both.runtime_args(HostedRuntime::Codex),
+            ["--model=opus", "-c", "model_reasoning_effort=\"high\""]
+        );
+        let effort = choice(None, Some("minimal"));
+        assert_eq!(
+            effort.runtime_args(HostedRuntime::Codex),
+            ["-c", "model_reasoning_effort=\"minimal\""]
+        );
+        assert_eq!(
+            choice(Some("gpt-5.5"), None).runtime_args(HostedRuntime::Codex),
+            ["--model=gpt-5.5"]
+        );
+        // Neither set, or set blank: the runtime keeps its own default.
+        for none in [choice(None, None), choice(Some("  "), Some(""))] {
+            assert!(none.is_default());
+            assert!(none.runtime_args(HostedRuntime::Claude).is_empty());
+            assert!(none.runtime_args(HostedRuntime::Codex).is_empty());
+        }
+    }
+
+    #[test]
+    fn an_effort_the_runtime_does_not_document_is_refused_by_name() {
+        // Each runtime's own levels pass, and a model name is never judged.
+        for effort in ["low", "medium", "high", "xhigh", "max"] {
+            choice(Some("anything-at-all"), Some(effort))
+                .check(HostedRuntime::Claude)
+                .unwrap();
+        }
+        for effort in HostedRuntime::Codex.efforts() {
+            choice(None, Some(effort))
+                .check(HostedRuntime::Codex)
+                .unwrap();
+        }
+        let error = choice(None, Some("minimal"))
+            .check(HostedRuntime::Claude)
+            .unwrap_err();
+        assert_eq!(
+            error,
+            "claude does not take the effort \"minimal\"; use one of: low, medium, high, xhigh, max"
+        );
+        let error = choice(None, Some("extreme"))
+            .check(HostedRuntime::Codex)
+            .unwrap_err();
+        assert!(
+            error.starts_with("codex does not take the effort \"extreme\""),
+            "{error}"
+        );
+        assert!(error.contains("none, minimal, low"), "{error}");
+        choice(Some("opus"), None)
+            .check(HostedRuntime::Claude)
+            .unwrap();
+    }
+
+    #[test]
+    fn a_choice_is_labelled_and_overridden_field_by_field() {
+        assert_eq!(choice(None, None).label(), "default");
+        assert_eq!(choice(Some("opus"), None).label(), "opus");
+        assert_eq!(choice(Some("opus"), Some("high")).label(), "opus/high");
+        assert_eq!(choice(None, Some("high")).label(), "default/high");
+        let recorded = choice(Some("opus"), Some("high"));
+        assert_eq!(recorded.overridden_by(&choice(None, None)), recorded);
+        assert_eq!(
+            recorded.overridden_by(&choice(None, Some("low"))),
+            choice(Some("opus"), Some("low"))
+        );
+        assert_eq!(
+            recorded.overridden_by(&choice(Some("sonnet"), None)),
+            choice(Some("sonnet"), Some("high"))
+        );
+    }
 
     #[tokio::test]
     async fn a_viewer_can_answer_a_tui_query_without_reporting_human_input() {

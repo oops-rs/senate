@@ -612,6 +612,10 @@ Without --wait it returns at once: read the answer with `senate inbox`,
         codex_remote: Option<String>,
         #[arg(long)]
         name: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        effort: Option<String>,
     },
     /// Enable live push for a running Antigravity conversation.
     ///
@@ -2160,8 +2164,11 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             resume,
             codex_remote,
             name,
+            model,
+            effort,
         } => {
             let paths = Paths::from_env()?;
+            let model = crate::ipc::HostedModel { model, effort };
             runtime(false)?.block_on(crate::host::run(
                 &paths,
                 &id,
@@ -2173,6 +2180,7 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
                     resume,
                     codex_remote: codex_remote.as_deref(),
                     name: name.as_deref(),
+                    model: &model,
                 },
             ))
         }
