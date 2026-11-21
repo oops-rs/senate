@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use senate_bridge::approvals::Approval;
 use senate_bridge::ipc::{
     self, ApprovalsReply, ApproveReply, ClientError, DocketReply, InboxReply, MAX_LINE, Posted,
-    Reply, Request, SessionSelector, WatchEvent,
+    Reply, Request, SessionRow, SessionSelector, SessionsReply, WatchEvent,
 };
 use senate_core::alias::KnownAliases;
 use senate_core::{CommitteeId, Locale, SenatorName};
@@ -55,7 +55,11 @@ impl Link {
     /// One request on a fresh connection.
     pub async fn call<T: DeserializeOwned>(&self, request: &Request) -> Result<T, ClientError> {
         let timeout = match request {
-            Request::Answer { .. } | Request::Take { .. } | Request::Task { .. } => WRITE_TIMEOUT,
+            Request::Answer { .. }
+            | Request::Take { .. }
+            | Request::Task { .. }
+            | Request::Stop { .. }
+            | Request::Restore { .. } => WRITE_TIMEOUT,
             _ => READ_TIMEOUT,
         };
         ipc::request(&self.socket, request, CONNECT_TIMEOUT, timeout).await
@@ -152,6 +156,8 @@ pub trait Sink: Send + Sync + 'static {
     /// Something came back to the person (the app notifies; the daemon
     /// stays quiet while it is connected).
     fn for_person(&self, _committee: &str, _thread: u64, _title: &str, _body: &str) {}
+    /// A permission prompt waits in a hosted terminal (first sight only).
+    fn prompt_waiting(&self, _row: &SessionRow) {}
 }
 
 /// Reconnect delays: doubling from `min` to `max`, reset by a connection.
@@ -270,6 +276,7 @@ impl<S: Sink> Driver<S> {
         for notice in fx.notices {
             match notice {
                 Notice::ApprovalArrived(a) => self.sink.approval_arrived(&a),
+                Notice::PromptWaiting(row) => self.sink.prompt_waiting(&row),
                 Notice::ForPerson {
                     committee,
                     thread,
@@ -313,6 +320,7 @@ impl<S: Sink> Driver<S> {
             }
             Refresh::Docket => self.refresh_docket().await,
             Refresh::Aliases => self.refresh_aliases(false).await,
+            Refresh::Sessions => self.refresh_sessions().await,
         }
         self.changed();
     }
@@ -331,6 +339,25 @@ impl<S: Sink> Driver<S> {
         match self.link.call::<KnownAliases>(&Request::Aliases).await {
             Ok(aliases) => crate::names::update(|n| n.aliases = Some(aliases)),
             Err(e) => tracing::debug!("reading aliases: {e}"),
+        }
+    }
+
+    async fn refresh_sessions(&self) {
+        match self.link.call::<SessionsReply>(&Request::Sessions).await {
+            Ok(reply) => {
+                let notices = {
+                    let mut m = self.model();
+                    let notices = m.set_sessions(reply);
+                    m.clear_read(&ReadOf::Sessions);
+                    notices
+                };
+                for notice in notices {
+                    if let Notice::PromptWaiting(row) = notice {
+                        self.sink.prompt_waiting(&row);
+                    }
+                }
+            }
+            Err(e) => self.read_failed(ReadOf::Sessions, &e),
         }
     }
 
@@ -411,6 +438,11 @@ impl<S: Sink> Driver<S> {
                 self.link.call::<Posted>(&request).await.map(to_value)
             }
             Action::MarkRead { .. } => self.link.call::<Value>(&request).await,
+            Action::StopSession { .. } | Action::RestoreSession { .. } => {
+                let r = self.link.call::<Value>(&request).await;
+                self.refresh_sessions().await;
+                r
+            }
         };
         if let Some(committee) = action.committee() {
             self.refresh_committee(committee).await;

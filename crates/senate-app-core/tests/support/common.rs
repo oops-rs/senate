@@ -18,8 +18,9 @@ use chrono::Utc;
 use senate_bridge::agent::AgentSource;
 use senate_bridge::approvals::{Approval, ApprovalKind, ResolvedBy};
 use senate_bridge::ipc::{
-    ApprovalsReply, ApproveReply, CommitteeStatus, DocketReply, InboxReply, IpcError, Posted,
-    Reply, Request, SenateDocket, StatusReply, StreamState, ThreadReply, WatchEvent,
+    ApprovalsReply, ApproveReply, CommitteeStatus, DocketReply, HostState, HostedModel,
+    HostedPrompt, InboxReply, IpcError, Posted, Reply, Request, SenateDocket, SessionRow,
+    SessionsReply, StatusReply, StreamState, ThreadReply, WatchEvent,
 };
 use senate_bridge::session::{Runtime, Session, SessionState};
 use senate_bridge::state::QueueCounts;
@@ -254,6 +255,7 @@ pub fn docket() -> DocketReply {
 /// What the fake daemon holds and saw.
 pub struct World {
     pub status: StatusReply,
+    pub sessions: SessionsReply,
     pub threads: Vec<ThreadSummary>,
     pub approvals: Vec<Approval>,
     pub docket: DocketReply,
@@ -269,6 +271,9 @@ impl World {
                 suspended(131, "which env?", "codex"),
             ],
             approvals: vec![approval("019a-thread:7")],
+            // Hosted terminals are opt-in (`hosted_sessions()`), so the
+            // counts the other tests check stay theirs.
+            sessions: SessionsReply::default(),
             docket: docket(),
             requests: Vec::new(),
         }
@@ -489,6 +494,31 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
                 .unwrap();
             Reply::ok(&senate_core::alias::KnownAliases::Scoped(table))
         }
+        Request::Sessions => Reply::ok(&w.sessions),
+        Request::Stop { senator, force, .. } => {
+            assert!(!force, "the app never forces a stop");
+            let label = senator.to_string();
+            match w.sessions.rows.iter_mut().find(|r| r.label() == label) {
+                Some(row) => {
+                    row.state = HostState::Stopped;
+                    row.prompt = None;
+                    let _ = events.send(WatchEvent::Sessions);
+                    Reply::ok(&serde_json::json!({}))
+                }
+                None => Reply::err(IpcError::bad_request(format!("no session {label}"))),
+            }
+        }
+        Request::Restore { senator, .. } => {
+            let label = senator.to_string();
+            match w.sessions.rows.iter_mut().find(|r| r.label() == label) {
+                Some(row) => {
+                    row.state = HostState::Running;
+                    let _ = events.send(WatchEvent::Sessions);
+                    Reply::ok(&serde_json::json!({}))
+                }
+                None => Reply::err(IpcError::bad_request(format!("no session {label}"))),
+            }
+        }
         Request::Approvals => Reply::ok(&ApprovalsReply {
             approvals: w.approvals.clone(),
         }),
@@ -508,6 +538,43 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
             ))),
         },
         other => Reply::err(IpcError::bad_request(format!("fake: {other:?}"))),
+    }
+}
+
+/// Two hosted terminals: `claude` (alias `lead`) running with a permission
+/// prompt waiting, and a stopped Codex `reviewer`.
+pub fn hosted_sessions() -> SessionsReply {
+    let row = |name: &str, alias: Option<&str>, runtime: Runtime, state: HostState| SessionRow {
+        host_id: EventId::new(),
+        session_id: format!("s-{name}"),
+        primary: path(name),
+        alias: alias.map(path),
+        committee: Some(committee()),
+        runtime,
+        model: HostedModel::default(),
+        dir: "/Users/alice/dev/refund".into(),
+        state,
+        started_at: (state == HostState::Running).then(|| Utc::now() - chrono::Duration::hours(2)),
+        attached: false,
+        typed_secs_ago: None,
+        tty: "/tmp/none".into(),
+        prompt: None,
+    };
+    let mut lead = row("claude", Some("lead"), Runtime::Claude, HostState::Running);
+    lead.prompt = Some(HostedPrompt {
+        tool: Some("cargo publish".into()),
+        since: Utc::now() - chrono::Duration::minutes(3),
+    });
+    lead.model = HostedModel {
+        model: Some("opus".into()),
+        effort: Some("high".into()),
+    };
+    SessionsReply {
+        rows: vec![
+            lead,
+            row("reviewer", None, Runtime::Codex, HostState::Stopped),
+        ],
+        orphans: Vec::new(),
     }
 }
 

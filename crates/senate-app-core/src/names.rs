@@ -43,7 +43,11 @@ pub(crate) fn update(edit: impl FnOnce(&mut Names)) {
 
 /// A snapshot of what is known.
 pub(crate) fn current() -> Names {
-    NAMES.read().ok().and_then(|n| n.clone()).unwrap_or_default()
+    NAMES
+        .read()
+        .ok()
+        .and_then(|n| n.clone())
+        .unwrap_or_default()
 }
 
 /// Changes whenever the names do.
@@ -73,7 +77,9 @@ impl Names {
             return p.to_string();
         };
         if let Some(c) = committee {
-            return aliases.alias_of(c, p).map_or_else(|| p.to_string(), ToString::to_string);
+            return aliases
+                .alias_of(c, p)
+                .map_or_else(|| p.to_string(), ToString::to_string);
         }
         // No committee in view: an alias only when it is the agent's one.
         let mut found: Vec<SenatorName> = match aliases {
@@ -119,12 +125,16 @@ impl Names {
                     .iter()
                     .find(|c| c.name == *child)
                     .and_then(|c| {
-                        c.seats.iter().find(|s| {
-                            Some(&s.committee) == committee && s.senator == inner
-                        })
+                        c.seats
+                            .iter()
+                            .find(|s| Some(&s.committee) == committee && s.senator == inner)
                     })
                     .and_then(|s| s.alias.clone());
-                role(l, declared.as_ref().unwrap_or(&inner).as_str(), child.as_str())
+                role(
+                    l,
+                    declared.as_ref().unwrap_or(&inner).as_str(),
+                    child.as_str(),
+                )
             }
             // A seat here, named with its committee.
             None => {
@@ -173,9 +183,27 @@ mod tests {
 
     fn names(locale: Locale) -> Names {
         let mut table = CommitteeAliases::new();
-        table.set(&committee("senate"), "senate-chair".parse().unwrap(), "claude-a956".parse().unwrap()).unwrap();
-        table.set(&committee("other"), "chair2".parse().unwrap(), "claude-a956".parse().unwrap()).unwrap();
-        table.set(&committee("senate"), "windows".parse().unwrap(), "claude-b111".parse().unwrap()).unwrap();
+        table
+            .set(
+                &committee("senate"),
+                "senate-chair".parse().unwrap(),
+                "claude-a956".parse().unwrap(),
+            )
+            .unwrap();
+        table
+            .set(
+                &committee("other"),
+                "chair2".parse().unwrap(),
+                "claude-a956".parse().unwrap(),
+            )
+            .unwrap();
+        table
+            .set(
+                &committee("senate"),
+                "windows".parse().unwrap(),
+                "claude-b111".parse().unwrap(),
+            )
+            .unwrap();
         Names {
             people: People::new([Name::new("alice").unwrap()]),
             aliases: Some(KnownAliases::Scoped(table)),
@@ -187,7 +215,10 @@ mod tests {
                     duty: None,
                     presence: PresenceState::Online,
                 }],
-                ..ChildSenate::new(Name::new("dark-conclave").unwrap(), "claude-d333".parse().unwrap())
+                ..ChildSenate::new(
+                    Name::new("dark-conclave").unwrap(),
+                    "claude-d333".parse().unwrap(),
+                )
             }],
             locale,
         }
@@ -201,9 +232,15 @@ mod tests {
     #[test]
     fn a_mention_is_shown_by_its_alias_on_the_committee_in_view() {
         let n = names(Locale::En);
-        assert_eq!(shown(&n, "[senator::claude-a956]", Some("senate")), "senate-chair");
+        assert_eq!(
+            shown(&n, "[senator::claude-a956]", Some("senate")),
+            "senate-chair"
+        );
         assert_eq!(shown(&n, "[senator::claude-a956]", Some("other")), "chair2");
-        assert_eq!(shown(&n, "[senator::claude-a956]", Some("third")), "claude-a956");
+        assert_eq!(
+            shown(&n, "[senator::claude-a956]", Some("third")),
+            "claude-a956"
+        );
         // No committee in view: only an agent's one alias counts.
         assert_eq!(shown(&n, "[senator::claude-a956]", None), "claude-a956");
         assert_eq!(shown(&n, "[senator::claude-b111]", None), "windows");
@@ -213,7 +250,10 @@ mod tests {
     #[test]
     fn roles_and_child_seats_read_as_names() {
         let n = names(Locale::En);
-        assert_eq!(shown(&n, "[speaker::claude-b111]", Some("senate")), "windows (Speaker)");
+        assert_eq!(
+            shown(&n, "[speaker::claude-b111]", Some("senate")),
+            "windows (Speaker)"
+        );
         assert_eq!(shown(&n, "[speaker]", None), "Speaker");
         assert_eq!(shown(&n, "[senator::*]", None), "any agent");
         assert_eq!(
@@ -225,13 +265,19 @@ mod tests {
             shown(&zh, "[/dark-conclave::senate::senator::claude-c222]", None),
             "senate-dev（dark-conclave）"
         );
-        assert_eq!(shown(&zh, "[speaker::claude-b111]", Some("senate")), "windows（Speaker）");
+        assert_eq!(
+            shown(&zh, "[speaker::claude-b111]", Some("senate")),
+            "windows（Speaker）"
+        );
     }
 
     #[test]
     fn without_aliases_a_mention_is_its_name() {
         let n = Names::default();
-        assert_eq!(shown(&n, "[senator::claude-a956]", Some("senate")), "claude-a956");
+        assert_eq!(
+            shown(&n, "[senator::claude-a956]", Some("senate")),
+            "claude-a956"
+        );
         assert_eq!(id_of("[senator::claude-a956]"), "senator::claude-a956");
     }
 }

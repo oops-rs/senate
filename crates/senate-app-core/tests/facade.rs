@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use senate_app_core::{
-    AppCore, AppState, ApprovalDecision, ApprovalRequest, CoreError, CoreListener,
+    AppCore, AppState, ApprovalDecision, ApprovalRequest, CoreError, CoreListener, HostedSession,
 };
 use senate_bridge::approvals::Decision;
 use senate_bridge::ipc::Request;
@@ -23,6 +23,7 @@ struct Listener {
     last: Mutex<Option<AppState>>,
     approvals: Mutex<Vec<ApprovalRequest>>,
     notes: Mutex<Vec<senate_app_core::ffi::PersonNote>>,
+    prompts: Mutex<Vec<HostedSession>>,
 }
 
 impl CoreListener for Listener {
@@ -34,6 +35,9 @@ impl CoreListener for Listener {
     }
     fn on_for_person(&self, note: senate_app_core::ffi::PersonNote) {
         self.notes.lock().unwrap().push(note);
+    }
+    fn on_prompt_waiting(&self, session: HostedSession) {
+        self.prompts.lock().unwrap().push(session);
     }
 }
 
@@ -167,12 +171,18 @@ async fn reading_a_thread_returns_its_events_and_marks_it_seen() {
     // aliases are in), an id elsewhere.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while senate_app_core::ffi::mention_names_version() == 0
-        || senate_app_core::ffi::split_mentions("[senator::claude]".into(), Some("refund-v2".into()))[0]
-            .display
-            .as_deref()
+        || senate_app_core::ffi::split_mentions(
+            "[senator::claude]".into(),
+            Some("refund-v2".into()),
+        )[0]
+        .display
+        .as_deref()
             != Some("lead")
     {
-        assert!(tokio::time::Instant::now() < deadline, "aliases never arrived");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "aliases never arrived"
+        );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     let parts = senate_app_core::ffi::split_mentions(
@@ -203,4 +213,60 @@ async fn reading_a_thread_returns_its_events_and_marks_it_seen() {
             ..
         }
     )));
+}
+
+#[tokio::test]
+async fn hosted_sessions_show_their_waiting_prompt_and_stop_and_restore() {
+    let (dir, socket, world) = setup();
+    world.lock().unwrap().sessions = common::hosted_sessions();
+    let daemon = FakeDaemon::start(&socket, world);
+    let core = AppCore::new(Some(dir.path().display().to_string()), Some("en".into())).unwrap();
+    let listener = Arc::new(Listener::default());
+    core.start(listener.clone()).unwrap();
+    let s = until(&listener, "sessions read", |s| s.sessions.len() == 2).await;
+    let lead = &s.sessions[0];
+    assert_eq!(lead.label, "refund-v2::lead");
+    assert!(lead.running);
+    assert_eq!(lead.prompt_tool.as_deref(), Some("cargo publish"));
+    assert_eq!(lead.model.as_deref(), Some("opus · high"));
+    assert_eq!(s.counts.prompts, 1);
+    // Two threads, one approval, one waiting terminal.
+    assert_eq!(s.menu.badge.as_deref(), Some("4"));
+    assert_eq!(
+        s.menu.prompts.as_deref(),
+        Some("1 terminal waiting for your permission")
+    );
+    assert_eq!(listener.prompts.lock().unwrap().len(), 1, "notified once");
+
+    // Attaching is a terminal command; the decision is the person's, there.
+    let attach = core.attach_terminal(lead.label.clone()).unwrap();
+    assert_eq!(attach.argv, ["senate", "attach", "refund-v2::lead"]);
+    assert!(attach.shell_line.starts_with("SENATE_HOME="));
+    assert!(attach.shell_line.ends_with("senate attach refund-v2::lead"));
+    assert_eq!(core.watch_terminal().argv, ["senate", "session", "watch"]);
+
+    core.stop_session("refund-v2::lead".into()).await.unwrap();
+    let s = until(&listener, "stopped", |s| {
+        s.sessions.iter().all(|x| !x.running) && s.counts.prompts == 0
+    })
+    .await;
+    assert_eq!(s.menu.prompts, None);
+    core.restore_session("reviewer".into()).await.unwrap();
+    until(&listener, "restored", |s| {
+        s.sessions
+            .iter()
+            .any(|x| x.label == "reviewer" && x.running)
+    })
+    .await;
+    assert!(matches!(
+        core.stop_session("nobody-here".into()).await,
+        Err(CoreError::Failed { message }) if message.contains("no session")
+    ));
+    assert_eq!(listener.prompts.lock().unwrap().len(), 1, "never twice");
+    assert!(
+        daemon
+            .requests()
+            .iter()
+            .any(|r| matches!(r, Request::Stop { force: false, .. }))
+    );
 }

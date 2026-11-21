@@ -32,7 +32,9 @@ async fn main() {
     let paths = Paths::from_env().expect("a Senate home");
     paths.ensure_home().expect("creating the Senate home");
     let socket = paths.socket();
-    let world = Arc::new(Mutex::new(common::World::new()));
+    let mut w = common::World::new();
+    w.sessions = common::hosted_sessions();
+    let world = Arc::new(Mutex::new(w));
     let daemon = common::FakeDaemon::start(&socket, Arc::clone(&world));
     println!("fake daemon on {}", socket.display());
     let mut n = 8;

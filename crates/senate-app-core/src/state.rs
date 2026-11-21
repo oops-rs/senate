@@ -10,7 +10,7 @@ use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
 use senate_bridge::approvals::Approval;
-use senate_bridge::ipc::{SenateDocket, StatusReply, StreamState};
+use senate_bridge::ipc::{SenateDocket, SessionRow, StatusReply, StreamState};
 use senate_core::{
     Address, Awaiting, DocketItem, Locale, Mention, SenatorName, SpeakerSeat, ThreadSummary,
 };
@@ -44,9 +44,57 @@ pub struct AppState {
     /// presides over; empty when none does. Read-only: the presiding agent
     /// routes and covers, not the person.
     pub docket: Vec<DocketSenate>,
+    /// This machine's hosted sessions, running first.
+    pub sessions: Vec<HostedSession>,
     pub counts: Counts,
     /// The last failed action or read.
     pub last_error: Option<String>,
+}
+
+/// One hosted session: a terminal this machine runs for a senator.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct HostedSession {
+    /// What commands take to name it: `committee::alias`, else its id.
+    pub label: String,
+    pub session_id: String,
+    /// The senator it speaks as, as a mention.
+    pub mention: String,
+    pub committee: Option<String>,
+    /// `claude`, `codex`.
+    pub runtime: String,
+    /// `opus · high`, when not the runtime's default.
+    pub model: Option<String>,
+    pub dir: String,
+    pub running: bool,
+    pub started_at: Option<SystemTime>,
+    /// Someone is attached to its terminal now.
+    pub attached: bool,
+    /// Seconds since a person last typed into it.
+    pub typed_secs_ago: Option<u64>,
+    /// A permission prompt waits in it: what it asks about.
+    pub prompt_tool: Option<String>,
+    /// Since when a prompt waits.
+    pub prompt_since: Option<SystemTime>,
+}
+
+impl From<&SessionRow> for HostedSession {
+    fn from(r: &SessionRow) -> Self {
+        Self {
+            label: r.label(),
+            session_id: r.session_id.clone(),
+            mention: Address::senator(&r.primary).in_text(),
+            committee: r.committee.as_ref().map(ToString::to_string),
+            runtime: r.runtime.as_str().to_string(),
+            model: text::model_label(r.model.model.as_deref(), r.model.effort.as_deref()),
+            dir: r.dir.display().to_string(),
+            running: r.is_running(),
+            started_at: r.started_at.map(Into::into),
+            attached: r.attached,
+            typed_secs_ago: r.typed_secs_ago,
+            prompt_tool: r.prompt.as_ref().and_then(|p| p.tool.clone()),
+            prompt_since: r.prompt.as_ref().map(|p| p.since.into()),
+        }
+    }
 }
 
 /// The menu-bar extra: the lines of its menu and the badge.
@@ -62,6 +110,8 @@ pub struct MenuState {
     pub lines: Vec<String>,
     /// `Docket: 3 awaiting the Speaker`, only while an agent presides.
     pub docket: Option<String>,
+    /// `1 terminal waiting for your permission`, only while one waits.
+    pub prompts: Option<String>,
     /// Shown next to the icon when something waits on the person.
     pub badge: Option<String>,
 }
@@ -73,6 +123,8 @@ pub struct Counts {
     pub codex: u32,
     /// Items awaiting a Speaker the person's agent holds.
     pub docket: u32,
+    /// Hosted terminals with a permission prompt waiting for a person.
+    pub prompts: u32,
     /// `threads + approvals`: what waits on the person.
     pub pending: u32,
 }
@@ -308,12 +360,28 @@ impl AppState {
         } else {
             Vec::new()
         };
+        let sessions: Vec<HostedSession> = if model.online {
+            model
+                .sessions
+                .iter()
+                .flat_map(|s| &s.rows)
+                .map(HostedSession::from)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let prompts = if model.online {
+            model.waiting_prompts()
+        } else {
+            0
+        };
         let counts = Counts {
             threads: count(waiting.len()),
             approvals: count(approvals.len()),
             codex: count(codex.len()),
             docket: count(docket_items),
-            pending: count(waiting.len() + approvals.len()),
+            prompts: count(prompts),
+            pending: count(waiting.len() + approvals.len() + prompts),
         };
         let offline_reason = model.offline.as_ref().map(|o| o.text(locale));
         let menu = menu(
@@ -322,6 +390,7 @@ impl AppState {
             waiting.len(),
             approvals.len(),
             docket_items,
+            prompts,
             offline_reason.as_deref(),
         );
         Self {
@@ -335,6 +404,7 @@ impl AppState {
             approvals: approvals.into_iter().map(Into::into).collect(),
             codex,
             docket,
+            sessions,
             counts,
             last_error: model.last_error.as_ref().map(|f| f.text(locale)),
         }
@@ -347,6 +417,7 @@ fn menu(
     threads: usize,
     approvals: usize,
     docket_items: usize,
+    prompts: usize,
     offline: Option<&str>,
 ) -> MenuState {
     let locale = model.locale;
@@ -357,6 +428,7 @@ fn menu(
             pending: text::offline_pending(locale),
             lines: Vec::new(),
             docket: None,
+            prompts: None,
             badge: None,
         };
     }
@@ -376,7 +448,7 @@ fn menu(
             )
         })
         .collect();
-    let total = threads + approvals;
+    let total = threads + approvals + prompts;
     MenuState {
         title: text::online_title(locale, &person),
         tooltip: format!("Senate · {pending}"),
@@ -385,6 +457,7 @@ fn menu(
         docket: model
             .presiding()
             .then(|| text::docket_line(locale, docket_items)),
+        prompts: (prompts > 0).then(|| text::prompts_line(locale, prompts)),
         badge: (total > 0).then(|| total.to_string()),
     }
 }

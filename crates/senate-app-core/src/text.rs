@@ -230,6 +230,32 @@ pub fn approvals_word(locale: Locale) -> &'static str {
     locale.pick("审批", "approvals")
 }
 
+pub fn sessions_word(locale: Locale) -> &'static str {
+    locale.pick("托管会话", "hosted sessions")
+}
+
+/// The menu line for terminals waiting on a person.
+pub fn prompts_line(locale: Locale, prompts: usize) -> String {
+    match locale {
+        Locale::Zh => format!("{prompts} 个终端在等你授权"),
+        Locale::En => format!(
+            "{prompts} {} waiting for your permission",
+            plural(prompts, "terminal", "terminals")
+        ),
+    }
+}
+
+/// A hosted session's model, when it is not the runtime's default:
+/// `opus · high`.
+pub fn model_label(model: Option<&str>, effort: Option<&str>) -> Option<String> {
+    match (model, effort) {
+        (None, None) => None,
+        (Some(m), None) => Some(m.to_string()),
+        (None, Some(e)) => Some(e.to_string()),
+        (Some(m), Some(e)) => Some(format!("{m} · {e}")),
+    }
+}
+
 pub fn docket_word(locale: Locale) -> &'static str {
     locale.pick("议程", "docket")
 }

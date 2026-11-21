@@ -16,15 +16,16 @@ use chrono::Utc;
 use senate_bridge::Paths;
 use senate_bridge::approvals::{Approval, Decision};
 use senate_bridge::delivery::codex::CodexConfig;
-use senate_bridge::ipc::{Request, SessionSelector, ThreadReply};
+use senate_bridge::ipc::{Request, SessionRow, SessionSelector, ThreadReply};
+use senate_core::alias::AliasName;
 use senate_core::{CommitteeId, Locale, Mention, Seq};
 use tokio::runtime::{Handle, Runtime};
 
 use crate::link::{Backoff, Driver, Link, Sink};
 use crate::model::{self, Action, Failure, Model, Refresh};
-use crate::state::{AppState, ApprovalRequest};
-use crate::reads::{self, ThreadView};
 use crate::names;
+use crate::reads::{self, ThreadView};
+use crate::state::{AppState, ApprovalRequest, HostedSession};
 use crate::text;
 
 /// Why a call failed.
@@ -63,6 +64,10 @@ pub trait CoreListener: Send + Sync {
     /// addressed to them): post a notification. The daemon posts none while
     /// the app is connected, so this is the only one.
     fn on_for_person(&self, note: PersonNote);
+    /// A permission prompt waits in a hosted terminal, seen for the first
+    /// time (for a notification); it is in the next
+    /// [`AppState::sessions`] too.
+    fn on_prompt_waiting(&self, session: HostedSession);
 }
 
 /// What to notify when something comes back to the person.
@@ -417,6 +422,35 @@ impl AppCore {
         Ok(reads::thread_view(reply, person.as_ref(), locale))
     }
 
+    /// End a hosted session's terminal, as the person (`senate session
+    /// stop <label>`). Never forced: the daemon spares a terminal someone
+    /// is typing in, and says so.
+    pub async fn stop_session(&self, label: String) -> Result<(), CoreError> {
+        let senator = self.session_label(&label)?;
+        self.act(Action::StopSession { senator }).await
+    }
+
+    /// Resume a stopped hosted session in the background (`senate session
+    /// restore <label>`), with the model it last had.
+    pub async fn restore_session(&self, label: String) -> Result<(), CoreError> {
+        let senator = self.session_label(&label)?;
+        self.act(Action::RestoreSession { senator }).await
+    }
+
+    /// What to run to open a hosted session's terminal: `senate attach
+    /// <label>` (Ctrl-] detaches). A waiting permission prompt is decided
+    /// there, by the person, never by the app.
+    pub fn attach_terminal(&self, label: String) -> Result<TerminalCommand, CoreError> {
+        let senator = self.session_label(&label)?;
+        Ok(self.senate_command(&["attach", &senator.to_string()]))
+    }
+
+    /// What to run to watch every hosted terminal side by side (`senate
+    /// session watch`).
+    pub fn watch_terminal(&self) -> TerminalCommand {
+        self.senate_command(&["session", "watch"])
+    }
+
     /// What to run to open Codex in a terminal: resuming `thread_id` in its
     /// directory, or a new Codex when `None`. Reads `[codex]` from
     /// `senate.toml` for the binary and the `--remote` address.
@@ -443,6 +477,34 @@ impl AppCore {
 
     fn driver(&self) -> Result<&Arc<Driver<ListenerSink>>, CoreError> {
         self.driver.get().ok_or(CoreError::NotStarted)
+    }
+
+    fn session_label(&self, label: &str) -> Result<AliasName, CoreError> {
+        label.parse().map_err(|e| CoreError::Invalid {
+            message: match self.locale() {
+                Locale::Zh => format!("会话 {label:?} 无效：{e}"),
+                Locale::En => format!("session {label:?}: {e}"),
+            },
+        })
+    }
+
+    /// `senate <args>` in a terminal, with this app's Senate home.
+    fn senate_command(&self, args: &[&str]) -> TerminalCommand {
+        let home = self.senate_home();
+        let mut argv = vec!["senate".to_string()];
+        argv.extend(args.iter().map(ToString::to_string));
+        let words: Vec<String> = argv.iter().map(|a| model::shell_quote(a)).collect();
+        let shell_line = format!(
+            "SENATE_HOME={} {}",
+            model::shell_quote(&home),
+            words.join(" ")
+        );
+        TerminalCommand {
+            argv,
+            cwd: None,
+            apple_script: model::terminal_script(&shell_line),
+            shell_line,
+        }
     }
 
     fn committee_id(&self, committee: &str) -> Result<CommitteeId, CoreError> {
@@ -518,6 +580,10 @@ impl Sink for ListenerSink {
 
     fn approval_arrived(&self, approval: &Approval) {
         self.listener.on_approval_requested(approval.into());
+    }
+
+    fn prompt_waiting(&self, row: &SessionRow) {
+        self.listener.on_prompt_waiting(row.into());
     }
 
     fn for_person(&self, committee: &str, thread: u64, title: &str, body: &str) {

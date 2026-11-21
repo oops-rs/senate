@@ -22,10 +22,11 @@ use std::path::PathBuf;
 
 use senate_bridge::approvals::{Approval, Decision};
 use senate_bridge::ipc::{
-    ApprovalsReply, ClientError, DocketReply, InboxReply, Request, SessionSelector, StatusReply,
-    WatchEvent,
+    ApprovalsReply, ClientError, DocketReply, InboxReply, Request, SessionRow, SessionSelector,
+    SessionsReply, StatusReply, WatchEvent,
 };
 use senate_bridge::session::{Runtime, Session, SessionState};
+use senate_core::alias::AliasName;
 use senate_core::{
     CommitteeId, Directed, Locale, SenatorName, Seq, SpeakerSeat, StatusPayload, StatusState,
     ThreadSummary,
@@ -45,6 +46,10 @@ pub enum Refresh {
     AllInboxes,
     /// `approvals`, replacing the list.
     Approvals,
+    /// `sessions`: this machine's hosted sessions and the prompts waiting
+    /// in them. On connect, on [`WatchEvent::Sessions`], after a stop or
+    /// restore, and on `lagged`.
+    Sessions,
     /// `aliases`: how agents are named on each committee
     /// ([`crate::names`]). Read at most every few minutes unless forced.
     Aliases,
@@ -57,6 +62,8 @@ pub enum Refresh {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Notice {
     ApprovalArrived(Approval),
+    /// A permission prompt waits in a hosted terminal (first sight only).
+    PromptWaiting(SessionRow),
     /// Something came back to the person: an answer, a note, an escalation
     /// addressed to them. The app posts the notification itself, and the
     /// daemon stays quiet while the app is connected.
@@ -127,6 +134,7 @@ pub enum ReadOf {
     },
     Approvals,
     Docket,
+    Sessions,
 }
 
 /// The last failed action or read, shown in the window.
@@ -156,6 +164,7 @@ impl Failure {
                     ),
                     ReadOf::Approvals => text::approvals_word(locale).to_string(),
                     ReadOf::Docket => text::docket_word(locale).to_string(),
+                    ReadOf::Sessions => text::sessions_word(locale).to_string(),
                 };
                 text::read_failed(locale, &what, message)
             }
@@ -180,9 +189,14 @@ pub struct Model {
     pub inboxes: BTreeMap<(SenatorName, CommitteeId), InboxReply>,
     /// What awaits the Speaker, while one of the person's agents presides.
     pub docket: Option<DocketReply>,
+    /// This machine's hosted sessions, as last read; `None` until read
+    /// since connecting.
+    pub sessions: Option<SessionsReply>,
     pub last_error: Option<Failure>,
     /// Approvals already notified about, so a reconnect does not repeat them.
     notified: BTreeSet<String>,
+    /// Hosted prompts already notified about, by session and when it opened.
+    prompts_notified: BTreeSet<(String, i64)>,
 }
 
 /// A thread waiting on the person, across the agents whose inbox lists it.
@@ -217,6 +231,7 @@ impl Model {
         self.offline = None;
         self.last_error = None;
         self.approvals.clear();
+        self.sessions = None;
     }
 
     /// The daemon cannot be reached (or the stream broke).
@@ -254,6 +269,11 @@ impl Model {
                 // How agents are named (the driver reads them at most every
                 // few minutes).
                 fx.refresh.push(Refresh::Aliases);
+                // The first status after connecting reads the hosted
+                // sessions; after that, the `sessions` line says when.
+                if self.sessions.is_none() {
+                    fx.refresh.push(Refresh::Sessions);
+                }
             }
             WatchEvent::ApprovalRequested(approval) => {
                 let approval = *approval;
@@ -268,6 +288,7 @@ impl Model {
             // Who works the desk changed: the docket may be another one.
             // What this machine's agents are comes with the next status.
             WatchEvent::Roles => fx.refresh.push(Refresh::Docket),
+            WatchEvent::Sessions => fx.refresh.push(Refresh::Sessions),
             WatchEvent::Inbox {
                 agent, committee, ..
             } => {
@@ -299,6 +320,7 @@ impl Model {
                 fx.refresh.push(Refresh::AllInboxes);
             }
             WatchEvent::Lagged { .. } => {
+                fx.refresh.push(Refresh::Sessions);
                 fx.refresh.push(Refresh::Approvals);
                 fx.refresh.push(Refresh::AllInboxes);
                 fx.refresh.push(Refresh::Docket);
@@ -312,6 +334,29 @@ impl Model {
             self.inboxes
                 .insert((agent, reply.committee.clone()), reply.clone());
         }
+    }
+
+    /// Fold a `sessions` reply; the prompts not seen before, to notify.
+    pub fn set_sessions(&mut self, reply: SessionsReply) -> Vec<Notice> {
+        let mut notices = Vec::new();
+        for row in &reply.rows {
+            if let Some(prompt) = &row.prompt
+                && self
+                    .prompts_notified
+                    .insert((row.session_id.clone(), prompt.since.timestamp()))
+            {
+                notices.push(Notice::PromptWaiting(row.clone()));
+            }
+        }
+        self.sessions = Some(reply);
+        notices
+    }
+
+    /// The hosted sessions with a prompt waiting.
+    pub fn waiting_prompts(&self) -> usize {
+        self.sessions
+            .as_ref()
+            .map_or(0, |s| s.rows.iter().filter(|r| r.prompt.is_some()).count())
     }
 
     pub fn set_approvals(&mut self, reply: ApprovalsReply) {
@@ -487,6 +532,15 @@ pub enum Action {
         id: String,
         decision: Decision,
     },
+    /// End a hosted session's terminal, as the person (`senate session
+    /// stop`, never forced: an attended terminal is spared).
+    StopSession {
+        senator: AliasName,
+    },
+    /// Resume a stopped hosted session in the background.
+    RestoreSession {
+        senator: AliasName,
+    },
 }
 
 impl Action {
@@ -549,6 +603,16 @@ impl Action {
                 committee: None,
             },
             Action::Approve { id, decision } => Request::Approve { id, decision },
+            Action::StopSession { senator } => Request::Stop {
+                session,
+                senator,
+                force: false,
+            },
+            Action::RestoreSession { senator } => Request::Restore {
+                session,
+                senator,
+                model: Default::default(),
+            },
         })
     }
 
@@ -560,7 +624,11 @@ impl Action {
             | Action::Take { committee, .. }
             | Action::Close { committee, .. }
             | Action::MarkRead { committee, .. } => Some(committee),
-            Action::Approvals | Action::Docket | Action::Approve { .. } => None,
+            Action::Approvals
+            | Action::Docket
+            | Action::Approve { .. }
+            | Action::StopSession { .. }
+            | Action::RestoreSession { .. } => None,
         }
     }
 }
@@ -760,7 +828,12 @@ mod tests {
         ]))));
         assert_eq!(
             fx.refresh,
-            vec![Refresh::AllInboxes, Refresh::Docket, Refresh::Aliases]
+            vec![
+                Refresh::AllInboxes,
+                Refresh::Docket,
+                Refresh::Aliases,
+                Refresh::Sessions
+            ]
         );
         m.set_inbox(inbox("claude", "a", &[3, 5]));
         m.set_inbox(inbox("codex", "a", &[7]));
@@ -1096,7 +1169,12 @@ mod tests {
         let fx = m.apply(WatchEvent::Lagged { missed: 4 });
         assert_eq!(
             fx.refresh,
-            vec![Refresh::Approvals, Refresh::AllInboxes, Refresh::Docket]
+            vec![
+                Refresh::Sessions,
+                Refresh::Approvals,
+                Refresh::AllInboxes,
+                Refresh::Docket
+            ]
         );
     }
 
