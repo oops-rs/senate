@@ -352,8 +352,7 @@ stdin.")]
         #[arg(long)]
         json: bool,
     },
-    /// What the committee knows: list or search its memory, or correct or
-    /// delete a point.
+    /// Search what the committee knows; correct or delete a point.
     ///
     /// The Speaker distils the committee's discussion into short points,
     /// each with the seqs it came from; a newer point replaces an older one.
