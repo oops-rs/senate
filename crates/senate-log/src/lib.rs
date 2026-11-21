@@ -88,4 +88,7 @@ pub use error::LogError;
 pub use memory::MemoryStore;
 pub use pg::{FLAT_NAMES_FORMAT, FlattenOutcome, NEAR_MATCH_SIMILARITY, PgStore};
 pub use sqlite::SqliteStore;
-pub use store::{CursorOwner, HeartbeatRecord, LogStore, MEMORY_URL, SQLITE_PREFIX, connect, now};
+pub use store::{
+    CursorOwner, HeartbeatRecord, Inspection, LogStore, MEMORY_URL, SQLITE_PREFIX, connect,
+    inspect, now,
+};

@@ -95,6 +95,35 @@ impl SqliteStore {
         })
     }
 
+    /// What the file at `path` is, reading only ([`crate::inspect`]).
+    pub(crate) async fn inspect_path(path: &Path) -> Result<crate::Inspection, LogError> {
+        if !path.exists() {
+            return Ok(crate::Inspection::Missing);
+        }
+        let path = path.to_path_buf();
+        tokio::task::spawn_blocking(move || -> Result<crate::Inspection, LogError> {
+            let conn = Connection::open_with_flags(
+                &path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?;
+            conn.busy_timeout(Duration::from_secs(5))?;
+            refuse_foreign(&conn)?;
+            let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+            let epoch = conn
+                .query_row("SELECT epoch FROM log_meta", [], |r| r.get::<_, String>(0))
+                .optional()
+                .ok()
+                .flatten();
+            Ok(crate::Inspection::Log {
+                epoch,
+                pending: usize::try_from(version).unwrap_or(0) < MIGRATIONS.len(),
+            })
+        })
+        .await
+        .map_err(task_failed)?
+    }
+
     /// Run `f` on the blocking pool with the connection.
     async fn run<T: Send + 'static>(
         &self,

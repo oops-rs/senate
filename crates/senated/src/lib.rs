@@ -83,6 +83,7 @@ mod assembly;
 pub mod chat;
 pub mod component;
 pub mod config;
+pub mod doctor;
 mod empty_hub;
 mod gateway_ipc;
 pub mod machine;

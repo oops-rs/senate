@@ -4,14 +4,14 @@ mod bind;
 mod conformance;
 mod transport;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, ensure};
 use async_trait::async_trait;
 use senate_core::{ChatSurface, Locale, Name};
 use senate_log::LogStore;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{ChatGateway, Component, ComponentContext, SenatedConfig};
 use bind::InboundHandler;
@@ -23,6 +23,43 @@ struct Settings {
     socket: PathBuf,
     platform: Name,
     token_env: String,
+}
+
+/// Whether a platform adapter is attached to the gateway socket, as the
+/// running server last wrote it to [`GatewayStatus::FILE`] in its
+/// `data_dir`: on start, and on every attach and detach. `senated doctor`
+/// reads it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GatewayStatus {
+    pub platform: String,
+    pub connected: bool,
+    pub at: chrono::DateTime<chrono::Utc>,
+}
+
+impl GatewayStatus {
+    pub const FILE: &'static str = "chat_gateway.json";
+
+    fn now(platform: &str, connected: bool) -> Self {
+        Self {
+            platform: platform.to_owned(),
+            connected,
+            at: chrono::Utc::now(),
+        }
+    }
+
+    /// Best effort: the status is informational.
+    fn write(&self, path: &Path) {
+        let text = serde_json::to_string_pretty(self).unwrap_or_default();
+        if let Err(e) = std::fs::write(path, text) {
+            tracing::debug!("{}: {e}", path.display());
+        }
+    }
+
+    /// What was last written in `data_dir`, if anything readable.
+    pub fn read(data_dir: &Path) -> Option<Self> {
+        let text = std::fs::read_to_string(data_dir.join(Self::FILE)).ok()?;
+        serde_json::from_str(&text).ok()
+    }
 }
 
 pub(crate) struct RemoteGateway {
@@ -57,6 +94,20 @@ impl RemoteGateway {
             surface,
             gateway,
         }))
+    }
+}
+
+impl RemoteGateway {
+    /// Keep [`GatewayStatus`] in `data_dir` from now on. Only the server
+    /// that serves the socket does: reading the configuration
+    /// ([`Self::from_config`]) writes nothing.
+    pub(crate) fn record_status_in(&self, data_dir: &Path) {
+        self.surface.record_to(data_dir.join(GatewayStatus::FILE));
+    }
+
+    /// The socket the adapter connects to.
+    pub(crate) fn socket(&self) -> &Path {
+        &self.settings.socket
     }
 }
 

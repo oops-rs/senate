@@ -348,3 +348,19 @@ async fn binding_recovers_abandoned_sockets_and_preserves_live_endpoints_and_fil
     assert!(socket::BoundSocket::bind(&path).await.is_err());
     assert_eq!(std::fs::read_to_string(path).unwrap(), "keep");
 }
+
+#[tokio::test]
+async fn whether_an_adapter_is_attached_is_written_down() {
+    let dir = tempfile::tempdir().unwrap();
+    let read_status = || crate::gateway_ipc::GatewayStatus::read(dir.path()).unwrap();
+    let surface = RemoteSurface::new("chat".into());
+    surface.record_to(dir.path().join(crate::gateway_ipc::GatewayStatus::FILE));
+    assert!(!read_status().connected, "none yet");
+    let (read, write, session) =
+        attach(surface.clone(), async { Ok(()) }, |_| async { Ok(()) }).await;
+    assert!(read_status().connected);
+    assert_eq!(read_status().platform, "chat");
+    drop((read, write));
+    let _ = session.await.unwrap();
+    assert!(!read_status().connected, "gone again");
+}

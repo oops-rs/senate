@@ -306,6 +306,7 @@ impl Assembly {
             return Err(AssemblyError::SurfaceWithoutSpeaker);
         }
         let adapter = if let Some(remote) = remote {
+            remote.record_status_in(&config.server.data_dir);
             let mount = remote
                 .gateway
                 .mount()

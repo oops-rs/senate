@@ -235,6 +235,40 @@ pub(crate) fn mint_epoch() -> String {
     EventId::new().to_string()
 }
 
+/// What a log at `database_url` is, found by reading only: it is neither
+/// created nor migrated (`senated doctor`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Inspection {
+    /// `memory:`: a log that is gone when senated stops.
+    Memory,
+    /// No log there yet; senated creates it when it first starts.
+    Missing,
+    /// A Senate log. `epoch` is `None` before the first start minted one;
+    /// `pending` when senated will migrate it when it next starts.
+    Log {
+        epoch: Option<String>,
+        pending: bool,
+    },
+}
+
+/// Look at the log `database_url` names, reading only. A database that is
+/// not Senate's is refused with [`LogError::ForeignDatabase`], as opening
+/// it would be.
+pub async fn inspect(database_url: &str) -> Result<Inspection, LogError> {
+    if database_url == MEMORY_URL {
+        return Ok(Inspection::Memory);
+    }
+    if database_url.starts_with("postgres://") || database_url.starts_with("postgresql://") {
+        return PgStore::inspect_url(database_url).await;
+    }
+    if let Some(path) = database_url.strip_prefix(SQLITE_PREFIX) {
+        return SqliteStore::inspect_path(std::path::Path::new(path)).await;
+    }
+    Err(LogError::Invalid(format!(
+        "database_url must be {MEMORY_URL:?}, a postgres:// URL or {SQLITE_PREFIX}<path>"
+    )))
+}
+
 /// Open the store a `database_url` names:
 ///
 /// - [`MEMORY_URL`] (`memory:`): a fresh [`MemoryStore`];

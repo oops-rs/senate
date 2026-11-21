@@ -68,6 +68,18 @@ enum Command {
         #[command(subcommand)]
         command: SecretaryCommand,
     },
+    /// Check a Senate server and say how to fix what is wrong: the
+    /// configuration, the log (read only, never created or migrated),
+    /// whether the server answers, and its chat gateway. Exits non-zero
+    /// when a check fails.
+    Doctor {
+        /// The server's senated.toml.
+        #[arg(long, env = "SENATED_CONFIG")]
+        config: PathBuf,
+        /// Print JSON: {checks: [{id, status, found, fix?}], summary}.
+        #[arg(long)]
+        json: bool,
+    },
     /// Convert a Postgres log written when senators were paths to flat
     /// names, once, keeping a copy of each table as <table>_pre_flat_names.
     FlattenLog {
@@ -108,6 +120,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Some(Command::FlattenLog { database_url }) => return flatten_log(&database_url).await,
+        Some(Command::Doctor { config, json }) => return doctor(&config, json).await,
         Some(Command::Secretary {
             command:
                 SecretaryCommand::Show {
@@ -155,6 +168,25 @@ async fn main() -> anyhow::Result<()> {
         .context("starting senated")?;
     tracing::info!(url = %daemon.base_url(), "serving");
     daemon.run_until_signal().await
+}
+
+/// `senated doctor`: every server check, printed; a failed one fails the
+/// command.
+async fn doctor(config: &std::path::Path, json: bool) -> anyhow::Result<()> {
+    let checks = senated::doctor::checks(config).await;
+    let locale = SenatedConfig::load(config)
+        .map(|c| c.server.locale)
+        .unwrap_or_default();
+    let report = senate_bridge::doctor::Report::new(checks);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print!("{}", report.render(locale));
+    }
+    if report.failed() {
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 /// `senated flatten-log`: convert a Postgres log, once, and say what was

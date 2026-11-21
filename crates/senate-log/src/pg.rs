@@ -297,6 +297,39 @@ impl PgStore {
         })
     }
 
+    /// What the database at `database_url` holds, reading only
+    /// ([`crate::inspect`]).
+    pub(crate) async fn inspect_url(database_url: &str) -> Result<crate::Inspection, LogError> {
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(database_url)
+            .await?;
+        let store = Self::from_pool(pool);
+        store.refuse_foreign().await?;
+        let found = store.inspect().await?;
+        if found.tables.is_empty() {
+            return Ok(crate::Inspection::Missing);
+        }
+        let recorded = match &found.recorded {
+            foreign::Recorded::Rows(rows) => rows.len(),
+            _ => 0,
+        };
+        let ours = MIGRATOR
+            .iter()
+            .filter(|m| !m.migration_type.is_down_migration())
+            .count();
+        let epoch = sqlx::query_scalar::<_, String>("SELECT epoch FROM log_meta")
+            .fetch_optional(&store.pool)
+            .await
+            .ok()
+            .flatten();
+        store.pool.close().await;
+        Ok(crate::Inspection::Log {
+            epoch,
+            pending: recorded < ours,
+        })
+    }
+
     async fn refuse_foreign(&self) -> Result<(), LogError> {
         let found = self.inspect().await?;
         let ours: Vec<(i64, Vec<u8>)> = MIGRATOR

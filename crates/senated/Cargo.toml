@@ -24,6 +24,7 @@ senate-work = { workspace = true }
 senate-bridge = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+chrono = { workspace = true }
 clap = { workspace = true }
 futures = { workspace = true }
 ractor = { workspace = true }
@@ -43,7 +44,6 @@ name = "grants"
 required-features = ["testing"]
 
 [dev-dependencies]
-chrono = { workspace = true }
 rusqlite = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "net", "io-util"] }

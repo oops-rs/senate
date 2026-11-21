@@ -9,7 +9,7 @@ mod tests;
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
@@ -57,6 +57,9 @@ pub(super) struct RemoteSurface {
     // ChatGateway caches Unsupported for the lifetime of this surface.
     capabilities: OnceLock<HashSet<String>>,
     peer: Mutex<Option<Arc<Peer>>>,
+    /// Where whether an adapter is attached is written
+    /// ([`super::GatewayStatus`]); unset, nowhere.
+    status: OnceLock<PathBuf>,
 }
 
 impl RemoteSurface {
@@ -65,7 +68,20 @@ impl RemoteSurface {
             platform,
             capabilities: OnceLock::new(),
             peer: Mutex::new(None),
+            status: OnceLock::new(),
         })
+    }
+
+    /// Write whether an adapter is attached to `path` from now on.
+    pub(super) fn record_to(&self, path: PathBuf) {
+        let _ = self.status.set(path);
+        self.record(false);
+    }
+
+    fn record(&self, connected: bool) {
+        if let Some(path) = self.status.get() {
+            super::GatewayStatus::now(&self.platform, connected).write(path);
+        }
     }
 
     fn peer(&self) -> MutexGuard<'_, Option<Arc<Peer>>> {
@@ -290,6 +306,7 @@ struct Attachment(Arc<RemoteSurface>);
 impl Drop for Attachment {
     fn drop(&mut self) {
         *self.0.peer() = None;
+        self.0.record(false);
     }
 }
 
@@ -438,6 +455,7 @@ where
         .await?;
         bail!(detail);
     }
+    surface.record(true);
     let _attachment = Attachment(surface);
     send(&mut writer, json!({"type":"ready","version":VERSION})).await?;
     let mut pending = HashMap::<String, (Instant, Finish)>::new();
