@@ -1,5 +1,7 @@
 //! A private platform process attached to this Senate via a local Unix socket.
 mod bind;
+#[cfg(test)]
+mod conformance;
 mod transport;
 
 use std::path::PathBuf;
