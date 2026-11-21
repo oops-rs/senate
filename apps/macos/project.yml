@@ -101,3 +101,52 @@ targets:
         ENABLE_HARDENED_RUNTIME: YES
         CODE_SIGN_ENTITLEMENTS: Senate/Senate.entitlements
         COMBINE_HIDPI_IMAGES: YES
+  # The store and view models against a fake core (Swift Testing), hosted
+  # by the app (which connects to nothing under test).
+  SenateTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: SenateTests
+    dependencies:
+      - target: Senate
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.senate.app.tests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/Senate.app/Contents/MacOS/Senate
+        BUNDLE_LOADER: $(TEST_HOST)
+        SWIFT_DEFAULT_ACTOR_ISOLATION: MainActor
+        SWIFT_APPROACHABLE_CONCURRENCY: YES
+        OTHER_SWIFT_FLAGS: -Xcc -fmodule-map-file=$(PROJECT_DIR)/Generated/senate_app_coreFFI.modulemap
+  # A smoke run of the real app against the core's fake daemon
+  # (scripts/ui-test.sh starts it).
+  SenateUITests:
+    type: bundle.ui-testing
+    platform: macOS
+    sources:
+      - path: SenateUITests
+    dependencies:
+      - target: Senate
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.senate.app.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: Senate
+        # XCTestCase's overrides are nonisolated while XCUIApplication is
+        # the main actor's: the UI tests stay in the Swift 5 language mode.
+        SWIFT_VERSION: "5.0"
+schemes:
+  Senate:
+    build:
+      targets:
+        Senate: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - SenateTests
+        - SenateUITests
+    archive:
+      config: Release

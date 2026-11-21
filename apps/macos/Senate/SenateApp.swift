@@ -8,7 +8,7 @@ import SenateCore
 /// Everything shown comes from the Rust core (`CoreStore`).
 @main
 struct SenateApp: App {
-    @State private var store = CoreStore()
+    @State private var store = CoreStore.forApp()
 
     init() {
         Diagnostics.shared.start()

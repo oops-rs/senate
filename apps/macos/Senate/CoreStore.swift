@@ -79,6 +79,15 @@ final class CoreStore {
     /// `~/.senate`.
     nonisolated static let homeKey = "senateHome"
 
+    /// The app's store. As the unit tests' host, the app connects to
+    /// nothing and posts nothing: the tests make their own stores.
+    static func forApp() -> CoreStore {
+        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil {
+            return CoreStore(makeCore: { throw CoreError.Setup(message: "testing") }, notifications: false)
+        }
+        return CoreStore()
+    }
+
     /// The real core. The Senate home: `$SENATE_HOME` when set (development
     /// runs), else the one chosen in Settings, else `~/.senate`. The
     /// language is the one the bundle was localized into, so the core's
@@ -465,7 +474,7 @@ func describe(_ error: Error) -> String {
 
 extension AppState {
     /// Before the core's first snapshot.
-    static let placeholder = AppState(
+    nonisolated static let placeholder = AppState(
         online: false,
         offlineReason: nil,
         person: nil,
