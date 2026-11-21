@@ -57,6 +57,30 @@ pub fn operation_id(epoch: &str, committee: &CommitteeId, seq: Seq, target: &str
     format!("{OPERATION_PREFIX}{}", &digest[..OPERATION_HASH_HEX])
 }
 
+/// The key for an update that can repeat at the same `seq`: a card
+/// refreshed in place, an announcement set again. What it sends is part of
+/// the key ([`operation_id`] with `target~<hash of payload>`), because the
+/// gateway holds an id to one payload: the same content again (a retry,
+/// or a restart that renders what it sent before) reuses the id, and
+/// anything else gets a new one.
+pub(crate) fn content_operation_id<T: serde::Serialize>(
+    epoch: &str,
+    committee: &CommitteeId,
+    seq: Seq,
+    target: &str,
+    payload: &T,
+) -> String {
+    // Cannot fail: cards and sections are plain strings and enums.
+    let bytes = serde_json::to_vec(payload).unwrap_or_default();
+    let digest = hex::encode(Sha256::digest(&bytes));
+    operation_id(
+        epoch,
+        committee,
+        seq,
+        &format!("{target}~{}", &digest[..12]),
+    )
+}
+
 /// The key for a reply in a group bound to no committee: there is no seq, so
 /// it is derived from the message being answered.
 pub(crate) fn unbound_operation_id(group_id: &str, message_ref: &str) -> String {
@@ -69,6 +93,20 @@ pub(crate) fn unbound_operation_id(group_id: &str, message_ref: &str) -> String 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_content_key_follows_what_is_sent() {
+        let committee: CommitteeId = "refund-v2".parse().expect("id");
+        let key = |text: &str| content_operation_id("e1", &committee, Seq(9), "g#waiting", &text);
+        assert_eq!(key("a"), key("a"), "a retry reuses its id");
+        assert_ne!(key("a"), key("b"), "new content, new id");
+        assert_ne!(
+            key("a"),
+            content_operation_id("e1", &committee, Seq(10), "g#waiting", &"a"),
+            "the same content at a later seq is another update"
+        );
+        assert!(key("a").len() <= OPERATION_ID_MAX);
+    }
 
     #[test]
     fn derived_ids_are_stable_valid_ulids() {

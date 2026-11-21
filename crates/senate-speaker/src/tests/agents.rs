@@ -999,3 +999,49 @@ async fn bind_in_a_people_group_to_its_committee_is_already_bound() {
     );
     rig.stop().await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_restart_that_renders_a_pinned_card_differently_sends_it_under_a_new_id() {
+    // The pinned cards' last-sent copy is kept only in memory: a restart
+    // renders them again. Who sits on the committee changes the "today"
+    // card without a new event, so the head alone cannot name the update.
+    let hub = agents_hub().await;
+    let surface = FakeSurface::with(Caps::ADOPTED);
+    let brain = ScriptedBrain::new();
+    let rig = Rig::start_with(hub.clone(), surface.clone(), brain.clone()).await;
+    rig.append(
+        NewEvent::new(refund(), Kind::Request, agent("bob"), "换 header").to(agent("alice")),
+    )
+    .await;
+    after_debounce(&rig).await;
+    rig.stop().await;
+    let today = || {
+        surface
+            .cards()
+            .into_iter()
+            .find(|c| c.first.title.starts_with("今天的摘要"))
+            .expect("today card")
+    };
+    let before = today();
+
+    // Same head, another seat: the card renders differently.
+    hub.connect(&refund(), &agent_path("bob"));
+    let rig = Rig::start_with(hub.clone(), surface.clone(), brain.clone()).await;
+    after_debounce(&rig).await;
+    rig.stop().await;
+    assert_eq!(surface.conflicts(), 0, "no id reused for another card");
+    let after = today();
+    assert_ne!(after.now, before.now, "the new seat is shown");
+    assert_eq!(after.updates, before.updates + 1);
+
+    // Another restart renders the same card again: the retry reuses its id,
+    // which the gateway takes as the update it already has.
+    let duplicates = surface.duplicates();
+    let rig = Rig::start_with(hub, surface.clone(), brain).await;
+    after_debounce(&rig).await;
+    rig.stop().await;
+    assert_eq!(surface.conflicts(), 0);
+    assert_eq!(today().now, after.now);
+    assert_eq!(today().updates, after.updates, "nothing new applied");
+    assert!(surface.duplicates() > duplicates, "the same id came again");
+}

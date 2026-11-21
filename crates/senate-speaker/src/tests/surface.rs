@@ -113,7 +113,11 @@ struct State {
     invite_attempts: Vec<String>,
     cards: Vec<CardPost>,
     card_operations: HashMap<String, (PostTarget, Card, Posted)>,
-    update_operations: HashSet<String>,
+    /// operation id → (the card ref, the card it carried). A reused id
+    /// with another payload is refused, as the gateway does.
+    update_operations: HashMap<String, (String, Card)>,
+    /// operation id → (group, section), held to the same rule.
+    announcement_operations: HashMap<String, (String, AnnouncementSection)>,
     pins: Vec<String>,
     /// operation id → (the group asked for, its id).
     groups: Vec<(String, NewGroup, String)>,
@@ -395,10 +399,20 @@ impl ChatSurface for FakeSurface {
         if !state.caps.cards {
             return unsupported("card updates");
         }
-        if !state.update_operations.insert(operation_id.to_owned()) {
+        let payload = (message_ref.to_owned(), card.clone());
+        if let Some(first) = state.update_operations.get(operation_id) {
+            if *first != payload {
+                state.conflicts += 1;
+                return Err(SurfaceError::Rejected(format!(
+                    "operation_conflict: {operation_id}"
+                )));
+            }
             state.duplicates += 1;
             return Ok(());
         }
+        state
+            .update_operations
+            .insert(operation_id.to_owned(), payload);
         let Some(posted) = state
             .cards
             .iter_mut()
@@ -501,6 +515,20 @@ impl ChatSurface for FakeSurface {
         if !state.caps.announcements {
             return unsupported("announcements");
         }
+        let payload = (group_id.to_owned(), section.clone());
+        if let Some(first) = state.announcement_operations.get(operation_id) {
+            if *first != payload {
+                state.conflicts += 1;
+                return Err(SurfaceError::Rejected(format!(
+                    "operation_conflict: {operation_id}"
+                )));
+            }
+            state.duplicates += 1;
+            return Ok(());
+        }
+        state
+            .announcement_operations
+            .insert(operation_id.to_owned(), payload);
         Ok(())
     }
 }

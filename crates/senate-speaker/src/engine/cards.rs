@@ -171,7 +171,7 @@ impl Engine {
             return Ok(()); // this revision already landed
         }
         let card = render::task_card(l, thread, None, answer);
-        let operation = self.op_id(committee, thread.updated, &marker)?;
+        let operation = self.content_op_id(committee, thread.updated, &marker, &card)?;
         match self
             .call(self.surface.update_card(&message_ref, &card, &operation))
             .await?
@@ -401,7 +401,7 @@ impl Engine {
             if unchanged {
                 continue;
             }
-            let operation = self.op_id(committee, head, &key)?;
+            let operation = self.content_op_id(committee, head, &key, &card)?;
             match self
                 .call(self.surface.update_card(&message_ref, &card, &operation))
                 .await?

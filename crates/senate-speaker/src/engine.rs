@@ -220,7 +220,7 @@ use crate::brain::{
     Utterance, apply_threshold,
 };
 use crate::config::{SpeakerConfig, SpeakerMode, WorkConfig};
-use crate::ids::{derived_event_id, operation_id, unbound_operation_id};
+use crate::ids::{content_operation_id, derived_event_id, operation_id, unbound_operation_id};
 use crate::render;
 use crate::secretary::{Effective, SecretaryConfigs};
 use crate::syntax::{is_affirmative, parse_command};
@@ -1512,6 +1512,23 @@ impl Engine {
             ))
         })?;
         Ok(operation_id(epoch, committee, seq, target))
+    }
+
+    /// [`op_id`](Self::op_id) for an update that can repeat at `seq` with
+    /// other content (a card, an announcement): `payload` is part of it.
+    fn content_op_id<T: serde::Serialize>(
+        &self,
+        committee: &CommitteeId,
+        seq: Seq,
+        target: &str,
+        payload: &T,
+    ) -> Result<String, Stall> {
+        let epoch = self.epoch.as_deref().ok_or_else(|| {
+            Stall::Hub(HubError::Unavailable(
+                "the log's epoch is not known yet".into(),
+            ))
+        })?;
+        Ok(content_operation_id(epoch, committee, seq, target, payload))
     }
 
     /// Load a committee the first time it is seen: its cursor, then the state

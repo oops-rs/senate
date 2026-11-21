@@ -151,7 +151,8 @@ impl Engine {
         }
         let l = state.locale;
         let head = state.board.head();
-        let operation = self.op_id(committee, head, &format!("{group}#announcement"))?;
+        let operation =
+            self.content_op_id(committee, head, &format!("{group}#announcement"), &section)?;
         let outcome = self
             .call(self.surface.set_announcement(group, &section, &operation))
             .await?;
