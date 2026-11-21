@@ -8,8 +8,9 @@
 //! - `config/hooks.json`, agy's global hooks, under one named hook `senate`
 //!   that Senate owns whole: `SessionStart` → `hook session-start --runtime agy`
 //!   and `PreInvocation` (before each model call) → `hook user-prompt-submit
-//!   --runtime agy`. agy has no hook for the end of a conversation; its
-//!   `Stop` ends a turn.
+//!   --runtime agy`, and `Stop` (the end of a turn) → `hook stop --runtime
+//!   agy`, which keeps the agent going when messages arrived during the
+//!   turn. agy has no hook for the end of a conversation.
 //! - `antigravity-cli/settings.json` gains `mcp(senate/*)` in
 //!   `permissions.allow`: Senate's own tools run unasked, the way Codex's
 //!   `default_tools_approval_mode = "approve"` does it, so a hosted agy with
@@ -37,9 +38,10 @@ const HOOK_NAME: &str = "senate";
 /// The grant that approves every Senate tool.
 pub const GRANT: &str = "mcp(senate/*)";
 /// `(agy hook event, hook subcommand)`.
-pub const HOOKS: [(&str, &str); 2] = [
+pub const HOOKS: [(&str, &str); 3] = [
     ("SessionStart", "session-start"),
     ("PreInvocation", "user-prompt-submit"),
+    ("Stop", "stop"),
 ];
 
 pub fn mcp_args() -> [&'static str; 3] {
@@ -302,7 +304,7 @@ mod tests {
         std::fs::write(cli.join("settings.json"), settings).unwrap();
 
         let dry = plan(dir.path(), EXE).unwrap();
-        assert_eq!(dry.changes(), 4, "{dry:#?}");
+        assert_eq!(dry.changes(), 5, "{dry:#?}");
         let mut out = String::new();
         render(&dry, false, Locale::En, &mut out);
         assert!(
@@ -338,7 +340,10 @@ mod tests {
             hooks["senate"]["SessionStart"][0]["command"],
             "/opt/bin/senate hook session-start --runtime agy"
         );
-        assert!(hooks["senate"].get("Stop").is_none());
+        assert_eq!(
+            hooks["senate"]["Stop"][0]["command"],
+            "/opt/bin/senate hook stop --runtime agy"
+        );
         let text = std::fs::read_to_string(cli.join("settings.json")).unwrap();
         assert!(
             text.find("\"model\"").unwrap() < text.find("\"permissions\"").unwrap(),

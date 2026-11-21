@@ -66,6 +66,8 @@ pub enum HookKind {
     UserPromptSubmit,
     SessionEnd,
     HostedApproval,
+    /// agy's `Stop`: the end of a turn, not of the conversation.
+    Stop,
 }
 
 impl HookKind {
@@ -76,6 +78,7 @@ impl HookKind {
             Self::UserPromptSubmit => "UserPromptSubmit",
             Self::SessionEnd => "SessionEnd",
             Self::HostedApproval => "HostedApproval",
+            Self::Stop => "Stop",
         }
     }
 }
@@ -234,6 +237,39 @@ fn agy_output(kind: HookKind, reply: &HookReply) -> Option<String> {
     (!steps.is_empty()).then(|| json!({"injectSteps": steps}).to_string())
 }
 
+/// agy's `Stop` hook. When something is waiting for the session as its turn
+/// ends, keep the agent going: its next model call's PreInvocation hook
+/// hands the messages over as a user message. The reason, which agy adds
+/// as a system message, is Senate's own fixed text.
+async fn turn_end(
+    daemon_socket: &Path,
+    stdin: &str,
+    runtime: Option<Runtime>,
+    timeouts: HookTimeouts,
+) -> Option<String> {
+    if runtime != Some(Runtime::Agy) || std::env::var_os(crate::companion::ENV_COMPANION).is_some()
+    {
+        return None;
+    }
+    let input = serde_json::from_str::<AgyHookInput>(stdin).ok()?;
+    let session_id = session::agy_session_key(&input.conversation_id)?;
+    let reply: ipc::WaitingReply = ipc::request(
+        daemon_socket,
+        &Request::Waiting { session_id },
+        timeouts.connect,
+        timeouts.request,
+    )
+    .await
+    .ok()?;
+    (reply.waiting > 0).then(|| {
+        json!({
+            "decision": "continue",
+            "reason": "[senate] New Senate messages arrived for this session. They are given to you next; read and act on them.",
+        })
+        .to_string()
+    })
+}
+
 /// Run one hook against the daemon at `daemon_socket`. Returns the line to
 /// print on stdout, or `None` (print nothing). Never fails.
 pub async fn run(
@@ -257,6 +293,9 @@ pub async fn run_as(
     runtime: Option<Runtime>,
     timeouts: HookTimeouts,
 ) -> Option<String> {
+    if kind == HookKind::Stop {
+        return turn_end(daemon_socket, stdin, runtime, timeouts).await;
+    }
     if kind == HookKind::HostedApproval {
         // The candidate marker is checked before any IPC connection. Most
         // PostToolUse hooks have no approval to finish.
@@ -407,7 +446,7 @@ pub async fn prepare(
                 host,
             })
         }
-        HookKind::HostedApproval => return None,
+        HookKind::HostedApproval | HookKind::Stop => return None,
     };
     Some(request)
 }

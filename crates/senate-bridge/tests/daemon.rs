@@ -1865,6 +1865,19 @@ async fn an_agy_session_takes_its_messages_as_a_user_message_before_its_next_mod
         (item.status == ItemStatus::Queued).then_some(())
     })
     .await;
+    // The turn ending now would leave it waiting: Stop keeps agy going,
+    // with Senate's own words only.
+    let stop = hook(HookKind::Stop).await.expect("continue");
+    assert_eq!(stop["decision"], "continue", "{stop}");
+    let reason = stop["reason"].as_str().unwrap();
+    assert!(
+        reason.starts_with("[senate] New Senate messages"),
+        "{reason}"
+    );
+    assert!(
+        !reason.contains("waiting for your next model call"),
+        "{reason}"
+    );
     let out = hook(HookKind::UserPromptSubmit)
         .await
         .expect("the queue comes back");
@@ -1876,6 +1889,10 @@ async fn an_agy_session_takes_its_messages_as_a_user_message_before_its_next_mod
     assert!(
         hook(HookKind::UserPromptSubmit).await.is_none(),
         "handed over once"
+    );
+    assert!(
+        hook(HookKind::Stop).await.is_none(),
+        "nothing waits: the turn may end"
     );
     h.stop().await;
 }

@@ -2875,6 +2875,7 @@ impl Shared {
                 secretary,
             } => wrap(self.on_secretaries(&session, action, for_, secretary).await),
             Request::Roles => wrap(self.on_roles().await),
+            Request::Waiting { session_id } => wrap(self.on_waiting(&session_id)),
             Request::SessionEnd { session_id, .. } => {
                 wrap(self.on_session_end(&session_id, None).await)
             }
@@ -3543,6 +3544,45 @@ impl Shared {
     /// hook hands over sits in an idle conversation until something new
     /// arrives. Its backlog is pushed into its inbox instead, which starts
     /// a turn; the delivery pass this hook wakes does it.
+    /// What waits for `session`'s next hook. Claude Code and agy take it in
+    /// the hook's reply; Codex is pushed through its app-server instead.
+    fn hook_items(
+        &self,
+        session: &Session,
+        committee: &CommitteeId,
+    ) -> Result<Vec<QueueItem>, IpcError> {
+        if !matches!(session.runtime, Runtime::Claude | Runtime::Agy) {
+            return Ok(Vec::new());
+        }
+        let sid = session.session_id.as_str();
+        let agent = &session.agent;
+        let mut items = self.store.queued_for(sid).map_err(internal)?;
+        let live = self.checked_live_sessions().map_err(internal)?;
+        let cands = routing::candidates(&live, agent, committee);
+        for item in self.store.pending_for(agent, committee).map_err(internal)? {
+            if let Route::To(s) = self.route(&item, &cands).map_err(internal)?
+                && s.session_id == sid
+            {
+                items.push(item);
+            }
+        }
+        items.sort_by_key(QueueItem::key);
+        items.dedup_by_key(|i| i.key());
+        Ok(items)
+    }
+
+    /// How many messages wait for `session_id`'s next hook.
+    fn on_waiting(&self, session_id: &str) -> Result<crate::ipc::WaitingReply, IpcError> {
+        let waiting = match self.store.session(session_id).map_err(internal)? {
+            Some(session) if session.is_live() => match session.committee() {
+                Some(committee) => self.hook_items(&session, &committee.clone())?.len(),
+                None => 0,
+            },
+            _ => 0,
+        };
+        Ok(crate::ipc::WaitingReply { waiting })
+    }
+
     fn hook_context(
         &self,
         session: &Session,
@@ -3556,29 +3596,13 @@ impl Shared {
         };
         let sid = session.session_id.as_str();
         let agent = &session.agent;
-        let mut items = Vec::new();
         let hosted_start = event == HookEvent::SessionStart
             && self.store.session_host(sid).map_err(internal)?.is_some();
-        // Claude Code and agy take what is waiting for them in the hook's
-        // reply; Codex is pushed through its app-server instead.
-        if matches!(session.runtime, Runtime::Claude | Runtime::Agy) && !hosted_start {
-            items = self.store.queued_for(sid).map_err(internal)?;
-            let live = self.checked_live_sessions().map_err(internal)?;
-            let cands = routing::candidates(&live, agent, &committee);
-            for item in self
-                .store
-                .pending_for(agent, &committee)
-                .map_err(internal)?
-            {
-                if let Route::To(s) = self.route(&item, &cands).map_err(internal)?
-                    && s.session_id == sid
-                {
-                    items.push(item);
-                }
-            }
-        }
-        items.sort_by_key(QueueItem::key);
-        items.dedup_by_key(|i| i.key());
+        let items = if hosted_start {
+            Vec::new()
+        } else {
+            self.hook_items(session, &committee)?
+        };
 
         let mut parts = Vec::new();
         let mut budget = HOOK_CONTEXT_MAX.saturating_sub(reserved);

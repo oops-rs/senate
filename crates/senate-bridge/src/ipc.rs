@@ -363,6 +363,11 @@ impl From<HostedRuntime> for Runtime {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WaitingReply {
+    pub waiting: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpawnReply {
     pub senator: SenatorName,
@@ -549,6 +554,10 @@ pub enum Request {
     /// Resolve a locally hosted terminal for the person attaching to it.
     Attach {
         senator: AliasName,
+    },
+    /// How many messages wait for `session_id`'s next hook.
+    Waiting {
+        session_id: String,
     },
     SessionEnd {
         session_id: String,
