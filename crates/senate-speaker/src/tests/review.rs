@@ -232,7 +232,12 @@ async fn h3_a_brain_that_never_answers_is_given_up_on() {
     );
     let said = rig.surface.texts();
     assert_eq!(said.len(), 1);
-    assert!(said[0].contains("/tell <name> <内容>"), "{said:?}");
+    // A deadline is the model's failure, not the asker's.
+    assert_eq!(
+        said[0],
+        crate::render::model_unavailable(senate_core::Locale::Zh, None),
+        "{said:?}"
+    );
 }
 
 #[tokio::test]

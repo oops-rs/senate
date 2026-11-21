@@ -419,13 +419,18 @@ async fn the_fixed_syntax_works_without_the_brain_and_covers_its_failures() {
     hub.connect(&refund(), &agent_path("alice"));
     let rig = Rig::start(hub).await;
 
-    // The model is down: the Speaker says so and points at the fixed syntax.
+    // The model is down: the Speaker says so in one line, without the
+    // fixed-syntax dump (nothing the asker wrote was wrong).
     rig.brain
         .interprets(Err(BrainError::Unavailable("provider 503".into())));
     rig.append(mention("pm", "帮我看看这个", "m_h1")).await;
     rig.settle().await;
     let said = rig.surface.texts();
-    assert!(said[0].contains("/tell <name> <内容>"), "{said:?}");
+    assert_eq!(
+        said[0],
+        render::model_unavailable(Locale::Zh, None),
+        "{said:?}"
+    );
 
     // /tell relays without consulting the Brain.
     rig.append(mention("pm", "/tell alice 记得更新退款文档", "m_h2"))
@@ -1417,10 +1422,21 @@ async fn the_main_flows_read_in_english() {
         "{brief}"
     );
 
-    // The fixed syntax's usage is English too.
+    // The model's failure reads in English too; with no model at all, the
+    // fixed syntax's usage does.
     rig.brain
         .interprets(Err(BrainError::Unavailable("provider 503".into())));
     rig.append(in_random("pm", "have a look at this", "m_h4"))
+        .await;
+    rig.settle().await;
+    let said = rig.surface.texts();
+    assert_eq!(
+        said.last(),
+        Some(&render::model_unavailable(Locale::En, None)),
+        "{said:?}"
+    );
+    rig.brain.interprets(Err(BrainError::NoModel));
+    rig.append(in_random("pm", "have a look at this", "m_h5"))
         .await;
     rig.settle().await;
     let said = rig.surface.texts();

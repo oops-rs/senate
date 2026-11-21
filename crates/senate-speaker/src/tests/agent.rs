@@ -473,7 +473,7 @@ async fn limits_members_validation_and_fixed_syntax_keep_their_boundaries() {
     rig.settle().await;
     assert_eq!(
         rig.surface.texts().last(),
-        Some(&crate::render::not_understood(Locale::Zh))
+        Some(&crate::render::model_unavailable(Locale::Zh, None))
     );
     let calls = rig.brain.conversations().len();
     rig.append(mention("pm", "/bind refund-v3", "fixed")).await;

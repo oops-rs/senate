@@ -28,10 +28,7 @@ pub(super) struct Progress {
 pub(super) fn decision(turn: Result<AgentTurn, BrainError>, l: Locale) -> Decision {
     match turn {
         Ok(turn) => Decision::Agent(turn),
-        Err(error) => {
-            warn!(%error, "the agent failed; answering with fixed syntax");
-            Decision::Say(render::not_understood(l))
-        }
+        Err(error) => super::failed(error, l),
     }
 }
 

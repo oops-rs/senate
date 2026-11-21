@@ -121,7 +121,8 @@
 //!
 //! A Brain call can take most of a minute, so none runs on the actor's
 //! mailbox. Each is spawned (at most [`BRAIN_CONCURRENCY`] at once, each
-//! given up on `brain_deadline_secs` + [`BRAIN_SLACK`] after it starts) and
+//! given up on the sum of its model tiers' `brain_deadline_secs` (the model,
+//! its one retry, the fallback) + [`BRAIN_SLACK`] after it starts) and
 //! its result comes back as a [`SpeakerMsg::Thought`]. A committee whose
 //! `chat` awaits an interpretation stops at that chat, as on a stall, and
 //! resumes from it when the result arrives, so its appends and posts keep
@@ -729,9 +730,16 @@ fn answering_agent(
 
 #[derive(Debug, Clone)]
 enum Decision {
-    Run { intent: Intent, confirm: bool },
+    Run {
+        intent: Intent,
+        confirm: bool,
+    },
     Agent(crate::brain::AgentTurn),
     Say(String),
+    /// The model failed on every tier: the asker gets one line
+    /// ([`render::model_unavailable`]), the error goes to the people who
+    /// run the Speaker ([`Engine::report_model_failure`]).
+    ModelDown(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2694,6 +2702,12 @@ impl Engine {
         let l = self.locale(&chat.committee);
         let (intent, confirm) = match decision {
             Decision::Say(text) => return self.say(chat, &text).await,
+            Decision::ModelDown(error) => {
+                let text = render::model_unavailable(l, as_command(&chat.body, l).as_deref());
+                let flow = self.say(chat, &text).await?;
+                self.report_model_failure(chat, &error).await?;
+                return Ok(flow);
+            }
             Decision::Agent(turn) => return Box::pin(self.run_agent(chat, turn)).await,
             Decision::Run { intent, confirm } => (intent, confirm),
         };
@@ -2831,6 +2845,72 @@ impl Engine {
     /// Reply to `chat` and be done with it.
     async fn say(&mut self, chat: &Event, text: &str) -> Result<Flow, Stall> {
         self.reply_to_chat(chat, text).await.map(|_| Flow::Done)
+    }
+
+    /// The technical side of a model failure on `chat`, once: into the
+    /// committee's Agent group when it has one, else a note in the log to
+    /// the Speaker's person (the Speaker, or the person who runs the agent
+    /// that is Speaker); always to the log of the daemon.
+    async fn report_model_failure(&mut self, chat: &Event, error: &str) -> Result<(), Stall> {
+        let committee = chat.committee.clone();
+        let l = self.locale(&committee);
+        warn!(%committee, seq = %chat.seq, %error, "the speaker's model failed on a chat");
+        let text = render::model_failure_note(l, &chat.from, chat.seq, error);
+        let agents = self
+            .committees
+            .get(&committee)
+            .and_then(|state| state.agents_group().cloned());
+        if let Some(agents) = agents {
+            let group = agents.group.group_id;
+            let target = format!("{group}#model-failure");
+            if self.has_copy(&committee, chat.seq, &target).await? {
+                return Ok(());
+            }
+            let operation = self.op_id(&committee, chat.seq, &target)?;
+            if let Some(posted) = self
+                .post(PostTarget::NewRoot { group_id: group }, &text, &operation)
+                .await?
+            {
+                self.hub
+                    .put_mirror(MirrorRef {
+                        committee: committee.clone(),
+                        seq: chat.seq,
+                        platform: self.surface.platform().to_owned(),
+                        target,
+                        message_ref: posted.message_ref,
+                        thread_ref: posted.thread_ref,
+                    })
+                    .await?;
+            }
+            return Ok(());
+        }
+        let Some(person) = self.speakers_person() else {
+            debug!(%committee, "no Agent group and no Speaker's person; the failure is logged only");
+            return Ok(());
+        };
+        let note = NewEvent::new(committee.clone(), Kind::Note, Address::Speaker, text)
+            .with_id(derived_event_id(&[
+                "model-failure",
+                committee.as_str(),
+                &chat.seq.to_string(),
+            ]))
+            .to(Address::senator(&person));
+        self.append(note).await.map(drop)
+    }
+
+    /// The person behind the Speaker: the Speaker when it is a person of
+    /// this Senate, else the person who runs the agent that is Speaker.
+    fn speakers_person(&self) -> Option<SenatorName> {
+        let office = self.roster.office()?;
+        let speaker = office.speaker_here()?;
+        match office.kind {
+            senate_core::SenatorKind::Person => Some(speaker.clone()),
+            senate_core::SenatorKind::Agent => self
+                .roster
+                .owner_of(speaker)
+                .and_then(|owner| SenatorName::new(owner.clone()).ok()),
+            _ => None,
+        }
     }
 
     /// Restate `action` and wait for a yes, or (fixed syntax) run it now.
@@ -3464,6 +3544,13 @@ impl Engine {
     ) -> Result<(), Stall> {
         let (intent, confirm) = match decision {
             Decision::Say(text) => return self.reply_unbound(mention, &text).await.map(drop),
+            Decision::ModelDown(error) => {
+                // No committee, so no Agent group or Speaker's note: the log.
+                warn!(%error, group = %mention.group_id, "the speaker's model failed on an unbound mention");
+                let l = self.config.locale;
+                let text = render::model_unavailable(l, as_command(&mention.text, l).as_deref());
+                return self.reply_unbound(mention, &text).await.map(drop);
+            }
             Decision::Agent(turn) => {
                 return Box::pin(self.run_unbound_agent(mention, Decision::Agent(turn))).await;
             }
@@ -3741,11 +3828,32 @@ fn decision_of(intent: Result<Intent, BrainError>, l: Locale) -> Decision {
             intent,
             confirm: true,
         },
-        Err(error) => {
-            warn!(%error, "the brain failed; answering with the fixed syntax");
-            Decision::Say(render::not_understood(l))
-        }
+        Err(error) => failed(error, l),
     }
+}
+
+/// What a Brain failure comes to: with no model, the fixed syntax is all
+/// there is and the message is not understood; otherwise the model failed
+/// and the asker is not blamed for it.
+fn failed(error: BrainError, l: Locale) -> Decision {
+    if matches!(error, BrainError::NoModel) {
+        debug!("no model; answering with the fixed syntax");
+        Decision::Say(render::not_understood(l))
+    } else {
+        warn!(%error, "the speaker's model failed on every tier");
+        Decision::ModelDown(error.to_string())
+    }
+}
+
+/// `text` as a fixed-syntax command once it has its leading `/`, when it
+/// reads as one: `tell alice hi` → `/tell alice hi`.
+fn as_command(text: &str, l: Locale) -> Option<String> {
+    let text = text.trim();
+    if text.starts_with('/') || text.starts_with('／') {
+        return None;
+    }
+    let command = format!("/{text}");
+    matches!(parse_command(&command, l), Some(Ok(_))).then_some(command)
 }
 
 fn command_decision(parsed: Result<Intent, String>) -> Decision {

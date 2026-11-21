@@ -13,6 +13,7 @@ mod flows;
 mod gone;
 pub(crate) mod hub;
 mod model_check;
+mod model_down;
 mod review;
 mod rig;
 mod secretary;

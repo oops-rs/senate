@@ -971,6 +971,40 @@ pub(crate) fn not_understood(l: Locale) -> String {
     }
 }
 
+/// The one line the asker reads when the Speaker's model failed (every
+/// tier: [`crate::ModelSettings::tiers`]) on what they wrote: no usage dump,
+/// since nothing they wrote was wrong. `command` is the fixed-syntax form of
+/// what they wrote, when it reads as one with a leading `/`.
+pub(crate) fn model_unavailable(l: Locale, command: Option<&str>) -> String {
+    match (l, command) {
+        (Locale::Zh, None) => "议长的模型暂时不可用，请稍后再试。".to_owned(),
+        (Locale::Zh, Some(command)) => {
+            format!("议长的模型暂时不可用，请稍后再试；也可以直接用固定写法：{command}")
+        }
+        (Locale::En, None) => {
+            "The Speaker's model is unavailable right now; try again shortly.".to_owned()
+        }
+        (Locale::En, Some(command)) => format!(
+            "The Speaker's model is unavailable right now; try again shortly, or use the command: {command}"
+        ),
+    }
+}
+
+/// The technical side of a model failure, for the people who run the
+/// Speaker (the Agent group, else the Speaker's person): who was told what,
+/// and why.
+pub(crate) fn model_failure_note(l: Locale, asker: &Address, seq: Seq, error: &str) -> String {
+    let asker = asker.in_text();
+    match l {
+        Locale::Zh => format!(
+            "议长的模型没能处理 {asker} 的消息（seq {seq}），已请对方稍后再试。原因：{error}。可用 `senated check-model` 检查模型。"
+        ),
+        Locale::En => format!(
+            "The Speaker's model failed on a message from {asker} (seq {seq}); they were asked to try again shortly. Reason: {error}. `senated check-model` checks the model."
+        ),
+    }
+}
+
 /// The on-behalf answer when the Brain could not produce one: honest, and it
 /// still tells the asker where things stand.
 pub(crate) fn fallback_unavailable(l: Locale, agent: &Address) -> String {
@@ -3115,6 +3149,9 @@ mod tests {
                 guest_refused(l),
                 guest_note_refused(l),
                 not_understood(l),
+                model_unavailable(l, None),
+                model_unavailable(l, Some("/status")),
+                model_failure_note(l, &agent, Seq(7), "upstream connect error"),
                 fallback_unavailable(l, &agent),
                 fallback_pending(l, &agent),
                 super::brief(l, &brief),
