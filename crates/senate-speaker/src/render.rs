@@ -496,6 +496,81 @@ pub(crate) fn empty_decision(l: Locale) -> String {
     }
 }
 
+/// What the committee knows, as a reply to `/memory`: each point with its
+/// seq (what `/forget` and `/correct` take) and where it came from.
+pub(crate) fn memory_list(l: Locale, query: &str, hits: &[senate_core::MemoryHit]) -> String {
+    if hits.is_empty() {
+        return match (l, query.trim().is_empty()) {
+            (Locale::Zh, true) => "还没有记下什么。".to_owned(),
+            (Locale::Zh, false) => format!("没有找到和「{}」有关的记忆。", query.trim()),
+            (Locale::En, true) => "Nothing is remembered yet.".to_owned(),
+            (Locale::En, false) => format!("Nothing remembered about \"{}\".", query.trim()),
+        };
+    }
+    let mut out = String::from(l.pick("我们知道的：", "What we know:"));
+    for hit in hits {
+        let refs: Vec<String> = hit.point.refs.iter().map(ToString::to_string).collect();
+        let from = if refs.is_empty() {
+            String::new()
+        } else {
+            match l {
+                Locale::Zh => format!("（出自 seq {}）", refs.join(", ")),
+                Locale::En => format!(" (from seq {})", refs.join(", ")),
+            }
+        };
+        out.push_str(&format!(
+            "\n- seq {} · {}{from}",
+            hit.point.seq,
+            item(&hit.point.text)
+        ));
+    }
+    out.push('\n');
+    out.push_str(l.pick(
+        "用 /correct <seq> <内容> 更正，/forget <seq> 删除。",
+        "Correct one with /correct <seq> <text>, delete it with /forget <seq>.",
+    ));
+    out
+}
+
+pub(crate) fn describe_forget(l: Locale, targets: &[Seq]) -> String {
+    let seqs = targets
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    match l {
+        Locale::Zh => format!("从记忆中删除 seq {seqs}。"),
+        Locale::En => format!("Delete seq {seqs} from what we know."),
+    }
+}
+
+pub(crate) fn describe_correct(l: Locale, target: Seq, text: &str) -> String {
+    match l {
+        Locale::Zh => format!("把记忆 seq {target} 更正为「{}」。", item(text)),
+        Locale::En => format!(
+            "Correct seq {target} in what we know to \"{}\".",
+            item(text)
+        ),
+    }
+}
+
+/// The acknowledgement once a correction or deletion is recorded.
+pub(crate) fn memory_edited(l: Locale, seq: Seq) -> String {
+    match l {
+        Locale::Zh => format!("已更新记忆（seq {seq}）"),
+        Locale::En => format!("Memory updated (seq {seq})"),
+    }
+}
+
+pub(crate) fn not_a_memory_point(l: Locale, seq: Seq) -> String {
+    match l {
+        Locale::Zh => format!("seq {seq} 不是本委员会记忆中现有的一条。用 /memory 查看。"),
+        Locale::En => {
+            format!("seq {seq} is not a point of what this committee knows. See /memory.")
+        }
+    }
+}
+
 pub(crate) fn not_a_decision(l: Locale, seq: Seq) -> String {
     match l {
         Locale::Zh => format!("seq {seq} 不是本委员会的一条决策，没法取代它。"),

@@ -273,6 +273,17 @@ pub enum Intent {
     /// hands it back. Both are settled to concrete agents, and restated,
     /// before anything changes.
     Reassign { from: String, to: String },
+    /// List what the committee knows, or search it for `query` (empty: the
+    /// newest points).
+    Remember {
+        #[serde(default)]
+        query: String,
+    },
+    /// Delete these memory points (by seq). A person's alone.
+    Forget { targets: Vec<Seq> },
+    /// Correct the memory point at `target` to read `text`. A person's
+    /// alone.
+    Correct { target: Seq, text: String },
     /// Nothing to do but say `reply` (which may be empty: say nothing).
     None { reply: String },
 }
@@ -285,7 +296,11 @@ impl Intent {
     pub fn changes_state(&self) -> bool {
         !matches!(
             self,
-            Self::Relay { .. } | Self::Status | Self::Recall | Self::None { .. }
+            Self::Relay { .. }
+                | Self::Status
+                | Self::Recall
+                | Self::Remember { .. }
+                | Self::None { .. }
         )
     }
 }

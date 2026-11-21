@@ -237,6 +237,8 @@ pub const CURSOR: &str = "speaker";
 pub const TAKEOVER_META: &str = meta::TAKEOVER;
 
 const PAGE: usize = 200;
+/// Memory points one `/memory` lists.
+const MEMORY_LIST: usize = 10;
 /// How much recent log a Brain call is shown.
 const CONTEXT_EVENTS: u64 = 30;
 /// Pause before retrying a stalled committee.
@@ -818,6 +820,13 @@ enum PendingAction {
         to: SenatorName,
         owner: Option<SenatorName>,
     },
+    /// A person's correction or deletion of what the committee knows.
+    Memory {
+        committee: CommitteeId,
+        key: String,
+        payload: senate_core::MemoryPayload,
+        body: String,
+    },
 }
 
 impl PendingAction {
@@ -845,7 +854,8 @@ impl PendingAction {
             | Self::Status { committee }
             | Self::Recall { committee }
             | Self::Work { committee, .. }
-            | Self::Reassign { committee, .. } => committee,
+            | Self::Reassign { committee, .. }
+            | Self::Memory { committee, .. } => committee,
             Self::Relay { event } => &event.committee,
         }
     }
@@ -862,7 +872,8 @@ impl PendingAction {
             | Self::Status { committee }
             | Self::Recall { committee }
             | Self::Work { committee, .. }
-            | Self::Reassign { committee, .. } => Some(committee),
+            | Self::Reassign { committee, .. }
+            | Self::Memory { committee, .. } => Some(committee),
             Self::Relay { event } => Some(&event.committee),
         }
     }
@@ -898,6 +909,15 @@ impl PendingAction {
             Self::Status { .. } => render::describe_status(l),
             Self::Recall { .. } => render::describe_recall(l),
             Self::Work { run, .. } => render::describe_work(l, run),
+            Self::Memory { payload, body, .. } => match payload {
+                senate_core::MemoryPayload::Delete { targets } => {
+                    render::describe_forget(l, targets)
+                }
+                senate_core::MemoryPayload::Correct { target, .. } => {
+                    render::describe_correct(l, *target, body)
+                }
+                senate_core::MemoryPayload::Point { .. } => String::new(),
+            },
             Self::Reassign {
                 committee,
                 agent,
@@ -2900,7 +2920,56 @@ impl Engine {
                 instruction,
             } => self.request_work(chat, &target, &instruction).await,
             Intent::Reassign { from, to } => self.request_reassign(chat, &from, &to).await,
+            Intent::Remember { query } => {
+                let hits = self
+                    .hub
+                    .memory_search(&committee, &query, MEMORY_LIST, false)
+                    .await?;
+                self.say(chat, &render::memory_list(l, &query, &hits)).await
+            }
+            Intent::Forget { targets } => {
+                if let Some(seq) = targets
+                    .iter()
+                    .find(|seq| self.memory_point(&committee, **seq).is_none())
+                {
+                    return self.say(chat, &render::not_a_memory_point(l, *seq)).await;
+                }
+                let action = PendingAction::Memory {
+                    committee,
+                    key: agent::event_key(chat),
+                    payload: senate_core::MemoryPayload::Delete { targets },
+                    body: String::new(),
+                };
+                self.restate_or_run(chat, action, confirm).await?;
+                Ok(Flow::Done)
+            }
+            Intent::Correct { target, text } => {
+                let Some(point) = self.memory_point(&committee, target) else {
+                    return self.say(chat, &render::not_a_memory_point(l, target)).await;
+                };
+                let mut refs = point.refs;
+                if committee == chat.committee {
+                    refs.push(chat.seq);
+                }
+                let action = PendingAction::Memory {
+                    committee,
+                    key: agent::event_key(chat),
+                    payload: senate_core::MemoryPayload::Correct { target, refs },
+                    body: text,
+                };
+                self.restate_or_run(chat, action, confirm).await?;
+                Ok(Flow::Done)
+            }
         }
+    }
+
+    /// The memory point at `seq` of `committee`, when it is in force.
+    fn memory_point(&self, committee: &CommitteeId, seq: Seq) -> Option<senate_core::MemoryPoint> {
+        let memory = self.committees.get(committee)?.brief.as_ref()?.memory();
+        memory
+            .is_in_force(seq)
+            .then(|| memory.get(seq).map(|hit| hit.point))
+            .flatten()
     }
 
     /// The role `group` is bound in on `committee`, as observed.
@@ -3410,6 +3479,21 @@ impl Engine {
                     .unwrap_or_default())
             }
             PendingAction::Status { committee } => Ok(self.status_text(committee).await),
+            PendingAction::Memory {
+                committee,
+                key,
+                payload,
+                body,
+            } => {
+                let edit = NewEvent::new(committee.clone(), Kind::Note, Address::Speaker, body)
+                    .with_id(derived_event_id(&["memory-edit", committee.as_str(), key]))
+                    .on_behalf_of(requester.clone())
+                    .with_meta(meta::MEMORY, payload.to_value());
+                let recorded = self.append_action(edit, strict).await?;
+                Ok(recorded
+                    .map(|event| render::memory_edited(l, event.seq))
+                    .unwrap_or_default())
+            }
             PendingAction::Recall { committee } => {
                 let brief = self.hub.brief(committee).await.map_err(Stall::from)?;
                 Ok(render::brief(l, &brief))
@@ -3654,7 +3738,10 @@ impl Engine {
             Intent::Status => Err(render::unbound_status(l)),
             Intent::Relay { .. } => Err(render::relay_needs_binding(l)),
             Intent::Decide { .. } => Err(render::decide_needs_binding(l)),
-            Intent::Recall => Err(render::recall_needs_binding(l)),
+            Intent::Recall
+            | Intent::Remember { .. }
+            | Intent::Forget { .. }
+            | Intent::Correct { .. } => Err(render::recall_needs_binding(l)),
             Intent::InviteToAgentGroup { .. } | Intent::SetOutputLevel { .. } => {
                 Err(render::agents_need_binding(l))
             }
@@ -3861,6 +3948,8 @@ fn changes_state(intent: &Intent) -> bool {
             | Intent::SetOutputLevel { .. }
             | Intent::Work { .. }
             | Intent::Reassign { .. }
+            | Intent::Forget { .. }
+            | Intent::Correct { .. }
     )
 }
 

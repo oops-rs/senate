@@ -5,8 +5,9 @@
 //! is the committee's Agent group), `/invite <handle>…` (into the Agent
 //! group), `/output answers|status|all` (the Agent group's output level),
 //! `/work <name> <instruction>` (coding work from that agent's
-//! checkpoint) and `/reassign <from> <to>` (hand an agent's work to
-//! another). It is parsed before the Brain is consulted, so a command never
+//! checkpoint), `/reassign <from> <to>` (hand an agent's work to
+//! another), and `/memory [<words>]`, `/forget <seq>…`, `/correct <seq>
+//! <text>` (what the committee knows). It is parsed before the Brain is consulted, so a command never
 //! costs a model call, and it is what the Speaker points people at when the
 //! Brain fails.
 //!
@@ -17,15 +18,15 @@
 //! have to remember which language a group is set to. Only what the Speaker
 //! writes back follows the locale.
 
-use senate_core::{Locale, OutputLevel, SenatorName};
+use senate_core::{Locale, OutputLevel, SenatorName, Seq};
 
 use crate::brain::{Intent, RelayKind};
 
 /// The one-line reminder of the fixed syntax.
 pub(crate) fn usage(locale: Locale) -> &'static str {
     locale.pick(
-        "固定写法：/tell <name> <内容>、/decide <决策>、/brief、/bind <committee>、/unbind、/status、/agents [<committee>]、/invite <handle>、/output answers|status|all、/work <name> <要做的事>、/reassign <from> <to>",
-        "Commands: /tell <name> <text>, /decide <decision>, /brief, /bind <committee>, /unbind, /status, /agents [<committee>], /invite <handle>, /output answers|status|all, /work <name> <what to do>, /reassign <from> <to>",
+        "固定写法：/tell <name> <内容>、/decide <决策>、/brief、/memory [<关键词>]、/forget <seq>、/correct <seq> <内容>、/bind <committee>、/unbind、/status、/agents [<committee>]、/invite <handle>、/output answers|status|all、/work <name> <要做的事>、/reassign <from> <to>",
+        "Commands: /tell <name> <text>, /decide <decision>, /brief, /memory [<words>], /forget <seq>, /correct <seq> <text>, /bind <committee>, /unbind, /status, /agents [<committee>], /invite <handle>, /output answers|status|all, /work <name> <what to do>, /reassign <from> <to>",
     )
 }
 
@@ -55,6 +56,38 @@ pub(crate) fn parse_command(text: &str, locale: Locale) -> Option<Result<Intent,
         "unbind" => Ok(Intent::Unbind),
         "status" => Ok(Intent::Status),
         "brief" => Ok(Intent::Recall),
+        "memory" | "记忆" => Ok(Intent::Remember {
+            query: args.to_owned(),
+        }),
+        "forget" | "忘掉" => {
+            let targets: Option<Vec<Seq>> = args
+                .split(|c: char| c.is_whitespace() || c == ',' || c == '，')
+                .filter(|w| !w.is_empty())
+                .map(|w| w.trim_start_matches('#').parse().ok())
+                .collect();
+            match targets {
+                Some(targets) if !targets.is_empty() => Ok(Intent::Forget { targets }),
+                _ => Err(wrong_use(l, "/forget <seq>…")),
+            }
+        }
+        "correct" | "更正" => match args.split_once(char::is_whitespace) {
+            Some((seq, text)) if !text.trim().is_empty() => {
+                match seq.trim_start_matches('#').parse() {
+                    Ok(target) => Ok(Intent::Correct {
+                        target,
+                        text: text.trim().to_owned(),
+                    }),
+                    Err(_) => Err(wrong_use(
+                        l,
+                        l.pick("/correct <seq> <内容>", "/correct <seq> <text>"),
+                    )),
+                }
+            }
+            _ => Err(wrong_use(
+                l,
+                l.pick("/correct <seq> <内容>", "/correct <seq> <text>"),
+            )),
+        },
         "decide" if !args.is_empty() => Ok(Intent::Decide {
             body: args.to_owned(),
             supersedes: None,
@@ -428,6 +461,38 @@ mod tests {
         for locale in Locale::ALL {
             assert_eq!(parse_command("/status", locale), Some(Ok(Intent::Status)));
         }
+    }
+
+    #[test]
+    fn memory_commands_take_seqs_and_words() {
+        let en = Locale::En;
+        assert_eq!(
+            parse_command("/memory release day", en),
+            Some(Ok(Intent::Remember {
+                query: "release day".into()
+            }))
+        );
+        assert_eq!(
+            parse_command("/记忆", en),
+            Some(Ok(Intent::Remember {
+                query: String::new()
+            }))
+        );
+        assert_eq!(
+            parse_command("/forget 12, #14", en),
+            Some(Ok(Intent::Forget {
+                targets: vec![Seq(12), Seq(14)]
+            }))
+        );
+        assert_eq!(
+            parse_command("/更正 12 发布日期改为周一", en),
+            Some(Ok(Intent::Correct {
+                target: Seq(12),
+                text: "发布日期改为周一".into()
+            }))
+        );
+        assert!(matches!(parse_command("/forget twelve", en), Some(Err(_))));
+        assert!(matches!(parse_command("/correct 12", en), Some(Err(_))));
     }
 
     #[test]

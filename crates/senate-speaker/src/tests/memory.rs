@@ -339,3 +339,86 @@ async fn a_brain_that_fails_writes_nothing_and_the_next_time_tries_again() {
     assert_eq!(digests(&rig.hub).len(), 1);
     rig.stop().await;
 }
+
+#[tokio::test]
+async fn people_list_correct_and_delete_what_the_committee_knows_by_command() {
+    use super::rig::{STRANGER, mention_in, user};
+    let rig = bound(config_in(senate_core::Locale::En)).await;
+    let point_of = |text: &str, refs: Vec<Seq>| {
+        NewEvent::new(orchard(), Kind::Note, Address::Speaker, text).with_meta(
+            meta::MEMORY,
+            MemoryPayload::Point {
+                refs,
+                supersedes: vec![],
+                digest: None,
+            }
+            .to_value(),
+        )
+    };
+    let deploys = rig
+        .append(point_of("Deploys happen at noon", vec![Seq(1)]))
+        .await;
+    let cache = rig
+        .append(point_of("The cache is shared", vec![Seq(1)]))
+        .await;
+    rig.settle().await;
+    let ask = |from: &str, text: &str, n: u32| {
+        mention_in(&orchard(), GROUP, from, text, &format!("m_cmd_{n}"))
+    };
+
+    rig.append(ask("alice", "/memory deploys", 1)).await;
+    rig.settle().await;
+    let listed = rig.surface.texts().last().cloned().unwrap();
+    assert!(
+        listed.contains(&format!(
+            "- seq {} · Deploys happen at noon (from seq 1)",
+            deploys.seq
+        )),
+        "{listed}"
+    );
+    assert!(!listed.contains("cache"), "only what matches: {listed}");
+
+    // A guest changes nothing; a seq that is no point is said so.
+    rig.append(ask(STRANGER, &format!("/forget {}", cache.seq), 2))
+        .await;
+    rig.append(ask("alice", "/forget 9999", 3)).await;
+    rig.settle().await;
+    assert!(
+        rig.surface
+            .texts()
+            .last()
+            .unwrap()
+            .contains("seq 9999 is not a point")
+    );
+
+    rig.append(ask(
+        "alice",
+        &format!("/correct {} Deploys happen at night", deploys.seq),
+        4,
+    ))
+    .await;
+    rig.append(ask("bob", &format!("/forget {}", cache.seq), 5))
+        .await;
+    rig.settle().await;
+    let brief = rig.hub.brief(&orchard()).await.unwrap();
+    let known: Vec<(&str, &Address)> = brief
+        .memory
+        .iter()
+        .map(|p| (p.text.as_str(), &p.by))
+        .collect();
+    assert_eq!(known, [("Deploys happen at night", &user("alice"))]);
+    let edits: Vec<Event> = memory_points(&rig.hub)
+        .into_iter()
+        .map(|(e, _)| e)
+        .filter(|e| e.on_behalf_of.is_some())
+        .collect();
+    assert_eq!(edits.len(), 2, "one correction, one deletion");
+    assert!(edits.iter().all(|e| e.from == Address::Speaker));
+    assert!(
+        rig.surface
+            .texts()
+            .iter()
+            .any(|t| t.starts_with("Memory updated (seq"))
+    );
+    rig.stop().await;
+}
