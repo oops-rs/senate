@@ -150,7 +150,8 @@ async fn the_parent_reaches_alices_desk_and_hears_back_in_its_own_thread() {
         .unwrap();
     assert_eq!(unaliased.alias, None, "a seat with no alias declares none");
 
-    // Bob asks the seat on alice's desk by its qualified name.
+    // Bob asks a seat on alice's desk by its qualified name; dave sits on
+    // no committee there, so it is the desk's to handle.
     let asked = speak(
         &world.server_url(),
         "tok-bob",
@@ -163,7 +164,7 @@ async fn the_parent_reaches_alices_desk_and_hears_back_in_its_own_thread() {
         .to(Address::Speaker)
         .with_meta(
             meta::INTENDED,
-            serde_json::json!("alice-desk::refund-v2::senator::claude"),
+            serde_json::json!("alice-desk::refund-v2::senator::dave"),
         ),
     )
     .await
@@ -171,7 +172,7 @@ async fn the_parent_reaches_alices_desk_and_hears_back_in_its_own_thread() {
     assert_eq!(asked.to, [alice_desk()]);
 
     // It lands on alice's desk: a root from the committee to the Speaker,
-    // meant for claude, its origin bob's thread above.
+    // meant for dave, its origin bob's thread above.
     let root = eventually_async("the question on alice's desk", || async {
         desk.events_of(&refund())
             .await
@@ -184,7 +185,7 @@ async fn the_parent_reaches_alices_desk_and_hears_back_in_its_own_thread() {
     assert_eq!(root.thread, None);
     assert_eq!(
         senate_core::locator::intended(&root).unwrap().to_string(),
-        "/acme/alice-desk::refund-v2::senator::claude"
+        "/acme/alice-desk::refund-v2::senator::dave"
     );
     let origin = Origin::of(&root).expect("an origin");
     assert_eq!(origin.locator.to_string(), "/acme::refund-v2::senator::bob");
@@ -197,7 +198,7 @@ async fn the_parent_reaches_alices_desk_and_hears_back_in_its_own_thread() {
         .expect("on the desk");
     assert_eq!(
         item.intended.as_ref().unwrap().to_string(),
-        "/acme/alice-desk::refund-v2::senator::claude"
+        "/acme/alice-desk::refund-v2::senator::dave"
     );
     // claude, her secretary, is told.
     claude.wait_for("Which retry limit").await;
@@ -874,9 +875,9 @@ async fn entries_kept_with_no_epoch_are_dropped_and_the_parents_log_read_again()
 /// The parent's built-in Speaker is asked in chat for alice's agent. Alice
 /// runs no agent above; her machine's Senate has declared claude's seat
 /// on the committee, so the relay goes to her desk and names that seat.
-/// It lands on her desk meant for claude, claude's session is told and
-/// answers, and the answer comes back up into the relay's thread and the
-/// chat it was asked in.
+/// claude is online in her Senate, so it goes to claude directly, claude
+/// answers as itself, and the answer comes back up into the relay's thread
+/// and the chat it was asked in.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_parents_speaker_relays_to_a_child_senates_seat_and_hears_back() {
     let world = Setup::new()
@@ -944,9 +945,17 @@ async fn the_parents_speaker_relays_to_a_child_senates_seat_and_hears_back() {
         })
         .await;
 
-    // Below: on alice's desk, meant for claude, whose session is told.
+    // Below: claude is online here, so it goes to claude directly, from
+    // the committee, still carrying where it came from; the desk is not
+    // asked to forward it.
     let root = on_desk(&desk, "Which retry limit does the refund callback use?").await;
-    assert_eq!(root.to, [Address::Speaker]);
+    assert_eq!(root.from, Address::Committee);
+    assert_eq!(root.to, [senator("claude")]);
+    let docket = desk.senate().daemon.hub.docket(&refund()).await.unwrap();
+    assert!(
+        docket.items.iter().all(|i| i.event.seq != root.seq),
+        "not on the desk"
+    );
     assert_eq!(
         senate_core::locator::intended(&root).unwrap().to_string(),
         "/acme/alice-desk::refund-v2::senator::claude"

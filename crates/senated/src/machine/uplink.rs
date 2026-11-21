@@ -19,7 +19,12 @@
 //!   name, and the thread there) and `meta.intended` (the seat it was
 //!   meant for, as the parent completed it, else this desk). The first
 //!   such item of a thread above is a new root here; later ones are
-//!   replies in that root's thread.
+//!   replies in that root's thread. When the seat it is meant for (named
+//!   by `meta.intended`, or the one its thread here was brought to) sits
+//!   on that committee here and is online, the item goes to that seat
+//!   directly (`to: senator::<seat>`), so its answer goes up as the
+//!   seat's; an offline or unknown seat, or none named, leaves it to the
+//!   desk.
 //! - **Up: the desk's answers.** An `answer` here in a thread whose root
 //!   came from above is posted above, in the origin thread, from
 //!   `<name>::<committee>::speaker`, `meta.answered_by` naming who answered
@@ -75,7 +80,7 @@ use senate_bridge::client::{ApiClient, ApiClientError, Decoded, decode_event};
 use senate_bridge::ipc::{Registration, UplinkStatus};
 use senate_core::{
     Address, ChildSeat, ChildSeats, CommitteeId, Event, EventId, Hub, Kind, Locale, Locator, Name,
-    NewEvent, Origin, SenatePath, SenatorId, Seq, is_provisional, meta,
+    NewEvent, Origin, PresenceState, SenatePath, SenatorId, SenatorName, Seq, is_provisional, meta,
 };
 use senate_log::LogStore;
 use senate_server::ServerHub;
@@ -614,14 +619,28 @@ impl Worker {
         let intended = senate_core::locator::intended(event)
             .unwrap_or_else(|| Locator::at(self.here(), committee.clone(), Address::Speaker));
         let down_key = format!("{DOWN}{}:{thread}", event.committee);
-        let brought: Option<Brought> = self.get(&down_key).await;
+        let kept: Option<Brought> = self.get(&down_key).await;
+        let brought = kept.as_ref().filter(|b| b.committee == committee);
+        // The seat it is for: the one named, else the one its thread here
+        // was brought to.
+        let seat = match self.seat_of(&intended, &committee) {
+            Some(seat) => Some(seat),
+            None => match brought {
+                Some(b) => self.seat_of_root(&committee, b.seq).await?,
+                None => None,
+            },
+        };
+        let to = match seat {
+            Some(seat) if self.online_here(&committee, &seat).await? => Address::Senator(seat),
+            _ => Address::Speaker,
+        };
         let mut here = NewEvent::new(
             committee.clone(),
             event.kind.clone(),
             Address::Committee,
             &event.body,
         )
-        .to(Address::Speaker)
+        .to(to)
         .with_id(derived(event, "uplink:down"))
         .with_meta(meta::ORIGIN, origin.value())
         .with_meta(
@@ -629,7 +648,7 @@ impl Worker {
             serde_json::Value::String(intended.to_string()),
         );
         here.refs = event.refs.clone();
-        if let Some(b) = brought.as_ref().filter(|b| b.committee == committee) {
+        if let Some(b) = brought {
             here = here.in_thread(b.seq);
         }
         let stored = self
@@ -637,7 +656,7 @@ impl Worker {
             .append(here)
             .await
             .map_err(|e| Pass::Failed(format!("bringing {} down: {e}", event.id)))?;
-        if brought.is_none() {
+        if kept.is_none() {
             // Read again after a reset, it is stored already, and where it
             // was put then is where its thread stays.
             let b = Brought {
@@ -647,6 +666,49 @@ impl Worker {
             self.put(&down_key, &b).await?;
         }
         Ok(())
+    }
+
+    /// The seat of this Senate on `committee` that `intended` names, if it
+    /// names one.
+    fn seat_of(&self, intended: &Locator, committee: &CommitteeId) -> Option<SenatorName> {
+        let here = intended.senate().is_some_and(|s| self.here().ends_with(s));
+        match intended.address() {
+            Address::Senator(seat) if here && intended.committee() == Some(committee) => {
+                Some(seat.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// The seat the root `seq` on `committee` here was brought to, when it
+    /// was brought to one rather than to the desk.
+    async fn seat_of_root(
+        &self,
+        committee: &CommitteeId,
+        seq: Seq,
+    ) -> Result<Option<SenatorName>, Pass> {
+        let root = self
+            .hub
+            .get(committee, seq)
+            .await
+            .map_err(|e| Pass::Failed(format!("reading the root {seq} here: {e}")))?;
+        Ok(root.and_then(|r| match r.to.as_slice() {
+            [Address::Senator(seat)] => Some(seat.clone()),
+            _ => None,
+        }))
+    }
+
+    /// Whether `seat` is connected on `committee` here now.
+    async fn online_here(&self, committee: &CommitteeId, seat: &SenatorName) -> Result<bool, Pass> {
+        let page = self
+            .hub
+            .presence(committee)
+            .await
+            .map_err(|e| Pass::Failed(format!("reading the presence on {committee}: {e}")))?;
+        Ok(page
+            .agents
+            .iter()
+            .any(|p| &p.agent == seat && p.state == PresenceState::Online))
     }
 
     /// An answer above in a root the desk forwarded up: into the asker's
