@@ -15,6 +15,14 @@
 //! calls the real `launchctl` or `systemctl` except [`SystemManager`], and
 //! every path is taken from the [`Spec`], never from the real home.
 //!
+//! A service manager starts the daemon with a `PATH` of its own, so
+//! `install` also resolves the coding agents the daemon starts (`claude`,
+//! `codex`) on the installing shell's `PATH` and records their absolute
+//! paths in the Senate config, where the daemon already reads them
+//! (`[companion] claude_bin`, `[codex] bin`). A path already configured
+//! there is kept. The shell's `PATH` is still written into the service, but
+//! only as the fallback, for `git` and what the agents run themselves.
+//!
 //! Like `senate install`, `senate service install` and `uninstall` are dry
 //! runs that print the file and the commands unless told `--yes`.
 
@@ -77,6 +85,9 @@ pub struct Spec {
     /// agents' own programs, so the one in effect at install time is kept.
     /// `None` leaves the service manager's default.
     pub path: Option<String>,
+    /// The Senate config file, where the coding agents' programs are
+    /// recorded.
+    pub config: PathBuf,
 }
 
 impl Spec {
@@ -398,6 +409,47 @@ pub fn locate_senated(current_exe: &Path, path_var: Option<&std::ffi::OsStr>) ->
         .find(|p| executable(p))
 }
 
+/// A coding agent the daemon starts, and the config key its program is
+/// read from.
+struct Agent {
+    name: &'static str,
+    table: &'static str,
+    key: &'static str,
+}
+
+const AGENTS: [Agent; 2] = [
+    Agent {
+        name: "claude",
+        table: "companion",
+        key: "claude_bin",
+    },
+    Agent {
+        name: "codex",
+        table: "codex",
+        key: "bin",
+    },
+];
+
+/// Where a coding agent's program is, as `install` finds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Found {
+    /// Already configured as an absolute path: left as it is.
+    Configured(PathBuf),
+    /// Found on the installing shell's `PATH`: to be recorded.
+    Resolved(PathBuf),
+    /// Not on the installing shell's `PATH`.
+    Missing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentProgram {
+    /// `claude` or `codex`.
+    pub name: &'static str,
+    /// `[companion] claude_bin` or `[codex] bin`.
+    pub setting: String,
+    pub found: Found,
+}
+
 /// What `install` would do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallPlan {
@@ -407,6 +459,9 @@ pub struct InstallPlan {
     pub unchanged: bool,
     pub steps: Vec<Cmd>,
     pub log: PathBuf,
+    /// The Senate config file the programs are recorded in.
+    pub config: PathBuf,
+    pub programs: Vec<AgentProgram>,
 }
 
 /// Work out the install. Reads only.
@@ -419,7 +474,94 @@ pub fn plan_install(spec: &Spec, senated: &Path) -> InstallPlan {
         contents,
         steps: install_steps(spec),
         log: spec.log(),
+        config: spec.config.clone(),
+        programs: agent_programs(&spec.config, spec.path.as_deref()),
     }
+}
+
+/// Each coding agent's program: the absolute path configured for it, else
+/// its configured name (or its own) looked up on `path`. A symlink is kept
+/// as found: a shim may dispatch on the name it was started under.
+fn agent_programs(config: &Path, path: Option<&str>) -> Vec<AgentProgram> {
+    use std::os::unix::fs::PermissionsExt;
+    let doc: toml_edit::DocumentMut = std::fs::read_to_string(config)
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or_default();
+    let executable = |p: &Path| {
+        std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    };
+    AGENTS
+        .iter()
+        .map(|agent| {
+            let configured = doc
+                .get(agent.table)
+                .and_then(|table| table.get(agent.key))
+                .and_then(toml_edit::Item::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from);
+            let found = match configured {
+                Some(program) if program.is_absolute() => Found::Configured(program),
+                configured => {
+                    let program = configured.unwrap_or_else(|| PathBuf::from(agent.name));
+                    path.into_iter()
+                        .flat_map(std::env::split_paths)
+                        .filter(|dir| dir.is_absolute())
+                        .map(|dir| dir.join(&program))
+                        .find(|candidate| executable(candidate))
+                        .map_or(Found::Missing, Found::Resolved)
+                }
+            };
+            AgentProgram {
+                name: agent.name,
+                setting: format!("[{}] {}", agent.table, agent.key),
+                found,
+            }
+        })
+        .collect()
+}
+
+/// Record each resolved program in the Senate config, keeping everything
+/// else in it as it was.
+fn record_programs(plan: &InstallPlan) -> anyhow::Result<()> {
+    if !plan
+        .programs
+        .iter()
+        .any(|p| matches!(p.found, Found::Resolved(_)))
+    {
+        return Ok(());
+    }
+    let before = match std::fs::read_to_string(&plan.config) {
+        Ok(before) => before,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", plan.config.display())),
+    };
+    let mut doc: toml_edit::DocumentMut = before
+        .parse()
+        .with_context(|| format!("{} is not valid TOML", plan.config.display()))?;
+    for (agent, program) in AGENTS.iter().zip(&plan.programs) {
+        let Found::Resolved(path) = &program.found else {
+            continue;
+        };
+        let table = doc
+            .entry(agent.table)
+            .or_insert_with(toml_edit::table)
+            .as_table_like_mut()
+            .with_context(|| {
+                format!(
+                    "[{}] in {} is not a table",
+                    agent.table,
+                    plan.config.display()
+                )
+            })?;
+        table.insert(agent.key, toml_edit::value(text(path)));
+    }
+    if let Some(dir) = plan.config.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    std::fs::write(&plan.config, doc.to_string())
+        .with_context(|| format!("writing {}", plan.config.display()))
 }
 
 /// Write the file and load the service.
@@ -443,6 +585,8 @@ pub fn apply_install(
     }
     std::fs::write(&plan.file, &plan.contents)
         .with_context(|| format!("writing {}", plan.file.display()))?;
+    // Before the daemon (re)starts: it reads them when it starts.
+    record_programs(plan)?;
     run_all(manager, &plan.steps)
 }
 
@@ -581,6 +725,57 @@ pub fn render_install(plan: &InstallPlan, platform: Platform, applied: bool, l: 
     );
     for step in &plan.steps {
         let _ = writeln!(out, "   {}", step.display());
+    }
+    let _ = writeln!(
+        out,
+        "\n3. {}",
+        l.pick(
+            format!("编码代理，记录在 {}：", plan.config.display()),
+            format!("coding agents, recorded in {}:", plan.config.display()),
+        )
+    );
+    for program in &plan.programs {
+        let line = match &program.found {
+            Found::Configured(path) => l.pick(
+                format!("{}：{}（已配置，保持不变）", program.name, path.display()),
+                format!(
+                    "{}: {} (already configured, kept)",
+                    program.name,
+                    path.display()
+                ),
+            ),
+            Found::Resolved(path) => l.pick(
+                format!(
+                    "{}：{}（{} {}）",
+                    program.name,
+                    path.display(),
+                    program.setting,
+                    if applied { "已记录" } else { "将记录" }
+                ),
+                format!(
+                    "{}: {} ({} as {})",
+                    program.name,
+                    path.display(),
+                    if applied {
+                        "recorded"
+                    } else {
+                        "would be recorded"
+                    },
+                    program.setting
+                ),
+            ),
+            Found::Missing => l.pick(
+                format!(
+                    "{}：不在 PATH 上；设置 {} 之前，`senate spawn {}` 会失败",
+                    program.name, program.setting, program.name
+                ),
+                format!(
+                    "{}: not found on PATH; `senate spawn {}` will fail until {} is set",
+                    program.name, program.name, program.setting
+                ),
+            ),
+        };
+        let _ = writeln!(out, "   {line}");
     }
     let _ = writeln!(out, "\n{}: {}", l.pick("日志", "log"), plan.log.display());
     if platform == Platform::Linux {
@@ -800,6 +995,7 @@ mod tests {
             senate_home: home.into(),
             uid: 501,
             path: None,
+            config: Path::new(home).join("config.toml"),
         }
     }
 
@@ -1072,6 +1268,7 @@ mod tests {
             senate_home: dir.join("user home/.senate"),
             uid: 501,
             path: None,
+            config: dir.join("user home/.senate/config.toml"),
         }
     }
 
@@ -1099,6 +1296,72 @@ mod tests {
             // Again: the file is up to date.
             assert!(plan_install(&s, &senated).unchanged);
         }
+    }
+
+    #[test]
+    fn install_records_the_coding_agents_found_on_the_installers_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("local bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let claude = bin.join("claude");
+        std::fs::write(&claude, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Not executable: not a program.
+        std::fs::write(bin.join("codex"), "").unwrap();
+        let mut s = temp_spec(Platform::Macos, dir.path());
+        s.path = Some(format!("relative:{}", bin.display()));
+        let senated = dir.path().join("senated");
+        std::fs::write(&senated, "x").unwrap();
+        std::fs::create_dir_all(&s.senate_home).unwrap();
+        std::fs::write(&s.config, "# mine\n[companion]\nenabled = false\n").unwrap();
+
+        let plan = plan_install(&s, &senated);
+        assert_eq!(plan.programs[0].found, Found::Resolved(claude.clone()));
+        assert_eq!(plan.programs[1].found, Found::Missing);
+        let dry = render_install(&plan, Platform::Macos, false, Locale::En);
+        assert!(
+            dry.contains(&format!(
+                "claude: {} (would be recorded as [companion] claude_bin)",
+                claude.display()
+            )),
+            "{dry}"
+        );
+        assert!(
+            dry.contains(
+                "codex: not found on PATH; `senate spawn codex` will fail until [codex] bin is set"
+            ),
+            "{dry}"
+        );
+        // The dry run wrote nothing.
+        assert_eq!(
+            std::fs::read_to_string(&s.config).unwrap(),
+            "# mine\n[companion]\nenabled = false\n"
+        );
+
+        apply_install(&plan, &senated, &Fake::default()).unwrap();
+        let written = std::fs::read_to_string(&s.config).unwrap();
+        assert!(
+            written.starts_with("# mine\n[companion]\nenabled = false\n"),
+            "{written}"
+        );
+        let parsed: toml::Value = toml::from_str(&written).unwrap();
+        assert_eq!(
+            parsed["companion"]["claude_bin"].as_str(),
+            Some(claude.to_str().unwrap())
+        );
+        assert!(parsed.get("codex").is_none(), "{written}");
+        // The shell's PATH still reaches the service, as the fallback.
+        assert!(plan.contents.contains("local bin"), "{}", plan.contents);
+
+        // Recorded once, it is configured: kept, whatever PATH says next.
+        s.path = None;
+        let again = plan_install(&s, &senated);
+        assert_eq!(again.programs[0].found, Found::Configured(claude.clone()));
+        let text = render_install(&again, Platform::Macos, true, Locale::En);
+        assert!(text.contains("(already configured, kept)"), "{text}");
+        apply_install(&again, &senated, &Fake::default()).unwrap();
+        assert_eq!(std::fs::read_to_string(&s.config).unwrap(), written);
     }
 
     #[test]

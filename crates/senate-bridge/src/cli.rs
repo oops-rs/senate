@@ -1481,6 +1481,7 @@ fn service_spec() -> anyhow::Result<(service::Spec, Locale)> {
             senate_home,
             uid: service::current_uid(),
             path: std::env::var("PATH").ok().filter(|p| !p.is_empty()),
+            config: std::path::absolute(paths.config()).context("resolving the Senate config")?,
         },
         locale,
     ))
