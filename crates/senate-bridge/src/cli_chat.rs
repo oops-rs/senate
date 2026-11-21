@@ -6,14 +6,14 @@
 //! the platform. `thread` reads the conversation: what was injected and
 //! what the Speaker posted, kept off the platform unless `--live`.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use clap::{Args, Subcommand};
 use senate_core::chat_sim::{SimTranscript, SimulateChat, SimulatedChat};
 use senate_core::{Address, CommitteeId, Name, SenatorName};
 
 use crate::Paths;
-use crate::ipc::{Request, SessionSelector};
+use crate::ipc::Request;
 
 use super::{committee_here, daemon_call, print_json, runtime, session_from_env};
 
@@ -92,8 +92,6 @@ enum Action {
     },
 }
 
-const POLL: Duration = Duration::from_millis(250);
-
 pub(super) fn run(args: Chat) -> anyhow::Result<()> {
     let paths = Paths::from_env()?;
     // Run inside a coding session, the command is that session's agent's:
@@ -144,7 +142,9 @@ pub(super) fn run(args: Chat) -> anyhow::Result<()> {
                     "simulated (log only)"
                 },
                 sent.group_id,
-                sent.seq.map(|s| format!(", chat seq {s}")).unwrap_or_default(),
+                sent.seq
+                    .map(|s| format!(", chat seq {s}"))
+                    .unwrap_or_default(),
                 if sent.conversation == sent.message_ref {
                     String::new()
                 } else {
@@ -163,29 +163,20 @@ pub(super) fn run(args: Chat) -> anyhow::Result<()> {
             json,
         } => runtime(false)?.block_on(async {
             let committee = committee_here(committee).await?;
-            let request = Request::ChatThread {
-                session: SessionSelector::default(),
-                committee: Some(committee),
+            let (transcript, arrived) = crate::speak::chat_thread(
+                &paths.socket(),
+                committee,
                 message_ref,
-            };
-            let mut transcript: SimTranscript = daemon_call(&paths, &request).await?;
-            if wait {
-                let since = since.unwrap_or_else(|| transcript.through_last_inbound());
-                let deadline = Instant::now() + Duration::from_secs(timeout);
-                while transcript.speaker_posts_after(since).next().is_none() {
-                    if Instant::now() >= deadline {
-                        if json {
-                            print_json(&transcript)?;
-                        } else {
-                            print!("{}", render(&transcript));
-                        }
-                        anyhow::bail!(
-                            "the Speaker posted nothing after entry {since} within {timeout}s"
-                        );
-                    }
-                    tokio::time::sleep(POLL).await;
-                    transcript = daemon_call(&paths, &request).await?;
+                wait.then(|| (since, Duration::from_secs(timeout))),
+            )
+            .await?;
+            if !arrived {
+                if json {
+                    print_json(&transcript)?;
+                } else {
+                    print!("{}", render(&transcript));
                 }
+                anyhow::bail!("the Speaker posted nothing new within {timeout}s");
             }
             if json {
                 print_json(&transcript)

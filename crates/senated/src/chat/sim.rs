@@ -280,7 +280,10 @@ impl Sims {
 }
 
 fn new_sim_ref() -> String {
-    format!("{SIM_REF_PREFIX}{}", EventId::new().to_string().to_lowercase())
+    format!(
+        "{SIM_REF_PREFIX}{}",
+        EventId::new().to_string().to_lowercase()
+    )
 }
 
 /// A card as the transcript shows it.
@@ -414,7 +417,10 @@ impl ChatGateway {
                 .post(target, &live_text(&name, &request.text), &operation)
                 .await
                 .map_err(|e| SimError::Unavailable(format!("the platform refused it: {e}")))?;
-            (posted.message_ref, posted.thread_ref.or(thread_root.clone()))
+            (
+                posted.message_ref,
+                posted.thread_ref.or(thread_root.clone()),
+            )
         } else {
             (new_sim_ref(), thread_root.clone())
         };
@@ -483,14 +489,18 @@ impl ChatGateway {
         })
     }
 
-    /// The bound group a new conversation opens in.
+    /// The bound group a new conversation opens in: the one named, else
+    /// the committee's only people group.
     fn group_for(&self, request: &SimRequest) -> Result<String, SimError> {
         let state = lock(&self.inner.state);
         let mut bound: Vec<&String> = state
             .table
             .groups
             .iter()
-            .filter(|(_, c)| **c == request.committee)
+            .filter(|(g, c)| {
+                **c == request.committee
+                    && (request.group.is_some() || !state.table.agents.contains(*g))
+            })
             .map(|(g, _)| g)
             .collect();
         bound.sort();

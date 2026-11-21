@@ -522,6 +522,39 @@ pub async fn thread(
     Ok((reply, pong.locale))
 }
 
+/// A simulated chat conversation (`senate chat thread`) by any of its
+/// refs. With `wait`, polled until the Speaker has posted something after
+/// the first `since` entries (default: through the latest message said),
+/// or until `timeout`; the flag says whether it did.
+pub async fn chat_thread(
+    socket: &Path,
+    committee: CommitteeId,
+    message_ref: String,
+    wait: Option<(Option<usize>, Duration)>,
+) -> Result<(senate_core::chat_sim::SimTranscript, bool), ClientError> {
+    let request = Request::ChatThread {
+        session: SessionSelector::default(),
+        committee: Some(committee),
+        message_ref,
+    };
+    let mut transcript: senate_core::chat_sim::SimTranscript = call(socket, &request).await?;
+    let Some((since, timeout)) = wait else {
+        return Ok((transcript, true));
+    };
+    let since = since.unwrap_or_else(|| transcript.through_last_inbound());
+    let deadline = tokio::time::Instant::now() + timeout;
+    while transcript.speaker_posts_after(since).next().is_none() {
+        if tokio::time::Instant::now() >= deadline {
+            return Ok((transcript, false));
+        }
+        tokio::time::sleep(CHAT_POLL).await;
+        transcript = call(socket, &request).await?;
+    }
+    Ok((transcript, true))
+}
+
+const CHAT_POLL: Duration = Duration::from_millis(250);
+
 /// The first thing that comes back in the thread `sent` started: an answer
 /// someone else wrote (a provisional one only says where the question
 /// stands) or the thread escalated to the person who asked, or `None` when

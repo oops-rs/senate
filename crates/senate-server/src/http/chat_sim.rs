@@ -60,7 +60,10 @@ pub(super) async fn simulate(
             )));
         }
     }
-    let from = request.as_person.clone().unwrap_or_else(|| person.0.clone());
+    let from = request
+        .as_person
+        .clone()
+        .unwrap_or_else(|| person.0.clone());
     if request.office {
         // Checked as a write for the office is.
         let mut probe = NewEvent::new(committee.clone(), Kind::Note, Address::Speaker, "");

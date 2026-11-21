@@ -5,12 +5,12 @@
 //! daemon itself is `senated` (`senated --machine` on a developer machine).
 
 // These two stay beside this file under their own names.
+#[path = "cli_chat.rs"]
+mod cli_chat;
 #[path = "cli_help.rs"]
 mod cli_help;
 #[path = "cli_legacy.rs"]
 mod cli_legacy;
-#[path = "cli_chat.rs"]
-mod cli_chat;
 #[path = "cli_secretary.rs"]
 mod cli_secretary;
 

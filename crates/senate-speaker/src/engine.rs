@@ -359,6 +359,10 @@ struct CommitteeState {
     answers: HashMap<Seq, String>,
     /// Task root → when it was asked (today's tasks).
     root_ts: HashMap<Seq, DateTime<Utc>>,
+    /// Roots that began as simulated chat (`senate chat send`): left out of
+    /// the "today" card with everything said in them, as the brief leaves
+    /// them out.
+    simulated_roots: HashSet<Seq>,
     /// Each agent's latest event: `(seq, ts, what)`.
     activity: HashMap<SenatorName, (Seq, DateTime<Utc>, String)>,
     /// Each seat in a child Senate's latest event here, by its relay
@@ -462,7 +466,16 @@ impl CommitteeState {
         self.brief
             .get_or_insert_with(|| BriefBuilder::new(event.committee.clone()))
             .observe(event);
-        if let Some(agent) = self.people.as_agent(&event.from) {
+        let simulated = event.is_simulated()
+            || event
+                .thread
+                .is_some_and(|root| self.simulated_roots.contains(&root));
+        if simulated && event.thread.is_none() {
+            self.simulated_roots.insert(event.seq);
+        }
+        if let Some(agent) = self.people.as_agent(&event.from)
+            && !simulated
+        {
             self.activity.insert(
                 agent.clone(),
                 (event.seq, event.ts, render::activity(self.locale, event)),
@@ -500,7 +513,7 @@ impl CommitteeState {
             }
             Kind::Question | Kind::Request => {
                 let root = event.thread.unwrap_or(event.seq);
-                if event.thread.is_none() && self.board.get(event.seq).is_some() {
+                if event.thread.is_none() && self.board.get(event.seq).is_some() && !simulated {
                     self.root_ts.insert(event.seq, event.ts);
                 }
                 if event.kind == Kind::Request || parked_inline(event) {

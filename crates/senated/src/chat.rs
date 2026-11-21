@@ -622,8 +622,10 @@ impl Inner {
         let mut pause = APPEND_RETRY;
         let mut attempt = 1;
         loop {
-            let result = match self.chat_event(hub, roster, committee, inbound, simulated)
-                .await {
+            let result = match self
+                .chat_event(hub, roster, committee, inbound, simulated)
+                .await
+            {
                 Ok(chat) => hub.append(chat.with_id(id.clone())).await,
                 Err(error) => Err(error),
             };
@@ -780,6 +782,8 @@ fn thread_agents(thread: &[Event], root: Seq, people: &senate_core::People) -> V
 #[derive(Debug, Default)]
 struct BindingTable {
     groups: HashMap<String, CommitteeId>,
+    /// The Agent groups among them.
+    agents: HashSet<String>,
     /// Every group any binding named, bound now or not.
     ever: HashSet<String>,
     /// Highest binding seq applied per committee, so an event seen twice
@@ -828,6 +832,11 @@ impl BindingTable {
             BindingAction::Bind => {
                 self.groups
                     .insert(binding.group_id.clone(), committee.clone());
+                if binding.role == senate_core::GroupRole::Agents {
+                    self.agents.insert(binding.group_id.clone());
+                } else {
+                    self.agents.remove(&binding.group_id);
+                }
             }
             BindingAction::Unbind => {
                 if self.groups.get(&binding.group_id) == Some(committee) {
