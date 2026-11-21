@@ -5,6 +5,7 @@
 //! [mcp_servers.senate]
 //! command = "<abs exe>"
 //! args = ["mcp"]
+//! default_tools_approval_mode = "approve"
 //!
 //! [[hooks.SessionStart]]
 //! [[hooks.SessionStart.hooks]]
@@ -15,8 +16,12 @@
 //!
 //! and the same for UserPromptSubmit and SessionEnd. The file is edited with
 //! `toml_edit`, so every other table, key and comment stays as it was; keys
-//! the user added to `[mcp_servers.senate]` (an approval mode, say) are
-//! kept. Codex runs a hook only once it is trusted in `/hooks`; `install`
+//! the user added to `[mcp_servers.senate]` are kept. Senate's own tools are
+//! approved up front: a hosted Codex has nobody at its terminal to answer
+//! an approval prompt, and would block on its first Senate tool call. The
+//! hosted TUI cannot set this for itself: `codex resume --remote` does not
+//! pass `mcp_servers.*` overrides on to the app-server, where the tools
+//! run. Codex runs a hook only once it is trusted in `/hooks`; `install`
 //! does not trust them on the user's behalf.
 
 use std::fmt::Write as _;
@@ -29,6 +34,10 @@ use senate_core::Locale;
 
 use super::{HOOK_TIMEOUT_SECS, HOOKS, shell_quote};
 use crate::mcp::SERVER_NAME;
+
+/// The `[mcp_servers.senate]` key that lets Senate's tools run unasked.
+const APPROVAL_KEY: &str = "default_tools_approval_mode";
+const APPROVE: &str = "approve";
 
 pub fn hook_command(exe: &str, subcommand: &str) -> String {
     format!("{} hook {subcommand} --codex", shell_quote(exe))
@@ -151,6 +160,17 @@ pub fn merge(doc: &mut DocumentMut, exe: &str) -> Result<Vec<String>, String> {
             )
         } else {
             format!("+ mcp_servers.{SERVER_NAME}: {want}")
+        });
+    }
+    let approval = server
+        .get(APPROVAL_KEY)
+        .and_then(Item::as_str)
+        .map(str::to_string);
+    if approval.as_deref() != Some(APPROVE) {
+        server.insert(APPROVAL_KEY, value(APPROVE));
+        changes.push(match approval {
+            Some(was) => format!("~ mcp_servers.{SERVER_NAME}.{APPROVAL_KEY}: {was}  →  {APPROVE}"),
+            None => format!("+ mcp_servers.{SERVER_NAME}.{APPROVAL_KEY} = \"{APPROVE}\""),
         });
     }
 
@@ -332,16 +352,6 @@ pub fn render(plan: &CodexPlan, exe: &str, applied: bool, locale: Locale, out: &
     );
     let _ = writeln!(
         out,
-        "   - {}\n\x20    default_tools_approval_mode = \"approve\" {} [mcp_servers.{SERVER_NAME}]{}",
-        locale.pick(
-            "Codex 可能在每次调用 Senate 工具前询问。要全部放行，加上",
-            "Codex may ask before each Senate tool call. To allow them all, add"
-        ),
-        locale.pick("到", "under"),
-        locale.pick("下。", ".")
-    );
-    let _ = writeln!(
-        out,
         "   - {}",
         locale.pick(
             "Codex 会话默认以 <person>/codex 的身份加入；senate.toml 的 [agents] 可以改名，\
@@ -377,7 +387,13 @@ trusted_hash = "sha256:abc"
 "#;
         let mut doc: DocumentMut = original.parse().unwrap();
         let changes = merge(&mut doc, EXE).unwrap();
-        assert_eq!(changes.len(), 4, "{changes:?}");
+        assert_eq!(changes.len(), 5, "{changes:?}");
+        assert!(
+            changes.contains(
+                &"+ mcp_servers.senate.default_tools_approval_mode = \"approve\"".to_owned()
+            ),
+            "{changes:?}"
+        );
         let text = doc.to_string();
         assert!(
             text.starts_with("# my codex config\nmodel = \"gpt-6\""),
@@ -396,6 +412,10 @@ trusted_hash = "sha256:abc"
         assert_eq!(
             parsed["mcp_servers"]["senate"]["args"],
             toml::Value::Array(vec!["mcp".into()])
+        );
+        assert_eq!(
+            parsed["mcp_servers"]["senate"]["default_tools_approval_mode"].as_str(),
+            Some("approve")
         );
         let start = parsed["hooks"]["SessionStart"].as_array().unwrap();
         assert_eq!(start.len(), 2);
@@ -437,6 +457,49 @@ trusted_hash = "sha256:abc"
             parsed["hooks"]["SessionEnd"][0]["hooks"][0]["command"].as_str(),
             Some("/new/senate hook session-end --codex")
         );
+    }
+
+    #[test]
+    fn senate_tools_are_approved_once_and_a_dry_run_shows_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let original = "[mcp_servers.senate]\ncommand = \"/opt/bin/senate\"\nargs = [\"mcp\"]\n\
+                        default_tools_approval_mode = \"prompt\"\nstartup_timeout_sec = 20\n";
+        std::fs::write(&path, original).unwrap();
+        // The dry run names the change and writes nothing.
+        let dry = plan(&path, EXE).unwrap();
+        // The hooks are new here too; the server's command was already ours.
+        assert_eq!(
+            dry.changes[0],
+            "~ mcp_servers.senate.default_tools_approval_mode: prompt  →  approve"
+        );
+        assert!(
+            dry.changes[1..].iter().all(|c| c.starts_with("+ hooks.")),
+            "{:?}",
+            dry.changes
+        );
+        let mut out = String::new();
+        render(&dry, EXE, false, Locale::En, &mut out);
+        assert!(
+            out.contains("~ mcp_servers.senate.default_tools_approval_mode: prompt  →  approve"),
+            "{out}"
+        );
+        assert!(
+            out.contains("default_tools_approval_mode = \"approve\""),
+            "{out}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        // Applied, the key is set once; the rest of the table is the user's.
+        std::fs::write(&path, &dry.after).unwrap();
+        let parsed: toml::Value = toml::from_str(&dry.after).unwrap();
+        let server = &parsed["mcp_servers"]["senate"];
+        assert_eq!(
+            server["default_tools_approval_mode"].as_str(),
+            Some("approve")
+        );
+        assert_eq!(server["startup_timeout_sec"].as_integer(), Some(20));
+        assert_eq!(dry.after.matches("default_tools_approval_mode").count(), 1);
+        assert!(plan(&path, EXE).unwrap().changes.is_empty());
     }
 
     #[test]
