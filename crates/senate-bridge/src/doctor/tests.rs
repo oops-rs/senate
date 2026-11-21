@@ -722,3 +722,84 @@ fn the_json_has_checks_and_a_summary() {
     assert!(text.ends_with("1 ok, 1 warn, 1 fail\n"), "{text}");
     assert!(!Report::new(vec![Check::warn("w", "x", None::<String>)]).failed());
 }
+
+struct Says(&'static str);
+
+impl Manager for Says {
+    fn run(&self, _: &Cmd) -> io::Result<Ran> {
+        Ok(Ran {
+            ok: true,
+            stdout: self.0.into(),
+            stderr: String::new(),
+        })
+    }
+}
+
+fn versioned(dir: &Path, name: &str, version: &str) -> PathBuf {
+    std::fs::create_dir_all(dir).unwrap();
+    let path = dir.join(name);
+    std::fs::write(&path, format!("#!/bin/sh\necho '{name} {version}'\n")).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+#[test]
+fn a_daemon_launchd_refused_to_sign_names_the_reinstall() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    let bin = home.join("bin");
+    let senated = versioned(&bin, "senated", "0.5.0");
+    let spec = spec(home, &bin.to_string_lossy());
+    let plan = service::plan_install(&spec, &senated);
+    std::fs::create_dir_all(plan.file.parent().unwrap()).unwrap();
+    std::fs::write(&plan.file, &plan.contents).unwrap();
+    let checks = service_checks(
+        &spec,
+        Some(&senated),
+        &Says("\tstate = not running\n\tlast exit reason = OS_REASON_CODESIGNING\n"),
+        EN,
+    );
+    let running = by_id(&checks, "service.running");
+    assert_eq!(running.status, Status::Fail);
+    assert!(
+        running.found.contains("OS_REASON_CODESIGNING")
+            && running.found.contains("overwritten in place"),
+        "{running:?}"
+    );
+    assert_eq!(running.fix.as_deref(), Some(SERVICE_INSTALL));
+
+    let checks = service_checks(
+        &spec,
+        Some(&senated),
+        &Says("\tstate = not running\n\tlast exit code = 1\n"),
+        EN,
+    );
+    let running = by_id(&checks, "service.running");
+    assert!(
+        running.found.contains("(last exit code = 1)"),
+        "{running:?}"
+    );
+}
+
+#[test]
+fn a_service_copy_behind_the_installed_senated_says_both_versions() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    let bin = home.join("cargo");
+    let senated = versioned(&bin, "senated", "0.5.0");
+    let spec = spec(home, &bin.to_string_lossy());
+    let plan = service::plan_install(&spec, &senated);
+    service::apply_install(&plan, &senated, &manager(true)).unwrap();
+    let checks = service_checks(&spec, Some(&senated), &manager(true), EN);
+    assert_eq!(by_id(&checks, "service.binary").status, Status::Ok);
+
+    versioned(&bin, "senated", "0.5.1");
+    let checks = service_checks(&spec, Some(&senated), &manager(true), EN);
+    let copy = by_id(&checks, "service.binary");
+    assert_eq!(copy.status, Status::Warn);
+    assert!(
+        copy.found.contains("the service runs 0.5.0") && copy.found.contains("0.5.1 is installed"),
+        "{copy:?}"
+    );
+    assert_eq!(copy.fix.as_deref(), Some(SERVICE_INSTALL));
+}

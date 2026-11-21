@@ -2,9 +2,20 @@
 //!
 //! On macOS a launchd user agent (`~/Library/LaunchAgents/dev.senate.senated.plist`),
 //! on Linux a systemd user unit (`~/.config/systemd/user/senated.service`).
-//! Both run the `senated` found next to the running `senate` (else on
-//! `PATH`) with `--machine`, start when the user logs in, restart it when it
-//! dies, and write stdout and stderr to `senated.log` in the Senate home.
+//! Both run `senated --machine`, start when the user logs in, restart it
+//! when it dies, and write stdout and stderr to `senated.log` in the Senate
+//! home.
+//!
+//! The service runs Senate's own copy of the programs, in `bin/` of the
+//! Senate home, never the `senated` that was found (next to the running
+//! `senate`, else on `PATH`). `install` copies `senated`, and the `senate`
+//! beside it that the daemon starts hosted terminals with, into a new file
+//! each and renames it into place. So an upgrade that overwrites the
+//! installed binaries in place (`cargo install`) never changes a file the
+//! running daemon or its hosts were started from: on macOS that left
+//! launchd unable to start the daemon again (`OS_REASON_CODESIGNING`). The
+//! price is that an upgrade reaches the service only at the next
+//! `install`; `senate setup doctor` says when the copy is behind.
 //! `SENATE_HOME` is passed to the service only when the home is not the
 //! default, `~/.senate`.
 //!
@@ -100,6 +111,16 @@ impl Spec {
                 .join(format!("{LABEL}.plist")),
             Platform::Linux => self.user_home.join(".config/systemd/user").join(UNIT),
         }
+    }
+
+    /// Where the service's own copies of the programs are.
+    pub fn bin_dir(&self) -> PathBuf {
+        self.senate_home.join("bin")
+    }
+
+    /// The `senated` the service runs: Senate's copy.
+    pub fn managed_senated(&self) -> PathBuf {
+        self.bin_dir().join("senated")
     }
 
     /// Where the daemon's output goes.
@@ -369,6 +390,8 @@ pub fn status_command(spec: &Spec) -> Cmd {
                 UNIT,
                 "--property=LoadState",
                 "--property=ActiveState",
+                "--property=Result",
+                "--property=ExecMainStatus",
             ],
             true,
         ),
@@ -500,9 +523,152 @@ pub struct AgentProgram {
     pub found: Found,
 }
 
+/// One program the service gets its own copy of.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgramCopy {
+    pub from: PathBuf,
+    pub to: PathBuf,
+}
+
+impl ProgramCopy {
+    /// Whether the copy has the same bytes as what it is copied from.
+    pub fn is_current(&self) -> bool {
+        match (std::fs::read(&self.from), std::fs::read(&self.to)) {
+            (Ok(from), Ok(to)) => from == to,
+            _ => false,
+        }
+    }
+}
+
+/// The programs the service gets copies of: `senated`, and the `senate`
+/// beside it, which the daemon starts hosted terminals with
+/// (`current_exe().with_file_name("senate")`).
+pub fn program_copies(spec: &Spec, senated: &Path) -> Vec<ProgramCopy> {
+    let dir = spec.bin_dir();
+    let mut copies = vec![ProgramCopy {
+        from: senated.to_path_buf(),
+        to: dir.join("senated"),
+    }];
+    let senate = senated.with_file_name("senate");
+    if senate.is_file() {
+        copies.push(ProgramCopy {
+            from: senate,
+            to: dir.join("senate"),
+        });
+    }
+    copies
+        .into_iter()
+        .filter(|copy| copy.from != copy.to)
+        .collect()
+}
+
+/// Copy `from` to a new file beside `to` and rename it into place, so
+/// whatever runs from the old file keeps it, and `to` is never seen half
+/// written.
+fn replace_program(copy: &ProgramCopy) -> anyhow::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+    let dir = copy
+        .to
+        .parent()
+        .context("a program copy has no directory")?;
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let name = copy
+        .to
+        .file_name()
+        .context("a program copy has no name")?
+        .to_string_lossy();
+    let staged = dir.join(format!(".{name}.{}.new", std::process::id()));
+    let written = (|| -> anyhow::Result<()> {
+        let bytes = std::fs::read(&copy.from)
+            .with_context(|| format!("reading {}", copy.from.display()))?;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o755)
+            .open(&staged)
+            .with_context(|| format!("writing {}", staged.display()))?;
+        file.write_all(&bytes)?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o755))?;
+        file.sync_all()?;
+        std::fs::rename(&staged, &copy.to)
+            .with_context(|| format!("replacing {}", copy.to.display()))?;
+        std::fs::File::open(dir)?.sync_all()?;
+        Ok(())
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&staged);
+    }
+    written
+}
+
+/// What `<program> --version` prints, its last word (`senated 0.5.0` →
+/// `0.5.0`); `None` when it does not run.
+pub fn program_version(program: &Path) -> Option<String> {
+    let out = std::process::Command::new(program)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|out| out.status.success())?;
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .last()
+        .map(str::to_owned)
+}
+
+/// The service's copies that are not what `install` would copy now: an
+/// upgrade since the last install has not reached the service.
+pub fn stale_copies(spec: &Spec, senated: &Path) -> Vec<ProgramCopy> {
+    program_copies(spec, senated)
+        .into_iter()
+        .filter(|copy| !copy.is_current())
+        .collect()
+}
+
+/// Whether the installed service runs Senate's copy of the programs.
+pub fn runs_managed_copy(spec: &Spec) -> bool {
+    std::fs::read_to_string(spec.file())
+        .is_ok_and(|file| file.contains(&*text(&spec.managed_senated())))
+}
+
+/// What to tell someone who upgraded Senate while the service runs an
+/// older copy: `None` when there is no service, or its copy is current.
+pub fn upgrade_note(spec: &Spec, senated: &Path, l: Locale) -> Option<String> {
+    if !runs_managed_copy(spec) {
+        return None;
+    }
+    let copy = stale_copies(spec, senated).into_iter().next()?;
+    let versions = program_version(&copy.to).zip(program_version(&copy.from));
+    Some(match versions {
+        Some((running, found)) if running != found => l.pick(
+            format!(
+                "Senate 服务运行 {running}，已安装的是 {found}：运行 `senate setup service install --yes` 来更新它。"
+            ),
+            format!(
+                "The Senate service runs {running}, {found} is installed: run `senate setup service install --yes` to update it."
+            ),
+        ),
+        _ => l.pick(
+            format!(
+                "Senate 服务运行的副本与 {} 不同：运行 `senate setup service install --yes` 来更新它。",
+                copy.from.display()
+            ),
+            format!(
+                "The Senate service runs a copy that differs from {}: run `senate setup service install --yes` to update it.",
+                copy.from.display()
+            ),
+        ),
+    })
+}
+
 /// What `install` would do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallPlan {
+    /// The programs copied into Senate's own `bin/` for the service.
+    pub copies: Vec<ProgramCopy>,
     pub file: PathBuf,
     pub contents: String,
     /// Whether the file is already there with these contents.
@@ -516,9 +682,10 @@ pub struct InstallPlan {
 
 /// Work out the install. Reads only.
 pub fn plan_install(spec: &Spec, senated: &Path) -> InstallPlan {
-    let contents = service_file_contents(spec, senated);
+    let contents = service_file_contents(spec, &spec.managed_senated());
     let file = spec.file();
     InstallPlan {
+        copies: program_copies(spec, senated),
         unchanged: std::fs::read_to_string(&file).is_ok_and(|t| t == contents),
         file,
         contents,
@@ -633,6 +800,11 @@ pub fn apply_install(
     if let Some(dir) = plan.log.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
+    // Each install makes new files: launchd (re)starts the daemon from a
+    // file nothing has written into since it was signed.
+    for copy in &plan.copies {
+        replace_program(copy)?;
+    }
     std::fs::write(&plan.file, &plan.contents)
         .with_context(|| format!("writing {}", plan.file.display()))?;
     // Before the daemon (re)starts: it reads them when it starts.
@@ -680,6 +852,68 @@ pub struct Status {
     pub running: Option<bool>,
     pub log: PathBuf,
     pub log_exists: bool,
+    /// How the daemon last ended, when the manager says it ended badly.
+    pub last_exit: Option<LastExit>,
+}
+
+/// How the service's daemon last ended, as the manager tells it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LastExit {
+    /// The manager's own words, one line.
+    pub detail: String,
+    /// macOS would not run the binary: it changed after it was signed,
+    /// typically overwritten in place by an upgrade.
+    pub codesigning: bool,
+}
+
+/// How the daemon last ended badly, from the status command's output; `None`
+/// when it never ended, or ended cleanly. Pure.
+pub fn parse_last_exit(platform: Platform, stdout: &str) -> Option<LastExit> {
+    let value = |key: &str, sep: &str| {
+        stdout.lines().find_map(|l| {
+            l.trim()
+                .strip_prefix(key)
+                .and_then(|v| v.trim_start().strip_prefix(sep))
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+        })
+    };
+    let parts: Vec<String> = match platform {
+        Platform::Macos => [
+            ("last exit code", value("last exit code", "=")),
+            ("last exit reason", value("last exit reason", "=")),
+            (
+                "last terminating signal",
+                value("last terminating signal", "="),
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(key, v)| {
+            v.filter(|v| !matches!(*v, "0" | "(never exited)"))
+                .map(|v| format!("{key} = {v}"))
+        })
+        .collect(),
+        Platform::Linux => {
+            let result = value("Result", "=").filter(|r| *r != "success");
+            let status = value("ExecMainStatus", "=").filter(|s| *s != "0");
+            match (result, status) {
+                (None, None) => Vec::new(),
+                (result, status) => result
+                    .map(|r| format!("Result={r}"))
+                    .into_iter()
+                    .chain(status.map(|s| format!("ExecMainStatus={s}")))
+                    .collect(),
+            }
+        }
+    };
+    if parts.is_empty() {
+        return None;
+    }
+    let detail = parts.join("; ");
+    Some(LastExit {
+        codesigning: detail.contains("CODESIGNING"),
+        detail,
+    })
 }
 
 /// Read what the manager reports. Pure given the command's output.
@@ -716,7 +950,13 @@ pub fn parse_status(spec: &Spec, ran: &io::Result<Ran>) -> (Option<bool>, Option
 pub fn status(spec: &Spec, manager: &dyn Manager) -> Status {
     let ran = manager.run(&status_command(spec));
     let (loaded, running) = parse_status(spec, &ran);
+    let last_exit = ran
+        .as_ref()
+        .ok()
+        .filter(|ran| ran.ok)
+        .and_then(|ran| parse_last_exit(spec.platform, &ran.stdout));
     Status {
+        last_exit,
         platform: spec.platform,
         file: spec.file(),
         file_exists: spec.file().exists(),
@@ -742,6 +982,36 @@ pub fn render_install(plan: &InstallPlan, platform: Platform, applied: bool, l: 
             format!("1. {} ({})", plan.file.display(), platform.manager_name()),
         )
     );
+    for copy in &plan.copies {
+        let _ = writeln!(
+            out,
+            "   {}",
+            l.pick(
+                format!(
+                    "{} → {}（{}）",
+                    copy.from.display(),
+                    copy.to.display(),
+                    if applied { "已复制" } else { "将复制" }
+                ),
+                format!(
+                    "{} → {} ({})",
+                    copy.from.display(),
+                    copy.to.display(),
+                    if applied { "copied" } else { "would copy" }
+                ),
+            )
+        );
+    }
+    if !plan.copies.iter().any(|c| c.to.ends_with("senate")) {
+        let _ = writeln!(
+            out,
+            "   {}",
+            l.pick(
+                "⚠ senated 旁边没有 senate：守护进程无法启动托管终端，直到 senate 与 senated 装在同一目录",
+                "⚠ no `senate` beside `senated`: the daemon cannot start hosted terminals until both are installed in one directory"
+            )
+        );
+    }
     if plan.unchanged {
         let _ = writeln!(out, "   {}", l.pick("内容已是最新", "already up to date"));
     } else {
@@ -995,6 +1265,9 @@ pub fn render_status(s: &Status, l: Locale) -> String {
         ),
     };
     let _ = writeln!(out, "{} {manager}", l.pick("服务管理器", "service manager"));
+    if let Some(exit) = &s.last_exit {
+        let _ = writeln!(out, "{} {}", l.pick("上次退出", "last exit"), exit.detail);
+    }
     let _ = writeln!(
         out,
         "{} {}  ({})",
@@ -1041,6 +1314,7 @@ mod tests {
             running,
             log: "/nowhere/senated.log".into(),
             log_exists: false,
+            last_exit: None,
         };
         let brief = |s: &Status| render_status_brief(s, Locale::En, None);
         assert_eq!(
@@ -1165,6 +1439,104 @@ mod tests {
         assert!(
             unit.contains("StandardOutput=append:/srv/sen ate/100%%/$x/senated.log\n"),
             "{unit}"
+        );
+    }
+
+    /// An executable that prints `name version` for `--version`.
+    fn versioned(dir: &Path, name: &str, version: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\necho '{name} {version}'\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[test]
+    fn the_service_runs_its_own_copy_replaced_by_a_new_file_each_install() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let s = temp_spec(Platform::Macos, dir.path());
+        let cargo_bin = dir.path().join("cargo bin");
+        let senated = versioned(&cargo_bin, "senated", "0.5.0");
+        versioned(&cargo_bin, "senate", "0.5.0");
+        let plan = plan_install(&s, &senated);
+        assert!(plan.contents.contains(&*text(&s.managed_senated())));
+        assert!(!plan.contents.contains("cargo bin"), "{}", plan.contents);
+        assert_eq!(
+            plan.copies.iter().map(|c| c.to.clone()).collect::<Vec<_>>(),
+            [s.bin_dir().join("senated"), s.bin_dir().join("senate")]
+        );
+        apply_install(&plan, &senated, &Fake::default()).unwrap();
+        let copy = s.managed_senated();
+        assert_eq!(
+            std::fs::read(&copy).unwrap(),
+            std::fs::read(&senated).unwrap()
+        );
+        assert_eq!(program_version(&copy).as_deref(), Some("0.5.0"));
+        assert!(s.bin_dir().join("senate").is_file());
+        assert!(stale_copies(&s, &senated).is_empty());
+        assert_eq!(upgrade_note(&s, &senated, Locale::En), None);
+        let first = std::fs::metadata(&copy).unwrap().ino();
+
+        // An upgrade overwrites the installed binary in place: the
+        // service's copy is untouched, and says it is behind.
+        std::fs::write(&senated, "#!/bin/sh\necho 'senated 0.5.1'\n").unwrap();
+        assert_eq!(program_version(&copy).as_deref(), Some("0.5.0"));
+        assert_eq!(stale_copies(&s, &senated).len(), 1);
+        let note = upgrade_note(&s, &senated, Locale::En).unwrap();
+        assert!(
+            note.contains("runs 0.5.0, 0.5.1 is installed")
+                && note.contains("senate setup service install --yes"),
+            "{note}"
+        );
+
+        // The next install renames a new file into place.
+        apply_install(&plan_install(&s, &senated), &senated, &Fake::default()).unwrap();
+        assert_ne!(std::fs::metadata(&copy).unwrap().ino(), first);
+        assert_eq!(program_version(&copy).as_deref(), Some("0.5.1"));
+        assert!(stale_copies(&s, &senated).is_empty());
+        let leftovers: Vec<_> = std::fs::read_dir(s.bin_dir())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .filter(|n| n.to_string_lossy().starts_with('.'))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    #[test]
+    fn the_last_exit_is_read_from_the_manager() {
+        let mac = "\tstate = not running\n\tlast exit code = 78: Function not implemented\n\tlast exit reason = OS_REASON_CODESIGNING\n";
+        let exit = parse_last_exit(Platform::Macos, mac).unwrap();
+        assert!(exit.codesigning, "{exit:?}");
+        assert!(exit.detail.contains("last exit code = 78"), "{exit:?}");
+        assert_eq!(
+            parse_last_exit(Platform::Macos, "\tlast exit code = (never exited)\n"),
+            None
+        );
+        assert_eq!(
+            parse_last_exit(Platform::Macos, "\tlast exit code = 0\n"),
+            None
+        );
+        let killed =
+            parse_last_exit(Platform::Macos, "\tlast terminating signal = Killed: 9\n").unwrap();
+        assert!(!killed.codesigning);
+        assert_eq!(killed.detail, "last terminating signal = Killed: 9");
+        assert_eq!(
+            parse_last_exit(
+                Platform::Linux,
+                "LoadState=loaded\nActiveState=active\nResult=success\nExecMainStatus=0\n"
+            ),
+            None
+        );
+        assert_eq!(
+            parse_last_exit(
+                Platform::Linux,
+                "ActiveState=failed\nResult=exit-code\nExecMainStatus=1\n"
+            )
+            .unwrap()
+            .detail,
+            "Result=exit-code; ExecMainStatus=1"
         );
     }
 

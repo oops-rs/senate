@@ -181,8 +181,13 @@ cargo install senate senated
 #   senated  (daemon: your machine's, or a team server)
 ```
 
-`senate setup service install` runs the `senated` it finds next to `senate`, so
-install both the same way. (`senate-bridge` installs the same `senate` binary
+`senate setup service install` copies the `senated` it finds next to `senate`
+(and that `senate`) into `~/.senate/bin` and runs the copy, so install both the
+same way. An upgrade overwrites the installed binaries in place, which macOS
+refuses to start a service from (`OS_REASON_CODESIGNING`). The copy is
+untouched, so the service keeps running the old version until you run
+`senate setup service install --yes` again. `senate setup doctor` says when the
+copy is behind. (`senate-bridge` installs the same `senate` binary
 as the `senate` package; install one of them, not both.)
 
 ### Build from Source (Contributors)
@@ -553,12 +558,14 @@ nothing. What it checks, and what usually fixes it:
 
 | Check | Fails or warns when | Fix |
 | :--- | :--- | :--- |
-| `service.file`, `service.running` | the service file is not what `setup service install` writes now (an old `senated` path, an old `PATH`), or the service is not running | `senate setup service install --yes` |
+| `service.file`, `service.running` | the service file is not what `setup service install` writes now (an old `senated` path, an old `PATH`), or the service is not running (with the manager's last exit reason, e.g. `OS_REASON_CODESIGNING`) | `senate setup service install --yes` |
+| `service.binary` | the service's copy in `~/.senate/bin` is older than the `senated` installed | `senate setup service install --yes` |
 | `service.program.*` | the daemon cannot find `claude`, `codex` or `agy` on the service's `PATH`, a recorded path is gone, or it is a Windows program | `senate setup service install --yes` |
 | `install.*` | Claude Code, Codex or agy is not registered the way `setup install` would register it now (another `senate` path, hooks without `--runtime`) | `senate setup install --yes` |
 | `install.codex.approval`, `install.agy.grant` | Codex lacks `default_tools_approval_mode = "approve"`, or agy lacks `mcp(senate/*)`: a hosted session blocks on its first Senate tool call | `senate setup install --yes` |
 | `leftovers.*` | another bridge (e.g. `acme-bridge`) or an old Senate still has hooks or an MCP server registered | `claude mcp remove --scope user <name>`, `codex mcp remove <name>`, or remove the hook from the file named |
 | `daemon`, `daemon.version` | the daemon is down, or runs another version than this `senate` | `senate setup service install --yes` (restarts it) |
+| `codex.app_server` | the Codex app-server does not answer: hosted Codex sessions cannot start or restore | `codex app-server daemon bootstrap` |
 | `sessions.*` | hosted terminals run with no session (`senate session prune`), or a session waits on a permission prompt (`senate attach <name>`) | as shown |
 | `uplink.*` | the Senate above does not answer, refused the registration, or runs a newer minor release | `cargo install senate senated` for a newer parent |
 | `senate.*` | the Senate served does not answer, the daemon's log epoch differs from the server's, or a cursor is ahead of the log | `senate setup service install --yes` (a restart resets them) |

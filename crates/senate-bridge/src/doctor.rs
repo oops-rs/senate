@@ -229,6 +229,56 @@ fn manager_default_path(platform: service::Platform) -> &'static str {
     }
 }
 
+/// The service runs Senate's copy of `senated` (and `senate`); a later
+/// upgrade reaches it only at the next `setup service install`.
+fn copy_check(spec: &service::Spec, senated: &Path, l: Locale) -> Check {
+    let stale = service::stale_copies(spec, senated);
+    if stale.is_empty() {
+        return Check::ok(
+            "service.binary",
+            l.pick(
+                format!("服务运行的副本与 {} 相同", senated.display()),
+                format!("the service runs a current copy of {}", senated.display()),
+            ),
+        );
+    }
+    let copy = &stale[0];
+    let running = service::program_version(&copy.to);
+    let found = service::program_version(&copy.from);
+    let ours = env!("CARGO_PKG_VERSION");
+    let text = match (&running, &found) {
+        (Some(running), Some(found)) if running != found => l.pick(
+            format!(
+                "服务运行 {running}（{}），已安装的是 {found}（{}；这个 senate 是 {ours}）",
+                copy.to.display(),
+                copy.from.display()
+            ),
+            format!(
+                "the service runs {running} ({}), {found} is installed ({}; this senate is {ours})",
+                copy.to.display(),
+                copy.from.display()
+            ),
+        ),
+        (None, _) if !copy.to.exists() => l.pick(
+            format!("服务的副本 {} 不存在", copy.to.display()),
+            format!("the service's copy {} is missing", copy.to.display()),
+        ),
+        _ => l.pick(
+            format!(
+                "服务的副本 {} 与已安装的 {} 不同",
+                copy.to.display(),
+                copy.from.display()
+            ),
+            format!(
+                "the service's copy {} differs from the installed {}",
+                copy.to.display(),
+                copy.from.display()
+            ),
+        ),
+    };
+    Check::warn("service.binary", text, Some(SERVICE_INSTALL))
+}
+
 fn executable(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
@@ -298,6 +348,11 @@ pub fn service_checks(
             }
         }
     }
+    if let (Some(senated), Some(now)) = (senated, &installed)
+        && now.contains(&*spec.managed_senated().to_string_lossy())
+    {
+        checks.push(copy_check(spec, senated, l));
+    }
     if installed.is_some() {
         let status = service::status(spec, manager);
         checks.push(match status.running {
@@ -305,17 +360,38 @@ pub fn service_checks(
                 "service.running",
                 l.pick("服务在运行", "the service is running"),
             ),
-            Some(false) => Check::fail(
-                "service.running",
-                l.pick(
-                    format!("服务已安装但没有运行；日志：{}", status.log.display()),
-                    format!(
-                        "the service is installed but not running; log: {}",
-                        status.log.display()
+            Some(false) => match &status.last_exit {
+                Some(exit) if exit.codesigning => Check::fail(
+                    "service.running",
+                    l.pick(
+                        format!(
+                            "服务没有运行：macOS 拒绝启动守护进程（{}），它的程序文件在签名后被原地覆盖（例如 cargo install）。重新安装服务会让它运行 Senate 自己的副本",
+                            exit.detail
+                        ),
+                        format!(
+                            "the service is not running: macOS refused to start the daemon ({}) because its binary was overwritten in place after it was signed (cargo install, say). Reinstalling the service runs Senate's own copy instead",
+                            exit.detail
+                        ),
                     ),
+                    Some(SERVICE_INSTALL),
                 ),
-                Some(SERVICE_INSTALL),
-            ),
+                exit => Check::fail(
+                    "service.running",
+                    l.pick(
+                        format!(
+                            "服务已安装但没有运行{}；日志：{}",
+                            exit.as_ref().map_or_else(String::new, |e| format!("（{}）", e.detail)),
+                            status.log.display()
+                        ),
+                        format!(
+                            "the service is installed but not running{}; log: {}",
+                            exit.as_ref().map_or_else(String::new, |e| format!(" ({})", e.detail)),
+                            status.log.display()
+                        ),
+                    ),
+                    Some(SERVICE_INSTALL),
+                ),
+            },
             None => Check::warn(
                 "service.running",
                 l.pick("无法询问服务管理器", "could not ask the service manager"),

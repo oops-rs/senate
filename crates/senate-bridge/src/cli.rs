@@ -2643,6 +2643,15 @@ fn run_setup(command: SetupCmd, output: Output) -> anyhow::Result<()> {
             } else {
                 print!("{}", install::render_brief(&plan, &opts, terminal));
             }
+            // An upgrade does not reach a service that runs its own copy.
+            if let Ok((spec, _)) = service_spec()
+                && let Some(senated) = std::env::current_exe().ok().and_then(|exe| {
+                    service::locate_senated(&exe, std::env::var_os("PATH").as_deref())
+                })
+                && let Some(note) = service::upgrade_note(&spec, &senated, locale)
+            {
+                println!("{note}");
+            }
             Ok(())
         }
         SetupCmd::Service { command } => run_service(command, output),
