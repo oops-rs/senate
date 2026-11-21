@@ -2733,6 +2733,7 @@ async fn joining_a_new_committee_opens_it_so_a_spawn_works() {
         cwd: project.clone(),
         chair: false,
         prompt: None,
+        model: Default::default(),
     };
     let refused = ipc::request::<SpawnReply>(
         &h.paths.socket(),
@@ -3078,6 +3079,7 @@ async fn mail_held_while_stopped_is_pushed_once_restored() {
         &Request::Restore {
             session: Default::default(),
             senator: path("seat-fixture").into(),
+            model: Default::default(),
         },
     )
     .await;
