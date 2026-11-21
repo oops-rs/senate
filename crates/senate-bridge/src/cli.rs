@@ -816,6 +816,24 @@ enum SetupCmd {
         #[command(subcommand)]
         command: ServiceCmd,
     },
+    /// Check this machine, and say how to fix what is wrong.
+    ///
+    /// Each check prints ok, warn or fail, what it found and, where one
+    /// command fixes it, that command: the daemon and its service file;
+    /// whether the daemon finds claude, codex and agy; the MCP server and
+    /// hooks of Claude Code, Codex and agy; hooks and MCP servers other
+    /// bridges left behind; the Senate this machine talks to and the one
+    /// above it (reachable, registered, version, log epoch, cursors); the
+    /// worktree bindings; hosted sessions; and, in WSL, systemd and linger.
+    /// Exits non-zero when a check fails. Changes nothing.
+    #[command(after_help = "Examples:
+  senate setup doctor
+  senate setup doctor --json")]
+    Doctor {
+        /// Print JSON: {checks: [{id, status, found, fix?}], summary}.
+        #[arg(long)]
+        json: bool,
+    },
     /// Forget expired local data. Dry run without --yes.
     ///
     /// Removes saved copies whose repository, branch or detached worktree is
@@ -1570,6 +1588,51 @@ fn service_spec() -> anyhow::Result<(service::Spec, Locale)> {
         },
         locale,
     ))
+}
+
+/// `senate setup doctor`: every check, printed; a failed one fails the
+/// command.
+fn run_doctor(json: bool) -> anyhow::Result<()> {
+    let paths = Paths::from_env()?;
+    let locale = BridgeConfig::locale_at(&paths.config());
+    let exe = std::env::current_exe()
+        .and_then(|p| p.canonicalize())
+        .context("locating this binary")?;
+    let install = install::InstallOptions::resolve(
+        exe.clone(),
+        None,
+        None,
+        install::Choice::Auto,
+        None,
+        install::Choice::Auto,
+        None,
+    )
+    .map(|o| o.with_locale(locale))
+    .map_err(|e| format!("{e:#}"));
+    let spec = service_spec().ok().map(|(spec, _)| spec);
+    let senated = service::locate_senated(&exe, std::env::var_os("PATH").as_deref());
+    let wsl = crate::doctor::Wsl::here();
+    let mut checks = crate::doctor::local(&crate::doctor::Local {
+        paths: &paths,
+        locale,
+        install: install.as_ref().map_err(Clone::clone),
+        service: spec.as_ref(),
+        senated: senated.as_deref(),
+        manager: &service::SystemManager,
+        wsl: wsl.as_ref(),
+    });
+    let live = runtime(false)?.block_on(crate::doctor::gather(&paths));
+    checks.extend(crate::doctor::live(&live, locale));
+    let report = crate::doctor::Report::new(checks);
+    if json {
+        print_json(&report)?;
+    } else {
+        print!("{}", report.render(locale));
+    }
+    if report.failed() {
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 fn run_service(command: ServiceCmd, output: Output) -> anyhow::Result<()> {
@@ -2451,6 +2514,7 @@ fn run_setup(command: SetupCmd, output: Output) -> anyhow::Result<()> {
             Ok(())
         }
         SetupCmd::Service { command } => run_service(command, output),
+        SetupCmd::Doctor { json } => run_doctor(json),
         SetupCmd::Clean { yes, delete_logs } => {
             let (paths, settings) = settings_here();
             let report = binding::free(&paths, &settings, yes, delete_logs)?;

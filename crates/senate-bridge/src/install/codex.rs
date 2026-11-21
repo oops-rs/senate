@@ -36,7 +36,7 @@ use super::{HOOK_TIMEOUT_SECS, HOOKS, shell_quote};
 use crate::mcp::SERVER_NAME;
 
 /// The `[mcp_servers.senate]` key that lets Senate's tools run unasked.
-const APPROVAL_KEY: &str = "default_tools_approval_mode";
+pub const APPROVAL_KEY: &str = "default_tools_approval_mode";
 const APPROVE: &str = "approve";
 
 pub fn hook_command(exe: &str, subcommand: &str) -> String {

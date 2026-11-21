@@ -245,6 +245,51 @@ pub fn service_file_contents(spec: &Spec, senated: &Path) -> String {
     }
 }
 
+/// The `PATH` a service file written by [`service_file_contents`] gives
+/// the daemon; `None` when it sets none (the manager's default applies).
+pub fn path_in_file(platform: Platform, contents: &str) -> Option<String> {
+    match platform {
+        Platform::Macos => {
+            let mut lines = contents.lines().map(str::trim);
+            lines.find(|l| *l == "<key>PATH</key>")?;
+            let value = lines
+                .next()?
+                .strip_prefix("<string>")?
+                .strip_suffix("</string>")?;
+            Some(
+                value
+                    .replace("&quot;", "\"")
+                    .replace("&apos;", "'")
+                    .replace("&lt;", "<")
+                    .replace("&gt;", ">")
+                    .replace("&amp;", "&"),
+            )
+        }
+        Platform::Linux => contents.lines().find_map(|line| {
+            let quoted = line
+                .trim()
+                .strip_prefix("Environment=\"")?
+                .strip_suffix('"')?;
+            let mut out = String::new();
+            let mut chars = quoted.chars().peekable();
+            while let Some(c) = chars.next() {
+                match (c, chars.peek()) {
+                    ('\\', Some(&n)) => {
+                        out.push(if n == 'n' { '\n' } else { n });
+                        chars.next();
+                    }
+                    ('%', Some('%')) | ('$', Some('$')) => {
+                        out.push(c);
+                        chars.next();
+                    }
+                    _ => out.push(c),
+                }
+            }
+            out.strip_prefix("PATH=").map(str::to_owned)
+        }),
+    }
+}
+
 /// One command to hand to the service manager.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cmd {
@@ -487,7 +532,7 @@ pub fn plan_install(spec: &Spec, senated: &Path) -> InstallPlan {
 /// Each coding agent's program: the absolute path configured for it, else
 /// its configured name (or its own) looked up on `path`. A symlink is kept
 /// as found: a shim may dispatch on the name it was started under.
-fn agent_programs(config: &Path, path: Option<&str>) -> Vec<AgentProgram> {
+pub fn agent_programs(config: &Path, path: Option<&str>) -> Vec<AgentProgram> {
     use std::os::unix::fs::PermissionsExt;
     let doc: toml_edit::DocumentMut = std::fs::read_to_string(config)
         .ok()
@@ -1283,6 +1328,24 @@ mod tests {
 
         let none = spec(Platform::Macos, "/Users/alice", "/Users/alice/.senate");
         assert!(!launchd_plist(&none, Path::new("/x/senated")).contains("EnvironmentVariables"));
+    }
+
+    #[test]
+    fn the_path_a_service_file_gives_reads_back() {
+        let odd = "/Users/alice/.local/bin:/opt/a & \"b\" <c>:/x/100%/$HOME\\y";
+        for platform in [Platform::Macos, Platform::Linux] {
+            let mut s = spec(platform, "/Users/alice", "/srv/sen");
+            s.path = Some(odd.into());
+            let file = service_file_contents(&s, Path::new("/x/senated"));
+            assert_eq!(
+                path_in_file(platform, &file).as_deref(),
+                Some(odd),
+                "{file}"
+            );
+            s.path = None;
+            let file = service_file_contents(&s, Path::new("/x/senated"));
+            assert_eq!(path_in_file(platform, &file), None, "{file}");
+        }
     }
 
     fn temp_spec(platform: Platform, dir: &Path) -> Spec {

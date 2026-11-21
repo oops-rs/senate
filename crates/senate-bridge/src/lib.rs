@@ -70,6 +70,7 @@ pub mod companion;
 pub mod config;
 pub mod daemon;
 pub mod delivery;
+pub mod doctor;
 pub mod follow;
 pub mod format;
 pub mod hook;
