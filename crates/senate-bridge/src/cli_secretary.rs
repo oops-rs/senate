@@ -54,9 +54,9 @@ enum Action {
     /// team that `list`, `appoint` and `dismiss` manage: the team shares
     /// your work items, while the desk workers answer for the Speaker.
     #[command(after_help = "Examples:
-  senate secretary desk                      Show the Speaker and its desk workers
-  senate secretary desk set claude-1 codex   Claude first, then codex
-  senate secretary desk set                  No desk workers: the desk waits on the Speaker")]
+  senate secretary desk                     Show the Speaker's desk workers
+  senate secretary desk set claude-1 codex  claude-1 first, then codex
+  senate secretary desk set                 None: the desk waits on the Speaker")]
     Desk {
         #[command(subcommand)]
         command: Option<DeskCmd>,
