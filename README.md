@@ -331,6 +331,12 @@ nvm install --lts && npm install -g @openai/codex
   The pin goes stale if the gateway's address changes. Windows Codex is not
   affected, since it uses Windows' resolver.
 
+- **Hosted Codex needs Codex's app-server daemon** (`codex app-server daemon
+  start`, as `senate setup install` says). It is a plain background
+  process, not a systemd unit, so it stops with the distro. Start it again
+  after the distro restarts, or have Codex manage it with
+  `codex app-server daemon bootstrap`.
+
 Then set up Senate as in Mode 1. `senate setup init` and
 `senate setup service install` notice WSL, and print the steps below.
 
