@@ -14,7 +14,7 @@ use senate_bridge::SessionState;
 use senate_bridge::daemon::{MAX_BATCH_EVENTS, PENDING_CAP};
 use senate_bridge::hook::HookKind;
 use senate_bridge::ipc::{self, IpcClient, Request, StatusReply, StreamState, WatchEvent};
-use senate_bridge::state::ItemStatus;
+use senate_bridge::state::{ItemStatus, Store};
 use senate_core::{Address, Kind, NewEvent, Refs, Seq};
 use serde_json::{Value, json};
 
@@ -283,6 +283,65 @@ async fn restart_resumes_from_the_persisted_cursor() {
         .unwrap();
     assert_eq!(first.last_event_id.as_deref(), Some("1"));
     h.wait_delivered_cursor("refund-v2", 4).await;
+    h.stop().await;
+}
+
+/// Issue #1: a batch in flight when the daemon died is sent again when it
+/// restarts (at least once), and that push says it was re-sent and may
+/// already have been seen; a normal push does not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_batch_in_flight_at_a_crash_is_sent_again_and_says_so() {
+    const NOTE: &str = "sent again after the Senate daemon restarted";
+    let mut h = Harness::new().await;
+    h.start().await;
+    let inbox = h.inbox("s1");
+    let wd = h.workdir("w1", Some("refund-v2"));
+    h.hook(HookKind::SessionStart, "s1", &wd, Some(&inbox))
+        .await;
+    h.wait_stream("refund-v2").await;
+    h.server.append(relayed_question("one"));
+    let msgs = inbox.wait_messages(1).await;
+    assert!(!msgs[0].contains(NOTE), "{}", msgs[0]);
+    h.wait_delivered_cursor("refund-v2", 1).await;
+    h.stop().await;
+
+    // The crash: the daemon had taken seq 2 in and claimed it in flight for
+    // s1, and died before recording it delivered.
+    let two = h.server.append(relayed_question("two"));
+    {
+        let store = Store::open(&h.paths.state_db()).unwrap();
+        assert!(
+            store
+                .ingest(&path("claude"), &two, true, None)
+                .unwrap()
+                .is_some()
+        );
+        let key = (path("claude"), two.committee.clone(), two.seq);
+        let claimed = store
+            .claim_inflight(std::slice::from_ref(&key), "s1")
+            .unwrap();
+        assert_eq!(claimed, [key]);
+    }
+
+    h.start().await;
+    let msgs = inbox.wait_messages(2).await;
+    assert!(pos(&msgs[1], two.seq.0).is_some(), "{}", msgs[1]);
+    assert_eq!(msgs[1].matches(NOTE).count(), 1, "{}", msgs[1]);
+    assert!(msgs[1].contains("seq"), "{}", msgs[1]);
+    eventually(
+        "the re-sent item is recorded delivered and unflagged",
+        WAIT,
+        || {
+            let item = h.item(two.seq.0)?;
+            (item.status == ItemStatus::Delivered && !item.redelivered).then_some(())
+        },
+    )
+    .await;
+
+    let three = h.server.append(relayed_question("three"));
+    let msgs = inbox.wait_messages(3).await;
+    assert!(pos(&msgs[2], three.seq.0).is_some(), "{}", msgs[2]);
+    assert!(!msgs[2].contains(NOTE), "{}", msgs[2]);
     h.stop().await;
 }
 

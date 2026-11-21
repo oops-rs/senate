@@ -135,6 +135,7 @@ CREATE TABLE IF NOT EXISTS queue (
     via          TEXT,
     enqueued_at  INTEGER NOT NULL,
     delivered_at INTEGER,
+    redelivered  INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (agent, committee, seq)
 );
 CREATE INDEX IF NOT EXISTS queue_by_status ON queue (status, agent, committee, seq);
@@ -170,7 +171,7 @@ const SESSION_COLS: &str = "session_id, cwd, git_root, branch, inferred_committe
      socket_ok, runtime, agent, agent_source";
 
 /// Columns of a queue row, in the order [`item_from_row`] reads them.
-const ITEM_COLS: &str = "agent, event, status, session_id, enqueued_at";
+const ITEM_COLS: &str = "agent, event, status, session_id, enqueued_at, redelivered";
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -237,6 +238,10 @@ pub struct QueueItem {
     pub session_id: Option<String>,
     /// When this bridge received it (local clock): the triage wait runs from here.
     pub enqueued_at: DateTime<Utc>,
+    /// It was in flight when the daemon last stopped, so the session may
+    /// already have it ([`Store::reset_inflight`]); the next delivery says
+    /// so. Cleared once it is recorded delivered.
+    pub redelivered: bool,
 }
 
 impl QueueItem {
@@ -464,6 +469,7 @@ fn item_from_row(row: &Row<'_>) -> rusqlite::Result<QueueItem> {
             .ok_or_else(|| conversion(2, format!("unknown item status {status:?}")))?,
         session_id: row.get(3)?,
         enqueued_at: ms_to_time(row.get(4)?),
+        redelivered: row.get::<_, i64>(5)? != 0,
     })
 }
 
@@ -728,6 +734,15 @@ impl Store {
         if !stop_notices {
             conn.execute(
                 "ALTER TABLE hosted_switch_notices ADD COLUMN stop_host_id TEXT",
+                [],
+            )?;
+        }
+        let flags_redelivery = conn
+            .prepare("SELECT 1 FROM pragma_table_info('queue') WHERE name = 'redelivered'")?
+            .exists([])?;
+        if !flags_redelivery {
+            conn.execute(
+                "ALTER TABLE queue ADD COLUMN redelivered INTEGER NOT NULL DEFAULT 0",
                 [],
             )?;
         }
@@ -2078,10 +2093,13 @@ impl Store {
         via: Option<&str>,
         where_extra: &str,
     ) -> Result<Vec<ItemKey>, StoreError> {
+        // Recorded delivered: a re-sent item has now been sent again, and
+        // the note it carried is not repeated in a later delivery.
         let delivered_at = (to == ItemStatus::Delivered).then(now_ms);
         let sql = format!(
             "UPDATE queue SET status = ?1, session_id = ?2, via = COALESCE(?3, via),
-                 delivered_at = COALESCE(?4, delivered_at)
+                 delivered_at = COALESCE(?4, delivered_at),
+                 redelivered = CASE WHEN ?4 IS NULL THEN redelivered ELSE 0 END
              WHERE agent = ?5 AND committee = ?6 AND seq = ?7 AND ({where_extra})"
         );
         let mut conn = self.conn();
@@ -2222,12 +2240,35 @@ impl Store {
         )
     }
 
-    /// After a crash nothing is really in flight.
+    /// At daemon start nothing is really in flight: items still marked so
+    /// were being handed to a session when the daemon last stopped. They go
+    /// back to pending, flagged `redelivered`: the session may have taken
+    /// them before the delivery was recorded, so the next delivery says they
+    /// were re-sent (delivery is at least once; see the daemon's module
+    /// docs, "Delivery guarantee").
     pub fn reset_inflight(&self) -> Result<usize, StoreError> {
         Ok(self.conn().execute(
-            "UPDATE queue SET status = 'pending', session_id = NULL WHERE status = 'inflight'",
+            "UPDATE queue SET status = 'pending', session_id = NULL, redelivered = 1
+             WHERE status = 'inflight'",
             [],
         )?)
+    }
+
+    /// Which of `keys` are flagged re-sent after a restart and not yet
+    /// recorded delivered.
+    pub fn redelivered(&self, keys: &[ItemKey]) -> Result<Vec<ItemKey>, StoreError> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT 1 FROM queue WHERE agent = ?1 AND committee = ?2 AND seq = ?3
+               AND redelivered = 1",
+        )?;
+        let mut out = Vec::new();
+        for key in keys {
+            if stmt.exists(params![agent_text(&key.0), key.1.as_str(), seq_sql(key.2)])? {
+                out.push(key.clone());
+            }
+        }
+        Ok(out)
     }
 
     // ---- the pending cap (applied by `ingest`, see `cap_pending`) -------
@@ -3108,6 +3149,65 @@ mod tests {
         assert_eq!(s.dropped(&claude(), &committee()).unwrap(), 1);
         s.consume_dropped(&claude(), &committee(), 5).unwrap();
         assert_eq!(s.dropped(&claude(), &committee()).unwrap(), 0);
+    }
+
+    #[test]
+    fn items_in_flight_at_a_crash_come_back_flagged_until_delivered() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        {
+            let s = Store::open(&path).unwrap();
+            for i in 1..=3 {
+                s.ingest(&claude(), &event(i), true, None).unwrap();
+            }
+            s.claim_inflight(&[key(&claude(), 1), key(&claude(), 2)], "a")
+                .unwrap();
+            s.finish_inflight(&[key(&claude(), 1)], "a", "inbox")
+                .unwrap();
+            // The daemon dies with seq 2 in flight.
+        }
+        let s = Store::open(&path).unwrap();
+        assert_eq!(s.reset_inflight().unwrap(), 1);
+        let flagged = |seq| s.item(&claude(), &committee(), Seq(seq)).unwrap().unwrap();
+        assert!(!flagged(1).redelivered, "delivered before the crash");
+        assert!(flagged(2).redelivered, "in flight at the crash");
+        assert_eq!(flagged(2).status, ItemStatus::Pending);
+        assert!(!flagged(3).redelivered, "never sent");
+        assert_eq!(
+            s.redelivered(&[key(&claude(), 2), key(&claude(), 3)])
+                .unwrap(),
+            [key(&claude(), 2)]
+        );
+        // Sent again and released (it did not fit): still flagged.
+        s.claim_inflight(&[key(&claude(), 2)], "a").unwrap();
+        s.release(&[key(&claude(), 2)]).unwrap();
+        assert!(flagged(2).redelivered);
+        // Recorded delivered: the flag is cleared.
+        s.claim_inflight(&[key(&claude(), 2)], "a").unwrap();
+        s.finish_inflight(&[key(&claude(), 2)], "a", "inbox")
+            .unwrap();
+        assert!(!flagged(2).redelivered);
+        assert!(s.redelivered(&[key(&claude(), 2)]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_database_from_before_the_flag_gets_it_unset() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        {
+            let s = Store::open(&path).unwrap();
+            s.ingest(&claude(), &event(1), true, None).unwrap();
+            s.conn()
+                .execute("ALTER TABLE queue DROP COLUMN redelivered", [])
+                .unwrap();
+        }
+        let s = Store::open(&path).unwrap();
+        assert!(
+            !s.item(&claude(), &committee(), Seq(1))
+                .unwrap()
+                .unwrap()
+                .redelivered
+        );
     }
 
     #[test]

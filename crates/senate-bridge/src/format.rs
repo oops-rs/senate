@@ -1165,6 +1165,37 @@ pub fn dropped_note(dropped: u64, locale: Locale) -> String {
     }
 }
 
+/// The line saying a batch was re-sent after a daemon restart. Delivery is
+/// at least once: a batch in flight when the daemon stopped is sent again,
+/// though the session may have taken it already
+/// ([`crate::state::Store::reset_inflight`]).
+pub fn redelivered_note(locale: Locale) -> String {
+    match locale {
+        Locale::Zh => {
+            "[senate] 这里发给你的消息中，有的是 Senate 守护进程重启后再次发送的：重启前它们可能\
+             已经送到过你这里，你也许已经看过。再次回答或行动之前，先按标头里的 seq 查一下它的\
+             讨论串（你的对话记录、mcp__senate__search），看你是否已经回答或处理过。"
+                .to_string()
+        }
+        Locale::En => "[senate] Some of the messages addressed to you here are sent again after \
+             the Senate daemon restarted: they may have reached you before the restart, so you \
+             may have seen them already. Before answering or acting on one again, check its \
+             thread by the seq in its header (your conversation, mcp__senate__search) for \
+             whether you already did."
+            .to_string(),
+    }
+}
+
+/// What the bridge says about a batch besides its events.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PushNotes {
+    /// Items the pending cap dropped, not yet announced.
+    pub dropped: u64,
+    /// The batch holds items re-sent after a daemon restart
+    /// ([`redelivered_note`]).
+    pub redelivered: bool,
+}
+
 /// The closing line for messages held back to a later push.
 fn more_waiting(rest: usize, locale: Locale) -> String {
     match locale {
@@ -1206,16 +1237,24 @@ pub fn render_push(
     also_waiting: usize,
     locale: Locale,
 ) -> Rendered {
-    render_push_noting(events, me, budget, also_waiting, 0, locale)
+    render_push_noting(
+        events,
+        me,
+        budget,
+        also_waiting,
+        PushNotes::default(),
+        locale,
+    )
 }
 
-/// [`render_push`], announcing `dropped` items the pending cap dropped.
+/// [`render_push`], with the bridge's `notes` on the batch: items the
+/// pending cap dropped, and that the batch was re-sent after a restart.
 pub fn render_push_noting(
     events: &[Event],
     me: &Reader,
     budget: usize,
     also_waiting: usize,
-    dropped: u64,
+    notes: PushNotes,
     locale: Locale,
 ) -> Rendered {
     let mut committees: Vec<&CommitteeId> = Vec::new();
@@ -1225,9 +1264,13 @@ pub fn render_push_noting(
         }
     }
     let mut text = preamble(&committees, events.iter().any(|e| from_user(e, me)), locale);
-    if dropped > 0 {
+    if notes.redelivered {
         text.push_str("\n\n");
-        text.push_str(&dropped_note(dropped, locale));
+        text.push_str(&redelivered_note(locale));
+    }
+    if notes.dropped > 0 {
+        text.push_str("\n\n");
+        text.push_str(&dropped_note(notes.dropped, locale));
     }
     let mut used = char_len(&text);
     let mut included = 0;
@@ -2288,12 +2331,47 @@ mod tests {
                 .ends_with("[senate] 还有 4 条消息在等待，会随后送达。")
         );
 
-        let noted = render_push_noting(&events, &alice(), 10_000, 0, 7, EN);
+        let seven = PushNotes {
+            dropped: 7,
+            ..PushNotes::default()
+        };
+        let noted = render_push_noting(&events, &alice(), 10_000, 0, seven, EN);
         assert!(noted.text.contains("7 older message(s)"));
         assert!(noted.text.contains("mcp__senate__catch_up"));
         assert!(noted.text.find("7 older").unwrap() < noted.text.find("seq 1 ").unwrap());
-        let noted = render_push_noting(&events, &alice(), 10_000, 0, 7, ZH);
+        let noted = render_push_noting(&events, &alice(), 10_000, 0, seven, ZH);
         assert!(noted.text.contains("有 7 条发给你的较早消息被丢弃了"));
+    }
+
+    #[test]
+    fn a_resent_batch_says_so_once_and_a_normal_one_does_not() {
+        let events: Vec<Event> = (1..=3)
+            .map(|i| {
+                NewEvent::new(
+                    committee(),
+                    Kind::Question,
+                    Address::Speaker,
+                    format!("q{i}"),
+                )
+                .into_event(Seq(i), Utc::now())
+            })
+            .collect();
+        let resent = PushNotes {
+            redelivered: true,
+            ..PushNotes::default()
+        };
+        for (locale, marker) in [
+            (EN, "sent again after the Senate daemon restarted"),
+            (ZH, "重启后再次发送"),
+        ] {
+            let normal = render_push(&events, &alice(), 10_000, 0, locale).text;
+            assert!(!normal.contains(marker), "{normal}");
+            let text = render_push_noting(&events, &alice(), 10_000, 0, resent, locale).text;
+            assert_eq!(text.matches(marker).count(), 1, "{text}");
+            assert!(text.contains("seq"), "{text}");
+            // Framing, before the first event.
+            assert!(text.find(marker).unwrap() < text.find("· seq 1 ").unwrap());
+        }
     }
 
     #[test]

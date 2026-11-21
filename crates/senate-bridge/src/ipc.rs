@@ -1536,6 +1536,11 @@ pub struct CatchUpReply {
     /// The `read` cursor before and after this call.
     pub read_before: Seq,
     pub read: Seq,
+    /// Some directed item here was in flight when the daemon last stopped
+    /// and had not been recorded delivered: the agent may have seen it
+    /// ([`crate::format::redelivered_note`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub redelivered: bool,
 }
 
 impl CatchUpReply {

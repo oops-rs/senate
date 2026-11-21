@@ -1273,6 +1273,10 @@ pub fn render_catch_up(reply: &CatchUpReply, locale: Locale) -> String {
         ),
     };
     let (mine, rest): (Vec<_>, Vec<_>) = reply.items.iter().partition(|i| i.directed);
+    if reply.redelivered {
+        out.push_str("\n\n");
+        out.push_str(&format::redelivered_note(locale));
+    }
     if !mine.is_empty() {
         out.push_str(locale.pick("\n\n── 发给你的 ──", "\n\n── Addressed to you ──"));
         for item in mine {
@@ -2956,6 +2960,23 @@ mod tests {
             has_more: false,
             read_before: Seq(0),
             read: Seq(2),
+            redelivered: false,
+        }
+    }
+
+    /// catch_up says once when directed items in it were sent again after
+    /// a daemon restart, and not otherwise.
+    #[test]
+    fn catch_up_says_when_items_were_sent_again_after_a_restart() {
+        for (locale, marker) in [
+            (Locale::En, "sent again after the Senate daemon restarted"),
+            (Locale::Zh, "重启后再次发送"),
+        ] {
+            let mut page = catch_up_page(None);
+            assert!(!render_catch_up(&page, locale).contains(marker));
+            page.redelivered = true;
+            let text = render_catch_up(&page, locale);
+            assert_eq!(text.matches(marker).count(), 1, "{text}");
         }
     }
 
