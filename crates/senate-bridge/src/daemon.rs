@@ -1056,6 +1056,9 @@ impl Shared {
         own.extend(self.seated());
         own.insert(agent.clone());
         let mut reader = format::Reader::new(Address::senator(agent), self.people(), own);
+        if let Ok(user) = SenatorName::new(self.config.person.clone()) {
+            reader = reader.with_user(user);
+        }
         for (committee, chair) in self.known_chairs() {
             reader = reader.with_chair(committee, chair);
         }
