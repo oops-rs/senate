@@ -101,6 +101,9 @@ pub struct Assembly {
     brain: Option<Arc<dyn Brain>>,
     hands: Option<Hands>,
     chats: Vec<ChatMount>,
+    /// The gateway mounted with [`Assembly::chat_gateway`]: it serves
+    /// simulated chat (`senate chat send`).
+    gateway: Option<ChatGateway>,
     components: Vec<Arc<dyn Component>>,
     /// Where `secretary.toml` is read, and the file the configuration came
     /// from.
@@ -122,6 +125,7 @@ impl Assembly {
             brain: None,
             hands: None,
             chats: Vec::new(),
+            gateway: None,
             components: Vec::new(),
             secretary_dir: None,
             config_file: None,
@@ -222,8 +226,9 @@ impl Assembly {
     /// Mount a chat platform through [`ChatGateway`], which writes what
     /// people say there into the log: its surface for the Speaker, and the
     /// gateway itself as a component.
-    pub fn chat_gateway(self, gateway: ChatGateway) -> Result<Self, AssemblyError> {
+    pub fn chat_gateway(mut self, gateway: ChatGateway) -> Result<Self, AssemblyError> {
         let mount = gateway.mount().ok_or(AssemblyError::GatewayMountedTwice)?;
+        self.gateway = Some(gateway.clone());
         Ok(self.chat(mount).component(gateway))
     }
 
@@ -257,6 +262,7 @@ impl Assembly {
             brain,
             hands,
             mut chats,
+            gateway,
             components,
             secretary_dir,
             config_file,
@@ -305,6 +311,9 @@ impl Assembly {
         if !chats.is_empty() && session.is_none() {
             return Err(AssemblyError::SurfaceWithoutSpeaker);
         }
+        let simulator: Option<Arc<dyn senate_core::chat_sim::ChatSimulator>> = gateway
+            .or_else(|| remote.as_ref().map(|r| r.gateway.clone()))
+            .map(|g| Arc::new(g) as Arc<dyn senate_core::chat_sim::ChatSimulator>);
         let adapter = if let Some(remote) = remote {
             remote.record_status_in(&config.server.data_dir);
             let mount = remote
@@ -340,6 +349,10 @@ impl Assembly {
         }
         if let Some(roster) = roster {
             server = server.roster(roster);
+        }
+        if let Some(simulator) = simulator.filter(|_| session.is_some()) {
+            // Simulated chat is answered by the Speaker: none, no chat.
+            server = server.chat_simulator(simulator);
         }
         let running = match listener {
             Some(listener) => server.start_with_listener(listener).await?,

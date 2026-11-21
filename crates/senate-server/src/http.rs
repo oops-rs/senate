@@ -1,6 +1,7 @@
 //! The HTTP/SSE API, exactly as `senate_core::api` documents it.
 
 mod chair_discussion;
+mod chat_sim;
 mod committee_seat;
 mod error;
 mod roles;
@@ -43,6 +44,8 @@ pub(crate) struct AppState {
     pub ping_every: Duration,
     /// Whether a Speaker judges task roots here.
     pub triaged: bool,
+    /// The chat gateway, for simulated chat.
+    pub simulator: Option<Arc<dyn senate_core::chat_sim::ChatSimulator>>,
 }
 
 pub(crate) fn router(state: AppState) -> Router {
@@ -102,6 +105,14 @@ pub(crate) fn router(state: AppState) -> Router {
         )
         .route("/v1/children/{name}/seats", put(roles::put_child_seats))
         .route("/v1/resolve", get(resolve))
+        .route(
+            "/v1/committees/{committee}/chat/simulate",
+            post(chat_sim::simulate),
+        )
+        .route(
+            "/v1/committees/{committee}/chat/simulated",
+            get(chat_sim::transcript),
+        )
         .fallback(|| async { ApiFailure::not_found("no such route") })
         .method_not_allowed_fallback(|| async { ApiFailure::method_not_allowed() })
         // Outermost, so errors and fallbacks carry it too.

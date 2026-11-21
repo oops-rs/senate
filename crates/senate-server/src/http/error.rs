@@ -17,7 +17,7 @@ pub(crate) struct ApiFailure {
 }
 
 impl ApiFailure {
-    fn new(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn new(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
         Self {
             status,
             code,

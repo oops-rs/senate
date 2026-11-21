@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use axum::http::HeaderValue;
 use ractor::{Actor, ActorCell};
+use senate_core::chat_sim::ChatSimulator;
 use senate_core::{Roster, SenatorName};
 use senate_log::LogStore;
 use tokio::net::TcpListener;
@@ -71,6 +72,7 @@ impl Server {
             roster: None,
             triaged: false,
             built_in: None,
+            simulator: None,
         }
     }
 }
@@ -91,9 +93,18 @@ pub struct ServerBuilder {
     roster: Option<Roster>,
     triaged: bool,
     built_in: Option<SenatorName>,
+    simulator: Option<Arc<dyn ChatSimulator>>,
 }
 
 impl ServerBuilder {
+    /// Serve simulated chat (`senate chat send`, [`senate_core::chat_sim`])
+    /// through `simulator`, the mounted chat gateway. Without one, those
+    /// requests are answered that this Senate has no chat platform.
+    pub fn chat_simulator(mut self, simulator: Arc<dyn ChatSimulator>) -> Self {
+        self.simulator = Some(simulator);
+        self
+    }
+
     /// Authenticate with `auth` instead of the configured tokens. With this
     /// set, `config.tokens` is not read.
     pub fn auth(mut self, auth: Arc<dyn Authenticate>) -> Self {
@@ -156,6 +167,7 @@ impl ServerBuilder {
             roster,
             triaged,
             built_in,
+            simulator,
         } = self;
         config.validate_intervals()?;
         let auth: Arc<dyn Authenticate> = match auth {
@@ -288,6 +300,7 @@ impl ServerBuilder {
             epoch: epoch_header,
             ping_every: config.sse_ping_interval(),
             triaged,
+            simulator,
         });
         let (stop_http, stopped) = oneshot::channel::<()>();
         let http_task = tokio::spawn(async move {
