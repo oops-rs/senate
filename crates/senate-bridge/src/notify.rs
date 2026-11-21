@@ -20,7 +20,11 @@
 //! - macOS: `osascript -e 'display notification "<body>" with title "<title>"'`,
 //!   the text escaped for an AppleScript string ([`applescript`]);
 //! - Linux: `notify-send --app-name Senate -- <title> <body>`, when
-//!   `notify-send` is on `PATH`.
+//!   `notify-send` is on `PATH`;
+//! - WSL ([`crate::wsl`]): a Windows toast, the only notifier there (a
+//!   distro has no notification daemon of its own), through
+//!   `powershell.exe -NoProfile -NonInteractive -EncodedCommand <script>`
+//!   ([`toast_script`]).
 //!
 //! Config, in `senate.toml`: `[notify] desktop = true` (default); `false`
 //! turns it off ([`NotifyConfig`]).
@@ -95,12 +99,132 @@ pub fn applescript(text: &str) -> String {
     out
 }
 
-/// The program and arguments that post `title` and `body` on this system,
-/// or `None` where there is no way to.
-pub fn command(title: &str, body: &str) -> Option<(&'static str, Vec<String>)> {
-    if cfg!(target_os = "macos") {
-        Some((
-            "osascript",
+/// `text` as a PowerShell single-quoted string literal. PowerShell takes
+/// the typographic single quotes as quotes too, so each is doubled like
+/// `'`; a control character becomes a space.
+pub fn powershell_literal(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('\'');
+    for c in text.chars() {
+        match c {
+            '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' => {
+                out.push(c);
+                out.push(c);
+            }
+            c if c.is_control() => out.push(' '),
+            c => out.push(c),
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// The application a toast from WSL is shown as: Windows PowerShell's own
+/// id, which every Windows has registered.
+pub const TOAST_APP: &str =
+    r"{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe";
+
+/// The PowerShell that shows `title` and `body` as a Windows toast through
+/// WinRT's `ToastNotificationManager`. The text goes in as text nodes, never
+/// as markup.
+pub fn toast_script(title: &str, body: &str) -> String {
+    [
+        "$ErrorActionPreference = 'Stop'".to_owned(),
+        // Else PowerShell reports loading the WinRT types as progress, as
+        // CLIXML on stderr, around any error.
+        "$ProgressPreference = 'SilentlyContinue'".to_owned(),
+        // A failure is one readable line on stderr, for the daemon's log
+        // (without a desktop, as from an SSH session: "the notification
+        // platform is unavailable").
+        "[Console]::OutputEncoding = [Text.Encoding]::UTF8".to_owned(),
+        "trap { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }".to_owned(),
+        "[void][Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]".to_owned(),
+        "[void][Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime]".to_owned(),
+        "$x = New-Object Windows.Data.Xml.Dom.XmlDocument".to_owned(),
+        r#"$x.LoadXml('<toast><visual><binding template="ToastGeneric"><text/><text/></binding></visual></toast>')"#.to_owned(),
+        "$t = $x.GetElementsByTagName('text')".to_owned(),
+        format!("[void]$t.Item(0).AppendChild($x.CreateTextNode({}))", powershell_literal(title)),
+        format!("[void]$t.Item(1).AppendChild($x.CreateTextNode({}))", powershell_literal(body)),
+        format!(
+            "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier({}).Show([Windows.UI.Notifications.ToastNotification]::new($x))",
+            powershell_literal(TOAST_APP)
+        ),
+    ]
+    .join("\n")
+}
+
+/// `script` as `-EncodedCommand` takes it: UTF-16LE, in base64. No shell
+/// or argument quoting can then change it.
+pub fn encoded_command(script: &str) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, b)| n | u32::from(*b) << (16 - 8 * i));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(char::from(ALPHABET[(n >> (18 - 6 * i) & 63) as usize]));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// Where Windows PowerShell is, seen from WSL: on `PATH` when WSL put the
+/// Windows directories there (the daemon's service leaves them out, see
+/// [`crate::wsl`]), else where Windows keeps it on drive C.
+fn wsl_powershell() -> String {
+    std::env::var_os("PATH")
+        .and_then(|path| {
+            std::env::split_paths(&path)
+                .map(|dir| dir.join("powershell.exe"))
+                .find(|p| p.is_file())
+        })
+        .map_or_else(
+            || "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe".to_owned(),
+            |p| p.to_string_lossy().into_owned(),
+        )
+}
+
+/// The systems [`command`] posts on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum System {
+    Macos,
+    Linux,
+    /// Linux in WSL, with Windows PowerShell at this path.
+    Wsl {
+        powershell: String,
+    },
+}
+
+impl System {
+    /// This one, or `None` where there is no way to post.
+    pub fn current() -> Option<Self> {
+        if cfg!(target_os = "macos") {
+            Some(Self::Macos)
+        } else if cfg!(target_os = "linux") {
+            Some(match crate::wsl::distro() {
+                Some(_) => Self::Wsl {
+                    powershell: wsl_powershell(),
+                },
+                None => Self::Linux,
+            })
+        } else {
+            None
+        }
+    }
+}
+
+/// The program and arguments that post `title` and `body` on `system`.
+pub fn command(system: &System, title: &str, body: &str) -> (String, Vec<String>) {
+    match system {
+        System::Macos => (
+            "osascript".into(),
             vec![
                 "-e".into(),
                 format!(
@@ -109,10 +233,9 @@ pub fn command(title: &str, body: &str) -> Option<(&'static str, Vec<String>)> {
                     applescript(title)
                 ),
             ],
-        ))
-    } else if cfg!(target_os = "linux") {
-        Some((
-            "notify-send",
+        ),
+        System::Linux => (
+            "notify-send".into(),
             vec![
                 "--app-name".into(),
                 "Senate".into(),
@@ -120,21 +243,30 @@ pub fn command(title: &str, body: &str) -> Option<(&'static str, Vec<String>)> {
                 title.replace('\n', " "),
                 body.replace('\n', " "),
             ],
-        ))
-    } else {
-        None
+        ),
+        System::Wsl { powershell } => (
+            powershell.clone(),
+            vec![
+                "-NoProfile".into(),
+                "-NonInteractive".into(),
+                "-EncodedCommand".into(),
+                encoded_command(&toast_script(title, body)),
+            ],
+        ),
     }
 }
 
-/// The system's notifier: `osascript` on macOS, `notify-send` on Linux.
+/// The system's notifier: `osascript` on macOS, `notify-send` on Linux, a
+/// Windows toast in WSL.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SystemNotifier;
 
 impl Notifier for SystemNotifier {
     fn post(&self, title: &str, body: &str) -> Result<(), String> {
-        let (program, args) = command(title, body)
+        let system = System::current()
             .ok_or_else(|| "desktop notifications are not supported on this system".to_string())?;
-        let out = std::process::Command::new(program)
+        let (program, args) = command(&system, title, body);
+        let out = std::process::Command::new(&program)
             .args(&args)
             .stdin(std::process::Stdio::null())
             .output()
@@ -315,23 +447,60 @@ mod tests {
             applescript("say \"hi\" \\ there\nnext"),
             "say \\\"hi\\\" \\\\ there next"
         );
-        if cfg!(target_os = "macos") {
-            let (program, args) =
-                command("Senate · refund-v2", "[senator::a/claude]: \"x\"").unwrap();
-            assert_eq!(program, "osascript");
-            assert_eq!(
-                args,
-                [
-                    "-e",
-                    "display notification \"[senator::a/claude]: \\\"x\\\"\" with title \"Senate · refund-v2\""
-                ]
-            );
-        }
-        if cfg!(target_os = "linux") {
-            let (program, args) = command("T", "b\nc").unwrap();
-            assert_eq!(program, "notify-send");
-            assert_eq!(args, ["--app-name", "Senate", "--", "T", "b c"]);
-        }
+        let (program, args) = command(
+            &System::Macos,
+            "Senate · refund-v2",
+            "[senator::a/claude]: \"x\"",
+        );
+        assert_eq!(program, "osascript");
+        assert_eq!(
+            args,
+            [
+                "-e",
+                "display notification \"[senator::a/claude]: \\\"x\\\"\" with title \"Senate · refund-v2\""
+            ]
+        );
+        let (program, args) = command(&System::Linux, "T", "b\nc");
+        assert_eq!(program, "notify-send");
+        assert_eq!(args, ["--app-name", "Senate", "--", "T", "b c"]);
+    }
+
+    #[test]
+    fn in_wsl_a_windows_toast_is_posted_through_an_encoded_powershell_script() {
+        assert_eq!(powershell_literal("it's"), "'it''s'");
+        assert_eq!(
+            powershell_literal("a\u{2019}b\nc"),
+            "'a\u{2019}\u{2019}b c'"
+        );
+        assert_eq!(encoded_command("ab"), "YQBiAA==");
+        assert_eq!(encoded_command("abc"), "YQBiAGMA");
+        let ps = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe";
+        let body = "[senator::bob]: it's '); Remove-Item x; ('";
+        let (program, args) = command(
+            &System::Wsl {
+                powershell: ps.into(),
+            },
+            "Senate · wsl",
+            body,
+        );
+        assert_eq!(program, ps);
+        assert_eq!(
+            args[..3],
+            ["-NoProfile", "-NonInteractive", "-EncodedCommand"]
+        );
+        let script = toast_script("Senate · wsl", body);
+        assert_eq!(args[3], encoded_command(&script));
+        assert!(
+            script.contains(r"CreateTextNode('[senator::bob]: it''s ''); Remove-Item x; (''')"),
+            "{script}"
+        );
+        assert!(
+            script.contains("CreateTextNode('Senate · wsl')"),
+            "{script}"
+        );
+        assert!(script.contains(
+            r"CreateToastNotifier('{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe')"
+        ));
     }
 
     #[test]
