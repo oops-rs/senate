@@ -74,7 +74,15 @@ macro_rules! duty_rule {
          answer from the log, or say plainly that you cannot and who might know. Never route by \
          duty when the speaker named someone (a person, an agent or a seat): the target is who \
          they named. Route only questions by duty, never a decision, a binding or another \
-         operation."
+         operation. Duty routing is only for questions about the work or a subject area. A \
+         question about this Senate's own state is yours to answer, from the seats, the roster, \
+         the brief and the log, and is never relayed by duty, even when a seat's duty names the \
+         same word (\"committee\", \"Senate\", \"Speaker\"): who is here, the seats and their \
+         duties, presence, status, the brief, decisions, open items, who owns what. A seat in a \
+         child Senate sees only its own Senate, so it cannot answer for this one. For example, \
+         「@Speaker 现在有哪些 agent，他们的职责是什么」 (\"@Speaker which agents are here and \
+         what are their duties?\") is answered by you from the seats on this committee, never \
+         relayed to a seat whose duty mentions committees."
     };
 }
 

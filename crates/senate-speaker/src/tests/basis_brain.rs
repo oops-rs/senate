@@ -1620,6 +1620,71 @@ fn assert_seats_and_rule(fixture: &Fixture) {
     ] {
         assert!(system.contains(needle), "{needle} in {system}");
     }
+    assert_own_state_rule(system);
+}
+
+/// The rule that keeps the Senate's own state with the Speaker, with the
+/// question from the live demo as its counter-example.
+fn assert_own_state_rule(system: &str) {
+    for needle in [
+        "Duty routing is only for questions about the work or a subject area.",
+        "A question about this Senate's own state is yours to answer",
+        "is never relayed by duty",
+        "who is here, the seats and their duties, presence, status, the brief, decisions, open \
+         items, who owns what",
+        "「@Speaker 现在有哪些 agent，他们的职责是什么」",
+        "never relayed to a seat whose duty mentions committees",
+    ] {
+        assert!(system.contains(needle), "{needle} in {system}");
+    }
+}
+
+/// The question from the live demo: the seats are listed, one seat's duty
+/// names "committee", and the Speaker answers itself in both modes.
+const WHO_IS_HERE: &str = "@Speaker 现在有哪些 agent，他们的职责是什么";
+
+#[tokio::test]
+async fn interpret_answers_who_is_here_itself_with_the_own_state_rule() {
+    let fixture = fixture(vec![Round::Answer(json!({
+        "action": "none",
+        "reply": "codex 和 dark-conclave::responder"
+    }))])
+    .await;
+    let intent = fixture
+        .brain
+        .interpret(Utterance {
+            seats: seats(),
+            ..utterance(&fixture, WHO_IS_HERE)
+        })
+        .await
+        .expect("intent");
+    assert!(!matches!(intent, Intent::Relay { .. }), "{intent:?}");
+    let request = &fixture.model.requests()[0];
+    assert_own_state_rule(request.system.as_deref().unwrap_or_default());
+}
+
+#[tokio::test]
+async fn converse_answers_who_is_here_itself_with_the_own_state_rule() {
+    let fixture = fixture(vec![Round::Answer(json!({
+        "reply": "codex 和 dark-conclave::responder",
+        "actions": [],
+        "awaiting_reply": false
+    }))])
+    .await;
+    let turn = fixture
+        .brain
+        .converse(Conversation {
+            utterance: Utterance {
+                seats: seats(),
+                ..utterance(&fixture, WHO_IS_HERE)
+            },
+            turns: Vec::new(),
+        })
+        .await
+        .expect("a turn");
+    assert!(turn.actions.is_empty(), "{:?}", turn.actions);
+    let request = &fixture.model.requests()[0];
+    assert_own_state_rule(request.system.as_deref().unwrap_or_default());
 }
 
 #[tokio::test]
