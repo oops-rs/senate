@@ -28,6 +28,14 @@
 //! the app-server, since Codex leaves hook context unanswered. Without `--runtime codex` a Codex hook
 //! is recognised by its rollout transcript ([`detect_runtime`]).
 //!
+//! agy runs `hook session-start|user-prompt-submit --runtime agy` as its
+//! SessionStart and PreInvocation hooks (`~/.gemini/config/hooks.json`):
+//! camelCase input naming the root `conversationId`, and `injectSteps` for
+//! output ([`agy_output`]). It takes what is waiting for it there, before
+//! each model call. A Senate-hosted agy's hook also names its host
+//! ([`crate::host::HOSTED_AGY_ENV`]): agy picks its own conversation ID, and
+//! the host's launch learns it from that first hook.
+//!
 //! Hook failures exit 0 with no output. A stalled stdin read has one
 //! second, followed by up to 200 ms of best-effort diagnostics.
 //! In a companion session (`SENATE_COMPANION` set, [`crate::companion`])
@@ -43,6 +51,7 @@ use sha2::{Digest, Sha256};
 use crate::host_approval::observed_at;
 use crate::ipc::{self, ClaudeApprovalSignal, HookEvent, HookReply, HookReport, Request};
 use crate::session::{self, Runtime};
+use senate_core::EventId;
 
 mod diagnostics;
 pub use diagnostics::{DROP_REPORT_BUDGET, STDIN_BUDGET, report_stdin_timeout};
@@ -352,7 +361,21 @@ pub async fn prepare(
             } else {
                 HookEvent::UserPromptSubmit
             };
+            // A hosted agy's hook says which host it runs under; the
+            // daemon checks that against the host's TUI among its ancestors.
+            let host: Option<EventId> = (runtime == Runtime::Agy)
+                .then(|| {
+                    std::env::var(crate::host::HOSTED_AGY_ENV)
+                        .ok()?
+                        .parse()
+                        .ok()
+                })
+                .flatten();
             let ancestors = async {
+                if host.is_some() {
+                    let parent = std::os::unix::process::parent_id();
+                    return session::ancestor_pids(parent, ANCESTOR_DEPTH, git_timeout).await;
+                }
                 let in_host = std::env::var_os(crate::host::HOSTED_CLAUDE_ENV).is_some();
                 if runtime != Runtime::Claude || (env.claude_pid.is_some() && !in_host) {
                     return Vec::new();
@@ -381,6 +404,7 @@ pub async fn prepare(
                 runtime,
                 agent_env: env.agent.clone(),
                 agent_file: facts.agent_file,
+                host,
             })
         }
         HookKind::HostedApproval => return None,

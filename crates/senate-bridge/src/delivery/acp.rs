@@ -336,6 +336,7 @@ impl Registration<'_> {
                 runtime: Runtime::Acp,
                 agent_env: None,
                 agent_file: facts.agent_file,
+                host: None,
             }),
             LOCAL_TIMEOUT,
             REGISTER_TIMEOUT,

@@ -324,6 +324,11 @@ pub struct HookReport {
     /// Contents of `.senate/agent`, if present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_file: Option<String>,
+    /// The Senate terminal host an agy hook runs under
+    /// ([`crate::host::HOSTED_AGY_ENV`]). agy names its conversation only
+    /// once it starts, so its first hook tells the host which one it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<EventId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
@@ -331,6 +336,8 @@ pub struct HookReport {
 pub enum HostedRuntime {
     Codex,
     Claude,
+    /// The Antigravity CLI.
+    Agy,
 }
 
 /// The model and reasoning effort a hosted session was started with, as the
@@ -351,6 +358,7 @@ impl From<HostedRuntime> for Runtime {
         match runtime {
             HostedRuntime::Codex => Self::Codex,
             HostedRuntime::Claude => Self::Claude,
+            HostedRuntime::Agy => Self::Agy,
         }
     }
 }
@@ -1984,6 +1992,7 @@ mod tests {
             runtime: Runtime::Claude,
             agent_env: Some("reviewer".into()),
             agent_file: None,
+            host: None,
         });
         let json = serde_json::to_value(&hook).unwrap();
         assert_eq!(json["op"], "hook");

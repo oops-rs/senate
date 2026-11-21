@@ -3278,6 +3278,16 @@ impl Shared {
             agent,
             agent_source,
         };
+        // A new hosted agy's first hook names its conversation, once the
+        // host's own TUI is among the hook's ancestors.
+        if native
+            && report.runtime == Runtime::Agy
+            && let Some(host_id) = &report.host
+            && crate::host::child_pid(&Paths::new(&self.home), host_id)
+                .is_some_and(|pid| report.ancestor_pids.contains(&pid))
+        {
+            self.hosts.name_agy(host_id, &report.session_id);
+        }
         if let Some(mut publication) = self.hosts.hook_gate(&report.session_id) {
             publication
                 .wait_for(|published| *published)

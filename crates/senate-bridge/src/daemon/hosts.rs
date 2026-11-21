@@ -20,7 +20,13 @@ struct Pending {
     session_id: Option<String>,
     published: watch::Sender<bool>,
     codex_restore: bool,
+    /// A new hosted agy: its conversation ID comes from its first hook.
+    unnamed: bool,
+    named: watch::Sender<Option<String>>,
 }
+
+/// How long a new hosted agy has to name its conversation in a hook.
+const AGY_NAMING_TIMEOUT: Duration = Duration::from_secs(15);
 
 impl Launches {
     pub(super) fn hook_gate(&self, session_id: &str) -> Option<watch::Receiver<bool>> {
@@ -36,6 +42,23 @@ impl Launches {
     /// session registry says yet.
     pub(super) fn launching(&self, id: &EventId) -> bool {
         lock(&self.0).contains_key(id)
+    }
+
+    /// A hosted agy's first hook names `session_id` as the conversation of
+    /// launch `id`. True when that is what the launch now waits on (named
+    /// now, or by this same ID before).
+    pub(super) fn name_agy(&self, id: &EventId, session_id: &str) -> bool {
+        let mut launches = lock(&self.0);
+        let Some(pending) = launches.get_mut(id) else {
+            return false;
+        };
+        if !pending.unnamed {
+            return pending.session_id.as_deref() == Some(session_id);
+        }
+        pending.unnamed = false;
+        pending.session_id = Some(session_id.to_owned());
+        pending.named.send_replace(Some(session_id.to_owned()));
+        true
     }
 
     pub(super) fn unpublished(&self, session_id: &str) -> bool {
@@ -477,9 +500,10 @@ impl Shared {
         let runtime = match session.runtime {
             Runtime::Codex => HostedRuntime::Codex,
             Runtime::Claude => HostedRuntime::Claude,
-            _ => {
+            Runtime::Agy => HostedRuntime::Agy,
+            Runtime::Acp => {
                 return Err(IpcError::bad_request(
-                    "only Codex and Claude Code can be restored",
+                    "only Codex, Claude Code and agy can be restored",
                 ));
             }
         };
@@ -581,7 +605,9 @@ impl Shared {
     {
         let session = target.session;
         self.refuse_running_host(&Paths::new(&self.home), &session.session_id)?;
-        if session.runtime == Runtime::Claude && claude_reachable(&session).await {
+        if (session.runtime == Runtime::Claude && claude_reachable(&session).await)
+            || (session.runtime == Runtime::Agy && agy_conversation_open(&session.session_id))
+        {
             return Err(IpcError::bad_request(
                 "the original session is still running; exit it before restoring",
             ));
@@ -703,6 +729,8 @@ impl Shared {
         };
         let id = EventId::new();
         let (published, _) = watch::channel(false);
+        let unnamed = runtime == HostedRuntime::Agy && resume.is_none();
+        let (named, mut naming) = watch::channel(None);
         {
             let mut launches = lock(&self.hosts.0);
             if let Some(limit) = limit {
@@ -725,6 +753,8 @@ impl Shared {
                     session_id: resume.clone(),
                     published: published.clone(),
                     codex_restore: resume.is_some() && runtime == HostedRuntime::Codex,
+                    unnamed,
+                    named,
                 },
             );
         }
@@ -739,6 +769,9 @@ impl Shared {
                 .map_err(IpcError::internal)?
                 .bin
                 .unwrap_or_else(|| PathBuf::from("codex")),
+            HostedRuntime::Agy => crate::config::AgyConfig::load(&paths.config())
+                .map_err(IpcError::internal)?
+                .bin(),
         };
         if !self.host_binary.is_file()
             || rustix::fs::access(&self.host_binary, rustix::fs::Access::EXEC_OK).is_err()
@@ -766,8 +799,11 @@ impl Shared {
         // and the TUI use the same shared server for the life of the session.
         let mut app_server = None;
         let restoring = resume.is_some();
-        let session_id = match runtime {
+        let mut session_id = match runtime {
             HostedRuntime::Claude => resume.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            // Until its first hook names it, a new agy's session is only
+            // the runtime's prefix.
+            HostedRuntime::Agy => resume.unwrap_or_else(|| Runtime::Agy.session_key("")),
             HostedRuntime::Codex => {
                 let connect = || crate::delivery::codex::AppServer::connect(&self.codex_transport);
                 let mut server = tokio::time::timeout(CODEX_PUSH_TIMEOUT, connect())
@@ -827,12 +863,13 @@ impl Shared {
                 id
             }
         };
-        if let Some(pending) = lock(&self.hosts.0).get_mut(&id) {
+        if !unnamed && let Some(pending) = lock(&self.hosts.0).get_mut(&id) {
             pending.session_id = Some(session_id.clone());
         }
         let remote = (runtime == HostedRuntime::Codex).then(|| self.codex_transport.remote());
+        let launch_session = session_id.clone();
         let launch = host::SessionCommand {
-            session_id: &session_id,
+            session_id: &launch_session,
             program: &program,
             resume: restoring && !start_empty,
             codex_remote: remote.as_deref(),
@@ -840,7 +877,7 @@ impl Shared {
             model: &model,
         };
         let session_runtime = Runtime::from(runtime);
-        let reply = SpawnReply {
+        let mut reply = SpawnReply {
             senator: seat.unwrap_or_else(|| agent::session_name(session_runtime, &session_id)),
             session_id: session_id.clone(),
             committee: committee.clone(),
@@ -858,6 +895,24 @@ impl Shared {
         let mut alias_may_have_landed = false;
         let mut staged = None;
         let result: Result<(), IpcError> = async {
+            if unnamed {
+                // A new agy names its conversation only once it runs: start
+                // it, then take the ID its first hook reports.
+                let (child, errors) = host::start(&self.host_binary, &paths, &id, runtime, &cwd, &launch)
+                    .map_err(IpcError::internal)?;
+                let (ready, ack) = await_ready(child, errors).await?;
+                process = Some(ready);
+                publication = Some(ack);
+                let named = tokio::time::timeout(AGY_NAMING_TIMEOUT, naming.wait_for(Option::is_some))
+                    .await
+                    .map_err(|_| IpcError::new(codes::SERVER, "agy did not name its conversation in time; are Senate's agy hooks installed (senate setup install)?"))?
+                    .map_err(IpcError::internal)?
+                    .clone()
+                    .ok_or_else(|| IpcError::internal("agy named no conversation"))?;
+                session_id = named;
+                reply.session_id = session_id.clone();
+                reply.senator = agent::session_name(session_runtime, &session_id);
+            }
             let cursor = if self.store.has_cursor(&reply.senator, &reply.committee).map_err(internal)? {
                 None
             } else {
@@ -873,11 +928,13 @@ impl Shared {
                     .map_err(intake_error)?;
                 Some((generation, (delivered, reported)))
             };
-            let (child, errors) = host::start(&self.host_binary, &paths, &id, runtime, &cwd, &launch)
-                .map_err(IpcError::internal)?;
-            let (ready, ack) = await_ready(child, errors).await?;
-            process = Some(ready);
-            publication = Some(ack);
+            if !unnamed {
+                let (child, errors) = host::start(&self.host_binary, &paths, &id, runtime, &cwd, &launch)
+                    .map_err(IpcError::internal)?;
+                let (ready, ack) = await_ready(child, errors).await?;
+                process = Some(ready);
+                publication = Some(ack);
+            }
             // The hosted Claude hook can wait for this bounded phase within
             // its own IPC deadline. Existing Codex hooks do not wait here.
             tokio::time::timeout(Duration::from_secs(7), async {
@@ -1185,6 +1242,27 @@ async fn claude_reachable(session: &Session) -> bool {
         && tokio::time::timeout(Duration::from_millis(300), UnixStream::connect(socket))
             .await
             .is_ok_and(|result| result.is_ok())
+}
+
+/// Whether an agy has conversation `session_id` open now: agy holds a lock
+/// on `~/.gemini/antigravity-cli/presence/<conversation>.lock` while it does.
+fn agy_conversation_open(session_id: &str) -> bool {
+    let Some(conversation) = Runtime::Agy.native_id(session_id) else {
+        return false;
+    };
+    let Some(path) = dirs::home_dir().map(|home| {
+        home.join(".gemini/antigravity-cli/presence")
+            .join(format!("{conversation}.lock"))
+    }) else {
+        return false;
+    };
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    matches!(
+        rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockShared),
+        Err(rustix::io::Errno::WOULDBLOCK)
+    )
 }
 
 async fn await_ready(

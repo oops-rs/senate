@@ -329,6 +329,16 @@ pub struct SessionCommand<'a> {
 pub(crate) const READY: u8 = 1;
 pub(crate) const PUBLISHED: u8 = 1;
 pub const HOSTED_CLAUDE_ENV: &str = "SENATE_HOSTED_CLAUDE";
+/// The host of a Senate-hosted agy, for its hooks: agy picks its own
+/// conversation ID once it starts, and its first SessionStart hook names
+/// it to the daemon with this host ID.
+pub const HOSTED_AGY_ENV: &str = "SENATE_HOSTED_AGY";
+/// A new hosted agy starts with this prompt. It is Senate's own fixed text:
+/// what the senator is asked to do comes as a Senate request, delivered by
+/// its hooks before the model call.
+pub const AGY_SEED: &str = "You are a senator in Senate, started by Senate in a terminal of its own. \
+Read your Senate inbox now (the senate MCP server's inbox tool) and act on what it asks; \
+answer each request in its thread.";
 
 pub(crate) fn preflight(paths: &Paths, id: &EventId, program: &Path) -> anyhow::Result<PathBuf> {
     let dir = directory(paths, id);
@@ -645,7 +655,8 @@ impl HostedRuntime {
     /// `model_reasoning_effort` setting takes).
     pub fn efforts(self) -> &'static [&'static str] {
         match self {
-            Self::Claude => &["low", "medium", "high", "xhigh", "max"],
+            // agy: `agy --help` (1.5.14).
+            Self::Claude | Self::Agy => &["low", "medium", "high", "xhigh", "max"],
             Self::Codex => &[
                 "none",
                 "minimal",
@@ -723,7 +734,9 @@ impl HostedModel {
         }
         if let Some(effort) = &self.effort {
             match runtime {
-                HostedRuntime::Claude => args.push(format!("--effort={effort}")),
+                HostedRuntime::Claude | HostedRuntime::Agy => {
+                    args.push(format!("--effort={effort}"));
+                }
                 // A checked effort is a bare word: quoted, it is a TOML string.
                 HostedRuntime::Codex => {
                     args.push("-c".to_owned());
@@ -793,11 +806,30 @@ fn runtime_command(
                 None => command,
             }
         }
+        // agy has no flag that names a new conversation: a new one starts
+        // from Senate's seed prompt and names itself to the daemon through
+        // its first hook; a restored one resumes by its ID.
+        HostedRuntime::Agy => {
+            let command = pty_process::Command::new(session.program);
+            let command = match crate::session::Runtime::Agy.native_id(session.session_id) {
+                Some(conversation) if session.resume => {
+                    command.arg(format!("--conversation={conversation}"))
+                }
+                _ => command.arg(format!("--prompt-interactive={AGY_SEED}")),
+            };
+            command.args(session.model.runtime_args(runtime))
+        }
     };
-    let command = if runtime == HostedRuntime::Claude {
-        command.env(HOSTED_CLAUDE_ENV, id.to_string())
-    } else {
-        command.env_remove(HOSTED_CLAUDE_ENV)
+    let command = match runtime {
+        HostedRuntime::Claude => command
+            .env(HOSTED_CLAUDE_ENV, id.to_string())
+            .env_remove(HOSTED_AGY_ENV),
+        HostedRuntime::Agy => command
+            .env(HOSTED_AGY_ENV, id.to_string())
+            .env_remove(HOSTED_CLAUDE_ENV),
+        HostedRuntime::Codex => command
+            .env_remove(HOSTED_CLAUDE_ENV)
+            .env_remove(HOSTED_AGY_ENV),
     };
     let command = command
         .current_dir(cwd)
@@ -814,6 +846,7 @@ fn runtime_command(
         .env_remove("CLAUDE_CODE_MESSAGING_TOKEN")
         .env_remove("CLAUDE_PID")
         .env_remove("CODEX_THREAD_ID")
+        .env_remove("ANTIGRAVITY_CONVERSATION_ID")
         .env_remove(crate::agent::AGENT_ENV)
         .env_remove(crate::companion::ENV_COMPANION)
         .env_remove(crate::companion::ENV_SESSION)

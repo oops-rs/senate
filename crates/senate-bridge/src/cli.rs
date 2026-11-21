@@ -424,7 +424,8 @@ stdin.")]
     },
     /// Start a coding agent in the background as a senator.
     ///
-    /// Starts the Codex or Claude Code TUI in a Senate-owned terminal,
+    /// Starts the Claude Code, Codex or Antigravity (agy) TUI in a
+    /// Senate-owned terminal,
     /// seats it on the committee and prints its senator name. Open its
     /// terminal with `senate attach`.
     #[command(after_help = "Examples:
@@ -435,6 +436,8 @@ stdin.")]
                                          Send it a first request once seated
   senate spawn claude --model opus --effort high
                                          Not the runtime's default model
+  senate spawn agy --prompt 'Triage the failing tests'
+                                         An Antigravity CLI senator
   senate attach reviewer                 Open its terminal (Ctrl-] detaches)")]
     Spawn {
         /// The coding agent to start.
@@ -913,8 +916,14 @@ fn run_hook(kind: HookKind, runtime_override: Option<Runtime>) {
         HookEnv::from_process()
     };
     let hosted_claude_start = kind == HookKind::SessionStart
-        && runtime_override.is_none_or(|runtime| runtime == Runtime::Claude)
-        && std::env::var_os(crate::host::HOSTED_CLAUDE_ENV).is_some();
+        && match runtime_override {
+            None | Some(Runtime::Claude) => {
+                std::env::var_os(crate::host::HOSTED_CLAUDE_ENV).is_some()
+            }
+            // A new hosted agy's first hook waits for its launch to publish.
+            Some(Runtime::Agy) => std::env::var_os(crate::host::HOSTED_AGY_ENV).is_some(),
+            Some(_) => false,
+        };
     let mut timeouts = HookTimeouts::default();
     if hosted_claude_start {
         // The installed native hook has a 10s limit. Reserve time for IPC

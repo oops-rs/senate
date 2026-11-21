@@ -17,9 +17,9 @@
 //!
 //! A service manager starts the daemon with a `PATH` of its own, so
 //! `install` also resolves the coding agents the daemon starts (`claude`,
-//! `codex`) on the installing shell's `PATH` and records their absolute
-//! paths in the Senate config, where the daemon already reads them
-//! (`[companion] claude_bin`, `[codex] bin`). A path already configured
+//! `codex`, `agy`) on the installing shell's `PATH` and records their
+//! absolute paths in the Senate config, where the daemon already reads them
+//! (`[companion] claude_bin`, `[codex] bin`, `[agy] bin`). A path already configured
 //! there is kept. The shell's `PATH` is still written into the service, but
 //! only as the fallback, for `git` and what the agents run themselves.
 //!
@@ -417,7 +417,7 @@ struct Agent {
     key: &'static str,
 }
 
-const AGENTS: [Agent; 2] = [
+const AGENTS: [Agent; 3] = [
     Agent {
         name: "claude",
         table: "companion",
@@ -426,6 +426,11 @@ const AGENTS: [Agent; 2] = [
     Agent {
         name: "codex",
         table: "codex",
+        key: "bin",
+    },
+    Agent {
+        name: "agy",
+        table: "agy",
         key: "bin",
     },
 ];
@@ -443,9 +448,9 @@ pub enum Found {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentProgram {
-    /// `claude` or `codex`.
+    /// `claude`, `codex` or `agy`.
     pub name: &'static str,
-    /// `[companion] claude_bin` or `[codex] bin`.
+    /// `[companion] claude_bin`, `[codex] bin` or `[agy] bin`.
     pub setting: String,
     pub found: Found,
 }

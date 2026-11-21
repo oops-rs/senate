@@ -3163,3 +3163,213 @@ async fn mail_held_while_stopped_is_pushed_once_restored() {
     .unwrap();
     drop(fixture);
 }
+
+/// A stand-in for agy: it records its argv, then does what agy does on its
+/// first prompt, running Senate's SessionStart hook with the conversation
+/// it picked, and records what the hook printed.
+fn agy_fixture(dir: &std::path::Path, conversation: &str) -> PathBuf {
+    let fixture = dir.join("fixture-agy");
+    std::fs::write(
+        &fixture,
+        format!(
+            r#"#!/bin/sh
+case "$1" in
+    --prompt-interactive=?*) conversation={conversation} ;;
+    --conversation=?*) conversation="${{1#--conversation=}}" ;;
+    *) exit 64 ;;
+esac
+argv=".fixture-argv-$SENATE_HOSTED_AGY"
+printf '%s\n' "$@" > "$argv.tmp" && mv "$argv.tmp" "$argv" || exit 1
+printf '{{"conversationId":"%s","cwd":"%s"}}' "$conversation" "$PWD" \
+    | {BIN:?} hook session-start --runtime agy > ".fixture-hook.tmp" \
+    && mv .fixture-hook.tmp .fixture-hook
+while IFS= read -r line; do
+    case "$line" in
+        paint) printf 'fixture TUI\n' ;;
+        q) exit 0 ;;
+    esac
+done
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o700)).unwrap();
+    fixture
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hosted_agy_names_its_conversation_through_its_first_hook_and_resumes_it() {
+    use senate_bridge::ipc::StopReply;
+    use senate_bridge::session::Runtime;
+
+    let mut h = Harness::new().await;
+    h.config.hosted_session_limit = Some(1);
+    h.dir = tempfile::tempdir_in("/tmp").unwrap();
+    h.paths = senate_bridge::Paths::new(h.dir.path().join("senate"));
+    h.paths.ensure_home().unwrap();
+    let project = h.workdir("agy-hosted", None);
+    let conversation = "3f2b8c1e-6d4a-4e7b-9c0d-1a2b3c4d5e6f";
+    let fixture = agy_fixture(h.dir.path(), conversation);
+    std::fs::write(
+        h.paths.config(),
+        format!("[agy]\nbin = {:?}\n", fixture.to_str().unwrap()),
+    )
+    .unwrap();
+    h.config.committees.push(committee());
+    start(&mut h).await;
+
+    // agy takes Claude Code's efforts, and nothing else.
+    let refused = ipc::request::<SpawnReply>(
+        &h.socket(),
+        &Request::Spawn {
+            session: Default::default(),
+            runtime: HostedRuntime::Agy,
+            committee: committee(),
+            alias: None,
+            cwd: project.clone(),
+            chair: false,
+            prompt: None,
+            model: HostedModel::new(None, Some("minimal".into())),
+        },
+        TIMEOUT,
+        TIMEOUT,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        refused.to_string().contains(
+            "agy does not take the effort \"minimal\"; use one of: low, medium, high, xhigh, max"
+        ),
+        "{refused}"
+    );
+
+    let seat: SpawnReply = call(
+        &h,
+        &Request::Spawn {
+            session: Default::default(),
+            runtime: HostedRuntime::Agy,
+            committee: committee(),
+            alias: Some(path("triage")),
+            cwd: project.clone(),
+            chair: false,
+            prompt: None,
+            model: HostedModel::new(Some("flash".into()), Some("high".into())),
+        },
+    )
+    .await;
+    let key = Runtime::Agy.session_key(conversation);
+    assert_eq!(seat.session_id, key);
+    assert_eq!(seat.senator.as_str(), format!("agy-{conversation}"));
+    let session = h.store().session(&key).unwrap().unwrap();
+    assert_eq!(session.runtime, Runtime::Agy);
+
+    let attach_target = Request::Attach {
+        senator: path("triage").into(),
+    };
+    let terminal: PathBuf = call(&h, &attach_target).await;
+    let args = hosted_fixture_argv(&terminal, &project, TIMEOUT).await;
+    assert!(
+        args[0].starts_with("--prompt-interactive=You are a senator in Senate"),
+        "{args:?}"
+    );
+    assert!(args.contains(&"--model=flash".to_owned()), "{args:?}");
+    assert!(args.contains(&"--effort=high".to_owned()), "{args:?}");
+    // The hook waited for the launch to publish, then answered as agy
+    // takes it: Senate's identity line, then the orientation.
+    let hook = eventually("the fixture's hook output", TIMEOUT, || {
+        std::fs::read_to_string(project.join(".fixture-hook")).ok()
+    })
+    .await;
+    let hook: serde_json::Value = serde_json::from_str(&hook).unwrap();
+    let identity = hook["injectSteps"][0]["systemMessage"]["systemMessage"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        identity,
+        format!("[senate] {} · [senator::agy-{conversation}]", committee())
+    );
+    assert!(
+        hook["injectSteps"][1]["userMessage"]
+            .as_str()
+            .unwrap()
+            .contains("This session is joined"),
+        "{hook}"
+    );
+
+    let _: StopReply = call(
+        &h,
+        &Request::Stop {
+            session: Default::default(),
+            senator: path("triage").into(),
+            force: true,
+        },
+    )
+    .await;
+    let restored: SpawnReply = call(
+        &h,
+        &Request::Restore {
+            session: Default::default(),
+            senator: path("triage").into(),
+            model: HostedModel::default(),
+        },
+    )
+    .await;
+    assert_eq!(restored.session_id, key);
+    assert_eq!(restored.senator, seat.senator);
+    let terminal: PathBuf = call(&h, &attach_target).await;
+    let args = hosted_fixture_argv(&terminal, &project, TIMEOUT).await;
+    assert_eq!(args[0], format!("--conversation={conversation}"));
+    assert!(args.contains(&"--model=flash".to_owned()), "{args:?}");
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hosted_agy_that_never_names_its_conversation_is_rolled_back() {
+    let mut h = Harness::new().await;
+    h.config.hosted_session_limit = Some(1);
+    h.dir = tempfile::tempdir_in("/tmp").unwrap();
+    h.paths = senate_bridge::Paths::new(h.dir.path().join("senate"));
+    h.paths.ensure_home().unwrap();
+    let project = h.workdir("agy-silent", None);
+    // agy without Senate's hooks: it runs, but no hook names it.
+    let fixture = h.dir.path().join("silent-agy");
+    std::fs::write(&fixture, "#!/bin/sh\nwhile IFS= read -r line; do :; done\n").unwrap();
+    std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(
+        h.paths.config(),
+        format!("[agy]\nbin = {:?}\n", fixture.to_str().unwrap()),
+    )
+    .unwrap();
+    h.config.committees.push(committee());
+    start(&mut h).await;
+    let error = ipc::request::<SpawnReply>(
+        &h.socket(),
+        &Request::Spawn {
+            session: Default::default(),
+            runtime: HostedRuntime::Agy,
+            committee: committee(),
+            alias: None,
+            cwd: project,
+            chair: false,
+            prompt: None,
+            model: Default::default(),
+        },
+        TIMEOUT,
+        Duration::from_secs(30),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("senate setup install"),
+        "{error}"
+    );
+    assert!(h.store().all_sessions().unwrap().is_empty());
+    let hosts = h.paths.home().join("hosts");
+    eventually("the unnamed host removed", TIMEOUT, || {
+        std::fs::read_dir(&hosts)
+            .map_or(true, |mut entries| entries.next().is_none())
+            .then_some(())
+    })
+    .await;
+    h.stop().await;
+}

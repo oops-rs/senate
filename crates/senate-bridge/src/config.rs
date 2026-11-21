@@ -792,6 +792,44 @@ impl BridgeConfig {
     }
 }
 
+/// `[agy]` in `senate.toml`: the Antigravity CLI a hosted agy session
+/// runs.
+///
+/// ```toml
+/// [agy]
+/// bin = "/Users/me/.local/bin/agy"   # default: `agy` on PATH
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct AgyConfig {
+    #[serde(default)]
+    pub bin: Option<PathBuf>,
+}
+
+impl AgyConfig {
+    /// The `[agy]` table of the bridge config at `path`; the defaults when
+    /// the file or the table is missing.
+    pub fn load(path: &Path) -> Result<Self, String> {
+        #[derive(Deserialize)]
+        struct File {
+            #[serde(default)]
+            agy: AgyConfig,
+        }
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(e) => return Err(format!("reading {}: {e}", path.display())),
+        };
+        toml::from_str::<File>(&text)
+            .map(|file| file.agy)
+            .map_err(|e| format!("parsing [agy] in {}: {e}", path.display()))
+    }
+
+    /// The executable to run: `bin`, else `agy` on PATH.
+    pub fn bin(&self) -> PathBuf {
+        self.bin.clone().unwrap_or_else(|| PathBuf::from("agy"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
