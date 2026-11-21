@@ -599,6 +599,13 @@ its Senate inbox; `--prompt` arrives as an ordinary Senate request.
 directory it has not opened before: answer it in `senate attach`, or open
 the directory in agy yourself first.
 
+To run an agent over the **Agent Client Protocol (ACP)** instead, with
+Senate as the client (agy's own ACP server, for one):
+```sh
+senate acp -- agy acp
+```
+Type one-time confirmation or `/deny` to grant/block permission requests interactively.
+
 ---
 
 ## 📖 Core Concepts & Addressing
