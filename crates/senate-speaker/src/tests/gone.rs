@@ -155,6 +155,15 @@ async fn a_question_to_an_unseated_agent_closes_with_a_note_to_the_asker() {
     );
     let open = open_questions(&events);
     assert!(!open.contains(&to_bob));
+    // Said in chat, under the question's copy.
+    assert!(
+        rig.surface
+            .texts()
+            .iter()
+            .any(|t| t.contains("已不在本委员会")),
+        "{:?}",
+        rig.surface.texts()
+    );
     assert!(open.contains(&to_pm), "a question to a person stays open");
     rig.stop().await;
 }

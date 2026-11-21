@@ -1947,11 +1947,12 @@ impl Engine {
     ///
     /// Never as text: a `status` (the card shows it), the Speaker's own notes
     /// (triage verdicts and acknowledgements it already said; not the note
-    /// that a child Senate is offline, which nothing else says), and a
+    /// that a child Senate is offline, nor that a question's seat is gone,
+    /// which nothing else says), and a
     /// person's approval the Speaker wrote for them. In a task thread of a
     /// committee with an Agent group, the Agent group's copy gets answers
     /// (everything at output level "everything") and a people group's copy
-    /// gets answers only, signed; otherwise the plain rule: the reply goes
+    /// gets answers and the note that the seat is gone only, signed; otherwise the plain rule: the reply goes
     /// under the root's copy.
     async fn reply_plans(
         &self,
@@ -1966,7 +1967,8 @@ impl Engine {
         // one who asked, not something already said in chat.
         let own_note = event.from == Address::Speaker
             && event.kind == Kind::Note
-            && !event.meta.contains_key(meta::CHILD_OFFLINE);
+            && !event.meta.contains_key(meta::CHILD_OFFLINE)
+            && !senate_core::brief::is_seat_removed(event);
         if event.kind == Kind::Status || own_note || approval {
             return Ok(Vec::new());
         }
@@ -1989,7 +1991,7 @@ impl Engine {
                         Some(old) => render::thread_mirror_covering(l, event, old),
                         None => render::thread_mirror(l, event),
                     }
-                } else if event.kind == Kind::Answer {
+                } else if event.kind == Kind::Answer || senate_core::brief::is_seat_removed(event) {
                     match &covering {
                         Some(old) => render::signed_covering(l, event, old),
                         None => render::signed(l, event),
