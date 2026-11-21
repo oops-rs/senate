@@ -43,7 +43,8 @@
 //!   session retries it again. A Codex hook never hands items over as
 //!   context: Codex leaves that context unanswered. A timeout
 //!   after the request was written may mean the turn did start; the batch is
-//!   then delivered twice rather than lost.
+//!   then delivered twice rather than lost (at least once, as every path:
+//!   [`crate::delivery`], "Delivery guarantee").
 //!
 //! The session-start brief needs no `thread/inject_items`: Codex runs the
 //! SessionStart hook with the same `additionalContext` output as Claude Code.

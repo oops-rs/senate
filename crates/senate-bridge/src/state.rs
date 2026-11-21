@@ -41,7 +41,9 @@
 //!
 //! Queue items move `pending → inflight → delivered`, or `inflight → queued`
 //! (held for the session's hooks) or back to `pending` (no one could take
-//! it). Every transition is a conditional update on the current status, so a
+//! it, or the daemon stopped with it in flight: then it is flagged
+//! `redelivered` until it is recorded delivered, since delivery is at least
+//! once; [`crate::delivery`], "Delivery guarantee"). Every transition is a conditional update on the current status, so a
 //! hook and the batcher racing for one item cannot both deliver it.
 //!
 //! The cursor, the queue row for an event and the pending cap are written in
@@ -875,7 +877,7 @@ impl Store {
     /// Take in one event from `agent`'s stream: enqueue it for that agent if
     /// `directed`, then move the agent's cursor to it, and, given a `cap`,
     /// keep only the agent's newest `cap` pending items on the committee
-    /// ([`cap_pending`]), all in one transaction, so a crash can never leave
+    /// (`cap_pending`), all in one transaction, so a crash can never leave
     /// the queue over its cap. Returns how many items the cap dropped, or
     /// `None` (and changes nothing) when the event is at or behind the
     /// cursor.
@@ -930,7 +932,7 @@ impl Store {
     /// as [`Store::enqueue`], and an item the agent lost when the chair
     /// last moved away from it ([`CHAIR_MOVED`]) is pending again. Given a
     /// `cap`, the agent's pending items on the committee are trimmed to it
-    /// in the same transaction ([`cap_pending`]). Returns how many the cap
+    /// in the same transaction (`cap_pending`). Returns how many the cap
     /// dropped, or `None` (and changes nothing) when the agent has the item
     /// in any other state.
     pub fn enqueue_for_chair(
@@ -2244,8 +2246,8 @@ impl Store {
     /// were being handed to a session when the daemon last stopped. They go
     /// back to pending, flagged `redelivered`: the session may have taken
     /// them before the delivery was recorded, so the next delivery says they
-    /// were re-sent (delivery is at least once; see the daemon's module
-    /// docs, "Delivery guarantee").
+    /// were re-sent (delivery is at least once: [`crate::delivery`],
+    /// "Delivery guarantee").
     pub fn reset_inflight(&self) -> Result<usize, StoreError> {
         Ok(self.conn().execute(
             "UPDATE queue SET status = 'pending', session_id = NULL, redelivered = 1
@@ -2271,7 +2273,7 @@ impl Store {
         Ok(out)
     }
 
-    // ---- the pending cap (applied by `ingest`, see `cap_pending`) -------
+    // ---- items dropped by the pending cap (`cap_pending`) ----------------
 
     /// Items of `agent` on `committee` dropped by the cap and not yet
     /// announced.

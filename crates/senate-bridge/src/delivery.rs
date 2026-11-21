@@ -20,6 +20,29 @@
 //!
 //! Each live adapter answers `Unavailable` for other runtimes.
 //! Claude Channels would be a further implementation of [`DeliveryAdapter`].
+//!
+//! # Delivery guarantee: at least once
+//!
+//! Every path into a session delivers a directed event at least once, never
+//! at most once: the inbox and Codex pushes, ACP, hook context (Claude Code,
+//! Codex and agy hooks), the companion session and `catch_up`. Losing a
+//! question is worse than seeing it twice. The daemon claims a batch in
+//! flight ([`crate::state::Store::claim_inflight`]), hands it over, and only
+//! then records it delivered. If the daemon dies in between, or that last
+//! write fails, the session may already have the batch while the rows are
+//! still in flight. At the next start they go back to pending flagged as
+//! re-sent ([`crate::state::Store::reset_inflight`]) and are delivered again.
+//! A Codex push that times out after the request was written is treated the
+//! same way ([`codex`]): it is sent again rather than dropped.
+//!
+//! A repeat after a restart is never silent. The delivery that carries a
+//! re-sent item says once, before the messages, that they were sent again
+//! after a daemon restart and may already have been seen, and asks the agent
+//! to check the thread by the seq in each header before answering or acting
+//! again ([`crate::format::redelivered_note`]). The flag is cleared once the
+//! item is recorded delivered, so a later delivery carries no note. Within
+//! one running daemon the in-flight claim means a batch is never handed to
+//! two sessions or pushed twice.
 
 pub mod acp;
 pub mod codex;

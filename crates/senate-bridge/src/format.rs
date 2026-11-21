@@ -1165,10 +1165,9 @@ pub fn dropped_note(dropped: u64, locale: Locale) -> String {
     }
 }
 
-/// The line saying a batch was re-sent after a daemon restart. Delivery is
-/// at least once: a batch in flight when the daemon stopped is sent again,
-/// though the session may have taken it already
-/// ([`crate::state::Store::reset_inflight`]).
+/// The line saying a batch holds messages sent again after a daemon
+/// restart, which the session may have taken already. Delivery is at least
+/// once ([`crate::delivery`], "Delivery guarantee").
 pub fn redelivered_note(locale: Locale) -> String {
     match locale {
         Locale::Zh => {
