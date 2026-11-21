@@ -548,7 +548,7 @@ fn alice_checkpoint() -> CheckpointRecord {
         agent: agent_path("alice"),
         body: "幂等键做完了".into(),
         checkpoint: CheckpointPayload {
-            branch: "feature/refund-v2/alice".into(),
+            branch: "senate/refund-v2/alice".into(),
             commit: "a41f9c2e0000".into(),
             pushed: false,
             remote_url: None,
@@ -610,7 +610,7 @@ async fn a_takeover_answers_from_the_checkpoint_and_says_when_it_does_not_cover(
     for needle in [
         "seq 7",
         "3 hours ago",
-        "feature/refund-v2/alice@a41f9c2",
+        "senate/refund-v2/alice@a41f9c2",
         "not pushed",
         "- 完成：幂等键用 Idempotency-Key",
         "DECISIONS.md\\n(no such file)",
@@ -816,7 +816,7 @@ fn conversation(fixture: &Fixture, text: &str, turns: Vec<Turn>) -> Conversation
 async fn add_checkpoint(hub: &MemoryHub, who: Address, progress: &str) {
     let branch = runner_of(who.as_senator().expect("an agent")).to_string();
     let payload = CheckpointPayload {
-        branch: format!("feature/refund-v2/{branch}"),
+        branch: format!("senate/refund-v2/{branch}"),
         commit: "a41f9c2e0000".into(),
         pushed: false,
         remote_url: None,
@@ -1089,7 +1089,7 @@ async fn the_agent_tools_are_committee_scoped_and_polite_when_unbound() {
     elsewhere = elsewhere.with_meta(
         meta::CHECKPOINT,
         CheckpointPayload {
-            branch: "feature/billing/bob".into(),
+            branch: "senate/billing/bob".into(),
             commit: "b0b".into(),
             pushed: false,
             remote_url: None,
@@ -1323,7 +1323,7 @@ async fn pick_agent_is_one_typed_turn_that_names_a_candidate_or_asks() {
         "[senator::alice]",
         "seq 12",
         "- claude · away · the thread this was asked in is this agent's",
-        "latest checkpoint: seq 7, 0 minutes ago, feature/refund-v2/alice@a41f9c2: 幂等键做完了",
+        "latest checkpoint: seq 7, 0 minutes ago, senate/refund-v2/alice@a41f9c2: 幂等键做完了",
         "open task threads: seq 12 \\\"幂等键的重试\\\"",
         "- codex · online",
         "duty: reviews the payment gateway",
@@ -1607,10 +1607,10 @@ async fn an_incomplete_committee_model_falls_back_and_is_reported() {
 
 // ----- the seats on the committee, and relaying by duty ------------------------------
 
-const DEPLOY_DUTY: &str = "负责回答 Commons / Senate 的部署、架构和使用问题";
+const DEPLOY_DUTY: &str = "负责回答 退款服务的部署、架构和使用问题";
 
 /// The committee's seats as the engine gives them: an agent here and two
-/// seats of the child Senate `dark-conclave`, one of them away.
+/// seats of the child Senate `carol-desk`, one of them away.
 fn seats() -> Vec<crate::CommitteeSeat> {
     vec![
         crate::CommitteeSeat {
@@ -1621,14 +1621,14 @@ fn seats() -> Vec<crate::CommitteeSeat> {
             presence: None,
         },
         crate::CommitteeSeat {
-            target: "dark-conclave::responder".into(),
-            shown: Some("senate-dev（dark-conclave）".into()),
+            target: "carol-desk::responder".into(),
+            shown: Some("refund-dev（carol-desk）".into()),
             duty: Some(DEPLOY_DUTY.into()),
             online: true,
             presence: None,
         },
         crate::CommitteeSeat {
-            target: "dark-conclave::archivist".into(),
+            target: "carol-desk::archivist".into(),
             shown: None,
             duty: None,
             online: false,
@@ -1646,12 +1646,12 @@ fn assert_seats_and_rule(fixture: &Fixture) {
         "Seats on this committee, written as a relay target",
         "- codex · online · duty: owns the retry path",
         &format!(
-            "- dark-conclave::responder · shown to people as senate-dev（dark-conclave） · \
+            "- carol-desk::responder · shown to people as refund-dev（carol-desk） · \
              online · duty: {DEPLOY_DUTY}"
         ),
         "Whenever you name a seat to people, write the name it is shown to people as, never its \
          relay target or id",
-        "- dark-conclave::archivist · away · duty: none set",
+        "- carol-desk::archivist · away · duty: none set",
     ] {
         assert!(prompt.contains(needle), "{needle} in {prompt}");
     }
@@ -1691,7 +1691,7 @@ const WHO_IS_HERE: &str = "@Speaker 现在有哪些 agent，他们的职责是�
 async fn interpret_answers_who_is_here_itself_with_the_own_state_rule() {
     let fixture = fixture(vec![Round::Answer(json!({
         "action": "none",
-        "reply": "codex 和 dark-conclave::responder"
+        "reply": "codex 和 carol-desk::responder"
     }))])
     .await;
     let intent = fixture
@@ -1710,7 +1710,7 @@ async fn interpret_answers_who_is_here_itself_with_the_own_state_rule() {
 #[tokio::test]
 async fn converse_answers_who_is_here_itself_with_the_own_state_rule() {
     let fixture = fixture(vec![Round::Answer(json!({
-        "reply": "codex 和 dark-conclave::responder",
+        "reply": "codex 和 carol-desk::responder",
         "actions": [],
         "awaiting_reply": false
     }))])
@@ -1735,25 +1735,25 @@ async fn converse_answers_who_is_here_itself_with_the_own_state_rule() {
 async fn interpret_shows_the_seats_and_their_duties_and_relays_by_duty() {
     let fixture = fixture(vec![Round::Answer(json!({
         "action": "relay",
-        "targets": ["dark-conclave::responder"],
+        "targets": ["carol-desk::responder"],
         "kind": "question",
-        "body": "Commons 是怎么部署的？"
+        "body": "退款服务是怎么部署的？"
     }))])
     .await;
     let intent = fixture
         .brain
         .interpret(Utterance {
             seats: seats(),
-            ..utterance(&fixture, "Commons 是怎么部署的？")
+            ..utterance(&fixture, "退款服务是怎么部署的？")
         })
         .await
         .expect("intent");
     assert_eq!(
         intent,
         Intent::Relay {
-            targets: vec!["dark-conclave::responder".into()],
+            targets: vec!["carol-desk::responder".into()],
             kind: RelayKind::Question,
-            body: "Commons 是怎么部署的？".into(),
+            body: "退款服务是怎么部署的？".into(),
         }
     );
     assert_seats_and_rule(&fixture);
@@ -1773,7 +1773,7 @@ async fn relays_to_a_gone_seat_are_marked_in_the_context() {
     let gone = fixture.log[0].seq;
     let said = Utterance {
         gone_relays: vec![gone],
-        ..utterance(&fixture, "Commons 怎么部署？")
+        ..utterance(&fixture, "退款服务怎么部署？")
     };
     fixture.brain.interpret(said.clone()).await.expect("intent");
     fixture
@@ -1805,9 +1805,9 @@ async fn converse_shows_the_seats_and_their_duties_as_context_and_relays_by_duty
         "reply": "",
         "actions": [action(json!({
             "action": "relay",
-            "targets": ["dark-conclave::responder"],
+            "targets": ["carol-desk::responder"],
             "kind": "question",
-            "body": "Commons 是怎么部署的？"
+            "body": "退款服务是怎么部署的？"
         }))],
         "awaiting_reply": false
     }))])
@@ -1817,7 +1817,7 @@ async fn converse_shows_the_seats_and_their_duties_as_context_and_relays_by_duty
         .converse(Conversation {
             utterance: Utterance {
                 seats: seats(),
-                ..utterance(&fixture, "Commons 是怎么部署的？")
+                ..utterance(&fixture, "退款服务是怎么部署的？")
             },
             turns: Vec::new(),
         })
@@ -1826,9 +1826,9 @@ async fn converse_shows_the_seats_and_their_duties_as_context_and_relays_by_duty
     assert_eq!(
         turn.actions,
         vec![Intent::Relay {
-            targets: vec!["dark-conclave::responder".into()],
+            targets: vec!["carol-desk::responder".into()],
             kind: RelayKind::Question,
-            body: "Commons 是怎么部署的？".into(),
+            body: "退款服务是怎么部署的？".into(),
         }]
     );
     assert_seats_and_rule(&fixture);

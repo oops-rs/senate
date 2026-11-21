@@ -35,7 +35,7 @@ fn mentions(candidates: &[SenatorName], l: Locale) -> String {
 ///
 /// ```text
 /// [senator::alice] 有 2 个 agent，你指的是哪一个？回复编号或名字：
-/// 1. [senator::claude] 在线 · 检查点 feature/refund-v2/alice@a41f9c2：重试路径做了一半 · 2 个进行中的任务
+/// 1. [senator::claude] 在线 · 检查点 senate/refund-v2/alice@a41f9c2：重试路径做了一半 · 2 个进行中的任务
 /// 2. [senator::codex] 不在线
 /// ```
 ///
@@ -321,7 +321,7 @@ mod tests {
                 no_agent_to_work_from(l, &alice),
                 no_agent_to_reassign(l, &alice),
                 run_crashed(l),
-                branch_label(l, "feature/refund-v2/speaker-7"),
+                branch_label(l, "senate/refund-v2/speaker-7"),
                 work_title(l, "finish the retry path"),
             ] {
                 assert_senate_vocabulary(&text);

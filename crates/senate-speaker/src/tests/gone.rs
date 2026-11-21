@@ -14,27 +14,27 @@ use serde_json::json;
 use super::hub::MemoryHub;
 use super::rig::*;
 
-/// The child Senate `wyak` declares `codex` on refund-v2, and the Speaker
+/// The child Senate `bob-desk` declares `codex` on refund-v2, and the Speaker
 /// relayed pm's question to that seat.
 async fn relayed_to_a_child_seat() -> (Rig, senate_core::Seq) {
     let hub = MemoryHub::new();
     hub.append(bind_event(&refund(), GROUP)).await.unwrap();
-    hub.add_child("wyak", "pm");
-    hub.declare_seats("wyak", &refund(), &[("codex", PresenceState::Online)]);
+    hub.add_child("bob-desk", "pm");
+    hub.declare_seats("bob-desk", &refund(), &[("codex", PresenceState::Online)]);
     let question = hub
         .append(
             NewEvent::new(
                 refund(),
                 Kind::Question,
                 Address::Speaker,
-                "Commons 怎么部署？",
+                "退款服务怎么部署？",
             )
             .to(Address::Child {
-                senate: name("wyak"),
+                senate: name("bob-desk"),
                 committee: refund(),
             })
             .on_behalf_of(user("pm"))
-            .with_meta(meta::INTENDED, json!("wyak::refund-v2::senator::codex")),
+            .with_meta(meta::INTENDED, json!("bob-desk::refund-v2::senator::codex")),
         )
         .await
         .unwrap()
@@ -71,7 +71,7 @@ async fn a_question_to_a_child_seat_closes_once_the_child_stops_declaring_it() {
     assert!(seat_notes(&rig.hub.events(&refund())).is_empty());
 
     // The child's next report no longer has the seat.
-    rig.hub.declare_seats("wyak", &refund(), &[]);
+    rig.hub.declare_seats("bob-desk", &refund(), &[]);
     rig.append(something_new()).await;
     rig.settle().await;
     rig.append(something_new()).await;
@@ -87,10 +87,10 @@ async fn a_question_to_a_child_seat_closes_once_the_child_stops_declaring_it() {
     assert_eq!(note.to, vec![user("pm")], "to the asker");
     assert_eq!(
         note.meta.get(meta::SEAT_REMOVED),
-        Some(&json!("wyak::refund-v2::senator::codex"))
+        Some(&json!("bob-desk::refund-v2::senator::codex"))
     );
     assert!(
-        note.body.contains("[wyak::refund-v2::senator::codex]"),
+        note.body.contains("[bob-desk::refund-v2::senator::codex]"),
         "{}",
         note.body
     );
@@ -109,8 +109,8 @@ async fn a_question_to_a_child_seat_closes_once_the_child_stops_declaring_it() {
 #[tokio::test]
 async fn a_child_that_has_not_reported_since_the_start_closes_nothing() {
     let (rig, question) = relayed_to_a_child_seat().await;
-    rig.hub.declare_seats("wyak", &refund(), &[]);
-    rig.hub.child_seen("wyak", None);
+    rig.hub.declare_seats("bob-desk", &refund(), &[]);
+    rig.hub.child_seen("bob-desk", None);
     rig.append(something_new()).await;
     rig.settle().await;
     let events = rig.hub.events(&refund());
@@ -174,11 +174,11 @@ async fn a_question_to_an_unseated_agent_closes_with_a_note_to_the_asker() {
 #[tokio::test]
 async fn the_brain_is_told_which_earlier_relays_went_to_a_seat_that_is_gone() {
     let (rig, question) = relayed_to_a_child_seat().await;
-    rig.hub.declare_seats("wyak", &refund(), &[]);
+    rig.hub.declare_seats("bob-desk", &refund(), &[]);
     rig.brain.interprets(Ok(crate::Intent::None {
         reply: String::new(),
     }));
-    rig.append(mention("pm", "Commons 怎么部署？", "again"))
+    rig.append(mention("pm", "退款服务怎么部署？", "again"))
         .await;
     rig.settle().await;
     let utterances = rig.brain.utterances();

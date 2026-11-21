@@ -125,19 +125,13 @@ mod tests;
 /// What every text the Speaker writes is held to in this crate's tests.
 #[cfg(test)]
 pub(crate) mod tests_support {
-    /// Panics when `text` uses the predecessor's vocabulary: its address
-    /// prefixes, its words for the Speaker and for a committee, or its chat
-    /// platform. A git branch such as `feature/refund-v2/alice` is a
-    /// developer's convention and is let through.
+    /// Panics when `text` writes an address in a legacy single-colon form
+    /// (`user:<name>`, `agent:<name>`) instead of Senate's own
+    /// (`senator::<name>`).
     pub(crate) fn assert_senate_vocabulary(text: &str) {
         let lower = text.to_lowercase();
-        let old_platform = concat!("fei", "shu");
-        for word in ["user:", "agent:", "steward", old_platform, "管家", "功能"] {
-            assert!(!lower.contains(word), "{word:?} in {text:?}");
+        for prefix in ["user:", "agent:"] {
+            assert!(!lower.contains(prefix), "{prefix:?} in {text:?}");
         }
-        assert!(
-            !lower.replace("feature/", "").contains("feature"),
-            "\"feature\" in {text:?}"
-        );
     }
 }

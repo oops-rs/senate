@@ -280,7 +280,7 @@ impl FakeSurface {
         }
         let mut state = self.lock();
         let content = match mention {
-            Some(user) => format!("<at {user}>{markdown}"),
+            Some(user) => format!("@{user} {markdown}"),
             None => markdown.to_owned(),
         };
         if let Some((first_target, first_content, first)) =

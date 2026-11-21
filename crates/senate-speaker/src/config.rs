@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 /// allowed_repos = ["example/refund"]   # only these repos (owner/name)
 /// max_concurrent_runs = 1           # runs at once on this server (and always one per committee)
 /// pr_base = "main"                  # what the PR merges into
-/// branch_prefix = "feature"         # branches are <prefix>/<committee>/speaker-<n>
+/// branch_prefix = "senate"          # branches are <prefix>/<committee>/speaker-<n>
 /// budget = { wall_secs = 1800, max_turns = 200 }
 /// [speaker.work.developers]         # who may ask, besides people whose agent is active on the committee
 /// refund-v2 = ["alice", "bob"]
@@ -131,7 +131,7 @@ pub struct WorkConfig {
     #[serde(default = "default_pr_base")]
     pub pr_base: String,
     /// How branches are named: a run pushes `<prefix>/<committee>/speaker-<n>`.
-    /// A git convention, `feature` unless a deployment says otherwise.
+    /// The first segment of a branch name, `senate` unless a deployment says otherwise.
     #[serde(default, rename = "branch_prefix")]
     pub branches: BranchNaming,
 }

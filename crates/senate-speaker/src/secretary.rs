@@ -149,7 +149,7 @@ pub struct ModelSettings {
     pub base_url: Option<String>,
     /// The request format the endpoint at `base_url` speaks:
     /// `chat_completions` (the default) or `responses` (OpenAI's
-    /// `v1/responses`, as some gateways such as LiteLLM serve it). Only
+    /// `v1/responses`, as some OpenAI-compatible gateways serve it). Only
     /// with `base_url`: a provider preset carries its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wire: Option<String>,

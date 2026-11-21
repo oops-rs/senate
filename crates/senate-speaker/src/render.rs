@@ -51,7 +51,7 @@ fn mentions(l: Locale, to: &[Address]) -> String {
 }
 
 /// A child Senate's seat as people are shown it: its alias there with the
-/// child's name, `senate-dev（dark-conclave）` / `senate-dev (dark-conclave)`.
+/// child's name, `refund-dev（carol-desk）` / `refund-dev (carol-desk)`.
 pub(crate) fn child_seat_name(l: Locale, alias: &SenatorName, child: &Name) -> String {
     match l {
         Locale::Zh => format!("{alias}（{child}）"),
@@ -263,7 +263,7 @@ pub(crate) fn is_takeover(event: &Event) -> bool {
 /// `[speaker::claude] 接管`, `[senator::copilot] companion`); for
 /// the Speaker speaking for someone who is not a senator,
 /// `[speaker] [guest::chat/u_1]`; for an answer from a child Senate's
-/// desk that one of its seats gave, that seat (`commons-dev（wyak）`);
+/// desk that one of its seats gave, that seat (`billing-dev（bob-desk）`);
 /// otherwise the bare sender.
 fn author(l: Locale, names: SeatNames<'_>, event: &Event) -> String {
     if let Address::Child { senate, .. } = &event.from
@@ -532,8 +532,8 @@ pub(crate) fn binding_body(l: Locale, bind: bool, group: &str) -> String {
 /// One seat on the committee as people read it, in `/status` and the
 /// pinned card: the name people are shown, presence and duty, from the
 /// same seats the Speaker's prompt lists.
-/// `senate-dev（dark-conclave） 在线 · 职责：Senate 开发` /
-/// `senate-dev (dark-conclave) online · duty: Senate development`.
+/// `refund-dev（carol-desk） 在线 · 职责：退款开发` /
+/// `refund-dev (carol-desk) online · duty: refund development`.
 pub(crate) fn seat_line(l: Locale, seat: &crate::brain::CommitteeSeat) -> String {
     let presence = match seat.presence {
         _ if seat.online => l.pick("在线", "online").to_owned(),
@@ -692,8 +692,8 @@ fn duty_suffix(l: Locale, line: &mut String, duty: Option<&str>) {
 }
 
 /// The Agent group's line for a checkpoint:
-/// `[senator::claude] 检查点 · feature/x@a41f9c2（已推送）· seq 40` /
-/// `[senator::claude] checkpoint · feature/x@a41f9c2 (pushed) · seq 40`.
+/// `[senator::claude] 检查点 · senate/x@a41f9c2（已推送）· seq 40` /
+/// `[senator::claude] checkpoint · senate/x@a41f9c2 (pushed) · seq 40`.
 pub(crate) fn checkpoint_line(
     l: Locale,
     names: SeatNames<'_>,
@@ -1200,7 +1200,7 @@ pub(crate) fn excerpt(text: &str) -> String {
 ///
 /// A relay meant for one seat in a child Senate names the seat, not the
 /// desk it goes through: `已转给 [north-desk::refund-v2::senator::codex]（seq 120）`.
-/// A seat with an alias is shown by it (`已转给 senate-dev（dark-conclave）`,
+/// A seat with an alias is shown by it (`已转给 refund-dev（carol-desk）`,
 /// `已转给 [senator::reviewer]`), never by its primary id.
 pub(crate) fn relay_ack_for(
     l: Locale,
@@ -2137,37 +2137,37 @@ mod tests {
     }
 
     /// Thread 773: `/status` and the today card in a group bound to
-    /// `commons-demo` list both child seats online by alias with their
+    /// `payments` list both child seats online by alias with their
     /// duties, and nothing of the built-in session (the engine leaves it
     /// out of the seats).
     #[test]
     fn status_and_the_today_card_list_every_seat_by_the_name_people_see() {
         let seats = [
             seat(
-                "dark-conclave::claude-11a084c4",
-                Some("senate-dev（dark-conclave）"),
+                "carol-desk::claude-11a084c4",
+                Some("refund-dev（carol-desk）"),
                 true,
-                Some("Senate 开发"),
+                Some("退款开发"),
             ),
             seat(
-                "wyak::codex-01a1fc99",
-                Some("commons-dev（wyak）"),
+                "bob-desk::codex-01a1fc99",
+                Some("billing-dev（bob-desk）"),
                 true,
-                Some("commons 的开发"),
+                Some("账单的开发"),
             ),
-            seat("dark-conclave::archivist", None, false, None),
+            seat("carol-desk::archivist", None, false, None),
         ];
-        let c = CommitteeId::new("commons-demo").unwrap();
+        let c = CommitteeId::new("payments").unwrap();
         let text = status(Locale::Zh, &c, &seats, &[]);
         assert_eq!(
             text,
-            "本群绑定在委员会 commons-demo。\n\
-             在线 agent：senate-dev（dark-conclave）、commons-dev（wyak）\n\
-             离线 agent：[dark-conclave::archivist]\n\
+            "本群绑定在委员会 payments。\n\
+             在线 agent：refund-dev（carol-desk）、billing-dev（bob-desk）\n\
+             离线 agent：[carol-desk::archivist]\n\
              席位：\n\
-             - senate-dev（dark-conclave） 在线 · 职责：Senate 开发\n\
-             - commons-dev（wyak） 在线 · 职责：commons 的开发\n\
-             - [dark-conclave::archivist] 离线"
+             - refund-dev（carol-desk） 在线 · 职责：退款开发\n\
+             - billing-dev（bob-desk） 在线 · 职责：账单的开发\n\
+             - [carol-desk::archivist] 离线"
         );
         assert!(!text.contains("secretary"), "{text}");
         assert!(!text.contains("claude-11a084c4"), "no primary id: {text}");
@@ -2184,9 +2184,9 @@ mod tests {
         assert!(
             card.markdown.ends_with(
                 "**各 agent 在场**\n\
-                 - senate-dev（dark-conclave） 在线 · 职责：Senate 开发\n\
-                 - commons-dev（wyak） 在线 · 职责：commons 的开发\n\
-                 - [dark-conclave::archivist] 离线"
+                 - refund-dev（carol-desk） 在线 · 职责：退款开发\n\
+                 - billing-dev（bob-desk） 在线 · 职责：账单的开发\n\
+                 - [carol-desk::archivist] 离线"
             ),
             "{}",
             card.markdown
@@ -2194,7 +2194,7 @@ mod tests {
         let card = today_card(Locale::En, &today);
         assert!(
             card.markdown
-                .contains("- senate-dev（dark-conclave） online · duty: Senate 开发"),
+                .contains("- refund-dev（carol-desk） online · duty: 退款开发"),
             "{}",
             card.markdown
         );
@@ -2295,24 +2295,24 @@ mod tests {
 
     #[test]
     fn a_child_seat_is_shown_by_its_alias_and_child() {
-        let alias: SenatorName = "senate-dev".parse().unwrap();
-        let child = Name::new("dark-conclave").unwrap();
+        let alias: SenatorName = "refund-dev".parse().unwrap();
+        let child = Name::new("carol-desk").unwrap();
         assert_eq!(
             child_seat_name(Locale::Zh, &alias, &child),
-            "senate-dev（dark-conclave）"
+            "refund-dev（carol-desk）"
         );
         assert_eq!(
             child_seat_name(Locale::En, &alias, &child),
-            "senate-dev (dark-conclave)"
+            "refund-dev (carol-desk)"
         );
     }
 
-    /// An answer from the `wyak` child's desk on `commons-demo`, given by
+    /// An answer from the `bob-desk` child's desk on `payments`, given by
     /// `by` when set.
     fn child_answer(by: Option<&str>) -> Event {
         let mut e = event(
             Kind::Answer,
-            Address::child(name("wyak"), CommitteeId::new("commons-demo").unwrap()),
+            Address::child(name("bob-desk"), CommitteeId::new("payments").unwrap()),
             vec![sen("claude")],
             Some(Seq(117)),
         );
@@ -2324,10 +2324,10 @@ mod tests {
         e
     }
 
-    fn wyak(alias: Option<&str>) -> Vec<senate_core::ChildSenate> {
-        let mut child = senate_core::ChildSenate::new(name("wyak"), path("speaker-wyak"));
+    fn bob_desk(alias: Option<&str>) -> Vec<senate_core::ChildSenate> {
+        let mut child = senate_core::ChildSenate::new(name("bob-desk"), path("speaker-bob"));
         child.seats.push(senate_core::ChildSeat {
-            committee: CommitteeId::new("commons-demo").unwrap(),
+            committee: CommitteeId::new("payments").unwrap(),
             senator: path("codex-01a1fc99"),
             alias: alias.map(path),
             duty: None,
@@ -2338,43 +2338,43 @@ mod tests {
 
     #[test]
     fn a_child_seats_answer_is_credited_to_the_seat() {
-        let by = Some("/senate/wyak::commons-demo::senator::codex-01a1fc99");
+        let by = Some("/senate/bob-desk::payments::senator::codex-01a1fc99");
         let aliases = senate_core::alias::CommitteeAliases::default();
-        let children = wyak(Some("commons-dev"));
+        let children = bob_desk(Some("billing-dev"));
         let names = SeatNames {
             aliases: &aliases,
             children: &children,
         };
         assert_eq!(
             thread_mirror(Locale::Zh, names, &child_answer(by)),
-            "commons-dev（wyak） ok"
+            "billing-dev（bob-desk） ok"
         );
         assert_eq!(
             thread_mirror(Locale::En, names, &child_answer(by)),
-            "commons-dev (wyak) ok"
+            "billing-dev (bob-desk) ok"
         );
         assert_eq!(
             signature(Locale::En, names, &child_answer(by)),
-            "Answered by commons-dev (wyak) · from the refund-v2 Agent group"
+            "Answered by billing-dev (bob-desk) · from the refund-v2 Agent group"
         );
 
         // With no alias declared, its id with the child.
-        let children = wyak(None);
+        let children = bob_desk(None);
         let names = SeatNames {
             aliases: &aliases,
             children: &children,
         };
         assert_eq!(
             thread_mirror(Locale::Zh, names, &child_answer(by)),
-            "codex-01a1fc99（wyak） ok"
+            "codex-01a1fc99（bob-desk） ok"
         );
         assert_eq!(
             thread_mirror(Locale::En, no_names(), &child_answer(by)),
-            "codex-01a1fc99 (wyak) ok"
+            "codex-01a1fc99 (bob-desk) ok"
         );
 
         // A seat of another Senate is not this child's to credit.
-        let other = Some("/senate/elsewhere::commons-demo::senator::codex-01a1fc99");
+        let other = Some("/senate/elsewhere::payments::senator::codex-01a1fc99");
         assert_eq!(
             thread_mirror(Locale::En, names, &child_answer(other)),
             thread_mirror(Locale::En, names, &child_answer(None)),
@@ -2383,13 +2383,13 @@ mod tests {
 
     #[test]
     fn a_child_desks_own_answer_stays_the_desk() {
-        let children = wyak(Some("commons-dev"));
+        let children = bob_desk(Some("billing-dev"));
         let aliases = senate_core::alias::CommitteeAliases::default();
         let names = SeatNames {
             aliases: &aliases,
             children: &children,
         };
-        let desk = Address::child(name("wyak"), CommitteeId::new("commons-demo").unwrap());
+        let desk = Address::child(name("bob-desk"), CommitteeId::new("payments").unwrap());
         assert_eq!(
             thread_mirror(Locale::Zh, names, &child_answer(None)),
             format!("{} ok", desk.in_text())

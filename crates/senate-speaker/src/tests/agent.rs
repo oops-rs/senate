@@ -1151,24 +1151,24 @@ async fn in_english_a_plan_is_restated_run_after_yes_and_too_many_actions_are_re
 async fn an_unaddressed_question_reaches_a_child_seat_by_duty_in_agent_mode() {
     let hub = MemoryHub::new();
     hub.append(bind_event(&refund(), GROUP)).await.unwrap();
-    hub.add_child("dark-conclave", "pm");
+    hub.add_child("carol-desk", "pm");
     hub.declare_seats(
-        "dark-conclave",
+        "carol-desk",
         &refund(),
         &[("responder", PresenceState::Online)],
     );
-    hub.declare_duty("dark-conclave", &refund(), "responder", "部署和架构问题");
+    hub.declare_duty("carol-desk", &refund(), "responder", "部署和架构问题");
     let brain = ScriptedBrain::new();
     brain.converses(Ok(AgentTurn::act(
         "",
         vec![Intent::Relay {
-            targets: vec!["dark-conclave::responder".into()],
+            targets: vec!["carol-desk::responder".into()],
             kind: RelayKind::Question,
-            body: "Commons 是怎么部署的？".into(),
+            body: "退款服务是怎么部署的？".into(),
         }],
     )));
     let rig = start(hub, FakeSurface::new(), brain).await;
-    rig.append(mention("pm", "Commons 是怎么部署的？", "ask"))
+    rig.append(mention("pm", "退款服务是怎么部署的？", "ask"))
         .await;
     rig.settle().await;
 
@@ -1178,7 +1178,7 @@ async fn an_unaddressed_question_reaches_a_child_seat_by_duty_in_agent_mode() {
         seats,
         &vec![crate::CommitteeSeat {
             shown: None,
-            target: "dark-conclave::responder".into(),
+            target: "carol-desk::responder".into(),
             duty: Some("部署和架构问题".into()),
             online: true,
             presence: Some(senate_core::PresenceState::Online),
@@ -1190,12 +1190,12 @@ async fn an_unaddressed_question_reaches_a_child_seat_by_duty_in_agent_mode() {
     assert_eq!(
         relay.to,
         vec![Address::Child {
-            senate: name("dark-conclave"),
+            senate: name("carol-desk"),
             committee: refund(),
         }]
     );
     assert_eq!(
         senate_core::locator::intended(&relay).map(|s| s.to_string()),
-        Some("dark-conclave::refund-v2::senator::responder".to_owned())
+        Some("carol-desk::refund-v2::senator::responder".to_owned())
     );
 }

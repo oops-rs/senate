@@ -85,7 +85,7 @@ fn checkpoint_of(
     trigger: CheckpointTrigger,
 ) -> NewEvent {
     let payload = CheckpointPayload {
-        branch: format!("feature/refund-v2/{}", runner_of(who)),
+        branch: format!("senate/refund-v2/{}", runner_of(who)),
         commit: COMMIT.into(),
         pushed,
         remote_url: None,
@@ -267,11 +267,11 @@ async fn only_a_handoff_checkpoint_is_a_line_in_the_agent_group() {
         rig.surface.texts(),
         vec![
             format!(
-                "[senator::claude] 检查点 · feature/refund-v2/alice@a41f9c2（已推送）· seq {}",
+                "[senator::claude] 检查点 · senate/refund-v2/alice@a41f9c2（已推送）· seq {}",
                 pushed.seq
             ),
             format!(
-                "[senator::copilot] 检查点 · feature/refund-v2/bob@a41f9c2（未推送）· seq {}",
+                "[senator::copilot] 检查点 · senate/refund-v2/bob@a41f9c2（未推送）· seq {}",
                 local.seq
             ),
         ]
@@ -401,17 +401,17 @@ async fn the_today_card_has_a_presence_line_per_agent() {
 #[tokio::test(start_paused = true)]
 async fn the_today_card_lists_child_seats_with_their_latest_activity() {
     let hub = agents_hub().await;
-    hub.add_child("wyak", "pm");
+    hub.add_child("bob-desk", "pm");
     hub.declare_seats(
-        "wyak",
+        "bob-desk",
         &refund(),
         &[
             ("codex", PresenceState::Online),
             ("archivist", PresenceState::Absent),
         ],
     );
-    hub.declare_duty("wyak", &refund(), "codex", "commons 的开发");
-    hub.declare_alias("wyak", &refund(), "codex", "commons-dev");
+    hub.declare_duty("bob-desk", &refund(), "codex", "账单的开发");
+    hub.declare_alias("bob-desk", &refund(), "codex", "billing-dev");
     let surface = FakeSurface::with(Caps::ADOPTED);
     let rig = Rig::start_with(hub, surface.clone(), ScriptedBrain::new()).await;
     let relayed = rig
@@ -420,16 +420,16 @@ async fn the_today_card_lists_child_seats_with_their_latest_activity() {
                 refund(),
                 Kind::Question,
                 senate_core::Address::Speaker,
-                "Commons 怎么部署？",
+                "退款服务怎么部署？",
             )
             .to(senate_core::Address::Child {
-                senate: super::rig::name("wyak"),
+                senate: super::rig::name("bob-desk"),
                 committee: refund(),
             })
             .on_behalf_of(super::rig::user("pm"))
             .with_meta(
                 senate_core::meta::INTENDED,
-                json!("wyak::refund-v2::senator::codex"),
+                json!("bob-desk::refund-v2::senator::codex"),
             ),
         )
         .await;
@@ -450,8 +450,8 @@ async fn the_today_card_lists_child_seats_with_their_latest_activity() {
     assert_eq!(
         section,
         format!(
-            "- commons-dev（wyak） 在线 · 职责：commons 的开发 · seq {} · 提问：Commons 怎么部署？\n\
-             - [wyak::archivist] 缺席（租约过期）",
+            "- billing-dev（bob-desk） 在线 · 职责：账单的开发 · seq {} · 提问：退款服务怎么部署？\n\
+             - [bob-desk::archivist] 缺席（租约过期）",
             relayed.seq
         ),
         "{text}"

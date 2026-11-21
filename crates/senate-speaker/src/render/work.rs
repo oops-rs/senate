@@ -28,7 +28,7 @@ fn base(run: &WorkRun) -> String {
 }
 
 /// The restatement of a work order, asking for a yes:
-/// `我理解为：从 [senator::claude] 的检查点 feature/refund-v2/alice@a41f9c2 拉新分支 …，代表 [senator::bob]。…回复「对」确认`.
+/// `我理解为：从 [senator::claude] 的检查点 senate/refund-v2/alice@a41f9c2 拉新分支 …，代表 [senator::bob]。…回复「对」确认`.
 pub(crate) fn confirm_work(l: Locale, run: &WorkRun) -> String {
     super::confirm_action(l, &describe_work(l, run))
 }
@@ -575,9 +575,9 @@ mod tests {
             requester: name("bob"),
             target_agent: path("claude"),
             instruction: "把重试路径做完".into(),
-            branch: "feature/refund-v2/speaker-7".into(),
+            branch: "senate/refund-v2/speaker-7".into(),
             state,
-            base_branch: Some("feature/refund-v2/alice".into()),
+            base_branch: Some("senate/refund-v2/alice".into()),
             base_commit: Some("a41f9c2e0000".into()),
             repo_url: Some("git@github.com:o/r.git".into()),
             checkpoint_seq: Some(Seq(3)),
@@ -596,7 +596,7 @@ mod tests {
             agent: path("claude"),
             body: String::new(),
             checkpoint: CheckpointPayload {
-                branch: "feature/refund-v2/alice".into(),
+                branch: "senate/refund-v2/alice".into(),
                 commit: "a41f9c2e0000".into(),
                 pushed,
                 remote_url: Some("git@github.com:o/r.git".into()),
@@ -615,8 +615,8 @@ mod tests {
     fn the_restatement_names_branch_commit_instruction_and_whom() {
         let text = confirm_work(Locale::Zh, &run(WorkState::Queued));
         for part in [
-            "[senator::claude] 的检查点 feature/refund-v2/alice@a41f9c2",
-            "feature/refund-v2/speaker-7",
+            "[senator::claude] 的检查点 senate/refund-v2/alice@a41f9c2",
+            "senate/refund-v2/speaker-7",
             "做：把重试路径做完",
             "代表 [senator::bob]",
             "回复「对」确认",
@@ -627,11 +627,11 @@ mod tests {
         r.instruction = "finish the retry path".into();
         assert_eq!(
             confirm_work(Locale::En, &r),
-            "I understand: Branch feature/refund-v2/speaker-7 off [senator::claude]'s checkpoint feature/refund-v2/alice@a41f9c2 and do: finish the retry path; then push and open a PR, on behalf of [senator::bob]. [senator::claude]'s own branch is not touched. Reply \"yes\" to confirm."
+            "I understand: Branch senate/refund-v2/speaker-7 off [senator::claude]'s checkpoint senate/refund-v2/alice@a41f9c2 and do: finish the retry path; then push and open a PR, on behalf of [senator::bob]. [senator::claude]'s own branch is not touched. Reply \"yes\" to confirm."
         );
         assert_eq!(
             work_root(Locale::En, &r),
-            "Coding task: finish the retry path\nFor [senator::bob], from [senator::claude]'s checkpoint feature/refund-v2/alice@a41f9c2, branch feature/refund-v2/speaker-7"
+            "Coding task: finish the retry path\nFor [senator::bob], from [senator::claude]'s checkpoint senate/refund-v2/alice@a41f9c2, branch senate/refund-v2/speaker-7"
         );
     }
 
@@ -643,7 +643,7 @@ mod tests {
         r.next_steps = vec!["重试".into(), "换个做法".into(), "交给一个人".into()];
         let text = work_result(Locale::Zh, &r, None);
         assert!(text.contains("时间上限"), "{text}");
-        assert!(text.contains("分支：feature/refund-v2/speaker-7（fffeee1，已推送）"));
+        assert!(text.contains("分支：senate/refund-v2/speaker-7（fffeee1，已推送）"));
         assert!(
             text.contains("1. 重试\n2. 换个做法\n3. 交给一个人"),
             "{text}"
@@ -652,7 +652,7 @@ mod tests {
         r.next_steps = vec!["retry".into(), "try another way".into()];
         assert_eq!(
             work_result(Locale::En, &r, None),
-            "Coding task hit its time limit and stopped: finish the retry path\nStopped at the time limit.\nBranch: feature/refund-v2/speaker-7 (fffeee1, pushed)\nNext, you can:\n1. retry\n2. try another way"
+            "Coding task hit its time limit and stopped: finish the retry path\nStopped at the time limit.\nBranch: senate/refund-v2/speaker-7 (fffeee1, pushed)\nNext, you can:\n1. retry\n2. try another way"
         );
         let mut ok = run(WorkState::Succeeded);
         ok.pr_url = Some("https://github.com/o/r/pull/1".into());
@@ -740,7 +740,7 @@ mod tests {
         );
         assert!(
             note.contains(
-                "git fetch origin && git switch -c feature/refund-v2/bob origin/feature/refund-v2/alice"
+                "git fetch origin && git switch -c senate/refund-v2/bob origin/senate/refund-v2/alice"
             ),
             "{note}"
         );

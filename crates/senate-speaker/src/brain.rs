@@ -71,7 +71,7 @@ pub struct CommitteeSeat {
     /// `<child>::<senator>` for a child's seat.
     pub target: String,
     /// How people are shown it, when it has an alias: the alias for an
-    /// agent here, `senate-dev（dark-conclave）` for a child's seat. Display
+    /// agent here, `refund-dev（carol-desk）` for a child's seat. Display
     /// only; a relay names `target`.
     pub shown: Option<String>,
     /// What it does on the committee ([`senate_core::duty`]), when set.
@@ -87,7 +87,7 @@ pub struct CommitteeSeat {
 
 impl CommitteeSeat {
     /// The seat as people are shown it: its alias when it has one, else
-    /// its id as a mention (`[senator::codex]`, `[dark-conclave::claude-…]`).
+    /// its id as a mention (`[senator::codex]`, `[carol-desk::claude-…]`).
     pub fn people_name(&self) -> String {
         match &self.shown {
             Some(shown) => shown.clone(),

@@ -99,15 +99,15 @@ mod tests {
         );
         // Long parts are hashed down to the limit, still deterministic.
         let epoch = "01JBZ6V3K8X5Q2W9R7T4Y1M0N6";
-        let alias = format!("oc_{}", "f".repeat(60));
+        let alias = format!("g-{}", "f".repeat(60));
         let long = operation_id(epoch, &committee, Seq(118), &alias);
         assert!(long.len() <= OPERATION_ID_MAX, "{long}");
         assert!(long.starts_with("senate:"));
         assert_eq!(long, operation_id(epoch, &committee, Seq(118), &alias));
         assert_ne!(long, operation_id(epoch, &committee, Seq(119), &alias));
         assert_ne!(
-            unbound_operation_id("backend", "om_1"),
-            unbound_operation_id("backend", "om_2")
+            unbound_operation_id("backend", "m-1"),
+            unbound_operation_id("backend", "m-2")
         );
     }
 }

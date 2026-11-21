@@ -65,8 +65,8 @@ macro_rules! target_rule {
 macro_rules! duty_rule {
     () => {
         "- Duties: a question or a change request that names no person, agent or seat to take \
-         it (e.g. \"@Speaker how is Commons deployed?\", 「@Speaker Commons 是怎么部署的？」, \
-         「@Speaker 请在 commons 仓库的 deploy/vm/README.md 末尾加一节，开分支、本地提交」) may \
+         it (e.g. \"@Speaker how is the refund service deployed?\", 「@Speaker 退款服务是怎么部署的？」, \
+         「@Speaker 请在 refund 仓库的 deploy/README.md 末尾加一节，开分支、本地提交」) may \
          belong to a seat on this committee by what it does there. Read the duty of every seat \
          listed under the seats on this committee (here and in child Senates). When its subject \
          falls within exactly one seat's duty, relay it to that seat: action relay, kind \
@@ -1584,11 +1584,11 @@ mod tests {
         assert!(parse(&work, true).is_ok());
         assert_eq!(
             parse(
-                &json!({"action": "relay", "targets": ["wyak::codex"], "kind": "request", "body": "在 README 末尾加一节"}),
+                &json!({"action": "relay", "targets": ["bob-desk::codex"], "kind": "request", "body": "在 README 末尾加一节"}),
                 false
             ),
             Ok(Intent::Relay {
-                targets: vec!["wyak::codex".into()],
+                targets: vec!["bob-desk::codex".into()],
                 kind: RelayKind::Request,
                 body: "在 README 末尾加一节".into(),
             })
@@ -1599,7 +1599,7 @@ mod tests {
     /// as a request.
     #[test]
     fn change_requests_are_routed_by_duty_too() {
-        let committee = CommitteeId::new("commons-demo").expect("committee");
+        let committee = CommitteeId::new("payments").expect("committee");
         let text = persona(Some(&committee), "Speaker", Locale::Zh);
         for rule in [
             "a question or a change request that names no person",

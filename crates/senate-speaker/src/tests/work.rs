@@ -47,7 +47,7 @@ fn checkpoint(handle: &str, pushed: bool, remote: Option<&str>) -> NewEvent {
 /// A hand-off checkpoint of the agent `who` on its person's branch.
 fn checkpoint_at(who: &SenatorName, commit: &str, pushed: bool, remote: Option<&str>) -> NewEvent {
     let payload = CheckpointPayload {
-        branch: format!("feature/refund-v2/{}", runner_of(who)),
+        branch: format!("senate/refund-v2/{}", runner_of(who)),
         commit: commit.into(),
         pushed,
         remote_url: remote.map(str::to_owned),
@@ -256,9 +256,9 @@ async fn a_confirmed_run_opens_a_pr_on_behalf_of_the_asker_and_puts_it_on_the_ca
     let forge = FakeForge::new();
     let rig = start(work_hub().await, Some(&runner), Some(&forge)).await;
     let (chat, restated) = ask(&rig, "bob", "/work alice 把重试路径做完", "m_w1").await;
-    let branch = format!("feature/refund-v2/speaker-{}", chat.seq);
+    let branch = format!("senate/refund-v2/speaker-{}", chat.seq);
     for part in [
-        "[senator::claude] 的检查点 feature/refund-v2/alice@a41f9c2",
+        "[senator::claude] 的检查点 senate/refund-v2/alice@a41f9c2",
         branch.as_str(),
         "做：把重试路径做完",
         "代表 [senator::bob]",
@@ -278,7 +278,7 @@ async fn a_confirmed_run_opens_a_pr_on_behalf_of_the_asker_and_puts_it_on_the_ca
     assert_eq!(calls.len(), 1);
     let order = &calls[0];
     assert_eq!(order.branch(), branch);
-    assert_eq!(order.base_branch, "feature/refund-v2/alice");
+    assert_eq!(order.base_branch, "senate/refund-v2/alice");
     assert_eq!(order.base_commit, COMMIT);
     assert_eq!(order.repo.slug, REPO);
     assert_eq!(order.requester, name("bob"));
@@ -480,7 +480,7 @@ async fn an_agent_named_outright_is_worked_from_its_own_checkpoint() {
     .await;
     let (chat, restated) = ask(&rig, "bob", "/work codex 把重试路径做完", "m_w1").await;
     assert!(
-        restated.contains("从 [senator::codex] 的检查点 feature/refund-v2/alice@c0dec0d"),
+        restated.contains("从 [senator::codex] 的检查点 senate/refund-v2/alice@c0dec0d"),
         "{restated}"
     );
     assert!(rig.brain.pick_inputs().is_empty(), "named: nothing to pick");
@@ -561,7 +561,7 @@ async fn when_the_speaker_cannot_tell_it_asks_and_the_answer_carries_the_order_o
     let restated = choose(&rig, "bob", "2", &chat, "m_w2").await;
     assert!(
         restated
-            .starts_with("我理解为：从 [senator::codex] 的检查点 feature/refund-v2/alice@c0dec0d"),
+            .starts_with("我理解为：从 [senator::codex] 的检查点 senate/refund-v2/alice@c0dec0d"),
         "{restated}"
     );
     assert!(restated.contains("代表 [senator::bob]"), "{restated}");
@@ -790,11 +790,11 @@ async fn in_english_the_restatement_and_the_result_read_in_english() {
     )
     .await;
     let (chat, restated) = ask(&rig, "bob", "/work alice finish the retry path", "m_w1").await;
-    let branch = format!("feature/refund-v2/speaker-{}", chat.seq);
+    let branch = format!("senate/refund-v2/speaker-{}", chat.seq);
     assert_eq!(
         restated,
         format!(
-            "I understand: Branch {branch} off [senator::claude]'s checkpoint feature/refund-v2/alice@a41f9c2 and do: finish the retry path; then push and open a PR, on behalf of [senator::bob]. [senator::claude]'s own branch is not touched. Reply \"yes\" to confirm."
+            "I understand: Branch {branch} off [senator::claude]'s checkpoint senate/refund-v2/alice@a41f9c2 and do: finish the retry path; then push and open a PR, on behalf of [senator::bob]. [senator::claude]'s own branch is not touched. Reply \"yes\" to confirm."
         )
     );
     // The yes is accepted in either language.
@@ -873,9 +873,9 @@ async fn a_reassignment_is_confirmed_pushes_the_checkpoint_and_routes_answers() 
     let note = &notes[0].body;
     for part in [
         "[senator::claude] 的工作交给你了",
-        "feature/refund-v2/alice",
+        "senate/refund-v2/alice",
         COMMIT,
-        "git fetch origin && git switch -c feature/refund-v2/bob origin/feature/refund-v2/alice",
+        "git fetch origin && git switch -c senate/refund-v2/bob origin/senate/refund-v2/alice",
         "--- PROGRESS.md ---",
         "重试上限是几次",
     ] {

@@ -2141,7 +2141,7 @@ async fn a_child_senate_not_known_to_be_offline_gets_no_line() {
 
 // ----- an unaddressed question, relayed by duty --------------------------------------
 
-const DEPLOY_DUTY: &str = "负责回答 Commons / Senate 的部署、架构和使用问题";
+const DEPLOY_DUTY: &str = "负责回答 退款服务的部署、架构和使用问题";
 
 /// The seats an utterance was interpreted with, as `(target, duty, online)`.
 fn seats_seen(rig: &Rig) -> Vec<(String, Option<String>, bool)> {
@@ -2155,7 +2155,7 @@ fn seats_seen(rig: &Rig) -> Vec<(String, Option<String>, bool)> {
 }
 
 /// A hub with codex (alice's second agent) connected on the committee with
-/// a duty, and carol's child Senate `dark-conclave` declaring `seats` there.
+/// a duty, and carol's child Senate `carol-desk` declaring `seats` there.
 async fn duty_hub(seats: &[(&str, PresenceState, Option<&str>)]) -> std::sync::Arc<MemoryHub> {
     let hub = bound_hub().await;
     hub.set_roster(roster_with_carol());
@@ -2170,25 +2170,21 @@ async fn duty_hub(seats: &[(&str, PresenceState, Option<&str>)]) -> std::sync::A
     )
     .await
     .expect("duty");
-    hub.add_child("dark-conclave", "carol");
+    hub.add_child("carol-desk", "carol");
     let declared: Vec<(&str, PresenceState)> = seats.iter().map(|(s, p, _)| (*s, *p)).collect();
-    hub.declare_seats("dark-conclave", &refund(), &declared);
+    hub.declare_seats("carol-desk", &refund(), &declared);
     for (seat, _, duty) in seats {
         if let Some(duty) = duty {
-            hub.declare_duty("dark-conclave", &refund(), seat, duty);
+            hub.declare_duty("carol-desk", &refund(), seat, duty);
         }
     }
     // A seat on another committee is not one of this committee's.
     let other = senate_core::CommitteeId::new("billing").expect("committee");
-    hub.declare_seats(
-        "dark-conclave",
-        &other,
-        &[("auditor", PresenceState::Online)],
-    );
+    hub.declare_seats("carol-desk", &other, &[("auditor", PresenceState::Online)]);
     hub
 }
 
-/// Thread 749: "@Speaker Commons 是怎么部署的？", addressed to nobody. The
+/// Thread 749: "@Speaker 退款服务是怎么部署的？", addressed to nobody. The
 /// model sees every seat on the committee with its duty, here and in the
 /// child Senate, and its relay to the one whose duty fits, written as the
 /// seats list it, reaches the child's desk naming that seat.
@@ -2201,11 +2197,11 @@ async fn an_unaddressed_question_reaches_the_child_seat_whose_duty_fits() {
     .await;
     let rig = Rig::start(hub).await;
     rig.brain.interprets(Ok(Intent::Relay {
-        targets: vec!["dark-conclave::responder".into()],
+        targets: vec!["carol-desk::responder".into()],
         kind: RelayKind::Question,
-        body: "Commons 是怎么部署的？".into(),
+        body: "退款服务是怎么部署的？".into(),
     }));
-    rig.append(mention("pm", "Commons 是怎么部署的？", "m_d1"))
+    rig.append(mention("pm", "退款服务是怎么部署的？", "m_d1"))
         .await;
     rig.settle().await;
 
@@ -2218,26 +2214,22 @@ async fn an_unaddressed_question_reaches_the_child_seat_whose_duty_fits() {
                 true
             ),
             (
-                "dark-conclave::responder".to_owned(),
+                "carol-desk::responder".to_owned(),
                 Some(DEPLOY_DUTY.to_owned()),
                 true
             ),
-            ("dark-conclave::archivist".to_owned(), None, false),
+            ("carol-desk::archivist".to_owned(), None, false),
         ],
         "every seat on the committee, as a relay names it, with duty and presence"
     );
     let relay = last_relay(&rig);
     assert_eq!(relay.kind, Kind::Question);
-    assert_eq!(
-        relay.to,
-        vec![desk_of("dark-conclave")],
-        "by way of the desk"
-    );
+    assert_eq!(relay.to, vec![desk_of("carol-desk")], "by way of the desk");
     assert_eq!(
         intended(&relay).as_deref(),
-        Some("dark-conclave::refund-v2::senator::responder")
+        Some("carol-desk::refund-v2::senator::responder")
     );
-    assert_eq!(relay.body, "Commons 是怎么部署的？");
+    assert_eq!(relay.body, "退款服务是怎么部署的？");
     assert!(
         rig.brain.pick_inputs().is_empty(),
         "named outright: no pick"
@@ -2251,9 +2243,9 @@ async fn an_unaddressed_question_reaches_the_child_seat_whose_duty_fits() {
 async fn an_unaddressed_change_request_reaches_the_duty_seat_as_a_request() {
     let hub = duty_hub(&[("responder", PresenceState::Online, Some(DEPLOY_DUTY))]).await;
     let rig = Rig::start(hub).await;
-    let asked = "请在 commons 仓库的 deploy/vm/README.md 末尾加一节，开分支、本地提交";
+    let asked = "请在 refund 仓库的 deploy/README.md 末尾加一节，开分支、本地提交";
     rig.brain.interprets(Ok(Intent::Relay {
-        targets: vec!["dark-conclave::responder".into()],
+        targets: vec!["carol-desk::responder".into()],
         kind: RelayKind::Request,
         body: asked.into(),
     }));
@@ -2270,10 +2262,10 @@ async fn an_unaddressed_change_request_reaches_the_duty_seat_as_a_request() {
         .into_iter()
         .find(|e| e.from == Address::Speaker && e.kind == Kind::Request)
         .expect("a request relayed");
-    assert_eq!(relay.to, vec![desk_of("dark-conclave")]);
+    assert_eq!(relay.to, vec![desk_of("carol-desk")]);
     assert_eq!(
         intended(&relay).as_deref(),
-        Some("dark-conclave::refund-v2::senator::responder")
+        Some("carol-desk::refund-v2::senator::responder")
     );
     assert_eq!(relay.body, asked);
     assert_eq!(relay.on_behalf_of, Some(user("pm")));
@@ -2314,7 +2306,7 @@ async fn several_seats_whose_duty_fits_are_not_routed() {
     ])
     .await;
     hub.child_seen(
-        "dark-conclave",
+        "carol-desk",
         Some(chrono::Utc::now() - chrono::Duration::hours(1)),
     );
     let rig = Rig::start(hub).await;
@@ -2322,17 +2314,17 @@ async fn several_seats_whose_duty_fits_are_not_routed() {
         reply: "这件事 responder 和 operator 都负责，请直接问其中一位。".into(),
     }));
     let before = rig.hub.events(&refund()).len();
-    rig.append(mention("pm", "Commons 是怎么部署的？", "m_d3"))
+    rig.append(mention("pm", "退款服务是怎么部署的？", "m_d3"))
         .await;
     rig.settle().await;
     let seen = seats_seen(&rig);
     assert!(
         seen.contains(&(
-            "dark-conclave::responder".to_owned(),
+            "carol-desk::responder".to_owned(),
             Some(DEPLOY_DUTY.to_owned()),
             false
         )) && seen.contains(&(
-            "dark-conclave::operator".to_owned(),
+            "carol-desk::operator".to_owned(),
             Some(DEPLOY_DUTY.to_owned()),
             false
         )),
@@ -2363,15 +2355,15 @@ async fn seats_are_shown_to_people_by_alias() {
         ("archivist", PresenceState::Absent, None),
     ])
     .await;
-    hub.declare_alias("dark-conclave", &refund(), "responder", "senate-dev");
+    hub.declare_alias("carol-desk", &refund(), "responder", "refund-dev");
     hub.set_alias(&refund(), "retry-desk", "codex");
     let rig = Rig::start(hub).await;
     rig.brain.interprets(Ok(Intent::Relay {
-        targets: vec!["dark-conclave::responder".into()],
+        targets: vec!["carol-desk::responder".into()],
         kind: RelayKind::Question,
-        body: "Commons 是怎么部署的？".into(),
+        body: "退款服务是怎么部署的？".into(),
     }));
-    rig.append(mention("pm", "Commons 是怎么部署的？", "m_a1"))
+    rig.append(mention("pm", "退款服务是怎么部署的？", "m_a1"))
         .await;
     rig.settle().await;
 
@@ -2388,21 +2380,21 @@ async fn seats_are_shown_to_people_by_alias() {
         [
             ("codex".to_owned(), Some("retry-desk".to_owned())),
             (
-                "dark-conclave::responder".to_owned(),
-                Some("senate-dev（dark-conclave）".to_owned())
+                "carol-desk::responder".to_owned(),
+                Some("refund-dev（carol-desk）".to_owned())
             ),
-            ("dark-conclave::archivist".to_owned(), None),
+            ("carol-desk::archivist".to_owned(), None),
         ]
     );
     let relay = last_relay(&rig);
     assert_eq!(
         intended(&relay).as_deref(),
-        Some("dark-conclave::refund-v2::senator::responder"),
+        Some("carol-desk::refund-v2::senator::responder"),
         "the relay still names the seat's id"
     );
     assert_eq!(
         rig.surface.texts().last().map(String::as_str),
-        Some(format!("已转给 senate-dev（dark-conclave）（seq {}）", relay.seq).as_str())
+        Some(format!("已转给 refund-dev（carol-desk）（seq {}）", relay.seq).as_str())
     );
 
     rig.brain.interprets(Ok(Intent::Relay {
@@ -2442,13 +2434,8 @@ async fn status_lists_the_child_seats_and_never_the_built_in_session() {
     .await
     .expect("presence");
     for (child, seat, alias, duty) in [
-        (
-            "dark-conclave",
-            "claude-11a084c4",
-            "senate-dev",
-            "Senate 开发",
-        ),
-        ("wyak", "codex-01a1fc99", "commons-dev", "commons 的开发"),
+        ("carol-desk", "claude-11a084c4", "refund-dev", "退款开发"),
+        ("bob-desk", "codex-01a1fc99", "billing-dev", "账单的开发"),
     ] {
         hub.add_child(child, "carol");
         hub.declare_seats(child, &refund(), &[(seat, PresenceState::Online)]);
@@ -2462,11 +2449,11 @@ async fn status_lists_the_child_seats_and_never_the_built_in_session() {
         rig.surface.texts().last().map(String::as_str),
         Some(
             "本群绑定在委员会 refund-v2。\n\
-             在线 agent：senate-dev（dark-conclave）、commons-dev（wyak）\n\
+             在线 agent：refund-dev（carol-desk）、billing-dev（bob-desk）\n\
              离线 agent：无\n\
              席位：\n\
-             - senate-dev（dark-conclave） 在线 · 职责：Senate 开发\n\
-             - commons-dev（wyak） 在线 · 职责：commons 的开发"
+             - refund-dev（carol-desk） 在线 · 职责：退款开发\n\
+             - billing-dev（bob-desk） 在线 · 职责：账单的开发"
         )
     );
 }
