@@ -1924,9 +1924,9 @@ impl Engine {
             }
             // A proposal's root is what a confirming reply maps back to.
             let text = if is_proposal(event, &self.roster.people()) {
-                render::proposal_root(l, event)
+                render::proposal_root(l, self.seat_names(), event)
             } else {
-                render::root_mirror(l, event)
+                render::root_mirror(l, self.seat_names(), event)
             };
             return Ok(vec![MirrorPlan {
                 to: PostTarget::NewRoot {
@@ -1952,7 +1952,7 @@ impl Engine {
             to: PostTarget::NewRoot {
                 group_id: group.to_owned(),
             },
-            text: render::root_mirror(l, event),
+            text: render::root_mirror(l, self.seat_names(), event),
             target: group.to_owned(),
             record_as: None,
             card: Some(render::task_card(l, thread, verdict, None)),
@@ -2004,13 +2004,15 @@ impl Engine {
                         continue;
                     }
                     match &covering {
-                        Some(old) => render::thread_mirror_covering(l, event, old),
-                        None => render::thread_mirror(l, event),
+                        Some(old) => {
+                            render::thread_mirror_covering(l, self.seat_names(), event, old)
+                        }
+                        None => render::thread_mirror(l, self.seat_names(), event),
                     }
                 } else if event.kind == Kind::Answer || senate_core::brief::is_seat_removed(event) {
                     match &covering {
-                        Some(old) => render::signed_covering(l, event, old),
-                        None => render::signed(l, event),
+                        Some(old) => render::signed_covering(l, self.seat_names(), event, old),
+                        None => render::signed(l, self.seat_names(), event),
                     }
                 } else {
                     continue;
@@ -2037,8 +2039,8 @@ impl Engine {
                     in_thread: true,
                 },
                 text: match &covering {
-                    Some(old) => render::thread_mirror_covering(l, event, old),
-                    None => render::thread_mirror(l, event),
+                    Some(old) => render::thread_mirror_covering(l, self.seat_names(), event, old),
+                    None => render::thread_mirror(l, self.seat_names(), event),
                 },
                 target: group,
                 record_as: None,

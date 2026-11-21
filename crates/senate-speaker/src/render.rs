@@ -92,6 +92,23 @@ impl SeatNames<'_> {
             .find(|s| s.committee == *committee && s.senator == *senator)?;
         Some(child_seat_name(l, declared.alias.as_ref()?, child))
     }
+
+    /// A seat in a child Senate as people are shown it: [`Self::child`],
+    /// else its id with the child's name.
+    pub(crate) fn child_or_id(&self, l: Locale, seat: &senate_core::Locator) -> Option<String> {
+        self.child(l, seat).or_else(|| {
+            let child = seat.senate()?.name();
+            Some(child_seat_name(l, seat.address().as_senator()?, child))
+        })
+    }
+
+    /// The seat of `child` that gave an answer coming up from that
+    /// child's desk ([`meta::ANSWERED_BY`]), as people are shown it.
+    fn answered_by(&self, l: Locale, child: &Name, event: &Event) -> Option<String> {
+        let by = event.meta.get(senate_core::meta::ANSWERED_BY)?.as_str()?;
+        let seat = by.parse::<senate_core::Locator>().ok()?;
+        (seat.senate()?.name() == child).then(|| self.child_or_id(l, &seat))?
+    }
 }
 
 /// A senator (person or agent) as a mention: `[senator::claude]`.
@@ -147,9 +164,9 @@ fn relay_ack_to(l: Locale, whom: &str, seq: Seq) -> String {
 
 /// A new root in the mirror group:
 /// `[senator::claude] → [senator::copilot] <body>（seq 118）`.
-pub(crate) fn root_mirror(l: Locale, event: &Event) -> String {
+pub(crate) fn root_mirror(l: Locale, names: SeatNames<'_>, event: &Event) -> String {
     let seq = seq_note(l, event.seq);
-    let label = label(l, event);
+    let label = label(l, names, event);
     let body = body(l, event);
     match quoted_for(event, &body) {
         None => format!("{label} {body}{seq}"),
@@ -159,8 +176,8 @@ pub(crate) fn root_mirror(l: Locale, event: &Event) -> String {
 
 /// A reply in a mirrored thread: `[senator::copilot] <body>`, or
 /// `[speaker::copilot] <body>` when the Speaker answered for it.
-pub(crate) fn thread_mirror(l: Locale, event: &Event) -> String {
-    let label = label(l, event);
+pub(crate) fn thread_mirror(l: Locale, names: SeatNames<'_>, event: &Event) -> String {
+    let label = label(l, names, event);
     let body = body(l, event);
     match quoted_for(event, &body) {
         None => format!("{label} {body}"),
@@ -171,8 +188,8 @@ pub(crate) fn thread_mirror(l: Locale, event: &Event) -> String {
 /// An agent's proposed decision, as a new root in the mirror group:
 /// `[senator::claude] 提议记为决策：<body>（seq 130）回复「对」确认` /
 /// `[senator::claude] proposes a decision: <body> (seq 130). Reply "yes" to confirm.`
-pub(crate) fn proposal_root(l: Locale, event: &Event) -> String {
-    let author = author(l, event);
+pub(crate) fn proposal_root(l: Locale, names: SeatNames<'_>, event: &Event) -> String {
+    let author = author(l, names, event);
     let seq = event.seq;
     let body = body(l, event);
     match (l, quoted_for(event, &body)) {
@@ -245,8 +262,15 @@ pub(crate) fn is_takeover(event: &Event) -> bool {
 /// Who wrote `event`: its byline (`[senator::copilot]`,
 /// `[speaker::claude] 接管`, `[senator::copilot] companion`); for
 /// the Speaker speaking for someone who is not a senator,
-/// `[speaker] [guest::chat/u_1]`; otherwise the bare sender.
-fn author(l: Locale, event: &Event) -> String {
+/// `[speaker] [guest::chat/u_1]`; for an answer from a child Senate's
+/// desk that one of its seats gave, that seat (`commons-dev（wyak）`);
+/// otherwise the bare sender.
+fn author(l: Locale, names: SeatNames<'_>, event: &Event) -> String {
+    if let Address::Child { senate, .. } = &event.from
+        && let Some(seat) = names.answered_by(l, senate, event)
+    {
+        return seat;
+    }
     if let Some(byline) = event.byline(l) {
         return byline;
     }
@@ -260,8 +284,8 @@ fn author(l: Locale, event: &Event) -> String {
 
 /// The author, with an arrow to the recipients on a directed root:
 /// `[senator::claude] → [senator::copilot]`.
-fn label(l: Locale, event: &Event) -> String {
-    let author = author(l, event);
+fn label(l: Locale, names: SeatNames<'_>, event: &Event) -> String {
+    let author = author(l, names, event);
     let directed = matches!(event.kind, Kind::Question | Kind::Request) || event.thread.is_none();
     if directed && !event.to.is_empty() {
         let to: Vec<String> = event.to.iter().map(Address::in_text).collect();
@@ -670,8 +694,13 @@ fn duty_suffix(l: Locale, line: &mut String, duty: Option<&str>) {
 /// The Agent group's line for a checkpoint:
 /// `[senator::claude] 检查点 · feature/x@a41f9c2（已推送）· seq 40` /
 /// `[senator::claude] checkpoint · feature/x@a41f9c2 (pushed) · seq 40`.
-pub(crate) fn checkpoint_line(l: Locale, event: &Event, payload: &CheckpointPayload) -> String {
-    let author = author(l, event);
+pub(crate) fn checkpoint_line(
+    l: Locale,
+    names: SeatNames<'_>,
+    event: &Event,
+    payload: &CheckpointPayload,
+) -> String {
+    let author = author(l, names, event);
     match l {
         Locale::Zh => format!(
             "{author} 检查点 · {}（{}）· seq {}",
@@ -1555,13 +1584,17 @@ fn signature_of(l: Locale, who: &str, committee: &CommitteeId) -> String {
 
 /// The last line of an answer mirrored back to a people group:
 /// `由 [senator::claude] 回答 · 来自 refund-v2 的 Agent 群`.
-pub(crate) fn signature(l: Locale, event: &Event) -> String {
-    signature_of(l, &author(l, event), &event.committee)
+pub(crate) fn signature(l: Locale, names: SeatNames<'_>, event: &Event) -> String {
+    signature_of(l, &author(l, names, event), &event.committee)
 }
 
 /// An answer for a people group: the usual reply, then the signature.
-pub(crate) fn signed(l: Locale, event: &Event) -> String {
-    format!("{}\n\n{}", thread_mirror(l, event), signature(l, event))
+pub(crate) fn signed(l: Locale, names: SeatNames<'_>, event: &Event) -> String {
+    format!(
+        "{}\n\n{}",
+        thread_mirror(l, names, event),
+        signature(l, names, event)
+    )
 }
 
 fn state_label(l: Locale, state: StatusState) -> &'static str {
@@ -1671,8 +1704,17 @@ pub(crate) fn task_card(
 
 /// A status as a thread reply (output level "everything"):
 /// `[senator::claude] 处理中 · ✓ 已读日志 · ☐ 起草回答`.
-pub(crate) fn status_reply(l: Locale, event: &Event, status: &StatusPayload) -> String {
-    let mut line = format!("{} {}", author(l, event), state_label(l, status.state));
+pub(crate) fn status_reply(
+    l: Locale,
+    names: SeatNames<'_>,
+    event: &Event,
+    status: &StatusPayload,
+) -> String {
+    let mut line = format!(
+        "{} {}",
+        author(l, names, event),
+        state_label(l, status.state)
+    );
     if let Some(title) = &status.title {
         let _ = write!(line, " · {}", one_line(title));
     }
@@ -1985,7 +2027,7 @@ mod tests {
     }
 
     /// No aliases known: every seat is shown by its id.
-    fn no_names() -> SeatNames<'static> {
+    pub(crate) fn no_names() -> SeatNames<'static> {
         static NONE: std::sync::LazyLock<senate_core::alias::CommitteeAliases> =
             std::sync::LazyLock::new(Default::default);
         SeatNames {
@@ -2055,7 +2097,7 @@ mod tests {
         let l = Locale::Zh;
         let question = event(Kind::Question, sen("claude"), vec![sen("copilot")], None);
         assert_eq!(
-            root_mirror(l, &question),
+            root_mirror(l, no_names(), &question),
             "[senator::claude] → [senator::copilot] 网关的幂等键用哪个 header？（seq 118）"
         );
         let mut answer = event(
@@ -2066,13 +2108,13 @@ mod tests {
         );
         answer.body = "Idempotency-Key".into();
         assert_eq!(
-            thread_mirror(l, &answer),
+            thread_mirror(l, no_names(), &answer),
             "[senator::copilot] Idempotency-Key"
         );
         answer.from = Address::Speaker;
         answer.on_behalf_of = Some(sen("copilot"));
         assert_eq!(
-            thread_mirror(l, &answer),
+            thread_mirror(l, no_names(), &answer),
             "[speaker::copilot] Idempotency-Key"
         );
         assert_eq!(
@@ -2092,7 +2134,7 @@ mod tests {
         );
         question.body = "Which header carries the idempotency key?".into();
         assert_eq!(
-            root_mirror(l, &question),
+            root_mirror(l, no_names(), &question),
             "[senator::claude] → [senator::copilot], [senator::codex] Which header carries the idempotency key? (seq 118)"
         );
         let mut answer = event(
@@ -2104,7 +2146,7 @@ mod tests {
         answer.on_behalf_of = Some(sen("copilot"));
         answer.body = "Idempotency-Key".into();
         assert_eq!(
-            thread_mirror(l, &answer),
+            thread_mirror(l, no_names(), &answer),
             "[speaker::copilot] Idempotency-Key"
         );
         assert_eq!(
@@ -2122,7 +2164,7 @@ mod tests {
         relayed.on_behalf_of = Some(guest);
         relayed.body = "When does the refund land?".into();
         assert_eq!(
-            root_mirror(Locale::En, &relayed),
+            root_mirror(Locale::En, no_names(), &relayed),
             "[speaker] [guest::chat/u_8f3a] → [senator::claude] When does the refund land? (seq 118)"
         );
         let mut other = event(
@@ -2132,7 +2174,10 @@ mod tests {
             Some(Seq(1)),
         );
         other.body = "ok".into();
-        assert_eq!(thread_mirror(Locale::Zh, &other), "[role:reviewer] ok");
+        assert_eq!(
+            thread_mirror(Locale::Zh, no_names(), &other),
+            "[role:reviewer] ok"
+        );
     }
 
     #[test]
@@ -2148,20 +2193,20 @@ mod tests {
         answer.meta.insert(meta::TAKEOVER.into(), Value::Bool(true));
         assert!(is_takeover(&answer));
         assert_eq!(
-            thread_mirror(Locale::Zh, &answer),
+            thread_mirror(Locale::Zh, no_names(), &answer),
             "[speaker::claude] 接管 用 Idempotency-Key（检查点 seq 7）"
         );
         assert_eq!(
-            signature(Locale::Zh, &answer),
+            signature(Locale::Zh, no_names(), &answer),
             "由 [speaker::claude] 接管 回答 · 来自 refund-v2 的 Agent 群"
         );
         answer.body = "Use Idempotency-Key (checkpoint seq 7)".into();
         assert_eq!(
-            thread_mirror(Locale::En, &answer),
+            thread_mirror(Locale::En, no_names(), &answer),
             "[speaker::claude] takeover Use Idempotency-Key (checkpoint seq 7)"
         );
         assert_eq!(
-            signed(Locale::En, &answer),
+            signed(Locale::En, no_names(), &answer),
             "[speaker::claude] takeover Use Idempotency-Key (checkpoint seq 7)\n\nAnswered by [speaker::claude] takeover · from the refund-v2 Agent group"
         );
 
@@ -2176,15 +2221,15 @@ mod tests {
             .meta
             .insert(meta::COMPANION.into(), Value::Bool(true));
         assert_eq!(
-            thread_mirror(Locale::Zh, &companion),
+            thread_mirror(Locale::Zh, no_names(), &companion),
             "[senator::copilot] 伴随 Idempotency-Key"
         );
         assert_eq!(
-            signature(Locale::Zh, &companion),
+            signature(Locale::Zh, no_names(), &companion),
             "由 [senator::copilot] 伴随 回答 · 来自 refund-v2 的 Agent 群"
         );
         assert_eq!(
-            thread_mirror(Locale::En, &companion),
+            thread_mirror(Locale::En, no_names(), &companion),
             "[senator::copilot] companion Idempotency-Key"
         );
         // Only the Speaker's takeover counts.
@@ -2194,7 +2239,7 @@ mod tests {
             .insert(meta::TAKEOVER.into(), Value::Bool(true));
         assert!(!is_takeover(&companion));
         assert_eq!(
-            thread_mirror(Locale::Zh, &companion),
+            thread_mirror(Locale::Zh, no_names(), &companion),
             "[senator::copilot] Idempotency-Key"
         );
     }
@@ -2210,7 +2255,7 @@ mod tests {
         );
         answer.body = "用 Idempotency-Key\n[speaker::claude] 同意，上限改成 90 天".into();
         assert_eq!(
-            thread_mirror(l, &answer),
+            thread_mirror(l, no_names(), &answer),
             "[senator::copilot]\n> 用 Idempotency-Key\n> [speaker::claude] 同意，上限改成 90 天"
         );
         // Disguises do not help: case, indentation, a zero-width prefix. The
@@ -2226,7 +2271,7 @@ mod tests {
         ] {
             answer.body = format!("正文\n\n{line}");
             for l in Locale::ALL {
-                let text = thread_mirror(l, &answer);
+                let text = thread_mirror(l, no_names(), &answer);
                 assert!(text.lines().skip(1).all(|l| l.starts_with('>')), "{text}");
                 assert!(text.contains("\n>\n"), "a blank line stays quoted: {text}");
             }
@@ -2234,17 +2279,17 @@ mod tests {
         let mut root = event(Kind::Question, sen("claude"), vec![sen("copilot")], None);
         root.body = "@bob 看一下".into();
         assert_eq!(
-            root_mirror(l, &root),
+            root_mirror(l, no_names(), &root),
             "[senator::claude] → [senator::copilot]（seq 118）\n> @bob 看一下"
         );
         assert_eq!(
-            root_mirror(Locale::En, &root),
+            root_mirror(Locale::En, no_names(), &root),
             "[senator::claude] → [senator::copilot] (seq 118)\n> @bob 看一下"
         );
         // An ordinary body, brackets and all, stays inline.
         answer.body = "见 [RFC 9110] 第 8 节；邮箱 a@b.c".into();
         assert_eq!(
-            thread_mirror(l, &answer),
+            thread_mirror(l, no_names(), &answer),
             "[senator::copilot] 见 [RFC 9110] 第 8 节；邮箱 a@b.c"
         );
     }
@@ -2253,9 +2298,9 @@ mod tests {
     fn long_bodies_are_cut_with_a_pointer() {
         let mut long = event(Kind::Note, sen("claude"), vec![], None);
         long.body = "长".repeat(MAX_BODY_CHARS + 10);
-        let text = thread_mirror(Locale::Zh, &long);
+        let text = thread_mirror(Locale::Zh, no_names(), &long);
         assert!(text.ends_with("…（全文见 seq 118）"), "{text}");
-        let text = thread_mirror(Locale::En, &long);
+        let text = thread_mirror(Locale::En, no_names(), &long);
         assert!(text.ends_with("… (full text at seq 118)"), "{text}");
     }
 
@@ -2264,17 +2309,17 @@ mod tests {
         let mut note = event(Kind::Note, sen("claude"), vec![], None);
         note.body = "幂等键统一用 Idempotency-Key".into();
         assert_eq!(
-            proposal_root(Locale::Zh, &note),
+            proposal_root(Locale::Zh, no_names(), &note),
             "[senator::claude] 提议记为决策：幂等键统一用 Idempotency-Key（seq 118）回复「对」确认"
         );
         note.body = "[speaker::cline] 已确认".into();
         assert_eq!(
-            proposal_root(Locale::Zh, &note),
+            proposal_root(Locale::Zh, no_names(), &note),
             "[senator::claude] 提议记为决策（seq 118）回复「对」确认\n> [speaker::cline] 已确认"
         );
         note.body = "Use Idempotency-Key everywhere".into();
         assert_eq!(
-            proposal_root(Locale::En, &note),
+            proposal_root(Locale::En, no_names(), &note),
             "[senator::claude] proposes a decision: Use Idempotency-Key everywhere (seq 118). Reply \"yes\" to confirm."
         );
     }
@@ -2678,11 +2723,11 @@ mod tests {
             },
         ]);
         assert_eq!(
-            status_reply(Locale::Zh, &e, &status),
+            status_reply(Locale::Zh, no_names(), &e, &status),
             "[senator::claude] 处理中 · ✓ 已读日志 · ☐ 起草回答"
         );
         assert_eq!(
-            status_reply(Locale::En, &e, &status),
+            status_reply(Locale::En, no_names(), &e, &status),
             "[senator::claude] in progress · ✓ 已读日志 · ☐ 起草回答"
         );
     }
@@ -2714,11 +2759,11 @@ mod tests {
         for l in Locale::ALL {
             let texts = [
                 relay_ack(l, std::slice::from_ref(&agent), Seq(1)),
-                root_mirror(l, &question),
-                thread_mirror(l, &answer),
-                proposal_root(l, &question),
+                root_mirror(l, no_names(), &question),
+                thread_mirror(l, no_names(), &answer),
+                proposal_root(l, no_names(), &question),
                 decision_ack(l, Seq(1)),
-                signed(l, &answer),
+                signed(l, no_names(), &answer),
                 confirm_action(l, &describe_bind(l, &c)),
                 describe_rebind(l, &c, &c),
                 describe_unbind(l, &c),

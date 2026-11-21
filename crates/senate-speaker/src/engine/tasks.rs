@@ -299,7 +299,7 @@ impl Engine {
                 message_ref: copy.message_ref,
                 in_thread: true,
             },
-            text: render::status_reply(l, event, &status),
+            text: render::status_reply(l, self.seat_names(), event, &status),
             target: agents,
             record_as: None,
             card: None,

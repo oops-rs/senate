@@ -211,7 +211,7 @@ impl Engine {
         let Some(group) = state.mirror_group().map(|g| g.group_id.clone()) else {
             return Ok(());
         };
-        let text = render::checkpoint_line(l, event, &payload);
+        let text = render::checkpoint_line(l, self.seat_names(), event, &payload);
         self.post_line(event, &group, group.clone(), text).await
     }
 

@@ -8,7 +8,7 @@ use senate_core::{
     WorkState,
 };
 
-use super::{author, body, cut, one_line, person, quoted_for, senator, signature_of};
+use super::{SeatNames, author, body, cut, one_line, person, quoted_for, senator, signature_of};
 use crate::syntax::usage;
 
 /// Characters of the instruction in a card's title and a one-line reason.
@@ -510,8 +510,8 @@ pub(crate) fn work_handback_note(
 
 /// `[senator::copilot]（接手 [senator::claude]）` /
 /// `[senator::copilot] (covering for [senator::claude])`.
-fn covering_label(l: Locale, event: &Event, old: &SenatorName) -> String {
-    let (who, old) = (author(l, event), senator(old));
+fn covering_label(l: Locale, names: SeatNames<'_>, event: &Event, old: &SenatorName) -> String {
+    let (who, old) = (author(l, names, event), senator(old));
     match l {
         Locale::Zh => format!("{who}（接手 {old}）"),
         Locale::En => format!("{who} (covering for {old})"),
@@ -521,8 +521,13 @@ fn covering_label(l: Locale, event: &Event, old: &SenatorName) -> String {
 /// A reply in a mirrored thread addressed to `old`, from the agent its work
 /// was reassigned to:
 /// `[senator::copilot]（接手 [senator::claude]）<body>`.
-pub(crate) fn thread_mirror_covering(l: Locale, event: &Event, old: &SenatorName) -> String {
-    let label = covering_label(l, event, old);
+pub(crate) fn thread_mirror_covering(
+    l: Locale,
+    names: SeatNames<'_>,
+    event: &Event,
+    old: &SenatorName,
+) -> String {
+    let label = covering_label(l, names, event, old);
     let body = body(l, event);
     match quoted_for(event, &body) {
         None => format!("{label} {body}"),
@@ -531,11 +536,16 @@ pub(crate) fn thread_mirror_covering(l: Locale, event: &Event, old: &SenatorName
 }
 
 /// The same for a people group, signed.
-pub(crate) fn signed_covering(l: Locale, event: &Event, old: &SenatorName) -> String {
+pub(crate) fn signed_covering(
+    l: Locale,
+    names: SeatNames<'_>,
+    event: &Event,
+    old: &SenatorName,
+) -> String {
     format!(
         "{}\n\n{}",
-        thread_mirror_covering(l, event, old),
-        signature_of(l, &covering_label(l, event, old), &event.committee)
+        thread_mirror_covering(l, names, event, old),
+        signature_of(l, &covering_label(l, names, event, old), &event.committee)
     )
 }
 
@@ -544,6 +554,7 @@ mod tests {
     use super::*;
     use senate_core::{Address, CheckpointFiles, CheckpointPayload, CheckpointTrigger, Kind};
 
+    use crate::render::tests::no_names;
     use crate::tests_support::assert_senate_vocabulary;
 
     fn path(s: &str) -> SenatorName {
@@ -677,21 +688,21 @@ mod tests {
         .into_event(Seq(9), chrono::Utc::now());
         let old = path("claude");
         assert_eq!(
-            thread_mirror_covering(Locale::Zh, &e, &old),
+            thread_mirror_covering(Locale::Zh, no_names(), &e, &old),
             "[senator::copilot]（接手 [senator::claude]） 做到第二步了"
         );
         assert!(
-            signed_covering(Locale::Zh, &e, &old)
+            signed_covering(Locale::Zh, no_names(), &e, &old)
                 .contains("由 [senator::copilot]（接手 [senator::claude]） 回答"),
             "{}",
-            signed_covering(Locale::Zh, &e, &old)
+            signed_covering(Locale::Zh, no_names(), &e, &old)
         );
         assert_eq!(
-            thread_mirror_covering(Locale::En, &e, &old),
+            thread_mirror_covering(Locale::En, no_names(), &e, &old),
             "[senator::copilot] (covering for [senator::claude]) 做到第二步了"
         );
         assert!(
-            signed_covering(Locale::En, &e, &old).ends_with(
+            signed_covering(Locale::En, no_names(), &e, &old).ends_with(
                 "\n\nAnswered by [senator::copilot] (covering for [senator::claude]) · from the refund-v2 Agent group"
             )
         );
@@ -807,8 +818,8 @@ mod tests {
                     &BranchNaming::default(),
                 ),
                 work_handback_note(l, &c, &alice),
-                thread_mirror_covering(l, &e, &alice),
-                signed_covering(l, &e, &alice),
+                thread_mirror_covering(l, no_names(), &e, &alice),
+                signed_covering(l, no_names(), &e, &alice),
             ];
             for text in texts {
                 assert_senate_vocabulary(&text);
