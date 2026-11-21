@@ -1441,7 +1441,8 @@ impl SenateMcp {
             .collect()
     }
 
-    /// The tools a Codex session is given: all of them, from the start.
+    /// The tools a Codex or agy session is given: all of them, from the
+    /// start.
     ///
     /// Codex lists a server's tools once, when a thread starts (its
     /// `tools/list` carries no thread, and it does not act on
@@ -2812,7 +2813,12 @@ impl ServerHandler for SenateMcp {
     ) -> Result<rmcp::model::ListToolsResult, McpError> {
         let scoped = self.for_request(&context);
         let this = scoped.as_ref().unwrap_or(self);
-        let tools = if is_codex_client(&context) || this.pins.runtime == Runtime::Codex {
+        // agy, like Codex, runs one server for many conversations and lists
+        // its tools once (1.5.14 measured: it does not list them again on
+        // `tools/list_changed`).
+        let tools = if is_codex_client(&context)
+            || matches!(this.pins.runtime, Runtime::Codex | Runtime::Agy)
+        {
             this.codex_tools()
         } else {
             this.tools().await

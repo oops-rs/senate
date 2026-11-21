@@ -2003,6 +2003,18 @@ async fn antigravity_hooks_and_mcp_use_the_same_exact_root_session() {
 
     let mut mcp =
         McpClient::start_for(h.socket(), selector(ids[0]), Locale::En, Runtime::Agy).await;
+    // agy lists the tools once for all its conversations: the role tools
+    // are there from the start, and refuse a call without the role.
+    let listed = mcp.request("tools/list", json!({})).await;
+    let names: Vec<&str> = listed["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect();
+    for tool in ["chair_docket", "speaker_docket", "spawn"] {
+        assert!(names.contains(&tool), "{tool} in {names:?}");
+    }
     let without_root = mcp
         .request(
             "tools/call",
