@@ -255,6 +255,18 @@ pub fn uplink(locale: Locale, u: &senate_bridge::ipc::UplinkStatus) -> String {
     }
 }
 
+/// A seat's presence, in words.
+pub fn presence(locale: Locale, state: senate_core::PresenceState) -> &'static str {
+    use senate_core::PresenceState as P;
+    match state {
+        P::Online => locale.pick("在线", "online"),
+        P::Disconnected => locale.pick("已断开", "disconnected"),
+        P::Absent => locale.pick("离开", "away"),
+        P::TakenOver => locale.pick("已接管", "taken over"),
+        P::Reassigned => locale.pick("已转交", "reassigned"),
+    }
+}
+
 pub fn sessions_word(locale: Locale) -> &'static str {
     locale.pick("托管会话", "hosted sessions")
 }

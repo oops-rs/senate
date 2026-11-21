@@ -1,0 +1,23 @@
+{
+  "sourceLanguage": "en",
+  "strings": {
+    "NSAppleEventsUsageDescription": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Senate opens Codex and hosted sessions in Terminal."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Senate 需要控制“终端”来打开 Codex 和托管会话。"
+          }
+        }
+      }
+    }
+  },
+  "version": "1.0"
+}

@@ -191,6 +191,8 @@ pub struct ChildSeatLine {
     pub duty: Option<String>,
     /// `online`, `disconnected`, `absent`, ….
     pub presence: String,
+    /// The presence in words, in the app's language.
+    pub presence_label: String,
 }
 
 /// One agent's stream on one committee.
@@ -570,6 +572,7 @@ fn child_line(c: &senate_core::ChildSenate, locale: Locale, now: DateTime<Utc>) 
                 senator: seat.senator.to_string(),
                 duty: seat.duty.clone(),
                 presence: seat.presence.as_str().to_string(),
+                presence_label: text::presence(locale, seat.presence).to_string(),
             })
             .collect(),
     }

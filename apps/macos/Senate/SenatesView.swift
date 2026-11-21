@@ -132,7 +132,7 @@ private struct ChildBlock: View {
                         .foregroundStyle(.indigo)
                         .help("[senator::\(seat.senator)]")
                     Tag(text: seat.committee)
-                    Tag(text: seat.presence, tint: seat.presence == "online" ? .green : .secondary)
+                    Tag(text: seat.presenceLabel, tint: seat.presence == "online" ? .green : .secondary)
                     if let duty = seat.duty {
                         Text(verbatim: duty).foregroundStyle(.secondary).lineLimit(1)
                     }
