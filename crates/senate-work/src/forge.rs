@@ -389,7 +389,7 @@ mod tests {
     fn outcome(status: RunStatus) -> RunOutcome {
         RunOutcome {
             status,
-            branch: "feature/refund-v2/speaker-7".into(),
+            branch: "senate/refund-v2/speaker-7".into(),
             pushed_commit: Some("abc".into()),
             summary: "Retry path done.".into(),
             next_steps: vec!["Review the cap".into()],
@@ -401,7 +401,7 @@ mod tests {
         let o = sample_order();
         let r = PrRequest::for_run(&o, &outcome(RunStatus::Succeeded));
         assert_eq!(r.base, "main");
-        assert_eq!(r.head, "feature/refund-v2/speaker-7");
+        assert_eq!(r.head, "senate/refund-v2/speaker-7");
         assert!(!r.draft);
         assert_eq!(
             r.title,
@@ -410,7 +410,7 @@ mod tests {
         for want in [
             "代 [senator::bob]（Bob）开启",
             "> 把 alice 的重试路径做完\n> with tests\n",
-            "[senator::claude] 的 `feature/refund-v2/alice@0123456789ab`",
+            "[senator::claude] 的 `senate/refund-v2/alice@0123456789ab`",
             "由 Senate 的 Speaker 开启",
             "- Review the cap",
         ] {
@@ -432,7 +432,7 @@ mod tests {
         );
         for want in [
             "Opened by the Senate Speaker for [senator::bob] (Bob).",
-            "`feature/refund-v2/alice@0123456789ab` of [senator::claude]",
+            "`senate/refund-v2/alice@0123456789ab` of [senator::claude]",
             "hit its time limit, partial work",
             "opened by the Senate Speaker; the developer's branch was not changed.",
         ] {
@@ -456,13 +456,13 @@ mod tests {
                 "--base",
                 "main",
                 "--head",
-                "feature/refund-v2/speaker-7"
+                "senate/refund-v2/speaker-7"
             ]
         );
         assert_eq!(a.last().unwrap(), "--draft");
         assert_eq!(
-            GhForge::find_args(&o.repo, "feature/refund-v2/speaker-7").join(" "),
-            "pr list --repo example/refund --head feature/refund-v2/speaker-7 --state open --json number,url --limit 1"
+            GhForge::find_args(&o.repo, "senate/refund-v2/speaker-7").join(" "),
+            "pr list --repo example/refund --head senate/refund-v2/speaker-7 --state open --json number,url --limit 1"
         );
         assert_eq!(
             pr_number_from_url("https://github.com/o/n/pull/42\n"),
@@ -479,7 +479,7 @@ mod tests {
             NoForge.open_pr(&r).await.unwrap(),
             Delivery::Branch {
                 repo: o.repo.clone(),
-                branch: "feature/refund-v2/speaker-7".into()
+                branch: "senate/refund-v2/speaker-7".into()
             }
         );
     }

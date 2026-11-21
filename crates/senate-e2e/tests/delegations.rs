@@ -24,7 +24,7 @@ use senated::testing::Message;
 /// session's inbox and the fake Codex app-server.
 async fn alice_with_two_agents(world: &World) -> (Laptop, FakeInbox, FakeCodex) {
     let mut alice = world.laptop("alice");
-    alice.git_init("feature/refund-v2/alice");
+    alice.git_init("senate/refund-v2/alice");
     let codex = alice.codex_app_server();
     alice.open().await;
     let inbox = alice.inbox("s-alice");

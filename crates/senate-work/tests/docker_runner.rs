@@ -46,7 +46,7 @@ struct Fixture {
 }
 
 impl Fixture {
-    /// origin `o/refund.git` with `main` and Alice's `feature/refund-v2/alice`.
+    /// origin `o/refund.git` with `main` and Alice's `senate/refund-v2/alice`.
     fn new() -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().canonicalize().unwrap();
@@ -76,7 +76,7 @@ impl Fixture {
                 "push",
                 "--quiet",
                 "origin",
-                "HEAD:refs/heads/feature/refund-v2/alice",
+                "HEAD:refs/heads/senate/refund-v2/alice",
             ],
         );
         let alice_commit = git(&seed, &["rev-parse", "HEAD"]);
@@ -97,7 +97,7 @@ impl Fixture {
             target_agent: "claude".parse().unwrap(),
             instruction: "把 alice 的重试路径做完".into(),
             repo: RepoRef::from_url(&format!("file://{}", self.origin.display())).unwrap(),
-            base_branch: "feature/refund-v2/alice".into(),
+            base_branch: "senate/refund-v2/alice".into(),
             base_commit: self.alice_commit.clone(),
             pr_base: "main".into(),
             checkpoint_files: CheckpointFiles {
@@ -144,7 +144,7 @@ done
         std::fs::write(&key, "sk-gateway-secret\n").unwrap();
         let mut c = DockerRunnerConfig::new("senate-runner:test", self.root.join("runs"));
         c.docker_bin = script;
-        c.gateway_base_url = Some("http://gw:4000".into());
+        c.gateway_base_url = Some("http://gw:8080".into());
         c.gateway_key_file = Some(key);
         c.allowed_repos = RepoAllowlist::new(["o/refund"]);
         DockerRunner::new(c)
@@ -200,14 +200,14 @@ async fn success_pushes_speaker_branch_and_leaves_alice_alone() {
     let (outcome, steps) = run(&runner, &order).await;
 
     assert_eq!(outcome.status, RunStatus::Succeeded, "{outcome:?}");
-    assert_eq!(outcome.branch, "feature/refund-v2/speaker-7");
+    assert_eq!(outcome.branch, "senate/refund-v2/speaker-7");
     assert_eq!(outcome.summary, "Retry path finished.");
     assert_eq!(outcome.next_steps, ["Review backoff"]);
     let pushed = outcome.pushed_commit.clone().expect("pushed");
 
     // The branch is on origin at the reported commit, by the Speaker.
     assert_eq!(
-        fx.origin_git(&["rev-parse", "refs/heads/feature/refund-v2/speaker-7"]),
+        fx.origin_git(&["rev-parse", "refs/heads/senate/refund-v2/speaker-7"]),
         pushed
     );
     assert_eq!(
@@ -232,7 +232,7 @@ async fn success_pushes_speaker_branch_and_leaves_alice_alone() {
     );
     // Alice's branch is untouched.
     assert_eq!(
-        fx.origin_git(&["rev-parse", "refs/heads/feature/refund-v2/alice"]),
+        fx.origin_git(&["rev-parse", "refs/heads/senate/refund-v2/alice"]),
         fx.alice_commit
     );
 
@@ -332,7 +332,7 @@ exec sleep 30
     assert_eq!(outcome.status, RunStatus::TimedOut, "{outcome:?}");
     let pushed = outcome.pushed_commit.clone().expect("partial work pushed");
     assert_eq!(
-        fx.origin_git(&["rev-parse", "refs/heads/feature/refund-v2/speaker-7"]),
+        fx.origin_git(&["rev-parse", "refs/heads/senate/refund-v2/speaker-7"]),
         pushed
     );
     assert!(
@@ -344,7 +344,7 @@ exec sleep 30
             .contains("partial.rs")
     );
     assert_eq!(outcome.next_steps.len(), 3);
-    assert!(outcome.next_steps[2].contains("feature/refund-v2/speaker-7"));
+    assert!(outcome.next_steps[2].contains("senate/refund-v2/speaker-7"));
     // The container was killed by name.
     let kill = std::fs::read_to_string(fx.bin("args.kill")).unwrap();
     assert_eq!(kill, "kill\nsenate-speaker-refund-v2-7\n");

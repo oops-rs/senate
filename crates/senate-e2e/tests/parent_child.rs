@@ -333,8 +333,8 @@ async fn a_child_is_refused_unless_its_speaker_is_on_the_roster_and_registers_it
 async fn a_name_is_looked_for_nearest_first_and_a_person_above_is_asked_directly() {
     let world = team_above().await;
     // Above: bob runs an agent also named claude on refund-v2, and is on
-    // ibot.
-    let ibot = CommitteeId::new("ibot").unwrap();
+    // ledger.
+    let ledger = CommitteeId::new("ledger").unwrap();
     speak(
         &world.server_url(),
         "tok-bob",
@@ -345,7 +345,7 @@ async fn a_name_is_looked_for_nearest_first_and_a_person_above_is_asked_directly
     speak(
         &world.server_url(),
         "tok-bob",
-        &NewEvent::new(ibot.clone(), Kind::Note, person("bob"), "ibot is here"),
+        &NewEvent::new(ledger.clone(), Kind::Note, person("bob"), "ledger is here"),
     )
     .await
     .unwrap();
@@ -394,24 +394,24 @@ async fn a_name_is_looked_for_nearest_first_and_a_person_above_is_asked_directly
             .all(|e| e.body != "Nearest first?")
     );
 
-    // ibot is only above: alice's question is posted there directly, as
+    // ledger is only above: alice's question is posted there directly, as
     // her (her token above), by its full name.
     let sent = senate_bridge::speak::send(
         &socket,
         refund(),
         SayKind::Question,
-        "/acme::ibot::bob",
-        "Is the ibot retry shared?".into(),
+        "/acme::ledger::bob",
+        "Is the ledger retry shared?".into(),
     )
     .await
     .unwrap();
-    assert_eq!(sent.posted.committee, ibot);
+    assert_eq!(sent.posted.committee, ledger);
     let asked = world
-        .events_of(&ibot)
+        .events_of(&ledger)
         .await
         .into_iter()
-        .find(|e| e.body == "Is the ibot retry shared?")
-        .expect("above, on ibot");
+        .find(|e| e.body == "Is the ledger retry shared?")
+        .expect("above, on ledger");
     assert_eq!(asked.from, person("alice"));
     assert_eq!(asked.to, [person("bob")]);
     assert!(
@@ -422,7 +422,7 @@ async fn a_name_is_looked_for_nearest_first_and_a_person_above_is_asked_directly
             .await
             .unwrap()
             .iter()
-            .all(|c| c != &ibot),
+            .all(|c| c != &ledger),
         "nothing of it below"
     );
 
@@ -465,11 +465,11 @@ async fn a_name_is_looked_for_nearest_first_and_a_person_above_is_asked_directly
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_desk_forwards_an_agents_question_above_and_the_answer_comes_back_down() {
     let world = team_above().await;
-    let ibot = CommitteeId::new("ibot").unwrap();
+    let ledger = CommitteeId::new("ledger").unwrap();
     speak(
         &world.server_url(),
         "tok-bob",
-        &NewEvent::new(ibot.clone(), Kind::Note, person("bob"), "ibot is here"),
+        &NewEvent::new(ledger.clone(), Kind::Note, person("bob"), "ledger is here"),
     )
     .await
     .unwrap();
@@ -495,14 +495,14 @@ async fn the_desk_forwards_an_agents_question_above_and_the_answer_comes_back_do
     desk.wait_connected("codex", true).await;
 
     // codex, an agent, writes to a seat above: it is put to alice's desk
-    // on the way (the boundary rule), meant for bob on ibot above.
+    // on the way (the boundary rule), meant for bob on ledger above.
     let sent: senate_bridge::ipc::SendReply = desk
         .ipc(senate_bridge::ipc::Request::Send {
             session: Laptop::session("s-codex"),
             kind: SayKind::Question,
             to: Vec::new(),
-            at: Some("/acme::ibot::senator::bob".parse().unwrap()),
-            body: "Does ibot retry refunds too?".into(),
+            at: Some("/acme::ledger::senator::bob".parse().unwrap()),
+            body: "Does ledger retry refunds too?".into(),
             refs: None,
             id: None,
         })
@@ -510,9 +510,9 @@ async fn the_desk_forwards_an_agents_question_above_and_the_answer_comes_back_do
     assert_eq!(sent.posted.to, [Address::Speaker]);
     assert_eq!(
         sent.intended.as_ref().unwrap().to_string(),
-        "/acme::ibot::senator::bob"
+        "/acme::ledger::senator::bob"
     );
-    claude.wait_for("Does ibot retry refunds too?").await;
+    claude.wait_for("Does ledger retry refunds too?").await;
 
     // claude, working the desk, forwards it above.
     let forwarded: senate_bridge::ipc::Forwarded = desk
@@ -523,12 +523,12 @@ async fn the_desk_forwards_an_agents_question_above_and_the_answer_comes_back_do
             id: None,
         })
         .await;
-    assert_eq!(forwarded.posted.committee, ibot);
+    assert_eq!(forwarded.posted.committee, ledger);
     let up = world
-        .events_of(&ibot)
+        .events_of(&ledger)
         .await
         .into_iter()
-        .find(|e| e.body == "Does ibot retry refunds too?")
+        .find(|e| e.body == "Does ledger retry refunds too?")
         .expect("above");
     assert_eq!(up.from, alice_desk());
     assert_eq!(up.to, [person("bob")]);
@@ -544,7 +544,7 @@ async fn the_desk_forwards_an_agents_question_above_and_the_answer_comes_back_do
     speak(
         &world.server_url(),
         "tok-bob",
-        &NewEvent::new(ibot.clone(), Kind::Answer, person("bob"), "Yes, twice.")
+        &NewEvent::new(ledger.clone(), Kind::Answer, person("bob"), "Yes, twice.")
             .to(alice_desk())
             .in_thread(up.seq),
     )
@@ -563,14 +563,14 @@ async fn the_desk_forwards_an_agents_question_above_and_the_answer_comes_back_do
     assert_eq!(down.thread, Some(sent.posted.seq));
     assert_eq!(
         down.meta[meta::ANSWERED_BY],
-        serde_json::json!("/acme::ibot::senator::bob")
+        serde_json::json!("/acme::ledger::senator::bob")
     );
     codex.wait_for("Yes, twice.").await;
     // It does not go back up.
     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
     assert_eq!(
         world
-            .events_of(&ibot)
+            .events_of(&ledger)
             .await
             .iter()
             .filter(|e| e.body == "Yes, twice.")

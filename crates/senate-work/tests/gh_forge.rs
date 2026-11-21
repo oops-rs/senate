@@ -22,7 +22,7 @@ case "$1 $2" in
   "pr create")
     if [ -f "$D/fail-create" ]; then echo "a pull request already exists" >&2; echo 41 > "$D/pr"; exit 1; fi
     echo 42 > "$D/pr"
-    echo "Creating pull request for feature/refund-v2/speaker-7 into main in o/refund"
+    echo "Creating pull request for senate/refund-v2/speaker-7 into main in o/refund"
     echo "https://github.com/o/refund/pull/42" ;;
   *) echo "unexpected: $*" >&2; exit 2 ;;
 esac
@@ -76,7 +76,7 @@ fn request() -> PrRequest {
         target_agent: "claude".parse().unwrap(),
         instruction: "finish the retry path".into(),
         repo: RepoRef::from_url("git@github.com:o/refund.git").unwrap(),
-        base_branch: "feature/refund-v2/alice".into(),
+        base_branch: "senate/refund-v2/alice".into(),
         base_commit: "abcdef0123".into(),
         pr_base: "main".into(),
         checkpoint_files: CheckpointFiles::default(),
@@ -121,10 +121,10 @@ async fn opens_once_then_returns_the_same_pr() {
     assert_eq!(lines.len(), 3, "{calls}");
     assert_eq!(
         lines[0],
-        "CALL [pr] [list] [--repo] [o/refund] [--head] [feature/refund-v2/speaker-7] [--state] [open] [--json] [number,url] [--limit] [1]"
+        "CALL [pr] [list] [--repo] [o/refund] [--head] [senate/refund-v2/speaker-7] [--state] [open] [--json] [number,url] [--limit] [1]"
     );
     assert!(lines[1].starts_with(
-        "CALL [pr] [create] [--repo] [o/refund] [--base] [main] [--head] [feature/refund-v2/speaker-7] [--title] ["
+        "CALL [pr] [create] [--repo] [o/refund] [--base] [main] [--head] [senate/refund-v2/speaker-7] [--title] ["
     ));
     assert!(lines[1].contains("for [senator::bob]"));
     assert!(!lines[1].contains("--draft"));

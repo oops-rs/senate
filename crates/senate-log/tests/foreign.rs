@@ -192,7 +192,7 @@ async fn a_migrations_table_with_a_clashing_version_and_another_checksum_is_refu
          VALUES ({INIT_VERSION}, 'init', true, '\\x0102'::bytea, 1)"
     ))
     .await;
-    db.run("CREATE TABLE events (feature text NOT NULL, seq bigint NOT NULL, envelope jsonb)")
+    db.run("CREATE TABLE events (topic text NOT NULL, seq bigint NOT NULL, envelope jsonb)")
         .await;
     db.run("INSERT INTO events VALUES ('refund', 1, '{}')")
         .await;
@@ -239,9 +239,9 @@ async fn an_events_table_of_another_shape_is_refused_and_no_migrations_table_app
         return;
     };
     db.run(
-        "CREATE TABLE events (feature text NOT NULL, seq bigint NOT NULL, id text NOT NULL, \
+        "CREATE TABLE events (topic text NOT NULL, seq bigint NOT NULL, id text NOT NULL, \
          ts timestamptz NOT NULL, kind text NOT NULL, from_addr text NOT NULL, \
-         envelope jsonb NOT NULL, PRIMARY KEY (feature, seq))",
+         envelope jsonb NOT NULL, PRIMARY KEY (topic, seq))",
     )
     .await;
     db.run("INSERT INTO events VALUES ('refund', 1, 'e1', now(), 'chat', 'someone', '{}')")
@@ -265,7 +265,7 @@ async fn senates_own_migrations_over_an_events_table_that_lost_a_column_are_refu
         return;
     };
     PgStore::from_pool(db.pool.clone()).migrate().await.unwrap();
-    db.run("ALTER TABLE events RENAME COLUMN committee TO feature")
+    db.run("ALTER TABLE events RENAME COLUMN committee TO topic")
         .await;
     let before = db.snapshot().await;
 

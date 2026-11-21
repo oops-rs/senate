@@ -285,7 +285,7 @@ async fn a_retry_after_a_lost_commit_ack_is_fanned_out_once() {
 async fn a_chair_discussion_retry_repairs_delivery_after_a_restart_and_chair_change() {
     let store = Arc::new(Faulty::default());
     let server = TestServer::start_with(store.clone(), None).await;
-    let target = CommitteeId::new("ibot").unwrap();
+    let target = CommitteeId::new("ledger").unwrap();
     let open = NewEvent::new(
         target.clone(),
         Kind::Note,
@@ -299,7 +299,7 @@ async fn a_chair_discussion_retry_repairs_delivery_after_a_restart_and_chair_cha
         agent_addr("claude"),
         "question",
     )
-    .with_meta(meta::INTENDED, "ibot::chair".into());
+    .with_meta(meta::INTENDED, "ledger::chair".into());
     store.arm(LOSE_ACK_AFTER_COMMIT);
     api_error(
         server.post_event(ALICE, &question).await,

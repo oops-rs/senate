@@ -21,7 +21,7 @@ use serde_json::json;
 
 fn checkpoint(from: Address, progress: &str) -> NewEvent {
     let payload = CheckpointPayload {
-        branch: "feature/refund-v2/alice".into(),
+        branch: "senate/refund-v2/alice".into(),
         commit: "a41f9c2e00000000000000000000000000000000".into(),
         pushed: false,
         remote_url: None,

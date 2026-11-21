@@ -41,7 +41,7 @@ async fn alice_at_her_desk(
     extra: &str,
 ) -> (Desk, FakeInbox, FakeCodex) {
     let mut desk = Desk::new(dir, "alice", Locale::Zh, &on_the_team(world, extra));
-    desk.git_init("feature/refund-v2/alice");
+    desk.git_init("senate/refund-v2/alice");
     let codex = desk.codex_app_server();
     desk.start().await;
     assert!(desk.machine().senate().is_none(), "it hosts no Senate");

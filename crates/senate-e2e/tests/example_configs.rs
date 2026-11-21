@@ -96,7 +96,7 @@ fn the_machine_example_parses_into_what_the_machine_reads() {
     let config = BridgeConfig::load(&full).unwrap();
     assert_eq!(config.committees, ["refund-v2".parse().unwrap()]);
     assert_eq!(config.brief_chars, 6000);
-    assert_eq!(config.branches().prefix(), "feature");
+    assert_eq!(config.branches().prefix(), "senate");
     assert_eq!(config.agents.claude.to_string(), "claude");
     assert_eq!(config.agents.codex.to_string(), "codex");
     let under = Hosted::load(&full).unwrap();

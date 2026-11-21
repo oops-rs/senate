@@ -53,11 +53,11 @@ async fn unseating_an_alias_retires_one_seat_until_an_explicit_join() {
     let hub = &server.running.hub;
     let primary = path(PRIMARY);
     let committee = committee();
-    let commons = CommitteeId::new("commons").unwrap();
+    let payments = CommitteeId::new("payments").unwrap();
     let mut stream = server.stream_as(ALICE, Some(PRIMARY), Some(0), None).await;
-    let commons_stream = hub.open_stream(&commons, Some(&primary)).await.unwrap();
-    eventually("commons chair", || async {
-        hub.chair(&commons).await.unwrap().chair.as_ref() == Some(&primary)
+    let payments_stream = hub.open_stream(&payments, Some(&primary)).await.unwrap();
+    eventually("payments chair", || async {
+        hub.chair(&payments).await.unwrap().chair.as_ref() == Some(&primary)
     })
     .await;
 
@@ -191,9 +191,9 @@ async fn unseating_an_alias_retires_one_seat_until_an_explicit_join() {
         hub.get(&committee, old.event.seq).await.unwrap(),
         Some(old.event.clone())
     );
-    assert!(hub.is_agent_connected(&commons, &primary).await);
+    assert!(hub.is_agent_connected(&payments, &primary).await);
     assert_eq!(
-        hub.chair(&commons).await.unwrap().chair,
+        hub.chair(&payments).await.unwrap().chair,
         Some(primary.clone())
     );
 
@@ -212,7 +212,7 @@ async fn unseating_an_alias_retires_one_seat_until_an_explicit_join() {
         .unwrap();
     assert_eq!(resolved.event.to, [agent_addr("copilot")]);
 
-    drop(commons_stream);
+    drop(payments_stream);
     server.running.shutdown().await.unwrap();
     let server =
         TestServer::start_with(Arc::new(SqliteStore::open(&db).await.unwrap()), None).await;
@@ -231,7 +231,7 @@ async fn unseating_an_alias_retires_one_seat_until_an_explicit_join() {
     );
     assert_eq!(hub.roster_now().owner_of(&primary), Some(&name("alice")));
     assert_eq!(
-        hub.chair(&commons).await.unwrap().chair,
+        hub.chair(&payments).await.unwrap().chair,
         Some(primary.clone())
     );
     let alias_result: api::SenatorAliases = server

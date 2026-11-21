@@ -7,7 +7,7 @@
 //!
 //! On the machine: alice's Senate, alice its Speaker, `claude` her
 //! secretary working the desk; `copilot` on `refund-v2` and `codex` on
-//! `ibot`, all her agents.
+//! `ledger`, all her agents.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -20,8 +20,8 @@ use senate_core::{
     Address, CommitteeId, Hub, Kind, Locale, NewEvent, Principal, PrincipalKind, meta,
 };
 
-fn ibot() -> CommitteeId {
-    CommitteeId::new("ibot").unwrap()
+fn ledger() -> CommitteeId {
+    CommitteeId::new("ledger").unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -189,13 +189,13 @@ async fn hosted_approval_stays_on_the_docket_until_its_senator_archives_it() {
 }
 
 /// Wait until the desk worker's docket (its `speaker_docket` tool) lists
-/// the item `seq` on ibot.
+/// the item `seq` on ledger.
 async fn on_the_desk(desk: &Desk, seq: senate_core::Seq) {
     eventually_async("the item on claude's docket", || async {
         let docket: senate_bridge::ipc::DocketReply = desk
             .ipc(Request::Docket {
                 session: Laptop::session("s-claude"),
-                committee: Some(ibot()),
+                committee: Some(ledger()),
             })
             .await;
         docket
@@ -349,7 +349,7 @@ async fn the_request_author_can_follow_up_with_the_assignee_and_other_writers() 
 }
 
 /// Alice's machine alone: claude (her secretary) and copilot on
-/// refund-v2, codex on ibot.
+/// refund-v2, codex on ledger.
 async fn alices_machine(dir: &std::path::Path) -> (Desk, FakeInbox, FakeInbox, FakeInbox) {
     let mut desk = Desk::new(
         dir,
@@ -372,34 +372,34 @@ async fn alices_machine(dir: &std::path::Path) -> (Desk, FakeInbox, FakeInbox, F
         .unwrap();
     // A committee exists once it has an event, and an agent joins only
     // those (refund-v2 does now: its first agent took a seat there on
-    // connecting), so alice opens ibot first.
+    // connecting), so alice opens ledger first.
     desk.senate()
         .daemon
         .hub
         .append(NewEvent::new(
-            ibot(),
+            ledger(),
             Kind::Note,
             person("alice"),
-            "ibot opens",
+            "ledger opens",
         ))
         .await
         .unwrap();
     let _: serde_json::Value = desk
         .ipc(Request::Join {
             session: Laptop::session("s-codex"),
-            committee: ibot(),
+            committee: ledger(),
         })
         .await;
-    eventually_async("codex on ibot", || async {
+    eventually_async("codex on ledger", || async {
         desk.senate()
             .daemon
             .hub
-            .is_agent_connected(&ibot(), &path("codex"))
+            .is_agent_connected(&ledger(), &path("codex"))
             .await
             .then_some(())
     })
     .await;
-    desk.post("s-codex", "ibot is open").await;
+    desk.post("s-codex", "ledger is open").await;
     (desk, claude, copilot, codex)
 }
 
@@ -412,10 +412,10 @@ async fn across_committees_a_person_goes_directly_and_an_agent_by_way_of_the_des
     assert_eq!(office.speaker.to_string(), "senator::alice");
     assert_eq!(office.desk, [path("claude")]);
 
-    // Alice, a person, standing on ibot: delivered on refund-v2 directly.
+    // Alice, a person, standing on ledger: delivered on refund-v2 directly.
     let sent = senate_bridge::speak::send(
         &desk.paths.socket(),
-        ibot(),
+        ledger(),
         SayKind::Question,
         "refund-v2::copilot",
         "Is the retry window configurable?".into(),
@@ -434,7 +434,7 @@ async fn across_committees_a_person_goes_directly_and_an_agent_by_way_of_the_des
         "Which status code does the refund callback return?",
     )
     .await;
-    assert_eq!(asked.posted.committee, ibot());
+    assert_eq!(asked.posted.committee, ledger());
     assert_eq!(asked.posted.to, [Address::Speaker]);
     assert_eq!(
         asked.intended.as_ref().unwrap().to_string(),
@@ -451,7 +451,7 @@ async fn across_committees_a_person_goes_directly_and_an_agent_by_way_of_the_des
     let forwarded: Forwarded = desk
         .ipc(Request::Forward {
             session: Laptop::session("s-claude"),
-            committee: ibot(),
+            committee: ledger(),
             seq: asked.posted.seq,
             id: None,
         })
@@ -473,7 +473,7 @@ async fn across_committees_a_person_goes_directly_and_an_agent_by_way_of_the_des
     let back = codex.wait_for("202, with a retry header").await;
     assert!(back.contains("202"), "{back}");
     let relayed = eventually_async("the answer in codex's thread", || async {
-        desk.events_of(&ibot())
+        desk.events_of(&ledger())
             .await
             .into_iter()
             .find(|e| e.body == "202, with a retry header")
@@ -492,7 +492,7 @@ async fn across_committees_a_person_goes_directly_and_an_agent_by_way_of_the_des
     let _: senate_bridge::ipc::Posted = desk
         .ipc(Request::Refuse {
             session: Laptop::session("s-claude"),
-            committee: ibot(),
+            committee: ledger(),
             seq: again.posted.seq,
             reason: "Deploys are alice's call; ask her.".into(),
             id: None,
@@ -500,7 +500,7 @@ async fn across_committees_a_person_goes_directly_and_an_agent_by_way_of_the_des
         .await;
     codex.wait_for("Deploys are alice's call; ask her.").await;
     let refusal = desk
-        .events_of(&ibot())
+        .events_of(&ledger())
         .await
         .into_iter()
         .find(|e| e.body == "Deploys are alice's call; ask her.")
@@ -615,7 +615,7 @@ async fn a_person_speaker_with_no_secretary_finds_the_desk_waiting_for_her() {
     let asked = send(
         &desk,
         "s-claude",
-        "ibot::codex",
+        "ledger::codex",
         "Should the refund retry be capped?",
     )
     .await;
@@ -879,10 +879,10 @@ async fn spawning_checks_scope_and_capacity_on_the_daemon() {
         .daemon
         .hub
         .append(NewEvent::new(
-            ibot(),
+            ledger(),
             Kind::Note,
             person("alice"),
-            "ibot opens",
+            "ledger opens",
         ))
         .await
         .unwrap();
@@ -914,7 +914,7 @@ async fn spawning_checks_scope_and_capacity_on_the_daemon() {
         ),
         (
             "chair",
-            ibot(),
+            ledger(),
             false,
             codes::NOT_PRESIDING,
             "another committee",
@@ -935,7 +935,7 @@ async fn spawning_checks_scope_and_capacity_on_the_daemon() {
         ),
         (
             "office",
-            ibot(),
+            ledger(),
             true,
             codes::BAD_REQUEST,
             "hosted session limit (0)",
@@ -1084,7 +1084,7 @@ async fn a_team_principals_agent_crosses_committees_by_way_of_the_desk() {
         &url,
         "tok-north-desk",
         &NewEvent::new(
-            ibot(),
+            ledger(),
             Kind::Question,
             senator("runner"),
             "Is refund-v2 frozen?",
@@ -1094,7 +1094,7 @@ async fn a_team_principals_agent_crosses_committees_by_way_of_the_desk() {
     )
     .await
     .unwrap();
-    assert_eq!(by_agent.committee, ibot());
+    assert_eq!(by_agent.committee, ledger());
     assert_eq!(by_agent.to, [Address::Speaker]);
     let roster = world.hub().roster().await.unwrap();
     assert_eq!(roster.owner_of(&path("runner")), Some(&name("north-desk")));
@@ -1108,7 +1108,7 @@ async fn a_team_principals_agent_crosses_committees_by_way_of_the_desk() {
         &url,
         "tok-north-desk",
         &NewEvent::new(
-            ibot(),
+            ledger(),
             Kind::Question,
             senator("north-desk"),
             "Who reviews refunds?",
@@ -1118,7 +1118,7 @@ async fn a_team_principals_agent_crosses_committees_by_way_of_the_desk() {
     )
     .await
     .unwrap();
-    assert_eq!(by_team.committee, ibot());
+    assert_eq!(by_team.committee, ledger());
     assert_eq!(by_team.to, [Address::Speaker]);
 
     // A person, by contrast, is delivered there directly.
@@ -1126,7 +1126,7 @@ async fn a_team_principals_agent_crosses_committees_by_way_of_the_desk() {
         &url,
         "tok-alice",
         &NewEvent::new(
-            ibot(),
+            ledger(),
             Kind::Question,
             person("alice"),
             "Is refund-v2 frozen?",

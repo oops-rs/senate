@@ -28,7 +28,7 @@ use senate_work::RepoAllowlist;
 use senate_work::testing::{FakeForge, FakeRun, FakeRunner};
 use senated::testing::{Message, Post};
 
-const BRANCH: &str = "feature/refund-v2/alice";
+const BRANCH: &str = "senate/refund-v2/alice";
 const PROGRESS: &str = "## 完成\n- 幂等键\n\n## 下一步\n- 重试路径（指数退避，上限待定）";
 
 async fn work_world(runner: &FakeRunner, forge: &FakeForge) -> World {
@@ -166,7 +166,7 @@ async fn work_on_a_checkpoint_branch() {
     )
     .await;
     let chat = chat_of(&world, "把 alice 的重试路径做完").await;
-    let branch = format!("feature/refund-v2/speaker-{}", chat.seq);
+    let branch = format!("senate/refund-v2/speaker-{}", chat.seq);
     for part in [
         format!("[senator::claude] 的检查点 {BRANCH}@{}", &head[..7]),
         branch.clone(),

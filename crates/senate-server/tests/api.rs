@@ -467,7 +467,7 @@ async fn malformed_appends_are_bad_requests() {
     for body in [
         json!({"committee": "refund-v2", "kind": "note", "from": "robot:x", "body": "b"}),
         json!({"committee": "refund-v2", "kind": "note", "from": "senator::alice",
-               "to": ["senator::claude", "group:oc_1"], "body": "b"}),
+               "to": ["senator::claude", "group:g-1"], "body": "b"}),
         json!({"committee": "refund-v2", "kind": "note", "from": "senator::alice",
                "to": ["agent:Not-A-Slug"], "body": "b"}),
     ] {
@@ -1157,15 +1157,15 @@ async fn hub_queries_and_mirrors_come_from_the_store() {
         message_ref: message_ref.into(),
         thread_ref: None,
     };
-    hub.put_mirror(copy("pm-group", "om_1")).await.unwrap();
-    hub.put_mirror(copy("agents", "om_2")).await.unwrap();
+    hub.put_mirror(copy("pm-group", "m-1")).await.unwrap();
+    hub.put_mirror(copy("agents", "m-2")).await.unwrap();
     assert_eq!(
         hub.mirrors_of_seq(&f, root.seq, "chat").await.unwrap(),
-        vec![copy("agents", "om_2"), copy("pm-group", "om_1")]
+        vec![copy("agents", "m-2"), copy("pm-group", "m-1")]
     );
     assert_eq!(
-        hub.mirror_of_message("chat", "om_1").await.unwrap(),
-        Some(copy("pm-group", "om_1"))
+        hub.mirror_of_message("chat", "m-1").await.unwrap(),
+        Some(copy("pm-group", "m-1"))
     );
     server.running.shutdown().await.unwrap();
 }
@@ -1604,8 +1604,8 @@ async fn resolve_says_elsewhere_for_what_another_senate_may_have() {
     server.append("refund-v2 exists").await;
     for (name, committee) in [
         // A committee that is not here: ask the Senate above.
-        ("ibot::senator::codex", None),
-        ("ibot::speaker", Some("refund-v2")),
+        ("ledger::senator::codex", None),
+        ("ledger::speaker", Some("refund-v2")),
         // Another Senate's path, even with a committee of the same name.
         ("acme::refund-v2::senator::alice", None),
         ("acme/north-desk::refund-v2::senator::alice", None),
@@ -1628,7 +1628,7 @@ async fn resolve_says_unknown_for_what_this_senate_should_have_and_does_not() {
         ("refund-v2::senator::nobody", None),
         ("senator::nobody", Some("refund-v2")),
         // A committee that is not here, in a path naming this Senate.
-        ("senate::ibot::senator::alice", None),
+        ("senate::ledger::senator::alice", None),
         // No committee in the name and none where it is written.
         ("senator::alice", None),
     ] {

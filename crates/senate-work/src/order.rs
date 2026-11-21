@@ -36,7 +36,7 @@ pub struct WorkOrder {
     /// The task, in the requester's words (after the restatement they confirmed).
     pub instruction: String,
     pub repo: RepoRef,
-    /// The checkpoint branch, e.g. `feature/refund-v2/alice`. Read, never written.
+    /// The checkpoint branch, e.g. `senate/refund-v2/alice`. Read, never written.
     pub base_branch: String,
     /// The checkpoint commit the Speaker branch starts from.
     pub base_commit: String,
@@ -360,7 +360,7 @@ pub(crate) fn sample_order() -> WorkOrder {
         target_agent: "claude".parse().unwrap(),
         instruction: "把 alice 的重试路径做完\nwith tests".into(),
         repo: RepoRef::from_url("git@github.com:example/refund.git").unwrap(),
-        base_branch: "feature/refund-v2/alice".into(),
+        base_branch: "senate/refund-v2/alice".into(),
         base_commit: "0123456789abcdef0123456789abcdef01234567".into(),
         pr_base: "main".into(),
         checkpoint_files: CheckpointFiles {
@@ -389,7 +389,7 @@ mod tests {
     #[test]
     fn branch_is_committee_speaker_run() {
         let o = sample_order();
-        assert_eq!(o.branch(), "feature/refund-v2/speaker-7");
+        assert_eq!(o.branch(), "senate/refund-v2/speaker-7");
         assert!(o.branches.is_speaker(&o.committee, &o.branch()));
         assert!(valid_branch_name(&o.branch()));
     }
@@ -401,16 +401,16 @@ mod tests {
         o.base_branch = "team/refund-v2/alice".into();
         assert_eq!(o.branch(), "team/refund-v2/speaker-7");
         o.validate(&allow()).unwrap();
-        // A `feature/` Speaker branch is not this deployment's.
+        // A `senate/` Speaker branch is not this deployment's.
         assert_eq!(
             check_push_target(
                 &o.branches,
                 &o.committee,
                 "main",
-                "feature/refund-v2/speaker-7"
+                "senate/refund-v2/speaker-7"
             ),
             Err(WorkError::NotSpeakerBranch(
-                "feature/refund-v2/speaker-7".into()
+                "senate/refund-v2/speaker-7".into()
             ))
         );
     }
@@ -425,7 +425,7 @@ mod tests {
         assert_eq!(sanitize_ref_component(""), "x");
         assert_eq!(sanitize_ref_component(&"a".repeat(100)).len(), 63);
         assert!(valid_branch_name(&format!(
-            "feature/{}/speaker-1",
+            "senate/{}/speaker-1",
             sanitize_ref_component("@{weird} name.lock")
         )));
     }
@@ -434,17 +434,17 @@ mod tests {
     fn speaker_branch_detection() {
         let f = committee();
         let b = BranchNaming::default();
-        assert!(b.is_speaker(&f, "feature/refund-v2/speaker-12"));
-        assert!(!b.is_speaker(&f, "feature/refund-v2/alice"));
-        assert!(!b.is_speaker(&f, "feature/refund-v2/speaker-"));
-        assert!(!b.is_speaker(&f, "feature/refund-v2/speaker-1x"));
-        assert!(!b.is_speaker(&f, "feature/other/speaker-1"));
-        assert!(!b.is_speaker(&f, "feature/refund-v2/speaker-1/alice"));
+        assert!(b.is_speaker(&f, "senate/refund-v2/speaker-12"));
+        assert!(!b.is_speaker(&f, "senate/refund-v2/alice"));
+        assert!(!b.is_speaker(&f, "senate/refund-v2/speaker-"));
+        assert!(!b.is_speaker(&f, "senate/refund-v2/speaker-1x"));
+        assert!(!b.is_speaker(&f, "senate/other/speaker-1"));
+        assert!(!b.is_speaker(&f, "senate/refund-v2/speaker-1/alice"));
     }
 
     #[test]
     fn branch_names() {
-        for ok in ["main", "feature/refund-v2/alice", "release-1.2"] {
+        for ok in ["main", "senate/refund-v2/alice", "release-1.2"] {
             assert!(valid_branch_name(ok), "{ok}");
         }
         for bad in [
@@ -530,21 +530,17 @@ mod tests {
         let f = committee();
         let b = BranchNaming::default();
         assert_eq!(
-            check_push_target(&b, &f, "main", "feature/refund-v2/alice"),
-            Err(WorkError::NotSpeakerBranch(
-                "feature/refund-v2/alice".into()
-            ))
+            check_push_target(&b, &f, "main", "senate/refund-v2/alice"),
+            Err(WorkError::NotSpeakerBranch("senate/refund-v2/alice".into()))
         );
         assert_eq!(
             check_push_target(
                 &b,
                 &f,
-                "feature/refund-v2/speaker-3",
-                "feature/refund-v2/speaker-3"
+                "senate/refund-v2/speaker-3",
+                "senate/refund-v2/speaker-3"
             ),
-            Err(WorkError::BranchIsBase(
-                "feature/refund-v2/speaker-3".into()
-            ))
+            Err(WorkError::BranchIsBase("senate/refund-v2/speaker-3".into()))
         );
         assert!(matches!(
             check_push_target(&b, &f, "main", "main"),
@@ -552,7 +548,7 @@ mod tests {
         ));
         // A run continuing from an earlier Speaker branch is fine.
         let mut o = sample_order();
-        o.base_branch = "feature/refund-v2/speaker-3".into();
+        o.base_branch = "senate/refund-v2/speaker-3".into();
         o.validate(&allow()).unwrap();
         // ...but not one whose own branch is the checkpoint branch.
         o.run_id = 3;
@@ -568,7 +564,7 @@ mod tests {
         let json = serde_json::to_value(&o).unwrap();
         assert_eq!(json["requester"], "bob");
         assert_eq!(json["target_agent"], "claude");
-        assert_eq!(json["branches"], "feature");
+        assert_eq!(json["branches"], "senate");
         assert_eq!(json["locale"], "zh");
         let back: WorkOrder = serde_json::from_value(json).unwrap();
         assert_eq!(back, o);
@@ -576,7 +572,7 @@ mod tests {
             "committee": "refund-v2", "run_id": 1, "requester": "bob", "on_behalf_of": "Bob",
             "target_agent": "claude",
             "instruction": "x", "repo": {"url": "git@github.com:o/n.git", "slug": "o/n"},
-            "base_branch": "feature/refund-v2/alice", "base_commit": "abcdef0"
+            "base_branch": "senate/refund-v2/alice", "base_commit": "abcdef0"
         });
         let m: WorkOrder = serde_json::from_value(minimal.clone()).unwrap();
         assert_eq!(m.pr_base, "main");
@@ -625,7 +621,7 @@ mod tests {
     fn headline_checkpoint_ref_and_notes() {
         let o = sample_order();
         assert_eq!(o.instruction_headline(), "把 alice 的重试路径做完");
-        assert_eq!(o.checkpoint_ref(), "feature/refund-v2/alice@0123456789ab");
+        assert_eq!(o.checkpoint_ref(), "senate/refund-v2/alice@0123456789ab");
         assert_eq!(
             checkpoint_notes(&o.checkpoint_files),
             [

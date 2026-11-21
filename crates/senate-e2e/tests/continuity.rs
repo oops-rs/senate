@@ -22,7 +22,7 @@ use senate_core::{
 };
 use senated::testing::{Message, Post};
 
-const BRANCH: &str = "feature/refund-v2/alice";
+const BRANCH: &str = "senate/refund-v2/alice";
 
 /// Presence in seconds rather than minutes: `disconnected` after 1 s
 /// without a heartbeat, `absent` after `lease`.

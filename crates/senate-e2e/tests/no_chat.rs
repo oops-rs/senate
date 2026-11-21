@@ -66,7 +66,7 @@ async fn an_absent_agent_is_covered_through_the_log() {
         .start()
         .await;
     let mut alice = world.laptop("alice");
-    alice.git_init("feature/refund-v2/alice");
+    alice.git_init("senate/refund-v2/alice");
     alice.open().await;
     let alice_inbox = alice.inbox("s-alice");
     alice.session_start("s-alice", &alice_inbox).await;

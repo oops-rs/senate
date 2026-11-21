@@ -494,7 +494,7 @@ async fn a_wildcard_nobody_can_pick_is_refused_and_the_built_in_desk_picks() {
 async fn the_docket_names_each_agents_latest_checkpoint() {
     let Built { server } = start(false, claude_presides).await;
     let payload = CheckpointPayload {
-        branch: "feature/refund-v2/alice".into(),
+        branch: "senate/refund-v2/alice".into(),
         commit: "a41f9c2e00000000000000000000000000000000".into(),
         pushed: false,
         remote_url: None,

@@ -463,20 +463,20 @@ async fn mirrors_are_first_write_wins_and_indexed_by_message(store: Arc<dyn LogS
             .is_empty()
     );
     store
-        .put_mirror(mirror(120, "chat", "om_root"))
+        .put_mirror(mirror(120, "chat", "m-root"))
         .await
         .unwrap();
     store
-        .put_mirror(mirror(120, "chat", "om_root"))
+        .put_mirror(mirror(120, "chat", "m-root"))
         .await
         .unwrap();
     store
-        .put_mirror(mirror(120, "chat", "om_other"))
+        .put_mirror(mirror(120, "chat", "m-other"))
         .await
         .unwrap();
     assert_eq!(
         store.mirrors_of_seq(&f, Seq(120), "chat").await.unwrap(),
-        vec![mirror(120, "chat", "om_root")],
+        vec![mirror(120, "chat", "m-root")],
         "first write wins"
     );
     assert!(
@@ -487,38 +487,38 @@ async fn mirrors_are_first_write_wins_and_indexed_by_message(store: Arc<dyn LogS
             .is_empty()
     );
     assert_eq!(
-        store.mirror_of_message("chat", "om_other").await.unwrap(),
+        store.mirror_of_message("chat", "m-other").await.unwrap(),
         None
     );
 
     // Two log events mirrored onto one platform message: the lower seq wins.
     store
-        .put_mirror(mirror(130, "chat", "om_shared"))
+        .put_mirror(mirror(130, "chat", "m-shared"))
         .await
         .unwrap();
     store
-        .put_mirror(mirror(125, "chat", "om_shared"))
+        .put_mirror(mirror(125, "chat", "m-shared"))
         .await
         .unwrap();
     assert_eq!(
         store
-            .mirror_of_message("chat", "om_shared")
+            .mirror_of_message("chat", "m-shared")
             .await
             .unwrap()
             .map(|m| m.seq),
         Some(Seq(125))
     );
     assert_eq!(
-        store.mirror_of_message("chat", "om_root").await.unwrap(),
-        Some(mirror(120, "chat", "om_root"))
+        store.mirror_of_message("chat", "m-root").await.unwrap(),
+        Some(mirror(120, "chat", "m-root"))
     );
     assert_eq!(
-        store.mirror_of_message("other", "om_root").await.unwrap(),
+        store.mirror_of_message("other", "m-root").await.unwrap(),
         None
     );
     let no_thread = MirrorRef {
         thread_ref: None,
-        ..mirror(140, "chat", "om_flat")
+        ..mirror(140, "chat", "m-flat")
     };
     store.put_mirror(no_thread.clone()).await.unwrap();
     assert_eq!(
@@ -539,28 +539,28 @@ async fn one_event_may_have_several_copies(store: Arc<dyn LogStore>) {
     };
     // Written out of target order; read back in byte order of target.
     store
-        .put_mirror(copy(120, "refund-backend", "om_question"))
+        .put_mirror(copy(120, "refund-backend", "m-question"))
         .await
         .unwrap();
     store
-        .put_mirror(copy(120, "pm-group", "om_human"))
+        .put_mirror(copy(120, "pm-group", "m-human"))
         .await
         .unwrap();
     store
-        .put_mirror(copy(120, "refund-backend#ack", "om_ack"))
+        .put_mirror(copy(120, "refund-backend#ack", "m-ack"))
         .await
         .unwrap();
     // First write wins per target, not per event.
     store
-        .put_mirror(copy(120, "pm-group", "om_retry"))
+        .put_mirror(copy(120, "pm-group", "m-retry"))
         .await
         .unwrap();
     assert_eq!(
         store.mirrors_of_seq(&f, Seq(120), "chat").await.unwrap(),
         vec![
-            copy(120, "pm-group", "om_human"),
-            copy(120, "refund-backend", "om_question"),
-            copy(120, "refund-backend#ack", "om_ack"),
+            copy(120, "pm-group", "m-human"),
+            copy(120, "refund-backend", "m-question"),
+            copy(120, "refund-backend#ack", "m-ack"),
         ]
     );
     assert!(
@@ -578,9 +578,9 @@ async fn one_event_may_have_several_copies(store: Arc<dyn LogStore>) {
             .is_empty()
     );
     for (message_ref, target) in [
-        ("om_human", "pm-group"),
-        ("om_question", "refund-backend"),
-        ("om_ack", "refund-backend#ack"),
+        ("m-human", "pm-group"),
+        ("m-question", "refund-backend"),
+        ("m-ack", "refund-backend#ack"),
     ] {
         assert_eq!(
             store
@@ -592,17 +592,17 @@ async fn one_event_may_have_several_copies(store: Arc<dyn LogStore>) {
         );
     }
     assert_eq!(
-        store.mirror_of_message("chat", "om_retry").await.unwrap(),
+        store.mirror_of_message("chat", "m-retry").await.unwrap(),
         None
     );
 
     // Several copies claim one message: lowest seq, then lowest target.
-    store.put_mirror(copy(131, "0", "om_shared")).await.unwrap();
-    store.put_mirror(copy(130, "b", "om_shared")).await.unwrap();
-    store.put_mirror(copy(130, "a", "om_shared")).await.unwrap();
+    store.put_mirror(copy(131, "0", "m-shared")).await.unwrap();
+    store.put_mirror(copy(130, "b", "m-shared")).await.unwrap();
+    store.put_mirror(copy(130, "a", "m-shared")).await.unwrap();
     assert_eq!(
-        store.mirror_of_message("chat", "om_shared").await.unwrap(),
-        Some(copy(130, "a", "om_shared"))
+        store.mirror_of_message("chat", "m-shared").await.unwrap(),
+        Some(copy(130, "a", "m-shared"))
     );
 }
 

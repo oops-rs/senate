@@ -197,10 +197,10 @@ mod tests {
 
     #[test]
     fn next_steps_are_written_in_the_orders_language() {
-        let zh = default_next_steps("feature/x/speaker-1", true, Locale::Zh);
+        let zh = default_next_steps("senate/x/speaker-1", true, Locale::Zh);
         assert_eq!(zh[0], "重试：让 Speaker 再跑一次");
-        assert_eq!(zh[2], "交给一个人：从分支 feature/x/speaker-1 接着做");
-        let en = default_next_steps("feature/x/speaker-1", false, Locale::En);
+        assert_eq!(zh[2], "交给一个人：从分支 senate/x/speaker-1 接着做");
+        let en = default_next_steps("senate/x/speaker-1", false, Locale::En);
         assert_eq!(en.len(), 3);
         assert_eq!(en[0], "Retry: have the Speaker run it again");
         assert_eq!(

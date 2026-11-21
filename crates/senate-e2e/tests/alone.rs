@@ -34,7 +34,7 @@ fn codex_pushes(codex: &common::fake_codex::FakeCodex) -> Vec<String> {
 async fn one_person_chains_claude_code_and_codex_under_a_presiding_agent() {
     let dir = tempfile::tempdir().unwrap();
     let mut desk = Desk::new(dir.path(), "alice", Locale::En, ALONE);
-    desk.git_init("feature/refund-v2/alice");
+    desk.git_init("senate/refund-v2/alice");
     let codex = desk.codex_app_server();
     desk.start().await;
     let top = desk.senate();
@@ -282,7 +282,7 @@ async fn one_person_chains_claude_code_and_codex_under_a_presiding_agent() {
     assert_eq!(answer.byline(Locale::Zh).unwrap(), "[speaker::codex] 接管");
     assert_eq!(
         answer.refs.as_ref().unwrap().branch.as_deref(),
-        Some("feature/refund-v2/alice")
+        Some("senate/refund-v2/alice")
     );
     let docket: DocketReply = desk
         .ipc(Request::Docket {

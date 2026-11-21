@@ -367,9 +367,7 @@ mod tests {
         let o = sample_order();
         let m = commit_message(&o, None);
         assert!(m.starts_with("Speaker run 7 for [senator::bob]: 把 alice 的重试路径做完\n\n"));
-        assert!(
-            m.contains("Checkpoint: feature/refund-v2/alice@0123456789ab of [senator::claude]")
-        );
+        assert!(m.contains("Checkpoint: senate/refund-v2/alice@0123456789ab of [senator::claude]"));
         assert!(!m.contains("user:"));
         assert!(!m.contains("Partial"));
         assert!(commit_message(&o, Some("timed out")).contains("Partial work: timed out"));

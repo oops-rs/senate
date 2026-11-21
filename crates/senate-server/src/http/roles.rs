@@ -107,7 +107,7 @@ pub(super) fn check_children_addressed(
 }
 
 /// The child Senate registered here that `locator` names, if any:
-/// `north-desk::ibot::...`, or this Senate's path and one name more.
+/// `north-desk::ledger::...`, or this Senate's path and one name more.
 fn child_named(state: &AppState, path: &SenatePath, locator: &Locator) -> Option<ChildSenate> {
     let senate = locator.senate()?;
     let relative = !senate.is_absolute() && senate.depth() == 1;

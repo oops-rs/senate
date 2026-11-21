@@ -9,7 +9,7 @@ image = "senate-runner:dev"
 # same path in both, so the daemon can mount <work_root>/<run>/work.
 work_root = "/var/lib/senate/runs"
 model = "claude-sonnet-4-5"
-gateway_base_url = "http://gateway.lan:4000"
+gateway_base_url = "http://gateway.lan:8080"
 # Read at each run; reaches the container through docker's environment only.
 gateway_key_file = "/run/secrets/runner-model-key"
 gateway_key_env = "ANTHROPIC_API_KEY"   # or ANTHROPIC_AUTH_TOKEN for a bearer gateway

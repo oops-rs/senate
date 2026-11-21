@@ -42,7 +42,7 @@ use crate::stream::{
 /// image = "senate-runner:latest"
 /// work_root = "/var/lib/senate/runs"        # must be the same path for the docker daemon
 /// model = "claude-sonnet-4-5"
-/// gateway_base_url = "http://gateway.lan:4000"
+/// gateway_base_url = "http://gateway.lan:8080"
 /// gateway_key_file = "/run/secrets/runner_gateway_key"
 /// allowed_repos = ["example/refund"]
 /// git_credential = { kind = "ssh_key", key_file = "/run/secrets/deploy_key" }
@@ -725,7 +725,7 @@ mod tests {
     fn runner() -> DockerRunner {
         let mut c = DockerRunnerConfig::new("senate-runner:test", "/tmp/runs");
         c.model = Some("claude-sonnet-4-5".into());
-        c.gateway_base_url = Some("http://gw:4000".into());
+        c.gateway_base_url = Some("http://gw:8080".into());
         c.gateway_key_file = Some("/run/secrets/key".into());
         c.docker_args = vec!["--network".into(), "runner".into()];
         DockerRunner::new(c)
@@ -740,7 +740,7 @@ mod tests {
         assert!(joined.contains("--name senate-speaker-refund-v2-7"));
         assert!(joined.contains("--volume /tmp/runs/r1/work:/work --workdir /work"));
         assert!(joined.contains("--cap-drop ALL"));
-        assert!(joined.contains("--env ANTHROPIC_BASE_URL=http://gw:4000"));
+        assert!(joined.contains("--env ANTHROPIC_BASE_URL=http://gw:8080"));
         // The key by name only.
         assert!(args.windows(2).any(|w| w == ["--env", "ANTHROPIC_API_KEY"]));
         let image = args.iter().position(|a| a == "senate-runner:test").unwrap();

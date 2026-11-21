@@ -25,8 +25,8 @@ use senate_log::{LogStore, MemoryStore};
 use senate_server::{Running, Server, ServerConfig, ServerError};
 use serde_json::json;
 
-fn ibot() -> CommitteeId {
-    CommitteeId::new("ibot").unwrap()
+fn ledger() -> CommitteeId {
+    CommitteeId::new("ledger").unwrap()
 }
 
 fn speaker_id(s: &str) -> Option<SpeakerName> {
@@ -122,12 +122,12 @@ fn intended(event: &Event) -> Option<&str> {
     event.meta.get(meta::INTENDED).and_then(|v| v.as_str())
 }
 
-/// A note on `ibot` from alice, so the committee exists.
-async fn open_ibot(server: &TestServer) {
+/// A note on `ledger` from alice, so the committee exists.
+async fn open_ledger(server: &TestServer) {
     stored(
         server,
         ALICE,
-        &NewEvent::new(ibot(), Kind::Note, person_addr("alice"), "ibot opens"),
+        &NewEvent::new(ledger(), Kind::Note, person_addr("alice"), "ledger opens"),
     )
     .await;
 }
@@ -931,27 +931,37 @@ fn meant_for(from: &str, locator: &str) -> NewEvent {
 #[tokio::test]
 async fn a_persons_message_crosses_directly_and_an_agents_by_way_of_the_desk() {
     let server = start(None, boundary).await;
-    open_ibot(&server).await;
+    open_ledger(&server).await;
 
     // A person: delivered on the other committee, a new root there.
-    let direct = stored(&server, ALICE, &meant_for("alice", "ibot::senator::codex")).await;
-    assert_eq!(direct.committee, ibot());
+    let direct = stored(
+        &server,
+        ALICE,
+        &meant_for("alice", "ledger::senator::codex"),
+    )
+    .await;
+    assert_eq!(direct.committee, ledger());
     assert_eq!(direct.to, [agent_addr("codex")]);
     assert_eq!(direct.thread, None);
-    assert_eq!(intended(&direct), Some("/senate::ibot::senator::codex"));
+    assert_eq!(intended(&direct), Some("/senate::ledger::senator::codex"));
 
     // An agent: kept on its own committee, for the desk, with where it was
     // meant to go.
-    let held = stored(&server, ALICE, &meant_for("claude", "ibot::senator::codex")).await;
+    let held = stored(
+        &server,
+        ALICE,
+        &meant_for("claude", "ledger::senator::codex"),
+    )
+    .await;
     assert_eq!(held.committee, committee());
     assert_eq!(held.to, [Address::Speaker]);
-    assert_eq!(intended(&held), Some("/senate::ibot::senator::codex"));
+    assert_eq!(intended(&held), Some("/senate::ledger::senator::codex"));
     let desk = docket(&server, &committee(), "speaker").await;
     let item = desk.items.iter().find(|i| i.event.seq == held.seq).unwrap();
     assert_eq!(item.awaiting, Awaiting::Addressed);
     assert_eq!(
         item.intended.as_ref().map(ToString::to_string).as_deref(),
-        Some("/senate::ibot::senator::codex")
+        Some("/senate::ledger::senator::codex")
     );
 
     // On its own committee: simply addressed.
@@ -966,14 +976,14 @@ async fn a_persons_message_crosses_directly_and_an_agents_by_way_of_the_desk() {
     let up = stored(
         &server,
         ALICE,
-        &meant_for("claude", "acme::ibot::senator::codex"),
+        &meant_for("claude", "acme::ledger::senator::codex"),
     )
     .await;
     assert_eq!(up.to, [Address::Speaker]);
-    assert_eq!(intended(&up), Some("acme::ibot::senator::codex"));
+    assert_eq!(intended(&up), Some("acme::ledger::senator::codex"));
     api_error(
         server
-            .post_event(ALICE, &meant_for("alice", "acme::ibot::senator::codex"))
+            .post_event(ALICE, &meant_for("alice", "acme::ledger::senator::codex"))
             .await,
         StatusCode::CONFLICT,
         "elsewhere",
@@ -982,7 +992,7 @@ async fn a_persons_message_crosses_directly_and_an_agents_by_way_of_the_desk() {
     // Something here that does not exist: refused with the reason.
     let unknown = api_error(
         server
-            .post_event(ALICE, &meant_for("alice", "ibot::senator::nobody"))
+            .post_event(ALICE, &meant_for("alice", "ledger::senator::nobody"))
             .await,
         StatusCode::BAD_REQUEST,
         "bad_request",
@@ -1003,10 +1013,10 @@ async fn a_persons_message_crosses_directly_and_an_agents_by_way_of_the_desk() {
 #[tokio::test]
 async fn an_agents_message_with_no_speaker_to_hold_it_is_refused() {
     let server = TestServer::start().await;
-    open_ibot(&server).await;
+    open_ledger(&server).await;
     api_error(
         server
-            .post_event(BOB, &meant_for("copilot", "ibot::senator::alice"))
+            .post_event(BOB, &meant_for("copilot", "ledger::senator::alice"))
             .await,
         StatusCode::CONFLICT,
         "conflict",
@@ -1024,13 +1034,13 @@ async fn a_direct_chair_discussion_has_two_local_threads_and_two_participants() 
     let target_open = stored(
         &server,
         BOB,
-        &NewEvent::new(ibot(), Kind::Note, agent_addr("codex"), "target opens"),
+        &NewEvent::new(ledger(), Kind::Note, agent_addr("codex"), "target opens"),
     )
     .await;
-    let question = meant_for("claude", "ibot::chair")
+    let question = meant_for("claude", "ledger::chair")
         .to(Address::Speaker)
         .with_refs(Refs {
-            branch: Some("feature/discussion".into()),
+            branch: Some("senate/discussion".into()),
             ..Refs::default()
         });
     let receipt = stored(&server, ALICE, &question).await;
@@ -1039,13 +1049,13 @@ async fn a_direct_chair_discussion_has_two_local_threads_and_two_participants() 
     assert_eq!(receipt.from, agent_addr("claude"));
     assert_eq!(receipt.thread, None);
     assert!(receipt.to.is_empty());
-    assert_eq!(intended(&receipt), Some("/senate::ibot::chair"));
+    assert_eq!(intended(&receipt), Some("/senate::ledger::chair"));
     assert_eq!(
         receipt.meta[meta::CHAIR_DISCUSSION],
-        "/senate::ibot::senator::codex"
+        "/senate::ledger::senator::codex"
     );
 
-    let events = hub.read(&ibot(), target_open.seq, 10).await.unwrap();
+    let events = hub.read(&ledger(), target_open.seq, 10).await.unwrap();
     let [copy] = &events[..] else {
         panic!("{events:?}")
     };
@@ -1066,9 +1076,12 @@ async fn a_direct_chair_discussion_has_two_local_threads_and_two_participants() 
             thread: receipt.seq,
         })
     );
-    assert_eq!(hub.chair(&ibot()).await.unwrap().chair, Some(path("codex")));
+    assert_eq!(
+        hub.chair(&ledger()).await.unwrap().chair,
+        Some(path("codex"))
+    );
     assert!(!senate_core::needs_triage(copy, &hub.roster_now().people()));
-    let desk = docket(&server, &ibot(), "speaker").await;
+    let desk = docket(&server, &ledger(), "speaker").await;
     assert!(desk.items.is_empty());
     assert!(desk.covered.is_empty());
 
@@ -1077,13 +1090,18 @@ async fn a_direct_chair_discussion_has_two_local_threads_and_two_participants() 
     assert!(retry.duplicate);
     assert_eq!(retry.event, receipt);
     assert_eq!(
-        hub.read(&ibot(), target_open.seq, 10).await.unwrap(),
+        hub.read(&ledger(), target_open.seq, 10).await.unwrap(),
         events
     );
 
-    let local = NewEvent::new(ibot(), Kind::Answer, agent_addr("observer"), "local answer")
-        .to(Address::Committee)
-        .in_thread(copy.seq);
+    let local = NewEvent::new(
+        ledger(),
+        Kind::Answer,
+        agent_addr("observer"),
+        "local answer",
+    )
+    .to(Address::Committee)
+    .in_thread(copy.seq);
     let local = stored(&server, CAROL, &local).await;
     assert!(!local.is_chair_discussion());
     assert_eq!(
@@ -1091,7 +1109,7 @@ async fn a_direct_chair_discussion_has_two_local_threads_and_two_participants() 
         1
     );
 
-    let answer = NewEvent::new(ibot(), Kind::Answer, agent_addr("codex"), "frozen Monday")
+    let answer = NewEvent::new(ledger(), Kind::Answer, agent_addr("codex"), "frozen Monday")
         .in_thread(copy.seq)
         .to(agent_addr("claude"));
     let local_answer = stored(&server, BOB, &answer).await;
@@ -1111,7 +1129,7 @@ async fn a_direct_chair_discussion_has_two_local_threads_and_two_participants() 
     assert_eq!(
         Origin::of(back),
         Some(Origin {
-            locator: "/senate::ibot::senator::codex".parse().unwrap(),
+            locator: "/senate::ledger::senator::codex".parse().unwrap(),
             thread: copy.seq,
         })
     );
@@ -1121,7 +1139,7 @@ async fn a_direct_chair_discussion_has_two_local_threads_and_two_participants() 
         .to(Address::Committee);
     let local_follow_up = stored(&server, ALICE, &follow_up).await;
     assert!(local_follow_up.to.is_empty());
-    let target_thread = hub.thread(&ibot(), copy.seq).await.unwrap();
+    let target_thread = hub.thread(&ledger(), copy.seq).await.unwrap();
     let [_, _, _, follow_up_copy] = &target_thread[..] else {
         panic!("{target_thread:?}")
     };
@@ -1139,24 +1157,24 @@ async fn a_direct_chair_discussion_has_two_local_threads_and_two_participants() 
 #[tokio::test]
 async fn only_plain_agent_questions_and_notes_open_direct_chair_discussions() {
     let server = start(None, boundary).await;
-    open_ibot(&server).await;
+    open_ledger(&server).await;
     let hub = &server.running.hub;
 
-    let mut request = meant_for("claude", "ibot::chair");
+    let mut request = meant_for("claude", "ledger::chair");
     request.kind = Kind::Request;
-    let mut proposal = meant_for("claude", "ibot::chair")
+    let mut proposal = meant_for("claude", "ledger::chair")
         .with_meta(meta::PROPOSAL, json!(senate_core::PROPOSAL_DECISION));
     proposal.kind = Kind::Note;
     let mut chair_note =
-        meant_for("claude", "ibot::chair").with_meta(meta::CHAIR, json!({"senator": "claude"}));
+        meant_for("claude", "ledger::chair").with_meta(meta::CHAIR, json!({"senator": "claude"}));
     chair_note.kind = Kind::Note;
     for other in [
         request,
         proposal,
         chair_note,
-        meant_for("claude", "ibot::chair").with_meta(meta::RELAYED_FROM, json!(1)),
-        meant_for("claude", "ibot::chair").with_meta(meta::SEEN, json!(0)),
-        meant_for("claude", "/another::ibot::chair"),
+        meant_for("claude", "ledger::chair").with_meta(meta::RELAYED_FROM, json!(1)),
+        meant_for("claude", "ledger::chair").with_meta(meta::SEEN, json!(0)),
+        meant_for("claude", "/another::ledger::chair"),
     ] {
         let held = stored(&server, ALICE, &other).await;
         assert_eq!(held.committee, committee());
@@ -1167,11 +1185,11 @@ async fn only_plain_agent_questions_and_notes_open_direct_chair_discussions() {
     assert_eq!(local.to, [Address::Chair]);
     assert!(!local.is_chair_discussion());
 
-    let mut note = meant_for("claude", "/senate::ibot::chair");
+    let mut note = meant_for("claude", "/senate::ledger::chair");
     note.kind = Kind::Note;
     let sent = stored(&server, ALICE, &note).await;
     assert!(sent.is_chair_discussion());
-    let events = hub.read(&ibot(), Seq(1), 10).await.unwrap();
+    let events = hub.read(&ledger(), Seq(1), 10).await.unwrap();
     let [copy] = &events[..] else {
         panic!("{events:?}")
     };
@@ -1179,10 +1197,10 @@ async fn only_plain_agent_questions_and_notes_open_direct_chair_discussions() {
     assert_eq!(copy.to, [person_addr("alice")]);
 
     for forged in [
-        meant_for("claude", "ibot::chair").with_meta(meta::CHAIR_DISCUSSION, json!(true)),
-        from_speaker(ibot(), Kind::Note, "office note").with_meta(
+        meant_for("claude", "ledger::chair").with_meta(meta::CHAIR_DISCUSSION, json!(true)),
+        from_speaker(ledger(), Kind::Note, "office note").with_meta(
             meta::CHAIR_DISCUSSION,
-            json!("/senate::ibot::senator::alice"),
+            json!("/senate::ledger::senator::alice"),
         ),
     ] {
         api_error(
@@ -1197,11 +1215,11 @@ async fn only_plain_agent_questions_and_notes_open_direct_chair_discussions() {
     // recipient. Reopening a historical desk item cannot create a copy.
     let historical = hub
         .append(
-            meant_for("claude", "/senate::ibot::chair")
+            meant_for("claude", "/senate::ledger::chair")
                 .to(Address::Speaker)
                 .with_meta(
                     meta::CHAIR_DISCUSSION,
-                    json!("/senate::ibot::senator::alice"),
+                    json!("/senate::ledger::senator::alice"),
                 ),
         )
         .await
@@ -1216,20 +1234,20 @@ async fn only_plain_agent_questions_and_notes_open_direct_chair_discussions() {
     )
     .in_thread(historical.seq);
     assert!(!stored(&server, ALICE, &reply).await.is_chair_discussion());
-    assert_eq!(hub.read(&ibot(), Seq(1), 10).await.unwrap(), events);
+    assert_eq!(hub.read(&ledger(), Seq(1), 10).await.unwrap(), events);
     server.running.shutdown().await.unwrap();
 }
 
 #[tokio::test]
 async fn a_chair_discussion_validates_reply_metadata_before_relaying() {
     let server = TestServer::start().await;
-    open_ibot(&server).await;
+    open_ledger(&server).await;
     let hub = &server.running.hub;
-    let source = stored(&server, BOB, &meant_for("codex", "ibot::chair")).await;
-    let root = hub.get(&ibot(), Seq(2)).await.unwrap().unwrap();
+    let source = stored(&server, BOB, &meant_for("codex", "ledger::chair")).await;
+    let root = hub.get(&ledger(), Seq(2)).await.unwrap().unwrap();
     assert_eq!(root.to, [person_addr("alice")]);
     let answer = || {
-        NewEvent::new(ibot(), Kind::Answer, person_addr("alice"), "reply")
+        NewEvent::new(ledger(), Kind::Answer, person_addr("alice"), "reply")
             .in_thread(root.seq)
             .to(Address::Committee)
     };
@@ -1255,7 +1273,7 @@ async fn a_chair_discussion_validates_reply_metadata_before_relaying() {
     let unrelated = stored(
         &server,
         ALICE,
-        &NewEvent::new(ibot(), Kind::Note, person_addr("alice"), "unrelated"),
+        &NewEvent::new(ledger(), Kind::Note, person_addr("alice"), "unrelated"),
     )
     .await;
     for event in [
@@ -1284,10 +1302,15 @@ async fn a_chair_discussion_validates_reply_metadata_before_relaying() {
 #[tokio::test]
 async fn an_answer_where_the_desk_forwarded_goes_back_to_the_asking_thread() {
     let server = start(None, boundary).await;
-    open_ibot(&server).await;
-    let asked = stored(&server, ALICE, &meant_for("claude", "ibot::senator::codex")).await;
+    open_ledger(&server).await;
+    let asked = stored(
+        &server,
+        ALICE,
+        &meant_for("claude", "ledger::senator::codex"),
+    )
+    .await;
 
-    // The desk (claude, for alice) forwards it: a new root on ibot.
+    // The desk (claude, for alice) forwards it: a new root on ledger.
     let origin = Origin {
         locator: "/senate::refund-v2::senator::claude".parse().unwrap(),
         thread: asked.seq,
@@ -1295,7 +1318,7 @@ async fn an_answer_where_the_desk_forwarded_goes_back_to_the_asking_thread() {
     let forwarded = stored(
         &server,
         ALICE,
-        &from_speaker(ibot(), Kind::Question, "is the API frozen?")
+        &from_speaker(ledger(), Kind::Question, "is the API frozen?")
             .to(agent_addr("codex"))
             .with_meta(meta::ORIGIN, origin.value()),
     )
@@ -1304,7 +1327,7 @@ async fn an_answer_where_the_desk_forwarded_goes_back_to_the_asking_thread() {
 
     // codex answers there.
     let answer = NewEvent::new(
-        ibot(),
+        ledger(),
         Kind::Answer,
         agent_addr("codex"),
         "frozen since Monday",
@@ -1332,7 +1355,7 @@ async fn an_answer_where_the_desk_forwarded_goes_back_to_the_asking_thread() {
     assert_eq!(back.to, [agent_addr("claude")]);
     assert_eq!(
         back.meta.get(meta::ANSWERED_BY).and_then(|v| v.as_str()),
-        Some("/senate::ibot::senator::codex")
+        Some("/senate::ledger::senator::codex")
     );
     assert_eq!(
         acted_by(back),
@@ -1359,7 +1382,7 @@ async fn an_answer_where_the_desk_forwarded_goes_back_to_the_asking_thread() {
         server
             .post_event(
                 BOB,
-                &NewEvent::new(ibot(), Kind::Question, agent_addr("codex"), "?")
+                &NewEvent::new(ledger(), Kind::Question, agent_addr("codex"), "?")
                     .with_meta(meta::ORIGIN, origin.value()),
             )
             .await,
@@ -1791,7 +1814,7 @@ async fn a_registered_child_is_addressed_and_speaks_through_its_speaker() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
-    let child: Address = "north-desk::ibot::speaker".parse().unwrap();
+    let child: Address = "north-desk::ledger::speaker".parse().unwrap();
 
     // Addressed directly, by anyone.
     let to_child = stored(
@@ -1806,13 +1829,13 @@ async fn a_registered_child_is_addressed_and_speaks_through_its_speaker() {
     let meant = stored(
         &server,
         ALICE,
-        &meant_for("claude", "north-desk::ibot::senator::codex"),
+        &meant_for("claude", "north-desk::ledger::senator::codex"),
     )
     .await;
     assert_eq!(meant.to, std::slice::from_ref(&child));
     assert_eq!(
         intended(&meant),
-        Some("/senate/north-desk::ibot::senator::codex")
+        Some("/senate/north-desk::ledger::senator::codex")
     );
     // A child nobody registered is no address.
     api_error(
@@ -1820,7 +1843,7 @@ async fn a_registered_child_is_addressed_and_speaks_through_its_speaker() {
             .post_event(
                 BOB,
                 &NewEvent::new(committee(), Kind::Question, person_addr("bob"), "?")
-                    .to("south::ibot::speaker".parse().unwrap()),
+                    .to("south::ledger::speaker".parse().unwrap()),
             )
             .await,
         StatusCode::BAD_REQUEST,
@@ -1847,7 +1870,7 @@ async fn a_registered_child_is_addressed_and_speaks_through_its_speaker() {
                 &NewEvent::new(
                     committee(),
                     Kind::Note,
-                    "south::ibot::speaker".parse().unwrap(),
+                    "south::ledger::speaker".parse().unwrap(),
                     "x",
                 ),
             )

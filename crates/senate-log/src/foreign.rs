@@ -1,7 +1,7 @@
 //! Telling a database Senate made from one it did not.
 //!
 //! Senate's Postgres migrations are numbered with the same versions as some
-//! other schemas (a predecessor's, say) while holding different SQL, so
+//! other schemas (another application's, say) while holding different SQL, so
 //! pointing Senate at such a database ends, left to sqlx, in a checksum
 //! mismatch that says nothing a person can act on. Before any migration runs,
 //! [`PgStore::migrate`](crate::PgStore::migrate) and
@@ -251,15 +251,7 @@ mod tests {
 
     #[test]
     fn an_events_table_without_senates_columns_is_foreign() {
-        let theirs = cols(&[
-            "feature",
-            "seq",
-            "id",
-            "ts",
-            "kind",
-            "from_addr",
-            "envelope",
-        ]);
+        let theirs = cols(&["topic", "seq", "id", "ts", "kind", "from_addr", "envelope"]);
         let reason = pg_refusal(
             &found(Recorded::Rows(vec![(1, vec![1, 1])]), Some(theirs), &[]),
             &ours(),
@@ -299,7 +291,7 @@ mod tests {
         assert!(sqlite_refusal(0, &cols(&["notes"]), None, 1).is_some());
         assert!(sqlite_refusal(3, &[], None, 1).is_some());
         assert!(sqlite_refusal(1, &cols(&["notes"]), None, 1).is_some());
-        let theirs = cols(&["feature", "seq"]);
+        let theirs = cols(&["topic", "seq"]);
         assert!(sqlite_refusal(1, &cols(&["events"]), Some(&theirs), 1).is_some());
     }
 }

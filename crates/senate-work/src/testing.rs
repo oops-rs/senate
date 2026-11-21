@@ -292,7 +292,7 @@ mod tests {
         let o = sample_order();
         let out = runner.run(&o, tx).await;
         assert_eq!(out.status, RunStatus::TimedOut);
-        assert_eq!(out.branch, "feature/refund-v2/speaker-7");
+        assert_eq!(out.branch, "senate/refund-v2/speaker-7");
         assert_eq!(out.next_steps.len(), 3);
         let mut steps = Vec::new();
         while let Ok(p) = rx.try_recv() {

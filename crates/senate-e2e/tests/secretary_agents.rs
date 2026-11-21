@@ -36,7 +36,7 @@ fn codex_pushes(codex: &common::fake_codex::FakeCodex) -> Vec<String> {
 async fn an_agent_secretary_covers_an_away_agents_questions_from_its_notes() {
     let dir = tempfile::tempdir().unwrap();
     let mut desk = Desk::new(dir.path(), "alice", Locale::En, CONFIG);
-    desk.git_init("feature/refund-v2/alice");
+    desk.git_init("senate/refund-v2/alice");
     let codex = desk.codex_app_server();
     desk.start().await;
     let top = desk.senate();
@@ -208,7 +208,7 @@ async fn an_agent_secretary_covers_an_away_agents_questions_from_its_notes() {
     );
     assert_eq!(
         answer.refs.as_ref().unwrap().branch.as_deref(),
-        Some("feature/refund-v2/alice")
+        Some("senate/refund-v2/alice")
     );
     assert_eq!(
         senate_bridge::format::author(&answer, Locale::En),
@@ -341,7 +341,7 @@ async fn the_secretarys_item_is_withdrawn_when_the_agent_returns_first() {
 
     let dir = tempfile::tempdir().unwrap();
     let mut desk = Desk::new(dir.path(), "alice", Locale::En, CONFIG);
-    desk.git_init("feature/refund-v2/alice");
+    desk.git_init("senate/refund-v2/alice");
     let codex = desk.codex_app_server();
     desk.start().await;
     let top = desk.senate();
