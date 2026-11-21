@@ -156,6 +156,50 @@ mod tests {
     }
 
     #[test]
+    fn plumbing_takes_one_runtime_flag_and_the_old_ones_for_now() {
+        use super::super::{Cmd, RuntimeFlag};
+        use crate::session::Runtime;
+        use clap::Parser as _;
+        let hook = |args: &[&str]| match Cli::try_parse_from(args).unwrap().command {
+            Some(Cmd::Hook {
+                runtime,
+                codex,
+                agy,
+                ..
+            }) => RuntimeFlag::chosen(runtime, codex, agy),
+            _ => unreachable!(),
+        };
+        let start = ["senate", "hook", "session-start"];
+        assert_eq!(hook(&start), None);
+        for (flag, runtime) in [
+            (&["--runtime", "claude"][..], Runtime::Claude),
+            (&["--runtime", "codex"], Runtime::Codex),
+            (&["--runtime", "agy"], Runtime::Agy),
+            (&["--codex"], Runtime::Codex),
+            (&["--agy"], Runtime::Agy),
+        ] {
+            assert_eq!(
+                hook(&[&start[..], flag].concat()),
+                Some(runtime),
+                "{flag:?}"
+            );
+        }
+        assert!(
+            Cli::try_parse_from([&start[..], &["--runtime", "agy", "--codex"]].concat()).is_err()
+        );
+        let mcp = |args: &[&str]| match Cli::try_parse_from(args).unwrap().command {
+            Some(Cmd::Mcp { runtime, agy, .. }) => RuntimeFlag::chosen(runtime, false, agy),
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            mcp(&["senate", "mcp", "--runtime", "agy"]),
+            Some(Runtime::Agy)
+        );
+        assert_eq!(mcp(&["senate", "mcp", "--agy"]), Some(Runtime::Agy));
+        assert_eq!(mcp(&["senate", "mcp"]), None);
+    }
+
+    #[test]
     fn every_visible_command_is_listed_once_with_a_one_line_summary() {
         let command = Cli::command();
         let listed: Vec<&str> = GROUPS

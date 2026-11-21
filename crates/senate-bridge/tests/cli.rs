@@ -380,7 +380,7 @@ fn install_is_a_dry_run_without_yes_and_idempotent_with_it() {
         assert_eq!(groups[0]["hooks"][0]["type"], "command");
         assert_eq!(
             groups[0]["hooks"][0]["command"],
-            format!("{} hook {sub}", exe.display())
+            format!("{} hook {sub} --runtime claude", exe.display())
         );
     }
     assert_eq!(
@@ -517,7 +517,7 @@ fn install_sets_up_codex_in_its_config_toml() {
     );
     assert!(
         text.contains(&format!(
-            "+ hooks.SessionStart: {} hook session-start --codex",
+            "+ hooks.SessionStart: {} hook session-start --runtime codex",
             exe.display()
         )),
         "{text}"
@@ -544,7 +544,7 @@ fn install_sets_up_codex_in_its_config_toml() {
     ] {
         assert_eq!(
             parsed["hooks"][event][0]["hooks"][0]["command"].as_str(),
-            Some(format!("{} hook {sub} --codex", exe.display()).as_str())
+            Some(format!("{} hook {sub} --runtime codex", exe.display()).as_str())
         );
     }
     assert_eq!(

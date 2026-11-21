@@ -685,7 +685,7 @@ impl Laptop {
     }
 
     /// A Codex thread starting in this machine's checkout (`hook
-    /// session-start --codex`).
+    /// session-start --runtime codex`).
     pub async fn codex_start(&self, thread: &str) -> Option<Value> {
         self.codex_start_with_identity(thread, false).await
     }
@@ -1274,7 +1274,7 @@ impl std::ops::Deref for Desk {
 }
 
 impl Laptop {
-    /// A Codex thread ends (`hook session-end --codex`).
+    /// A Codex thread ends (`hook session-end --runtime codex`).
     pub async fn codex_end(&self, thread: &str) {
         let stdin = serde_json::json!({
             "session_id": thread,

@@ -18,14 +18,14 @@
 //! hook runs under a hosted Claude TUI. A parent shell
 //! exits quickly, so the chain is not evidence of liveness.
 //!
-//! Codex runs the same hooks (`hook <event> --codex`, from its
+//! Codex runs the same hooks (`hook <event> --runtime codex`, from its
 //! `config.toml`) inside the app-server, with the same input shape and the
 //! same `hookSpecificOutput`; `session_id` is the Codex thread id. A Codex
 //! session reports no socket, token, pids or `SENATE_AGENT` (the
 //! app-server's environment belongs to none of its threads). Its context
 //! carries the
 //! orientation and brief only: queued messages reach it as turns through
-//! the app-server, since Codex leaves hook context unanswered. Without `--codex` a Codex hook
+//! the app-server, since Codex leaves hook context unanswered. Without `--runtime codex` a Codex hook
 //! is recognised by its rollout transcript ([`detect_runtime`]).
 //!
 //! Hook failures exit 0 with no output. A stalled stdin read has one
@@ -216,7 +216,7 @@ pub async fn run(
     run_as(kind, daemon_socket, stdin, env, None, timeouts).await
 }
 
-/// [`run`] for a known runtime: `Some(Codex)` for `hook <event> --codex`
+/// [`run`] for a known runtime: `Some(Codex)` for `hook <event> --runtime codex`
 /// (what `install` writes for Codex); `None` infers it from the input
 /// ([`detect_runtime`]).
 pub async fn run_as(

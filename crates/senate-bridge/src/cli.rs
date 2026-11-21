@@ -345,8 +345,11 @@ stdin.")]
     /// Run the Senate MCP server over stdio.
     #[command(hide = true)]
     Mcp {
-        /// Resolve the caller using Antigravity root conversation metadata.
-        #[arg(long, conflicts_with = "acp_session")]
+        /// The coding runtime that started this server.
+        #[arg(long, value_enum, conflicts_with = "acp_session")]
+        runtime: Option<RuntimeFlag>,
+        /// Old spelling of `--runtime agy`, kept for one release.
+        #[arg(long, hide = true, conflicts_with_all = ["runtime", "acp_session"])]
         agy: bool,
         /// Exact session supplied by the owning Senate ACP client.
         #[arg(long, hide = true)]
@@ -361,11 +364,15 @@ stdin.")]
         /// The hook event.
         #[arg(value_enum)]
         event: HookKind,
-        /// Run as a Codex hook (the session is a Codex thread).
-        #[arg(long, conflicts_with = "agy")]
+        /// The coding runtime running the hook. Without it, the hook
+        /// input says (Claude Code unless it names a Codex rollout).
+        #[arg(long, value_enum)]
+        runtime: Option<RuntimeFlag>,
+        /// Old spelling of `--runtime codex`, kept for one release.
+        #[arg(long, hide = true, conflicts_with_all = ["runtime", "agy"])]
         codex: bool,
-        /// Run as an Antigravity SessionStart or PreInvocation hook.
-        #[arg(long)]
+        /// Old spelling of `--runtime agy`, kept for one release.
+        #[arg(long, hide = true, conflicts_with = "runtime")]
         agy: bool,
     },
     /// Show the daemon, the Senate, sessions and delivery.
@@ -868,6 +875,30 @@ fn read_stdin(timeout: Duration) -> Result<Option<String>, std::sync::mpsc::Recv
 }
 
 /// Hooks never fail and never print anything but their one JSON line.
+/// `--runtime` on the plumbing commands (`hook`, `mcp`): the coding
+/// runtimes that run Senate's hooks and MCP server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum RuntimeFlag {
+    Claude,
+    Codex,
+    Agy,
+}
+
+impl RuntimeFlag {
+    /// The runtime `--runtime`, or one of the old `--codex` / `--agy`
+    /// flags, names. `None`: none was given.
+    fn chosen(runtime: Option<Self>, codex: bool, agy: bool) -> Option<Runtime> {
+        let flag = runtime
+            .or_else(|| codex.then_some(Self::Codex))
+            .or_else(|| agy.then_some(Self::Agy))?;
+        Some(match flag {
+            Self::Claude => Runtime::Claude,
+            Self::Codex => Runtime::Codex,
+            Self::Agy => Runtime::Agy,
+        })
+    }
+}
+
 fn run_hook(kind: HookKind, runtime_override: Option<Runtime>) {
     let stdin = match read_stdin(hook::STDIN_BUDGET) {
         Ok(Some(stdin)) => stdin,
@@ -1988,10 +2019,15 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             ))?;
             Ok(())
         }
-        Cmd::Mcp { agy, acp_session } => {
+        Cmd::Mcp {
+            runtime: flag,
+            agy,
+            acp_session,
+        } => {
             init_logging("senate_bridge=warn");
             let paths = Paths::from_env()?;
             let locale = BridgeConfig::locale_at(&paths.config());
+            let agy = RuntimeFlag::chosen(flag, false, agy) == Some(Runtime::Agy);
             let (harness, selector) = if agy {
                 (Runtime::Agy, SessionSelector::default())
             } else if let Some(session_id) = acp_session {
@@ -2520,11 +2556,14 @@ pub fn main() -> ExitCode {
         },
         full_ids: false,
     });
-    if let Cmd::Hook { event, codex, agy } = command {
-        let harness = agy
-            .then_some(Runtime::Agy)
-            .or_else(|| codex.then_some(Runtime::Codex));
-        run_hook(event, harness);
+    if let Cmd::Hook {
+        event,
+        runtime,
+        codex,
+        agy,
+    } = command
+    {
+        run_hook(event, RuntimeFlag::chosen(runtime, codex, agy));
         return ExitCode::SUCCESS;
     }
     let output = Output {

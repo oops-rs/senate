@@ -1676,7 +1676,7 @@ impl Harness {
         fake_codex::FakeCodex::bind(self.dir.path().join("codex.sock"))
     }
 
-    /// Run a hook the way Codex would (`hook <event> --codex`).
+    /// Run a hook the way Codex would (`hook <event> --runtime codex`).
     pub async fn hook_codex(&self, kind: HookKind, thread: &str, cwd: &Path) -> Option<Value> {
         self.hook_as(
             kind,

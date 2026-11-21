@@ -329,10 +329,27 @@ pub(crate) fn runs_senate(command: &str) -> bool {
     name == "senate" || name == "senate-bridge"
 }
 
-/// A hook command an earlier install wrote, perhaps for another path or by
-/// the binary's old name.
+/// The hook `install` writes for `runtime` (`claude`, `codex`, `agy`).
+pub fn runtime_hook_command(exe: &str, subcommand: &str, runtime: &str) -> String {
+    format!("{} --runtime {runtime}", hook_command(exe, subcommand))
+}
+
+/// A hook command an earlier install wrote for `runtime`, perhaps for
+/// another path, by the binary's old name, or with the runtime flag of an
+/// earlier release (none for Claude Code, `--codex`, `--agy`).
+pub(crate) fn is_runtime_hook(command: &str, subcommand: &str, runtime: &str) -> bool {
+    let command = command.trim_end();
+    let old = match runtime {
+        "claude" => format!("hook {subcommand}"),
+        other => format!("hook {subcommand} --{other}"),
+    };
+    runs_senate(command)
+        && (command.ends_with(&old)
+            || command.ends_with(&format!("hook {subcommand} --runtime {runtime}")))
+}
+
 fn is_ours(command: &str, subcommand: &str) -> bool {
-    runs_senate(command) && command.trim_end().ends_with(&format!("hook {subcommand}"))
+    is_runtime_hook(command, subcommand, "claude")
 }
 
 /// Merge the bridge's hooks and `crossSessionInbound` into `settings`.
@@ -348,7 +365,7 @@ pub fn merge_settings(settings: &mut Value, exe: &str) -> Result<Vec<String>, St
         .as_object_mut()
         .ok_or("`hooks` in settings.json is not an object")?;
     for (event, sub) in HOOKS {
-        let want = hook_command(exe, sub);
+        let want = runtime_hook_command(exe, sub, "claude");
         let groups = hooks
             .entry(event)
             .or_insert_with(|| Value::Array(Vec::new()))
@@ -934,11 +951,44 @@ mod tests {
         );
         assert_eq!(
             s["hooks"]["SessionStart"][1]["hooks"][0]["command"],
-            "/bin/senate hook session-start"
+            "/bin/senate hook session-start --runtime claude"
         );
         assert_eq!(s["crossSessionInbound"], "accept");
         let again = merge_settings(&mut s, "/bin/senate").unwrap();
         assert!(again.is_empty(), "{again:?}");
+    }
+
+    #[test]
+    fn hooks_of_an_earlier_release_take_the_runtime_flag_in_place() {
+        let mut s = json!({"hooks": {"SessionStart": [{"hooks": [
+            {"type": "command", "command": "/bin/senate hook session-start"}
+        ]}]}});
+        let changes = merge_settings(&mut s, "/bin/senate").unwrap();
+        assert!(
+            changes.contains(&"~ hooks.SessionStart: /bin/senate hook session-start  →  /bin/senate hook session-start --runtime claude".to_owned()),
+            "{changes:?}"
+        );
+        assert_eq!(s["hooks"]["SessionStart"].as_array().unwrap().len(), 1);
+        assert!(is_runtime_hook(
+            "/x/senate hook session-end --agy",
+            "session-end",
+            "agy"
+        ));
+        assert!(is_runtime_hook(
+            "/x/senate hook session-end --runtime agy",
+            "session-end",
+            "agy"
+        ));
+        assert!(!is_runtime_hook(
+            "/x/senate hook session-end --codex",
+            "session-end",
+            "claude"
+        ));
+        assert!(!is_runtime_hook(
+            "/x/senate hook session-end --runtime codex",
+            "session-end",
+            "claude"
+        ));
     }
 
     #[test]
@@ -951,7 +1001,7 @@ mod tests {
         assert_eq!(s["hooks"]["SessionEnd"].as_array().unwrap().len(), 1);
         assert_eq!(
             s["hooks"]["SessionEnd"][0]["hooks"][0]["command"],
-            "/new/senate hook session-end"
+            "/new/senate hook session-end --runtime claude"
         );
     }
 

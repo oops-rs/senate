@@ -10,7 +10,7 @@
 //! [[hooks.SessionStart]]
 //! [[hooks.SessionStart.hooks]]
 //! type = "command"
-//! command = "<abs exe> hook session-start --codex"
+//! command = "<abs exe> hook session-start --runtime codex"
 //! timeout = 10
 //! ```
 //!
@@ -40,14 +40,11 @@ const APPROVAL_KEY: &str = "default_tools_approval_mode";
 const APPROVE: &str = "approve";
 
 pub fn hook_command(exe: &str, subcommand: &str) -> String {
-    format!("{} hook {subcommand} --codex", shell_quote(exe))
+    super::runtime_hook_command(exe, subcommand, "codex")
 }
 
 fn is_ours(command: &str, subcommand: &str) -> bool {
-    super::runs_senate(command)
-        && command
-            .trim_end()
-            .ends_with(&format!("hook {subcommand} --codex"))
+    super::is_runtime_hook(command, subcommand, "codex")
 }
 
 /// What happened to one hook entry.
@@ -422,7 +419,7 @@ trusted_hash = "sha256:abc"
         assert_eq!(start[0]["hooks"][0]["command"].as_str(), Some("echo hi"));
         assert_eq!(
             start[1]["hooks"][0]["command"].as_str(),
-            Some("/opt/bin/senate hook session-start --codex")
+            Some("/opt/bin/senate hook session-start --runtime codex")
         );
         assert_eq!(start[1]["hooks"][0]["timeout"].as_integer(), Some(10));
         for event in ["UserPromptSubmit", "SessionEnd"] {
@@ -455,7 +452,7 @@ trusted_hash = "sha256:abc"
         assert_eq!(parsed["hooks"]["SessionEnd"].as_array().unwrap().len(), 1);
         assert_eq!(
             parsed["hooks"]["SessionEnd"][0]["hooks"][0]["command"].as_str(),
-            Some("/new/senate hook session-end --codex")
+            Some("/new/senate hook session-end --runtime codex")
         );
     }
 
@@ -518,7 +515,7 @@ trusted_hash = "sha256:abc"
         let parsed: toml::Value = toml::from_str(&doc.to_string()).unwrap();
         assert_eq!(
             parsed["hooks"]["SessionStart"][0]["hooks"][0]["command"].as_str(),
-            Some("/opt/bin/senate hook session-start --codex")
+            Some("/opt/bin/senate hook session-start --runtime codex")
         );
         assert!(merge(&mut doc, EXE).unwrap().is_empty());
     }
