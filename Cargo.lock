@@ -2244,6 +2244,7 @@ dependencies = [
 name = "senate-app-core"
 version = "0.4.0"
 dependencies = [
+ "cc",
  "chrono",
  "senate-bridge",
  "senate-core",
