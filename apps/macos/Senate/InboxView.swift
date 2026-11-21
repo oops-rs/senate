@@ -35,6 +35,7 @@ struct InboxView: View {
         } else {
             List(threads, selection: $store.selectedThread) { thread in
                 ThreadRow(thread: thread)
+                    .environment(\.mentionCommittee, thread.committee)
                     .tag(thread.key)
                     .contextMenu { RowMenu(store: store, thread: thread) }
             }
@@ -45,6 +46,7 @@ struct InboxView: View {
     @ViewBuilder private var pane: some View {
         if let row = store.selectedRow {
             ThreadPane(store: store, row: row)
+                .environment(\.mentionCommittee, row.committee)
                 // Read again when something new is said in it.
                 .task(id: "\(row.key)@\(row.updated)") { await store.loadThread(row) }
         } else {
@@ -294,13 +296,9 @@ private struct Composer: View {
                     }
                 }
             HStack {
-                Text(verbatim: L(
-                    "inbox.reply_hint",
-                    String(row.root),
-                    store.state.person.map { "[senator::\($0)]" } ?? ""
-                ))
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                Text(verbatim: L("inbox.replying_as", store.state.person ?? "?", String(row.root)))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Spacer()
                 Button(L("inbox.send")) { Task { await store.sendReply(row) } }
                     .keyboardShortcut(.return, modifiers: .command)

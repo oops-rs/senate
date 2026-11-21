@@ -1,44 +1,104 @@
+import AppKit
 import SwiftUI
 import SenateCore
 
-/// A text with its bracketed ids set apart: `[senator::alice/claude]` is shown
-/// in a monospaced face and a colour for what it names, so it reads as an id
-/// in the middle of a Chinese or an English sentence. The brackets stay: they
-/// are part of the id's spelling and what a reader copies back into a tool.
-/// The core finds the mentions (`splitMentions`), never this view.
+/// A text with its mentions shown as names: `[senator::claude-a956…]` reads
+/// `senate-chair`, `[speaker::copilot]` reads `copilot (Speaker)`, in the
+/// font around it with a quiet tint for what it names. The id stays one
+/// step away: in the tooltip, in the context menu (Copy), and for VoiceOver.
+/// The core splits the text and names each mention for the committee the
+/// text belongs to (`\.mentionCommittee`); this view never resolves a name.
 struct MentionText: View {
     let text: String
+    @Environment(\.mentionCommittee) private var committee
 
     init(_ text: String) {
         self.text = text
     }
 
     var body: some View {
-        parts.reduce(Text(verbatim: "")) { sum, part in
+        let parts = Mentions.shared.parts(text, committee: committee)
+        let ids = parts.compactMap(\.id)
+        let line = parts.reduce(Text(verbatim: "")) { sum, part in
             Text("\(sum)\(piece(part))")
+        }
+        if ids.isEmpty {
+            line
+        } else {
+            line
+                .help(ids.map { "[\($0)]" }.joined(separator: "\n"))
+                .contextMenu {
+                    ForEach(ids, id: \.self) { id in
+                        Button(L("mention.copy", "[\(id)]")) { Mentions.copy(id) }
+                    }
+                }
+                .accessibilityCustomContent(Text(verbatim: L("a11y.ids")), Text(verbatim: ids.joined(separator: ", ")))
         }
     }
 
-    private var parts: [TextPart] { splitMentions(text: text) }
-
     private func piece(_ part: TextPart) -> Text {
         guard let kind = part.mention else { return Text(verbatim: part.text) }
-        // Monospaced in whatever font surrounds it, so it keeps the size of
-        // a caption or a title (and Dynamic Type).
-        return Text(verbatim: part.text)
-            .monospaced()
+        return Text(verbatim: part.display ?? part.text)
             .fontWeight(.medium)
             .foregroundStyle(MentionText.color(kind))
     }
 
     static func color(_ kind: MentionKind) -> Color {
         switch kind {
-        case .senior: .blue
-        case .junior, .anyAgent: .purple
+        case .senior: .primary
+        case .junior, .anyAgent: .indigo
         case .speaker, .speakerFor: .orange
         case .committee: .teal
-        case .guest: .gray
+        case .guest: .secondary
         }
+    }
+}
+
+extension EnvironmentValues {
+    /// The committee the texts below belong to: names are aliases there.
+    @Entry var mentionCommittee: String?
+}
+
+/// Split texts, kept until the core's names change (`mentionNamesVersion`):
+/// drawing a list of a thousand rows splits nothing twice.
+@Observable
+final class Mentions {
+    static let shared = Mentions()
+
+    /// Read by every `MentionText`, so they redraw when names change.
+    private(set) var version: UInt64 = 0
+    @ObservationIgnored private var cache: [Key: [TextPart]] = [:]
+
+    private struct Key: Hashable {
+        let text: String
+        let committee: String?
+    }
+
+    func parts(_ text: String, committee: String?) -> [TextPart] {
+        _ = version
+        let key = Key(text: text, committee: committee)
+        if let hit = cache[key] { return hit }
+        // Plain text needs no trip to the core.
+        let parts = text.contains("[")
+            ? splitMentions(text: text, committee: committee)
+            : [TextPart(text: text, mention: nil, display: nil, id: nil)]
+        if cache.count > 10_000 { cache.removeAll(keepingCapacity: true) }
+        cache[key] = parts
+        return parts
+    }
+
+    /// Called with each state: drop what was split under the old names.
+    func update() {
+        let now = mentionNamesVersion()
+        if now != version {
+            cache.removeAll(keepingCapacity: true)
+            version = now
+        }
+    }
+
+    static func copy(_ id: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString("[\(id)]", forType: .string)
     }
 }
 

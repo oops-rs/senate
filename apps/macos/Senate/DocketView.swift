@@ -45,6 +45,7 @@ struct DocketView: View {
                                 SeatsRow(seats: committee.seats)
                             }
                         }
+                        .environment(\.mentionCommittee, committee.committee)
                     }
                 }
             } else {

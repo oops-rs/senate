@@ -175,6 +175,7 @@ final class CoreStore {
     }
 
     private func apply(_ next: AppState) {
+        Mentions.shared.update()
         if next.lastError != state.lastError {
             actionError = nil
         }

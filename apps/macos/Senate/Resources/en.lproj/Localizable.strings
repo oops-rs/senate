@@ -30,7 +30,6 @@
 "inbox.take_help" = "Take the thread over: queued deliveries to the agent are cancelled";
 "inbox.close" = "Close";
 "inbox.send" = "Send";
-"inbox.reply_hint" = "Replies in #%1$@ as %2$@.";
 "inbox.close_title" = "Close “%@”?";
 "inbox.close_confirm" = "Close thread";
 "inbox.close_message" = "The thread is archived as you, for everyone on %@.";
@@ -89,3 +88,6 @@
 "a11y.offline" = "Offline";
 "a11y.dismiss" = "Dismiss";
 "a11y.unread" = "Unread";
+"inbox.replying_as" = "Replying as %1$@ in #%2$@";
+"mention.copy" = "Copy %@";
+"a11y.ids" = "IDs";

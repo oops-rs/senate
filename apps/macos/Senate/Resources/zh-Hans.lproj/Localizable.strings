@@ -30,7 +30,6 @@
 "inbox.take_help" = "接手这条线程：发给 agent 的排队投递会被取消";
 "inbox.close" = "关闭";
 "inbox.send" = "发送";
-"inbox.reply_hint" = "以 %2$@ 的身份回复 #%1$@。";
 "inbox.close_title" = "关闭“%@”？";
 "inbox.close_confirm" = "关闭线程";
 "inbox.close_message" = "线程会以你的名义归档，%@ 上的所有人都会看到。";
@@ -89,3 +88,6 @@
 "a11y.offline" = "离线";
 "a11y.dismiss" = "关闭";
 "a11y.unread" = "未读";
+"inbox.replying_as" = "以 %1$@ 的身份回复 #%2$@";
+"mention.copy" = "复制 %@";
+"a11y.ids" = "ID";
