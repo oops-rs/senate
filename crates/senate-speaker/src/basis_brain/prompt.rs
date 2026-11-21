@@ -355,7 +355,16 @@ fn answer_label(agent: &SenatorName) -> String {
     format!("[speaker::{agent}]")
 }
 
-pub(crate) fn answer(question: &Question) -> String {
+/// What the committee knows that bears on a question, as a prompt section.
+fn known_section(known: &str) -> String {
+    if known.is_empty() {
+        String::new()
+    } else {
+        format!("What the committee knows that may bear on it (its memory):\n{known}\n\n")
+    }
+}
+
+pub(crate) fn answer(question: &Question, known: &str) -> String {
     if let Some(takeover) = &question.takeover {
         return takeover_prompt(question, takeover);
     }
@@ -364,8 +373,9 @@ pub(crate) fn answer(question: &Question) -> String {
         "{agent} is offline or has not answered in time; you are to answer the question below \
          for it.\n\n\
          The question (seq {seq}, from {from}{behalf}):\n{body}\n\n\
-         Recent log:\n{context}\n\n\
-         Look for grounds with log_search / log_read first. Answer from the log only, citing seq; \
+         {known}Recent log:\n{context}\n\n\
+         Look for grounds in what the committee knows first (committee_memory), then with \
+         log_search / log_read. Answer from these only, citing seq; \
          when the log does not hold the answer, say plainly that you do not know, and that \
          {agent} will see the question when it is back online. \
          Your answer is posted as {label}, the Speaker answering for {agent}; give the answer \
@@ -376,6 +386,7 @@ pub(crate) fn answer(question: &Question) -> String {
         body = question.event.body,
         context = render_context(&question.context),
         label = answer_label(&question.agent),
+        known = known_section(known),
     )
 }
 
@@ -724,7 +735,8 @@ impl IntentWire {
 // ---- Agent mode -------------------------------------------------------
 
 /// The tools an agent-mode run may call, as the persona names them.
-const AGENT_TOOLS_SAID: &str = "log_read / log_search (the log), committee_brief (the brief: \
+const AGENT_TOOLS_SAID: &str = "committee_memory (what the committee knows, first), log_read / \
+     log_search (the log), committee_brief (the brief: \
      decisions, open questions, checkpoints, presence), committee_status (the bound groups, which \
      agents are online), presence (each agent's presence), tasks (task threads), checkpoint (one \
      agent's latest checkpoint)";
@@ -794,7 +806,7 @@ fn turn_speaker(speaker: &Address) -> String {
     }
 }
 
-pub(crate) fn converse(conversation: &Conversation, max_actions: usize) -> String {
+pub(crate) fn converse(conversation: &Conversation, max_actions: usize, known: &str) -> String {
     let utterance = &conversation.utterance;
     let earlier = if conversation.turns.is_empty() {
         "(this is the start of the conversation)".to_owned()
@@ -817,7 +829,7 @@ pub(crate) fn converse(conversation: &Conversation, max_actions: usize) -> Strin
          {binding}\n\n\
          {ROSTER_HEADING}\n{roster}\n\n\
          {SEATS_HEADING}\n{seats}\n\n\
-         Recent log:\n{context}\n\n\
+         {known}Recent log:\n{context}\n\n\
          Earlier in this thread (oldest first):\n{earlier}\n\n\
          {speaker} just said:\n\n{text}\n\n\
          Look things up with the tools first if you need to (they are read-only and change \
@@ -832,6 +844,7 @@ pub(crate) fn converse(conversation: &Conversation, max_actions: usize) -> Strin
         roster = render_roster(&utterance.roster),
         seats = render_seats(&utterance.seats),
         context = render_context_gone(&utterance.context, &utterance.gone_relays),
+        known = known_section(known),
     )
 }
 

@@ -17,7 +17,7 @@ use senate_core::{CommitteeId, Event, Hub, HubError, Seq};
 use serde_json::{Value, json};
 
 use super::prompt::render_event;
-use super::{LOG_READ, LOG_SEARCH};
+use super::{LOG_READ, LOG_SEARCH, MEMORY_SEARCH};
 use crate::engine::CURSOR;
 
 const DEFAULT_LIMIT: usize = 20;
@@ -189,6 +189,87 @@ impl ToolExecutor for LogSearch {
     }
 }
 
+pub(crate) struct MemorySearch {
+    hub: Arc<dyn Hub>,
+    committee: Option<CommitteeId>,
+}
+
+impl MemorySearch {
+    pub(crate) fn new(hub: Arc<dyn Hub>, committee: Option<CommitteeId>) -> Self {
+        Self { hub, committee }
+    }
+}
+
+impl ToolDefinition for MemorySearch {
+    fn descriptor(&self) -> RuntimeToolDescriptor {
+        descriptor(
+            MEMORY_SEARCH,
+            "Search what this committee knows: short points distilled from its discussion, each \
+             with the seqs it came from, newer ones replacing older. Look here first; use \
+             log_search for what is recent or not distilled yet.",
+            memory_search_schema(),
+        )
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for MemorySearch {
+    async fn execute(&self, _ctx: ParallelToolContext, input: Value) -> ToolResult {
+        let committee = committee_or_err(self.committee.as_ref())?;
+        let query = input.get("query").and_then(Value::as_str).unwrap_or("");
+        let hits = self
+            .hub
+            .memory_search(committee, query, limit(&input), false)
+            .await
+            .map_err(unavailable)?;
+        Ok(render_memory(&hits))
+    }
+}
+
+/// Memory points as lines a model can cite.
+pub(crate) fn render_memory(hits: &[senate_core::MemoryHit]) -> String {
+    if hits.is_empty() {
+        return "(nothing known about that)".to_owned();
+    }
+    hits.iter()
+        .map(|hit| {
+            let refs: Vec<String> = hit.point.refs.iter().map(ToString::to_string).collect();
+            let by = if hit.point.by_person() {
+                format!(", corrected by {}", hit.point.by.in_text())
+            } else {
+                String::new()
+            };
+            format!(
+                "- seq {} (from seq {}{by}): {}",
+                hit.point.seq,
+                refs.join(", "),
+                hit.point.text
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn memory_search_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Words to look for, in the language they were written in, e.g. \"release day\" or \"发布\". Empty for the newest points."
+            },
+            "limit": {
+                "type": ["integer", "null"],
+                "minimum": 1,
+                "maximum": MAX_LIMIT,
+                "description": "How many points, at most (null for 20)."
+            }
+        },
+        "required": ["query", "limit"],
+        "additionalProperties": false
+    })
+}
+
 fn log_read_schema() -> Value {
     json!({
         "type": "object",
@@ -243,7 +324,11 @@ mod tests {
     /// HTTP 400 before this held.
     #[test]
     fn every_property_is_required_for_strict_mode() {
-        for schema in [log_read_schema(), log_search_schema()] {
+        for schema in [
+            log_read_schema(),
+            log_search_schema(),
+            memory_search_schema(),
+        ] {
             let required: Vec<&str> = schema["required"]
                 .as_array()
                 .expect("required")

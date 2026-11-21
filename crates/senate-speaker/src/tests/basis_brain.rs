@@ -339,10 +339,18 @@ async fn interpret_returns_a_typed_intent_with_only_the_log_tools_in_reach() {
             .collect();
         assert_eq!(
             ordinary,
-            BTreeSet::from([LOG_READ.to_owned(), LOG_SEARCH.to_owned()]),
+            BTreeSet::from([
+                crate::basis_brain::MEMORY_SEARCH.to_owned(),
+                LOG_READ.to_owned(),
+                LOG_SEARCH.to_owned(),
+            ]),
             "offered {names:?}"
         );
-        assert_eq!(names.len(), 3, "the two log tools and the answering tool");
+        assert_eq!(
+            names.len(),
+            4,
+            "the memory, the two log tools and the answering tool"
+        );
         let system = request.system.as_deref().unwrap_or_default();
         assert!(
             system.contains("You are the Speaker"),
@@ -524,7 +532,11 @@ async fn answer_on_behalf_reads_the_log_and_returns_the_final_message() {
     let requests = fixture.model.requests();
     assert_eq!(
         tool_names(&requests[0]),
-        BTreeSet::from([LOG_READ.to_owned(), LOG_SEARCH.to_owned()])
+        BTreeSet::from([
+            crate::basis_brain::MEMORY_SEARCH.to_owned(),
+            LOG_READ.to_owned(),
+            LOG_SEARCH.to_owned(),
+        ])
     );
     let prompt = format!("{:?}", requests[0].messages);
     assert!(prompt.contains("[speaker::claude]"), "{prompt}");
@@ -1935,6 +1947,52 @@ async fn spot_agreement_reads_who_agreed_as_addresses_or_finds_none() {
     let prompt = format!("{:?}", spotted.model.requests()[0].messages);
     assert!(
         prompt.contains("Topics already proposed as decisions: release day"),
+        "{prompt}"
+    );
+}
+
+#[tokio::test]
+async fn an_answer_for_an_agent_looks_at_what_the_committee_knows_first() {
+    let fixture = fixture(vec![Round::Text("The release is on Monday (seq 3).")]).await;
+    fixture
+        .hub
+        .append(
+            NewEvent::new(
+                refund(),
+                Kind::Note,
+                Address::Speaker,
+                "The release is on Monday",
+            )
+            .with_meta(
+                meta::MEMORY,
+                senate_core::MemoryPayload::Point {
+                    refs: vec![Seq(2)],
+                    supersedes: vec![],
+                    digest: None,
+                }
+                .to_value(),
+            ),
+        )
+        .await
+        .expect("point");
+    let mut event = fixture.log[1].clone();
+    event.body = "When is the release?".into();
+    fixture
+        .brain
+        .answer_on_behalf(Question {
+            event,
+            agent: agent_path("alice"),
+            committee: refund(),
+            context: fixture.log.clone(),
+            takeover: None,
+            locale: Locale::En,
+        })
+        .await
+        .expect("an answer");
+    let prompt = format!("{:?}", fixture.model.requests()[0].messages);
+    assert!(
+        prompt.contains("What the committee knows that may bear on it (its memory):")
+            && prompt.contains("(from seq 2): The release is on Monday"),
         "{prompt}"
     );
 }

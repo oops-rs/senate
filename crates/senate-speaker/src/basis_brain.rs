@@ -120,11 +120,13 @@ use prompt::{
     AgentTurnWire, AgreementWire, CrossingWire, DigestWire, IntentWire, OfflineWire, PickWire,
     TriageWire,
 };
-use tools::{LogRead, LogSearch};
+use tools::{LogRead, LogSearch, MemorySearch};
 
 /// The two tool names the Speaker's model is offered.
 pub const LOG_READ: &str = "log_read";
 pub const LOG_SEARCH: &str = "log_search";
+/// The committee's memory ([`senate_core::memory`]), searched before the log.
+pub const MEMORY_SEARCH: &str = "committee_memory";
 /// The read-only tools an agent-mode (`converse`) run holds besides the log.
 pub const COMMITTEE_BRIEF: &str = "committee_brief";
 pub const COMMITTEE_STATUS: &str = "committee_status";
@@ -132,7 +134,8 @@ pub const PRESENCE: &str = "presence";
 pub const TASKS: &str = "tasks";
 pub const CHECKPOINT: &str = "checkpoint";
 /// Every tool a `converse` run is offered (and the answering tool).
-pub const AGENT_TOOLS: [&str; 7] = [
+pub const AGENT_TOOLS: [&str; 8] = [
+    MEMORY_SEARCH,
     LOG_READ,
     LOG_SEARCH,
     COMMITTEE_BRIEF,
@@ -143,6 +146,8 @@ pub const AGENT_TOOLS: [&str; 7] = [
 ];
 
 const UNBOUND_WORKSPACE: &str = "_unbound";
+/// Memory points looked up for a question or a conversation turn.
+const KNOWN_POINTS: usize = 5;
 /// Tool calls one run may make before it must answer.
 const TOOL_BUDGET: usize = 8;
 /// Tool calls one agent-mode turn may make: it may need the brief, a
@@ -294,7 +299,8 @@ impl BasisBrain {
                 self.persona(committee, settings.speaker.locale_of_opt(committee)),
             ))
             .with_shell(ShellAccess::Denied)
-            .with_tool_roster(ToolRoster::only([LOG_READ, LOG_SEARCH]))
+            .with_tool_roster(ToolRoster::only([MEMORY_SEARCH, LOG_READ, LOG_SEARCH]))
+            .with_tool(MemorySearch::new(Arc::clone(&self.hub), committee.cloned()))
             .with_tool(LogRead::new(Arc::clone(&self.hub), committee.cloned()))
             .with_tool(LogSearch::new(Arc::clone(&self.hub), committee.cloned()))
             .with_tool(CommitteeBrief::new(
@@ -323,6 +329,26 @@ impl BasisBrain {
             .or_default()
             .insert(connection, Arc::clone(&workspace));
         Ok(workspace)
+    }
+
+    /// What the committee knows that bears on `text`, looked up before the
+    /// run so memory always comes first; empty when unbound or unreadable.
+    async fn known(&self, committee: Option<&CommitteeId>, text: &str) -> String {
+        let Some(committee) = committee else {
+            return String::new();
+        };
+        match self
+            .hub
+            .memory_search(committee, text, KNOWN_POINTS, false)
+            .await
+        {
+            Ok(hits) if !hits.is_empty() => tools::render_memory(&hits),
+            Ok(_) => String::new(),
+            Err(error) => {
+                tracing::debug!(%committee, %error, "no memory for this run");
+                String::new()
+            }
+        }
     }
 
     /// The persona of every run but `converse`, with this committee's extra
@@ -521,9 +547,10 @@ impl BasisBrain {
         let takeover = question.takeover.is_some();
         let committee = Some(&question.committee);
         let workspace = self.workspace(committee, model).await?;
+        let known = self.known(committee, &question.event.body).await;
         let spec = self
             .bounded(
-                RunSpec::new(prompt::answer(question)),
+                RunSpec::new(prompt::answer(question, &known)),
                 "speaker-answer",
                 committee,
                 model,
@@ -653,6 +680,9 @@ impl BasisBrain {
         let settings = self.settings(committee.as_ref());
         let max_actions = settings.speaker.agent_max_actions;
         let workspace = self.workspace(committee.as_ref(), model).await?;
+        let known = self
+            .known(committee.as_ref(), &conversation.utterance.text)
+            .await;
         let profile = RunProfile::new()
             .with_tool_roster(ToolRoster::only(AGENT_TOOLS))
             .with_system_prompt(SystemPrompt::Replace(prompt::with_instructions(
@@ -678,7 +708,7 @@ impl BasisBrain {
             .map_err(|e| BrainError::Unavailable(e.to_string()))?;
         let output = run
             .output::<AgentTurnWire, _, _>(
-                prompt::converse(conversation, max_actions),
+                prompt::converse(conversation, max_actions, &known),
                 prompt::agent_turn_spec(max_actions, conversation.utterance.work),
                 NullSink,
                 AllowAll,
