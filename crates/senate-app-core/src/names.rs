@@ -1,7 +1,7 @@
 //! How people are shown a mention: a name, not an id. `[senator::claude-…]`
 //! with the alias `senate-chair` on its committee is `senate-chair`,
 //! `[senator::alice]` is `alice`, `[speaker::copilot]` is `copilot
-//! (Speaker)`, a seat in a child Senate is `senate-dev（dark-conclave）`.
+//! (Speaker)`, a seat in a child Senate is `refund-dev（carol-desk）`.
 //! The same rules as the Speaker's own rendering (`senate-speaker`'s
 //! `SeatNames`): an alias on the committee where it is shown, the alias a
 //! child declares for its seat, else the id's name.
@@ -148,8 +148,8 @@ impl Names {
     }
 }
 
-/// A seat in a child Senate as people are shown it: `senate-dev
-/// (dark-conclave)` / `senate-dev（dark-conclave）`.
+/// A seat in a child Senate as people are shown it: `refund-dev
+/// (carol-desk)` / `refund-dev（carol-desk）`.
 pub fn seat_name(l: Locale, name: &str, child: &str) -> String {
     role(l, name, child)
 }
@@ -217,12 +217,12 @@ mod tests {
                 seats: vec![ChildSeat {
                     committee: committee("senate"),
                     senator: "claude-c222".parse().unwrap(),
-                    alias: Some("senate-dev".parse().unwrap()),
+                    alias: Some("refund-dev".parse().unwrap()),
                     duty: None,
                     presence: PresenceState::Online,
                 }],
                 ..ChildSenate::new(
-                    Name::new("dark-conclave").unwrap(),
+                    Name::new("carol-desk").unwrap(),
                     "claude-d333".parse().unwrap(),
                 )
             }],
@@ -263,13 +263,13 @@ mod tests {
         assert_eq!(shown(&n, "[speaker]", None), "Speaker");
         assert_eq!(shown(&n, "[senator::*]", None), "any agent");
         assert_eq!(
-            shown(&n, "[/dark-conclave::senate::senator::claude-c222]", None),
-            "senate-dev (dark-conclave)"
+            shown(&n, "[/carol-desk::senate::senator::claude-c222]", None),
+            "refund-dev (carol-desk)"
         );
         let zh = names(Locale::Zh);
         assert_eq!(
-            shown(&zh, "[/dark-conclave::senate::senator::claude-c222]", None),
-            "senate-dev（dark-conclave）"
+            shown(&zh, "[/carol-desk::senate::senator::claude-c222]", None),
+            "refund-dev（carol-desk）"
         );
         assert_eq!(
             shown(&zh, "[speaker::claude-b111]", Some("senate")),

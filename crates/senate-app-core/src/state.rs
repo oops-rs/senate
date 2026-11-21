@@ -156,7 +156,7 @@ pub struct SenateInfo {
     /// The Senates registered below this one.
     pub children: Vec<ChildLine>,
     /// This Senate's registration with the Senate above, when it has one:
-    /// `registered as dark-conclave with https://…`.
+    /// `registered as carol-desk with https://…`.
     pub uplink: Option<String>,
 }
 
@@ -184,7 +184,7 @@ pub struct ChildLine {
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct ChildSeatLine {
     pub committee: String,
-    /// As people are shown it: `senate-dev（dark-conclave）`.
+    /// As people are shown it: `refund-dev（carol-desk）`.
     pub name: String,
     /// Its id in the child.
     pub senator: String,

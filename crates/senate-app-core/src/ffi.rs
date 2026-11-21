@@ -735,7 +735,7 @@ mod tests {
         assert_eq!(split_mentions(String::new(), None), Vec::new());
         let kinds: Vec<_> = split_mentions(
             "[senator::alice] [senator::*] [speaker::claude] [committee] [guest::chat/u1] \
-             [ibot::senator::codex]"
+             [ledger::senator::codex]"
                 .into(),
             None,
         )

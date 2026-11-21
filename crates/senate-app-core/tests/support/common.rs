@@ -94,7 +94,7 @@ pub fn status(sessions: Vec<Session>) -> StatusReply {
 }
 
 /// The Senate's roles: `claude` chairs refund-v2, and one child Senate,
-/// `dark-conclave`, declares its `senate-dev` seat there; this Senate is
+/// `carol-desk`, declares its `refund-dev` seat there; this Senate is
 /// registered with the one above.
 pub fn roles() -> senate_bridge::ipc::RolesReply {
     use senate_bridge::ipc::{Registration, RolesReply, UplinkStatus};
@@ -112,12 +112,12 @@ pub fn roles() -> senate_bridge::ipc::RolesReply {
             seats: vec![ChildSeat {
                 committee: committee(),
                 senator: path("claude-c222"),
-                alias: Some(path("senate-dev")),
+                alias: Some(path("refund-dev")),
                 duty: Some("reviews refunds".into()),
                 presence: PresenceState::Online,
             }],
             last_seen: Some(Utc::now()),
-            ..ChildSenate::new(Name::new("dark-conclave").unwrap(), path("claude-d333"))
+            ..ChildSenate::new(Name::new("carol-desk").unwrap(), path("claude-d333"))
         }],
         uplink: Some(UplinkStatus {
             url: "https://senate.example".into(),
@@ -190,7 +190,7 @@ fn session(id: &str, runtime: Runtime, agent: &str) -> Session {
         agent_source: AgentSource::Harness,
         cwd: "/Users/alice/dev/refund".into(),
         git_root: Some("/Users/alice/dev/refund".into()),
-        branch: Some("feature/refund-v2/alice".into()),
+        branch: Some("senate/refund-v2/alice".into()),
         inferred_committee: Some(committee()),
         committee_source: None,
         joined_committee: None,
@@ -279,7 +279,7 @@ pub fn docket() -> DocketReply {
                         seq: Seq(31),
                         ts: Utc::now(),
                         summary: "lint config moved to the repo root".into(),
-                        branch: "feature/refund-v2/alice".into(),
+                        branch: "senate/refund-v2/alice".into(),
                     }),
                     open_threads: 1,
                     duty: None,

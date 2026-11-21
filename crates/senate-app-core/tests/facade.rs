@@ -293,9 +293,9 @@ async fn the_senate_shows_its_chairs_children_and_uplink() {
     assert_eq!(senate.chairs[0].committee, "refund-v2");
     assert_eq!(senate.chairs[0].chair.as_deref(), Some("[senator::claude]"));
     let child = &senate.children[0];
-    assert_eq!(child.name, "dark-conclave");
+    assert_eq!(child.name, "carol-desk");
     assert!(child.online);
-    assert_eq!(child.seats[0].name, "senate-dev (dark-conclave)");
+    assert_eq!(child.seats[0].name, "refund-dev (carol-desk)");
     assert_eq!(child.seats[0].duty.as_deref(), Some("reviews refunds"));
     assert_eq!(
         senate.uplink.as_deref(),

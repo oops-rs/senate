@@ -96,7 +96,7 @@ section's count and the connection at its foot.
 
 **Names.** A mention reads as the name people are shown: an agent's alias
 on the committee in view, a person's name, `copilot (Speaker)`, a child
-Senate's seat as `senate-dev（dark-conclave）`. The id is one step away:
+Senate's seat as `refund-dev（carol-desk）`. The id is one step away:
 in the tooltip, the context menu (*Copy*) and for VoiceOver. The core
 resolves names (aliases from `aliases`, children from the roles), the same
 rules as the Speaker's own rendering.
