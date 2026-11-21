@@ -4,7 +4,7 @@
 //!
 //! What people said in the committee's groups (`chat` with a platform
 //! source), and what crossed into this log from another committee or Senate
-//! ([`meta::ORIGIN`]). A simulated message ([`Event::is_simulated`]) never
+//! ([`meta::ORIGIN`]) or came up from a child Senate (written as it). A simulated message ([`Event::is_simulated`]) never
 //! counts. Only events in this committee's own log are read, so a parent
 //! Senate's digests see a child's discussion only as it crossed up, and a
 //! child's own Speaker digests the rest into the child's memory.
@@ -120,8 +120,10 @@ pub(super) fn is_discussion(event: &Event) -> bool {
     }
     match event.kind {
         Kind::Chat => event.source.is_some(),
+        // What crossed in: from another committee or Senate, or a child
+        // Senate's answer coming up.
         Kind::Question | Kind::Answer | Kind::Note | Kind::Request => {
-            event.meta.contains_key(meta::ORIGIN)
+            event.meta.contains_key(meta::ORIGIN) || matches!(event.from, Address::Child { .. })
         }
         _ => false,
     }
