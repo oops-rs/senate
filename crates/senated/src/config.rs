@@ -28,7 +28,7 @@
 //! model = "claude-sonnet-4-5"
 //! api_key_env = "ANTHROPIC_API_KEY"   # the variable's NAME, never the key
 //! deadline_secs = 45
-//! triage_deadline_secs = 5
+//! triage_deadline_secs = 30
 //! token_budget = 80000
 //! ```
 //!

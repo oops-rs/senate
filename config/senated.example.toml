@@ -143,7 +143,7 @@ token_sha256 = "5b88a3d16b92cd96dd5a2cf692e1c84fc3df64bbc2a56df44877f33b980b60ea
 # # base_url = "http://model-gateway.internal:8080"
 # # wire = "responses"   # only with base_url: the gateway serves OpenAI's v1/responses (default "chat_completions")
 # deadline_secs = 45
-# triage_deadline_secs = 5
+# triage_deadline_secs = 30
 # token_budget = 80000
 
 # ---------------------------------------------------------------------------
@@ -189,7 +189,7 @@ token_sha256 = "5b88a3d16b92cd96dd5a2cf692e1c84fc3df64bbc2a56df44877f33b980b60ea
 # brief_top_debounce_secs = 30
 # # Triage of each question or request to an agent gets this long; past it
 # # the verdict is "unsure" and the agent asks its person first.
-# triage_deadline_secs = 5
+# triage_deadline_secs = 30
 # # Task-card updates are coalesced over this window; the final state lands.
 # card_debounce_ms = 2000
 # # Bounds on each model run.

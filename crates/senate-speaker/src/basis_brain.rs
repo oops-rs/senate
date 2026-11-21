@@ -389,10 +389,24 @@ impl BasisBrain {
         locale: Locale,
         model: &ModelSettings,
     ) -> RunSpec {
+        let triage = self.bounds(Some(committee), model).triage;
+        self.quick_within_deadline(name, committee, locale, model, triage)
+    }
+
+    /// [`quick`](Self::quick) bounded by `deadline` instead of the triage
+    /// deadline: the model check measures how long a quick call takes.
+    fn quick_within_deadline(
+        &self,
+        name: &str,
+        committee: &CommitteeId,
+        locale: Locale,
+        model: &ModelSettings,
+        deadline: Duration,
+    ) -> RunSpec {
         let bounds = self.bounds(Some(committee), model);
         RunSpec::default()
             .with_session_name(name)
-            .with_deadline(bounds.triage)
+            .with_deadline(deadline)
             .with_tool_budget(1)
             .with_token_budget(bounds.tokens)
             .with_profile(self.speaking(Some(committee), locale))
@@ -654,8 +668,25 @@ impl BasisBrain {
         model: &ModelSettings,
         input: &TriageInput,
     ) -> Result<TriagePayload, BrainError> {
+        let triage = self.bounds(Some(&input.committee), model).triage;
+        self.triage_within(model, input, triage).await
+    }
+
+    /// [`triage_on`](Self::triage_on) bounded by `deadline`.
+    pub(crate) async fn triage_within(
+        &self,
+        model: &ModelSettings,
+        input: &TriageInput,
+        deadline: Duration,
+    ) -> Result<TriagePayload, BrainError> {
         let workspace = self.workspace(Some(&input.committee), model).await?;
-        let spec = self.quick("speaker-triage", &input.committee, input.locale, model);
+        let spec = self.quick_within_deadline(
+            "speaker-triage",
+            &input.committee,
+            input.locale,
+            model,
+            deadline,
+        );
         let mut run = workspace
             .prepare(spec)
             .map_err(|e| BrainError::Unavailable(e.to_string()))?;
@@ -723,8 +754,25 @@ impl BasisBrain {
         model: &ModelSettings,
         input: &PickInput,
     ) -> Result<Pick, BrainError> {
+        let triage = self.bounds(Some(&input.committee), model).triage;
+        self.pick_within(model, input, triage).await
+    }
+
+    /// [`pick_on`](Self::pick_on) bounded by `deadline`.
+    pub(crate) async fn pick_within(
+        &self,
+        model: &ModelSettings,
+        input: &PickInput,
+        deadline: Duration,
+    ) -> Result<Pick, BrainError> {
         let workspace = self.workspace(Some(&input.committee), model).await?;
-        let spec = self.quick("speaker-pick", &input.committee, input.locale, model);
+        let spec = self.quick_within_deadline(
+            "speaker-pick",
+            &input.committee,
+            input.locale,
+            model,
+            deadline,
+        );
         let mut run = workspace
             .prepare(spec)
             .map_err(|e| BrainError::Unavailable(e.to_string()))?;

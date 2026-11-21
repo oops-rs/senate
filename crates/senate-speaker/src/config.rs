@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 /// brain_deadline_secs = 45          # wall-clock bound on one Brain run (the Speaker gives up 15 s later)
 /// brain_token_budget = 80000        # token bound on one Brain run
 /// brief_top_debounce_secs = 30      # wait after a decision before rewriting the brief's top
-/// triage_deadline_secs = 5          # wall-clock bound on one triage call (then: unsure)
+/// triage_deadline_secs = 30         # wall-clock bound on one triage or pick call (then: unsure)
 /// card_debounce_ms = 2000           # at most one in-place update per card per this long
 /// takeover_stale_hours = 24         # a checkpoint older than this is not answered from (escalated)
 /// mode = "intent"                   # "agent": multi-step conversations with tools (agent mode)
@@ -254,8 +254,14 @@ fn default_takeover_stale_hours() -> u64 {
     24
 }
 
+/// 30 s: hosted models answer a triage or pick in about 7–11 s
+/// (measured against a hosted model in a live run), and the bound should
+/// hold about 2.5× the slowest call. A committee waits on a root's triage
+/// no longer than this, and a model that is down still fails at once, so
+/// the cost of a long bound is paid only by a model that hangs.
+/// `senated check-model` measures it and suggests a value.
 fn default_triage_deadline_secs() -> u64 {
-    5
+    30
 }
 
 fn default_card_debounce_ms() -> u64 {
@@ -379,7 +385,7 @@ mod tests {
         assert_eq!(config.answer_fallback(), Duration::from_secs(60));
         assert_eq!(config.confirmation_ttl(), Duration::from_secs(600));
         assert_eq!(config.brief_top_debounce(), Duration::from_secs(30));
-        assert_eq!(config.triage_deadline(), Duration::from_secs(5));
+        assert_eq!(config.triage_deadline(), Duration::from_secs(30));
         assert_eq!(config.card_debounce(), Duration::from_millis(2_000));
         assert_eq!(config.takeover_stale(), Duration::from_secs(24 * 3_600));
         assert_eq!(

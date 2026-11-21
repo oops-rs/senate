@@ -17,13 +17,19 @@
 //!   ([`interpret`](crate::Brain::interpret), [`triage`](crate::Brain::triage),
 //!   [`pick_agent`](crate::Brain::pick_agent)) on canned inputs, through the
 //!   same code the Speaker runs, so their schemas and parsing are what is
-//!   checked.
+//!   checked. They are measured under the longer of their own deadline
+//!   and [`PROBE_DEADLINE`], so a slow model's real time is known: one
+//!   slower than `triage_deadline_secs` fails, and when that deadline is
+//!   below about twice the slowest of them the report suggests another
+//!   ([`TierReport::suggested_triage_deadline_secs`]).
 //!
 //! The result is data ([`ModelReport`], serde-able): `senated check-model`
 //! prints it and exits non-zero on a failure, the daemon logs it once at
 //! start, and `senated doctor` reads it.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use tokio::time::Instant;
 
 use basis::async_trait;
 use basis::tools::{
@@ -73,12 +79,54 @@ pub struct TierReport {
     pub base_url: Option<String>,
     pub wire: Option<String>,
     pub checks: Vec<CheckResult>,
+    /// The deadline triage and pick run under on this model, in seconds.
+    #[serde(default)]
+    pub triage_deadline_secs: Option<u64>,
+    /// A `triage_deadline_secs` to set instead: present when the one in
+    /// force is below about twice the slowest triage or pick measured.
+    #[serde(default)]
+    pub suggested_triage_deadline_secs: Option<u64>,
 }
 
 impl TierReport {
     pub fn passed(&self) -> bool {
         self.checks.iter().all(|c| c.passed)
     }
+
+    /// The slowest of the quick checks (triage, pick), in milliseconds.
+    pub fn slowest_quick_millis(&self) -> Option<u64> {
+        self.checks
+            .iter()
+            .filter(|c| QUICK_CHECKS.contains(&c.check.as_str()))
+            .map(|c| c.millis)
+            .max()
+    }
+
+    /// The warning for a deadline too tight for this model, if any.
+    pub fn warning(&self) -> Option<String> {
+        let suggested = self.suggested_triage_deadline_secs?;
+        let configured = self.triage_deadline_secs?;
+        let slowest = self.slowest_quick_millis()?;
+        Some(format!(
+            "{}: triage_deadline_secs = {configured} is below 2x the slowest triage/pick call \
+             ({:.1} s); set triage_deadline_secs = {suggested}",
+            self.tier,
+            slowest as f64 / 1000.0
+        ))
+    }
+}
+
+/// The checks bounded by `triage_deadline_secs`.
+const QUICK_CHECKS: [&str; 2] = ["triage", "pick"];
+
+/// The `triage_deadline_secs` to suggest when `configured` is below twice
+/// the slowest quick call: 2.5x it, rounded up to a multiple of 5 s.
+pub fn suggest_triage_deadline(configured_secs: u64, slowest_millis: u64) -> Option<u64> {
+    if slowest_millis.saturating_mul(2) <= configured_secs.saturating_mul(1000) {
+        return None;
+    }
+    let secs = slowest_millis.saturating_mul(5).div_ceil(2000);
+    Some(secs.div_ceil(5).saturating_mul(5).max(5))
 }
 
 /// The self-check of the model a committee (or the Senate as a whole) runs
@@ -97,6 +145,11 @@ impl ModelReport {
         self.problem.is_none()
             && !self.tiers.is_empty()
             && self.tiers.iter().all(TierReport::passed)
+    }
+
+    /// Deadlines too tight for the model measured, one line each.
+    pub fn warnings(&self) -> Vec<String> {
+        self.tiers.iter().filter_map(TierReport::warning).collect()
     }
 
     /// The failed checks, as `tier/check: reason` lines.
@@ -137,6 +190,9 @@ impl ModelReport {
                     check.reason,
                     check.millis
                 ));
+            }
+            if let Some(warning) = tier.warning() {
+                out.push_str(&format!("  warn  {warning}\n"));
             }
         }
         out
@@ -181,14 +237,23 @@ impl BasisBrain {
         let quick = committee.cloned().unwrap_or_else(|| {
             CommitteeId::new(PROBE_COMMITTEE).unwrap_or_else(|_| unreachable!("a valid id"))
         });
+        let deadline = self.bounds(Some(&quick), model).triage;
+        // Measured past the deadline, so a slow model's time is known.
+        let measure = deadline.max(PROBE_DEADLINE);
         let (round_trip, terminal, intent, triage, pick) = tokio::join!(
             timed(
                 "tool_round_trip",
+                PROBE_DEADLINE,
                 Box::pin(self.round_trip(committee, model))
             ),
-            timed("terminal_tool", Box::pin(self.terminal(committee, model))),
+            timed(
+                "terminal_tool",
+                PROBE_DEADLINE,
+                Box::pin(self.terminal(committee, model))
+            ),
             timed(
                 "intent",
+                PROBE_DEADLINE,
                 Box::pin(async {
                     self.interpret_on(model, &probe_utterance(committee))
                         .await
@@ -197,22 +262,29 @@ impl BasisBrain {
             ),
             timed(
                 "triage",
+                measure,
                 Box::pin(async {
-                    self.triage_on(model, &probe_triage(&quick))
+                    self.triage_within(model, &probe_triage(&quick), measure)
                         .await
                         .map(|t| format!("{:?}", t.verdict))
                 })
             ),
             timed(
                 "pick",
+                measure,
                 Box::pin(async {
-                    self.pick_on(model, &probe_pick(&quick))
+                    self.pick_within(model, &probe_pick(&quick), measure)
                         .await
                         .map(|p| format!("{p:?}"))
                 })
             ),
         );
+        let (triage, pick) = (within(triage, deadline), within(pick, deadline));
+        let deadline_secs = deadline.as_secs();
+        let slowest = triage.millis.max(pick.millis);
         TierReport {
+            triage_deadline_secs: Some(deadline_secs),
+            suggested_triage_deadline_secs: suggest_triage_deadline(deadline_secs, slowest),
             tier: label.replace("-retry", ""),
             provider: model.provider.clone(),
             model: model.model.clone(),
@@ -321,16 +393,34 @@ struct ReadyWire {
     ready: bool,
 }
 
-/// `name`'s result, timed, bounded by [`PROBE_DEADLINE`] (the quick turns
-/// carry their own, tighter, triage deadline).
-async fn timed(name: &str, check: impl Future<Output = Result<String, BrainError>>) -> CheckResult {
+/// A quick check that answered, but later than the Speaker would wait:
+/// failed, saying how late.
+fn within(mut check: CheckResult, deadline: Duration) -> CheckResult {
+    if check.passed && u128::from(check.millis) > deadline.as_millis() {
+        check.passed = false;
+        check.reason = format!(
+            "answered ({}) in {:.1} s, after triage_deadline_secs = {}",
+            check.reason,
+            check.millis as f64 / 1000.0,
+            deadline.as_secs()
+        );
+    }
+    check
+}
+
+/// `name`'s result, timed, bounded by `bound`.
+async fn timed(
+    name: &str,
+    bound: Duration,
+    check: impl Future<Output = Result<String, BrainError>>,
+) -> CheckResult {
     let started = Instant::now();
-    let result = tokio::time::timeout(PROBE_DEADLINE, check)
+    let result = tokio::time::timeout(bound, check)
         .await
         .unwrap_or_else(|_| {
             Err(BrainError::Unavailable(format!(
                 "no result within {} s",
-                PROBE_DEADLINE.as_secs()
+                bound.as_secs()
             )))
         });
     let millis = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);

@@ -264,7 +264,8 @@ async fn a_slow_triage_is_given_up_on_after_its_deadline() {
     rig.settle().await;
     let elapsed = started.elapsed();
     assert!(
-        elapsed >= Duration::from_secs(5) && elapsed < Duration::from_secs(10),
+        // The default triage deadline: 30 s.
+        elapsed >= Duration::from_secs(30) && elapsed < Duration::from_secs(35),
         "{elapsed:?}"
     );
     let notes = verdicts(&rig.hub.events(&refund()), asked.seq);

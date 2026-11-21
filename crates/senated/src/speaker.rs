@@ -129,7 +129,11 @@ pub(crate) async fn log_model_check(brain: BasisBrain) {
             models = report.tiers.len(),
             "the Speaker's model passed its self-check"
         );
-    } else {
+    }
+    for warning in report.warnings() {
+        tracing::warn!(%warning, "the Speaker's model is slower than its triage deadline allows");
+    }
+    if report.problem.is_none() && !report.passed() {
         for failure in report.failures() {
             tracing::error!(%failure, "the Speaker's model failed its self-check");
         }

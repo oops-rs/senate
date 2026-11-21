@@ -37,6 +37,8 @@ enum Behaviour {
     SkipsTerminal,
     /// Every request fails.
     Down,
+    /// Does everything, but takes this many seconds over a triage or pick.
+    Slow(u64),
 }
 
 const REJECTED: &str = "Invalid 'messages[2].tool_call_id': expected an ID that begins with 'fc'";
@@ -88,6 +90,16 @@ impl Provider for Scripted {
                 return Err(ProviderError::InvalidRequest(REJECTED.into()));
             }
             _ => {}
+        }
+        if let Behaviour::Slow(secs) = self.behaviour
+            && request.tools.iter().any(|t| {
+                matches!(
+                    t.description.as_deref(),
+                    Some(TRIAGE_DESCRIPTION | PICK_DESCRIPTION)
+                )
+            })
+        {
+            tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
         }
         let terminal = request.tools.iter().find_map(|tool| {
             let payload = match tool.description.as_deref()? {
@@ -383,4 +395,84 @@ async fn when_every_tier_fails_the_last_error_comes_back() {
 
 fn rig_alone() -> Rig {
     rig(Behaviour::Down, None)
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_deadline_below_twice_the_measured_quick_call_is_warned_with_a_value() {
+    // 6 s a call against the rig's 10 s: it passes, but too close.
+    let rig = rig(Behaviour::Slow(6), None);
+    let report = rig.brain.check_model(None).await;
+    assert!(report.passed(), "{}", report.render());
+    let tier = &report.tiers[0];
+    assert_eq!(tier.triage_deadline_secs, Some(10));
+    assert!(tier.slowest_quick_millis().is_some_and(|ms| ms >= 6_000));
+    assert_eq!(tier.suggested_triage_deadline_secs, Some(15));
+    let warnings = report.warnings();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0].contains("set triage_deadline_secs = 15"),
+        "{}",
+        warnings[0]
+    );
+    assert!(
+        report
+            .render()
+            .contains("  warn  primary: triage_deadline_secs = 10")
+    );
+    // The fields are added, and read back.
+    let value: Value = serde_json::to_value(&report).expect("json");
+    assert_eq!(
+        value["tiers"][0]["suggested_triage_deadline_secs"],
+        json!(15)
+    );
+    let back: crate::ModelReport = serde_json::from_value(value).expect("reads");
+    assert_eq!(back, report);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_quick_call_slower_than_its_deadline_fails_with_its_real_time() {
+    let rig = rig(Behaviour::Slow(12), None);
+    let report = rig.brain.check_model(None).await;
+    for name in ["triage", "pick"] {
+        let c = check(&report, "primary", name);
+        assert!(!c.passed, "{name} passed");
+        assert!(
+            c.reason.contains("after triage_deadline_secs = 10"),
+            "{name}: {}",
+            c.reason
+        );
+        assert!(c.millis >= 12_000, "{name}: {} ms", c.millis);
+    }
+    assert!(check(&report, "primary", "intent").passed);
+    assert_eq!(report.tiers[0].suggested_triage_deadline_secs, Some(30));
+}
+
+#[tokio::test]
+async fn a_fast_model_gets_no_warning() {
+    let report = rig(Behaviour::Good, None).brain.check_model(None).await;
+    assert_eq!(report.tiers[0].suggested_triage_deadline_secs, None);
+    assert!(report.warnings().is_empty());
+    assert!(!report.render().contains("warn"));
+}
+
+#[test]
+fn the_suggestion_is_two_and_a_half_times_the_slowest_rounded_up_to_five() {
+    use crate::basis_brain::probe::suggest_triage_deadline;
+    assert_eq!(
+        suggest_triage_deadline(5, 11_000),
+        Some(30),
+        "an 11 s model on 5 s"
+    );
+    assert_eq!(
+        suggest_triage_deadline(30, 11_000),
+        None,
+        "the new default holds it"
+    );
+    assert_eq!(
+        suggest_triage_deadline(10, 5_000),
+        None,
+        "exactly 2x is enough"
+    );
+    assert_eq!(suggest_triage_deadline(10, 5_001), Some(15));
+    assert_eq!(suggest_triage_deadline(1, 600), Some(5));
 }
