@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use async_trait::async_trait;
 use ractor::ActorRef;
 use senate_core::{ChatSurface, CommitteeId, PostTarget, Posted, SurfaceError};
-use senate_speaker::{SecretaryConfigs, Speaker, SpeakerArgs, SpeakerMsg};
+use senate_speaker::{BasisBrain, ModelReport, SecretaryConfigs, Speaker, SpeakerArgs, SpeakerMsg};
 
 use crate::component::{Component, ComponentContext};
 
@@ -100,4 +100,103 @@ impl Component for SpeakerComponent {
 /// only the name of its variable and whether it is set.
 pub fn secretary_show(secretary: &SecretaryConfigs, committee: Option<&CommitteeId>) -> String {
     secretary.explain(committee).render(secretary.locale())
+}
+
+/// What `senated check-model` (and `senated doctor`) reads: the self-check
+/// of every model the built-in session runs on for `committee` (`None`:
+/// the Senate as a whole), on the Brain's own code paths
+/// ([`BasisBrain::check_model`]). It reads no log; it never fails, what goes
+/// wrong is in the report.
+pub async fn check_model(
+    secretary: Arc<SecretaryConfigs>,
+    committee: Option<&CommitteeId>,
+) -> ModelReport {
+    BasisBrain::for_probe(secretary, crate::empty_hub::empty())
+        .check_model(committee)
+        .await
+}
+
+/// Log the self-check of a running built-in session's model, once: loudly
+/// when a check fails. The daemon keeps running either way; the fixed
+/// syntax works without a model.
+pub(crate) async fn log_model_check(brain: BasisBrain) {
+    let report = brain.check_model(None).await;
+    if let Some(problem) = &report.problem {
+        // Said where the configuration is read; nothing to probe.
+        tracing::warn!(%problem, "the Speaker's model was not self-checked");
+    } else if report.passed() {
+        tracing::info!(
+            models = report.tiers.len(),
+            "the Speaker's model passed its self-check"
+        );
+    } else {
+        for failure in report.failures() {
+            tracing::error!(%failure, "the Speaker's model failed its self-check");
+        }
+        tracing::error!(
+            "the Speaker's model failed its self-check; people get the fixed syntax until it \
+             works. Run `senated check-model` for the report:\n{}",
+            report.render()
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use senate_core::Locale;
+    use senate_speaker::{BaseLayer, ModelSettings, SecretaryConfigs};
+
+    /// No model: nothing is probed, and the report says why.
+    #[tokio::test]
+    async fn without_a_model_the_check_fails_with_the_reason() {
+        let dir = tempfile::tempdir().expect("dir");
+        let secretary = Arc::new(SecretaryConfigs::new(
+            None,
+            BaseLayer::new(dir.path(), Locale::En),
+        ));
+        let report = super::check_model(secretary, None).await;
+        assert!(!report.passed());
+        assert!(report.tiers.is_empty());
+        assert!(
+            report.render().contains("no usable model"),
+            "{}",
+            report.render()
+        );
+    }
+
+    /// An endpoint nobody listens on: every check fails with basis's own
+    /// reason, on the primary and on the fallback, each reported apart.
+    #[tokio::test]
+    async fn an_unreachable_endpoint_fails_every_check_with_its_reason() {
+        let dir = tempfile::tempdir().expect("dir");
+        let unreachable = |model: &str| ModelSettings {
+            base_url: Some("http://127.0.0.1:9/v1".into()),
+            model: Some(model.into()),
+            deadline_secs: Some(5),
+            triage_deadline_secs: Some(5),
+            ..ModelSettings::default()
+        };
+        let model = ModelSettings {
+            fallback: Some(Box::new(unreachable("backup"))),
+            ..unreachable("primary")
+        };
+        let secretary = Arc::new(SecretaryConfigs::new(
+            None,
+            BaseLayer::new(dir.path(), Locale::En).with_model(model),
+        ));
+        let report = super::check_model(secretary, None).await;
+        assert!(!report.passed());
+        let tiers: Vec<&str> = report.tiers.iter().map(|t| t.tier.as_str()).collect();
+        assert_eq!(tiers, ["primary", "fallback"]);
+        for tier in &report.tiers {
+            assert_eq!(tier.checks.len(), 5);
+            for check in &tier.checks {
+                assert!(!check.passed, "{}", report.render());
+                assert!(!check.reason.is_empty());
+            }
+        }
+        assert_eq!(report.failures().len(), 10);
+    }
 }

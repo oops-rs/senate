@@ -374,6 +374,11 @@ impl Assembly {
                 }
             };
             let brain = brain.unwrap_or_else(|| {
+                // Once at start, off the critical path: logged, never fatal.
+                tokio::spawn(crate::speaker::log_model_check(BasisBrain::for_probe(
+                    secretary.clone(),
+                    hub.clone(),
+                )));
                 Arc::new(BasisBrain::on_secretary(secretary.clone(), hub.clone())) as Arc<dyn Brain>
             });
             let mut args = SpeakerArgs::new(hub.clone(), surface, brain, speaker_config, unbound)

@@ -182,6 +182,22 @@ impl BasisBrain {
     /// ([`basis_runtime`]), with durable history under
     /// `<data_dir>/speaker/history`.
     pub fn on_secretary(secretary: Arc<SecretaryConfigs>, hub: Arc<dyn Hub>) -> Self {
+        Self::on_secretary_with(secretary, hub, None)
+    }
+
+    /// The production Brain for [`check_model`](Self::check_model) alone:
+    /// no provider retries, so a check fails with the provider's own reason
+    /// (a refused connection, a rejected request) rather than a deadline
+    /// spent retrying it.
+    pub fn for_probe(secretary: Arc<SecretaryConfigs>, hub: Arc<dyn Hub>) -> Self {
+        Self::on_secretary_with(secretary, hub, Some(0))
+    }
+
+    fn on_secretary_with(
+        secretary: Arc<SecretaryConfigs>,
+        hub: Arc<dyn Hub>,
+        retries: Option<usize>,
+    ) -> Self {
         let speaker_dir = secretary.effective(None).speaker.speaker_dir();
         let history = speaker_dir.join("history");
         // The global config may name a provider or endpoint; a workspace
@@ -192,7 +208,11 @@ impl BasisBrain {
             secretary,
             hub,
             Arc::new(move |settings: &ModelSettings| {
-                basis_runtime(settings, &runtime_config, history.clone())
+                let runtime = basis_runtime(settings, &runtime_config, history.clone())?;
+                Ok(match retries {
+                    Some(budget) => runtime.with_provider_retry_budget(budget),
+                    None => runtime,
+                })
             }),
         );
         brain.config = discovered;
@@ -485,7 +505,7 @@ impl BasisBrain {
                 AllowAll,
             )
             .await
-            .map_err(|failure| BrainError::Unavailable(failure.error.to_string()))?;
+            .map_err(output_error)?;
         output.value.into_intent(work)
     }
 
@@ -564,7 +584,7 @@ impl BasisBrain {
                 AllowAll,
             )
             .await
-            .map_err(|failure| BrainError::Unavailable(failure.error.to_string()))?;
+            .map_err(output_error)?;
         output.value.into_payload()
     }
 
@@ -608,7 +628,7 @@ impl BasisBrain {
                 AllowAll,
             )
             .await
-            .map_err(|failure| BrainError::Unavailable(failure.error.to_string()))?;
+            .map_err(output_error)?;
         output.value.into_turn(conversation.utterance.work)
     }
 
@@ -630,7 +650,7 @@ impl BasisBrain {
                 AllowAll,
             )
             .await
-            .map_err(|failure| BrainError::Unavailable(failure.error.to_string()))?;
+            .map_err(output_error)?;
         Ok(output.value.into_pick(&input.candidates))
     }
 
@@ -652,7 +672,7 @@ impl BasisBrain {
                 AllowAll,
             )
             .await
-            .map_err(|failure| BrainError::Unavailable(failure.error.to_string()))?;
+            .map_err(output_error)?;
         output.value.into_crossing()
     }
 
@@ -674,7 +694,7 @@ impl BasisBrain {
                 AllowAll,
             )
             .await
-            .map_err(|failure| BrainError::Unavailable(failure.error.to_string()))?;
+            .map_err(output_error)?;
         output.value.into_offline()
     }
 
@@ -759,6 +779,15 @@ impl Brain for BasisBrain {
             async move { self.offline_on(&tier.model, input).await }
         })
         .await
+    }
+}
+
+/// Why a typed turn has no value: the run's own reason, with its cause
+/// chain (a refused connection, the gateway's words), when it has one.
+pub(crate) fn output_error<S>(failure: basis::OutputFailure<S>) -> BrainError {
+    match failure.report.map(|report| report.outcome) {
+        Some(RunOutcome::Error { message }) => BrainError::Unavailable(message),
+        _ => BrainError::Unavailable(failure.error.to_string()),
     }
 }
 

@@ -100,4 +100,4 @@ pub use component::{Component, ComponentContext, GaveUp, component_fn};
 pub use config::{ForgeSection, SenatedConfig, SenatedConfigError, WorkSection};
 pub use machine::{HostedSenate, Machine, MachineError};
 pub use senate_server::{Authenticate, StaticTokens};
-pub use speaker::{NO_CHAT_PLATFORM, NoChat, secretary_show};
+pub use speaker::{NO_CHAT_PLATFORM, NoChat, check_model, secretary_show};

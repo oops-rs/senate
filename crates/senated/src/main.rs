@@ -5,6 +5,7 @@
 //! senated --machine                 # a developer machine: $SENATE_HOME/senate.toml
 //! senated flatten-log --database-url postgres://…   # convert an old Postgres log, once
 //! senated secretary show [--config senated.toml | --home DIR] [--committee ID]
+//! senated check-model [--config senated.toml | --home DIR] [--committee ID] [--json]
 //! ```
 //!
 //! With `--config` it serves the log and the bridge API from
@@ -18,6 +19,12 @@
 //! (for one committee with `--committee`), which file each value came from,
 //! and the current problems, in the configured language. A model's key is
 //! never printed: only the name of its variable and whether it is set.
+//!
+//! `check-model` probes the model the built-in session runs on (and its
+//! `[model] fallback`): a tool round trip, the terminal tool, and the
+//! intent, triage and pick outputs, one short run each. It prints pass or
+//! fail with the exact reason per check and exits non-zero when one fails.
+//! The daemon runs the same check once at start and logs it.
 //!
 //! With `--machine` it reads the developer machine's `senate.toml` in the
 //! Senate home (`--home`, else `$SENATE_HOME`, else `~/.senate`) and runs
@@ -80,6 +87,26 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Check that the built-in session's model does what the Speaker asks
+    /// of it: a tool round trip, the terminal tool, and the intent, triage
+    /// and pick outputs, on the primary model and the fallback. Exits
+    /// non-zero when a check fails.
+    CheckModel {
+        /// A Senate server's senated.toml (secretary.toml is beside it).
+        #[arg(long, env = "SENATED_CONFIG", conflicts_with = "home")]
+        config: Option<PathBuf>,
+        /// A developer machine's Senate home (default: $SENATE_HOME, else
+        /// ~/.senate).
+        #[arg(long, value_name = "DIR")]
+        home: Option<PathBuf>,
+        /// The committee whose model to check (default: the Senate as a
+        /// whole).
+        #[arg(long, value_name = "ID")]
+        committee: Option<CommitteeId>,
+        /// Print the report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Convert a Postgres log written when senators were paths to flat
     /// names, once, keeping a copy of each table as <table>_pre_flat_names.
     FlattenLog {
@@ -129,6 +156,12 @@ async fn main() -> anyhow::Result<()> {
                     committee,
                 },
         }) => return secretary_show(config, home, committee.as_ref()),
+        Some(Command::CheckModel {
+            config,
+            home,
+            committee,
+            json,
+        }) => return check_model(config, home, committee.as_ref(), json).await,
         None => {}
     }
     if cli.machine {
@@ -225,7 +258,39 @@ fn secretary_show(
     home: Option<PathBuf>,
     committee: Option<&CommitteeId>,
 ) -> anyhow::Result<()> {
-    let secretary = match (config, home) {
+    let secretary = load_secretary(config, home)?;
+    print!("{}", senated::secretary_show(&secretary, committee));
+    Ok(())
+}
+
+/// `senated check-model`: probe the model in force, print the report, and
+/// fail when a check does.
+async fn check_model(
+    config: Option<PathBuf>,
+    home: Option<PathBuf>,
+    committee: Option<&CommitteeId>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let secretary = std::sync::Arc::new(load_secretary(config, home)?);
+    let report = senated::check_model(secretary, committee).await;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print!("{}", report.render());
+    }
+    if !report.passed() {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// The built-in session's configuration, from a server's file or a
+/// machine's Senate home.
+fn load_secretary(
+    config: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> anyhow::Result<senate_speaker::SecretaryConfigs> {
+    Ok(match (config, home) {
         (Some(path), _) => {
             let config = SenatedConfig::load(&path)
                 .with_context(|| format!("loading {}", path.display()))?;
@@ -239,7 +304,5 @@ fn secretary_show(
             let data_dir = paths.hosted(senate_bridge::paths::HOSTED_KEY).join("data");
             senated::config::load_secretary_home(paths.home(), &data_dir)?
         }
-    };
-    print!("{}", senated::secretary_show(&secretary, committee));
-    Ok(())
+    })
 }

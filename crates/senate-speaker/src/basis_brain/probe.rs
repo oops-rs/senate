@@ -164,9 +164,10 @@ impl BasisBrain {
                 continue;
             }
             seen.push(key);
+            // Boxed: five basis runs at once make a deep future.
             report
                 .tiers
-                .push(self.check_tier(committee, tier.label, &tier.model).await);
+                .push(Box::pin(self.check_tier(committee, tier.label, &tier.model)).await);
         }
         report
     }
@@ -181,23 +182,35 @@ impl BasisBrain {
             CommitteeId::new(PROBE_COMMITTEE).unwrap_or_else(|_| unreachable!("a valid id"))
         });
         let (round_trip, terminal, intent, triage, pick) = tokio::join!(
-            timed("tool_round_trip", self.round_trip(committee, model)),
-            timed("terminal_tool", self.terminal(committee, model)),
-            timed("intent", async {
-                self.interpret_on(model, &probe_utterance(committee))
-                    .await
-                    .map(|intent| format!("{intent:?}"))
-            }),
-            timed("triage", async {
-                self.triage_on(model, &probe_triage(&quick))
-                    .await
-                    .map(|t| format!("{:?}", t.verdict))
-            }),
-            timed("pick", async {
-                self.pick_on(model, &probe_pick(&quick))
-                    .await
-                    .map(|p| format!("{p:?}"))
-            }),
+            timed(
+                "tool_round_trip",
+                Box::pin(self.round_trip(committee, model))
+            ),
+            timed("terminal_tool", Box::pin(self.terminal(committee, model))),
+            timed(
+                "intent",
+                Box::pin(async {
+                    self.interpret_on(model, &probe_utterance(committee))
+                        .await
+                        .map(|intent| format!("{intent:?}"))
+                })
+            ),
+            timed(
+                "triage",
+                Box::pin(async {
+                    self.triage_on(model, &probe_triage(&quick))
+                        .await
+                        .map(|t| format!("{:?}", t.verdict))
+                })
+            ),
+            timed(
+                "pick",
+                Box::pin(async {
+                    self.pick_on(model, &probe_pick(&quick))
+                        .await
+                        .map(|p| format!("{p:?}"))
+                })
+            ),
         );
         TierReport {
             tier: label.replace("-retry", ""),
@@ -291,7 +304,7 @@ impl BasisBrain {
                 AllowAll,
             )
             .await
-            .map_err(|failure| BrainError::Unavailable(failure.error.to_string()))?;
+            .map_err(super::output_error)?;
         Ok(format!(
             "called speaker_probe (ready = {})",
             output.value.ready
@@ -360,6 +373,7 @@ fn probe_utterance(committee: Option<&CommitteeId>) -> Utterance {
             platform: "probe".into(),
             group_id: "probe".into(),
             group_name: None,
+            simulated: false,
         },
         context: Vec::new(),
         roster: Roster::default(),
