@@ -1002,3 +1002,91 @@ async fn the_parents_speaker_relays_to_a_child_senates_seat_and_hears_back() {
     desk.stop().await;
     world.stop().await;
 }
+
+/// claude's session ends (as `senate stop` ends a hosted one): its seat is
+/// away at once, here and as declared above, not once the two-minute
+/// presence threshold passes. A question then meant for it goes to alice's
+/// desk, which holds it for claude.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_seat_whose_session_ended_is_away_at_once_and_its_mail_goes_to_the_desk() {
+    let world = team_above().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut desk = Desk::new(
+        dir.path(),
+        "alice",
+        Locale::En,
+        &under(&world, "tok-alice", "secretaries = [\"claude\"]\n"),
+    );
+    desk.start().await;
+    assert_eq!(
+        desk.wait_registration().await.registration,
+        Registration::Registered
+    );
+    let claude = desk.inbox("s-claude");
+    desk.session_start("s-claude", &claude).await.unwrap();
+    desk.wait_connected("claude", true).await;
+    // The committee exists above once something is said there.
+    speak(
+        &world.server_url(),
+        "tok-bob",
+        &NewEvent::new(refund(), Kind::Note, person("bob"), "the committee above"),
+    )
+    .await
+    .unwrap();
+    let declared = |state| {
+        let world = &world;
+        move || {
+            world.daemon().hub.children().into_iter().find(|c| {
+                c.seats
+                    .iter()
+                    .any(|s| s.senator == path("claude") && s.presence == state)
+            })
+        }
+    };
+    eventually(
+        "claude's seat declared online",
+        declared(senate_core::continuity::PresenceState::Online),
+    )
+    .await;
+
+    let ended = std::time::Instant::now();
+    desk.session_end("s-claude", &claude).await;
+    desk.wait_connected("claude", false).await;
+    eventually(
+        "claude's seat declared away above",
+        declared(senate_core::continuity::PresenceState::Disconnected),
+    )
+    .await;
+    assert!(
+        ended.elapsed() < std::time::Duration::from_secs(60),
+        "away at once, not after the threshold: {:?}",
+        ended.elapsed()
+    );
+
+    // Meant for claude, it goes to the desk now.
+    speak(
+        &world.server_url(),
+        "tok-bob",
+        &NewEvent::new(
+            refund(),
+            Kind::Question,
+            person("bob"),
+            "Is the refund webhook idempotent?",
+        )
+        .to(Address::Speaker)
+        .with_meta(
+            meta::INTENDED,
+            serde_json::json!("alice-desk::refund-v2::senator::claude"),
+        ),
+    )
+    .await
+    .unwrap();
+    let root = on_desk(&desk, "Is the refund webhook idempotent?").await;
+    assert_eq!(root.to, [Address::Speaker]);
+    assert_eq!(
+        senate_core::locator::intended(&root).unwrap().to_string(),
+        "/acme/alice-desk::refund-v2::senator::claude"
+    );
+    desk.stop().await;
+    world.stop().await;
+}

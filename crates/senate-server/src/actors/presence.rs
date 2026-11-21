@@ -124,6 +124,15 @@ impl Presence {
         self.heartbeat_at(committee, agent, cursor, Instant::now());
     }
 
+    /// The agent's bridge said it left the committee (no session of it is
+    /// bound there any more): its last heartbeat no longer counts as
+    /// activity. Its open streams still do, by when they opened.
+    pub(crate) fn leave(&self, committee: &CommitteeId, agent: &SenatorName) {
+        self.lock()
+            .heartbeats
+            .remove(&(committee.clone(), agent.clone()));
+    }
+
     fn heartbeat_at(
         &self,
         committee: &CommitteeId,

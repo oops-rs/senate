@@ -25,6 +25,7 @@
 //! moves and, every heartbeat period, the cursor again plus the agent's
 //! heartbeat.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -45,6 +46,9 @@ use crate::ipc::StreamState;
 pub(crate) struct CommitteeWorker {
     state: Arc<Mutex<StreamState>>,
     stop: watch::Sender<bool>,
+    /// Stopped because no session of the agent is bound to the committee
+    /// any more: the reporter tells the server so as it goes.
+    leaving: Arc<AtomicBool>,
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -66,6 +70,14 @@ impl CommitteeWorker {
         let _ = self.stop.send(true);
     }
 
+    /// Stop because the agent left the committee here: no session of it
+    /// is bound there any more. The server hears it at once and marks the
+    /// agent away, instead of waiting out the presence threshold.
+    pub(crate) fn leave(&self) {
+        self.leaving.store(true, Ordering::SeqCst);
+        self.stop();
+    }
+
     pub(crate) fn into_tasks(self) -> Vec<JoinHandle<()>> {
         self.tasks
     }
@@ -79,6 +91,7 @@ pub(crate) fn spawn(
     let (stop, rx) = watch::channel(false);
     let state = Arc::new(Mutex::new(StreamState::Connecting { attempt: 0 }));
     let dirty = Arc::new(Notify::new());
+    let leaving = Arc::new(AtomicBool::new(false));
     let resyncs = shared.resyncs();
     let tasks = vec![
         tokio::spawn(run_stream(
@@ -90,9 +103,21 @@ pub(crate) fn spawn(
             rx.clone(),
             resyncs,
         )),
-        tokio::spawn(run_reporter(shared, agent, committee, dirty, rx)),
+        tokio::spawn(run_reporter(
+            shared,
+            agent,
+            committee,
+            dirty,
+            rx,
+            leaving.clone(),
+        )),
     ];
-    CommitteeWorker { state, stop, tasks }
+    CommitteeWorker {
+        state,
+        stop,
+        leaving,
+        tasks,
+    }
 }
 
 /// `base · 2^(attempt-1)`, capped, with ±20% jitter so laptops waking
@@ -272,6 +297,7 @@ async fn run_reporter(
     committee: CommitteeId,
     dirty: Arc<Notify>,
     mut stop: watch::Receiver<bool>,
+    leaving: Arc<AtomicBool>,
 ) {
     let mut next_beat = Instant::now();
     loop {
@@ -300,6 +326,14 @@ async fn run_reporter(
     .is_err()
     {
         tracing::debug!(%agent, %committee, "final cursor report timed out");
+    }
+    // After its last heartbeat, so none of those lands after it.
+    if leaving.load(Ordering::SeqCst)
+        && tokio::time::timeout(Duration::from_secs(2), shared.leave(&agent, &committee))
+            .await
+            .is_err()
+    {
+        tracing::debug!(%agent, %committee, "telling the server the agent left timed out");
     }
 }
 

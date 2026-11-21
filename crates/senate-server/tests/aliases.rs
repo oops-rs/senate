@@ -32,6 +32,7 @@ async fn sit(server: &TestServer, committee: &str, agent: &str) {
             agent: path(agent),
             sessions: 1,
             cursor: Seq::ZERO,
+            left: false,
         })
         .send()
         .await

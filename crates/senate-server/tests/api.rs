@@ -270,6 +270,7 @@ async fn an_agent_is_seated_on_first_contact_by_any_request_that_acts_as_it() {
             agent: path("claude"),
             sessions: 1,
             cursor: Seq::ZERO,
+            left: false,
         })
         .send()
         .await
@@ -286,6 +287,7 @@ async fn beat(server: &TestServer, token: &str, agent: &str, cursor: u64) {
             agent: path(agent),
             sessions: 1,
             cursor: Seq(cursor),
+            left: false,
         })
         .send()
         .await
@@ -795,6 +797,7 @@ async fn heartbeat_is_recorded_per_agent() {
         agent: path("claude"),
         sessions: 2,
         cursor: Seq(3),
+        left: false,
     };
     let response = server
         .request(Method::POST, &heartbeat_path(&f), BOB)
@@ -817,6 +820,7 @@ async fn heartbeat_is_recorded_per_agent() {
         agent: path("aider"),
         sessions: 1,
         cursor: Seq(1),
+        left: false,
     };
     server
         .request(Method::POST, &heartbeat_path(&f), BOB)
@@ -895,6 +899,7 @@ async fn every_response_carries_the_epoch() {
         agent: path("claude"),
         sessions: 1,
         cursor: Seq(1),
+        left: false,
     };
     let requests = [
         (server.request(Method::GET, &events_path(&f), BOB), 200),
@@ -1088,6 +1093,7 @@ async fn a_stream_without_heartbeats_stops_counting_after_the_grace() {
                 agent: alice.clone(),
                 sessions: 1,
                 cursor: Seq::ZERO,
+                left: false,
             })
             .send()
             .await

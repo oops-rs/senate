@@ -711,6 +711,7 @@ impl LogStore for SqliteStore {
                         sessions: u32::try_from(sessions)
                             .map_err(|_| LogError::Corrupt(format!("sessions {sessions}")))?,
                         cursor: seq_from_db(row.get(2)?)?,
+                        left: false,
                     },
                     agent,
                     at: time_from_db(&row.get::<_, String>(3)?)?,
@@ -747,6 +748,7 @@ impl LogStore for SqliteStore {
                     sessions: u32::try_from(sessions)
                         .map_err(|_| LogError::Corrupt(format!("sessions {sessions}")))?,
                     cursor: seq_from_db(delivered)?,
+                    left: false,
                 },
                 agent,
                 at: time_from_db(&seen_at)?,

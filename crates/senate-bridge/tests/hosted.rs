@@ -1109,6 +1109,19 @@ async fn stop_cli_protects_an_attending_viewer_and_releases_the_slot() {
             .state,
         SessionState::Ended
     );
+    // Its seat is away from now on: the bridge tells the server it left,
+    // instead of letting the presence threshold run out.
+    eventually(
+        "the bridge to tell the server the seat left",
+        TIMEOUT,
+        || {
+            h.server
+                .heartbeats_of(committee().as_str(), fixture.seat.senator.as_str())
+                .into_iter()
+                .find(|beat| beat.left && beat.sessions == 0)
+        },
+    )
+    .await;
     let notes = h.server.events(committee().as_str());
     let note = notes
         .iter()

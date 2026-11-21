@@ -1254,7 +1254,7 @@ impl Shared {
             let keep = desired.contains(&(agent.clone(), committee.clone()));
             if !keep {
                 tracing::info!(%agent, %committee, "leaving committee (no bound session)");
-                worker.stop();
+                worker.leave();
             }
             keep
         });
@@ -2143,9 +2143,32 @@ impl Shared {
             agent: agent.clone(),
             sessions: u32::try_from(sessions).unwrap_or(u32::MAX),
             cursor,
+            left: false,
         };
         if let Err(e) = self.api.heartbeat(committee, &beat).await {
             tracing::debug!(%agent, %committee, "heartbeat failed: {e}");
+        }
+    }
+
+    /// Tell the server `agent` left `committee` here: no session of it is
+    /// bound there any more, so it is away from now on.
+    pub(crate) async fn leave(&self, agent: &SenatorName, committee: &CommitteeId) {
+        let cursor = match self.store.delivered_cursor(agent, committee) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(%agent, %committee, "reading the cursor to leave: {e}");
+                return;
+            }
+        };
+        let beat = Heartbeat {
+            agent: agent.clone(),
+            sessions: 0,
+            cursor,
+            left: true,
+        };
+        match self.api.heartbeat(committee, &beat).await {
+            Ok(()) => tracing::info!(%agent, %committee, "told the server the agent left"),
+            Err(e) => tracing::debug!(%agent, %committee, "telling the server the agent left: {e}"),
         }
     }
 

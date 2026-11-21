@@ -152,6 +152,7 @@ async fn beat(server: &TestServer, token: &str, agent: &str, cursor: u64) {
             agent: path(agent),
             sessions: 1,
             cursor: Seq(cursor),
+            left: false,
         })
         .send()
         .await
@@ -354,6 +355,7 @@ async fn store_with_old_beat(age_secs: i64) -> (Arc<dyn LogStore>, chrono::DateT
                 agent: path("claude"),
                 sessions: 1,
                 cursor: Seq(0),
+                left: false,
             },
             at,
         )
@@ -477,6 +479,7 @@ async fn a_sqlite_store_restarts_into_what_the_clock_says() {
                     agent: path("claude"),
                     sessions: 1,
                     cursor: Seq(0),
+                    left: false,
                 },
                 beat,
             )
@@ -603,5 +606,50 @@ async fn a_senator_cannot_write_a_provisional_answer() {
         "forbidden",
     )
     .await;
+    server.running.shutdown().await.unwrap();
+}
+
+async fn leave(server: &TestServer, token: &str, agent: &str, cursor: u64) {
+    let response = server
+        .request(Method::POST, &heartbeat_path(&committee()), token)
+        .json(&Heartbeat {
+            agent: path(agent),
+            sessions: 0,
+            cursor: Seq(cursor),
+            left: true,
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+}
+
+/// `senate stop` (or the agent's last session ending) makes its bridge stop
+/// following the committee and say so: the agent is away at once, not once
+/// the two-minute threshold passes, and its next heartbeat brings it back.
+#[tokio::test]
+async fn an_agent_whose_bridge_says_it_left_is_disconnected_at_once() {
+    let server = TestServer::start_configured(Arc::new(MemoryStore::new()), restart_config).await;
+    let hub = server.running.hub.clone();
+    first_agent_writes(&server, "codex").await;
+    beat(&server, ALICE, "claude", 0).await;
+    assert_eq!(alice_now(hub.as_ref()).await, PresenceState::Online);
+
+    leave(&server, ALICE, "claude", 0).await;
+    assert_eq!(alice_now(hub.as_ref()).await, PresenceState::Disconnected);
+    let events = presence_events(hub.as_ref()).await;
+    let (p, _) = events
+        .iter()
+        .rfind(|(p, _)| p.agent == path("claude"))
+        .expect("claude's disconnect written");
+    assert_eq!(p.state, PresenceState::Disconnected);
+    assert_eq!(p.previous, Some(PresenceState::Online));
+    // A tick later it is still away: the heartbeat before it no longer
+    // counts.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(alice_now(hub.as_ref()).await, PresenceState::Disconnected);
+
+    beat(&server, ALICE, "claude", 0).await;
+    assert_eq!(alice_now(hub.as_ref()).await, PresenceState::Online);
     server.running.shutdown().await.unwrap();
 }

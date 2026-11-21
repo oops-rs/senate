@@ -823,6 +823,7 @@ async fn heartbeats_keep_the_latest_per_agent(store: Arc<dyn LogStore>) {
                 agent: claude.clone(),
                 sessions: 1,
                 cursor: Seq(4),
+                left: false,
             },
             first,
         )
@@ -833,6 +834,7 @@ async fn heartbeats_keep_the_latest_per_agent(store: Arc<dyn LogStore>) {
         agent: claude.clone(),
         sessions: 2,
         cursor: Seq(9),
+        left: false,
     };
     store
         .record_heartbeat(&f, beat.clone(), second)
@@ -857,6 +859,7 @@ async fn heartbeats_keep_the_latest_per_agent(store: Arc<dyn LogStore>) {
         agent: codex.clone(),
         sessions: 1,
         cursor: Seq(1),
+        left: false,
     };
     store
         .record_heartbeat(&f, other.clone(), second)

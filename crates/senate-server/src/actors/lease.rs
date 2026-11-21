@@ -81,6 +81,9 @@ struct Agent {
     /// transition is dated to when it fell due, so it has the same event id
     /// on every restart.
     restored: bool,
+    /// When its bridge said it left (no session bound any more), with no
+    /// activity seen since: quiet from then on, whatever the threshold.
+    left: Option<Instant>,
 }
 
 impl Agent {
@@ -95,6 +98,7 @@ impl Agent {
             cursor: None,
             new_owner: None,
             restored: false,
+            left: None,
         }
     }
 }
@@ -160,6 +164,7 @@ impl Leases {
                     cursor: p.cursor,
                     new_owner: p.new_owner.clone(),
                     restored: heard.is_some(),
+                    left: None,
                 },
             );
         }
@@ -226,9 +231,11 @@ impl Leases {
             .or_insert_with(|| Agent::new(wall));
         if let Some(at) = activity
             && entry.last_seen.is_none_or(|seen| at > seen)
+            && entry.left.is_none_or(|left| at > left)
         {
             entry.last_seen = Some(at);
             entry.restored = false;
+            entry.left = None;
             let ago =
                 chrono::Duration::from_std(now.saturating_duration_since(at)).unwrap_or_default();
             entry.last_seen_wall = Some(wall - ago);
@@ -242,7 +249,13 @@ impl Leases {
             // Stands until it is handed back (module docs).
             return None;
         }
-        let target = if quiet < self.timing.disconnected {
+        let target = if entry.left.is_some() && quiet < self.timing.lease {
+            // It said it left: away now, not once the threshold passes.
+            match current {
+                Some(PresenceState::Online) => PresenceState::Disconnected,
+                _ => return None,
+            }
+        } else if quiet < self.timing.disconnected {
             if current.is_none() {
                 // A first appearance: held, not written (module docs).
                 entry.state = Some(PresenceState::Online);
@@ -264,7 +277,11 @@ impl Leases {
         };
         // A transition that fell due while the server was down is dated to
         // then (see the module docs on restarts).
-        let since = match (entry.restored, entry.last_seen_wall, target) {
+        let since = match (
+            entry.restored && entry.left.is_none(),
+            entry.last_seen_wall,
+            target,
+        ) {
             (true, Some(heard), PresenceState::Disconnected) => {
                 heard + chrono::Duration::from_std(self.timing.disconnected).unwrap_or_default()
             }
@@ -284,6 +301,15 @@ impl Leases {
             lag: lag(head, entry.cursor),
             new_owner: None,
         })
+    }
+
+    /// `agent`'s bridge said just now that it left: no session of it is
+    /// bound to the committee any more. The next [`Self::decide`] makes it
+    /// `disconnected` at once, unless activity after `now` came first.
+    pub(crate) fn leave(&mut self, agent: &SenatorName, now: Instant) {
+        if let Some(entry) = self.agents.get_mut(agent) {
+            entry.left = Some(now);
+        }
     }
 
     /// `agent` took a seat on this committee just now (its first contact):

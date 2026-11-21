@@ -781,6 +781,7 @@ impl LogStore for PgStore {
                         sessions: u32::try_from(sessions)
                             .map_err(|_| LogError::Corrupt(format!("sessions {sessions}")))?,
                         cursor: seq_from_db(row.try_get("delivered_seq")?)?,
+                        left: false,
                     },
                     agent,
                     at: row.try_get("seen_at")?,
@@ -814,6 +815,7 @@ impl LogStore for PgStore {
                 sessions: u32::try_from(sessions)
                     .map_err(|_| LogError::Corrupt(format!("sessions {sessions}")))?,
                 cursor: seq_from_db(row.try_get("delivered_seq")?)?,
+                left: false,
             },
             at: row.try_get("seen_at")?,
         }))

@@ -37,6 +37,7 @@ async fn seat(server: &TestServer, agents: &[&str]) {
                 agent: path(agent),
                 sessions: 1,
                 cursor: Seq::ZERO,
+                left: false,
             })
             .send()
             .await
@@ -122,6 +123,7 @@ async fn a_wildcard_reaches_only_the_agents_on_the_committee() {
             agent: path("codex"),
             sessions: 1,
             cursor: Seq::ZERO,
+            left: false,
         })
         .send()
         .await

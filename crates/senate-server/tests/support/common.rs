@@ -140,6 +140,7 @@ impl TestServer {
             agent: path(agent),
             sessions: 1,
             cursor: Seq::ZERO,
+            left: false,
         })
         .send()
         .await

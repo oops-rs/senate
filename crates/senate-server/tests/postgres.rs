@@ -135,6 +135,7 @@ async fn server_over_postgres() {
             agent: path("claude"),
             sessions: 1,
             cursor: Seq(5),
+            left: false,
         })
         .send()
         .await

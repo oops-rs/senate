@@ -320,6 +320,15 @@ impl CommitteeState {
         if self.seats.is_unseated(agent) {
             return Ok(());
         }
+        if heartbeat.left {
+            // Its bridge says no session of it is bound here any more (its
+            // last session ended, `senate stop` say): away now, not once
+            // the threshold passes.
+            self.args.presence.leave(&self.args.committee, agent);
+            self.leases.leave(agent, Instant::now());
+            self.check_lease(agent).await;
+            return Ok(());
+        }
         self.args
             .presence
             .heartbeat(&self.args.committee, agent, heartbeat.cursor);
