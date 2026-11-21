@@ -776,6 +776,25 @@ pub fn render_install(plan: &InstallPlan, platform: Platform, applied: bool, l: 
             ),
         };
         let _ = writeln!(out, "   {line}");
+        if let Found::Configured(path) = &program.found
+            && crate::wsl::distro().is_some()
+            && crate::wsl::is_windows_path(path)
+        {
+            let _ = writeln!(
+                out,
+                "   {}",
+                l.pick(
+                    format!(
+                        "⚠ 这是 Windows 程序：在 WSL 里请把 {} 改成发行版内的 Linux {}",
+                        program.setting, program.name
+                    ),
+                    format!(
+                        "⚠ that is a Windows program: in WSL, set {} to the Linux {} inside the distro",
+                        program.setting, program.name
+                    ),
+                )
+            );
+        }
     }
     let _ = writeln!(out, "\n{}: {}", l.pick("日志", "log"), plan.log.display());
     if platform == Platform::Linux {

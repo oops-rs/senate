@@ -94,6 +94,7 @@ pub mod status;
 mod stream;
 pub mod terminal;
 pub mod testenv;
+pub mod wsl;
 
 pub use config::BridgeConfig;
 pub use daemon::{DaemonHandle, DaemonOptions, Timing};

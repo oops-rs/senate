@@ -170,14 +170,46 @@ pub enum CodexChoice {
     No,
 }
 
-/// `name` as an executable file in one of `$PATH`'s directories.
-fn on_path(name: &str) -> bool {
-    std::env::var_os("PATH").is_some_and(|path| {
-        std::env::split_paths(&path).any(|dir| {
-            std::fs::metadata(dir.join(name))
-                .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+/// `name` as an executable file in the first of `path`'s directories that
+/// has one.
+fn find_in(path: &str, name: &str) -> Option<PathBuf> {
+    std::env::split_paths(path)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(name))
+        .find(|p| {
+            std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
         })
-    })
+}
+
+/// `name` on `$PATH`; in WSL, never a Windows program ([`crate::wsl`]).
+fn find_on_path(name: &str) -> Option<PathBuf> {
+    let path = crate::wsl::setup_path(std::env::var("PATH").ok())?;
+    find_in(&path, name)
+}
+
+fn on_path(name: &str) -> bool {
+    find_on_path(name).is_some()
+}
+
+/// In WSL, the Linux `claude` as an absolute path: a bare `claude` would
+/// run whichever comes first on `PATH`, maybe the Windows one, and register
+/// Senate with Windows' Claude Code instead of this distro's.
+fn wsl_claude(distro: &str) -> anyhow::Result<Option<PathBuf>> {
+    if let Some(found) = find_on_path("claude") {
+        return Ok(Some(found));
+    }
+    let windows = std::env::var("PATH")
+        .ok()
+        .and_then(|path| find_in(&path, "claude"));
+    match windows {
+        Some(windows) => anyhow::bail!(
+            "the only `claude` on PATH is a Windows program ({}). In WSL ({distro}), \
+             install Claude Code inside the distro (e.g. `curl -fsSL https://claude.ai/install.sh | bash`) \
+             or pass --claude-bin with the Linux one",
+            windows.display()
+        ),
+        None => Ok(None),
+    }
 }
 
 impl InstallOptions {
@@ -215,7 +247,11 @@ impl InstallOptions {
         claude_dir: Option<PathBuf>,
         claude_bin: Option<PathBuf>,
     ) -> anyhow::Result<Self> {
-        let claude_bin = claude_bin.unwrap_or_else(|| PathBuf::from("claude"));
+        let claude_bin = match (claude_bin, crate::wsl::distro()) {
+            (Some(bin), _) => bin,
+            (None, Some(distro)) => wsl_claude(&distro)?.unwrap_or_else(|| PathBuf::from("claude")),
+            (None, None) => PathBuf::from("claude"),
+        };
         let override_dir = claude_dir.or_else(|| {
             std::env::var_os("CLAUDE_CONFIG_DIR")
                 .filter(|v| !v.is_empty())

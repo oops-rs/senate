@@ -1533,7 +1533,9 @@ fn service_spec() -> anyhow::Result<(service::Spec, Locale)> {
             user_home,
             senate_home,
             uid: service::current_uid(),
-            path: std::env::var("PATH").ok().filter(|p| !p.is_empty()),
+            // In WSL, without the Windows directories: the daemon must find
+            // the Linux `git`, `claude` and `codex`, never a Windows one.
+            path: crate::wsl::setup_path(std::env::var("PATH").ok().filter(|p| !p.is_empty())),
             config: std::path::absolute(paths.config()).context("resolving the Senate config")?,
         },
         locale,
@@ -1561,6 +1563,9 @@ fn run_service(command: ServiceCmd, output: Output) -> anyhow::Result<()> {
                 "{}",
                 service::render_install(&plan, spec.platform, yes, locale)
             );
+            if let Some(distro) = crate::wsl::distro() {
+                print!("{}", crate::wsl::notes(&distro, locale));
+            }
         }
         ServiceCmd::Uninstall { yes } => {
             let plan = service::plan_uninstall(&spec);
@@ -2388,6 +2393,10 @@ fn run_setup(command: SetupCmd, output: Output) -> anyhow::Result<()> {
             };
             let path = init::init_local(&paths, &profile)?;
             println!("{}", path.display());
+            if let Some(distro) = crate::wsl::distro() {
+                let locale = BridgeConfig::locale_at(&paths.config());
+                print!("{}", crate::wsl::notes(&distro, locale));
+            }
             Ok(())
         }
         SetupCmd::Install {
