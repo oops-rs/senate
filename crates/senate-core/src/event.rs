@@ -112,6 +112,14 @@ pub struct Source {
     pub group_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_name: Option<String>,
+    /// Nobody said it on the platform: `senate chat send` injected it
+    /// through the gateway, as a test of the Speaker
+    /// ([`crate::chat_sim`]). The Speaker carries a chat's source onto what
+    /// it derives from it (a relay, a task, a decision), so those are marked
+    /// too; readers show them as "(simulated)" and the brief leaves them
+    /// out.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub simulated: bool,
 }
 
 /// The platform identity of an event that began on a platform: which message
@@ -180,6 +188,12 @@ pub struct Event {
 }
 
 impl Event {
+    /// It began as a simulated platform message, or was derived from one
+    /// ([`Source::simulated`]).
+    pub fn is_simulated(&self) -> bool {
+        self.source.as_ref().is_some_and(|s| s.simulated)
+    }
+
     /// True when `addr` is named in `to`. `committee` is a broadcast for
     /// catch-up, not a push to every session, so it does not count here.
     pub fn is_directed_to(&self, addr: &Address) -> bool {

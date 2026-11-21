@@ -83,6 +83,7 @@ pub mod alias;
 pub mod api;
 pub mod brief;
 pub mod chair;
+pub mod chat_sim;
 pub mod committee_seat;
 pub mod continuity;
 pub mod docket;

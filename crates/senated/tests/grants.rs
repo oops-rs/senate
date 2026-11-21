@@ -192,6 +192,7 @@ async fn binding(hub: &MemoryHub, to: &str, group: &str, action: BindingAction) 
                 platform: "chat".into(),
                 group_id: group.into(),
                 group_name: None,
+                simulated: false,
             })
             .with_binding(&BindingPayload {
                 action,
@@ -218,6 +219,7 @@ async fn chat(hub: &MemoryHub, to: &str, group: &str, message_ref: &str) {
             platform: "chat".into(),
             group_id: group.into(),
             group_name: None,
+            simulated: false,
         })
         .with_mirror(Mirror {
             platform: "chat".into(),

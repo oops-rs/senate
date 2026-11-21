@@ -25,6 +25,9 @@ pub struct GroupRef {
     pub platform: String,
     pub group_id: String,
     pub group_name: Option<String>,
+    /// What was said here was simulated ([`senate_core::Source::simulated`]),
+    /// carried onto what the Speaker records from it.
+    pub simulated: bool,
 }
 
 /// Something a person said to the Speaker.

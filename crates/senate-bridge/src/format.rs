@@ -1379,6 +1379,7 @@ mod tests {
             platform: "chat".into(),
             group_id: "backend".into(),
             group_name: None,
+            simulated: false,
         }
     }
 

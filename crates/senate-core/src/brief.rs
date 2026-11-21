@@ -204,6 +204,12 @@ impl BriefBuilder {
         self.head = event.seq;
         self.presence.observe(event);
         self.duties.observe(event);
+        // Simulated traffic (`senate chat send`) is a test of the Speaker,
+        // never work: no decision, question or participant of it is kept.
+        // A group it bound is bound all the same.
+        if event.is_simulated() && event.kind != Kind::Binding {
+            return;
+        }
 
         if matches!(event.from, Address::Senator(_) | Address::Guest(_)) {
             self.participants

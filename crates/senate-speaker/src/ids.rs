@@ -44,7 +44,11 @@ pub(crate) fn derived_event_id(parts: &[&str]) -> EventId {
 /// The key is capped at 64 bytes, so a longer one is sent as `senate:` plus
 /// 48 hex digits of its SHA-256; that form has no further `:`, so it never
 /// equals a verbatim one.
-pub(crate) fn operation_id(epoch: &str, committee: &CommitteeId, seq: Seq, target: &str) -> String {
+///
+/// Public because the chat gateway derives it too: a new root whose key is
+/// that of an event descended from a simulated message (`senate chat send`)
+/// is kept off the platform with the rest of that conversation.
+pub fn operation_id(epoch: &str, committee: &CommitteeId, seq: Seq, target: &str) -> String {
     let full = format!("{OPERATION_PREFIX}{epoch}:{committee}:{seq}:{target}");
     if full.len() <= OPERATION_ID_MAX {
         return full;

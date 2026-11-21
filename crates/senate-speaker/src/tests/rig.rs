@@ -128,6 +128,7 @@ pub(crate) fn source() -> Source {
         platform: PLATFORM.into(),
         group_id: GROUP.into(),
         group_name: Some(GROUP_NAME.into()),
+        simulated: false,
     }
 }
 

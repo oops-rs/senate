@@ -111,6 +111,7 @@ pub use brain::{
 };
 pub use config::{DEFAULT_BOT_NAME, SpeakerConfig, SpeakerMode, WorkConfig};
 pub use engine::{CURSOR, TAKEOVER_META};
+pub use ids::operation_id;
 pub use scripted::{ScriptedBrain, scripted_verdict};
 pub use secretary::{
     BaseLayer, DEFAULT_NAME, Duty, Effective, ModelCheck, ModelSettings, Problem, SecretaryConfigs,

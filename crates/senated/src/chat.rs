@@ -88,6 +88,7 @@ use tokio_util::sync::CancellationToken;
 use crate::component::{Component, ComponentContext};
 
 mod grants;
+mod sim;
 
 pub use grants::GrantPolicy;
 use grants::{Grants, Want};
@@ -217,6 +218,8 @@ struct Inner {
     policy: Mutex<GrantPolicy>,
     /// Cancelled when the daemon shuts down: grant tasks end.
     stop: Mutex<CancellationToken>,
+    /// The log's epoch, once read: what the Speaker's operation ids name.
+    epoch: Mutex<Option<String>>,
 }
 
 #[derive(Default)]
@@ -232,6 +235,8 @@ struct State {
     /// The group of each message (and thread) the platform delivered, so a
     /// reply to one can be healed. Bounded; lost on restart.
     delivered: MessageGroups,
+    /// Simulated conversations ([`sim`]).
+    sims: sim::Sims,
 }
 
 /// Platform message refs and the group they were delivered in.
@@ -301,6 +306,7 @@ impl ChatGateway {
                 fresh: Mutex::new(None),
                 policy: Mutex::default(),
                 stop: Mutex::new(CancellationToken::new()),
+                epoch: Mutex::new(None),
             }),
         }
     }
@@ -371,6 +377,16 @@ impl ChatGateway {
     /// Handle one message the platform delivered. Waits until the gateway
     /// runs (it needs the log).
     pub async fn deliver(&self, inbound: Inbound) -> Result<Delivered, GatewayError> {
+        self.deliver_marked(inbound, false).await
+    }
+
+    /// [`ChatGateway::deliver`], the `chat` event's source marked
+    /// `simulated` when it is ([`ChatGateway::simulate`]).
+    async fn deliver_marked(
+        &self,
+        inbound: Inbound,
+        simulated: bool,
+    ) -> Result<Delivered, GatewayError> {
         let hub = self.inner.hub().await?;
         let committee = self.remember_inbound(&inbound);
         if inbound.text.trim().is_empty() {
@@ -381,7 +397,7 @@ impl ChatGateway {
             Some(committee) => {
                 let event = self
                     .inner
-                    .record(hub.as_ref(), &roster, &committee, &inbound)
+                    .record(hub.as_ref(), &roster, &committee, &inbound, simulated)
                     .await?;
                 Ok(Delivered::Recorded(Box::new(event)))
             }
@@ -412,8 +428,12 @@ impl Component for ChatGateway {
                 received = log.recv() => received,
             };
             match received {
-                Ok(event) if event.kind == Kind::Binding => self.inner.observe(&event),
-                Ok(_) => {}
+                Ok(event) => {
+                    if event.kind == Kind::Binding {
+                        self.inner.observe(&event);
+                    }
+                    lock(&self.inner.state).sims.observe(&event);
+                }
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
                     tracing::warn!(skipped, "log subscription lagged; rebuilding bindings");
                     let table =
@@ -494,8 +514,12 @@ impl Inner {
         let Some(rx) = fresh.as_mut() else { return };
         loop {
             match rx.try_recv() {
-                Ok(event) if event.kind == Kind::Binding => self.observe(&event),
-                Ok(_) => {}
+                Ok(event) => {
+                    if event.kind == Kind::Binding {
+                        self.observe(&event);
+                    }
+                    lock(&self.state).sims.observe(&event);
+                }
                 Err(broadcast::error::TryRecvError::Lagged(_)) => {
                     // The pump rebuilds on its own lag; this side only needs
                     // what is newest, which keeps coming.
@@ -586,6 +610,7 @@ impl Inner {
         roster: &Roster,
         committee: &CommitteeId,
         inbound: &Inbound,
+        simulated: bool,
     ) -> Result<Event, GatewayError> {
         let id = EventId::derived(
             0,
@@ -597,7 +622,8 @@ impl Inner {
         let mut pause = APPEND_RETRY;
         let mut attempt = 1;
         loop {
-            let result = match self.chat_event(hub, roster, committee, inbound).await {
+            let result = match self.chat_event(hub, roster, committee, inbound, simulated)
+                .await {
                 Ok(chat) => hub.append(chat.with_id(id.clone())).await,
                 Err(error) => Err(error),
             };
@@ -622,6 +648,7 @@ impl Inner {
         roster: &Roster,
         committee: &CommitteeId,
         inbound: &Inbound,
+        simulated: bool,
     ) -> Result<NewEvent, HubError> {
         let from = sender_address(roster, &self.platform, &inbound.sender);
         let mut chat = NewEvent::new(committee.clone(), Kind::Chat, from, inbound.text.clone())
@@ -629,6 +656,7 @@ impl Inner {
                 platform: self.platform.clone(),
                 group_id: inbound.group_id.clone(),
                 group_name: inbound.group_name.clone(),
+                simulated,
             })
             .with_mirror(Mirror {
                 platform: self.platform.clone(),
@@ -868,6 +896,43 @@ impl RecordingSurface {
         }
     }
 
+    /// The simulated conversation a post belongs to, if any: the log is
+    /// read up to now first, so an event the Speaker just appended (a
+    /// relay it is about to post a card for) is known.
+    async fn sim_route(&self, target: &PostTarget, operation_id: &str) -> Option<sim::SimRoute> {
+        self.inner.drain_fresh();
+        self.inner.sim_route(target, operation_id).await
+    }
+
+    /// A conversation's post, kept off the platform: recorded only.
+    fn post_offline(
+        &self,
+        route: &sim::SimRoute,
+        text: &str,
+        card: bool,
+        operation_id: &str,
+    ) -> Posted {
+        lock(&self.inner.state)
+            .sims
+            .post_offline(route, text, card, operation_id)
+    }
+
+    /// A live conversation's post, made on the platform: recorded too.
+    fn record_live(
+        &self,
+        route: Option<&sim::SimRoute>,
+        text: &str,
+        card: bool,
+        operation_id: &str,
+        result: &Result<Posted, SurfaceError>,
+    ) {
+        if let (Some(route), Ok(posted)) = (route, result) {
+            lock(&self.inner.state)
+                .sims
+                .record_post(route, text, card, operation_id, posted);
+        }
+    }
+
     fn posted(&self, result: Result<Posted, SurfaceError>) -> Result<Posted, SurfaceError> {
         if let Ok(posted) = &result {
             let mut state = lock(&self.inner.state);
@@ -892,6 +957,10 @@ impl ChatSurface for RecordingSurface {
         markdown: &str,
         operation_id: &str,
     ) -> Result<Posted, SurfaceError> {
+        let route = self.sim_route(&target, operation_id).await;
+        if let Some(route) = route.as_ref().filter(|r| !r.live) {
+            return Ok(self.post_offline(route, markdown, false, operation_id));
+        }
         let mut posted = self
             .inner
             .surface
@@ -904,6 +973,7 @@ impl ChatSurface for RecordingSurface {
                 .post(target, markdown, operation_id)
                 .await;
         }
+        self.record_live(route.as_ref(), markdown, false, operation_id, &posted);
         self.posted(posted)
     }
 
@@ -914,6 +984,11 @@ impl ChatSurface for RecordingSurface {
         user: &str,
         operation_id: &str,
     ) -> Result<Posted, SurfaceError> {
+        let route = self.sim_route(&target, operation_id).await;
+        let text = format!("@{user} {markdown}");
+        if let Some(route) = route.as_ref().filter(|r| !r.live) {
+            return Ok(self.post_offline(route, &text, false, operation_id));
+        }
         let mut posted = self
             .inner
             .surface
@@ -926,6 +1001,7 @@ impl ChatSurface for RecordingSurface {
                 .post_mentioning(target, markdown, user, operation_id)
                 .await;
         }
+        self.record_live(route.as_ref(), &text, false, operation_id, &posted);
         self.posted(posted)
     }
 
@@ -935,6 +1011,11 @@ impl ChatSurface for RecordingSurface {
         card: &Card,
         operation_id: &str,
     ) -> Result<Posted, SurfaceError> {
+        let route = self.sim_route(&target, operation_id).await;
+        let text = sim::card_text(card);
+        if let Some(route) = route.as_ref().filter(|r| !r.live) {
+            return Ok(self.post_offline(route, &text, true, operation_id));
+        }
         let mut posted = self
             .inner
             .surface
@@ -947,6 +1028,7 @@ impl ChatSurface for RecordingSurface {
                 .post_card(target, card, operation_id)
                 .await;
         }
+        self.record_live(route.as_ref(), &text, true, operation_id, &posted);
         self.posted(posted)
     }
 
@@ -956,13 +1038,30 @@ impl ChatSurface for RecordingSurface {
         card: &Card,
         operation_id: &str,
     ) -> Result<(), SurfaceError> {
-        self.inner
+        let offline = lock(&self.inner.state).sims.is_offline(message_ref);
+        if offline == Some(true) {
+            lock(&self.inner.state)
+                .sims
+                .record_update(message_ref, &sim::card_text(card));
+            return Ok(());
+        }
+        let updated = self
+            .inner
             .surface
             .update_card(message_ref, card, operation_id)
-            .await
+            .await;
+        if offline.is_some() && updated.is_ok() {
+            lock(&self.inner.state)
+                .sims
+                .record_update(message_ref, &sim::card_text(card));
+        }
+        updated
     }
 
     async fn pin(&self, message_ref: &str, operation_id: &str) -> Result<(), SurfaceError> {
+        if lock(&self.inner.state).sims.is_offline(message_ref) == Some(true) {
+            return Ok(());
+        }
         self.inner.surface.pin(message_ref, operation_id).await
     }
 

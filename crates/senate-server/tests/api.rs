@@ -350,6 +350,7 @@ async fn senators_cannot_state_server_provenance() {
                 platform: "chat".into(),
                 group_id: "g".into(),
                 group_name: None,
+                simulated: false,
             },
         ),
     ];

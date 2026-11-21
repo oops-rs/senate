@@ -109,6 +109,7 @@ impl Engine {
                     platform: self.surface.platform().to_owned(),
                     group_id: created.group_id,
                     group_name: Some(name.clone()),
+                    simulated: false,
                 };
                 let id = derived_event_id(&[
                     "agents-group",

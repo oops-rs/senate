@@ -127,6 +127,7 @@ pub fn chat_source() -> Source {
         platform: "chat".into(),
         group_id: "backend".into(),
         group_name: Some("退款 v2 · 后端群".into()),
+        simulated: false,
     }
 }
 

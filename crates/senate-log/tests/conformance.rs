@@ -252,6 +252,7 @@ async fn every_envelope_field_round_trips(store: Arc<dyn LogStore>) {
         platform: "chat".into(),
         group_id: "backend".into(),
         group_name: Some("退款 v2 · 后端群".into()),
+        simulated: false,
     })
     .with_refs(Refs {
         commit: Some("a41f9c2".into()),

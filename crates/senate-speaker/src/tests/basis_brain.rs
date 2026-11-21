@@ -218,6 +218,7 @@ fn group() -> GroupRef {
         platform: "chat".into(),
         group_id: GROUP.into(),
         group_name: None,
+        simulated: false,
     }
 }
 

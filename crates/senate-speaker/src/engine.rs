@@ -491,6 +491,7 @@ impl CommitteeState {
                             platform: binding.platform,
                             group_id: binding.group_id,
                             group_name: binding.group_name,
+                            simulated: false,
                         },
                         role: binding.role,
                         seq: event.seq,
@@ -3218,6 +3219,7 @@ impl Engine {
                             platform: group.platform.clone(),
                             group_id: group.group_id.clone(),
                             group_name: group.group_name.clone(),
+                            simulated: group.simulated,
                         });
                 if let Some(chat) = chat {
                     decision = decision.with_meta(meta::RELAYED_FROM, json!(chat.0));
@@ -3759,6 +3761,7 @@ fn group_ref(source: &Source) -> GroupRef {
         platform: source.platform.clone(),
         group_id: source.group_id.clone(),
         group_name: source.group_name.clone(),
+        simulated: source.simulated,
     }
 }
 
@@ -3767,6 +3770,7 @@ fn mention_group(mention: &UnboundMention) -> GroupRef {
         platform: mention.platform.clone(),
         group_id: mention.group_id.clone(),
         group_name: mention.group_name.clone(),
+        simulated: false,
     }
 }
 
@@ -3825,6 +3829,7 @@ fn group_binding(
         platform: group.platform.clone(),
         group_id: group.group_id.clone(),
         group_name: group.group_name.clone(),
+        simulated: group.simulated,
     })
     .with_binding(&BindingPayload {
         action,
