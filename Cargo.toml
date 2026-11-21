@@ -25,9 +25,9 @@ senate-e2e = { path = "crates/senate-e2e" }
 
 # The agent harness behind the built-in Speaker. basis re-exports every
 # mentra type a host must name, so this is the only harness dependency.
-basis = "0.22.1"
+basis = "0.27.2"
 # Scripted providers for Speaker tests, matching the mentra basis resolves.
-mentra = { version = "0.34.0", default-features = false }
+mentra = { version = "0.38.1", default-features = false }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
