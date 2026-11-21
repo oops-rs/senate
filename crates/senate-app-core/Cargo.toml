@@ -34,6 +34,10 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
+[build-dependencies]
+# The unified-log shim (src/oslog/shim.c), on macOS.
+cc = "1"
+
 [dev-dependencies]
 tempfile = { workspace = true }
 

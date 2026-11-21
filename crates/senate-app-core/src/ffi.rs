@@ -635,16 +635,21 @@ pub fn terminal_command(
 
 /// Logs to stderr, `RUST_LOG` or `senate_app_core=info`; once per process.
 fn init_logging() {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
     static ONCE: OnceLock<()> = OnceLock::new();
     ONCE.get_or_init(|| {
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| "senate_app_core=info".into()),
-            )
+        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| "senate_app_core=info,senate_bridge=warn".into());
+        // stderr for a run from a shell (`RUST_LOG`); the unified log for
+        // every run, where Console and `log stream` find it.
+        let stderr = tracing_subscriber::fmt::layer()
             .with_writer(std::io::stderr)
-            .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
-            .try_init();
+            .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()));
+        let registry = tracing_subscriber::registry().with(filter).with(stderr);
+        #[cfg(target_os = "macos")]
+        let registry = registry.with(crate::oslog::OsLogLayer);
+        let _ = registry.try_init();
     });
 }
 
