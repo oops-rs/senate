@@ -39,6 +39,9 @@ enum Behaviour {
     Down,
     /// Does everything, but takes this many seconds over a triage or pick.
     Slow(u64),
+    /// Does everything, but takes this many seconds over the
+    /// `terminal_tool` check, a full run.
+    SlowTerminal(u64),
 }
 
 const REJECTED: &str = "Invalid 'messages[2].tool_call_id': expected an ID that begins with 'fc'";
@@ -98,6 +101,14 @@ impl Provider for Scripted {
                     Some(TRIAGE_DESCRIPTION | PICK_DESCRIPTION)
                 )
             })
+        {
+            tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+        }
+        if let Behaviour::SlowTerminal(secs) = self.behaviour
+            && request
+                .tools
+                .iter()
+                .any(|t| t.description.as_deref() == Some(PROBE_DESCRIPTION))
         {
             tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
         }
@@ -475,4 +486,83 @@ fn the_suggestion_is_two_and_a_half_times_the_slowest_rounded_up_to_five() {
     );
     assert_eq!(suggest_triage_deadline(10, 5_001), Some(15));
     assert_eq!(suggest_triage_deadline(1, 600), Some(5));
+}
+
+#[tokio::test]
+async fn a_failing_tier_with_another_passing_is_degraded_not_down() {
+    use crate::ModelVerdict;
+    let report = rig(Behaviour::Good, Some(Behaviour::Down))
+        .brain
+        .check_model(None)
+        .await;
+    assert!(!report.passed(), "the check still reports the fallback");
+    assert_eq!(
+        report.verdict(),
+        ModelVerdict::Degraded {
+            serving: "primary".into()
+        }
+    );
+    assert!(
+        report
+            .render()
+            .contains("warn  a tier failed; the primary model passed and serves the Speaker"),
+        "{}",
+        report.render()
+    );
+    let report = rig(Behaviour::Down, Some(Behaviour::Good))
+        .brain
+        .check_model(None)
+        .await;
+    assert_eq!(
+        report.verdict(),
+        ModelVerdict::Degraded {
+            serving: "fallback".into()
+        }
+    );
+    let report = rig(Behaviour::Down, Some(Behaviour::Down))
+        .brain
+        .check_model(None)
+        .await;
+    assert_eq!(report.verdict(), ModelVerdict::Down);
+    assert!(!report.render().contains("serves the Speaker"));
+    let report = rig(Behaviour::Good, None).brain.check_model(None).await;
+    assert_eq!(report.verdict(), ModelVerdict::Passed);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_full_run_is_probed_under_the_models_own_deadline() {
+    // 25 s: past the old fixed 20 s, inside the default 45 s brain deadline.
+    let report = rig(Behaviour::SlowTerminal(25), None)
+        .brain
+        .check_model(None)
+        .await;
+    let terminal = check(&report, "primary", "terminal_tool");
+    assert!(terminal.passed, "{}", report.render());
+    assert!(terminal.millis >= 25_000, "{} ms", terminal.millis);
+    // Past the deadline it fails.
+    let report = rig(Behaviour::SlowTerminal(60), None)
+        .brain
+        .check_model(None)
+        .await;
+    let terminal = check(&report, "primary", "terminal_tool");
+    assert!(!terminal.passed, "{}", report.render());
+    assert!(
+        terminal.millis < 50_000,
+        "bounded by 45 s: {} ms",
+        terminal.millis
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_quick_call_is_measured_up_to_twice_its_deadline() {
+    // The rig's triage deadline is 10 s: measured up to 20 s.
+    let report = rig(Behaviour::Slow(40), None).brain.check_model(None).await;
+    let triage = check(&report, "primary", "triage");
+    assert!(!triage.passed);
+    assert!(
+        (20_000..21_000).contains(&triage.millis),
+        "{} ms: {}",
+        triage.millis,
+        triage.reason
+    );
 }

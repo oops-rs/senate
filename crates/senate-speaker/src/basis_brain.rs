@@ -115,7 +115,7 @@ use crate::brain::{
 use crate::config::SpeakerConfig;
 use crate::secretary::{Effective, ModelSettings, SecretaryConfigs, Tier};
 use agent_tools::{Checkpoint, CommitteeBrief, CommitteeStatus, Presence, Tasks};
-pub use probe::{CheckResult, ModelReport, PROBE_DEADLINE, TierReport};
+pub use probe::{CheckResult, ModelReport, ModelVerdict, QUICK_MEASURE, TierReport};
 use prompt::{
     AgentTurnWire, AgreementWire, CrossingWire, DigestWire, IntentWire, OfflineWire, PickWire,
     TriageWire,

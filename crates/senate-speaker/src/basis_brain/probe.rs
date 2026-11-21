@@ -3,7 +3,8 @@
 //!
 //! [`BasisBrain::check_model`] probes each model a committee runs on (the
 //! primary and, when configured, the fallback: [`ModelSettings::tiers`]),
-//! one short run per check, under [`PROBE_DEADLINE`]:
+//! one short run per check, each under the deadline the Speaker gives that
+//! model for the same kind of run (`deadline_secs` for full runs):
 //!
 //! - **`tool_round_trip`**: an ordinary run with one probe-only tool,
 //!   `probe_digest`, whose result the model cannot make up; the run must
@@ -17,11 +18,17 @@
 //!   ([`interpret`](crate::Brain::interpret), [`triage`](crate::Brain::triage),
 //!   [`pick_agent`](crate::Brain::pick_agent)) on canned inputs, through the
 //!   same code the Speaker runs, so their schemas and parsing are what is
-//!   checked. They are measured under the longer of their own deadline
-//!   and [`PROBE_DEADLINE`], so a slow model's real time is known: one
-//!   slower than `triage_deadline_secs` fails, and when that deadline is
-//!   below about twice the slowest of them the report suggests another
+//!   checked. Triage and pick are measured for up to twice
+//!   `triage_deadline_secs` ([`QUICK_MEASURE`]), so a slow model's real
+//!   time is known. One slower than the deadline fails. When the deadline
+//!   is below about twice the slowest of them, the report suggests another
 //!   ([`TierReport::suggested_triage_deadline_secs`]).
+//!
+//! A tier that fails does not take the Speaker down while another one
+//! passes ([`ModelReport::verdict`]): the Brain tries the tiers in order
+//! on every call, so a failing fallback is a warning and a failing primary
+//! with a working fallback is served by the fallback. The startup check
+//! only reports. It does not change routing.
 //!
 //! The result is data ([`ModelReport`], serde-able): `senated check-model`
 //! prints it and exits non-zero on a failure, the daemon logs it once at
@@ -48,8 +55,9 @@ use crate::secretary::ModelSettings;
 /// The probe-only tool. Registered on every workspace but outside every
 /// roster: only the probe's own run is offered it.
 pub const PROBE_DIGEST: &str = "probe_digest";
-/// The bound on each check's run, or the configured one when tighter.
-pub const PROBE_DEADLINE: Duration = Duration::from_secs(20);
+/// How far past `triage_deadline_secs` a quick check is measured: this
+/// many times it.
+pub const QUICK_MEASURE: u32 = 2;
 /// The answering tool's description of the `terminal_tool` check; also how
 /// a scripted test finds it.
 pub(crate) const PROBE_DESCRIPTION: &str =
@@ -129,6 +137,18 @@ pub fn suggest_triage_deadline(configured_secs: u64, slowest_millis: u64) -> Opt
     Some(secs.div_ceil(5).saturating_mul(5).max(5))
 }
 
+/// [`ModelReport::verdict`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelVerdict {
+    /// Every check on every tier passed.
+    Passed,
+    /// A tier failed, but `serving` passed every check: the Brain still
+    /// answers through it. A warning, not an outage.
+    Degraded { serving: String },
+    /// No tier passed (or there was none): people get the fixed syntax.
+    Down,
+}
+
 /// The self-check of the model a committee (or the Senate as a whole) runs
 /// on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,6 +165,23 @@ impl ModelReport {
         self.problem.is_none()
             && !self.tiers.is_empty()
             && self.tiers.iter().all(TierReport::passed)
+    }
+
+    /// What the report means for the Speaker: every tier fine, one serving
+    /// while another fails, or none serving (the fixed syntax only).
+    pub fn verdict(&self) -> ModelVerdict {
+        if self.problem.is_some() || self.tiers.is_empty() {
+            return ModelVerdict::Down;
+        }
+        if self.passed() {
+            return ModelVerdict::Passed;
+        }
+        match self.tiers.iter().find(|t| t.passed()) {
+            Some(serving) => ModelVerdict::Degraded {
+                serving: serving.tier.clone(),
+            },
+            None => ModelVerdict::Down,
+        }
     }
 
     /// Deadlines too tight for the model measured, one line each.
@@ -195,6 +232,11 @@ impl ModelReport {
                 out.push_str(&format!("  warn  {warning}\n"));
             }
         }
+        if let ModelVerdict::Degraded { serving } = self.verdict() {
+            out.push_str(&format!(
+                "warn  a tier failed; the {serving} model passed and serves the Speaker\n"
+            ));
+        }
         out
     }
 }
@@ -239,21 +281,22 @@ impl BasisBrain {
         });
         let deadline = self.bounds(Some(&quick), model).triage;
         // Measured past the deadline, so a slow model's time is known.
-        let measure = deadline.max(PROBE_DEADLINE);
+        let measure = deadline * QUICK_MEASURE;
+        let full = self.probe_deadline(committee, model);
         let (round_trip, terminal, intent, triage, pick) = tokio::join!(
             timed(
                 "tool_round_trip",
-                PROBE_DEADLINE,
+                full,
                 Box::pin(self.round_trip(committee, model))
             ),
             timed(
                 "terminal_tool",
-                PROBE_DEADLINE,
+                full,
                 Box::pin(self.terminal(committee, model))
             ),
             timed(
                 "intent",
-                PROBE_DEADLINE,
+                full,
                 Box::pin(async {
                     self.interpret_on(model, &probe_utterance(committee))
                         .await
@@ -384,7 +427,7 @@ impl BasisBrain {
     }
 
     fn probe_deadline(&self, committee: Option<&CommitteeId>, model: &ModelSettings) -> Duration {
-        self.bounds(committee, model).deadline.min(PROBE_DEADLINE)
+        self.bounds(committee, model).deadline
     }
 }
 

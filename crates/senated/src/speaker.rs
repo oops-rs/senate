@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use async_trait::async_trait;
 use ractor::ActorRef;
 use senate_core::{ChatSurface, CommitteeId, PostTarget, Posted, SurfaceError};
-use senate_speaker::{BasisBrain, ModelReport, SecretaryConfigs, Speaker, SpeakerArgs, SpeakerMsg};
+use senate_speaker::{
+    BasisBrain, ModelReport, ModelVerdict, SecretaryConfigs, Speaker, SpeakerArgs, SpeakerMsg,
+};
 
 use crate::component::{Component, ComponentContext};
 
@@ -121,27 +123,36 @@ pub async fn check_model(
 /// syntax works without a model.
 pub(crate) async fn log_model_check(brain: BasisBrain) {
     let report = brain.check_model(None).await;
-    if let Some(problem) = &report.problem {
-        // Said where the configuration is read; nothing to probe.
-        tracing::warn!(%problem, "the Speaker's model was not self-checked");
-    } else if report.passed() {
-        tracing::info!(
-            models = report.tiers.len(),
-            "the Speaker's model passed its self-check"
-        );
-    }
     for warning in report.warnings() {
         tracing::warn!(%warning, "the Speaker's model is slower than its triage deadline allows");
     }
-    if report.problem.is_none() && !report.passed() {
-        for failure in report.failures() {
-            tracing::error!(%failure, "the Speaker's model failed its self-check");
+    if let Some(problem) = &report.problem {
+        // Said where the configuration is read; nothing to probe.
+        tracing::warn!(%problem, "the Speaker's model was not self-checked");
+        return;
+    }
+    match report.verdict() {
+        ModelVerdict::Passed => tracing::info!(
+            models = report.tiers.len(),
+            "the Speaker's model passed its self-check"
+        ),
+        ModelVerdict::Degraded { serving } => {
+            // The Brain tries its tiers in order on every call: the one
+            // that passed keeps answering.
+            for failure in report.failures() {
+                tracing::warn!(%failure, %serving, "a model tier failed its self-check; the {serving} model serves");
+            }
         }
-        tracing::error!(
-            "the Speaker's model failed its self-check; people get the fixed syntax until it \
+        ModelVerdict::Down => {
+            for failure in report.failures() {
+                tracing::error!(%failure, "the Speaker's model failed its self-check");
+            }
+            tracing::error!(
+                "the Speaker's model failed its self-check; people get the fixed syntax until it \
              works. Run `senated check-model` for the report:\n{}",
-            report.render()
-        );
+                report.render()
+            );
+        }
     }
 }
 

@@ -102,8 +102,8 @@ mod syntax;
 
 pub use actor::{RunReport, Speaker, SpeakerArgs, SpeakerMsg, SpeakerState, Thought};
 pub use basis_brain::{
-    BasisBrain, CheckResult, LOG_READ, LOG_SEARCH, ModelRecipe, ModelReport, PROBE_DEADLINE,
-    RuntimeRecipe, TierReport, basis_runtime,
+    BasisBrain, CheckResult, LOG_READ, LOG_SEARCH, ModelRecipe, ModelReport, ModelVerdict,
+    QUICK_MEASURE, RuntimeRecipe, TierReport, basis_runtime,
 };
 pub use brain::{
     AgentCandidate, AgentTurn, Agreement, AgreementInput, Answer, Brain, BrainError, CommitteeSeat,
