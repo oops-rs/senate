@@ -811,12 +811,22 @@ impl ServerHub {
                 .non_interactive(senator)
                 .map_err(|e| HubError::Rejected(e.to_string()))?;
         }
-        if let Some(senator) = address.as_senator()
-            && !self.seats.snapshot().knows(senator)
-        {
-            return Ok(Resolved::Unknown {
-                reason: format!("{path}::{target} has no senator {senator}"),
-            });
+        if let Some(senator) = address.as_senator() {
+            let roster = self.seats.snapshot();
+            if !roster.knows(senator) {
+                let like = roster.named_like(senator.as_str(), 5);
+                let reason = if like.is_empty() {
+                    format!("{path}::{target} has no senator {senator}")
+                } else {
+                    let like = like
+                        .iter()
+                        .map(|s| format!("[senator::{s}]"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("{path}::{target} has no senator {senator}; did you mean {like}?")
+                };
+                return Ok(Resolved::Unknown { reason });
+            }
         }
         Ok(Resolved::Here {
             locator: Locator::at(path, target.clone(), address.clone()),

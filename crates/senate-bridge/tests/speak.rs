@@ -197,6 +197,8 @@ async fn tell_is_a_note_and_request_is_a_request() {
         )
     );
 
+    // bob's agent has connected before: a senator of this Senate.
+    h.server.seat("copilot", "bob");
     let o = senate(
         &h,
         &[
@@ -235,6 +237,36 @@ async fn tell_is_a_note_and_request_is_a_request() {
     .await;
     assert!(o.status.success(), "{}", err(&o));
     assert_eq!(last(&h).to, [person("bob")]);
+}
+
+/// A name that is no senator here (a mistyped name, or a prefix of a
+/// session's id) is refused before anything is posted: the question would
+/// otherwise wait for someone who does not exist.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_name_that_is_no_senator_is_refused_and_nothing_is_posted() {
+    let h = machine(false).await;
+    let before = h.server.events("refund-v2").len();
+    for wrote in ["clau", "claude-7ddea704", "nobody"] {
+        let o = senate(
+            &h,
+            &["ask", wrote, "which header?", "--committee", "refund-v2"],
+            None,
+            None,
+        )
+        .await;
+        assert!(!o.status.success(), "{wrote}: {}", out(&o));
+        assert!(
+            err(&o).contains(&format!("[senator::{wrote}] cannot be reached"))
+                && err(&o).contains(&format!("has no senator {wrote}")),
+            "{wrote}: {}",
+            err(&o)
+        );
+        assert_eq!(
+            h.server.events("refund-v2").len(),
+            before,
+            "{wrote}: nothing was posted"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

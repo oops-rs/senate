@@ -1636,6 +1636,20 @@ async fn resolve_says_unknown_for_what_this_senate_should_have_and_does_not() {
             other => panic!("{name}: expected unknown, got {other:?}"),
         }
     }
+    // A prefix of a senator's name is not that senator: it is unknown, and
+    // the reason names who it was probably meant to be.
+    for (name, like) in [
+        ("senator::ali", "[senator::alice]"),
+        ("senator::car", "[senator::carol]"),
+    ] {
+        match resolve(&server, name, Some("refund-v2")).await {
+            Resolved::Unknown { reason } => assert!(
+                reason.contains(&format!("did you mean {like}")),
+                "{name}: {reason}"
+            ),
+            other => panic!("{name}: expected unknown, got {other:?}"),
+        }
+    }
     // Not a qualified name at all.
     for bad in ["alice", "refund-v2::senator::alice/claude", ""] {
         let response = server

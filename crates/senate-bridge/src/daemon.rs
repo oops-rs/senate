@@ -4611,6 +4611,8 @@ impl Shared {
         if body.trim().is_empty() {
             return Err(IpcError::bad_request("`body` is empty"));
         }
+        // A qualified name is resolved below; a bare one is checked after.
+        let bare = at.is_none();
         if let Some(at) = at {
             // A person's message to a seat elsewhere is delivered directly,
             // on the committee the name resolves to.
@@ -4638,6 +4640,19 @@ impl Shared {
                 "a person writes to a senator, `senator::*` or `speaker`, not {}",
                 bad.in_text()
             )));
+        }
+        // A senator named here must be one: a person, a seated agent or an
+        // alias. Otherwise the message would wait for someone who does not
+        // exist (a mistyped name, or a prefix of a session's id).
+        for address in to.iter_mut().filter(|_| bare) {
+            if matches!(address, Address::Senator(_)) {
+                let (level, there, resolved) = self
+                    .resolve_seat(&Locator::here(address.clone()), &committee)
+                    .await?;
+                if level == 0 && there == committee {
+                    *address = resolved;
+                }
+            }
         }
         let mut spoke_in = Vec::new();
         let thread = match thread {

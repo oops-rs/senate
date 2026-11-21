@@ -875,6 +875,30 @@ impl Roster {
         self.agents.iter().map(|a| a.name.clone()).collect()
     }
 
+    /// The senators, people first, whose name starts with `written` or
+    /// contains it, ignoring case: what an unknown name was probably meant
+    /// to be. At most `limit`, those starting with it first.
+    pub fn named_like(&self, written: &str, limit: usize) -> Vec<SenatorName> {
+        let written = written.to_lowercase();
+        if written.is_empty() {
+            return Vec::new();
+        }
+        let names: Vec<SenatorName> = self
+            .principals
+            .iter()
+            .map(Principal::path)
+            .chain(self.agents())
+            .collect();
+        let starts = names
+            .iter()
+            .filter(|n| n.as_str().to_lowercase().starts_with(&written));
+        let contains = names.iter().filter(|n| {
+            let n = n.as_str().to_lowercase();
+            !n.starts_with(&written) && n.contains(&written)
+        });
+        starts.chain(contains).take(limit).cloned().collect()
+    }
+
     /// The agents seated in this Senate, with who answers for each.
     pub fn seated(&self) -> &[SeatedAgent] {
         &self.agents
@@ -1114,6 +1138,32 @@ mod tests {
         assert!(roster.is_person_address(&addr("senator::carol")));
         assert_eq!(roster.owner_of(&senator("gemini")), Some(&name("alice")));
         assert_eq!(roster.owner_of(&senator("wendell")), None);
+    }
+
+    #[test]
+    fn a_name_like_an_unknown_one_starts_with_it_or_contains_it() {
+        let roster = Roster::new(
+            principals(&["wendell", "alice"]),
+            vec![
+                agent("claude-7ddea704-5624", "wendell"),
+                agent("codex", "wendell"),
+                agent("my-claude", "alice"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            roster.named_like("claude-7ddea704", 5),
+            [senator("claude-7ddea704-5624")]
+        );
+        assert_eq!(
+            roster.named_like("CLAUDE", 5),
+            [senator("claude-7ddea704-5624"), senator("my-claude")],
+            "starting with it first, ignoring case"
+        );
+        assert_eq!(roster.named_like("w", 5), [senator("wendell")]);
+        assert_eq!(roster.named_like("c", 1).len(), 1, "at most the limit");
+        assert!(roster.named_like("zzz", 5).is_empty());
+        assert!(roster.named_like("", 5).is_empty());
     }
 
     #[test]
