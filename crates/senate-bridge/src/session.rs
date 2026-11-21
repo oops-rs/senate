@@ -588,6 +588,10 @@ mod tests {
         assert_eq!(agy_conversation_open_in(home.path(), &key), Some(false));
         rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive).unwrap();
         assert_eq!(agy_conversation_open_in(home.path(), &key), Some(true));
+        // Unlock explicitly: a child another test forks in this process
+        // shares the open file until it execs, so dropping alone may leave
+        // the lock held for a moment.
+        rustix::fs::flock(&lock, rustix::fs::FlockOperation::Unlock).unwrap();
         drop(lock);
         assert_eq!(agy_conversation_open_in(home.path(), &key), Some(false));
         assert_eq!(
