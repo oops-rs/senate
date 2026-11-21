@@ -125,12 +125,10 @@ fn a_stale_stopped_service_that_misses_a_program_fails() {
 
     let now = spec(home, &new.to_string_lossy());
     let checks = service_checks(&now, Some(&senated), &manager(false), EN);
+    // Only the PATH differs: a warning naming what it misses, not a failure.
     let file = by_id(&checks, "service.file");
-    assert_eq!(file.status, Status::Fail);
-    assert!(
-        file.found.contains(&old.to_string_lossy().to_string()),
-        "{file:?}"
-    );
+    assert_eq!(file.status, Status::Warn, "{file:?}");
+    assert!(file.found.contains("does not find codex"), "{file:?}");
     assert_eq!(file.fix.as_deref(), Some(SERVICE_INSTALL));
     assert_eq!(by_id(&checks, "service.running").status, Status::Fail);
     let claude = by_id(&checks, "service.program.claude");
@@ -140,6 +138,61 @@ fn a_stale_stopped_service_that_misses_a_program_fails() {
     assert_eq!(codex.status, Status::Fail);
     assert!(codex.found.contains("cannot find codex"), "{codex:?}");
     assert_eq!(codex.fix.as_deref(), Some(SERVICE_INSTALL));
+}
+
+#[test]
+fn a_minimal_shell_path_does_not_fail_a_complete_service_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    let bin = home.join("bin");
+    program(&bin, "claude");
+    program(&bin, "codex");
+    let senated = program(&bin, "senated");
+    // Installed from a full login shell.
+    let full = format!("{}:/usr/bin:/bin", bin.display());
+    let installed = spec(home, &full);
+    let plan = service::plan_install(&installed, &senated);
+    std::fs::create_dir_all(plan.file.parent().unwrap()).unwrap();
+    std::fs::write(&plan.file, &plan.contents).unwrap();
+
+    // doctor over SSH, with a PATH that has none of it.
+    let ssh = spec(home, "/usr/bin:/bin");
+    let checks = service_checks(&ssh, Some(&senated), &manager(true), EN);
+    let file = by_id(&checks, "service.file");
+    assert_eq!(file.status, Status::Ok, "{file:?}");
+    assert!(file.found.contains("PATH differs"), "{file:?}");
+    for id in ["service.program.claude", "service.program.codex"] {
+        assert_eq!(by_id(&checks, id).status, Status::Ok, "{checks:#?}");
+    }
+}
+
+#[test]
+fn a_service_file_running_another_binary_still_fails() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    let bin = home.join("bin");
+    let senated = program(&bin, "senated");
+    let spec = spec(home, "/usr/bin:/bin");
+    let plan = service::plan_install(&spec, &senated);
+    std::fs::create_dir_all(plan.file.parent().unwrap()).unwrap();
+    let managed = spec.managed_senated().to_string_lossy().into_owned();
+    let wrong = plan.contents.replace(&managed, "/somewhere/else/senated");
+    assert_ne!(wrong, plan.contents);
+    std::fs::write(&plan.file, wrong).unwrap();
+
+    // Even with this shell's PATH in it, the program differs.
+    let checks = service_checks(&spec, Some(&senated), &manager(true), EN);
+    let file = by_id(&checks, "service.file");
+    assert_eq!(file.status, Status::Fail, "{file:?}");
+    assert!(file.found.contains("/somewhere/else/senated"), "{file:?}");
+
+    // And with a different shell PATH too.
+    let other = super::service::Spec {
+        path: Some(bin.to_string_lossy().into_owned()),
+        ..spec
+    };
+    let checks = service_checks(&other, Some(&senated), &manager(true), EN);
+    assert_eq!(by_id(&checks, "service.file").status, Status::Fail);
 }
 
 #[test]

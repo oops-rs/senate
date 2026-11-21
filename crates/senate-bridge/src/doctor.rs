@@ -334,34 +334,7 @@ pub fn service_checks(
             ),
             Some(SERVICE_INSTALL),
         )),
-        (Some(senated), Some(now)) => {
-            let plan = service::plan_install(spec, senated);
-            if plan.unchanged {
-                checks.push(Check::ok(
-                    "service.file",
-                    l.pick(
-                        format!("{} 是最新的", file.display()),
-                        format!("{} is current", file.display()),
-                    ),
-                ));
-            } else {
-                let (have, want) = first_difference(now, &plan.contents);
-                checks.push(Check::fail(
-                    "service.file",
-                    l.pick(
-                        format!(
-                            "{} 与 setup service install 现在会写的不同：现为 `{have}`，应为 `{want}`",
-                            file.display()
-                        ),
-                        format!(
-                            "{} differs from what setup service install writes now: has `{have}`, would write `{want}`",
-                            file.display()
-                        ),
-                    ),
-                    Some(SERVICE_INSTALL),
-                ));
-            }
-        }
+        (Some(senated), Some(now)) => checks.push(file_check(spec, senated, now, l)),
     }
     if let (Some(senated), Some(now)) = (senated, &installed)
         && now.contains(&*spec.managed_senated().to_string_lossy())
@@ -429,6 +402,88 @@ pub fn service_checks(
         checks.push(program_check(program, here, installed.is_some(), l));
     }
     checks
+}
+
+/// The installed service file against what `setup service install` would
+/// write now. The `PATH` it records is taken from the shell that installed
+/// it, and a shell run over SSH has a far shorter one, so a file that
+/// differs only in its `PATH` is not stale: it is a warning only when the
+/// daemon's `PATH` misses a program this shell finds.
+fn file_check(spec: &service::Spec, senated: &Path, now: &str, l: Locale) -> Check {
+    let file = spec.file();
+    let plan = service::plan_install(spec, senated);
+    if plan.unchanged {
+        return Check::ok(
+            "service.file",
+            l.pick(
+                format!("{} 是最新的", file.display()),
+                format!("{} is current", file.display()),
+            ),
+        );
+    }
+    let installed_path = service::path_in_file(spec.platform, now);
+    let as_installed = service::Spec {
+        path: installed_path.clone(),
+        ..spec.clone()
+    };
+    if service::service_file_contents(&as_installed, &spec.managed_senated()) != now {
+        let (have, want) = first_difference(now, &plan.contents);
+        return Check::fail(
+            "service.file",
+            l.pick(
+                format!(
+                    "{} 与 setup service install 现在会写的不同：现为 `{have}`，应为 `{want}`",
+                    file.display()
+                ),
+                format!(
+                    "{} differs from what setup service install writes now: has `{have}`, would write `{want}`",
+                    file.display()
+                ),
+            ),
+            Some(SERVICE_INSTALL),
+        );
+    }
+    let daemon_path =
+        installed_path.unwrap_or_else(|| manager_default_path(spec.platform).to_owned());
+    let daemon = service::agent_programs(&spec.config, Some(&daemon_path));
+    let shell = service::agent_programs(&spec.config, spec.path.as_deref());
+    let missed: Vec<&str> = daemon
+        .iter()
+        .zip(&shell)
+        .filter(|(d, s)| matches!(d.found, Found::Missing) && matches!(s.found, Found::Resolved(_)))
+        .map(|(d, _)| d.name)
+        .collect();
+    if missed.is_empty() {
+        Check::ok(
+            "service.file",
+            l.pick(
+                format!(
+                    "{} 是最新的（它的 PATH 与这个 shell 的不同，守护进程用它能找到所需程序）",
+                    file.display()
+                ),
+                format!(
+                    "{} is current (its PATH differs from this shell's and finds the programs the daemon needs)",
+                    file.display()
+                ),
+            ),
+        )
+    } else {
+        let missed = missed.join(", ");
+        Check::warn(
+            "service.file",
+            l.pick(
+                format!(
+                    "{} 的 PATH 找不到 {missed}，这个 shell 的 PATH 能找到",
+                    file.display()
+                ),
+                format!(
+                    "{}'s PATH does not find {missed}, which this shell's PATH does",
+                    file.display()
+                ),
+            ),
+            Some(SERVICE_INSTALL),
+        )
+    }
 }
 
 /// The first line where two texts differ, each trimmed (`(end)` past the
