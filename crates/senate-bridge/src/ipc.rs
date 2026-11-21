@@ -434,6 +434,11 @@ pub struct HostedPrompt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool: Option<String>,
     pub since: DateTime<Utc>,
+    /// A choice the host saw waiting on the screen, which no runtime
+    /// signal told of (a "hooks need review" at startup, say), rather than
+    /// a permission prompt.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub screen: bool,
 }
 
 impl SessionRow {

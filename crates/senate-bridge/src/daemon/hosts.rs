@@ -876,6 +876,7 @@ impl Shared {
             codex_remote: remote.as_deref(),
             name: name.as_deref(),
             model: &model,
+            prompt_quiet: self.timing.screen_prompt_quiet,
         };
         let session_runtime = Runtime::from(runtime);
         let mut reply = SpawnReply {

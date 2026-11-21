@@ -566,6 +566,9 @@ stdin.")]
         model: Option<String>,
         #[arg(long)]
         effort: Option<String>,
+        /// See `host::prompt::QUIET`.
+        #[arg(long)]
+        prompt_quiet_ms: Option<u64>,
     },
     /// Manual checks of the delivery plumbing.
     #[command(hide = true)]
@@ -2165,9 +2168,12 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             name,
             model,
             effort,
+            prompt_quiet_ms,
         } => {
             let paths = Paths::from_env()?;
             let model = crate::ipc::HostedModel { model, effort };
+            let prompt_quiet = prompt_quiet_ms
+                .map_or(crate::host::prompt::QUIET, std::time::Duration::from_millis);
             runtime(false)?.block_on(crate::host::run(
                 &paths,
                 &id,
@@ -2180,6 +2186,7 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
                     codex_remote: codex_remote.as_deref(),
                     name: name.as_deref(),
                     model: &model,
+                    prompt_quiet,
                 },
             ))
         }

@@ -399,10 +399,19 @@ fn session_checks(sessions: &SessionsReply, l: Locale) -> Vec<Check> {
         let since = prompt.since.format("%H:%M");
         checks.push(Check::warn(
             format!("sessions.prompt.{label}"),
-            l.pick(
-                format!("{label} 自 {since} 起在等待权限确认（{tool}）"),
-                format!("{label} waits on a permission prompt ({tool}) since {since}"),
-            ),
+            if prompt.screen {
+                l.pick(
+                    format!("{label} 自 {since} 起停在终端里一个 Senate 不会回答的提示上"),
+                    format!(
+                        "{label} waits on a prompt in its terminal that Senate does not answer, since {since}"
+                    ),
+                )
+            } else {
+                l.pick(
+                    format!("{label} 自 {since} 起在等待权限确认（{tool}）"),
+                    format!("{label} waits on a permission prompt ({tool}) since {since}"),
+                )
+            },
             Some(format!("senate attach {label}")),
         ));
     }

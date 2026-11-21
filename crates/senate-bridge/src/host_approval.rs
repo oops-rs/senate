@@ -101,6 +101,10 @@ pub(crate) struct ApprovalNotice {
     pub append_attempted: bool,
     #[serde(default)]
     pub failures: u8,
+    /// Not a permission prompt the runtime told of: a choice its host saw
+    /// waiting on the screen ([`crate::host::prompt`]).
+    #[serde(default)]
+    pub screen: bool,
 }
 
 #[cfg(test)]

@@ -609,6 +609,7 @@ pub fn hosted_sessions() -> SessionsReply {
     lead.prompt = Some(HostedPrompt {
         tool: Some("cargo publish".into()),
         since: Utc::now() - chrono::Duration::minutes(3),
+        screen: false,
     });
     lead.model = HostedModel {
         model: Some("opus".into()),

@@ -202,6 +202,7 @@ impl Shared {
         Some(HostedPrompt {
             tool: notice.tool.as_deref().map(tool_label),
             since,
+            screen: notice.screen,
         })
     }
 
@@ -259,6 +260,59 @@ impl Shared {
                 })?;
             }
         }
+        self.reconcile_screen_prompts(&paths)
+    }
+
+    /// A choice each host sees waiting on its screen ([`host::prompt`]),
+    /// as a notice like an approval's, while nobody attends the terminal
+    /// and no permission prompt Senate knows of explains it.
+    fn reconcile_screen_prompts(&self, paths: &Paths) -> Result<(), StoreError> {
+        let relayed = self.relay.hosted_prompts();
+        for id in host::running_ids(paths)? {
+            let Some(native) = self.store.session_for_host(&id)? else {
+                continue;
+            };
+            let Some((live, session)) = self.approval_host(&native)? else {
+                continue;
+            };
+            if live != id {
+                continue;
+            }
+            let shown = host::prompt::read(paths, &id)
+                .filter(|_| !relayed.iter().any(|prompt| prompt.session_id == native));
+            let viewer = host::viewer_activity(paths, &id);
+            self.edit_approvals(&id, |state| {
+                let key = shown.map(|prompt| format!("screen:{}", prompt.since));
+                // Senate's own approval of what is on the screen comes first.
+                let approval = state.claude.is_some()
+                    || state
+                        .notices
+                        .iter()
+                        .any(|n| !n.screen && n.archive.is_none());
+                let mut changed = close_notices(state, |n| {
+                    n.screen && (approval || key.as_ref() != Some(&n.prompt))
+                });
+                if approval {
+                    return changed;
+                }
+                let (Some(prompt), Some(key), Some(viewer)) = (shown, key, viewer.as_ref()) else {
+                    return changed;
+                };
+                let Some(unattended) = viewer.unattended_since(observed_at()) else {
+                    return changed;
+                };
+                // Quiet since before someone last typed: they saw it, and
+                // what they typed may not have reached the screen yet.
+                let at = prompt.since.max(unattended);
+                if prompt.since > viewer.input_at && open_notice(state, &session, at, key, None) {
+                    if let Some(notice) = state.notices.last_mut() {
+                        notice.screen = true;
+                    }
+                    changed = true;
+                }
+                changed
+            })?;
+        }
         Ok(())
     }
 
@@ -302,7 +356,8 @@ impl Shared {
                 .ok()
                 .flatten()
                 .is_some_and(|(id, _)| &id == host_id)
-            && (notice.runtime != Runtime::Codex
+            && (notice.screen
+                || notice.runtime != Runtime::Codex
                 || self
                     .relay
                     .hosted_prompts()
@@ -407,6 +462,16 @@ fn approval_body(notice: &ApprovalNotice, locale: Locale) -> String {
     let committee = &notice.committee;
     let attach = format!("senate attach {}", notice.agent);
     let who = Address::senator(&notice.agent).in_text();
+    if notice.screen {
+        return match locale {
+            Locale::En => format!(
+                "{who} is waiting on a prompt in its terminal in committee \u{0060}{committee}\u{0060} that Senate does not answer (its screen shows a choice and has not changed for a while).\nAsk a person to run \u{0060}{attach}\u{0060} and choose in the terminal."
+            ),
+            Locale::Zh => format!(
+                "{who} 在委员会 \u{0060}{committee}\u{0060} 的终端里停在一个 Senate 不会回答的提示上（屏幕显示一个选择，已有一段时间没有变化）。\n请让人员运行 \u{0060}{attach}\u{0060}，在终端内选择。"
+            ),
+        };
+    }
     let tool = notice.tool.as_ref().map_or_else(String::new, |tool| {
         let quoted = serde_json::json!(tool_label(tool));
         match locale {
@@ -486,6 +551,7 @@ fn open_notice(
         archive: None,
         append_attempted: false,
         failures: 0,
+        screen: false,
     });
     true
 }

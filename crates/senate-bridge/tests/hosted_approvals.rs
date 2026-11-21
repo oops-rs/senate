@@ -1174,3 +1174,50 @@ async fn a_waiting_prompt_shows_on_its_session_row_and_watchers_hear_it_open_and
     terminal.stop();
     h.stop().await;
 }
+
+/// A TUI that stops on a choice no hook or app-server tells of (Codex's
+/// "hooks need review" at startup): once its screen is quiet, the chair
+/// hears of it, the row and doctor show it, and answering it closes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_quiet_choice_on_the_screen_is_a_notice_until_someone_answers_it() {
+    let (mut h, project) = fixture(true, Locale::En).await;
+    let program = h.dir.path().join("tui");
+    std::fs::write(
+        &program,
+        format!(
+            "#!/bin/sh\n{RECORD_HOSTED_ARGV}\n\
+             printf '  Hooks need review\\r\\n\\r\\n\\342\\200\\272 1. Review hooks\\r\\n  2. Trust all and continue\\r\\n'\n\
+             IFS= read -r line\n\
+             printf '\\033[2J\\033[Hchosen\\r\\n'\n\
+             while IFS= read -r line; do :; done\n"
+        ),
+    )
+    .unwrap();
+    start(&mut h).await;
+    let (launch, terminal) = Terminal::spawn(&h, project, HostedRuntime::Claude).await;
+
+    let notice = next_notice(&h, 1).await;
+    assert!(
+        notice
+            .body
+            .contains("waiting on a prompt in its terminal in committee `refund-v2` that Senate does not answer"),
+        "{}",
+        notice.body
+    );
+    assert!(notice.body.contains("senate attach"), "{}", notice.body);
+    assert_eq!(notice.to, vec![Address::Chair]);
+    let prompt = session_prompt(&h, &launch.session_id)
+        .await
+        .expect("the row carries the waiting prompt");
+    assert!(prompt.screen && prompt.tool.is_none(), "{prompt:?}");
+
+    // Someone attaches and chooses: the TUI repaints and the notice closes.
+    send_input(&terminal).await;
+    wait_archived(&h, notice.seq).await;
+    assert_eq!(session_prompt(&h, &launch.session_id).await, None);
+    // The screen no longer shows a choice: nothing more is said.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    assert_eq!(notices(&h).len(), 1);
+    terminal.stop();
+    h.stop().await;
+}

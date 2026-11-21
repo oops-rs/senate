@@ -5,6 +5,7 @@ pub(crate) mod control;
 mod emulation;
 mod input;
 mod picker;
+pub(crate) mod prompt;
 mod terminal;
 pub mod view;
 pub(crate) mod watch;
@@ -327,6 +328,8 @@ pub struct SessionCommand<'a> {
     pub name: Option<&'a str>,
     /// The model and effort the TUI is started with.
     pub model: &'a HostedModel,
+    /// See [`prompt::QUIET`].
+    pub prompt_quiet: Duration,
 }
 
 pub(crate) const READY: u8 = 1;
@@ -426,6 +429,10 @@ pub(crate) fn start(
     if let Some(effort) = &session.model.effort {
         command.arg(format!("--effort={effort}"));
     }
+    command.arg(format!(
+        "--prompt-quiet-ms={}",
+        session.prompt_quiet.as_millis()
+    ));
 
     std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
     let mut spawn = || -> anyhow::Result<(Child, File)> {
@@ -610,6 +617,7 @@ pub async fn run(
         }
         served = serve(&listener, &tty, &output, &viewer) => served,
         served = watch::serve(&watchers, &tty.screen) => served,
+        prompted = prompt::watch(&dir, &tty.screen, session.prompt_quiet) => prompted,
         fitted = tty.fit() => fitted,
         peer = control::next_stop(&controls, &viewer, &tty, paths, id) => {
             stop = Some(peer);

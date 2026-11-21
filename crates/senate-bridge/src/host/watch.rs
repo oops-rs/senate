@@ -118,6 +118,8 @@ pub(super) struct Screen {
     /// A new fit was asked for, or the viewer left: the latest applies.
     fit_due: Notify,
     watchers: AtomicU64,
+    /// When the TUI last wrote anything ([`super::observed_at`]).
+    last_output: AtomicU64,
 }
 
 impl Screen {
@@ -129,6 +131,7 @@ impl Screen {
             fit: Mutex::new(None),
             fit_due: Notify::new(),
             watchers: AtomicU64::new(0),
+            last_output: AtomicU64::new(super::observed_at()),
         }
     }
 
@@ -186,6 +189,8 @@ impl Screen {
     pub(super) fn output(&self, bytes: &[u8]) {
         let mut parser = self.parser();
         parser.process(bytes);
+        self.last_output
+            .store(super::observed_at(), Ordering::Release);
         // Nobody watching is not an error.
         let _ = self.changes.send(Change::Output(bytes.into()));
     }
@@ -195,6 +200,24 @@ impl Screen {
         let mut parser = self.parser();
         parser.set_size(dimension(rows), dimension(cols));
         let _ = self.changes.send(Change::Size(rows, cols));
+    }
+
+    /// When the TUI last wrote anything.
+    pub(super) fn last_output(&self) -> u64 {
+        self.last_output.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_last_output(&self, at: u64) {
+        self.last_output.store(at, Ordering::Release);
+    }
+
+    /// The text of each row of the screen, top to bottom. Kept in memory
+    /// only, for [`super::prompt`].
+    pub(super) fn rows(&self) -> Vec<String> {
+        let parser = self.parser();
+        let (_, cols) = parser.screen().size();
+        parser.screen().rows(0, cols.get()).collect()
     }
 
     /// The size and the screen as they are, and every change after them.

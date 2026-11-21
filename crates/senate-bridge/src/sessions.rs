@@ -133,7 +133,7 @@ pub fn render(reply: &SessionsReply, now: DateTime<Utc>, locale: Locale) -> Stri
                     .map_or_else(|| "-".to_owned(), ToString::to_string),
                 row.runtime.as_str().to_owned(),
                 row.model.label(),
-                row.state.as_str().to_owned(),
+                state(row, locale),
                 row.started_at
                     .map_or_else(|| "-".to_owned(), |at| uptime(at, now)),
                 viewer(row, locale),
@@ -179,6 +179,25 @@ pub fn render(reply: &SessionsReply, now: DateTime<Utc>, locale: Locale) -> Stri
         );
     }
     out.trim_end().to_owned()
+}
+
+/// Its state, and the prompt waiting in its terminal, if one is.
+fn state(row: &SessionRow, locale: Locale) -> String {
+    let state = row.state.as_str();
+    match &row.prompt {
+        Some(prompt) if row.is_running() => {
+            let what = match (&prompt.tool, prompt.screen) {
+                (_, true) => locale.pick("等待终端提示", "prompt in terminal").to_owned(),
+                (Some(tool), false) => match locale {
+                    Locale::Zh => format!("等待批准 {tool}"),
+                    Locale::En => format!("approval: {tool}"),
+                },
+                (None, false) => locale.pick("等待批准", "approval").to_owned(),
+            };
+            format!("{state} · {what}")
+        }
+        _ => state.to_owned(),
+    }
 }
 
 /// Who is at its terminal: `attached`, how long since someone typed, or
@@ -303,5 +322,29 @@ mod tests {
             render(&SessionsReply::default(), now, Locale::En),
             "No hosted sessions on this machine."
         );
+    }
+
+    #[test]
+    fn a_waiting_prompt_shows_in_the_state() {
+        let now = Utc::now();
+        let mut waiting = row("codex-1", None, HostState::Running);
+        waiting.prompt = Some(crate::ipc::HostedPrompt {
+            tool: None,
+            since: now,
+            screen: true,
+        });
+        let mut asking = row("claude-1", None, HostState::Running);
+        asking.prompt = Some(crate::ipc::HostedPrompt {
+            tool: Some("Bash".into()),
+            since: now,
+            screen: false,
+        });
+        let reply = SessionsReply {
+            rows: vec![waiting, asking],
+            orphans: Vec::new(),
+        };
+        let text = render(&reply, now, Locale::En);
+        assert!(text.contains("running · prompt in terminal"), "{text}");
+        assert!(text.contains("running · approval: Bash"), "{text}");
     }
 }

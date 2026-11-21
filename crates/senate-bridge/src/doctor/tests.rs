@@ -480,6 +480,7 @@ fn session(label: &str, running: bool, prompt: bool) -> SessionRow {
         prompt: prompt.then(|| HostedPrompt {
             tool: Some("Bash".into()),
             since: chrono::Utc::now(),
+            screen: false,
         }),
     }
 }

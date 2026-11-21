@@ -240,6 +240,9 @@ pub struct Timing {
     /// How long nobody may have typed in a hosted agy's terminal before
     /// its host types the idle nudge into it.
     pub agy_nudge_quiet: Duration,
+    /// How long a hosted TUI showing a choice must have written nothing
+    /// before its host reports a prompt waiting ([`crate::host::prompt`]).
+    pub screen_prompt_quiet: Duration,
 }
 
 impl Default for Timing {
@@ -261,6 +264,7 @@ impl Default for Timing {
             checkpoint_poll: Duration::from_secs(60),
             checkpoint_interval: Duration::from_secs(2 * 3600),
             agy_nudge_quiet: Duration::from_secs(10),
+            screen_prompt_quiet: crate::host::prompt::QUIET,
         }
     }
 }
