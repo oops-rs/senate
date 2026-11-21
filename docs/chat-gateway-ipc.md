@@ -188,7 +188,7 @@ Platform user ids (`user`, `users`, `invite`, `not_added`) are the people's acco
 {"type":"result","id":"s4","value":{"group_id":"g-agents","not_added":["u-bob"]}}
 {"type":"call","id":"s5","op":"pin","args":{"message_ref":"m-card","operation_id":"9a40…"}}
 {"type":"result","id":"s5","value":null}
-{"type":"call","id":"s6","op":"set_announcement","args":{"group_id":"g-refund","section":{"title":"Committee refund","markdown":"**Seats**\n- senate-dev (dark-conclave) online · duty: Senate development"},"operation_id":"5e21…"}}
+{"type":"call","id":"s6","op":"set_announcement","args":{"group_id":"g-refund","section":{"title":"Committee refund","markdown":"**Seats**\n- refund-dev (alice-desk) online · duty: refund backend"},"operation_id":"5e21…"}}
 {"type":"result","id":"s6","value":null}
 ```
 

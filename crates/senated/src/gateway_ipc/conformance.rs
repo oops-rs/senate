@@ -334,7 +334,7 @@ async fn an_adapter_with_every_op_serves_every_surface_method() {
 
     let section = AnnouncementSection {
         title: "Committee refund".into(),
-        markdown: "**Seats**\n- senate-dev (dark-conclave) online".into(),
+        markdown: "**Seats**\n- refund-dev (alice-desk) online".into(),
     };
     surface
         .set_announcement("g-people", &section, "op-announce")
@@ -344,7 +344,7 @@ async fn an_adapter_with_every_op_serves_every_surface_method() {
         served.last(),
         (
             "set_announcement".into(),
-            json!({"group_id":"g-people","section":{"title":"Committee refund","markdown":"**Seats**\n- senate-dev (dark-conclave) online"},"operation_id":"op-announce"})
+            json!({"group_id":"g-people","section":{"title":"Committee refund","markdown":"**Seats**\n- refund-dev (alice-desk) online"},"operation_id":"op-announce"})
         )
     );
 
