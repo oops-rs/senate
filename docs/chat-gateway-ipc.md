@@ -1,45 +1,218 @@
 # Local chat gateway protocol (v1)
 
-This protocol connects a platform adapter to a Senate server on the same host. Senate owns identity, group bindings, the committee log and addressing. The adapter owns its platform credentials and implements platform operations. An external senator uses Senate's existing authenticated HTTP and SSE APIs independently.
+This protocol connects a chat platform adapter to `senated` on the same host. It is the two-process form of a chat gateway. In the one-process form, a layer hands `Assembly` its `ChatSurface` directly. Over the socket the adapter can serve every `ChatSurface` operation, so the two forms can do the same things.
 
-## Connection
+Senate owns identity, group bindings, the committee log and addressing. The adapter owns its platform credentials. It turns platform events into `inbound` frames and carries out the operations Senate calls. An external senator uses Senate's authenticated HTTP and SSE APIs separately. It does not use this socket.
 
-The adapter connects to the Unix socket in its `[chat_gateway]` configuration. The server reads `socket`, `platform` and `token_env` from `[chat_gateway]`. The socket is private to the server account. Each frame is a UTF-8 JSON object followed by LF, up to 1 MiB excluding the delimiter. All IDs below correlate a single exchange on its connection. They are strings. Persistent operation IDs have a separate purpose and survive reconnects.
+You can write an adapter from this document alone. `crates/senated/src/gateway_ipc/conformance.rs` is an example adapter and the test that holds `senated` to this document.
+
+## Configuration
+
+```toml
+[chat_gateway]
+platform = "chat"                                # the platform slug, [a-z0-9-]
+socket = "/path/to/private-directory/chat.sock"  # absolute
+token_env = "SENATE_CHAT_GATEWAY_TOKEN"          # names the variable holding the gateway credential
+```
+
+`senated` creates the socket with mode `0600` and refuses to start if a live endpoint or an ordinary file is already at that path. The adapter needs both the socket path and the gateway credential. It keeps its own platform credential separately.
+
+## Framing
+
+Each frame is one UTF-8 JSON object followed by LF (`\n`). A frame is at most 1 MiB, not counting the LF. A larger frame, a frame that isn't valid JSON or a frame of unknown shape closes the connection. Frames are objects tagged by `type`.
+
+| Direction | `type` | Purpose |
+|---|---|---|
+| adapter → senated | `hello` | authenticate, choose the version and advertise capabilities (first frame) |
+| senated → adapter | `ready` | the handshake succeeded |
+| senated → adapter | `error` | the handshake was refused for a reason the adapter should see; the socket then closes |
+| adapter → senated | `inbound` | a platform message for Senate |
+| senated → adapter | `ack` | the outcome of one `inbound` |
+| senated → adapter | `call` | a platform operation for the adapter to carry out |
+| adapter → senated | `result` | the outcome of one `call` |
+
+`senated` rejects unknown fields in the frames the adapter sends. The `id` of a `call`/`result` or `inbound`/`ack` pair is a string that correlates one exchange on one connection only. A new connection starts new ids. A persistent `operation_id` is a different thing and survives reconnects (see [Retry and idempotency](#retry-and-idempotency)).
+
+## Handshake
 
 ```json
-{"type":"hello","version":1,"platform":"chat","token":"<gateway credential>","capabilities":["post","adopt_group","release_group"]}
+{"type":"hello","version":1,"platform":"chat","token":"<gateway credential>","capabilities":["post","post_mentioning","post_card","update_card","pin","create_group","invite","rename_group","adopt_group","release_group"]}
 {"type":"ready","version":1}
 ```
 
-The server validates the version, platform and bearer before accepting the connection. One adapter serves a platform at a time. Invalid credentials, versions and malformed frames close the connection. The adapter must advertise `post`. Grant operations are optional. Every reconnect must advertise the same set of capabilities as the first authenticated connection. A changed set receives a terminal handshake error and the socket closes before `ready`. To change advertised operations, stop the old adapter, restart `senated`, then start the new adapter. The gateway caches an `unsupported` grant result for the lifetime of the daemon. An adapter should return `unavailable` for a temporary loss of a grant operation.
+The adapter sends `hello` within 5 seconds of connecting. `senated` checks that:
+
+- `version` is 1,
+- `platform` matches the configured platform,
+- `token` matches the gateway credential (compared in constant time),
+- `capabilities` contains `post`.
+
+If any check fails, the connection closes without a reply. One adapter serves a platform at a time, so a second connection is closed while the first is attached. `senated` accepts at most 8 connections at once.
+
+### Capabilities
+
+A capability is an op name from [Operations](#operations). The adapter advertises the ops it implements. `post` is required and the rest are optional. `senated` ignores names it doesn't know, so an adapter may advertise ops from a later revision of this document.
+
+`senated` never sends a `call` for an op the adapter didn't advertise. Senate answers it locally as `unsupported` and falls back: a plain post instead of a card, the person's name as text instead of a native mention, adopting a group instead of creating one. An adapter written before the full set existed (`post`, `adopt_group`, `release_group`) therefore keeps working unchanged.
+
+The first authenticated connection fixes the capability set for the daemon's lifetime. A reconnect that advertises a different set gets a terminal error before `ready`, and then the socket closes:
 
 ```json
 {"type":"error","error":{"kind":"rejected","detail":"gateway capabilities changed; restart senated to change adapter capabilities"}}
 ```
 
-The adapter keeps its platform credential separately.
+To change the advertised ops, stop the old adapter, restart `senated`, then start the new adapter.
 
-## Platform messages
+## Platform messages (`inbound` / `ack`)
 
 ```json
 {"type":"inbound","id":"i1","message":{"group_id":"oc_group","group_name":"Refund","sender":"ou_alice","message_ref":"om_bind","thread_ref":null,"thread_root":null,"reply_to":null,"addressing":"mention","mentions":[],"text":"/bind refund-v2"}}
 {"type":"ack","id":"i1"}
 ```
 
-The fields match `senated::Inbound`. Addressing is `mention`, `reply` or `ambient`; a mention has `user` and `name` (an empty string is allowed). The adapter sends messages in order. It keeps an unacknowledged message for retry on reconnect. Both peers continue serving outgoing calls while an inbound is waiting for acknowledgement. A malformed message identity or a conflicting replay of a durable first-bind receipt receives a terminal rejection, e.g. `{"type":"ack","id":"i1","error":{"kind":"rejected","detail":"conflicting replay"}}`. The adapter records the rejection in its log and advances to the next input. Ordinary bound messages are deduplicated by platform, committee and message reference. A later delivery with the same key is acknowledged and the original event is preserved. A transient failure closes the connection and the adapter retains its pending input.
+`message` is `senated::Inbound`:
 
-## Platform operations
+| Field | Type | Meaning |
+|---|---|---|
+| `group_id` | string | the platform's stable id of the group (not empty) |
+| `group_name` | string or null | its display name |
+| `sender` | string | the platform's id of the sender (not empty) |
+| `message_ref` | string | the platform's id of the message (not empty) |
+| `thread_ref`, `thread_root` | string or null | the thread holding the message, and that thread's root |
+| `reply_to` | string or null | the message this one replies to |
+| `addressing` | `mention`, `reply` or `ambient` | why the platform delivered it: the bot was mentioned, a reply attributed to the bot, or chat that mentions nobody in particular |
+| `mentions` | array of `{"user":string,"name":string}` | who the message mentions, by platform id (`name` may be empty) |
+| `text` | string | the text |
+
+The nullable fields may be left out. Senate turns platform ids into addresses itself.
+
+The adapter sends one `inbound` at a time, in platform order, and waits for its `ack` before sending the next. Calls keep flowing in both directions while an inbound waits, because handling a message can itself call the adapter (a `/bind` adopts the group and posts a confirmation).
+
+- `{"type":"ack","id":"i1"}`: handled. Drop it from the adapter's pending store.
+- `{"type":"ack","id":"i1","error":{"kind":"rejected","detail":"conflicting replay"}}`: terminal. Examples are an empty identity field, or a replay of a first `/bind` whose receipt conflicts with the one already journaled. Record the rejection in the adapter's log and move on to the next input.
+- No ack, because the connection closed: transient. Keep the input and send it again after reconnecting.
+
+Redelivery is safe. Ordinary bound messages are deduplicated by platform, committee and `message_ref`, so a second delivery is acknowledged and the first event is kept. An explicit first `/bind` journals its receipt, the original response and its completion in the log store. A replay, even after the binding changed or after a server restart, finishes the original action. It doesn't become another chat or post a second confirmation. Pending work resumes when the authenticated adapter reconnects.
+
+## Operations (`call` / `result`)
 
 ```json
-{"type":"call","id":"s1","op":"post","args":{"target":{"kind":"reply","message_ref":"om_bind","in_thread":true},"markdown":"已绑定","operation_id":"example"}}
+{"type":"call","id":"s1","op":"post","args":{"target":{"kind":"reply","message_ref":"om_bind","in_thread":true},"markdown":"Bound.","operation_id":"0b6c…"}}
 {"type":"result","id":"s1","value":{"message_ref":"om_post","thread_ref":"omt_thread","duplicate":false}}
-{"type":"call","id":"s2","op":"adopt_group","args":{"message_ref":"om_bind"}}
-{"type":"result","id":"s2","value":{"group_id":"oc_group","already_granted":false}}
-{"type":"call","id":"s3","op":"release_group","args":{"group_id":"oc_group"}}
-{"type":"result","id":"s3","value":true}
-{"type":"result","id":"s4","error":{"kind":"unavailable","detail":"platform unavailable"}}
+{"type":"result","id":"s2","error":{"kind":"unavailable","detail":"platform unavailable"}}
 ```
 
-A new root target is `{"kind":"new_root","group_id":"oc_group"}`. The three error kinds are `rejected`, `unavailable` and `unsupported`. A result carries exactly one of `value` and `error`. A lost reply has an unknown outcome. The sender retries the same logical operation with the same operation ID, target and payload. The adapter passes the operation ID through to the platform, which must return the original refs on replay.
+A `result` carries its call's `id` and exactly one of `value` or `error`. An op that returns nothing answers `"value":null`. A `result` with an id `senated` isn't waiting for closes the connection.
 
-The first model-free acceptance case covers an authorized user's explicit `/bind <committee>`, a guest attempting the same command, and subsequent bound chat. Replay after the binding changed must resume the original action without turning the input into another chat or posting another confirmation. Explicit first binds journal the receipt, original response details and completion in the log store, including when a built-in Speaker is enabled. Other unbound messages handled by the built-in Speaker are acknowledged when queued. Pending work resumes when the authenticated adapter reconnects, including after a server restart.
+Up to 32 calls may be outstanding at once, and the adapter may answer them in any order. A call with no result after 45 seconds closes the connection. Every outstanding call then fails as `unavailable`, and Senate retries it later (see below).
+
+### Shared shapes
+
+**target**: where a post goes.
+
+```json
+{"kind":"new_root","group_id":"oc_group"}
+{"kind":"reply","message_ref":"om_123","in_thread":true}
+```
+
+`new_root` is a new root message in a group. `reply` replies to a message. With `in_thread: true` the reply goes inside the message's thread, and the adapter opens a thread if the message has none.
+
+**posted**: what a post returns.
+
+```json
+{"message_ref":"om_post","thread_ref":"omt_thread","duplicate":false}
+```
+
+`thread_ref` is the thread the post is in, or null. `duplicate` is true when the platform or adapter had already carried out this `operation_id`. In that case `message_ref` and `thread_ref` are the original post's. `thread_ref` may be left out.
+
+**card**: a task card, independent of the platform. It is the serde form of `senate_core::Card`. Its texts are already in the committee's language, and the adapter renders the card however its platform shows cards.
+
+```json
+{
+  "title": "Refund retries",
+  "state": "processing",
+  "markdown": "asked by **alice** · triage: backend",
+  "steps": [{"id": "read", "label": "read the log", "done": true}],
+  "links": [{"label": "branch", "url": "https://example.test/b"}]
+}
+```
+
+`state` is one of `processing`, `active`, `suspended` or `archived`. A step's `id` is stable across updates of the same card.
+
+### Op reference
+
+Platform user ids (`user`, `users`, `invite`, `not_added`) are the people's account ids on this platform, as the roster records them.
+
+| op | args | `value` |
+|---|---|---|
+| `post` (required) | `target`, `markdown`, `operation_id` | posted |
+| `post_mentioning` | `target`, `markdown`, `user`, `operation_id` | posted |
+| `post_card` | `target`, `card`, `operation_id` | posted |
+| `update_card` | `message_ref`, `card`, `operation_id` | null |
+| `pin` | `message_ref`, `operation_id` | null |
+| `create_group` | `group: {"name", "invite": [user ids]}`, `operation_id` | `{"group_id", "not_added": [user ids]}` |
+| `invite` | `group_id`, `users: [user ids]`, `operation_id` | null |
+| `rename_group` | `group_id`, `name`, `operation_id` | null |
+| `adopt_group` | `message_ref` | `{"group_id", "already_granted": bool}` |
+| `release_group` | `group_id` | bool |
+
+- **post**: post `markdown` to `target`.
+- **post_mentioning**: the same as `post`, with a native mention of `user` at the start of the message.
+- **post_card**: post `card` as a message that `update_card` can change in place. The returned `message_ref` is the one later updates receive.
+- **update_card**: replace the whole content of the card posted as `message_ref`. Apply the updates of one card in the order their calls arrive, and handle any revision number the platform needs.
+- **pin**: pin `message_ref` in its group.
+- **create_group**: create a group named `name`, with the bot as owner, and invite `invite`. `group_id` is the new group's stable id, the same id its messages will carry in `inbound`. Invitees the platform didn't add go in `not_added` (for example, the app lacks permission to add members or doesn't know the id). That isn't an error, because the group exists anyway. `not_added` may be left out when it's empty.
+- **invite**: add `users` to `group_id`. Users who are already members are not an error.
+- **rename_group**: rename `group_id` to `name`. Senate does this to mark a group archived, for example.
+- **adopt_group**: ask the platform for full use of an existing group (unmentioned chat, proactive posts) because a person bound it. The group is identified by `message_ref`, a message the adapter delivered from it. Return the group's unchanged `group_id`, and set `already_granted` if the adapter already had the grant. Adopting twice is not an error.
+- **release_group**: give back what `adopt_group` or `create_group` was granted, once the group is bound to nothing. Return whether a grant was removed. Releasing a group without a grant returns `false` and is not an error.
+
+```json
+{"type":"call","id":"s3","op":"post_card","args":{"target":{"kind":"new_root","group_id":"oc_agents"},"card":{"title":"Refund retries","state":"processing","markdown":"asked by **alice**","steps":[],"links":[]},"operation_id":"7f1e…"}}
+{"type":"result","id":"s3","value":{"message_ref":"om_card","thread_ref":null,"duplicate":false}}
+{"type":"call","id":"s4","op":"create_group","args":{"group":{"name":"refund · agents","invite":["ou_alice","ou_bob"]},"operation_id":"c2d9…"}}
+{"type":"result","id":"s4","value":{"group_id":"oc_agents","not_added":["ou_bob"]}}
+{"type":"call","id":"s5","op":"pin","args":{"message_ref":"om_card","operation_id":"9a40…"}}
+{"type":"result","id":"s5","value":null}
+```
+
+## Errors
+
+```json
+{"type":"result","id":"s6","error":{"kind":"rejected","detail":"bot is not in the group"}}
+```
+
+`kind` maps one-to-one onto `senate_core::SurfaceError`. `detail` is free text for logs.
+
+| `kind` | Meaning | What Senate does |
+|---|---|---|
+| `rejected` | The platform refused, and retrying the same request won't help. | Gives up on that operation. A post rejected for lack of a grant may first be healed (the group adopted again) and then tried once more. |
+| `unavailable` | Transient: the platform or adapter can't be reached right now. | Retries later with the same `operation_id`. |
+| `unsupported` | This adapter, or its grants, can't do this kind of thing at all. | Treats it as permanent, does not retry, and falls back. For `adopt_group` and `release_group`, it stops asking for the daemon's lifetime. |
+
+Use `unavailable`, not `unsupported`, for a temporary loss (for example, a grant that is being re-authorized), because an `unsupported` answer is not retried.
+
+## Retry and idempotency
+
+Every op except `adopt_group` and `release_group` carries an `operation_id`. These two are idempotent by definition. An `operation_id` names one logical operation. Senate derives it from the log, so it is the same across retries, reconnects and `senated` restarts.
+
+A lost reply, a timeout or a dropped connection leaves the outcome unknown. Senate then sends the same op again with the same `operation_id` and the same args. **The same `operation_id` is always safe to retry**, because the adapter must make a repeat of it the same operation:
+
+- `post`, `post_mentioning`, `post_card`: don't post again. Return the original `message_ref` and `thread_ref` with `duplicate: true`.
+- `create_group`: don't create a second group. Return the original `group_id` and `not_added`.
+- `update_card`, `pin`, `invite`, `rename_group`: succeed without repeating a visible side effect, or repeat one that is harmless and already idempotent. Re-applying the same card content, pinning a pinned message, inviting members, or setting the same name all count.
+
+Keep the `operation_id` table durable, because a retry can arrive after the adapter or `senated` restarts. Pass the `operation_id` through as the platform's own idempotency key where the platform has one. Otherwise record it in the adapter's store.
+
+## Versioning
+
+The `version` in `hello` and `ready` changes only when a frame changes. A new op is not a new version. Ops are added by name and negotiated through capabilities, so adapters and daemons of different revisions within one version work together: the daemon sends only what the adapter advertised, and the adapter ignores nothing because it receives only those ops. A frame change (a new frame type, or a changed field of an existing frame) bumps the version, and a daemon refuses a `hello` with a version it doesn't speak.
+
+| Revision | Version | Change |
+|---|---|---|
+| initial | 1 | frames; ops `post`, `adopt_group`, `release_group` |
+| full surface | 1 | ops `post_mentioning`, `post_card`, `update_card`, `pin`, `create_group`, `invite`, `rename_group` |
+
+## Acceptance
+
+The first model-free acceptance case covers three things: an authorized user's explicit `/bind <committee>`, a guest attempting the same command, and later bound chat. Explicit first binds journal the receipt, the original response details and completion in the log store, including when a built-in Speaker is enabled. Other unbound messages handled by the built-in Speaker are acknowledged when queued.
