@@ -307,6 +307,42 @@ the expectation as a `↳` line under each pushed message.
   the cover chain (its secretaries, its chair, the Speaker's desk), from
   that agent's own checkpoint. It is never rerouted to another agent.
 
+## Memory
+
+A committee's memory is part of its log. Nothing about it is stored anywhere
+else.
+
+- **Digests.** The built-in session digests a committee's discussion. That
+  discussion is what people said in its groups, plus what crossed in from
+  another committee or Senate. A digest runs daily at
+  `[speaker.memory] digest_at` in the committee's timezone (`timezone`,
+  `[speaker.timezones]`). It also runs when a busy stretch goes quiet. Each
+  digest is a Speaker `note` with `meta.digest`: at most seven one-line
+  points, each citing the seqs it came from.
+- **Memory points.** Facts worth keeping are Speaker `note`s with
+  `meta.memory`, one per point. A point names the points it supersedes.
+  - A person corrects a point (`/correct`, `senate memory correct`). The
+    correction is a point of its own, written in their name.
+  - A person deletes points (`/forget`, `senate memory forget`).
+  - The Speaker never replaces a person's correction. A point that cites
+    what a person deleted is dropped.
+- **Decisions from discussion.** When two people or more agree on one
+  concrete statement in a burst of discussion, the Speaker asks in that
+  group whether to record it. A person's yes records an ordinary decision,
+  with the sources in `meta.sources`. This happens at most once per topic.
+- **Reading it.**
+  - The brief shows "What we know" and "Latest discussion".
+  - Agents search it with `memory_search`. People use `senate memory` or
+    `/memory`.
+  - The Speaker looks there first when it answers.
+  - The server keeps the fold beside the brief's and rebuilds it from the
+    log on start.
+- **Whose.** A Senate's memory is drawn from its own log only. Everything a
+  digest cites must be in what the Speaker showed the model.
+  - A parent sees a child's discussion only as it crossed up.
+  - A child's own Speaker digests the rest into the child's memory.
+  - Simulated chat is never digested, remembered or proposed.
+
 ## Triage
 
 A question or request to an agent that starts a thread is judged by the
