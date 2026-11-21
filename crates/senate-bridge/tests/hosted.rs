@@ -3497,6 +3497,12 @@ async fn an_idle_hosted_agy_is_nudged_once_per_turn_and_never_over_a_typing_pers
     })
     .await;
     assert_eq!(typed(), "[senate] new messages\n");
+    // Its turn ends idle: what arrives from here on is a new batch.
+    let turns = || read(".fixture-stops").lines().count();
+    eventually("the nudged turn ended", TIMEOUT, || {
+        (turns() == 2).then_some(())
+    })
+    .await;
 
     // A new batch after that PreInvocation is nudged again. This time the
     // agy does not take its turn: what comes next waits, un-nudged.
@@ -3520,6 +3526,10 @@ async fn an_idle_hosted_agy_is_nudged_once_per_turn_and_never_over_a_typing_pers
         read(".fixture-prompts")
             .contains("third note")
             .then_some(())
+    })
+    .await;
+    eventually("the person's turn ended", TIMEOUT, || {
+        (turns() == 3).then_some(())
     })
     .await;
     note("fourth note");
