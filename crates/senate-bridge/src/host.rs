@@ -151,6 +151,9 @@ struct Viewer {
     path: PathBuf,
     activity: ViewerActivity,
     dirty: bool,
+    /// Whether a viewer left a line typed but not submitted. Kept only in
+    /// memory: the idle nudge must never be typed onto it.
+    draft: input::Draft,
 }
 
 impl Viewer {
@@ -487,6 +490,7 @@ pub async fn run(
         path: dir.join("viewer.json"),
         activity: ViewerActivity::default(),
         dirty: false,
+        draft: input::Draft::default(),
     });
     Viewer::lock(&viewer).record();
     let (pty, pts) = pty_process::open()?;
@@ -1242,9 +1246,13 @@ async fn relay(
                         {
                             let mut queries =
                                 cursor.lock().unwrap_or_else(|error| error.into_inner());
+                            let mut viewer = Viewer::lock(viewer);
                             if let Some(human_at) = classify.observe(&keys[..n], at, &mut queries) {
-                                Viewer::lock(viewer).input(human_at);
+                                viewer.input(human_at);
                             }
+                            // Terminal reports are escape sequences, which
+                            // the draft passes over.
+                            viewer.draft.observe(&keys[..n]);
                         }
                         tty.write.lock().await.write_all(&keys[..n]).await?;
                     }
@@ -1376,6 +1384,7 @@ mod tests {
             path: dir.path().join("viewer.json"),
             activity: ViewerActivity::default(),
             dirty: false,
+            draft: input::Draft::default(),
         });
         let (host, mut viewer) = UnixStream::pair().unwrap();
         let view_only = async {

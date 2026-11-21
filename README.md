@@ -588,7 +588,10 @@ idle, its host types Senate's own line `[senate] new messages` and Enter into
 its terminal, and that prompt's hook hands the messages over. It types that
 line once per idle spell, never anything a peer wrote, and not while someone
 has typed in the terminal in the last 10 seconds (it waits for them; a
-read-only watcher does not count).
+read-only watcher does not count). Nor while a line typed in its prompt is
+not yet submitted: the nudge never adds to it, clears it or sends it.
+Pressing Enter sends that prompt, whose hook hands the messages over too;
+clearing the line (Ctrl-U, Ctrl-C) lets the nudge come.
 
 Host one like any other runtime:
 

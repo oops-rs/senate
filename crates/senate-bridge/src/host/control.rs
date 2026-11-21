@@ -26,6 +26,7 @@ const HANDSHAKE: Duration = Duration::from_secs(2);
 /// The nudge replies.
 const NUDGED: u8 = 4;
 const TYPED_RECENTLY: u8 = 5;
+const DRAFT_PENDING: u8 = 6;
 
 /// The one line a host types into an idle hosted agy when something waits
 /// for it: Senate's own fixed text, never anything a peer wrote. agy's
@@ -59,6 +60,9 @@ pub(crate) enum Nudge {
     Typed,
     /// Someone typed in the terminal lately; ask again after this long.
     Wait(Duration),
+    /// A viewer left a line typed but not submitted in the prompt: the
+    /// nudge would be appended to it and submit it.
+    Draft,
 }
 
 fn socket(paths: &Paths, id: &EventId) -> PathBuf {
@@ -122,11 +126,19 @@ pub(super) async fn next_stop(
     }
 }
 
-/// Type the nudge into the TUI, unless a viewer typed within `quiet`. A
+/// Type the nudge into the TUI, unless a viewer typed within `quiet` or
+/// left a line unsubmitted, which it never touches. A
 /// watcher records no input, so watching never holds a nudge back.
 async fn nudge_once(stream: &mut UnixStream, viewer: &Mutex<Viewer>, tty: &Tty, quiet: Duration) {
     let now = observed_at();
-    let input_at = Viewer::lock(viewer).activity.input_at;
+    let (input_at, draft) = {
+        let viewer = Viewer::lock(viewer);
+        (viewer.activity.input_at, viewer.draft.pending())
+    };
+    if draft {
+        let _ = stream.write_u8(DRAFT_PENDING).await;
+        return;
+    }
     let quiet_ns = u64::try_from(quiet.as_nanos()).unwrap_or(u64::MAX);
     let since = now.saturating_sub(input_at);
     if input_at > 0 && since < quiet_ns {
@@ -181,6 +193,7 @@ pub(crate) async fn nudge(paths: &Paths, id: &EventId, quiet: Duration) -> Resul
             .map_err(IpcError::internal)?;
         match stream.read_u8().await {
             Ok(NUDGED) => Ok(Nudge::Typed),
+            Ok(DRAFT_PENDING) => Ok(Nudge::Draft),
             Ok(TYPED_RECENTLY) => {
                 let ms = stream.read_u64().await.map_err(IpcError::internal)?;
                 Ok(Nudge::Wait(Duration::from_millis(ms)))

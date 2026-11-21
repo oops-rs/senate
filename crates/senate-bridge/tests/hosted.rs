@@ -65,6 +65,12 @@ async fn wait_for_session_end(h: &Harness, session_id: &str) {
 }
 
 async fn attach(h: &Harness, alias: &str, keys: &[u8]) {
+    attach_typing(h, alias, true, keys).await;
+}
+
+/// [`attach`], asking the fixture to paint first only if `paint`: a line
+/// left in its prompt would swallow the request.
+async fn attach_typing(h: &Harness, alias: &str, paint: bool, keys: &[u8]) {
     let mut cmd = tokio::process::Command::new(BIN);
     testenv::isolate_async(&mut cmd, h.dir.path());
     cmd.args(["attach", alias])
@@ -86,8 +92,14 @@ async fn attach(h: &Harness, alias: &str, keys: &[u8]) {
             )
             .await
             .unwrap();
-        input.write_all(b"paint\r").await.unwrap();
-        wait_terminal_output(&mut output, b"fixture TUI").await;
+        if paint {
+            input.write_all(b"paint\r").await.unwrap();
+            wait_terminal_output(&mut output, b"fixture TUI").await;
+        } else {
+            // Nothing to wait for on the screen: give the attachment time
+            // to reach the host.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
     })
     .await
     .unwrap();
@@ -3451,7 +3463,7 @@ done
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_idle_hosted_agy_is_nudged_once_per_turn_and_never_over_a_typing_person() {
+async fn an_idle_hosted_agy_is_nudged_once_per_turn_and_never_over_a_person_typing_or_a_draft() {
     use senate_core::{Address, Kind, NewEvent};
 
     let mut h = Harness::new().await;
@@ -3563,5 +3575,29 @@ async fn an_idle_hosted_agy_is_nudged_once_per_turn_and_never_over_a_typing_pers
     assert_eq!(nudges(), 3, "{}", typed());
     // fast_timing's quiet time is 2 s.
     assert!(typed_at.elapsed() >= Duration::from_secs(2));
+    eventually("the third nudged turn ended", TIMEOUT, || {
+        (turns() == 4).then_some(())
+    })
+    .await;
+
+    // A person leaves half a line in the prompt: no nudge is typed onto it,
+    // however long it sits there. Once they clear it, the nudge comes.
+    attach(&h, "idler", b"dra\x1d").await;
+    note("fifth note");
+    tokio::time::sleep(Duration::from_millis(3500)).await;
+    assert_eq!(nudges(), 3, "nudged onto a draft: {}", typed());
+    attach_typing(&h, "idler", false, b"\x15\x1d").await;
+    eventually("the nudge once the draft is cleared", TIMEOUT, || {
+        read(".fixture-prompts")
+            .contains("fifth note")
+            .then_some(())
+    })
+    .await;
+    assert_eq!(nudges(), 4, "{}", typed());
+    assert!(
+        !typed().contains("dra"),
+        "the draft was submitted: {}",
+        typed()
+    );
     h.stop().await;
 }

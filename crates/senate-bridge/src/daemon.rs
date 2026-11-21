@@ -3719,24 +3719,34 @@ impl Shared {
                 }
                 _ => continue,
             };
-            match crate::host::control::nudge(&paths, &host, self.timing.agy_nudge_quiet).await {
-                Ok(crate::host::control::Nudge::Wait(wait)) => {
-                    if let Some(idle) = lock(&self.agy_idle).get_mut(&sid)
-                        && idle.spell == spell
-                    {
-                        idle.nudged = false;
+            use crate::host::control::Nudge;
+            let retry =
+                match crate::host::control::nudge(&paths, &host, self.timing.agy_nudge_quiet).await
+                {
+                    Ok(Nudge::Wait(wait)) => Some(wait),
+                    // A line a viewer left unsubmitted: its Enter starts a turn
+                    // whose PreInvocation takes what waits, and clearing it
+                    // leaves the nudge to a later pass.
+                    Ok(Nudge::Draft) => Some(self.timing.agy_nudge_quiet),
+                    Ok(Nudge::Typed) => {
+                        tracing::info!(session = %sid, "nudged an idle hosted agy");
+                        None
                     }
-                    let at = Instant::now() + wait;
-                    due = Some(due.map_or(at, |d| d.min(at)));
+                    // Not again this spell: a host that cannot type it now
+                    // would be asked over and over.
+                    Err(error) => {
+                        tracing::warn!(%error, session = %sid, "nudging an idle hosted agy");
+                        None
+                    }
+                };
+            if let Some(wait) = retry {
+                if let Some(idle) = lock(&self.agy_idle).get_mut(&sid)
+                    && idle.spell == spell
+                {
+                    idle.nudged = false;
                 }
-                Ok(crate::host::control::Nudge::Typed) => {
-                    tracing::info!(session = %sid, "nudged an idle hosted agy");
-                }
-                // Not again this spell: a host that cannot type it now
-                // would be asked over and over.
-                Err(error) => {
-                    tracing::warn!(%error, session = %sid, "nudging an idle hosted agy");
-                }
+                let at = Instant::now() + wait;
+                due = Some(due.map_or(at, |d| d.min(at)));
             }
         }
         due

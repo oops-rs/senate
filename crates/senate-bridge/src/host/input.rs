@@ -230,6 +230,74 @@ fn report(params: &[u8], final_byte: u8, cursor: &mut CursorQueries, at: u64) ->
     }
 }
 
+/// Whether a viewer has left an unsubmitted line in the TUI's prompt: any
+/// key since the last Enter, Ctrl-U or Ctrl-C. Escape sequences (arrows,
+/// focus and mouse reports, a paste's brackets) say nothing either way;
+/// the text of a paste does. Backspace might empty the line or not, so it
+/// leaves the flag as it was.
+#[derive(Default)]
+pub(super) struct Draft {
+    pending: bool,
+    escape: Escape,
+}
+
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum Escape {
+    #[default]
+    None,
+    /// After ESC.
+    Start,
+    /// A CSI (`ESC [`) or SS3 (`ESC O`) sequence, up to its final byte.
+    Sequence,
+    /// SS3 takes one byte.
+    Single,
+    /// A control string (OSC, DCS, APC, PM), up to BEL or ST.
+    String { escape: bool },
+}
+
+impl Draft {
+    pub(super) fn pending(&self) -> bool {
+        self.pending
+    }
+
+    pub(super) fn observe(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.escape = match self.escape {
+                Escape::Start => match byte {
+                    b'[' => Escape::Sequence,
+                    b'O' => Escape::Single,
+                    b']' | b'P' | b'_' | b'^' => Escape::String { escape: false },
+                    0x1b => Escape::Start,
+                    _ => Escape::None,
+                },
+                Escape::Sequence if (0x40..=0x7e).contains(&byte) => Escape::None,
+                Escape::Sequence => Escape::Sequence,
+                Escape::Single => Escape::None,
+                Escape::String { escape } => match byte {
+                    0x07 => Escape::None,
+                    b'\\' if escape => Escape::None,
+                    _ => Escape::String {
+                        escape: byte == 0x1b,
+                    },
+                },
+                Escape::None => match byte {
+                    0x1b => Escape::Start,
+                    b'\r' | b'\n' | 0x15 | 0x03 => {
+                        self.pending = false;
+                        Escape::None
+                    }
+                    0x7f | 0x08 => Escape::None,
+                    0x09 | 0x20.. => {
+                        self.pending = true;
+                        Escape::None
+                    }
+                    _ => Escape::None,
+                },
+            };
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,5 +389,30 @@ mod tests {
         cursor.output(b"6n", 5);
         assert_eq!(input.observe(b"\x1b[1;2R", 6, &mut cursor), None);
         assert_eq!(input.observe(b"\x1b[1;2R", 7, &mut cursor), Some(7));
+    }
+
+    #[test]
+    fn a_draft_is_what_was_typed_since_the_last_enter() {
+        let mut draft = Draft::default();
+        draft.observe(b"hello");
+        assert!(draft.pending());
+        draft.observe(b"\r");
+        assert!(!draft.pending());
+        // Arrows, focus reports and a paste's brackets are not text; split
+        // across frames they still are not.
+        draft.observe(b"\x1b[A\x1b[I\x1b");
+        draft.observe(b"[O\x1bOA\x1b]11;?\x07");
+        assert!(!draft.pending());
+        draft.observe(b"\x1b[200~pasted\x1b[201~");
+        assert!(draft.pending());
+        // Backspace may or may not empty the line: still a draft.
+        draft.observe(b"\x7f\x7f\x7f\x7f\x7f\x7f");
+        assert!(draft.pending());
+        draft.observe(b"\x15");
+        assert!(!draft.pending());
+        draft.observe("é".as_bytes());
+        assert!(draft.pending());
+        draft.observe(b"\x03");
+        assert!(!draft.pending());
     }
 }
