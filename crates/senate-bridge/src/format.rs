@@ -212,9 +212,16 @@ fn origin(event: &Event, locale: Locale) -> String {
         })
         .collect();
     let platform = platform(event).unwrap_or_default();
+    // Injected with `senate chat send`, or derived from such a message:
+    // nobody said it on the platform.
+    let simulated = match (source.simulated, locale) {
+        (false, _) => "",
+        (true, Locale::Zh) => "（模拟）",
+        (true, Locale::En) => " (simulated)",
+    };
     match locale {
-        Locale::Zh => format!(" 在 {platform} 群「{}」", name.trim()),
-        Locale::En => format!(" in {platform} group「{}」", name.trim()),
+        Locale::Zh => format!(" 在 {platform} 群「{}」{simulated}", name.trim()),
+        Locale::En => format!(" in {platform} group「{}」{simulated}", name.trim()),
     }
 }
 
@@ -1989,6 +1996,24 @@ mod tests {
         );
         // Another reader gets the answer with no such line.
         assert!(!render_event(&answer, &alice(), EN).contains("while you were away"));
+    }
+
+    #[test]
+    fn simulated_platform_messages_say_so() {
+        let e = NewEvent::new(committee(), Kind::Chat, pm(), "问一下 bob 的 agent")
+            .with_source(Source {
+                simulated: true,
+                ..chat_source()
+            })
+            .into_event(Seq(30), Utc::now());
+        assert_eq!(
+            header(&e, EN),
+            "[senate · refund-v2 · seq 30 · from [senator::pm] in chat group「backend」 (simulated) · chat]"
+        );
+        assert_eq!(
+            header(&e, ZH),
+            "[senate · refund-v2 · seq 30 · 来自 [senator::pm] 在 chat 群「backend」（模拟） · chat]"
+        );
     }
 
     #[test]

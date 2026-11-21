@@ -9,6 +9,8 @@
 mod cli_help;
 #[path = "cli_legacy.rs"]
 mod cli_legacy;
+#[path = "cli_chat.rs"]
+mod cli_chat;
 #[path = "cli_secretary.rs"]
 mod cli_secretary;
 
@@ -162,6 +164,11 @@ enum Cmd {
     },
     /// Appoint session secretaries and manage their shared work.
     Secretary(cli_secretary::Secretary),
+    /// Simulate chat in a bound group, and read what the Speaker answers.
+    #[command(after_help = "Examples:
+  senate chat send --committee refund-v2 \"ask bob's agent how long refunds take\"
+  senate chat thread sim:01j… --wait")]
+    Chat(cli_chat::Chat),
     /// The profile, Claude Code and Codex hooks, the daemon service.
     #[command(after_help = "Examples:
   senate setup install --yes          Register Senate with Claude Code and Codex
@@ -1699,6 +1706,7 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
         Cmd::Session { command } => run_session(command, output),
         Cmd::Senator { command } => run_senator(command, output),
         Cmd::Secretary(args) => cli_secretary::run(args),
+        Cmd::Chat(args) => cli_chat::run(args),
         Cmd::Setup { command } => run_setup(command, output),
         Cmd::Join {
             committee,

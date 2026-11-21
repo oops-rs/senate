@@ -771,6 +771,26 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<EventId>,
     },
+    /// `senate chat send`: a simulated chat message
+    /// ([`senate_core::chat_sim`]), from the person, or refused when the
+    /// command runs in a coding session (the daemon names that session's
+    /// agent as the caller, and the server refuses agents).
+    ChatSend {
+        #[serde(default)]
+        session: SessionSelector,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        committee: Option<CommitteeId>,
+        /// Its `by` is the daemon's to fill in.
+        request: senate_core::chat_sim::SimulateChat,
+    },
+    /// `senate chat thread`: a simulated conversation by any of its refs.
+    ChatThread {
+        #[serde(default)]
+        session: SessionSelector,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        committee: Option<CommitteeId>,
+        message_ref: String,
+    },
     /// The events of one thread, root first.
     Thread {
         session: SessionSelector,

@@ -3111,6 +3111,19 @@ impl Shared {
                 self.on_say(&session, committee, kind, to, at, body, thread, id)
                     .await,
             ),
+            Request::ChatSend {
+                session,
+                committee,
+                request,
+            } => wrap(self.on_chat_send(&session, committee, request).await),
+            Request::ChatThread {
+                session,
+                committee,
+                message_ref,
+            } => wrap(
+                self.on_chat_thread(&session, committee, &message_ref)
+                    .await,
+            ),
             Request::Thread {
                 session,
                 committee,
@@ -5475,6 +5488,40 @@ impl Shared {
             event = event.with_id(id);
         }
         self.post(event).await
+    }
+
+    /// A simulated chat message. The caller is the coding session the
+    /// command runs in when there is one (an agent, which the server
+    /// refuses), else the person.
+    async fn on_chat_send(
+        &self,
+        selector: &SessionSelector,
+        committee: Option<CommitteeId>,
+        mut request: senate_core::chat_sim::SimulateChat,
+    ) -> Result<senate_core::chat_sim::SimulatedChat, IpcError> {
+        let (session, committee) = self.session_and_committee(selector, committee)?;
+        request.by = Some(match session {
+            Some(session) => session.agent,
+            None => SenatorName::new(self.config.person.clone())
+                .map_err(|e| IpcError::bad_request(e.to_string()))?,
+        });
+        self.api
+            .simulate_chat(&committee, &request)
+            .await
+            .map_err(server_error)
+    }
+
+    async fn on_chat_thread(
+        &self,
+        selector: &SessionSelector,
+        committee: Option<CommitteeId>,
+        message_ref: &str,
+    ) -> Result<senate_core::chat_sim::SimTranscript, IpcError> {
+        let (_, committee) = self.session_and_committee(selector, committee)?;
+        self.api
+            .simulated_chat(&committee, message_ref)
+            .await
+            .map_err(server_error)
     }
 
     async fn on_brief(

@@ -426,6 +426,37 @@ impl ApiClient {
         Ok(checked(resp).await?.json().await?)
     }
 
+    /// `POST .../chat/simulate`: inject a simulated chat message
+    /// ([`senate_core::chat_sim`]).
+    pub async fn simulate_chat(
+        &self,
+        committee: &CommitteeId,
+        request: &senate_core::chat_sim::SimulateChat,
+    ) -> Result<senate_core::chat_sim::SimulatedChat, ApiClientError> {
+        let url = self.url(&senate_core::chat_sim::simulate_path(committee));
+        let resp = self
+            .authed(self.http.post(url))
+            .json(request)
+            .send()
+            .await?;
+        Ok(checked(resp).await?.json().await?)
+    }
+
+    /// `GET .../chat/simulated?ref=`: a simulated conversation.
+    pub async fn simulated_chat(
+        &self,
+        committee: &CommitteeId,
+        message_ref: &str,
+    ) -> Result<senate_core::chat_sim::SimTranscript, ApiClientError> {
+        let url = self.url(&senate_core::chat_sim::simulated_path(committee));
+        let resp = self
+            .authed(self.http.get(url))
+            .query(&[("ref", message_ref)])
+            .send()
+            .await?;
+        Ok(checked(resp).await?.json().await?)
+    }
+
     /// `GET .../brief`: the committee's brief, derived from its whole log.
     pub async fn brief(&self, committee: &CommitteeId) -> Result<Brief, ApiClientError> {
         let url = self.url(&api::brief_path(committee));
