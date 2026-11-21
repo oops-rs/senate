@@ -822,6 +822,7 @@ async fn the_commit_triggered_checkpoint_swaps_first_too() {
     h.start_with(senate_bridge::Timing {
         checkpoint_poll: Duration::from_millis(150),
         checkpoint_interval: Duration::from_secs(3600),
+        agy_nudge_quiet: Duration::from_secs(10),
         ..fast_timing()
     })
     .await;

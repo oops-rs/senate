@@ -2732,10 +2732,20 @@ async fn a_spawn_prompt_is_an_ordinary_request_to_the_new_seat() {
     assert_eq!(sent.to, vec![senate_core::Address::senator(&reply.senator)]);
     assert_eq!(sent.body, "Review the open PR on the gateway");
     assert!(sent.thread.is_none());
-    // Nothing was typed into its terminal.
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Nothing was typed into its terminal: not the prompt, and not the
+    // idle nudge, which is agy's alone, even asked as agy's Stop asks.
+    let waiting: senate_bridge::ipc::WaitingReply = call(
+        &h,
+        &Request::Waiting {
+            session_id: reply.session_id.clone(),
+        },
+    )
+    .await;
+    let _ = waiting;
+    tokio::time::sleep(Duration::from_millis(600)).await;
     let typed = std::fs::read_to_string(project.join("typed")).unwrap_or_default();
     assert!(!typed.contains("Review the open PR"), "{typed}");
+    assert!(!typed.contains("[senate] new messages"), "{typed}");
 
     h.stop().await;
 }
@@ -3371,5 +3381,158 @@ async fn a_hosted_agy_that_never_names_its_conversation_is_rolled_back() {
             .then_some(())
     })
     .await;
+    h.stop().await;
+}
+
+/// A stand-in for agy that takes turns: every line typed into it (but
+/// `paint` and `q`) is recorded in `.fixture-typed` and, unless
+/// `.fixture-hold` exists, starts a turn as agy's does: its PreInvocation
+/// hook (output appended to `.fixture-prompts`), then its Stop hook, again
+/// while Stop says to go on. It ends its seed turn the same way.
+fn agy_turn_fixture(dir: &std::path::Path, conversation: &str) -> PathBuf {
+    let fixture = dir.join("fixture-agy-turns");
+    std::fs::write(
+        &fixture,
+        format!(
+            r#"#!/bin/sh
+case "$1" in
+    --prompt-interactive=?*) conversation={conversation} ;;
+    --conversation=?*) conversation="${{1#--conversation=}}" ;;
+    *) exit 64 ;;
+esac
+input() {{ printf '{{"conversationId":"%s","cwd":"%s"}}' "$conversation" "$PWD"; }}
+stop() {{ input | {BIN:?} hook stop --runtime agy; }}
+turn() {{
+    while :; do
+        input | {BIN:?} hook user-prompt-submit --runtime agy >> .fixture-prompts
+        printf '\n' >> .fixture-prompts
+        [ -n "$(stop)" ] || break
+    done
+    printf 'stop\n' >> .fixture-stops
+}}
+input | {BIN:?} hook session-start --runtime agy > /dev/null
+stop > /dev/null
+printf 'stop\n' >> .fixture-stops
+while IFS= read -r line; do
+    case "$line" in
+        paint) printf 'fixture TUI\n' ;;
+        q) exit 0 ;;
+        *)
+            printf '%s\n' "$line" >> .fixture-typed
+            [ -e .fixture-hold ] || turn
+            ;;
+    esac
+done
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o700)).unwrap();
+    fixture
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_idle_hosted_agy_is_nudged_once_per_turn_and_never_over_a_typing_person() {
+    use senate_core::{Address, Kind, NewEvent};
+
+    let mut h = Harness::new().await;
+    h.config.hosted_session_limit = Some(1);
+    h.dir = tempfile::tempdir_in("/tmp").unwrap();
+    h.paths = senate_bridge::Paths::new(h.dir.path().join("senate"));
+    h.paths.ensure_home().unwrap();
+    let project = h.workdir("agy-idle", None);
+    let conversation = "7c1d2e3f-4a5b-4c6d-8e9f-0a1b2c3d4e5f";
+    let fixture = agy_turn_fixture(h.dir.path(), conversation);
+    std::fs::write(
+        h.paths.config(),
+        format!("[agy]\nbin = {:?}\n", fixture.to_str().unwrap()),
+    )
+    .unwrap();
+    h.config.committees.push(committee());
+    start(&mut h).await;
+    let seat: SpawnReply = call(
+        &h,
+        &Request::Spawn {
+            session: Default::default(),
+            runtime: HostedRuntime::Agy,
+            committee: committee(),
+            alias: Some(path("idler")),
+            cwd: project.clone(),
+            chair: false,
+            prompt: None,
+            model: Default::default(),
+        },
+    )
+    .await;
+    let read = |name: &str| std::fs::read_to_string(project.join(name)).unwrap_or_default();
+    let typed = || read(".fixture-typed");
+    let nudges = || {
+        typed()
+            .lines()
+            .filter(|l| *l == "[senate] new messages")
+            .count()
+    };
+    let note = |body: &str| {
+        h.server.append(
+            NewEvent::new(
+                committee(),
+                Kind::Note,
+                Address::senior(&h.config.person),
+                body,
+            )
+            .to(Address::senator(&seat.senator)),
+        );
+    };
+    eventually("the seed turn ended", TIMEOUT, || {
+        (!read(".fixture-stops").is_empty()).then_some(())
+    })
+    .await;
+
+    // Idle with something waiting: one nudge, and its prompt hook takes it.
+    note("first note for the idle agy");
+    eventually("the first nudge delivered", TIMEOUT, || {
+        read(".fixture-prompts")
+            .contains("first note for the idle agy")
+            .then_some(())
+    })
+    .await;
+    assert_eq!(typed(), "[senate] new messages\n");
+
+    // A new batch after that PreInvocation is nudged again. This time the
+    // agy does not take its turn: what comes next waits, un-nudged.
+    std::fs::write(project.join(".fixture-hold"), "").unwrap();
+    note("second note");
+    eventually("the second nudge", TIMEOUT, || {
+        (nudges() == 2).then_some(())
+    })
+    .await;
+    note("third note");
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(nudges(), 2, "{}", typed());
+    assert!(!read(".fixture-prompts").contains("third note"));
+
+    // A person types a prompt: that turn takes what waited. A note right
+    // after it waits out the quiet time before its nudge.
+    std::fs::remove_file(project.join(".fixture-hold")).unwrap();
+    let typed_at = std::time::Instant::now();
+    attach(&h, "idler", b"prompt\r\x1d").await;
+    eventually("the person's turn took the waiting notes", TIMEOUT, || {
+        read(".fixture-prompts")
+            .contains("third note")
+            .then_some(())
+    })
+    .await;
+    note("fourth note");
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_eq!(nudges(), 2, "nudged over a typing person: {}", typed());
+    eventually("the nudge after the quiet time", TIMEOUT, || {
+        read(".fixture-prompts")
+            .contains("fourth note")
+            .then_some(())
+    })
+    .await;
+    assert_eq!(nudges(), 3, "{}", typed());
+    // fast_timing's quiet time is 2 s.
+    assert!(typed_at.elapsed() >= Duration::from_secs(2));
     h.stop().await;
 }

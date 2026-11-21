@@ -1,4 +1,5 @@
-//! Stop requests use a private socket so they can reach a host with a viewer.
+//! Stop and nudge requests use a private socket so they can reach a host
+//! with a viewer.
 
 use std::io;
 use std::os::unix::fs::PermissionsExt;
@@ -11,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
-use super::{Viewer, accept, directory, observed_at};
+use super::{Tty, Viewer, accept, directory, observed_at};
 use crate::ipc::{self, IpcError, codes};
 use crate::paths::Paths;
 use crate::state::Store;
@@ -22,11 +23,42 @@ const STOPPED: u8 = 1;
 const FAILED: u8 = 2;
 const END_UNCONFIRMED: u8 = 3;
 const HANDSHAKE: Duration = Duration::from_secs(2);
+/// The nudge replies.
+const NUDGED: u8 = 4;
+const TYPED_RECENTLY: u8 = 5;
+
+/// The one line a host types into an idle hosted agy when something waits
+/// for it: Senate's own fixed text, never anything a peer wrote. agy's
+/// PreInvocation hook then hands over what waits, as at any prompt.
+pub(crate) const AGY_NUDGE: &str = "[senate] new messages";
+/// Between the nudge's text and its Enter: sent together, a TUI can take
+/// the pair as a paste and the Enter as a newline in it.
+const NUDGE_ENTER_DELAY: Duration = Duration::from_millis(150);
 
 #[derive(Serialize, Deserialize)]
 struct StopRequest {
     force: bool,
     unconfirmed_audit: NewEvent,
+}
+
+/// Type [`AGY_NUDGE`] unless a viewer typed within `quiet_ms`.
+#[derive(Serialize, Deserialize)]
+struct NudgeRequest {
+    nudge: NudgeParams,
+}
+
+#[derive(Serialize, Deserialize)]
+struct NudgeParams {
+    quiet_ms: u64,
+}
+
+/// What a nudge request came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Nudge {
+    /// The line was typed.
+    Typed,
+    /// Someone typed in the terminal lately; ask again after this long.
+    Wait(Duration),
 }
 
 fn socket(paths: &Paths, id: &EventId) -> PathBuf {
@@ -40,9 +72,11 @@ pub(super) fn listen(paths: &Paths, id: &EventId) -> io::Result<UnixListener> {
     Ok(listener)
 }
 
+/// Serves nudges until a stop request is accepted, and returns its stream.
 pub(super) async fn next_stop(
     listener: &UnixListener,
     viewer: &Mutex<Viewer>,
+    tty: &Tty,
     paths: &Paths,
     host: &EventId,
 ) -> UnixStream {
@@ -53,6 +87,16 @@ pub(super) async fn next_stop(
         else {
             continue;
         };
+        if let Ok(NudgeRequest { nudge }) = serde_json::from_str::<NudgeRequest>(&line) {
+            nudge_once(
+                &mut stream,
+                viewer,
+                tty,
+                Duration::from_millis(nudge.quiet_ms),
+            )
+            .await;
+            continue;
+        }
         let Ok(request) = serde_json::from_str::<StopRequest>(&line) else {
             continue;
         };
@@ -76,6 +120,79 @@ pub(super) async fn next_stop(
         let _ = stream.write_u8(ACCEPTED).await;
         return stream;
     }
+}
+
+/// Type the nudge into the TUI, unless a viewer typed within `quiet`. A
+/// watcher records no input, so watching never holds a nudge back.
+async fn nudge_once(stream: &mut UnixStream, viewer: &Mutex<Viewer>, tty: &Tty, quiet: Duration) {
+    let now = observed_at();
+    let input_at = Viewer::lock(viewer).activity.input_at;
+    let quiet_ns = u64::try_from(quiet.as_nanos()).unwrap_or(u64::MAX);
+    let since = now.saturating_sub(input_at);
+    if input_at > 0 && since < quiet_ns {
+        let wait = Duration::from_nanos(quiet_ns - since);
+        let mut reply = vec![TYPED_RECENTLY];
+        reply.extend_from_slice(
+            &u64::try_from(wait.as_millis())
+                .unwrap_or(u64::MAX)
+                .to_be_bytes(),
+        );
+        let _ = stream.write_all(&reply).await;
+        return;
+    }
+    let typed = async {
+        tty.write
+            .lock()
+            .await
+            .write_all(AGY_NUDGE.as_bytes())
+            .await?;
+        tokio::time::sleep(NUDGE_ENTER_DELAY).await;
+        tty.write.lock().await.write_all(b"\r").await
+    }
+    .await;
+    match typed {
+        Ok(()) => {
+            let _ = stream.write_u8(NUDGED).await;
+        }
+        Err(error) => {
+            tracing::warn!(%error, "typing the idle nudge into the coding TUI");
+            let _ = stream.write_u8(FAILED).await;
+        }
+    }
+}
+
+/// Ask host `id` to type the idle nudge into its TUI, unless a viewer typed
+/// there within `quiet`.
+pub(crate) async fn nudge(paths: &Paths, id: &EventId, quiet: Duration) -> Result<Nudge, IpcError> {
+    let mut payload = serde_json::to_vec(&NudgeRequest {
+        nudge: NudgeParams {
+            quiet_ms: u64::try_from(quiet.as_millis()).unwrap_or(u64::MAX),
+        },
+    })
+    .map_err(IpcError::internal)?;
+    payload.push(b'\n');
+    tokio::time::timeout(HANDSHAKE, async {
+        let mut stream = UnixStream::connect(socket(paths, id))
+            .await
+            .map_err(IpcError::internal)?;
+        stream
+            .write_all(&payload)
+            .await
+            .map_err(IpcError::internal)?;
+        match stream.read_u8().await {
+            Ok(NUDGED) => Ok(Nudge::Typed),
+            Ok(TYPED_RECENTLY) => {
+                let ms = stream.read_u64().await.map_err(IpcError::internal)?;
+                Ok(Nudge::Wait(Duration::from_millis(ms)))
+            }
+            Ok(_) => Err(IpcError::internal("the host could not type the nudge")),
+            Err(error) => Err(IpcError::internal(format!(
+                "the host did not answer the nudge: {error}"
+            ))),
+        }
+    })
+    .await
+    .map_err(|_| IpcError::internal("timed out waiting for the terminal host to nudge"))?
 }
 
 /// Release the session binding guard after this acknowledgement, before the

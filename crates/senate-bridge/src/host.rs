@@ -607,7 +607,7 @@ pub async fn run(
         served = serve(&listener, &tty, &output, &viewer) => served,
         served = watch::serve(&watchers, &tty.screen) => served,
         fitted = tty.fit() => fitted,
-        peer = control::next_stop(&controls, &viewer, paths, id) => {
+        peer = control::next_stop(&controls, &viewer, &tty, paths, id) => {
             stop = Some(peer);
             stop_group(&mut child, pid).await
         }

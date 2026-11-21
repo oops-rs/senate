@@ -237,6 +237,9 @@ pub struct Timing {
     pub checkpoint_poll: Duration,
     /// Time between automatic checkpoints of an open session.
     pub checkpoint_interval: Duration,
+    /// How long nobody may have typed in a hosted agy's terminal before
+    /// its host types the idle nudge into it.
+    pub agy_nudge_quiet: Duration,
 }
 
 impl Default for Timing {
@@ -257,6 +260,7 @@ impl Default for Timing {
             triage_wait: Duration::from_secs(senate_core::task::TRIAGE_WAIT_SECS),
             checkpoint_poll: Duration::from_secs(60),
             checkpoint_interval: Duration::from_secs(2 * 3600),
+            agy_nudge_quiet: Duration::from_secs(10),
         }
     }
 }
@@ -380,6 +384,16 @@ type Seat = (SenatorName, CommitteeId);
 /// The branch a session is on now and what it is bound to there.
 type Rebind = (Option<String>, Option<CommitteeId>);
 
+/// An idle agy session ([`Shared::nudge_idle_agy`]): which idle spell
+/// this is, and whether it has had its nudge.
+struct AgyIdle {
+    spell: u64,
+    nudged: bool,
+}
+
+/// Tells one idle spell of an agy from the next.
+static AGY_IDLE_SPELL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 #[derive(Default)]
 struct HookDrops {
     count: u64,
@@ -496,6 +510,11 @@ pub(crate) struct Shared {
     /// did, not yet told: the branch they are on, and what they are bound
     /// to now.
     rebinds: Mutex<HashMap<String, Rebind>>,
+    /// agy sessions idle since their last turn ended (`Stop` with nothing
+    /// waiting, no hook since), and whether their host has typed the idle
+    /// nudge since. Any later hook of the session removes it. Kept in
+    /// memory: after a restart no agy is nudged until its next `Stop`.
+    agy_idle: Mutex<HashMap<String, AgyIdle>>,
     companion_config: CompanionConfig,
     /// The companion running now, if any (one at a time).
     companion: Mutex<Option<companion::Running>>,
@@ -799,6 +818,7 @@ impl Shared {
             auto: Mutex::new(HashMap::new()),
             home: common.home.clone(),
             rebinds: Mutex::new(HashMap::new()),
+            agy_idle: Mutex::new(HashMap::new()),
             companion_config: common.companion_config.clone(),
             companion: Mutex::new(None),
             companion_tried: Mutex::new(BTreeSet::new()),
@@ -2333,6 +2353,9 @@ impl Shared {
         if again {
             self.work.notify_one();
         }
+        if let Some(at) = self.nudge_idle_agy(&sessions).await {
+            due = Some(due.map_or(at, |d| d.min(at)));
+        }
         Ok(due)
     }
 
@@ -3284,6 +3307,10 @@ impl Shared {
     /// a fixed senator selected by their harness, file or environment.
     async fn on_hook(&self, report: HookReport, native: bool) -> Result<HookReply, IpcError> {
         let began = Instant::now();
+        // An agy hook (PreInvocation, SessionStart) ends its idle spell.
+        if report.runtime == Runtime::Agy {
+            lock(&self.agy_idle).remove(&report.session_id);
+        }
         if report.runtime.native_id(&report.session_id).is_none()
             || (matches!(report.runtime, Runtime::Agy | Runtime::Acp) && !native)
         {
@@ -3632,7 +3659,87 @@ impl Shared {
             },
             _ => 0,
         };
+        // Asked by agy's `Stop`. With something waiting the turn goes on
+        // to read it; with nothing, the session sits idle from here.
+        if waiting == 0 && session::Runtime::Agy.native_id(session_id).is_some() {
+            let spell = AGY_IDLE_SPELL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            lock(&self.agy_idle).insert(
+                session_id.to_owned(),
+                AgyIdle {
+                    spell,
+                    nudged: false,
+                },
+            );
+            // Something held just as this was answered still gets its nudge.
+            self.work.notify_one();
+        } else {
+            lock(&self.agy_idle).remove(session_id);
+        }
         Ok(crate::ipc::WaitingReply { waiting })
+    }
+
+    /// Have the host of each idle hosted agy with something waiting type
+    /// the idle nudge, once per idle spell: its next PreInvocation hook then
+    /// takes what waits. A hand-started agy has no host and is never
+    /// nudged; nor is any other runtime. Returns when to ask again a host
+    /// whose terminal someone typed in lately.
+    async fn nudge_idle_agy(&self, sessions: &[Session]) -> Option<Instant> {
+        let idle: Vec<String> = lock(&self.agy_idle)
+            .iter()
+            .filter(|(_, idle)| !idle.nudged)
+            .map(|(sid, _)| sid.clone())
+            .collect();
+        let paths = Paths::new(&self.home);
+        let mut due: Option<Instant> = None;
+        for sid in idle {
+            let Some(session) = sessions
+                .iter()
+                .find(|s| s.session_id == sid && s.runtime == Runtime::Agy)
+            else {
+                continue;
+            };
+            let Some(committee) = session.committee().cloned() else {
+                continue;
+            };
+            if !self
+                .hook_items(session, &committee)
+                .is_ok_and(|items| !items.is_empty())
+            {
+                continue;
+            }
+            let Ok(Some(host)) = self.store.session_host(&sid) else {
+                continue;
+            };
+            // Counted as nudged before the line is typed: the turn it starts
+            // can end, and a new idle spell begin, before the host replies.
+            let spell = match lock(&self.agy_idle).get_mut(&sid) {
+                Some(idle) if !idle.nudged => {
+                    idle.nudged = true;
+                    idle.spell
+                }
+                _ => continue,
+            };
+            match crate::host::control::nudge(&paths, &host, self.timing.agy_nudge_quiet).await {
+                Ok(crate::host::control::Nudge::Wait(wait)) => {
+                    if let Some(idle) = lock(&self.agy_idle).get_mut(&sid)
+                        && idle.spell == spell
+                    {
+                        idle.nudged = false;
+                    }
+                    let at = Instant::now() + wait;
+                    due = Some(due.map_or(at, |d| d.min(at)));
+                }
+                Ok(crate::host::control::Nudge::Typed) => {
+                    tracing::info!(session = %sid, "nudged an idle hosted agy");
+                }
+                // Not again this spell: a host that cannot type it now
+                // would be asked over and over.
+                Err(error) => {
+                    tracing::warn!(%error, session = %sid, "nudging an idle hosted agy");
+                }
+            }
+        }
+        due
     }
 
     fn hook_context(

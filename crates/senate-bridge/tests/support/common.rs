@@ -1548,6 +1548,7 @@ pub fn fast_timing() -> Timing {
         // Off unless a test turns it on (`tests/checkpoint.rs`).
         checkpoint_poll: Duration::from_secs(3600),
         checkpoint_interval: Duration::from_secs(7200),
+        agy_nudge_quiet: Duration::from_secs(2),
     }
 }
 
