@@ -1100,3 +1100,77 @@ async fn an_unrelated_claude_result_skips_ipc_without_a_candidate() {
         std::io::ErrorKind::WouldBlock
     );
 }
+
+/// Read the watch stream until a `sessions` event (other lines pass by).
+async fn next_sessions_event(stream: &mut ipc::WatchStream) {
+    tokio::time::timeout(WAIT, async {
+        loop {
+            match stream.next().await.unwrap() {
+                Some(ipc::WatchEvent::Sessions) => return,
+                Some(_) => {}
+                None => panic!("the watch stream closed"),
+            }
+        }
+    })
+    .await
+    .expect("a sessions event");
+}
+
+async fn session_prompt(h: &Harness, session_id: &str) -> Option<ipc::HostedPrompt> {
+    let reply: ipc::SessionsReply = ipc::request(&h.socket(), &Request::Sessions, WAIT, WAIT)
+        .await
+        .unwrap();
+    reply
+        .rows
+        .into_iter()
+        .find(|r| r.session_id == session_id)
+        .and_then(|r| r.prompt)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_waiting_prompt_shows_on_its_session_row_and_watchers_hear_it_open_and_close() {
+    let (mut h, project) = fixture(true, Locale::En).await;
+    start(&mut h).await;
+    let mut stream = ipc::IpcClient::connect(&h.socket(), WAIT)
+        .await
+        .unwrap()
+        .watch(true, WAIT)
+        .await
+        .unwrap();
+    let (launch, terminal) = Terminal::spawn(&h, project, HostedRuntime::Claude).await;
+    // The host started.
+    next_sessions_event(&mut stream).await;
+    assert_eq!(session_prompt(&h, &launch.session_id).await, None);
+
+    let signal = |event: &str| {
+        json!({
+            "hook_event_name": event, "session_id": launch.session_id,
+            "tool_name": "Bash", "tool_input": {"command": "echo row-fixture"},
+        })
+    };
+    let notify = json!({
+        "hook_event_name": "Notification", "session_id": launch.session_id,
+        "notification_type": "permission_prompt",
+    });
+    let send = |input| claude_hook(h.dir.path(), &h, terminal.host_id(), input);
+    send(signal("PermissionRequest")).await;
+    send(notify).await;
+    // The prompt opened: watchers hear it, and the row says what waits.
+    next_sessions_event(&mut stream).await;
+    let prompt = session_prompt(&h, &launch.session_id)
+        .await
+        .expect("the row carries the waiting prompt");
+    assert_eq!(prompt.tool.as_deref(), Some("echo row-fixture"));
+    let age = chrono::Utc::now() - prompt.since;
+    assert!(
+        age >= chrono::Duration::zero() && age < chrono::Duration::seconds(60),
+        "dated on the wall clock: {age:?}"
+    );
+
+    // Answered in the terminal: the row clears, and watchers hear it.
+    send(signal("PostToolUse")).await;
+    next_sessions_event(&mut stream).await;
+    assert_eq!(session_prompt(&h, &launch.session_id).await, None);
+    terminal.stop();
+    h.stop().await;
+}

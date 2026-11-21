@@ -223,6 +223,7 @@ mod tests {
             attached: false,
             typed_secs_ago: None,
             tty: "/home/hosts/x/tty".into(),
+            prompt: None,
         }
     }
 

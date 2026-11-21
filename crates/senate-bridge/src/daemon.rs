@@ -2523,6 +2523,15 @@ impl Shared {
         let _ = self.watch.send(event);
     }
 
+    /// After a request that may start or end a host: tell watchers when
+    /// it went through.
+    fn sessions_changed(&self, reply: Reply) -> Reply {
+        if reply.ok {
+            self.publish(WatchEvent::Sessions);
+        }
+        reply
+    }
+
     fn publish_status(&self) {
         if self.watch.receiver_count() == 0 {
             return;
@@ -2784,18 +2793,18 @@ impl Shared {
                     prompt,
                     model,
                 };
-                wrap(self.on_hosted_spawn(&session, order).await)
+                self.sessions_changed(wrap(self.on_hosted_spawn(&session, order).await))
             }
             Request::Restore {
                 session,
                 senator,
                 model,
-            } => wrap(self.on_hosted_restore(&session, &senator, model).await),
+            } => self.sessions_changed(wrap(self.on_hosted_restore(&session, &senator, model).await)),
             Request::Stop {
                 session,
                 senator,
                 force,
-            } => wrap(self.on_hosted_stop(&session, &senator, force).await),
+            } => self.sessions_changed(wrap(self.on_hosted_stop(&session, &senator, force).await)),
             Request::Attach { senator } => wrap(self.on_attach(senator).await),
             Request::Receipt { committee, seq } => wrap(self.receipt(&committee, seq).await),
             Request::SetCommitteeSeat { committee, request } => {
@@ -2885,12 +2894,12 @@ impl Shared {
             Request::Roles => wrap(self.on_roles().await),
             Request::Waiting { session_id } => wrap(self.on_waiting(&session_id)),
             Request::SessionEnd { session_id, .. } => {
-                wrap(self.on_session_end(&session_id, None).await)
+                self.sessions_changed(wrap(self.on_session_end(&session_id, None).await))
             }
             Request::HostedSessionEnd {
                 session_id,
                 host_id,
-            } => wrap(self.on_session_end(&session_id, Some(&host_id)).await),
+            } => self.sessions_changed(wrap(self.on_session_end(&session_id, Some(&host_id)).await)),
             Request::HostedClaudeApproval {
                 session_id,
                 host_id,
@@ -3118,6 +3127,7 @@ impl Shared {
                 continue;
             }
             let facts = crate::host::facts(&paths, &host_id).map_err(IpcError::internal)?;
+            let prompt = self.hosted_prompt(&host_id);
             let committee = session.committee().cloned();
             let alias = committee
                 .as_ref()
@@ -3143,6 +3153,7 @@ impl Shared {
                 started_at: facts.started_at,
                 attached: facts.attached,
                 typed_secs_ago: facts.typed_secs_ago,
+                prompt,
             });
         }
         rows.sort_by(|a, b| {

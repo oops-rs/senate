@@ -421,6 +421,19 @@ pub struct SessionRow {
     pub typed_secs_ago: Option<u64>,
     /// The host's attach socket.
     pub tty: PathBuf,
+    /// A permission prompt waits in its terminal for a person: what it is
+    /// for and since when. A fact only: deciding stays in the terminal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<HostedPrompt>,
+}
+
+/// A permission prompt waiting in a hosted terminal ([`SessionRow::prompt`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostedPrompt {
+    /// The tool or command it asks about, when the runtime said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    pub since: DateTime<Utc>,
 }
 
 impl SessionRow {
@@ -1386,6 +1399,9 @@ pub enum WatchEvent {
     /// this side knows them: what a session may do (`presides`, and so the
     /// tools it is given) may have changed with it. Ask again.
     Roles,
+    /// This machine's hosted sessions changed: a host started or ended, or a
+    /// permission prompt opened or closed in one. Read `sessions` again.
+    Sessions,
     /// The watcher fell behind and missed `missed` events: read everything
     /// again.
     Lagged { missed: u64 },

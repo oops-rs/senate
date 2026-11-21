@@ -7,7 +7,7 @@ use crate::host_approval::{
     ApprovalNotice, ClaudeCandidate, CodexApprovalSignal, HostApprovalState, observed_at,
     tool_label,
 };
-use crate::ipc::ClaudeApprovalSignal;
+use crate::ipc::{ClaudeApprovalSignal, HostedPrompt};
 use senate_core::StatusState;
 use tokio::sync::mpsc;
 
@@ -163,8 +163,11 @@ impl Shared {
         let marker = host::approval_candidate(&Paths::new(&self.home), host_id);
         // Change the marker in the same order as the serialized state edit.
         // A stray marker only costs an unnecessary IPC until reconciliation.
+        let mut opened_or_closed = false;
         let changed = self.store.edit_hosted_approvals(host_id, |state| {
+            let before = open_prompts(state);
             let changed = edit(state);
+            opened_or_closed = open_prompts(state) != before;
             if state.claude.is_some() {
                 if !marker.exists() {
                     let _ = std::fs::write(&marker, []);
@@ -177,7 +180,29 @@ impl Shared {
         if changed {
             self.hosted_approvals.wake.notify_one();
         }
+        if opened_or_closed {
+            self.publish(WatchEvent::Sessions);
+        }
         Ok(())
+    }
+
+    /// The prompt waiting in a host's terminal, for `sessions`: its oldest
+    /// open notice, dated on the wall clock.
+    pub(super) fn hosted_prompt(&self, host_id: &EventId) -> Option<HostedPrompt> {
+        let states = self.store.hosted_approval_states().ok()?;
+        let (_, state) = states.into_iter().find(|(id, _)| id == host_id)?;
+        let notice = state
+            .notices
+            .iter()
+            .filter(|n| n.archive.is_none())
+            .min_by_key(|n| n.at)?;
+        let ago = observed_at().saturating_sub(notice.at);
+        let since = chrono::Utc::now()
+            - chrono::Duration::from_std(Duration::from_nanos(ago)).unwrap_or_default();
+        Some(HostedPrompt {
+            tool: notice.tool.as_deref().map(tool_label),
+            since,
+        })
     }
 
     async fn reconcile_approval_hosts(&self) -> Result<(), StoreError> {
@@ -397,6 +422,16 @@ fn approval_body(notice: &ApprovalNotice, locale: Locale) -> String {
             "{who} 在委员会 \u{0060}{committee}\u{0060} 等待工具授权。{tool}\n请让人员运行 \u{0060}{attach}\u{0060}，在终端内决定。"
         ),
     }
+}
+
+/// The notices still waiting for a person, by id.
+fn open_prompts(state: &HostApprovalState) -> Vec<EventId> {
+    state
+        .notices
+        .iter()
+        .filter(|n| n.archive.is_none())
+        .map(|n| n.id.clone())
+        .collect()
 }
 
 fn set_context(state: &mut HostApprovalState, session_id: &str) -> bool {
