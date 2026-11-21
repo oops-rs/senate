@@ -26,6 +26,7 @@ use crate::{Paths, binding};
 
 mod leftovers;
 mod live;
+mod worktree;
 mod wsl;
 
 pub use live::{CodexProbe, Live, Probe, gather, live};
@@ -188,6 +189,20 @@ pub struct Local<'a> {
     pub manager: &'a dyn service::Manager,
     /// Set when this runs inside WSL.
     pub wsl: Option<&'a Wsl>,
+}
+
+/// Hosted Codex sessions whose worktree keeps its git data where Codex's
+/// sandbox cannot write ([`worktree`]). Asks git, so after [`gather`].
+pub fn worktree_checks(live: &Live, install: Option<&InstallOptions>, l: Locale) -> Vec<Check> {
+    let Some(sessions) = &live.sessions else {
+        return Vec::new();
+    };
+    let found = worktree::find(&sessions.rows);
+    if found.is_empty() {
+        return Vec::new();
+    }
+    let sandboxes = worktree::Sandboxes::read(install.and_then(|o| o.codex_config.as_deref()));
+    worktree::checks(&found, &sandboxes, l)
 }
 
 /// Every check that reads files only.

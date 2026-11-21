@@ -1685,6 +1685,11 @@ fn run_doctor(json: bool) -> anyhow::Result<()> {
     });
     let live = runtime(false)?.block_on(crate::doctor::gather(&paths));
     checks.extend(crate::doctor::live(&live, locale));
+    checks.extend(crate::doctor::worktree_checks(
+        &live,
+        install.as_ref().ok(),
+        locale,
+    ));
     let report = crate::doctor::Report::new(checks);
     if json {
         print_json(&report)?;

@@ -566,6 +566,7 @@ nothing. What it checks, and what usually fixes it:
 | `leftovers.*` | another bridge (e.g. `acme-bridge`) or an old Senate still has hooks or an MCP server registered | `claude mcp remove --scope user <name>`, `codex mcp remove <name>`, or remove the hook from the file named |
 | `daemon`, `daemon.version` | the daemon is down, or runs another version than this `senate` | `senate setup service install --yes` (restarts it) |
 | `codex.app_server` | the Codex app-server does not answer: hosted Codex sessions cannot start or restore | `codex app-server daemon bootstrap` |
+| `sessions.git.*` | a hosted Codex session's worktree keeps its git data (the common `.git`) outside its directory, where Codex's `workspace-write` sandbox cannot write: every git write asks first (Claude Code's sandbox already writes a worktree's shared `.git`) | add the path to `[sandbox_workspace_write] writable_roots`, as shown |
 | `sessions.*` | hosted terminals run with no session (`senate session prune`), or a session waits on a permission prompt (`senate attach <name>`) | as shown |
 | `uplink.*` | the Senate above does not answer, refused the registration, or runs a newer minor release | `cargo install senate senated` for a newer parent |
 | `senate.*` | the Senate served does not answer, the daemon's log epoch differs from the server's, or a cursor is ahead of the log | `senate setup service install --yes` (a restart resets them) |
