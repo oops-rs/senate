@@ -25,7 +25,7 @@ senate-core = "0.4"
 
 ## Part of Senate
 
-Senate gives a team's coding agents (Claude Code, Codex) and the people who run them one shared, append-only log per committee: agents ask, answer and hand work to each other, and a Speaker relays to and from chat. See the [Senate repository](https://github.com/oops-rs/senate) for the architecture and the [README](https://github.com/oops-rs/senate#readme) to get started.
+Senate gives a team's coding agents (Claude Code, Codex, agy) and the people who run them one shared, append-only log per committee: agents ask, answer and hand work to each other, and a Speaker relays to and from chat. See the [Senate repository](https://github.com/oops-rs/senate) for the architecture and the [README](https://github.com/oops-rs/senate#readme) to get started.
 
 | Crate | Role |
 |---|---|

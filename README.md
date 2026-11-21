@@ -77,7 +77,7 @@ Senate operates across developer machines and team servers through a resilient s
  │ ┌──────────────────────────────────────┐ │      │ ┌────────────────────────────────────────────────────┐ │
  │ │ developer-machine side: senate-bridge│ │◀─────┼─┤ senate-server (Axum HTTP & SSE API)                 │ │
  │ │                                      │ │      │ └─────────────────────────┬──────────────────────────┘ │
- │ │  • Session Manager (Claude / Codex)  │ │      │                           │ in-process                 │
+ │ │  • Session Manager (Claude/Codex/agy)│ │      │                           │ in-process                 │
  │ │  • SSE Streams & Delivery Ladder     │ │      │                           ▼                            │
  │ │  • Local State DB (state.db)         │ │      │ ┌────────────────────────────────────────────────────┐ │
  │ │  • Unix Socket (~/.senate/bridge.sock│ │      │ │ Hub (senate_core::Hub in-process seam)             │ │
@@ -207,7 +207,7 @@ The fastest way to experience Senate locally. No central server or database requ
 # 1. Initialize local configuration with you as the Speaker
 senate setup init --local --person alice
 
-# 2. Register MCP servers and hooks into Claude Code & Codex
+# 2. Register MCP servers and hooks into Claude Code, Codex & agy
 senate setup install --yes
 
 # 3. Start the daemon (or install it as a persistent user service)
@@ -566,48 +566,38 @@ Running `senate setup install --yes` registers these tools into your agent runti
 
 ### Antigravity CLI Integration
 
-To integrate Senate with the **Antigravity CLI (agy)**:
+`senate setup install` sets up the **Antigravity CLI (agy)** when `agy` is on
+your `PATH` (`--agy` forces it, `--no-agy` skips it). Like the other
+runtimes, the dry run shows each change and `--yes` writes them into agy's
+own global files under `~/.gemini` (`--gemini-dir` for another):
 
-1. Add the MCP server entry to `.agents/mcp_config.json`:
-   ```json
-   {
-     "mcpServers": {
-       "senate": {
-         "command": "/path/to/senate",
-         "args": ["mcp", "--agy"]
-       }
-     }
-   }
-   ```
+| File | What Senate adds |
+| :--- | :--- |
+| `config/mcp_config.json` | The `senate` MCP server: `senate mcp --runtime agy` |
+| `config/hooks.json` | A named hook `senate`: `SessionStart`, `PreInvocation` (before each model call) and `Stop` (end of a turn) run `senate hook … --runtime agy` |
+| `antigravity-cli/settings.json` | `mcp(senate/*)` in `permissions.allow`, so Senate's own tools run without asking |
 
-2. Register lifecycle hooks in `.agents/hooks.json`:
-   ```json
-   {
-     "senate": {
-       "SessionStart": [{"command": "/path/to/senate hook session-start --agy"}],
-       "PreInvocation": [{"command": "/path/to/senate hook user-prompt-submit --agy"}]
-     }
-   }
-   ```
+An agy session joins as `[senator::agy-<conversation-id>]`. It takes what
+waits for it at its hooks: the brief and its messages arrive as a user
+message before its next model call, and a turn that ends while a message is
+waiting goes on to read it. agy offers no channel Senate can push into, so a
+message that lands while an agy session sits idle waits for its next prompt
+(`senate status` shows its delivery as `at hooks`).
 
-3. Bind the workspace with `senate join`. Each session registers as `agy-<UUID>`.
+Host one like any other runtime:
 
-<details>
-<summary><b>Immediate Push via Native Endpoint & ACP</b></summary>
-
-For sub-millisecond push into native Antigravity terminals with proof-of-launch verification:
 ```sh
-# Supply per-process CSRF token through stdin:
-senate agy-register <conversation-uuid> 127.0.0.1:<port> < /path/to/private/token
-senate agy-unregister <conversation-uuid>
+senate spawn agy --alias triage --prompt 'Triage the failing tests'
+senate attach triage
+senate session restore triage      # resumes the same agy conversation
 ```
 
-To run an **Agent Control Protocol (ACP)** server connection:
-```sh
-senate acp -- agy acp
-```
-Type one-time confirmation or `/deny` to grant/block permission requests interactively.
-</details>
+A hosted agy starts from Senate's fixed seed prompt, which tells it to read
+its Senate inbox; `--prompt` arrives as an ordinary Senate request.
+`--model` and `--effort` (`low` … `max`) pass through to agy. `[agy] bin` in
+`senate.toml` picks the executable. agy asks once whether to trust a
+directory it has not opened before: answer it in `senate attach`, or open
+the directory in agy yourself first.
 
 ---
 

@@ -2,7 +2,7 @@
 
 The `senate` command of [Senate](https://github.com/oops-rs/senate): reach
 your coding agents, see what waits for you, and run the hooks and MCP server
-that Claude Code and Codex use.
+that Claude Code, Codex and the Antigravity CLI (agy) use.
 
 ```
 cargo install senate
