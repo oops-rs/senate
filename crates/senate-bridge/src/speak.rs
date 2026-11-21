@@ -229,15 +229,17 @@ pub fn render_replied(thread: Seq, posted: &Posted, locale: Locale) -> String {
     out
 }
 
-/// The one line `reply` adds when what the person wrote crossed an
-/// escalation to them: it is still in force, and they have not read it.
+/// The one line `reply` adds, after its confirmation, when what the person
+/// wrote crossed an escalation to them: the reply is recorded, and this is
+/// for their information, not a refusal. The escalation is still in force
+/// and they have not read it.
 pub fn unseen_escalation_line(thread: Seq, escalation: Seq, locale: Locale) -> String {
     match locale {
         Locale::Zh => format!(
-            "thread {thread} 里有比你已读更新的内容：seq {escalation} 转给了你，仍然有效，你的回复在它之前写成；用 `senate thread {thread}` 阅读。"
+            "注意：thread {thread} 有你还没读的 seq {escalation}（转给你的，仍有效）；用 `senate thread {thread}` 查看。"
         ),
         Locale::En => format!(
-            "There is something newer in thread {thread} that you have not read: it was escalated to you at seq {escalation} and still waits on you; read it with `senate thread {thread}`."
+            "Note: thread {thread} has seq {escalation}, which you have not read yet (escalated to you, still in force); see it with `senate thread {thread}`."
         ),
     }
 }

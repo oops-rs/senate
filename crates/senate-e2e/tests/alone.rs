@@ -627,7 +627,9 @@ async fn what_the_agent_hands_back_stays_in_the_persons_inbox_until_they_act() {
     assert!(crossed.unseen_escalation.is_some(), "{crossed:?}");
     let line = senate_bridge::speak::render_replied(root, &crossed, Locale::En);
     assert!(
-        line.contains("There is something newer in thread") && line.contains("senate thread"),
+        line.starts_with(&format!("Replied in thread {root}"))
+            && line.contains(&format!("Note: thread {root} has seq"))
+            && line.contains("senate thread"),
         "{line}"
     );
     let reply = inbox(false).await;

@@ -1452,20 +1452,30 @@ async fn a_reply_written_before_the_escalation_was_read_does_not_end_it() {
             "the reply says what had been shown to the person when it was written"
         );
         let text = out(&r);
+        // The confirmation comes first, as for any reply; then the note,
+        // as information.
+        let confirmed = text.lines().next().unwrap_or_default();
+        let replied = if zh {
+            format!("的 thread {root} 里回复（seq {}）", sent.seq)
+        } else {
+            format!("Replied in thread {root} on refund-v2 (seq {})", sent.seq)
+        };
+        assert!(confirmed.contains(&replied), "{text}");
         let line = text.lines().nth(1).unwrap_or_default();
         if zh {
             assert!(
-                line.contains(&format!(
-                    "thread {root} 里有比你已读更新的内容：seq {} 转给了你",
+                line.starts_with(&format!(
+                    "注意：thread {root} 有你还没读的 seq {}（转给你的，仍有效）",
                     esc.seq
                 )) && line.contains(&format!("`senate thread {root}`")),
                 "{text}"
             );
         } else {
             assert!(
-                line.contains(&format!(
-                    "There is something newer in thread {root} that you have not read"
-                )) && line.contains(&format!("escalated to you at seq {}", esc.seq))
+                line.starts_with(&format!(
+                    "Note: thread {root} has seq {}, which you have not read yet",
+                    esc.seq
+                )) && line.contains("(escalated to you, still in force)")
                     && line.contains(&format!("`senate thread {root}`")),
                 "{text}"
             );
