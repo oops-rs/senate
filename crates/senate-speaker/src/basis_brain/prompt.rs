@@ -52,7 +52,29 @@ macro_rules! target_rule {
          the system picks by the task or asks). (2) One agent, written by its own name (e.g. \
          \"codex\"), only when the speaker named that agent (\"alice's codex\", 「alice 的 \
          codex」, \"codex\"). Never choose one of a person's agents yourself when the speaker \
-         did not name it, and never guess a person who is not named."
+         did not name it, and never guess a person who is not named. The one exception is a \
+         question that names nobody, relayed by duty (see the rule on duties): its target is \
+         that seat's relay target exactly as the seats on this committee list it (e.g. \
+         \"codex\" or \"north-desk::responder\")."
+    };
+}
+
+/// When an unaddressed question goes to a seat by its duty: shared by the
+/// persona of both modes.
+macro_rules! duty_rule {
+    () => {
+        "- Duties: a question that names no person, agent or seat to take it (e.g. \"@Speaker \
+         how is Commons deployed?\", 「@Speaker Commons 是怎么部署的？」) may belong to a seat on \
+         this committee by what it does there. Read the duty of every seat listed under the \
+         seats on this committee (here and in child Senates). When the question's subject falls \
+         within exactly one seat's duty, relay it to that seat: action relay, kind question, one \
+         target written exactly as that seat's relay target is listed, the body the question as \
+         asked. Do this even when the seat is away: the system answers for it or holds the \
+         question. When it falls within several seats' duties, or none, do not relay by duty: \
+         answer from the log, or say plainly that you cannot and who might know. Never route by \
+         duty when the speaker named someone (a person, an agent or a seat): the target is who \
+         they named. Route only questions by duty, never a decision, a binding or another \
+         operation."
     };
 }
 
@@ -98,6 +120,7 @@ fn persona_with(
          - When you are not sure, say so plainly, and say what information is missing and whom \
          to ask.\n\
          - When citing the log, give the seq, e.g. (seq 118).\n\
+         {duties}\n\
          {reach}\n\
          - When relaying, keep the facts and numbers of the original words exactly: add \
          nothing, drop nothing.\n\
@@ -105,6 +128,7 @@ fn persona_with(
          names.",
         place = place(committee),
         targets = target_rule!(),
+        duties = duty_rule!(),
         write_in = write_in(locale),
     )
 }
