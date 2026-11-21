@@ -22,9 +22,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::brain::{
-    AgentCandidate, AgentTurn, Answer, BrainError, CommitteeSeat, Conversation, Crossing, CrossingInput, Intent,
-    Offline, OfflineInput, Pick, PickInput, Question, RelayKind, Takeover, TriageInput, Utterance,
-    apply_threshold,
+    AgentCandidate, AgentTurn, Answer, BrainError, CommitteeSeat, Conversation, Crossing,
+    CrossingInput, Intent, Offline, OfflineInput, Pick, PickInput, Question, RelayKind, Takeover,
+    TriageInput, Utterance, apply_threshold,
 };
 
 /// How much of one event body a prompt or tool result shows.

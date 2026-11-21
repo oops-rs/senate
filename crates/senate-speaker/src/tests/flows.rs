@@ -2122,3 +2122,181 @@ async fn a_child_senate_not_known_to_be_offline_gets_no_line() {
         assert!(rig.brain.offline_inputs().is_empty(), "{seen:?}");
     }
 }
+
+// ----- an unaddressed question, relayed by duty --------------------------------------
+
+const DEPLOY_DUTY: &str = "负责回答 Commons / Senate 的部署、架构和使用问题";
+
+/// The seats an utterance was interpreted with, as `(target, duty, online)`.
+fn seats_seen(rig: &Rig) -> Vec<(String, Option<String>, bool)> {
+    let utterances = rig.brain.utterances();
+    let utterance = utterances.last().expect("interpreted");
+    utterance
+        .seats
+        .iter()
+        .map(|s| (s.target.clone(), s.duty.clone(), s.online))
+        .collect()
+}
+
+/// A hub with codex (alice's second agent) connected on the committee with
+/// a duty, and carol's child Senate `dark-conclave` declaring `seats` there.
+async fn duty_hub(seats: &[(&str, PresenceState, Option<&str>)]) -> std::sync::Arc<MemoryHub> {
+    let hub = bound_hub().await;
+    hub.set_roster(roster_with_carol());
+    hub.seat(&path("codex"), "alice");
+    hub.connect(&refund(), &path("codex"));
+    hub.append(
+        senate_core::DutyPayload {
+            senator: path("codex"),
+            duty: "owns the retry path".into(),
+        }
+        .note(refund(), Address::senator(&path("codex"))),
+    )
+    .await
+    .expect("duty");
+    hub.add_child("dark-conclave", "carol");
+    let declared: Vec<(&str, PresenceState)> = seats.iter().map(|(s, p, _)| (*s, *p)).collect();
+    hub.declare_seats("dark-conclave", &refund(), &declared);
+    for (seat, _, duty) in seats {
+        if let Some(duty) = duty {
+            hub.declare_duty("dark-conclave", &refund(), seat, duty);
+        }
+    }
+    // A seat on another committee is not one of this committee's.
+    let other = senate_core::CommitteeId::new("billing").expect("committee");
+    hub.declare_seats(
+        "dark-conclave",
+        &other,
+        &[("auditor", PresenceState::Online)],
+    );
+    hub
+}
+
+/// Thread 749: "@Speaker Commons 是怎么部署的？", addressed to nobody. The
+/// model sees every seat on the committee with its duty, here and in the
+/// child Senate, and its relay to the one whose duty fits, written as the
+/// seats list it, reaches the child's desk naming that seat.
+#[tokio::test]
+async fn an_unaddressed_question_reaches_the_child_seat_whose_duty_fits() {
+    let hub = duty_hub(&[
+        ("responder", PresenceState::Online, Some(DEPLOY_DUTY)),
+        ("archivist", PresenceState::Absent, None),
+    ])
+    .await;
+    let rig = Rig::start(hub).await;
+    rig.brain.interprets(Ok(Intent::Relay {
+        targets: vec!["dark-conclave::responder".into()],
+        kind: RelayKind::Question,
+        body: "Commons 是怎么部署的？".into(),
+    }));
+    rig.append(mention("pm", "Commons 是怎么部署的？", "m_d1"))
+        .await;
+    rig.settle().await;
+
+    assert_eq!(
+        seats_seen(&rig),
+        [
+            (
+                "codex".to_owned(),
+                Some("owns the retry path".to_owned()),
+                true
+            ),
+            (
+                "dark-conclave::responder".to_owned(),
+                Some(DEPLOY_DUTY.to_owned()),
+                true
+            ),
+            ("dark-conclave::archivist".to_owned(), None, false),
+        ],
+        "every seat on the committee, as a relay names it, with duty and presence"
+    );
+    let relay = last_relay(&rig);
+    assert_eq!(relay.kind, Kind::Question);
+    assert_eq!(
+        relay.to,
+        vec![desk_of("dark-conclave")],
+        "by way of the desk"
+    );
+    assert_eq!(
+        intended(&relay).as_deref(),
+        Some("dark-conclave::refund-v2::senator::responder")
+    );
+    assert_eq!(relay.body, "Commons 是怎么部署的？");
+    assert!(
+        rig.brain.pick_inputs().is_empty(),
+        "named outright: no pick"
+    );
+}
+
+/// The same for a seat of this Senate: a relay to `codex` by its duty
+/// reaches codex itself.
+#[tokio::test]
+async fn an_unaddressed_question_reaches_the_local_seat_whose_duty_fits() {
+    let hub = duty_hub(&[("responder", PresenceState::Online, Some(DEPLOY_DUTY))]).await;
+    let rig = Rig::start(hub).await;
+    rig.brain.interprets(Ok(Intent::Relay {
+        targets: vec!["codex".into()],
+        kind: RelayKind::Question,
+        body: "重试路径现在是怎么做的？".into(),
+    }));
+    rig.append(mention("pm", "重试路径现在是怎么做的？", "m_d2"))
+        .await;
+    rig.settle().await;
+    let relay = last_relay(&rig);
+    assert_eq!(relay.kind, Kind::Question);
+    assert_eq!(relay.to, vec![Address::senator(&path("codex"))]);
+    assert_eq!(intended(&relay), None);
+    assert!(
+        rig.brain.pick_inputs().is_empty(),
+        "named outright: no pick"
+    );
+}
+
+/// Two seats whose duties both fit: the model sees both, answers itself,
+/// and nothing is relayed. A child that has gone quiet shows its seats
+/// away, whatever it last declared.
+#[tokio::test]
+async fn several_seats_whose_duty_fits_are_not_routed() {
+    let hub = duty_hub(&[
+        ("responder", PresenceState::Online, Some(DEPLOY_DUTY)),
+        ("operator", PresenceState::Online, Some(DEPLOY_DUTY)),
+    ])
+    .await;
+    hub.child_seen(
+        "dark-conclave",
+        Some(chrono::Utc::now() - chrono::Duration::hours(1)),
+    );
+    let rig = Rig::start(hub).await;
+    rig.brain.interprets(Ok(Intent::None {
+        reply: "这件事 responder 和 operator 都负责，请直接问其中一位。".into(),
+    }));
+    let before = rig.hub.events(&refund()).len();
+    rig.append(mention("pm", "Commons 是怎么部署的？", "m_d3"))
+        .await;
+    rig.settle().await;
+    let seen = seats_seen(&rig);
+    assert!(
+        seen.contains(&(
+            "dark-conclave::responder".to_owned(),
+            Some(DEPLOY_DUTY.to_owned()),
+            false
+        )) && seen.contains(&(
+            "dark-conclave::operator".to_owned(),
+            Some(DEPLOY_DUTY.to_owned()),
+            false
+        )),
+        "{seen:?}"
+    );
+    let events = rig.hub.events(&refund());
+    assert_eq!(events.len(), before + 1, "only the question: {events:#?}");
+    assert!(
+        !events
+            .iter()
+            .any(|e| e.from == Address::Speaker && e.kind == Kind::Question),
+        "nothing relayed"
+    );
+    assert_eq!(
+        rig.surface.texts().last().map(String::as_str),
+        Some("这件事 responder 和 operator 都负责，请直接问其中一位。")
+    );
+}

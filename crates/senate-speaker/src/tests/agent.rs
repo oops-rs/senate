@@ -1143,3 +1143,57 @@ async fn in_english_a_plan_is_restated_run_after_yes_and_too_many_actions_are_re
     }
     rig.stop().await;
 }
+
+/// Agent mode: the conversation's utterance carries the committee's seats,
+/// a child's included, and a relay to the one whose duty fits runs at once,
+/// reaching the child's desk naming the seat.
+#[tokio::test]
+async fn an_unaddressed_question_reaches_a_child_seat_by_duty_in_agent_mode() {
+    let hub = MemoryHub::new();
+    hub.append(bind_event(&refund(), GROUP)).await.unwrap();
+    hub.add_child("dark-conclave", "pm");
+    hub.declare_seats(
+        "dark-conclave",
+        &refund(),
+        &[("responder", PresenceState::Online)],
+    );
+    hub.declare_duty("dark-conclave", &refund(), "responder", "部署和架构问题");
+    let brain = ScriptedBrain::new();
+    brain.converses(Ok(AgentTurn::act(
+        "",
+        vec![Intent::Relay {
+            targets: vec!["dark-conclave::responder".into()],
+            kind: RelayKind::Question,
+            body: "Commons 是怎么部署的？".into(),
+        }],
+    )));
+    let rig = start(hub, FakeSurface::new(), brain).await;
+    rig.append(mention("pm", "Commons 是怎么部署的？", "ask"))
+        .await;
+    rig.settle().await;
+
+    let conversations = rig.brain.conversations();
+    let seats = &conversations[0].utterance.seats;
+    assert_eq!(
+        seats,
+        &vec![crate::CommitteeSeat {
+            target: "dark-conclave::responder".into(),
+            duty: Some("部署和架构问题".into()),
+            online: true,
+        }]
+    );
+    let relay = rig.hub.events(&refund()).into_iter().last().unwrap();
+    assert_eq!(relay.from, Address::Speaker);
+    assert_eq!(relay.kind, Kind::Question);
+    assert_eq!(
+        relay.to,
+        vec![Address::Child {
+            senate: name("dark-conclave"),
+            committee: refund(),
+        }]
+    );
+    assert_eq!(
+        senate_core::locator::intended(&relay).map(|s| s.to_string()),
+        Some("dark-conclave::refund-v2::senator::responder".to_owned())
+    );
+}

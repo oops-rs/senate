@@ -1571,3 +1571,134 @@ async fn an_incomplete_committee_model_falls_back_and_is_reported() {
         "{problems:?}"
     );
 }
+
+// ----- the seats on the committee, and relaying by duty ------------------------------
+
+const DEPLOY_DUTY: &str = "负责回答 Commons / Senate 的部署、架构和使用问题";
+
+/// The committee's seats as the engine gives them: an agent here and two
+/// seats of the child Senate `dark-conclave`, one of them away.
+fn seats() -> Vec<crate::CommitteeSeat> {
+    vec![
+        crate::CommitteeSeat {
+            target: "codex".into(),
+            duty: Some("owns the retry path".into()),
+            online: true,
+        },
+        crate::CommitteeSeat {
+            target: "dark-conclave::responder".into(),
+            duty: Some(DEPLOY_DUTY.into()),
+            online: true,
+        },
+        crate::CommitteeSeat {
+            target: "dark-conclave::archivist".into(),
+            duty: None,
+            online: false,
+        },
+    ]
+}
+
+/// What both modes must show the model: each seat as a relay target with
+/// its presence and duty in the prompt, and the rule in the persona.
+fn assert_seats_and_rule(fixture: &Fixture) {
+    let request = &fixture.model.requests()[0];
+    let prompt = format!("{:?}", request.messages);
+    for needle in [
+        "Seats on this committee, written as a relay target",
+        "- codex · online · duty: owns the retry path",
+        &format!("- dark-conclave::responder · online · duty: {DEPLOY_DUTY}"),
+        "- dark-conclave::archivist · away · duty: none set",
+    ] {
+        assert!(prompt.contains(needle), "{needle} in {prompt}");
+    }
+    let system = request.system.as_deref().unwrap_or_default();
+    for needle in [
+        "within exactly one seat's duty, relay it to that seat: action relay, kind question",
+        "several seats' duties, or none, do not relay by duty",
+        "Never route by duty when the speaker named someone",
+        "that seat's relay target exactly as the seats on this committee list it",
+    ] {
+        assert!(system.contains(needle), "{needle} in {system}");
+    }
+}
+
+#[tokio::test]
+async fn interpret_shows_the_seats_and_their_duties_and_relays_by_duty() {
+    let fixture = fixture(vec![Round::Answer(json!({
+        "action": "relay",
+        "targets": ["dark-conclave::responder"],
+        "kind": "question",
+        "body": "Commons 是怎么部署的？"
+    }))])
+    .await;
+    let intent = fixture
+        .brain
+        .interpret(Utterance {
+            seats: seats(),
+            ..utterance(&fixture, "Commons 是怎么部署的？")
+        })
+        .await
+        .expect("intent");
+    assert_eq!(
+        intent,
+        Intent::Relay {
+            targets: vec!["dark-conclave::responder".into()],
+            kind: RelayKind::Question,
+            body: "Commons 是怎么部署的？".into(),
+        }
+    );
+    assert_seats_and_rule(&fixture);
+}
+
+#[tokio::test]
+async fn converse_shows_the_seats_and_their_duties_as_context_and_relays_by_duty() {
+    let fixture = fixture(vec![Round::Answer(json!({
+        "reply": "",
+        "actions": [action(json!({
+            "action": "relay",
+            "targets": ["dark-conclave::responder"],
+            "kind": "question",
+            "body": "Commons 是怎么部署的？"
+        }))],
+        "awaiting_reply": false
+    }))])
+    .await;
+    let turn = fixture
+        .brain
+        .converse(Conversation {
+            utterance: Utterance {
+                seats: seats(),
+                ..utterance(&fixture, "Commons 是怎么部署的？")
+            },
+            turns: Vec::new(),
+        })
+        .await
+        .expect("a turn");
+    assert_eq!(
+        turn.actions,
+        vec![Intent::Relay {
+            targets: vec!["dark-conclave::responder".into()],
+            kind: RelayKind::Question,
+            body: "Commons 是怎么部署的？".into(),
+        }]
+    );
+    assert_seats_and_rule(&fixture);
+}
+
+#[tokio::test]
+async fn no_seats_known_says_so() {
+    let fixture = fixture(vec![Round::Answer(
+        json!({ "action": "none", "reply": "" }),
+    )])
+    .await;
+    fixture
+        .brain
+        .interpret(utterance(&fixture, "在吗"))
+        .await
+        .expect("intent");
+    let prompt = format!("{:?}", fixture.model.requests()[0].messages);
+    assert!(
+        prompt.contains("with presence and duty:\\n(none known)"),
+        "{prompt}"
+    );
+}
