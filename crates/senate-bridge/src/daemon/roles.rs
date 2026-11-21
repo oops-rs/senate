@@ -1815,7 +1815,10 @@ mod tests {
         let c = CommitteeId::new("ibot").unwrap();
         let en = roles_text::not_chairing(&me, &c, Some(&chair), Locale::En);
         assert!(en.contains("[senator::codex] does not chair the committee `ibot`"));
-        assert!(en.contains("the chair of `ibot` is [senator::claude]"), "{en}");
+        assert!(
+            en.contains("the chair of `ibot` is [senator::claude]"),
+            "{en}"
+        );
         assert!(en.contains("chair_docket"), "{en}");
         let zh = roles_text::not_chairing(&me, &c, None, Locale::Zh);
         assert!(zh.starts_with("[senator::codex] 不是委员会 `ibot` 的主席"));

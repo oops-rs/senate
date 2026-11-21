@@ -16,7 +16,7 @@ Most people run it through [`senated`](https://crates.io/crates/senated) rather 
 
 ```toml
 [dependencies]
-senate-server = "0.3"
+senate-server = "0.4"
 ```
 
 ## Part of Senate

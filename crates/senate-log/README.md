@@ -20,7 +20,7 @@ The server is the only component that holds a `LogStore`; everything else reache
 
 ```toml
 [dependencies]
-senate-log = "0.3"
+senate-log = "0.4"
 ```
 
 ## Part of Senate

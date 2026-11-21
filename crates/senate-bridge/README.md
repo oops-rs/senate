@@ -26,7 +26,7 @@ It runs inside `senated --machine`; depend on this crate to embed the machine si
 
 ```toml
 [dependencies]
-senate-bridge = "0.3"
+senate-bridge = "0.4"
 ```
 
 ## Part of Senate

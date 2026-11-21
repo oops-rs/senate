@@ -1490,14 +1490,14 @@ dependencies = [
 
 [[package]]
 name = "senate"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "senate-bridge",
 ]
 
 [[package]]
 name = "senate-bridge"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1531,7 +1531,7 @@ dependencies = [
 
 [[package]]
 name = "senate-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "chrono",
