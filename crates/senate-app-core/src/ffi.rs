@@ -24,6 +24,7 @@ use crate::link::{Backoff, Driver, Link, Sink};
 use crate::model::{self, Action, Failure, Model, Refresh};
 use crate::state::{AppState, ApprovalRequest};
 use crate::reads::{self, ThreadView};
+use crate::names;
 use crate::text;
 
 /// Why a call failed.
@@ -134,61 +135,61 @@ pub enum MentionKind {
     Guest,
 }
 
-/// A piece of a text: plain words, or one mention (brackets included).
+/// A piece of a text: plain words, or one mention.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct TextPart {
+    /// As written (a mention with its brackets).
     pub text: String,
     /// `None` for plain words.
     pub mention: Option<MentionKind>,
+    /// A mention as people are shown it: `senate-chair`, `alice`,
+    /// `copilot (Speaker)` ([`crate::names`]). `None` for plain words.
+    pub display: Option<String>,
+    /// A mention's id, without brackets: `senator::claude-a956…`, what a
+    /// reader copies into a tool. `None` for plain words.
+    pub id: Option<String>,
 }
 
-/// Split `text` into plain words and mentions, in order, so the app can set
-/// ids apart from the words around them. Brackets that hold anything else
-/// (`[1]`, `[draft]`) stay plain. The pieces joined give `text` back.
+/// Split `text` into plain words and mentions, in order, each mention with
+/// the name people are shown on `committee` (the one the text belongs to;
+/// `None` when there is none). Brackets that hold anything else (`[1]`,
+/// `[draft]`) stay plain. The pieces' `text` joined give `text` back.
 #[uniffi::export]
-pub fn split_mentions(text: String) -> Vec<TextPart> {
+pub fn split_mentions(text: String, committee: Option<String>) -> Vec<TextPart> {
+    let names = names::current();
+    let committee = committee.and_then(|c| CommitteeId::new(c).ok());
     let mut parts = Vec::new();
     let mut at = 0;
+    let plain = |s: &str| TextPart {
+        text: s.to_string(),
+        mention: None,
+        display: None,
+        id: None,
+    };
     for found in Mention::scan(&text) {
         if found.range.start > at {
-            parts.push(TextPart {
-                text: text[at..found.range.start].to_string(),
-                mention: None,
-            });
+            parts.push(plain(&text[at..found.range.start]));
         }
+        let written = &text[found.range.clone()];
         parts.push(TextPart {
-            text: text[found.range.clone()].to_string(),
-            mention: Some(kind_of(&found.mention, &known_people())),
+            text: written.to_string(),
+            mention: Some(kind_of(&found.mention, &names.people)),
+            display: Some(names.display(&found.mention, committee.as_ref())),
+            id: Some(names::id_of(written)),
         });
         at = found.range.end;
     }
     if at < text.len() {
-        parts.push(TextPart {
-            text: text[at..].to_string(),
-            mention: None,
-        });
+        parts.push(plain(&text[at..]));
     }
     parts
 }
 
-/// The people of the Senate the daemon last reported: a name is flat, so
-/// whether `[senator::x]` is a person is what the daemon's status says
-/// (`StatusReply::people`). Set by the driver; empty until it reports.
-static PEOPLE: std::sync::RwLock<Option<senate_core::People>> = std::sync::RwLock::new(None);
-
-/// Remember who the Senate's people are, for [`split_mentions`].
-pub(crate) fn note_people(people: &senate_core::People) {
-    if let Ok(mut known) = PEOPLE.write() {
-        *known = Some(people.clone());
-    }
-}
-
-fn known_people() -> senate_core::People {
-    PEOPLE
-        .read()
-        .ok()
-        .and_then(|p| p.clone())
-        .unwrap_or_default()
+/// Changes whenever what [`split_mentions`] knows of names does: the app
+/// keeps split texts until it moves.
+#[uniffi::export]
+pub fn mention_names_version() -> u64 {
+    names::version()
 }
 
 fn kind_of(mention: &Mention, people: &senate_core::People) -> MentionKind {
@@ -247,11 +248,13 @@ impl AppCore {
             .map_err(|e| CoreError::Setup {
                 message: format!("starting the runtime: {e}"),
             })?;
+        let locale = locale_of(language.as_deref());
+        names::update(|n| n.locale = locale);
         Ok(Arc::new(Self {
             paths,
             handle: runtime.handle().clone(),
             runtime: Mutex::new(Some(runtime)),
-            locale: Mutex::new(locale_of(language.as_deref())),
+            locale: Mutex::new(locale),
             driver: OnceLock::new(),
         }))
     }
@@ -267,6 +270,7 @@ impl AppCore {
     /// Write texts in another language from now on; the next state follows.
     pub fn set_language(&self, language: Option<String>) {
         let locale = locale_of(language.as_deref());
+        names::update(|n| n.locale = locale);
         *self.locale.lock().unwrap_or_else(|e| e.into_inner()) = locale;
         if let Some(driver) = self.driver.get() {
             driver.set_locale(locale);
@@ -306,6 +310,8 @@ impl AppCore {
             driver.refresh(Refresh::Approvals).await;
             driver.refresh(Refresh::AllInboxes).await;
             driver.refresh(Refresh::Docket).await;
+            driver.refresh_aliases(true).await;
+            driver.changed();
         });
         Ok(())
     }
@@ -629,10 +635,10 @@ mod tests {
     #[test]
     fn mentions_are_split_out_of_running_text() {
         // Names are flat: who is a person is what the daemon reported.
-        note_people(&senate_core::People::new([
-            senate_core::Name::new("alice").unwrap()
-        ]));
-        let parts = split_mentions("请[senator::claude]看一下 [1] 和 [speaker]".into());
+        names::update(|n| {
+            n.people = senate_core::People::new([senate_core::Name::new("alice").unwrap()]);
+        });
+        let parts = split_mentions("请[senator::claude]看一下 [1] 和 [speaker]".into(), None);
         let shown: Vec<_> = parts.iter().map(|p| (p.text.as_str(), p.mention)).collect();
         assert_eq!(
             shown,
@@ -645,11 +651,12 @@ mod tests {
         );
         let joined: String = parts.iter().map(|p| p.text.as_str()).collect();
         assert_eq!(joined, "请[senator::claude]看一下 [1] 和 [speaker]");
-        assert_eq!(split_mentions(String::new()), Vec::new());
+        assert_eq!(split_mentions(String::new(), None), Vec::new());
         let kinds: Vec<_> = split_mentions(
             "[senator::alice] [senator::*] [speaker::claude] [committee] [guest::chat/u1] \
              [ibot::senator::codex]"
                 .into(),
+            None,
         )
         .into_iter()
         .filter_map(|p| p.mention)

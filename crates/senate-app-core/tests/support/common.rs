@@ -481,6 +481,14 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
             }),
             None => Reply::err(IpcError::bad_request(format!("no thread {thread}"))),
         },
+        // `claude` goes by `lead` on refund-v2.
+        Request::Aliases => {
+            let mut table = senate_core::alias::CommitteeAliases::new();
+            table
+                .set(&committee(), path("lead"), path("claude"))
+                .unwrap();
+            Reply::ok(&senate_core::alias::KnownAliases::Scoped(table))
+        }
         Request::Approvals => Reply::ok(&ApprovalsReply {
             approvals: w.approvals.clone(),
         }),

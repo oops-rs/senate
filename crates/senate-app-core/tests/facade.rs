@@ -163,6 +163,26 @@ async fn reading_a_thread_returns_its_events_and_marks_it_seen() {
     core.start(listener.clone()).unwrap();
     until(&listener, "online", |s| s.online && s.inbox.len() == 2).await;
 
+    // Mentions read as names: `claude` is `lead` on refund-v2 (once the
+    // aliases are in), an id elsewhere.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while senate_app_core::ffi::mention_names_version() == 0
+        || senate_app_core::ffi::split_mentions("[senator::claude]".into(), Some("refund-v2".into()))[0]
+            .display
+            .as_deref()
+            != Some("lead")
+    {
+        assert!(tokio::time::Instant::now() < deadline, "aliases never arrived");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let parts = senate_app_core::ffi::split_mentions(
+        "ask [speaker::claude] or [senator::alice]".into(),
+        Some("refund-v2".into()),
+    );
+    assert_eq!(parts[1].display.as_deref(), Some("lead (Speaker)"));
+    assert_eq!(parts[1].id.as_deref(), Some("speaker::claude"));
+    assert_eq!(parts[3].display.as_deref(), Some("alice"));
+
     let view = core.thread("refund-v2".into(), 131).await.unwrap();
     assert_eq!(view.root, 131);
     assert_eq!(view.committee, "refund-v2");

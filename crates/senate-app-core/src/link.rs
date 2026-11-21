@@ -11,13 +11,14 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use senate_bridge::approvals::Approval;
 use senate_bridge::ipc::{
     self, ApprovalsReply, ApproveReply, ClientError, DocketReply, InboxReply, MAX_LINE, Posted,
     Reply, Request, SessionSelector, WatchEvent,
 };
+use senate_core::alias::KnownAliases;
 use senate_core::{CommitteeId, Locale, SenatorName};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -26,6 +27,8 @@ use tokio::net::UnixStream;
 
 use crate::model::{Action, Effects, Failure, Model, Notice, Offline, ReadOf, Refresh, message};
 
+/// How often the aliases are read again on a status sweep.
+const ALIASES_EVERY: Duration = Duration::from_secs(300);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 /// Local reads.
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
@@ -176,6 +179,8 @@ impl Backoff {
 /// Keeps a [`Model`] current from the daemon and runs the window's actions.
 pub struct Driver<S: Sink> {
     link: Link,
+    /// When the aliases were last read.
+    aliases_read: Mutex<Option<Instant>>,
     model: Mutex<Model>,
     sink: S,
     backoff: Backoff,
@@ -185,6 +190,7 @@ impl<S: Sink> Driver<S> {
     pub fn new(link: Link, sink: S, backoff: Backoff, locale: Locale) -> Arc<Self> {
         Arc::new(Self {
             link,
+            aliases_read: Mutex::new(None),
             model: Mutex::new(Model::new(locale)),
             sink,
             backoff,
@@ -223,6 +229,8 @@ impl<S: Sink> Driver<S> {
                     delay = self.backoff.min;
                     tracing::info!("watching the daemon on {}", self.link.socket.display());
                     self.model().connected();
+                    // A restarted daemon may serve other names.
+                    *self.aliases_read.lock().unwrap_or_else(|e| e.into_inner()) = None;
                     self.changed();
                     let reason = loop {
                         match stream.next().await {
@@ -304,8 +312,26 @@ impl<S: Sink> Driver<S> {
                 }
             }
             Refresh::Docket => self.refresh_docket().await,
+            Refresh::Aliases => self.refresh_aliases(false).await,
         }
         self.changed();
+    }
+
+    /// Read the aliases into [`crate::names`]; unless `force`, only when the
+    /// last read is older than [`ALIASES_EVERY`]. A failure keeps the old
+    /// names (an id is still a correct way to show a seat).
+    pub async fn refresh_aliases(&self, force: bool) {
+        {
+            let mut last = self.aliases_read.lock().unwrap_or_else(|e| e.into_inner());
+            if !force && last.is_some_and(|at| at.elapsed() < ALIASES_EVERY) {
+                return;
+            }
+            *last = Some(Instant::now());
+        }
+        match self.link.call::<KnownAliases>(&Request::Aliases).await {
+            Ok(aliases) => crate::names::update(|n| n.aliases = Some(aliases)),
+            Err(e) => tracing::debug!("reading aliases: {e}"),
+        }
     }
 
     async fn refresh_inbox(&self, agent: SenatorName, committee: CommitteeId) {

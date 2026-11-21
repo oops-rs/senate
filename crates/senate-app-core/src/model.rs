@@ -45,6 +45,9 @@ pub enum Refresh {
     AllInboxes,
     /// `approvals`, replacing the list.
     Approvals,
+    /// `aliases`: how agents are named on each committee
+    /// ([`crate::names`]). Read at most every few minutes unless forced.
+    Aliases,
     /// `docket`: what awaits the Speaker of every Senate one of the
     /// person's agents presides over. Does nothing when none does.
     Docket,
@@ -228,7 +231,14 @@ impl Model {
         let mut fx = Effects::default();
         match event {
             WatchEvent::Status(status) => {
-                crate::ffi::note_people(&status.people);
+                crate::names::update(|n| {
+                    n.people = status.people.clone();
+                    // Child Senates by name, whichever Senate reported them.
+                    for child in status.roles.iter().flat_map(|r| &r.children) {
+                        n.children.retain(|c| c.name != child.name);
+                        n.children.push(child.clone());
+                    }
+                });
                 self.status = Some(*status);
                 let targets: BTreeSet<_> = self.targets().into_iter().collect();
                 self.inboxes.retain(|k, _| targets.contains(k));
@@ -241,6 +251,9 @@ impl Model {
                 // aged, an item put to the Speaker).
                 fx.refresh.push(Refresh::AllInboxes);
                 fx.refresh.push(Refresh::Docket);
+                // How agents are named (the driver reads them at most every
+                // few minutes).
+                fx.refresh.push(Refresh::Aliases);
             }
             WatchEvent::ApprovalRequested(approval) => {
                 let approval = *approval;
@@ -745,7 +758,10 @@ mod tests {
             ("codex", "a"),
             ("claude", "b"),
         ]))));
-        assert_eq!(fx.refresh, vec![Refresh::AllInboxes, Refresh::Docket]);
+        assert_eq!(
+            fx.refresh,
+            vec![Refresh::AllInboxes, Refresh::Docket, Refresh::Aliases]
+        );
         m.set_inbox(inbox("claude", "a", &[3, 5]));
         m.set_inbox(inbox("codex", "a", &[7]));
         m.set_inbox(inbox("claude", "b", &[9]));
