@@ -505,34 +505,61 @@ pub(crate) fn binding_body(l: Locale, bind: bool, group: &str) -> String {
 
 // ----- status and presence ---------------------------------------------------
 
-/// `/status`: the binding, which agents are online, and each one's presence
-/// line ([`presence_status`]).
+/// One seat on the committee as people read it, in `/status` and the
+/// pinned card: the name people are shown, presence and duty, from the
+/// same seats the Speaker's prompt lists.
+/// `senate-dev（dark-conclave） 在线 · 职责：Senate 开发` /
+/// `senate-dev (dark-conclave) online · duty: Senate development`.
+pub(crate) fn seat_line(l: Locale, seat: &crate::brain::CommitteeSeat) -> String {
+    let presence = match seat.presence {
+        _ if seat.online => l.pick("在线", "online").to_owned(),
+        Some(state) if state != PresenceState::Online => presence_word(l, state, None),
+        _ => l.pick("离线", "offline").to_owned(),
+    };
+    let mut line = format!("{} {presence}", seat.people_name());
+    duty_suffix(l, &mut line, seat.duty.as_deref());
+    line
+}
+
+/// `/status`: the binding, which seats are online (here and in child
+/// Senates), each seat with its presence and duty ([`seat_line`]), and
+/// the presence line of each agent here ([`presence_status`]).
 pub(crate) fn status(
     l: Locale,
     committee: &CommitteeId,
-    online: &[SenatorName],
-    offline: &[SenatorName],
+    seats: &[crate::brain::CommitteeSeat],
     presence: &[String],
 ) -> String {
-    let list = |agents: &[SenatorName]| {
-        if agents.is_empty() {
+    let list = |online: bool| {
+        let names: Vec<String> = seats
+            .iter()
+            .filter(|s| s.online == online)
+            .map(crate::brain::CommitteeSeat::people_name)
+            .collect();
+        if names.is_empty() {
             l.pick("无", "none").to_owned()
         } else {
-            join(l, agents.iter().map(senator))
+            join(l, names)
         }
     };
     let mut text = match l {
         Locale::Zh => format!(
             "本群绑定在委员会 {committee}。\n在线 agent：{}\n离线 agent：{}",
-            list(online),
-            list(offline)
+            list(true),
+            list(false)
         ),
         Locale::En => format!(
             "This group is bound to committee {committee}.\nAgents online: {}\nAgents offline: {}",
-            list(online),
-            list(offline)
+            list(true),
+            list(false)
         ),
     };
+    if !seats.is_empty() {
+        text.push_str(l.pick("\n席位：", "\nSeats:"));
+        for seat in seats {
+            let _ = write!(text, "\n- {}", seat_line(l, seat));
+        }
+    }
     if !presence.is_empty() {
         text.push_str(l.pick("\n在场：", "\nPresence:"));
         for line in presence {
@@ -1679,8 +1706,9 @@ pub(crate) struct Today<'a> {
     pub(crate) threads: Vec<&'a ThreadSummary>,
     /// `(agent, seq, what)`, one per agent, most recent first.
     pub(crate) activity: Vec<(SenatorName, Seq, String)>,
-    /// Each agent with a presence on the committee.
-    pub(crate) presence: Vec<&'a AgentPresence>,
+    /// Every seat on the committee, here and in child Senates, as the
+    /// Speaker's prompt lists them.
+    pub(crate) seats: &'a [crate::brain::CommitteeSeat],
 }
 
 /// The pinned "today" card.
@@ -1757,25 +1785,10 @@ pub(crate) fn today_card(l: Locale, today: &Today<'_>) -> Card {
             .collect(),
         l.pick("今天还没有动静。", "Nothing yet today."),
     );
-    if !today.presence.is_empty() {
+    if !today.seats.is_empty() {
         section(
             l.pick("各 agent 在场", "Agent presence"),
-            today
-                .presence
-                .iter()
-                .map(|p| {
-                    let mut line = format!(
-                        "{} {}",
-                        senator(&p.agent),
-                        presence_word(l, p.state, p.new_owner.as_ref())
-                    );
-                    if let Some(lag) = p.lag.filter(|lag| *lag > 0) {
-                        let _ = write!(line, " · {}", lag_words(l, lag));
-                    }
-                    duty_suffix(l, &mut line, p.duty.as_deref());
-                    line
-                })
-                .collect(),
+            today.seats.iter().map(|seat| seat_line(l, seat)).collect(),
             "",
         );
     }
@@ -1835,6 +1848,87 @@ pub(crate) fn crossing_refused(l: Locale, to: &senate_core::Locator, reason: &st
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A seat as the engine lists it: relay target, the name people are
+    /// shown, presence and duty.
+    fn seat(
+        target: &str,
+        shown: Option<&str>,
+        online: bool,
+        duty: Option<&str>,
+    ) -> crate::brain::CommitteeSeat {
+        crate::brain::CommitteeSeat {
+            target: target.into(),
+            shown: shown.map(Into::into),
+            duty: duty.map(Into::into),
+            online,
+            presence: None,
+        }
+    }
+
+    /// Thread 773: `/status` and the today card in a group bound to
+    /// `commons-demo` list both child seats online by alias with their
+    /// duties, and nothing of the built-in session (the engine leaves it
+    /// out of the seats).
+    #[test]
+    fn status_and_the_today_card_list_every_seat_by_the_name_people_see() {
+        let seats = [
+            seat(
+                "dark-conclave::claude-11a084c4",
+                Some("senate-dev（dark-conclave）"),
+                true,
+                Some("Senate 开发"),
+            ),
+            seat(
+                "wyak::codex-01a1fc99",
+                Some("commons-dev（wyak）"),
+                true,
+                Some("commons 的开发"),
+            ),
+            seat("dark-conclave::archivist", None, false, None),
+        ];
+        let c = CommitteeId::new("commons-demo").unwrap();
+        let text = status(Locale::Zh, &c, &seats, &[]);
+        assert_eq!(
+            text,
+            "本群绑定在委员会 commons-demo。\n\
+             在线 agent：senate-dev（dark-conclave）、commons-dev（wyak）\n\
+             离线 agent：[dark-conclave::archivist]\n\
+             席位：\n\
+             - senate-dev（dark-conclave） 在线 · 职责：Senate 开发\n\
+             - commons-dev（wyak） 在线 · 职责：commons 的开发\n\
+             - [dark-conclave::archivist] 离线"
+        );
+        assert!(!text.contains("secretary"), "{text}");
+        assert!(!text.contains("claude-11a084c4"), "no primary id: {text}");
+
+        let today = Today {
+            date: chrono::NaiveDate::from_ymd_opt(2026, 11, 21).unwrap(),
+            decisions: Vec::new(),
+            questions: Vec::new(),
+            threads: Vec::new(),
+            activity: Vec::new(),
+            seats: &seats,
+        };
+        let card = today_card(Locale::Zh, &today);
+        assert!(
+            card.markdown.ends_with(
+                "**各 agent 在场**\n\
+                 - senate-dev（dark-conclave） 在线 · 职责：Senate 开发\n\
+                 - commons-dev（wyak） 在线 · 职责：commons 的开发\n\
+                 - [dark-conclave::archivist] 离线"
+            ),
+            "{}",
+            card.markdown
+        );
+        let card = today_card(Locale::En, &today);
+        assert!(
+            card.markdown
+                .contains("- senate-dev（dark-conclave） online · duty: Senate 开发"),
+            "{}",
+            card.markdown
+        );
+    }
 
     /// No aliases known: every seat is shown by its id.
     fn no_names() -> SeatNames<'static> {
@@ -2162,24 +2256,26 @@ mod tests {
         let text = status(
             Locale::Zh,
             &committee(),
-            &[path("claude")],
-            &[],
+            &[seat("claude", None, true, None)],
             &["[senator::claude] 在线".to_owned()],
         );
         assert_eq!(
             text,
-            "本群绑定在委员会 refund-v2。\n在线 agent：[senator::claude]\n离线 agent：无\n在场：\n- [senator::claude] 在线"
+            "本群绑定在委员会 refund-v2。\n在线 agent：[senator::claude]\n离线 agent：无\n席位：\n- [senator::claude] 在线\n在场：\n- [senator::claude] 在线"
         );
         let text = status(
             Locale::En,
             &committee(),
-            &[path("claude"), path("devin")],
-            &[path("copilot")],
+            &[
+                seat("claude", None, true, None),
+                seat("devin", None, true, None),
+                seat("copilot", None, false, None),
+            ],
             &[],
         );
         assert_eq!(
             text,
-            "This group is bound to committee refund-v2.\nAgents online: [senator::claude], [senator::devin]\nAgents offline: [senator::copilot]"
+            "This group is bound to committee refund-v2.\nAgents online: [senator::claude], [senator::devin]\nAgents offline: [senator::copilot]\nSeats:\n- [senator::claude] online\n- [senator::devin] online\n- [senator::copilot] offline"
         );
 
         let presence = AgentPresence {
@@ -2482,37 +2578,25 @@ mod tests {
             to: vec![sen("claude")],
             body: "Which header?".into(),
         };
-        let presence = AgentPresence {
-            agent: path("claude"),
-            state: PresenceState::Online,
-            since: Utc::now(),
-            since_seq: Seq(1),
-            seq: None,
-            last_seen: None,
-            cursor: None,
-            lag: Some(1),
-            new_owner: None,
-            duty: Some("reviews".into()),
-        };
         let today = Today {
             date: chrono::NaiveDate::from_ymd_opt(2026, 4, 12).expect("date"),
             decisions: vec![&decision],
             questions: vec![&question],
             threads: vec![&t],
             activity: vec![(path("copilot"), Seq(7), "answer: 90 days".into())],
-            presence: vec![&presence],
+            seats: &[seat("claude", None, true, Some("reviews"))],
         };
         let card = today_card(Locale::En, &today);
         assert_eq!(card.title, "Today · 04-12");
         assert_eq!(
             card.markdown,
-            "**Today's decisions**\n- seq 5: cap is 90 days\n\n**Open questions**\n- seq 6 · [senator::copilot]: Which header?\n\n**Today's tasks**\n- seq 118 · Which header? · waiting on a person\n\n**What each agent did last**\n- [senator::copilot] · seq 7 · answer: 90 days\n\n**Agent presence**\n- [senator::claude] online · 1 event behind · duty: reviews"
+            "**Today's decisions**\n- seq 5: cap is 90 days\n\n**Open questions**\n- seq 6 · [senator::copilot]: Which header?\n\n**Today's tasks**\n- seq 118 · Which header? · waiting on a person\n\n**What each agent did last**\n- [senator::copilot] · seq 7 · answer: 90 days\n\n**Agent presence**\n- [senator::claude] online · duty: reviews"
         );
         let card = today_card(Locale::Zh, &today);
         assert_eq!(card.title, "今天的摘要 · 04-12");
         assert!(
             card.markdown
-                .contains("- [senator::claude] 在线 · 落后 1 条事件"),
+                .contains("- [senator::claude] 在线 · 职责：reviews"),
             "{}",
             card.markdown
         );
@@ -2599,7 +2683,7 @@ mod tests {
                 cancelled(l),
                 binding_body(l, true, "chat-room"),
                 binding_body(l, false, "chat-room"),
-                status(l, &c, &[path("claude")], &[], &[]),
+                status(l, &c, &[seat("claude", None, true, None)], &[]),
                 takeover_escalation(l, &agent, NoCover::Unavailable, "q"),
                 handback_note(l, Seq(1), &[]),
                 handback_line(l, &agent, 1),

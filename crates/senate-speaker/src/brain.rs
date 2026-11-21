@@ -69,6 +69,22 @@ pub struct CommitteeSeat {
     /// It can be reached now: the agent is connected here, or the child is
     /// online and declares the seat online.
     pub online: bool,
+    /// Its presence as people read it when it cannot be reached: the
+    /// agent's presence here, or what the child declares (disconnected
+    /// when the child has gone quiet). `None` when nothing is known.
+    pub presence: Option<senate_core::PresenceState>,
+}
+
+impl CommitteeSeat {
+    /// The seat as people are shown it: its alias when it has one, else
+    /// its id as a mention (`[senator::codex]`, `[dark-conclave::claude-…]`).
+    pub fn people_name(&self) -> String {
+        match &self.shown {
+            Some(shown) => shown.clone(),
+            None if self.target.contains("::") => format!("[{}]", self.target),
+            None => format!("[senator::{}]", self.target),
+        }
+    }
 }
 
 /// A directed question the Speaker must answer for an absent agent.

@@ -446,7 +446,7 @@ async fn the_fixed_syntax_works_without_the_brain_and_covers_its_failures() {
     assert_eq!(
         rig.surface.texts().last().map(String::as_str),
         Some(
-            "本群绑定在委员会 refund-v2。\n在线 agent：[senator::claude]\n离线 agent：[senator::aider]、[senator::copilot]"
+            "本群绑定在委员会 refund-v2。\n在线 agent：[senator::claude]\n离线 agent：无\n席位：\n- [senator::claude] 在线"
         )
     );
 
@@ -1400,7 +1400,7 @@ async fn the_main_flows_read_in_english() {
     assert_eq!(
         rig.surface.texts().last().map(String::as_str),
         Some(
-            "This group is bound to committee refund-v2.\nAgents online: [senator::claude]\nAgents offline: [senator::aider], [senator::copilot]"
+            "This group is bound to committee refund-v2.\nAgents online: [senator::claude]\nAgents offline: none\nSeats:\n- [senator::claude] online"
         )
     );
 
@@ -2367,5 +2367,55 @@ async fn seats_are_shown_to_people_by_alias() {
     assert_eq!(
         rig.surface.texts().last().map(String::as_str),
         Some(format!("已转给 [senator::retry-desk]（seq {}）", relay.seq).as_str())
+    );
+}
+
+/// Thread 773: in a group bound to a committee whose seats are all in
+/// child Senates, `/status` lists every seat online by the name people
+/// see, with its duty, and never the built-in session, connected here as
+/// it is.
+#[tokio::test]
+async fn status_lists_the_child_seats_and_never_the_built_in_session() {
+    let hub = bound_hub().await;
+    hub.set_roster(
+        roster_with_carol()
+            .with_built_in(path("secretary"))
+            .expect("the built-in session"),
+    );
+    hub.connect(&refund(), &path("secretary"));
+    hub.append(super::continuity::presence_of(
+        &path("secretary"),
+        PresenceState::Online,
+        1,
+    ))
+    .await
+    .expect("presence");
+    for (child, seat, alias, duty) in [
+        (
+            "dark-conclave",
+            "claude-11a084c4",
+            "senate-dev",
+            "Senate 开发",
+        ),
+        ("wyak", "codex-01a1fc99", "commons-dev", "commons 的开发"),
+    ] {
+        hub.add_child(child, "carol");
+        hub.declare_seats(child, &refund(), &[(seat, PresenceState::Online)]);
+        hub.declare_duty(child, &refund(), seat, duty);
+        hub.declare_alias(child, &refund(), seat, alias);
+    }
+    let rig = Rig::start(hub).await;
+    rig.append(mention("pm", "/status", "m_st1")).await;
+    rig.settle().await;
+    assert_eq!(
+        rig.surface.texts().last().map(String::as_str),
+        Some(
+            "本群绑定在委员会 refund-v2。\n\
+             在线 agent：senate-dev（dark-conclave）、commons-dev（wyak）\n\
+             离线 agent：无\n\
+             席位：\n\
+             - senate-dev（dark-conclave） 在线 · 职责：Senate 开发\n\
+             - commons-dev（wyak） 在线 · 职责：commons 的开发"
+        )
     );
 }

@@ -118,6 +118,7 @@ impl Engine {
             .unwrap_or_default();
         let mut agents: Vec<SenatorName> = presence.iter().map(|p| p.agent.clone()).collect();
         agents.extend(checkpoints.iter().map(|c| c.agent.clone()));
+        agents.retain(|agent| *agent != self.me);
         agents.sort();
         agents.dedup();
         let now = Utc::now();

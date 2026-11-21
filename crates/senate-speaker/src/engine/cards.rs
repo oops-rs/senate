@@ -238,13 +238,14 @@ impl Engine {
     /// binding, and pin them. Without cards there are none (logged once);
     /// without pins they stay unpinned.
     pub(super) async fn post_pinned_cards(&mut self, committee: &CommitteeId) -> Result<(), Stall> {
+        let seats = self.committee_seats(committee).await;
         let Some(state) = self.committees.get(committee) else {
             return Ok(());
         };
         let Some(agents) = state.agents_group().cloned() else {
             return Ok(());
         };
-        let (waiting, today_card) = pinned_cards(state);
+        let (waiting, today_card) = pinned_cards(state, &seats);
         let group = agents.group.group_id.clone();
         for (target, card) in [
             (waiting_target(&group), waiting),
@@ -353,6 +354,7 @@ impl Engine {
         committee: &CommitteeId,
         day: NaiveDate,
     ) -> Result<(), Stall> {
+        let seats = self.committee_seats(committee).await;
         let Some(state) = self.committees.get(committee) else {
             return Ok(());
         };
@@ -360,7 +362,7 @@ impl Engine {
             return Ok(());
         };
         let head = state.board.head();
-        let (waiting, today_card) = pinned_cards(state);
+        let (waiting, today_card) = pinned_cards(state, &seats);
         let group = agents.group.group_id.clone();
         let copies = self
             .hub
@@ -429,8 +431,9 @@ fn card_wanted(level: OutputLevel, state: StatusState) -> bool {
     level != OutputLevel::Answers || matches!(state, StatusState::Active | StatusState::Archived)
 }
 
-/// "等人处理" and "今天的摘要" as the committee's state has them now.
-fn pinned_cards(state: &CommitteeState) -> (Card, Card) {
+/// "等人处理" and "今天的摘要" as the committee's state has them now, the
+/// latter listing `seats` ([`Engine::committee_seats`]).
+fn pinned_cards(state: &CommitteeState, seats: &[crate::brain::CommitteeSeat]) -> (Card, Card) {
     let l = state.locale;
     let waiting = render::waiting_card(l, &state.board.threads(Some(StatusState::Suspended)));
     let day = today();
@@ -467,10 +470,6 @@ fn pinned_cards(state: &CommitteeState) -> (Card, Card) {
         .map(|(agent, (seq, _, what))| (agent.clone(), *seq, what.clone()))
         .collect();
     activity.sort_by_key(|a| std::cmp::Reverse(a.1));
-    let presence = brief
-        .as_ref()
-        .map(|b| b.presence.iter().collect())
-        .unwrap_or_default();
     let today_card = render::today_card(
         l,
         &render::Today {
@@ -479,7 +478,7 @@ fn pinned_cards(state: &CommitteeState) -> (Card, Card) {
             questions,
             threads,
             activity,
-            presence,
+            seats,
         },
     );
     (waiting, today_card)

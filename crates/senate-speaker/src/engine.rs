@@ -3194,22 +3194,15 @@ impl Engine {
         }
     }
 
-    /// `/status`: which agents can be reached now, each by its own
-    /// connection, and the presence lines. A person with no agent here is
-    /// not listed: there is nothing of theirs to connect.
+    /// `/status`: every seat on the committee, here and in child Senates,
+    /// as the Speaker's prompt lists them ([`Engine::committee_seats`]),
+    /// then the presence lines of the agents here. The built-in session is
+    /// no member and is never listed.
     async fn status_text(&self, committee: &CommitteeId) -> String {
         let l = self.locale(committee);
-        let mut online = Vec::new();
-        let mut offline = Vec::new();
-        for agent in self.roster.agents() {
-            if self.hub.is_agent_connected(committee, &agent).await {
-                online.push(agent);
-            } else {
-                offline.push(agent);
-            }
-        }
+        let seats = self.committee_seats(committee).await;
         let presence = self.presence_lines(committee).await;
-        render::status(l, committee, &online, &offline, &presence)
+        render::status(l, committee, &seats, &presence)
     }
 
     /// Reply in the thread of the platform message a `chat` is, and record

@@ -258,11 +258,15 @@ impl Engine {
     /// Senates declare there, each named as a relay names it. What the hub
     /// cannot say is left out, not guessed.
     pub(super) async fn committee_seats(&self, committee: &CommitteeId) -> Vec<CommitteeSeat> {
-        let duties = match self.hub.presence(committee).await {
-            Ok(page) => page.duties,
+        let page = match self.hub.presence(committee).await {
+            Ok(page) => page,
             Err(error) => {
                 tracing::debug!(%committee, %error, "listing seats without their duties");
-                Default::default()
+                senate_core::api::PresencePage {
+                    agents: Vec::new(),
+                    head: Seq::ZERO,
+                    duties: Default::default(),
+                }
             }
         };
         let agents = match self.hub.committee_agents(committee).await {
@@ -280,9 +284,14 @@ impl Engine {
                     .aliases
                     .alias_of(committee, &agent)
                     .map(ToString::to_string),
-                target: agent.to_string(),
-                duty: duties.get(&agent).cloned(),
+                duty: page.duties.get(&agent).cloned(),
                 online: self.hub.is_agent_connected(committee, &agent).await,
+                presence: page
+                    .agents
+                    .iter()
+                    .find(|p| p.agent == agent)
+                    .map(|p| p.state),
+                target: agent.to_string(),
             });
         }
         let now = chrono::Utc::now();
@@ -297,6 +306,11 @@ impl Engine {
                         .map(|alias| crate::render::child_seat_name(l, alias, &child.name)),
                     duty: seat.duty.clone(),
                     online: child_online && seat.presence == PresenceState::Online,
+                    presence: Some(if child_online {
+                        seat.presence
+                    } else {
+                        PresenceState::Disconnected
+                    }),
                 });
             }
         }

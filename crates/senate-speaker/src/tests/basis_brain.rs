@@ -1585,18 +1585,21 @@ fn seats() -> Vec<crate::CommitteeSeat> {
             shown: None,
             duty: Some("owns the retry path".into()),
             online: true,
+            presence: None,
         },
         crate::CommitteeSeat {
             target: "dark-conclave::responder".into(),
             shown: Some("senate-dev（dark-conclave）".into()),
             duty: Some(DEPLOY_DUTY.into()),
             online: true,
+            presence: None,
         },
         crate::CommitteeSeat {
             target: "dark-conclave::archivist".into(),
             shown: None,
             duty: None,
             online: false,
+            presence: None,
         },
     ]
 }

@@ -332,18 +332,27 @@ impl Hub for MemoryHub {
         Ok(self.lock().aliases.clone())
     }
 
-    /// The agents connected on `committee`, in roster order: like the
-    /// server, which counts the agents with a connection there.
+    /// The agents connected on `committee` or with a presence there, in
+    /// roster order: like the server.
     async fn committee_agents(
         &self,
         committee: &CommitteeId,
     ) -> Result<Vec<SenatorName>, HubError> {
+        let present: HashSet<SenatorName> = self
+            .presence(committee)
+            .await?
+            .agents
+            .into_iter()
+            .map(|p| p.agent)
+            .collect();
         let state = self.lock();
         Ok(state
             .roster
             .agents()
             .into_iter()
-            .filter(|a| state.connected.contains(&(committee.clone(), a.clone())))
+            .filter(|a| {
+                present.contains(a) || state.connected.contains(&(committee.clone(), a.clone()))
+            })
             .collect())
     }
 

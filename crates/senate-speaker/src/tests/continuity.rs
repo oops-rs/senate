@@ -40,7 +40,7 @@ pub(crate) async fn agents_hub() -> Arc<MemoryHub> {
 /// The server's presence transition for `who` (a senator path such as
 /// `claude`), `offset_ms` after a fixed base so each one has its own
 /// derived id.
-fn presence_of(who: &SenatorName, state: PresenceState, offset_ms: i64) -> NewEvent {
+pub(crate) fn presence_of(who: &SenatorName, state: PresenceState, offset_ms: i64) -> NewEvent {
     let since = chrono::DateTime::<Utc>::from_timestamp_millis(1_800_000_000_000 + offset_ms)
         .expect("a time");
     presence_event(
@@ -330,10 +330,14 @@ async fn status_lists_each_agent_by_its_own_connection() {
         said.contains("\n在线 agent：[senator::copilot]、[senator::codex]\n"),
         "{said}"
     );
+    assert!(said.contains("\n离线 agent：[senator::claude]\n"), "{said}");
+    // Every seat with its presence; aider, on the roster but never on the
+    // committee, is no seat of it.
     assert!(
-        said.contains("\n离线 agent：[senator::aider]、[senator::claude]\n"),
+        said.contains("\n席位：\n- [senator::claude] 缺席（租约过期）\n- [senator::copilot] 在线\n- [senator::codex] 在线\n"),
         "{said}"
     );
+    assert!(!said.contains("aider"), "{said}");
     assert!(
         said.contains("\n- [senator::claude] 缺席（租约过期）"),
         "{said}"
@@ -355,7 +359,7 @@ async fn status_lists_each_agent_by_its_own_connection() {
     rig.settle().await;
     let said = rig.surface.texts().last().cloned().expect("a reply");
     assert!(
-        said.starts_with("This group is bound to committee refund-v2.\nAgents online: [senator::codex]\nAgents offline: [senator::aider], [senator::claude], [senator::copilot]"),
+        said.starts_with("This group is bound to committee refund-v2.\nAgents online: [senator::codex]\nAgents offline: [senator::claude]\nSeats:\n- [senator::claude] absent (lease expired)\n- [senator::codex] online\n"),
         "{said}"
     );
     assert!(
@@ -385,7 +389,7 @@ async fn the_today_card_has_a_presence_line_per_agent() {
     let text = today.now.markdown;
     assert!(text.contains("**各 agent 在场**"), "{text}");
     assert!(
-        text.contains("- [senator::claude] 缺席（租约过期） · 落后 3 条事件"),
+        text.contains("- [senator::claude] 缺席（租约过期）"),
         "{text}"
     );
     assert!(text.contains("- [senator::copilot] 失联"), "{text}");
