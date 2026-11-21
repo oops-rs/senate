@@ -13,67 +13,43 @@ use super::Cli;
 
 /// Every visible command, once, under its heading.
 const GROUPS: &[(&str, &[&str])] = &[
-    (
-        "See what is happening",
-        &["status", "inbox", "watch", "thread", "receipt"],
-    ),
+    ("See what is happening", &["status", "inbox", "thread"]),
     (
         "Speak as yourself",
         &["ask", "tell", "request", "reply", "take"],
     ),
-    (
-        "This worktree",
-        &["where", "join", "leave", "pin", "unpin", "list", "free"],
-    ),
+    ("This worktree", &["join", "leave", "where"]),
     (
         "Senators and sessions",
-        &[
-            "spawn",
-            "sessions",
-            "attach",
-            "watch-all",
-            "stop",
-            "restore",
-            "aliases",
-            "alias",
-            "seat",
-            "secretary-team",
-        ],
+        &["spawn", "attach", "session", "senator", "secretary"],
     ),
-    ("Set up this machine", &["init", "install", "service"]),
-    (
-        "Plumbing, run by coding agents and installers",
-        &[
-            "mcp",
-            "hook",
-            "acp",
-            "agy-register",
-            "agy-unregister",
-            "codex-smoke",
-            "debug",
-        ],
-    ),
+    ("Set up this machine", &["setup"]),
 ];
 
 const FOOTER: &str = "\
 Run `senate help <command>` for a command's details and examples.
 
 Start here:
-  senate status                   Is the daemon up, and who is connected?
+  senate                          Is the daemon up, and who is connected?
   senate inbox                    What waits for you?
   senate ask claude \"...\" --wait  Ask an agent and stay for the answer
 
 First time on this machine:
-  senate init --local --person <you>  Only to use Senate alone, without a team
-  senate install --yes                Register Senate with Claude Code and Codex
-  senate service install --yes        Keep the daemon running, from login
-  senate join                         In each repository: bind it to a committee
+  senate setup init --local --person <you>  Only to use Senate alone
+  senate setup install --yes                Register with Claude Code and Codex
+  senate setup service install --yes        Keep the daemon running, from login
+  senate join                               In each repository: pick a committee
 ";
 
 pub(super) fn parse(terminal: Option<Terminal>) -> Cli {
     let mut command = command(terminal);
+    let mut args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    if let Some((renamed, old, new)) = super::cli_legacy::rewrite(&args) {
+        super::cli_legacy::point(&old, &new);
+        args = renamed;
+    }
     let parsed = command
-        .try_get_matches_from_mut(std::env::args_os())
+        .try_get_matches_from_mut(args)
         .and_then(|mut matches| {
             Cli::from_arg_matches_mut(&mut matches).map_err(|error| error.format(&mut command))
         });
@@ -251,13 +227,17 @@ mod tests {
         for needle in [
             "See what is happening:\n  status",
             "Speak as yourself:\n  ask",
-            "Plumbing, run by coding agents and installers:\n  mcp",
             "Options:\n  -v, --verbose",
             "senate help <command>",
         ] {
             assert!(piped.contains(needle), "{needle:?} in:\n{piped}");
         }
-        assert!(!piped.contains("session-host"), "{piped}");
+        for hidden in ["session-host", "mcp", "hook", "debug", "watch-all"] {
+            assert!(
+                !piped.contains(&format!("\n  {hidden} ")),
+                "{hidden} in {piped}"
+            );
+        }
 
         let narrow = Terminal::new(60, false);
         let text = render(&command(Some(narrow)).render_help().to_string(), narrow);

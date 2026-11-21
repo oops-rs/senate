@@ -319,7 +319,7 @@ fn install_is_a_dry_run_without_yes_and_idempotent_with_it() {
     let exe = std::fs::canonicalize(BIN).unwrap();
     let install = |yes: bool| {
         let mut cmd = bridge(dir.path(), &dir.path().join("senate"));
-        cmd.args(["install", "--no-codex"])
+        cmd.args(["setup", "install", "--no-codex"])
             .arg("--claude-dir")
             .arg(&claude_dir)
             .arg("--claude-bin")
@@ -447,7 +447,7 @@ fn install_reports_in_the_bridges_locale() {
     let exe = std::fs::canonicalize(BIN).unwrap();
     let install = |yes: bool| {
         let mut cmd = bridge(dir.path(), &senate);
-        cmd.args(["install", "--no-codex"])
+        cmd.args(["setup", "install", "--no-codex"])
             .arg("--claude-dir")
             .arg(&claude_dir)
             .arg("--claude-bin")
@@ -492,7 +492,7 @@ fn install_sets_up_codex_in_its_config_toml() {
     let exe = std::fs::canonicalize(BIN).unwrap();
     let install = |yes: bool| {
         let mut cmd = bridge(dir.path(), &dir.path().join("senate"));
-        cmd.args(["install", "--codex", "--codex-home"])
+        cmd.args(["setup", "install", "--codex", "--codex-home"])
             .arg(&codex_home)
             .arg("--claude-dir")
             .arg(&claude_dir)
@@ -574,7 +574,7 @@ fn install_refuses_a_broken_settings_file() {
     std::fs::write(claude_dir.join("settings.json"), "{ not json").unwrap();
     let (claude_bin, log) = fake_claude(dir.path());
     let out = bridge(dir.path(), &dir.path().join("senate"))
-        .args(["install", "--no-codex", "--yes", "--claude-dir"])
+        .args(["setup", "install", "--no-codex", "--yes", "--claude-dir"])
         .arg(&claude_dir)
         .arg("--claude-bin")
         .arg(&claude_bin)
@@ -656,6 +656,83 @@ fn status_without_a_daemon_says_so() {
 }
 
 #[test]
+fn a_bare_senate_is_senate_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = |args: &[&str]| {
+        let out = bridge(dir.path(), &dir.path().join("senate"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}: {out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    assert_eq!(run(&[]), run(&["status"]));
+}
+
+#[test]
+fn each_old_command_name_still_works_and_names_the_new_one() {
+    let dir = tempfile::tempdir().unwrap();
+    for (old, new) in [
+        (&["watch"][..], "inbox --follow"),
+        (&["watch-all"], "session watch"),
+        (&["sessions"], "session list"),
+        (&["sessions", "stop"], "session stop"),
+        (&["sessions", "prune"], "session prune"),
+        (&["stop", "x"], "session stop"),
+        (&["restore", "x"], "session restore"),
+        (&["aliases"], "senator list"),
+        (&["alias", "rm", "x"], "senator unalias"),
+        (&["pin", "reviewer"], "join --alias"),
+        (&["unpin"], "leave --alias"),
+        (
+            &["seat", "join", "--committee", "c", "--senator", "x"],
+            "senator seat",
+        ),
+        (
+            &["seat", "unseat", "--committee", "c", "--senator", "x"],
+            "senator unseat",
+        ),
+        (&["list"], "where --all"),
+        (&["init"], "setup init"),
+        (&["install"], "setup install"),
+        (&["service", "status"], "setup service"),
+        (&["free"], "setup clean"),
+        (&["receipt", "1"], "debug receipt"),
+        (&["secretary-team", "members"], "secretary list"),
+        (&["secretary-team", "remove"], "secretary dismiss"),
+        (
+            &["secretary-team", "read", "01HZY0000000000000000000AA"],
+            "secretary work show",
+        ),
+        (&["join", "--alias", "x", "--session", "s"], "senator alias"),
+    ] {
+        // `--help` parses the rewritten command without running it.
+        let out = bridge(dir.path(), &dir.path().join("senate"))
+            .args(old)
+            .arg("--help")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{old:?}: {out:?}");
+        let err = String::from_utf8(out.stderr).unwrap();
+        assert_eq!(
+            err,
+            format!(
+                "senate: `senate {}` is now `senate {new}`; the old name goes in the next minor release.\n",
+                match old {
+                    ["join", ..] => "join --alias … --session …".to_owned(),
+                    ["seat", action, ..] => format!("seat {action}"),
+                    ["sessions" | "alias" | "secretary-team", action, ..] =>
+                        format!("{} {action}", old[0]),
+                    [name, ..] => (*name).to_owned(),
+                    [] => unreachable!(),
+                }
+            ),
+            "{old:?}"
+        );
+    }
+}
+
+#[test]
 fn help_groups_the_commands_and_gives_each_one_line_when_piped() {
     let dir = tempfile::tempdir().unwrap();
     let out = bridge(dir.path(), &dir.path().join("senate"))
@@ -667,11 +744,19 @@ fn help_groups_the_commands_and_gives_each_one_line_when_piped() {
     for needle in [
         "See what is happening:\n  status ",
         "Speak as yourself:\n  ask ",
-        "This worktree:\n  where ",
-        "Set up this machine:\n  init ",
-        "Start here:\n  senate status",
+        "This worktree:\n  join ",
+        "Senators and sessions:\n  spawn ",
+        "Set up this machine:\n  setup ",
+        "Start here:\n  senate  ",
     ] {
         assert!(text.contains(needle), "{needle:?} in:\n{text}");
+    }
+    // Plumbing and the old names are not listed.
+    for hidden in ["mcp", "hook", "debug", "sessions", "watch-all", "install"] {
+        assert!(
+            !text.contains(&format!("\n  {hidden} ")),
+            "{hidden} in:\n{text}"
+        );
     }
     assert!(
         text.lines().all(|line| line.chars().count() <= 80),
@@ -743,8 +828,8 @@ fn the_default_output_is_brief_and_verbose_says_everything() {
         assert_eq!(text.starts_with("directory "), verbose, "{value:?}: {text}");
     }
 
-    assert_eq!(run(&["free"]), "Nothing has expired.\n");
-    let free = run(&["free", "--verbose"]);
+    assert_eq!(run(&["setup", "clean"]), "Nothing has expired.\n");
+    let free = run(&["setup", "clean", "--verbose"]);
     assert!(free.contains("Session records would free 0"), "{free}");
 }
 
@@ -790,7 +875,9 @@ fn init_local_writes_one_profile_and_never_overwrites_it() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("senate");
     let out = bridge(dir.path(), &home)
-        .args(["init", "--local", "--person", "alice", "--locale", "zh"])
+        .args([
+            "setup", "init", "--local", "--person", "alice", "--locale", "zh",
+        ])
         .output()
         .unwrap();
     assert!(out.status.success(), "{out:?}");
@@ -813,7 +900,7 @@ fn init_local_writes_one_profile_and_never_overwrites_it() {
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
 
     let again = bridge(dir.path(), &home)
-        .args(["init", "--local", "--person", "bob"])
+        .args(["setup", "init", "--local", "--person", "bob"])
         .output()
         .unwrap();
     assert!(!again.status.success());
@@ -821,7 +908,7 @@ fn init_local_writes_one_profile_and_never_overwrites_it() {
     assert_eq!(std::fs::read_to_string(&written).unwrap(), text);
 
     let no_flag = bridge(dir.path(), &dir.path().join("other"))
-        .args(["init", "--person", "alice"])
+        .args(["setup", "init", "--person", "alice"])
         .output()
         .unwrap();
     assert!(!no_flag.status.success());

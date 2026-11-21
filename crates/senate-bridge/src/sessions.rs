@@ -58,13 +58,22 @@ pub fn select_for_stop<'a>(
         StopSelector::Named(names) => {
             let mut out = Vec::new();
             for name in names {
-                let found = rows
-                    .iter()
-                    .filter(|r| r.is_running())
-                    .find(|r| r.label() == *name || r.primary.as_str() == name);
-                match found {
-                    Some(row) => out.push(row),
-                    None => return Err(format!("no running hosted session named {name}")),
+                let running = || rows.iter().filter(|r| r.is_running());
+                let exact = running().find(|r| r.label() == *name || r.primary.as_str() == name);
+                // A bare alias names the one running session that has it.
+                let by_alias: Vec<&SessionRow> = running()
+                    .filter(|r| r.alias.as_ref().is_some_and(|a| a.as_str() == name))
+                    .collect();
+                match (exact, by_alias.as_slice()) {
+                    (Some(row), _) | (None, &[row]) => out.push(row),
+                    (None, []) => return Err(format!("no running hosted session named {name}")),
+                    (None, several) => {
+                        let labels: Vec<String> = several.iter().map(|r| r.label()).collect();
+                        return Err(format!(
+                            "{name} names several running sessions; name one: {}",
+                            labels.join(", ")
+                        ));
+                    }
                 }
             }
             out

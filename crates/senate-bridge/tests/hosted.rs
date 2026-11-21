@@ -1142,6 +1142,43 @@ async fn a_chosen_model_and_effort_reach_the_tui_and_are_kept_for_restore() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_senator_group_names_a_session_and_sets_its_duty() {
+    let fixture = HostedClaude::launch(false).await;
+    let h = &fixture.h;
+    let id = fixture.seat.session_id.clone();
+
+    let (ok, out) = senate(h, &["senator", "alias", "renamed", "--session", &id]).await;
+    assert!(ok, "{out}");
+    assert!(
+        out.contains("renamed ->") && out.contains("(refund-v2)"),
+        "{out}"
+    );
+    let (ok, out) = senate(h, &["senator", "list"]).await;
+    assert!(ok && out.contains("refund-v2::renamed"), "{out}");
+
+    let (ok, out) = senate(
+        h,
+        &[
+            "senator",
+            "duty",
+            "reviews the server crate",
+            "--session",
+            &id,
+        ],
+    )
+    .await;
+    assert!(ok && out.contains("Set the duty on refund-v2"), "{out}");
+    let (ok, out) = senate(h, &["senator", "duty", "", "--session", &id]).await;
+    assert!(ok && out.contains("Cleared the duty on refund-v2"), "{out}");
+
+    // The old form still names the session, and says what it is now.
+    let (ok, out) = senate(h, &["join", "--alias", "again", "--session", &id]).await;
+    assert!(ok, "{out}");
+    assert!(out.contains("is now `senate senator alias`"), "{out}");
+    assert!(out.contains("again ->"), "{out}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stop_cli_protects_an_attending_viewer_and_releases_the_slot() {
     use senate_bridge::SessionState;
     use senate_bridge::ipc::StopReply;
@@ -1177,7 +1214,7 @@ async fn stop_cli_protects_an_attending_viewer_and_releases_the_slot() {
         let mut cmd = tokio::process::Command::new(BIN);
         testenv::isolate_async(&mut cmd, h.dir.path());
         cmd.env("SENATE_HOME", h.paths.home())
-            .args(["stop", "seat-fixture"]);
+            .args(["session", "stop", "seat-fixture"]);
         if force {
             cmd.arg("--force");
         }
@@ -1185,7 +1222,11 @@ async fn stop_cli_protects_an_attending_viewer_and_releases_the_slot() {
     };
     let refused = cli(false).output().await.unwrap();
     assert!(!refused.status.success());
-    assert!(String::from_utf8_lossy(&refused.stderr).contains("a viewer is attending"));
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("someone typed into it"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
     assert!(fixture.terminal.exists());
     let mut host_errors = std::fs::File::open(fixture.terminal.with_file_name("errors")).unwrap();
     let stopped = cli(true).output().await.unwrap();
@@ -1198,7 +1239,7 @@ async fn stop_cli_protects_an_attending_viewer_and_releases_the_slot() {
     );
     assert_eq!(
         String::from_utf8_lossy(&stopped.stdout).trim(),
-        fixture.seat.senator.as_str()
+        "stopped refund-v2::seat-fixture"
     );
     assert!(!fixture.terminal.parent().unwrap().exists());
     assert_eq!(
@@ -2581,7 +2622,7 @@ async fn watch_all_shows_every_session_and_enter_attaches_to_one() {
     let (h, typed) = watched_sessions(&["north", "south"]).await;
     let mut cmd = tokio::process::Command::new(BIN);
     testenv::isolate_async(&mut cmd, h.dir.path());
-    cmd.arg("watch-all")
+    cmd.args(["session", "watch"])
         .env("SENATE_HOME", h.paths.home())
         .kill_on_drop(true);
     let (pty, pts) = pty_process::open().unwrap();
@@ -2794,7 +2835,7 @@ async fn sessions_lists_stops_by_name_and_prunes_an_orphan() {
     assert!(row.tty.exists(), "the attach socket: {}", row.tty.display());
     assert!(row.started_at.is_some());
     assert!(reply.orphans.is_empty());
-    let (ok, listed) = senate(&h, &["sessions"]).await;
+    let (ok, listed) = senate(&h, &["session", "list"]).await;
     assert!(ok, "{listed}");
     assert!(
         listed.contains(&row.label()) && listed.contains("running"),
@@ -2824,7 +2865,7 @@ async fn sessions_lists_stops_by_name_and_prunes_an_orphan() {
     let reply: ipc::SessionsReply = call(&h, &Request::Sessions).await;
     assert_eq!(reply.orphans, vec![orphan.clone()]);
 
-    let (ok, pruned) = senate(&h, &["sessions", "prune"]).await;
+    let (ok, pruned) = senate(&h, &["session", "prune"]).await;
     assert!(ok, "{pruned}");
     assert!(
         pruned.contains(&format!("stopped orphaned host {orphan}")),
@@ -2847,7 +2888,7 @@ async fn sessions_lists_stops_by_name_and_prunes_an_orphan() {
     );
 
     // Stop by name, as listed; nobody typed into it, so no --force.
-    let (ok, stopped) = senate(&h, &["sessions", "stop", &row.label()]).await;
+    let (ok, stopped) = senate(&h, &["session", "stop", &row.label()]).await;
     assert!(ok, "{stopped}");
     assert!(
         stopped.contains(&format!("stopped {}", row.label())),
@@ -2855,7 +2896,7 @@ async fn sessions_lists_stops_by_name_and_prunes_an_orphan() {
     );
     let reply: ipc::SessionsReply = call(&h, &Request::Sessions).await;
     assert_eq!(reply.rows[0].state, ipc::HostState::Stopped, "{reply:?}");
-    let (ok, again) = senate(&h, &["sessions", "stop", &row.label()]).await;
+    let (ok, again) = senate(&h, &["session", "stop", &row.label()]).await;
     assert!(
         !ok && again.contains("no running hosted session"),
         "{again}"

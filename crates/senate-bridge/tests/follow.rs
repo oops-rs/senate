@@ -709,8 +709,8 @@ fn each_command_swaps_before_it_reads_or_writes() {
         &["where"][..],
         &["join", "later"],
         &["leave"],
-        &["pin", "reviewer"],
-        &["unpin"],
+        &["join", "--alias", "reviewer"],
+        &["leave", "--alias"],
     ] {
         let dir = tempfile::tempdir().unwrap();
         let paths = home(dir.path());
@@ -897,7 +897,7 @@ fn join_leave_pin_unpin_where_list_round_trip_and_touch_nothing_under_dot_git() 
         "refund-v2\n"
     );
 
-    let out = ok(&senate(dir.path(), &wd, &["pin", "reviewer"]));
+    let out = ok(&senate(dir.path(), &wd, &["join", "--alias", "reviewer"]));
     assert!(
         out.contains("can claim the initial alias reviewer"),
         "{out}"
@@ -907,10 +907,18 @@ fn join_leave_pin_unpin_where_list_round_trip_and_touch_nothing_under_dot_git() 
         std::fs::read_to_string(wd.join(".senate/agent")).unwrap(),
         "reviewer\n"
     );
-    let err = failed(&senate(dir.path(), &wd, &["pin", "Not An Agent"]));
+    let err = failed(&senate(
+        dir.path(),
+        &wd,
+        &["join", "--alias", "Not An Agent"],
+    ));
     assert!(err.contains("not an agent"), "{err}");
     // A path is not a name: refused, the pin unchanged.
-    let err = failed(&senate(dir.path(), &wd, &["pin", "claude/reviewer"]));
+    let err = failed(&senate(
+        dir.path(),
+        &wd,
+        &["join", "--alias", "claude/reviewer"],
+    ));
     assert!(err.contains("one name, with no path inside it"), "{err}");
     assert_eq!(
         std::fs::read_to_string(wd.join(".senate/agent")).unwrap(),
@@ -929,12 +937,12 @@ fn join_leave_pin_unpin_where_list_round_trip_and_touch_nothing_under_dot_git() 
     );
     assert!(!wd.join(".senate/agent").exists(), "a's pin is not on b");
     let json: serde_json::Value =
-        serde_json::from_str(&ok(&senate(dir.path(), &wd, &["list", "--json"]))).unwrap();
+        serde_json::from_str(&ok(&senate(dir.path(), &wd, &["where", "--all", "--json"]))).unwrap();
     assert_eq!(json.as_array().unwrap().len(), 1);
     assert_eq!(json[0]["branch"], "a");
     assert_eq!(json[0]["committee"], "refund-v2");
     assert_eq!(json[0]["stale"], serde_json::Value::Null);
-    let out = ok(&senate(dir.path(), &wd, &["list"]));
+    let out = ok(&senate(dir.path(), &wd, &["where", "--all"]));
     assert!(out.contains("refund-v2") && !out.contains("stale"), "{out}");
 
     ok(&senate(dir.path(), &wd, &["join", "other"]));
@@ -947,10 +955,10 @@ fn join_leave_pin_unpin_where_list_round_trip_and_touch_nothing_under_dot_git() 
         "{out}"
     );
 
-    let out = ok(&senate(dir.path(), &wd, &["unpin"]));
+    let out = ok(&senate(dir.path(), &wd, &["leave", "--alias"]));
     assert!(out.contains("Removed the agent pin"), "{out}");
     assert!(!wd.join(".senate/agent").exists());
-    let out = ok(&senate(dir.path(), &wd, &["unpin"]));
+    let out = ok(&senate(dir.path(), &wd, &["leave", "--alias"]));
     assert!(out.contains("There was no agent pin"), "{out}");
     let out = ok(&senate(dir.path(), &wd, &["leave"]));
     assert!(
@@ -1006,7 +1014,7 @@ fn the_commands_work_outside_git_and_speak_chinese_when_asked() {
     let out = ok(&senate(dir.path(), &wd, &["leave"]));
     assert!(out.contains("已解除"), "{out}");
     assert!(out.contains("这里现在没有绑定任何委员会"), "{out}");
-    let out = ok(&senate(dir.path(), &wd, &["list"]));
+    let out = ok(&senate(dir.path(), &wd, &["where", "--all"]));
     assert!(out.contains("没有保存的"), "{out}");
 }
 
@@ -1088,7 +1096,7 @@ fn free_removes_each_kind_of_stale_copy_and_never_a_live_branchs() {
         age(&s.dir);
     }
     let rows = |dir: &Path| -> serde_json::Value {
-        serde_json::from_str(&ok(&senate(dir, dir, &["list", "--json"]))).unwrap()
+        serde_json::from_str(&ok(&senate(dir, dir, &["where", "--all", "--json"]))).unwrap()
     };
     let listed = rows(dir.path());
     let stale: Vec<_> = listed
@@ -1108,12 +1116,16 @@ fn free_removes_each_kind_of_stale_copy_and_never_a_live_branchs() {
 
     // A dry run changes nothing.
     let snapshot = tree_listing(&dir.path().join("home"));
-    let out = ok(&senate(dir.path(), dir.path(), &["free"]));
+    let out = ok(&senate(dir.path(), dir.path(), &["setup", "clean"]));
     assert!(out.contains("would free 3, kept 1"), "{out}");
     assert!(out.contains("dry run"), "{out}");
     assert_eq!(tree_listing(&dir.path().join("home")), snapshot);
 
-    let out = ok(&senate(dir.path(), dir.path(), &["free", "--yes"]));
+    let out = ok(&senate(
+        dir.path(),
+        dir.path(),
+        &["setup", "clean", "--yes"],
+    ));
     assert!(out.contains("freed 3, kept 1"), "{out}");
     let left = rows(dir.path());
     assert_eq!(left.as_array().unwrap().len(), 1, "{left}");
@@ -1122,7 +1134,11 @@ fn free_removes_each_kind_of_stale_copy_and_never_a_live_branchs() {
         "the live branch's copy stays"
     );
     // Again: nothing to do.
-    let out = ok(&senate(dir.path(), dir.path(), &["free", "--yes"]));
+    let out = ok(&senate(
+        dir.path(),
+        dir.path(),
+        &["setup", "clean", "--yes"],
+    ));
     assert!(out.contains("freed 0, kept 1"), "{out}");
 }
 
@@ -1146,13 +1162,17 @@ fn free_lists_a_senate_log_no_longer_hosted_and_removes_it_only_with_the_extra_f
         "person = \"alice\"\n[local]\nspeaker = \"claude\"\n[[preside]]\nagent = \"claude\"\n",
     )
     .unwrap();
-    let out = ok(&senate(dir.path(), dir.path(), &["free"]));
+    let out = ok(&senate(dir.path(), dir.path(), &["setup", "clean"]));
     assert!(out.contains("senates/old"), "{out}");
     assert!(out.contains("senates/under-codex"), "{out}");
     assert!(out.contains("senates/under-claude"), "{out}");
     assert!(!out.contains("senates/top"), "{out}");
     // --yes alone keeps logs, and says so.
-    let out = ok(&senate(dir.path(), dir.path(), &["free", "--yes"]));
+    let out = ok(&senate(
+        dir.path(),
+        dir.path(),
+        &["setup", "clean", "--yes"],
+    ));
     assert!(
         out.contains("kept") && out.contains("--delete-logs"),
         "{out}"
@@ -1161,12 +1181,16 @@ fn free_lists_a_senate_log_no_longer_hosted_and_removes_it_only_with_the_extra_f
     assert!(home.join("senates/under-codex/log.db").exists());
     assert!(home.join("senates/under-claude/log.db").exists());
     // The extra flag needs --yes.
-    failed(&senate(dir.path(), dir.path(), &["free", "--delete-logs"]));
+    failed(&senate(
+        dir.path(),
+        dir.path(),
+        &["setup", "clean", "--delete-logs"],
+    ));
     assert!(home.join("senates/old/log.db").exists());
     let out = ok(&senate(
         dir.path(),
         dir.path(),
-        &["free", "--yes", "--delete-logs"],
+        &["setup", "clean", "--yes", "--delete-logs"],
     ));
     assert!(out.contains("logs deleted"), "{out}");
     assert!(!home.join("senates/old").exists());
@@ -1266,7 +1290,7 @@ fn free_forgets_old_sessions_and_idle_agents_and_keeps_the_rest() {
     drop(conn);
 
     let snapshot = std::fs::read(&db).unwrap().len();
-    let out = ok(&senate(dir.path(), dir.path(), &["free"]));
+    let out = ok(&senate(dir.path(), dir.path(), &["setup", "clean"]));
     assert!(out.contains("would free 2 (ended over 7 days ago"), "{out}");
     assert!(
         out.contains("idle") || out.contains("[senator::idle]"),
@@ -1294,7 +1318,11 @@ fn free_forgets_old_sessions_and_idle_agents_and_keeps_the_rest() {
     );
     assert_eq!(count("SELECT COUNT(*) FROM cursors"), 5);
 
-    let out = ok(&senate(dir.path(), dir.path(), &["free", "--yes"]));
+    let out = ok(&senate(
+        dir.path(),
+        dir.path(),
+        &["setup", "clean", "--yes"],
+    ));
     assert!(out.contains("freed 2 (ended over 7 days ago"), "{out}");
     assert_eq!(count("SELECT COUNT(*) FROM sessions"), 2);
     let remaining: Vec<String> = {

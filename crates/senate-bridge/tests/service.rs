@@ -39,7 +39,13 @@ fn install_is_a_dry_run_that_shows_the_file_and_the_commands() {
     let out = stdout(&senate(
         &home,
         &senate_home,
-        &["service", "install", "--senated", "/opt/my tools/senated"],
+        &[
+            "setup",
+            "service",
+            "install",
+            "--senated",
+            "/opt/my tools/senated",
+        ],
     ));
     assert!(out.contains("/opt/my tools/senated"), "{out}");
     assert!(out.contains("--machine"), "{out}");
@@ -81,7 +87,7 @@ fn the_default_home_passes_no_environment_and_the_report_follows_the_locale() {
     let out = stdout(&senate(
         &home,
         &senate_home,
-        &["service", "install", "--senated", "/x/senated"],
+        &["setup", "service", "install", "--senated", "/x/senated"],
     ));
     assert!(!out.contains("SENATE_HOME"), "{out}");
     assert!(
@@ -98,7 +104,7 @@ fn uninstall_is_a_dry_run_too() {
     let out = stdout(&senate(
         &home,
         &home.join(".senate"),
-        &["service", "uninstall"],
+        &["setup", "service", "uninstall"],
     ));
     assert!(
         out.contains("would remove") && out.contains("dry run"),
@@ -122,7 +128,7 @@ fn install_without_a_daemon_to_run_says_how_to_name_one() {
         .env("HOME", &home)
         .env("SENATE_HOME", home.join(".senate"))
         .env("PATH", "")
-        .args(["service", "install"])
+        .args(["setup", "service", "install"])
         .output()
         .unwrap();
     if !out.status.success() {

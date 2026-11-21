@@ -1005,7 +1005,7 @@ impl Watcher {
         cmd.env("HOME", h.dir.path())
             .env("SENATE_HOME", h.paths.home())
             .env("SENATE_VERBOSE", "1")
-            .arg("watch")
+            .args(["inbox", "--follow"])
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

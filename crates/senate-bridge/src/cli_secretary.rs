@@ -12,7 +12,7 @@ use senate_core::{CommitteeId, EventId, SenatorName, Seq};
 use super::{daemon_call, parse_seat_name, print_json, runtime};
 
 #[derive(Args)]
-pub(super) struct SecretaryTeam {
+pub(super) struct Secretary {
     /// Your Senate handle. Defaults to the signed-in person.
     #[arg(long = "for", global = true, value_parser = parse_seat_name)]
     principal: Option<SenatorName>,
@@ -39,21 +39,30 @@ struct Dismissal {
 
 #[derive(Subcommand)]
 enum Action {
+    /// List the team's appointed sessions by their stable senator IDs.
+    List,
     /// Appoint a specific session to the secretary team.
     Appoint(Membership),
     /// Dismiss a specific session from the secretary team.
-    Remove(Dismissal),
-    /// List the team's appointed sessions by their stable senator IDs.
-    Members,
+    Dismiss(Dismissal),
+    /// List, read, record and assign the team's shared work items.
+    Work {
+        #[command(subcommand)]
+        command: Work,
+    },
+}
+
+#[derive(Subcommand)]
+enum Work {
     /// List the team's work items.
     List {
         /// Continue the listing after this item ID.
         #[arg(long)]
         after: Option<EventId>,
     },
-    /// Read an item and its history.
-    Read {
-        /// The item's ID, as `list` prints it.
+    /// Show an item and its history.
+    Show {
+        /// The item's ID, as `work list` prints it.
         item: EventId,
         /// Skip this many history entries.
         #[arg(long, default_value_t)]
@@ -75,9 +84,9 @@ enum Action {
     },
     /// Assign an item and notify its new owner.
     Assign {
-        /// The item's ID, as `list` prints it.
+        /// The item's ID, as `work list` prints it.
         item: EventId,
-        /// The new owner: a senator ID from `members`.
+        /// The new owner: a senator ID from `senate secretary list`.
         #[arg(long, value_parser = parse_seat_name)]
         to: SenatorName,
         /// Reuse the ID to retry the same assignment.
@@ -86,7 +95,7 @@ enum Action {
     },
 }
 
-pub(super) fn run(args: SecretaryTeam) -> anyhow::Result<()> {
+pub(super) fn run(args: Secretary) -> anyhow::Result<()> {
     let paths = Paths::from_env()?;
     let principal = args.principal;
     let operation = match args.action {
@@ -101,7 +110,7 @@ pub(super) fn run(args: SecretaryTeam) -> anyhow::Result<()> {
                 },
             );
         }
-        Action::Remove(member) => {
+        Action::Dismiss(member) => {
             return change_member(
                 &paths,
                 Request::SetSecretarySession {
@@ -112,14 +121,21 @@ pub(super) fn run(args: SecretaryTeam) -> anyhow::Result<()> {
                 },
             );
         }
-        Action::Members => SecretaryWorkOp::Members,
-        Action::List { after } => SecretaryWorkOp::List { after },
-        Action::Read { item, offset } => SecretaryWorkOp::Read { item, offset },
-        Action::Create {
-            title,
-            committee,
-            thread,
-            id,
+        Action::List => SecretaryWorkOp::Members,
+        Action::Work {
+            command: Work::List { after },
+        } => SecretaryWorkOp::List { after },
+        Action::Work {
+            command: Work::Show { item, offset },
+        } => SecretaryWorkOp::Read { item, offset },
+        Action::Work {
+            command:
+                Work::Create {
+                    title,
+                    committee,
+                    thread,
+                    id,
+                },
         } => SecretaryWorkOp::Create {
             id: id.unwrap_or_default(),
             title,
@@ -127,7 +143,9 @@ pub(super) fn run(args: SecretaryTeam) -> anyhow::Result<()> {
                 .zip(thread)
                 .map(|(committee, root)| WorkThread { committee, root }),
         },
-        Action::Assign { item, to, id } => SecretaryWorkOp::Change {
+        Action::Work {
+            command: Work::Assign { item, to, id },
+        } => SecretaryWorkOp::Change {
             item,
             id: id.unwrap_or_default(),
             update: SecretaryWorkUpdate::Assign { to },

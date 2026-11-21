@@ -7,6 +7,8 @@
 // These two stay beside this file under their own names.
 #[path = "cli_help.rs"]
 mod cli_help;
+#[path = "cli_legacy.rs"]
+mod cli_legacy;
 #[path = "cli_secretary.rs"]
 mod cli_secretary;
 
@@ -51,8 +53,9 @@ struct Cli {
         value_parser = clap::builder::FalseyValueParser::new()
     )]
     verbose: bool,
+    /// Without one, `senate` runs `senate status`.
     #[command(subcommand)]
-    command: Cmd,
+    command: Option<Cmd>,
 }
 
 /// How much a command prints: the everyday view, or with `--verbose`
@@ -85,38 +88,11 @@ impl Output {
 // A new command also needs a place in `cli_help::GROUPS`.
 #[derive(Subcommand)]
 enum Cmd {
-    /// Write the profile for using Senate alone on this machine.
+    /// Bind this worktree to a committee, and suggest a session alias.
     ///
-    /// Writes `senate.toml` in the Senate home, with a local top Senate
-    /// whose Speaker is you or one of your agents. Writes nothing else and
-    /// never overwrites an existing profile. Under a team Senate, write
-    /// senate.toml from config/senate.example.toml instead.
-    #[command(after_help = "Examples:
-  senate init --local --person alice
-  senate init --local --person alice --speaker claude --locale zh")]
-    Init {
-        /// The local profile (the only one `init` writes).
-        #[arg(long)]
-        local: bool,
-        /// Your handle (lowercase letters, digits, `-`).
-        #[arg(long)]
-        person: Name,
-        /// The Speaker, as a senator id (`senator::claude`: an agent
-        /// presides over an unattended root). Default: you.
-        #[arg(long)]
-        speaker: Option<String>,
-        /// `en` or `zh`.
-        #[arg(long, default_value = "en")]
-        locale: Locale,
-        /// The loopback address the local Senate serves on.
-        #[arg(long, default_value = init::DEFAULT_LOCAL_LISTEN)]
-        listen: String,
-    },
-    /// Bind this worktree to a committee, or give a session an alias.
-    ///
-    /// The worktree form writes `.senate/committee` (untracked, kept per
-    /// branch: switching branches swaps in that branch's own copy). Live
-    /// sessions here pick it up at their next prompt. No daemon needed.
+    /// Writes `.senate/committee` (untracked, kept per branch: switching
+    /// branches swaps in that branch's own copy). Live sessions here pick
+    /// it up at their next prompt. No daemon needed.
     ///
     /// Without a name, the committee is derived from where this is run, and
     /// printed with how: the repository's name (the last segment of the
@@ -126,124 +102,93 @@ enum Cmd {
     /// detached; lowercased, other characters becoming `-`, at most 63
     /// characters (a longer one ends in `-` and a short hash). Read-only.
     ///
-    /// With --alias, one coding session gets a persistent name instead, and
-    /// the worktree is left alone.
+    /// With --alias, `.senate/agent` is written too: a session started here
+    /// is offered that alias. Run inside a coding session, that session
+    /// takes the alias on the committee as well.
     #[command(after_help = "Examples:
   senate join                    Derive the committee from repository and branch
   senate join refund-v2          Bind this worktree to refund-v2
-  senate join --alias reviewer   Inside a coding session: name it reviewer
-  senate join refund-v2 --duty 'reviews the server crate'
-                                 Also set this session's duty there
-  senate join --alias reviewer --session <id>
-                                 Name a session from another terminal
-                                 (`senate status --full-ids` prints the ids)")]
+  senate join --alias reviewer   Also name sessions here (and this one) reviewer
+  senate senator alias reviewer --session <id>
+                                 Name a session from another terminal")]
     Join {
-        /// The committee. With --alias, omit to use the session's current committee.
+        /// The committee (default: derived from repository and branch).
         committee: Option<CommitteeId>,
-        /// Bind an alias to the primary ID of one coding session.
-        #[arg(long, visible_alias = "senator")]
-        alias: Option<senate_core::SenatorName>,
-        /// Full session ID. Defaults to the calling coding session.
-        #[arg(long, requires = "alias")]
-        session: Option<String>,
-        /// Also set this session's duty on the committee: one line saying
-        /// what it does there. An empty string clears it. Run inside a
-        /// coding session, or with --session.
+        /// The alias sessions in this worktree are offered, e.g. reviewer;
+        /// also given to the calling coding session.
         #[arg(long)]
+        alias: Option<String>,
+        /// Moved to `senate senator duty`; kept for one release.
+        #[arg(long, hide = true)]
         duty: Option<String>,
     },
-    /// Watch every hosted senator's terminal, side by side.
-    ///
-    /// A full-screen grid of read-only views of the sessions hosted on this
-    /// machine, one tile a session, in pages when they do not all fit.
-    /// Nothing typed here reaches a session. Arrows or h j k l move
-    /// between tiles, PgUp and PgDn between pages; Enter attaches to the
-    /// tile's session (detaching comes back to the grid); q or Ctrl-]
-    /// leaves.
-    #[command(name = "watch-all")]
-    WatchAll,
-    /// List senator aliases by committee, with the IDs they stand for.
-    Aliases,
-    /// Manage senator aliases.
-    Alias {
-        #[command(subcommand)]
-        command: AliasCmd,
-    },
-    /// Appoint session secretaries and manage their shared work.
-    SecretaryTeam(cli_secretary::SecretaryTeam),
     /// Remove this worktree's committee binding on the current branch.
-    Leave,
-    /// List, stop or prune this machine's hosted sessions.
     ///
-    /// With no subcommand: each session's name (`committee::alias`, else
-    /// its senator), committee, runtime, state, uptime, who is at its
-    /// terminal, and directory.
-    #[command(after_help = "Examples:
-  senate sessions                     List them
-  senate sessions stop reviewer       Stop one (senate restore reopens it)
-  senate sessions stop --idle         Stop each one nobody is attached to
-  senate sessions stop --all --force  Stop all, even if typed into lately
-  senate sessions prune               Stop hosts with no session")]
-    Sessions {
-        #[command(subcommand)]
-        command: Option<SessionsCmd>,
+    /// With --alias, only the alias suggestion goes and the committee
+    /// binding stays. A live session's alias is removed with `senate
+    /// senator unalias`.
+    Leave {
+        /// Remove only the alias suggestion (`.senate/agent`).
+        #[arg(long)]
+        alias: bool,
     },
-    /// Remove a senator from a committee, or seat it again.
-    Seat {
-        #[command(subcommand)]
-        command: SeatCmd,
-    },
-    /// Suggest an alias for sessions in this worktree.
-    ///
-    /// Writes `.senate/agent` for the current branch: a session started here
-    /// is offered this flat name as its initial alias.
-    Pin {
-        /// Initial alias, e.g. reviewer.
-        agent: String,
-    },
-    /// Remove this worktree's alias suggestion on the current branch.
-    Unpin,
     /// Show the committee and agent names this directory resolves to.
     ///
     /// Prints the committee and where it comes from, the agent a session
     /// here would speak as, the branch `.senate/` belongs to, and whether
-    /// other branches have saved copies.
-    Where,
-    /// List saved worktree bindings, by repository.
-    ///
-    /// Every saved `.senate/` copy: its branch, committee, when it was
+    /// other branches have saved copies. With --all, every saved `.senate/`
+    /// copy instead, by repository: its branch, committee, when it was
     /// saved, and whether it has expired.
-    List {
-        /// Print JSON.
+    #[command(after_help = "Examples:
+  senate where
+  senate where --all --json")]
+    Where {
+        /// List every saved worktree binding on this machine.
         #[arg(long)]
+        all: bool,
+        /// With --all, print JSON.
+        #[arg(long, requires = "all")]
         json: bool,
     },
-    /// Forget expired local data. Dry run without --yes.
-    ///
-    /// Removes saved copies whose repository, branch or detached worktree is
-    /// gone; session records of sessions that ended long ago or whose
-    /// process is gone; queued items and cursors of agents with no session
-    /// and no contact for `free_after_days` (senate.toml, default 30). A
-    /// hosted Senate's log is only listed.
-    Free {
-        /// Do it.
-        #[arg(long)]
-        yes: bool,
-        /// With --yes, also delete the data of hosted Senates that
-        /// `senate.toml` no longer lists: logs, which nothing else removes.
-        #[arg(long, requires = "yes")]
-        delete_logs: bool,
+    /// List, watch, stop or restore this machine's hosted sessions.
+    Session {
+        #[command(subcommand)]
+        command: SessionCmd,
     },
-    /// Show what waits for you.
+    /// List senators and their aliases, seat them, set their duty.
+    Senator {
+        #[command(subcommand)]
+        command: SenatorCmd,
+    },
+    /// Appoint session secretaries and manage their shared work.
+    Secretary(cli_secretary::Secretary),
+    /// The profile, Claude Code and Codex hooks, the daemon service.
+    #[command(after_help = "Examples:
+  senate setup install --yes          Register Senate with Claude Code and Codex
+  senate setup service install --yes  Keep the daemon running, from login
+  senate setup clean                  What expired local data would go")]
+    Setup {
+        #[command(subcommand)]
+        command: SetupCmd,
+    },
+    /// Show what waits for you; with --follow, as it arrives.
     ///
     /// First what was said to you that you have not seen (an answer, a
     /// note, an escalation with its reason), then open task threads on a
     /// committee for your agents or escalated to you, and what awaits the
     /// Speaker of every Senate one of your agents presides over here.
+    ///
+    /// With --follow it stays in the foreground and prints answers, notes,
+    /// questions and escalations (with their reason) as they arrive, on the
+    /// committees this machine's sessions are on, or the one named. Not
+    /// what is put to the Speaker: that is the agent's docket. Following
+    /// marks nothing as read.
     #[command(after_help = "Examples:
   senate inbox                Open threads on this directory's committee
   senate inbox --all          Also answered threads and idle seats
   senate inbox --mark-read    List, then mark what was new as read
+  senate inbox --follow       Print what is addressed to you as it arrives
+  senate inbox --follow --global --json
   senate thread 12            Read one of the threads listed")]
     Inbox {
         /// The committee (default: the one `senate where` shows for this directory).
@@ -251,12 +196,21 @@ enum Cmd {
         committee: Option<CommitteeId>,
         /// Also list threads whose last word is an answer (they wait on no
         /// one) and seated senators with nothing going on.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "follow")]
         all: bool,
         /// Mark every thread listed as new for you as read, after listing
         /// it. An escalation to you keeps waiting until you act on it.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "follow")]
         mark_read: bool,
+        /// Stay and print what is addressed to you as it arrives.
+        #[arg(long)]
+        follow: bool,
+        /// With --follow, every committee on this machine.
+        #[arg(long, requires = "follow", conflicts_with = "committee")]
+        global: bool,
+        /// With --follow, one JSON object per line.
+        #[arg(long, requires = "follow")]
+        json: bool,
     },
     /// Ask a question.
     ///
@@ -365,17 +319,6 @@ Without --wait it returns at once: read the answer with `senate inbox`,
         #[arg(long)]
         json: bool,
     },
-    /// Show how one event was recorded and delivered on this machine.
-    Receipt {
-        /// The event's seq.
-        seq: u64,
-        /// The committee (default: the one `senate where` shows for this directory).
-        #[arg(long)]
-        committee: Option<CommitteeId>,
-        /// Print the daemon's result as JSON.
-        #[arg(long)]
-        json: bool,
-    },
     /// Print a thread: each event with who wrote it, when, and what.
     #[command(after_help = "Examples:
   senate thread 12
@@ -390,23 +333,6 @@ Without --wait it returns at once: read the answer with `senate inbox`,
         #[arg(long)]
         json: bool,
     },
-    /// Print what is addressed to you as it arrives.
-    ///
-    /// Stays in the foreground and prints answers, notes, questions and
-    /// escalations (with their reason) on the committees this machine's
-    /// sessions are on, or the one named. Not what is put to the Speaker:
-    /// that is the agent's docket. It marks nothing as read.
-    #[command(after_help = "Examples:
-  senate watch
-  senate watch --global
-  senate watch --json")]
-    Watch {
-        #[command(flatten)]
-        scope: DisplayScope,
-        /// One JSON object per line.
-        #[arg(long)]
-        json: bool,
-    },
     /// Take a thread over: nothing more of it goes to agents.
     Take {
         /// The thread's root seq.
@@ -416,6 +342,7 @@ Without --wait it returns at once: read the answer with `senate inbox`,
         committee: Option<CommitteeId>,
     },
     /// Run the Senate MCP server over stdio.
+    #[command(hide = true)]
     Mcp {
         /// Resolve the caller using Antigravity root conversation metadata.
         #[arg(long, conflicts_with = "acp_session")]
@@ -428,6 +355,7 @@ Without --wait it returns at once: read the answer with `senate inbox`,
     ///
     /// Claude Code / Codex hook entry point; reads the hook JSON on stdin.
     /// Always exits 0.
+    #[command(hide = true)]
     Hook {
         /// The hook event.
         #[arg(value_enum)]
@@ -438,46 +366,6 @@ Without --wait it returns at once: read the answer with `senate inbox`,
         /// Run as an Antigravity SessionStart or PreInvocation hook.
         #[arg(long)]
         agy: bool,
-    },
-    /// Set up Claude Code and Codex. Dry run without --yes.
-    ///
-    /// Registers the MCP server and the session hooks. Codex is set up when
-    /// `codex` is on PATH. Without --yes it prints what it would change and
-    /// writes nothing.
-    #[command(after_help = "Examples:
-  senate install          Show what would change
-  senate install --yes    Write it")]
-    Install {
-        /// Set up Codex even when `codex` is not on PATH.
-        #[arg(long, conflicts_with = "no_codex")]
-        codex: bool,
-        /// Leave Codex alone.
-        #[arg(long)]
-        no_codex: bool,
-        /// Codex home holding config.toml (default: $CODEX_HOME, else ~/.codex).
-        #[arg(long, value_name = "DIR")]
-        codex_home: Option<PathBuf>,
-        /// Write the changes.
-        #[arg(long)]
-        yes: bool,
-        /// Claude config dir (default: $CLAUDE_CONFIG_DIR, else ~/.claude).
-        #[arg(long, value_name = "DIR")]
-        claude_dir: Option<PathBuf>,
-        /// The `claude` CLI to register the MCP server with.
-        #[arg(long, value_name = "PATH")]
-        claude_bin: Option<PathBuf>,
-    },
-    /// Keep the daemon running in the background, from login.
-    ///
-    /// Runs `senated --machine` without a terminal: a launchd user agent on
-    /// macOS, a systemd user unit on Linux.
-    #[command(after_help = "Examples:
-  senate service install --yes
-  senate service status
-  senate service uninstall --yes")]
-    Service {
-        #[command(subcommand)]
-        command: ServiceCmd,
     },
     /// Show the daemon, the Senate, sessions and delivery.
     ///
@@ -501,6 +389,7 @@ Without --wait it returns at once: read the answer with `senate inbox`,
     ///
     /// Smoke test of the Codex app-server adapter: connect, initialize, read
     /// a thread's status and, with --text, start or steer a turn with it.
+    #[command(hide = true)]
     CodexSmoke {
         /// The Codex thread id (a Codex session's id).
         #[arg(long)]
@@ -515,8 +404,11 @@ Without --wait it returns at once: read the answer with `senate inbox`,
         listen: Option<String>,
     },
     /// Run a local ACP agent in a Senate-owned terminal session.
-    #[command(after_help = "Examples:
-  senate acp -- agy acp")]
+    #[command(
+        hide = true,
+        after_help = "Examples:
+  senate acp -- agy acp"
+    )]
     Acp {
         /// Command and arguments of the ACP stdio server.
         #[arg(last = true, required = true, num_args = 1..)]
@@ -583,29 +475,6 @@ Without --wait it returns at once: read the answer with `senate inbox`,
         #[arg(long)]
         read_only: bool,
     },
-    /// Resume a stopped hosted senator in the background.
-    ///
-    /// The recorded session reopens in a detached Senate-owned terminal. A
-    /// hosted Claude session with no saved conversation opens with its
-    /// original ID.
-    Restore {
-        /// The senator's primary name or alias (`committee::alias` for an
-        /// alias on one committee).
-        senator: AliasName,
-        /// Each given replaces the recorded one, for this restore and
-        /// those after it.
-        #[command(flatten)]
-        model: ModelArgs,
-    },
-    /// End a hosted senator's terminal (`senate restore` resumes it).
-    Stop {
-        /// The senator's primary name or alias (`committee::alias` for an
-        /// alias on one committee).
-        senator: AliasName,
-        /// Stop even when the attached viewer has typed in the past three minutes.
-        #[arg(long)]
-        force: bool,
-    },
     #[command(hide = true)]
     SessionHost {
         id: EventId,
@@ -628,6 +497,7 @@ Without --wait it returns at once: read the answer with `senate inbox`,
     /// Enable live push for a running Antigravity conversation.
     ///
     /// Reads the conversation's local API token from stdin.
+    #[command(hide = true)]
     AgyRegister {
         /// The conversation's UUID.
         conversation: String,
@@ -635,11 +505,13 @@ Without --wait it returns at once: read the answer with `senate inbox`,
         endpoint: std::net::SocketAddr,
     },
     /// Close the Senate registration of an Antigravity conversation.
+    #[command(hide = true)]
     AgyUnregister {
         /// The conversation's UUID.
         conversation: String,
     },
     /// Manual checks of the delivery plumbing.
+    #[command(hide = true)]
     Debug {
         #[command(subcommand)]
         command: DebugCmd,
@@ -714,6 +586,17 @@ enum ServiceCmd {
 
 #[derive(Subcommand)]
 enum DebugCmd {
+    /// Show how one event was recorded and delivered on this machine.
+    Receipt {
+        /// The event's seq.
+        seq: u64,
+        /// The committee (default: the one `senate where` shows for this directory).
+        #[arg(long)]
+        committee: Option<CommitteeId>,
+        /// Print the daemon's result as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Write one user message into a Claude Code inbox socket (smoke test of the framing).
     Push {
         /// The inbox socket (a session's CLAUDE_CODE_MESSAGING_SOCKET).
@@ -729,26 +612,32 @@ enum DebugCmd {
 }
 
 #[derive(Subcommand)]
-enum AliasCmd {
-    /// Remove an alias. A bare alias on several committees asks which;
-    /// `committee::alias` names one.
-    #[command(after_help = "Examples:
-  senate alias rm smoke          Remove the alias smoke
-  senate alias rm nous::main     Remove main from the committee nous")]
-    Rm {
-        /// The alias, or `committee::alias`.
-        alias: AliasName,
-    },
-}
-
-#[derive(Subcommand)]
-enum SessionsCmd {
-    /// End hosted sessions' terminals (`senate restore` reopens one).
+enum SessionCmd {
+    /// List this machine's hosted sessions.
+    ///
+    /// Each session's name (`committee::alias`, else its senator),
+    /// committee, runtime, model, state, uptime, who is at its terminal,
+    /// and directory.
+    List,
+    /// Watch every hosted senator's terminal, side by side.
+    ///
+    /// A full-screen grid of read-only views of the sessions hosted on this
+    /// machine, one tile a session, in pages when they do not all fit.
+    /// Nothing typed here reaches a session. Arrows or h j k l move
+    /// between tiles, PgUp and PgDn between pages; Enter attaches to the
+    /// tile's session (detaching comes back to the grid); q or Ctrl-]
+    /// leaves.
+    Watch,
+    /// End hosted sessions' terminals (`senate session restore` reopens one).
     ///
     /// Each TUI is asked to end, then killed. A session someone typed into
     /// in the last 5 minutes is skipped unless --force.
+    #[command(after_help = "Examples:
+  senate session stop reviewer       Stop one, by alias or committee::alias
+  senate session stop --idle         Stop each one nobody is attached to
+  senate session stop --all --force  Stop all, even if typed into lately")]
     Stop {
-        /// Sessions by name (`committee::alias` or senator name).
+        /// Sessions by name (`committee::alias`, an alias, or senator name).
         #[arg(required_unless_present_any = ["idle", "all"])]
         names: Vec<String>,
         /// Every running session nobody is attached to.
@@ -762,27 +651,87 @@ enum SessionsCmd {
         #[arg(long)]
         force: bool,
     },
+    /// Resume a stopped hosted senator in the background.
+    ///
+    /// The recorded session reopens in a detached Senate-owned terminal. A
+    /// hosted Claude session with no saved conversation opens with its
+    /// original ID.
+    Restore {
+        /// The senator's primary name or alias (`committee::alias` for an
+        /// alias on one committee).
+        senator: AliasName,
+        /// Each given replaces the recorded one, for this restore and
+        /// those after it.
+        #[command(flatten)]
+        model: ModelArgs,
+    },
     /// Stop terminal hosts that no session owns, and clear ended hosts'
     /// leftovers.
     Prune,
 }
 
 #[derive(Subcommand)]
-enum SeatCmd {
-    /// Remove the senator's seat and end its connection on this committee.
+enum SenatorCmd {
+    /// List senator aliases by committee, with the IDs they stand for.
+    List,
+    /// Give one coding session an alias on its committee.
+    ///
+    /// The alias is bound to the session's primary ID and persists. To
+    /// have every session started in a worktree offered an alias, use
+    /// `senate join --alias`.
+    #[command(after_help = "Examples:
+  senate senator alias reviewer     Inside a coding session: name it reviewer
+  senate senator alias reviewer --session <id>
+                                    Name a session from another terminal
+                                    (`senate status --full-ids` prints the ids)")]
+    Alias {
+        /// The alias, e.g. reviewer.
+        alias: SenatorName,
+        /// The committee (default: the session's current committee).
+        #[arg(long)]
+        committee: Option<CommitteeId>,
+        /// Full session ID. Defaults to the calling coding session.
+        #[arg(long)]
+        session: Option<String>,
+    },
+    /// Remove an alias. A bare alias on several committees asks which;
+    /// `committee::alias` names one.
+    #[command(after_help = "Examples:
+  senate senator unalias smoke       Remove the alias smoke
+  senate senator unalias nous::main  Remove main from the committee nous")]
+    Unalias {
+        /// The alias, or `committee::alias`.
+        alias: AliasName,
+    },
+    /// Seat a removed senator on the committee again, under the same id.
+    Seat(SeatArgs),
+    /// Remove a senator's seat and end its connection on a committee.
     Unseat(SeatArgs),
-    /// Seat the senator on the committee again under the same senator id.
-    Join(SeatArgs),
+    /// Set a session's duty on its committee: one line on what it does.
+    #[command(after_help = "Examples:
+  senate senator duty 'reviews the server crate'
+  senate senator duty ''                     Clear it
+  senate senator duty 'triage' --session <id> --committee refund-v2")]
+    Duty {
+        /// The duty. An empty string clears it.
+        duty: String,
+        /// The committee (default: the session's current committee).
+        #[arg(long)]
+        committee: Option<CommitteeId>,
+        /// Full session ID. Defaults to the calling coding session.
+        #[arg(long)]
+        session: Option<String>,
+    },
 }
 
 #[derive(Args)]
 struct SeatArgs {
+    /// A primary senator id or alias in this Senate.
+    #[arg(value_parser = parse_seat_name)]
+    senator: SenatorName,
     /// The committee the seat is on.
     #[arg(long)]
     committee: CommitteeId,
-    /// A primary senator id or alias in this Senate.
-    #[arg(long, value_parser = parse_seat_name)]
-    senator: SenatorName,
     /// The primary id acting for the Speaker's office.
     #[arg(long, value_parser = parse_seat_name)]
     acted_by: Option<SenatorName>,
@@ -792,6 +741,93 @@ struct SeatArgs {
     /// Print the server's current seat state as JSON.
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Subcommand)]
+enum SetupCmd {
+    /// Write the profile for using Senate alone on this machine.
+    ///
+    /// Writes `senate.toml` in the Senate home, with a local top Senate
+    /// whose Speaker is you or one of your agents. Writes nothing else and
+    /// never overwrites an existing profile. Under a team Senate, write
+    /// senate.toml from config/senate.example.toml instead.
+    #[command(after_help = "Examples:
+  senate setup init --local --person alice
+  senate setup init --local --person alice --speaker claude --locale zh")]
+    Init {
+        /// The local profile (the only one `setup init` writes).
+        #[arg(long)]
+        local: bool,
+        /// Your handle (lowercase letters, digits, `-`).
+        #[arg(long)]
+        person: Name,
+        /// The Speaker, as a senator id (`senator::claude`: an agent
+        /// presides over an unattended root). Default: you.
+        #[arg(long)]
+        speaker: Option<String>,
+        /// `en` or `zh`.
+        #[arg(long, default_value = "en")]
+        locale: Locale,
+        /// The loopback address the local Senate serves on.
+        #[arg(long, default_value = init::DEFAULT_LOCAL_LISTEN)]
+        listen: String,
+    },
+    /// Set up Claude Code and Codex. Dry run without --yes.
+    ///
+    /// Registers the MCP server and the session hooks. Codex is set up when
+    /// `codex` is on PATH. Without --yes it prints what it would change and
+    /// writes nothing.
+    #[command(after_help = "Examples:
+  senate setup install          Show what would change
+  senate setup install --yes    Write it")]
+    Install {
+        /// Set up Codex even when `codex` is not on PATH.
+        #[arg(long, conflicts_with = "no_codex")]
+        codex: bool,
+        /// Leave Codex alone.
+        #[arg(long)]
+        no_codex: bool,
+        /// Codex home holding config.toml (default: $CODEX_HOME, else ~/.codex).
+        #[arg(long, value_name = "DIR")]
+        codex_home: Option<PathBuf>,
+        /// Write the changes.
+        #[arg(long)]
+        yes: bool,
+        /// Claude config dir (default: $CLAUDE_CONFIG_DIR, else ~/.claude).
+        #[arg(long, value_name = "DIR")]
+        claude_dir: Option<PathBuf>,
+        /// The `claude` CLI to register the MCP server with.
+        #[arg(long, value_name = "PATH")]
+        claude_bin: Option<PathBuf>,
+    },
+    /// Keep the daemon running in the background, from login.
+    ///
+    /// Runs `senated --machine` without a terminal: a launchd user agent on
+    /// macOS, a systemd user unit on Linux.
+    #[command(after_help = "Examples:
+  senate setup service install --yes
+  senate setup service status
+  senate setup service uninstall --yes")]
+    Service {
+        #[command(subcommand)]
+        command: ServiceCmd,
+    },
+    /// Forget expired local data. Dry run without --yes.
+    ///
+    /// Removes saved copies whose repository, branch or detached worktree is
+    /// gone; session records of sessions that ended long ago or whose
+    /// process is gone; queued items and cursors of agents with no session
+    /// and no contact for `free_after_days` (senate.toml, default 30). A
+    /// hosted Senate's log is only listed.
+    Clean {
+        /// Do it.
+        #[arg(long)]
+        yes: bool,
+        /// With --yes, also delete the data of hosted Senates that
+        /// `senate.toml` no longer lists: logs, which nothing else removes.
+        #[arg(long, requires = "yes")]
+        delete_logs: bool,
+    },
 }
 
 fn parse_seat_name(raw: &str) -> Result<SenatorName, senate_core::SenatorNameError> {
@@ -1125,13 +1161,24 @@ async fn stop_sessions(
         )
         .await;
         match result {
-            Ok(_) => println!(
-                "{}",
-                locale.pick(
-                    format!("已停止 {}", row.label()),
-                    format!("stopped {}", row.label())
-                )
-            ),
+            Ok(reply) => {
+                println!(
+                    "{}",
+                    locale.pick(
+                        format!("已停止 {}", row.label()),
+                        format!("stopped {}", row.label())
+                    )
+                );
+                if reply.audit_pending {
+                    eprintln!(
+                        "{}",
+                        locale.pick(
+                            "停止记录已排队，稍后写入委员会日志。",
+                            "The stop note is queued for the committee log."
+                        )
+                    );
+                }
+            }
             Err(error) => {
                 failed += 1;
                 eprintln!("{}: {error}", row.label());
@@ -1143,6 +1190,11 @@ async fn stop_sessions(
             "{}",
             locale.pick("没有要停止的会话。", "No session to stop.")
         );
+    }
+    // A session asked for by name and left running is a failure; `--idle`
+    // and `--all` only report what they skipped.
+    if matches!(selector, crate::sessions::StopSelector::Named(_)) {
+        failed += kept.len();
     }
     anyhow::ensure!(failed == 0, "{failed} session(s) could not be stopped");
     Ok(())
@@ -1545,374 +1597,122 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
     let Output { terminal, verbose } = output;
     match command {
         Cmd::Hook { .. } => Ok(()),
-        Cmd::Init {
-            local,
-            person,
-            speaker,
-            locale,
-            listen,
-        } => {
-            if !local {
-                anyhow::bail!(
-                    "`senate init` writes the local profile only: run `senate init --local`. \
-                     Under a team Senate, write senate.toml from config/senate.example.toml."
-                );
-            }
-            let paths = Paths::from_env()?;
-            let profile = init::LocalProfile {
-                person,
-                speaker: speaker
-                    .map(|s| {
-                        let s = if s.contains("::") {
-                            s
-                        } else {
-                            format!("senator::{s}")
-                        };
-                        s.parse::<senate_core::SenatorId>()
-                    })
-                    .transpose()
-                    .map_err(anyhow::Error::msg)?,
-                locale,
-                listen,
-            };
-            let path = init::init_local(&paths, &profile)?;
-            println!("{}", path.display());
-            Ok(())
-        }
-        Cmd::Sessions { command } => {
-            let paths = Paths::from_env()?;
-            let locale = BridgeConfig::locale_at(&paths.config());
-            let rt = runtime(false)?;
-            match command {
-                None => {
-                    let reply: crate::ipc::SessionsReply =
-                        rt.block_on(daemon_call(&paths, &Request::Sessions))?;
-                    println!(
-                        "{}",
-                        crate::sessions::render(&reply, chrono::Utc::now(), locale)
-                    );
-                    Ok(())
-                }
-                Some(SessionsCmd::Stop {
-                    names,
-                    idle,
-                    all,
-                    force,
-                }) => {
-                    let selector = if all {
-                        crate::sessions::StopSelector::All
-                    } else if idle {
-                        crate::sessions::StopSelector::Idle
-                    } else {
-                        crate::sessions::StopSelector::Named(names)
-                    };
-                    rt.block_on(stop_sessions(&paths, &selector, force, locale))
-                }
-                Some(SessionsCmd::Prune) => {
-                    let reply: crate::ipc::PruneReply = rt.block_on(ipc::request(
-                        &paths.socket(),
-                        &Request::PruneHosts,
-                        Duration::from_secs(1),
-                        crate::host::REQUEST_TIMEOUT,
-                    ))?;
-                    for id in &reply.stopped {
-                        println!(
-                            "{}",
-                            locale.pick(
-                                format!("已停止孤立的终端宿主 {id}"),
-                                format!("stopped orphaned host {id}"),
-                            )
-                        );
-                    }
-                    println!(
-                        "{}",
-                        locale.pick(
-                            format!(
-                                "停止了 {} 个孤立宿主，清理了 {} 个已结束宿主的目录。",
-                                reply.stopped.len(),
-                                reply.removed.len()
-                            ),
-                            format!(
-                                "Stopped {} orphaned host(s); cleared {} ended host director(ies).",
-                                reply.stopped.len(),
-                                reply.removed.len()
-                            ),
-                        )
-                    );
-                    Ok(())
-                }
-            }
-        }
-        Cmd::WatchAll => {
-            let paths = Paths::from_env()?;
-            runtime(false)?.block_on(crate::host::view::watch_all(&paths, || {
-                let paths = paths.clone();
-                Box::pin(async move { hosted_sessions(&paths).await })
-            }))
-        }
-        Cmd::Aliases => {
-            let paths = Paths::from_env()?;
-            let locale = BridgeConfig::locale_at(&paths.config());
-            let known: KnownAliases =
-                runtime(false)?.block_on(daemon_call(&paths, &Request::Aliases))?;
-            let rows: Vec<(String, SenatorName)> = match &known {
-                KnownAliases::Scoped(table) => {
-                    table.iter().map(|q| (q.to_string(), q.primary)).collect()
-                }
-                KnownAliases::Unscoped(map) => {
-                    eprintln!(
-                        "{}",
-                        locale.pick(
-                            "这个 Senate 的服务器较旧：别名不分委员会，在整个 Senate 内有效。",
-                            "This Senate's server is older: its aliases are Senate-wide, not per committee.",
-                        )
-                    );
-                    map.iter()
-                        .map(|(alias, primary)| (alias.to_string(), primary.clone()))
-                        .collect()
-                }
-            };
-            if rows.is_empty() {
-                println!(
-                    "{}",
-                    locale.pick("尚无 senator 别名。", "No senator aliases registered.")
-                );
-            }
-            for (alias, primary) in rows {
-                output.print(&format!(
-                    "{alias} -> {}",
-                    senate_core::Address::senator(&primary).in_text()
-                ));
-            }
-            Ok(())
-        }
-        Cmd::Alias {
-            command: AliasCmd::Rm { alias },
-        } => {
-            let paths = Paths::from_env()?;
-            let rt = runtime(false)?;
-            let known: KnownAliases = rt.block_on(daemon_call(&paths, &Request::Aliases))?;
-            // What goes: (shown name, primary, committee). An older
-            // server's alias is on no committee.
-            let target: (String, SenatorName, Option<CommitteeId>) = match &known {
-                KnownAliases::Unscoped(map) => match map.get(&alias.alias) {
-                    Some(primary) => (alias.alias.to_string(), primary.clone(), None),
-                    None => anyhow::bail!("no alias {alias}"),
-                },
-                KnownAliases::Scoped(table) => {
-                    let found: Vec<QualifiedAlias> = match &alias.committee {
-                        Some(committee) => table
-                            .get(committee, &alias.alias)
-                            .map(|primary| QualifiedAlias {
-                                committee: committee.clone(),
-                                alias: alias.alias.clone(),
-                                primary: primary.clone(),
-                            })
-                            .into_iter()
-                            .collect(),
-                        None => table.matches(&alias.alias),
-                    };
-                    let one = match found.as_slice() {
-                        [] => anyhow::bail!("no alias {alias}"),
-                        [one] => one.clone(),
-                        _ => choose_alias(&alias, found)?,
-                    };
-                    (one.to_string(), one.primary, Some(one.committee))
-                }
-            };
-            let (shown, primary, committee) = target;
-            let _: serde_json::Value = rt.block_on(daemon_call(
-                &paths,
-                &Request::RemoveAlias {
-                    primary: primary.clone(),
-                    alias: alias.alias.clone(),
-                    committee,
-                },
-            ))?;
-            output.print(&format!(
-                "removed {shown} -> {}",
-                senate_core::Address::senator(&primary).in_text()
-            ));
-            Ok(())
-        }
-        Cmd::SecretaryTeam(args) => cli_secretary::run(args),
-        Cmd::Seat { command } => {
-            let (action, args) = match command {
-                SeatCmd::Unseat(args) => (CommitteeSeatAction::Unseat, args),
-                SeatCmd::Join(args) => (CommitteeSeatAction::Join, args),
-            };
-            let paths = Paths::from_env()?;
-            let request = senate_core::api::SetCommitteeSeat {
-                senator: args.senator,
-                action,
-                id: args.id.unwrap_or_default(),
-                acted_by: args.acted_by,
-            };
-            let reply: senate_core::api::CommitteeSeatInfo =
-                runtime(false)?.block_on(daemon_call(
-                    &paths,
-                    &Request::SetCommitteeSeat {
-                        committee: args.committee,
-                        request,
-                    },
-                ))?;
-            if args.json {
-                return print_json(&reply);
-            }
-            let locale = BridgeConfig::locale_at(&paths.config());
-            let seat = senate_core::Address::senator(&reply.senator).in_text();
-            match reply.action {
-                CommitteeSeatAction::Unseat => output.print(&locale.pick(
-                    format!("{seat} 已从 {} 除席（seq {}）", reply.committee, reply.seq),
-                    format!(
-                        "{seat} unseated from {} (seq {})",
-                        reply.committee, reply.seq
-                    ),
-                )),
-                CommitteeSeatAction::Join => output.print(&locale.pick(
-                    format!("{seat} 已加入 {}（seq {}）", reply.committee, reply.seq),
-                    format!("{seat} joined {} (seq {})", reply.committee, reply.seq),
-                )),
-            }
-            Ok(())
-        }
+        Cmd::Session { command } => run_session(command, output),
+        Cmd::Senator { command } => run_senator(command, output),
+        Cmd::Secretary(args) => cli_secretary::run(args),
+        Cmd::Setup { command } => run_setup(command, output),
         Cmd::Join {
             committee,
-            alias: Some(alias),
-            session,
+            alias,
             duty,
-        } => {
-            let paths = Paths::from_env()?;
-            let locale = BridgeConfig::locale_at(&paths.config());
-            let session = calling_session(session, locale)?;
-            runtime(false)?.block_on(async {
-                let committee = match committee {
-                    Some(c) => c,
-                    None => daemon_call::<ipc::BoundReply>(
-                        &paths,
-                        &Request::Bound {
-                            session: session.clone(),
-                        },
-                    )
-                    .await?
-                    .committee
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "{}",
-                            locale.pick(
-                                "请指定这个会话要加入的委员会。",
-                                "Specify the committee this session should join."
-                            )
-                        )
-                    })?,
-                };
-                let reply: ipc::JoinReply = daemon_call(
-                    &paths,
-                    &Request::JoinAs {
-                        session: session.clone(),
-                        committee,
-                        senator: alias.clone(),
-                    },
-                )
-                .await?;
-                anyhow::ensure!(
-                    reply.alias.as_ref() == Some(&alias),
-                    "{}",
-                    locale.pick(
-                        "daemon 未确认此别名。",
-                        "The daemon did not confirm the alias."
-                    )
-                );
-                output.print(&format!(
-                    "{} -> {} ({})",
-                    senate_core::Address::senator(&alias).in_text(),
-                    senate_core::Address::senator(&reply.agent).in_text(),
-                    reply.committee
-                ));
-                if let Some(duty) = duty {
-                    let line = set_duty(&paths, session, reply.committee, duty, locale).await?;
-                    output.print(&line);
-                }
-                Ok(())
-            })
-        }
-        Cmd::Join {
-            committee,
-            alias: None,
-            duty,
-            ..
         } => {
             let (paths, settings) = settings_here();
             let cwd = std::env::current_dir()?;
+            let alias = alias.as_deref().map(binding::parse_pin).transpose()?;
+            if duty.is_some() {
+                cli_legacy::point("join --duty", "senator duty");
+            }
             // The session is found before anything is written, so a duty
-            // that cannot be set leaves the worktree as it was.
-            let session = duty
-                .as_ref()
-                .map(|_| calling_session(None, settings.locale))
-                .transpose()?;
+            // that cannot be set leaves the worktree as it was. An alias
+            // goes to the calling session only when there is one.
+            let session = match (&duty, &alias) {
+                (Some(_), _) => Some(calling_session(None, settings.locale)?),
+                (None, Some(_)) => session_from_env(),
+                (None, None) => None,
+            };
             let rt = runtime(false)?;
-            let (change, choice) =
-                rt.block_on(binding::join_choosing(&paths, &cwd, committee, &settings))?;
-            if let crate::joinname::Choice::Derived(d) = &choice {
-                println!("{}", binding::render_derived(d, settings.locale));
+            // With an alias and no name, a worktree that has a committee
+            // keeps it: only the alias is new.
+            let kept = match (&alias, &committee) {
+                (Some(_), None) => rt
+                    .block_on(binding::resolve(&paths, &cwd, &settings))
+                    .committee
+                    .map(|(committee, _)| committee),
+                _ => None,
+            };
+            let committee = match kept {
+                Some(committee) => Some(committee),
+                None => {
+                    let (change, choice) =
+                        rt.block_on(binding::join_choosing(&paths, &cwd, committee, &settings))?;
+                    if let crate::joinname::Choice::Derived(d) = &choice {
+                        println!("{}", binding::render_derived(d, settings.locale));
+                    }
+                    println!("{}", binding::render_join(&change, settings.locale));
+                    let committee = change.value.as_deref().map(CommitteeId::new).transpose()?;
+                    if let Some(committee) = &committee {
+                        println!(
+                            "{}",
+                            rt.block_on(open_committee(&paths, committee.clone(), settings.locale))
+                        );
+                    }
+                    committee
+                }
+            };
+            if let Some(alias) = &alias {
+                let pinned = rt.block_on(binding::change(
+                    &paths,
+                    &cwd,
+                    binding::Item::Agent,
+                    Some(alias.to_string()),
+                    &settings,
+                ))?;
+                println!("{}", binding::render_pin(&pinned, settings.locale));
+                if let (Some(session), Some(committee)) = (&session, &committee) {
+                    let line = rt.block_on(alias_session(
+                        &paths,
+                        session.clone(),
+                        committee.clone(),
+                        alias.clone(),
+                        settings.locale,
+                    ))?;
+                    output.print(&line);
+                }
             }
-            println!("{}", binding::render_join(&change, settings.locale));
-            if let Some(committee) = &change.value {
-                let committee = CommitteeId::new(committee)?;
-                println!(
-                    "{}",
-                    rt.block_on(open_committee(&paths, committee, settings.locale))
-                );
-            }
-            if let (Some(duty), Some(session), Some(committee)) = (duty, session, &change.value) {
-                let committee = CommitteeId::new(committee)?;
+            if let (Some(duty), Some(session), Some(committee)) = (duty, session, committee) {
                 let line =
                     rt.block_on(set_duty(&paths, session, committee, duty, settings.locale))?;
                 println!("{line}");
             }
             Ok(())
         }
-        Cmd::Leave => {
+        Cmd::Leave { alias } => {
             let (paths, settings) = settings_here();
             let cwd = std::env::current_dir()?;
-            let change = runtime(false)?.block_on(binding::change(
-                &paths,
-                &cwd,
-                binding::Item::Committee,
-                None,
-                &settings,
-            ))?;
-            println!("{}", binding::render_leave(&change, settings.locale));
+            let item = if alias {
+                binding::Item::Agent
+            } else {
+                binding::Item::Committee
+            };
+            let change =
+                runtime(false)?.block_on(binding::change(&paths, &cwd, item, None, &settings))?;
+            println!(
+                "{}",
+                if alias {
+                    binding::render_unpin(&change, settings.locale)
+                } else {
+                    binding::render_leave(&change, settings.locale)
+                }
+            );
             Ok(())
         }
-        Cmd::Pin { agent } => {
+        Cmd::Where { all: true, json } => {
             let (paths, settings) = settings_here();
-            let agent = binding::parse_pin(&agent)?;
-            let cwd = std::env::current_dir()?;
-            let change = runtime(false)?.block_on(binding::change(
-                &paths,
-                &cwd,
-                binding::Item::Agent,
-                Some(agent.to_string()),
-                &settings,
-            ))?;
-            println!("{}", binding::render_pin(&change, settings.locale));
-            Ok(())
+            let rows = binding::list(&paths);
+            if json {
+                print_json(&rows)
+            } else if verbose {
+                print!("{}", binding::render_list(&rows, settings.locale));
+                Ok(())
+            } else {
+                print!(
+                    "{}",
+                    binding::render_list_brief(&rows, settings.locale, terminal)
+                );
+                Ok(())
+            }
         }
-        Cmd::Unpin => {
-            let (paths, settings) = settings_here();
-            let cwd = std::env::current_dir()?;
-            let change = runtime(false)?.block_on(binding::change(
-                &paths,
-                &cwd,
-                binding::Item::Agent,
-                None,
-                &settings,
-            ))?;
-            println!("{}", binding::render_unpin(&change, settings.locale));
-            Ok(())
-        }
-        Cmd::Where => {
+        Cmd::Where { all: false, .. } => {
             let (paths, settings) = settings_here();
             let cwd = std::env::current_dir()?;
             let rt = runtime(false)?;
@@ -1936,39 +1736,24 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             );
             Ok(())
         }
-        Cmd::List { json } => {
-            let (paths, settings) = settings_here();
-            let rows = binding::list(&paths);
-            if json {
-                print_json(&rows)
-            } else if verbose {
-                print!("{}", binding::render_list(&rows, settings.locale));
-                Ok(())
-            } else {
-                print!(
-                    "{}",
-                    binding::render_list_brief(&rows, settings.locale, terminal)
-                );
-                Ok(())
-            }
-        }
-        Cmd::Free { yes, delete_logs } => {
-            let (paths, settings) = settings_here();
-            let report = binding::free(&paths, &settings, yes, delete_logs)?;
-            print!(
-                "{}",
-                if verbose {
-                    binding::render_free(&report, settings.locale)
-                } else {
-                    binding::render_free_brief(&report, settings.locale, terminal)
-                }
-            );
-            Ok(())
+        Cmd::Inbox {
+            committee,
+            follow: true,
+            global,
+            json,
+            ..
+        } => {
+            let paths = Paths::from_env()?;
+            runtime(false)?.block_on(async {
+                let committee = DisplayScope { global, committee }.resolve(&paths).await?;
+                watch(&paths, committee, json, output).await
+            })
         }
         Cmd::Inbox {
             committee,
             all,
             mark_read,
+            ..
         } => {
             let paths = Paths::from_env()?;
             let locale = BridgeConfig::locale_at(&paths.config());
@@ -2017,29 +1802,6 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
                 }
             })
         }
-        Cmd::Receipt {
-            seq,
-            committee,
-            json,
-        } => {
-            let paths = Paths::from_env()?;
-            let reply: ipc::EventReceipt = runtime(false)?.block_on(async {
-                let committee = committee_here(committee).await?;
-                daemon_call(
-                    &paths,
-                    &Request::Receipt {
-                        committee,
-                        seq: Seq(seq),
-                    },
-                )
-                .await
-            })?;
-            if json {
-                return print_json(&reply);
-            }
-            output.print(&reply.render(BridgeConfig::locale_at(&paths.config())));
-            Ok(())
-        }
         Cmd::Thread {
             seq,
             committee,
@@ -2055,13 +1817,6 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
                     output.print(&speak::render_thread(&reply, locale));
                     Ok(())
                 }
-            })
-        }
-        Cmd::Watch { scope, json } => {
-            let paths = Paths::from_env()?;
-            runtime(false)?.block_on(async {
-                let committee = scope.resolve(&paths).await?;
-                watch(&paths, committee, json, output).await
             })
         }
         Cmd::Take { thread, committee } => {
@@ -2134,31 +1889,6 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
                 },
                 terminal,
             )
-        }
-        Cmd::Restore { senator, model } => {
-            let senator = pick_alias(senator)?;
-            remember_terminal()?;
-            launch(
-                &Request::Restore {
-                    senator,
-                    session: SessionSelector::default(),
-                    model: model.into(),
-                },
-                terminal,
-            )
-        }
-        Cmd::Stop { senator, force } => {
-            let senator = pick_alias(senator)?;
-            let reply: StopReply = host_call(&Request::Stop {
-                session: SessionSelector::default(),
-                senator,
-                force,
-            })?;
-            println!("{}", reply.senator);
-            if reply.audit_pending {
-                eprintln!("The stop note is queued for the committee log.");
-            }
-            Ok(())
         }
         Cmd::Attach { senator, read_only } => {
             let senator = match senator {
@@ -2275,7 +2005,391 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             };
             runtime(false)?.block_on(mcp::serve_stdio(paths.socket(), selector, locale, harness))
         }
-        Cmd::Install {
+        Cmd::CodexSmoke {
+            thread,
+            text,
+            listen,
+        } => {
+            let paths = Paths::from_env()?;
+            let mut config =
+                codex::CodexConfig::load(&paths.config()).map_err(anyhow::Error::msg)?;
+            if listen.is_some() {
+                config.listen = listen;
+            }
+            let transport = config.transport().map_err(anyhow::Error::msg)?;
+            runtime(false)?.block_on(codex_smoke(&transport, &thread, text.as_deref()))
+        }
+        Cmd::Status { scope, full_ids } => {
+            let paths = Paths::from_env()?;
+            let (view, committee) = runtime(false)?.block_on(async {
+                let scope = scope.resolve(&paths).await?;
+                let view = status::collect_for(&paths, scope.as_ref()).await?;
+                Ok::<_, anyhow::Error>((view, scope))
+            })?;
+            let now = chrono::Utc::now();
+            let text = match (verbose, terminal) {
+                (true, Some(terminal)) => {
+                    status::render_terminal(&view, now, full_ids, committee.as_ref(), terminal)
+                }
+                (true, None) => status::render_scope(&view, now, full_ids, committee.as_ref()),
+                // Piped, the everyday view is the terminal's without colour.
+                (false, _) => status::render_brief(
+                    &view,
+                    now,
+                    full_ids,
+                    committee.as_ref(),
+                    terminal.unwrap_or(Terminal::new(100, false)),
+                ),
+            };
+            print!("{text}");
+            Ok(())
+        }
+        Cmd::Debug {
+            command:
+                DebugCmd::Receipt {
+                    seq,
+                    committee,
+                    json,
+                },
+        } => {
+            let paths = Paths::from_env()?;
+            let reply: ipc::EventReceipt = runtime(false)?.block_on(async {
+                let committee = committee_here(committee).await?;
+                daemon_call(
+                    &paths,
+                    &Request::Receipt {
+                        committee,
+                        seq: Seq(seq),
+                    },
+                )
+                .await
+            })?;
+            if json {
+                return print_json(&reply);
+            }
+            output.print(&reply.render(BridgeConfig::locale_at(&paths.config())));
+            Ok(())
+        }
+        Cmd::Debug {
+            command:
+                DebugCmd::Push {
+                    socket,
+                    token,
+                    text,
+                },
+        } => {
+            let token = token
+                .or_else(|| std::env::var("CLAUDE_CODE_MESSAGING_TOKEN").ok())
+                .filter(|t| !t.is_empty())
+                .context("no token: pass --token or set CLAUDE_CODE_MESSAGING_TOKEN")?;
+            let options = inbox::PushOptions {
+                timeout: Duration::from_secs(5),
+                linger: Duration::from_secs(2),
+            };
+            let reply =
+                runtime(false)?.block_on(inbox::push(&socket, Some(&token), &text, &options))?;
+            println!(
+                "pushed {} chars to {}",
+                text.chars().count(),
+                socket.display()
+            );
+            match reply {
+                Some(r) => println!("socket replied: {r}"),
+                None => println!("socket sent nothing back"),
+            }
+            Ok(())
+        }
+    }
+}
+
+/// `senate session …`: this machine's hosted sessions.
+fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
+    let terminal = output.terminal;
+    match command {
+        SessionCmd::List => {
+            let paths = Paths::from_env()?;
+            let locale = BridgeConfig::locale_at(&paths.config());
+            let rt = runtime(false)?;
+            let reply: crate::ipc::SessionsReply =
+                rt.block_on(daemon_call(&paths, &Request::Sessions))?;
+            println!(
+                "{}",
+                crate::sessions::render(&reply, chrono::Utc::now(), locale)
+            );
+            Ok(())
+        }
+        SessionCmd::Watch => {
+            let paths = Paths::from_env()?;
+            runtime(false)?.block_on(crate::host::view::watch_all(&paths, || {
+                let paths = paths.clone();
+                Box::pin(async move { hosted_sessions(&paths).await })
+            }))
+        }
+        SessionCmd::Stop {
+            names,
+            idle,
+            all,
+            force,
+        } => {
+            let paths = Paths::from_env()?;
+            let locale = BridgeConfig::locale_at(&paths.config());
+            let selector = if all {
+                crate::sessions::StopSelector::All
+            } else if idle {
+                crate::sessions::StopSelector::Idle
+            } else {
+                crate::sessions::StopSelector::Named(names)
+            };
+            runtime(false)?.block_on(stop_sessions(&paths, &selector, force, locale))
+        }
+        SessionCmd::Restore { senator, model } => {
+            let senator = pick_alias(senator)?;
+            remember_terminal()?;
+            launch(
+                &Request::Restore {
+                    senator,
+                    session: SessionSelector::default(),
+                    model: model.into(),
+                },
+                terminal,
+            )
+        }
+        SessionCmd::Prune => {
+            let paths = Paths::from_env()?;
+            let locale = BridgeConfig::locale_at(&paths.config());
+            let rt = runtime(false)?;
+            let reply: crate::ipc::PruneReply = rt.block_on(ipc::request(
+                &paths.socket(),
+                &Request::PruneHosts,
+                Duration::from_secs(1),
+                crate::host::REQUEST_TIMEOUT,
+            ))?;
+            for id in &reply.stopped {
+                println!(
+                    "{}",
+                    locale.pick(
+                        format!("已停止孤立的终端宿主 {id}"),
+                        format!("stopped orphaned host {id}"),
+                    )
+                );
+            }
+            println!(
+                "{}",
+                locale.pick(
+                    format!(
+                        "停止了 {} 个孤立宿主，清理了 {} 个已结束宿主的目录。",
+                        reply.stopped.len(),
+                        reply.removed.len()
+                    ),
+                    format!(
+                        "Stopped {} orphaned host(s); cleared {} ended host director(ies).",
+                        reply.stopped.len(),
+                        reply.removed.len()
+                    ),
+                )
+            );
+            Ok(())
+        }
+    }
+}
+
+/// `senate senator …`: names, seats and duties.
+fn run_senator(command: SenatorCmd, output: Output) -> anyhow::Result<()> {
+    match command {
+        SenatorCmd::List => {
+            let paths = Paths::from_env()?;
+            let locale = BridgeConfig::locale_at(&paths.config());
+            let known: KnownAliases =
+                runtime(false)?.block_on(daemon_call(&paths, &Request::Aliases))?;
+            let rows: Vec<(String, SenatorName)> = match &known {
+                KnownAliases::Scoped(table) => {
+                    table.iter().map(|q| (q.to_string(), q.primary)).collect()
+                }
+                KnownAliases::Unscoped(map) => {
+                    eprintln!(
+                        "{}",
+                        locale.pick(
+                            "这个 Senate 的服务器较旧：别名不分委员会，在整个 Senate 内有效。",
+                            "This Senate's server is older: its aliases are Senate-wide, not per committee.",
+                        )
+                    );
+                    map.iter()
+                        .map(|(alias, primary)| (alias.to_string(), primary.clone()))
+                        .collect()
+                }
+            };
+            if rows.is_empty() {
+                println!(
+                    "{}",
+                    locale.pick("尚无 senator 别名。", "No senator aliases registered.")
+                );
+            }
+            for (alias, primary) in rows {
+                output.print(&format!(
+                    "{alias} -> {}",
+                    senate_core::Address::senator(&primary).in_text()
+                ));
+            }
+            Ok(())
+        }
+        SenatorCmd::Unalias { alias } => {
+            let paths = Paths::from_env()?;
+            let rt = runtime(false)?;
+            let known: KnownAliases = rt.block_on(daemon_call(&paths, &Request::Aliases))?;
+            // What goes: (shown name, primary, committee). An older
+            // server's alias is on no committee.
+            let target: (String, SenatorName, Option<CommitteeId>) = match &known {
+                KnownAliases::Unscoped(map) => match map.get(&alias.alias) {
+                    Some(primary) => (alias.alias.to_string(), primary.clone(), None),
+                    None => anyhow::bail!("no alias {alias}"),
+                },
+                KnownAliases::Scoped(table) => {
+                    let found: Vec<QualifiedAlias> = match &alias.committee {
+                        Some(committee) => table
+                            .get(committee, &alias.alias)
+                            .map(|primary| QualifiedAlias {
+                                committee: committee.clone(),
+                                alias: alias.alias.clone(),
+                                primary: primary.clone(),
+                            })
+                            .into_iter()
+                            .collect(),
+                        None => table.matches(&alias.alias),
+                    };
+                    let one = match found.as_slice() {
+                        [] => anyhow::bail!("no alias {alias}"),
+                        [one] => one.clone(),
+                        _ => choose_alias(&alias, found)?,
+                    };
+                    (one.to_string(), one.primary, Some(one.committee))
+                }
+            };
+            let (shown, primary, committee) = target;
+            let _: serde_json::Value = rt.block_on(daemon_call(
+                &paths,
+                &Request::RemoveAlias {
+                    primary: primary.clone(),
+                    alias: alias.alias.clone(),
+                    committee,
+                },
+            ))?;
+            output.print(&format!(
+                "removed {shown} -> {}",
+                senate_core::Address::senator(&primary).in_text()
+            ));
+            Ok(())
+        }
+        SenatorCmd::Alias {
+            alias,
+            committee,
+            session,
+        } => {
+            let paths = Paths::from_env()?;
+            let locale = BridgeConfig::locale_at(&paths.config());
+            let session = calling_session(session, locale)?;
+            runtime(false)?.block_on(async {
+                let committee = session_committee(&paths, &session, committee, locale).await?;
+                let line = alias_session(&paths, session, committee, alias, locale).await?;
+                output.print(&line);
+                Ok(())
+            })
+        }
+        SenatorCmd::Seat(args) => seat(CommitteeSeatAction::Join, args, output),
+        SenatorCmd::Unseat(args) => seat(CommitteeSeatAction::Unseat, args, output),
+        SenatorCmd::Duty {
+            duty,
+            committee,
+            session,
+        } => {
+            let paths = Paths::from_env()?;
+            let locale = BridgeConfig::locale_at(&paths.config());
+            let session = calling_session(session, locale)?;
+            runtime(false)?.block_on(async {
+                let committee = session_committee(&paths, &session, committee, locale).await?;
+                let line = set_duty(&paths, session, committee, duty, locale).await?;
+                println!("{line}");
+                Ok(())
+            })
+        }
+    }
+}
+
+/// `senate senator seat|unseat`.
+fn seat(action: CommitteeSeatAction, args: SeatArgs, output: Output) -> anyhow::Result<()> {
+    let paths = Paths::from_env()?;
+    let request = senate_core::api::SetCommitteeSeat {
+        senator: args.senator,
+        action,
+        id: args.id.unwrap_or_default(),
+        acted_by: args.acted_by,
+    };
+    let reply: senate_core::api::CommitteeSeatInfo = runtime(false)?.block_on(daemon_call(
+        &paths,
+        &Request::SetCommitteeSeat {
+            committee: args.committee,
+            request,
+        },
+    ))?;
+    if args.json {
+        return print_json(&reply);
+    }
+    let locale = BridgeConfig::locale_at(&paths.config());
+    let seat = senate_core::Address::senator(&reply.senator).in_text();
+    match reply.action {
+        CommitteeSeatAction::Unseat => output.print(&locale.pick(
+            format!("{seat} 已从 {} 除席（seq {}）", reply.committee, reply.seq),
+            format!(
+                "{seat} unseated from {} (seq {})",
+                reply.committee, reply.seq
+            ),
+        )),
+        CommitteeSeatAction::Join => output.print(&locale.pick(
+            format!("{seat} 已加入 {}（seq {}）", reply.committee, reply.seq),
+            format!("{seat} joined {} (seq {})", reply.committee, reply.seq),
+        )),
+    }
+    Ok(())
+}
+
+/// `senate setup …`: this machine's profile, agents and daemon service.
+fn run_setup(command: SetupCmd, output: Output) -> anyhow::Result<()> {
+    let Output { terminal, verbose } = output;
+    match command {
+        SetupCmd::Init {
+            local,
+            person,
+            speaker,
+            locale,
+            listen,
+        } => {
+            if !local {
+                anyhow::bail!(
+                    "`senate init` writes the local profile only: run `senate init --local`. \
+                     Under a team Senate, write senate.toml from config/senate.example.toml."
+                );
+            }
+            let paths = Paths::from_env()?;
+            let profile = init::LocalProfile {
+                person,
+                speaker: speaker
+                    .map(|s| {
+                        let s = if s.contains("::") {
+                            s
+                        } else {
+                            format!("senator::{s}")
+                        };
+                        s.parse::<senate_core::SenatorId>()
+                    })
+                    .transpose()
+                    .map_err(anyhow::Error::msg)?,
+                locale,
+                listen,
+            };
+            let path = init::init_local(&paths, &profile)?;
+            println!("{}", path.display());
+            Ok(())
+        }
+        SetupCmd::Install {
             codex,
             no_codex,
             codex_home,
@@ -2314,73 +2428,18 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Cmd::CodexSmoke {
-            thread,
-            text,
-            listen,
-        } => {
-            let paths = Paths::from_env()?;
-            let mut config =
-                codex::CodexConfig::load(&paths.config()).map_err(anyhow::Error::msg)?;
-            if listen.is_some() {
-                config.listen = listen;
-            }
-            let transport = config.transport().map_err(anyhow::Error::msg)?;
-            runtime(false)?.block_on(codex_smoke(&transport, &thread, text.as_deref()))
-        }
-        Cmd::Service { command } => run_service(command, output),
-        Cmd::Status { scope, full_ids } => {
-            let paths = Paths::from_env()?;
-            let (view, committee) = runtime(false)?.block_on(async {
-                let scope = scope.resolve(&paths).await?;
-                let view = status::collect_for(&paths, scope.as_ref()).await?;
-                Ok::<_, anyhow::Error>((view, scope))
-            })?;
-            let now = chrono::Utc::now();
-            let text = match (verbose, terminal) {
-                (true, Some(terminal)) => {
-                    status::render_terminal(&view, now, full_ids, committee.as_ref(), terminal)
+        SetupCmd::Service { command } => run_service(command, output),
+        SetupCmd::Clean { yes, delete_logs } => {
+            let (paths, settings) = settings_here();
+            let report = binding::free(&paths, &settings, yes, delete_logs)?;
+            print!(
+                "{}",
+                if verbose {
+                    binding::render_free(&report, settings.locale)
+                } else {
+                    binding::render_free_brief(&report, settings.locale, terminal)
                 }
-                (true, None) => status::render_scope(&view, now, full_ids, committee.as_ref()),
-                // Piped, the everyday view is the terminal's without colour.
-                (false, _) => status::render_brief(
-                    &view,
-                    now,
-                    full_ids,
-                    committee.as_ref(),
-                    terminal.unwrap_or(Terminal::new(100, false)),
-                ),
-            };
-            print!("{text}");
-            Ok(())
-        }
-        Cmd::Debug {
-            command:
-                DebugCmd::Push {
-                    socket,
-                    token,
-                    text,
-                },
-        } => {
-            let token = token
-                .or_else(|| std::env::var("CLAUDE_CODE_MESSAGING_TOKEN").ok())
-                .filter(|t| !t.is_empty())
-                .context("no token: pass --token or set CLAUDE_CODE_MESSAGING_TOKEN")?;
-            let options = inbox::PushOptions {
-                timeout: Duration::from_secs(5),
-                linger: Duration::from_secs(2),
-            };
-            let reply =
-                runtime(false)?.block_on(inbox::push(&socket, Some(&token), &text, &options))?;
-            println!(
-                "pushed {} chars to {}",
-                text.chars().count(),
-                socket.display()
             );
-            match reply {
-                Some(r) => println!("socket replied: {r}"),
-                None => println!("socket sent nothing back"),
-            }
             Ok(())
         }
     }
@@ -2444,7 +2503,14 @@ fn describe_error(error: &anyhow::Error) -> String {
 pub fn main() -> ExitCode {
     let terminal = Terminal::stdout();
     let cli = cli_help::parse(terminal);
-    if let Cmd::Hook { event, codex, agy } = cli.command {
+    let command = cli.command.unwrap_or(Cmd::Status {
+        scope: DisplayScope {
+            global: false,
+            committee: None,
+        },
+        full_ids: false,
+    });
+    if let Cmd::Hook { event, codex, agy } = command {
         let harness = agy
             .then_some(Runtime::Agy)
             .or_else(|| codex.then_some(Runtime::Codex));
@@ -2455,7 +2521,7 @@ pub fn main() -> ExitCode {
         terminal,
         verbose: cli.verbose,
     };
-    match run(cli.command, output) {
+    match run(command, output) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("senate: {}", describe_error(&e));
@@ -2467,26 +2533,98 @@ pub fn main() -> ExitCode {
 /// The coding session `senate` runs in: `explicit`, or the one its
 /// environment names (`CODEX_THREAD_ID`, `CLAUDE_CODE_SESSION_ID`).
 fn calling_session(explicit: Option<String>, locale: Locale) -> anyhow::Result<SessionSelector> {
-    let env_id = |key| std::env::var(key).ok().filter(|id: &String| !id.is_empty());
-    let id = match (
-        explicit,
-        env_id("CODEX_THREAD_ID"),
-        env_id("CLAUDE_CODE_SESSION_ID"),
-    ) {
-        (Some(id), _, _) => id,
-        (None, Some(id), None) | (None, None, Some(id)) => id,
-        _ => anyhow::bail!(
-            "{}",
-            locale.pick(
-                "请用 --session 指定完整的会话 ID。",
-                "Specify the full session ID with --session."
+    match explicit {
+        Some(id) => Ok(SessionSelector {
+            session_id: Some(id),
+            claude_pid: None,
+        }),
+        None => session_from_env().ok_or_else(|| {
+            anyhow::anyhow!(
+                "{}",
+                locale.pick(
+                    "请用 --session 指定完整的会话 ID。",
+                    "Specify the full session ID with --session."
+                )
             )
-        ),
+        }),
+    }
+}
+
+/// The coding session this process runs inside, when its environment
+/// names exactly one (`CODEX_THREAD_ID` or `CLAUDE_CODE_SESSION_ID`).
+fn session_from_env() -> Option<SessionSelector> {
+    let env_id = |key| std::env::var(key).ok().filter(|id: &String| !id.is_empty());
+    let id = match (env_id("CODEX_THREAD_ID"), env_id("CLAUDE_CODE_SESSION_ID")) {
+        (Some(id), None) | (None, Some(id)) => id,
+        _ => return None,
     };
-    Ok(SessionSelector {
+    Some(SessionSelector {
         session_id: Some(id),
         claude_pid: None,
     })
+}
+
+/// `committee`, else the one `session` is on now.
+async fn session_committee(
+    paths: &Paths,
+    session: &SessionSelector,
+    committee: Option<CommitteeId>,
+    locale: Locale,
+) -> anyhow::Result<CommitteeId> {
+    if let Some(committee) = committee {
+        return Ok(committee);
+    }
+    daemon_call::<ipc::BoundReply>(
+        paths,
+        &Request::Bound {
+            session: session.clone(),
+        },
+    )
+    .await?
+    .committee
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "{}",
+            locale.pick(
+                "请用 --committee 指定这个会话所在的委员会。",
+                "Specify the session's committee with --committee."
+            )
+        )
+    })
+}
+
+/// Gives `session` the alias `alias` on `committee` through the daemon,
+/// and says so.
+async fn alias_session(
+    paths: &Paths,
+    session: SessionSelector,
+    committee: CommitteeId,
+    alias: SenatorName,
+    locale: Locale,
+) -> anyhow::Result<String> {
+    let reply: ipc::JoinReply = daemon_call(
+        paths,
+        &Request::JoinAs {
+            session,
+            committee,
+            senator: alias.clone(),
+        },
+    )
+    .await?;
+    anyhow::ensure!(
+        reply.alias.as_ref() == Some(&alias),
+        "{}",
+        locale.pick(
+            "daemon 未确认此别名。",
+            "The daemon did not confirm the alias."
+        )
+    );
+    Ok(format!(
+        "{} -> {} ({})",
+        senate_core::Address::senator(&alias).in_text(),
+        senate_core::Address::senator(&reply.agent).in_text(),
+        reply.committee
+    ))
 }
 
 /// Sets `session`'s duty on `committee` through the daemon, and says so.
