@@ -79,6 +79,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use senate_core::chat_sim::SIM_REF_PREFIX;
 use senate_core::{
     Address, AdoptedGroup, AnnouncementSection, BindingAction, BindingPayload, Card, ChatSurface,
     CommitteeId, CreatedGroup, Event, EventId, Guest, Hub, HubError, Kind, Mirror, NewEvent,
@@ -938,6 +939,32 @@ impl RecordingSurface {
         self.inner.sim_route(target, operation_id).await
     }
 
+    /// A `sim:` ref is Senate's own, and the platform never saw it. A
+    /// conversation that is not live keeps posts for it off the platform,
+    /// but one this run no longer holds (forgotten after a restart, or
+    /// evicted) does not, and nothing else should name one. The platform is
+    /// never asked about such a ref: the call is refused here, and the
+    /// Speaker passes it over.
+    fn orphaned_sim_ref(message_ref: &str) -> Result<(), SurfaceError> {
+        if message_ref.starts_with(SIM_REF_PREFIX) {
+            tracing::debug!(
+                message_ref,
+                "a simulated message this run no longer holds; not sent to the platform"
+            );
+            return Err(SurfaceError::Rejected(format!(
+                "{message_ref} is a simulated message the platform never saw"
+            )));
+        }
+        Ok(())
+    }
+
+    fn orphaned_sim_target(target: &PostTarget) -> Result<(), SurfaceError> {
+        match target {
+            PostTarget::Reply { message_ref, .. } => Self::orphaned_sim_ref(message_ref),
+            PostTarget::NewRoot { .. } => Ok(()),
+        }
+    }
+
     /// A conversation's post, kept off the platform: recorded only.
     fn post_offline(
         &self,
@@ -995,6 +1022,7 @@ impl ChatSurface for RecordingSurface {
         if let Some(route) = route.as_ref().filter(|r| !r.live) {
             return Ok(self.post_offline(route, markdown, false, operation_id));
         }
+        Self::orphaned_sim_target(&target)?;
         let mut posted = self
             .inner
             .surface
@@ -1023,6 +1051,7 @@ impl ChatSurface for RecordingSurface {
         if let Some(route) = route.as_ref().filter(|r| !r.live) {
             return Ok(self.post_offline(route, &text, false, operation_id));
         }
+        Self::orphaned_sim_target(&target)?;
         let mut posted = self
             .inner
             .surface
@@ -1050,6 +1079,7 @@ impl ChatSurface for RecordingSurface {
         if let Some(route) = route.as_ref().filter(|r| !r.live) {
             return Ok(self.post_offline(route, &text, true, operation_id));
         }
+        Self::orphaned_sim_target(&target)?;
         let mut posted = self
             .inner
             .surface
@@ -1079,6 +1109,7 @@ impl ChatSurface for RecordingSurface {
                 .record_update(message_ref, &sim::card_text(card));
             return Ok(());
         }
+        Self::orphaned_sim_ref(message_ref)?;
         let updated = self
             .inner
             .surface
@@ -1096,6 +1127,7 @@ impl ChatSurface for RecordingSurface {
         if lock(&self.inner.state).sims.is_offline(message_ref) == Some(true) {
             return Ok(());
         }
+        Self::orphaned_sim_ref(message_ref)?;
         self.inner.surface.pin(message_ref, operation_id).await
     }
 
@@ -1144,6 +1176,7 @@ impl ChatSurface for RecordingSurface {
     }
 
     async fn adopt_group(&self, message_ref: &str) -> Result<AdoptedGroup, SurfaceError> {
+        Self::orphaned_sim_ref(message_ref)?;
         self.inner.surface.adopt_group(message_ref).await
     }
 

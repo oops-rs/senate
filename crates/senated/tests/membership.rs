@@ -968,3 +968,51 @@ async fn a_group_with_only_simulated_messages_is_listed_as_waiting() {
     assert_eq!(rig.gateway.parked_groups(), []);
     rig.stop().await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_simulated_ref_this_run_no_longer_holds_never_reaches_the_platform() {
+    // After a restart the log still names `sim:` messages, but no
+    // conversation holds them: the Speaker's reply, card update or pin
+    // for one is refused before the platform is asked.
+    let rig = rig().await;
+    rig.hear("m1").await;
+    rig.bind("alpha").await;
+    pass(Duration::from_secs(1)).await;
+    let mount = rig.gateway.mount().unwrap();
+    let orphan = "sim:01gone";
+    let card = senate_core::Card {
+        title: "task".into(),
+        state: senate_core::StatusState::Processing,
+        markdown: String::new(),
+        steps: Vec::new(),
+        links: Vec::new(),
+    };
+    let rejected = |r: &Result<_, senate_core::SurfaceError>| {
+        matches!(r, Err(senate_core::SurfaceError::Rejected(_)))
+    };
+    let post = mount.surface.post(reply_to(orphan), "answer", "op1").await;
+    assert!(rejected(&post.map(|_| ())));
+    let mention = mount
+        .surface
+        .post_mentioning(reply_to(orphan), "answer", "u_1", "op2")
+        .await;
+    assert!(rejected(&mention.map(|_| ())));
+    let posted_card = mount
+        .surface
+        .post_card(reply_to(orphan), &card, "op3")
+        .await;
+    assert!(rejected(&posted_card.map(|_| ())));
+    assert!(rejected(
+        &mount.surface.update_card(orphan, &card, "op4").await
+    ));
+    assert!(rejected(&mount.surface.pin(orphan, "op5").await));
+    assert!(rejected(
+        &mount.surface.adopt_group(orphan).await.map(|_| ())
+    ));
+
+    assert_eq!(rig.fake.posts(), [], "nothing posted");
+    assert_eq!(rig.fake.card_updates(), []);
+    assert_eq!(rig.fake.pins(), Vec::<String>::new());
+    assert_eq!(rig.adopts().len(), 1, "only the bind's own adopt");
+    rig.stop().await;
+}
