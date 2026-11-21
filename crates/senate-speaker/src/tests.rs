@@ -12,6 +12,7 @@ mod desk;
 mod flows;
 mod gone;
 pub(crate) mod hub;
+mod model_check;
 mod review;
 mod rig;
 mod secretary;

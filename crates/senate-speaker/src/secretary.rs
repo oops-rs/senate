@@ -374,7 +374,7 @@ fn env_is_set(var: &str) -> bool {
 }
 
 /// `url` with any `user:password@` taken out.
-fn without_credentials(url: &str) -> String {
+pub(crate) fn without_credentials(url: &str) -> String {
     let Some((scheme, rest)) = url.split_once("://") else {
         return url.to_owned();
     };

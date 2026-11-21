@@ -365,6 +365,10 @@ impl AgentTurn {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum BrainError {
+    /// No model is configured for this committee: the fixed syntax is all
+    /// there is, and a message that is not a command is not understood.
+    #[error("no usable model is configured for this committee")]
+    NoModel,
     /// The model could not be reached, ran out of budget, or failed.
     #[error("the brain is unavailable: {0}")]
     Unavailable(String),

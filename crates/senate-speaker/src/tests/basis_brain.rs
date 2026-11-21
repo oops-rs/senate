@@ -1018,15 +1018,16 @@ async fn converse_drops_none_and_refuses_a_plan_with_a_broken_step() {
         AgentTurn::act("在的", vec![Intent::Status])
     );
 
-    let broken = fixture(vec![Round::Answer(json!({
+    // Out of shape twice: the model and its one retry.
+    let broken_plan = Round::Answer(json!({
         "reply": "",
         "actions": [
             action(json!({ "action": "decide", "body": "重试上限 3 次" })),
             action(json!({ "action": "relay", "targets": null, "body": "x" })),
         ],
         "awaiting_reply": false
-    }))])
-    .await;
+    }));
+    let broken = fixture(vec![broken_plan.clone(), broken_plan]).await;
     let error = broken
         .brain
         .converse(conversation(&broken, "记一下，再转告", Vec::new()))

@@ -221,7 +221,22 @@ impl Engine {
         self.fallback_after = c.answer_fallback();
         self.confirmation_ttl = c.confirmation_ttl();
         self.top_debounce = c.brief_top_debounce();
-        self.brain_timeout = c.brain_deadline() + BRAIN_SLACK;
+        // Every tier may take its whole deadline: the model, its retry, the
+        // fallback ([`ModelSettings::tiers`](crate::ModelSettings::tiers)).
+        self.brain_timeout = effective.model.as_ref().map_or_else(
+            || c.brain_deadline(),
+            |model| {
+                model
+                    .tiers()
+                    .iter()
+                    .map(|tier| {
+                        tier.model
+                            .deadline_secs
+                            .map_or_else(|| c.brain_deadline(), Duration::from_secs)
+                    })
+                    .sum()
+            },
+        ) + BRAIN_SLACK;
         self.triage_deadline = c.triage_deadline();
         self.card_debounce = c.card_debounce();
         self.takeover_stale = c.takeover_stale();

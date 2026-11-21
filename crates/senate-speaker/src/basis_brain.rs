@@ -51,8 +51,20 @@
 //! brief alone (the prompt holds all it needs; the log tools stay in reach
 //! but are not asked for). Every run is bounded by a deadline, a tool
 //! budget, and a token budget, and every basis failure becomes a
-//! [`BrainError`], on which the Speaker falls back to its fixed syntax (or,
-//! for a pick, to [`rule_pick`](crate::rule_pick)).
+//! [`BrainError`].
+//!
+//! **Tiers.** Every call runs on the committee's model tiers in order
+//! ([`ModelSettings::tiers`]): the model, the model once more, then the
+//! `[model] fallback` when one is configured; the first answer wins, each
+//! failed attempt and the tier that answered are logged. A quick call
+//! (triage, pick, crossing, offline) is bounded by the triage deadline as a
+//! whole, so a timeout leaves no room for another tier but a fast failure
+//! does. When every tier fails the Speaker falls back to its fixed syntax
+//! (or, for a pick, to [`rule_pick`](crate::rule_pick)); with no model at
+//! all the error is [`BrainError::NoModel`].
+//!
+//! **Self-check.** [`BasisBrain::check_model`] probes each model on the
+//! same code paths ([`probe`]).
 //!
 //! **Configuration per committee.** Everything a run is bounded by, the
 //! persona's bot name and language, the model, and this Senate's extra
@@ -75,12 +87,15 @@
 //! transcript in the server's memory for the life of the process.
 
 mod agent_tools;
+pub(crate) mod probe;
 pub(crate) mod prompt;
 mod tools;
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use basis::runtime::FileToolProfile;
@@ -90,14 +105,16 @@ use basis::{
 };
 use senate_core::{Brief, CommitteeId, Hub, Locale, TriagePayload};
 use tokio::sync::Mutex;
+use tracing::{info, warn};
 
 use crate::brain::{
     AgentTurn, Answer, Brain, BrainError, Conversation, Crossing, CrossingInput, Intent, Offline,
     OfflineInput, Pick, PickInput, Question, TriageInput, Utterance,
 };
 use crate::config::SpeakerConfig;
-use crate::secretary::{Effective, ModelSettings, SecretaryConfigs};
+use crate::secretary::{Effective, ModelSettings, SecretaryConfigs, Tier};
 use agent_tools::{Checkpoint, CommitteeBrief, CommitteeStatus, Presence, Tasks};
+pub use probe::{CheckResult, ModelReport, PROBE_DEADLINE, TierReport};
 use prompt::{AgentTurnWire, CrossingWire, IntentWire, OfflineWire, PickWire, TriageWire};
 use tools::{LogRead, LogSearch};
 
@@ -138,11 +155,9 @@ pub type RuntimeRecipe = Arc<dyn Fn() -> RuntimeBuilder + Send + Sync>;
 /// Speaker falls back to its fixed syntax) until its model changes.
 pub type ModelRecipe = Arc<dyn Fn(&ModelSettings) -> Result<RuntimeBuilder, String> + Send + Sync>;
 
-/// One committee's open workspace, and the model it was opened for.
-struct Opened {
-    connection: String,
-    workspace: Arc<Workspace>,
-}
+/// A committee's workspaces, one per model it runs on (its tiers'
+/// connections), by [`ModelSettings::connection_key`].
+type Opened = HashMap<String, Arc<Workspace>>;
 
 pub struct BasisBrain {
     hub: Arc<dyn Hub>,
@@ -216,30 +231,34 @@ impl BasisBrain {
         self.secretary.effective(committee)
     }
 
+    /// `committee`'s workspace on `model` (one of its tiers), opened on
+    /// first use. Workspaces on a model no tier names any more are closed.
     async fn workspace(
         &self,
         committee: Option<&CommitteeId>,
+        model: &ModelSettings,
     ) -> Result<Arc<Workspace>, BrainError> {
         let settings = self.settings(committee);
-        let Some(model) = settings.model.clone() else {
-            return Err(BrainError::Unavailable(
-                "no usable model is configured for this committee".into(),
-            ));
-        };
         let connection = model.connection_key();
         let key = committee.map_or_else(|| UNBOUND_WORKSPACE.to_owned(), ToString::to_string);
         let mut workspaces = self.workspaces.lock().await;
-        if let Some(opened) = workspaces.get(&key)
-            && opened.connection == connection
-        {
-            return Ok(Arc::clone(&opened.workspace));
+        let opened = workspaces.entry(key.clone()).or_default();
+        if let Some(workspace) = opened.get(&connection) {
+            return Ok(Arc::clone(workspace));
         }
-        // New, or its model changed: (re)open this committee's alone.
+        // New, or its model changed: drop what no tier runs on, open this.
+        let live: Vec<String> = settings
+            .model
+            .iter()
+            .flat_map(ModelSettings::tiers)
+            .map(|tier| tier.model.connection_key())
+            .collect();
+        opened.retain(|c, _| live.contains(c));
         let path = settings.speaker.speaker_dir().join(&key);
         tokio::fs::create_dir_all(&path).await.map_err(|e| {
             BrainError::Unavailable(format!("cannot create {}: {e}", path.display()))
         })?;
-        let runtime = (self.recipe)(&model)
+        let runtime = (self.recipe)(model)
             .map_err(BrainError::Unavailable)?
             .with_file_tools(FileToolProfile::None)
             .with_delegation_depth(0);
@@ -264,7 +283,8 @@ impl BasisBrain {
             ))
             .with_tool(Presence::new(Arc::clone(&self.hub), committee.cloned()))
             .with_tool(Tasks::new(Arc::clone(&self.hub), committee.cloned()))
-            .with_tool(Checkpoint::new(Arc::clone(&self.hub), committee.cloned()));
+            .with_tool(Checkpoint::new(Arc::clone(&self.hub), committee.cloned()))
+            .with_tool(probe::ProbeDigest);
         if let Some(model) = &model.model {
             builder = builder.with_model(ModelSelector::Id(model.clone()));
         }
@@ -274,13 +294,10 @@ impl BasisBrain {
                 .await
                 .map_err(|e| BrainError::Unavailable(format!("cannot open the workspace: {e}")))?,
         );
-        workspaces.insert(
-            key,
-            Opened {
-                connection,
-                workspace: Arc::clone(&workspace),
-            },
-        );
+        workspaces
+            .entry(key)
+            .or_default()
+            .insert(connection, Arc::clone(&workspace));
         Ok(workspace)
     }
 
@@ -299,25 +316,116 @@ impl BasisBrain {
         RunProfile::new().with_system_prompt(SystemPrompt::Replace(self.persona(committee, locale)))
     }
 
-    fn bounded(&self, spec: RunSpec, name: &str, committee: Option<&CommitteeId>) -> RunSpec {
-        let settings = self.settings(committee);
+    fn bounded(
+        &self,
+        spec: RunSpec,
+        name: &str,
+        committee: Option<&CommitteeId>,
+        model: &ModelSettings,
+    ) -> RunSpec {
+        let bounds = self.bounds(committee, model);
         spec.with_session_name(name)
-            .with_deadline(settings.speaker.brain_deadline())
+            .with_deadline(bounds.deadline)
             .with_tool_budget(TOOL_BUDGET)
-            .with_token_budget(settings.speaker.brain_token_budget)
+            .with_token_budget(bounds.tokens)
     }
 
     /// A typed turn with no tools but its answer, bounded by the triage
     /// deadline.
-    fn quick(&self, name: &str, committee: &CommitteeId, locale: Locale) -> RunSpec {
-        let settings = self.settings(Some(committee));
+    fn quick(
+        &self,
+        name: &str,
+        committee: &CommitteeId,
+        locale: Locale,
+        model: &ModelSettings,
+    ) -> RunSpec {
+        let bounds = self.bounds(Some(committee), model);
         RunSpec::default()
             .with_session_name(name)
-            .with_deadline(settings.speaker.triage_deadline())
+            .with_deadline(bounds.triage)
             .with_tool_budget(1)
-            .with_token_budget(settings.speaker.brain_token_budget)
+            .with_token_budget(bounds.tokens)
             .with_profile(self.speaking(Some(committee), locale))
     }
+
+    /// What one run on `model` is bounded by: its own keys, else the
+    /// committee's configuration.
+    fn bounds(&self, committee: Option<&CommitteeId>, model: &ModelSettings) -> Bounds {
+        let speaker = &self.settings(committee).speaker;
+        Bounds {
+            deadline: model
+                .deadline_secs
+                .map_or_else(|| speaker.brain_deadline(), Duration::from_secs),
+            triage: model
+                .triage_deadline_secs
+                .map_or_else(|| speaker.triage_deadline(), Duration::from_secs),
+            tokens: model.token_budget.unwrap_or(speaker.brain_token_budget),
+        }
+    }
+
+    /// `attempt` on each of `committee`'s tiers in order
+    /// ([`ModelSettings::tiers`]: the model, one retry, the fallback) until
+    /// one answers. A quick call (`within`: the triage deadline) is bounded
+    /// by it as a whole, so it never holds its committee longer; a fast
+    /// failure still leaves room for the next tier. Every failed attempt is
+    /// logged, and so is the tier that answered.
+    async fn tiered<T, F, Fut>(
+        &self,
+        call: &'static str,
+        committee: Option<&CommitteeId>,
+        within: Option<Duration>,
+        attempt: F,
+    ) -> Result<T, BrainError>
+    where
+        F: Fn(Tier) -> Fut,
+        Fut: Future<Output = Result<T, BrainError>>,
+    {
+        let Some(model) = self.settings(committee).model.clone() else {
+            return Err(BrainError::NoModel);
+        };
+        let started = Instant::now();
+        let tiers = model.tiers();
+        let mut failure = None;
+        for tier in tiers {
+            let label = tier.label;
+            let model_id = tier.model.model.clone().unwrap_or_default();
+            let result = match within.map(|w| w.saturating_sub(started.elapsed())) {
+                Some(left) if left.is_zero() => break,
+                Some(left) => tokio::time::timeout(left, attempt(tier))
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(BrainError::Unavailable(format!(
+                            "no result within {} s",
+                            within.unwrap_or_default().as_secs()
+                        )))
+                    }),
+                None => attempt(tier).await,
+            };
+            match result {
+                Ok(value) => {
+                    info!(call, tier = label, model = %model_id, committee = ?committee.map(CommitteeId::as_str), "the brain answered");
+                    return Ok(value);
+                }
+                Err(error) => {
+                    warn!(call, tier = label, model = %model_id, committee = ?committee.map(CommitteeId::as_str), %error, "a brain attempt failed");
+                    failure = Some(error);
+                }
+            }
+        }
+        Err(failure.unwrap_or_else(|| {
+            BrainError::Unavailable(format!(
+                "no result within {} s",
+                within.unwrap_or_default().as_secs()
+            ))
+        }))
+    }
+}
+
+/// What one run is bounded by.
+struct Bounds {
+    deadline: Duration,
+    triage: Duration,
+    tokens: u64,
 }
 
 /// The runtime for `settings` on basis: the provider, endpoint and key it
@@ -352,21 +460,26 @@ pub fn basis_runtime(
     Ok(builder)
 }
 
-#[async_trait]
-impl Brain for BasisBrain {
-    async fn interpret(&self, utterance: Utterance) -> Result<Intent, BrainError> {
+/// One attempt of each call, on one tier's model. The probe
+/// ([`BasisBrain::check_model`]) runs these same functions.
+impl BasisBrain {
+    pub(crate) async fn interpret_on(
+        &self,
+        model: &ModelSettings,
+        utterance: &Utterance,
+    ) -> Result<Intent, BrainError> {
         let work = utterance.work;
         let committee = utterance.committee.as_ref();
-        let workspace = self.workspace(committee).await?;
+        let workspace = self.workspace(committee, model).await?;
         let spec = self
-            .bounded(RunSpec::default(), "speaker-interpret", committee)
+            .bounded(RunSpec::default(), "speaker-interpret", committee, model)
             .with_profile(self.speaking(committee, utterance.locale));
         let mut run = workspace
             .prepare(spec)
             .map_err(|e| BrainError::Unavailable(e.to_string()))?;
         let output = run
             .output::<IntentWire, _, _>(
-                prompt::interpret(&utterance),
+                prompt::interpret(utterance),
                 prompt::intent_spec(utterance.work),
                 NullSink,
                 AllowAll,
@@ -376,15 +489,20 @@ impl Brain for BasisBrain {
         output.value.into_intent(work)
     }
 
-    async fn answer_on_behalf(&self, question: Question) -> Result<Answer, BrainError> {
+    async fn answer_on(
+        &self,
+        model: &ModelSettings,
+        question: &Question,
+    ) -> Result<Answer, BrainError> {
         let takeover = question.takeover.is_some();
         let committee = Some(&question.committee);
-        let workspace = self.workspace(committee).await?;
+        let workspace = self.workspace(committee, model).await?;
         let spec = self
             .bounded(
-                RunSpec::new(prompt::answer(&question)),
+                RunSpec::new(prompt::answer(question)),
                 "speaker-answer",
                 committee,
+                model,
             )
             .with_profile(self.speaking(committee, question.locale));
         let mut run = workspace
@@ -402,14 +520,20 @@ impl Brain for BasisBrain {
         })
     }
 
-    async fn brief_top(&self, brief: &Brief, locale: Locale) -> Result<String, BrainError> {
+    async fn brief_top_on(
+        &self,
+        model: &ModelSettings,
+        brief: &Brief,
+        locale: Locale,
+    ) -> Result<String, BrainError> {
         let committee = Some(&brief.committee);
-        let workspace = self.workspace(committee).await?;
+        let workspace = self.workspace(committee, model).await?;
         let spec = self
             .bounded(
                 RunSpec::new(prompt::brief_top(brief, locale)),
                 "speaker-brief-top",
                 committee,
+                model,
             )
             .with_profile(self.speaking(committee, locale));
         let mut run = workspace
@@ -422,15 +546,19 @@ impl Brain for BasisBrain {
         final_text(report)
     }
 
-    async fn triage(&self, input: TriageInput) -> Result<TriagePayload, BrainError> {
-        let workspace = self.workspace(Some(&input.committee)).await?;
-        let spec = self.quick("speaker-triage", &input.committee, input.locale);
+    pub(crate) async fn triage_on(
+        &self,
+        model: &ModelSettings,
+        input: &TriageInput,
+    ) -> Result<TriagePayload, BrainError> {
+        let workspace = self.workspace(Some(&input.committee), model).await?;
+        let spec = self.quick("speaker-triage", &input.committee, input.locale, model);
         let mut run = workspace
             .prepare(spec)
             .map_err(|e| BrainError::Unavailable(e.to_string()))?;
         let output = run
             .output::<TriageWire, _, _>(
-                prompt::triage(&input),
+                prompt::triage(input),
                 prompt::triage_spec(),
                 NullSink,
                 AllowAll,
@@ -440,11 +568,15 @@ impl Brain for BasisBrain {
         output.value.into_payload()
     }
 
-    async fn converse(&self, conversation: Conversation) -> Result<AgentTurn, BrainError> {
+    async fn converse_on(
+        &self,
+        model: &ModelSettings,
+        conversation: &Conversation,
+    ) -> Result<AgentTurn, BrainError> {
         let committee = conversation.utterance.committee.clone();
         let settings = self.settings(committee.as_ref());
         let max_actions = settings.speaker.agent_max_actions;
-        let workspace = self.workspace(committee.as_ref()).await?;
+        let workspace = self.workspace(committee.as_ref(), model).await?;
         let profile = RunProfile::new()
             .with_tool_roster(ToolRoster::only(AGENT_TOOLS))
             .with_system_prompt(SystemPrompt::Replace(prompt::with_instructions(
@@ -457,7 +589,12 @@ impl Brain for BasisBrain {
                 settings.instructions.as_deref(),
             )));
         let spec = self
-            .bounded(RunSpec::default(), "speaker-converse", committee.as_ref())
+            .bounded(
+                RunSpec::default(),
+                "speaker-converse",
+                committee.as_ref(),
+                model,
+            )
             .with_tool_budget(AGENT_TOOL_BUDGET)
             .with_profile(profile);
         let mut run = workspace
@@ -465,7 +602,7 @@ impl Brain for BasisBrain {
             .map_err(|e| BrainError::Unavailable(e.to_string()))?;
         let output = run
             .output::<AgentTurnWire, _, _>(
-                prompt::converse(&conversation, max_actions),
+                prompt::converse(conversation, max_actions),
                 prompt::agent_turn_spec(max_actions, conversation.utterance.work),
                 NullSink,
                 AllowAll,
@@ -475,18 +612,19 @@ impl Brain for BasisBrain {
         output.value.into_turn(conversation.utterance.work)
     }
 
-    async fn pick_agent(&self, input: PickInput) -> Result<Pick, BrainError> {
-        if input.candidates.is_empty() {
-            return Ok(Pick::Ask);
-        }
-        let workspace = self.workspace(Some(&input.committee)).await?;
-        let spec = self.quick("speaker-pick", &input.committee, input.locale);
+    pub(crate) async fn pick_on(
+        &self,
+        model: &ModelSettings,
+        input: &PickInput,
+    ) -> Result<Pick, BrainError> {
+        let workspace = self.workspace(Some(&input.committee), model).await?;
+        let spec = self.quick("speaker-pick", &input.committee, input.locale, model);
         let mut run = workspace
             .prepare(spec)
             .map_err(|e| BrainError::Unavailable(e.to_string()))?;
         let output = run
             .output::<PickWire, _, _>(
-                prompt::pick(&input, chrono::Utc::now()),
+                prompt::pick(input, chrono::Utc::now()),
                 prompt::pick_spec(),
                 NullSink,
                 AllowAll,
@@ -496,15 +634,19 @@ impl Brain for BasisBrain {
         Ok(output.value.into_pick(&input.candidates))
     }
 
-    async fn decide_crossing(&self, input: CrossingInput) -> Result<Crossing, BrainError> {
-        let workspace = self.workspace(Some(&input.committee)).await?;
-        let spec = self.quick("speaker-crossing", &input.committee, input.locale);
+    async fn crossing_on(
+        &self,
+        model: &ModelSettings,
+        input: &CrossingInput,
+    ) -> Result<Crossing, BrainError> {
+        let workspace = self.workspace(Some(&input.committee), model).await?;
+        let spec = self.quick("speaker-crossing", &input.committee, input.locale, model);
         let mut run = workspace
             .prepare(spec)
             .map_err(|e| BrainError::Unavailable(e.to_string()))?;
         let output = run
             .output::<CrossingWire, _, _>(
-                prompt::crossing(&input),
+                prompt::crossing(input),
                 prompt::crossing_spec(),
                 NullSink,
                 AllowAll,
@@ -514,15 +656,19 @@ impl Brain for BasisBrain {
         output.value.into_crossing()
     }
 
-    async fn decide_offline(&self, input: OfflineInput) -> Result<Offline, BrainError> {
-        let workspace = self.workspace(Some(&input.committee)).await?;
-        let spec = self.quick("speaker-offline", &input.committee, input.locale);
+    async fn offline_on(
+        &self,
+        model: &ModelSettings,
+        input: &OfflineInput,
+    ) -> Result<Offline, BrainError> {
+        let workspace = self.workspace(Some(&input.committee), model).await?;
+        let spec = self.quick("speaker-offline", &input.committee, input.locale, model);
         let mut run = workspace
             .prepare(spec)
             .map_err(|e| BrainError::Unavailable(e.to_string()))?;
         let output = run
             .output::<OfflineWire, _, _>(
-                prompt::offline(&input, chrono::Utc::now()),
+                prompt::offline(input, chrono::Utc::now()),
                 prompt::offline_spec(),
                 NullSink,
                 AllowAll,
@@ -530,6 +676,89 @@ impl Brain for BasisBrain {
             .await
             .map_err(|failure| BrainError::Unavailable(failure.error.to_string()))?;
         output.value.into_offline()
+    }
+
+    /// The triage deadline of `committee`: what a quick call's tiers share.
+    fn quick_within(&self, committee: &CommitteeId) -> Option<Duration> {
+        Some(self.settings(Some(committee)).speaker.triage_deadline())
+    }
+}
+
+#[async_trait]
+impl Brain for BasisBrain {
+    async fn interpret(&self, utterance: Utterance) -> Result<Intent, BrainError> {
+        let committee = utterance.committee.clone();
+        self.tiered("interpret", committee.as_ref(), None, |tier| {
+            let utterance = &utterance;
+            async move { self.interpret_on(&tier.model, utterance).await }
+        })
+        .await
+    }
+
+    async fn answer_on_behalf(&self, question: Question) -> Result<Answer, BrainError> {
+        self.tiered("answer", Some(&question.committee), None, |tier| {
+            let question = &question;
+            async move { self.answer_on(&tier.model, question).await }
+        })
+        .await
+    }
+
+    async fn brief_top(&self, brief: &Brief, locale: Locale) -> Result<String, BrainError> {
+        self.tiered(
+            "brief_top",
+            Some(&brief.committee),
+            None,
+            |tier| async move { self.brief_top_on(&tier.model, brief, locale).await },
+        )
+        .await
+    }
+
+    async fn triage(&self, input: TriageInput) -> Result<TriagePayload, BrainError> {
+        let within = self.quick_within(&input.committee);
+        self.tiered("triage", Some(&input.committee), within, |tier| {
+            let input = &input;
+            async move { self.triage_on(&tier.model, input).await }
+        })
+        .await
+    }
+
+    async fn converse(&self, conversation: Conversation) -> Result<AgentTurn, BrainError> {
+        let committee = conversation.utterance.committee.clone();
+        self.tiered("converse", committee.as_ref(), None, |tier| {
+            let conversation = &conversation;
+            async move { self.converse_on(&tier.model, conversation).await }
+        })
+        .await
+    }
+
+    async fn pick_agent(&self, input: PickInput) -> Result<Pick, BrainError> {
+        if input.candidates.is_empty() {
+            return Ok(Pick::Ask);
+        }
+        let within = self.quick_within(&input.committee);
+        self.tiered("pick", Some(&input.committee), within, |tier| {
+            let input = &input;
+            async move { self.pick_on(&tier.model, input).await }
+        })
+        .await
+    }
+
+    async fn decide_crossing(&self, input: CrossingInput) -> Result<Crossing, BrainError> {
+        let within = self.quick_within(&input.committee);
+        self.tiered("crossing", Some(&input.committee), within, |tier| {
+            let input = &input;
+            async move { self.crossing_on(&tier.model, input).await }
+        })
+        .await
+    }
+
+    async fn decide_offline(&self, input: OfflineInput) -> Result<Offline, BrainError> {
+        let within = self.quick_within(&input.committee);
+        self.tiered("offline", Some(&input.committee), within, |tier| {
+            let input = &input;
+            async move { self.offline_on(&tier.model, input).await }
+        })
+        .await
     }
 }
 
