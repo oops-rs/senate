@@ -32,6 +32,18 @@
 //! token_budget = 80000
 //! ```
 //!
+//! An OpenAI-compatible gateway is reached by `base_url`, spoken to in
+//! Chat Completions unless `wire = "responses"` says it serves OpenAI's
+//! `v1/responses` (as LiteLLM does for OpenAI models):
+//!
+//! ```toml
+//! [model]
+//! base_url = "https://gateway.example.com/v1"
+//! model = "gpt-6.1"
+//! api_key_env = "GATEWAY_API_KEY"
+//! wire = "responses"
+//! ```
+//!
 //! Any other top-level section is left for a private layer to read from
 //! [`ServerConfig::extra`]; the `senated` binary warns about it.
 //!

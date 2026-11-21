@@ -141,6 +141,7 @@ token_sha256 = "5b88a3d16b92cd96dd5a2cf692e1c84fc3df64bbc2a56df44877f33b980b60ea
 # api_key_env = "ANTHROPIC_API_KEY"
 # # An OpenAI-compatible endpoint, for a gateway.
 # # base_url = "http://model-gateway.internal:4000"
+# # wire = "responses"   # only with base_url: the gateway serves OpenAI's v1/responses (default "chat_completions")
 # deadline_secs = 45
 # triage_deadline_secs = 5
 # token_budget = 80000

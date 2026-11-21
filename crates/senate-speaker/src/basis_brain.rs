@@ -338,6 +338,9 @@ pub fn basis_runtime(
     }
     if let Some(url) = &settings.base_url {
         builder = builder.with_base_url(url.clone());
+        if let Some(wire) = &settings.wire {
+            builder = builder.with_wire(crate::secretary::wire_of(wire)?);
+        }
     }
     if let Some(var) = &settings.api_key_env {
         let key = std::env::var(var)

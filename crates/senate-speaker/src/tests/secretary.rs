@@ -532,3 +532,53 @@ fn check_all_finds_a_broken_committee_file_nobody_has_acted_on() {
     home.write("refund-v2.secretary.toml", "answer_fallback_secs = 10\n");
     assert!(configs.check_all().is_empty());
 }
+
+/// `wire` names how a `base_url` is spoken to: two values, and only with a
+/// base URL; it layers like every other key and is part of the connection.
+#[test]
+fn a_model_wire_is_checked_layered_and_keyed() {
+    let gateway = ModelSettings {
+        base_url: Some("https://gateway.example.com/v1".into()),
+        model: Some("gpt-6.1".into()),
+        wire: Some("responses".into()),
+        ..ModelSettings::default()
+    };
+    assert_eq!(gateway.check_basis(), Ok(()));
+    assert_eq!(
+        crate::secretary::wire_of("responses"),
+        Ok(basis::runtime::Wire::Responses)
+    );
+    assert_eq!(
+        crate::secretary::wire_of("chat_completions"),
+        Ok(basis::runtime::Wire::ChatCompletions)
+    );
+
+    let wrong = ModelSettings {
+        wire: Some("grpc".into()),
+        ..gateway.clone()
+    };
+    assert!(wrong.check_basis().unwrap_err().contains("is not one of"));
+
+    let no_url = ModelSettings {
+        provider: Some("openai".into()),
+        wire: Some("responses".into()),
+        ..ModelSettings::default()
+    };
+    assert!(
+        no_url
+            .check_basis()
+            .unwrap_err()
+            .contains("needs a base_url")
+    );
+
+    let above = ModelSettings {
+        model: Some("gpt-6.1-sol".into()),
+        ..ModelSettings::default()
+    };
+    assert_eq!(above.over(&gateway).wire.as_deref(), Some("responses"));
+    let chat = ModelSettings {
+        wire: Some("chat_completions".into()),
+        ..gateway.clone()
+    };
+    assert_ne!(chat.connection_key(), gateway.connection_key());
+}

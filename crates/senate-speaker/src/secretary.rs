@@ -147,6 +147,12 @@ pub struct ModelSettings {
     /// An OpenAI-compatible endpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+    /// The request format the endpoint at `base_url` speaks:
+    /// `chat_completions` (the default) or `responses` (OpenAI's
+    /// `v1/responses`, as some gateways such as LiteLLM serve it). Only
+    /// with `base_url`: a provider preset carries its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire: Option<String>,
     /// Wall-clock bound on one run (`[speaker] brain_deadline_secs`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline_secs: Option<u64>,
@@ -172,6 +178,7 @@ impl ModelSettings {
             model: pick(&self.model, &below.model),
             api_key_env: pick(&self.api_key_env, &below.api_key_env),
             base_url: pick(&self.base_url, &below.base_url),
+            wire: pick(&self.wire, &below.wire),
             deadline_secs: pick(&self.deadline_secs, &below.deadline_secs),
             triage_deadline_secs: pick(&self.triage_deadline_secs, &below.triage_deadline_secs),
             token_budget: pick(&self.token_budget, &below.token_budget),
@@ -182,8 +189,8 @@ impl ModelSettings {
     /// share one client.
     pub fn connection_key(&self) -> String {
         format!(
-            "{:?}|{:?}|{:?}|{:?}",
-            self.provider, self.model, self.api_key_env, self.base_url
+            "{:?}|{:?}|{:?}|{:?}|{:?}",
+            self.provider, self.model, self.api_key_env, self.base_url, self.wire
         )
     }
 
@@ -199,6 +206,14 @@ impl ModelSettings {
         }
         if let Some(url) = &self.base_url {
             basis::provider::normalize_base_url(url).map_err(|e| e.to_string())?;
+        }
+        if let Some(wire) = &self.wire {
+            wire_of(wire)?;
+            if self.base_url.is_none() {
+                return Err(format!(
+                    "wire = {wire:?} needs a base_url: a provider preset speaks its own wire"
+                ));
+            }
         }
         if let Some(var) = &self.api_key_env {
             if var.trim().is_empty() {
@@ -255,6 +270,9 @@ impl ModelSettings {
         if let Some(v) = &self.base_url {
             out.push(("base_url", quoted(&without_credentials(v)), None));
         }
+        if let Some(v) = &self.wire {
+            out.push(("wire", quoted(v), None));
+        }
         if let Some(v) = self.deadline_secs {
             out.push(("deadline_secs", v.to_string(), None));
         }
@@ -265,6 +283,17 @@ impl ModelSettings {
             out.push(("token_budget", v.to_string(), None));
         }
         out
+    }
+}
+
+/// The basis wire `wire` names: `chat_completions` or `responses`.
+pub fn wire_of(wire: &str) -> Result<basis::runtime::Wire, String> {
+    match wire.trim() {
+        "chat_completions" => Ok(basis::runtime::Wire::ChatCompletions),
+        "responses" => Ok(basis::runtime::Wire::Responses),
+        other => Err(format!(
+            "wire = {other:?} is not one of \"chat_completions\", \"responses\""
+        )),
     }
 }
 
