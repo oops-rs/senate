@@ -2242,7 +2242,7 @@ dependencies = [
 
 [[package]]
 name = "senate-app-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "senate-bridge",
@@ -2259,7 +2259,7 @@ dependencies = [
 
 [[package]]
 name = "senate-bridge"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2296,7 +2296,7 @@ dependencies = [
 
 [[package]]
 name = "senate-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2309,7 +2309,7 @@ dependencies = [
 
 [[package]]
 name = "senate-e2e"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "ractor",
@@ -2330,7 +2330,7 @@ dependencies = [
 
 [[package]]
 name = "senate-log"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2347,7 +2347,7 @@ dependencies = [
 
 [[package]]
 name = "senate-server"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2374,7 +2374,7 @@ dependencies = [
 
 [[package]]
 name = "senate-speaker"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "basis",
@@ -2395,7 +2395,7 @@ dependencies = [
 
 [[package]]
 name = "senate-work"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "senate-core",
@@ -2410,7 +2410,7 @@ dependencies = [
 
 [[package]]
 name = "senated"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
