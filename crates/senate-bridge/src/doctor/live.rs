@@ -11,6 +11,7 @@ use senate_core::{CommitteeId, Locale, Seq};
 use super::{Check, SERVICE_INSTALL};
 use crate::client::ApiClient;
 use crate::config::Hosted;
+use crate::delivery::codex::{AppServer, CodexConfig, DAEMON_BOOTSTRAP, Transport};
 use crate::ipc::{self, Registration, Request, SessionsReply, StatusReply, UplinkStatus};
 use crate::paths::HOSTED_KEY;
 use crate::state::Store;
@@ -54,6 +55,53 @@ pub struct Live {
     pub ahead: Vec<(CommitteeId, Seq)>,
     /// The saved worktree bindings.
     pub bindings: Vec<binding::Row>,
+    /// Whether the Codex app-server answered: `None` when there is no
+    /// Codex to ask (no `codex` and no `codex.listen`).
+    pub codex: Option<Result<(), CodexProbe>>,
+}
+
+/// Why the Codex app-server did not answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodexProbe {
+    /// Its daemon is not running; the text says how to start it.
+    /// `managed`: the managed daemon (no `codex.listen`), which
+    /// `codex app-server daemon bootstrap` starts and keeps running.
+    Down { text: String, managed: bool },
+    /// Something else went wrong.
+    Failed(String),
+}
+
+/// Connect to the Codex app-server and `initialize`, if there is one to ask.
+async fn probe_codex(paths: &Paths) -> Option<Result<(), CodexProbe>> {
+    let config = CodexConfig::load(&paths.config()).ok()?;
+    let transport = config.transport().ok()?;
+    if let Transport::Proxy { program } = &transport {
+        let found = if program.is_absolute() {
+            program.is_file()
+        } else {
+            program
+                .to_str()
+                .and_then(crate::install::find_on_path)
+                .is_some()
+        };
+        if !found {
+            return None;
+        }
+    }
+    Some(
+        match tokio::time::timeout(ASK, AppServer::connect(&transport)).await {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(e)) if e.is_daemon_down() => Err(CodexProbe::Down {
+                text: e.to_string(),
+                managed: matches!(transport, Transport::Proxy { .. }),
+            }),
+            Ok(Err(e)) => Err(CodexProbe::Failed(e.to_string())),
+            Err(_) => Err(CodexProbe::Failed(format!(
+                "{transport}: no answer in {}s",
+                ASK.as_secs()
+            ))),
+        },
+    )
 }
 
 async fn probe(url: &str, token: &str) -> Probe {
@@ -113,6 +161,7 @@ pub async fn gather(paths: &Paths) -> Live {
         epoch: None,
         ahead: Vec::new(),
         bindings: binding::list(paths),
+        codex: probe_codex(paths).await,
     };
     let config = match BridgeConfig::load_unchecked(&paths.config()) {
         Ok(config) => config,
@@ -296,6 +345,9 @@ pub fn live(live: &Live, l: Locale) -> Vec<Check> {
     if let Some(sessions) = &live.sessions {
         checks.extend(session_checks(sessions, l));
     }
+    if let Some(codex) = &live.codex {
+        checks.push(codex_check(codex, l));
+    }
     if let Some(parent) = &live.parent {
         checks.push(reach("uplink.parent", parent, l));
         checks.push(registration_check(live.registration.as_ref(), l));
@@ -355,6 +407,32 @@ fn session_checks(sessions: &SessionsReply, l: Locale) -> Vec<Check> {
         ));
     }
     checks
+}
+
+/// Hosted Codex sessions start and resume through the app-server daemon.
+fn codex_check(codex: &Result<(), CodexProbe>, l: Locale) -> Check {
+    match codex {
+        Ok(()) => Check::ok(
+            "codex.app_server",
+            l.pick("Codex app-server 有回应", "the Codex app-server answers"),
+        ),
+        Err(CodexProbe::Down { text, managed }) => Check::fail(
+            "codex.app_server",
+            l.pick(
+                format!("Codex app-server 没有运行，托管的 Codex 无法启动或恢复：{text}"),
+                format!("hosted Codex sessions cannot start or restore: {text}"),
+            ),
+            managed.then_some(DAEMON_BOOTSTRAP),
+        ),
+        Err(CodexProbe::Failed(e)) => Check::warn(
+            "codex.app_server",
+            l.pick(
+                format!("Codex app-server 没有正常回应：{e}"),
+                format!("the Codex app-server did not answer properly: {e}"),
+            ),
+            None::<String>,
+        ),
+    }
 }
 
 fn registration_check(status: Option<&UplinkStatus>, l: Locale) -> Check {

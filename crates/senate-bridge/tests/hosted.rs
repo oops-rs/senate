@@ -3601,3 +3601,46 @@ async fn an_idle_hosted_agy_is_nudged_once_per_turn_and_never_over_a_person_typi
     );
     h.stop().await;
 }
+
+/// With no Codex app-server running, spawning a hosted Codex says that,
+/// and how to start one, instead of a raw socket error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_codex_spawn_without_an_app_server_says_the_daemon_is_not_running() {
+    let mut h = Harness::new().await;
+    h.dir = tempfile::tempdir_in("/tmp").unwrap();
+    h.paths = senate_bridge::Paths::new(h.dir.path().join("senate"));
+    h.paths.ensure_home().unwrap();
+    std::fs::write(
+        h.paths.config(),
+        format!(
+            "[codex]\nlisten = \"unix://{}\"\n",
+            h.dir.path().join("codex.sock").display()
+        ),
+    )
+    .unwrap();
+    h.config.committees.push(committee());
+    let project = h.workdir("codex-down", None);
+    start(&mut h).await;
+    let request = Request::Spawn {
+        session: Default::default(),
+        runtime: HostedRuntime::Codex,
+        committee: committee(),
+        alias: None,
+        cwd: project,
+        chair: false,
+        prompt: None,
+        model: Default::default(),
+    };
+    let error = ipc::request::<SpawnReply>(&h.socket(), &request, TIMEOUT, TIMEOUT)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("no Codex app-server is listening")
+            && error.contains("codex app-server daemon bootstrap"),
+        "{error}"
+    );
+    assert!(!error.contains("WebSocket"), "{error}");
+    assert!(h.store().all_sessions().unwrap().is_empty());
+    h.stop().await;
+}

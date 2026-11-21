@@ -156,7 +156,7 @@ async fn unloaded_and_unknown_threads_are_not_loaded() {
 }
 
 #[tokio::test]
-async fn no_app_server_is_a_connect_error() {
+async fn no_app_server_says_the_daemon_is_not_running() {
     let dir = tempfile::tempdir().unwrap();
     let err = push_once(
         &Transport::Unix(dir.path().join("nobody.sock")),
@@ -166,7 +166,8 @@ async fn no_app_server_is_a_connect_error() {
     )
     .await
     .unwrap_err();
-    assert!(matches!(err, CodexError::Connect { .. }), "{err}");
+    assert!(err.is_daemon_down(), "{err}");
+    assert!(err.to_string().contains("nobody.sock"), "{err}");
     let Some(down) = fake_codex_bin(dir.path(), None) else {
         eprintln!("skipping the proxy half: no nc on this machine");
         return;
@@ -174,6 +175,25 @@ async fn no_app_server_is_a_connect_error() {
     let err = push_once(&Transport::Proxy { program: down }, "t1", "x", PUSH)
         .await
         .unwrap_err();
+    assert!(err.is_daemon_down(), "{err}");
+    let text = err.to_string();
+    assert!(
+        text.contains("daemon is not running")
+            && text.contains("codex app-server daemon start")
+            && text.contains("codex app-server daemon bootstrap"),
+        "{text}"
+    );
+    // A codex that is not there at all is not a daemon that is down.
+    let err = push_once(
+        &Transport::Proxy {
+            program: dir.path().join("no-codex"),
+        },
+        "t1",
+        "x",
+        PUSH,
+    )
+    .await
+    .unwrap_err();
     assert!(matches!(err, CodexError::Connect { .. }), "{err}");
 }
 

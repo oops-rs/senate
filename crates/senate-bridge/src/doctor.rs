@@ -28,7 +28,7 @@ mod leftovers;
 mod live;
 mod wsl;
 
-pub use live::{Live, Probe, gather, live};
+pub use live::{CodexProbe, Live, Probe, gather, live};
 pub use wsl::Wsl;
 
 /// The command that brings the registrations up to date.

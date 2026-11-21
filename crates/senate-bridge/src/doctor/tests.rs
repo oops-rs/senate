@@ -518,7 +518,42 @@ fn healthy() -> Live {
             row("/w/a", "senate", None),
             row("/w/old", "gone", Some("branch gone")),
         ],
+        codex: None,
     }
+}
+
+#[test]
+fn a_codex_app_server_that_is_down_names_the_daemon_command() {
+    let mut machine = healthy();
+    machine.codex = Some(Ok(()));
+    let checks = live(&machine, EN);
+    assert_eq!(by_id(&checks, "codex.app_server").status, Status::Ok);
+
+    machine.codex = Some(Err(CodexProbe::Down {
+        text: "the Codex app-server daemon is not running".into(),
+        managed: true,
+    }));
+    let checks = live(&machine, EN);
+    let codex = by_id(&checks, "codex.app_server");
+    assert_eq!(codex.status, Status::Fail);
+    assert!(codex.found.contains("cannot start or restore"), "{codex:?}");
+    assert_eq!(
+        codex.fix.as_deref(),
+        Some("codex app-server daemon bootstrap")
+    );
+
+    // A socket of the person's own: there is no managed daemon to start.
+    machine.codex = Some(Err(CodexProbe::Down {
+        text: "no Codex app-server is listening on /s".into(),
+        managed: false,
+    }));
+    assert_eq!(by_id(&live(&machine, EN), "codex.app_server").fix, None);
+
+    machine.codex = Some(Err(CodexProbe::Failed("odd".into())));
+    assert_eq!(
+        by_id(&live(&machine, EN), "codex.app_server").status,
+        Status::Warn
+    );
 }
 
 #[test]

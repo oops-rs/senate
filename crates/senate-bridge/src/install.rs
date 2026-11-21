@@ -189,7 +189,7 @@ fn find_in(path: &str, name: &str) -> Option<PathBuf> {
 }
 
 /// `name` on `$PATH`; in WSL, never a Windows program ([`crate::wsl`]).
-fn find_on_path(name: &str) -> Option<PathBuf> {
+pub(crate) fn find_on_path(name: &str) -> Option<PathBuf> {
     let path = crate::wsl::setup_path(std::env::var("PATH").ok())?;
     find_in(&path, name)
 }

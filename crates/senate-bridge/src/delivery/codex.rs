@@ -152,6 +152,10 @@ impl std::fmt::Display for Transport {
 pub enum CodexError {
     #[error("cannot reach the Codex app-server ({transport}): {reason}")]
     Connect { transport: String, reason: String },
+    /// Nothing answers where the app-server should be: its daemon is not
+    /// running. Said plainly, with the command that starts it.
+    #[error("{}", daemon_down(.transport))]
+    DaemonDown { transport: Transport },
     #[error("Codex app-server connection: {0}")]
     Io(#[from] std::io::Error),
     #[error("Codex app-server connection: {0}")]
@@ -170,7 +174,31 @@ pub enum CodexError {
     Timeout,
 }
 
+/// The commands that start the managed app-server daemon.
+pub const DAEMON_START: &str = "codex app-server daemon start";
+pub const DAEMON_BOOTSTRAP: &str = "codex app-server daemon bootstrap";
+
+fn daemon_down(transport: &Transport) -> String {
+    match transport {
+        Transport::Proxy { .. } => format!(
+            "the Codex app-server daemon is not running. Start it with `{DAEMON_START}`, \
+             or `{DAEMON_BOOTSTRAP}` to keep it running"
+        ),
+        Transport::Unix(path) => format!(
+            "no Codex app-server is listening on {} (codex.listen in senate.toml). Start the \
+             app-server there, or remove codex.listen and use the managed daemon \
+             (`{DAEMON_BOOTSTRAP}`)",
+            path.display()
+        ),
+    }
+}
+
 impl CodexError {
+    /// Whether this says the app-server is not running at all.
+    pub fn is_daemon_down(&self) -> bool {
+        matches!(self, Self::DaemonDown { .. })
+    }
+
     fn from_rpc(method: &str, thread: &str, error: &Value) -> Self {
         let code = error.get("code").and_then(Value::as_i64).unwrap_or(0);
         let message = error
@@ -246,11 +274,21 @@ impl AppServer {
             transport: transport.to_string(),
             reason,
         };
+        let down = || CodexError::DaemonDown {
+            transport: transport.clone(),
+        };
         let (ws, child) = match transport {
             Transport::Unix(path) => {
-                let stream = tokio::net::UnixStream::connect(path)
-                    .await
-                    .map_err(|e| connect_error(e.to_string()))?;
+                let stream = tokio::net::UnixStream::connect(path).await.map_err(|e| {
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                    ) {
+                        down()
+                    } else {
+                        connect_error(e.to_string())
+                    }
+                })?;
                 let ws = WebSocket::handshake(Box::new(stream))
                     .await
                     .map_err(|e| connect_error(e.to_string()))?;
@@ -269,10 +307,19 @@ impl AppServer {
                     return Err(connect_error("the proxy has no stdio".into()));
                 };
                 // With no daemon running, the proxy exits and the upgrade
-                // reads end of file.
+                // reads end of file (or its stdin is already closed).
                 let ws = WebSocket::handshake(Box::new(tokio::io::join(stdout, stdin)))
                     .await
-                    .map_err(|e| connect_error(e.to_string()))?;
+                    .map_err(|e| {
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::BrokenPipe
+                        ) {
+                            down()
+                        } else {
+                            connect_error(e.to_string())
+                        }
+                    })?;
                 (ws, Some(child))
             }
         };
