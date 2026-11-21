@@ -2551,6 +2551,7 @@ impl Engine {
                         group,
                         context: self.context(&chat.committee, chat.seq).await?,
                         roster: self.roster.clone(),
+                        seats: self.committee_seats(&chat.committee).await,
                         locale: l,
                     };
                     if self.mode == SpeakerMode::Agent {
@@ -3312,6 +3313,7 @@ impl Engine {
                     group: mention_group(&mention),
                     context: Vec::new(),
                     roster: self.roster.clone(),
+                    seats: Vec::new(),
                     locale: l,
                 };
                 if self.mode == SpeakerMode::Agent {

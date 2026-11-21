@@ -45,8 +45,26 @@ pub struct Utterance {
     /// the agents seated under each, so "alice's agent" can become the
     /// handle `alice` and "alice's codex" the agent `codex`.
     pub roster: Roster,
+    /// Every seat on the committee, here and in child Senates, with its
+    /// duty: whom an unaddressed question can be relayed to by duty. Empty
+    /// in a group bound to no committee.
+    pub seats: Vec<CommitteeSeat>,
     /// The language to reply in.
     pub locale: Locale,
+}
+
+/// One seat on the acting committee, as a relay can reach it: an agent of
+/// this Senate, or a seat a child Senate declares on the committee.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitteeSeat {
+    /// How a relay names it: the agent's own name (`codex`) here, or
+    /// `<child>::<senator>` for a child's seat.
+    pub target: String,
+    /// What it does on the committee ([`senate_core::duty`]), when set.
+    pub duty: Option<String>,
+    /// It can be reached now: the agent is connected here, or the child is
+    /// online and declares the seat online.
+    pub online: bool,
 }
 
 /// A directed question the Speaker must answer for an absent agent.

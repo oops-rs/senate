@@ -229,6 +229,7 @@ fn utterance(fixture: &Fixture, text: &str) -> Utterance {
         group: group(),
         context: fixture.log.clone(),
         roster: roster(),
+        seats: Vec::new(),
         locale: Locale::Zh,
     }
 }
@@ -433,6 +434,7 @@ async fn the_roster_lists_each_persons_seated_agents() {
         .brain
         .interpret(Utterance {
             roster: seated,
+            seats: Vec::new(),
             ..utterance(&fixture, "告诉 alice 的 codex 先 rebase")
         })
         .await
@@ -1349,6 +1351,7 @@ async fn live_interpret_understands_a_relay() {
             group: group(),
             context: hub.events(&refund()),
             roster: roster(),
+            seats: Vec::new(),
             locale: Locale::Zh,
         })
         .await

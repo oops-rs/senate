@@ -104,7 +104,7 @@ pub use basis_brain::{
     BasisBrain, LOG_READ, LOG_SEARCH, ModelRecipe, RuntimeRecipe, basis_runtime,
 };
 pub use brain::{
-    AgentCandidate, AgentTurn, Answer, Brain, BrainError, Conversation, Crossing, CrossingInput,
+    AgentCandidate, AgentTurn, Answer, Brain, BrainError, CommitteeSeat, Conversation, Crossing, CrossingInput,
     GroupRef, Intent, Offline, OfflineInput, Pick, PickInput, Question, RelayKind, Takeover,
     TriageInput, Turn, Utterance, apply_threshold, rule_crossing, rule_offline, rule_pick,
     triage_verdict,

@@ -81,7 +81,7 @@ use super::{
     Address, CommitteeId, Engine, Event, Flow, GroupRef, Instant, Intent, Origin, Seq, Stall,
     Value, meta, warn,
 };
-use crate::brain::{AgentCandidate, Pick, PickInput, rule_pick};
+use crate::brain::{AgentCandidate, CommitteeSeat, Pick, PickInput, rule_pick};
 use crate::render;
 use crate::syntax;
 
@@ -253,6 +253,47 @@ pub(super) struct Choice {
 }
 
 impl Engine {
+    /// Every seat on `committee` an unaddressed question could be relayed
+    /// to by its duty: this Senate's agents there, then the seats child
+    /// Senates declare there, each named as a relay names it. What the hub
+    /// cannot say is left out, not guessed.
+    pub(super) async fn committee_seats(&self, committee: &CommitteeId) -> Vec<CommitteeSeat> {
+        let duties = match self.hub.presence(committee).await {
+            Ok(page) => page.duties,
+            Err(error) => {
+                tracing::debug!(%committee, %error, "listing seats without their duties");
+                Default::default()
+            }
+        };
+        let agents = match self.hub.committee_agents(committee).await {
+            Ok(agents) => agents,
+            Err(error) => {
+                tracing::debug!(%committee, %error, "listing seats without this Senate's agents");
+                Vec::new()
+            }
+        };
+        let mut seats = Vec::new();
+        for agent in agents.into_iter().filter(|a| *a != self.me) {
+            seats.push(CommitteeSeat {
+                target: agent.to_string(),
+                duty: duties.get(&agent).cloned(),
+                online: self.hub.is_agent_connected(committee, &agent).await,
+            });
+        }
+        let now = chrono::Utc::now();
+        for child in &self.children {
+            let child_online = child.is_online(now);
+            for seat in child.seats.iter().filter(|s| s.committee == *committee) {
+                seats.push(CommitteeSeat {
+                    target: format!("{}::{}", child.name, seat.senator),
+                    duty: seat.duty.clone(),
+                    online: child_online && seat.presence == PresenceState::Online,
+                });
+            }
+        }
+        seats
+    }
+
     /// The candidates as the Speaker sees them now on the chat's committee.
     async fn candidates(
         &self,

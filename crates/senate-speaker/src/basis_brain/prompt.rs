@@ -22,7 +22,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::brain::{
-    AgentCandidate, AgentTurn, Answer, BrainError, Conversation, Crossing, CrossingInput, Intent,
+    AgentCandidate, AgentTurn, Answer, BrainError, CommitteeSeat, Conversation, Crossing, CrossingInput, Intent,
     Offline, OfflineInput, Pick, PickInput, Question, RelayKind, Takeover, TriageInput, Utterance,
     apply_threshold,
 };
@@ -204,6 +204,34 @@ pub(crate) fn render_roster(roster: &Roster) -> String {
 const ROSTER_HEADING: &str =
     "People on the roster (handle, other names) and the agents seated under each:";
 
+/// The seats on the committee, here and in child Senates, one per line:
+/// the name a relay writes, presence, duty. Shown in the interpret and the
+/// converse prompt alike.
+pub(crate) fn render_seats(seats: &[CommitteeSeat]) -> String {
+    if seats.is_empty() {
+        return "(none known)".to_owned();
+    }
+    seats
+        .iter()
+        .map(|seat| {
+            let duty = seat
+                .duty
+                .as_deref()
+                .map_or_else(|| "none set".to_owned(), |duty| cut(duty, 300));
+            format!(
+                "- {} · {} · duty: {duty}",
+                seat.target,
+                if seat.online { "online" } else { "away" }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+const SEATS_HEADING: &str = "Seats on this committee, written as a relay target (an agent of \
+     this Senate by its name; a seat in a child Senate as <child>::<senator>), with presence and \
+     duty:";
+
 fn render_binding(committee: Option<&CommitteeId>) -> String {
     match committee {
         Some(committee) => format!("This group is bound to committee {committee}."),
@@ -224,6 +252,7 @@ pub(crate) fn interpret(utterance: &Utterance) -> String {
         "In the group \"{group}\", {speaker} said to you:\n\n{text}\n\n\
          {binding}\n\n\
          {ROSTER_HEADING}\n{roster}\n\n\
+         {SEATS_HEADING}\n{seats}\n\n\
          Recent log:\n{context}\n\n\
          Decide what to do, then call the speaker_intent tool exactly once with your conclusion. \
          When you need older records, use log_search / log_read first.",
@@ -232,6 +261,7 @@ pub(crate) fn interpret(utterance: &Utterance) -> String {
         text = utterance.text,
         binding = render_binding(utterance.committee.as_ref()),
         roster = render_roster(&utterance.roster),
+        seats = render_seats(&utterance.seats),
         context = render_context(&utterance.context),
     )
 }
@@ -681,6 +711,7 @@ pub(crate) fn converse(conversation: &Conversation, max_actions: usize) -> Strin
         "In a thread of the group \"{group}\", {speaker} is talking with you.\n\n\
          {binding}\n\n\
          {ROSTER_HEADING}\n{roster}\n\n\
+         {SEATS_HEADING}\n{seats}\n\n\
          Recent log:\n{context}\n\n\
          Earlier in this thread (oldest first):\n{earlier}\n\n\
          {speaker} just said:\n\n{text}\n\n\
@@ -694,6 +725,7 @@ pub(crate) fn converse(conversation: &Conversation, max_actions: usize) -> Strin
         text = utterance.text,
         binding = render_binding(utterance.committee.as_ref()),
         roster = render_roster(&utterance.roster),
+        seats = render_seats(&utterance.seats),
         context = render_context(&utterance.context),
     )
 }
