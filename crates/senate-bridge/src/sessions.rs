@@ -124,7 +124,7 @@ pub fn render(reply: &SessionsReply, now: DateTime<Utc>, locale: Locale) -> Stri
                     .map_or_else(|| "-".to_owned(), ToString::to_string),
                 row.runtime.as_str().to_owned(),
                 row.model.label(),
-                row.state_label().to_owned(),
+                row.state.as_str().to_owned(),
                 row.started_at
                     .map_or_else(|| "-".to_owned(), |at| uptime(at, now)),
                 viewer(row, locale),
@@ -211,7 +211,6 @@ mod tests {
             dir: "/work/refund".into(),
             state,
             started_at: None,
-            restart_needed: false,
             attached: false,
             typed_secs_ago: None,
             tty: "/home/hosts/x/tty".into(),
@@ -266,14 +265,10 @@ mod tests {
         running.attached = true;
         running.typed_secs_ago = Some(120);
         running.model = crate::ipc::HostedModel::new(Some("opus".into()), Some("high".into()));
-        let mut stopped = row("codex-2", None, HostState::Stopped);
-        // Only a running session is told to restart.
-        stopped.restart_needed = true;
-        let mut stale = row("codex-4", Some("builder"), HostState::Running);
-        stale.restart_needed = true;
+        let stopped = row("codex-2", None, HostState::Stopped);
         let orphan = EventId::new();
         let reply = SessionsReply {
-            rows: vec![running, stopped, stale],
+            rows: vec![running, stopped],
             orphans: vec![orphan.clone()],
         };
         let text = render(&reply, now, Locale::En);
@@ -290,10 +285,8 @@ mod tests {
         assert!(lines[1].ends_with("/work/refund"), "{text}");
         assert!(lines[2].starts_with("codex-2"), "{text}");
         assert!(lines[2].contains("stopped"), "{text}");
-        assert!(lines[3].starts_with("refund-v2::builder"), "{text}");
-        assert!(lines[3].contains("restart needed"), "{text}");
         assert!(
-            lines[4].contains(&format!("orphaned host {orphan}")),
+            lines[3].contains(&format!("orphaned host {orphan}")),
             "{text}"
         );
         assert_eq!(

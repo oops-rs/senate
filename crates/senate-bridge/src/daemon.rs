@@ -168,7 +168,6 @@ use crate::session::{self, Runtime, Session, SessionState};
 use crate::state::{ItemKey, ItemStatus, QueueItem, SessionUpsert, Store, StoreError};
 use crate::stream::{self, CommitteeWorker};
 
-mod codex_roles;
 mod front;
 mod host_policy;
 mod hosted_approvals;
@@ -507,9 +506,6 @@ pub(crate) struct Shared {
     relay: Arc<Relay>,
     /// Everything `watch` connections are told.
     watch: broadcast::Sender<WatchEvent>,
-    /// The roles each running hosted Codex was published with
-    /// ([`codex_roles`]).
-    codex_roles: Mutex<BTreeMap<EventId, codex_roles::Baseline>>,
     /// Desktop notifications for what is addressed to the person.
     notifications: Option<Notifications>,
     /// Events already announced to the person (every agent's stream carries
@@ -704,10 +700,6 @@ pub async fn start_with_host_binary(
         tasks.push(tokio::spawn(sweeper(shared.clone(), rx.clone())));
         tasks.push(tokio::spawn(host_notices(shared.clone(), rx.clone())));
         tasks.push(tokio::spawn(checkpointer(shared.clone(), rx.clone())));
-        tasks.push(tokio::spawn(codex_roles::follow(
-            shared.clone(),
-            rx.clone(),
-        )));
         shared.work.notify_one();
         tracing::info!(
             person = %shared.config.person,
@@ -790,7 +782,6 @@ impl Shared {
             timing: common.timing,
             streams: Mutex::new(BTreeMap::new()),
             work: Notify::new(),
-            codex_roles: Mutex::new(BTreeMap::new()),
             committees_changed: Notify::new(),
             generation: RwLock::new(0),
             resyncs,
@@ -3125,9 +3116,6 @@ impl Shared {
                 continue;
             }
             let facts = crate::host::facts(&paths, &host_id).map_err(IpcError::internal)?;
-            let restart_needed = session.runtime == Runtime::Codex
-                && facts.running
-                && self.codex_restart_needed(&host_id);
             let committee = session.committee().cloned();
             let alias = committee
                 .as_ref()
@@ -3151,7 +3139,6 @@ impl Shared {
                     HostState::Stopped
                 },
                 started_at: facts.started_at,
-                restart_needed,
                 attached: facts.attached,
                 typed_secs_ago: facts.typed_secs_ago,
             });

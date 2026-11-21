@@ -549,74 +549,61 @@ async fn a_hosted_codex_thread_is_named_after_the_senators_alias() {
     h.stop().await;
 }
 
+/// What a hosted Codex restore does: it rejoins the same thread on the
+/// app-server, with no new `thread/start`. Codex keeps a loaded thread's MCP
+/// connections, and so the tools it listed, until the thread has had no
+/// subscriber for its unload delay (60 s by default), and Senate's relay
+/// stays subscribed; so a stop and restore is no way to change a Codex
+/// session's tools. That is why a Codex session lists every role's tools
+/// from the start (`tests/mcp.rs`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_hosted_codex_whose_role_changed_is_told_once_to_restart() {
-    use senate_core::{ChairPayload, Kind, NewEvent, meta};
-
+async fn a_hosted_codex_restore_rejoins_its_thread_and_starts_none() {
     let (mut h, project) = fixture(true, Locale::En).await;
     let fake = h.codex();
     start(&mut h).await;
     let (launch, terminal) = Terminal::spawn(&h, project, HostedRuntime::Codex).await;
     let thread = launch.session_id.clone();
-    let restart_needed = |h: &Harness| {
-        let socket = h.socket();
-        async move {
-            let reply: senate_bridge::ipc::SessionsReply =
-                ipc::request(&socket, &Request::Sessions, WAIT, WAIT)
-                    .await
-                    .unwrap();
-            reply.rows.iter().any(|row| row.restart_needed)
-        }
-    };
-    let notices = || {
-        fake.pushes()
-            .into_iter()
-            .filter(|(_, params)| {
-                params["threadId"] == thread.as_str()
-                    && common::fake_codex::input_text(params).contains("Your Senate role changed")
+    let count = |name: &str| {
+        fake.calls()
+            .iter()
+            .filter(|(method, params)| {
+                method == name && (name == "thread/start" || params["threadId"] == thread.as_str())
             })
-            .map(|(_, params)| common::fake_codex::input_text(&params).to_owned())
-            .collect::<Vec<_>>()
+            .count()
     };
-    assert!(!restart_needed(&h).await);
+    assert_eq!(count("thread/start"), 1);
 
-    // The Codex is made chair: the tools it listed are not the chair's.
-    let make_chair = |who: &senate_core::SenatorName| {
-        h.server.state.inner.lock().unwrap().chair = Some((who.clone(), true));
-        h.server.append(
-            NewEvent::new(committee(), Kind::Note, Address::Committee, "chair set").with_meta(
-                meta::CHAIR,
-                ChairPayload {
-                    senator: who.clone(),
-                }
-                .value(),
-            ),
-        );
-    };
-    make_chair(&launch.senator);
-    eventually("the restart notice", WAIT, || {
-        (!notices().is_empty()).then_some(())
-    })
-    .await;
-    let [notice] = notices().try_into().unwrap();
-    assert!(
-        notice.contains("this session now chairs its committee"),
-        "{notice}"
-    );
-    assert!(
-        notice.contains(&format!(
-            "`senate stop {0}`, then `senate restore {0}`",
-            launch.senator
-        )),
-        "{notice}"
-    );
-    assert!(restart_needed(&h).await);
-
-    // Another change before the restart: still one notice.
-    make_chair(&path("chair-test"));
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    assert_eq!(notices().len(), 1);
-    assert!(restart_needed(&h).await);
+    let _: senate_bridge::ipc::StopReply = ipc::request(
+        &h.socket(),
+        &Request::Stop {
+            session: Default::default(),
+            senator: launch.senator.clone().into(),
+            force: true,
+        },
+        WAIT,
+        WAIT,
+    )
+    .await
+    .unwrap();
+    terminal.stop();
+    let restored: SpawnReply = ipc::request(
+        &h.socket(),
+        &Request::Restore {
+            session: Default::default(),
+            senator: launch.senator.clone().into(),
+            model: Default::default(),
+        },
+        WAIT,
+        WAIT,
+    )
+    .await
+    .unwrap();
+    // The same thread and seat, rejoined: no new `thread/start`.
+    assert_eq!(restored.session_id, thread);
+    assert_eq!(restored.senator, launch.senator);
+    assert_eq!(count("thread/start"), 1);
+    assert!(count("thread/resume") >= 1, "{:?}", fake.methods());
+    let terminal = Terminal::from_launch(&h, &restored).await;
     terminal.stop();
     h.stop().await;
 }

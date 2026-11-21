@@ -399,10 +399,6 @@ pub struct SessionRow {
     /// When its host started; `None` when it is not running.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<DateTime<Utc>>,
-    /// A hosted Codex whose roles changed since it started: it keeps the
-    /// tools it listed then until it is restarted.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub restart_needed: bool,
     /// Someone is attached to its terminal now.
     #[serde(default, skip_serializing_if = "is_false")]
     pub attached: bool,
@@ -426,16 +422,6 @@ impl SessionRow {
 
     pub fn is_running(&self) -> bool {
         self.state == HostState::Running
-    }
-
-    /// Its state as a listing shows it: `restart needed` for a running
-    /// session that must be restarted for its tools.
-    pub fn state_label(&self) -> &'static str {
-        if self.is_running() && self.restart_needed {
-            "restart needed"
-        } else {
-            self.state.as_str()
-        }
     }
 }
 
