@@ -23,8 +23,8 @@ use serde_json::{Value, json};
 
 use crate::brain::{
     AgentCandidate, AgentTurn, Answer, BrainError, CommitteeSeat, Conversation, Crossing,
-    CrossingInput, Intent, Offline, OfflineInput, Pick, PickInput, Question, RelayKind, Takeover,
-    TriageInput, Utterance, apply_threshold,
+    CrossingInput, DigestInput, DigestOut, Intent, MemoryDraft, Offline, OfflineInput, Pick,
+    PickInput, Question, RelayKind, Takeover, TriageInput, Utterance, apply_threshold,
 };
 
 /// How much of one event body a prompt or tool result shows.
@@ -1835,5 +1835,161 @@ mod tests {
             assert_eq!(pick(asked.clone()), Pick::Ask, "{asked}");
         }
         assert!(serde_json::from_value::<PickWire>(json!({ "reason": "r" })).is_err());
+    }
+}
+
+// ---- Digesting the discussion -----------------------------------------
+
+/// The digest tool's description; also how a scripted test finds it.
+pub(crate) const DIGEST_DESCRIPTION: &str =
+    "Report the digest of this discussion and the memory points it adds. Call this exactly once.";
+
+pub(crate) fn digest_spec() -> OutputSpec {
+    OutputSpec::new("speaker_digest", DIGEST_DESCRIPTION, digest_schema())
+}
+
+fn digest_schema() -> Value {
+    let refs = json!({
+        "type": "array",
+        "items": { "type": "integer" },
+        "description": "The seq of every message listed above this comes from, e.g. [12, 15]. Only seqs listed above."
+    });
+    json!({
+        "type": "object",
+        "properties": {
+            "points": {
+                "type": "array",
+                "maxItems": senate_core::memory::MAX_DIGEST_POINTS,
+                "description": "What was discussed, most important first: one short line each.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "text": { "type": "string", "description": "One line, in the language asked for." },
+                        "refs": refs.clone()
+                    },
+                    "required": ["text", "refs"],
+                    "additionalProperties": false
+                }
+            },
+            "memory": {
+                "type": "array",
+                "description": "Facts from this discussion that will still matter in weeks: who owns what, how something works, a constraint, a date. Empty when nothing lasting was said.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "text": { "type": "string", "description": "The fact, one self-contained line, in the language asked for." },
+                        "refs": refs,
+                        "supersedes": {
+                            "type": "array",
+                            "items": { "type": "integer" },
+                            "description": "The seq of each point under \"What we know\" this fact replaces (it is no longer true, or this says it better). Never a point marked (by a person). Usually empty."
+                        }
+                    },
+                    "required": ["text", "refs", "supersedes"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["points", "memory"],
+        "additionalProperties": false
+    })
+}
+
+pub(crate) fn digest(input: &DigestInput) -> String {
+    let discussion: Vec<String> = input.events.iter().map(render_event).collect();
+    let memory = if input.memory.is_empty() {
+        "(nothing yet)".to_owned()
+    } else {
+        input
+            .memory
+            .iter()
+            .map(|p| {
+                let by = if p.by_person() { " (by a person)" } else { "" };
+                format!("- seq {}{by}: {}", p.seq, cut(&p.text, 200))
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let decisions = if input.decisions.is_empty() {
+        "(none)".to_owned()
+    } else {
+        input
+            .decisions
+            .iter()
+            .map(|d| format!("- seq {}: {}", d.seq, cut(&d.body, 200)))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    format!(
+        "You keep the memory of committee {committee}. Below is what was said in its groups since \
+         the last digest (and what crossed in from other committees), oldest first.\n\n\
+         {discussion}\n\n\
+         What we know (memory points in force):\n{memory}\n\n\
+         Decisions in force (already recorded; do not restate them):\n{decisions}\n\n\
+         Report:\n\
+         - points: at most {max} one-line points of what was discussed, settled or left open, \
+         most important first. Group the messages by topic; skip greetings and chit-chat.\n\
+         - memory: only facts that will still matter later, each one self-contained line. When \
+         one replaces a point under \"What we know\", name that point's seq in supersedes; never \
+         a point marked (by a person).\n\
+         Every point and fact cites the seqs listed above it comes from, and nothing else. Write \
+         in {language}; keep names, numbers and identifiers as written. Use only what is above: \
+         do not guess.",
+        committee = input.committee,
+        discussion = discussion.join("\n"),
+        max = senate_core::memory::MAX_DIGEST_POINTS,
+        language = language(input.locale),
+    )
+}
+
+/// The digest tool's payload.
+#[derive(Debug, Deserialize)]
+pub(crate) struct DigestWire {
+    #[serde(default)]
+    points: Vec<DigestPointWire>,
+    #[serde(default)]
+    memory: Vec<MemoryWire>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DigestPointWire {
+    text: String,
+    #[serde(default)]
+    refs: Vec<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MemoryWire {
+    text: String,
+    #[serde(default)]
+    refs: Vec<u64>,
+    #[serde(default)]
+    supersedes: Vec<u64>,
+}
+
+impl DigestWire {
+    /// As the Brain's answer; the engine checks every seq against what it
+    /// showed.
+    pub(crate) fn into_out(self) -> DigestOut {
+        let seqs = |v: Vec<u64>| v.into_iter().map(Seq).collect();
+        DigestOut {
+            points: self
+                .points
+                .into_iter()
+                .map(|p| senate_core::DigestPoint {
+                    text: p.text,
+                    refs: seqs(p.refs),
+                })
+                .collect(),
+            memory: self
+                .memory
+                .into_iter()
+                .map(|m| MemoryDraft {
+                    text: m.text,
+                    refs: seqs(m.refs),
+                    supersedes: seqs(m.supersedes),
+                })
+                .collect(),
+        }
     }
 }

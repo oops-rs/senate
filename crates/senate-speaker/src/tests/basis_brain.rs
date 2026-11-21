@@ -30,7 +30,8 @@ use super::rig::{
     roster, runner_of, user,
 };
 use crate::basis_brain::prompt::{
-    AGENT_TURN_DESCRIPTION, INTENT_DESCRIPTION, PICK_DESCRIPTION, TRIAGE_DESCRIPTION,
+    AGENT_TURN_DESCRIPTION, DIGEST_DESCRIPTION, INTENT_DESCRIPTION, PICK_DESCRIPTION,
+    TRIAGE_DESCRIPTION,
 };
 use crate::basis_brain::{
     AGENT_TOOLS, CHECKPOINT, COMMITTEE_BRIEF, COMMITTEE_STATUS, PRESENCE, TASKS,
@@ -104,6 +105,7 @@ impl Provider for ScriptedModel {
                             | TRIAGE_DESCRIPTION
                             | AGENT_TURN_DESCRIPTION
                             | PICK_DESCRIPTION
+                            | DIGEST_DESCRIPTION
                     )
                 )
             })
@@ -1850,4 +1852,46 @@ async fn no_seats_known_says_so() {
         prompt.contains("with presence and duty:\\n(none known)"),
         "{prompt}"
     );
+}
+
+#[tokio::test]
+async fn digest_is_one_typed_turn_that_cites_seqs_and_marks_a_persons_points() {
+    let digested = fixture(vec![Round::Answer(json!({
+        "points": [{ "text": "Release moved to Monday", "refs": [1, 2] }],
+        "memory": [{ "text": "Releases go out on Mondays", "refs": [2], "supersedes": [7] }]
+    }))])
+    .await;
+    let mut correction = digested.log[0].clone();
+    correction.seq = Seq(8);
+    let person_point = senate_core::MemoryPoint {
+        seq: Seq(8),
+        ts: correction.ts,
+        text: "Reviews need two approvals".into(),
+        refs: vec![Seq(1)],
+        supersedes: vec![],
+        by: user("alice"),
+    };
+    let out = digested
+        .brain
+        .digest(crate::DigestInput {
+            committee: refund(),
+            locale: Locale::En,
+            trigger: senate_core::DigestTrigger::Daily,
+            events: digested.log.clone(),
+            memory: vec![person_point],
+            decisions: Vec::new(),
+        })
+        .await
+        .expect("a digest");
+    assert_eq!(out.points[0].refs, [Seq(1), Seq(2)]);
+    assert_eq!(out.memory[0].supersedes, [Seq(7)]);
+    let requests = digested.model.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].tools.len(), 1, "only the answering tool");
+    let prompt = format!("{:?}", requests[0].messages);
+    assert!(
+        prompt.contains("seq 8 (by a person): Reviews need two approvals"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("Write in English"), "{prompt}");
 }

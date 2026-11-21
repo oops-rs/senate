@@ -13,6 +13,7 @@ senate-work = { workspace = true }
 async-trait = { workspace = true }
 basis = { workspace = true }
 chrono = { workspace = true }
+chrono-tz = { workspace = true }
 hex = { workspace = true }
 ractor = { workspace = true }
 serde = { workspace = true }

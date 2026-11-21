@@ -24,9 +24,19 @@ use serde::{Deserialize, Serialize};
 /// agent_max_actions = 5             # agent mode: most operations one turn may plan
 /// locale = "zh"                     # what people read: "zh" or "en" (default "en")
 /// bot_name = "Speaker"              # how people address the bot in chat, e.g. "@Speaker"
+/// timezone = "Europe/Berlin"        # the committees' day (IANA name); default: the server's local zone
 ///
 /// [speaker.locales]                 # a committee whose people read another language
 /// refund-v2 = "en"
+///
+/// [speaker.timezones]               # a committee whose people live in another timezone
+/// refund-v2 = "America/New_York"
+///
+/// [speaker.memory]                  # digests of the discussion, and its memory
+/// digest_at = "18:00"               # the daily digest, in the committee's timezone
+/// quiet_mins = 120                  # a busy stretch of discussion this quiet gets its own digest
+/// busy_messages = 10                # what counts as busy: this many messages, from two people or more
+/// agreement_quiet_secs = 120        # a burst this quiet is checked for an agreement to record
 ///
 /// [speaker.work]                    # coding work on request; absent = no work runs
 /// allowed_repos = ["example/refund"]   # only these repos (owner/name)
@@ -86,6 +96,82 @@ pub struct SpeakerConfig {
     /// this when it tells people how to reach it.
     #[serde(default = "default_bot_name")]
     pub bot_name: String,
+    /// The committees' timezone, by IANA name, unless
+    /// [`SpeakerConfig::timezones`] names another for a committee; `None`
+    /// is the server's local zone. A committee's day (the today card, the
+    /// daily digest) is a day there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub timezones: BTreeMap<CommitteeId, String>,
+    /// Digests of the discussion and the committee's memory.
+    #[serde(default)]
+    pub memory: MemorySettings,
+}
+
+/// `[speaker.memory]`: when the Speaker digests a committee's discussion,
+/// and when it checks a burst for an agreement to record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemorySettings {
+    /// The daily digest's local time in the committee's timezone, `HH:MM`.
+    #[serde(default = "default_digest_at")]
+    pub digest_at: String,
+    /// A busy stretch of discussion this many minutes quiet gets its own
+    /// digest.
+    #[serde(default = "default_quiet_mins")]
+    pub quiet_mins: u64,
+    /// Busy: at least this many messages since the last digest, from two
+    /// people or more.
+    #[serde(default = "default_busy_messages")]
+    pub busy_messages: usize,
+    /// A burst of discussion this many seconds quiet is checked for an
+    /// agreement to propose recording as a decision.
+    #[serde(default = "default_agreement_quiet_secs")]
+    pub agreement_quiet_secs: u64,
+}
+
+impl Default for MemorySettings {
+    fn default() -> Self {
+        Self {
+            digest_at: default_digest_at(),
+            quiet_mins: default_quiet_mins(),
+            busy_messages: default_busy_messages(),
+            agreement_quiet_secs: default_agreement_quiet_secs(),
+        }
+    }
+}
+
+impl MemorySettings {
+    /// [`MemorySettings::digest_at`] as a time; 18:00 when it does not
+    /// read as `HH:MM`.
+    pub fn digest_time(&self) -> chrono::NaiveTime {
+        chrono::NaiveTime::parse_from_str(self.digest_at.trim(), "%H:%M")
+            .unwrap_or_else(|_| chrono::NaiveTime::from_hms_opt(18, 0, 0).unwrap_or_default())
+    }
+
+    pub fn quiet(&self) -> Duration {
+        Duration::from_secs(self.quiet_mins.saturating_mul(60))
+    }
+
+    pub fn agreement_quiet(&self) -> Duration {
+        Duration::from_secs(self.agreement_quiet_secs)
+    }
+}
+
+fn default_digest_at() -> String {
+    "18:00".to_owned()
+}
+
+fn default_quiet_mins() -> u64 {
+    120
+}
+
+fn default_busy_messages() -> usize {
+    10
+}
+
+fn default_agreement_quiet_secs() -> u64 {
+    120
 }
 
 /// The bot's display name when the configuration does not give one.
@@ -216,7 +302,21 @@ impl SpeakerConfig {
             locale: Locale::default(),
             locales: BTreeMap::new(),
             bot_name: default_bot_name(),
+            timezone: None,
+            timezones: BTreeMap::new(),
+            memory: MemorySettings::default(),
         }
+    }
+
+    /// The timezone of `committee`'s day; the server's local zone when none
+    /// is configured, or the one configured is not an IANA name.
+    pub fn zone_of(&self, committee: &CommitteeId) -> crate::clock::Zone {
+        self.timezones
+            .get(committee)
+            .or(self.timezone.as_ref())
+            .map_or(crate::clock::Zone::Local, |name| {
+                crate::clock::Zone::parse(name)
+            })
     }
 
     /// The language `committee`'s people read.

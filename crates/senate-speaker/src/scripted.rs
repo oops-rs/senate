@@ -10,9 +10,9 @@ use async_trait::async_trait;
 use senate_core::{Brief, Locale, TriagePayload, TriageVerdict};
 
 use crate::brain::{
-    AgentTurn, Answer, Brain, BrainError, Conversation, Crossing, CrossingInput, Intent, Offline,
-    OfflineInput, Pick, PickInput, Question, TriageInput, Utterance, rule_crossing, rule_offline,
-    rule_pick,
+    AgentTurn, Answer, Brain, BrainError, Conversation, Crossing, CrossingInput, DigestInput,
+    DigestOut, Intent, Offline, OfflineInput, Pick, PickInput, Question, TriageInput, Utterance,
+    rule_crossing, rule_offline, rule_pick,
 };
 
 /// One scripted result, and how long the "model" takes to produce it.
@@ -40,6 +40,8 @@ struct Script {
     crossing_inputs: Vec<CrossingInput>,
     offlines: VecDeque<Step<Offline>>,
     offline_inputs: Vec<OfflineInput>,
+    digests: VecDeque<Step<DigestOut>>,
+    digest_inputs: Vec<DigestInput>,
 }
 
 /// Plays queued answers in order and records every call. An unscripted call
@@ -218,6 +220,20 @@ impl ScriptedBrain {
         self.lock().offline_inputs.clone()
     }
 
+    /// Queue the next [`Brain::digest`] result.
+    pub fn digests(&self, result: Result<DigestOut, BrainError>) -> &Self {
+        self.lock().digests.push_back(Step {
+            delay: Duration::ZERO,
+            result,
+        });
+        self
+    }
+
+    /// Every window digested so far (recorded when the call starts).
+    pub fn digest_inputs(&self) -> Vec<DigestInput> {
+        self.lock().digest_inputs.clone()
+    }
+
     fn lock(&self) -> MutexGuard<'_, Script> {
         self.script
             .lock()
@@ -333,5 +349,14 @@ impl Brain for ScriptedBrain {
             script.turns.pop_front()
         };
         play(step, "no scripted turn").await
+    }
+
+    async fn digest(&self, input: DigestInput) -> Result<DigestOut, BrainError> {
+        let step = {
+            let mut script = self.lock();
+            script.digest_inputs.push(input);
+            script.digests.pop_front()
+        };
+        play(step, "no scripted digest").await
     }
 }

@@ -13,9 +13,11 @@
 use async_trait::async_trait;
 use std::time::Duration;
 
+use senate_core::brief::BriefDecision;
 use senate_core::{
-    Address, Brief, CheckpointRecord, ChildSenate, CommitteeId, Event, Kind, Locale, Locator, Name,
-    OutputLevel, Roster, SenatorName, Seq, ThreadSummary, TriagePayload, TriageVerdict,
+    Address, Brief, CheckpointRecord, ChildSenate, CommitteeId, DigestPoint, DigestTrigger, Event,
+    Kind, Locale, Locator, MemoryPoint, Name, OutputLevel, Roster, SenatorName, Seq, ThreadSummary,
+    TriagePayload, TriageVerdict,
 };
 use serde::{Deserialize, Serialize};
 
@@ -451,6 +453,54 @@ pub trait Brain: Send + Sync + 'static {
     async fn decide_offline(&self, input: OfflineInput) -> Result<Offline, BrainError> {
         Ok(rule_offline(&input))
     }
+
+    /// Digest a window of the committee's discussion: at most
+    /// [`MAX_DIGEST_POINTS`](senate_core::memory::MAX_DIGEST_POINTS)
+    /// one-line points, and the facts worth keeping as memory points, each
+    /// citing seqs from [`DigestInput::events`] only. The Speaker checks
+    /// every citation and supersession against the input and drops what
+    /// does not hold. An error means no digest this time; the next trigger
+    /// tries again.
+    async fn digest(&self, input: DigestInput) -> Result<DigestOut, BrainError> {
+        let _ = input;
+        Err(BrainError::Unavailable("this brain does not digest".into()))
+    }
+}
+
+/// A window of a committee's discussion to digest, from its own log only.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DigestInput {
+    pub committee: CommitteeId,
+    pub locale: Locale,
+    pub trigger: DigestTrigger,
+    /// The discussion, oldest first: what people said in the committee's
+    /// groups, and what crossed in from another committee or Senate. These
+    /// are the only seqs a point may cite.
+    pub events: Vec<Event>,
+    /// The memory points in force, oldest first: what a new point may
+    /// supersede (never one a person wrote).
+    pub memory: Vec<MemoryPoint>,
+    /// The decisions in force, which points do not restate.
+    pub decisions: Vec<BriefDecision>,
+}
+
+/// What [`Brain::digest`] returns.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DigestOut {
+    /// The digest's points, one line each.
+    pub points: Vec<DigestPoint>,
+    /// New memory points.
+    pub memory: Vec<MemoryDraft>,
+}
+
+/// A memory point as the Brain proposes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryDraft {
+    pub text: String,
+    /// The seqs it came from.
+    pub refs: Vec<Seq>,
+    /// The points in force it replaces.
+    pub supersedes: Vec<Seq>,
 }
 
 /// A question addressed to a child Senate that is not online.

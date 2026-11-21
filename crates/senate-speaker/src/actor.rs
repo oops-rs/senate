@@ -136,6 +136,12 @@ pub enum SpeakerMsg {
         committee: CommitteeId,
         group: String,
     },
+    /// A committee's digest of its discussion is due: its daily time came,
+    /// or a busy stretch went quiet.
+    DigestDue {
+        committee: CommitteeId,
+        trigger: senate_core::DigestTrigger,
+    },
     /// A Brain call the Speaker spawned has finished. Only the Speaker
     /// makes these.
     Thought(Thought),
@@ -241,6 +247,9 @@ impl Actor for Speaker {
             SpeakerMsg::PinnedDue(committee) => engine.on_pinned_due(committee).await,
             SpeakerMsg::AnnouncementDue { committee, group } => {
                 engine.on_announcement_due(committee, group).await
+            }
+            SpeakerMsg::DigestDue { committee, trigger } => {
+                engine.on_digest_due(committee, trigger).await;
             }
             SpeakerMsg::Thought(thought) => engine.on_thought(thought.0).await,
             SpeakerMsg::Run(report) => engine.on_run(report.0).await,

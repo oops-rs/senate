@@ -1166,6 +1166,16 @@ fn item(text: &str) -> String {
     cut(&one_line(text), BRIEF_ITEM_CHARS)
 }
 
+/// A digest's body: its points, one `- ` line each, as the Brain wrote them
+/// (in the committee's language). Where each came from is in the payload.
+pub(crate) fn digest_body(points: &[senate_core::DigestPoint]) -> String {
+    points
+        .iter()
+        .map(|p| format!("- {}", item(&p.text)))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -1861,6 +1871,8 @@ pub(crate) fn decision_line(l: Locale, decision: &senate_core::brief::BriefDecis
 pub(crate) struct Today<'a> {
     pub(crate) date: chrono::NaiveDate,
     pub(crate) decisions: Vec<&'a senate_core::brief::BriefDecision>,
+    /// Today's latest digest of the discussion, one line per point.
+    pub(crate) discussion: Vec<String>,
     pub(crate) questions: Vec<&'a senate_core::brief::BriefQuestion>,
     pub(crate) threads: Vec<&'a ThreadSummary>,
     /// One line per agent here active today, then per seat in a child
@@ -1890,6 +1902,17 @@ pub(crate) fn today_card(l: Locale, today: &Today<'_>) -> Card {
             .collect(),
         none,
     );
+    if !today.discussion.is_empty() {
+        section(
+            l.pick("今天的讨论", "Today's discussion"),
+            today
+                .discussion
+                .iter()
+                .map(|line| cut(&one_line(line), BRIEF_ITEM_CHARS))
+                .collect(),
+            "",
+        );
+    }
     section(
         l.pick("待回答的问题", "Open questions"),
         today
@@ -2175,6 +2198,7 @@ mod tests {
         let today = Today {
             date: chrono::NaiveDate::from_ymd_opt(2026, 11, 21).unwrap(),
             decisions: Vec::new(),
+            discussion: Vec::new(),
             questions: Vec::new(),
             threads: Vec::new(),
             activity: Vec::new(),
@@ -3027,6 +3051,7 @@ mod tests {
         let today = Today {
             date: chrono::NaiveDate::from_ymd_opt(2026, 4, 12).expect("date"),
             decisions: vec![&decision],
+            discussion: vec!["Release moved to Monday".to_owned()],
             questions: vec![&question],
             threads: vec![&t],
             activity: vec![(
@@ -3039,7 +3064,7 @@ mod tests {
         assert_eq!(card.title, "Today · 04-12");
         assert_eq!(
             card.markdown,
-            "**Today's decisions**\n- seq 5: cap is 90 days\n\n**Open questions**\n- seq 6 · [senator::copilot]: Which header?\n\n**Today's tasks**\n- seq 118 · Which header? · waiting on a person\n\n**What each agent did last**\n- [senator::copilot] · seq 7 · answer: 90 days\n\n**Agent presence**\n- [senator::claude] online · duty: reviews"
+            "**Today's decisions**\n- seq 5: cap is 90 days\n\n**Today's discussion**\n- Release moved to Monday\n\n**Open questions**\n- seq 6 · [senator::copilot]: Which header?\n\n**Today's tasks**\n- seq 118 · Which header? · waiting on a person\n\n**What each agent did last**\n- [senator::copilot] · seq 7 · answer: 90 days\n\n**Agent presence**\n- [senator::claude] online · duty: reviews"
         );
         let card = today_card(Locale::Zh, &today);
         assert_eq!(card.title, "今天的摘要 · 04-12");

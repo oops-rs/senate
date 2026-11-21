@@ -180,6 +180,7 @@ pub(crate) mod announcement;
 mod cards;
 mod desk;
 mod gone;
+mod memory;
 mod offline;
 mod route;
 mod takeover;
@@ -411,6 +412,9 @@ struct CommitteeState {
     /// Questions whose seat is gone that the office has closed this run
     /// ([`gone`]), so the note is not written again before it is observed.
     seat_removed: HashSet<Seq>,
+    /// What was said since the last digest, and the digest timers
+    /// ([`memory`]).
+    discussion: memory::Discussion,
 }
 
 /// The seat in a child Senate an event is about, as a relay names it
@@ -467,6 +471,7 @@ impl CommitteeState {
         self.brief
             .get_or_insert_with(|| BriefBuilder::new(event.committee.clone()))
             .observe(event);
+        self.discussion.observe(event);
         let simulated = event.is_simulated()
             || event
                 .thread
@@ -1002,6 +1007,16 @@ pub(crate) enum ThoughtKind {
         basis: Seq,
         top: Result<String, BrainError>,
     },
+    /// A digest drafted from the discussion `from..=through`, which showed
+    /// the Brain the seqs in `shown`.
+    Digested {
+        committee: CommitteeId,
+        trigger: senate_core::DigestTrigger,
+        from: Seq,
+        through: Seq,
+        shown: std::collections::BTreeSet<Seq>,
+        out: Result<crate::brain::DigestOut, BrainError>,
+    },
 }
 
 impl ThoughtKind {
@@ -1015,7 +1030,8 @@ impl ThoughtKind {
             | Self::Crossed { committee, .. }
             | Self::OfflineDecided { committee, .. }
             | Self::Triaged { committee, .. }
-            | Self::TopWritten { committee, .. } => Some(committee),
+            | Self::TopWritten { committee, .. }
+            | Self::Digested { committee, .. } => Some(committee),
             Self::UnboundConversed { .. } | Self::UnboundInterpreted { .. } => None,
         }
     }
@@ -1212,6 +1228,7 @@ impl Engine {
             for (_, timer) in state.cards.drain() {
                 timer.abort();
             }
+            state.discussion.shutdown();
             for timer in [state.pinned.timer.take(), state.pinned.midnight.take()]
                 .into_iter()
                 .flatten()
@@ -1344,6 +1361,9 @@ impl Engine {
                     state.seat_picks.retain(|(seq, _, _), _| *seq != event.seq);
                     self.agent_progress.remove(&(committee.clone(), event.seq));
                 }
+                if memory::is_discussion(&event) {
+                    self.arm_quiet(&committee);
+                }
                 if let Err(error) = self.hub.set_cursor(&committee, CURSOR, event.seq).await {
                     // Harmless: a restart reprocesses idempotently.
                     warn!(%committee, %error, "cannot persist the speaker cursor");
@@ -1471,6 +1491,7 @@ impl Engine {
                 let stale = state.top_stale();
                 self.committees.insert(committee.clone(), state);
                 self.rearm(committee);
+                self.arm_digests(committee);
                 self.rearm_cards(committee).await;
                 self.interrupt_runs(committee).await;
                 if stale {
@@ -1742,6 +1763,17 @@ impl Engine {
                 seq,
                 triage,
             } => self.on_triaged(committee, seq, triage).await,
+            ThoughtKind::Digested {
+                committee,
+                trigger,
+                from,
+                through,
+                shown,
+                out,
+            } => {
+                self.on_digested(committee, trigger, (from, through), shown, out)
+                    .await;
+            }
         }
     }
 
@@ -1902,8 +1934,13 @@ impl Engine {
 
     async fn mirror_plans(&self, event: &Event, platform: &str) -> Result<Vec<MirrorPlan>, Stall> {
         let l = self.locale(&event.committee);
-        if is_brief_top(event) {
-            return Ok(Vec::new()); // the brief's own header, never chat
+        if is_brief_top(event)
+            || event.meta.contains_key(meta::DIGEST)
+            || event.meta.contains_key(meta::MEMORY)
+        {
+            // The brief's own header, a digest, the committee's memory:
+            // never chat.
+            return Ok(Vec::new());
         }
         if event.kind == Kind::Decision && event.from == Address::Speaker {
             // Recorded for someone who said it on the platform: the only copy

@@ -24,7 +24,7 @@
 //! `<agents>#today-<date>` on the committee's head), so a replay is a gateway
 //! duplicate and new content is always a new operation.
 
-use chrono::{Local, NaiveDate, NaiveTime};
+use chrono::{NaiveDate, NaiveTime};
 use senate_core::{Card, MirrorRef, StatusState};
 
 use super::{
@@ -32,6 +32,7 @@ use super::{
     STALL_RETRY, Seq, Stall, card_target, debug, warn,
 };
 use crate::actor::SpeakerMsg;
+use crate::clock::Zone;
 use crate::render;
 
 fn waiting_target(group: &str) -> String {
@@ -42,22 +43,14 @@ fn today_target(group: &str) -> String {
     format!("{group}#pinned-today")
 }
 
-/// Today, by the server's local clock: "今天的摘要" starts fresh each day.
-fn today() -> NaiveDate {
-    Local::now().date_naive()
+fn is_today(ts: &chrono::DateTime<chrono::Utc>, day: NaiveDate, zone: Zone) -> bool {
+    zone.date_of(*ts) == day
 }
 
-fn is_today(ts: &chrono::DateTime<chrono::Utc>, day: NaiveDate) -> bool {
-    ts.with_timezone(&Local).date_naive() == day
-}
-
-/// Time until a little after the next local midnight.
-fn until_midnight() -> Duration {
-    let now = Local::now();
-    let tomorrow = now.date_naive().succ_opt().unwrap_or(now.date_naive());
-    let midnight = tomorrow.and_time(NaiveTime::MIN);
-    let left = midnight - now.naive_local();
-    left.to_std().unwrap_or(Duration::ZERO) + Duration::from_secs(5)
+/// Time until a little after the next midnight in the committee's
+/// timezone: "今天的摘要" starts fresh each day there.
+fn until_midnight(zone: Zone) -> Duration {
+    zone.until(chrono::Utc::now(), NaiveTime::MIN) + Duration::from_secs(5)
 }
 
 impl Engine {
@@ -241,13 +234,14 @@ impl Engine {
     /// without pins they stay unpinned.
     pub(super) async fn post_pinned_cards(&mut self, committee: &CommitteeId) -> Result<(), Stall> {
         let seats = self.committee_seats(committee).await;
+        let zone = self.config.zone_of(committee);
         let Some(state) = self.committees.get(committee) else {
             return Ok(());
         };
         let Some(agents) = state.agents_group().cloned() else {
             return Ok(());
         };
-        let (waiting, today_card) = pinned_cards(state, &seats);
+        let (waiting, today_card) = pinned_cards(state, &seats, zone);
         let group = agents.group.group_id.clone();
         for (target, card) in [
             (waiting_target(&group), waiting),
@@ -322,7 +316,8 @@ impl Engine {
 
     pub(crate) async fn on_pinned_due(&mut self, committee: CommitteeId) {
         self.catch_up(&committee).await;
-        let day = today();
+        let zone = self.config.zone_of(&committee);
+        let day = zone.today();
         let Some(state) = self.committees.get_mut(&committee) else {
             return;
         };
@@ -335,7 +330,7 @@ impl Engine {
             let message = committee.clone();
             state.pinned.midnight = Some(
                 self.myself
-                    .send_after(until_midnight(), move || SpeakerMsg::PinnedDue(message)),
+                    .send_after(until_midnight(zone), move || SpeakerMsg::PinnedDue(message)),
             );
             state.pinned.midnight_for = Some(day);
         }
@@ -357,6 +352,7 @@ impl Engine {
         day: NaiveDate,
     ) -> Result<(), Stall> {
         let seats = self.committee_seats(committee).await;
+        let zone = self.config.zone_of(committee);
         let Some(state) = self.committees.get(committee) else {
             return Ok(());
         };
@@ -364,7 +360,7 @@ impl Engine {
             return Ok(());
         };
         let head = state.board.head();
-        let (waiting, today_card) = pinned_cards(state, &seats);
+        let (waiting, today_card) = pinned_cards(state, &seats, zone);
         let group = agents.group.group_id.clone();
         let copies = self
             .hub
@@ -435,10 +431,23 @@ fn card_wanted(level: OutputLevel, state: StatusState) -> bool {
 
 /// "等人处理" and "今天的摘要" as the committee's state has them now, the
 /// latter listing `seats` ([`Engine::committee_seats`]).
-fn pinned_cards(state: &CommitteeState, seats: &[crate::brain::CommitteeSeat]) -> (Card, Card) {
+fn pinned_cards(
+    state: &CommitteeState,
+    seats: &[crate::brain::CommitteeSeat],
+    zone: Zone,
+) -> (Card, Card) {
     let l = state.locale;
     let waiting = render::waiting_card(l, &state.board.threads(Some(StatusState::Suspended)));
-    let day = today();
+    let day = zone.today();
+    let is_today = |ts: &chrono::DateTime<chrono::Utc>, day: NaiveDate| is_today(ts, day, zone);
+    // The latest digest, when it was written today.
+    let discussion = state
+        .brief
+        .as_ref()
+        .and_then(|b| b.memory().latest_digest())
+        .filter(|d| is_today(&d.ts, day))
+        .map(|d| d.payload.points.iter().map(|p| p.text.clone()).collect())
+        .unwrap_or_default();
     let brief = state.brief.as_ref().map(senate_core::BriefBuilder::brief);
     let decisions = brief
         .as_ref()
@@ -506,6 +515,7 @@ fn pinned_cards(state: &CommitteeState, seats: &[crate::brain::CommitteeSeat]) -
         &render::Today {
             date: day,
             decisions,
+            discussion,
             questions,
             threads,
             activity,
