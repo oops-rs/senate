@@ -31,6 +31,7 @@ use crate::event::{BindingAction, Event, Kind, Refs, meta};
 use crate::ids::{CommitteeId, Seq};
 use crate::locale::Locale;
 use crate::locator::{Locator, intended};
+use crate::memory::{Digest, MAX_BRIEF_POINTS, MemoryFold, MemoryPoint};
 use crate::senator::SenatorName;
 
 /// Most recent decisions kept (in seq order).
@@ -81,6 +82,13 @@ pub struct Brief {
     /// Senators and guests who have written to the log, most recent first.
     #[serde(default)]
     pub participants: Vec<BriefParticipant>,
+    /// What the committee knows: the latest [`MAX_BRIEF_POINTS`] memory
+    /// points in force, oldest first ([`crate::memory`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub memory: Vec<MemoryPoint>,
+    /// The Speaker's latest digest of the discussion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<Digest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -167,6 +175,7 @@ pub struct BriefBuilder {
     presence: PresenceBoard,
     duties: DutyFold,
     participants: HashMap<Address, (Seq, DateTime<Utc>)>,
+    memory: MemoryFold,
 }
 
 impl BriefBuilder {
@@ -183,6 +192,7 @@ impl BriefBuilder {
             presence: PresenceBoard::new(),
             duties: DutyFold::new(),
             participants: HashMap::new(),
+            memory: MemoryFold::new(),
         }
     }
 
@@ -210,6 +220,7 @@ impl BriefBuilder {
         if event.is_simulated() && event.kind != Kind::Binding {
             return;
         }
+        self.memory.observe(event);
 
         if matches!(event.from, Address::Senator(_) | Address::Guest(_)) {
             self.participants
@@ -310,6 +321,11 @@ impl BriefBuilder {
         self.presence.seats().is_unseated(agent)
     }
 
+    /// The committee's memory, folded with the rest.
+    pub fn memory(&self) -> &MemoryFold {
+        &self.memory
+    }
+
     pub fn brief(&self) -> Brief {
         let decisions = last_n(self.decisions.values(), MAX_DECISIONS);
         let open_questions = last_n(self.open.values(), MAX_OPEN_QUESTIONS);
@@ -343,6 +359,8 @@ impl BriefBuilder {
                 })
                 .collect(),
             participants,
+            memory: last_n(self.memory.in_force(), MAX_BRIEF_POINTS),
+            digest: self.memory.latest_digest().cloned(),
         }
     }
 }
@@ -373,6 +391,8 @@ impl Brief {
         let header = self.header_markdown(locale);
         let mut decisions = self.decisions.as_slice();
         let tails = [
+            self.digest_markdown(locale),
+            self.memory_markdown(locale),
             self.open_questions_markdown(locale),
             self.checkpoints_markdown(locale, now),
             self.presence_markdown(locale),
@@ -420,6 +440,48 @@ impl Brief {
                     Locale::En => writeln!(out, "- {name} ({}:{})", g.platform, g.group_id),
                 };
             }
+        }
+        out
+    }
+
+    fn digest_markdown(&self, locale: Locale) -> String {
+        let Some(digest) = &self.digest else {
+            return String::new();
+        };
+        let mut out = match locale {
+            Locale::Zh => format!(
+                "\n## 近况（seq {}，截至 seq {}）\n\n",
+                digest.seq, digest.payload.through
+            ),
+            Locale::En => format!(
+                "\n## Latest discussion (seq {}, through seq {})\n\n",
+                digest.seq, digest.payload.through
+            ),
+        };
+        for point in &digest.payload.points {
+            let _ = writeln!(
+                out,
+                "- {}{}",
+                one_line(&point.text),
+                refs_words(&point.refs, locale)
+            );
+        }
+        out
+    }
+
+    fn memory_markdown(&self, locale: Locale) -> String {
+        if self.memory.is_empty() {
+            return String::new();
+        }
+        let mut out = format!("\n## {}\n\n", locale.pick("我们知道的", "What we know"));
+        for point in &self.memory {
+            let _ = writeln!(
+                out,
+                "- seq {} · {}{}",
+                point.seq,
+                one_line(&point.text),
+                refs_words(&point.refs, locale)
+            );
         }
         out
     }
@@ -577,6 +639,22 @@ fn decisions_markdown(shown: &[BriefDecision], total: usize, locale: Locale) -> 
         );
     }
     out
+}
+
+/// ` (from seq 3, 7)` after a point, or nothing without refs.
+fn refs_words(refs: &[Seq], locale: Locale) -> String {
+    if refs.is_empty() {
+        return String::new();
+    }
+    let list = refs
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    match locale {
+        Locale::Zh => format!("（出自 seq {list}）"),
+        Locale::En => format!(" (from seq {list})"),
+    }
 }
 
 /// What separates who from what they said.
@@ -970,6 +1048,56 @@ mod tests {
              \n## 最近活跃\n\n[guest::chat/u_8f3a]（seq 6）、[senator::copilot]（seq 5）、[senator::claude]（seq 1）\n"
         );
         assert_senate_vocabulary(&md);
+    }
+
+    #[test]
+    fn what_we_know_and_the_latest_digest_show_in_the_brief() {
+        use crate::memory::{DigestPayload, DigestPoint, DigestTrigger, MemoryPayload};
+        let mut log = Log(Vec::new());
+        log.push(ev(Kind::Chat, "senator::ana", "let's ship on Monday"));
+        log.push(ev(Kind::Chat, "senator::ben", "agreed, Monday"));
+        let point = |body: &str, refs: Vec<Seq>, supersedes: Vec<Seq>| {
+            ev(Kind::Note, "speaker", body).with_meta(
+                meta::MEMORY,
+                MemoryPayload::Point {
+                    refs,
+                    supersedes,
+                    digest: None,
+                }
+                .to_value(),
+            )
+        };
+        let old = log.push(point("Release on Friday", vec![Seq(1)], vec![]));
+        log.push(point("Release on Monday", vec![Seq(1), Seq(2)], vec![old]));
+        log.push(
+            ev(Kind::Note, "speaker", "- Release moved to Monday").with_meta(
+                meta::DIGEST,
+                DigestPayload {
+                    trigger: DigestTrigger::Quiet,
+                    from: Seq(1),
+                    through: Seq(2),
+                    points: vec![DigestPoint {
+                        text: "Release moved to Monday".into(),
+                        refs: vec![Seq(1), Seq(2)],
+                    }],
+                }
+                .to_value(),
+            ),
+        );
+        let brief = Brief::from_events(c(), &log.0);
+        assert_eq!(brief.memory.len(), 1, "the superseded point is gone");
+        let en = brief.to_markdown(Locale::En, DEFAULT_MARKDOWN_CHARS);
+        assert!(en.contains(
+            "\n## Latest discussion (seq 5, through seq 2)\n\n- Release moved to Monday (from seq 1, 2)\n"
+        ));
+        assert!(en.contains("\n## What we know\n\n- seq 4 · Release on Monday (from seq 1, 2)\n"));
+        let zh = brief.to_markdown(Locale::Zh, DEFAULT_MARKDOWN_CHARS);
+        assert!(zh.contains(
+            "\n## 近况（seq 5，截至 seq 2）\n\n- Release moved to Monday（出自 seq 1, 2）\n"
+        ));
+        assert!(zh.contains("\n## 我们知道的\n\n- seq 4 · Release on Monday（出自 seq 1, 2）\n"));
+        assert_senate_vocabulary(&en);
+        assert_senate_vocabulary(&zh);
     }
 
     #[test]

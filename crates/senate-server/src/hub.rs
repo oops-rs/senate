@@ -38,9 +38,9 @@ use senate_core::hub::SCAN_PAGE;
 use senate_core::{
     Address, AgentPresence, Appended, Awaiting, Brief, BriefBuilder, ChairSource, CheckpointFacts,
     CheckpointRecord, Checkpoints, CommitteeId, CommitteeSeatChange, DocketItem, DocketPage,
-    DutyFold, Event, EventId, Hub, HubError, Kind, Locale, Locator, MirrorRef, Name, NewEvent,
-    Office, Origin, People, Principal, Roster, RosterError, SeatFacts, SenatePath, SenatorName,
-    Seq, SpeakerDocket, SpeakerSeat, StatusState, TaskBoard, meta,
+    DutyFold, Event, EventId, Hub, HubError, Kind, Locale, Locator, MemoryHit, MirrorRef, Name,
+    NewEvent, Office, Origin, People, Principal, Roster, RosterError, SeatFacts, SenatePath,
+    SenatorName, Seq, SpeakerDocket, SpeakerSeat, StatusState, TaskBoard, meta,
 };
 use senate_log::{CursorOwner, LogError, LogStore};
 use tokio::sync::{broadcast, mpsc};
@@ -1642,6 +1642,23 @@ impl Hub for ServerHub {
             .search(committee, query, limit)
             .await
             .map_err(log_error)
+    }
+
+    /// Searches the memory folded with the cached brief, after folding what
+    /// is new: one fold, rebuilt from the log on start.
+    async fn memory_search(
+        &self,
+        committee: &CommitteeId,
+        query: &str,
+        limit: usize,
+        all: bool,
+    ) -> Result<Vec<MemoryHit>, HubError> {
+        Ok(self
+            .folded(&self.briefs, committee)
+            .await?
+            .fold
+            .memory()
+            .search(query, limit, all))
     }
 
     /// Folds what the committee committed since the cached builder's head;

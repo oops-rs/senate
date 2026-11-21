@@ -94,6 +94,7 @@ pub mod hub;
 pub mod ids;
 pub mod locale;
 pub mod locator;
+pub mod memory;
 pub mod mention;
 pub mod roster;
 pub mod secretary_work;
@@ -129,6 +130,10 @@ pub use hub::{
 pub use ids::{CommitteeId, EventId, IdError, Name, Seq};
 pub use locale::{Locale, LocaleParseError};
 pub use locator::{Locator, LocatorParseError, Origin};
+pub use memory::{
+    Digest, DigestPayload, DigestPoint, DigestTrigger, MemoryFold, MemoryHit, MemoryPayload,
+    MemoryPoint, Retired,
+};
 pub use mention::{Found, Mention, MentionParseError};
 pub use roster::{
     Account, AgentOf, DEFAULT_SENATE_NAME, DelegationPresence, Office, People, Principal,

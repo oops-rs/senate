@@ -32,6 +32,7 @@ use crate::continuity::{
 };
 use crate::event::{Event, Kind, NewEvent};
 use crate::ids::{CommitteeId, Name, Seq};
+use crate::memory::{MemoryFold, MemoryHit};
 use crate::roster::{DelegationPresence, People, ResolveError, Roster};
 use crate::senator::SenatorName;
 use crate::task::TaskBoard;
@@ -288,6 +289,21 @@ pub trait Hub: Send + Sync + 'static {
         hits.reverse();
         hits.truncate(limit);
         Ok(hits)
+    }
+
+    /// Up to `limit` of the committee's memory points matching `query`,
+    /// best first ([`MemoryFold::search`]); an empty query lists the newest.
+    /// Points no longer in force only with `all`. The default scans; the
+    /// server searches the fold it keeps with the brief.
+    async fn memory_search(
+        &self,
+        committee: &CommitteeId,
+        query: &str,
+        limit: usize,
+        all: bool,
+    ) -> Result<Vec<MemoryHit>, HubError> {
+        let fold = scan(self, committee, MemoryFold::new(), MemoryFold::observe).await?;
+        Ok(fold.search(query, limit, all))
     }
 
     /// The committee's brief over its whole log. The default scans; the

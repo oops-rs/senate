@@ -22,12 +22,13 @@ use axum::{Json, Router};
 use senate_core::alias::CommitteeAliases;
 use senate_core::api::{
     AppendResponse, CheckpointQuery, Cursor, CursorQuery, DEFAULT_PAGE, DEFAULT_SEARCH,
-    EPOCH_HEADER, EventsPage, EventsQuery, Heartbeat, MAX_PAGE, MAX_SEARCH, Me, PresencePage,
-    ResolveQuery, Resolved, SearchQuery, SearchResults, StreamQuery, ThreadsPage, ThreadsQuery,
+    EPOCH_HEADER, EventsPage, EventsQuery, Heartbeat, MAX_PAGE, MAX_SEARCH, Me, MemoryQuery,
+    MemoryResults, PresencePage, ResolveQuery, Resolved, SearchQuery, SearchResults, StreamQuery,
+    ThreadsPage, ThreadsQuery,
 };
 use senate_core::{
-    Address, Brief, CheckpointPayload, CheckpointRecord, CommitteeId, DutyPayload, Hub, Kind, Name,
-    NewEvent, Roster, SenatorName, Seq, StatusPayload, StatusState, meta,
+    Address, Brief, CheckpointPayload, CheckpointRecord, CommitteeId, DutyPayload, Hub, Kind,
+    MemoryPayload, Name, NewEvent, Roster, SenatorName, Seq, StatusPayload, StatusState, meta,
 };
 
 use crate::auth::{Authenticate, bearer_token};
@@ -73,6 +74,7 @@ pub(crate) fn router(state: AppState) -> Router {
         )
         .route("/v1/committees/{committee}/search", get(search))
         .route("/v1/committees/{committee}/brief", get(brief))
+        .route("/v1/committees/{committee}/memory", get(memory))
         .route("/v1/committees/{committee}/threads", get(threads))
         .route("/v1/committees/{committee}/presence", get(presence))
         .route(
@@ -472,6 +474,7 @@ async fn append(
             reject_speaker_keys(&event)?;
         }
     }
+    check_memory(&roster, sender, &event)?;
     check_duty(&state, &roster, sender, &event).await?;
     check_checkpoint(&roster, &event)?;
     check_companion(&roster, &event)?;
@@ -598,6 +601,49 @@ fn reject_speaker_keys(event: &NewEvent) -> Result<(), ApiFailure> {
         }
     }
     Ok(())
+}
+
+/// The committee's memory ([`senate_core::memory`]): a point is the
+/// Speaker's; a correction or deletion is a person's, written by them or by
+/// the Speaker on their behalf. Agents, teams, services, guests and child
+/// Senates write none of it; they search it.
+fn check_memory(roster: &Roster, sender: Sender, event: &NewEvent) -> Result<(), ApiFailure> {
+    let Some(value) = event.meta.get(meta::MEMORY) else {
+        return Ok(());
+    };
+    let payload: MemoryPayload = serde_json::from_value(value.clone()).map_err(|e| {
+        ApiFailure::bad_request(format!(
+            "meta.{} is not a memory payload: {e}",
+            meta::MEMORY
+        ))
+    })?;
+    if event.kind != Kind::Note {
+        return Err(ApiFailure::bad_request(format!(
+            "meta.{} goes on a note",
+            meta::MEMORY
+        )));
+    }
+    let is_person = |who: &Address| {
+        who.as_senator()
+            .and_then(|s| roster.principal(s.name()))
+            .is_some_and(|p| p.kind.is_person())
+    };
+    let allowed = match (sender, payload.by_person()) {
+        (Sender::Speaker, false) => event.on_behalf_of.is_none(),
+        (Sender::Speaker, true) => event.on_behalf_of.as_ref().is_some_and(is_person),
+        (Sender::Senator, true) => event.on_behalf_of.is_none() && is_person(&event.from),
+        _ => false,
+    };
+    if allowed {
+        Ok(())
+    } else {
+        Err(ApiFailure::forbidden(format!(
+            "the Speaker writes memory points; only a person corrects or deletes one \
+             (meta.{} refused from {})",
+            meta::MEMORY,
+            event.from
+        )))
+    }
 }
 
 /// What a senator holding the Speaker's seat may not write as `speaker`:
@@ -965,6 +1011,22 @@ async fn search(
     let limit = params.limit.unwrap_or(DEFAULT_SEARCH).clamp(1, MAX_SEARCH);
     let events = state.hub.search(&committee, &params.q, limit).await?;
     Ok(Json(SearchResults { events }))
+}
+
+async fn memory(
+    State(state): State<AppState>,
+    _person: Person,
+    path: Result<Path<String>, PathRejection>,
+    params: Result<Query<MemoryQuery>, QueryRejection>,
+) -> Result<Json<MemoryResults>, ApiFailure> {
+    let committee = committee_path(path)?;
+    let params = query(params)?;
+    let limit = params.limit.unwrap_or(DEFAULT_SEARCH).clamp(1, MAX_SEARCH);
+    let points = state
+        .hub
+        .memory_search(&committee, &params.q, limit, params.all)
+        .await?;
+    Ok(Json(MemoryResults { points }))
 }
 
 async fn brief(

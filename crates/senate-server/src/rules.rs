@@ -9,8 +9,9 @@ use senate_core::{Kind, NewEvent, meta};
 
 /// Keys only the Speaker writes. A senator carrying one, whatever its value,
 /// is refused, so no event in the log looks like one the Speaker wrote.
-pub(crate) const SPEAKER_KEYS: [&str; 6] = [
+pub(crate) const SPEAKER_KEYS: [&str; 7] = [
     meta::BRIEF_TOP,
+    meta::DIGEST,
     meta::TRIAGE,
     meta::OUTPUT_LEVEL,
     meta::WORK,
@@ -32,10 +33,13 @@ const STATE_KINDS: [Kind; 6] = [
 ];
 
 /// Meta keys that carry or cause a state change: bindings, status, decision
-/// proposals and what they supersede, checkpoints, presence, duties, and everything
+/// proposals and what they supersede, checkpoints, presence, duties, the
+/// committee's memory and digests, and everything
 /// the Speaker writes (triage, level, work runs, provisional answers,
 /// takeover).
-const STATE_KEYS: [&str; 14] = [
+const STATE_KEYS: [&str; 16] = [
+    meta::DIGEST,
+    meta::MEMORY,
     meta::BINDING,
     meta::DUTY,
     meta::STATUS,

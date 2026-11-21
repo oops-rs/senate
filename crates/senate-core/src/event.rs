@@ -545,6 +545,15 @@ pub mod meta {
     /// On the desk's note in an asker's thread: where the message was
     /// forwarded, as a qualified name.
     pub const FORWARDED_TO: &str = "forwarded_to";
+    /// `note` from the Speaker: a digest of the discussion, a
+    /// [`DigestPayload`](crate::memory::DigestPayload). Speaker only; the
+    /// server refuses the key from senators. See [`crate::memory`].
+    pub const DIGEST: &str = "digest";
+    /// `note`: a memory point, a correction or a deletion, a
+    /// [`MemoryPayload`](crate::memory::MemoryPayload). A point is the
+    /// Speaker's; a correction or deletion is a person's, written by them or
+    /// by the Speaker on their behalf. See [`crate::memory`].
+    pub const MEMORY: &str = "memory";
     /// On an answer relayed back into an asker's thread: who answered
     /// where the message was forwarded, as a qualified name.
     pub const ANSWERED_BY: &str = "answered_by";

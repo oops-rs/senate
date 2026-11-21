@@ -567,6 +567,24 @@ pub struct SearchResults {
     pub events: Vec<Event>,
 }
 
+/// `GET .../memory`: the committee's memory points matching `q`, best first
+/// ([`Hub::memory_search`](crate::Hub::memory_search)); without `q`, the
+/// newest. Points no longer in force only with `all`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct MemoryQuery {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub q: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub all: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryResults {
+    pub points: Vec<crate::memory::MemoryHit>,
+}
+
 /// `GET /v1/aliases`, the Senate-wide view older bridges read: each alias
 /// that stands for one agent, wherever it is
 /// ([`crate::alias::CommitteeAliases::flat`]). `GET /v1/committee-aliases`
