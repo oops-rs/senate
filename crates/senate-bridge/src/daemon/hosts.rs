@@ -153,6 +153,7 @@ async fn stop_child(child: &mut Child) -> Result<(), IpcError> {
 }
 
 impl Shared {
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn on_spawn_with<Fut>(
         &self,
         runtime: HostedRuntime,
