@@ -1684,6 +1684,10 @@ pub struct CommitteeStatus {
     pub configured: bool,
     /// Live sessions of the agent bound to it.
     pub sessions: usize,
+    /// The agent's duty on the committee, as the committee's presence and
+    /// log last said; `None`: it has none, or it is not known yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duty: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

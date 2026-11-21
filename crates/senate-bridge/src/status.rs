@@ -236,6 +236,7 @@ fn offline(paths: &Paths) -> anyhow::Result<StatusView> {
             delivered: c.delivered,
             reported: c.reported,
             stream: None,
+            duty: None,
             agent,
             committee,
         })
@@ -860,6 +861,7 @@ mod tests {
             }),
             configured: true,
             sessions,
+            duty: None,
         };
         StatusView {
             daemon: None,

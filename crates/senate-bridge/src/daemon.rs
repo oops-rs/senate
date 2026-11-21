@@ -513,6 +513,10 @@ pub(crate) struct Shared {
     /// Agents whose work on a committee is reassigned to one of mine
     /// ([`routing::Covering`]).
     covering: Mutex<routing::Covering>,
+    /// Each seat's duty as its committee last said: seeded from the
+    /// presence page when a stream opens, then from duty notes as they
+    /// arrive. For `status`.
+    duties: Mutex<BTreeMap<(CommitteeId, SenatorName), String>>,
     /// This Senate's place among those the machine serves.
     index: usize,
     /// Live Codex sessions of every Senate, for the shared approvals relay.
@@ -803,6 +807,7 @@ impl Shared {
             notifications: common.notifications.clone(),
             announced_to_person: Mutex::new(BTreeSet::new()),
             covering: Mutex::new(routing::Covering::new()),
+            duties: Mutex::new(BTreeMap::new()),
             index,
             codex_sessions: common.codex_sessions.clone(),
             announced: Mutex::new(HashMap::new()),
@@ -1759,7 +1764,23 @@ impl Shared {
     /// what the stream folded so far.
     pub(crate) async fn seed_covering(&self, agent: &SenatorName, committee: &CommitteeId) {
         match self.api.presence(committee).await {
-            Ok(page) => lock(&self.covering).seed(agent, committee, &page.agents),
+            Ok(page) => {
+                lock(&self.covering).seed(agent, committee, &page.agents);
+                let mut duties = lock(&self.duties);
+                duties.retain(|(c, _), _| c != committee);
+                // The page's own duties, else what each presence carries
+                // (an older server).
+                let listed = page.duties.iter().map(|(a, d)| (a.clone(), d.clone()));
+                let carried = page
+                    .agents
+                    .iter()
+                    .filter_map(|p| Some((p.agent.clone(), p.duty.clone()?)));
+                for (agent, duty) in listed.chain(carried) {
+                    if !duty.is_empty() {
+                        duties.entry((committee.clone(), agent)).or_insert(duty);
+                    }
+                }
+            }
             Err(e) => tracing::debug!(%committee, "presence unavailable for reassigned work: {e}"),
         }
     }
@@ -1787,6 +1808,15 @@ impl Shared {
             event
         };
         self.note_cover_change(agent, event);
+        if let Some(duty) = senate_core::DutyPayload::of(event) {
+            let seat = (event.committee.clone(), duty.senator);
+            let mut duties = lock(&self.duties);
+            if duty.duty.is_empty() {
+                duties.remove(&seat);
+            } else {
+                duties.insert(seat, duty.duty);
+            }
+        }
         let directed = {
             let mut covering = lock(&self.covering);
             covering.observe(event, agent);
@@ -3219,6 +3249,9 @@ impl Shared {
                             s.is_live() && s.agent == agent && s.committee() == Some(&committee)
                         })
                         .count(),
+                    duty: lock(&self.duties)
+                        .get(&(committee.clone(), agent.clone()))
+                        .cloned(),
                     agent,
                     committee,
                 }

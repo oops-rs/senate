@@ -1896,3 +1896,55 @@ async fn an_agy_session_takes_its_messages_as_a_user_message_before_its_next_mod
     );
     h.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn status_carries_each_streams_duty_from_presence_and_from_duty_notes() {
+    let mut h = Harness::new().await;
+    // claude's seat on refund-v2 has a duty before the daemon starts.
+    h.server.append(
+        senate_core::DutyPayload {
+            senator: "claude".parse().unwrap(),
+            duty: "reviews refunds".into(),
+        }
+        .note(committee(), claude("alice")),
+    );
+    h.start().await;
+    let wd = h.workdir("w1", Some("refund-v2"));
+    h.hook(HookKind::SessionStart, "s1", &wd, Some(&h.inbox("s1")))
+        .await;
+    h.wait_stream("refund-v2").await;
+    // The seat's duty in `status`, once it is `want`.
+    async fn duty_becomes(h: &Harness, want: &str) {
+        let deadline = tokio::time::Instant::now() + WAIT;
+        loop {
+            let status: ipc::StatusReply =
+                ipc::request(&h.socket(), &ipc::Request::Status, WAIT, WAIT)
+                    .await
+                    .unwrap();
+            let duty = status
+                .committees
+                .iter()
+                .find(|c| c.agent.to_string() == "claude" && c.committee == committee())
+                .and_then(|c| c.duty.clone());
+            if duty.as_deref() == Some(want) {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "duty is {duty:?}, not {want:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+    duty_becomes(&h, "reviews refunds").await;
+
+    // A new duty note while the stream is open replaces it.
+    h.server.append(
+        senate_core::DutyPayload {
+            senator: "claude".parse().unwrap(),
+            duty: "owns the gateway".into(),
+        }
+        .note(committee(), claude("alice")),
+    );
+    duty_becomes(&h, "owns the gateway").await;
+}
