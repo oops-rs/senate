@@ -294,6 +294,8 @@ pub fn docket() -> DocketReply {
 /// What the fake daemon holds and saw.
 pub struct World {
     pub status: StatusReply,
+    /// Threads with more events than their canned two: root → count.
+    pub long: std::collections::BTreeMap<u64, usize>,
     pub sessions: SessionsReply,
     pub threads: Vec<ThreadSummary>,
     pub approvals: Vec<Approval>,
@@ -313,6 +315,7 @@ impl World {
             // Hosted terminals are opt-in (`hosted_sessions()`), so the
             // counts the other tests check stay theirs.
             sessions: SessionsReply::default(),
+            long: Default::default(),
             docket: docket(),
             requests: Vec::new(),
         }
@@ -521,7 +524,10 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
             Some(t) => Reply::ok(&ThreadReply {
                 committee: c,
                 root: t.root,
-                events: thread_events(t),
+                events: match w.long.get(&t.root.0) {
+                    Some(&n) => long_thread(t, n),
+                    None => thread_events(t),
+                },
             }),
             None => Reply::err(IpcError::bad_request(format!("no thread {thread}"))),
         },
@@ -617,6 +623,25 @@ pub fn hosted_sessions() -> SessionsReply {
     }
 }
 
+/// `n` more threads waiting on alice (half to claude, half to codex), and
+/// thread 990 with `events` events.
+pub fn scale(w: &mut World, n: u64, events: usize) {
+    let titles = [
+        "Should the refund flow ask for approval",
+        "[senator::claude] wants a review of the retry budget",
+        "Which environment runs the migration?",
+        "Rotate the staging keys before Friday",
+    ];
+    for i in 0..n {
+        let agent = if i % 2 == 0 { "claude" } else { "codex" };
+        let title = format!("{} #{i}", titles[i as usize % titles.len()]);
+        w.threads.push(suspended(1000 + i, &title, agent));
+    }
+    w.threads
+        .push(suspended(990, "A very long discussion", "claude"));
+    w.long.insert(990, events);
+}
+
 /// What a canned thread says: its question, and the agent's note on it.
 pub fn thread_events(t: &ThreadSummary) -> Vec<Event> {
     let event = |seq: u64, kind: Kind, from: Address, body: String| Event {
@@ -647,6 +672,32 @@ pub fn thread_events(t: &ThreadSummary) -> Vec<Event> {
             Address::senator(&agent),
             format!("Waiting on a person: {reason}."),
         ));
+    }
+    events
+}
+
+/// A thread of `n` events, the agent and alice taking turns.
+pub fn long_thread(t: &ThreadSummary, n: usize) -> Vec<Event> {
+    let mut events = thread_events(t);
+    events.truncate(1);
+    for i in 1..n as u64 {
+        let (from, kind) = if i % 2 == 1 {
+            (Address::senator(&path("claude")), Kind::Note)
+        } else {
+            (Address::senior(&alice()), Kind::Answer)
+        };
+        events.push(Event {
+            seq: Seq(t.root.0 + i),
+            thread: Some(t.root),
+            kind,
+            from,
+            body: format!(
+                "Step {i}: [senator::claude] checked the retry budget against the \
+                 staging numbers; the p99 stays under the limit."
+            ),
+            id: EventId::new(),
+            ..events[0].clone()
+        });
     }
     events
 }

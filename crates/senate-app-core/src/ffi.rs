@@ -401,7 +401,7 @@ impl AppCore {
 
     /// One thread, root first, read as the person: showing it marks it
     /// seen up to its last event, and the inboxes on its committee are read
-    /// again (the result arrives as state too).
+    /// again afterwards (the result arrives as state).
     pub async fn thread(&self, committee: String, thread: u64) -> Result<ThreadView, CoreError> {
         let committee = self.committee_id(&committee)?;
         let request = Request::Thread {
@@ -415,7 +415,10 @@ impl AppCore {
             .on_runtime(move |driver| async move {
                 let reply = driver.read::<ThreadReply>(&request).await;
                 if reply.is_ok() {
-                    driver.refresh_committee(&committee).await;
+                    // Its read state changed: the inboxes follow, in the
+                    // background, so the thread shows without waiting.
+                    let again = Arc::clone(&driver);
+                    tokio::spawn(async move { again.refresh_committee(&committee).await });
                 }
                 reply
             })

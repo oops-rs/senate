@@ -9,7 +9,9 @@
 //! SENATE_HOME=/tmp/sh SENATE_APP_SHOW=1 apps/macos/build/Build/Products/Debug/Senate.app/Contents/MacOS/Senate
 //! ```
 //!
-//! Every 20 s it asks for one more approval. Ctrl-C stops it. It only ever
+//! Every 20 s it asks for one more approval. Ctrl-C stops it.
+//! `FAKE_THREADS=2000` adds that many threads (and a 5000-event thread 990,
+//! `FAKE_EVENTS` to change it), to measure the app with a large inbox. It only ever
 //! writes under `SENATE_HOME`, which this example requires to be set.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -34,6 +36,19 @@ async fn main() {
     let socket = paths.socket();
     let mut w = common::World::new();
     w.sessions = common::hosted_sessions();
+    // FAKE_THREADS=N: N more threads waiting on alice, and thread 990 a
+    // long one (FAKE_EVENTS events, default 5000), to measure the app.
+    if let Some(n) = std::env::var("FAKE_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        let events = std::env::var("FAKE_EVENTS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(5000);
+        common::scale(&mut w, n, events);
+        println!("{n} more threads; thread 990 has {events} events");
+    }
     w.status.roles = Some(common::roles());
     let world = Arc::new(Mutex::new(w));
     let daemon = common::FakeDaemon::start(&socket, Arc::clone(&world));
