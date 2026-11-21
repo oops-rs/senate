@@ -10,8 +10,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Utc;
 use senate_core::{
-    Address, Appended, BindingAction, BindingPayload, ChatSurface, CommitteeId, Event, GroupRole,
-    Hub, HubError, Kind, Mirror, MirrorRef, NewEvent, PostTarget, Roster, SenatorName, Seq, Source,
+    Account, Address, Appended, BindingAction, BindingPayload, ChatSurface, CommitteeId, Event,
+    GroupRole, Hub, HubError, Kind, Mirror, MirrorRef, Name, NewEvent, PostTarget, Principal,
+    Roster, SenatorName, Seq, Source,
 };
 use senated::testing::{Caps, FakeChat, MembershipKind, MembershipOutcome, Message};
 use senated::{ChatGateway, Component, ComponentContext, MembershipPolicy};
@@ -22,6 +23,8 @@ use tokio_util::sync::CancellationToken;
 
 const GRACE: Duration = Duration::from_secs(3);
 const GROUP: &str = "g_backend";
+/// The platform account of the one person on the roster.
+const PERSON: &str = "u_wendell";
 
 /// A log in memory, as the gateway needs one.
 struct MemoryHub {
@@ -114,7 +117,13 @@ impl Hub for MemoryHub {
     }
 
     async fn roster(&self) -> Result<Roster, HubError> {
-        Ok(Roster::default())
+        // One person, so a message can be simulated as theirs.
+        let mut wendell = Principal::new(Name::new("wendell").unwrap());
+        wendell.accounts = vec![Account {
+            platform: "chat".into(),
+            id: PERSON.into(),
+        }];
+        Ok(Roster::new(vec![wendell], vec![]).unwrap())
     }
 
     async fn is_agent_connected(&self, _committee: &CommitteeId, _agent: &SenatorName) -> bool {
@@ -208,6 +217,11 @@ async fn binding(hub: &MemoryHub, to: &str, group: &str, action: BindingAction) 
 
 /// A person's chat in a group, as a gateway recorded it before a restart.
 async fn chat(hub: &MemoryHub, to: &str, group: &str, message_ref: &str) {
+    chat_marked(hub, to, group, message_ref, false).await;
+}
+
+/// [`chat`], marked simulated when it was (`senate chat send`).
+async fn chat_marked(hub: &MemoryHub, to: &str, group: &str, message_ref: &str, simulated: bool) {
     hub.append(
         NewEvent::new(
             committee(to),
@@ -219,7 +233,7 @@ async fn chat(hub: &MemoryHub, to: &str, group: &str, message_ref: &str) {
             platform: "chat".into(),
             group_id: group.into(),
             group_name: None,
-            simulated: false,
+            simulated,
         })
         .with_mirror(Mirror {
             platform: "chat".into(),
@@ -801,5 +815,73 @@ async fn a_reply_to_something_the_speaker_posted_finds_its_group_in_the_logs_mir
         .unwrap();
     assert_eq!(rig.fake.rejected_posts(), 1);
     assert_eq!(rig.adopts().len(), 1);
+    rig.stop().await;
+}
+
+fn simulated(text: &str) -> senate_core::chat_sim::SimRequest {
+    senate_core::chat_sim::SimRequest {
+        committee: committee("alpha"),
+        from: Name::new("wendell").unwrap(),
+        text: text.into(),
+        group: None,
+        reply_to: None,
+        ambient: true,
+        live: false,
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_restart_names_a_group_by_its_latest_real_message_never_a_simulated_one() {
+    let hub = MemoryHub::new();
+    binding(&hub, "alpha", GROUP, BindingAction::Bind).await;
+    chat(&hub, "alpha", GROUP, "m_real").await;
+    // `senate chat send` after it: the latest chat, but Senate's own ref.
+    chat_marked(&hub, "alpha", GROUP, "sim:01abc", true).await;
+    let rig = rig_on(hub, |fake| fake.know_message("m_real", GROUP)).await;
+    pass(Duration::from_secs(1)).await;
+    let adopts = rig.adopts();
+    assert_eq!(adopts.len(), 1, "{adopts:?}");
+    assert_eq!(adopts[0].subject, "m_real");
+    assert_eq!(adopts[0].outcome, MembershipOutcome::Done);
+    rig.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_restart_with_only_simulated_messages_waits_for_a_real_one() {
+    let hub = MemoryHub::new();
+    binding(&hub, "alpha", GROUP, BindingAction::Bind).await;
+    chat_marked(&hub, "alpha", GROUP, "sim:01abc", true).await;
+    let rig = rig_on(hub, |_| {}).await;
+    pass(Duration::from_secs(600)).await;
+    assert_eq!(rig.adopts(), [], "never by a simulated ref");
+
+    rig.hear("m_first").await;
+    pass(Duration::from_secs(1)).await;
+    assert_eq!(rig.adopts().len(), 1);
+    assert_eq!(rig.adopts()[0].subject, "m_first");
+    rig.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_simulated_message_never_names_its_group_for_an_adopt() {
+    let rig = rig().await;
+    rig.bind("alpha").await;
+    pass(Duration::from_secs(1)).await;
+    assert_eq!(rig.adopts(), [], "nothing names the group yet");
+
+    let sent = rig.gateway.simulate(simulated("hello")).await.unwrap();
+    assert!(sent.message_ref.starts_with("sim:"), "{sent:?}");
+    pass(Duration::from_secs(600)).await;
+    assert_eq!(rig.adopts(), [], "not by the simulated message");
+
+    rig.hear("m_real").await;
+    // Another simulated message after the real one: the real one still names it.
+    rig.fake.fail_adopts(1);
+    pass(Duration::from_millis(10)).await;
+    rig.gateway.simulate(simulated("again")).await.unwrap();
+    pass(Duration::from_secs(5)).await;
+    let subjects: Vec<String> = rig.adopts().into_iter().map(|c| c.subject).collect();
+    assert_eq!(subjects, ["m_real", "m_real"]);
+    assert!(rig.fake.joined().contains(&GROUP.to_owned()));
     rig.stop().await;
 }

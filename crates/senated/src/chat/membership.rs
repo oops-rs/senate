@@ -342,7 +342,7 @@ impl Inner {
     }
 
     /// A message the platform delivered from `group`, found in the log: the
-    /// latest chat from it, the way a bound group is named for an adopt
+    /// latest real (never simulated) chat from it, the way a bound group is named for an adopt
     /// after a restart, before anyone has spoken there.
     async fn derive_ref(&self, group: &str) -> Result<Option<String>, HubError> {
         let Some(hub) = self.hub.borrow().clone() else {
@@ -362,7 +362,9 @@ impl Inner {
             let Some(last) = page.last() else { break };
             after = last.seq;
             for event in &page {
+                // A simulated message's ref is not the platform's to know.
                 if let (Some(source), Some(mirror)) = (&event.source, &event.mirror)
+                    && !source.simulated
                     && source.platform == self.platform
                     && source.group_id == group
                     && mirror.platform == self.platform

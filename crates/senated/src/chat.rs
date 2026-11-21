@@ -43,8 +43,8 @@
 //!     group are made one at a time, in the order wanted.
 //!   - *After a restart* nothing is stored: the log's bindings are replayed,
 //!     every group it says is bound is adopted again (idempotent; named by
-//!     the latest chat the log holds from the group, else by its first new
-//!     message), and every group it ever bound that is bound to nothing is
+//!     the latest real (never simulated) chat the log holds from the group,
+//!     else by its first new real message), and every group it ever bound that is bound to nothing is
 //!     released again (idempotent) once the grace has passed.
 //!   - *Self-heal.* A post into a bound group that the platform refuses
 //!     ([`SurfaceError::Rejected`]) while the bot's membership is not confirmed
@@ -228,8 +228,8 @@ struct State {
     table: BindingTable,
     /// Messages the Speaker posted, and the threads they are in.
     posted: Remembered,
-    /// The latest message the platform delivered from each group: what names
-    /// a group to adopt.
+    /// The latest real message the platform delivered from each group (never
+    /// a simulated one): what names a group to adopt.
     latest_ref: HashMap<String, String>,
     /// Which groups the bot should be in, and what the platform has confirmed.
     memberships: Memberships,
@@ -352,19 +352,26 @@ impl ChatGateway {
         inbound: &Inbound,
     ) -> Result<Option<CommitteeId>, GatewayError> {
         self.inner.hub().await?;
-        Ok(self.remember_inbound(inbound))
+        Ok(self.remember_inbound(inbound, false))
     }
 
-    fn remember_inbound(&self, inbound: &Inbound) -> Option<CommitteeId> {
+    /// Remember a message the gateway was handed. Only a real one names its
+    /// group to the platform: a simulated message's ref is Senate's own
+    /// (`sim:`), or the bot's own post when live, and the platform cannot be
+    /// asked to adopt a group by it.
+    fn remember_inbound(&self, inbound: &Inbound, simulated: bool) -> Option<CommitteeId> {
         self.inner.drain_fresh();
         let mut state = lock(&self.inner.state);
-        state
-            .latest_ref
-            .insert(inbound.group_id.clone(), inbound.message_ref.clone());
         for message in std::iter::once(inbound.message_ref.as_str()).chain(inbound.refs()) {
             state.delivered.insert(message, &inbound.group_id);
         }
         let committee = state.table.committee_of(&inbound.group_id).cloned();
+        if simulated {
+            return committee;
+        }
+        state
+            .latest_ref
+            .insert(inbound.group_id.clone(), inbound.message_ref.clone());
         if committee.is_some() {
             // A message from a bound group: if its membership is not
             // confirmed yet and nothing is working on it (a restart
@@ -390,7 +397,7 @@ impl ChatGateway {
         simulated: bool,
     ) -> Result<Delivered, GatewayError> {
         let hub = self.inner.hub().await?;
-        let committee = self.remember_inbound(&inbound);
+        let committee = self.remember_inbound(&inbound, simulated);
         if inbound.text.trim().is_empty() {
             return Ok(Delivered::Dropped);
         }
