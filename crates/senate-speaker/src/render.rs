@@ -11,9 +11,9 @@
 use std::fmt::Write as _;
 
 use senate_core::{
-    Address, AgentPresence, Brief, Card, CheckpointPayload, CommitteeId, Event, Kind, Locale, Name,
-    OutputLevel, PresencePayload, PresenceState, Roster, SenatorName, Seq, StatusPayload,
-    StatusState, ThreadSummary, TriagePayload, TriageVerdict,
+    Address, AgentPresence, AnnouncementSection, Brief, Card, CheckpointPayload, CommitteeId,
+    Event, Kind, Locale, Name, OutputLevel, PresencePayload, PresenceState, Roster, SenatorName,
+    Seq, StatusPayload, StatusState, ThreadSummary, TriagePayload, TriageVerdict,
 };
 
 use crate::syntax::usage;
@@ -1728,40 +1728,54 @@ pub(crate) fn status_reply(
     line
 }
 
+/// One line per thread waiting on people, as "等人处理" lists them, in
+/// the order given: `seq 12 · <title> · 等 [senator::alice]（<reason>）`.
+pub(crate) fn waiting_lines(l: Locale, threads: &[&ThreadSummary]) -> Vec<String> {
+    threads
+        .iter()
+        .map(|thread| {
+            let who = thread
+                .takeover
+                .as_ref()
+                .or(thread.escalated_to.as_ref())
+                .map(|who| match l {
+                    Locale::Zh => format!(" · 等 {}", person(who)),
+                    Locale::En => format!(" · waiting on {}", person(who)),
+                })
+                .unwrap_or_default();
+            let reason = thread
+                .reason
+                .as_deref()
+                .map(|r| {
+                    let r = cut(&one_line(r), PINNED_TITLE_CHARS);
+                    match l {
+                        Locale::Zh => format!("（{r}）"),
+                        Locale::En => format!(" ({r})"),
+                    }
+                })
+                .unwrap_or_default();
+            format!(
+                "seq {} · {}{who}{reason}",
+                thread.root,
+                cut(&one_line(&thread.title), PINNED_TITLE_CHARS)
+            )
+        })
+        .collect()
+}
+
+fn nothing_waiting(l: Locale) -> &'static str {
+    l.pick("没有等人处理的话题。", "Nothing is waiting on a person.")
+}
+
 /// The pinned "waiting on people" card: every suspended thread, oldest
 /// first, at most [`WAITING_LINES`] lines.
 pub(crate) fn waiting_card(l: Locale, threads: &[&ThreadSummary]) -> Card {
     let mut markdown = String::new();
     if threads.is_empty() {
-        markdown.push_str(l.pick("没有等人处理的话题。", "Nothing is waiting on a person."));
+        markdown.push_str(nothing_waiting(l));
     }
-    for thread in threads.iter().take(WAITING_LINES) {
-        let who = thread
-            .takeover
-            .as_ref()
-            .or(thread.escalated_to.as_ref())
-            .map(|who| match l {
-                Locale::Zh => format!(" · 等 {}", person(who)),
-                Locale::En => format!(" · waiting on {}", person(who)),
-            })
-            .unwrap_or_default();
-        let reason = thread
-            .reason
-            .as_deref()
-            .map(|r| {
-                let r = cut(&one_line(r), PINNED_TITLE_CHARS);
-                match l {
-                    Locale::Zh => format!("（{r}）"),
-                    Locale::En => format!(" ({r})"),
-                }
-            })
-            .unwrap_or_default();
-        let _ = writeln!(
-            markdown,
-            "- seq {} · {}{who}{reason}",
-            thread.root,
-            cut(&one_line(&thread.title), PINNED_TITLE_CHARS)
-        );
+    for line in waiting_lines(l, threads).iter().take(WAITING_LINES) {
+        let _ = writeln!(markdown, "- {line}");
     }
     if threads.len() > WAITING_LINES {
         markdown.push_str(&more(l, threads.len() - WAITING_LINES));
@@ -1773,6 +1787,40 @@ pub(crate) fn waiting_card(l: Locale, threads: &[&ThreadSummary]) -> Card {
         steps: Vec::new(),
         links: Vec::new(),
     }
+}
+
+/// A bold heading over its lines as a list, at most `cap` of them and then
+/// how many more, or `none` when there are no lines; a blank line after.
+fn list_section(
+    markdown: &mut String,
+    l: Locale,
+    title: &str,
+    lines: &[String],
+    none: &str,
+    cap: usize,
+) {
+    let _ = writeln!(markdown, "**{title}**");
+    if lines.is_empty() {
+        let _ = writeln!(markdown, "{none}");
+    }
+    for line in lines.iter().take(cap) {
+        let _ = writeln!(markdown, "- {line}");
+    }
+    if lines.len() > cap {
+        let _ = writeln!(markdown, "{}", more(l, lines.len() - cap));
+    }
+    markdown.push('\n');
+}
+
+/// A decision as the pinned card and the announcement list it:
+/// `seq 42：<decision>` / `seq 42: <decision>`.
+pub(crate) fn decision_line(l: Locale, decision: &senate_core::brief::BriefDecision) -> String {
+    format!(
+        "seq {}{}{}",
+        decision.seq,
+        l.pick("：", ": "),
+        cut(&one_line(&decision.body), BRIEF_ITEM_CHARS)
+    )
 }
 
 /// What the pinned "today" card lists.
@@ -1797,30 +1845,14 @@ pub(crate) fn today_card(l: Locale, today: &Today<'_>) -> Card {
     let colon = l.pick("：", ": ");
     let none = l.pick("无。", "None.");
     let mut section = |title: &str, lines: Vec<String>, none: &str| {
-        let _ = writeln!(markdown, "**{title}**");
-        if lines.is_empty() {
-            let _ = writeln!(markdown, "{none}");
-        }
-        for line in lines.iter().take(TODAY_ITEMS) {
-            let _ = writeln!(markdown, "- {line}");
-        }
-        if lines.len() > TODAY_ITEMS {
-            let _ = writeln!(markdown, "{}", more(l, lines.len() - TODAY_ITEMS));
-        }
-        markdown.push('\n');
+        list_section(&mut markdown, l, title, &lines, none, TODAY_ITEMS);
     };
     section(
         l.pick("今天的决策", "Today's decisions"),
         today
             .decisions
             .iter()
-            .map(|d| {
-                format!(
-                    "seq {}{colon}{}",
-                    d.seq,
-                    cut(&one_line(&d.body), BRIEF_ITEM_CHARS)
-                )
-            })
+            .map(|d| decision_line(l, d))
             .collect(),
         none,
     );
@@ -1885,6 +1917,105 @@ pub(crate) fn today_card(l: Locale, today: &Today<'_>) -> Card {
         markdown: markdown.trim_end().to_owned(),
         steps: Vec::new(),
         links: Vec::new(),
+    }
+}
+
+/// Items per list of a people group's announcement.
+const ANNOUNCEMENT_ITEMS: usize = 5;
+/// Points of the memory's latest digest in the announcement.
+const ANNOUNCEMENT_LATELY: usize = 7;
+
+/// What the Speaker's section of a people group's announcement lists. All
+/// of it is the committee's state now, with nothing relative to the time,
+/// so the same state renders the same section.
+pub(crate) struct AnnouncementParts<'a> {
+    pub(crate) committee: &'a CommitteeId,
+    /// Every seat, as `/status` lists them ([`seat_line`]).
+    pub(crate) seats: &'a [crate::brain::CommitteeSeat],
+    /// The threads waiting on people, oldest first, as "等人处理".
+    pub(crate) waiting: Vec<&'a ThreadSummary>,
+    /// Decisions in force, newest first.
+    pub(crate) decisions: Vec<&'a senate_core::brief::BriefDecision>,
+    /// The memory's latest digest, one rendered line per point (shown only
+    /// when there are any).
+    pub(crate) lately: Vec<String>,
+    /// What the memory knows, one rendered line per point (shown only when
+    /// there are any).
+    pub(crate) known: Vec<String>,
+}
+
+/// The Speaker's section of a people group's announcement: the committee,
+/// how to reach the Speaker, the seats, what waits on people, recent
+/// decisions. Built from the lines `/status` and the pinned cards use.
+pub(crate) fn announcement(l: Locale, parts: &AnnouncementParts<'_>) -> AnnouncementSection {
+    let mut markdown = String::new();
+    let none = l.pick("无。", "None.");
+    let _ = writeln!(markdown, "**{}**", l.pick("怎么用", "How to use"));
+    let _ = writeln!(
+        markdown,
+        "{}{}\n",
+        l.pick(
+            "在群里 @Speaker 提问或交代事情。",
+            "Mention @Speaker here to ask or to hand over work. "
+        ),
+        usage(l)
+    );
+    let seats: Vec<String> = parts.seats.iter().map(|s| seat_line(l, s)).collect();
+    list_section(
+        &mut markdown,
+        l,
+        l.pick("席位", "Seats"),
+        &seats,
+        none,
+        usize::MAX,
+    );
+    list_section(
+        &mut markdown,
+        l,
+        l.pick("等人处理", "Waiting on people"),
+        &waiting_lines(l, &parts.waiting),
+        nothing_waiting(l),
+        ANNOUNCEMENT_ITEMS,
+    );
+    let decisions: Vec<String> = parts
+        .decisions
+        .iter()
+        .map(|d| decision_line(l, d))
+        .collect();
+    list_section(
+        &mut markdown,
+        l,
+        l.pick("最近的决策", "Recent decisions"),
+        &decisions,
+        none,
+        ANNOUNCEMENT_ITEMS,
+    );
+    if !parts.lately.is_empty() {
+        list_section(
+            &mut markdown,
+            l,
+            l.pick("近况", "Lately"),
+            &parts.lately,
+            none,
+            ANNOUNCEMENT_LATELY,
+        );
+    }
+    if !parts.known.is_empty() {
+        list_section(
+            &mut markdown,
+            l,
+            l.pick("我们知道的", "What we know"),
+            &parts.known,
+            none,
+            ANNOUNCEMENT_ITEMS,
+        );
+    }
+    AnnouncementSection {
+        title: match l {
+            Locale::Zh => format!("委员会 {}", parts.committee),
+            Locale::En => format!("Committee {}", parts.committee),
+        },
+        markdown: markdown.trim_end().to_owned(),
     }
 }
 
@@ -2024,6 +2155,89 @@ mod tests {
             "{}",
             card.markdown
         );
+    }
+
+    /// The announcement is built from the `/status` seat lines, the
+    /// "等人处理" lines and the brief's decisions, newest first; the memory's
+    /// blocks show only when there is something in them.
+    #[test]
+    fn the_announcement_reuses_the_status_and_pinned_card_lines() {
+        let seats = [
+            seat(
+                "alice-desk::claude-1",
+                Some("refund-dev（alice-desk）"),
+                true,
+                Some("退款后端"),
+            ),
+            seat("alice-desk::archivist", None, false, None),
+        ];
+        let waiting = thread();
+        let decisions: Vec<senate_core::brief::BriefDecision> = (1..=7)
+            .map(|n| senate_core::brief::BriefDecision {
+                seq: Seq(100 + n),
+                ts: Utc::now(),
+                by: Address::senior(&name("pm")),
+                body: format!("决策 {n}"),
+            })
+            .collect();
+        let c = CommitteeId::new("refund").unwrap();
+        let mut parts = AnnouncementParts {
+            committee: &c,
+            seats: &seats,
+            waiting: vec![&waiting],
+            decisions: decisions.iter().rev().collect(),
+            lately: Vec::new(),
+            known: Vec::new(),
+        };
+        let section = announcement(Locale::Zh, &parts);
+        assert_eq!(section.title, "委员会 refund");
+        let usage = crate::syntax::usage(Locale::Zh);
+        assert_eq!(
+            section.markdown,
+            format!(
+                "**怎么用**\n在群里 @Speaker 提问或交代事情。{usage}\n\n\
+                 **席位**\n\
+                 - {}\n\
+                 - {}\n\n\
+                 **等人处理**\n\
+                 - {}\n\n\
+                 **最近的决策**\n\
+                 - seq 107：决策 7\n\
+                 - seq 106：决策 6\n\
+                 - seq 105：决策 5\n\
+                 - seq 104：决策 4\n\
+                 - seq 103：决策 3\n\
+                 （还有 2 条）",
+                seat_line(Locale::Zh, &seats[0]),
+                seat_line(Locale::Zh, &seats[1]),
+                waiting_lines(Locale::Zh, &[&waiting])[0],
+            )
+        );
+        assert!(
+            waiting_card(Locale::Zh, &[&waiting])
+                .markdown
+                .contains(&waiting_lines(Locale::Zh, &[&waiting])[0])
+        );
+        assert!(!section.markdown.contains("近况"));
+
+        parts.waiting.clear();
+        parts.decisions.clear();
+        parts.lately = vec!["网关改用 Idempotency-Key".into()];
+        parts.known = vec!["退款走异步队列".into()];
+        let section = announcement(Locale::En, &parts);
+        assert_eq!(section.title, "Committee refund");
+        assert!(
+            section.markdown.ends_with(
+                "**Waiting on people**\nNothing is waiting on a person.\n\n\
+                 **Recent decisions**\nNone.\n\n\
+                 **Lately**\n- 网关改用 Idempotency-Key\n\n\
+                 **What we know**\n- 退款走异步队列"
+            ),
+            "{}",
+            section.markdown
+        );
+        // The same state renders the same section.
+        assert_eq!(announcement(Locale::En, &parts), section);
     }
 
     /// No aliases known: every seat is shown by its id.
