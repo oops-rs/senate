@@ -1704,8 +1704,11 @@ pub(crate) struct Today<'a> {
     pub(crate) decisions: Vec<&'a senate_core::brief::BriefDecision>,
     pub(crate) questions: Vec<&'a senate_core::brief::BriefQuestion>,
     pub(crate) threads: Vec<&'a ThreadSummary>,
-    /// `(agent, seq, what)`, one per agent, most recent first.
-    pub(crate) activity: Vec<(SenatorName, Seq, String)>,
+    /// One line per agent here active today, then per seat in a child
+    /// Senate, most recent first: who, as people are shown it (a child's
+    /// seat with its presence and duty, as [`seat_line`]), and its latest
+    /// `(seq, what)` the log has, if any today.
+    pub(crate) activity: Vec<(String, Option<(Seq, String)>)>,
     /// Every seat on the committee, here and in child Senates, as the
     /// Speaker's prompt lists them.
     pub(crate) seats: &'a [crate::brain::CommitteeSeat],
@@ -1781,7 +1784,10 @@ pub(crate) fn today_card(l: Locale, today: &Today<'_>) -> Card {
         today
             .activity
             .iter()
-            .map(|(agent, seq, what)| format!("{} · seq {seq} · {what}", senator(agent)))
+            .map(|(who, last)| match last {
+                Some((seq, what)) => format!("{who} · seq {seq} · {what}"),
+                None => who.clone(),
+            })
             .collect(),
         l.pick("今天还没有动静。", "Nothing yet today."),
     );
@@ -2597,7 +2603,10 @@ mod tests {
             decisions: vec![&decision],
             questions: vec![&question],
             threads: vec![&t],
-            activity: vec![(path("copilot"), Seq(7), "answer: 90 days".into())],
+            activity: vec![(
+                "[senator::copilot]".into(),
+                Some((Seq(7), "answer: 90 days".into())),
+            )],
             seats: &[seat("claude", None, true, Some("reviews"))],
         };
         let card = today_card(Locale::En, &today);

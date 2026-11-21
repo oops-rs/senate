@@ -395,6 +395,69 @@ async fn the_today_card_has_a_presence_line_per_agent() {
     assert!(text.contains("- [senator::copilot] 失联"), "{text}");
 }
 
+/// Thread 797 item 7b: "各 agent 最近在做" lists the seats in child
+/// Senates, as /status shows them (alias, presence, duty), with the latest
+/// relay to them the log here has; a quiet seat is listed too.
+#[tokio::test(start_paused = true)]
+async fn the_today_card_lists_child_seats_with_their_latest_activity() {
+    let hub = agents_hub().await;
+    hub.add_child("wyak", "pm");
+    hub.declare_seats(
+        "wyak",
+        &refund(),
+        &[
+            ("codex", PresenceState::Online),
+            ("archivist", PresenceState::Absent),
+        ],
+    );
+    hub.declare_duty("wyak", &refund(), "codex", "commons 的开发");
+    hub.declare_alias("wyak", &refund(), "codex", "commons-dev");
+    let surface = FakeSurface::with(Caps::ADOPTED);
+    let rig = Rig::start_with(hub, surface.clone(), ScriptedBrain::new()).await;
+    let relayed = rig
+        .append(
+            NewEvent::new(
+                refund(),
+                Kind::Question,
+                senate_core::Address::Speaker,
+                "Commons 怎么部署？",
+            )
+            .to(senate_core::Address::Child {
+                senate: super::rig::name("wyak"),
+                committee: refund(),
+            })
+            .on_behalf_of(super::rig::user("pm"))
+            .with_meta(
+                senate_core::meta::INTENDED,
+                json!("wyak::refund-v2::senator::codex"),
+            ),
+        )
+        .await;
+    rig.settle().await;
+    tokio::time::advance(Duration::from_millis(2_100)).await;
+    rig.settle().await;
+    let today = surface
+        .cards()
+        .into_iter()
+        .find(|c| c.first.title.starts_with("今天的摘要"))
+        .expect("today card");
+    let text = today.now.markdown;
+    let section = text
+        .split("**各 agent 最近在做**\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\n\n").next())
+        .unwrap_or_default();
+    assert_eq!(
+        section,
+        format!(
+            "- commons-dev（wyak） 在线 · 职责：commons 的开发 · seq {} · 提问：Commons 怎么部署？\n\
+             - [wyak::archivist] 缺席（租约过期）",
+            relayed.seq
+        ),
+        "{text}"
+    );
+}
+
 // ----- takeover ----------------------------------------------------------------
 
 #[tokio::test]

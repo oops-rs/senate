@@ -463,13 +463,42 @@ fn pinned_cards(state: &CommitteeState, seats: &[crate::brain::CommitteeSeat]) -
         })
         .collect();
     threads.sort_by_key(|t| t.root);
-    let mut activity: Vec<(senate_core::SenatorName, Seq, String)> = state
+    // Agents here active today, by the name people see them by; then
+    // every seat in a child Senate, from its report, with what the log
+    // here last has of it today (the relays to it, its answers).
+    let mut active: Vec<(Seq, String, String)> = state
         .activity
         .iter()
         .filter(|(_, (_, ts, _))| is_today(ts, day))
-        .map(|(agent, (seq, _, what))| (agent.clone(), *seq, what.clone()))
+        .map(|(agent, (seq, _, what))| {
+            let who = seats
+                .iter()
+                .find(|s| s.target == agent.as_str())
+                .map_or_else(
+                    || senate_core::Address::senator(agent).in_text(),
+                    crate::brain::CommitteeSeat::people_name,
+                );
+            (*seq, who, what.clone())
+        })
         .collect();
-    activity.sort_by_key(|a| std::cmp::Reverse(a.1));
+    let mut quiet = Vec::new();
+    for seat in seats.iter().filter(|s| s.target.contains("::")) {
+        let who = render::seat_line(l, seat);
+        match state
+            .seat_activity
+            .get(&seat.target)
+            .filter(|(_, ts, _)| is_today(ts, day))
+        {
+            Some((seq, _, what)) => active.push((*seq, who, what.clone())),
+            None => quiet.push((who, None)),
+        }
+    }
+    active.sort_by_key(|a| std::cmp::Reverse(a.0));
+    let activity = active
+        .into_iter()
+        .map(|(seq, who, what)| (who, Some((seq, what))))
+        .chain(quiet)
+        .collect();
     let today_card = render::today_card(
         l,
         &render::Today {

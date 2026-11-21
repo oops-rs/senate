@@ -360,6 +360,10 @@ struct CommitteeState {
     root_ts: HashMap<Seq, DateTime<Utc>>,
     /// Each agent's latest event: `(seq, ts, what)`.
     activity: HashMap<SenatorName, (Seq, DateTime<Utc>, String)>,
+    /// Each seat in a child Senate's latest event here, by its relay
+    /// target (`<child>::<senator>`): a relay down meant for it, or an
+    /// answer it gave coming up. `(seq, ts, what)`.
+    seat_activity: HashMap<String, (Seq, DateTime<Utc>, String)>,
     /// Verdicts that came back from the Brain for a task root or a relaying
     /// `chat`, keyed by that seq, until the step that uses them is done.
     triage: HashMap<Seq, TriagePayload>,
@@ -401,6 +405,26 @@ struct CommitteeState {
     seat_removed: HashSet<Seq>,
 }
 
+/// The seat in a child Senate an event is about, as a relay names it
+/// (`<child>::<senator>`): a message to the child's desk meant for that
+/// seat ([`meta::INTENDED`]), or an answer from the child that the seat
+/// gave ([`meta::ANSWERED_BY`]).
+fn child_seat_of(event: &Event) -> Option<String> {
+    let (child, locator) = if let Address::Child { senate, .. } = &event.from {
+        let by = event.meta.get(meta::ANSWERED_BY)?.as_str()?;
+        (senate, by.parse::<senate_core::Locator>().ok()?)
+    } else {
+        let locator = senate_core::locator::intended(event)?;
+        let child = event.to.iter().find_map(|a| match a {
+            Address::Child { senate, .. } => Some(senate),
+            _ => None,
+        })?;
+        (child, locator)
+    };
+    let seat = locator.address().as_senator()?;
+    (locator.senate()?.name() == child).then(|| format!("{child}::{seat}"))
+}
+
 /// An agent's latest presence transition in the log.
 #[derive(Debug, Clone, Copy)]
 struct PresenceSeen {
@@ -438,6 +462,12 @@ impl CommitteeState {
         if let Some(agent) = self.people.as_agent(&event.from) {
             self.activity.insert(
                 agent.clone(),
+                (event.seq, event.ts, render::activity(self.locale, event)),
+            );
+        }
+        if let Some(seat) = child_seat_of(event) {
+            self.seat_activity.insert(
+                seat,
                 (event.seq, event.ts, render::activity(self.locale, event)),
             );
         }
