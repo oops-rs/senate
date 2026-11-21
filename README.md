@@ -529,10 +529,43 @@ The top level is the daily loop: `status` (a bare `senate` runs it), `inbox`
 | `senate session` | `list` · `watch` · `stop` · `restore` · `prune` |
 | `senate senator` | `list` · `alias` · `unalias` · `seat` · `unseat` · `duty` |
 | `senate secretary` | `list` · `appoint` · `dismiss` · `work list\|show\|create\|assign` |
-| `senate setup` | `init` · `install` · `service install\|uninstall\|status` · `clean` |
+| `senate setup` | `init` · `install` · `service install\|uninstall\|status` · `doctor` · `clean` |
 
 The names before this grouping (`sessions`, `watch`, `pin`, `install`, …) still
 work for one more minor release and print the command that replaces them.
+
+### Troubleshooting
+
+When something does not arrive or a session sits idle, start with:
+
+```bash
+senate setup doctor          # check this machine; each problem with its fix
+senate setup doctor --json   # the same, for scripts: {checks: [...], summary}
+```
+
+Each line is `ok`, `warn` or `fail`, what was found, and the command that
+fixes it where one does. It exits non-zero when a check fails and changes
+nothing. What it checks, and what usually fixes it:
+
+| Check | Fails or warns when | Fix |
+| :--- | :--- | :--- |
+| `service.file`, `service.running` | the service file is not what `setup service install` writes now (an old `senated` path, an old `PATH`), or the service is not running | `senate setup service install --yes` |
+| `service.program.*` | the daemon cannot find `claude`, `codex` or `agy` on the service's `PATH`, a recorded path is gone, or it is a Windows program | `senate setup service install --yes` |
+| `install.*` | Claude Code, Codex or agy is not registered the way `setup install` would register it now (another `senate` path, hooks without `--runtime`) | `senate setup install --yes` |
+| `install.codex.approval`, `install.agy.grant` | Codex lacks `default_tools_approval_mode = "approve"`, or agy lacks `mcp(senate/*)`: a hosted session blocks on its first Senate tool call | `senate setup install --yes` |
+| `leftovers.*` | another bridge (e.g. `commons-bridge`) or an old Senate still has hooks or an MCP server registered | `claude mcp remove --scope user <name>`, `codex mcp remove <name>`, or remove the hook from the file named |
+| `daemon`, `daemon.version` | the daemon is down, or runs another version than this `senate` | `senate setup service install --yes` (restarts it) |
+| `sessions.*` | hosted terminals run with no session (`senate session prune`), or a session waits on a permission prompt (`senate attach <name>`) | as shown |
+| `uplink.*` | the Senate above does not answer, refused the registration, or runs a newer minor release | `cargo install senate senated` for a newer parent |
+| `senate.*` | the Senate served does not answer, the daemon's log epoch differs from the server's, or a cursor is ahead of the log | `senate setup service install --yes` (a restart resets them) |
+| `bindings.*` | saved worktree bindings expired (`senate setup clean --yes`), or name a committee with no messages yet | as shown |
+| `wsl.*` | systemd is off, linger is off, or the service's `PATH` has `/mnt/<drive>` directories | as shown |
+
+A server has its own: `senated doctor --config senated.toml [--json]` checks
+the configuration, the log (read only: never created or migrated), whether
+the server answers on its `listen` address, and with `[chat_gateway]`
+whether the socket is served and a platform adapter is attached (the server
+writes `chat_gateway.json` in its `data_dir` on every attach and detach).
 
 ---
 
