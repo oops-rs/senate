@@ -111,16 +111,21 @@ struct AgyHookInput {
 }
 
 impl AgyHookInput {
+    /// The input as Claude Code's. `cwd` is `None` when agy gave none:
+    /// its TUI (1.5.14) sends an empty `cwd` and no `workspacePaths`, while
+    /// its print mode sends both.
     fn normalize(mut self) -> Option<HookInput> {
-        let cwd = self.cwd.take().or_else(|| {
-            (self.workspace_paths.len() == 1).then(|| self.workspace_paths.remove(0))
-        })?;
-        if !cwd.is_absolute() {
+        let cwd = self
+            .cwd
+            .take()
+            .filter(|cwd| !cwd.as_os_str().is_empty())
+            .or_else(|| (self.workspace_paths.len() == 1).then(|| self.workspace_paths.remove(0)));
+        if cwd.as_ref().is_some_and(|cwd| !cwd.is_absolute()) {
             return None;
         }
         Some(HookInput {
             session_id: Some(session::agy_session_key(&self.conversation_id)?),
-            cwd: Some(cwd),
+            cwd,
             transcript_path: self.transcript_path,
             ..HookInput::default()
         })
@@ -364,9 +369,15 @@ pub async fn prepare(
         if kind == HookKind::SessionEnd {
             return None;
         }
-        serde_json::from_str::<AgyHookInput>(stdin)
+        let mut input = serde_json::from_str::<AgyHookInput>(stdin)
             .ok()?
-            .normalize()?
+            .normalize()?;
+        if input.cwd.is_none() {
+            // agy runs its hooks in the directory of hooks.json; agy itself
+            // runs where the session works.
+            input.cwd = session::ancestor_cwd(git_timeout).await;
+        }
+        input
     } else {
         serde_json::from_str(stdin).ok()?
     };
@@ -483,6 +494,26 @@ fn approval_signal(hook: &Value) -> Option<ClaudeApprovalSignal> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agy_input_without_a_directory_leaves_it_to_the_hook() {
+        let id = "0b1f6e9a-2c3d-4e5f-8a9b-0c1d2e3f4a5b";
+        let parse = |input: Value| {
+            serde_json::from_value::<AgyHookInput>(input)
+                .unwrap()
+                .normalize()
+        };
+        // The TUI's input: an empty cwd and no workspace paths.
+        let tui = parse(json!({"conversationId": id, "cwd": "", "workspacePaths": []})).unwrap();
+        assert_eq!(tui.session_id.as_deref(), Some(&*format!("agy:{id}")));
+        assert_eq!(tui.cwd, None);
+        // Print mode's: the real one.
+        let print = parse(json!({"conversationId": id, "cwd": "/w", "workspacePaths": ["/w"]}));
+        assert_eq!(print.unwrap().cwd, Some(PathBuf::from("/w")));
+        let one = parse(json!({"conversationId": id, "cwd": "", "workspacePaths": ["/x"]}));
+        assert_eq!(one.unwrap().cwd, Some(PathBuf::from("/x")));
+        assert!(parse(json!({"conversationId": id, "cwd": "rel"})).is_none());
+    }
 
     #[test]
     fn output_shape() {

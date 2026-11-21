@@ -606,7 +606,8 @@ impl Shared {
         let session = target.session;
         self.refuse_running_host(&Paths::new(&self.home), &session.session_id)?;
         if (session.runtime == Runtime::Claude && claude_reachable(&session).await)
-            || (session.runtime == Runtime::Agy && agy_conversation_open(&session.session_id))
+            || (session.runtime == Runtime::Agy
+                && session::agy_conversation_open(&session.session_id) == Some(true))
         {
             return Err(IpcError::bad_request(
                 "the original session is still running; exit it before restoring",
@@ -1242,27 +1243,6 @@ async fn claude_reachable(session: &Session) -> bool {
         && tokio::time::timeout(Duration::from_millis(300), UnixStream::connect(socket))
             .await
             .is_ok_and(|result| result.is_ok())
-}
-
-/// Whether an agy has conversation `session_id` open now: agy holds a lock
-/// on `~/.gemini/antigravity-cli/presence/<conversation>.lock` while it does.
-fn agy_conversation_open(session_id: &str) -> bool {
-    let Some(conversation) = Runtime::Agy.native_id(session_id) else {
-        return false;
-    };
-    let Some(path) = dirs::home_dir().map(|home| {
-        home.join(".gemini/antigravity-cli/presence")
-            .join(format!("{conversation}.lock"))
-    }) else {
-        return false;
-    };
-    let Ok(file) = std::fs::File::open(path) else {
-        return false;
-    };
-    matches!(
-        rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockShared),
-        Err(rustix::io::Errno::WOULDBLOCK)
-    )
 }
 
 async fn await_ready(

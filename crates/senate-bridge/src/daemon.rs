@@ -1335,7 +1335,15 @@ impl Shared {
                 if crate::host::awaiting_publication(&paths, &id) {
                     continue;
                 }
-            } else if s.claude_pid.is_some_and(|pid| !session::pid_alive(pid)) {
+            } else if s.claude_pid.is_some_and(|pid| !session::pid_alive(pid))
+                // agy reports no process; it holds a lock while the
+                // conversation is open (checked only for a quiet row, so
+                // the probe never meets agy opening it), and a later hook
+                // revives the row.
+                || (s.runtime == Runtime::Agy
+                    && chrono::Utc::now() - s.last_seen > chrono::Duration::seconds(60)
+                    && session::agy_conversation_open(&s.session_id) == Some(false))
+            {
                 tracing::info!(session = %s.session_id, "session process is gone; marking stale");
                 changed |= self
                     .store

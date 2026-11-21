@@ -485,6 +485,63 @@ pub async fn ancestor_pids(start: u32, depth: usize, timeout: Duration) -> Vec<u
     out
 }
 
+/// Whether an agy has the conversation of agy session `session_id` open
+/// now: agy holds a lock on `~/.gemini/antigravity-cli/presence/<id>.lock`
+/// while it does. `None` when that cannot be told (no such file: another
+/// agy home, or a conversation agy has not opened here).
+pub fn agy_conversation_open(session_id: &str) -> Option<bool> {
+    agy_conversation_open_in(&dirs::home_dir()?, session_id)
+}
+
+fn agy_conversation_open_in(home: &Path, session_id: &str) -> Option<bool> {
+    let conversation = Runtime::Agy.native_id(session_id)?;
+    let path = home
+        .join(".gemini/antigravity-cli/presence")
+        .join(format!("{conversation}.lock"));
+    let file = std::fs::File::open(path).ok()?;
+    match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockShared) {
+        Ok(()) => Some(false),
+        Err(rustix::io::Errno::WOULDBLOCK) => Some(true),
+        Err(_) => None,
+    }
+}
+
+/// The working directory of the nearest process above this one that works
+/// somewhere else: for a hook a runtime runs in a directory of its own
+/// (agy runs its hooks where hooks.json is), the runtime's.
+pub async fn ancestor_cwd(timeout: Duration) -> Option<PathBuf> {
+    let own = std::env::current_dir().ok()?;
+    let parent = std::os::unix::process::parent_id();
+    for pid in ancestor_pids(parent, 4, timeout).await {
+        if let Some(cwd) = cwd_of(pid, timeout).await
+            && cwd != own
+        {
+            return Some(cwd);
+        }
+    }
+    None
+}
+
+/// `pid`'s working directory: `/proc` on Linux, `lsof` elsewhere.
+async fn cwd_of(pid: u32, timeout: Duration) -> Option<PathBuf> {
+    if let Ok(cwd) = std::fs::read_link(format!("/proc/{pid}/cwd")) {
+        return Some(cwd);
+    }
+    let child = tokio::process::Command::new("lsof")
+        .args(["-a", "-d", "cwd", "-Fn", "-p", &pid.to_string()])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    let output = tokio::time::timeout(timeout, child).await.ok()?.ok()?;
+    String::from_utf8(output.stdout)
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix('n'))
+        .map(PathBuf::from)
+        .filter(|cwd| cwd.is_absolute())
+}
+
 async fn parent_of(pid: u32, timeout: Duration) -> Option<u32> {
     let child = tokio::process::Command::new("ps")
         .args(["-o", "ppid=", "-p", &pid.to_string()])
@@ -518,6 +575,26 @@ pub fn pid_alive(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_agy_conversation_is_open_while_agy_holds_its_presence_lock() {
+        let home = tempfile::tempdir().unwrap();
+        let id = "0b1f6e9a-2c3d-4e5f-8a9b-0c1d2e3f4a5b";
+        let key = Runtime::Agy.session_key(id);
+        assert_eq!(agy_conversation_open_in(home.path(), &key), None);
+        let dir = home.path().join(".gemini/antigravity-cli/presence");
+        std::fs::create_dir_all(&dir).unwrap();
+        let lock = std::fs::File::create(dir.join(format!("{id}.lock"))).unwrap();
+        assert_eq!(agy_conversation_open_in(home.path(), &key), Some(false));
+        rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive).unwrap();
+        assert_eq!(agy_conversation_open_in(home.path(), &key), Some(true));
+        drop(lock);
+        assert_eq!(agy_conversation_open_in(home.path(), &key), Some(false));
+        assert_eq!(
+            agy_conversation_open_in(home.path(), "claude-session"),
+            None
+        );
+    }
 
     #[test]
     fn branch_inference_needs_three_segments() {
