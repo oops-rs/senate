@@ -9,6 +9,7 @@ mod continuity;
 mod decisions;
 mod desk;
 mod flows;
+mod gone;
 pub(crate) mod hub;
 mod review;
 mod rig;

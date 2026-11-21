@@ -177,6 +177,7 @@ mod agent;
 mod agents;
 mod cards;
 mod desk;
+mod gone;
 mod offline;
 mod route;
 mod takeover;
@@ -395,6 +396,9 @@ struct CommitteeState {
     /// What was decided for a question to a child Senate that is offline,
     /// by the question's seq, until it is carried out.
     offline: HashMap<Seq, crate::brain::Offline>,
+    /// Questions whose seat is gone that the office has closed this run
+    /// ([`gone`]), so the note is not written again before it is observed.
+    seat_removed: HashSet<Seq>,
 }
 
 /// An agent's latest presence transition in the log.
@@ -1735,6 +1739,10 @@ impl Engine {
             Flow::Done => self.on_child_offline(event).await?,
             flow => flow,
         };
+        // Put to a seat that is gone since: closed, the asker told.
+        if matches!(flow, Flow::Done) {
+            self.close_gone_seats(&event.committee).await?;
+        }
         if matches!(flow, Flow::Done) {
             self.after(event).await;
         }

@@ -71,7 +71,7 @@ pub(crate) struct SeatNames<'a> {
 impl SeatNames<'_> {
     /// An agent here as people are shown it on `committee`: its alias
     /// there as a mention, else its id.
-    fn local(&self, committee: &CommitteeId, address: &Address) -> String {
+    pub(crate) fn local(&self, committee: &CommitteeId, address: &Address) -> String {
         address
             .as_senator()
             .and_then(|agent| self.aliases.alias_of(committee, agent))
@@ -79,7 +79,7 @@ impl SeatNames<'_> {
     }
 
     /// A seat in a child Senate, when the child declares an alias for it.
-    fn child(&self, l: Locale, seat: &senate_core::Locator) -> Option<String> {
+    pub(crate) fn child(&self, l: Locale, seat: &senate_core::Locator) -> Option<String> {
         let child = seat.senate()?.name();
         let committee = seat.committee()?;
         let senator = seat.address().as_senator()?;
@@ -1824,6 +1824,19 @@ pub(crate) fn activity(l: Locale, event: &Event) -> String {
     }
 }
 
+/// The office's note in the thread of a question whose seat is gone: it
+/// will not be answered there, and it is not passed on to anyone else.
+pub(crate) fn seat_removed(l: Locale, seat: &str) -> String {
+    match l {
+        Locale::Zh => format!(
+            "{seat} 已不在本委员会，这个问题不会再有回答，Speaker 也没有转给别人。需要的话请重新提问。"
+        ),
+        Locale::En => format!(
+            "{seat} is no longer on this committee, so this question will not be answered there, and the Speaker has not passed it to anyone else. Ask again if you still need it."
+        ),
+    }
+}
+
 /// The desk's note in the asker's thread: where the message was forwarded.
 pub(crate) fn crossing_forwarded(l: Locale, to: &senate_core::Locator) -> String {
     let to = to.in_text();
@@ -2576,6 +2589,7 @@ mod tests {
             ts: Utc::now(),
             from: sen("copilot"),
             to: vec![sen("claude")],
+            intended: None,
             body: "Which header?".into(),
         };
         let today = Today {

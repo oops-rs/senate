@@ -30,12 +30,21 @@ use crate::duty::DutyFold;
 use crate::event::{BindingAction, Event, Kind, Refs, meta};
 use crate::ids::{CommitteeId, Seq};
 use crate::locale::Locale;
+use crate::locator::{Locator, intended};
 use crate::senator::SenatorName;
 
 /// Most recent decisions kept (in seq order).
 pub const MAX_DECISIONS: usize = 30;
 /// Most recent open questions kept (in seq order).
 pub const MAX_OPEN_QUESTIONS: usize = 10;
+/// The Speaker's note that a question's seat is gone ([`meta::SEAT_REMOVED`]):
+/// it closes the question.
+pub fn is_seat_removed(event: &Event) -> bool {
+    event.kind == Kind::Note
+        && event.from == Address::Speaker
+        && event.meta.contains_key(meta::SEAT_REMOVED)
+}
+
 /// Characters of an open question's body kept in the brief.
 pub const QUESTION_CHARS: usize = 200;
 /// Default bound of [`Brief::to_markdown`].
@@ -99,6 +108,10 @@ pub struct BriefQuestion {
     pub from: Address,
     #[serde(default)]
     pub to: Vec<Address>,
+    /// The seat it was meant for when that is outside this committee's own
+    /// agents ([`meta::INTENDED`]): a seat a child Senate declares.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intended: Option<Locator>,
     pub body: String,
 }
 
@@ -197,7 +210,7 @@ impl BriefBuilder {
                 .insert(event.from.clone(), (event.seq, event.ts));
         }
         if let Some(root) = event.thread
-            && event.kind == Kind::Answer
+            && (event.kind == Kind::Answer || is_seat_removed(event))
         {
             self.open.remove(&root);
         }
@@ -229,6 +242,7 @@ impl BriefBuilder {
                         ts: event.ts,
                         from: principal(event),
                         to: event.to.clone(),
+                        intended: intended(event),
                         body: cut(&event.body, QUESTION_CHARS),
                     },
                 );
@@ -276,6 +290,18 @@ impl BriefBuilder {
             }
             _ => {}
         }
+    }
+
+    /// Every question root still open, oldest first (the brief keeps only
+    /// the latest [`MAX_OPEN_QUESTIONS`]).
+    pub fn open_questions(&self) -> impl Iterator<Item = &BriefQuestion> {
+        self.open.values()
+    }
+
+    /// Whether the log unseated `agent` from this committee (and has not
+    /// seated it again since).
+    pub fn is_unseated(&self, agent: &SenatorName) -> bool {
+        self.presence.seats().is_unseated(agent)
     }
 
     pub fn brief(&self) -> Brief {
@@ -651,6 +677,55 @@ mod tests {
             group_name: Some(format!("{group} 群")),
             role: GroupRole::People,
         })
+    }
+
+    /// Thread 797 item 7: a question to a seat that is gone closes when
+    /// the Speaker says so in its thread; nobody else's note closes it.
+    #[test]
+    fn a_seat_removed_note_from_the_speaker_closes_the_question() {
+        let mut log = Log(Vec::new());
+        let gone = log.push(
+            ev(Kind::Question, "speaker", "Commons 怎么部署？")
+                .to(Address::Child {
+                    senate: crate::Name::new("wyak").unwrap(),
+                    committee: c(),
+                })
+                .on_behalf_of(addr("senator::wendell"))
+                .with_meta(meta::INTENDED, json!("/vm/wyak::refund-v2::senator::codex")),
+        );
+        let kept = log
+            .push(ev(Kind::Question, "senator::claude", "重试几次？").to(addr("senator::copilot")));
+        log.push(
+            ev(Kind::Note, "senator::claude", "fake")
+                .in_thread(kept)
+                .with_meta(meta::SEAT_REMOVED, json!("senator::copilot")),
+        );
+        let mut builder = BriefBuilder::new(c());
+        for e in &log.0 {
+            builder.observe(e);
+        }
+        let open: Vec<_> = builder.open_questions().map(|q| q.seq).collect();
+        assert_eq!(open, [gone, kept]);
+        assert_eq!(
+            builder.brief().open_questions[0]
+                .intended
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("/vm/wyak::refund-v2::senator::codex")
+        );
+        log.push(
+            ev(Kind::Note, "speaker", "该席位已不在本委员会。")
+                .in_thread(gone)
+                .to(addr("senator::wendell"))
+                .with_meta(
+                    meta::SEAT_REMOVED,
+                    json!("/vm/wyak::refund-v2::senator::codex"),
+                ),
+        );
+        let brief = Brief::from_events(c(), &log.0);
+        let open: Vec<_> = brief.open_questions.iter().map(|q| q.seq).collect();
+        assert_eq!(open, [kept]);
     }
 
     #[test]

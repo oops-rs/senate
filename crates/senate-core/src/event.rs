@@ -543,6 +543,12 @@ pub mod meta {
     /// a child Senate that was offline: the note that it is held, or the
     /// answer given on the child's behalf. The child Senate's name.
     pub const CHILD_OFFLINE: &str = "child_offline";
+    /// On the Speaker's note in a question's thread: the seat the question
+    /// was put to is no longer on the committee (unseated here, or no
+    /// longer declared by the child Senate it was in), as a qualified
+    /// name. The question is closed: the brief no longer lists it as open.
+    /// Only the Speaker's note counts.
+    pub const SEAT_REMOVED: &str = "seat_removed";
 }
 
 fn flag(event: &Event, key: &str) -> bool {
