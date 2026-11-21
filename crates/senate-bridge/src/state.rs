@@ -35,6 +35,10 @@
 //!   database from before it gets the empty table when it is opened: nothing
 //!   is seen yet, so what was answered to the person and never opened shows
 //!   once as new.
+//! - `replacements` — a `senate session replace` under way, by the senator
+//!   being replaced: what it held and the steps done, as the daemon's own
+//!   JSON record (`daemon::replace`), so running the command again resumes
+//!   it. Removed when the replacement finishes.
 //! - `verdicts` and `owners` — facts of the log, the same for every agent:
 //!   the Speaker's triage verdict per thread root, and the
 //!   [`TaskOwner`] (agent and session) that took each thread.
@@ -165,6 +169,11 @@ CREATE TABLE IF NOT EXISTS owners (
     agent      TEXT NOT NULL,
     session_id TEXT NOT NULL,
     PRIMARY KEY (committee, root)
+);
+CREATE TABLE IF NOT EXISTS replacements (
+    old     TEXT PRIMARY KEY,
+    record  TEXT NOT NULL,
+    updated INTEGER NOT NULL
 );
 ";
 
@@ -2445,6 +2454,35 @@ impl Store {
             "status IN ('pending', 'queued')",
         )
     }
+
+    // ---- replacements under way --------------------------------------------
+
+    /// Record (or update) the replacement of `old`: its JSON record.
+    pub fn save_replacement(&self, old: &SenatorName, record: &str) -> Result<(), StoreError> {
+        self.conn().execute(
+            "INSERT INTO replacements (old, record, updated) VALUES (?1, ?2, ?3)
+             ON CONFLICT(old) DO UPDATE SET record = excluded.record, updated = excluded.updated",
+            params![agent_text(old), record, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// Every replacement under way: the senator replaced and its record.
+    pub fn replacements(&self) -> Result<Vec<(SenatorName, String)>, StoreError> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT old, record FROM replacements ORDER BY old")?;
+        let rows = stmt.query_map([], |r| Ok((agent_col(r, 0)?, r.get::<_, String>(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// The replacement of `old` is finished (or was never started).
+    pub fn remove_replacement(&self, old: &SenatorName) -> Result<(), StoreError> {
+        self.conn().execute(
+            "DELETE FROM replacements WHERE old = ?1",
+            params![agent_text(old)],
+        )?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -3210,6 +3248,24 @@ mod tests {
                 .unwrap()
                 .redelivered
         );
+    }
+
+    #[test]
+    fn a_replacement_under_way_survives_a_reopen_until_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        {
+            let s = Store::open(&path).unwrap();
+            s.save_replacement(&claude(), r#"{"step":1}"#).unwrap();
+            s.save_replacement(&claude(), r#"{"step":2}"#).unwrap();
+        }
+        let s = Store::open(&path).unwrap();
+        assert_eq!(
+            s.replacements().unwrap(),
+            [(claude(), r#"{"step":2}"#.to_string())]
+        );
+        s.remove_replacement(&claude()).unwrap();
+        assert!(s.replacements().unwrap().is_empty());
     }
 
     #[test]
