@@ -507,11 +507,18 @@ pub enum Request {
         /// typed into its terminal.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prompt: Option<String>,
+        /// The runtime's model and effort; unset, its own default.
+        #[serde(flatten)]
+        model: HostedModel,
     },
     Restore {
         #[serde(default)]
         session: SessionSelector,
         senator: AliasName,
+        /// What to change of the recorded model and effort, for this
+        /// restore and those after it.
+        #[serde(flatten)]
+        model: HostedModel,
     },
     Stop {
         #[serde(default)]

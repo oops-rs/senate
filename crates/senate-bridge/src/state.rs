@@ -103,6 +103,11 @@ CREATE TABLE IF NOT EXISTS hosted_native_seats (
     session_id TEXT PRIMARY KEY,
     retired INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS hosted_models (
+    session_id TEXT PRIMARY KEY,
+    model      TEXT,
+    effort     TEXT
+);
 CREATE TABLE IF NOT EXISTS hosted_switch_notices (
     id TEXT PRIMARY KEY,
     event TEXT NOT NULL,
@@ -294,6 +299,9 @@ struct HostedBinding<'a> {
     committee: &'a CommitteeId,
     cursor: Option<(Seq, Seq)>,
     transition: Option<(&'a Session, &'a NewEvent)>,
+    /// The model and effort this launch starts with; a switch carries the
+    /// first session's over.
+    model: Option<&'a crate::ipc::HostedModel>,
 }
 
 pub struct Store {
@@ -984,6 +992,7 @@ impl Store {
         id: &EventId,
         committee: &CommitteeId,
         cursor: Option<(Seq, Seq)>,
+        model: &crate::ipc::HostedModel,
     ) -> Result<Session, StoreError> {
         self.upsert(
             s,
@@ -992,8 +1001,30 @@ impl Store {
                 committee,
                 cursor,
                 transition: None,
+                model: Some(model),
             }),
         )
+    }
+
+    /// The model and effort a hosted session was last started with.
+    pub(crate) fn hosted_model(
+        &self,
+        session_id: &str,
+    ) -> Result<crate::ipc::HostedModel, StoreError> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT model, effort FROM hosted_models WHERE session_id = ?1",
+                [session_id],
+                |row| {
+                    Ok(crate::ipc::HostedModel {
+                        model: row.get(0)?,
+                        effort: row.get(1)?,
+                    })
+                },
+            )
+            .optional()?
+            .unwrap_or_default())
     }
 
     /// Discard a fresh launch and the local cursor that transaction created.
@@ -1012,6 +1043,10 @@ impl Store {
         if changed != 0 {
             tx.execute(
                 "DELETE FROM hosted_native_seats WHERE session_id = ?1",
+                [&launch.session_id],
+            )?;
+            tx.execute(
+                "DELETE FROM hosted_models WHERE session_id = ?1",
                 [&launch.session_id],
             )?;
             tx.execute(
@@ -1067,6 +1102,7 @@ impl Store {
                 committee,
                 cursor: None,
                 transition: Some((first, notice)),
+                model: None,
             }),
         )
     }
@@ -1251,6 +1287,12 @@ impl Store {
                     "INSERT OR REPLACE INTO hosted_native_seats (session_id, retired) VALUES (?1, 1)",
                     [&first.session_id],
                 )?;
+                // The same TUI runs on: so does its model.
+                tx.execute(
+                    "INSERT OR REPLACE INTO hosted_models (session_id, model, effort)
+                     SELECT ?2, model, effort FROM hosted_models WHERE session_id = ?1",
+                    params![first.session_id, s.session_id],
+                )?;
                 tx.execute(
                     "DELETE FROM session_ancestors WHERE session_id = ?1",
                     [&first.session_id],
@@ -1329,6 +1371,13 @@ impl Store {
                 }
             }
             if let Some(binding) = &hosted {
+                if let Some(model) = binding.model {
+                    tx.execute(
+                        "INSERT OR REPLACE INTO hosted_models (session_id, model, effort)
+                         VALUES (?1, ?2, ?3)",
+                        params![s.session_id, model.model, model.effort],
+                    )?;
+                }
                 if s.runtime == Runtime::Claude {
                     tx.execute(
                         "INSERT OR REPLACE INTO hosted_native_seats (session_id, retired) VALUES (?1, 0)",
@@ -1614,6 +1663,11 @@ impl Store {
             [],
         )?;
         tx.execute(
+            "DELETE FROM hosted_models
+             WHERE session_id NOT IN (SELECT session_id FROM sessions)",
+            [],
+        )?;
+        tx.execute(
             "UPDATE queue SET status = 'pending', session_id = NULL
              WHERE status = 'queued'
                AND session_id NOT IN (SELECT session_id FROM sessions WHERE state = 'live')",
@@ -1647,6 +1701,7 @@ impl Store {
                 "DELETE FROM hosted_native_seats WHERE session_id = ?1",
                 [id],
             )?;
+            tx.execute("DELETE FROM hosted_models WHERE session_id = ?1", [id])?;
         }
         tx.commit()?;
         Ok(gone)
@@ -2761,7 +2816,7 @@ mod tests {
         resumed.token = None;
         resumed.claude_pid = None;
         let session = store
-            .register_hosted_session(&resumed, &host, &committee, None)
+            .register_hosted_session(&resumed, &host, &committee, None, &Default::default())
             .unwrap();
         assert!(session.is_live());
         assert!(
@@ -2804,6 +2859,7 @@ mod tests {
                 &host,
                 &committee,
                 Some((Seq(17), Seq::ZERO)),
+                &crate::ipc::HostedModel::new(Some("opus".into()), Some("high".into())),
             )
             .unwrap();
         let next = upsert("new");
@@ -2825,6 +2881,8 @@ mod tests {
         );
         assert_eq!(store.session_host("old").unwrap(), None);
         assert_eq!(store.hosted_native_retired("old").unwrap(), Some(true));
+        // The same TUI runs on after /clear: so does its model.
+        assert_eq!(store.hosted_model("new").unwrap().label(), "opus/high");
         assert_eq!(replacement.agent, first.agent);
         assert_eq!(store.current_sessions().unwrap().len(), 1);
         assert_eq!(
@@ -2857,7 +2915,13 @@ mod tests {
         let host = EventId::new();
         let committee = committee();
         let old = store
-            .register_hosted_session(&upsert("old"), &host, &committee, None)
+            .register_hosted_session(
+                &upsert("old"),
+                &host,
+                &committee,
+                None,
+                &crate::ipc::HostedModel::new(Some("opus".into()), None),
+            )
             .unwrap();
         let notice = NewEvent::new(committee, Kind::Note, Address::Committee, "changed context");
         store
@@ -2874,12 +2938,15 @@ mod tests {
         store.prune(Duration::from_secs(60), &paths).unwrap();
         assert!(store.session("old").unwrap().is_none());
         assert_eq!(store.hosted_native_retired("old").unwrap(), None);
+        assert!(store.hosted_model("old").unwrap().is_default());
         assert_eq!(store.hosted_native_retired("current").unwrap(), Some(false));
+        assert_eq!(store.hosted_model("current").unwrap().label(), "opus");
         assert_eq!(
             store.delete_sessions(&["current".into()], &paths).unwrap(),
             1
         );
         assert_eq!(store.hosted_native_retired("current").unwrap(), None);
+        assert!(store.hosted_model("current").unwrap().is_default());
     }
 
     #[test]

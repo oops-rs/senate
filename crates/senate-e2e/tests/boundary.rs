@@ -902,6 +902,7 @@ async fn spawning_checks_scope_and_capacity_on_the_daemon() {
         cwd: dir.path().to_path_buf(),
         chair,
         prompt: None,
+        model: Default::default(),
     };
     for (session, committee, chair, code, message) in [
         (
@@ -1019,6 +1020,7 @@ async fn restoring_an_unseated_senator_requires_explicit_rejoin_before_capacity(
                 .try_ipc::<SpawnReply>(Request::Restore {
                     session,
                     senator: alias.clone().into(),
+                    model: Default::default(),
                 })
                 .await
                 .unwrap_err();
@@ -1035,6 +1037,7 @@ async fn restoring_an_unseated_senator_requires_explicit_rejoin_before_capacity(
             .try_ipc::<SpawnReply>(Request::Restore {
                 session: Laptop::session("chair"),
                 senator: alias.clone().into(),
+                model: Default::default(),
             })
             .await
             .unwrap_err();

@@ -4,7 +4,7 @@ use senate_core::SenatorKind;
 
 use super::hosts::LaunchAudit;
 use super::*;
-use crate::ipc::{HostedRuntime, SpawnReply, StopReply};
+use crate::ipc::{HostedModel, HostedRuntime, SpawnReply, StopReply};
 
 const ROLE_TIMEOUT: Duration = Duration::from_secs(4);
 const AUDIT_TIMEOUT: Duration = Duration::from_secs(4);
@@ -70,6 +70,8 @@ pub(super) struct SpawnOrder {
     pub(super) chair: bool,
     /// The new seat's first request, if any.
     pub(super) prompt: Option<String>,
+    /// The runtime's model and effort; unset, its own default.
+    pub(super) model: HostedModel,
 }
 
 fn not_hosting() -> IpcError {
@@ -157,7 +159,11 @@ impl Shared {
             cwd,
             chair: appoint_chair,
             prompt,
+            model,
         } = order;
+        // Nothing starts for an effort the runtime would not take.
+        let model = HostedModel::new(model.model, model.effort);
+        model.check(runtime).map_err(IpcError::bad_request)?;
         let prompt = prompt.filter(|p| !p.trim().is_empty());
         let auth = self.authorize_host_action(selector).await?;
         auth.check_target(&committee, appoint_chair)?;
@@ -168,6 +174,7 @@ impl Shared {
                 committee,
                 alias,
                 cwd,
+                model,
                 self.config.hosted_session_limit,
                 move |phase, reply, runtime| async move {
                     self.audit_host_launch(audit_auth, false, phase, reply, runtime)
@@ -215,11 +222,17 @@ impl Shared {
         &self,
         selector: &SessionSelector,
         senator: &AliasName,
+        model: HostedModel,
     ) -> Result<SpawnReply, IpcError> {
         let auth = self.authorize_host_action(selector).await?;
         let target = self
             .resolve_restore(senator, auth.committee_scope.as_ref())
             .await?;
+        // The record, with what this restore changes of it.
+        let model = target
+            .model
+            .overridden_by(&HostedModel::new(model.model, model.effort));
+        model.check(target.runtime).map_err(IpcError::bad_request)?;
         auth.check_target(&target.committee, false)?;
         self.check_restore_seat(&target.committee, &target.session.agent)
             .await?;
@@ -227,6 +240,7 @@ impl Shared {
         let launch = self
             .on_restore_with(
                 target,
+                model,
                 self.config.hosted_session_limit,
                 move |phase, reply, runtime| async move {
                     self.audit_host_launch(audit_auth, true, phase, reply, runtime)

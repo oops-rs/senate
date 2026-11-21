@@ -13,7 +13,7 @@ use common::{
     Harness, RECORD_HOSTED_ARGV, committee, eventually, fast_timing, hosted_fixture_argv, path,
 };
 use senate_bridge::daemon::{DaemonOptions, start_with_host_binary};
-use senate_bridge::ipc::{self, HostedRuntime, Request, SpawnReply};
+use senate_bridge::ipc::{self, HostedModel, HostedRuntime, Request, SpawnReply};
 use senate_bridge::testenv;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
@@ -168,6 +168,7 @@ done
         cwd: project.clone(),
         chair: false,
         prompt: None,
+        model: Default::default(),
     };
     let request = spawn(Some(path("fixture")));
     let error = ipc::request::<SpawnReply>(&h.socket(), &request, TIMEOUT, TIMEOUT)
@@ -350,6 +351,7 @@ done
         &Request::Restore {
             session: Default::default(),
             senator: launched.senator.clone().into(),
+            model: Default::default(),
         },
     )
     .await;
@@ -634,6 +636,7 @@ async fn restore_refuses_a_reachable_claude_and_keeps_the_servers_backlog() {
     let restore = Request::Restore {
         session: Default::default(),
         senator: senator.clone().into(),
+        model: Default::default(),
     };
     let refused = ipc::request::<SpawnReply>(&h.socket(), &restore, TIMEOUT, TIMEOUT)
         .await
@@ -798,6 +801,7 @@ async fn codex_native_end_during_or_after_restore_does_not_leave_a_live_row() {
         let request = Request::Restore {
             session: Default::default(),
             senator: senator.clone().into(),
+            model: Default::default(),
         };
         let restored: SpawnReply = if native_end == NativeEnd::BeforePublication {
             h.store().set_session_state(id, SessionState::Live).unwrap();
@@ -894,6 +898,10 @@ impl HostedClaude {
     }
 
     async fn launch_with_limit(companion: bool, limit: usize) -> Self {
+        Self::launch_with(companion, limit, HostedModel::default()).await
+    }
+
+    async fn launch_with(companion: bool, limit: usize, model: HostedModel) -> Self {
         let mut h = Harness::new().await;
         h.config.hosted_session_limit = Some(limit);
         h.dir = tempfile::tempdir_in("/tmp").unwrap();
@@ -966,6 +974,7 @@ done
                 cwd: project.clone(),
                 chair: false,
                 prompt: None,
+                model,
             },
         )
         .await;
@@ -1043,6 +1052,81 @@ done
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_chosen_model_and_effort_reach_the_tui_and_are_kept_for_restore() {
+    use senate_bridge::ipc::StopReply;
+
+    let choice = |model: Option<&str>, effort: Option<&str>| {
+        HostedModel::new(model.map(str::to_owned), effort.map(str::to_owned))
+    };
+    let mut fixture = HostedClaude::launch_with(false, 1, choice(Some("opus"), Some("high"))).await;
+    let args = hosted_fixture_argv(&fixture.terminal, &fixture.project, TIMEOUT).await;
+    assert!(args.contains(&"--model=opus".to_owned()), "{args:?}");
+    assert!(args.contains(&"--effort=high".to_owned()), "{args:?}");
+
+    // An effort Claude Code does not take is refused before anything
+    // starts, even with no slot left, naming the ones it does take.
+    let refused = ipc::request::<SpawnReply>(
+        &fixture.h.socket(),
+        &Request::Spawn {
+            session: Default::default(),
+            runtime: HostedRuntime::Claude,
+            committee: committee(),
+            alias: None,
+            cwd: fixture.project.clone(),
+            chair: false,
+            prompt: None,
+            model: choice(None, Some("minimal")),
+        },
+        TIMEOUT,
+        TIMEOUT,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        refused.to_string().contains(
+            "claude does not take the effort \"minimal\"; use one of: low, medium, high, xhigh, max"
+        ),
+        "{refused}"
+    );
+    assert_eq!(fixture.h.store().all_sessions().unwrap().len(), 1);
+
+    let mut restore = async |model: HostedModel| {
+        let _: StopReply = call(
+            &fixture.h,
+            &Request::Stop {
+                session: Default::default(),
+                senator: fixture.seat.senator.clone().into(),
+                force: true,
+            },
+        )
+        .await;
+        let restored: SpawnReply = call(
+            &fixture.h,
+            &Request::Restore {
+                session: Default::default(),
+                senator: path("seat-fixture").into(),
+                model,
+            },
+        )
+        .await;
+        assert_eq!(restored, fixture.seat);
+        fixture.terminal = call(&fixture.h, &HostedClaude::attach_request()).await;
+        hosted_fixture_argv(&fixture.terminal, &fixture.project, TIMEOUT).await
+    };
+    // Restored as it was: the record brings back the same model and effort.
+    let args = restore(HostedModel::default()).await;
+    assert!(args.contains(&"--model=opus".to_owned()), "{args:?}");
+    assert!(args.contains(&"--effort=high".to_owned()), "{args:?}");
+    // What a restore changes is used, and becomes the record.
+    let args = restore(choice(None, Some("low"))).await;
+    assert!(args.contains(&"--model=opus".to_owned()), "{args:?}");
+    assert!(args.contains(&"--effort=low".to_owned()), "{args:?}");
+    let args = restore(HostedModel::default()).await;
+    assert!(args.contains(&"--effort=low".to_owned()), "{args:?}");
+    assert!(!args.contains(&"--effort=high".to_owned()), "{args:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stop_cli_protects_an_attending_viewer_and_releases_the_slot() {
     use senate_bridge::SessionState;
     use senate_bridge::ipc::StopReply;
@@ -1058,6 +1142,7 @@ async fn stop_cli_protects_an_attending_viewer_and_releases_the_slot() {
         cwd: fixture.project.clone(),
         chair: false,
         prompt: None,
+        model: Default::default(),
     };
     fixture.reject(&spare, "hosted session limit (1)").await;
     let mut viewer = tokio::net::UnixStream::connect(&fixture.terminal)
@@ -1138,6 +1223,7 @@ async fn stop_cli_protects_an_attending_viewer_and_releases_the_slot() {
         &Request::Restore {
             session: Default::default(),
             senator: path("seat-fixture").into(),
+            model: Default::default(),
         },
     )
     .await;
@@ -1559,6 +1645,7 @@ async fn claude_hook_changes_native_context_without_moving_the_seat_or_its_mail(
         &Request::Restore {
             session: Default::default(),
             senator: path("seat-fixture").into(),
+            model: Default::default(),
         },
     )
     .await;
@@ -2113,6 +2200,7 @@ async fn one_hosted_session() -> (Harness, PathBuf) {
             cwd: project,
             chair: false,
             prompt: None,
+            model: Default::default(),
         },
     )
     .await;
@@ -2227,6 +2315,7 @@ async fn watched_sessions(aliases: &[&str]) -> (Harness, PathBuf) {
                 cwd: project.clone(),
                 chair: false,
                 prompt: None,
+                model: Default::default(),
             },
         )
         .await;
@@ -2570,6 +2659,7 @@ async fn a_spawn_prompt_is_an_ordinary_request_to_the_new_seat() {
             cwd: project.clone(),
             chair: false,
             prompt: Some("Review the open PR on the gateway".into()),
+            model: Default::default(),
         },
     )
     .await;

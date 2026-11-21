@@ -533,6 +533,8 @@ Without --wait it returns at once: read the answer with `senate inbox`,
   senate spawn claude --committee refund-v2 --dir ../refund
   senate spawn codex --prompt 'Review the open PR'
                                          Send it a first request once seated
+  senate spawn claude --model opus --effort high
+                                         Not the runtime's default model
   senate attach reviewer                 Open its terminal (Ctrl-] detaches)")]
     Spawn {
         /// The coding agent to start.
@@ -555,6 +557,8 @@ Without --wait it returns at once: read the answer with `senate inbox`,
         /// Like --prompt, read from a file.
         #[arg(long, value_name = "PATH")]
         prompt_file: Option<PathBuf>,
+        #[command(flatten)]
+        model: ModelArgs,
     },
     /// Open a hosted senator's terminal. Press Ctrl-] to detach.
     ///
@@ -588,6 +592,10 @@ Without --wait it returns at once: read the answer with `senate inbox`,
         /// The senator's primary name or alias (`committee::alias` for an
         /// alias on one committee).
         senator: AliasName,
+        /// Each given replaces the recorded one, for this restore and
+        /// those after it.
+        #[command(flatten)]
+        model: ModelArgs,
     },
     /// End a hosted senator's terminal (`senate restore` resumes it).
     Stop {
@@ -636,6 +644,26 @@ Without --wait it returns at once: read the answer with `senate inbox`,
         #[command(subcommand)]
         command: DebugCmd,
     },
+}
+
+/// The runtime's own model and effort for a hosted session. Senate passes
+/// them through as the runtime's flags; left out, it uses its own default.
+#[derive(Args)]
+struct ModelArgs {
+    /// The model, as the runtime names it (e.g. opus, gpt-5.5).
+    #[arg(long)]
+    model: Option<String>,
+    /// The reasoning effort. Claude Code: low, medium, high, xhigh, max.
+    /// Codex: none, minimal, low, medium, high, xhigh, max, ultra,
+    /// persistent.
+    #[arg(long)]
+    effort: Option<String>,
+}
+
+impl From<ModelArgs> for crate::ipc::HostedModel {
+    fn from(args: ModelArgs) -> Self {
+        Self::new(args.model, args.effort)
+    }
 }
 
 #[derive(Args)]
@@ -2077,6 +2105,7 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             dir,
             prompt,
             prompt_file,
+            model,
         } => {
             let prompt = match prompt_file {
                 Some(path) => Some(
@@ -2099,17 +2128,19 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
                     cwd: std::path::absolute(dir)?,
                     session: SessionSelector::default(),
                     prompt,
+                    model: model.into(),
                 },
                 terminal,
             )
         }
-        Cmd::Restore { senator } => {
+        Cmd::Restore { senator, model } => {
             let senator = pick_alias(senator)?;
             remember_terminal()?;
             launch(
                 &Request::Restore {
                     senator,
                     session: SessionSelector::default(),
+                    model: model.into(),
                 },
                 terminal,
             )

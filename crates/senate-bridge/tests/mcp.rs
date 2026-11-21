@@ -240,6 +240,7 @@ async fn stop_tool_enforces_authority_and_records_the_actor() {
         cwd: project.clone(),
         chair: false,
         prompt: None,
+        model: Default::default(),
     };
     let socket = h.socket();
     let launched = |request: Request| {

@@ -439,6 +439,15 @@ enum SpawnParams {
         /// as an ordinary request from you.
         #[serde(default)]
         prompt: Option<String>,
+        /// The runtime's model, as it names it (e.g. `opus`, `gpt-5.5`).
+        /// Omit for the runtime's own default.
+        #[serde(default)]
+        model: Option<String>,
+        /// The reasoning effort. Claude Code: low, medium, high, xhigh,
+        /// max. Codex: none, minimal, low, medium, high, xhigh, max, ultra,
+        /// persistent. Omit for the runtime's own default.
+        #[serde(default)]
+        effort: Option<String>,
     },
     Restore {
         /// Primary senator name or alias of a previously recorded local session
@@ -2195,6 +2204,8 @@ impl SenateMcp {
                 alias,
                 chair,
                 prompt,
+                model,
+                effort,
             } => Request::Spawn {
                 session,
                 runtime,
@@ -2203,10 +2214,12 @@ impl SenateMcp {
                 cwd,
                 chair,
                 prompt,
+                model: crate::ipc::HostedModel::new(model, effort),
             },
             SpawnParams::Restore { senator } => Request::Restore {
                 session,
                 senator: parse_alias_name(&senator)?,
+                model: crate::ipc::HostedModel::default(),
             },
             SpawnParams::Stop { senator } => {
                 let reply: crate::ipc::StopReply = client

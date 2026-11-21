@@ -2768,6 +2768,7 @@ impl Shared {
                 cwd,
                 chair,
                 prompt,
+                model,
             } => {
                 let order = host_policy::SpawnOrder {
                     runtime,
@@ -2776,12 +2777,15 @@ impl Shared {
                     cwd,
                     chair,
                     prompt,
+                    model,
                 };
                 wrap(self.on_hosted_spawn(&session, order).await)
             }
-            Request::Restore { session, senator } => {
-                wrap(self.on_hosted_restore(&session, &senator).await)
-            }
+            Request::Restore {
+                session,
+                senator,
+                model,
+            } => wrap(self.on_hosted_restore(&session, &senator, model).await),
             Request::Stop {
                 session,
                 senator,

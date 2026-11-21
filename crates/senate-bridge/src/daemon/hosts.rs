@@ -9,7 +9,7 @@ use tokio::sync::oneshot;
 
 use super::*;
 use crate::host;
-use crate::ipc::{HostedRuntime, SpawnReply};
+use crate::ipc::{HostedModel, HostedRuntime, SpawnReply};
 
 const HOST_NOTICE_FAILURE_LIMIT: u32 = 3;
 
@@ -63,7 +63,9 @@ impl Drop for PendingGuard<'_> {
 pub(super) struct RestoreTarget {
     pub(super) committee: CommitteeId,
     pub(super) session: Session,
-    runtime: HostedRuntime,
+    pub(super) runtime: HostedRuntime,
+    /// The model and effort it was last started with.
+    pub(super) model: HostedModel,
 }
 
 pub(super) struct StopTarget {
@@ -157,6 +159,7 @@ impl Shared {
         committee: CommitteeId,
         alias: Option<SenatorName>,
         cwd: PathBuf,
+        model: HostedModel,
         limit: Option<usize>,
         audit: impl Fn(LaunchAudit, SpawnReply, HostedRuntime) -> Fut + Send,
     ) -> Result<HostedLaunch, IpcError>
@@ -174,7 +177,7 @@ impl Shared {
                 "unknown committee {committee}"
             )));
         }
-        self.launch_host(runtime, committee, alias, cwd, None, limit, audit)
+        self.launch_host(runtime, committee, alias, cwd, None, model, limit, audit)
             .await
     }
 
@@ -482,10 +485,15 @@ impl Shared {
         let committee = session.committee().cloned().ok_or_else(|| {
             IpcError::bad_request(format!("no committee is recorded for {senator}"))
         })?;
+        let model = self
+            .store
+            .hosted_model(&session.session_id)
+            .map_err(internal)?;
         Ok(RestoreTarget {
             runtime,
             committee,
             session,
+            model,
         })
     }
 
@@ -561,6 +569,7 @@ impl Shared {
     pub(super) async fn on_restore_with<Fut>(
         &self,
         target: RestoreTarget,
+        model: HostedModel,
         limit: Option<usize>,
         audit: impl Fn(LaunchAudit, SpawnReply, HostedRuntime) -> Fut + Send,
     ) -> Result<HostedLaunch, IpcError>
@@ -591,6 +600,7 @@ impl Shared {
                 senator: session.agent,
                 start_empty,
             }),
+            model,
             limit,
             audit,
         )
@@ -653,6 +663,7 @@ impl Shared {
         alias: Option<SenatorName>,
         cwd: PathBuf,
         resume: Option<HostResume>,
+        model: HostedModel,
         limit: Option<usize>,
         audit: impl Fn(LaunchAudit, SpawnReply, HostedRuntime) -> Fut + Send,
     ) -> Result<HostedLaunch, IpcError>
@@ -821,7 +832,7 @@ impl Shared {
             resume: restoring && !start_empty,
             codex_remote: remote.as_deref(),
             name: name.as_deref(),
-            model: &crate::ipc::HostedModel::default(),
+            model: &model,
         };
         let session_runtime = Runtime::from(runtime);
         let reply = SpawnReply {
@@ -924,6 +935,7 @@ impl Shared {
                     &id,
                     &reply.committee,
                     cursor.map(|(_, seqs)| seqs),
+                    &model,
                 )
                 .map_err(internal)?;
             if !restoring {

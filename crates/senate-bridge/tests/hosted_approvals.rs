@@ -94,6 +94,7 @@ impl Terminal {
                 cwd,
                 chair: false,
                 prompt: None,
+                model: Default::default(),
             },
             WAIT,
             WAIT,
@@ -534,6 +535,7 @@ async fn a_hosted_codex_thread_is_named_after_the_senators_alias() {
         cwd: project.clone(),
         chair: false,
         prompt: None,
+        model: Default::default(),
     };
     let reviewer: SpawnReply = ipc::request(&h.socket(), &spawn(Some("reviewer")), WAIT, WAIT)
         .await
@@ -732,6 +734,7 @@ async fn stopping_a_restored_codex_host_closes_its_notice_and_leaves_the_native_
         &Request::Restore {
             session: Default::default(),
             senator: senator.into(),
+            model: Default::default(),
         },
         WAIT,
         WAIT,
