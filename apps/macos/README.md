@@ -1,243 +1,215 @@
 # Senate for macOS
 
-The Senate menu-bar app: a status item with the number of things waiting on
-you, an inbox per agent and a merged one, Codex approvals, a small Codex
-panel, the docket of a Senate one of your agents presides over, and the list
-of Senates your machine serves. SwiftUI over the shared Rust core
-[`senate-app-core`](../../crates/senate-app-core), macOS 14+. English and
-Simplified Chinese, following the system language (English when it is
-neither).
+The Senate menu-bar app: what waits on you (your inbox across agents,
+Codex approvals, permission prompts in hosted terminals), the threads
+themselves with a reply box, this machine's hosted sessions, the docket of
+a Senate one of your agents presides over, and the Senates your machine
+serves. SwiftUI over the shared Rust core
+[`senate-app-core`](../../crates/senate-app-core), **macOS 26+**, English
+and Simplified Chinese.
 
-It is a **client of `senated --machine`**, the developer-machine daemon. The
-core talks to it over `$SENATE_HOME/bridge.sock` (default
-`~/.senate/bridge.sock`), the same newline-delimited JSON IPC the hooks and
-the MCP server use, with the bridge's own types (`senate_bridge::ipc`). It
-holds no state of its own and never talks to a Senate server: start the
-daemon first (`senated --machine`, see the top-level README). When it is not
-running the menu says *offline* and the core keeps reconnecting (0.5 s
-doubling to 10 s).
+![The inbox](docs/screenshots/inbox.png)
 
-## Build and run
+It is a **client of `senated --machine`**, the developer-machine daemon,
+over `$SENATE_HOME/bridge.sock` (default `~/.senate/bridge.sock`), the same
+newline-delimited JSON IPC the hooks and the MCP server use. It holds no
+state of its own beyond reply drafts and settings, and never talks to a
+Senate server. When the daemon is down the window says why, keeps retrying
+(0.5 s doubling to 10 s), offers *Try Now*, and shows the command that
+installs the daemon as a service; it never starts it itself.
 
-Needs Xcode (Swift 6), [XcodeGen](https://github.com/yonaskolb/XcodeGen)
-(`brew install xcodegen`) and the Rust toolchain with both macOS targets
-(`rustup target add aarch64-apple-darwin x86_64-apple-darwin`). From
-`apps/macos/`:
+## Build, run, test
+
+Needs Xcode 26+ (Swift 6), [XcodeGen](https://github.com/yonaskolb/XcodeGen)
+(`brew install xcodegen`) and the Rust toolchain (`rustup target add
+aarch64-apple-darwin x86_64-apple-darwin`). From `apps/macos/`:
 
 ```sh
-scripts/build-core.sh            # optional: the Xcode build runs it as its first phase
 xcodegen generate                # Senate.xcodeproj from project.yml
 xcodebuild -project Senate.xcodeproj -scheme Senate -configuration Debug \
     -derivedDataPath build CODE_SIGNING_ALLOWED=NO build
 open build/Build/Products/Debug/Senate.app
+scripts/ui-test.sh               # unit tests, then the UI smoke run (--unit-only: just the first)
+scripts/release.sh               # signed, notarized Senate.app and DMG (see Release)
 ```
 
-or open `Senate.xcodeproj` in Xcode and run the *Senate* scheme. The target's
-pre-build phase runs `scripts/build-core.sh` itself, so after the first
-`xcodegen generate` a plain build picks up Rust changes. In Xcode the script
-builds only the architectures being built (Debug: the active one); run by
-hand it builds arm64 and x86_64 and `lipo`s them
-(`scripts/build-core.sh --release` for the release profile).
+The `SenateCore` target's pre-build phase runs `scripts/build-core.sh`:
+the Rust core as a static library plus its UniFFI Swift bindings, into
+`Generated/`. It fails the build when `project.yml`'s `MARKETING_VERSION`
+is not the workspace's version. `cargo test -p senate-app-core` tests the
+core (state folding, names, sessions, both languages, the FFI against a
+fake daemon); it never touches `~/.senate`.
 
-The script keeps `MACOSX_DEPLOYMENT_TARGET` out of cargo's environment
-(Xcode exports it): with rustc 1.97 on macOS 27 any value of it makes
-release-mode proc-macro dylibs fail to load ("mis-aligned LINKEDIT string
-pool"), and the broken dylibs stay cached. If a release build fails that way,
-`cargo clean --release` first. The C in the dependencies gets the app's 14.0
-through `CFLAGS_<target>` instead.
-
-The bundle identifier is `dev.senate.app`. The app is signed ad hoc
-(`CODE_SIGN_IDENTITY = -`), not with a team; with `CODE_SIGNING_ALLOWED=NO` it
-is only linker-signed, which is enough to run it locally.
-
-What is checked in: `project.yml`, the sources and string files in `Senate/`,
-the script. What is generated and ignored: `Senate.xcodeproj` (by `xcodegen
-generate`, after any change to `project.yml` or to the set of files),
-`Senate/Info.plist` (by XcodeGen, from `project.yml`), `Generated/` (by
-`build-core.sh`), `build/`.
-
-To work on the app without a Senate server, run the core's fake daemon: it
-serves the person `alice` with agents `alice/claude` and `alice/codex`, a
-Senate under `alice/claude` (so a docket), canned threads, a Codex thread and
-an approval every 20 s. It refuses to run unless `SENATE_HOME` names a scratch
-directory, and the socket path must be short (about 100 bytes):
+Without a Senate server, run the core's fake daemon. It serves `alice`
+with `claude` (alias `lead`, presiding, a hosted terminal with a waiting
+permission prompt) and `codex`, canned threads, a docket, a child Senate,
+and an approval every 20 s. It refuses to run unless `SENATE_HOME` names a
+scratch directory, and the socket path must be short:
 
 ```sh
 mkdir -p /tmp/sh && chmod 700 /tmp/sh
 SENATE_HOME=/tmp/sh cargo run -p senate-app-core --example fake_daemon &
-SENATE_HOME=/tmp/sh SENATE_APP_SHOW=1 \
-    build/Build/Products/Debug/Senate.app/Contents/MacOS/Senate
+SENATE_HOME=/tmp/sh SENATE_APP_SHOW=1 build/Build/Products/Debug/Senate.app/Contents/MacOS/Senate
 ```
 
 | Variable | Effect |
 | --- | --- |
-| `SENATE_HOME` | the Senate home (`bridge.sock`, `senate.toml`); default `~/.senate` |
+| `SENATE_HOME` | the Senate home; wins over the one chosen in Settings |
 | `SENATE_APP_SHOW=1` | open the window at launch |
 | `SENATE_APP_NOTIFICATIONS=0` | no notification permission prompt and no notifications |
-| `RUST_LOG` | the core's log filter, to stderr (default `senate_app_core=info`) |
+| `SENATE_APP_SNAPSHOT=<dir>` | Debug builds: write each section and Settings as PNGs of the app's own window, then quit (how `docs/screenshots/` is made) |
+| `SENATE_APP_PERF=1` | print state-apply and thread-read times and main-thread stalls, tour the sections, quit (`SENATE_APP_PERF_THREAD=<root>` opens that thread) |
+| `FAKE_THREADS=N` | the fake daemon: N more threads and a 5,000-event thread 990 |
+| `RUST_LOG` | the core's log filter (default `senate_app_core=info,senate_bridge=warn`) |
 
-Launched from Finder or `open`, an app does not inherit the shell's
-environment; run the binary inside the bundle (as above) or use `open --env`.
+## What it does
 
-Tests: the core's are Rust (`cargo test -p senate-app-core`): state folding,
-menu text in both languages, action to request mapping, the Terminal command,
-mention splitting, and the driver and the FFI facade against a fake daemon on
-a temp socket. They never touch `~/.senate`. The Swift side is views and a
-store with no logic worth a test of its own.
+**Menu bar.** The icon (filled when online) with what waits on you:
+threads, approvals and terminals waiting for a permission. The menu:
+online as whom, the counts, the docket line while presiding, a line when a
+terminal waits, *Open Inbox* ⌘I, *Approvals* ⌘A, *Sessions* ⌘S, *Docket*
+⌘D, *Try Now* while offline, *Settings…* ⌘,, *About Senate*, *Quit* ⌘Q.
+Menu bar only (`LSUIElement`).
+
+**Window** (⌘1–5 for the sections; ⌘R refresh). A sidebar with each
+section's count and the connection at its foot.
+
+- **Inbox**: the threads waiting on you, with what was last said and an
+  unread dot; search (⌘F) and an agent filter in the toolbar. The chosen
+  thread opens beside the list with every event (the latest 300; *Show
+  earlier* for more) and a reply box: *Send* (⌘↩) answers as you
+  (`[senator::alice]`). Reading a thread marks it seen. *Take* takes it
+  over; *Close* archives it, after confirming. Drafts outlive the app.
+- **Approvals**: permission prompts waiting in hosted terminals (*Attach to
+  decide*: they are decided in the terminal, never here), and Codex approval
+  requests (*Allow*, *Allow for session*, *Deny*, *Deny and stop*; the first
+  answer wins across the TUI, the app and any chat platform).
+- **Sessions**: this machine's hosted sessions (committee, runtime, model,
+  uptime, attached, a waiting prompt): *Attach* opens it in Terminal
+  (`senate attach`), *Stop* (never forced) and *Restore*; *Watch all*
+  (`senate session watch`). Below, the Codex threads, *Open in Terminal*.
+- **Docket** (while one of your agents presides): what awaits that Speaker.
+  Read-only: routing and covering are the presiding agent's own tools.
+- **Senates**: address, you, the Speaker, the registration above, each
+  committee's chair, your agents with their duty and streams, and the
+  Senates below with the seats they declare.
+
+**Names.** A mention reads as the name people are shown: an agent's alias
+on the committee in view, a person's name, `copilot (Speaker)`, a child
+Senate's seat as `senate-dev（dark-conclave）`. The id is one step away:
+in the tooltip, the context menu (*Copy*) and for VoiceOver. The core
+resolves names (aliases from `aliases`, children from the roles), the same
+rules as the Speaker's own rendering.
+
+**Notifications**, asked for when the first one is posted: something came
+back to you (*Reply* inline, *Take*); a Codex approval (*Allow*, *Deny*,
+both needing the Mac unlocked); a prompt in a hosted terminal (*Attach*).
+Grouped by thread; clicking opens what it is about; each kind can be
+turned off in Settings.
+
+**Settings**: open at login (the app's own login item), notifications per
+kind, the Senate home, and the log streamed in Terminal.
+
+### In the app, and in the CLI
+
+In the app: reading and answering what waits on you, approvals, seeing and
+attaching to hosted sessions (stop, restore), the docket, the Senates.
+In the CLI and the agents: `spawn`, `join`/`leave`, `setup` (install, the
+daemon service), aliases and seats, secretaries, `prune`, and
+asking, posting, search, the brief and checkpoints.
 
 ## Architecture
 
 ```
-SwiftUI views ──► CoreStore (@Observable, @MainActor) ──► AppCore (Rust, UniFFI)
-       ▲                       ▲                               │ tokio runtime
-       └── state ──────────────┴─ ListenerBridge ◄─ CoreListener ◄─ Driver ◄─ bridge.sock
+SwiftUI views ─► CoreStore (@Observable, main actor) ─► AppCoreProtocol ─► AppCore (Rust) ─► bridge.sock
+      ▲                    ▲                                                   │ tokio, 2 threads
+      └── state ───────────┴── one task reading an AsyncStream ◄── CoreListener ┘
 ```
 
-- **`crates/senate-app-core`** (Rust, `lib` + `staticlib`) is the app:
-  `model.rs` folds the daemon's `watch` stream into a model and maps actions
-  to IPC requests; `link.rs` holds the socket, reconnects, and runs actions;
-  `state.rs` flattens the model into the snapshot; `text.rs` writes its
-  sentences; `ffi.rs` is the UniFFI facade. `AppCore` owns a tokio runtime on
-  two background threads. `start(listener)` connects; after every change the
-  core calls `CoreListener.onState(AppState)` with a full snapshot, and
-  `onApprovalRequested` once per new approval.
-- **The FFI surface** (generated into `Generated/senate_app_core.swift`):
-  `AppCore(senateHome:language:)`, `setLanguage(language:)`,
-  `start(listener:)`, `snapshot()`, `refresh()`, `reply(committee:thread:body:)`,
-  `take(committee:thread:)`, `close(committee:thread:)`, `approve(id:decision:)`
-  (the four are `async throws`: they run on the core's runtime and return when
-  the daemon has answered), `codexTerminal(threadId:)` (returns the argv, cwd,
-  shell line and AppleScript; Swift runs it, so the core never drives other
-  apps), `senateHome()`, and the free function `splitMentions(text:)`. Errors
-  are `CoreError` (`NotStarted`, `AlreadyStarted`, `Invalid`, `Failed`,
-  `Setup`). UniFFI is pinned to `=0.32.2`; the bindings are generated by the
-  same version from the built library's metadata (`--features bindgen --bin
-  uniffi-bindgen`).
-- **Swift** is thin: `CoreStore` keeps the latest `AppState` and what only the
-  UI knows (the tab, the agent filter, reply drafts, rows in flight);
-  `ListenerBridge` hops callbacks to the main queue in order; the views render
-  the state and call the store. Linking: the bridging header includes
-  `Generated/senate_app_coreFFI.h`; the target links
-  `Generated/libsenate_app_core.a` plus `iconv`, CoreFoundation, Security and
-  SystemConfiguration.
+- **`crates/senate-app-core`** is the app's logic: `model.rs` folds the
+  daemon's `watch` stream and maps actions to IPC requests; `link.rs` holds
+  the socket, reconnects and runs actions; `state.rs` flattens the model
+  into the snapshot; `reads.rs` is what is read on demand (a thread);
+  `names.rs` names mentions; `text.rs` writes its sentences in either
+  language; `oslog` sends its `tracing` to the unified log; `ffi.rs` is the
+  UniFFI facade.
+- **`SenateCore`** (a static framework) is the generated bindings, kept apart
+  so the app's own code can be main-actor by default. **`AppCoreProtocol`**
+  is the app's one door to the daemon: the store holds nothing else, and the
+  tests pass a fake.
+- **Swift** is the store and views. Swift 6, strict concurrency, main actor
+  by default; the core's callbacks only yield into an `AsyncStream` that one
+  main-actor task reads, in order.
 
-### Two languages
+### Languages
 
-The split is by where the words come from.
+Text built from data is written by the core in the app's language; fixed
+labels live in the String Catalog `Senate/Localizable.xcstrings` (and
+`InfoPlist.xcstrings`), English and Simplified Chinese, with plural forms.
+Senate, senator and Speaker are never translated. A test fails if a label
+lacks either language.
 
-- **Text built from data is written in Rust**, for the language the app passes
-  to `AppCore(senateHome:language:)`: the menu lines and counts (`2 pending
-  threads, 1 approval` / `2 个待处理线程，1 个审批`), stream states, the labels
-  of states, kinds and triage verdicts, why an item awaits the Speaker, the
-  offline reason, and the core's own errors. The app passes
-  `Bundle.main.preferredLocalizations.first`, so the core and the labels agree
-  on one language: `zh-Hans` or `en`, English when the system language is
-  neither. Messages the daemon wrote (a refusal) are shown as it wrote them,
-  in the language of `senate.toml`.
-- **Fixed labels live in Swift**: `Senate/Resources/{en,zh-Hans}.lproj/
-  Localizable.strings` (buttons, tabs, headings, hints, with `%@` / `%lld`
-  slots, looked up with `L("key")`) and `InfoPlist.strings`. Both files carry
-  every key.
-- Senate, senator and Speaker are never translated, in either place. In
-  running text an id is a bracketed mention (`[senator::alice/claude]`),
-  written the same in both languages; `MentionText` sets it apart (monospaced,
-  coloured by what it names) wherever text may hold one. What people wrote
-  (a thread's title, a docket item's body) is shown as written.
+### IPC used
 
-## What it does
-
-### Menu bar
-
-The icon (filled when online) with the pending count, threads plus approvals,
-next to it. The menu: `Senate: online as <person>` or `Senate: offline`;
-`2 pending threads, 1 approval`; `Docket: 3 awaiting the Speaker` while one of
-your agents presides; one line per stream (`alice/claude · refund-v2 · live ·
-seq 120`); *Open Inbox* (⌘I), *Open Approvals* (⌘A), *Open Docket* (⌘D, while
-presiding), *Quit Senate* (⌘Q). The app is menu-bar only (`LSUIElement`: no
-Dock icon). The window starts closed (macOS 15+; on 14 SwiftUI opens it at
-launch); closing it leaves the app running.
-
-### Window
-
-A header with the connection (`online as alice · http://…` or why it is
-offline) and, with more than one Senate, one chip per Senate; the last error;
-a Refresh button (⌘R); and the tabs.
-
-**Inbox**: the threads waiting on you, for every committee the daemon has a
-stream for. With more than one agent, a menu narrows it to one agent
-(`alice/claude`, `alice/codex`; each with its count); a thread put to you
-stays in every agent's view. Each row: title, committee, kind, state, triage
-verdict and reason, who asked (`[speaker::bob/claude]` is the Speaker
-answering for that senator), who it was addressed to, how long it has been in
-its state, owner, takeover, escalation.
-
-- *Reply* opens a box; *Send* (⌘↩) answers in the thread as you,
-  `[senator::alice]` (`answer` with `as_person`). Drafts survive refreshes.
-- *Take* takes the thread over (`take`): the daemon cancels queued deliveries
-  of it to the agent.
-- *Close* asks for confirmation, then archives the thread as you (`task` with
-  state `archived`, `as_person`).
-
-**Approvals**: Codex app-server approval requests the daemon relays: what it
-wants to run or change, where, and why. *Allow*, *Allow for session*, *Deny*,
-*Deny and stop* (cancel the turn). The first answer wins across the TUI, the
-app and any chat platform: one answered elsewhere disappears; answering one
-already answered shows the daemon's refusal. Each new request posts a macOS
-notification; clicking it opens this tab.
-
-**Codex**: the Codex threads registered with the daemon, in every Senate:
-committee, the agent it speaks as, state (live / stale), thread id,
-directory, branch, waiting approvals. *Open in Terminal* opens Terminal.app in
-the thread's directory running `codex resume --remote <addr> <thread>`; *New
-Codex in Terminal* runs `codex --remote <addr>`. `<addr>` is `[codex] listen`
-from `senate.toml`, else `unix://` (the managed app-server daemon, as `senate
-install` sets up); `[codex] bin` replaces `codex`. macOS asks once to let
-Senate control Terminal.
-
-**Docket** (only while one of your agents presides over a Senate): what awaits
-that Speaker, per committee, oldest first. Each item says why it waits: a
-message for one of your agents that the Speaker must route (*route*), a
-message addressed to the Speaker (*answer*), or a question to agents none of
-whom is connected (*cover*), plus the agents seated there with their latest
-checkpoint. With more than one presided Senate, a menu picks one. **It is
-read-only.** Routing, covering and referring to a person are done by the
-presiding agent itself, with its own tools (`speaker_route`, `speaker_cover`,
-`speaker_escalate`), in its session, never by a person in this window. The tab
-exists to see what is waiting for a presiding session that is closed or stuck.
-
-**Senates**: every Senate the daemon serves: its title (`Senate`, or `Senate
-under alice/claude`), its address, who you are in it, who holds the Speaker's
-seat, your agents there (runtime, sessions, whether presiding, what waits) and
-each stream with its state and the seq delivered.
-
-## IPC used
-
-| Request | When |
+| Request / line | When |
 | --- | --- |
-| `watch` | held open for the app's life; `status`, `approval_requested`, `approval_resolved`, `inbox`, `lagged` drive everything |
-| `inbox {committee, agent}` | for each (agent, committee) stream of the primary Senate: on every `status` (each sweep, 30 s), on an `inbox` event for it, after an action, on Refresh |
-| `docket` (no session) | while an agent of yours presides: on every `status`, on any `inbox` event, on `lagged`, on Refresh |
-| `approvals` | after `lagged`, on Refresh |
-| `answer {thread, body, committee, as_person: true}` | Reply |
-| `take {thread, committee}` | Take |
-| `task {thread, status: {state: archived}, committee, as_person: true}` | Close |
-| `approve {id, decision}` | the approval buttons |
+| `watch {app: true}` | held open; `status`, `inbox`, `for_person`, `approval_*`, `roles`, `sessions`, `lagged` drive everything |
+| `inbox`, `docket`, `approvals` | on status sweeps, on their events, after actions, on Refresh |
+| `aliases` | on connect, at most every 5 min on a sweep, on Refresh |
+| `sessions` | on connect, on the `sessions` line, after a stop or restore, on lagged |
+| `thread {mark_seen: true}` | opening a thread |
+| `answer` / `take` / `task archived` (as the person) | Reply, Take, Close |
+| `approve` | the approval buttons and notification actions |
+| `stop` / `restore` (as the person, never forced) | Sessions |
 
-A request that names no session (the app has none) is served by the
-**primary Senate**, the one where your agents sit directly. So inboxes,
-replies, take and close work for that Senate. A Senate one level down is known
-by its status (streams, sessions, Codex threads) and its docket; the daemon
-has no way yet to read a person's inbox there from a client without a session.
+## Logs, crashes, performance
 
-## Not in v1
+The app and the core log under the subsystem `dev.senate.app` (categories
+`app`, `notifications`, `diagnostics`, `core`): Console.app, or
+`log stream --info --predicate 'subsystem == "dev.senate.app"'` (Settings ›
+Advanced opens it). MetricKit's crash and hang reports are written there
+when they arrive; the system's own stay in `~/Library/Logs/DiagnosticReports`.
+Nothing leaves the machine.
 
-- Claude Code approvals (they need Channels' permission relay).
-- Acting on the docket (see above), asking, posting, search, the brief,
-  checkpoints: the app is a menu and an inbox, not a second IDE. Use the agent.
-- An inbox for a Senate below the primary one (see IPC above).
-- Real lag numbers: `status` reports the seq delivered per stream but not the
-  server's latest, so "behind" means the daemon's stream is not live.
-- Starting the daemon from the app, login items, auto-update, an app icon,
-  signing with a team identity and notarization.
-- Swift UI tests; Windows and Linux (the core is portable, a shell for them is
-  not written).
+Measured (Release, this Mac, fake daemon with 2,003 threads and a
+5,000-event thread): a state apply takes 0-1 ms on the main thread; the long
+thread is read in about 95 ms off it and drawn 300 events at a time; section
+switches stall the main thread 25-150 ms, the same with 10 threads as with
+2,003. Signposts mark state applies and thread reads in Instruments.
+
+## Release
+
+`scripts/release.sh` archives a universal Release build signed with a
+Developer ID, the hardened runtime and one entitlement
+(`com.apple.security.automation.apple-events`, to drive Terminal; no App
+Sandbox, since the daemon's socket is in `~/.senate`), checks the signature,
+notarizes and staples the app, makes `Senate-<version>.dmg` with an
+Applications link, signs, notarizes and staples it, and assesses both with
+`spctl`. Output in `build/release/`.
+
+What it needs once, on the Mac that releases:
+
+1. A **Developer ID Application** certificate in the login keychain
+   (Xcode › Settings › Accounts › Manage Certificates › + › Developer ID
+   Application, or the developer account's Certificates page). Check:
+   `security find-identity -v -p codesigning`.
+2. A **notarytool profile** named `senate-notary`, with an app-specific
+   password from appleid.apple.com:
+   `xcrun notarytool store-credentials senate-notary --apple-id <id> --team-id <team> --password <app-specific password>`.
+
+`SENATE_SIGN_IDENTITY=- scripts/release.sh --no-notarize` checks the whole
+pipeline without either (ad hoc, not notarized: Gatekeeper refuses it on
+another Mac).
+
+The UI smoke run needs macOS UI automation enabled once for the test
+runner (approve the prompt when it appears, or `automationmodetool enable-automationmode-without-authentication`).
+
+## Not yet
+
+- Deciding a hosted terminal's permission prompt in the app: it is attached
+  to and decided in the terminal. The app is meant to become the trusted
+  channel for authorisations (Touch ID) later; that waits.
+- Claude Code approvals other than hosted terminals' (they need Channels'
+  permission relay); acting on the docket; an inbox for a Senate below the
+  primary one.
+- Auto-update.
