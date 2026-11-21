@@ -12,10 +12,10 @@
 //! - [`senator_id`]: who a senator is: `senator::wendell`,
 //!   `/acme::senator::wendell` (a Senate path in an id starts with `/`).
 //! - [`locator`]: qualified names, read from the right
-//!   (`acme/north-desk::ibot::senator::codex`, `ibot::speaker`), naming a
+//!   (`acme/north-desk::ledger::senator::codex`, `ledger::speaker`), naming a
 //!   seat or a Speaker from anywhere.
 //! - [`mention`]: the same ids as written in running text, in brackets:
-//!   `[senator::claude]`, `[speaker::claude]`, `[ibot::senator::codex]`.
+//!   `[senator::claude]`, `[speaker::claude]`, `[ledger::senator::codex]`.
 //! - [`alias`]: senator aliases, each on the committee it was given in,
 //!   and how a bare or qualified alias resolves.
 //! - [`roster`]: who sits in one Senate, the rules that hold for it, who may
@@ -46,9 +46,9 @@
 //! | Thing | Scope | Shape | Example |
 //! | --- | --- | --- | --- |
 //! | Senate | its parent Senate | a path of names, parent first | `acme/north-desk` |
-//! | Committee | one Senate | flat id | `ibot` |
+//! | Committee | one Senate | flat id | `ledger` |
 //! | Senator | one Senate | flat name | `wendell`, `codex` |
-//! | Seat | one committee | committee × senator | `ibot::senator::codex` |
+//! | Seat | one committee | committee × senator | `ledger::senator::codex` |
 //!
 //! A **senator** is a person or an agent. No path is inside a senator's
 //! name: nothing about who owns it or where it sits. Whether a name is a
@@ -152,29 +152,24 @@ pub use work::{BranchNaming, DEFAULT_BRANCH_PREFIX, WorkRun, WorkState, is_work_
 /// What every rendered text is held to in this crate's tests.
 #[cfg(test)]
 pub(crate) mod testing {
-    /// Panics when `text` uses the predecessor's vocabulary: its address
-    /// prefixes, or its words for the Speaker and for a committee. A git
-    /// branch such as `feature/refund-v2/alice` is a developer's convention,
-    /// not that vocabulary, so `feature/` is let through.
+    /// Panics when `text` writes an address in a legacy single-colon form
+    /// (`user:<name>`, `agent:<name>`) instead of Senate's own
+    /// (`senator::<name>`).
     pub(crate) fn assert_senate_vocabulary(text: &str) {
         let lower = text.to_lowercase();
-        for word in ["user:", "agent:", "steward"] {
-            assert!(!lower.contains(word), "{word:?} in {text:?}");
+        for prefix in ["user:", "agent:"] {
+            assert!(!lower.contains(prefix), "{prefix:?} in {text:?}");
         }
-        assert!(
-            !lower.replace("feature/", "").contains("feature"),
-            "\"feature\" in {text:?}"
-        );
     }
 
     #[test]
-    #[should_panic(expected = "feature")]
-    fn the_vocabulary_check_catches_the_old_word_for_a_committee() {
-        assert_senate_vocabulary("on feature/refund-v2/alice for this feature");
+    #[should_panic(expected = "agent:")]
+    fn the_vocabulary_check_catches_a_legacy_address() {
+        assert_senate_vocabulary("ask agent:alice");
     }
 
     #[test]
-    fn the_vocabulary_check_lets_a_branch_name_through() {
-        assert_senate_vocabulary("[senator::claude] on feature/refund-v2/alice");
+    fn the_vocabulary_check_lets_senate_addresses_through() {
+        assert_senate_vocabulary("[senator::claude] on senate/refund-v2/alice");
     }
 }

@@ -614,7 +614,7 @@ mod tests {
                 awaiting: Awaiting::Away {
                     agents: vec!["codex".parse().unwrap()],
                 },
-                intended: Some("ibot::senator::codex".parse().unwrap()),
+                intended: Some("ledger::senator::codex".parse().unwrap()),
             }],
             covered: [(Seq(7), "claude".parse().unwrap())].into_iter().collect(),
             seats: vec![SeatFacts {

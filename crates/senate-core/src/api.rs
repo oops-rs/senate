@@ -775,11 +775,11 @@ mod tests {
             "none is not sent"
         );
         let aliased = ChildSeat {
-            alias: Some(path("senate-dev")),
+            alias: Some(path("refund-dev")),
             ..seat
         };
         let wire = serde_json::to_value(&aliased).unwrap();
-        assert_eq!(wire["alias"], "senate-dev");
+        assert_eq!(wire["alias"], "refund-dev");
         assert_eq!(serde_json::from_value::<ChildSeat>(wire).unwrap(), aliased);
     }
 
@@ -916,19 +916,19 @@ mod tests {
     #[test]
     fn a_resolution_says_here_elsewhere_or_which() {
         let q: ResolveQuery = serde_json::from_value(
-            json!({ "name": "ibot::senator::codex", "committee": "refund-v2" }),
+            json!({ "name": "ledger::senator::codex", "committee": "refund-v2" }),
         )
         .unwrap();
-        assert_eq!(q.name.to_string(), "ibot::senator::codex");
+        assert_eq!(q.name.to_string(), "ledger::senator::codex");
         assert_eq!(q.committee, Some(c()));
         let here = Resolved::Here {
-            locator: "acme::ibot::senator::codex".parse().unwrap(),
-            committee: CommitteeId::new("ibot").unwrap(),
+            locator: "acme::ledger::senator::codex".parse().unwrap(),
+            committee: CommitteeId::new("ledger").unwrap(),
             address: "senator::codex".parse().unwrap(),
         };
         let value = serde_json::to_value(&here).unwrap();
         assert_eq!(value["found"], "here");
-        assert_eq!(value["locator"], "acme::ibot::senator::codex");
+        assert_eq!(value["locator"], "acme::ledger::senator::codex");
         assert_eq!(serde_json::from_value::<Resolved>(value).unwrap(), here);
         assert_eq!(
             serde_json::to_value(Resolved::Elsewhere).unwrap(),

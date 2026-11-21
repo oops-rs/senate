@@ -3,8 +3,8 @@
 //! [`FakeChat`] is both halves of a chat layer at once:
 //!
 //! - the platform the Speaker speaks on ([`ChatSurface`]): it records every
-//!   post, card and card update, pin, group created, invite, rename, and
-//!   grant, mints message and thread refs, and honours `operation_id`
+//!   post, card and card update, pin, group created, invite, rename, join
+//!   and leave, mints message and thread refs, and honours `operation_id`
 //!   idempotency as a platform does;
 //! - the people in it: [`FakeChat::deliver`] has someone say something in a
 //!   group, mentioning the bot or not, in a thread or not, and hands it to
@@ -45,8 +45,8 @@ pub struct Caps {
     pub groups: bool,
     /// Add people when creating a group.
     pub members: bool,
-    /// Adopt and release existing groups (bind = grant).
-    pub grants: bool,
+    /// Adopt and release existing groups (bind = join).
+    pub membership: bool,
 }
 
 impl Caps {
@@ -56,14 +56,14 @@ impl Caps {
         pins: true,
         groups: true,
         members: true,
-        grants: true,
+        membership: true,
     };
 
     /// Posts, mentions, cards and pins; no group creation (an Agent group is
-    /// adopted with a command) and no grants (every group's chat arrives).
+    /// adopted with a command) and no joining (every group's chat arrives).
     pub const PLAIN: Self = Self {
         groups: false,
-        grants: false,
+        membership: false,
         ..Self::ALL
     };
 }
@@ -209,7 +209,7 @@ struct State {
     invites: Vec<(String, Vec<String>)>,
     invite_operations: HashSet<String>,
     renames: Vec<(String, String)>,
-    granted: BTreeSet<String>,
+    joined: BTreeSet<String>,
     adopt_calls: Vec<String>,
     release_calls: Vec<String>,
     adopt_delay: Duration,
@@ -219,21 +219,21 @@ struct State {
     release_failures: usize,
     /// Adopts never return.
     adopt_hangs: bool,
-    /// Root posts into a group with no grant (and not configured) are
-    /// refused, as a platform does for a chat it has not granted.
-    posts_need_grant: bool,
-    replies_need_grant: bool,
-    grant_calls: Vec<GrantCall>,
+    /// Root posts into a group the bot has not joined (and not configured) are
+    /// refused, as a platform does for a chat the bot is not in.
+    posts_need_membership: bool,
+    replies_need_membership: bool,
+    membership_calls: Vec<MembershipCall>,
     /// When set, the groups configured on the platform: unmentioned chat
-    /// from any other group without a grant is not delivered.
+    /// from any other group the bot has not joined is not delivered.
     configured: Option<BTreeSet<String>>,
     /// Posts still to fail, each as the caller sees a bug in the surface.
     panics: usize,
     /// Posts still to refuse as unavailable.
     outages: usize,
-    /// Posts still to refuse outright, grant or no grant.
+    /// Posts still to refuse outright, joined or not.
     refusals: usize,
-    /// Every post refused for want of a grant, or on request.
+    /// Every post refused for want of membership, or on request.
     rejected: usize,
 }
 
@@ -241,23 +241,23 @@ struct State {
 /// [`ChatSurface::release_group`], when it was made (the runtime's clock, so
 /// a test with a paused clock reads exact times) and how it ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GrantCall {
-    pub kind: GrantKind,
+pub struct MembershipCall {
+    pub kind: MembershipKind,
     /// The message ref an adopt named its group by, or the group a release
     /// named.
     pub subject: String,
     pub at: Instant,
-    pub outcome: GrantOutcome,
+    pub outcome: MembershipOutcome,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GrantKind {
+pub enum MembershipKind {
     Adopt,
     Release,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GrantOutcome {
+pub enum MembershipOutcome {
     Done,
     /// Refused as unavailable on request ([`FakeChat::fail_adopts`]).
     Failed,
@@ -296,7 +296,7 @@ impl FakeChat {
     }
 
     /// Only these groups get unmentioned chat delivered, besides groups the
-    /// bot holds a grant for.
+    /// bot has joined.
     pub fn gate_ambient(&self, configured: &[&str]) {
         self.lock().configured = Some(configured.iter().map(|g| (*g).to_owned()).collect());
     }
@@ -336,31 +336,31 @@ impl FakeChat {
         self.lock().adopt_hangs = hang;
     }
 
-    /// Root posts into a group without a grant (and not configured with
+    /// Root posts into a group the bot has not joined (and not configured with
     /// [`gate_ambient`](Self::gate_ambient)) are refused, until the group is
     /// adopted.
-    pub fn require_grants_to_post(&self, require: bool) {
-        self.lock().posts_need_grant = require;
+    pub fn require_membership_to_post(&self, require: bool) {
+        self.lock().posts_need_membership = require;
     }
 
     /// The next `n` posts are refused outright ([`SurfaceError::Rejected`]),
-    /// whatever the group's grant.
+    /// whether or not the bot has joined the group.
     pub fn reject_next_posts(&self, n: usize) {
         self.lock().refusals = n;
     }
 
-    /// How many posts the platform has refused, for want of a grant or on
+    /// How many posts the platform has refused, for want of membership or on
     /// request.
     pub fn rejected_posts(&self) -> usize {
         self.lock().rejected
     }
 
-    /// Replies to a message of a group without a grant (and not configured
+    /// Replies to a message of a group the bot has not joined (and not configured
     /// with [`gate_ambient`](Self::gate_ambient)) are refused, until the
     /// group is adopted. A reply names a message, never the group: the
     /// platform knows which.
-    pub fn require_grants_to_reply(&self, require: bool) {
-        self.lock().replies_need_grant = require;
+    pub fn require_membership_to_reply(&self, require: bool) {
+        self.lock().replies_need_membership = require;
     }
 
     /// The platform knows `message_ref` as a message of `group_id`, as one
@@ -387,7 +387,7 @@ impl FakeChat {
             if let Some(configured) = &state.configured
                 && inbound.addressing == Addressing::Ambient
                 && !configured.contains(&inbound.group_id)
-                && !state.granted.contains(&inbound.group_id)
+                && !state.joined.contains(&inbound.group_id)
             {
                 return Ok(Delivered::Dropped);
             }
@@ -431,9 +431,9 @@ impl FakeChat {
         self.lock().renames.clone()
     }
 
-    /// Groups the bot holds a grant for: created or adopted, not released.
-    pub fn granted(&self) -> Vec<String> {
-        self.lock().granted.iter().cloned().collect()
+    /// Groups the bot has joined: created or adopted, not released.
+    pub fn joined(&self) -> Vec<String> {
+        self.lock().joined.iter().cloned().collect()
     }
 
     /// The message refs each adopt named its group by.
@@ -447,29 +447,29 @@ impl FakeChat {
 
     /// Every adopt and release, in the order made, with when and how it
     /// ended.
-    pub fn grant_calls(&self) -> Vec<GrantCall> {
-        self.lock().grant_calls.clone()
+    pub fn membership_calls(&self) -> Vec<MembershipCall> {
+        self.lock().membership_calls.clone()
     }
 
-    /// [`grant_calls`](Self::grant_calls) of one kind.
-    pub fn grant_calls_of(&self, kind: GrantKind) -> Vec<GrantCall> {
+    /// [`membership_calls`](Self::membership_calls) of one kind.
+    pub fn membership_calls_of(&self, kind: MembershipKind) -> Vec<MembershipCall> {
         self.lock()
-            .grant_calls
+            .membership_calls
             .iter()
             .filter(|c| c.kind == kind)
             .cloned()
             .collect()
     }
 
-    fn refuse_ungranted(state: &mut State, target: &PostTarget) -> Result<(), SurfaceError> {
-        let result = Self::ungranted(state, target);
+    fn refuse_nonmembers(state: &mut State, target: &PostTarget) -> Result<(), SurfaceError> {
+        let result = Self::nonmember(state, target);
         if result.is_err() {
             state.rejected += 1;
         }
         result
     }
 
-    fn ungranted(state: &mut State, target: &PostTarget) -> Result<(), SurfaceError> {
+    fn nonmember(state: &mut State, target: &PostTarget) -> Result<(), SurfaceError> {
         if state.refusals > 0 {
             state.refusals -= 1;
             return Err(SurfaceError::Rejected(
@@ -477,18 +477,18 @@ impl FakeChat {
             ));
         }
         let (group, required) = match target {
-            PostTarget::NewRoot { group_id } => (Some(group_id), state.posts_need_grant),
+            PostTarget::NewRoot { group_id } => (Some(group_id), state.posts_need_membership),
             PostTarget::Reply { message_ref, .. } => (
                 state
                     .messages
                     .get(message_ref)
                     .and_then(|(group, _)| group.as_ref()),
-                state.replies_need_grant,
+                state.replies_need_membership,
             ),
         };
         if let Some(group_id) = group
             && required
-            && !state.granted.contains(group_id)
+            && !state.joined.contains(group_id)
             && !state
                 .configured
                 .as_ref()
@@ -581,7 +581,7 @@ impl FakeChat {
             state.outages -= 1;
             return Err(SurfaceError::Unavailable("fake chat: an outage".into()));
         }
-        Self::refuse_ungranted(&mut state, &target)?;
+        Self::refuse_nonmembers(&mut state, &target)?;
         let content = format!("{}\0{markdown}", mention.unwrap_or_default());
         if let Some((first_target, first_content, first)) =
             state.operations.get(operation_id).cloned()
@@ -695,7 +695,7 @@ impl ChatSurface for FakeChat {
                 ..first
             });
         }
-        Self::refuse_ungranted(&mut state, &target)?;
+        Self::refuse_nonmembers(&mut state, &target)?;
         let (posted, group) = Self::mint(&mut state, &target);
         state.card_operations.insert(
             operation_id.to_owned(),
@@ -771,7 +771,7 @@ impl ChatSurface for FakeChat {
             });
         }
         let group_id = format!("g_{}", state.groups.len() + 1);
-        state.granted.insert(group_id.clone());
+        state.joined.insert(group_id.clone());
         state.groups.push((
             operation_id.to_owned(),
             Group {
@@ -819,24 +819,24 @@ impl ChatSurface for FakeChat {
     async fn adopt_group(&self, message_ref: &str) -> Result<AdoptedGroup, SurfaceError> {
         let (delay, hang, call) = {
             let mut state = self.lock();
-            if !state.caps.grants {
-                state.grant_calls.push(GrantCall {
-                    kind: GrantKind::Adopt,
+            if !state.caps.membership {
+                state.membership_calls.push(MembershipCall {
+                    kind: MembershipKind::Adopt,
                     subject: message_ref.to_owned(),
                     at: Instant::now(),
-                    outcome: GrantOutcome::Unsupported,
+                    outcome: MembershipOutcome::Unsupported,
                 });
-                return unsupported("group grants");
+                return unsupported("group membership");
             }
             state.adopt_calls.push(message_ref.to_owned());
             let outcome = if state.adopt_failures > 0 {
                 state.adopt_failures -= 1;
-                GrantOutcome::Failed
+                MembershipOutcome::Failed
             } else {
-                GrantOutcome::Pending
+                MembershipOutcome::Pending
             };
-            state.grant_calls.push(GrantCall {
-                kind: GrantKind::Adopt,
+            state.membership_calls.push(MembershipCall {
+                kind: MembershipKind::Adopt,
                 subject: message_ref.to_owned(),
                 at: Instant::now(),
                 outcome,
@@ -844,10 +844,10 @@ impl ChatSurface for FakeChat {
             (
                 state.adopt_delay,
                 state.adopt_hangs,
-                state.grant_calls.len() - 1,
+                state.membership_calls.len() - 1,
             )
         };
-        if self.lock().grant_calls[call].outcome == GrantOutcome::Failed {
+        if self.lock().membership_calls[call].outcome == MembershipOutcome::Failed {
             return Err(SurfaceError::Unavailable("fake chat: an outage".into()));
         }
         if hang {
@@ -856,39 +856,39 @@ impl ChatSurface for FakeChat {
         tokio::time::sleep(delay).await;
         let mut state = self.lock();
         let Some(group_id) = state.messages.get(message_ref).and_then(|(g, _)| g.clone()) else {
-            state.grant_calls[call].outcome = GrantOutcome::Rejected;
+            state.membership_calls[call].outcome = MembershipOutcome::Rejected;
             return Err(SurfaceError::Rejected(format!(
                 "unknown message {message_ref}"
             )));
         };
-        let already_granted = !state.granted.insert(group_id.clone());
-        state.grant_calls[call].outcome = GrantOutcome::Done;
+        let already_joined = !state.joined.insert(group_id.clone());
+        state.membership_calls[call].outcome = MembershipOutcome::Done;
         Ok(AdoptedGroup {
             group_id,
-            already_granted,
+            already_joined,
         })
     }
 
     async fn release_group(&self, group_id: &str) -> Result<bool, SurfaceError> {
         let delay = {
             let mut state = self.lock();
-            let outcome = if !state.caps.grants {
-                GrantOutcome::Unsupported
+            let outcome = if !state.caps.membership {
+                MembershipOutcome::Unsupported
             } else if state.release_failures > 0 {
                 state.release_failures -= 1;
-                GrantOutcome::Failed
+                MembershipOutcome::Failed
             } else {
-                GrantOutcome::Pending
+                MembershipOutcome::Pending
             };
-            state.grant_calls.push(GrantCall {
-                kind: GrantKind::Release,
+            state.membership_calls.push(MembershipCall {
+                kind: MembershipKind::Release,
                 subject: group_id.to_owned(),
                 at: Instant::now(),
                 outcome,
             });
             match outcome {
-                GrantOutcome::Unsupported => return unsupported("group grants"),
-                GrantOutcome::Failed => {
+                MembershipOutcome::Unsupported => return unsupported("group membership"),
+                MembershipOutcome::Failed => {
                     return Err(SurfaceError::Unavailable("fake chat: an outage".into()));
                 }
                 _ => {}
@@ -899,13 +899,13 @@ impl ChatSurface for FakeChat {
         tokio::time::sleep(delay).await;
         let mut state = self.lock();
         if let Some(call) = state
-            .grant_calls
+            .membership_calls
             .iter_mut()
             .rev()
-            .find(|c| c.kind == GrantKind::Release && c.subject == group_id)
+            .find(|c| c.kind == MembershipKind::Release && c.subject == group_id)
         {
-            call.outcome = GrantOutcome::Done;
+            call.outcome = MembershipOutcome::Done;
         }
-        Ok(state.granted.remove(group_id))
+        Ok(state.joined.remove(group_id))
     }
 }

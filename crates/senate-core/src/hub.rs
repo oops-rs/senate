@@ -960,7 +960,7 @@ mod tests {
     async fn the_latest_checkpoint_is_the_named_agents_own() {
         let hub = VecHub::new();
         let payload = CheckpointPayload {
-            branch: "feature/refund-v2/alice".into(),
+            branch: "senate/refund-v2/alice".into(),
             commit: "a41f9c2".into(),
             pushed: true,
             remote_url: None,

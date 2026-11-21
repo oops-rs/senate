@@ -1,21 +1,21 @@
-//! Bind = grant: keeping the platform's grants in line with the log.
+//! Bind = join: keeping the bot's group memberships in line with the log.
 //!
-//! The gateway decides *what* each group's grant should be (held while the
-//! log binds the group, given back once it binds it to nothing); this module
+//! The gateway decides *which* groups the bot should be in (joined while the
+//! log binds the group, left once it binds it to nothing); this module
 //! makes it so, without ever holding anything up:
 //!
 //! - every change runs in a task of its own, one task per group at a time,
 //!   so a slow or hanging platform never blocks the Speaker, an append, or
 //!   another group;
-//! - a release waits [`GrantPolicy::release_grace`] first, and a bind within
+//! - a release waits [`MembershipPolicy::release_grace`] first, and a bind within
 //!   it cancels it, so a group moved from one committee to another (an
-//!   unbind, then a bind) keeps its grant throughout and is never adopted
+//!   unbind, then a bind) stays joined throughout and is never adopted
 //!   twice;
 //! - a failed adopt or release is retried with a doubling pause (from
-//!   [`GrantPolicy::retry_initial`] up to [`GrantPolicy::retry_max`], with no
+//!   [`MembershipPolicy::retry_initial`] up to [`MembershipPolicy::retry_max`], with no
 //!   end) until it succeeds or the log's bindings make it unwanted;
 //! - calls for one group are made one at a time and in the order wanted, and
-//!   each is bounded by [`GrantPolicy::call_timeout`], so a call that never
+//!   each is bounded by [`MembershipPolicy::call_timeout`], so a call that never
 //!   returns is a failure like any other;
 //! - a surface that answers `Unsupported` is asked no more, for that kind of
 //!   call: nothing retries, nothing spins.
@@ -36,11 +36,11 @@ use tokio_util::sync::CancellationToken;
 
 use super::{Inner, lock};
 
-/// How the gateway paces the platform's grants. See the [module
-/// docs](self) and [`ChatGateway::with_grant_policy`](super::ChatGateway::with_grant_policy).
+/// How the gateway paces joining and leaving groups. See the [module
+/// docs](self) and [`ChatGateway::with_membership_policy`](super::ChatGateway::with_membership_policy).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GrantPolicy {
-    /// How long a group bound to nothing keeps its grant before it is
+pub struct MembershipPolicy {
+    /// How long the bot stays in a group bound to nothing before it is
     /// released. A bind in that time keeps it.
     pub release_grace: Duration,
     /// The pause after a failed adopt or release; it doubles per failure.
@@ -52,7 +52,7 @@ pub struct GrantPolicy {
     pub call_timeout: Duration,
 }
 
-impl Default for GrantPolicy {
+impl Default for MembershipPolicy {
     fn default() -> Self {
         Self {
             release_grace: Duration::from_secs(3),
@@ -63,20 +63,20 @@ impl Default for GrantPolicy {
     }
 }
 
-impl GrantPolicy {
+impl MembershipPolicy {
     fn next_pause(&self, pause: Duration) -> Duration {
         pause.saturating_mul(2).min(self.retry_max)
     }
 }
 
-/// What the log wants of a group's grant.
+/// What the log wants of the bot's membership of a group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Want {
     Held,
     Released,
 }
 
-struct GroupGrant {
+struct GroupMembership {
     /// What the log wants now; `epoch` changes whenever this does.
     want: Option<Want>,
     epoch: u64,
@@ -88,7 +88,7 @@ struct GroupGrant {
     gate: Arc<AsyncMutex<()>>,
 }
 
-impl GroupGrant {
+impl GroupMembership {
     fn new() -> Self {
         Self {
             want: None,
@@ -101,13 +101,13 @@ impl GroupGrant {
 }
 
 #[derive(Default)]
-pub(super) struct Grants {
-    groups: HashMap<String, GroupGrant>,
+pub(super) struct Memberships {
+    groups: HashMap<String, GroupMembership>,
     adopt_unsupported: bool,
     release_unsupported: bool,
 }
 
-impl Grants {
+impl Memberships {
     fn unsupported(&self, want: Want) -> bool {
         match want {
             Want::Held => self.adopt_unsupported,
@@ -123,7 +123,7 @@ impl Grants {
         let g = self
             .groups
             .entry(group.to_owned())
-            .or_insert_with(GroupGrant::new);
+            .or_insert_with(GroupMembership::new);
         if g.want != Some(want) {
             g.want = Some(want);
             g.epoch += 1;
@@ -159,8 +159,13 @@ enum Called {
 impl Inner {
     /// The log wants `want` of `group`: start the task that makes it so,
     /// unless nothing needs doing. Called with the state locked.
-    pub(super) fn want_grant(self: &Arc<Self>, grants: &mut Grants, group: &str, want: Want) {
-        let Some(epoch) = grants.set(group, want) else {
+    pub(super) fn want_membership(
+        self: &Arc<Self>,
+        memberships: &mut Memberships,
+        group: &str,
+        want: Want,
+    ) {
+        let Some(epoch) = memberships.set(group, want) else {
             return;
         };
         let delay = match want {
@@ -191,7 +196,7 @@ impl Inner {
             }
         }
         let mut state = lock(&self.state);
-        if let Some(g) = state.grants.groups.get_mut(&group)
+        if let Some(g) = state.memberships.groups.get_mut(&group)
             && g.driver == Some(epoch)
         {
             g.driver = None;
@@ -203,24 +208,24 @@ impl Inner {
         group: &str,
         want: Want,
         epoch: u64,
-        policy: &GrantPolicy,
+        policy: &MembershipPolicy,
         stop: &CancellationToken,
     ) -> Attempt {
         let gate = {
             let state = lock(&self.state);
-            if !state.grants.is_current(group, epoch) {
+            if !state.memberships.is_current(group, epoch) {
                 return Attempt::Done;
             }
-            state.grants.groups[group].gate.clone()
+            state.memberships.groups[group].gate.clone()
         };
         let _turn = gate.lock_owned().await;
         // Decided only now, once it is this call's turn: what was wanted
         // may have changed, or been done, while waiting.
         let by = {
             let state = lock(&self.state);
-            if !state.grants.is_current(group, epoch)
-                || state.grants.groups[group].confirmed == Some(want)
-                || state.grants.unsupported(want)
+            if !state.memberships.is_current(group, epoch)
+                || state.memberships.groups[group].confirmed == Some(want)
+                || state.memberships.unsupported(want)
             {
                 return Attempt::Done;
             }
@@ -254,9 +259,9 @@ impl Inner {
         match called {
             Called::Adopted(AdoptedGroup {
                 group_id,
-                already_granted,
+                already_joined,
             }) => {
-                tracing::debug!(%group_id, already_granted, "group adopted");
+                tracing::debug!(%group_id, already_joined, "group adopted");
                 self.confirm(group, Want::Held);
                 Attempt::Done
             }
@@ -270,18 +275,18 @@ impl Inner {
                 Attempt::Done
             }
             Called::Failed(error) => {
-                tracing::warn!(%group, %error, ?want, "cannot change a group's grant; will retry");
+                tracing::warn!(%group, %error, ?want, "cannot join or leave a group; will retry");
                 Attempt::Retry
             }
             Called::TimedOut => {
-                tracing::warn!(%group, ?want, timeout = ?policy.call_timeout, "the platform did not answer a grant call; will retry");
+                tracing::warn!(%group, ?want, timeout = ?policy.call_timeout, "the platform did not answer a join or leave call; will retry");
                 Attempt::Retry
             }
             Called::Stopped => Attempt::Done,
         }
     }
 
-    async fn call<F>(&self, stop: &CancellationToken, policy: &GrantPolicy, call: F) -> Called
+    async fn call<F>(&self, stop: &CancellationToken, policy: &MembershipPolicy, call: F) -> Called
     where
         F: Future<Output = Result<AdoptedGroup, SurfaceError>>,
     {
@@ -298,7 +303,7 @@ impl Inner {
     async fn call_release<F>(
         &self,
         stop: &CancellationToken,
-        policy: &GrantPolicy,
+        policy: &MembershipPolicy,
         call: F,
     ) -> Called
     where
@@ -316,7 +321,7 @@ impl Inner {
 
     /// The platform said so: a fact, whatever has been wanted since.
     fn confirm(&self, group: &str, state: Want) {
-        if let Some(g) = lock(&self.state).grants.groups.get_mut(group) {
+        if let Some(g) = lock(&self.state).memberships.groups.get_mut(group) {
             g.confirmed = Some(state);
         }
     }
@@ -324,14 +329,14 @@ impl Inner {
     fn unsupported(&self, want: Want, reason: &str) {
         let mut state = lock(&self.state);
         let flag = match want {
-            Want::Held => &mut state.grants.adopt_unsupported,
-            Want::Released => &mut state.grants.release_unsupported,
+            Want::Held => &mut state.memberships.adopt_unsupported,
+            Want::Released => &mut state.memberships.release_unsupported,
         };
         if !std::mem::replace(flag, true) {
             tracing::info!(
                 reason,
                 ?want,
-                "this chat surface does not grant groups; not asking again"
+                "this chat surface cannot join or leave groups; not asking again"
             );
         }
     }
@@ -370,7 +375,7 @@ impl Inner {
     }
 
     /// A post into `group` was refused: when the group is bound and the
-    /// platform has not confirmed its grant, adopt it now (waiting for an
+    /// platform has not confirmed the bot's membership, adopt it now (waiting for an
     /// adopt already under way) and say the post may be tried once more.
     pub(super) async fn heal(self: &Arc<Self>, group: &str) -> bool {
         self.drain_fresh();
@@ -378,26 +383,26 @@ impl Inner {
         let policy = *lock(&self.policy);
         let (gate, by) = {
             let mut state = lock(&self.state);
-            if state.table.committee_of(group).is_none() || state.grants.adopt_unsupported {
+            if state.table.committee_of(group).is_none() || state.memberships.adopt_unsupported {
                 return false;
             }
             let Some(by) = state.latest_ref.get(group).cloned() else {
                 return false;
             };
             let g = state
-                .grants
+                .memberships
                 .groups
                 .entry(group.to_owned())
-                .or_insert_with(GroupGrant::new);
+                .or_insert_with(GroupMembership::new);
             if g.confirmed == Some(Want::Held) {
-                // Granted: this refusal is about something else.
+                // Joined: this refusal is about something else.
                 return false;
             }
             (g.gate.clone(), by)
         };
         let _turn = gate.lock_owned().await;
         if lock(&self.state)
-            .grants
+            .memberships
             .groups
             .get(group)
             .is_some_and(|g| g.confirmed == Some(Want::Held))

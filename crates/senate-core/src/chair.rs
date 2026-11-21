@@ -165,7 +165,7 @@ mod tests {
     use crate::ids::CommitteeId;
 
     fn c() -> CommitteeId {
-        CommitteeId::new("ibot").unwrap()
+        CommitteeId::new("ledger").unwrap()
     }
 
     fn name(s: &str) -> SenatorName {

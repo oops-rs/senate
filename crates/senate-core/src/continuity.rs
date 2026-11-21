@@ -577,7 +577,7 @@ mod tests {
 
     fn payload(files: CheckpointFiles) -> CheckpointPayload {
         CheckpointPayload {
-            branch: "feature/refund-v2/alice".into(),
+            branch: "senate/refund-v2/alice".into(),
             commit: "a41f9c2e0000000000000000000000000000beef".into(),
             pushed: true,
             remote_url: Some("git@example.com:acme/pay.git".into()),
@@ -604,7 +604,7 @@ mod tests {
             open: Some("- seq 112".into()),
         });
         assert!(p.check().is_ok());
-        assert_eq!(p.at(), "feature/refund-v2/alice@a41f9c2");
+        assert_eq!(p.at(), "senate/refund-v2/alice@a41f9c2");
         let json = p.value();
         assert_eq!(json["trigger"], "tool");
         assert!(json["files"].get("decisions").is_none());

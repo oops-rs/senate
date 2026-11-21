@@ -36,9 +36,9 @@
 //!
 //! # Branches
 //!
-//! Branch names follow a developer habit that is not Senate's to rename:
-//! `feature/<committee>/<person>` for a developer's own branch, and
-//! `feature/<committee>/speaker-<run>` for the branch a run pushes.
+//! Branch names are `<prefix>/<committee>/<person>` for a developer's own
+//! branch, and `<prefix>/<committee>/speaker-<run>` for the branch a run
+//! pushes. The prefix is `senate` unless a deployment sets another.
 //! [`BranchNaming`] holds the prefix, [`DEFAULT_BRANCH_PREFIX`] by default,
 //! and is the only place these names are put together.
 //!
@@ -62,8 +62,7 @@ use crate::locale::Locale;
 use crate::senator::SenatorName;
 
 /// The first segment of a branch name unless a deployment says otherwise.
-/// A git convention, not Senate's word for a committee.
-pub const DEFAULT_BRANCH_PREFIX: &str = "feature";
+pub const DEFAULT_BRANCH_PREFIX: &str = "senate";
 
 /// What a run's branch is called after the committee: `speaker-<run>`.
 const SPEAKER_BRANCH_STEM: &str = "speaker-";
@@ -103,14 +102,14 @@ impl BranchNaming {
     }
 
     /// A developer's own branch on a committee:
-    /// `feature/<committee>/<person>`. It is the person's, whichever of
+    /// `senate/<committee>/<person>`. It is the person's, whichever of
     /// their agents works on it.
     pub fn developer(&self, committee: &CommitteeId, person: &Name) -> String {
         format!("{}{person}", self.committee_dir(committee))
     }
 
     /// The branch a work run creates and pushes:
-    /// `feature/<committee>/speaker-<run_id>`.
+    /// `senate/<committee>/speaker-<run_id>`.
     pub fn speaker(&self, committee: &CommitteeId, run_id: u64) -> String {
         format!(
             "{}{SPEAKER_BRANCH_STEM}{run_id}",
@@ -357,17 +356,17 @@ mod tests {
         let branches = BranchNaming::default();
         assert_eq!(branches.prefix(), DEFAULT_BRANCH_PREFIX);
         let alice = Name::new("alice").unwrap();
-        assert_eq!(branches.developer(&c(), &alice), "feature/refund-v2/alice");
-        assert_eq!(branches.speaker(&c(), 7), "feature/refund-v2/speaker-7");
+        assert_eq!(branches.developer(&c(), &alice), "senate/refund-v2/alice");
+        assert_eq!(branches.speaker(&c(), 7), "senate/refund-v2/speaker-7");
 
-        assert!(branches.is_speaker(&c(), "feature/refund-v2/speaker-12"));
+        assert!(branches.is_speaker(&c(), "senate/refund-v2/speaker-12"));
         for not in [
-            "feature/refund-v2/alice",
-            "feature/refund-v2/speaker-",
-            "feature/refund-v2/speaker-1x",
-            "feature/other/speaker-1",
-            "feature/refund-v2/speaker-1/alice",
-            "feature/refund-v2/steward-1",
+            "senate/refund-v2/alice",
+            "senate/refund-v2/speaker-",
+            "senate/refund-v2/speaker-1x",
+            "senate/other/speaker-1",
+            "senate/refund-v2/speaker-1/alice",
+            "senate/refund-v2/chair-1",
             "refund-v2/speaker-1",
         ] {
             assert!(!branches.is_speaker(&c(), not), "{not}");
@@ -380,7 +379,7 @@ mod tests {
         assert_eq!(team.prefix(), "team/topic");
         assert_eq!(team.speaker(&c(), 3), "team/topic/refund-v2/speaker-3");
         assert!(team.is_speaker(&c(), "team/topic/refund-v2/speaker-3"));
-        assert!(!team.is_speaker(&c(), "feature/refund-v2/speaker-3"));
+        assert!(!team.is_speaker(&c(), "senate/refund-v2/speaker-3"));
 
         let bare = BranchNaming::new("");
         assert_eq!(bare.speaker(&c(), 3), "refund-v2/speaker-3");

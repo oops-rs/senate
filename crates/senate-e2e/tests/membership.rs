@@ -1,4 +1,4 @@
-//! Bind = grant, end to end: a group the platform has no configuration for
+//! Bind = join, end to end: a group the platform has no configuration for
 //! is bound with `/bind`, the gateway has the platform adopt it, and from
 //! then on its unmentioned chat reaches the log; `/agents` adopts the Agent
 //! group the same way, and unbinding the last people group releases both.
@@ -15,15 +15,15 @@ use std::time::Duration;
 use common::*;
 use senate_core::Kind;
 use senated::Delivered;
-use senated::GrantPolicy;
-use senated::testing::{Caps, GrantKind, GrantOutcome, Message};
+use senated::MembershipPolicy;
+use senated::testing::{Caps, MembershipKind, MembershipOutcome, Message};
 
 /// A platform app that may adopt groups, configured for none: only
-/// mentions arrive from a group until it holds a grant.
-fn granting() -> Setup {
+/// mentions arrive from a group until the bot has joined it.
+fn joining() -> Setup {
     Setup::new().platform(|chat| {
         chat.set_caps(Caps {
-            grants: true,
+            membership: true,
             ..Caps::PLAIN
         });
         chat.gate_ambient(&[]);
@@ -31,8 +31,8 @@ fn granting() -> Setup {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn binding_an_unconfigured_group_grants_it_and_unbinding_releases_it() {
-    let world = granting().start().await;
+async fn binding_an_unconfigured_group_joins_it_and_unbinding_leaves_it() {
+    let world = joining().start().await;
 
     let before = world
         .say(Message::ambient(GROUP, "u_pm", "m_before", "绑定之前"))
@@ -46,7 +46,7 @@ async fn binding_an_unconfigured_group_grants_it_and_unbinding_releases_it() {
     eventually("the people group to be adopted", || {
         world
             .fake()
-            .granted()
+            .joined()
             .contains(&GROUP.to_owned())
             .then_some(())
     })
@@ -66,15 +66,15 @@ async fn binding_an_unconfigured_group_grants_it_and_unbinding_releases_it() {
     );
     assert!(
         !world.events().await.iter().any(|e| e.body == "绑定之前"),
-        "nothing from before the grant"
+        "nothing from before the join"
     );
 
-    // The Agent group, adopted with `/agents`, is granted too.
+    // The Agent group, adopted with `/agents`, is joined too.
     world.with_agent_group().await;
     eventually("the Agent group to be adopted", || {
         world
             .fake()
-            .granted()
+            .joined()
             .contains(&AGENTS.to_owned())
             .then_some(())
     })
@@ -88,7 +88,7 @@ async fn binding_an_unconfigured_group_grants_it_and_unbinding_releases_it() {
         .say(Message::mention(GROUP, "u_pm", "m_unbind", "/unbind"))
         .await;
     eventually("both groups to be released", || {
-        world.fake().granted().is_empty().then_some(())
+        world.fake().joined().is_empty().then_some(())
     })
     .await;
     let released = world.fake().release_calls();
@@ -99,15 +99,14 @@ async fn binding_an_unconfigured_group_grants_it_and_unbinding_releases_it() {
 
 /// The platform answers adopts slowly: the Speaker's first root posts into
 /// groups it just bound (the "no Agent group" hint, the Agent group's
-/// pinned cards) do not wait for the grant, and the grants still land.
+/// pinned cards) do not wait for the join, and the joins still land.
 ///
-/// Replaces a scenario of the predecessor's own platform, where a post into
-/// a group not yet granted was refused and its surface healed the grant
-/// before posting again; that is a property of one platform's transport,
-/// not of the platform-neutral gateway.
+/// Refusing a post into a group not yet joined, and healing it before
+/// posting again, is a property of one platform's transport, not of the
+/// platform-neutral gateway; this test does not depend on it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn posts_right_after_a_bind_do_not_wait_for_a_slow_grant() {
-    let world = granting().start().await;
+async fn posts_right_after_a_bind_do_not_wait_for_a_slow_join() {
+    let world = joining().start().await;
     world.fake().delay_adopts(Duration::from_millis(300));
 
     world.bind().await;
@@ -128,9 +127,9 @@ async fn posts_right_after_a_bind_do_not_wait_for_a_slow_grant() {
         (pins.len() >= 2).then_some(())
     })
     .await;
-    eventually("both groups granted", || {
-        let granted = world.fake().granted();
-        (granted.contains(&GROUP.to_owned()) && granted.contains(&AGENTS.to_owned())).then_some(())
+    eventually("both groups joined", || {
+        let joined = world.fake().joined();
+        (joined.contains(&GROUP.to_owned()) && joined.contains(&AGENTS.to_owned())).then_some(())
     })
     .await;
     world.stop().await;
@@ -141,7 +140,7 @@ async fn posts_right_after_a_bind_do_not_wait_for_a_slow_grant() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_restart_releases_what_the_log_unbound() {
     // The log must outlive the daemon.
-    let mut world = granting().sqlite().start().await;
+    let mut world = joining().sqlite().start().await;
     world.bind().await;
     world
         .say(Message::mention(GROUP, "u_pm", "m_unbind", "/unbind"))
@@ -169,8 +168,8 @@ async fn a_restart_releases_what_the_log_unbound() {
 }
 
 /// A short grace and short pauses, for tests that wait in real time.
-fn quick(grace_ms: u64) -> GrantPolicy {
-    GrantPolicy {
+fn quick(grace_ms: u64) -> MembershipPolicy {
+    MembershipPolicy {
         release_grace: Duration::from_millis(grace_ms),
         retry_initial: Duration::from_millis(20),
         retry_max: Duration::from_millis(100),
@@ -181,12 +180,12 @@ fn quick(grace_ms: u64) -> GrantPolicy {
 /// A platform that fails twice before it takes an adopt, and twice before it
 /// takes a release: both are retried until they land.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_platform_that_fails_grants_is_asked_until_it_takes_them() {
-    let world = granting()
-        .grants(quick(200))
+async fn a_platform_that_fails_joins_is_asked_until_it_takes_them() {
+    let world = joining()
+        .membership_policy(quick(200))
         .platform(|chat| {
             chat.set_caps(Caps {
-                grants: true,
+                membership: true,
                 ..Caps::PLAIN
             });
             chat.gate_ambient(&[]);
@@ -200,23 +199,23 @@ async fn a_platform_that_fails_grants_is_asked_until_it_takes_them() {
     eventually("the group to be adopted after two failures", || {
         world
             .fake()
-            .granted()
+            .joined()
             .contains(&GROUP.to_owned())
             .then_some(())
     })
     .await;
     let outcomes: Vec<_> = world
         .fake()
-        .grant_calls_of(GrantKind::Adopt)
+        .membership_calls_of(MembershipKind::Adopt)
         .iter()
         .map(|c| c.outcome)
         .collect();
     assert_eq!(
         outcomes,
         [
-            GrantOutcome::Failed,
-            GrantOutcome::Failed,
-            GrantOutcome::Done
+            MembershipOutcome::Failed,
+            MembershipOutcome::Failed,
+            MembershipOutcome::Done
         ]
     );
 
@@ -225,16 +224,16 @@ async fn a_platform_that_fails_grants_is_asked_until_it_takes_them() {
         .say(Message::mention(GROUP, "u_pm", "m_unbind", "/unbind"))
         .await;
     eventually("the group to be released after two failures", || {
-        world.fake().granted().is_empty().then_some(())
+        world.fake().joined().is_empty().then_some(())
     })
     .await;
-    let releases = world.fake().grant_calls_of(GrantKind::Release);
+    let releases = world.fake().membership_calls_of(MembershipKind::Release);
     assert_eq!(
         releases.iter().map(|c| c.outcome).collect::<Vec<_>>(),
         [
-            GrantOutcome::Failed,
-            GrantOutcome::Failed,
-            GrantOutcome::Done
+            MembershipOutcome::Failed,
+            MembershipOutcome::Failed,
+            MembershipOutcome::Done
         ]
     );
     assert!(
@@ -245,15 +244,15 @@ async fn a_platform_that_fails_grants_is_asked_until_it_takes_them() {
 }
 
 /// A group moved from one committee to another (unbound, then bound again
-/// within the grace) keeps its grant: no release, no second adopt.
+/// within the grace) stays joined: no release, no second adopt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_group_moved_to_another_committee_keeps_its_grant() {
-    let world = granting().grants(quick(3_000)).start().await;
+async fn a_group_moved_to_another_committee_stays_joined() {
+    let world = joining().membership_policy(quick(3_000)).start().await;
     world.bind().await;
     eventually("the group to be adopted", || {
         world
             .fake()
-            .granted()
+            .joined()
             .contains(&GROUP.to_owned())
             .then_some(())
     })
@@ -283,11 +282,14 @@ async fn a_group_moved_to_another_committee_keeps_its_grant() {
 
     tokio::time::sleep(Duration::from_millis(3_500)).await;
     assert!(
-        world.fake().grant_calls_of(GrantKind::Release).is_empty(),
+        world
+            .fake()
+            .membership_calls_of(MembershipKind::Release)
+            .is_empty(),
         "never released"
     );
     assert_eq!(world.fake().adopt_calls().len(), 1, "never adopted twice");
-    assert!(world.fake().granted().contains(&GROUP.to_owned()));
+    assert!(world.fake().joined().contains(&GROUP.to_owned()));
     world.stop().await;
 }
 
@@ -295,11 +297,11 @@ async fn a_group_moved_to_another_committee_keeps_its_grant() {
 /// log, without waiting for anyone to speak.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_restart_adopts_a_bound_group_again_from_the_log() {
-    let mut world = granting()
+    let mut world = joining()
         .sqlite()
         .platform(|chat| {
             chat.set_caps(Caps {
-                grants: true,
+                membership: true,
                 ..Caps::PLAIN
             });
             chat.gate_ambient(&[]);
@@ -312,7 +314,7 @@ async fn a_restart_adopts_a_bound_group_again_from_the_log() {
     eventually("the group to be adopted", || {
         world
             .fake()
-            .granted()
+            .joined()
             .contains(&GROUP.to_owned())
             .then_some(())
     })
@@ -325,7 +327,7 @@ async fn a_restart_adopts_a_bound_group_again_from_the_log() {
     eventually("the group to be adopted again", || {
         world
             .fake()
-            .granted()
+            .joined()
             .contains(&GROUP.to_owned())
             .then_some(())
     })
@@ -340,12 +342,12 @@ async fn a_restart_adopts_a_bound_group_again_from_the_log() {
 async fn a_release_the_platform_refused_is_performed_after_a_restart() {
     let starts = Arc::new(AtomicUsize::new(0));
     let seen = starts.clone();
-    let mut world = granting()
+    let mut world = joining()
         .sqlite()
-        .grants(quick(100))
+        .membership_policy(quick(100))
         .platform(move |chat| {
             chat.set_caps(Caps {
-                grants: true,
+                membership: true,
                 ..Caps::PLAIN
             });
             chat.gate_ambient(&[]);
@@ -360,7 +362,12 @@ async fn a_release_the_platform_refused_is_performed_after_a_restart() {
         .say(Message::mention(GROUP, "u_pm", "m_unbind", "/unbind"))
         .await;
     eventually("the release to be tried and refused", || {
-        (world.fake().grant_calls_of(GrantKind::Release).len() >= 2).then_some(())
+        (world
+            .fake()
+            .membership_calls_of(MembershipKind::Release)
+            .len()
+            >= 2)
+            .then_some(())
     })
     .await;
     assert!(world.fake().release_calls().is_empty(), "never taken");
@@ -378,19 +385,19 @@ async fn a_release_the_platform_refused_is_performed_after_a_restart() {
 }
 
 /// The Speaker's first post into a group it has just bound is refused by a
-/// platform that has not granted the group yet: the gateway adopts it then
+/// platform that has not let the bot join the group yet: the gateway adopts it then
 /// and the post goes through.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_post_refused_for_want_of_a_grant_heals_it_and_lands() {
-    let world = granting()
+async fn a_post_refused_for_want_of_membership_rejoins_and_lands() {
+    let world = joining()
         .platform(|chat| {
             chat.set_caps(Caps {
-                grants: true,
+                membership: true,
                 ..Caps::PLAIN
             });
             chat.gate_ambient(&[]);
             chat.delay_adopts(Duration::from_millis(300));
-            chat.require_grants_to_post(true);
+            chat.require_membership_to_post(true);
         })
         .start()
         .await;
@@ -400,26 +407,26 @@ async fn a_post_refused_for_want_of_a_grant_heals_it_and_lands() {
             p.is_root_in(GROUP)
         })
         .await;
-    assert!(world.fake().granted().contains(&GROUP.to_owned()));
+    assert!(world.fake().joined().contains(&GROUP.to_owned()));
     world.stop().await;
 }
 
 /// The Speaker confirms a bind in the thread of the bind message, as a
 /// reply, which names a message and not a group. The platform refuses it
-/// until the group's (slow) grant has landed; the gateway finds the group
+/// until the group's (slow) join has landed; the gateway finds the group
 /// from the bind message, adopts, and the confirmation lands, with no heal
 /// of the platform layer's own.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_confirmation_in_the_bind_messages_thread_is_refused_once_and_then_lands() {
-    let world = granting()
+    let world = joining()
         .platform(|chat| {
             chat.set_caps(Caps {
-                grants: true,
+                membership: true,
                 ..Caps::PLAIN
             });
             chat.gate_ambient(&[]);
             chat.delay_adopts(Duration::from_secs(3));
-            chat.require_grants_to_reply(true);
+            chat.require_membership_to_reply(true);
         })
         .start()
         .await;
@@ -432,7 +439,7 @@ async fn the_confirmation_in_the_bind_messages_thread_is_refused_once_and_then_l
         .await;
     assert_eq!(confirmation.group.as_deref(), Some(GROUP));
     assert!(
-        world.fake().granted().contains(&GROUP.to_owned()),
+        world.fake().joined().contains(&GROUP.to_owned()),
         "the confirmation landed because the group had been adopted"
     );
     assert_eq!(

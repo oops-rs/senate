@@ -51,7 +51,7 @@ pub enum SurfaceError {
     /// Transient: the gateway or platform is unreachable; retry later.
     #[error("unavailable: {0}")]
     Unavailable(String),
-    /// This surface (or its grants) cannot do it at all. The Speaker falls
+    /// This surface (or what the platform lets the bot do) cannot do it at all. The Speaker falls
     /// back: adopt instead of create, a plain post instead of a card, the
     /// person's name as text instead of a native mention.
     #[error("unsupported: {0}")]
@@ -109,14 +109,15 @@ pub struct AnnouncementSection {
     pub markdown: String,
 }
 
-/// A group the surface was granted at runtime by
+/// A group the bot joined at runtime by
 /// [`adopt_group`](ChatSurface::adopt_group).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdoptedGroup {
     /// The group's identity, unchanged: the `group_id` its messages carry.
     pub group_id: String,
-    /// The surface already had it (configured, created, or adopted before).
-    pub already_granted: bool,
+    /// The bot was already in it (configured, created, or adopted before).
+    /// On the wire this is `already_granted`, a historical name.
+    pub already_joined: bool,
 }
 
 fn unsupported<T>(what: &str) -> Result<T, SurfaceError> {
@@ -223,19 +224,19 @@ pub trait ChatSurface: Send + Sync + 'static {
         unsupported("announcements")
     }
 
-    /// Ask the platform for the full use of an existing group (unmentioned
-    /// chat, proactive posts) because a person bound it. The group is named
-    /// by `message_ref`, a message the platform delivered from it; it keeps
-    /// its `group_id`. Idempotent: adopting a group the surface already has
-    /// is not an error.
+    /// Join an existing group because a person bound it: ask the platform
+    /// to let the bot see and post in this group (unmentioned chat as well
+    /// as mentions, posts of its own). The group is named by `message_ref`,
+    /// a message the platform delivered from it; it keeps its `group_id`.
+    /// Idempotent: joining a group the bot is already in is not an error.
     async fn adopt_group(&self, _message_ref: &str) -> Result<AdoptedGroup, SurfaceError> {
         unsupported("group adoption")
     }
 
-    /// Give back what [`adopt_group`](Self::adopt_group) (or
-    /// [`create_group`](Self::create_group)) was granted, once the group is
-    /// bound to nothing. Returns whether a grant was removed; releasing a
-    /// group with none is not an error.
+    /// Leave a group joined by [`adopt_group`](Self::adopt_group) (or
+    /// created by [`create_group`](Self::create_group)), once it is bound to
+    /// nothing. Returns whether the bot left anything; leaving a group the
+    /// bot is not in is not an error.
     async fn release_group(&self, _group_id: &str) -> Result<bool, SurfaceError> {
         unsupported("group release")
     }

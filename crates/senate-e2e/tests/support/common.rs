@@ -38,7 +38,9 @@ use senate_speaker::{Brain, ScriptedBrain, SpeakerConfig, WorkConfig};
 use senate_work::testing::{FakeForge, FakeRunner};
 use senate_work::{Forge, RepoAllowlist, Runner};
 use senated::testing::{FakeChat, Message, Post};
-use senated::{Assembly, ChatGateway, Delivered, GrantPolicy, Machine, Senated, SenatedConfig};
+use senated::{
+    Assembly, ChatGateway, Delivered, Machine, MembershipPolicy, Senated, SenatedConfig,
+};
 use serde_json::Value;
 use tokio::io::AsyncBufReadExt;
 use tokio::net::UnixListener;
@@ -145,7 +147,7 @@ pub struct Setup {
     chat: bool,
     speaker_on: bool,
     platform: Option<Platform>,
-    grants: Option<GrantPolicy>,
+    membership_policy: Option<MembershipPolicy>,
     hands: Option<Hands>,
     server: Vec<Tweak<senate_server::ServerConfig>>,
     speaker: Vec<Tweak<SpeakerConfig>>,
@@ -163,7 +165,7 @@ impl Setup {
             chat: true,
             speaker_on: true,
             platform: None,
-            grants: None,
+            membership_policy: None,
             hands: None,
             server: Vec::new(),
             speaker: Vec::new(),
@@ -201,10 +203,10 @@ impl Setup {
         self
     }
 
-    /// Pace the gateway's grants (a short grace and retry, for a test that
+    /// Pace the gateway's joins and leaves (a short grace and retry, for a test that
     /// waits in real time).
-    pub fn grants(mut self, policy: GrantPolicy) -> Self {
-        self.grants = Some(policy);
+    pub fn membership_policy(mut self, policy: MembershipPolicy) -> Self {
+        self.membership_policy = Some(policy);
         self
     }
 
@@ -269,7 +271,7 @@ pub struct World {
     pub locale: Locale,
     hands: Option<Hands>,
     platform: Option<Platform>,
-    grants: Option<GrantPolicy>,
+    membership_policy: Option<MembershipPolicy>,
 }
 
 impl World {
@@ -384,7 +386,7 @@ token = "tok-carol"
             locale: setup.locale,
             hands: setup.hands,
             platform: setup.platform,
-            grants: setup.grants,
+            membership_policy: setup.membership_policy,
         };
         world.launch(setup.chat).await;
         world
@@ -399,8 +401,8 @@ token = "tok-carol"
         }
         if chat {
             let (fake, gateway) = FakeChat::new();
-            let gateway = match self.grants {
-                Some(policy) => gateway.with_grant_policy(policy),
+            let gateway = match self.membership_policy {
+                Some(policy) => gateway.with_membership_policy(policy),
                 None => gateway,
             };
             if let Some(platform) = &self.platform {

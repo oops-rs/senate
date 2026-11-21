@@ -691,13 +691,16 @@ mod tests {
     fn a_seat_removed_note_from_the_speaker_closes_the_question() {
         let mut log = Log(Vec::new());
         let gone = log.push(
-            ev(Kind::Question, "speaker", "Commons 怎么部署？")
+            ev(Kind::Question, "speaker", "退款服务怎么部署？")
                 .to(Address::Child {
-                    senate: crate::Name::new("wyak").unwrap(),
+                    senate: crate::Name::new("bob-desk").unwrap(),
                     committee: c(),
                 })
                 .on_behalf_of(addr("senator::wendell"))
-                .with_meta(meta::INTENDED, json!("/vm/wyak::refund-v2::senator::codex")),
+                .with_meta(
+                    meta::INTENDED,
+                    json!("/vm/bob-desk::refund-v2::senator::codex"),
+                ),
         );
         let kept = log
             .push(ev(Kind::Question, "senator::claude", "重试几次？").to(addr("senator::copilot")));
@@ -718,7 +721,7 @@ mod tests {
                 .as_ref()
                 .map(ToString::to_string)
                 .as_deref(),
-            Some("/vm/wyak::refund-v2::senator::codex")
+            Some("/vm/bob-desk::refund-v2::senator::codex")
         );
         log.push(
             ev(Kind::Note, "speaker", "该席位已不在本委员会。")
@@ -726,7 +729,7 @@ mod tests {
                 .to(addr("senator::wendell"))
                 .with_meta(
                     meta::SEAT_REMOVED,
-                    json!("/vm/wyak::refund-v2::senator::codex"),
+                    json!("/vm/bob-desk::refund-v2::senator::codex"),
                 ),
         );
         let brief = Brief::from_events(c(), &log.0);
@@ -848,7 +851,7 @@ mod tests {
 
     fn checkpoint_payload() -> CheckpointPayload {
         CheckpointPayload {
-            branch: "feature/refund-v2/alice".into(),
+            branch: "senate/refund-v2/alice".into(),
             commit: "a41f9c2deadbeef".into(),
             pushed: false,
             remote_url: None,
@@ -962,7 +965,7 @@ mod tests {
              \n## 已绑定的群\n\n- backend 群（chat:backend）\n\
              \n## 决定\n\n- seq 4 · 2026-11-15 · [senator::pm]：cap is 30 days\n\
              \n## 待回答的问题\n\n- seq 5 · [senator::copilot] → [senator::claude]、[senator::alice]：how many retries?\n\
-             \n## 最近检查点\n\n- [senator::claude] 最近检查点 · feature/refund-v2/alice@a41f9c2，未推送 · 3 分钟前 · seq 1：幂等键做完了\n\
+             \n## 最近检查点\n\n- [senator::claude] 最近检查点 · senate/refund-v2/alice@a41f9c2，未推送 · 3 分钟前 · seq 1：幂等键做完了\n\
              \n## 在场\n\n- [senator::copilot] 失联（自 2026-11-16 09:00 UTC 起） · 在 refund-v2 上落后 14 条事件\n\
              \n## 最近活跃\n\n[guest::chat/u_8f3a]（seq 6）、[senator::copilot]（seq 5）、[senator::claude]（seq 1）\n"
         );
@@ -981,7 +984,7 @@ mod tests {
              \n## Bound groups\n\n- backend 群 (chat:backend)\n\
              \n## Decisions\n\n- seq 4 · 2026-11-15 · [senator::pm]: cap is 30 days\n\
              \n## Open questions\n\n- seq 5 · [senator::copilot] → [senator::claude], [senator::alice]: how many retries?\n\
-             \n## Latest checkpoints\n\n- [senator::claude] latest checkpoint · feature/refund-v2/alice@a41f9c2, not pushed · 3 min ago · seq 1: 幂等键做完了\n\
+             \n## Latest checkpoints\n\n- [senator::claude] latest checkpoint · senate/refund-v2/alice@a41f9c2, not pushed · 3 min ago · seq 1: 幂等键做完了\n\
              \n## Presence\n\n- [senator::copilot] disconnected since 2026-11-16 09:00 UTC · 14 events behind on refund-v2\n\
              \n## Recently active\n\n[guest::chat/u_8f3a] (seq 6), [senator::copilot] (seq 5), [senator::claude] (seq 1)\n"
         );

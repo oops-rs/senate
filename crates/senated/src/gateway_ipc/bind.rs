@@ -233,7 +233,7 @@ impl InboundHandler {
                 group_name: source.group_name.clone(),
                 role: GroupRole::People,
             })
-            // The grant reconciler can now adopt this group again after a
+            // The membership reconciler can now adopt this group again after a
             // restart, even if nothing was said between the bind and shutdown.
             .with_mirror(Mirror {
                 platform: self.platform.clone(),

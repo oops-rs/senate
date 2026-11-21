@@ -6,7 +6,7 @@ Senate's contracts: everything that crosses a crate or process boundary, defined
 
 ## What's in it
 
-- **Names and addresses**: committee ids, `seq`, event ids; `SenatorName` (a person such as `wendell` or an agent such as `claude`); `SenatePath` (`acme/north-desk`); addresses (`senator::<name>`, `senator::*`, `speaker`, `committee`, `guest::<platform>/<id>`); qualified locators (`acme/north-desk::ibot::senator::codex`) and in-text mentions (`[senator::claude]`).
+- **Names and addresses**: committee ids, `seq`, event ids; `SenatorName` (a person such as `wendell` or an agent such as `claude`); `SenatePath` (`acme/north-desk`); addresses (`senator::<name>`, `senator::*`, `speaker`, `committee`, `guest::<platform>/<id>`); qualified locators (`acme/north-desk::ledger::senator::codex`) and in-text mentions (`[senator::claude]`).
 - **Aliases**, each on the committee it was given in, and how a bare or qualified alias resolves.
 - **The roster**: who sits in a Senate, who may act as whom, and what "whichever agent" resolves to.
 - **The event envelope**: the single record of a committee's log, its payloads and shared `meta` keys.

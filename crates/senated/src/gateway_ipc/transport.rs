@@ -289,7 +289,7 @@ impl ChatSurface for RemoteSurface {
             .await?;
         Ok(AdoptedGroup {
             group_id: reply.group_id,
-            already_granted: reply.already_granted,
+            already_joined: reply.already_granted,
         })
     }
 

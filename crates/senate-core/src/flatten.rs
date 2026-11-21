@@ -363,8 +363,8 @@ mod tests {
         assert_eq!(Flattener::address("guest::chat/u_1"), "guest::chat/u_1");
         assert_eq!(Flattener::agent("wendell/codex"), "codex");
         assert_eq!(
-            Flattener::agent("feature/refund-v2/wendell"),
-            "feature/refund-v2/wendell"
+            Flattener::agent("senate/refund-v2/wendell"),
+            "senate/refund-v2/wendell"
         );
 
         let envelope = json!({
@@ -378,7 +378,7 @@ mod tests {
                 "work": { "target_agent": "wendell/codex", "branch": "wendell/fix" },
                 "proposed_by": "senator::wendell/claude",
                 "mentions": [{ "address": "senator::wendell/codex", "name": "Codex" }],
-                "checkpoint": { "branch": "feature/x/wendell", "commit": "abc" }
+                "checkpoint": { "branch": "senate/x/wendell", "commit": "abc" }
             }
         });
         let out = Flattener::envelope(&envelope);
@@ -398,7 +398,7 @@ mod tests {
         assert_eq!(meta["work"]["target_agent"], "codex");
         // A branch is not a senator, wherever it is.
         assert_eq!(meta["work"]["branch"], "wendell/fix");
-        assert_eq!(meta["checkpoint"]["branch"], "feature/x/wendell");
+        assert_eq!(meta["checkpoint"]["branch"], "senate/x/wendell");
         assert_eq!(meta["proposed_by"], "senator::claude");
         assert_eq!(meta["mentions"][0]["address"], "senator::codex");
 

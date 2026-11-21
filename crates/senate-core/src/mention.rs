@@ -13,7 +13,7 @@
 //! - `[committee]`: everyone on the committee.
 //! - `[senator::*]`: whichever agent should get it.
 //! - `[guest::chat/u_8f3a]`: someone who is not a senator.
-//! - `[ibot::senator::codex]`, `[acme/north-desk::ibot::speaker]`: a
+//! - `[ledger::senator::codex]`, `[acme/north-desk::ledger::speaker]`: a
 //!   qualified name ([`Locator`]), naming a seat or a Speaker elsewhere.
 //!
 //! The words are the same in every language. Senate, senator and Speaker are
@@ -54,7 +54,7 @@ pub enum MentionParseError {
     #[error("a mention is written in square brackets: {0:?}")]
     NoBrackets(String),
     #[error(
-        "unknown mention: {0:?} (expected [senator::<name>], [senator::*], [speaker], [speaker::<name>], [committee], [guest::<platform>/<id>], or a qualified name such as [ibot::senator::<name>])"
+        "unknown mention: {0:?} (expected [senator::<name>], [senator::*], [speaker], [speaker::<name>], [committee], [guest::<platform>/<id>], or a qualified name such as [ledger::senator::<name>])"
     )]
     Unknown(String),
     #[error(transparent)]
@@ -229,10 +229,10 @@ mod tests {
             "[committee]",
             "[senator::*]",
             "[guest::chat/u_8f3a]",
-            "[ibot::senator::codex]",
-            "[acme/north-desk::ibot::speaker]",
+            "[ledger::senator::codex]",
+            "[acme/north-desk::ledger::speaker]",
             "[chair]",
-            "[ibot::chair]",
+            "[ledger::chair]",
         ] {
             let m: Mention = s.parse().unwrap();
             assert_eq!(m.to_string(), s);
@@ -265,7 +265,7 @@ mod tests {
             "[speaker::wendell/claude]",
             "[guest::chat]",
             "[guest::chat/a b]",
-            "[ibot::codex]",
+            "[ledger::codex]",
         ] {
             assert!(s.parse::<Mention>().is_err(), "{s:?}");
         }
@@ -284,7 +284,7 @@ mod tests {
 
     #[test]
     fn scan_finds_whichever_agent_guests_and_qualified_names() {
-        let text = "让[senator::*]看看[guest::chat/u_8f3a]问的事，再问[ibot::senator::codex] [guest::chat/a]b]";
+        let text = "让[senator::*]看看[guest::chat/u_8f3a]问的事，再问[ledger::senator::codex] [guest::chat/a]b]";
         let found = Mention::scan(text);
         assert_eq!(found.len(), 4);
         assert_eq!(found[0].mention, Mention::AnyAgent);
@@ -298,7 +298,7 @@ mod tests {
         );
         assert_eq!(
             found[2].mention.locator().to_string(),
-            "ibot::senator::codex"
+            "ledger::senator::codex"
         );
         // Another committee is not an address of this log.
         assert_eq!(found[2].mention.address(), None);

@@ -7,9 +7,9 @@
 //! ```text
 //! [<senate path>::][<committee>::]<address>
 //!
-//! acme/north-desk::ibot::senator::codex   the seat codex on ibot in acme/north-desk
-//! ibot::senator::codex                    the same, in the nearest Senate that has ibot
-//! ibot::speaker                           the Speaker of ibot
+//! acme/north-desk::ledger::senator::codex   the seat codex on ledger in acme/north-desk
+//! ledger::senator::codex                    the same, in the nearest Senate that has ledger
+//! ledger::speaker                           the Speaker of ledger
 //! senator::codex                          here: this Senate, this committee
 //! ```
 //!
@@ -31,11 +31,11 @@
 //!
 //! Parsing ([`FromStr`]) is strict. Tools also accept a short form
 //! ([`Locator::parse_short`]), where a bare name is a senator: `codex` is
-//! `senator::codex`, `ibot::codex` is `ibot::senator::codex`, `*` is
+//! `senator::codex`, `ledger::codex` is `ledger::senator::codex`, `*` is
 //! `senator::*`.
 //!
 //! In running text a locator is bracketed like any id:
-//! `[ibot::senator::codex]` ([`Locator::in_text`]).
+//! `[ledger::senator::codex]` ([`Locator::in_text`]).
 
 use std::fmt;
 use std::str::FromStr;
@@ -165,13 +165,13 @@ impl Locator {
         }
     }
 
-    /// Written in running text: `[ibot::senator::codex]`.
+    /// Written in running text: `[ledger::senator::codex]`.
     pub fn in_text(&self) -> String {
         format!("[{self}]")
     }
 
     /// The short form tools accept besides the strict one: a bare last
-    /// name is a senator (`codex`, `ibot::codex`, `acme::ibot::codex`) and
+    /// name is a senator (`codex`, `ledger::codex`, `acme::ledger::codex`) and
     /// `*` is `senator::*`.
     pub fn parse_short(s: &str) -> Result<Self, LocatorParseError> {
         let s = s.trim();
@@ -325,18 +325,18 @@ mod tests {
     #[test]
     fn round_trips_every_form() {
         for s in [
-            "/acme/north-desk::ibot::senator::codex",
-            "acme/north-desk::ibot::senator::codex",
-            "/acme::ibot::speaker",
-            "north-desk::ibot::senator::codex",
-            "ibot::senator::codex",
-            "ibot::speaker",
-            "ibot::committee",
+            "/acme/north-desk::ledger::senator::codex",
+            "acme/north-desk::ledger::senator::codex",
+            "/acme::ledger::speaker",
+            "north-desk::ledger::senator::codex",
+            "ledger::senator::codex",
+            "ledger::speaker",
+            "ledger::committee",
             "senator::codex",
             "senator::*",
             "speaker",
-            "ibot::guest::chat/u_1",
-            "acme::ibot::guest::dial/a::b",
+            "ledger::guest::chat/u_1",
+            "acme::ledger::guest::dial/a::b",
         ] {
             let l = loc(s);
             assert_eq!(l.to_string(), s);
@@ -346,22 +346,22 @@ mod tests {
 
     #[test]
     fn read_from_the_right() {
-        let l = loc("acme/north-desk::ibot::senator::codex");
+        let l = loc("acme/north-desk::ledger::senator::codex");
         assert_eq!(l.senate().unwrap().to_string(), "acme/north-desk");
-        assert_eq!(l.committee().unwrap().as_str(), "ibot");
+        assert_eq!(l.committee().unwrap().as_str(), "ledger");
         assert_eq!(l.address().to_string(), "senator::codex");
         assert!(l.is_complete());
 
-        let l = loc("ibot::speaker");
+        let l = loc("ledger::speaker");
         assert_eq!(l.senate(), None);
-        assert_eq!(l.committee().unwrap().as_str(), "ibot");
+        assert_eq!(l.committee().unwrap().as_str(), "ledger");
         assert_eq!(l.address(), &Address::Speaker);
         assert!(!l.is_complete() && !l.is_here());
 
         assert!(loc("senator::codex").is_here());
         // A guest id may hold `::`; the address starts at the first keyword.
         assert_eq!(
-            loc("acme::ibot::guest::dial/a::b").address().to_string(),
+            loc("acme::ledger::guest::dial/a::b").address().to_string(),
             "guest::dial/a::b"
         );
     }
@@ -371,18 +371,18 @@ mod tests {
         for s in [
             "",
             "codex",
-            "ibot::codex",
+            "ledger::codex",
             "a::b::c::senator::codex",
-            "speaker::ibot::senator::codex",
+            "speaker::ledger::senator::codex",
             "acme::speaker::senator::codex",
-            "Ibot::senator::codex",
-            "ibot::senator::wendell/claude",
-            "ibot::",
+            "Ledger::senator::codex",
+            "ledger::senator::wendell/claude",
+            "ledger::",
             "::speaker",
-            "north-desk::ibot::speaker::x",
+            "north-desk::ledger::speaker::x",
             "/acme::senator::codex",
             "acme/north-desk::senator::codex",
-            "ibot::chair::x",
+            "ledger::chair::x",
         ] {
             assert!(s.parse::<Locator>().is_err(), "{s:?}");
         }
@@ -401,11 +401,11 @@ mod tests {
             loc("acme::senator::wendell").committee().unwrap().as_str(),
             "acme"
         );
-        let absolute = loc("/acme/north-desk::ibot::senator::codex");
+        let absolute = loc("/acme/north-desk::ledger::senator::codex");
         assert!(absolute.senate().unwrap().is_absolute());
         assert_eq!(
             absolute.in_text(),
-            "[/acme/north-desk::ibot::senator::codex]"
+            "[/acme/north-desk::ledger::senator::codex]"
         );
     }
 
@@ -414,13 +414,13 @@ mod tests {
         for (short, full) in [
             ("codex", "senator::codex"),
             ("*", "senator::*"),
-            ("ibot::codex", "ibot::senator::codex"),
-            ("ibot::*", "ibot::senator::*"),
+            ("ledger::codex", "ledger::senator::codex"),
+            ("ledger::*", "ledger::senator::*"),
             (
-                "acme/north-desk::ibot::claude",
-                "acme/north-desk::ibot::senator::claude",
+                "acme/north-desk::ledger::claude",
+                "acme/north-desk::ledger::senator::claude",
             ),
-            ("ibot::speaker", "ibot::speaker"),
+            ("ledger::speaker", "ledger::speaker"),
             ("speaker", "speaker"),
             (" senator::codex ", "senator::codex"),
         ] {
@@ -440,12 +440,12 @@ mod tests {
             loc("acme/north-desk::refund::senator::codex")
         );
         assert_eq!(
-            loc("ibot::speaker").completed(&here, &committee),
-            loc("acme/north-desk::ibot::speaker")
+            loc("ledger::speaker").completed(&here, &committee),
+            loc("acme/north-desk::ledger::speaker")
         );
         assert_eq!(
-            loc("acme::ibot::speaker").completed(&here, &committee),
-            loc("acme::ibot::speaker")
+            loc("acme::ledger::speaker").completed(&here, &committee),
+            loc("acme::ledger::speaker")
         );
     }
 
@@ -455,14 +455,14 @@ mod tests {
             loc("senator::codex").as_address(),
             Some("senator::codex".parse().unwrap())
         );
-        assert_eq!(loc("ibot::senator::codex").as_address(), None);
+        assert_eq!(loc("ledger::senator::codex").as_address(), None);
         // A child Senate's Speaker, named relative to the parent's log.
         assert_eq!(
-            loc("north-desk::ibot::speaker").as_address(),
-            Some("north-desk::ibot::speaker".parse().unwrap())
+            loc("north-desk::ledger::speaker").as_address(),
+            Some("north-desk::ledger::speaker".parse().unwrap())
         );
-        assert_eq!(loc("/north-desk::ibot::speaker").as_address(), None);
-        assert_eq!(loc("ibot::chair").address(), &Address::Chair);
+        assert_eq!(loc("/north-desk::ledger::speaker").as_address(), None);
+        assert_eq!(loc("ledger::chair").address(), &Address::Chair);
         assert_eq!(
             Locator::from(Address::Speaker),
             Locator::here(Address::Speaker)
@@ -471,13 +471,13 @@ mod tests {
 
     #[test]
     fn serializes_as_a_string() {
-        let l = loc("ibot::senator::codex");
+        let l = loc("ledger::senator::codex");
         assert_eq!(
             serde_json::to_value(&l).unwrap(),
-            serde_json::json!("ibot::senator::codex")
+            serde_json::json!("ledger::senator::codex")
         );
         assert_eq!(
-            serde_json::from_value::<Locator>(serde_json::json!("ibot::senator::codex")).unwrap(),
+            serde_json::from_value::<Locator>(serde_json::json!("ledger::senator::codex")).unwrap(),
             l
         );
     }

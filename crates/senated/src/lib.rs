@@ -93,7 +93,7 @@ pub mod testing;
 
 pub use assembly::{Assembly, AssemblyError, Senated};
 pub use chat::{
-    Addressing, ChatGateway, ChatMount, Delivered, GatewayError, GrantPolicy, Inbound,
+    Addressing, ChatGateway, ChatMount, Delivered, GatewayError, Inbound, MembershipPolicy,
     PlatformMention, UNBOUND_CAPACITY, sender_address,
 };
 pub use component::{Component, ComponentContext, GaveUp, component_fn};

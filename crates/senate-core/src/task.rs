@@ -1003,7 +1003,7 @@ mod tests {
     fn json_work() -> serde_json::Value {
         serde_json::json!({
             "run_id": 1, "requester": "bob", "target_agent": "claude",
-            "instruction": "x", "branch": "feature/refund-v2/speaker-1", "state": "queued"
+            "instruction": "x", "branch": "senate/refund-v2/speaker-1", "state": "queued"
         })
     }
 

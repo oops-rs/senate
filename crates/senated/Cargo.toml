@@ -40,7 +40,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [[test]]
-name = "grants"
+name = "membership"
 required-features = ["testing"]
 
 [dev-dependencies]

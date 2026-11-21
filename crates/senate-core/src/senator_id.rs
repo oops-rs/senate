@@ -177,7 +177,7 @@ mod tests {
             "speaker",
             "senator::",
             "senator::wendell/claude",
-            "/acme::ibot::senator::wendell",
+            "/acme::ledger::senator::wendell",
             "::senator::wendell",
             "/acme:senator::wendell",
             "senator::speaker",

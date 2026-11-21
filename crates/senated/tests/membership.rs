@@ -1,4 +1,4 @@
-//! The gateway's grants over a fake platform, with the clock paused: what a
+//! The gateway's group memberships over a fake platform, with the clock paused: what a
 //! bind and an unbind ask of the platform, when, and how often.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -13,8 +13,8 @@ use senate_core::{
     Address, Appended, BindingAction, BindingPayload, ChatSurface, CommitteeId, Event, GroupRole,
     Hub, HubError, Kind, Mirror, MirrorRef, NewEvent, PostTarget, Roster, SenatorName, Seq, Source,
 };
-use senated::testing::{Caps, FakeChat, GrantKind, GrantOutcome, Message};
-use senated::{ChatGateway, Component, ComponentContext, GrantPolicy};
+use senated::testing::{Caps, FakeChat, MembershipKind, MembershipOutcome, Message};
+use senated::{ChatGateway, Component, ComponentContext, MembershipPolicy};
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -239,8 +239,8 @@ struct Rig {
     running: JoinHandle<anyhow::Result<()>>,
 }
 
-fn policy() -> GrantPolicy {
-    GrantPolicy {
+fn policy() -> MembershipPolicy {
+    MembershipPolicy {
         release_grace: GRACE,
         retry_initial: Duration::from_secs(1),
         retry_max: Duration::from_secs(8),
@@ -255,11 +255,11 @@ async fn rig() -> Rig {
 async fn rig_on(hub: Arc<MemoryHub>, platform: impl FnOnce(&FakeChat)) -> Rig {
     let (fake, gateway) = FakeChat::new();
     fake.set_caps(Caps {
-        grants: true,
+        membership: true,
         ..Caps::PLAIN
     });
     platform(&fake);
-    let gateway = gateway.with_grant_policy(policy());
+    let gateway = gateway.with_membership_policy(policy());
     let stop = CancellationToken::new();
     let running = tokio::spawn({
         let gateway = gateway.clone();
@@ -299,12 +299,12 @@ impl Rig {
         settle().await;
     }
 
-    fn adopts(&self) -> Vec<senated::testing::GrantCall> {
-        self.fake.grant_calls_of(GrantKind::Adopt)
+    fn adopts(&self) -> Vec<senated::testing::MembershipCall> {
+        self.fake.membership_calls_of(MembershipKind::Adopt)
     }
 
-    fn releases(&self) -> Vec<senated::testing::GrantCall> {
-        self.fake.grant_calls_of(GrantKind::Release)
+    fn releases(&self) -> Vec<senated::testing::MembershipCall> {
+        self.fake.membership_calls_of(MembershipKind::Release)
     }
 
     async fn stop(self) {
@@ -328,7 +328,7 @@ async fn pass(time: Duration) {
 
 #[tokio::test(start_paused = true)]
 async fn the_default_grace_is_three_seconds() {
-    let policy = GrantPolicy::default();
+    let policy = MembershipPolicy::default();
     assert_eq!(policy.release_grace, Duration::from_secs(3));
 }
 
@@ -339,7 +339,7 @@ async fn an_unbind_then_a_bind_within_the_grace_neither_releases_nor_adopts_agai
     rig.bind("alpha").await;
     pass(Duration::from_secs(1)).await;
     assert_eq!(rig.adopts().len(), 1);
-    assert!(rig.fake.granted().contains(&GROUP.to_owned()));
+    assert!(rig.fake.joined().contains(&GROUP.to_owned()));
 
     // The group moves from one committee to another.
     rig.unbind("alpha").await;
@@ -349,7 +349,7 @@ async fn an_unbind_then_a_bind_within_the_grace_neither_releases_nor_adopts_agai
 
     assert_eq!(rig.releases(), [], "never released");
     assert_eq!(rig.adopts().len(), 1, "never adopted twice");
-    assert!(rig.fake.granted().contains(&GROUP.to_owned()));
+    assert!(rig.fake.joined().contains(&GROUP.to_owned()));
     assert_eq!(rig.gateway.committee_of(GROUP), Some(committee("beta")));
     rig.stop().await;
 }
@@ -372,8 +372,8 @@ async fn an_unbind_alone_releases_once_after_the_grace() {
     assert_eq!(releases.len(), 1);
     assert_eq!(releases[0].subject, GROUP);
     assert_eq!(releases[0].at - unbound, GRACE);
-    assert_eq!(releases[0].outcome, GrantOutcome::Done);
-    assert!(rig.fake.granted().is_empty());
+    assert_eq!(releases[0].outcome, MembershipOutcome::Done);
+    assert!(rig.fake.joined().is_empty());
     // Nothing more, however long it waits.
     pass(Duration::from_secs(600)).await;
     assert_eq!(rig.releases().len(), 1);
@@ -397,9 +397,9 @@ async fn a_release_that_fails_twice_is_retried_with_backoff_until_it_lands() {
     assert_eq!(
         outcomes,
         [
-            GrantOutcome::Failed,
-            GrantOutcome::Failed,
-            GrantOutcome::Done
+            MembershipOutcome::Failed,
+            MembershipOutcome::Failed,
+            MembershipOutcome::Done
         ]
     );
     // After the grace, then 1s, then 2s.
@@ -412,7 +412,7 @@ async fn a_release_that_fails_twice_is_retried_with_backoff_until_it_lands() {
             GRACE + Duration::from_secs(3)
         ]
     );
-    assert!(rig.fake.granted().is_empty());
+    assert!(rig.fake.joined().is_empty());
     rig.stop().await;
 }
 
@@ -440,19 +440,19 @@ async fn an_adopt_that_fails_is_retried_until_it_lands() {
     rig.hear("m1").await;
     rig.fake.fail_adopts(2);
     rig.bind("alpha").await;
-    assert!(rig.fake.granted().is_empty());
+    assert!(rig.fake.joined().is_empty());
     pass(Duration::from_secs(10)).await;
 
     let outcomes: Vec<_> = rig.adopts().iter().map(|c| c.outcome).collect();
     assert_eq!(
         outcomes,
         [
-            GrantOutcome::Failed,
-            GrantOutcome::Failed,
-            GrantOutcome::Done
+            MembershipOutcome::Failed,
+            MembershipOutcome::Failed,
+            MembershipOutcome::Done
         ]
     );
-    assert!(rig.fake.granted().contains(&GROUP.to_owned()));
+    assert!(rig.fake.joined().contains(&GROUP.to_owned()));
     pass(Duration::from_secs(600)).await;
     assert_eq!(rig.adopts().len(), 3, "settled: no more asking");
     rig.stop().await;
@@ -478,7 +478,7 @@ async fn an_unbind_during_an_adopt_retry_ends_the_retries_and_releases() {
     );
     // The platform may still hold something from before: the release goes.
     assert_eq!(rig.releases().len(), 1);
-    assert_eq!(rig.releases()[0].outcome, GrantOutcome::Done);
+    assert_eq!(rig.releases()[0].outcome, MembershipOutcome::Done);
     rig.stop().await;
 }
 
@@ -500,8 +500,8 @@ async fn a_restart_adopts_a_bound_group_again_by_a_message_the_log_holds() {
         let adopts = rig.adopts();
         assert_eq!(adopts.len(), 1, "run {run}");
         assert_eq!(adopts[0].subject, "m_newer", "the latest message");
-        assert_eq!(adopts[0].outcome, GrantOutcome::Done);
-        assert!(rig.fake.granted().contains(&GROUP.to_owned()));
+        assert_eq!(adopts[0].outcome, MembershipOutcome::Done);
+        assert!(rig.fake.joined().contains(&GROUP.to_owned()));
         assert_eq!(rig.releases(), []);
         rig.stop().await;
     }
@@ -528,7 +528,7 @@ async fn a_restart_performs_a_release_the_log_says_is_owed() {
     binding(&hub, "alpha", GROUP, BindingAction::Bind).await;
     binding(&hub, "alpha", GROUP, BindingAction::Unbind).await;
     let rig = rig_on(hub, |fake| {
-        // The platform still holds the grant from before the restart.
+        // The bot is still in the group from before the restart.
         fake.know_message("m1", GROUP);
     })
     .await;
@@ -538,15 +538,15 @@ async fn a_restart_performs_a_release_the_log_says_is_owed() {
         .unwrap();
     // Held on the platform from before: adopt it as the earlier run did.
     rig.fake.adopt_group("m1").await.unwrap();
-    assert!(rig.fake.granted().contains(&GROUP.to_owned()));
+    assert!(rig.fake.joined().contains(&GROUP.to_owned()));
     pass(GRACE + Duration::from_secs(1)).await;
     assert_eq!(rig.releases().len(), 1);
-    assert!(rig.fake.granted().is_empty());
+    assert!(rig.fake.joined().is_empty());
     rig.stop().await;
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_surface_that_cannot_grant_is_asked_once_and_not_again() {
+async fn a_surface_that_cannot_join_is_asked_once_and_not_again() {
     let rig = rig_on(MemoryHub::new(), |fake| fake.set_caps(Caps::PLAIN)).await;
     rig.hear("m1").await;
     rig.bind("alpha").await;
@@ -559,7 +559,7 @@ async fn a_surface_that_cannot_grant_is_asked_once_and_not_again() {
     pass(Duration::from_secs(3_600)).await;
     assert_eq!(rig.adopts().len(), 1, "no retry storm");
     assert!(rig.releases().len() <= 1, "no retry storm");
-    assert_eq!(rig.adopts()[0].outcome, GrantOutcome::Unsupported);
+    assert_eq!(rig.adopts()[0].outcome, MembershipOutcome::Unsupported);
     rig.stop().await;
 }
 
@@ -592,14 +592,17 @@ async fn a_hanging_adopt_blocks_neither_the_log_nor_the_gateway() {
     rig.fake.hang_adopts(false);
     rig.unbind("alpha").await;
     pass(Duration::from_secs(120)).await;
-    assert_eq!(rig.releases().last().unwrap().outcome, GrantOutcome::Done);
+    assert_eq!(
+        rig.releases().last().unwrap().outcome,
+        MembershipOutcome::Done
+    );
     rig.stop().await;
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_root_post_refused_for_want_of_a_grant_adopts_and_goes_through() {
+async fn a_root_post_refused_for_want_of_membership_joins_and_goes_through() {
     let rig = rig().await;
-    rig.fake.require_grants_to_post(true);
+    rig.fake.require_membership_to_post(true);
     rig.fake.delay_adopts(Duration::from_secs(2));
     let mount = rig.gateway.mount().unwrap();
     rig.hear("m1").await;
@@ -621,8 +624,8 @@ async fn a_root_post_refused_for_want_of_a_grant_adopts_and_goes_through() {
     assert_eq!(rig.fake.posts().len(), 1);
     assert_eq!(rig.adopts().len(), 1, "the adopt under way is waited for");
 
-    // A refusal for another reason is not retried: the group is granted.
-    rig.fake.require_grants_to_post(false);
+    // A refusal for another reason is not retried: the bot is in the group.
+    rig.fake.require_membership_to_post(false);
     let _ = mount
         .surface
         .post(
@@ -647,9 +650,9 @@ fn reply_to(message_ref: &str) -> PostTarget {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_reply_refused_for_want_of_a_grant_adopts_its_group_and_goes_through() {
+async fn a_reply_refused_for_want_of_membership_joins_its_group_and_goes_through() {
     let rig = rig().await;
-    rig.fake.require_grants_to_reply(true);
+    rig.fake.require_membership_to_reply(true);
     rig.fake.delay_adopts(Duration::from_secs(2));
     let mount = rig.gateway.mount().unwrap();
     // The bind message, then the bind: the Speaker confirms in the thread of
@@ -676,7 +679,7 @@ async fn a_reply_refused_for_want_of_a_grant_adopts_its_group_and_goes_through()
 #[tokio::test(start_paused = true)]
 async fn a_reply_to_a_message_the_gateway_cannot_place_is_not_healed() {
     let rig = rig().await;
-    rig.fake.require_grants_to_reply(true);
+    rig.fake.require_membership_to_reply(true);
     rig.fake.delay_adopts(Duration::from_secs(2));
     let mount = rig.gateway.mount().unwrap();
     // The platform knows the message, the gateway never saw it and the log
@@ -697,7 +700,7 @@ async fn a_reply_to_a_message_the_gateway_cannot_place_is_not_healed() {
 #[tokio::test(start_paused = true)]
 async fn a_reply_into_a_group_that_is_not_bound_is_not_healed() {
     let rig = rig().await;
-    rig.fake.require_grants_to_reply(true);
+    rig.fake.require_membership_to_reply(true);
     let mount = rig.gateway.mount().unwrap();
     rig.hear("m1").await;
     let refused = mount.surface.post(reply_to("m1"), "x", "op-1").await;
@@ -731,13 +734,13 @@ async fn a_reply_is_retried_once_and_never_in_a_loop() {
     let mount = rig.gateway.mount().unwrap();
     rig.hear("m1").await;
     rig.bind("alpha").await;
-    // The platform refuses for a reason no grant mends.
+    // The platform refuses for a reason no join mends.
     rig.fake.reject_next_posts(10);
     let refused = mount.surface.post(reply_to("m1"), "x", "op-1").await;
     assert!(refused.is_err());
     assert_eq!(rig.fake.rejected_posts(), 2, "the post and its one retry");
     assert_eq!(rig.adopts().len(), 1);
-    // Granted now: another refusal is not healed at all.
+    // Joined now: another refusal is not healed at all.
     let refused = mount.surface.post(reply_to("m1"), "y", "op-2").await;
     assert!(refused.is_err());
     assert_eq!(rig.fake.rejected_posts(), 3);
@@ -748,15 +751,15 @@ async fn a_reply_is_retried_once_and_never_in_a_loop() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_reply_is_not_delayed_when_the_grant_is_already_confirmed() {
+async fn a_reply_is_not_delayed_when_membership_is_already_confirmed() {
     let rig = rig().await;
     rig.fake.delay_adopts(Duration::from_secs(2));
     let mount = rig.gateway.mount().unwrap();
     rig.hear("m1").await;
     rig.bind("alpha").await;
     pass(Duration::from_secs(5)).await;
-    assert_eq!(rig.adopts()[0].outcome, GrantOutcome::Done);
-    rig.fake.require_grants_to_reply(true);
+    assert_eq!(rig.adopts()[0].outcome, MembershipOutcome::Done);
+    rig.fake.require_membership_to_reply(true);
     let started = Instant::now();
     mount
         .surface
@@ -772,7 +775,7 @@ async fn a_reply_is_not_delayed_when_the_grant_is_already_confirmed() {
 #[tokio::test(start_paused = true)]
 async fn a_reply_to_something_the_speaker_posted_finds_its_group_in_the_logs_mirrors() {
     let rig = rig().await;
-    rig.fake.require_grants_to_reply(true);
+    rig.fake.require_membership_to_reply(true);
     rig.fake.delay_adopts(Duration::from_secs(2));
     let mount = rig.gateway.mount().unwrap();
     rig.hear("m_bind").await;

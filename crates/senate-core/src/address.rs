@@ -16,7 +16,7 @@
 //!   ([`crate::chair`]).
 //! - `<child>::<committee>::speaker` is a child Senate of this one, reached
 //!   through its Speaker's office for that committee:
-//!   `north-desk::ibot::speaker`. A parent never needs to know a child's
+//!   `north-desk::ledger::speaker`. A parent never needs to know a child's
 //!   senators; what the child's Speaker's office says above is authored so.
 //!
 //! A qualified name ([`crate::Locator`]) names a seat anywhere; only the
@@ -362,7 +362,7 @@ mod tests {
             "guest::chat/u_8f3a",
             "guest::dial/Reviewer-7@example.com",
             "chair",
-            "north-desk::ibot::speaker",
+            "north-desk::ledger::speaker",
         ] {
             let a: Address = s.parse().unwrap();
             assert_eq!(a.to_string(), s);
@@ -381,15 +381,13 @@ mod tests {
             "senator::speaker",
             "user:wendell",
             "agent:wendell",
-            "steward",
-            "feature",
             "[speaker]",
             "guest:chat/u_1",
             "guest::chat",
             // A qualified name is a locator, not a stored address.
-            "acme/north-desk::ibot::speaker",
-            "ibot::senator::codex",
-            "ibot::chair",
+            "acme/north-desk::ledger::speaker",
+            "ledger::senator::codex",
+            "ledger::chair",
         ] {
             assert!(s.parse::<Address>().is_err(), "{s:?}");
         }
@@ -468,7 +466,7 @@ mod tests {
     #[test]
     fn unknown_forms_decode_as_other_and_round_trip() {
         for s in [
-            "group:oc_1",
+            "group:g-1",
             "senator::Not-A-Slug",
             "role:reviewer",
             "guest::chat/has space",

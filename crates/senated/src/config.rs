@@ -34,7 +34,7 @@
 //!
 //! An OpenAI-compatible gateway is reached by `base_url`, spoken to in
 //! Chat Completions unless `wire = "responses"` says it serves OpenAI's
-//! `v1/responses` (as LiteLLM does for OpenAI models):
+//! `v1/responses` (as some OpenAI-compatible gateways do):
 //!
 //! ```toml
 //! [model]

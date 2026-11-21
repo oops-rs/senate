@@ -21,13 +21,14 @@
 //!   reply to the bot, or anything in reply to or in the thread of one of the
 //!   Speaker's own posts) is handed to the Speaker as an [`UnboundMention`];
 //!   anything else is dropped.
-//! - **Bind = grant.** When the log binds a group, the platform is asked
-//!   for its full use ([`ChatSurface::adopt_group`], named by the latest
-//!   message it delivered from that group); when the log leaves a group
-//!   bound to nothing, the grant is given back
+//! - **Bind = join.** When the log binds a group, the bot joins it: the
+//!   platform is asked to let the bot see and post in it
+//!   ([`ChatSurface::adopt_group`], named by the latest message it
+//!   delivered from that group); when the log leaves a group bound to
+//!   nothing, the bot leaves it
 //!   ([`ChatSurface::release_group`]). The log decides, and the gateway
-//!   keeps these guarantees ([`GrantPolicy`] sets the numbers):
-//!   - *Grace.* A release waits [`GrantPolicy::release_grace`] (3 seconds)
+//!   keeps these guarantees ([`MembershipPolicy`] sets the numbers):
+//!   - *Grace.* A release waits [`MembershipPolicy::release_grace`] (3 seconds)
 //!     and is cancelled when the group is bound again within it, so a group
 //!     moved from one committee to another is neither released nor adopted
 //!     a second time.
@@ -37,7 +38,7 @@
 //!     retries of an adopt; a bind cancels a release). A failure is logged,
 //!     never fatal.
 //!   - *Never in the way.* Every call runs in a task of its own and is cut
-//!     off after [`GrantPolicy::call_timeout`]. A slow or hanging platform
+//!     off after [`MembershipPolicy::call_timeout`]. A slow or hanging platform
 //!     delays no append, no delivery, and not the Speaker. Calls for one
 //!     group are made one at a time, in the order wanted.
 //!   - *After a restart* nothing is stored: the log's bindings are replayed,
@@ -46,9 +47,9 @@
 //!     message), and every group it ever bound that is bound to nothing is
 //!     released again (idempotent) once the grace has passed.
 //!   - *Self-heal.* A post into a bound group that the platform refuses
-//!     ([`SurfaceError::Rejected`]) while the group's grant is not confirmed
-//!     adopts the group (waiting for an adopt already under way) and is
-//!     tried once more. Posts do not otherwise wait for a grant, and a
+//!     ([`SurfaceError::Rejected`]) while the bot's membership is not confirmed
+//!     joins the group (waiting for a join already under way) and is
+//!     tried once more. Posts do not otherwise wait for a join, and a
 //!     platform layer needs no heal of its own. A *root* post names its
 //!     group. A *reply* names only the message it replies to, so the gateway
 //!     finds that message's group from what it records: the log's mirror
@@ -61,7 +62,7 @@
 //!     has not been given since it started), or is not bound, nothing is
 //!     healed and the refusal stands. One heal and one retry per post, never
 //!     a loop.
-//!   - A platform without grants answers `Unsupported`, which is noted once
+//!   - A platform that cannot join or leave groups answers `Unsupported`, which is noted once
 //!     and never asked again: no retries, no work.
 //!
 //! The gateway is a [`Component`]: mount it with
@@ -87,11 +88,11 @@ use tokio_util::sync::CancellationToken;
 
 use crate::component::{Component, ComponentContext};
 
-mod grants;
+mod membership;
 mod sim;
 
-pub use grants::GrantPolicy;
-use grants::{Grants, Want};
+pub use membership::MembershipPolicy;
+use membership::{Memberships, Want};
 
 /// Capacity of the channel of mentions in unbound groups, gateway to
 /// Speaker.
@@ -215,8 +216,8 @@ struct Inner {
     /// A subscription of the delivering side, drained before each message so
     /// a binding the log just committed is never missed.
     fresh: Mutex<Option<broadcast::Receiver<Event>>>,
-    policy: Mutex<GrantPolicy>,
-    /// Cancelled when the daemon shuts down: grant tasks end.
+    policy: Mutex<MembershipPolicy>,
+    /// Cancelled when the daemon shuts down: join and leave tasks end.
     stop: Mutex<CancellationToken>,
     /// The log's epoch, once read: what the Speaker's operation ids name.
     epoch: Mutex<Option<String>>,
@@ -230,8 +231,8 @@ struct State {
     /// The latest message the platform delivered from each group: what names
     /// a group to adopt.
     latest_ref: HashMap<String, String>,
-    /// What the platform's grants should be, and what it has confirmed.
-    grants: Grants,
+    /// Which groups the bot should be in, and what the platform has confirmed.
+    memberships: Memberships,
     /// The group of each message (and thread) the platform delivered, so a
     /// reply to one can be healed. Bounded; lost on restart.
     delivered: MessageGroups,
@@ -311,10 +312,10 @@ impl ChatGateway {
         }
     }
 
-    /// Pace the platform's grants differently from the default
-    /// ([`GrantPolicy::default`]). Set it before the gateway runs.
+    /// Pace joining and leaving groups differently from the default
+    /// ([`MembershipPolicy::default`]). Set it before the gateway runs.
     #[must_use]
-    pub fn with_grant_policy(self, policy: GrantPolicy) -> Self {
+    pub fn with_membership_policy(self, policy: MembershipPolicy) -> Self {
         *lock(&self.inner.policy) = policy;
         self
     }
@@ -345,7 +346,7 @@ impl ChatGateway {
             .cloned()
     }
 
-    /// Wait for the binding table, then remember the group references used for grants and reply healing.
+    /// Wait for the binding table, then remember the group references used for joins and reply healing.
     pub(crate) async fn observe_inbound(
         &self,
         inbound: &Inbound,
@@ -365,11 +366,12 @@ impl ChatGateway {
         }
         let committee = state.table.committee_of(&inbound.group_id).cloned();
         if committee.is_some() {
-            // A message from a bound group: if its grant is not
+            // A message from a bound group: if its membership is not
             // confirmed yet and nothing is working on it (a restart
             // that found nothing to name the group by), this names it.
-            let State { grants, .. } = &mut *state;
-            self.inner.want_grant(grants, &inbound.group_id, Want::Held);
+            let State { memberships, .. } = &mut *state;
+            self.inner
+                .want_membership(memberships, &inbound.group_id, Want::Held);
         }
         committee
     }
@@ -412,7 +414,7 @@ impl Component for ChatGateway {
         "chat-gateway"
     }
 
-    /// Keep the binding table current from the log and the platform's grants
+    /// Keep the binding table current from the log and the bot's group memberships
     /// in line with it, until shutdown.
     async fn run(&self, ctx: ComponentContext) -> anyhow::Result<()> {
         // Subscribe before reading, so no binding falls between the two.
@@ -529,7 +531,7 @@ impl Inner {
         }
     }
 
-    /// A live binding event: apply it, then grant the group a bind leaves
+    /// A live binding event: apply it, then join the group a bind leaves
     /// bound, or (after the grace) release the one an unbind leaves bound to
     /// nothing.
     fn observe(self: &Arc<Self>, event: &Event) {
@@ -544,12 +546,12 @@ impl Inner {
             BindingAction::Unbind if !bound => Want::Released,
             _ => return,
         };
-        let State { grants, .. } = &mut *state;
-        self.want_grant(grants, &group, want);
+        let State { memberships, .. } = &mut *state;
+        self.want_membership(memberships, &group, want);
     }
 
     /// Replace the table with one rebuilt from the log, then bring the
-    /// grants in line with it: every group the log ever bound is adopted
+    /// memberships in line with it: every group the log ever bound is adopted
     /// while bound and released once bound to nothing. What the platform
     /// already confirmed this run is not asked again; after a restart
     /// nothing is confirmed, so every group is (idempotently).
@@ -563,8 +565,8 @@ impl Inner {
             } else {
                 Want::Released
             };
-            let State { grants, .. } = &mut *state;
-            self.want_grant(grants, &group, want);
+            let State { memberships, .. } = &mut *state;
+            self.want_membership(memberships, &group, want);
         }
     }
 
@@ -885,11 +887,11 @@ struct RecordingSurface {
 
 impl RecordingSurface {
     /// A post into a bound group was refused and the platform has not
-    /// confirmed the group's grant (a bind and the Speaker's first posts
+    /// confirmed the bot's membership of the group (a bind and the Speaker's first posts
     /// there happen together, while the adopt is still under way): adopt it
     /// now. A reply names a message, not a group: the group is found from
     /// the message. True when the post should be tried once more.
-    async fn refused_for_want_of_grant(
+    async fn refused_for_want_of_membership(
         &self,
         target: &PostTarget,
         result: &Result<Posted, SurfaceError>,
@@ -975,7 +977,7 @@ impl ChatSurface for RecordingSurface {
             .surface
             .post(target.clone(), markdown, operation_id)
             .await;
-        if self.refused_for_want_of_grant(&target, &posted).await {
+        if self.refused_for_want_of_membership(&target, &posted).await {
             posted = self
                 .inner
                 .surface
@@ -1003,7 +1005,7 @@ impl ChatSurface for RecordingSurface {
             .surface
             .post_mentioning(target.clone(), markdown, user, operation_id)
             .await;
-        if self.refused_for_want_of_grant(&target, &posted).await {
+        if self.refused_for_want_of_membership(&target, &posted).await {
             posted = self
                 .inner
                 .surface
@@ -1030,7 +1032,7 @@ impl ChatSurface for RecordingSurface {
             .surface
             .post_card(target.clone(), card, operation_id)
             .await;
-        if self.refused_for_want_of_grant(&target, &posted).await {
+        if self.refused_for_want_of_membership(&target, &posted).await {
             posted = self
                 .inner
                 .surface
