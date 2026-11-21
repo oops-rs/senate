@@ -204,7 +204,7 @@ Platform user ids (`user`, `users`, `invite`, `not_added`) are the people's acco
 
 | `kind` | Meaning | What Senate does |
 |---|---|---|
-| `rejected` | The platform refused, and retrying the same request won't help. | Gives up on that operation. A post rejected because the bot is not in the group may first be healed (the group joined again) and then tried once more. |
+| `rejected` | The platform refused, and retrying the same request won't help. | Gives up on that operation. A post rejected because the bot is not in the group may first be healed (the group joined again) and then tried once more. A rejected `adopt_group` or `release_group` is not retried until a new message arrives from the group, it is bound again, or `senated` restarts; `senated doctor` lists it. |
 | `unavailable` | Transient: the platform or adapter can't be reached right now. | Retries later with the same `operation_id`. |
 | `unsupported` | This adapter, or what the platform lets the bot do, can't do this kind of thing at all. | Treats it as permanent, does not retry, and falls back. For `adopt_group` and `release_group`, it stops asking for the daemon's lifetime. |
 

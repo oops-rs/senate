@@ -36,7 +36,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use senate_core::{AdoptedGroup, HubError, Seq, SurfaceError};
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Mutex as AsyncMutex, watch};
 use tokio_util::sync::CancellationToken;
 
 use super::{Inner, lock};
@@ -82,7 +82,8 @@ pub(super) enum Want {
 }
 
 /// Why a bound group's membership is stuck until someone acts.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
 pub enum ParkedReason {
     /// The platform refused the call outright; it is not tried again until
     /// something changes.
@@ -96,9 +97,10 @@ pub enum ParkedReason {
 }
 
 /// A group the gateway cannot bring in line with the log by itself.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ParkedGroup {
     pub group_id: String,
+    #[serde(flatten)]
     pub reason: ParkedReason,
     pub since: chrono::DateTime<chrono::Utc>,
 }
@@ -130,11 +132,23 @@ impl GroupMembership {
     }
 }
 
-#[derive(Default)]
 pub(super) struct Memberships {
     groups: HashMap<String, GroupMembership>,
     adopt_unsupported: bool,
     release_unsupported: bool,
+    /// [`Memberships::parked`], sent whenever it changes.
+    parked_tx: watch::Sender<Vec<ParkedGroup>>,
+}
+
+impl Default for Memberships {
+    fn default() -> Self {
+        Self {
+            groups: HashMap::new(),
+            adopt_unsupported: false,
+            release_unsupported: false,
+            parked_tx: watch::Sender::new(Vec::new()),
+        }
+    }
 }
 
 impl Memberships {
@@ -154,17 +168,23 @@ impl Memberships {
             .groups
             .entry(group.to_owned())
             .or_insert_with(GroupMembership::new);
+        let mut unparked = false;
         if g.want != Some(want) {
             g.want = Some(want);
             g.epoch += 1;
-            g.parked = None;
+            unparked = g.parked.take().is_some();
         }
         let refused = matches!(g.parked, Some((ParkedReason::Rejected { .. }, _)));
-        if unsupported || refused || g.confirmed == Some(want) || g.driver == Some(g.epoch) {
-            return None;
+        let start =
+            !(unsupported || refused || g.confirmed == Some(want) || g.driver == Some(g.epoch));
+        if start {
+            g.driver = Some(g.epoch);
         }
-        g.driver = Some(g.epoch);
-        Some(g.epoch)
+        let epoch = g.epoch;
+        if unparked {
+            self.publish();
+        }
+        start.then_some(epoch)
     }
 
     fn is_current(&self, group: &str, epoch: u64) -> bool {
@@ -174,9 +194,25 @@ impl Memberships {
     /// Something changed for `group` (a real message from it, a rebind):
     /// what was parked may be tried again.
     pub(super) fn unpark(&mut self, group: &str) {
-        if let Some(g) = self.groups.get_mut(group) {
-            g.parked = None;
+        if let Some(g) = self.groups.get_mut(group)
+            && g.parked.take().is_some()
+        {
+            self.publish();
         }
+    }
+
+    fn publish(&self) {
+        let parked = self.parked();
+        self.parked_tx.send_if_modified(|now| {
+            let changed = *now != parked;
+            *now = parked;
+            changed
+        });
+    }
+
+    /// [`Memberships::parked`], now and whenever it changes.
+    pub(super) fn watch_parked(&self) -> watch::Receiver<Vec<ParkedGroup>> {
+        self.parked_tx.subscribe()
     }
 
     fn refused(&self, group: &str) -> bool {
@@ -418,6 +454,7 @@ impl Inner {
             ),
         }
         g.parked = Some((reason, chrono::Utc::now()));
+        state.memberships.publish();
     }
 
     fn unsupported(&self, want: Want, reason: &str) {

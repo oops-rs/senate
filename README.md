@@ -568,8 +568,10 @@ nothing. What it checks, and what usually fixes it:
 A server has its own: `senated doctor --config senated.toml [--json]` checks
 the configuration, the log (read only: never created or migrated), whether
 the server answers on its `listen` address, and with `[chat_gateway]`
-whether the socket is served and a platform adapter is attached (the server
-writes `chat_gateway.json` in its `data_dir` on every attach and detach).
+whether the socket is served, whether a platform adapter is attached, and
+whether any bound group is stuck: one the platform refused to join, or one
+with no real message to join it by (the server writes `chat_gateway.json`
+in its `data_dir` on every attach and detach and whenever that changes).
 
 ---
 

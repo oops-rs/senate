@@ -364,3 +364,33 @@ async fn whether_an_adapter_is_attached_is_written_down() {
     let _ = session.await.unwrap();
     assert!(!read_status().connected, "gone again");
 }
+
+#[tokio::test]
+async fn parked_groups_are_written_down_beside_the_attachment() {
+    let dir = tempfile::tempdir().unwrap();
+    let read_status = || crate::gateway_ipc::GatewayStatus::read(dir.path()).unwrap();
+    let surface = RemoteSurface::new("chat".into());
+    surface.record_to(dir.path().join(crate::gateway_ipc::GatewayStatus::FILE));
+    assert_eq!(read_status().parked, []);
+    let parked = vec![crate::ParkedGroup {
+        group_id: "g_1".into(),
+        reason: crate::ParkedReason::Rejected {
+            error: "rejected: unknown chat".into(),
+        },
+        since: chrono::Utc::now(),
+    }];
+    surface.record_parked(parked.clone());
+    assert_eq!(read_status().parked, parked);
+    let (read, write, session) =
+        attach(surface.clone(), async { Ok(()) }, |_| async { Ok(()) }).await;
+    assert!(read_status().connected);
+    assert_eq!(read_status().parked, parked, "an attach keeps them");
+    surface.record_parked(Vec::new());
+    assert_eq!(read_status().parked, []);
+    assert!(
+        read_status().connected,
+        "and clearing them keeps the attachment"
+    );
+    drop((read, write));
+    let _ = session.await.unwrap();
+}

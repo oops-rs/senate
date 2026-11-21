@@ -13,7 +13,7 @@ use senate_core::{ChatSurface, Locale, Name};
 use senate_log::LogStore;
 use serde::{Deserialize, Serialize};
 
-use crate::{ChatGateway, Component, ComponentContext, SenatedConfig};
+use crate::{ChatGateway, Component, ComponentContext, ParkedGroup, SenatedConfig};
 use bind::InboundHandler;
 use transport::RemoteSurface;
 
@@ -25,25 +25,31 @@ struct Settings {
     token_env: String,
 }
 
-/// Whether a platform adapter is attached to the gateway socket, as the
-/// running server last wrote it to [`GatewayStatus::FILE`] in its
-/// `data_dir`: on start, and on every attach and detach. `senated doctor`
-/// reads it.
+/// Whether a platform adapter is attached to the gateway socket, and which
+/// bound groups the gateway cannot join by itself, as the running server
+/// last wrote it to [`GatewayStatus::FILE`] in its `data_dir`: on start, on
+/// every attach and detach, and whenever the parked groups change.
+/// `senated doctor` reads it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatewayStatus {
     pub platform: String,
     pub connected: bool,
     pub at: chrono::DateTime<chrono::Utc>,
+    /// Bound groups whose membership waits on someone
+    /// ([`ChatGateway::parked_groups`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parked: Vec<ParkedGroup>,
 }
 
 impl GatewayStatus {
     pub const FILE: &'static str = "chat_gateway.json";
 
-    fn now(platform: &str, connected: bool) -> Self {
+    fn now(platform: &str, connected: bool, parked: Vec<ParkedGroup>) -> Self {
         Self {
             platform: platform.to_owned(),
             connected,
             at: chrono::Utc::now(),
+            parked,
         }
     }
 
@@ -135,6 +141,19 @@ impl Component for Adapter {
             self.locale,
             self.builtin,
         ));
+        // Keep the status file's parked groups current while serving.
+        let mut parked = self.remote.gateway.watch_parked();
+        let surface = self.remote.surface.clone();
+        let stop = ctx.shutdown.clone();
+        tokio::spawn(async move {
+            loop {
+                surface.record_parked(parked.borrow_and_update().clone());
+                tokio::select! {
+                    () = stop.cancelled() => break,
+                    changed = parked.changed() => if changed.is_err() { break },
+                }
+            }
+        });
         transport::serve(
             &self.remote.settings.socket,
             &self.remote.token,

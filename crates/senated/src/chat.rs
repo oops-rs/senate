@@ -348,6 +348,11 @@ impl ChatGateway {
         lock(&self.inner.state).memberships.parked()
     }
 
+    /// [`ChatGateway::parked_groups`], now and whenever it changes.
+    pub fn watch_parked(&self) -> watch::Receiver<Vec<ParkedGroup>> {
+        lock(&self.inner.state).memberships.watch_parked()
+    }
+
     /// Whether the gateway currently has `group_id` bound to a committee.
     pub fn committee_of(&self, group_id: &str) -> Option<CommitteeId> {
         self.inner.drain_fresh();

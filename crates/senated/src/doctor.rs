@@ -11,6 +11,7 @@ use senate_bridge::doctor::Check;
 use senate_core::Locale;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use crate::ParkedReason;
 use crate::SenatedConfig;
 use crate::gateway_ipc::{GatewayStatus, RemoteGateway};
 
@@ -205,7 +206,8 @@ fn gateway_checks(config: &SenatedConfig, running: bool, l: Locale) -> Vec<Check
             )
         });
     }
-    checks.push(match GatewayStatus::read(&config.server.data_dir) {
+    let status = GatewayStatus::read(&config.server.data_dir);
+    checks.push(match &status {
         Some(status) if status.connected => Check::ok(
             "gateway.connected",
             l.pick(
@@ -242,7 +244,54 @@ fn gateway_checks(config: &SenatedConfig, running: bool, l: Locale) -> Vec<Check
             None::<String>,
         ),
     });
+    if let Some(status) = &status {
+        checks.push(parked_check(status, l));
+    }
     checks
+}
+
+/// The bound groups the gateway cannot join by itself, with what fixes each.
+fn parked_check(status: &GatewayStatus, l: Locale) -> Check {
+    if status.parked.is_empty() {
+        return Check::ok(
+            "gateway.groups",
+            l.pick(
+                "没有卡住的已绑定群",
+                "no bound group is stuck joining or leaving",
+            ),
+        );
+    }
+    let lines: Vec<String> = status
+        .parked
+        .iter()
+        .map(|p| {
+            let since = p.since.format("%F %T UTC");
+            match &p.reason {
+                ParkedReason::Rejected { error } => l.pick(
+                    format!("{}：平台拒绝加入或退出（{error}），自 {since} 起不再重试", p.group_id),
+                    format!(
+                        "{}: the platform refused to join or leave it ({error}); not retried since {since}",
+                        p.group_id
+                    ),
+                ),
+                ParkedReason::NoRealMessage => l.pick(
+                    format!("{}：没有真实消息可用来加入（模拟消息不行），自 {since} 起等待", p.group_id),
+                    format!(
+                        "{}: no real message to join it by (simulated ones cannot); waiting since {since}",
+                        p.group_id
+                    ),
+                ),
+            }
+        })
+        .collect();
+    Check::warn(
+        "gateway.groups",
+        lines.join("; "),
+        Some(l.pick(
+            "在群里发一条真实消息，或重新绑定该群；重启 senated 也会再试一次",
+            "send a real message in the group, or bind it again; restarting senated also tries again",
+        )),
+    )
 }
 
 #[cfg(test)]
@@ -318,6 +367,13 @@ mod tests {
             platform: "chat".into(),
             connected: true,
             at: chrono::Utc::now(),
+            parked: vec![crate::ParkedGroup {
+                group_id: "g_1".into(),
+                reason: ParkedReason::Rejected {
+                    error: "rejected: unknown chat".into(),
+                },
+                since: chrono::Utc::now(),
+            }],
         };
         std::fs::write(
             dir.path().join(GatewayStatus::FILE),
@@ -325,5 +381,52 @@ mod tests {
         )
         .unwrap();
         assert_eq!(GatewayStatus::read(dir.path()), Some(status));
+    }
+
+    #[test]
+    fn an_older_status_without_parked_groups_still_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(GatewayStatus::FILE),
+            r#"{"platform":"chat","connected":true,"at":"2026-11-22T00:00:00Z"}"#,
+        )
+        .unwrap();
+        let status = GatewayStatus::read(dir.path()).unwrap();
+        assert_eq!(status.parked, []);
+        assert_eq!(parked_check(&status, Locale::En).status, Status::Ok);
+    }
+
+    #[test]
+    fn parked_groups_are_a_warning_with_the_fix() {
+        let since = chrono::Utc::now();
+        let status = GatewayStatus {
+            platform: "chat".into(),
+            connected: true,
+            at: since,
+            parked: vec![
+                crate::ParkedGroup {
+                    group_id: "g_refused".into(),
+                    reason: ParkedReason::Rejected {
+                        error: "rejected: unknown chat".into(),
+                    },
+                    since,
+                },
+                crate::ParkedGroup {
+                    group_id: "g_quiet".into(),
+                    reason: ParkedReason::NoRealMessage,
+                    since,
+                },
+            ],
+        };
+        let check = parked_check(&status, Locale::En);
+        assert_eq!(check.status, Status::Warn, "{check:?}");
+        assert!(check.found.contains("g_refused"), "{check:?}");
+        assert!(check.found.contains("unknown chat"), "{check:?}");
+        assert!(check.found.contains("g_quiet"), "{check:?}");
+        let fix = check.fix.as_deref().unwrap_or_default();
+        assert!(
+            fix.contains("real message") && fix.contains("bind it again"),
+            "{fix}"
+        );
     }
 }

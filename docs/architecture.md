@@ -767,11 +767,21 @@ platform follow, without ever holding the log or the Speaker up:
   doubling to at most 30, until it succeeds or the bindings change so it is
   no longer wanted. Each call is bounded by a timeout, runs in its own task,
   and is serialised per group.
+- A call the platform refuses outright (`rejected`) is *parked*, not
+  retried: logged once, and tried again only after a new real message from
+  the group, a rebind, or a restart. Parked groups, and bound groups with no
+  real message to name them by, are listed in `chat_gateway.json` and
+  `senated doctor` warns on them (`gateway.groups`).
+- A group is only ever named to the platform by a real message. A simulated
+  one (`senate chat send`) carries Senate's own `sim:` ref, which the
+  platform never saw. No call keyed on a `sim:` ref (a reply, a card, a card
+  update, a pin, an adopt) reaches the platform: a conversation that is not
+  live keeps them off it, and one forgotten after a restart has them refused.
 - Nothing is stored for this. After a restart the gateway replays the log's
   `binding` events: every bound group is adopted again, named by the latest
-  chat the log holds from it (or by its first new message when nobody has
-  spoken since), and every group once bound and now bound to nothing is
-  released again. Both calls are idempotent.
+  real (never simulated) chat the log holds from it, or by its first new
+  real message when there is none, and every group once bound and now
+  bound to nothing is released again. Both calls are idempotent.
 - A post refused (`SurfaceError::Rejected`) into a bound group the bot is not
   confirmed to be in adopts the group (waiting for an adopt already under way) and
   is tried once more; posts otherwise never wait for an adopt, and a post

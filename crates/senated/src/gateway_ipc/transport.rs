@@ -60,6 +60,8 @@ pub(super) struct RemoteSurface {
     /// Where whether an adapter is attached is written
     /// ([`super::GatewayStatus`]); unset, nowhere.
     status: OnceLock<PathBuf>,
+    /// What was last written there: attached, and the parked groups.
+    recorded: Mutex<(bool, Vec<crate::ParkedGroup>)>,
 }
 
 impl RemoteSurface {
@@ -69,6 +71,7 @@ impl RemoteSurface {
             capabilities: OnceLock::new(),
             peer: Mutex::new(None),
             status: OnceLock::new(),
+            recorded: Mutex::default(),
         })
     }
 
@@ -79,8 +82,27 @@ impl RemoteSurface {
     }
 
     fn record(&self, connected: bool) {
+        let mut recorded = self.recorded();
+        recorded.0 = connected;
+        self.write_status(&recorded);
+    }
+
+    /// The bound groups the gateway has parked, from now on.
+    pub(super) fn record_parked(&self, parked: Vec<crate::ParkedGroup>) {
+        let mut recorded = self.recorded();
+        recorded.1 = parked;
+        self.write_status(&recorded);
+    }
+
+    fn recorded(&self) -> MutexGuard<'_, (bool, Vec<crate::ParkedGroup>)> {
+        self.recorded
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn write_status(&self, (connected, parked): &(bool, Vec<crate::ParkedGroup>)) {
         if let Some(path) = self.status.get() {
-            super::GatewayStatus::now(&self.platform, connected).write(path);
+            super::GatewayStatus::now(&self.platform, *connected, parked.clone()).write(path);
         }
     }
 
