@@ -1046,6 +1046,13 @@ impl Shared {
         self.work.notify_one();
         if runtime == HostedRuntime::Codex {
             self.reconcile_approvals();
+            // Its tools are those of the roles it has now; a restore starts
+            // the count again.
+            match self.store.session(&session_id) {
+                Ok(Some(session)) => self.note_codex_roles(&id, &session),
+                Ok(None) => {}
+                Err(e) => tracing::debug!(session = %session_id, "the hosted Codex's roles: {e}"),
+            }
         }
         Ok(HostedLaunch {
             reply,

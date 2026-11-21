@@ -550,6 +550,78 @@ async fn a_hosted_codex_thread_is_named_after_the_senators_alias() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hosted_codex_whose_role_changed_is_told_once_to_restart() {
+    use senate_core::{ChairPayload, Kind, NewEvent, meta};
+
+    let (mut h, project) = fixture(true, Locale::En).await;
+    let fake = h.codex();
+    start(&mut h).await;
+    let (launch, terminal) = Terminal::spawn(&h, project, HostedRuntime::Codex).await;
+    let thread = launch.session_id.clone();
+    let restart_needed = |h: &Harness| {
+        let socket = h.socket();
+        async move {
+            let reply: senate_bridge::ipc::SessionsReply =
+                ipc::request(&socket, &Request::Sessions, WAIT, WAIT)
+                    .await
+                    .unwrap();
+            reply.rows.iter().any(|row| row.restart_needed)
+        }
+    };
+    let notices = || {
+        fake.pushes()
+            .into_iter()
+            .filter(|(_, params)| {
+                params["threadId"] == thread.as_str()
+                    && common::fake_codex::input_text(params).contains("Your Senate role changed")
+            })
+            .map(|(_, params)| common::fake_codex::input_text(&params).to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert!(!restart_needed(&h).await);
+
+    // The Codex is made chair: the tools it listed are not the chair's.
+    let make_chair = |who: &senate_core::SenatorName| {
+        h.server.state.inner.lock().unwrap().chair = Some((who.clone(), true));
+        h.server.append(
+            NewEvent::new(committee(), Kind::Note, Address::Committee, "chair set").with_meta(
+                meta::CHAIR,
+                ChairPayload {
+                    senator: who.clone(),
+                }
+                .value(),
+            ),
+        );
+    };
+    make_chair(&launch.senator);
+    eventually("the restart notice", WAIT, || {
+        (!notices().is_empty()).then_some(())
+    })
+    .await;
+    let [notice] = notices().try_into().unwrap();
+    assert!(
+        notice.contains("this session now chairs its committee"),
+        "{notice}"
+    );
+    assert!(
+        notice.contains(&format!(
+            "`senate stop {0}`, then `senate restore {0}`",
+            launch.senator
+        )),
+        "{notice}"
+    );
+    assert!(restart_needed(&h).await);
+
+    // Another change before the restart: still one notice.
+    make_chair(&path("chair-test"));
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(notices().len(), 1);
+    assert!(restart_needed(&h).await);
+    terminal.stop();
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn codex_hosted_notices_close_on_input_and_recur_on_native_replay() {
     let (mut h, project) = fixture(true, Locale::En).await;
     let fake = h.codex();

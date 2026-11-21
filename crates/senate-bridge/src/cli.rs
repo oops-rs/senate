@@ -970,7 +970,7 @@ async fn hosted_sessions(paths: &Paths) -> anyhow::Result<Vec<crate::host::view:
                     .map_or_else(|| "-".to_owned(), ToString::to_string),
                 row.runtime.as_str(),
                 row.model.label(),
-                row.state.as_str()
+                row.state_label()
             ),
             // What a command takes: `committee::alias`, so it names one
             // session whatever other committees call theirs.
