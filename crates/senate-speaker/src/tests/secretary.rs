@@ -582,3 +582,67 @@ fn a_model_wire_is_checked_layered_and_keyed() {
     };
     assert_ne!(chat.connection_key(), gateway.connection_key());
 }
+
+/// `[model] fallback = { … }` parses as a second model table, is checked
+/// with it (and cannot nest), and makes the third tier: the primary, its
+/// one retry, then the fallback on its own connection with the primary's
+/// bounds where it says none.
+#[test]
+fn a_model_fallback_is_parsed_checked_and_tiered() {
+    let table: toml::Table = toml::from_str(
+        r#"
+        [model]
+        base_url = "https://gateway.example.com/v1"
+        model = "gpt-6.1"
+        deadline_secs = 30
+        fallback = { provider = "anthropic", model = "claude-sonnet-5-5", triage_deadline_secs = 4 }
+        "#,
+    )
+    .expect("toml");
+    let base = BaseLayer::of_main_table(&table, "/tmp/data", Locale::En).expect("base");
+    let model = base.model.expect("model");
+    assert_eq!(model.check_basis(), Ok(()));
+
+    let tiers = model.tiers();
+    let labels: Vec<&str> = tiers.iter().map(|t| t.label).collect();
+    assert_eq!(labels, ["primary", "primary-retry", "fallback"]);
+    assert_eq!(tiers[0].model, tiers[1].model);
+    assert!(tiers[0].model.fallback.is_none());
+    let fallback = &tiers[2].model;
+    assert_eq!(fallback.model.as_deref(), Some("claude-sonnet-5-5"));
+    assert_eq!(fallback.provider.as_deref(), Some("anthropic"));
+    // Its own connection: no base_url from the primary; the primary's bounds.
+    assert_eq!(fallback.base_url, None);
+    assert_eq!(fallback.deadline_secs, Some(30));
+    assert_eq!(fallback.triage_deadline_secs, Some(4));
+    assert!(fallback.fallback.is_none());
+
+    // Without one: two attempts on the one model.
+    let alone = ModelSettings {
+        fallback: None,
+        ..model.clone()
+    };
+    assert_eq!(alone.tiers().len(), 2);
+
+    // A broken fallback is the model's problem; so is a nested one.
+    let broken = ModelSettings {
+        fallback: Some(Box::new(ModelSettings {
+            provider: Some("nonesuch".into()),
+            ..ModelSettings::default()
+        })),
+        ..alone.clone()
+    };
+    assert!(broken.check_basis().unwrap_err().starts_with("fallback: "));
+    let nested = ModelSettings {
+        fallback: Some(Box::new(model.clone())),
+        ..alone.clone()
+    };
+    assert!(nested.check_basis().unwrap_err().contains("of its own"));
+
+    // A layer above that names no fallback keeps the one below.
+    let above = ModelSettings {
+        model: Some("gpt-6.1-sol".into()),
+        ..ModelSettings::default()
+    };
+    assert_eq!(above.over(&model).fallback, model.fallback);
+}

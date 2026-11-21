@@ -115,7 +115,7 @@ pub use ids::operation_id;
 pub use scripted::{ScriptedBrain, scripted_verdict};
 pub use secretary::{
     BaseLayer, DEFAULT_NAME, Duty, Effective, ModelCheck, ModelSettings, Problem, SecretaryConfigs,
-    Shown, ShownValue, Source,
+    Shown, ShownValue, Source, Tier,
 };
 
 #[cfg(test)]

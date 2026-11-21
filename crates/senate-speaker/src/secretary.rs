@@ -162,6 +162,22 @@ pub struct ModelSettings {
     /// Token bound on one run (`[speaker] brain_token_budget`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_budget: Option<u64>,
+    /// `fallback = { … }`: a second model, with the same keys, that the
+    /// Brain turns to when this one fails twice ([`ModelSettings::tiers`]).
+    /// It names its own connection (provider, model, key, endpoint, wire);
+    /// the bounds it leaves out are this model's. It has no fallback of its
+    /// own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<Box<ModelSettings>>,
+}
+
+/// One attempt in the order the Brain tries its models.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tier {
+    /// How the log names it: `primary`, `primary-retry`, `fallback`.
+    pub label: &'static str,
+    /// The model it runs on, without a fallback of its own.
+    pub model: ModelSettings,
 }
 
 /// Checks that a model is complete and valid before it is used.
@@ -182,7 +198,44 @@ impl ModelSettings {
             deadline_secs: pick(&self.deadline_secs, &below.deadline_secs),
             triage_deadline_secs: pick(&self.triage_deadline_secs, &below.triage_deadline_secs),
             token_budget: pick(&self.token_budget, &below.token_budget),
+            fallback: pick(&self.fallback, &below.fallback),
         }
+    }
+
+    /// The order the Brain tries its models in, one entry per attempt: this
+    /// model, this model again (one retry), then the fallback when there is
+    /// one. The fallback's bounds default to this model's.
+    pub fn tiers(&self) -> Vec<Tier> {
+        let primary = Self {
+            fallback: None,
+            ..self.clone()
+        };
+        let mut tiers = vec![
+            Tier {
+                label: "primary",
+                model: primary.clone(),
+            },
+            Tier {
+                label: "primary-retry",
+                model: primary.clone(),
+            },
+        ];
+        if let Some(fallback) = &self.fallback {
+            let bounds = Self {
+                deadline_secs: primary.deadline_secs,
+                triage_deadline_secs: primary.triage_deadline_secs,
+                token_budget: primary.token_budget,
+                ..Self::default()
+            };
+            tiers.push(Tier {
+                label: "fallback",
+                model: Self {
+                    fallback: None,
+                    ..fallback.over(&bounds)
+                },
+            });
+        }
+        tiers
     }
 
     /// What a model client is built from: two settings with the same key
@@ -198,6 +251,14 @@ impl ModelSettings {
     /// variable that is set and says what it is for. Nothing is resolved
     /// beyond reading the variable.
     pub fn check_basis(&self) -> Result<(), String> {
+        if let Some(fallback) = &self.fallback {
+            if fallback.fallback.is_some() {
+                return Err("fallback has a fallback of its own; only one is tried".into());
+            }
+            fallback
+                .check_basis()
+                .map_err(|e| format!("fallback: {e}"))?;
+        }
         if self.model.as_deref().is_some_and(|m| m.trim().is_empty()) {
             return Err("model is empty".into());
         }
@@ -281,6 +342,17 @@ impl ModelSettings {
         }
         if let Some(v) = self.token_budget {
             out.push(("token_budget", v.to_string(), None));
+        }
+        if let Some(fallback) = &self.fallback {
+            let keys: Vec<String> = fallback
+                .shown()
+                .into_iter()
+                .map(|(key, value, set)| match set {
+                    Some(false) => format!("{key} = {value} (not set)"),
+                    _ => format!("{key} = {value}"),
+                })
+                .collect();
+            out.push(("fallback", format!("{{ {} }}", keys.join(", ")), None));
         }
         out
     }
