@@ -3207,6 +3207,23 @@ done
     fixture
 }
 
+/// The hosted agy was given session settings that trust its directory,
+/// by its real path, and nothing else.
+fn agy_trusts_only(args: &[String], project: &std::path::Path) {
+    let at = args
+        .iter()
+        .position(|a| a == "--settings")
+        .expect("--settings");
+    let settings: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&args[at + 1]).unwrap()).unwrap();
+    let real = std::fs::canonicalize(project).unwrap();
+    assert_eq!(
+        settings,
+        serde_json::json!({ "trustedWorkspaces": [real] }),
+        "{args:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_hosted_agy_names_its_conversation_through_its_first_hook_and_resumes_it() {
     use senate_bridge::ipc::StopReply;
@@ -3284,6 +3301,7 @@ async fn a_hosted_agy_names_its_conversation_through_its_first_hook_and_resumes_
     );
     assert!(args.contains(&"--model=flash".to_owned()), "{args:?}");
     assert!(args.contains(&"--effort=high".to_owned()), "{args:?}");
+    agy_trusts_only(&args, &project);
     // The hook waited for the launch to publish, then answered as agy
     // takes it: Senate's identity line, then the orientation.
     let hook = eventually("the fixture's hook output", TIMEOUT, || {
@@ -3330,6 +3348,7 @@ async fn a_hosted_agy_names_its_conversation_through_its_first_hook_and_resumes_
     let args = hosted_fixture_argv(&terminal, &project, TIMEOUT).await;
     assert_eq!(args[0], format!("--conversation={conversation}"));
     assert!(args.contains(&"--model=flash".to_owned()), "{args:?}");
+    agy_trusts_only(&args, &project);
     h.stop().await;
 }
 

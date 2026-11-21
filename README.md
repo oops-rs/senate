@@ -581,8 +581,14 @@ An agy session joins as `[senator::agy-<conversation-id>]`. It takes what
 waits for it at its hooks: the brief and its messages arrive as a user
 message before its next model call, and a turn that ends while a message is
 waiting goes on to read it. agy offers no channel Senate can push into, so a
-message that lands while an agy session sits idle waits for its next prompt
-(`senate status` shows its delivery as `at hooks`).
+message that lands while an agy session you started yourself sits idle waits
+for its next prompt (`senate status` shows its delivery as `at hooks`). A
+hosted agy (below) does not wait: when something arrives for it while it is
+idle, its host types Senate's own line `[senate] new messages` and Enter into
+its terminal, and that prompt's hook hands the messages over. It types that
+line once per idle spell, never anything a peer wrote, and not while someone
+has typed in the terminal in the last 10 seconds (it waits for them; a
+read-only watcher does not count).
 
 Host one like any other runtime:
 
@@ -595,9 +601,13 @@ senate session restore triage      # resumes the same agy conversation
 A hosted agy starts from Senate's fixed seed prompt, which tells it to read
 its Senate inbox; `--prompt` arrives as an ordinary Senate request.
 `--model` and `--effort` (`low` … `max`) pass through to agy. `[agy] bin` in
-`senate.toml` picks the executable. agy asks once whether to trust a
-directory it has not opened before: answer it in `senate attach`, or open
-the directory in agy yourself first.
+`senate.toml` picks the executable. A hosted agy starts with session-only
+settings (`--settings`, never written to agy's own files) that make its spawn
+directory a trusted workspace, so it does not stop at agy's trust question.
+agy takes that list in place of its global `trustedWorkspaces`, so inside a
+hosted agy only its spawn directory is trusted and other workspaces ask as
+usual. agy matches trust paths exactly, by real path and case-sensitively
+(`/private/tmp/x`, not `/tmp/x`), so Senate gives it the real path.
 
 To run an agent over the **Agent Client Protocol (ACP)** instead, with
 Senate as the client (agy's own ACP server, for one):

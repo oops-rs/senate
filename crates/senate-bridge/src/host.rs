@@ -817,7 +817,12 @@ fn runtime_command(
                 }
                 _ => command.arg(format!("--prompt-interactive={AGY_SEED}")),
             };
-            command.args(session.model.runtime_args(runtime))
+            let settings = dir.join("agy-settings.json");
+            std::fs::write(&settings, serde_json::to_vec(&agy_settings(cwd))?)?;
+            command
+                .arg("--settings")
+                .arg(settings)
+                .args(session.model.runtime_args(runtime))
         }
     };
     let command = match runtime {
@@ -852,6 +857,17 @@ fn runtime_command(
         .env_remove(crate::companion::ENV_SESSION)
         .kill_on_drop(true);
     Ok(command)
+}
+
+/// A hosted agy's settings for its session only, never saved by agy: the
+/// directory it was spawned in is a trusted workspace, so agy does not stop
+/// at its trust question with nobody at the terminal. agy takes each key
+/// of these in place of its global one, so inside this session only this
+/// directory is trusted. agy matches the real path (`/private/tmp/…`, not
+/// `/tmp/…`).
+fn agy_settings(cwd: &Path) -> serde_json::Value {
+    let dir = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_owned());
+    serde_json::json!({ "trustedWorkspaces": [dir] })
 }
 
 /// How often a host checks that its directory is still there.
