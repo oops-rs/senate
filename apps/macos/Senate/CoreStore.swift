@@ -8,19 +8,24 @@ import SenateCore
 /// Rust core, plus what only the UI knows (the tab, the agent filter, reply
 /// drafts, buttons in flight). Every action goes to the core; its result
 /// comes back as state.
-@MainActor
+///
+/// The core is reached only through `AppCoreProtocol`, UniFFI's protocol
+/// for `AppCore`: the app's one door to the daemon (tests pass a fake).
 @Observable
 final class CoreStore {
     static let windowID = "main"
     /// Set (non-empty) to open the window at launch (development).
     static let showEnv = "SENATE_APP_SHOW"
 
+    /// Makes the core: the real one reads `$SENATE_HOME`, else `~/.senate`.
+    typealias MakeCore = () throws -> any AppCoreProtocol
+
     enum Tab: Hashable {
         case inbox, approvals, codex, docket, senates
     }
 
     private(set) var state: AppState = .placeholder
-    /// The core could not start (a bad Senate home); nothing works.
+    /// The core could not start (a bad Senate home); `connect()` retries.
     private(set) var setupError: String?
     /// The last local failure (an empty reply, Terminal); the core's own
     /// `lastError` covers what reached the daemon.
@@ -37,27 +42,53 @@ final class CoreStore {
     /// Keys of rows with an action in flight.
     private(set) var busy: Set<String> = []
 
-    @ObservationIgnored private var core: AppCore?
-    @ObservationIgnored private var listener: ListenerBridge?
+    @ObservationIgnored private let makeCore: MakeCore
+    @ObservationIgnored private(set) var core: (any AppCoreProtocol)?
+    @ObservationIgnored private var events: Task<Void, Never>?
     @ObservationIgnored private var openWindow: OpenWindowAction?
     @ObservationIgnored private let notifier = Notifier()
 
-    init() {
-        notifier.onOpen = { [weak self] in self?.show(.approvals) }
-        notifier.setUp()
-        do {
-            // nil home: the core reads $SENATE_HOME, else ~/.senate. The
-            // language is the one the bundle was localized into, so the
-            // core's sentences and the app's labels agree.
-            let core = try AppCore(senateHome: nil, language: appLanguage())
-            self.core = core
-            state = core.snapshot()
-            let listener = ListenerBridge(store: self)
-            self.listener = listener
-            try core.start(listener: listener)
-        } catch {
-            setupError = describe(error)
+    init(makeCore: @escaping MakeCore = CoreStore.realCore, notifications: Bool = true) {
+        self.makeCore = makeCore
+        if notifications {
+            notifier.onOpen = { [weak self] in self?.show(.approvals) }
+            notifier.setUp()
         }
+        connect()
+    }
+
+    /// The real core. The language is the one the bundle was localized
+    /// into, so the core's sentences and the app's labels agree.
+    nonisolated static func realCore() throws -> any AppCoreProtocol {
+        try AppCore(senateHome: nil, language: appLanguage())
+    }
+
+    /// Make and start the core. After a setup error, tries again.
+    func connect() {
+        guard core == nil else { return }
+        let (stream, continuation) = AsyncStream.makeStream(of: CoreEvent.self)
+        do {
+            let core = try makeCore()
+            state = core.snapshot()
+            try core.start(listener: CoreEvents(continuation))
+            self.core = core
+            setupError = nil
+        } catch {
+            continuation.finish()
+            setupError = describe(error)
+            return
+        }
+        // The core's callbacks, in the order it made them, on the main actor.
+        events = Task { [weak self] in
+            for await event in stream {
+                guard let self else { return }
+                self.handle(event)
+            }
+        }
+    }
+
+    deinit {
+        events?.cancel()
     }
 
     /// The error line under the header.
@@ -84,7 +115,15 @@ final class CoreStore {
 
     // MARK: From the core
 
-    fileprivate func apply(_ next: AppState) {
+    func handle(_ event: CoreEvent) {
+        switch event {
+        case let .state(next): apply(next)
+        case let .approval(approval): notifier.approvalRequested(approval)
+        case let .person(note): notifier.forPerson(note)
+        }
+    }
+
+    private func apply(_ next: AppState) {
         if next.lastError != state.lastError {
             actionError = nil
         }
@@ -92,14 +131,6 @@ final class CoreStore {
         if let filter = agentFilter, !state.agents.contains(where: { $0.path == filter }) {
             agentFilter = nil
         }
-    }
-
-    fileprivate func approvalRequested(_ approval: ApprovalRequest) {
-        notifier.approvalRequested(approval)
-    }
-
-    fileprivate func forPerson(_ note: PersonNote) {
-        notifier.forPerson(note)
     }
 
     // MARK: Window
@@ -182,7 +213,7 @@ final class CoreStore {
     func isBusy(_ key: String) -> Bool { busy.contains(key) }
 
     @discardableResult
-    private func run(_ key: String, _ op: @Sendable (AppCore) async throws -> Void) async -> Bool {
+    private func run(_ key: String, _ op: (any AppCoreProtocol) async throws -> Void) async -> Bool {
         guard let core else { return false }
         busy.insert(key)
         defer { busy.remove(key) }
@@ -197,35 +228,25 @@ final class CoreStore {
     }
 }
 
-/// The core's listener: hands each callback to the main thread, in order.
-final class ListenerBridge: CoreListener, @unchecked Sendable {
-    // Written once in init, read on the core's threads.
-    private weak var store: CoreStore?
+/// What the core tells the app, in the order it says it.
+enum CoreEvent: Sendable {
+    case state(AppState)
+    case approval(ApprovalRequest)
+    case person(PersonNote)
+}
 
-    @MainActor init(store: CoreStore) {
-        self.store = store
+/// The core's listener: called on the core's threads, it only yields each
+/// callback into the stream `CoreStore` reads on the main actor.
+nonisolated final class CoreEvents: CoreListener {
+    private let continuation: AsyncStream<CoreEvent>.Continuation
+
+    init(_ continuation: AsyncStream<CoreEvent>.Continuation) {
+        self.continuation = continuation
     }
 
-    func onState(state: AppState) {
-        let store = self.store
-        DispatchQueue.main.async {
-            MainActor.assumeIsolated { store?.apply(state) }
-        }
-    }
-
-    func onApprovalRequested(approval: ApprovalRequest) {
-        let store = self.store
-        DispatchQueue.main.async {
-            MainActor.assumeIsolated { store?.approvalRequested(approval) }
-        }
-    }
-
-    func onForPerson(note: PersonNote) {
-        let store = self.store
-        DispatchQueue.main.async {
-            MainActor.assumeIsolated { store?.forPerson(note) }
-        }
-    }
+    func onState(state: AppState) { continuation.yield(.state(state)) }
+    func onApprovalRequested(approval: ApprovalRequest) { continuation.yield(.approval(approval)) }
+    func onForPerson(note: PersonNote) { continuation.yield(.person(note)) }
 }
 
 /// An error as the user should read it. What the core words (`Invalid`,
