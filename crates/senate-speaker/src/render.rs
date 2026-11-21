@@ -2019,6 +2019,15 @@ pub(crate) fn announcement(l: Locale, parts: &AnnouncementParts<'_>) -> Announce
     }
 }
 
+/// Said once in a people group whose announcement the Speaker cannot set.
+pub(crate) fn announcement_unsupported(l: Locale) -> String {
+    l.pick(
+        "我没法更新本群的公告：如平台支持群公告，请给机器人编辑权限。",
+        "I can't update this group's announcement: give the bot permission to edit it, if this platform supports announcements.",
+    )
+    .to_owned()
+}
+
 /// One agent event as a few words for the "today" card.
 pub(crate) fn activity(l: Locale, event: &Event) -> String {
     let what = match event.kind {

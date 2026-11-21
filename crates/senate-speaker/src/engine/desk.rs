@@ -138,7 +138,8 @@ impl Engine {
             | SpeakerMsg::TopDue(committee)
             | SpeakerMsg::PinnedDue(committee)
             | SpeakerMsg::FallbackDue { committee, .. }
-            | SpeakerMsg::CardDue { committee, .. } => Some(committee.clone()),
+            | SpeakerMsg::CardDue { committee, .. }
+            | SpeakerMsg::AnnouncementDue { committee, .. } => Some(committee.clone()),
             SpeakerMsg::Thought(thought) => thought.0.committee().cloned(),
             SpeakerMsg::Run(report) => Some(report.0.committee().clone()),
             SpeakerMsg::Unbound(_) => None,

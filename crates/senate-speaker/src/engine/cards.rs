@@ -85,6 +85,7 @@ impl Engine {
         if pinned {
             self.schedule_pinned(&event.committee);
         }
+        self.schedule_announcements(&event.committee);
         self.invite_on_activity(event).await;
     }
 
@@ -230,6 +231,7 @@ impl Engine {
         if pinned {
             self.schedule_pinned(committee);
         }
+        self.schedule_announcements(committee);
     }
 
     // ----- the pinned cards ----------------------------------------------------

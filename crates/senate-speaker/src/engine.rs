@@ -175,6 +175,7 @@
 
 mod agent;
 mod agents;
+pub(crate) mod announcement;
 mod cards;
 mod desk;
 mod gone;
@@ -378,6 +379,8 @@ struct CommitteeState {
     /// Debounced card updates, per task root.
     cards: HashMap<Seq, Timer>,
     pinned: Pinned,
+    /// Each people group's announcement, by group id.
+    announcements: HashMap<String, announcement::Announced>,
     /// People invited into the Agent group this run (because one of their
     /// agents showed up).
     invited: HashSet<Name>,

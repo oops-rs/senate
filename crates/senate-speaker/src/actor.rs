@@ -130,6 +130,12 @@ pub enum SpeakerMsg {
     /// The Agent group's pinned cards are due for a refresh (debounced, and
     /// at midnight).
     PinnedDue(CommitteeId),
+    /// A people group's announcement is due for a refresh (debounced, and
+    /// at most hourly).
+    AnnouncementDue {
+        committee: CommitteeId,
+        group: String,
+    },
     /// A Brain call the Speaker spawned has finished. Only the Speaker
     /// makes these.
     Thought(Thought),
@@ -233,6 +239,9 @@ impl Actor for Speaker {
             SpeakerMsg::TopDue(committee) => engine.on_top_due(committee).await,
             SpeakerMsg::CardDue { committee, root } => engine.on_card_due(committee, root).await,
             SpeakerMsg::PinnedDue(committee) => engine.on_pinned_due(committee).await,
+            SpeakerMsg::AnnouncementDue { committee, group } => {
+                engine.on_announcement_due(committee, group).await
+            }
             SpeakerMsg::Thought(thought) => engine.on_thought(thought.0).await,
             SpeakerMsg::Run(report) => engine.on_run(report.0).await,
             SpeakerMsg::Settle(reply) => state.settles.push(reply),

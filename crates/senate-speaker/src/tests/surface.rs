@@ -11,7 +11,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use async_trait::async_trait;
-use senate_core::{Card, ChatSurface, NewGroup, PostTarget, Posted, SurfaceError};
+use senate_core::{
+    AnnouncementSection, Card, ChatSurface, NewGroup, PostTarget, Posted, SurfaceError,
+};
 
 /// The platform this surface reports, in mirrors, sources and accounts.
 pub(crate) const PLATFORM: &str = "chat";
@@ -39,8 +41,11 @@ pub(crate) struct CardPost {
     pub(crate) updates: usize,
 }
 
-/// What the surface can do beyond plain posts.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// What the surface can do beyond plain posts. By default nothing but
+/// announcements: the tests of a surface that only posts are about its
+/// posts, and a surface without announcements says so in every people
+/// group once, which has tests of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Caps {
     pub(crate) mentions: bool,
     pub(crate) cards: bool,
@@ -50,6 +55,21 @@ pub(crate) struct Caps {
     /// Add members when creating a group (an app may create chats but not
     /// add people to them).
     pub(crate) members: bool,
+    /// Set the Speaker's section of a group's announcement.
+    pub(crate) announcements: bool,
+}
+
+impl Default for Caps {
+    fn default() -> Self {
+        Self {
+            mentions: false,
+            cards: false,
+            pins: false,
+            groups: false,
+            members: false,
+            announcements: true,
+        }
+    }
 }
 
 impl Caps {
@@ -59,6 +79,7 @@ impl Caps {
         pins: true,
         groups: true,
         members: true,
+        announcements: true,
     };
 
     /// Everything but group management: an Agent group is adopted.
@@ -99,6 +120,9 @@ struct State {
     invites: Vec<(String, Vec<String>)>,
     invite_operations: HashSet<String>,
     renames: Vec<(String, String)>,
+    /// Every set_announcement call: (group, section, operation id), the
+    /// unsupported ones too.
+    announcements: Vec<(String, AnnouncementSection, String)>,
 }
 
 #[derive(Default)]
@@ -179,6 +203,12 @@ impl FakeSurface {
 
     pub(crate) fn invites(&self) -> Vec<(String, Vec<String>)> {
         self.lock().invites.clone()
+    }
+
+    /// Every announcement section asked for, supported or not: (group,
+    /// section, operation id).
+    pub(crate) fn announcements(&self) -> Vec<(String, AnnouncementSection, String)> {
+        self.lock().announcements.clone()
     }
 
     pub(crate) fn renames(&self) -> Vec<(String, String)> {
@@ -453,6 +483,24 @@ impl ChatSurface for FakeSurface {
             return unsupported("renames");
         }
         state.renames.push((group_id.to_owned(), name.to_owned()));
+        Ok(())
+    }
+
+    async fn set_announcement(
+        &self,
+        group_id: &str,
+        section: &AnnouncementSection,
+        operation_id: &str,
+    ) -> Result<(), SurfaceError> {
+        let mut state = self.lock();
+        state.announcements.push((
+            group_id.to_owned(),
+            section.clone(),
+            operation_id.to_owned(),
+        ));
+        if !state.caps.announcements {
+            return unsupported("announcements");
+        }
         Ok(())
     }
 }
