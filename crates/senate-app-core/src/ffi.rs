@@ -321,6 +321,13 @@ impl AppCore {
         Ok(())
     }
 
+    /// While the daemon is unreachable, try again now rather than after the
+    /// current wait (0.5 s doubling to 10 s).
+    pub fn reconnect(&self) -> Result<(), CoreError> {
+        self.driver()?.reconnect_now();
+        Ok(())
+    }
+
     /// Reply in a thread as the person (`senator::<person>`).
     pub async fn reply(
         &self,

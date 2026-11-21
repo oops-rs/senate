@@ -467,3 +467,22 @@ fn world_is_the_one_the_tests_describe() {
     );
     assert_eq!(w.threads.len(), 2);
 }
+
+#[tokio::test]
+async fn reconnect_now_cuts_a_long_wait_short() {
+    let (_dir, socket, world) = setup();
+    // A minute between tries: only reconnect_now gets it online in time.
+    let slow = Backoff {
+        min: Duration::from_secs(60),
+        max: Duration::from_secs(60),
+    };
+    let driver = Driver::new(Link::new(&socket), Recorder::default(), slow, Locale::En);
+    tokio::spawn(Arc::clone(&driver).run());
+    until(&driver, "offline", |s| {
+        !s.online && s.offline_reason.is_some()
+    })
+    .await;
+    let _daemon = FakeDaemon::start(&socket, world);
+    driver.reconnect_now();
+    until(&driver, "online at once", |s| s.online).await;
+}

@@ -185,6 +185,8 @@ impl Backoff {
 /// Keeps a [`Model`] current from the daemon and runs the window's actions.
 pub struct Driver<S: Sink> {
     link: Link,
+    /// Cuts a reconnect's wait short ([`Driver::reconnect_now`]).
+    wake: tokio::sync::Notify,
     /// When the aliases were last read.
     aliases_read: Mutex<Option<Instant>>,
     model: Mutex<Model>,
@@ -196,6 +198,7 @@ impl<S: Sink> Driver<S> {
     pub fn new(link: Link, sink: S, backoff: Backoff, locale: Locale) -> Arc<Self> {
         Arc::new(Self {
             link,
+            wake: tokio::sync::Notify::new(),
             aliases_read: Mutex::new(None),
             model: Mutex::new(Model::new(locale)),
             sink,
@@ -217,6 +220,12 @@ impl<S: Sink> Driver<S> {
     pub fn set_locale(&self, locale: Locale) {
         self.model().locale = locale;
         self.changed();
+    }
+
+    /// While offline, try to connect now instead of after the current wait.
+    /// Does nothing while connected.
+    pub fn reconnect_now(&self) {
+        self.wake.notify_one();
     }
 
     /// Hand the current model to the sink.
@@ -267,8 +276,11 @@ impl<S: Sink> Driver<S> {
                     }
                 }
             }
-            tokio::time::sleep(delay).await;
-            delay = self.backoff.next(delay);
+            tokio::select! {
+                () = tokio::time::sleep(delay) => delay = self.backoff.next(delay),
+                // Asked to try now: from the shortest wait again.
+                () = self.wake.notified() => delay = self.backoff.min,
+            }
         }
     }
 
