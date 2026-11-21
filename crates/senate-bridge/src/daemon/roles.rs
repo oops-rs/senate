@@ -1458,18 +1458,26 @@ pub(crate) mod roles_text {
         let chair = chair.map(mention);
         match (locale, chair) {
             (Locale::Zh, Some(c)) => format!(
-                "{me} 不是委员会 `{committee}` 的主席（chair），{c} 才是；这个会话没有主席工具。"
+                "{me} 不是委员会 `{committee}` 的主席（chair），{c} 才是；这个会话没有主席工具。\
+                 主席工具（chair_docket、chair_route、chair_cover、chair_escalate）用来处理\
+                 等待主席的事项，只归主席使用；要找主席，用 ask 发给 `chair`。"
             ),
-            (Locale::Zh, None) => {
-                format!("{me} 不是委员会 `{committee}` 的主席（chair）；这个会话没有主席工具。")
-            }
+            (Locale::Zh, None) => format!(
+                "{me} 不是委员会 `{committee}` 的主席（chair）；这个会话没有主席工具。\
+                 主席工具（chair_docket、chair_route、chair_cover、chair_escalate）用来处理\
+                 等待主席的事项，只归主席使用；要找主席，用 ask 发给 `chair`。"
+            ),
             (Locale::En, Some(c)) => format!(
-                "{me} does not chair the committee `{committee}` ({c} does), so this session has \
-                 no chair tools."
+                "{me} does not chair the committee `{committee}`: the chair of `{committee}` is \
+                 {c}, so this session has no chair tools. The chair tools (chair_docket, \
+                 chair_route, chair_cover, chair_escalate) work what awaits the chair and are the \
+                 chair's alone; to reach the chair, ask `chair`."
             ),
             (Locale::En, None) => format!(
                 "{me} does not chair the committee `{committee}`, so this session has no chair \
-                 tools."
+                 tools. The chair tools (chair_docket, chair_route, chair_cover, chair_escalate) \
+                 work what awaits the chair and are the chair's alone; to reach the chair, ask \
+                 `chair`."
             ),
         }
     }
@@ -1716,7 +1724,8 @@ mod tests {
         let c = CommitteeId::new("ibot").unwrap();
         let en = roles_text::not_chairing(&me, &c, Some(&chair), Locale::En);
         assert!(en.contains("[senator::codex] does not chair the committee `ibot`"));
-        assert!(en.contains("[senator::claude] does"));
+        assert!(en.contains("the chair of `ibot` is [senator::claude]"), "{en}");
+        assert!(en.contains("chair_docket"), "{en}");
         let zh = roles_text::not_chairing(&me, &c, None, Locale::Zh);
         assert!(zh.starts_with("[senator::codex] 不是委员会 `ibot` 的主席"));
     }

@@ -1441,6 +1441,28 @@ impl SenateMcp {
             .collect()
     }
 
+    /// The tools a Codex session is given: all of them, from the start.
+    ///
+    /// Codex lists a server's tools once, when a thread starts (its
+    /// `tools/list` carries no thread, and it does not act on
+    /// `tools/list_changed`), so it could never gain the tools of a role it
+    /// takes later, nor could a hosted Codex spawned as chair, whose thread
+    /// starts before it can be appointed. Each chair and presiding tool
+    /// still refuses a call from a session without the role, naming who
+    /// holds it; its description says the role it needs.
+    pub fn codex_tools(&self) -> Vec<rmcp::model::Tool> {
+        self.tool_router
+            .list_all()
+            .into_iter()
+            .map(|mut tool| {
+                if let Some(text) = codex_description(&tool.name, &tool.description) {
+                    tool.description = Some(text.into());
+                }
+                tool
+            })
+            .collect()
+    }
+
     /// Whether the session's tools are other ones than the client last
     /// listed. A client that has listed none yet has nothing to list again.
     async fn tools_moved(&self) -> bool {
@@ -2674,6 +2696,48 @@ fn proposed(l: Locale, c: &CommitteeId, seq: Seq, again: &str, chat: bool) -> St
 /// The Codex thread a request comes from: Codex puts it in every tool
 /// call's `_meta` (`threadId`, and `thread_id` in `x-codex-turn-metadata`).
 /// Claude Code sends neither.
+/// The name Codex gives itself as an MCP client.
+const CODEX_CLIENT: &str = "codex-mcp-client";
+
+fn is_codex_client(context: &RequestContext<RoleServer>) -> bool {
+    context
+        .peer
+        .peer_info()
+        .is_some_and(|info| info.client_info.name == CODEX_CLIENT)
+}
+
+/// A role tool's description as a Codex session reads it: led by the role
+/// it needs, since every Codex session lists it. `None` for a tool every
+/// session has.
+fn codex_description(
+    name: &str,
+    description: &Option<std::borrow::Cow<'static, str>>,
+) -> Option<String> {
+    let text = description.as_deref()?;
+    let (lead, asides): (&str, &[&str]) = if CHAIR_TOOLS.contains(&name) {
+        (
+            "If you chair this committee: ",
+            &[" (only the chair's session has this tool)"],
+        )
+    } else if PRESIDING_TOOLS.contains(&name) {
+        (
+            "If you work the Speaker's desk: ",
+            &[
+                " (only the session working the Speaker's desk has this tool)",
+                " (this tool is only given to the session that does)",
+            ],
+        )
+    } else {
+        return None;
+    };
+    let mut text = asides
+        .iter()
+        .fold(text.to_owned(), |text, aside| text.replace(aside, ""));
+    text.insert_str(0, lead);
+    text.push_str(" Without that role a call is refused, naming who holds it.");
+    Some(text)
+}
+
 pub fn codex_thread(meta: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
     meta.get("threadId")
         .and_then(serde_json::Value::as_str)
@@ -2748,9 +2812,12 @@ impl ServerHandler for SenateMcp {
     ) -> Result<rmcp::model::ListToolsResult, McpError> {
         let scoped = self.for_request(&context);
         let this = scoped.as_ref().unwrap_or(self);
-        Ok(rmcp::model::ListToolsResult::with_all_items(
-            this.tools().await,
-        ))
+        let tools = if is_codex_client(&context) || this.pins.runtime == Runtime::Codex {
+            this.codex_tools()
+        } else {
+            this.tools().await
+        };
+        Ok(rmcp::model::ListToolsResult::with_all_items(tools))
     }
 
     fn get_info(&self) -> ServerConfig {

@@ -50,6 +50,28 @@ impl McpClient {
         locale: Locale,
         runtime: Runtime,
     ) -> Self {
+        Self::start_named(daemon_socket, selector, locale, runtime, "test").await
+    }
+
+    /// As Codex connects: it names itself `codex-mcp-client`.
+    async fn start_codex(daemon_socket: PathBuf, selector: SessionSelector) -> Self {
+        Self::start_named(
+            daemon_socket,
+            selector,
+            Locale::En,
+            Runtime::Claude,
+            "codex-mcp-client",
+        )
+        .await
+    }
+
+    async fn start_named(
+        daemon_socket: PathBuf,
+        selector: SessionSelector,
+        locale: Locale,
+        runtime: Runtime,
+        client_name: &str,
+    ) -> Self {
         let (client, server) = tokio::io::duplex(1 << 20);
         tokio::spawn(async move {
             // As `senate mcp` serves: the server, and beside it what tells
@@ -78,7 +100,7 @@ impl McpClient {
                 json!({
                     "protocolVersion": "2025-06-18",
                     "capabilities": {},
-                    "clientInfo": {"name": "test", "version": "0"}
+                    "clientInfo": {"name": client_name, "version": "0"}
                 }),
             )
             .await;
@@ -1699,6 +1721,81 @@ async fn a_session_whose_role_changes_is_told_its_tools_changed() {
         presiding(&codex.tool_names().await),
         senate_bridge::mcp::PRESIDING_TOOLS.len()
     );
+}
+
+/// Codex lists tools once and never again, so a Codex session is given
+/// every role's tools from the start, each led by the role it needs; a call
+/// without the role is refused, naming who holds it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_codex_session_lists_every_role_tool_and_is_refused_by_role() {
+    let mut h = Harness::new().await;
+    h.server.set_speaker("claude");
+    h.server.state.inner.lock().unwrap().chair = Some((path("claude"), true));
+    h.start().await;
+    let wd = h.workdir("a", Some("refund-v2"));
+    h.hook(HookKind::SessionStart, "c1", &wd, None)
+        .await
+        .unwrap();
+    let mut env = h.env_for("x1", None);
+    env.agent = Some("codex".into());
+    h.hook_with(HookKind::SessionStart, "x1", &wd, &env)
+        .await
+        .unwrap();
+
+    let mut codex = McpClient::start_codex(h.socket(), selector("x1")).await;
+    let tools = codex.request("tools/list", json!({})).await;
+    let tools = tools["tools"].as_array().unwrap();
+    let description = |name: &str| {
+        tools
+            .iter()
+            .find(|t| t["name"] == name)
+            .unwrap_or_else(|| panic!("{name} is listed"))["description"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    for tool in senate_bridge::mcp::CHAIR_TOOLS {
+        let text = description(tool);
+        assert!(text.starts_with("If you chair this committee: "), "{text}");
+        assert!(!text.contains("only the chair's session"), "{text}");
+    }
+    for tool in senate_bridge::mcp::PRESIDING_TOOLS {
+        let text = description(tool);
+        assert!(
+            text.starts_with("If you work the Speaker's desk: "),
+            "{text}"
+        );
+        assert!(!text.contains("has this tool"), "{text}");
+    }
+    assert!(tools.iter().any(|t| t["name"] == "spawn"));
+    assert!(!description("ask").starts_with("If you"));
+
+    let (err, text) = codex.call("chair_docket", json!({})).await;
+    assert!(err);
+    assert!(
+        text.contains("the chair of `refund-v2` is [senator::claude]"),
+        "{text}"
+    );
+    assert!(text.contains("to reach the chair, ask `chair`"), "{text}");
+    let (err, text) = codex
+        .call(
+            "speaker_route",
+            json!({"committee": "refund-v2", "seq": 1, "to": "claude"}),
+        )
+        .await;
+    assert!(err);
+    assert!(
+        text.contains("[senator::codex] does not work the Speaker's desk"),
+        "{text}"
+    );
+    assert!(text.contains("To reach the desk, ask `speaker`"), "{text}");
+
+    // Any other client is given only the tools of the roles it holds.
+    let mut claude = McpClient::start(h.socket(), selector("x1")).await;
+    let listed = claude.tool_names().await;
+    for tool in senate_bridge::mcp::CHAIR_TOOLS {
+        assert!(!listed.iter().any(|n| n == tool), "{tool} in {listed:?}");
+    }
 }
 
 /// The presiding tools are the presiding session's alone: listed for the

@@ -251,10 +251,18 @@ impl Front {
         };
         match self.seat_of(&session.agent) {
             Some(seat) => Ok((seat.clone(), session.agent)),
-            None => Err(IpcError::new(
-                codes::NOT_PRESIDING,
-                crate::preside::not_presiding(&session.agent, locale),
-            )),
+            None => {
+                let desk: Vec<SenatorName> = self
+                    .senates
+                    .iter()
+                    .filter_map(|s| s.office())
+                    .flat_map(|office| office.agent_workers().cloned().collect::<Vec<_>>())
+                    .collect();
+                Err(IpcError::new(
+                    codes::NOT_PRESIDING,
+                    crate::preside::not_presiding(&session.agent, &desk, locale),
+                ))
+            }
         }
     }
 

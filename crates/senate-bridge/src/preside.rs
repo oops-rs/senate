@@ -60,18 +60,32 @@ fn mentions(paths: &[SenatorName]) -> String {
 }
 
 /// A presiding op from a session that does not preside.
-pub fn not_presiding(agent: &SenatorName, locale: Locale) -> String {
+pub fn not_presiding(agent: &SenatorName, desk: &[SenatorName], locale: Locale) -> String {
     let me = mention(agent);
-    match locale {
-        Locale::Zh => format!(
+    let desk = desk.iter().map(mention).collect::<Vec<_>>().join(", ");
+    match (locale, desk.is_empty()) {
+        (Locale::Zh, false) => format!(
             "{me} 不在 Speaker 的办公桌工作（既不是 agent 担任的 Speaker，也不是 Speaker 的 \
-             secretary），所以这个会话没有主持工具。只有在办公桌工作的 agent 的会话才能代表 \
-             Speaker 办公室行事。"
+             secretary），所以这个会话没有主持工具。主持工具（speaker_*）用来代表 Speaker \
+             办公室处理办公桌上的事项；现在在办公桌工作的是 {desk}。要找办公桌，用 ask 发给 \
+             `speaker`。"
         ),
-        Locale::En => format!(
+        (Locale::Zh, true) => format!(
+            "{me} 不在 Speaker 的办公桌工作（既不是 agent 担任的 Speaker，也不是 Speaker 的 \
+             secretary），所以这个会话没有主持工具。主持工具（speaker_*）用来代表 Speaker \
+             办公室处理办公桌上的事项；要找办公桌，用 ask 发给 `speaker`。"
+        ),
+        (Locale::En, false) => format!(
             "{me} does not work the Speaker's desk (it is neither an agent Speaker nor one of the \
-             Speaker's secretaries), so this session has no presiding tools. Only the session of \
-             an agent working the desk acts for the Speaker's office."
+             Speaker's secretaries), so this session has no presiding tools. The presiding tools \
+             (speaker_*) act for the Speaker's office on what is on its desk; the desk is worked \
+             by {desk}. To reach the desk, ask `speaker`."
+        ),
+        (Locale::En, true) => format!(
+            "{me} does not work the Speaker's desk (it is neither an agent Speaker nor one of the \
+             Speaker's secretaries), so this session has no presiding tools. The presiding tools \
+             (speaker_*) act for the Speaker's office on what is on its desk. To reach the desk, \
+             ask `speaker`."
         ),
     }
 }
@@ -545,7 +559,12 @@ mod tests {
         assert!(alone.contains("this Senate") && alone.contains("Nothing awaits"));
         assert!(alone.contains("no agent is seated there yet"), "{alone}");
         assert!(nudge(1, None, Locale::Zh).contains("1 件"));
-        assert!(not_presiding(&path("codex"), Locale::En).contains("[senator::codex]"));
+        assert!(not_presiding(&path("codex"), &[], Locale::En).contains("[senator::codex]"));
+        let named = not_presiding(&path("codex"), &[path("claude")], Locale::En);
+        assert!(
+            named.contains("the desk is worked by [senator::claude]"),
+            "{named}"
+        );
     }
 
     #[test]
