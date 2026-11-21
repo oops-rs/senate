@@ -15,7 +15,9 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail, ensure};
 use async_trait::async_trait;
-use senate_core::{AdoptedGroup, ChatSurface, PostTarget, Posted, SurfaceError};
+use senate_core::{
+    AdoptedGroup, Card, ChatSurface, CreatedGroup, NewGroup, PostTarget, Posted, SurfaceError,
+};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -114,6 +116,26 @@ struct PostedReply {
     duplicate: bool,
 }
 
+impl From<PostedReply> for Posted {
+    fn from(reply: PostedReply) -> Self {
+        Self {
+            message_ref: reply.message_ref,
+            thread_ref: reply.thread_ref,
+            duplicate: reply.duplicate,
+        }
+    }
+}
+
+fn wire_target(target: PostTarget) -> Value {
+    match target {
+        PostTarget::NewRoot { group_id } => json!({"kind":"new_root","group_id":group_id}),
+        PostTarget::Reply {
+            message_ref,
+            in_thread,
+        } => json!({"kind":"reply","message_ref":message_ref,"in_thread":in_thread}),
+    }
+}
+
 #[derive(Deserialize)]
 struct AdoptedReply {
     group_id: String,
@@ -132,24 +154,103 @@ impl ChatSurface for RemoteSurface {
         markdown: &str,
         operation_id: &str,
     ) -> Result<Posted, SurfaceError> {
-        let target = match target {
-            PostTarget::NewRoot { group_id } => json!({"kind":"new_root","group_id":group_id}),
-            PostTarget::Reply {
-                message_ref,
-                in_thread,
-            } => json!({"kind":"reply","message_ref":message_ref,"in_thread":in_thread}),
-        };
         let reply: PostedReply = self
             .call(
                 "post",
-                json!({"target":target,"markdown":markdown,"operation_id":operation_id}),
+                json!({"target":wire_target(target),"markdown":markdown,"operation_id":operation_id}),
             )
             .await?;
-        Ok(Posted {
-            message_ref: reply.message_ref,
-            thread_ref: reply.thread_ref,
-            duplicate: reply.duplicate,
-        })
+        Ok(reply.into())
+    }
+
+    async fn post_mentioning(
+        &self,
+        target: PostTarget,
+        markdown: &str,
+        user: &str,
+        operation_id: &str,
+    ) -> Result<Posted, SurfaceError> {
+        let reply: PostedReply = self
+            .call(
+                "post_mentioning",
+                json!({"target":wire_target(target),"markdown":markdown,"user":user,"operation_id":operation_id}),
+            )
+            .await?;
+        Ok(reply.into())
+    }
+
+    async fn post_card(
+        &self,
+        target: PostTarget,
+        card: &Card,
+        operation_id: &str,
+    ) -> Result<Posted, SurfaceError> {
+        let reply: PostedReply = self
+            .call(
+                "post_card",
+                json!({"target":wire_target(target),"card":card,"operation_id":operation_id}),
+            )
+            .await?;
+        Ok(reply.into())
+    }
+
+    async fn update_card(
+        &self,
+        message_ref: &str,
+        card: &Card,
+        operation_id: &str,
+    ) -> Result<(), SurfaceError> {
+        self.call(
+            "update_card",
+            json!({"message_ref":message_ref,"card":card,"operation_id":operation_id}),
+        )
+        .await
+    }
+
+    async fn pin(&self, message_ref: &str, operation_id: &str) -> Result<(), SurfaceError> {
+        self.call(
+            "pin",
+            json!({"message_ref":message_ref,"operation_id":operation_id}),
+        )
+        .await
+    }
+
+    async fn create_group(
+        &self,
+        group: &NewGroup,
+        operation_id: &str,
+    ) -> Result<CreatedGroup, SurfaceError> {
+        self.call(
+            "create_group",
+            json!({"group":group,"operation_id":operation_id}),
+        )
+        .await
+    }
+
+    async fn invite(
+        &self,
+        group_id: &str,
+        users: &[String],
+        operation_id: &str,
+    ) -> Result<(), SurfaceError> {
+        self.call(
+            "invite",
+            json!({"group_id":group_id,"users":users,"operation_id":operation_id}),
+        )
+        .await
+    }
+
+    async fn rename_group(
+        &self,
+        group_id: &str,
+        name: &str,
+        operation_id: &str,
+    ) -> Result<(), SurfaceError> {
+        self.call(
+            "rename_group",
+            json!({"group_id":group_id,"name":name,"operation_id":operation_id}),
+        )
+        .await
     }
 
     async fn adopt_group(&self, message_ref: &str) -> Result<AdoptedGroup, SurfaceError> {

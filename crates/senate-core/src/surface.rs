@@ -16,6 +16,7 @@
 //! mentions them.
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 use crate::address::Address;
 use crate::event::StatusState;
@@ -58,8 +59,9 @@ pub enum SurfaceError {
 }
 
 /// A task card, platform-neutral. The gateway renders it. Its texts are
-/// already in the committee's language when it reaches the surface.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// already in the committee's language when it reaches the surface. Its
+/// serde form is the `card` of the chat gateway protocol.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Card {
     pub title: String,
     pub state: StatusState,
@@ -70,7 +72,7 @@ pub struct Card {
 }
 
 /// A group for the Speaker to create.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewGroup {
     pub name: String,
     /// Platform user ids to invite: people's accounts on this surface's
@@ -79,11 +81,12 @@ pub struct NewGroup {
 }
 
 /// A group the surface created.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreatedGroup {
     pub group_id: String,
     /// Invitees the platform did not add (an app without the permission to
     /// add members, or ids it does not know). The group exists regardless.
+    #[serde(default)]
     pub not_added: Vec<String>,
 }
 
