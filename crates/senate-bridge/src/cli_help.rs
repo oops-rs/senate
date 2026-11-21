@@ -16,7 +16,7 @@ const GROUPS: &[(&str, &[&str])] = &[
     ("See what is happening", &["status", "inbox", "thread"]),
     (
         "Speak as yourself",
-        &["ask", "tell", "request", "reply", "take"],
+        &["ask", "tell", "request", "reply", "take", "chat"],
     ),
     ("This worktree", &["join", "leave", "where"]),
     (

@@ -164,7 +164,7 @@ enum Cmd {
     },
     /// Appoint session secretaries and manage their shared work.
     Secretary(cli_secretary::Secretary),
-    /// Simulate chat in a bound group, and read what the Speaker answers.
+    /// Simulate chat in a bound group and read the replies
     #[command(after_help = "Examples:
   senate chat send --committee refund-v2 \"ask bob's agent how long refunds take\"
   senate chat thread sim:01j… --wait")]
