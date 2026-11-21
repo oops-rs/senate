@@ -173,6 +173,7 @@ mod host_policy;
 mod hosted_approvals;
 mod hosts;
 mod preside;
+mod replace;
 mod roles;
 mod secretary_work;
 
@@ -2891,6 +2892,11 @@ impl Shared {
                 senator,
                 force,
             } => self.sessions_changed(wrap(self.on_hosted_stop(&session, &senator, force).await)),
+            Request::Replace {
+                senator,
+                prompt,
+                model,
+            } => self.sessions_changed(wrap(self.on_replace(&senator, prompt, model).await)),
             Request::Attach { senator } => wrap(self.on_attach(senator).await),
             Request::Receipt { committee, seq } => wrap(self.receipt(&committee, seq).await),
             Request::SetCommitteeSeat { committee, request } => {

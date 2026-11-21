@@ -1132,7 +1132,7 @@ impl Shared {
 
     /// A refusal from the server, in the person's language when it is one
     /// the bridge knows.
-    fn refusal(&self, e: ApiClientError) -> IpcError {
+    pub(crate) fn refusal(&self, e: ApiClientError) -> IpcError {
         match e.status() {
             Some(403) => IpcError::new(
                 codes::SERVER,

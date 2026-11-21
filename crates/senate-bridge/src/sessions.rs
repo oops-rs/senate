@@ -220,6 +220,33 @@ fn short(secs: u64) -> String {
     uptime(now - chrono::Duration::seconds(secs.cast_signed()), now)
 }
 
+/// What `senate session replace` prints: each step and what it did.
+pub fn render_replace(reply: &crate::ipc::ReplaceReply, locale: Locale) -> String {
+    let old = senate_core::Address::senator(&reply.old).in_text();
+    let new = senate_core::Address::senator(&reply.new).in_text();
+    let mut out = match locale {
+        Locale::Zh => format!("{new} 在委员会 `{}` 替换了 {old}：\n", reply.committee),
+        Locale::En => format!("{new} replaced {old} on `{}`:\n", reply.committee),
+    };
+    for report in &reply.steps {
+        let earlier = if report.earlier {
+            locale.pick("（之前已完成）", " (done earlier)")
+        } else {
+            ""
+        };
+        out.push_str(&format!(
+            "  {:<9} {}{earlier}\n",
+            report.step.as_str(),
+            report.detail
+        ));
+    }
+    out.push_str(&match locale {
+        Locale::Zh => format!("用 `senate attach {}` 打开它的终端。", reply.new),
+        Locale::En => format!("Open its terminal with `senate attach {}`.", reply.new),
+    });
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

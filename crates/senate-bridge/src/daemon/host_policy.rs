@@ -9,16 +9,20 @@ use crate::ipc::{HostedModel, HostedRuntime, SpawnReply, StopReply};
 const ROLE_TIMEOUT: Duration = Duration::from_secs(4);
 const AUDIT_TIMEOUT: Duration = Duration::from_secs(4);
 
-struct HostAuthority {
-    sender: Address,
-    acted_by: Option<SenatorName>,
+pub(super) struct HostAuthority {
+    pub(super) sender: Address,
+    pub(super) acted_by: Option<SenatorName>,
     committee_scope: Option<CommitteeId>,
     may_appoint: bool,
     committees: Vec<CommitteeId>,
 }
 
 impl HostAuthority {
-    fn check_target(&self, committee: &CommitteeId, appoint_chair: bool) -> Result<(), IpcError> {
+    pub(super) fn check_target(
+        &self,
+        committee: &CommitteeId,
+        appoint_chair: bool,
+    ) -> Result<(), IpcError> {
         if (appoint_chair && !self.may_appoint)
             || self
                 .committee_scope
@@ -51,7 +55,7 @@ impl HostAuthority {
 
     /// An event of `kind` from whoever acts, naming the secretary who acts
     /// for the Speaker's office.
-    fn event(&self, committee: CommitteeId, kind: Kind, body: String) -> NewEvent {
+    pub(super) fn event(&self, committee: CommitteeId, kind: Kind, body: String) -> NewEvent {
         let event = NewEvent::new(committee, kind, self.sender.clone(), body);
         match &self.acted_by {
             Some(actor) => event.with_meta(meta::ACTED_BY, serde_json::json!(actor)),
@@ -82,7 +86,7 @@ fn not_hosting() -> IpcError {
 }
 
 impl Shared {
-    async fn authorize_host_action(
+    pub(super) async fn authorize_host_action(
         &self,
         selector: &SessionSelector,
     ) -> Result<HostAuthority, IpcError> {

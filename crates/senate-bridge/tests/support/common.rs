@@ -239,6 +239,10 @@ pub struct Inner {
     pub speaker: Option<senate_core::SpeakerSeat>,
     /// The chair and its connection, for tests that exercise role routing.
     pub chair: Option<(SenatorName, bool)>,
+    /// `/v1/secretaries`: principal → its secretaries, in order.
+    pub secretaries: senate_core::api::Secretaries,
+    /// Refuse this many `PUT /v1/secretaries/…` with a 503 first.
+    pub refuse_secretaries: usize,
     pub unseated: Option<SenatorName>,
     /// What `/v1/me` says about a Speaker judging roots here.
     pub triaged: bool,
@@ -432,6 +436,111 @@ async fn alias(
         return api_error(StatusCode::CONFLICT, "conflict", &error.to_string());
     }
     Json(request.alias).into_response()
+}
+
+/// Remove `alias` while it stands for `primary`, like the server.
+async fn remove_alias(
+    State(st): St,
+    UrlPath((primary, alias)): UrlPath<(SenatorName, SenatorName)>,
+    headers: HeaderMap,
+    Query(query): Query<senate_core::api::RemoveAlias>,
+) -> Response {
+    if let Err(error) = auth(&st, &headers) {
+        return error;
+    }
+    let on = query.committee.unwrap_or_else(committee);
+    let mut inner = st.inner.lock().unwrap();
+    // A server from before aliases could be removed has no such route.
+    if inner.old_aliases {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if inner.aliases.get(&on, &alias) == Some(&primary) {
+        inner.aliases.remove(&on, &alias);
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn secretaries(State(st): St, headers: HeaderMap) -> Response {
+    if let Err(error) = auth(&st, &headers) {
+        return error;
+    }
+    Json(st.inner.lock().unwrap().secretaries.clone()).into_response()
+}
+
+async fn set_secretaries(
+    State(st): St,
+    UrlPath(principal): UrlPath<SenatorName>,
+    headers: HeaderMap,
+    Json(request): Json<senate_core::api::SetSecretaries>,
+) -> Response {
+    if let Err(error) = auth(&st, &headers) {
+        return error;
+    }
+    let mut inner = st.inner.lock().unwrap();
+    if inner.refuse_secretaries > 0 {
+        inner.refuse_secretaries -= 1;
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+            "injected secretaries refusal",
+        );
+    }
+    if request.secretaries.is_empty() {
+        inner.secretaries.remove(&principal);
+    } else {
+        inner.secretaries.insert(principal, request.secretaries);
+    }
+    Json(inner.secretaries.clone()).into_response()
+}
+
+/// Unseat (or seat again) like the server: the change in the log, and the
+/// seat's status after it.
+async fn set_seat(
+    State(st): St,
+    UrlPath(committee): UrlPath<CommitteeId>,
+    headers: HeaderMap,
+    Json(request): Json<senate_core::api::SetCommitteeSeat>,
+) -> Response {
+    let person = match auth(&st, &headers) {
+        Ok(person) => person,
+        Err(error) => return error,
+    };
+    let change = senate_core::CommitteeSeatChange {
+        senator: request.senator.clone(),
+        action: request.action,
+        by: name(&person),
+    };
+    let (event, duplicate) = st.store(change.event(committee.clone(), request.id), true);
+    st.inner.lock().unwrap().unseated = match request.action {
+        senate_core::CommitteeSeatAction::Unseat => Some(request.senator.clone()),
+        senate_core::CommitteeSeatAction::Join => None,
+    };
+    Json(senate_core::api::CommitteeSeatInfo {
+        committee,
+        senator: request.senator,
+        action: request.action,
+        seq: event.seq,
+        duplicate,
+    })
+    .into_response()
+}
+
+async fn set_chair(
+    State(st): St,
+    UrlPath(committee): UrlPath<CommitteeId>,
+    headers: HeaderMap,
+    Json(request): Json<senate_core::api::SetChair>,
+) -> Response {
+    if let Err(error) = auth(&st, &headers) {
+        return error;
+    }
+    st.inner.lock().unwrap().chair = Some((request.senator.clone(), true));
+    Json(senate_core::api::ChairInfo {
+        committee,
+        chair: Some(request.senator),
+        source: None,
+    })
+    .into_response()
 }
 
 async fn me(State(st): St, headers: HeaderMap) -> Response {
@@ -1226,6 +1335,8 @@ impl FakeServer {
                 epoch: "epoch-1".into(),
                 searches: Vec::new(),
                 brief_broken: false,
+                secretaries: Default::default(),
+                refuse_secretaries: 0,
                 brief_delay: Duration::ZERO,
                 resolves: Vec::new(),
             }),
@@ -1246,6 +1357,15 @@ impl FakeServer {
             .route("/v1/committee-aliases", get(aliases))
             .route("/v1/aliases", get(flat_aliases))
             .route("/v1/aliases/{primary}", axum::routing::put(alias))
+            .route(
+                "/v1/aliases/{primary}/{alias}",
+                axum::routing::delete(remove_alias),
+            )
+            .route(senate_core::api::SECRETARIES_PATH, get(secretaries))
+            .route(
+                "/v1/secretaries/{principal}",
+                axum::routing::put(set_secretaries),
+            )
             .route(senate_core::api::RESOLVE_PATH, get(resolve))
             .route(
                 "/v1/committees/{committee}/events",
@@ -1257,7 +1377,10 @@ impl FakeServer {
                 get(get_cursor).put(put_cursor),
             )
             .route("/v1/committees/{committee}/heartbeat", post(heartbeat))
-            .route("/v1/committees/{committee}/seat", get(seat_status))
+            .route(
+                "/v1/committees/{committee}/seat",
+                get(seat_status).put(set_seat),
+            )
             .route(
                 senate_core::api::SECRETARY_REMINDERS_PATH,
                 post(secretary_reminders).put(ack_secretary_reminder),
@@ -1266,7 +1389,10 @@ impl FakeServer {
                 "/v1/secretary-teams/{principal}/session",
                 axum::routing::put(secretary_session),
             )
-            .route("/v1/committees/{committee}/chair", get(chair))
+            .route(
+                "/v1/committees/{committee}/chair",
+                get(chair).put(set_chair),
+            )
             .route("/v1/committees/{committee}/docket", get(docket))
             .route("/v1/committees/{committee}/search", get(search))
             .route("/v1/committees/{committee}/brief", get(brief))

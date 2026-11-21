@@ -378,6 +378,79 @@ pub struct SpawnReply {
     pub request: Option<Seq>,
 }
 
+/// One step of `senate session replace`, in the order they run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplaceStep {
+    /// Start the new session and wait until it is seated and connected.
+    Spawn,
+    /// Move the alias on the committee to the new seat.
+    Alias,
+    /// Give the new seat the old one's duty.
+    Duty,
+    /// Put the new seat where the old one stood among desk workers.
+    Desk,
+    /// Make the new seat the chair, when the old one was.
+    Chair,
+    /// Hand the old seat's open threads to the new one.
+    Handover,
+    /// Send the starting prompt.
+    Prompt,
+    /// Stop the old session's terminal.
+    Stop,
+    /// Unseat the old seat.
+    Unseat,
+}
+
+impl ReplaceStep {
+    pub const ALL: [Self; 9] = [
+        Self::Spawn,
+        Self::Alias,
+        Self::Duty,
+        Self::Desk,
+        Self::Chair,
+        Self::Handover,
+        Self::Prompt,
+        Self::Stop,
+        Self::Unseat,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Spawn => "spawn",
+            Self::Alias => "alias",
+            Self::Duty => "duty",
+            Self::Desk => "desk",
+            Self::Chair => "chair",
+            Self::Handover => "handover",
+            Self::Prompt => "prompt",
+            Self::Stop => "stop",
+            Self::Unseat => "unseat",
+        }
+    }
+}
+
+/// What one step of a replacement did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplaceStepReport {
+    pub step: ReplaceStep,
+    /// Done by an earlier run of the same replacement.
+    #[serde(default)]
+    pub earlier: bool,
+    /// What it did, or why there was nothing to do.
+    pub detail: String,
+}
+
+/// `Request::Replace` once every step is done.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplaceReply {
+    pub committee: CommitteeId,
+    pub old: SenatorName,
+    pub new: SenatorName,
+    pub session_id: String,
+    pub steps: Vec<ReplaceStepReport>,
+}
+
 /// `Request::Sessions`: the hosted sessions on this machine, the running
 /// first, then by name.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -551,6 +624,20 @@ pub enum Request {
         senator: AliasName,
         /// What to change of the recorded model and effort, for this
         /// restore and those after it.
+        #[serde(flatten)]
+        model: HostedModel,
+    },
+    /// `senate session replace`: start a fresh hosted session of the same
+    /// runtime, directory and committee as `senator`, hand it everything
+    /// the old seat held, then stop and unseat the old one. From the
+    /// person's command line only. Asked again for a replacement that
+    /// stopped partway, it resumes where it stopped.
+    Replace {
+        senator: AliasName,
+        /// The new seat's first request, if any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt: Option<String>,
+        /// What to change of the old seat's model and effort.
         #[serde(flatten)]
         model: HostedModel,
     },

@@ -725,6 +725,36 @@ enum SessionCmd {
         #[command(flatten)]
         model: ModelArgs,
     },
+    /// Start a fresh hosted session in a senator's place and hand it the
+    /// seat.
+    ///
+    /// The new session has the same runtime, directory and committee. Once
+    /// it is seated and connected it takes the old seat's alias on the
+    /// committee, its duty, its place among the desk workers, the chair if
+    /// the old seat held it, and its open questions and requests (each
+    /// handed over in its own thread); then the old session is stopped and
+    /// unseated. Each step is reported. If one fails, the command says
+    /// where; run it again to resume from there. If starting the new session
+    /// fails, nothing is handed over.
+    #[command(after_help = "Examples:
+  senate session replace reviewer
+  senate session replace reviewer --prompt 'Pick up the gateway review'
+  senate session replace refund-v2::reviewer --model opus --effort high")]
+    Replace {
+        /// The senator's alias (`committee::alias` for one on one
+        /// committee) or primary name.
+        senator: AliasName,
+        /// A first instruction for the new session, sent once the seat is
+        /// handed over, as an ordinary Senate request from you.
+        #[arg(long, conflicts_with = "prompt_file")]
+        prompt: Option<String>,
+        /// Like --prompt, read from a file.
+        #[arg(long, value_name = "PATH")]
+        prompt_file: Option<PathBuf>,
+        /// Each given replaces the old session's for the new one.
+        #[command(flatten)]
+        model: ModelArgs,
+    },
     /// Stop terminal hosts that no session owns, and clear ended hosts'
     /// leftovers.
     Prune,
@@ -2316,6 +2346,10 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
 }
 
 /// `senate session …`: this machine's hosted sessions.
+/// A replacement starts a session, waits for it to connect, and stops
+/// another: longer than one host request.
+const REPLACE_TIMEOUT: Duration = Duration::from_secs(300);
+
 fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
     let terminal = output.terminal;
     match command {
@@ -2366,6 +2400,42 @@ fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
                 },
                 terminal,
             )
+        }
+        SessionCmd::Replace {
+            senator,
+            prompt,
+            prompt_file,
+            model,
+        } => {
+            let prompt = match prompt_file {
+                Some(path) => Some(
+                    std::fs::read_to_string(&path)
+                        .with_context(|| format!("read the prompt file {}", path.display()))?,
+                ),
+                None => prompt,
+            };
+            if prompt.as_deref().is_some_and(|p| p.trim().is_empty()) {
+                anyhow::bail!("the prompt is empty");
+            }
+            let senator = pick_alias(senator)?;
+            remember_terminal()?;
+            let paths = Paths::from_env()?;
+            let locale = BridgeConfig::locale_at(&paths.config());
+            let reply: crate::ipc::ReplaceReply = runtime(false)?.block_on(ipc::request(
+                &paths.socket(),
+                &Request::Replace {
+                    senator,
+                    prompt,
+                    model: model.into(),
+                },
+                Duration::from_secs(1),
+                REPLACE_TIMEOUT,
+            ))?;
+            println!(
+                "{}",
+                output.text(&crate::sessions::render_replace(&reply, locale))
+            );
+            Ok(())
         }
         SessionCmd::Prune => {
             let paths = Paths::from_env()?;

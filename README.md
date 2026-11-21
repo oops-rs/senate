@@ -524,7 +524,15 @@ senate session list                    # every hosted session on this machine
 senate session watch                   # all of them side by side, read-only
 senate session stop reviewer           # end its terminal...
 senate session restore reviewer        # ...and reopen it later
+senate session replace reviewer        # a fresh session takes the seat
 ```
+
+`senate session replace` starts a new session of the same runtime in the same
+directory and committee. Once it is connected, it hands over the old seat's
+alias, duty, place among the desk workers, the chair (if the old seat held it)
+and its open questions and requests, then stops and unseats the old session.
+It reports each step. If one fails, running the command again resumes from that
+step.
 
 ### Where Each Command Lives
 
@@ -534,7 +542,7 @@ The top level is the daily loop: `status` (a bare `senate` runs it), `inbox`
 
 | Group | Commands |
 | :--- | :--- |
-| `senate session` | `list` · `watch` · `stop` · `restore` · `prune` |
+| `senate session` | `list` · `watch` · `stop` · `restore` · `replace` · `prune` |
 | `senate senator` | `list` · `alias` · `unalias` · `seat` · `unseat` · `duty` |
 | `senate secretary` | `list` · `appoint` · `dismiss` · `work list\|show\|create\|assign` (the secretary team) · `desk` · `desk set` (the Speaker's desk workers, in order) |
 | `senate chat` | `send` · `thread` (simulated chat; see [Testing](#-testing--verification)) |

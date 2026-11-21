@@ -3644,3 +3644,208 @@ async fn a_codex_spawn_without_an_app_server_says_the_daemon_is_not_running() {
     assert!(h.store().all_sessions().unwrap().is_empty());
     h.stop().await;
 }
+
+/// `senate session replace`: a fresh hosted session takes the seat. Once it
+/// is connected it gets the alias, the duty, the old seat's place on the
+/// desk, the chair and its open question (handed over in the question's own
+/// thread), then the starting prompt; the old session is stopped and
+/// unseated. A failure partway (the desk) stops at that step and the same
+/// command resumes there without starting a second session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replace_hands_the_seat_to_a_fresh_session_and_resumes_after_a_failure() {
+    use senate_core::{Address, Kind, meta};
+    let (h, project, _typed) = fixture_daemon(3).await;
+    let old: SpawnReply = call(
+        &h,
+        &Request::Spawn {
+            session: Default::default(),
+            runtime: HostedRuntime::Claude,
+            committee: committee(),
+            alias: Some(path("reviewer")),
+            cwd: project.clone(),
+            chair: false,
+            prompt: None,
+            model: Default::default(),
+        },
+    )
+    .await;
+    let (ok, out) = senate(
+        &h,
+        &[
+            "senator",
+            "duty",
+            "reviews the gateway",
+            "--session",
+            &old.session_id,
+        ],
+    )
+    .await;
+    assert!(ok, "{out}");
+    // The daemon learns the duty from its stream.
+    let duty = h
+        .server
+        .events(committee().as_str())
+        .into_iter()
+        .rev()
+        .find(|e| senate_core::DutyPayload::of(e).is_some())
+        .unwrap();
+    {
+        let mut inner = h.server.state.inner.lock().unwrap();
+        inner.chair = Some((old.senator.clone(), true));
+        inner
+            .secretaries
+            .insert(path("alice"), vec![path("codex"), old.senator.clone()]);
+        // The desk refuses once: the first run stops there.
+        inner.refuse_secretaries = 1;
+    }
+    let open = h.server.append(common::question(
+        common::person("bob"),
+        Address::senator(&old.senator),
+        "Which retry limit did you settle on?",
+    ));
+    // Wait until the daemon has taken in what came before the replace.
+    eventually(
+        "the daemon to know the duty and the question",
+        TIMEOUT,
+        || {
+            (h.store()
+                .delivered_cursor(&old.senator, &committee())
+                .ok()?
+                >= open.seq.max(duty.seq))
+            .then_some(())
+        },
+    )
+    .await;
+
+    let (ok, out) = senate(
+        &h,
+        &[
+            "session",
+            "replace",
+            "reviewer",
+            "--prompt",
+            "Pick up the gateway review",
+        ],
+    )
+    .await;
+    assert!(!ok, "{out}");
+    assert!(out.contains("stopped at the desk step"), "{out}");
+    assert!(out.contains("Done: spawn, alias, duty"), "{out}");
+    assert!(out.contains("Run the same command again"), "{out}");
+
+    let (ok, out) = senate(&h, &["session", "replace", "reviewer"]).await;
+    assert!(ok, "{out}");
+    assert!(out.contains("(done earlier)"), "{out}");
+    let rows: ipc::SessionsReply = call(&h, &Request::Sessions).await;
+    // One new session, not two: the second run resumed.
+    assert_eq!(rows.rows.len(), 2, "{rows:?}");
+    let new = rows
+        .rows
+        .iter()
+        .find(|r| r.primary != old.senator)
+        .unwrap()
+        .primary
+        .clone();
+    assert!(
+        out.contains(" replaced ") && out.contains("on `refund-v2`"),
+        "{out}"
+    );
+    for step in [
+        "spawn", "alias", "duty", "desk", "chair", "handover", "prompt", "stop", "unseat",
+    ] {
+        assert!(out.contains(&format!("\n  {step} ")), "{step} in {out}");
+    }
+    let old_row = rows.rows.iter().find(|r| r.primary == old.senator).unwrap();
+    assert_ne!(old_row.state, ipc::HostState::Running, "{rows:?}");
+
+    let events = h.server.events(committee().as_str());
+    {
+        let inner = h.server.state.inner.lock().unwrap();
+        assert_eq!(
+            inner.aliases.alias_of(&committee(), &new),
+            Some(&path("reviewer"))
+        );
+        assert_eq!(inner.aliases.alias_of(&committee(), &old.senator), None);
+        assert_eq!(inner.chair.as_ref().map(|c| &c.0), Some(&new));
+        assert_eq!(
+            inner.secretaries.get(&path("alice")).unwrap(),
+            &[path("codex"), new.clone()],
+            "the same place on the desk"
+        );
+        assert_eq!(inner.unseated.as_ref(), Some(&old.senator));
+    }
+    let duties: Vec<_> = events
+        .iter()
+        .filter_map(senate_core::DutyPayload::of)
+        .filter(|d| d.senator == new)
+        .collect();
+    assert_eq!(duties.len(), 1, "one duty note, though the step ran once");
+    assert_eq!(duties[0].duty, "reviews the gateway");
+    let handed: Vec<_> = events
+        .iter()
+        .filter(|e| e.thread == Some(open.seq) && e.meta.contains_key(meta::HANDED_TO))
+        .collect();
+    assert_eq!(handed.len(), 1, "{handed:?}");
+    assert_eq!(handed[0].to, [Address::senator(&new)]);
+    assert_eq!(handed[0].kind, Kind::Question);
+    assert!(
+        handed[0].body.contains("Which retry limit"),
+        "{}",
+        handed[0].body
+    );
+    let prompts: Vec<_> = events
+        .iter()
+        .filter(|e| e.kind == Kind::Request && e.body == "Pick up the gateway review")
+        .collect();
+    assert_eq!(prompts.len(), 1);
+    assert_eq!(prompts[0].to, [Address::senator(&new)]);
+    // The handover and the prompt come after the alias moved, so nothing
+    // for the seat reached a session that had not started.
+    assert!(handed[0].seq < prompts[0].seq);
+    assert!(h.store().replacements().unwrap().is_empty());
+}
+
+/// A name that is no hosted session here is refused, and so is a
+/// replacement whose new session cannot start (here: the machine is at its
+/// limit of hosted sessions): the spawn step fails, nothing is handed over,
+/// the old seat keeps its alias and terminal, and nothing is left under way.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replace_refuses_an_unknown_seat_and_hands_nothing_over_when_the_spawn_fails() {
+    let (h, project, _typed) = fixture_daemon(1).await;
+    let (ok, out) = senate(&h, &["session", "replace", "nobody-here"]).await;
+    assert!(!ok, "{out}");
+    assert!(out.contains("unknown alias nobody-here"), "{out}");
+
+    let old: SpawnReply = call(
+        &h,
+        &Request::Spawn {
+            session: Default::default(),
+            runtime: HostedRuntime::Claude,
+            committee: committee(),
+            alias: Some(path("reviewer")),
+            cwd: project,
+            chair: false,
+            prompt: None,
+            model: Default::default(),
+        },
+    )
+    .await;
+    let (ok, out) = senate(&h, &["session", "replace", "reviewer"]).await;
+    assert!(!ok, "{out}");
+    assert!(out.contains("stopped at the spawn step"), "{out}");
+    assert!(out.contains("Nothing was handed over"), "{out}");
+    assert_eq!(
+        h.server
+            .state
+            .inner
+            .lock()
+            .unwrap()
+            .aliases
+            .alias_of(&committee(), &old.senator),
+        Some(&path("reviewer"))
+    );
+    let rows: ipc::SessionsReply = call(&h, &Request::Sessions).await;
+    assert_eq!(rows.rows.len(), 1, "{rows:?}");
+    assert_eq!(rows.rows[0].state, ipc::HostState::Running);
+    assert!(h.store().replacements().unwrap().is_empty());
+}
