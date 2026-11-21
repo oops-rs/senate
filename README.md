@@ -536,7 +536,7 @@ The top level is the daily loop: `status` (a bare `senate` runs it), `inbox`
 | :--- | :--- |
 | `senate session` | `list` · `watch` · `stop` · `restore` · `prune` |
 | `senate senator` | `list` · `alias` · `unalias` · `seat` · `unseat` · `duty` |
-| `senate secretary` | `list` · `appoint` · `dismiss` · `work list\|show\|create\|assign` |
+| `senate secretary` | `list` · `appoint` · `dismiss` · `work list\|show\|create\|assign` (the secretary team) · `desk` · `desk set` (the Speaker's desk workers, in order) |
 | `senate chat` | `send` · `thread` (simulated chat; see [Testing](#-testing--verification)) |
 | `senate setup` | `init` · `install` · `service install\|uninstall\|status` · `doctor` · `clean` |
 

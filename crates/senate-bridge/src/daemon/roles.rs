@@ -1208,6 +1208,51 @@ impl Shared {
         })
     }
 
+    /// The Speaker's desk workers, its secretaries in order: read, or with
+    /// `set` replaced as given. The server decides who may change them (the
+    /// Speaker, the person who runs it, or the Speaker's office).
+    pub(crate) async fn on_desk(
+        &self,
+        set: Option<Vec<SenatorName>>,
+    ) -> Result<crate::ipc::DeskReply, IpcError> {
+        self.refresh_me().await;
+        let speaker = self
+            .office()
+            .and_then(|o| o.speaker_here().cloned())
+            .ok_or_else(|| IpcError::bad_request(roles_text::desk_elsewhere(self.locale)))?;
+        let all = match set {
+            Some(list) => {
+                let mut seen = std::collections::BTreeSet::new();
+                if let Some(twice) = list.iter().find(|s| !seen.insert(*s)) {
+                    return Err(IpcError::bad_request(roles_text::desk_named_twice(
+                        twice,
+                        self.locale,
+                    )));
+                }
+                if list.contains(&speaker) {
+                    return Err(IpcError::bad_request(roles_text::desk_not_the_speaker(
+                        &speaker,
+                        self.locale,
+                    )));
+                }
+                let all = self
+                    .api
+                    .set_secretaries(&speaker, list, None)
+                    .await
+                    .map_err(|e| self.refusal(e))?;
+                // The desk changed.
+                self.refresh_me().await;
+                all
+            }
+            None => self.api.secretaries().await.map_err(server_error)?,
+        };
+        Ok(crate::ipc::DeskReply {
+            secretaries: all.get(&speaker).cloned().unwrap_or_default(),
+            desk: self.office().map(|o| o.desk).unwrap_or_default(),
+            speaker,
+        })
+    }
+
     /// Register this machine's companion as a secretary of `agent`, once
     /// per daemon run, keeping the secretaries it already has.
     pub(crate) async fn register_companion(&self, agent: &SenatorName) {
@@ -1777,6 +1822,37 @@ pub(crate) mod roles_text {
         match locale {
             Locale::Zh => format!("Senate 拒绝了这个请求：{detail}"),
             Locale::En => format!("The Senate refused this: {detail}"),
+        }
+    }
+
+    pub(crate) fn desk_elsewhere(locale: Locale) -> String {
+        locale
+            .pick(
+                "这个 Senate 的 Speaker 不在这里（或还不知道是谁），它的 desk 要在它所在的 Senate 设置。",
+                "This Senate's Speaker is not a senator here (or is not known yet): its desk is set \
+                 where it presides.",
+            )
+            .to_owned()
+    }
+
+    pub(crate) fn desk_named_twice(senator: &SenatorName, locale: Locale) -> String {
+        let who = Address::senator(senator).in_text();
+        match locale {
+            Locale::Zh => format!("{who} 被列了两次；每个 desk worker 只能出现一次。"),
+            Locale::En => format!("{who} is named twice; name each desk worker once."),
+        }
+    }
+
+    pub(crate) fn desk_not_the_speaker(speaker: &SenatorName, locale: Locale) -> String {
+        let who = Address::senator(speaker).in_text();
+        match locale {
+            Locale::Zh => format!(
+                "{who} 是 Speaker 本人，不能做自己的 secretary；它是 agent 时本来就排在 desk 第一位。"
+            ),
+            Locale::En => format!(
+                "{who} is the Speaker itself, not one of its secretaries; as an agent it works the \
+                 desk first anyway."
+            ),
         }
     }
 

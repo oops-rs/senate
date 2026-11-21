@@ -1036,3 +1036,44 @@ async fn status_defaults_to_the_directory_committee_and_global_includes_both_que
     assert!(check(h.dir.path(), &[]).contains("second-session"));
     h.stop().await;
 }
+
+/// `secretary desk` says it is the Speaker's secretaries, not the team, and
+/// `set` takes the workers in order.
+#[test]
+fn the_desk_is_told_apart_from_the_secretary_team() {
+    let dir = tempfile::tempdir().unwrap();
+    let help = |args: &[&str]| {
+        let out = bridge(dir.path(), &dir.path().join("senate"))
+            .args(args)
+            .arg("--help")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}: {out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let group = help(&["secretary"]);
+    assert!(group.contains("desk "), "{group}");
+    assert!(group.contains("secretary team"), "{group}");
+    let desk = help(&["secretary", "desk"]);
+    assert!(
+        desk.contains("desk workers: its secretaries, in order"),
+        "{desk}"
+    );
+    assert!(desk.contains("not the secretary"), "{desk}");
+    assert!(
+        desk.contains("senate secretary desk set claude-1 codex"),
+        "{desk}"
+    );
+    let set = help(&["secretary", "desk", "set"]);
+    assert!(set.contains("[SENATORS]..."), "{set}");
+    // The desk is the Speaker's: no --for.
+    let out = bridge(dir.path(), &dir.path().join("senate"))
+        .args(["secretary", "--for", "alice", "desk"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("--for does not apply"),
+        "{out:?}"
+    );
+}

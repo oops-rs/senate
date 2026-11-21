@@ -100,3 +100,80 @@ async fn a_desk_changed_elsewhere_is_known_on_the_machine_at_once() {
     alice.close().await;
     world.stop().await;
 }
+
+/// `senate secretary desk [set]`: the person who presides reads and sets
+/// the desk workers from the command line, in order, through their own
+/// daemon; someone else is refused by the Senate; a list naming the
+/// Speaker itself, or one senator twice, is refused before it is sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_desk_workers_are_shown_and_set_from_the_command_line() {
+    use senate_bridge::ipc::DeskReply;
+    let world = team_above().await;
+    let mut bob = world.laptop("bob");
+    bob.open().await;
+    let shown: DeskReply = bob.ipc(Request::Desk { set: None }).await;
+    assert_eq!(shown.speaker, path("bob"));
+    assert!(shown.secretaries.is_empty(), "{shown:?}");
+
+    let set: DeskReply = bob
+        .ipc(Request::Desk {
+            set: Some(vec![path("claude"), path(BOB_CLAUDE)]),
+        })
+        .await;
+    assert_eq!(set.secretaries, [path("claude"), path(BOB_CLAUDE)]);
+    // In that order on the Senate, and in the office the daemon now knows.
+    let all = ApiClient::new(&world.server_url(), "tok-bob")
+        .unwrap()
+        .secretaries()
+        .await
+        .unwrap();
+    assert_eq!(
+        all.get(&path("bob")).unwrap(),
+        &[path("claude"), path(BOB_CLAUDE)]
+    );
+    let first = set.desk.iter().position(|w| w == &path("claude"));
+    let second = set.desk.iter().position(|w| w == &path(BOB_CLAUDE));
+    assert!(first.is_some() && first < second, "{set:?}");
+    // The order is the order given.
+    let swapped: DeskReply = bob
+        .ipc(Request::Desk {
+            set: Some(vec![path(BOB_CLAUDE), path("claude")]),
+        })
+        .await;
+    assert_eq!(swapped.secretaries, [path(BOB_CLAUDE), path("claude")]);
+
+    for bad in [vec![path("bob")], vec![path("claude"), path("claude")]] {
+        let refused = bob
+            .try_ipc::<DeskReply>(Request::Desk {
+                set: Some(bad.clone()),
+            })
+            .await;
+        assert!(
+            matches!(&refused, Err(ClientError::Remote(e)) if e.code == codes::BAD_REQUEST),
+            "{bad:?}: {refused:?}"
+        );
+    }
+
+    // Alice neither presides nor runs the Speaker: the Senate refuses her.
+    let mut alice = world.laptop("alice");
+    alice.open().await;
+    let refused = alice
+        .try_ipc::<DeskReply>(Request::Desk {
+            set: Some(vec![path("claude")]),
+        })
+        .await;
+    assert!(refused.is_err(), "{refused:?}");
+    let shown: DeskReply = alice.ipc(Request::Desk { set: None }).await;
+    assert_eq!(shown.secretaries, [path(BOB_CLAUDE), path("claude")]);
+
+    // Set to nothing: no desk workers.
+    let cleared: DeskReply = bob
+        .ipc(Request::Desk {
+            set: Some(Vec::new()),
+        })
+        .await;
+    assert!(cleared.secretaries.is_empty(), "{cleared:?}");
+    alice.close().await;
+    bob.close().await;
+    world.stop().await;
+}

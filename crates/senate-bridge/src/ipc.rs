@@ -1012,6 +1012,13 @@ pub enum Request {
         principal: Option<SenatorName>,
         appointed: bool,
     },
+    /// The Speaker's desk workers (its secretaries, in order), from the
+    /// person's command line: read, or with `set` replaced in order. Not
+    /// the secretary team ([`Request::SetSecretarySession`]).
+    Desk {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        set: Option<Vec<SenatorName>>,
+    },
     /// Explicit team work as this session, or as the person without a selector.
     SecretaryWork {
         session: SessionSelector,
@@ -1107,6 +1114,19 @@ pub struct SecretariesReply {
     /// Every secretary relation of the Senate.
     #[serde(default)]
     pub all: senate_core::api::Secretaries,
+}
+
+/// The Speaker's desk after `desk`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeskReply {
+    /// The Speaker, a senator of this Senate.
+    pub speaker: SenatorName,
+    /// Its secretaries, in order: the desk workers set with `desk set`.
+    pub secretaries: Vec<SenatorName>,
+    /// Who works the desk as the server has it, in order: the Speaker
+    /// itself first when it is an agent, then its secretaries (and the
+    /// built-in session when it runs). The first present acts.
+    pub desk: Vec<SenatorName>,
 }
 
 /// Where an agent's message went.

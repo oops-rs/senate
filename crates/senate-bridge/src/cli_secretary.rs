@@ -1,6 +1,6 @@
 use crate::{
     Paths,
-    ipc::{Request, SessionSelector},
+    ipc::{DeskReply, Request, SessionSelector},
 };
 use clap::{Args, Subcommand};
 use senate_core::api::Secretaries;
@@ -39,16 +39,43 @@ struct Dismissal {
 
 #[derive(Subcommand)]
 enum Action {
-    /// List the team's appointed sessions by their stable senator IDs.
+    /// List the secretary team's appointed sessions by their stable senator
+    /// IDs.
     List,
     /// Appoint a specific session to the secretary team.
     Appoint(Membership),
     /// Dismiss a specific session from the secretary team.
     Dismiss(Dismissal),
+    /// Show or set the Speaker's desk workers: its secretaries, in order.
+    ///
+    /// The desk is everything addressed to the Speaker. Its workers are the
+    /// Speaker itself when it is an agent, then the Speaker's secretaries in
+    /// this order; the first one present acts. This is not the secretary
+    /// team that `list`, `appoint` and `dismiss` manage: the team shares
+    /// your work items, while the desk workers answer for the Speaker.
+    #[command(after_help = "Examples:
+  senate secretary desk                      Show the Speaker and its desk workers
+  senate secretary desk set claude-1 codex   Claude first, then codex
+  senate secretary desk set                  No desk workers: the desk waits on the Speaker")]
+    Desk {
+        #[command(subcommand)]
+        command: Option<DeskCmd>,
+    },
     /// List, read, record and assign the team's shared work items.
     Work {
         #[command(subcommand)]
         command: Work,
+    },
+}
+
+#[derive(Subcommand)]
+enum DeskCmd {
+    /// Replace the desk workers with these senators, in this order. Name
+    /// none to clear them.
+    Set {
+        /// Senators (agents of this Senate), first acting first.
+        #[arg(value_parser = parse_seat_name)]
+        senators: Vec<SenatorName>,
     },
 }
 
@@ -99,6 +126,17 @@ pub(super) fn run(args: Secretary) -> anyhow::Result<()> {
     let paths = Paths::from_env()?;
     let principal = args.principal;
     let operation = match args.action {
+        Action::Desk { command } => {
+            if principal.is_some() {
+                anyhow::bail!(
+                    "--for does not apply to `secretary desk`: the desk is the Speaker's"
+                );
+            }
+            let set = command.map(|DeskCmd::Set { senators }| senators);
+            let reply: DeskReply =
+                runtime(false)?.block_on(daemon_call(&paths, &Request::Desk { set }))?;
+            return print_json(&reply);
+        }
         Action::Appoint(member) => {
             return change_member(
                 &paths,

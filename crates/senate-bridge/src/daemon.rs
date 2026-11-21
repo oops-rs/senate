@@ -2827,6 +2827,7 @@ impl Shared {
                 self.on_set_secretary_session(target_session, senator, principal, appointed)
                     .await,
             ),
+            Request::Desk { set } => wrap(self.on_desk(set).await),
             Request::SecretaryWork {
                 session,
                 principal,
