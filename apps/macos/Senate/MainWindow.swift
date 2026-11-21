@@ -1,40 +1,26 @@
 import SwiftUI
 import SenateCore
 
-/// The window: a connection header, the last error, and the tabs.
+/// The window: a sidebar of sections with their counts and the connection
+/// at its foot, and the chosen section beside it.
 struct MainWindow: View {
     @Bindable var store: CoreStore
 
     var body: some View {
-        VStack(spacing: 0) {
-            Header(store: store)
-            if let error = store.shownError {
-                ErrorBar(message: error) { store.actionError = nil }
-            }
-            TabView(selection: $store.tab) {
-                InboxView(store: store)
-                    .tabItem { Text(verbatim: label(L("tab.inbox"), store.state.counts.threads)) }
-                    .tag(CoreStore.Tab.inbox)
-                ApprovalsView(store: store)
-                    .tabItem { Text(verbatim: label(L("tab.approvals"), store.state.counts.approvals)) }
-                    .tag(CoreStore.Tab.approvals)
-                CodexView(store: store)
-                    .tabItem { Text(verbatim: label(L("tab.codex"), store.state.counts.codex)) }
-                    .tag(CoreStore.Tab.codex)
-                // Only while one of your agents presides over a Senate.
-                if store.state.menu.docket != nil {
-                    DocketView(store: store)
-                        .tabItem { Text(verbatim: label(L("tab.docket"), store.state.counts.docket)) }
-                        .tag(CoreStore.Tab.docket)
+        NavigationSplitView {
+            Sidebar(store: store)
+                .navigationSplitViewColumnWidth(min: 180, ideal: 210, max: 280)
+        } detail: {
+            detail
+                .navigationTitle((store.section ?? .inbox).title)
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    if let error = store.shownError {
+                        ErrorBar(message: error) { store.actionError = nil }
+                    }
                 }
-                SenatesView(store: store)
-                    .tabItem { Text(verbatim: L("tab.senates")) }
-                    .tag(CoreStore.Tab.senates)
-            }
-            .padding(.top, 8)
         }
         .toolbar {
-            ToolbarItem {
+            ToolbarItem(placement: .primaryAction) {
                 Button {
                     store.refresh()
                 } label: {
@@ -45,47 +31,108 @@ struct MainWindow: View {
                 .keyboardShortcut("r")
             }
         }
+        .onChange(of: store.state.menu.docket == nil) { _, gone in
+            if gone && store.section == .docket { store.section = .inbox }
+        }
     }
 
-    private func label(_ title: String, _ count: UInt32) -> String {
-        count > 0 ? "\(title) (\(count))" : title
+    @ViewBuilder private var detail: some View {
+        switch store.section {
+        case .inbox, nil: InboxView(store: store)
+        case .approvals: ApprovalsView(store: store)
+        case .codex: CodexView(store: store)
+        case .docket: DocketView(store: store)
+        case .senates: SenatesView(store: store)
+        }
     }
 }
 
-private struct Header: View {
-    let store: CoreStore
+/// The sections, each with what waits there, and the connection below.
+private struct Sidebar: View {
+    @Bindable var store: CoreStore
 
     var body: some View {
-        let s = store.state
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(s.online ? Color.green : Color.secondary)
-                    .frame(width: 8, height: 8)
-                if s.online {
-                    Text(verbatim: L("header.online_as", s.person ?? "?")).bold()
-                    if let primary = s.senates.first {
-                        Text(verbatim: primary.serverUrl).foregroundStyle(.secondary)
-                    }
-                } else {
-                    Text(verbatim: L("header.offline")).bold()
-                    if let reason = s.offlineReason {
-                        Text(verbatim: reason).foregroundStyle(.secondary).lineLimit(1)
-                    }
-                }
-                Spacer()
-            }
-            if s.senates.count > 1 {
-                HStack(spacing: 6) {
-                    ForEach(s.senates) { senate in
-                        Tag(text: senate.title, tint: senate.committees.allSatisfy(\.live) ? .green : .orange)
-                    }
-                }
+        List(selection: $store.section) {
+            ForEach(store.sections, id: \.self) { section in
+                Label(section.title, systemImage: section.symbol)
+                    .badge(Int(store.count(section)))
+                    .tag(section)
             }
         }
-        .font(.callout)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            ConnectionFooter(state: store.state)
+        }
+    }
+}
+
+extension CoreStore.Section {
+    var title: String {
+        switch self {
+        case .inbox: L("tab.inbox")
+        case .approvals: L("tab.approvals")
+        case .codex: L("tab.codex")
+        case .docket: L("tab.docket")
+        case .senates: L("tab.senates")
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .inbox: "tray"
+        case .approvals: "checkmark.shield"
+        case .codex: "terminal"
+        case .docket: "list.bullet.rectangle"
+        case .senates: "building.columns"
+        }
+    }
+}
+
+/// Who this machine is online as, or why it is offline.
+private struct ConnectionFooter: View {
+    let state: AppState
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            StatusDot(online: state.online)
+                .padding(.top, 4)
+            VStack(alignment: .leading, spacing: 2) {
+                if state.online {
+                    Text(verbatim: L("header.online_as", state.person ?? "?"))
+                        .font(.callout.weight(.medium))
+                    if let primary = state.senates.first {
+                        Text(verbatim: primary.serverUrl)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                } else {
+                    Text(verbatim: L("header.offline")).font(.callout.weight(.medium))
+                    if let reason = state.offlineReason {
+                        Text(verbatim: reason)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(3)
+                    }
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// Online or not, with a label for VoiceOver.
+struct StatusDot: View {
+    let online: Bool
+    var size: CGFloat = 8
+
+    var body: some View {
+        Circle()
+            .fill(online ? Color.green : Color.secondary)
+            .frame(width: size, height: size)
+            .accessibilityLabel(online ? L("a11y.online") : L("a11y.offline"))
     }
 }
 
@@ -95,16 +142,21 @@ private struct ErrorBar: View {
 
     var body: some View {
         HStack(alignment: .top) {
-            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .accessibilityHidden(true)
             MentionText(message).textSelection(.enabled)
             Spacer()
-            Button(action: dismiss) { Image(systemName: "xmark") }
-                .buttonStyle(.borderless)
+            Button(action: dismiss) {
+                Image(systemName: "xmark")
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel(L("a11y.dismiss"))
         }
         .font(.callout)
         .padding(.horizontal, 14)
-        .padding(.vertical, 6)
-        .background(Color.orange.opacity(0.12))
+        .padding(.vertical, 8)
+        .background(.orange.opacity(0.12))
     }
 }
 
@@ -127,17 +179,17 @@ struct Tag: View {
 struct EmptyNote: View {
     let online: Bool
     let text: String
+    var symbol: String = "tray"
 
     var body: some View {
-        VStack {
-            Spacer()
-            Text(verbatim: online ? text : L("empty.daemon_down"))
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding()
-            Spacer()
+        if online {
+            ContentUnavailableView(text, systemImage: symbol)
+        } else {
+            ContentUnavailableView(
+                L("empty.daemon_down"),
+                systemImage: "bolt.horizontal.circle"
+            )
         }
-        .frame(maxWidth: .infinity)
     }
 }
 

@@ -24,10 +24,8 @@
 "inbox.owner" = " · owner %@";
 "inbox.taken_by" = " · taken by %@";
 "inbox.escalated_to" = " · escalated to %@";
-"inbox.for" = "to %@";
 "inbox.triage" = "triage: %@";
 "inbox.reply" = "Reply";
-"inbox.cancel_reply" = "Cancel reply";
 "inbox.take" = "Take";
 "inbox.take_help" = "Take the thread over: queued deliveries to the agent are cancelled";
 "inbox.close" = "Close";
@@ -81,3 +79,13 @@
 "senates.stream_help" = "delivered up to seq %1$@; %2$lld session(s)";
 "senates.inbox_note" = "Inboxes and replies are for the first Senate, where your agents sit directly. The others show their streams and docket.";
 "inbox.from_for" = "%1$@ for %2$@";
+"inbox.search" = "Search threads";
+"inbox.no_selection" = "No thread selected";
+"inbox.no_selection_hint" = "Choose a thread to read it and reply.";
+"inbox.taken" = "taken";
+"inbox.thread_failed" = "The thread could not be read";
+"inbox.reply_placeholder" = "Reply as yourself…";
+"a11y.online" = "Online";
+"a11y.offline" = "Offline";
+"a11y.dismiss" = "Dismiss";
+"a11y.unread" = "Unread";

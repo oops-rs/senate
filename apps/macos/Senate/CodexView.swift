@@ -55,7 +55,7 @@ private struct CodexRow: View {
             HStack {
                 Button(L("codex.open")) { store.openTerminal(thread: c.thread) }
                 if c.approvals > 0 {
-                    Button(L("codex.show_approvals")) { store.tab = .approvals }
+                    Button(L("codex.show_approvals")) { store.section = .approvals }
                 }
             }
         }

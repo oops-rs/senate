@@ -19,9 +19,10 @@ struct SenateApp: App {
         // The window waits to be opened from the menu.
         Window("Senate", id: CoreStore.windowID) {
             MainWindow(store: store)
-                .frame(minWidth: 600, minHeight: 440)
+                .frame(minWidth: 760, minHeight: 460)
         }
-        .defaultSize(width: 800, height: 620)
+        .defaultSize(width: 980, height: 660)
+        .windowToolbarStyle(.unified)
         .defaultLaunchBehavior(.suppressed)
     }
 }

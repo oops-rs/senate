@@ -20,7 +20,8 @@ final class CoreStore {
     /// Makes the core: the real one reads `$SENATE_HOME`, else `~/.senate`.
     typealias MakeCore = () throws -> any AppCoreProtocol
 
-    enum Tab: Hashable {
+    /// The window's sections, in sidebar order.
+    enum Section: String, CaseIterable, Hashable {
         case inbox, approvals, codex, docket, senates
     }
 
@@ -30,15 +31,23 @@ final class CoreStore {
     /// The last local failure (an empty reply, Terminal); the core's own
     /// `lastError` covers what reached the daemon.
     var actionError: String?
-    var tab: Tab = .inbox
+    var section: Section? = .inbox
     /// Show only the threads for (or escalated past) this agent's path;
     /// `nil` is every agent.
     var agentFilter: String?
+    /// The inbox search field.
+    var search = ""
+    /// The thread open beside the inbox, by key.
+    var selectedThread: String?
+    /// The open thread as last read, and a failure to read it.
+    private(set) var thread: ThreadView?
+    private(set) var threadError: String?
     /// Which presided Senate's docket is shown, by key; `nil` is the first.
     var docketSenate: String?
-    /// Reply drafts by thread key, and which threads have the box open.
-    var drafts: [String: String] = [:]
-    var replying: Set<String> = []
+    /// Reply drafts by thread key. They outlive the app.
+    var drafts: [String: String] = [:] {
+        didSet { defaults.set(drafts, forKey: Self.draftsKey) }
+    }
     /// Keys of rows with an action in flight.
     private(set) var busy: Set<String> = []
 
@@ -47,9 +56,17 @@ final class CoreStore {
     @ObservationIgnored private var events: Task<Void, Never>?
     @ObservationIgnored private var openWindow: OpenWindowAction?
     @ObservationIgnored private let notifier = Notifier()
+    @ObservationIgnored private let defaults: UserDefaults
+    private static let draftsKey = "drafts"
 
-    init(makeCore: @escaping MakeCore = CoreStore.realCore, notifications: Bool = true) {
+    init(
+        makeCore: @escaping MakeCore = CoreStore.realCore,
+        defaults: UserDefaults = .standard,
+        notifications: Bool = true
+    ) {
         self.makeCore = makeCore
+        self.defaults = defaults
+        drafts = defaults.dictionary(forKey: Self.draftsKey) as? [String: String] ?? [:]
         if notifications {
             notifier.onOpen = { [weak self] in self?.show(.approvals) }
             notifier.setUp()
@@ -101,11 +118,45 @@ final class CoreStore {
         state.agents.filter { $0.inbox }
     }
 
-    /// The inbox, narrowed to one agent when a filter is set. A thread put to
-    /// the person waits on them whichever agent it was for, so it stays.
+    /// The inbox, narrowed to one agent when a filter is set and to what
+    /// matches the search. A thread put to the person waits on them
+    /// whichever agent it was for, so it stays in every agent's view.
     var inbox: [InboxThread] {
-        guard let filter = agentFilter else { return state.inbox }
-        return state.inbox.filter { $0.forAgents.contains(filter) || $0.escalated }
+        var threads = state.inbox
+        if let filter = agentFilter {
+            threads = threads.filter { $0.forAgents.contains(filter) || $0.escalated }
+        }
+        let query = search.trimmingCharacters(in: .whitespaces)
+        if !query.isEmpty {
+            threads = threads.filter { t in
+                [t.title, t.committee, t.from, t.newsLine ?? "", String(t.root)]
+                    .contains { $0.localizedStandardContains(query) }
+            }
+        }
+        return threads
+    }
+
+    /// The selected thread's row, while it is in the inbox.
+    var selectedRow: InboxThread? {
+        guard let key = selectedThread else { return nil }
+        return state.inbox.first { $0.key == key }
+    }
+
+    /// The sections shown: the docket only while one of your agents presides.
+    var sections: [Section] {
+        Section.allCases.filter { $0 != .docket || state.menu.docket != nil }
+    }
+
+    /// What waits in a section, for its badge.
+    func count(_ section: Section) -> UInt32 {
+        let c = state.counts
+        switch section {
+        case .inbox: return c.threads
+        case .approvals: return c.approvals
+        case .codex: return 0
+        case .docket: return c.docket
+        case .senates: return 0
+        }
     }
 
     /// The docket shown: the chosen presided Senate, else the first.
@@ -138,13 +189,20 @@ final class CoreStore {
     func attach(openWindow: OpenWindowAction) {
         let first = self.openWindow == nil
         self.openWindow = openWindow
-        if first, let v = ProcessInfo.processInfo.environment[Self.showEnv], !v.isEmpty {
+        guard first else { return }
+        if let v = ProcessInfo.processInfo.environment[Self.showEnv], !v.isEmpty {
             show(.inbox)
         }
+        #if DEBUG
+        if let dir = Snapshot.directory {
+            show(.inbox)
+            Snapshot.run(self, into: dir)
+        }
+        #endif
     }
 
-    func show(_ tab: Tab) {
-        self.tab = tab
+    func show(_ section: Section) {
+        self.section = section
         openWindow?(id: Self.windowID)
         NSApplication.shared.activate()
     }
@@ -156,12 +214,27 @@ final class CoreStore {
         do { try core.refresh() } catch { actionError = describe(error) }
     }
 
-    func toggleReply(_ thread: InboxThread) {
-        if replying.contains(thread.key) {
-            replying.remove(thread.key)
-        } else {
-            replying.insert(thread.key)
+    /// Read the open thread (which marks it seen). Called when it is
+    /// chosen and whenever its row says something new was said.
+    func loadThread(_ row: InboxThread) async {
+        guard let core else { return }
+        do {
+            let view = try await core.thread(committee: row.committee, thread: row.root)
+            guard selectedThread == row.key else { return }
+            thread = view
+            threadError = nil
+        } catch {
+            guard selectedThread == row.key else { return }
+            threadError = describe(error)
         }
+    }
+
+    /// The thread shown for `row`: the one read for it, if that is it.
+    func threadView(for row: InboxThread) -> ThreadView? {
+        guard let thread, thread.committee == row.committee, thread.root == row.root else {
+            return nil
+        }
+        return thread
     }
 
     func sendReply(_ thread: InboxThread) async {
@@ -175,7 +248,7 @@ final class CoreStore {
         }
         if ok {
             drafts[thread.key] = nil
-            replying.remove(thread.key)
+            await loadThread(thread)
         }
     }
 

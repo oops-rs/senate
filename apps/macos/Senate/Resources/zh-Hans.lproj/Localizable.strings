@@ -24,10 +24,8 @@
 "inbox.owner" = " · 负责：%@";
 "inbox.taken_by" = " · 由 %@ 接手";
 "inbox.escalated_to" = " · 转给 %@";
-"inbox.for" = "发给 %@";
 "inbox.triage" = "分流：%@";
 "inbox.reply" = "回复";
-"inbox.cancel_reply" = "取消回复";
 "inbox.take" = "接手";
 "inbox.take_help" = "接手这条线程：发给 agent 的排队投递会被取消";
 "inbox.close" = "关闭";
@@ -81,3 +79,13 @@
 "senates.stream_help" = "已投递到 seq %1$@；%2$lld 个会话";
 "senates.inbox_note" = "收件箱和回复针对第一个 Senate（你的 agent 直接就座的那个）；其余的显示它们的连接和议程。";
 "inbox.from_for" = "%1$@（代 %2$@）";
+"inbox.search" = "搜索线程";
+"inbox.no_selection" = "未选择线程";
+"inbox.no_selection_hint" = "选择一个线程以阅读和回复。";
+"inbox.taken" = "已接管";
+"inbox.thread_failed" = "无法读取该线程";
+"inbox.reply_placeholder" = "以你自己的身份回复…";
+"a11y.online" = "在线";
+"a11y.offline" = "离线";
+"a11y.dismiss" = "关闭";
+"a11y.unread" = "未读";
