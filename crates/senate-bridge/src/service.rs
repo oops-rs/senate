@@ -40,6 +40,7 @@
 use std::fmt::Write as _;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::Context;
 use senate_core::Locale;
@@ -411,6 +412,8 @@ pub struct Ran {
 pub trait Manager {
     /// Run one command. `Err` when it could not be started at all.
     fn run(&self, cmd: &Cmd) -> io::Result<Ran>;
+    /// Wait between tries; a fake returns at once.
+    fn sleep(&self, d: Duration);
 }
 
 /// The real thing: runs `launchctl` or `systemctl`.
@@ -428,21 +431,112 @@ impl Manager for SystemManager {
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         })
     }
+
+    fn sleep(&self, d: Duration) {
+        std::thread::sleep(d);
+    }
+}
+
+/// How often, and how long, install waits for launchd to let go of the
+/// old service after `bootout`, which returns before it has.
+const BOOTOUT_POLL: Duration = Duration::from_millis(100);
+const BOOTOUT_POLLS: usize = 50;
+/// `bootstrap` sometimes fails with "5: Input/output error" though
+/// nothing is wrong (seen right after a `bootout`); trying again a moment
+/// later works.
+const BOOTSTRAP_TRIES: usize = 3;
+const BOOTSTRAP_PAUSE: Duration = Duration::from_secs(1);
+
+fn output(r: &Ran) -> &str {
+    if r.stderr.trim().is_empty() {
+        r.stdout.trim()
+    } else {
+        r.stderr.trim()
+    }
+}
+
+/// launchd's transient `bootstrap` failure.
+fn io_error_5(r: &Ran) -> bool {
+    output(r).contains("5: Input/output error")
+}
+
+/// Whether `launchctl print` shows the service running `program`.
+fn launchd_runs(manager: &dyn Manager, target: &str, program: &Path) -> bool {
+    let Ok(r) = manager.run(&Cmd::new("launchctl", &["print", target], true)) else {
+        return false;
+    };
+    let want = text(program);
+    r.ok && r.stdout.lines().any(|l| {
+        l.trim()
+            .strip_prefix("program = ")
+            .is_some_and(|p| p.trim() == want)
+    }) && r
+        .stdout
+        .lines()
+        .any(|l| l.trim() == "state = running" || l.trim().starts_with("pid = "))
+}
+
+/// Load the launchd service: `bootout`, wait until the old one is gone,
+/// then `bootstrap`, tried again on launchd's transient error 5. When the
+/// tries run out the label may be loaded all the same: if it runs
+/// `program`, that is success; otherwise `kickstart -k` gets it going.
+fn load_launchd(
+    manager: &dyn Manager,
+    bootout: &Cmd,
+    bootstrap: &Cmd,
+    target: &str,
+    program: &Path,
+) -> anyhow::Result<()> {
+    run_all(manager, std::slice::from_ref(bootout))?;
+    let print = Cmd::new("launchctl", &["print", target], true);
+    for _ in 0..BOOTOUT_POLLS {
+        match manager.run(&print) {
+            Ok(r) if r.ok => manager.sleep(BOOTOUT_POLL),
+            _ => break,
+        }
+    }
+    let mut last = String::new();
+    for attempt in 1..=BOOTSTRAP_TRIES {
+        let r = match manager.run(bootstrap) {
+            Ok(r) if r.ok => return Ok(()),
+            Ok(r) => r,
+            Err(e) => anyhow::bail!("could not run `{}`: {e}", bootstrap.display()),
+        };
+        last = output(&r).to_owned();
+        if !io_error_5(&r) {
+            anyhow::bail!("`{}` failed: {last}", bootstrap.display());
+        }
+        tracing::debug!("{} (try {attempt}): {last}", bootstrap.display());
+        if attempt < BOOTSTRAP_TRIES {
+            manager.sleep(BOOTSTRAP_PAUSE);
+        }
+    }
+    if launchd_runs(manager, target, program) {
+        return Ok(());
+    }
+    let kickstart = Cmd::new("launchctl", &["kickstart", "-k", target], false);
+    match manager.run(&kickstart) {
+        Ok(r) if r.ok => Ok(()),
+        Ok(r) => anyhow::bail!(
+            "`{}` failed {BOOTSTRAP_TRIES} times ({last}), and `{}` failed too ({}). \
+             Run them by hand, or log out and back in, then `senate setup service install`",
+            bootstrap.display(),
+            kickstart.display(),
+            output(&r)
+        ),
+        Err(e) => anyhow::bail!(
+            "`{}` failed {BOOTSTRAP_TRIES} times ({last}), and `{}` could not run: {e}",
+            bootstrap.display(),
+            kickstart.display()
+        ),
+    }
 }
 
 fn run_all(manager: &dyn Manager, steps: &[Cmd]) -> anyhow::Result<()> {
     for step in steps {
         match manager.run(step) {
             Ok(r) if r.ok || step.may_fail => {}
-            Ok(r) => anyhow::bail!(
-                "`{}` failed: {}",
-                step.display(),
-                if r.stderr.trim().is_empty() {
-                    r.stdout.trim()
-                } else {
-                    r.stderr.trim()
-                }
-            ),
+            Ok(r) => anyhow::bail!("`{}` failed: {}", step.display(), output(&r)),
             Err(e) if step.may_fail => {
                 tracing::debug!("{}: {e}", step.display());
             }
@@ -674,6 +768,11 @@ pub struct InstallPlan {
     /// Whether the file is already there with these contents.
     pub unchanged: bool,
     pub steps: Vec<Cmd>,
+    pub platform: Platform,
+    /// launchd's `gui/<uid>/<label>`.
+    pub target: String,
+    /// The program the service file starts.
+    pub program: PathBuf,
     pub log: PathBuf,
     /// The Senate config file the programs are recorded in.
     pub config: PathBuf,
@@ -690,6 +789,9 @@ pub fn plan_install(spec: &Spec, senated: &Path) -> InstallPlan {
         file,
         contents,
         steps: install_steps(spec),
+        platform: spec.platform,
+        target: spec.target(),
+        program: spec.managed_senated(),
         log: spec.log(),
         config: spec.config.clone(),
         programs: agent_programs(&spec.config, spec.path.as_deref()),
@@ -809,7 +911,12 @@ pub fn apply_install(
         .with_context(|| format!("writing {}", plan.file.display()))?;
     // Before the daemon (re)starts: it reads them when it starts.
     record_programs(plan)?;
-    run_all(manager, &plan.steps)
+    match (plan.platform, plan.steps.as_slice()) {
+        (Platform::Macos, [bootout, bootstrap]) => {
+            load_launchd(manager, bootout, bootstrap, &plan.target, &plan.program)
+        }
+        _ => run_all(manager, &plan.steps),
+    }
 }
 
 /// What `uninstall` would do.
@@ -1674,6 +1781,8 @@ mod tests {
                 ..self.answer.clone()
             })
         }
+
+        fn sleep(&self, _: Duration) {}
     }
 
     #[test]
@@ -1743,15 +1852,20 @@ mod tests {
             assert!(!plan.unchanged);
             // Planning wrote nothing.
             assert!(!s.file().exists());
-            let fake = Fake::default();
+            // After bootout, launchd no longer knows the service.
+            let fake = Fake {
+                fail: Some("launchctl print"),
+                ..Fake::default()
+            };
             apply_install(&plan, &senated, &fake).unwrap();
             assert_eq!(std::fs::read_to_string(s.file()).unwrap(), plan.contents);
             assert!(s.senate_home.is_dir(), "the log's directory exists");
             let calls = fake.calls.borrow().clone();
-            assert_eq!(
-                calls,
-                plan.steps.iter().map(Cmd::display).collect::<Vec<_>>()
-            );
+            let mut want: Vec<_> = plan.steps.iter().map(Cmd::display).collect();
+            if platform == Platform::Macos {
+                want.insert(1, "launchctl print gui/501/dev.senate.senated".into());
+            }
+            assert_eq!(calls, want);
             // Again: the file is up to date.
             assert!(plan_install(&s, &senated).unchanged);
         }
@@ -1850,6 +1964,193 @@ mod tests {
         let plan = plan_install(&fresh, &gone);
         assert!(apply_install(&plan, &gone, &Fake::default()).is_err());
         assert!(!fresh.file().exists());
+    }
+
+    /// Answers each command from a script, in order, and counts the
+    /// pauses.
+    struct Scripted {
+        script: RefCell<std::collections::VecDeque<(&'static str, bool, String)>>,
+        calls: RefCell<Vec<String>>,
+        slept: RefCell<Vec<Duration>>,
+    }
+
+    impl Scripted {
+        fn new(script: Vec<(&'static str, bool, String)>) -> Self {
+            Self {
+                script: RefCell::new(script.into()),
+                calls: RefCell::default(),
+                slept: RefCell::default(),
+            }
+        }
+
+        fn done(&self) {
+            assert!(self.script.borrow().is_empty(), "left: {:?}", self.script);
+        }
+    }
+
+    impl Manager for Scripted {
+        fn run(&self, cmd: &Cmd) -> io::Result<Ran> {
+            let shown = cmd.display();
+            self.calls.borrow_mut().push(shown.clone());
+            let (want, ok, out) = self
+                .script
+                .borrow_mut()
+                .pop_front()
+                .unwrap_or_else(|| panic!("unscripted `{shown}`"));
+            assert!(shown.starts_with(want), "ran `{shown}`, expected `{want}`");
+            Ok(Ran {
+                ok,
+                stdout: if ok { out.clone() } else { String::new() },
+                stderr: if ok { String::new() } else { out },
+            })
+        }
+
+        fn sleep(&self, d: Duration) {
+            self.slept.borrow_mut().push(d);
+        }
+    }
+
+    const IO5: &str = "Bootstrap failed: 5: Input/output error";
+
+    fn launchd_plan(dir: &Path) -> (InstallPlan, PathBuf) {
+        let s = temp_spec(Platform::Macos, dir);
+        let senated = dir.join("senated");
+        std::fs::write(&senated, "x").unwrap();
+        (plan_install(&s, &senated), senated)
+    }
+
+    fn gone() -> (&'static str, bool, String) {
+        ("launchctl print", false, "Could not find service".into())
+    }
+
+    fn running(program: &Path) -> String {
+        format!(
+            "gui/501/dev.senate.senated = {{\n\tstate = running\n\tprogram = {}\n\tpid = 42\n}}\n",
+            program.display()
+        )
+    }
+
+    #[test]
+    fn install_waits_for_bootout_to_finish_before_bootstrap() {
+        let dir = tempfile::tempdir().unwrap();
+        let (plan, senated) = launchd_plan(dir.path());
+        let fake = Scripted::new(vec![
+            ("launchctl bootout", true, String::new()),
+            ("launchctl print", true, "state = running".into()),
+            ("launchctl print", true, "state = not running".into()),
+            gone(),
+            ("launchctl bootstrap", true, String::new()),
+        ]);
+        apply_install(&plan, &senated, &fake).unwrap();
+        fake.done();
+        assert_eq!(*fake.slept.borrow(), vec![BOOTOUT_POLL; 2]);
+    }
+
+    #[test]
+    fn bootout_that_never_finishes_still_goes_on_to_bootstrap() {
+        let dir = tempfile::tempdir().unwrap();
+        let (plan, senated) = launchd_plan(dir.path());
+        let mut script = vec![("launchctl bootout", false, "No such process".into())];
+        script.extend((0..BOOTOUT_POLLS).map(|_| ("launchctl print", true, String::new())));
+        script.push(("launchctl bootstrap", true, String::new()));
+        let fake = Scripted::new(script);
+        apply_install(&plan, &senated, &fake).unwrap();
+        fake.done();
+    }
+
+    #[test]
+    fn bootstrap_error_5_is_tried_again_after_a_pause() {
+        let dir = tempfile::tempdir().unwrap();
+        let (plan, senated) = launchd_plan(dir.path());
+        let fake = Scripted::new(vec![
+            ("launchctl bootout", true, String::new()),
+            gone(),
+            ("launchctl bootstrap", false, IO5.into()),
+            ("launchctl bootstrap", true, String::new()),
+        ]);
+        apply_install(&plan, &senated, &fake).unwrap();
+        fake.done();
+        assert_eq!(*fake.slept.borrow(), vec![BOOTSTRAP_PAUSE]);
+    }
+
+    #[test]
+    fn error_5_with_the_service_loaded_and_running_the_new_program_is_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let (plan, senated) = launchd_plan(dir.path());
+        let mut script = vec![("launchctl bootout", true, String::new()), gone()];
+        script.extend((0..BOOTSTRAP_TRIES).map(|_| ("launchctl bootstrap", false, IO5.into())));
+        script.push(("launchctl print", true, running(&plan.program)));
+        let fake = Scripted::new(script);
+        apply_install(&plan, &senated, &fake).unwrap();
+        fake.done();
+        assert!(!fake.calls.borrow().iter().any(|c| c.contains("kickstart")));
+    }
+
+    #[test]
+    fn error_5_every_time_ends_with_a_kickstart() {
+        let dir = tempfile::tempdir().unwrap();
+        let (plan, senated) = launchd_plan(dir.path());
+        let mut script = vec![("launchctl bootout", true, String::new()), gone()];
+        script.extend((0..BOOTSTRAP_TRIES).map(|_| ("launchctl bootstrap", false, IO5.into())));
+        // Loaded, but still the old program.
+        script.push(("launchctl print", true, running(Path::new("/old/senated"))));
+        script.push((
+            "launchctl kickstart -k gui/501/dev.senate.senated",
+            true,
+            String::new(),
+        ));
+        let fake = Scripted::new(script);
+        apply_install(&plan, &senated, &fake).unwrap();
+        fake.done();
+        assert_eq!(
+            *fake.slept.borrow(),
+            vec![BOOTSTRAP_PAUSE; BOOTSTRAP_TRIES - 1]
+        );
+    }
+
+    #[test]
+    fn when_the_kickstart_fails_too_the_error_names_both() {
+        let dir = tempfile::tempdir().unwrap();
+        let (plan, senated) = launchd_plan(dir.path());
+        let mut script = vec![("launchctl bootout", true, String::new()), gone()];
+        script.extend((0..BOOTSTRAP_TRIES).map(|_| ("launchctl bootstrap", false, IO5.into())));
+        script.push(gone());
+        script.push((
+            "launchctl kickstart",
+            false,
+            "Could not find service".into(),
+        ));
+        let fake = Scripted::new(script);
+        let err = apply_install(&plan, &senated, &fake)
+            .unwrap_err()
+            .to_string();
+        fake.done();
+        assert!(err.contains("launchctl bootstrap gui/501"), "{err}");
+        assert!(err.contains("failed 3 times"), "{err}");
+        assert!(err.contains("5: Input/output error"), "{err}");
+        assert!(err.contains("launchctl kickstart -k"), "{err}");
+        assert!(err.contains("Could not find service"), "{err}");
+    }
+
+    #[test]
+    fn another_bootstrap_error_fails_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let (plan, senated) = launchd_plan(dir.path());
+        let fake = Scripted::new(vec![
+            ("launchctl bootout", true, String::new()),
+            gone(),
+            (
+                "launchctl bootstrap",
+                false,
+                "Bootstrap failed: 122: Path had bad ownership".into(),
+            ),
+        ]);
+        let err = apply_install(&plan, &senated, &fake)
+            .unwrap_err()
+            .to_string();
+        fake.done();
+        assert!(err.contains("bad ownership"), "{err}");
+        assert!(fake.slept.borrow().is_empty());
     }
 
     #[test]

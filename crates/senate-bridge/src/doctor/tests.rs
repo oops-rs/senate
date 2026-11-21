@@ -52,6 +52,8 @@ impl Manager for Manned {
             stderr: String::new(),
         })
     }
+
+    fn sleep(&self, _: std::time::Duration) {}
 }
 
 fn manager(running: bool) -> Manned {
@@ -787,6 +789,8 @@ impl Manager for Says {
             stderr: String::new(),
         })
     }
+
+    fn sleep(&self, _: std::time::Duration) {}
 }
 
 fn versioned(dir: &Path, name: &str, version: &str) -> PathBuf {
