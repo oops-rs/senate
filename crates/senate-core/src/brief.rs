@@ -46,6 +46,15 @@ pub fn is_seat_removed(event: &Event) -> bool {
         && event.meta.contains_key(meta::SEAT_REMOVED)
 }
 
+/// The seat an in-thread message hands its thread to ([`meta::HANDED_TO`]).
+pub fn handed_to(event: &Event) -> Option<SenatorName> {
+    event
+        .meta
+        .get(meta::HANDED_TO)
+        .and_then(serde_json::Value::as_str)
+        .and_then(|s| s.strip_prefix("senator::").unwrap_or(s).parse().ok())
+}
+
 /// Characters of an open question's body kept in the brief.
 pub const QUESTION_CHARS: usize = 200;
 /// Default bound of [`Brief::to_markdown`].
@@ -230,6 +239,17 @@ impl BriefBuilder {
             && (event.kind == Kind::Answer || is_seat_removed(event))
         {
             self.open.remove(&root);
+        }
+        // Handed to the seat that replaced the one it was put to: that seat
+        // answers it now.
+        if let Some(root) = event.thread
+            && let Some(seat) = handed_to(event)
+            && let Some(question) = self.open.get_mut(&root)
+        {
+            let seat = Address::senator(&seat);
+            if !question.to.contains(&seat) {
+                question.to.push(seat);
+            }
         }
 
         match &event.kind {
@@ -813,6 +833,31 @@ mod tests {
         let brief = Brief::from_events(c(), &log.0);
         let open: Vec<_> = brief.open_questions.iter().map(|q| q.seq).collect();
         assert_eq!(open, [kept]);
+    }
+
+    #[test]
+    fn a_question_handed_to_a_new_seat_counts_it_among_its_recipients() {
+        let mut log = Log(Vec::new());
+        let q = log
+            .push(ev(Kind::Question, "senator::claude", "重试几次？").to(addr("senator::copilot")));
+        log.push(
+            ev(Kind::Question, "senator::wendell", "handed over")
+                .in_thread(q)
+                .to(addr("senator::codex"))
+                .with_meta(meta::HANDED_TO, json!("codex")),
+        );
+        // Handed twice to the same seat: listed once.
+        log.push(
+            ev(Kind::Note, "senator::wendell", "again")
+                .in_thread(q)
+                .with_meta(meta::HANDED_TO, json!("senator::codex")),
+        );
+        let brief = Brief::from_events(c(), &log.0);
+        assert_eq!(brief.open_questions.len(), 1);
+        assert_eq!(
+            brief.open_questions[0].to,
+            [addr("senator::copilot"), addr("senator::codex")]
+        );
     }
 
     #[test]

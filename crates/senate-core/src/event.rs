@@ -579,6 +579,12 @@ pub mod meta {
     /// name. The question is closed: the brief no longer lists it as open.
     /// Only the Speaker's note counts.
     pub const SEAT_REMOVED: &str = "seat_removed";
+    /// A message in an open thread handing it to another seat, because the
+    /// seat it was put to was replaced (`senate session replace`): the
+    /// senator (`"claude-…"`) that answers it now. The brief counts that
+    /// seat among the question's recipients, so the question stays open
+    /// when the replaced seat is unseated instead of being closed as gone.
+    pub const HANDED_TO: &str = "handed_to";
 }
 
 fn flag(event: &Event, key: &str) -> bool {
