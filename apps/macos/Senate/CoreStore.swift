@@ -68,7 +68,7 @@ final class CoreStore {
         self.defaults = defaults
         drafts = defaults.dictionary(forKey: Self.draftsKey) as? [String: String] ?? [:]
         if notifications {
-            notifier.onOpen = { [weak self] in self?.show(.approvals) }
+            notifier.handle = { [weak self] action in await self?.perform(action) }
             notifier.setUp()
         }
         connect()
@@ -179,6 +179,11 @@ final class CoreStore {
 
     private func apply(_ next: AppState) {
         Mentions.shared.update()
+        // An approval answered anywhere takes its banner down.
+        let still = Set(next.approvals.map(\.id))
+        for gone in state.approvals.map(\.id) where !still.contains(gone) {
+            notifier.withdrawApproval(gone)
+        }
         if next.lastError != state.lastError {
             actionError = nil
         }
@@ -186,6 +191,42 @@ final class CoreStore {
         if let filter = agentFilter, !state.agents.contains(where: { $0.path == filter }) {
             agentFilter = nil
         }
+    }
+
+    // MARK: Notifications
+
+    /// What a person did with a notification.
+    func perform(_ action: NotificationAction) async {
+        switch action {
+        case let .openThread(committee, root):
+            selectedThread = "\(committee):\(root)"
+            show(.inbox)
+        case let .reply(committee, root, body):
+            await reply(committee: committee, root: root, body: body, key: "\(committee):\(root)")
+        case let .take(committee, root):
+            await run("\(committee):\(root)") { core in
+                try await core.take(committee: committee, thread: root)
+            }
+        case .openApprovals:
+            show(.approvals)
+        case let .approve(id, allow):
+            await run("approval:\(id)") { core in
+                try await core.approve(id: id, decision: allow ? .allow : .deny)
+            }
+        case .openSessions:
+            show(.sessions)
+        case let .attach(label):
+            runInTerminal { try $0.attachTerminal(label: label) }
+        }
+    }
+
+    /// Ask for notification permission (Settings).
+    func requestNotifications() async -> Bool {
+        await notifier.requestAuthorization()
+    }
+
+    func notificationsAuthorized() async -> Bool {
+        await notifier.authorized()
     }
 
     // MARK: Window
@@ -243,16 +284,21 @@ final class CoreStore {
 
     func sendReply(_ thread: InboxThread) async {
         let body = drafts[thread.key] ?? ""
-        guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            actionError = L("error.empty_reply")
-            return
-        }
-        let ok = await run(thread.key) { core in
-            try await core.reply(committee: thread.committee, thread: thread.root, body: body)
-        }
-        if ok {
+        if await reply(committee: thread.committee, root: thread.root, body: body, key: thread.key) {
             drafts[thread.key] = nil
             await loadThread(thread)
+        }
+    }
+
+    /// Reply in a thread as the person; `key` is the row that waits.
+    @discardableResult
+    func reply(committee: String, root: UInt64, body: String, key: String) async -> Bool {
+        guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            actionError = L("error.empty_reply")
+            return false
+        }
+        return await run(key) { core in
+            try await core.reply(committee: committee, thread: root, body: body)
         }
     }
 
