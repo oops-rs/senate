@@ -202,6 +202,8 @@ pub struct CommitteeLine {
     /// `live`, `connecting`, `behind, retry in 12s (attempt 3)`, `stopped`.
     pub stream: String,
     pub live: bool,
+    /// The agent's duty on the committee, when it has one.
+    pub duty: Option<String>,
     /// The seq delivered so far.
     pub delivered: u64,
     pub sessions: u32,
@@ -521,6 +523,7 @@ fn senate_info(s: &StatusReply, primary: bool, locale: Locale, now: DateTime<Utc
                 committee: c.committee.to_string(),
                 stream: text::stream(locale, c.stream.as_ref(), now),
                 live: matches!(c.stream, Some(StreamState::Connected { .. })),
+                duty: c.duty.clone(),
                 delivered: c.delivered.0,
                 sessions: count(c.sessions),
             })

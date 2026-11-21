@@ -55,6 +55,8 @@ fn stream(committee: &str, agent: &str, sessions: usize) -> CommitteeStatus {
         stream: Some(StreamState::Connected { since: Utc::now() }),
         configured: true,
         sessions,
+        // `claude` reviews on refund-v2.
+        duty: (agent == "claude").then(|| "reviews refunds".to_string()),
     }
 }
 

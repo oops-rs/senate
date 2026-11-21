@@ -91,6 +91,9 @@ private struct SenateBlock: View {
                             .environment(\.mentionCommittee, line.committee)
                         Text(verbatim: "· \(line.committee) · \(line.stream)")
                             .foregroundStyle(.secondary)
+                        if let duty = line.duty {
+                            Text(verbatim: "· \(duty)").foregroundStyle(.secondary).lineLimit(1)
+                        }
                     }
                     .font(.callout)
                     .help(L("senates.stream_help", String(line.delivered), Int(line.sessions)))

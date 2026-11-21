@@ -765,6 +765,7 @@ mod tests {
                     stream: Some(StreamState::Connected { since: Utc::now() }),
                     configured: true,
                     sessions: 1,
+                    duty: None,
                 })
                 .collect(),
             sessions: Vec::new(),
