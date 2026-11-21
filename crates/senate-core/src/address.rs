@@ -360,7 +360,7 @@ mod tests {
             "speaker",
             "committee",
             "guest::chat/u_8f3a",
-            "guest::dial/Reviewer-7@example.com",
+            "guest::web/Reviewer-7@example.com",
             "chair",
             "north-desk::ledger::speaker",
         ] {

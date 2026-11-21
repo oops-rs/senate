@@ -336,7 +336,7 @@ mod tests {
             "senator::*",
             "speaker",
             "ledger::guest::chat/u_1",
-            "acme::ledger::guest::dial/a::b",
+            "acme::ledger::guest::web/a::b",
         ] {
             let l = loc(s);
             assert_eq!(l.to_string(), s);
@@ -361,8 +361,8 @@ mod tests {
         assert!(loc("senator::codex").is_here());
         // A guest id may hold `::`; the address starts at the first keyword.
         assert_eq!(
-            loc("acme::ledger::guest::dial/a::b").address().to_string(),
-            "guest::dial/a::b"
+            loc("acme::ledger::guest::web/a::b").address().to_string(),
+            "guest::web/a::b"
         );
     }
 

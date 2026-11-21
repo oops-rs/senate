@@ -765,12 +765,12 @@ mod tests {
             "id": "01JB0000000000000000000000",
             "ts": "2026-11-16T09:00:00Z",
             "kind": "poll",
-            "from": "guest:dial/reviewer",
+            "from": "guest:web/reviewer",
             "body": ""
         });
         let event: Event = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(event.kind, Kind::Other("poll".into()));
-        assert_eq!(event.from, Address::Other("guest:dial/reviewer".into()));
+        assert_eq!(event.from, Address::Other("guest:web/reviewer".into()));
         assert_eq!(event.author(), None);
         assert_eq!(serde_json::to_value(&event).unwrap(), value);
     }

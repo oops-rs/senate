@@ -370,8 +370,8 @@ mod tests {
         let original = r#"# my codex config
 model = "gpt-6"
 
-[mcp_servers.dial]
-url = "https://dial.example/mcp" # keep me
+[mcp_servers.other]
+url = "https://other.example/mcp" # keep me
 
 [[hooks.SessionStart]]
 matcher = "startup"
@@ -397,7 +397,7 @@ trusted_hash = "sha256:abc"
             "{text}"
         );
         assert!(
-            text.contains("url = \"https://dial.example/mcp\" # keep me"),
+            text.contains("url = \"https://other.example/mcp\" # keep me"),
             "{text}"
         );
         assert!(text.contains("trusted_hash = \"sha256:abc\""), "{text}");

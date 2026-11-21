@@ -485,7 +485,7 @@ fn install_sets_up_codex_in_its_config_toml() {
     std::fs::create_dir_all(&claude_dir).unwrap();
     std::fs::create_dir_all(&codex_home).unwrap();
     let config = codex_home.join("config.toml");
-    let original = "# mine\nmodel = \"gpt-6\"\n\n[mcp_servers.dial]\nurl = \"https://x/mcp\"\n";
+    let original = "# mine\nmodel = \"gpt-6\"\n\n[mcp_servers.other]\nurl = \"https://x/mcp\"\n";
     std::fs::write(&config, original).unwrap();
     std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
     let (claude_bin, _log) = fake_claude(dir.path());

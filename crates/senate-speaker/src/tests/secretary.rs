@@ -572,7 +572,7 @@ fn a_model_wire_is_checked_layered_and_keyed() {
     );
 
     let above = ModelSettings {
-        model: Some("gpt-6.1-sol".into()),
+        model: Some("gpt-6.1-mini".into()),
         ..ModelSettings::default()
     };
     assert_eq!(above.over(&gateway).wire.as_deref(), Some("responses"));
@@ -641,7 +641,7 @@ fn a_model_fallback_is_parsed_checked_and_tiered() {
 
     // A layer above that names no fallback keeps the one below.
     let above = ModelSettings {
-        model: Some("gpt-6.1-sol".into()),
+        model: Some("gpt-6.1-mini".into()),
         ..ModelSettings::default()
     };
     assert_eq!(above.over(&model).fallback, model.fallback);
