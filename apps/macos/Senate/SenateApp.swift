@@ -60,6 +60,9 @@ struct MenuContent: View {
         if let docket = store.state.menu.docket {
             Text(verbatim: docket)
         }
+        if let prompts = store.state.menu.prompts {
+            Button(prompts) { store.show(.sessions) }
+        }
         if let setup = store.setupError {
             Text(verbatim: L("menu.setup", setup))
         }
@@ -74,6 +77,8 @@ struct MenuContent: View {
             .keyboardShortcut("i")
         Button(L("menu.open_approvals")) { store.show(.approvals) }
             .keyboardShortcut("a")
+        Button(L("menu.open_sessions")) { store.show(.sessions) }
+            .keyboardShortcut("s")
         if store.state.menu.docket != nil {
             Button(L("menu.open_docket")) { store.show(.docket) }
                 .keyboardShortcut("d")

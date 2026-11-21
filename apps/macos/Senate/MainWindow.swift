@@ -30,6 +30,9 @@ struct MainWindow: View {
                 .disabled(!store.state.online)
                 .keyboardShortcut("r")
             }
+            if store.section == .sessions {
+                SessionsToolbar(store: store)
+            }
         }
         .onChange(of: store.state.menu.docket == nil) { _, gone in
             if gone && store.section == .docket { store.section = .inbox }
@@ -40,7 +43,7 @@ struct MainWindow: View {
         switch store.section {
         case .inbox, nil: InboxView(store: store)
         case .approvals: ApprovalsView(store: store)
-        case .codex: CodexView(store: store)
+        case .sessions: SessionsView(store: store)
         case .docket: DocketView(store: store)
         case .senates: SenatesView(store: store)
         }
@@ -70,7 +73,7 @@ extension CoreStore.Section {
         switch self {
         case .inbox: L("tab.inbox")
         case .approvals: L("tab.approvals")
-        case .codex: L("tab.codex")
+        case .sessions: L("tab.sessions")
         case .docket: L("tab.docket")
         case .senates: L("tab.senates")
         }
@@ -80,7 +83,7 @@ extension CoreStore.Section {
         switch self {
         case .inbox: "tray"
         case .approvals: "checkmark.shield"
-        case .codex: "terminal"
+        case .sessions: "terminal"
         case .docket: "list.bullet.rectangle"
         case .senates: "building.columns"
         }

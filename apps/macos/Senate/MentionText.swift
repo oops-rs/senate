@@ -96,9 +96,14 @@ final class Mentions {
         }
     }
 
+    /// Copy a mention's id, bracketed as it is written in running text.
     static func copy(_ id: String) {
+        copyText("[\(id)]")
+    }
+
+    static func copyText(_ text: String) {
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString("[\(id)]", forType: .string)
+        NSPasteboard.general.setString(text, forType: .string)
     }
 }
 

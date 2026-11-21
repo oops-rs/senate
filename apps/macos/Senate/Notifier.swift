@@ -60,6 +60,26 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         }
     }
 
+    /// A permission prompt waits in a hosted terminal: the person decides it
+    /// there, so the notification leads to the terminal.
+    func promptWaiting(_ session: HostedSession) {
+        guard enabled else { return }
+        let content = UNMutableNotificationContent()
+        content.title = L("notify.prompt", session.label)
+        content.body = session.promptTool ?? L("notify.prompt_body")
+        content.sound = .default
+        let request = UNNotificationRequest(
+            identifier: "prompt:\(session.sessionId)",
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error {
+                NSLog("Senate: notification: \(error.localizedDescription)")
+            }
+        }
+    }
+
     // Shown even while the app is frontmost.
     nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter,

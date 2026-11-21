@@ -22,7 +22,7 @@ final class CoreStore {
 
     /// The window's sections, in sidebar order.
     enum Section: String, CaseIterable, Hashable {
-        case inbox, approvals, codex, docket, senates
+        case inbox, approvals, sessions, docket, senates
     }
 
     private(set) var state: AppState = .placeholder
@@ -152,8 +152,10 @@ final class CoreStore {
         let c = state.counts
         switch section {
         case .inbox: return c.threads
-        case .approvals: return c.approvals
-        case .codex: return 0
+        // A prompt waiting in a hosted terminal is something to approve
+        // too, though it is answered there.
+        case .approvals: return c.approvals + c.prompts
+        case .sessions: return c.prompts
         case .docket: return c.docket
         case .senates: return 0
         }
@@ -171,6 +173,7 @@ final class CoreStore {
         case let .state(next): apply(next)
         case let .approval(approval): notifier.approvalRequested(approval)
         case let .person(note): notifier.forPerson(note)
+        case let .prompt(session): notifier.promptWaiting(session)
         }
     }
 
@@ -274,10 +277,35 @@ final class CoreStore {
     /// Open Terminal.app running Codex: resuming `thread` in its directory,
     /// or a new one.
     func openTerminal(thread: String?) {
+        runInTerminal { try $0.codexTerminal(threadId: thread) }
+    }
+
+    /// Open a hosted session's terminal in Terminal (`senate attach`).
+    func attach(_ session: HostedSession) {
+        runInTerminal { try $0.attachTerminal(label: session.label) }
+    }
+
+    /// Every hosted terminal side by side, in Terminal.
+    func openWatch() {
+        runInTerminal { $0.watchTerminal() }
+    }
+
+    func stop(_ session: HostedSession) async {
+        await run("session:\(session.label)") { core in
+            try await core.stopSession(label: session.label)
+        }
+    }
+
+    func restore(_ session: HostedSession) async {
+        await run("session:\(session.label)") { core in
+            try await core.restoreSession(label: session.label)
+        }
+    }
+
+    private func runInTerminal(_ command: (any AppCoreProtocol) throws -> TerminalCommand) {
         guard let core else { return }
         do {
-            let command = try core.codexTerminal(threadId: thread)
-            try Terminal.run(command)
+            try Terminal.run(command(core))
             actionError = nil
         } catch {
             actionError = describe(error)
@@ -307,6 +335,7 @@ enum CoreEvent: Sendable {
     case state(AppState)
     case approval(ApprovalRequest)
     case person(PersonNote)
+    case prompt(HostedSession)
 }
 
 /// The core's listener: called on the core's threads, it only yields each
@@ -321,6 +350,7 @@ nonisolated final class CoreEvents: CoreListener {
     func onState(state: AppState) { continuation.yield(.state(state)) }
     func onApprovalRequested(approval: ApprovalRequest) { continuation.yield(.approval(approval)) }
     func onForPerson(note: PersonNote) { continuation.yield(.person(note)) }
+    func onPromptWaiting(session: HostedSession) { continuation.yield(.prompt(session)) }
 }
 
 /// An error as the user should read it. What the core words (`Invalid`,
@@ -352,13 +382,15 @@ extension AppState {
             pending: L("menu.daemon_down"),
             lines: [],
             docket: nil,
+            prompts: nil,
             badge: nil
         ),
         inbox: [],
         approvals: [],
         codex: [],
         docket: [],
-        counts: Counts(threads: 0, approvals: 0, codex: 0, docket: 0, pending: 0),
+        sessions: [],
+        counts: Counts(threads: 0, approvals: 0, codex: 0, docket: 0, prompts: 0, pending: 0),
         lastError: nil
     )
 }
