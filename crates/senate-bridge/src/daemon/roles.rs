@@ -18,7 +18,9 @@
 //!   ([`senate_core::ChairFold`]); this side asks `GET .../chair` when a
 //!   stream opens and follows the log after. What is addressed to `chair`
 //!   is pushed to the chair's session (an agent), or announced to the
-//!   person (when the person chairs).
+//!   person (when the person chairs). When the chair moves, what is open on
+//!   the chair's docket goes to the new chair and is withdrawn from the old
+//!   one where it was not pushed yet ([`Shared::chair_pass`]).
 //! - **Escalation** goes one step up: a member to its chair, the chair (or
 //!   a committee with no chair) to the desk, a desk worker to the Speaker.
 //! - **Secretaries** are registered with the Senate (`/v1/secretaries`);
@@ -51,6 +53,8 @@ pub(crate) struct ChairCache {
     fold: ChairFold,
     /// Whether the fold saw the committee from its first event.
     whole: Option<bool>,
+    /// The last senator this side knew to chair it.
+    held: Option<SenatorName>,
 }
 
 impl ChairCache {
@@ -82,6 +86,19 @@ impl ChairCache {
             self.known = Some((p.agent, ChairSource::FirstAgent));
         }
         false
+    }
+
+    /// Whether the chair passed from one senator to another since this was
+    /// last asked: the first chair known is no move, and neither is a
+    /// committee left with none for a while.
+    fn handed_over(&mut self) -> bool {
+        let Some(now) = self.chair() else {
+            return false;
+        };
+        if self.held.as_ref() == Some(&now) {
+            return false;
+        }
+        self.held.replace(now).is_some()
     }
 
     fn chair(&self) -> Option<SenatorName> {
@@ -270,6 +287,10 @@ impl Shared {
             let cache = chairs.entry(event.committee.clone()).or_default();
             let before = cache.chair();
             let seats_changed = cache.observe(event);
+            if cache.handed_over() {
+                lock(&self.chair_moved).insert(event.committee.clone());
+                self.work.notify_one();
+            }
             (seats_changed, cache.chair() != before)
         };
         if moved {
@@ -299,6 +320,10 @@ impl Shared {
                 .chair
                 .clone()
                 .map(|c| (c, info.source.unwrap_or(ChairSource::Set)));
+            if cache.handed_over() {
+                lock(&self.chair_moved).insert(info.committee.clone());
+                self.work.notify_one();
+            }
             cache.chair() != before
         };
         if moved {
@@ -697,6 +722,72 @@ impl Shared {
                     "the question is no longer the secretary's to cover; withdrawn"
                 );
             }
+        }
+        Ok(())
+    }
+
+    /// Hand what waits on `chair` to the new chair of each committee whose
+    /// chair moved. Who a message to `chair` is for is otherwise decided
+    /// once, as each agent's stream passes it ([`Shared::for_chair`]): a
+    /// stream that passed it while another chaired never comes back to it.
+    /// So on a move, every item on the chair's docket (the roots addressed
+    /// to `chair` that the chair has not answered and that are not
+    /// archived) is queued for the new chair when it is an agent served
+    /// here, unless it wrote it; and what is still queued, not pushed, for any other agent
+    /// only as `chair` is withdrawn ([`crate::state::CHAIR_MOVED`]). An item the
+    /// new chair lost on an earlier move is queued again; one it was pushed
+    /// already is not.
+    pub(crate) async fn chair_pass(&self) {
+        let committees = std::mem::take(&mut *lock(&self.chair_moved));
+        for committee in committees {
+            if let Err(e) = self.hand_over(&committee).await {
+                // Looked at again on the next pass.
+                tracing::warn!(%committee, "handing the chair's items over: {e}");
+                lock(&self.chair_moved).insert(committee);
+            }
+        }
+    }
+
+    async fn hand_over(&self, committee: &CommitteeId) -> anyhow::Result<()> {
+        let Some(chair) = self.chair_of(committee) else {
+            return Ok(());
+        };
+        let addressed = |event: &Event, agent: &SenatorName| {
+            event.to.contains(&Address::Chair) && !event.is_directed_to(&Address::senator(agent))
+        };
+        for item in self.store.waiting_on(committee)? {
+            if item.agent != chair && addressed(&item.event, &item.agent) {
+                let gone = self.store.cancel(
+                    Some(&item.agent),
+                    committee,
+                    item.event.seq,
+                    false,
+                    crate::state::CHAIR_MOVED,
+                )?;
+                if !gone.is_empty() {
+                    tracing::info!(%committee, seq = %item.event.seq, agent = %item.agent, %chair, "the chair moved; withdrawn");
+                }
+            }
+        }
+        if self.people().is_person(&chair)
+            || !(self.served_agents()?.contains(&chair) && self.seating().owns(&chair))
+        {
+            return Ok(());
+        }
+        let page = tokio::time::timeout(ROLE_TIMEOUT, self.api.chair_docket(committee))
+            .await
+            .map_err(|_| anyhow::anyhow!("the server was slow"))??;
+        let mut queued = false;
+        for item in page.items {
+            let event = item.event;
+            if self.for_chair(&chair, &event) && self.store.enqueue_for_chair(&chair, &event)? {
+                tracing::info!(%committee, seq = %event.seq, %chair, "the chair moved; handed to the new chair");
+                queued = true;
+            }
+        }
+        if queued {
+            self.cap_unbound(&chair, committee)?;
+            self.work.notify_one();
         }
         Ok(())
     }

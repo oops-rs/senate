@@ -190,8 +190,9 @@ pub enum ItemStatus {
     Queued,
     Delivered,
     /// Never to be pushed: triage parked it on a person, a person took the
-    /// thread over, or the Speaker answered it for this agent while it had
-    /// taken over. `via` says which (`parked`, `takeover`, `answered`).
+    /// thread over, the Speaker answered it for this agent while it had
+    /// taken over, or the chair moved to another agent ([`CHAIR_MOVED`]).
+    /// `via` says which (`parked`, `takeover`, `answered`, `chair-moved`).
     Cancelled,
 }
 
@@ -217,6 +218,10 @@ impl ItemStatus {
         }
     }
 }
+
+/// `via` of an item addressed to `chair` that was withdrawn from an agent
+/// because the chair moved to another.
+pub const CHAIR_MOVED: &str = "chair-moved";
 
 /// `(agent, committee, seq)`: a queue item's identity.
 pub type ItemKey = (SenatorName, CommitteeId, Seq);
@@ -858,6 +863,44 @@ impl Store {
             ],
         )?;
         Ok(added > 0)
+    }
+
+    /// Queue `event`, addressed to `chair`, for `agent` now that it chairs:
+    /// as [`Store::enqueue`], and an item the agent lost when the chair
+    /// last moved away from it ([`CHAIR_MOVED`]) is pending again. `false`
+    /// when the agent has the item in any other state.
+    pub fn enqueue_for_chair(
+        &self,
+        agent: &SenatorName,
+        event: &Event,
+    ) -> Result<bool, StoreError> {
+        let json = serde_json::to_string(event).map_err(|e| StoreError::Corrupt(e.to_string()))?;
+        let added = self.conn().execute(
+            "INSERT INTO queue (agent, committee, seq, event, status, enqueued_at)
+             VALUES (?1, ?2, ?3, ?4, 'pending', ?5)
+             ON CONFLICT (agent, committee, seq) DO UPDATE SET
+                 status = 'pending', session_id = NULL, via = NULL,
+                 event = excluded.event, enqueued_at = excluded.enqueued_at
+             WHERE queue.status = 'cancelled' AND queue.via = ?6",
+            params![
+                agent_text(agent),
+                event.committee.as_str(),
+                seq_sql(event.seq),
+                json,
+                now_ms(),
+                CHAIR_MOVED,
+            ],
+        )?;
+        Ok(added > 0)
+    }
+
+    /// Everything on `committee` not yet pushed (pending, or held for
+    /// hooks), any agent's.
+    pub fn waiting_on(&self, committee: &CommitteeId) -> Result<Vec<QueueItem>, StoreError> {
+        self.items(
+            "committee = ?1 AND status IN ('pending', 'queued')",
+            &[&committee.as_str()],
+        )
     }
 
     /// Move `agent`'s cursor past `seq` without keeping anything (an event

@@ -534,6 +534,9 @@ pub(crate) struct Shared {
     /// Items queued for a local secretary to cover that were not yet pushed
     /// or withdrawn.
     cover_open: Mutex<BTreeSet<ItemKey>>,
+    /// Committees whose chair moved from one senator to another: what
+    /// waits on `chair` there is to be handed to the new chair ([`roles`]).
+    chair_moved: Mutex<BTreeSet<CommitteeId>>,
 }
 
 /// What the automatic checkpoints know of one worktree.
@@ -813,6 +816,7 @@ impl Shared {
             chairs: Mutex::new(BTreeMap::new()),
             companion_registered: Mutex::new(BTreeSet::new()),
             cover_dirty: Mutex::new(BTreeSet::new()),
+            chair_moved: Mutex::new(BTreeSet::new()),
             cover_open: Mutex::new(BTreeSet::new()),
         }))
     }
@@ -2231,6 +2235,7 @@ impl Shared {
     /// becomes ready, if one is waiting.
     async fn delivery_pass(self: &Arc<Self>) -> anyhow::Result<Option<Instant>> {
         let cover_due = self.cover_pass().await;
+        self.chair_pass().await;
         let pending = self.store.pending()?;
         let sessions = self.checked_live_sessions()?;
         let mut plan: BTreeMap<String, Vec<QueueItem>> = BTreeMap::new();

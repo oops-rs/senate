@@ -886,9 +886,36 @@ async fn chair(State(st): St, UrlPath(committee): UrlPath<String>, headers: Head
     .into_response()
 }
 
+#[derive(serde::Deserialize)]
+struct DocketQuery {
+    role: Option<String>,
+}
+
+/// What awaits the chair, roughly as the server keeps it: each root to
+/// `chair` until someone other than its author writes in its thread.
+fn chair_items(events: &[Event]) -> Vec<senate_core::DocketItem> {
+    events
+        .iter()
+        .filter(|e| {
+            e.thread.is_none()
+                && matches!(e.kind, Kind::Question | Kind::Request | Kind::Note)
+                && e.to.contains(&Address::Chair)
+                && !events
+                    .iter()
+                    .any(|r| r.thread == Some(e.seq) && r.from != e.from)
+        })
+        .map(|e| senate_core::DocketItem {
+            event: e.clone(),
+            awaiting: senate_core::Awaiting::Addressed,
+            intended: None,
+        })
+        .collect()
+}
+
 async fn docket(
     State(st): St,
     UrlPath(committee): UrlPath<String>,
+    Query(q): Query<DocketQuery>,
     headers: HeaderMap,
 ) -> Response {
     if let Err(error) = auth(&st, &headers) {
@@ -898,12 +925,16 @@ async fn docket(
     let Some((chair, connected)) = &inner.chair else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    let items = match q.role.as_deref() {
+        Some("chair") => chair_items(&inner.events.get(&committee).cloned().unwrap_or_default()),
+        _ => Vec::new(),
+    };
     Json(senate_core::DocketPage {
         head: Seq(inner.head(&committee)),
         committee: CommitteeId::new(committee).unwrap(),
         speaker: inner.speaker.clone(),
         office: None,
-        items: Vec::new(),
+        items,
         covered: BTreeMap::new(),
         seats: vec![senate_core::docket::SeatFacts {
             agent: chair.clone(),
