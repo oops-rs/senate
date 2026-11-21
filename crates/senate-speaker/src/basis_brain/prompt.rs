@@ -53,8 +53,9 @@ macro_rules! target_rule {
          \"codex\"), only when the speaker named that agent (\"alice's codex\", 「alice 的 \
          codex」, \"codex\"). Never choose one of a person's agents yourself when the speaker \
          did not name it, and never guess a person who is not named. The one exception is a \
-         question that names nobody, relayed by duty (see the rule on duties): its target is \
-         that seat's relay target exactly as the seats on this committee list it (e.g. \
+         question or change request that names nobody, relayed by duty (see the rule on \
+         duties): its target is that seat's relay target exactly as the seats on this committee \
+         list it (e.g. \
          \"codex\" or \"north-desk::responder\")."
     };
 }
@@ -63,23 +64,25 @@ macro_rules! target_rule {
 /// persona of both modes.
 macro_rules! duty_rule {
     () => {
-        "- Duties: a question that names no person, agent or seat to take it (e.g. \"@Speaker \
-         how is Commons deployed?\", 「@Speaker Commons 是怎么部署的？」) may belong to a seat on \
-         this committee by what it does there. Read the duty of every seat listed under the \
-         seats on this committee (here and in child Senates). When the question's subject falls \
-         within exactly one seat's duty, relay it to that seat: action relay, kind question, one \
-         target written exactly as that seat's relay target is listed, the body the question as \
-         asked. Do this even when the seat is away: the system answers for it or holds the \
-         question. When it falls within several seats' duties, or none, do not relay by duty: \
-         answer from the log, or say plainly that you cannot and who might know. Never route by \
-         duty when the speaker named someone (a person, an agent or a seat): the target is who \
-         they named. Route only questions by duty, never a decision, a binding or another \
-         operation. Duty routing is only for questions about the work or a subject area. A \
-         question about this Senate's own state is yours to answer, from the seats, the roster, \
-         the brief and the log, and is never relayed by duty, even when a seat's duty names the \
-         same word (\"committee\", \"Senate\", \"Speaker\"): who is here, the seats and their \
-         duties, presence, status, the brief, decisions, open items, who owns what. A seat in a \
-         child Senate sees only its own Senate, so it cannot answer for this one. For example, \
+        "- Duties: a question or a change request that names no person, agent or seat to take \
+         it (e.g. \"@Speaker how is Commons deployed?\", 「@Speaker Commons 是怎么部署的？」, \
+         「@Speaker 请在 commons 仓库的 deploy/vm/README.md 末尾加一节，开分支、本地提交」) may \
+         belong to a seat on this committee by what it does there. Read the duty of every seat \
+         listed under the seats on this committee (here and in child Senates). When its subject \
+         falls within exactly one seat's duty, relay it to that seat: action relay, kind \
+         question for a question, kind request for a change or a task to carry out, one target \
+         written exactly as that seat's relay target is listed, the body as said. Do this even \
+         when the seat is away: the system answers for it or holds the message. When it falls \
+         within several seats' duties, or none, do not relay by duty: answer from the log, or \
+         say plainly that you cannot and who might know. Never route by duty when the speaker \
+         named someone (a person, an agent or a seat): the target is who they named. Route only \
+         questions and change requests by duty, never a decision, a binding or another \
+         operation. Duty routing is only for the work or a subject area. A question about this \
+         Senate's own state is yours to answer, from the seats, the roster, the brief and the \
+         log, and is never relayed by duty, even when a seat's duty names the same word \
+         (\"committee\", \"Senate\", \"Speaker\"): who is here, the seats and their duties, \
+         presence, status, the brief, decisions, open items, who owns what. A seat in a child \
+         Senate sees only its own Senate, so it cannot answer for this one. For example, \
          「@Speaker 现在有哪些 agent，他们的职责是什么」 (\"@Speaker which agents are here and \
          what are their duties?\") is answered by you from the seats on this committee, never \
          relayed to a seat whose duty mentions committees."
@@ -455,9 +458,19 @@ pub(crate) const INTENT_DESCRIPTION: &str = "Report what the Speaker should do a
 /// What each action of the wire means, `none` aside: part of the `action`
 /// field's description in the interpret schema and, whole, in the agent
 /// schema (where there is no `none`).
+macro_rules! work_described {
+    () => {
+        "work: the speaker wants you to do coding work yourself, starting from a colleague's checkpoint (e.g. \"finish alice's retry path\", 「把 alice 的重试路径做完」, \"add the tests on top of bob's branch\", 「接着 bob 的分支把测试补上」); it is restated for them to confirm, and a PR is opened on their behalf."
+    };
+}
+
+/// `actions_described!` when this Senate does no coding work itself: a
+/// change someone asks for is relayed (by name, or by duty as a request).
+const NO_WORK: &str = "There is no work action here: you do no coding work yourself. A change or task someone asks for is relayed to an agent: to the one they named, or by duty (kind request).";
+
 macro_rules! actions_described {
     () => {
-        "relay: the speaker wants something passed to one or more colleagues' agents (e.g. \"tell alice's agent …\", 「告诉 alice 的 agent …」, \"ask bob's codex …\", 「问一下 bob 的 agent …」). decide: the speaker wants a decision recorded for the committee (e.g. \"note this: refunds are capped at 30 days\", 「记一下：退款上限 30 天」, \"remember, the idempotency key is always Idempotency-Key\", 「记住，幂等键统一用 Idempotency-Key」, \"decided: …\", 「定了：…」); it is restated for them to confirm. recall: the speaker asks what has been decided or what you remember about the committee (e.g. \"what do you remember\", 「你记得什么」, \"what's settled so far\", 「现在定了哪些」, \"what did we decide before\", 「之前决定了什么」); the brief is sent. bind: the speaker wants this group bound to a committee. unbind: the speaker wants this group's binding removed. status: the speaker asks what this group is bound to or which agents are online. adopt_agent_group: the speaker wants this group to be a committee's Agent group, where agents' traffic and task cards go (e.g. \"make this group refund-v2's agent group\", 「把这个群设为 refund-v2 的 agent 群」, \"this is the agent group\", 「这个群是 agent 群」). invite_to_agent_group: the speaker wants people pulled into the Agent group (e.g. \"add @alice to the agent group\", 「把 @alice 拉进 agent 群」). set_output_level: the speaker wants the Agent group to get less or more traffic (e.g. \"agent group: answers only\" / 「agent 群只回答案」 is answers, \"send status to the agent group\" / 「agent 群发状态」 is status, \"everything, every round trip\" / 「全部往返」 is all). work: the speaker wants you to do coding work yourself, starting from a colleague's checkpoint (e.g. \"finish alice's retry path\", 「把 alice 的重试路径做完」, \"add the tests on top of bob's branch\", 「接着 bob 的分支把测试补上」); it is restated for them to confirm, and a PR is opened on their behalf. reassign: the speaker wants one colleague's work on this committee handed to another (e.g. \"hand alice's work on refund-v2 to bob\", 「把 alice 在 refund-v2 的工作交给 bob」), or handed back (e.g. \"give refund-v2 back to alice\", 「把 refund-v2 交还给 alice」: to is alice, from is whoever has it now if said, else alice too)."
+        concat!("relay: the speaker wants something passed to one or more colleagues' agents (e.g. \"tell alice's agent …\", 「告诉 alice 的 agent …」, \"ask bob's codex …\", 「问一下 bob 的 agent …」). decide: the speaker wants a decision recorded for the committee (e.g. \"note this: refunds are capped at 30 days\", 「记一下：退款上限 30 天」, \"remember, the idempotency key is always Idempotency-Key\", 「记住，幂等键统一用 Idempotency-Key」, \"decided: …\", 「定了：…」); it is restated for them to confirm. recall: the speaker asks what has been decided or what you remember about the committee (e.g. \"what do you remember\", 「你记得什么」, \"what's settled so far\", 「现在定了哪些」, \"what did we decide before\", 「之前决定了什么」); the brief is sent. bind: the speaker wants this group bound to a committee. unbind: the speaker wants this group's binding removed. status: the speaker asks what this group is bound to or which agents are online. adopt_agent_group: the speaker wants this group to be a committee's Agent group, where agents' traffic and task cards go (e.g. \"make this group refund-v2's agent group\", 「把这个群设为 refund-v2 的 agent 群」, \"this is the agent group\", 「这个群是 agent 群」). invite_to_agent_group: the speaker wants people pulled into the Agent group (e.g. \"add @alice to the agent group\", 「把 @alice 拉进 agent 群」). set_output_level: the speaker wants the Agent group to get less or more traffic (e.g. \"agent group: answers only\" / 「agent 群只回答案」 is answers, \"send status to the agent group\" / 「agent 群发状态」 is status, \"everything, every round trip\" / 「全部往返」 is all). ", work_described!(), " reassign: the speaker wants one colleague's work on this committee handed to another (e.g. \"hand alice's work on refund-v2 to bob\", 「把 alice 在 refund-v2 的工作交给 bob」), or handed back (e.g. \"give refund-v2 back to alice\", 「把 refund-v2 交还给 alice」: to is alice, from is whoever has it now if said, else alice too).")
     };
 }
 
@@ -474,11 +487,40 @@ const TARGETS_DESCRIPTION: &str = concat!(
     " invite_to_agent_group: who is invited: people's handles from the roster (e.g. \"alice\"), one per person named; never an agent. Never guess a person who is not named."
 );
 
-pub(crate) fn intent_spec() -> OutputSpec {
-    OutputSpec::new("speaker_intent", INTENT_DESCRIPTION, intent_schema()).with_tools()
+/// The actions' description: with the `work` action only when this
+/// Senate does coding work itself.
+fn actions_for(work: bool, described: &str) -> String {
+    if work {
+        described.to_owned()
+    } else {
+        described.replace(work_described!(), NO_WORK)
+    }
 }
 
-fn intent_schema() -> Value {
+/// `work` is offered only when coding work is configured here: without it
+/// the action, and its `target` and `instruction`, are not in the schema.
+pub(crate) fn intent_spec(work: bool) -> OutputSpec {
+    OutputSpec::new("speaker_intent", INTENT_DESCRIPTION, intent_schema(work)).with_tools()
+}
+
+fn intent_schema(work: bool) -> Value {
+    let mut schema = full_intent_schema();
+    let description = actions_for(work, INTENT_ACTION_DESCRIPTION);
+    schema["properties"]["action"]["description"] = Value::String(description);
+    if !work {
+        let properties = schema["properties"]
+            .as_object_mut()
+            .expect("the intent schema has properties");
+        properties.remove("target");
+        properties.remove("instruction");
+        if let Some(actions) = properties["action"]["enum"].as_array_mut() {
+            actions.retain(|a| a.as_str() != Some("work"));
+        }
+    }
+    schema
+}
+
+fn full_intent_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
@@ -494,8 +536,8 @@ fn intent_schema() -> Value {
             },
             "kind": {
                 "type": "string",
-                "enum": ["question", "note"],
-                "description": "relay only. question whenever the speaker expects the agent to answer or report back, including a statement followed by a question, even an implicit or casual one (e.g. \"the refund cap is 30 days now, have you changed yours?\", 「退款上限改成 30 天了，你那边改了吗」, \"…, let me know when it's done\", 「…，弄好了说一声」); an unanswered question is answered on the agent's behalf. note only when nothing is asked: information or an instruction for the agent to take into account."
+                "enum": ["question", "request", "note"],
+                "description": "relay only. request when the speaker wants the agent to carry out a change or a task (e.g. 「在 deploy/vm/README.md 末尾加一节，开分支、本地提交」, \"fix the retry path\"); the agent reports back in the thread. question whenever the speaker expects the agent to answer or report back, including a statement followed by a question, even an implicit or casual one (e.g. \"the refund cap is 30 days now, have you changed yours?\", 「退款上限改成 30 天了，你那边改了吗」, \"…, let me know when it's done\", 「…，弄好了说一声」); an unanswered question is answered on the agent's behalf. note only when nothing is asked: information or an instruction for the agent to take into account."
             },
             "body": {
                 "type": "string",
@@ -574,8 +616,13 @@ pub(crate) struct IntentWire {
 }
 
 impl IntentWire {
-    pub(crate) fn into_intent(self) -> Result<Intent, BrainError> {
+    /// `work` is accepted only when coding work is configured here
+    /// (`work`); the schema does not offer it otherwise.
+    pub(crate) fn into_intent(self, work: bool) -> Result<Intent, BrainError> {
         match self.action.as_str() {
+            "work" if !work => Err(BrainError::Invalid(
+                "work is not available: no coding work is configured here".into(),
+            )),
             "relay" => {
                 let body = self.body.unwrap_or_default();
                 if self.targets.is_empty() || body.trim().is_empty() {
@@ -583,6 +630,7 @@ impl IntentWire {
                 }
                 let kind = match self.kind.as_deref() {
                     Some("question") => RelayKind::Question,
+                    Some("request") => RelayKind::Request,
                     _ => RelayKind::Note,
                 };
                 Ok(Intent::Relay {
@@ -772,11 +820,11 @@ pub(crate) const AGENT_TURN_DESCRIPTION: &str = "Report this turn of the convers
      should run (in order), and whether you asked the speaker something. Call this exactly \
      once, after any lookups you need, and then stop.";
 
-pub(crate) fn agent_turn_spec(max_actions: usize) -> OutputSpec {
+pub(crate) fn agent_turn_spec(max_actions: usize, work: bool) -> OutputSpec {
     OutputSpec::new(
         "speaker_turn",
         AGENT_TURN_DESCRIPTION,
-        agent_turn_schema(max_actions),
+        agent_turn_schema(max_actions, work),
     )
     .with_tools()
 }
@@ -784,8 +832,8 @@ pub(crate) fn agent_turn_spec(max_actions: usize) -> OutputSpec {
 /// One action of the agent wire: the interpret schema in strict form. Every
 /// property is required and every one but `action` nullable (null: does not
 /// apply); there is no `none` (and no `reply`): the turn's `reply` says it.
-fn agent_action_schema() -> Value {
-    let mut schema = intent_schema();
+fn agent_action_schema(work: bool) -> Value {
+    let mut schema = intent_schema(work);
     let properties = schema["properties"]
         .as_object_mut()
         .expect("the intent schema has properties");
@@ -801,7 +849,7 @@ fn agent_action_schema() -> Value {
                     .cloned()
                     .collect(),
             );
-            property["description"] = Value::String(actions_described!().to_owned());
+            property["description"] = Value::String(actions_for(work, actions_described!()));
             continue;
         }
         let kind = property["type"].clone();
@@ -819,7 +867,7 @@ fn agent_action_schema() -> Value {
     schema
 }
 
-fn agent_turn_schema(max_actions: usize) -> Value {
+fn agent_turn_schema(max_actions: usize, work: bool) -> Value {
     json!({
         "type": "object",
         "properties": {
@@ -829,7 +877,7 @@ fn agent_turn_schema(max_actions: usize) -> Value {
             },
             "actions": {
                 "type": "array",
-                "items": agent_action_schema(),
+                "items": agent_action_schema(work),
                 "description": format!("The operations the speaker asked for, in the order they said them, one entry each; at most {max_actions}. Empty when you only answer, or ask.")
             },
             "awaiting_reply": {
@@ -858,11 +906,11 @@ impl AgentTurnWire {
     /// shape fails the turn (a plan is never run with a step silently
     /// missing). `none` actions are dropped; when the turn says nothing
     /// else, the first one's reply becomes the turn's.
-    pub(crate) fn into_turn(self) -> Result<AgentTurn, BrainError> {
+    pub(crate) fn into_turn(self, work: bool) -> Result<AgentTurn, BrainError> {
         let mut reply = self.reply.trim().to_owned();
         let mut actions = Vec::new();
         for wire in self.actions {
-            match wire.into_intent()? {
+            match wire.into_intent(work)? {
                 Intent::None { reply: said } => {
                     if reply.is_empty() {
                         reply = said.trim().to_owned();
@@ -1347,7 +1395,7 @@ mod tests {
     fn wire(value: Value) -> Result<Intent, BrainError> {
         serde_json::from_value::<IntentWire>(value)
             .map_err(|e| BrainError::Invalid(e.to_string()))
-            .and_then(IntentWire::into_intent)
+            .and_then(|w| w.into_intent(true))
     }
 
     #[test]
@@ -1442,7 +1490,7 @@ mod tests {
 
     #[test]
     fn the_schema_names_every_action() {
-        let schema = intent_schema();
+        let schema = intent_schema(true);
         let actions = schema["properties"]["action"]["enum"]
             .as_array()
             .expect("enum");
@@ -1465,9 +1513,94 @@ mod tests {
         }
     }
 
+    /// Thread 797 item 8: without coding work configured, `work` is not
+    /// offered (nor its fields), not accepted, and a change is relayed.
+    #[test]
+    fn work_is_offered_only_when_it_is_configured() {
+        for schema in [
+            intent_schema(false),
+            agent_turn_schema(5, false)["properties"]["actions"]["items"].clone(),
+        ] {
+            let properties = &schema["properties"];
+            let actions = properties["action"]["enum"].as_array().expect("enum");
+            assert!(!actions.contains(&json!("work")), "{actions:?}");
+            assert!(properties.get("target").is_none());
+            assert!(properties.get("instruction").is_none());
+            let described = properties["action"]["description"]
+                .as_str()
+                .expect("description");
+            assert!(
+                !described.contains("work: the speaker wants you"),
+                "{described}"
+            );
+            assert!(
+                described.contains("There is no work action here"),
+                "{described}"
+            );
+            assert!(described.contains("reassign:"), "{described}");
+        }
+        assert_strict(&agent_turn_schema(5, false), "turn");
+        let with = intent_schema(true);
+        assert!(
+            with["properties"]["action"]["enum"]
+                .as_array()
+                .expect("enum")
+                .contains(&json!("work"))
+        );
+        assert!(
+            with["properties"]["action"]["description"]
+                .as_str()
+                .expect("description")
+                .contains("work: the speaker wants you")
+        );
+
+        let work = json!({"action": "work", "target": "alice", "instruction": "加测试"});
+        let parse = |value: &Value, work: bool| {
+            serde_json::from_value::<IntentWire>(value.clone())
+                .expect("wire")
+                .into_intent(work)
+        };
+        assert!(parse(&work, false).is_err());
+        assert!(parse(&work, true).is_ok());
+        assert_eq!(
+            parse(
+                &json!({"action": "relay", "targets": ["wyak::codex"], "kind": "request", "body": "在 README 末尾加一节"}),
+                false
+            ),
+            Ok(Intent::Relay {
+                targets: vec!["wyak::codex".into()],
+                kind: RelayKind::Request,
+                body: "在 README 末尾加一节".into(),
+            })
+        );
+    }
+
+    /// Thread 797 item 8: a change request that names nobody goes by duty
+    /// as a request.
+    #[test]
+    fn change_requests_are_routed_by_duty_too() {
+        let committee = CommitteeId::new("commons-demo").expect("committee");
+        let text = persona(Some(&committee), "Speaker", Locale::Zh);
+        for rule in [
+            "a question or a change request that names no person",
+            "kind request for a change or a task to carry out",
+            "Route only questions and change requests by duty",
+            "A question about this Senate's own state is yours to answer",
+        ] {
+            assert!(text.contains(rule), "{rule}");
+        }
+        let kind = intent_schema(false)["properties"]["kind"].clone();
+        assert!(
+            kind["enum"]
+                .as_array()
+                .expect("enum")
+                .contains(&json!("request"))
+        );
+    }
+
     #[test]
     fn a_target_is_a_person_or_one_agent_named_outright() {
-        let schema = intent_schema();
+        let schema = intent_schema(true);
         let targets = schema["properties"]["targets"]["description"]
             .as_str()
             .expect("targets");
@@ -1516,7 +1649,7 @@ mod tests {
 
     #[test]
     fn the_agent_turn_schema_is_strict_and_has_no_none() {
-        let schema = agent_turn_schema(5);
+        let schema = agent_turn_schema(5, true);
         assert_strict(&schema, "turn");
         let action = &schema["properties"]["actions"]["items"];
         let actions = action["properties"]["action"]["enum"]
@@ -1589,7 +1722,7 @@ mod tests {
         }))
         .expect("wire");
         assert_eq!(
-            wire.into_turn(),
+            wire.into_turn(true),
             Ok(AgentTurn::act(
                 "请确认",
                 vec![Intent::Reassign {
@@ -1620,7 +1753,7 @@ mod tests {
 
     #[test]
     fn a_statement_with_an_implicit_question_is_a_question() {
-        let schema = intent_schema();
+        let schema = intent_schema(true);
         let kind = schema["properties"]["kind"]["description"]
             .as_str()
             .expect("description");

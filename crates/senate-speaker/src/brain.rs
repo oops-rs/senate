@@ -51,6 +51,9 @@ pub struct Utterance {
     pub seats: Vec<CommitteeSeat>,
     /// The language to reply in.
     pub locale: Locale,
+    /// This Senate does coding work itself (`[speaker.work]` and a runner
+    /// are configured): the `work` action is offered.
+    pub work: bool,
 }
 
 /// One seat on the acting committee, as a relay can reach it: an agent of
@@ -205,6 +208,9 @@ pub enum RelayKind {
     Question,
     /// Information or an instruction to pass on; no answer is owed.
     Note,
+    /// A change or a task for the agent to carry out: a `request`, which
+    /// opens a task thread it reports back in.
+    Request,
 }
 
 /// What the Speaker should do about an utterance.

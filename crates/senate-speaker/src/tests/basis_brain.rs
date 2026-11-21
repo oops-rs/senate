@@ -231,6 +231,7 @@ fn utterance(fixture: &Fixture, text: &str) -> Utterance {
         roster: roster(),
         seats: Vec::new(),
         locale: Locale::Zh,
+        work: true,
     }
 }
 
@@ -261,6 +262,33 @@ fn tool_results(request: &Request<'_>) -> Vec<(String, bool)> {
             _ => None,
         })
         .collect()
+}
+
+/// Thread 797 item 8: with no coding work configured, the answering tool
+/// does not offer `work`, and a `work` answer anyway is out of shape.
+#[tokio::test]
+async fn interpret_offers_work_only_when_it_is_configured() {
+    let fixture = fixture(vec![Round::Answer(json!({
+        "action": "work",
+        "target": "alice",
+        "instruction": "在 README 末尾加一节"
+    }))])
+    .await;
+    let said = Utterance {
+        work: false,
+        ..utterance(&fixture, "请在 README 末尾加一节")
+    };
+    assert!(fixture.brain.interpret(said).await.is_err());
+    let requests = fixture.model.requests();
+    let answering = requests[0]
+        .tools
+        .iter()
+        .find(|tool| tool.description.as_deref() == Some(INTENT_DESCRIPTION))
+        .expect("the answering tool");
+    let schema = serde_json::to_string(answering).expect("tool");
+    assert!(!schema.contains("\"work\""), "{schema}");
+    assert!(schema.contains("There is no work action here"), "{schema}");
+    assert!(schema.contains("\"request\""), "{schema}");
 }
 
 #[tokio::test]
@@ -1353,6 +1381,7 @@ async fn live_interpret_understands_a_relay() {
             roster: roster(),
             seats: Vec::new(),
             locale: Locale::Zh,
+            work: false,
         })
         .await
         .expect("the live model answers");
@@ -1638,7 +1667,7 @@ fn assert_seats_and_rule(fixture: &Fixture) {
 /// question from the live demo as its counter-example.
 fn assert_own_state_rule(system: &str) {
     for needle in [
-        "Duty routing is only for questions about the work or a subject area.",
+        "Duty routing is only for the work or a subject area.",
         "A question about this Senate's own state is yours to answer",
         "is never relayed by duty",
         "who is here, the seats and their duties, presence, status, the brief, decisions, open \

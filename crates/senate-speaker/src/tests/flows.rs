@@ -2228,6 +2228,41 @@ async fn an_unaddressed_question_reaches_the_child_seat_whose_duty_fits() {
     );
 }
 
+/// Thread 797 item 8: an unaddressed change request, where this Senate
+/// does no coding work itself. The Brain is not offered `work`, and its
+/// relay by duty goes to the child seat as a `request`, through the desk.
+#[tokio::test]
+async fn an_unaddressed_change_request_reaches_the_duty_seat_as_a_request() {
+    let hub = duty_hub(&[("responder", PresenceState::Online, Some(DEPLOY_DUTY))]).await;
+    let rig = Rig::start(hub).await;
+    let asked = "请在 commons 仓库的 deploy/vm/README.md 末尾加一节，开分支、本地提交";
+    rig.brain.interprets(Ok(Intent::Relay {
+        targets: vec!["dark-conclave::responder".into()],
+        kind: RelayKind::Request,
+        body: asked.into(),
+    }));
+    rig.append(mention("pm", asked, "m_d9")).await;
+    rig.settle().await;
+    let utterances = rig.brain.utterances();
+    assert!(
+        !utterances.last().expect("interpreted").work,
+        "no [speaker.work] here: work is not offered"
+    );
+    let relay = rig
+        .hub
+        .events(&refund())
+        .into_iter()
+        .find(|e| e.from == Address::Speaker && e.kind == Kind::Request)
+        .expect("a request relayed");
+    assert_eq!(relay.to, vec![desk_of("dark-conclave")]);
+    assert_eq!(
+        intended(&relay).as_deref(),
+        Some("dark-conclave::refund-v2::senator::responder")
+    );
+    assert_eq!(relay.body, asked);
+    assert_eq!(relay.on_behalf_of, Some(user("pm")));
+}
+
 /// The same for a seat of this Senate: a relay to `codex` by its duty
 /// reaches codex itself.
 #[tokio::test]

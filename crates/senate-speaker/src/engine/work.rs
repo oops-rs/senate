@@ -249,6 +249,13 @@ fn run_status(l: Locale, run: &WorkRun, steps: &[Step], pr: Option<&str>) -> Sta
 }
 
 impl Engine {
+    /// This Senate does coding work itself on the committee being acted
+    /// on: a runner and `[speaker.work]` are both configured. Only then is
+    /// the Brain offered the `work` action.
+    pub(super) fn does_work(&self) -> bool {
+        self.runner.is_some() && self.work.is_some()
+    }
+
     // ----- asking --------------------------------------------------------------
 
     /// Whether `person` is a developer of the committee (module docs): one

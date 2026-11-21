@@ -2609,6 +2609,7 @@ impl Engine {
                         roster: self.roster.clone(),
                         seats: self.committee_seats(&chat.committee).await,
                         locale: l,
+                        work: self.does_work(),
                     };
                     if self.mode == SpeakerMode::Agent {
                         self.start_conversation(chat, utterance);
@@ -2906,6 +2907,7 @@ impl Engine {
         let kind = match kind {
             RelayKind::Question => Kind::Question,
             RelayKind::Note => Kind::Note,
+            RelayKind::Request => Kind::Request,
         };
         let seq = agent::event_key(chat);
         let committee = self.acting_committee(chat);
@@ -3364,6 +3366,8 @@ impl Engine {
                     roster: self.roster.clone(),
                     seats: Vec::new(),
                     locale: l,
+                    // Work needs a bound committee.
+                    work: false,
                 };
                 if self.mode == SpeakerMode::Agent {
                     self.start_unbound_conversation(mention, utterance);

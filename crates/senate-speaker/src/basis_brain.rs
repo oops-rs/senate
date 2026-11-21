@@ -352,6 +352,7 @@ pub fn basis_runtime(
 #[async_trait]
 impl Brain for BasisBrain {
     async fn interpret(&self, utterance: Utterance) -> Result<Intent, BrainError> {
+        let work = utterance.work;
         let committee = utterance.committee.as_ref();
         let workspace = self.workspace(committee).await?;
         let spec = self
@@ -363,13 +364,13 @@ impl Brain for BasisBrain {
         let output = run
             .output::<IntentWire, _, _>(
                 prompt::interpret(&utterance),
-                prompt::intent_spec(),
+                prompt::intent_spec(utterance.work),
                 NullSink,
                 AllowAll,
             )
             .await
             .map_err(|failure| BrainError::Unavailable(failure.error.to_string()))?;
-        output.value.into_intent()
+        output.value.into_intent(work)
     }
 
     async fn answer_on_behalf(&self, question: Question) -> Result<Answer, BrainError> {
@@ -462,13 +463,13 @@ impl Brain for BasisBrain {
         let output = run
             .output::<AgentTurnWire, _, _>(
                 prompt::converse(&conversation, max_actions),
-                prompt::agent_turn_spec(max_actions),
+                prompt::agent_turn_spec(max_actions, conversation.utterance.work),
                 NullSink,
                 AllowAll,
             )
             .await
             .map_err(|failure| BrainError::Unavailable(failure.error.to_string()))?;
-        output.value.into_turn()
+        output.value.into_turn(conversation.utterance.work)
     }
 
     async fn pick_agent(&self, input: PickInput) -> Result<Pick, BrainError> {
