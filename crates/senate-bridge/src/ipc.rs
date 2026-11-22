@@ -334,12 +334,23 @@ pub struct HookReport {
     pub host: Option<EventId>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    clap::ValueEnum,
+    rmcp::schemars::JsonSchema,
+)]
+#[schemars(crate = "rmcp::schemars", inline)]
 #[serde(rename_all = "lowercase")]
 pub enum HostedRuntime {
     Codex,
     Claude,
-    /// The Antigravity CLI.
+    // The Antigravity CLI.
     Agy,
 }
 

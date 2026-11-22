@@ -216,6 +216,95 @@ fn at(text: &str, needle: &str) -> usize {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn chair_spawns_agy_with_model_and_runtime_specific_effort() {
+    use senate_bridge::daemon::{DaemonOptions, start_with_host_binary};
+    use senate_bridge::ipc::{HookReply, SpawnReply};
+
+    let mut h = Harness::new().await;
+    h.dir = tempfile::tempdir_in("/tmp").unwrap();
+    h.paths = senate_bridge::Paths::new(h.dir.path().join("senate"));
+    h.paths.ensure_home().unwrap();
+    let project = h.workdir("project", None);
+    let fixture = agy_fixture(h.dir.path(), "8b135e59-a160-4ed4-a0e9-105ed957be07");
+    std::fs::write(h.paths.config(), format!("[agy]\nbin = {fixture:?}\n")).unwrap();
+    h.config.committees.push(committee());
+    h.daemon = Some(
+        start_with_host_binary(
+            DaemonOptions {
+                paths: h.paths.clone(),
+                config: h.config.clone(),
+                timing: fast_timing(),
+                desktop: None,
+            },
+            env!("CARGO_BIN_EXE_senate").into(),
+        )
+        .await
+        .unwrap(),
+    );
+    let hook = serde_json::from_value(json!({
+        "event":"session_start", "runtime":"claude", "session_id":"chair-fixture",
+        "cwd":project, "committee_file":committee(), "source":"startup",
+    }))
+    .unwrap();
+    let _: HookReply = ipc::request(&h.socket(), &Request::SessionHook(hook), WAIT, WAIT)
+        .await
+        .unwrap();
+    h.server.state.inner.lock().unwrap().chair = Some((path("claude-chair-fixture"), true));
+    let mut chair = McpClient::start(h.socket(), selector("chair-fixture")).await;
+    let tools = chair.request("tools/list", json!({})).await;
+    let spawn = tools["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "spawn")
+        .unwrap();
+    let schema = spawn["inputSchema"]["oneOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["properties"].get("runtime").is_some())
+        .unwrap();
+    assert_eq!(
+        schema["properties"]["runtime"]["enum"],
+        json!(["codex", "claude", "agy"]),
+        "{schema}"
+    );
+
+    let args = |effort| {
+        json!({"action":"spawn","runtime":"agy","committee":committee(),"cwd":project,
+                               "model":"flash","effort":effort})
+    };
+    let (error, message) = chair.call("spawn", args("minimal")).await;
+    assert!(
+        error && message.contains("agy does not take the effort"),
+        "{message}"
+    );
+    assert!(std::fs::read_dir(&project).unwrap().all(|f| {
+        !f.unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".fixture-argv-")
+    }));
+    let (error, message) = chair.call("spawn", args("high")).await;
+    assert!(!error, "{message}");
+    let seat: SpawnReply = serde_json::from_str(&message).unwrap();
+    let terminal: PathBuf = ipc::request(
+        &h.socket(),
+        &Request::Attach {
+            senator: seat.senator.into(),
+        },
+        WAIT,
+        WAIT,
+    )
+    .await
+    .unwrap();
+    let argv = hosted_fixture_argv(&terminal, &project, WAIT).await;
+    assert!(argv.contains(&"--model=flash".to_owned()), "{argv:?}");
+    assert!(argv.contains(&"--effort=high".to_owned()), "{argv:?}");
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stop_tool_enforces_authority_and_records_the_actor() {
     use senate_bridge::daemon::{DaemonOptions, start_with_host_binary};
     use senate_bridge::ipc::{HookReply, HostedRuntime, SpawnReply, StopReply};

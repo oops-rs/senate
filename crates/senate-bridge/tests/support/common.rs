@@ -158,6 +158,42 @@ if [ -n "$SENATE_HOSTED_CLAUDE" ]; then
 fi
 "#;
 
+/// A stand-in for agy: it records its argv, then does what agy does on its
+/// first prompt, running Senate's SessionStart hook with the conversation
+/// it picked, and records what the hook printed.
+pub fn agy_fixture(dir: &std::path::Path, conversation: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+    const BIN: &str = env!("CARGO_BIN_EXE_senate");
+    let fixture = dir.join("fixture-agy");
+    std::fs::write(
+        &fixture,
+        format!(
+            r#"#!/bin/sh
+case "$1" in
+    models) printf 'gemini-3.8-flash\tGemini Flash\n'; exit ;;
+    --prompt-interactive=?*) conversation={conversation} ;;
+    --conversation=?*) conversation="${{1#--conversation=}}" ;;
+    *) exit 64 ;;
+esac
+argv=".fixture-argv-$SENATE_HOSTED_AGY"
+printf '%s\n' "$@" > "$argv.tmp" && mv "$argv.tmp" "$argv" || exit 1
+printf '{{"conversationId":"%s","cwd":"%s"}}' "$conversation" "$PWD" \
+    | {BIN:?} hook session-start --runtime agy > ".fixture-hook.tmp" \
+    && mv .fixture-hook.tmp .fixture-hook
+while IFS= read -r line; do
+    case "$line" in
+        paint) printf 'fixture TUI\n' ;;
+        q) exit 0 ;;
+    esac
+done
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o700)).unwrap();
+    fixture
+}
+
 pub async fn hosted_fixture_argv(terminal: &Path, cwd: &Path, timeout: Duration) -> Vec<String> {
     let host = terminal
         .parent()
