@@ -13,7 +13,8 @@ struct MainWindow: View {
                 .navigationSplitViewColumnWidth(min: 200, ideal: Theme.sidebarWidth, max: 320)
         } detail: {
             content
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // Wide enough that nothing in it wraps into a tall column.
+                .frame(minWidth: 440, maxWidth: .infinity, maxHeight: .infinity)
                 .background(Theme.surface.ignoresSafeArea())
                 .safeAreaInset(edge: .top, spacing: 0) {
                     if store.state.online, let error = store.shownError {
@@ -62,7 +63,8 @@ struct MainWindow: View {
     }
 }
 
-/// ⌘1…⌘5 open the sections in sidebar order, ⌘R reads everything again.
+/// ⌘1…⌘5 open the sections in sidebar order; ⌘R reads everything again, or
+/// tries the daemon now while it cannot be reached.
 /// Invisible buttons: the app has no menu bar of its own (it lives in the
 /// status item).
 private struct Shortcuts: View {
@@ -74,9 +76,10 @@ private struct Shortcuts: View {
                 Button(section.title) { store.place = .section(section) }
                     .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: .command)
             }
-            Button(L("toolbar.refresh")) { store.refresh() }
-                .keyboardShortcut("r")
-                .disabled(!store.state.online)
+            Button(L("toolbar.refresh")) {
+                if store.state.online { store.refresh() } else { store.reconnect() }
+            }
+            .keyboardShortcut("r")
         }
         .opacity(0)
         .frame(width: 0, height: 0)
@@ -135,7 +138,10 @@ private struct Sidebar: View {
                         .tag(CoreStore.Place.section(section))
                 }
             }
-            Section {
+            // Offline, nothing is known to wait: say nothing rather than
+            // "nothing waits on you".
+            if store.state.online {
+              Section {
                 let threads = store.inbox
                 ForEach(threads) { thread in
                     ThreadRow(thread: thread)
@@ -157,6 +163,7 @@ private struct Sidebar: View {
                         AgentFilter(store: store)
                     }
                 }
+              }
             }
         }
         .listStyle(.sidebar)
@@ -373,6 +380,7 @@ private struct ErrorBanner: View {
             MentionText(message)
                 .font(Theme.Fonts.text)
                 .foregroundStyle(Theme.onSurface)
+                .lineLimit(4)
                 .textSelection(.enabled)
             Spacer(minLength: Theme.Space.s)
             Button(action: dismiss) {
@@ -391,38 +399,5 @@ private struct ErrorBanner: View {
         .padding(.horizontal, Theme.Space.xl)
         .padding(.bottom, Theme.Space.s)
         .frame(maxWidth: .infinity)
-    }
-}
-
-/// A small rounded label.
-struct Tag: View {
-    let text: String
-    var tint: Color = .secondary
-
-    var body: some View {
-        Text(verbatim: text)
-            .font(.caption)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(tint.opacity(0.15), in: Capsule())
-            .foregroundStyle(tint == .secondary ? Color.primary : tint)
-    }
-}
-
-/// What a list shows when it is empty or the daemon is offline.
-struct EmptyNote: View {
-    let online: Bool
-    let text: String
-    var symbol: String = "tray"
-
-    var body: some View {
-        if online {
-            ContentUnavailableView(text, systemImage: symbol)
-        } else {
-            ContentUnavailableView(
-                L("empty.daemon_down"),
-                systemImage: "bolt.horizontal.circle"
-            )
-        }
     }
 }

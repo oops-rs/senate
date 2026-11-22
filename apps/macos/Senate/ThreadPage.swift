@@ -273,6 +273,7 @@ private struct Composer: View {
                 Text(verbatim: L("inbox.replying_as", store.state.person ?? "?", String(row.root)))
                     .font(Theme.Fonts.meta)
                     .foregroundStyle(Theme.onSurfaceVariant)
+                    .lineLimit(1)
                     .padding(.leading, 5)
                 Spacer()
                 Button {

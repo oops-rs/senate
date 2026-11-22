@@ -163,27 +163,44 @@ struct StatusDot: View {
     }
 }
 
+/// A page that is not a list: its content centred in the column. It
+/// scrolls when the window is too small for it, so it never asks the
+/// window for more height than the window has.
+struct CenteredPage<Content: View>: View {
+    var width: CGFloat = 560
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        GeometryReader { geometry in
+            ScrollView {
+                content
+                    .frame(maxWidth: width)
+                    .padding(Theme.Space.xxl)
+                    .frame(maxWidth: .infinity, minHeight: geometry.size.height)
+            }
+        }
+    }
+}
+
 /// What a section shows when it has nothing: one quiet line, centred.
 struct EmptyState: View {
     let text: String
     var detail: String? = nil
 
     var body: some View {
-        VStack(spacing: Theme.Space.s) {
-            Text(verbatim: text)
-                .font(Theme.Fonts.display)
-                .foregroundStyle(Theme.onSurface)
-                .multilineTextAlignment(.center)
-            if let detail {
-                Text(verbatim: detail)
-                    .font(Theme.Fonts.text)
-                    .foregroundStyle(Theme.onSurfaceVariant)
-                    .multilineTextAlignment(.center)
+        CenteredPage {
+            VStack(spacing: Theme.Space.s) {
+                Text(verbatim: text)
+                    .font(Theme.Fonts.display)
+                    .foregroundStyle(Theme.onSurface)
+                if let detail {
+                    Text(verbatim: detail)
+                        .font(Theme.Fonts.text)
+                        .foregroundStyle(Theme.onSurfaceVariant)
+                }
             }
+            .multilineTextAlignment(.center)
         }
-        .padding(Theme.Space.xxl)
-        .frame(maxWidth: 560)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 

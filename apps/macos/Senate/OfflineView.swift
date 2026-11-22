@@ -2,8 +2,8 @@ import SwiftUI
 import SenateCore
 
 /// What the window shows while the daemon cannot be reached: why, that the
-/// app keeps trying on its own, a way to try now, and how to start the
-/// daemon. The app never starts it itself.
+/// app keeps trying on its own, how to start the daemon, and a way to try
+/// now. The app never starts it itself.
 struct OfflineView: View {
     let store: CoreStore
     @State private var copied = false
@@ -11,40 +11,42 @@ struct OfflineView: View {
     static let startCommand = "senate setup service install --yes"
 
     var body: some View {
-        ContentUnavailableView {
-            Label(L("offline.title"), systemImage: "bolt.horizontal.circle")
-        } description: {
-            VStack(spacing: 10) {
+        CenteredPage(width: 520) {
+          VStack(spacing: Theme.Space.xl) {
+            VStack(spacing: Theme.Space.s) {
+                Text(verbatim: L("offline.title"))
+                    .font(Theme.Fonts.display)
+                    .foregroundStyle(Theme.onSurface)
+                    .accessibilityAddTraits(.isHeader)
                 if let reason = store.state.offlineReason {
                     Text(verbatim: reason)
+                        .font(Theme.Fonts.text)
+                        .foregroundStyle(Theme.onSurface)
+                        .textSelection(.enabled)
                 }
                 Text(verbatim: L("offline.retrying"))
-                    .foregroundStyle(.secondary)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(verbatim: L("offline.start_hint"))
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    HStack {
-                        Text(verbatim: Self.startCommand)
-                            .font(.callout.monospaced())
-                            .textSelection(.enabled)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 6))
-                        Button(copied ? L("offline.copied") : L("offline.copy")) {
-                            Mentions.copyText(Self.startCommand)
-                            copied = true
-                        }
-                        .controlSize(.small)
-                    }
-                }
-                .padding(.top, 6)
+                    .font(Theme.Fonts.text)
+                    .foregroundStyle(Theme.onSurfaceVariant)
             }
-        } actions: {
+            .multilineTextAlignment(.center)
+            VStack(alignment: .leading, spacing: Theme.Space.s) {
+                Text(verbatim: L("offline.start_hint"))
+                    .font(Theme.Fonts.row)
+                    .foregroundStyle(Theme.onSurfaceVariant)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: Theme.Space.s) {
+                    CodeBlock(text: Self.startCommand)
+                    Button(copied ? L("offline.copied") : L("offline.copy")) {
+                        Mentions.copyText(Self.startCommand)
+                        copied = true
+                    }
+                    .buttonStyle(.pill)
+                }
+            }
+            .card()
             Button(L("offline.retry")) { store.reconnect() }
-                .buttonStyle(.borderedProminent)
-                .keyboardShortcut("r")
+                .buttonStyle(.pill(.filled))
+          }
         }
     }
 }
@@ -56,14 +58,26 @@ struct SetupProblemView: View {
     let message: String
 
     var body: some View {
-        ContentUnavailableView {
-            Label(L("setup.title"), systemImage: "exclamationmark.triangle")
-        } description: {
-            Text(verbatim: message)
-        } actions: {
-            Button(L("setup.retry")) { store.connect() }
-                .buttonStyle(.borderedProminent)
-            SettingsLink { Text(verbatim: L("setup.settings")) }
+        CenteredPage(width: 520) {
+          VStack(spacing: Theme.Space.xl) {
+            VStack(spacing: Theme.Space.s) {
+                Text(verbatim: L("setup.title"))
+                    .font(Theme.Fonts.display)
+                    .foregroundStyle(Theme.onSurface)
+                    .accessibilityAddTraits(.isHeader)
+                Text(verbatim: message)
+                    .font(Theme.Fonts.text)
+                    .foregroundStyle(Theme.onSurfaceVariant)
+                    .textSelection(.enabled)
+            }
+            .multilineTextAlignment(.center)
+            HStack(spacing: Theme.Space.s) {
+                Button(L("setup.retry")) { store.connect() }
+                    .buttonStyle(.pill(.filled))
+                SettingsLink { Text(verbatim: L("setup.settings")) }
+                    .buttonStyle(.pill)
+            }
+          }
         }
     }
 }

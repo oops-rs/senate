@@ -597,23 +597,6 @@
         }
       }
     },
-    "empty.daemon_down": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "The daemon is not running. Start it with `senated --machine`."
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "守护进程未运行。用 `senated --machine` 启动它。"
-          }
-        }
-      }
-    },
     "error.already_started": {
       "extractionState": "manual",
       "localizations": {
@@ -2335,23 +2318,6 @@
         }
       }
     },
-    "settings.advanced": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Advanced"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "高级"
-          }
-        }
-      }
-    },
     "settings.choose": {
       "extractionState": "manual",
       "localizations": {
@@ -2365,23 +2331,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "选择…"
-          }
-        }
-      }
-    },
-    "settings.general": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "General"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "通用"
           }
         }
       }
