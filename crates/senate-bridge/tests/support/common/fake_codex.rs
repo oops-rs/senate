@@ -414,6 +414,13 @@ fn answer(st: &mut CodexState, method: &str, params: &Value) -> Result<Value, St
             "platformFamily": "unix",
             "platformOs": "macos"
         })),
+        "model/list" if params["includeHidden"] == true => match params["cursor"].as_str() {
+            None => Ok(json!({"data":[{"id":"gpt-6.2-astra"}],"nextCursor":"second"})),
+            Some("second") => {
+                Ok(json!({"data":[{"id":"gpt-6.10-astra"},{"id":"gpt-6-sol"}],"nextCursor":null}))
+            }
+            _ => Err("invalid model list cursor".into()),
+        },
         "thread/start" => {
             let id = format!("hosted-thread-{}", st.connections);
             st.threads.insert(

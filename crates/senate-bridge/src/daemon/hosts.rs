@@ -110,6 +110,7 @@ impl Drop for StopAuditGuard<'_> {
 }
 
 struct HostResume {
+    recorded_model: HostedModel,
     session_id: String,
     senator: SenatorName,
     start_empty: bool,
@@ -626,6 +627,7 @@ impl Shared {
             None,
             session.cwd,
             Some(HostResume {
+                recorded_model: target.model,
                 session_id: session.session_id,
                 senator: session.agent,
                 start_empty,
@@ -720,6 +722,11 @@ impl Shared {
             )));
         }
         let paths = Paths::new(self.home.canonicalize().map_err(IpcError::internal)?);
+        let requested_model = model.model.clone();
+        let mut model = resume
+            .as_ref()
+            .map(|r| r.recorded_model.overridden_by(&model))
+            .unwrap_or(model);
         let (resume, seat, start_empty) = match resume {
             Some(resume) => (
                 Some(resume.session_id),
@@ -804,7 +811,13 @@ impl Shared {
             HostedRuntime::Claude => resume.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             // Until its first hook names it, a new agy's session is only
             // the runtime's prefix.
-            HostedRuntime::Agy => resume.unwrap_or_else(|| Runtime::Agy.session_key("")),
+            HostedRuntime::Agy => {
+                if let Some(request) = &requested_model {
+                    let catalog = super::model_catalog::agy_models(&program, &cwd).await?;
+                    model.model = Some(super::model_catalog::resolve(request, catalog)?);
+                }
+                resume.unwrap_or_else(|| Runtime::Agy.session_key(""))
+            }
             HostedRuntime::Codex => {
                 let connect = || crate::delivery::codex::AppServer::connect(&self.codex_transport);
                 let mut server = tokio::time::timeout(CODEX_PUSH_TIMEOUT, connect())
@@ -816,15 +829,25 @@ impl Shared {
                         )
                     })?
                     .map_err(IpcError::internal)?;
+                if let Some(request) = &requested_model {
+                    let catalog = tokio::time::timeout(CODEX_PUSH_TIMEOUT, server.model_ids())
+                        .await
+                        .map_err(|_| IpcError::internal("Codex model/list timed out"))?
+                        .map_err(IpcError::internal)?;
+                    model.model = Some(super::model_catalog::resolve(request, catalog)?);
+                }
                 let id = if let Some(id) = resume {
                     id
                 } else {
-                    let id = tokio::time::timeout(CODEX_PUSH_TIMEOUT, server.create_thread(&cwd))
-                        .await
-                        .map_err(|_| {
-                            IpcError::new(codes::SERVER, "timed out creating the Codex thread")
-                        })?
-                        .map_err(IpcError::internal)?;
+                    let id = tokio::time::timeout(
+                        CODEX_PUSH_TIMEOUT,
+                        server.create_thread(&cwd, model.model.as_deref()),
+                    )
+                    .await
+                    .map_err(|_| {
+                        IpcError::new(codes::SERVER, "timed out creating the Codex thread")
+                    })?
+                    .map_err(IpcError::internal)?;
                     let seeded =
                         tokio::time::timeout(CODEX_PUSH_TIMEOUT, server.seed_hosted_thread(&id))
                             .await;
@@ -880,6 +903,11 @@ impl Shared {
         };
         let session_runtime = Runtime::from(runtime);
         let mut reply = SpawnReply {
+            resolved_model: model.model.clone().filter(|id| {
+                requested_model
+                    .as_ref()
+                    .is_some_and(|request| request != id)
+            }),
             senator: seat.unwrap_or_else(|| agent::session_name(session_runtime, &session_id)),
             session_id: session_id.clone(),
             committee: committee.clone(),

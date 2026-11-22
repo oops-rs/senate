@@ -233,10 +233,12 @@ impl Shared {
             .resolve_restore(senator, auth.committee_scope.as_ref())
             .await?;
         // The record, with what this restore changes of it.
-        let model = target
+        let model = HostedModel::new(model.model, model.effort);
+        target
             .model
-            .overridden_by(&HostedModel::new(model.model, model.effort));
-        model.check(target.runtime).map_err(IpcError::bad_request)?;
+            .overridden_by(&model)
+            .check(target.runtime)
+            .map_err(IpcError::bad_request)?;
         auth.check_target(&target.committee, false)?;
         self.check_restore_seat(&target.committee, &target.session.agent)
             .await?;

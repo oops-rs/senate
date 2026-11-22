@@ -375,10 +375,54 @@ impl AppServer {
         }
     }
 
-    pub(crate) async fn create_thread(&mut self, cwd: &Path) -> Result<String, CodexError> {
-        let result = self
-            .request("thread/start", "", json!({"cwd": cwd}))
-            .await?;
+    pub(crate) async fn model_ids(&mut self) -> Result<Vec<String>, CodexError> {
+        #[derive(Deserialize)]
+        struct Model {
+            id: String,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Page {
+            data: Vec<Model>,
+            next_cursor: Option<String>,
+        }
+
+        let mut ids = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut cursor = None;
+        loop {
+            let result = self
+                .request(
+                    "model/list",
+                    "",
+                    json!({"includeHidden": true, "cursor": cursor}),
+                )
+                .await?;
+            let page: Page = serde_json::from_value(result)
+                .map_err(|e| CodexError::Protocol(format!("model/list: {e}")))?;
+            ids.extend(page.data.into_iter().map(|model| model.id));
+            let Some(next) = page.next_cursor else {
+                return Ok(ids);
+            };
+            if !seen.insert(next.clone()) {
+                return Err(CodexError::Protocol(
+                    "model/list repeated its cursor".into(),
+                ));
+            }
+            cursor = Some(next);
+        }
+    }
+
+    pub(crate) async fn create_thread(
+        &mut self,
+        cwd: &Path,
+        model: Option<&str>,
+    ) -> Result<String, CodexError> {
+        let mut params = json!({"cwd": cwd});
+        if let Some(model) = model {
+            params["model"] = json!(model);
+        }
+        let result = self.request("thread/start", "", params).await?;
         result
             .pointer("/thread/id")
             .and_then(Value::as_str)

@@ -551,6 +551,102 @@ async fn a_hosted_codex_thread_is_named_after_the_senators_alias() {
     h.stop().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hosted_codex_model_alias_is_resolved_before_launch_and_pinned_on_restore() {
+    let (mut h, project) = fixture(true, Locale::En).await;
+    std::fs::write(
+        h.dir.path().join("tui"),
+        r#"#!/bin/sh
+printf '%s\n' "$@" > argv.tmp && mv argv.tmp argv || exit 1
+while IFS= read -r line; do :; done
+"#,
+    )
+    .unwrap();
+    let args_contain = |model: &str| {
+        std::fs::read_to_string(project.join("argv"))
+            .ok()
+            .filter(|args| args.lines().any(|arg| arg == format!("--model={model}")))
+            .map(|_| ())
+    };
+    let fake = h.codex();
+    start(&mut h).await;
+    let spawn = |requested: &str| {
+        let mut cmd = tokio::process::Command::new(BIN);
+        testenv::isolate_async(&mut cmd, h.dir.path());
+        cmd.current_dir(&project)
+            .env("SENATE_HOME", h.paths.home())
+            .args([
+                "spawn",
+                "codex",
+                "--committee",
+                committee().as_str(),
+                "--model",
+                requested,
+            ]);
+        cmd
+    };
+    let unknown = spawn("astr").output().await.unwrap();
+    assert!(!unknown.status.success());
+    assert!(String::from_utf8_lossy(&unknown.stderr).contains("close matches"));
+    assert!(!fake.methods().iter().any(|method| method == "thread/start"));
+
+    let out = spawn("astra").output().await.unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let senator = path(std::str::from_utf8(&out.stdout).unwrap().trim());
+    let resolved = "gpt-6.10-astra";
+    assert!(String::from_utf8_lossy(&out.stderr).contains(&format!("astra → {resolved}")));
+    assert!(
+        fake.calls()
+            .iter()
+            .any(|(method, params)| method == "thread/start" && params["model"] == resolved)
+    );
+    eventually("spawned Codex model", WAIT, || args_contain(resolved)).await;
+    let list_count = || fake.methods().iter().filter(|m| *m == "model/list").count();
+    let mut queries = list_count();
+    let mut guard = None;
+    for (override_id, expected) in [(None, resolved), (Some("sol"), "gpt-6-sol")] {
+        let _: senate_bridge::ipc::StopReply = ipc::request(
+            &h.socket(),
+            &Request::Stop {
+                session: Default::default(),
+                senator: senator.clone().into(),
+                force: true,
+            },
+            WAIT,
+            WAIT,
+        )
+        .await
+        .unwrap();
+        drop(guard.take());
+        std::fs::remove_file(project.join("argv")).unwrap();
+        let reply: SpawnReply = ipc::request(
+            &h.socket(),
+            &Request::Restore {
+                session: Default::default(),
+                senator: senator.clone().into(),
+                model: senate_bridge::ipc::HostedModel::new(override_id.map(str::to_string), None),
+            },
+            WAIT,
+            WAIT,
+        )
+        .await
+        .unwrap();
+        queries += if override_id.is_some() { 2 } else { 0 };
+        assert_eq!(list_count(), queries);
+        let terminal = Terminal::from_launch(&h, &reply).await;
+        eventually("restored Codex model", WAIT, || args_contain(expected)).await;
+        let listing: senate_bridge::ipc::SessionsReply =
+            ipc::request(&h.socket(), &Request::Sessions, WAIT, WAIT)
+                .await
+                .unwrap();
+        assert_eq!(listing.rows[0].model.model.as_deref(), Some(expected));
+        // The next iteration stops this host through IPC.
+        guard = Some(terminal);
+    }
+    drop(guard);
+    h.stop().await;
+}
+
 /// What a hosted Codex restore does: it rejoins the same thread on the
 /// app-server, with no new `thread/start`. Codex keeps a loaded thread's MCP
 /// connections, and so the tools it listed, until the thread has had no

@@ -3196,6 +3196,7 @@ fn agy_fixture(dir: &std::path::Path, conversation: &str) -> PathBuf {
         format!(
             r#"#!/bin/sh
 case "$1" in
+    models) printf 'gemini-3.8-flash\tGemini Flash\n'; exit ;;
     --prompt-interactive=?*) conversation={conversation} ;;
     --conversation=?*) conversation="${{1#--conversation=}}" ;;
     *) exit 64 ;;
@@ -3311,7 +3312,10 @@ async fn a_hosted_agy_names_its_conversation_through_its_first_hook_and_resumes_
         args[0].starts_with("--prompt-interactive=You are a senator in Senate"),
         "{args:?}"
     );
-    assert!(args.contains(&"--model=flash".to_owned()), "{args:?}");
+    assert!(
+        args.contains(&"--model=gemini-3.8-flash".to_owned()),
+        "{args:?}"
+    );
     assert!(args.contains(&"--effort=high".to_owned()), "{args:?}");
     agy_trusts_only(&args, &project);
     // The hook waited for the launch to publish, then answered as agy
@@ -3359,7 +3363,10 @@ async fn a_hosted_agy_names_its_conversation_through_its_first_hook_and_resumes_
     let terminal: PathBuf = call(&h, &attach_target).await;
     let args = hosted_fixture_argv(&terminal, &project, TIMEOUT).await;
     assert_eq!(args[0], format!("--conversation={conversation}"));
-    assert!(args.contains(&"--model=flash".to_owned()), "{args:?}");
+    assert!(
+        args.contains(&"--model=gemini-3.8-flash".to_owned()),
+        "{args:?}"
+    );
     agy_trusts_only(&args, &project);
     h.stop().await;
 }

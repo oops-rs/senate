@@ -582,7 +582,7 @@ stdin.")]
 /// them through as the runtime's flags; left out, it uses its own default.
 #[derive(Args)]
 struct ModelArgs {
-    /// The model, as the runtime names it (e.g. opus, gpt-5.5).
+    /// A model ID or family (e.g. astra). Claude Code resolves its own aliases.
     #[arg(long)]
     model: Option<String>,
     /// The reasoning effort. Claude Code: low, medium, high, xhigh, max.
@@ -1733,6 +1733,12 @@ fn choose_alias(
 fn launch(request: &Request, terminal: Option<Terminal>) -> anyhow::Result<()> {
     let reply: SpawnReply = host_call(request)?;
     println!("{}", reply.senator);
+    if let Some(resolved) = &reply.resolved_model
+        && let Request::Spawn { model, .. } | Request::Restore { model, .. } = request
+        && let Some(requested) = &model.model
+    {
+        eprintln!("{requested} → {resolved}");
+    }
     let locale = Paths::from_env()
         .map(|p| BridgeConfig::locale_at(&p.config()))
         .unwrap_or_default();

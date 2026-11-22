@@ -373,6 +373,9 @@ pub struct WaitingReply {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpawnReply {
+    /// Canonical model when an explicit alias was expanded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_model: Option<String>,
     pub senator: SenatorName,
     pub session_id: String,
     pub committee: CommitteeId,

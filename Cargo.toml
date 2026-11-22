@@ -77,6 +77,7 @@ rustix = { version = "1.1.6", features = ["fs", "process", "termios", "time"] }
 
 # CLI and logging.
 clap = { version = "4", features = ["derive", "env"] }
+strsim = "0.11"
 terminal_size = "0.4"
 textwrap = { version = "0.16", default-features = false, features = ["unicode-width"] }
 tracing = "0.1"

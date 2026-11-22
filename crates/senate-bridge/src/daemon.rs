@@ -173,6 +173,7 @@ mod front;
 mod host_policy;
 mod hosted_approvals;
 mod hosts;
+mod model_catalog;
 mod pause;
 mod preside;
 mod remote_approve;

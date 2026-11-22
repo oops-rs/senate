@@ -689,7 +689,11 @@ senate session restore triage      # resumes the same agy conversation
 
 A hosted agy starts from Senate's fixed seed prompt, which tells it to read
 its Senate inbox; `--prompt` arrives as an ordinary Senate request.
-`--model` and `--effort` (`low` … `max`) pass through to agy. `[agy] bin` in
+Senate resolves `--model` against `agy models` for agy and the app-server's
+`model/list` for Codex. An exact ID wins. A family name such as `astra` selects
+its newest numeric version. If several families match, choose a listed ID.
+Restore keeps the recorded choice unless you supply a new `--model`.
+Claude Code handles its own aliases. agy accepts `--effort` from `low` to `max`. `[agy] bin` in
 `senate.toml` picks the executable. A hosted agy starts with session-only
 settings (`--settings`, never written to agy's own files) that make its spawn
 directory a trusted workspace, so it does not stop at agy's trust question.
