@@ -13,11 +13,13 @@
 //!   seats. A child may be backing off after a failed request during the
 //!   parent restart. Wait for fresh reports up to the maximum reconnect
 //!   backoff plus one poll from Speaker startup. The first send starts
-//!   the hourly throttle.
+//!   the hourly window for lower-priority changes.
 //! - **Coalesced and throttled.** One refresh is pending per group at a
-//!   time: `card_debounce_ms` after the first change, and never sooner than
-//!   [`ANNOUNCEMENT_INTERVAL`] after the last section sent there. Whatever
-//!   changed meanwhile lands with it.
+//!   time. Recheck after the card debounce even on quiet committees: child
+//!   seat reports do not append events. Seat membership, availability and
+//!   decisions in the hub's committed brief can trigger an edit at once.
+//!   Other changes ride along or wait until [`ANNOUNCEMENT_INTERVAL`] has
+//!   elapsed since the last edit.
 //! - **Unsupported once.** A surface that cannot set this group's
 //!   announcement (no announcements, or no right to edit this one) gets one
 //!   notice in the group, and no more tries until the group is bound again
@@ -27,13 +29,15 @@
 //!   post retries with its saved operation id.
 //!
 //! What was last sent is kept in memory only (like the pinned cards): a
-//! restart sends one refresh. Its `operation_id` names the committee's head
-//! when it was rendered, so a replay is a gateway duplicate and new content
-//! is always a new operation.
+//! restart sends one refresh. A write keys its content to the committed head. Further
+//! writes at that head also include the previous successful operation. Retries reuse the key, while a
+//! child returning to its earlier state at the same head gets a new one.
+//! Restart loses this chain: returning to the first content at the same
+//! head across restart can replay the original key.
 
 use std::{fs, io, path::Path};
 
-use senate_core::{AnnouncementSection, BriefBuilder, EventId, StatusState};
+use senate_core::{AnnouncementSection, Brief, BriefBuilder, EventId, StatusState};
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 
@@ -45,7 +49,7 @@ use crate::actor::SpeakerMsg;
 use crate::brain::CommitteeSeat;
 use crate::render;
 
-/// At most one announcement update per group per this long.
+/// Minimum time between edits carrying only lower-priority changes.
 pub(crate) const ANNOUNCEMENT_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 /// One people group's announcement, for the binding that bound it.
@@ -56,9 +60,56 @@ pub(super) struct Announced {
     /// The section last set, and when.
     last: Option<AnnouncementSection>,
     sent_at: Option<Instant>,
-    timer: Option<Timer>,
+    priority: Option<Priority>,
+    last_operation: Option<(Seq, String)>,
+    timer: Option<(Instant, Timer)>,
     /// The surface cannot set it here: no more tries for this binding.
     unsupported: bool,
+}
+
+/// Compare seat identities and availability independently of display-only
+/// changes (for example, duties). Decision sequences name immutable entries.
+#[derive(PartialEq, Eq)]
+struct Priority {
+    seats: std::collections::BTreeMap<String, (bool, bool, Option<senate_core::PresenceState>)>,
+    decisions: Vec<Seq>,
+}
+
+impl Announced {
+    fn schedule(
+        &mut self,
+        actor: &ractor::ActorRef<SpeakerMsg>,
+        committee: &CommitteeId,
+        group: String,
+        delay: Duration,
+    ) {
+        let due = Instant::now() + delay;
+        if self.unsupported
+            || self
+                .timer
+                .as_ref()
+                .is_some_and(|(scheduled, _)| *scheduled <= due)
+        {
+            return;
+        }
+        if let Some((_, timer)) = self.timer.take() {
+            timer.abort();
+        }
+        let committee = committee.clone();
+        let timer = actor.send_after(delay, move || SpeakerMsg::AnnouncementDue {
+            committee,
+            group,
+        });
+        self.timer = Some((due, timer));
+    }
+}
+
+impl Drop for Announced {
+    fn drop(&mut self) {
+        if let Some((_, timer)) = self.timer.take() {
+            timer.abort();
+        }
+    }
 }
 
 /// Saved atomically for one logical binding. A repeat bind has a new log
@@ -103,35 +154,16 @@ impl Engine {
             .people_groups()
             .map(|g| (g.group.group_id.clone(), g.seq))
             .collect();
-        forget_unbound(state, &bound);
+        state
+            .announcements
+            .retain(|group, _| bound.iter().any(|(g, _)| g == group));
         for (group, binding) in bound {
             let entry = state.announcements.entry(group.clone()).or_default();
             if entry.binding != binding {
-                if let Some(timer) = entry.timer.take() {
-                    timer.abort();
-                }
-                *entry = Announced {
-                    binding,
-                    ..Announced::default()
-                };
+                *entry = Announced::default();
+                entry.binding = binding;
             }
-            if entry.unsupported || entry.timer.is_some() {
-                continue;
-            }
-            let delay = entry
-                .sent_at
-                .map(|at| (at + ANNOUNCEMENT_INTERVAL).saturating_duration_since(Instant::now()))
-                .unwrap_or_default()
-                .max(debounce);
-            let message = committee.clone();
-            entry.timer =
-                Some(
-                    self.myself
-                        .send_after(delay, move || SpeakerMsg::AnnouncementDue {
-                            committee: message,
-                            group,
-                        }),
-                );
+            entry.schedule(&self.myself, committee, group, debounce);
         }
     }
 
@@ -144,6 +176,13 @@ impl Engine {
         else {
             return;
         };
+        if entry
+            .timer
+            .as_ref()
+            .is_none_or(|(due, _)| *due > Instant::now())
+        {
+            return;
+        }
         entry.timer = None;
         if entry.sent_at.is_none() && !entry.unsupported {
             // Seat reports do not append events. Read them even on a quiet
@@ -169,34 +208,24 @@ impl Engine {
                 } else {
                     remaining.min(self.card_debounce)
                 };
-                entry.timer =
-                    Some(
-                        self.myself
-                            .send_after(delay, move || SpeakerMsg::AnnouncementDue {
-                                committee,
-                                group,
-                            }),
-                    );
+                entry.schedule(&self.myself, &committee, group, delay);
                 return;
             }
         }
-        if let Err(stall) = self.refresh_announcement(&committee, &group).await {
-            warn!(%committee, %group, error = %stall, "announcement deferred");
-            let (message, again) = (committee.clone(), group.clone());
-            let timer = self
-                .myself
-                .send_after(STALL_RETRY, move || SpeakerMsg::AnnouncementDue {
-                    committee: message,
-                    group: again,
-                });
-            match self
-                .committees
-                .get_mut(&committee)
-                .and_then(|state| state.announcements.get_mut(&group))
-            {
-                Some(entry) => entry.timer = Some(timer),
-                None => timer.abort(),
+        let delay = match self.refresh_announcement(&committee, &group).await {
+            Ok(()) if self.card_debounce.is_zero() => senate_core::api::UPLINK_POLL,
+            Ok(()) => self.card_debounce,
+            Err(stall) => {
+                warn!(%committee, %group, error = %stall, "announcement deferred");
+                STALL_RETRY
             }
+        };
+        if let Some(entry) = self
+            .committees
+            .get_mut(&committee)
+            .and_then(|s| s.announcements.get_mut(&group))
+        {
+            entry.schedule(&self.myself, &committee, group, delay);
         }
     }
 
@@ -222,14 +251,34 @@ impl Engine {
         if entry.unsupported || entry.binding != binding {
             return Ok(());
         }
-        let section = announcement_section(committee, state, &seats);
+        let brief = self.hub.brief(committee).await?;
+        let section = announcement_section(committee, state, &seats, &brief);
         if entry.last.as_ref() == Some(&section) {
             return Ok(()); // nothing people would see changed
         }
+        let priority = Priority {
+            seats: seats
+                .iter()
+                .map(|s| (s.target.clone(), (s.online, s.paused, s.presence)))
+                .collect(),
+            decisions: brief.decisions.iter().map(|d| d.seq).collect(),
+        };
+        if entry.priority.as_ref() == Some(&priority)
+            && entry
+                .sent_at
+                .is_some_and(|at| at.elapsed() < ANNOUNCEMENT_INTERVAL)
+        {
+            return Ok(());
+        }
         let l = state.locale;
-        let head = state.board.head();
-        let operation =
-            self.content_op_id(committee, head, &format!("{group}#announcement"), &section)?;
+        let head = brief.head;
+        let target = format!("{group}#announcement");
+        let operation = match &entry.last_operation {
+            Some((previous_head, previous)) if *previous_head == head => {
+                self.content_op_id(committee, head, &target, &(previous, &section))?
+            }
+            _ => self.content_op_id(committee, head, &target, &section)?,
+        };
         let outcome = self
             .call(self.surface.set_announcement(group, &section, &operation))
             .await?;
@@ -256,6 +305,7 @@ impl Engine {
         else {
             return Ok(());
         };
+        entry.priority = Some(priority);
         match outcome {
             Outcome::Done(()) => {
                 if matches!(
@@ -264,6 +314,7 @@ impl Engine {
                 ) {
                     Notice::Recovered(EventId::new()).save(&path)?;
                 }
+                entry.last_operation = Some((head, operation));
                 entry.last = Some(section);
                 entry.sent_at = Some(Instant::now());
             }
@@ -312,34 +363,20 @@ impl Engine {
     }
 }
 
-/// Drop what is kept for groups no longer bound for people.
-fn forget_unbound(state: &mut CommitteeState, bound: &[(String, Seq)]) {
-    state.announcements.retain(|group, entry| {
-        let keep = bound.iter().any(|(g, _)| g == group);
-        if !keep && let Some(timer) = entry.timer.take() {
-            timer.abort();
-        }
-        keep
-    });
-}
-
 /// The section as the committee's state has it now, the seats as
 /// [`Engine::committee_seats`] lists them.
 fn announcement_section(
     committee: &CommitteeId,
     state: &CommitteeState,
     seats: &[CommitteeSeat],
+    brief: &Brief,
 ) -> AnnouncementSection {
-    let brief = state.brief.as_ref().map(BriefBuilder::brief);
     let memory = state.brief.as_ref().map(BriefBuilder::memory);
     let parts = render::AnnouncementParts {
         committee,
         seats,
         waiting: state.board.threads(Some(StatusState::Suspended)),
-        decisions: brief
-            .as_ref()
-            .map(|b| b.decisions.iter().rev().collect())
-            .unwrap_or_default(),
+        decisions: brief.decisions.iter().rev().collect(),
         lately: memory
             .and_then(|m| m.latest_digest())
             .map(|d| {

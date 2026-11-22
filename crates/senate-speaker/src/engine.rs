@@ -2266,7 +2266,7 @@ impl Engine {
                         message_ref,
                         in_thread: true,
                     },
-                    text: render::decision_ack(l, event.seq),
+                    text: render::decision_ack(l, event.seq, event.is_simulated()),
                     target: group,
                     record_as: None,
                     card: None,
@@ -2286,7 +2286,7 @@ impl Engine {
                 message_ref: mirror.message_ref,
                 in_thread: true,
             },
-            text: render::decision_ack(l, event.seq),
+            text: render::decision_ack(l, event.seq, event.is_simulated()),
             target: source.group_id,
             record_as: None,
             card: None,
@@ -3545,7 +3545,7 @@ impl Engine {
                 // or here when it was said in another committee's log.
                 let recorded = self.append_action(decision, strict).await?;
                 Ok(match (chat, recorded) {
-                    (None, Some(event)) => render::decision_ack(l, event.seq),
+                    (None, Some(event)) => render::decision_ack(l, event.seq, event.is_simulated()),
                     _ => String::new(),
                 })
             }

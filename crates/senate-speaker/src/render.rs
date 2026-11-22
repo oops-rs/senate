@@ -222,7 +222,15 @@ pub(crate) fn discussion_proposal(l: Locale, event: &Event) -> String {
 }
 
 /// `已记录决策（seq 131）` / `Decision recorded (seq 131)`.
-pub(crate) fn decision_ack(l: Locale, seq: Seq) -> String {
+pub(crate) fn decision_ack(l: Locale, seq: Seq, simulated: bool) -> String {
+    if simulated {
+        return match l {
+            Locale::Zh => format!("模拟决策（seq {seq}），未计入委员会决策。"),
+            Locale::En => format!(
+                "Simulated decision (seq {seq}). It does not count as a committee decision."
+            ),
+        };
+    }
     match l {
         Locale::Zh => format!("已记录决策（seq {seq}）"),
         Locale::En => format!("Decision recorded (seq {seq})"),
@@ -2659,8 +2667,14 @@ mod tests {
             relay_ack(l, &[sen("claude"), sen("bob")], Seq(120)),
             "Passed to [senator::claude], [senator::bob] (seq 120)"
         );
-        assert_eq!(decision_ack(l, Seq(131)), "Decision recorded (seq 131)");
-        assert_eq!(decision_ack(Locale::Zh, Seq(131)), "已记录决策（seq 131）");
+        assert_eq!(
+            decision_ack(l, Seq(131), false),
+            "Decision recorded (seq 131)"
+        );
+        assert_eq!(
+            decision_ack(Locale::Zh, Seq(131), false),
+            "已记录决策（seq 131）"
+        );
     }
 
     #[test]
@@ -3271,7 +3285,7 @@ mod tests {
                 root_mirror(l, no_names(), &question),
                 thread_mirror(l, no_names(), &answer),
                 proposal_root(l, no_names(), &question),
-                decision_ack(l, Seq(1)),
+                decision_ack(l, Seq(1), false),
                 signed(l, no_names(), &answer),
                 confirm_action(l, &describe_bind(l, &c)),
                 describe_rebind(l, &c, &c),

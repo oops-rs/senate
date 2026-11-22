@@ -1,6 +1,5 @@
 //! The Speaker's section of each people group's announcement: people
-//! groups only, sent when what it shows changed, coalesced and at most
-//! hourly, and a surface that cannot set it told about once.
+//! groups only, sent when what it shows changed, coalesced by priority, and a surface that cannot set it told about once.
 
 use std::time::Duration;
 
@@ -51,7 +50,7 @@ fn notices(surface: &FakeSurface) -> usize {
 }
 
 #[tokio::test(start_paused = true)]
-async fn only_people_groups_get_it_and_a_burst_lands_once_an_hour_on() {
+async fn only_people_groups_get_one_edit_after_a_burst_of_decisions() {
     let hub = hub_with_groups().await;
     let surface = FakeSurface::with(Caps::ADOPTED);
     let rig = Rig::start_with(hub, surface.clone(), ScriptedBrain::new()).await;
@@ -70,16 +69,13 @@ async fn only_people_groups_get_it_and_a_burst_lands_once_an_hour_on() {
         first.markdown
     );
 
-    // Three decisions in a burst, inside the hour: nothing yet.
+    // Decisions committed within a single debounce window land together.
     rig.append(decision("幂等键统一用 Idempotency-Key")).await;
-    pass(&rig, DEBOUNCE).await;
     rig.append(decision("退款走异步队列")).await;
     rig.append(decision("重试最多三次")).await;
-    pass(&rig, ANNOUNCEMENT_INTERVAL - DEBOUNCE * 3).await;
-    assert_eq!(surface.announcements().len(), 1, "throttled to one an hour");
-
-    // The hour is up: one update, with all three.
-    pass(&rig, DEBOUNCE * 2).await;
+    rig.settle().await;
+    assert_eq!(surface.announcements().len(), 1);
+    pass(&rig, DEBOUNCE).await;
     let sent = surface.announcements();
     assert_eq!(sent.len(), 2, "{sent:?}");
     let (group, latest, operation) = &sent[1];
@@ -290,7 +286,9 @@ async fn the_latest_digest_and_what_we_know_join_the_section() {
         ),
     )
     .await;
-    pass(&rig, ANNOUNCEMENT_INTERVAL + DEBOUNCE).await;
+    pass(&rig, DEBOUNCE).await;
+    assert_eq!(surface.announcements().len(), 1);
+    pass(&rig, ANNOUNCEMENT_INTERVAL - DEBOUNCE).await;
     let sent = surface.announcements();
     let latest = &sent.last().unwrap().1.markdown;
     assert!(
@@ -306,4 +304,137 @@ async fn the_latest_digest_and_what_we_know_join_the_section() {
         "after the decisions: {latest}"
     );
     rig.stop().await;
+}
+
+fn last_markdown(rig: &Rig) -> String {
+    rig.surface
+        .announcements()
+        .pop()
+        .expect("an announcement")
+        .1
+        .markdown
+}
+
+#[tokio::test(start_paused = true)]
+async fn quiet_child_reports_update_the_same_seat_line_as_status() {
+    use super::rig::mention;
+    use senate_core::PresenceState;
+
+    let hub = hub_with_groups().await;
+    let rig = Rig::start_with(hub, FakeSurface::with(Caps::ADOPTED), ScriptedBrain::new()).await;
+    pass(&rig, DEBOUNCE).await;
+    rig.hub.add_child("east", "alice");
+    rig.hub
+        .declare_seats("east", &refund(), &[("delegate", PresenceState::Online)]);
+    pass(&rig, DEBOUNCE).await;
+    let edits = rig.surface.announcements();
+    assert_eq!(edits.len(), 2);
+    let line = edits[1]
+        .1
+        .markdown
+        .lines()
+        .find(|l| l.contains("delegate] 在线"))
+        .unwrap()
+        .trim_start_matches("- ");
+    rig.append(mention("pm", "/status", "status1")).await;
+    rig.settle().await;
+    assert!(
+        rig.surface
+            .posts()
+            .iter()
+            .any(|p| p.markdown.contains(line))
+    );
+
+    rig.hub
+        .child_seen("east", Some(chrono::DateTime::UNIX_EPOCH));
+    pass(&rig, DEBOUNCE).await;
+    assert!(last_markdown(&rig).contains("delegate] 失联"));
+    rig.hub
+        .declare_seats("east", &refund(), &[("delegate", PresenceState::Online)]);
+    pass(&rig, DEBOUNCE).await;
+    let head = rig.cursor(&refund()).await;
+    let online = rig.surface.announcements().last().unwrap().clone();
+    rig.hub
+        .child_seen("east", Some(chrono::DateTime::UNIX_EPOCH));
+    pass(&rig, DEBOUNCE).await;
+    rig.hub
+        .declare_seats("east", &refund(), &[("delegate", PresenceState::Online)]);
+    pass(&rig, DEBOUNCE).await;
+    let restored = rig.surface.announcements().last().unwrap().clone();
+    assert_eq!(rig.cursor(&refund()).await, head);
+    assert_eq!(online.1, restored.1);
+    assert_ne!(
+        online.2, restored.2,
+        "a return to online must reach the platform"
+    );
+
+    rig.hub
+        .declare_seats("east", &refund(), &[("delegate", PresenceState::Absent)]);
+    pass(&rig, DEBOUNCE).await;
+    rig.hub.pause_child_seat("east", &refund(), "delegate");
+    pass(&rig, DEBOUNCE).await;
+    assert!(last_markdown(&rig).contains("delegate] 已暂停"));
+    rig.hub.declare_seats("east", &refund(), &[]);
+    pass(&rig, DEBOUNCE).await;
+    assert!(!last_markdown(&rig).contains("delegate"));
+    rig.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn announcement_includes_committed_decisions_beyond_a_stalled_cursor() {
+    use super::rig::{config, mention};
+    use senate_core::SurfaceError;
+    let hub = MemoryHub::new();
+    hub.append(bind_event(&refund(), GROUP)).await.unwrap();
+    let mut cfg = config();
+    cfg.card_debounce_ms = 100;
+    let rig = Rig::start_config(
+        hub,
+        FakeSurface::with(Caps::ADOPTED),
+        ScriptedBrain::new(),
+        cfg,
+    )
+    .await;
+    let debounce = Duration::from_millis(100);
+    pass(&rig, debounce).await;
+    rig.surface
+        .fail_next(SurfaceError::Unavailable("offline".into()));
+    let blocked = rig.append(mention("pm", "/status", "unavailable")).await;
+    rig.settle().await;
+    assert!(rig.cursor(&refund()).await < blocked.seq);
+    let decided = rig.append(decision("new committed decision")).await;
+    pass(&rig, debounce).await;
+    assert!(rig.cursor(&refund()).await < decided.seq);
+    assert!(last_markdown(&rig).contains("new committed decision"));
+    rig.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn simulated_decide_explains_why_it_is_absent_from_announcements() {
+    use super::rig::{config_in, mention};
+    use senate_core::Locale;
+    for (locale, expected) in [
+        (Locale::En, "It does not count as a committee decision."),
+        (Locale::Zh, "未计入委员会决策"),
+    ] {
+        let rig = Rig::start_config(
+            hub_with_groups().await,
+            FakeSurface::with(Caps::ADOPTED),
+            ScriptedBrain::new(),
+            config_in(locale),
+        )
+        .await;
+        let mut chat = mention("pm", "/decide simulation only", "m_sim");
+        chat.source.as_mut().unwrap().simulated = true;
+        rig.append(chat).await;
+        pass(&rig, DEBOUNCE).await;
+        assert!(
+            rig.surface
+                .posts()
+                .iter()
+                .any(|p| p.markdown.contains(expected))
+        );
+        assert!(!last_markdown(&rig).contains("simulation only"));
+        rig.stop().await;
+    }
 }

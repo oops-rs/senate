@@ -144,6 +144,19 @@ impl MemoryHub {
         child.last_seen = Some(chrono::Utc::now());
     }
 
+    pub(crate) fn pause_child_seat(&self, child: &str, committee: &CommitteeId, senator: &str) {
+        self.lock()
+            .children
+            .iter_mut()
+            .find(|c| c.name.as_str() == child)
+            .unwrap()
+            .seats
+            .iter_mut()
+            .find(|s| s.committee == *committee && s.senator.to_string() == senator)
+            .unwrap()
+            .paused = true;
+    }
+
     /// The duty the seat `senator` of `child` declares on `committee`.
     pub(crate) fn declare_duty(
         &self,

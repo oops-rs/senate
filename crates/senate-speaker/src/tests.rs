@@ -46,8 +46,7 @@ async fn startup_seats_rig() -> rig::Rig {
 }
 
 #[tokio::test(start_paused = true)]
-async fn first_announcement_waits_for_each_fresh_report_then_throttles() {
-    use crate::engine::announcement::ANNOUNCEMENT_INTERVAL;
+async fn first_announcement_waits_for_each_fresh_report_then_debounces_decisions() {
     use senate_core::{Kind, NewEvent, PresenceState};
     use std::time::Duration;
     let rig = startup_seats_rig().await;
@@ -76,7 +75,7 @@ async fn first_announcement_waits_for_each_fresh_report_then_throttles() {
         "approved",
     ))
     .await;
-    announcement::pass(&rig, ANNOUNCEMENT_INTERVAL - debounce).await;
+    rig.settle().await;
     assert_eq!(rig.surface.announcements().len(), 1);
     announcement::pass(&rig, debounce).await;
     let sent = rig.surface.announcements();

@@ -296,7 +296,11 @@ impl Engine {
             });
         }
         let now = chrono::Utc::now();
-        for child in &self.children {
+        let children = self.hub.children().await.unwrap_or_else(|error| {
+            tracing::debug!(%committee, %error, "using last child seat reports");
+            self.children.clone()
+        });
+        for child in &children {
             let child_online = child.is_online(now);
             for seat in child.seats.iter().filter(|s| s.committee == *committee) {
                 seats.push(CommitteeSeat {
