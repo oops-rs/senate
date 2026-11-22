@@ -292,8 +292,8 @@ pub struct Inner {
     pub searches: Vec<(String, String, Option<usize>)>,
     /// `GET .../brief` answers 500 while set.
     pub brief_broken: bool,
-    /// `GET .../brief` answers only after this long.
-    pub brief_delay: Duration,
+    /// The next brief handler signals arrival and waits for release.
+    brief_gate: Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>,
     /// Every `GET /v1/resolve`: `(name, committee)`.
     pub resolves: Vec<(String, Option<String>)>,
 }
@@ -980,8 +980,11 @@ async fn brief(State(st): St, UrlPath(committee): UrlPath<String>, headers: Head
     if let Err(r) = auth(&st, &headers) {
         return r;
     }
-    let delay = st.inner.lock().unwrap().brief_delay;
-    tokio::time::sleep(delay).await;
+    let gate = st.inner.lock().unwrap().brief_gate.take();
+    if let Some((arrived, release)) = gate {
+        let _ = arrived.send(());
+        let _ = release.await;
+    }
     let inner = st.inner.lock().unwrap();
     if inner.brief_broken {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "internal", "brief broke");
@@ -1379,7 +1382,7 @@ impl FakeServer {
                 brief_broken: false,
                 secretaries: Default::default(),
                 refuse_secretaries: 0,
-                brief_delay: Duration::ZERO,
+                brief_gate: None,
                 resolves: Vec::new(),
             }),
             live,
@@ -1543,9 +1546,12 @@ impl FakeServer {
         self.state.inner.lock().unwrap().brief_broken = broken;
     }
 
-    /// Make `GET .../brief` answer only after `delay`.
-    pub fn set_brief_delay(&self, delay: Duration) {
-        self.state.inner.lock().unwrap().brief_delay = delay;
+    /// Hold the next brief response until the caller drops the release sender.
+    pub fn hold_next_brief(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (arrived, seen) = oneshot::channel();
+        let (release, wait) = oneshot::channel();
+        self.state.inner.lock().unwrap().brief_gate = Some((arrived, wait));
+        (seen, release)
     }
 
     pub fn heartbeats(&self) -> Vec<(String, String, Heartbeat)> {

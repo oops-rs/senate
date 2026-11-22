@@ -1265,14 +1265,16 @@ async fn session_start_injects_the_brief_ahead_of_the_backlog() {
 
     // Nor does a slow one: the hook answers in time, without it.
     h.server.set_brief_broken(false);
-    h.server.set_brief_delay(Duration::from_secs(5));
-    let started = std::time::Instant::now();
+    let (mut arrived, release) = h.server.hold_next_brief();
     let out = h
         .hook(HookKind::SessionStart, "t", &wd, None)
         .await
         .expect("a slow brief does not fail the hook");
-    assert!(started.elapsed() < Duration::from_secs(2));
+    arrived
+        .try_recv()
+        .expect("the hook requested the held brief");
     assert!(!context(&out).contains("# Brief"));
+    drop(release);
     h.stop().await;
 }
 
