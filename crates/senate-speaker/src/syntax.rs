@@ -1,7 +1,7 @@
 //! The fixed syntax: always understood, model or no model.
 //!
 //! `/bind <committee>`, `/unbind`, `/tell <name> <text>` (a person or an agent),
-//! `/status`, `/decide <text>`, `/brief`, `/agents [<committee>]` (this group
+//! `/status`, `/decide [--supersedes <seq>] <text>`, `/brief`, `/agents [<committee>]` (this group
 //! is the committee's Agent group), `/invite <handle>…` (into the Agent
 //! group), `/output answers|status|all` (the Agent group's output level),
 //! `/work <name> <instruction>` (coding work from that agent's
@@ -25,8 +25,8 @@ use crate::brain::{Intent, RelayKind};
 /// The one-line reminder of the fixed syntax.
 pub(crate) fn usage(locale: Locale) -> &'static str {
     locale.pick(
-        "固定写法：/tell <name> <内容>、/decide <决策>、/brief、/memory [<关键词>]、/forget <seq>、/correct <seq> <内容>、/bind <committee>、/unbind、/status、/agents [<committee>]、/invite <handle>、/output answers|status|all、/work <name> <要做的事>、/reassign <from> <to>",
-        "Commands: /tell <name> <text>, /decide <decision>, /brief, /memory [<words>], /forget <seq>, /correct <seq> <text>, /bind <committee>, /unbind, /status, /agents [<committee>], /invite <handle>, /output answers|status|all, /work <name> <what to do>, /reassign <from> <to>",
+        "固定写法：/tell <name> <内容>、/decide [--supersedes <seq>] <决策>、/brief、/memory [<关键词>]、/forget <seq>、/correct <seq> <内容>、/bind <committee>、/unbind、/status、/agents [<committee>]、/invite <handle>、/output answers|status|all、/work <name> <要做的事>、/reassign <from> <to>",
+        "Commands: /tell <name> <text>, /decide [--supersedes <seq>] <decision>, /brief, /memory [<words>], /forget <seq>, /correct <seq> <text>, /bind <committee>, /unbind, /status, /agents [<committee>], /invite <handle>, /output answers|status|all, /work <name> <what to do>, /reassign <from> <to>",
     )
 }
 
@@ -88,11 +88,15 @@ pub(crate) fn parse_command(text: &str, locale: Locale) -> Option<Result<Intent,
                 l.pick("/correct <seq> <内容>", "/correct <seq> <text>"),
             )),
         },
-        "decide" if !args.is_empty() => Ok(Intent::Decide {
-            body: args.to_owned(),
-            supersedes: None,
+        "decide" => parse_decision(args).ok_or_else(|| {
+            wrong_use(
+                l,
+                l.pick(
+                    "/decide [--supersedes <seq>] <决策>",
+                    "/decide [--supersedes <seq>] <decision>",
+                ),
+            )
         }),
-        "decide" => Err(wrong_use(l, l.pick("/decide <决策>", "/decide <decision>"))),
         "agents" if !args.contains(char::is_whitespace) => Ok(Intent::AdoptAgentGroup {
             committee: (!args.is_empty()).then(|| args.to_owned()),
         }),
@@ -178,6 +182,22 @@ fn relay_kind(body: &str) -> RelayKind {
     } else {
         RelayKind::Note
     }
+}
+
+fn parse_decision(args: &str) -> Option<Intent> {
+    let first = args.split_whitespace().next()?;
+    let (body, supersedes) = if first == "--supersedes" {
+        let (seq, body) = args[first.len()..]
+            .trim_start()
+            .split_once(char::is_whitespace)?;
+        (body.trim(), Some(seq.parse().ok()?))
+    } else {
+        (args, None)
+    };
+    Some(Intent::Decide {
+        body: body.to_owned(),
+        supersedes,
+    })
 }
 
 fn output_level(arg: &str) -> Option<OutputLevel> {
@@ -382,7 +402,16 @@ mod tests {
             }))
         );
         assert_eq!(parse_command("/brief", zh), Some(Ok(Intent::Recall)));
-        for wrong in ["/bind", "/bind a b", "/tell bob", "/decide", "/frobnicate"] {
+        for wrong in [
+            "/bind",
+            "/bind a b",
+            "/tell bob",
+            "/decide",
+            "/decide --supersedes",
+            "/decide --supersedes 33",
+            "/decide --supersedes old text",
+            "/frobnicate",
+        ] {
             assert!(matches!(parse_command(wrong, zh), Some(Err(_))), "{wrong}");
         }
         assert_eq!(parse_command("告诉 alice 的 agent", zh), None);

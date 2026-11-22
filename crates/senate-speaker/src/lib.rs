@@ -7,7 +7,7 @@
 //!
 //! - **interprets** a platform `chat` addressed to it with its [`Brain`], or
 //!   the fixed syntax (`/bind <committee>`, `/unbind`, `/tell
-//!   <name> <text>`, `/status`, `/decide <text>`, `/brief`,
+//!   <name> <text>`, `/status`, `/decide [--supersedes <seq>] <text>`, `/brief`,
 //!   `/agents [<committee>]`, `/invite <handle>…`, `/output
 //!   answers|status|all`, `/work`, `/reassign`), which always works and is
 //!   the fallback when the Brain fails. `relay` appends a `question`/`note`

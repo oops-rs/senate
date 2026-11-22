@@ -309,6 +309,19 @@ async fn slash_decide_records_directly_and_only_for_members() {
         surface.texts().last().cloned(),
         Some(render::guest_refused(Locale::Zh))
     );
+    rig.append(mention(
+        "pm",
+        &format!("/decide --supersedes {} 新的决定", recorded[0].seq),
+        "m_replace",
+    ))
+    .await;
+    rig.settle().await;
+    let history = decisions(&hub.events(&refund()));
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[1].meta[meta::SUPERSEDES], json!(recorded[0].seq));
+    let brief = hub.brief(&refund()).await.expect("brief");
+    assert_eq!(brief.decisions.len(), 1);
+    assert_eq!(brief.decisions[0].body, "新的决定");
     rig.stop().await;
 
     // A replay from before the command records and says nothing twice.

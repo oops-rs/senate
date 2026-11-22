@@ -72,7 +72,7 @@ async fn only_people_groups_get_one_edit_after_a_burst_of_decisions() {
     // Decisions committed within a single debounce window land together.
     rig.append(decision("幂等键统一用 Idempotency-Key")).await;
     rig.append(decision("退款走异步队列")).await;
-    rig.append(decision("重试最多三次")).await;
+    let old = rig.append(decision("重试最多三次")).await;
     rig.settle().await;
     assert_eq!(surface.announcements().len(), 1);
     pass(&rig, DEBOUNCE).await;
@@ -94,6 +94,17 @@ async fn only_people_groups_get_one_edit_after_a_burst_of_decisions() {
     );
     assert_ne!(operation, &sent[0].2, "new content is a new operation");
     assert!(surface.announcements().iter().all(|(g, _, _)| g != AGENTS));
+    rig.append(super::rig::mention(
+        "pm",
+        &format!("/decide --supersedes {} 重试最多两次", old.seq),
+        "m_replace",
+    ))
+    .await;
+    pass(&rig, DEBOUNCE).await;
+    let announcements = surface.announcements();
+    let updated = &announcements.last().unwrap().1.markdown;
+    assert!(updated.contains("重试最多两次"));
+    assert!(!updated.contains("重试最多三次"));
     rig.stop().await;
 }
 
