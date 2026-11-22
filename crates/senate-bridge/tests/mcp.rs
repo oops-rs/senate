@@ -299,7 +299,10 @@ async fn chair_spawns_agy_with_model_and_runtime_specific_effort() {
     .await
     .unwrap();
     let argv = hosted_fixture_argv(&terminal, &project, WAIT).await;
-    assert!(argv.contains(&"--model=flash".to_owned()), "{argv:?}");
+    assert!(
+        argv.contains(&"--model=gemini-3.8-flash".to_owned()),
+        "{argv:?}"
+    );
     assert!(argv.contains(&"--effort=high".to_owned()), "{argv:?}");
     h.stop().await;
 }
