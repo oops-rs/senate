@@ -629,6 +629,76 @@ async fn leave(server: &TestServer, token: &str, agent: &str, cursor: u64) {
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
 }
 
+/// `senate session pause`: the bridge's leave says paused, so the agent is
+/// `absent` with `paused` at once (written, and in the live view and the
+/// presence page an older client reads as plain absent), and its next
+/// heartbeat brings it back online, not paused.
+#[tokio::test]
+async fn a_paused_leave_is_absent_and_paused_at_once() {
+    let server = TestServer::start_configured(Arc::new(MemoryStore::new()), restart_config).await;
+    let hub = server.running.hub.clone();
+    first_agent_writes(&server, "codex").await;
+    beat(&server, ALICE, "claude", 0).await;
+    let response = server
+        .request(Method::POST, &heartbeat_path(&committee()), ALICE)
+        .json(&Heartbeat {
+            paused: true,
+            agent: path("claude"),
+            sessions: 0,
+            cursor: Seq(0),
+            left: true,
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(alice_now(hub.as_ref()).await, PresenceState::Absent);
+    let page = hub.presence(&committee()).await.unwrap();
+    let claude = page
+        .agents
+        .iter()
+        .find(|a| a.agent == path("claude"))
+        .unwrap();
+    assert!(claude.paused, "{claude:?}");
+    let events = presence_events(hub.as_ref()).await;
+    let (p, _) = events
+        .iter()
+        .rfind(|(p, _)| p.agent == path("claude"))
+        .expect("claude's pause written");
+    assert_eq!(p.state, PresenceState::Absent);
+    assert!(p.paused);
+    assert_eq!(p.previous, Some(PresenceState::Online));
+
+    // Over HTTP, as a 0.x client reads it: absent.
+    let raw: serde_json::Value = server
+        .request(
+            Method::GET,
+            &format!("/v1/committees/{}/presence", committee()),
+            ALICE,
+        )
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let raw = raw["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["agent"] == "claude")
+        .unwrap()
+        .clone();
+    assert_eq!(raw["state"], "absent");
+    assert_eq!(raw["paused"], true);
+
+    beat(&server, ALICE, "claude", 0).await;
+    assert_eq!(alice_now(hub.as_ref()).await, PresenceState::Online);
+    let page = hub.presence(&committee()).await.unwrap();
+    assert!(!page.agents.iter().any(|a| a.paused), "resumed");
+    server.running.shutdown().await.unwrap();
+}
+
 /// `senate session stop` (or the agent's last session ending) makes its bridge stop
 /// following the committee and say so: the agent is away at once, not once
 /// the two-minute threshold passes, and its next heartbeat brings it back.

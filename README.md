@@ -525,8 +525,25 @@ senate session watch                   # all of them side by side, read-only
 senate session approve reviewer        # answer its permission prompt (--always, --deny)
 senate session stop reviewer           # end its terminal...
 senate session restore reviewer        # ...and reopen it later
+senate session pause --all             # checkpoint, then stop each one...
+senate session resume --all            # ...and bring them back where they were
 senate session replace reviewer        # a fresh session takes the seat
 ```
+
+`senate session pause` sends each session a Senate note asking it to finish its
+current step and write a checkpoint. It waits up to 90 s for the checkpoint
+(`--timeout` changes that), or until the session has been quiet for 10 s after
+writing it. Then it stops the terminal and records the session as paused. A
+paused seat shows as `paused` in `senate session list`, `senate status`, the
+Speaker's `/status` and the app. Its presence stays `absent`, so the usual away
+rules apply, and messages for it wait in the queue. A session someone typed
+into in the last 5 minutes is skipped unless you pass `--force`. `--dry-run`
+lists what would be paused. `senate session resume` restores each paused
+session into the same conversation and points it at its last checkpoint. A
+session you stopped on purpose is never resumed. In `senate.toml`,
+`pause_on_shutdown = true` pauses every session when the service stops (90 s
+at most), and `resume_on_start = true` resumes them when it starts again. Both
+are off by default.
 
 `senate session replace` starts a new session of the same runtime in the same
 directory and committee. Once it is connected, it hands over the old seat's
@@ -555,7 +572,7 @@ The top level is the daily loop: `status` (a bare `senate` runs it), `inbox`
 
 | Group | Commands |
 | :--- | :--- |
-| `senate session` | `list` · `watch` · `approve` · `stop` · `restore` · `replace` · `prune` |
+| `senate session` | `list` · `watch` · `approve` · `stop` · `restore` · `pause` · `resume` · `replace` · `prune` |
 | `senate senator` | `list` · `alias` · `unalias` · `seat` · `unseat` · `duty` |
 | `senate secretary` | `list` · `appoint` · `dismiss` · `work list\|show\|create\|assign` (the secretary team) · `desk` · `desk set` (the Speaker's desk workers, in order) |
 | `senate chat` | `send` · `thread` (simulated chat; see [Testing](#-testing--verification)) |

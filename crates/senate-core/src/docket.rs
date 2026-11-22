@@ -178,6 +178,10 @@ pub struct SeatFacts {
     /// Its duty on the committee ([`crate::duty`]), the latest one set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duty: Option<String>,
+    /// Paused on purpose (its presence is `absent` with `paused`): it is
+    /// expected back, and sees what waits for it then.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub paused: bool,
 }
 
 /// An agent's latest checkpoint, as far as picking needs it.
@@ -618,6 +622,7 @@ mod tests {
             }],
             covered: [(Seq(7), "claude".parse().unwrap())].into_iter().collect(),
             seats: vec![SeatFacts {
+                paused: false,
                 agent: "codex".parse().unwrap(),
                 connected: false,
                 presence: Some(PresenceState::Absent),

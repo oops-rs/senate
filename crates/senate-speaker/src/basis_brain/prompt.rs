@@ -279,7 +279,12 @@ pub(crate) fn render_seats(seats: &[CommitteeSeat]) -> String {
             format!(
                 "- {}{shown} · {} · duty: {duty}",
                 seat.target,
-                if seat.online { "online" } else { "away" }
+                match (seat.online, seat.paused) {
+                    (true, _) => "online",
+                    (false, true) =>
+                        "paused (expected back; may be answered as paused, to answer when resumed)",
+                    (false, false) => "away",
+                }
             )
         })
         .collect::<Vec<_>>()
@@ -437,8 +442,22 @@ fn takeover_prompt(question: &Question, takeover: &Takeover) -> String {
         || "(the brief could not be read)".to_owned(),
         |b| b.to_markdown(question.locale, TAKEOVER_BRIEF_CHARS),
     );
+    let (away, paused) = if takeover.paused {
+        (
+            "is paused: its operator paused its terminal and will resume it, in the same \
+             conversation, and it sees this question then",
+            format!(
+                " Since {agent} is paused, when this material is not enough you may instead \
+                 answer that it is paused and will answer when it is resumed, rather than \
+                 writing {not_covered}.",
+                not_covered = NOT_COVERED
+            ),
+        )
+    } else {
+        ("is away (its lease has expired)", String::new())
+    };
     format!(
-        "{agent} is away (its lease has expired). You have taken over its inbox and are to \
+        "{agent} {away}. You have taken over its inbox and are to \
          answer the question below for it.\n\n\
          The question (seq {seq}, from {from}{behalf}):\n{body}\n\n\
          The latest checkpoint of {agent} (seq {cp_seq}, {age} ago, {at}, {pushed}):\n\n{files}\n\n\
@@ -451,7 +470,7 @@ fn takeover_prompt(question: &Question, takeover: &Takeover) -> String {
          the same person. Do not speculate about details of the code, and do not promise \
          anything on its behalf. \
          If this material is not enough to answer, write only {not_covered} on the first line, \
-         and on the second line say in one sentence what is missing. \
+         and on the second line say in one sentence what is missing.{paused} \
          Your answer is posted as {label} takeover, the Speaker answering for {agent} while it \
          is away; give the answer itself, with no pleasantries.",
         seq = question.event.seq,

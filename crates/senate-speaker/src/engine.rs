@@ -448,6 +448,8 @@ fn child_seat_of(event: &Event) -> Option<String> {
 struct PresenceSeen {
     seq: Seq,
     state: PresenceState,
+    /// Paused on purpose ([`senate_core::PresencePayload::paused`]).
+    paused: bool,
     /// The state before it: the previous event's, else the payload's own.
     previous: Option<PresenceState>,
 }
@@ -618,6 +620,7 @@ impl CommitteeState {
                     PresenceSeen {
                         seq: event.seq,
                         state: payload.state,
+                        paused: payload.paused,
                         previous: seen.map(|s| s.state).or(payload.previous),
                     },
                 );

@@ -280,10 +280,16 @@ impl ToolExecutor for Presence {
                 out,
                 "\n- {} · {} · since {} (seq {})",
                 mention(&p.agent),
-                p.state.label(Locale::En),
+                senate_core::presence_label(p.state, p.paused, Locale::En),
                 p.since.format("%Y-%m-%d %H:%M UTC"),
                 p.since_seq
             );
+            if p.paused {
+                out.push_str(
+                    " · paused on purpose and expected back: what waits for it is delivered \
+                     when it is resumed, so it may be answered as paused, to answer when resumed",
+                );
+            }
             if let (PresenceState::Reassigned, Some(owner)) = (p.state, &p.new_owner) {
                 let _ = write!(out, " · handed to {}", mention(owner));
             }

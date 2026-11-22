@@ -360,7 +360,9 @@ impl Shared {
         } else {
             self.locale.pick(
                 format!("{actor} 停止了委员会 `{committee}` 中 {who} 的托管终端。"),
-                format!("{actor} stopped the hosted terminal for {who} in committee `{committee}`."),
+                format!(
+                    "{actor} stopped the hosted terminal for {who} in committee `{committee}`."
+                ),
             )
         };
         if force {

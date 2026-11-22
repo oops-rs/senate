@@ -625,7 +625,7 @@ pub(crate) fn binding_body(l: Locale, bind: bool, group: &str) -> String {
 pub(crate) fn seat_line(l: Locale, seat: &crate::brain::CommitteeSeat) -> String {
     let presence = match seat.presence {
         _ if seat.online => l.pick("在线", "online").to_owned(),
-        Some(state) if state != PresenceState::Online => presence_word(l, state, None),
+        Some(state) if state != PresenceState::Online => presence_word(l, state, seat.paused, None),
         _ => l.pick("离线", "offline").to_owned(),
     };
     let mut line = format!("{} {presence}", seat.people_name());
@@ -686,9 +686,13 @@ pub(crate) fn status(
 pub(crate) fn presence_word(
     l: Locale,
     state: PresenceState,
+    paused: bool,
     new_owner: Option<&SenatorName>,
 ) -> String {
     match (state, new_owner) {
+        (PresenceState::Absent, _) if paused => l
+            .pick("已暂停（恢复后回答）", "paused (answers when resumed)")
+            .to_owned(),
         (PresenceState::Absent, _) => l
             .pick("缺席（租约过期）", "absent (lease expired)")
             .to_owned(),
@@ -716,7 +720,7 @@ pub(crate) fn presence_line(l: Locale, payload: &PresencePayload) -> String {
     format!(
         "{} {}",
         senator(&payload.agent),
-        presence_word(l, payload.state, payload.new_owner.as_ref())
+        presence_word(l, payload.state, payload.paused, payload.new_owner.as_ref())
     )
 }
 
@@ -749,7 +753,11 @@ pub(crate) fn presence_status(
     let mut line = senator(agent);
     match presence {
         Some(p) => {
-            let _ = write!(line, " {}", presence_word(l, p.state, p.new_owner.as_ref()));
+            let _ = write!(
+                line,
+                " {}",
+                presence_word(l, p.state, p.paused, p.new_owner.as_ref())
+            );
             if let Some(lag) = p.lag.filter(|lag| *lag > 0) {
                 let _ = write!(line, " · {}", lag_words(l, lag));
             }
@@ -2244,6 +2252,7 @@ mod tests {
         duty: Option<&str>,
     ) -> crate::brain::CommitteeSeat {
         crate::brain::CommitteeSeat {
+            paused: false,
             target: target.into(),
             shown: shown.map(Into::into),
             duty: duty.map(Into::into),

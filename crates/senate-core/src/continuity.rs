@@ -618,8 +618,16 @@ mod tests {
         before.as_object_mut().unwrap().remove("paused");
         let parsed: AgentPresence = serde_json::from_value(before).unwrap();
         assert!(!parsed.paused);
-        let plain = AgentPresence { paused: false, ..paused.clone() };
-        assert!(serde_json::to_value(&plain).unwrap().get("paused").is_none());
+        let plain = AgentPresence {
+            paused: false,
+            ..paused.clone()
+        };
+        assert!(
+            serde_json::to_value(&plain)
+                .unwrap()
+                .get("paused")
+                .is_none()
+        );
         assert_eq!(
             paused.line(Locale::En),
             "[senator::claude] paused",

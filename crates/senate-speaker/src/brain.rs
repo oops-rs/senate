@@ -87,6 +87,8 @@ pub struct CommitteeSeat {
     /// agent's presence here, or what the child declares (disconnected
     /// when the child has gone quiet). `None` when nothing is known.
     pub presence: Option<senate_core::PresenceState>,
+    /// Paused on purpose: away, and expected back.
+    pub paused: bool,
 }
 
 impl CommitteeSeat {
@@ -129,6 +131,9 @@ pub struct Takeover {
     pub age: Duration,
     /// The committee's brief, when it could be read.
     pub brief: Option<Brief>,
+    /// The agent is paused on purpose (`senate session pause`), not gone:
+    /// it is resumed later and sees the question then.
+    pub paused: bool,
 }
 
 /// An answer drafted for an absent agent.

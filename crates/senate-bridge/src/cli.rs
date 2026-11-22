@@ -1478,9 +1478,7 @@ fn pause_selector(
     }
     let mut names = Vec::new();
     for name in which.names {
-        let parsed: AliasName = name
-            .parse()
-            .map_err(|e| anyhow::anyhow!("{name}: {e}"))?;
+        let parsed: AliasName = name.parse().map_err(|e| anyhow::anyhow!("{name}: {e}"))?;
         names.push(pick_alias(parsed)?.to_string());
     }
     Ok(Some(StopSelector::Named(names)))
@@ -1562,7 +1560,8 @@ async fn pause_sessions(
             Ok(reply) => println!(
                 "{}",
                 match (reply.checkpoint, locale) {
-                    (Some(seq), Locale::Zh) => format!("已暂停 {}（检查点 seq {seq}）", row.label()),
+                    (Some(seq), Locale::Zh) =>
+                        format!("已暂停 {}（检查点 seq {seq}）", row.label()),
                     (Some(seq), Locale::En) =>
                         format!("paused {} (checkpoint seq {seq})", row.label()),
                     (None, Locale::Zh) => format!(
@@ -1599,8 +1598,8 @@ async fn resume_sessions(
     locale: Locale,
 ) -> anyhow::Result<()> {
     let reply: crate::ipc::SessionsReply = daemon_call(paths, &Request::Sessions).await?;
-    let chosen = crate::sessions::select_for_resume(&reply.rows, selector)
-        .map_err(anyhow::Error::msg)?;
+    let chosen =
+        crate::sessions::select_for_resume(&reply.rows, selector).map_err(anyhow::Error::msg)?;
     if chosen.is_empty() {
         println!(
             "{}",
@@ -1633,7 +1632,8 @@ async fn resume_sessions(
             Ok(reply) => println!(
                 "{}",
                 match (reply.checkpoint, locale) {
-                    (Some(seq), Locale::Zh) => format!("已恢复 {}（检查点 seq {seq}）", row.label()),
+                    (Some(seq), Locale::Zh) =>
+                        format!("已恢复 {}（检查点 seq {seq}）", row.label()),
                     (Some(seq), Locale::En) =>
                         format!("resumed {} (checkpoint seq {seq})", row.label()),
                     (None, Locale::Zh) => format!("已恢复 {}", row.label()),

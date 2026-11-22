@@ -382,8 +382,14 @@ fn seat_line(seat: &SeatFacts, locale: Locale) -> String {
         }
     };
     let line = match (seat.presence, locale) {
-        (Some(p), Locale::Zh) => format!("{now}，presence：{}", p.label(locale)),
-        (Some(p), Locale::En) => format!("{now}, presence: {}", p.label(locale)),
+        (Some(p), Locale::Zh) => format!(
+            "{now}，presence：{}",
+            senate_core::presence_label(p, seat.paused, locale)
+        ),
+        (Some(p), Locale::En) => format!(
+            "{now}, presence: {}",
+            senate_core::presence_label(p, seat.paused, locale)
+        ),
         (None, _) => now,
     };
     match (&seat.duty, locale) {
@@ -571,6 +577,7 @@ mod tests {
         use chrono::{TimeZone, Utc};
         use senate_core::PresenceState;
         let seat = |connected, presence, last_seen| SeatFacts {
+            paused: false,
             agent: path("copilot"),
             connected,
             presence,

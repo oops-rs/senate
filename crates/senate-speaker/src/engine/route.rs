@@ -291,6 +291,7 @@ impl Engine {
                     .iter()
                     .find(|p| p.agent == agent)
                     .map(|p| p.state),
+                paused: page.agents.iter().any(|p| p.agent == agent && p.paused),
                 target: agent.to_string(),
             });
         }
@@ -311,6 +312,7 @@ impl Engine {
                     } else {
                         PresenceState::Disconnected
                     }),
+                    paused: false,
                 });
             }
         }

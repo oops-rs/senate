@@ -111,9 +111,8 @@ pub use brief::{Brief, BriefBuilder};
 pub use chair::{ChairFold, ChairPayload, ChairSource};
 pub use committee_seat::{CommitteeSeatAction, CommitteeSeatChange, CommitteeSeats};
 pub use continuity::{
-    presence_label,
     AgentPresence, CheckpointFiles, CheckpointPayload, CheckpointRecord, CheckpointTrigger,
-    Checkpoints, PresenceBoard, PresencePayload, PresenceState, presence_event,
+    Checkpoints, PresenceBoard, PresencePayload, PresenceState, presence_event, presence_label,
 };
 pub use docket::{
     Awaiting, CheckpointFacts, DocketItem, DocketPage, PickPayload, SeatFacts, SpeakerDocket,

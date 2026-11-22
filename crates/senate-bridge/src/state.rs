@@ -1175,18 +1175,15 @@ impl Store {
     /// Forget that `agent` was paused: it was resumed, stopped on purpose,
     /// or replaced. Whether it was.
     pub(crate) fn clear_paused(&self, agent: &SenatorName) -> Result<bool, StoreError> {
-        Ok(self
-            .conn()
-            .execute("DELETE FROM hosted_paused WHERE agent = ?1", [agent_text(agent)])?
-            != 0)
+        Ok(self.conn().execute(
+            "DELETE FROM hosted_paused WHERE agent = ?1",
+            [agent_text(agent)],
+        )? != 0)
     }
 
     /// `agent`'s pause, if it is recorded paused.
     pub(crate) fn paused(&self, agent: &SenatorName) -> Result<Option<Paused>, StoreError> {
-        Ok(self
-            .all_paused()?
-            .into_iter()
-            .find(|p| &p.agent == agent))
+        Ok(self.all_paused()?.into_iter().find(|p| &p.agent == agent))
     }
 
     /// Every hosted session recorded paused, oldest pause first.
@@ -1211,8 +1208,9 @@ impl Store {
                 agent: agent
                     .parse()
                     .map_err(|e| StoreError::Corrupt(format!("paused agent {agent}: {e}")))?,
-                committee: CommitteeId::new(&committee)
-                    .map_err(|e| StoreError::Corrupt(format!("paused committee {committee}: {e}")))?,
+                committee: CommitteeId::new(&committee).map_err(|e| {
+                    StoreError::Corrupt(format!("paused committee {committee}: {e}"))
+                })?,
                 paused_at: DateTime::from_timestamp_millis(at).unwrap_or_default(),
                 checkpoint: checkpoint.map(|s| Seq(s.cast_unsigned())),
             });

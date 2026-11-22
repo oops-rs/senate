@@ -547,6 +547,11 @@ pub enum Action {
         senator: AliasName,
         decision: Decision,
     },
+    /// Resume a paused hosted session where it was (`senate session
+    /// resume`): restored, and pointed at its last checkpoint.
+    ResumeSession {
+        senator: AliasName,
+    },
 }
 
 impl Action {
@@ -622,6 +627,7 @@ impl Action {
             Action::ApproveSession { senator, decision } => {
                 Request::ApproveSession { senator, decision }
             }
+            Action::ResumeSession { senator } => Request::Resume { senator },
         })
     }
 
@@ -638,7 +644,8 @@ impl Action {
             | Action::Approve { .. }
             | Action::StopSession { .. }
             | Action::RestoreSession { .. }
-            | Action::ApproveSession { .. } => None,
+            | Action::ApproveSession { .. }
+            | Action::ResumeSession { .. } => None,
         }
     }
 }
@@ -755,6 +762,7 @@ mod tests {
 
     fn status(streams: &[(&str, &str)]) -> StatusReply {
         StatusReply {
+            paused: Default::default(),
             pid: 1,
             version: "0.1.0".into(),
             person: Name::new("alice").unwrap(),

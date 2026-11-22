@@ -465,6 +465,13 @@ impl AppCore {
         .await
     }
 
+    /// Resume a paused hosted session where it was (`senate session resume
+    /// <label>`).
+    pub async fn resume_session(&self, label: String) -> Result<(), CoreError> {
+        let senator = self.session_label(&label)?;
+        self.act(Action::ResumeSession { senator }).await
+    }
+
     /// What to run to open a hosted session's terminal: `senate attach
     /// <label>` (Ctrl-] detaches). A prompt Senate cannot answer is decided
     /// there.

@@ -62,6 +62,14 @@ person = "alice"
 # spawn and restore.
 # hosted_session_limit = 4
 
+# Optional: on SIGTERM (the service stopping, a logout or a shutdown),
+# pause every hosted session: ask each to checkpoint, then stop it, 90 s
+# at most in all (`senate session pause --all --force`). Off by default.
+# pause_on_shutdown = true
+# Optional: when the daemon starts, resume the hosted sessions recorded
+# paused, never one stopped on purpose. Off by default.
+# resume_on_start = true
+
 # Optional: the first segment of a developer branch,
 # `<branch_prefix>/<committee>/<person>`: what `committee_from_branch`
 # reads, and how the Speaker names its work branches. Default "senate".

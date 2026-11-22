@@ -27,7 +27,7 @@ use crate::ipc::{
     SecretaryProblem, SecretaryProblems, StatusReply, StreamState, UplinkStatus,
 };
 use crate::paths::Paths;
-use crate::session::{Runtime, Session};
+use crate::session::{Runtime, Session, SessionState};
 use crate::state::{QueueCounts, Store};
 
 pub use terminal::{render_brief, render_terminal};
@@ -45,6 +45,8 @@ pub struct StatusView {
     pub server_url: Option<String>,
     pub committees: Vec<CommitteeStatus>,
     pub sessions: Vec<Session>,
+    /// Agents whose hosted session is recorded paused.
+    pub paused: std::collections::BTreeSet<senate_core::SenatorName>,
     pub hosted: std::collections::BTreeMap<String, Option<String>>,
     pub hosted_unbound: std::collections::BTreeMap<String, String>,
     pub hosted_viewer_unavailable: std::collections::BTreeSet<String>,
@@ -70,6 +72,7 @@ impl StatusView {
             server_url: Some(reply.server_url),
             committees: reply.committees,
             sessions: reply.sessions,
+            paused: reply.paused,
             hosted: reply.hosted,
             hosted_unbound: reply.hosted_unbound,
             hosted_viewer_unavailable: reply.hosted_viewer_unavailable,
@@ -201,6 +204,7 @@ fn offline(paths: &Paths) -> anyhow::Result<StatusView> {
         server_url: config.as_ref().map(|c| c.server_url.clone()),
         committees: Vec::new(),
         sessions: Vec::new(),
+        paused: Default::default(),
         hosted: Default::default(),
         hosted_unbound: Default::default(),
         hosted_viewer_unavailable: Default::default(),
@@ -792,7 +796,11 @@ fn render_senate(
                         Address::senator(&s.agent).in_text(),
                         s.agent_source
                     ),
-                    s.state.as_str().to_string(),
+                    if s.state == SessionState::Ended && view.paused.contains(&s.agent) {
+                        l.pick("已暂停", "paused").to_string()
+                    } else {
+                        s.state.as_str().to_string()
+                    },
                     session_committee(s, l),
                     s.branch.clone().unwrap_or_else(|| "—".into()),
                     home_relative(&s.cwd),
@@ -871,6 +879,7 @@ mod tests {
             server_url: Some("http://x".into()),
             committees: vec![row("claude", 1), row("codex", 0)],
             sessions: Vec::new(),
+            paused: Default::default(),
             hosted: Default::default(),
             hosted_unbound: Default::default(),
             hosted_viewer_unavailable: Default::default(),

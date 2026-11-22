@@ -414,6 +414,12 @@ final class CoreStore {
         }
     }
 
+    func resume(_ session: HostedSession) async {
+        await run("session:\(session.label)") { core in
+            try await core.resumeSession(label: session.label)
+        }
+    }
+
     private func runInTerminal(_ command: (any AppCoreProtocol) throws -> TerminalCommand) {
         guard let core else { return }
         do {

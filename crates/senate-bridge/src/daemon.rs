@@ -3453,6 +3453,13 @@ impl Shared {
             hosted_viewer_unavailable: host_status.viewer_unavailable,
             dropped_hooks,
             sessions,
+            paused: self
+                .store
+                .all_paused()
+                .map_err(internal)?
+                .into_iter()
+                .map(|p| p.agent)
+                .collect(),
             queue: self.store.counts().map_err(internal)?,
             speaker: self.speaker_seat(),
             roles: Some(self.roles_now()),

@@ -342,6 +342,54 @@ mod tests {
     }
 
     #[test]
+    fn pause_takes_a_committee_and_resume_only_the_paused() {
+        let running = row("claude-1", Some("reviewer"), HostState::Running);
+        let mut elsewhere = row("codex-2", Some("builder"), HostState::Running);
+        elsewhere.committee = Some(CommitteeId::new("ledger").unwrap());
+        let mut paused = row("claude-3", Some("main"), HostState::Stopped);
+        paused.paused = true;
+        let stopped = row("codex-4", Some("idle"), HostState::Stopped);
+        let rows = vec![running, elsewhere, paused, stopped];
+        let labels = |v: &[&SessionRow]| v.iter().map(|r| r.label()).collect::<Vec<_>>();
+
+        let committee = StopSelector::Committee(CommitteeId::new("refund-v2").unwrap());
+        let StopPlan { stop, .. } = select_for_stop(&rows, &committee, false).unwrap();
+        assert_eq!(labels(&stop), ["refund-v2::reviewer"], "running, on it");
+
+        let resume = select_for_resume(&rows, &StopSelector::All).unwrap();
+        assert_eq!(labels(&resume), ["refund-v2::main"]);
+        let named = StopSelector::Named(vec!["main".into()]);
+        assert_eq!(
+            labels(&select_for_resume(&rows, &named).unwrap()),
+            ["refund-v2::main"]
+        );
+        let stopped = StopSelector::Named(vec!["idle".into()]);
+        assert_eq!(
+            select_for_resume(&rows, &stopped).unwrap_err(),
+            "no paused hosted session named idle",
+            "stopped on purpose is not paused"
+        );
+        let text = render(
+            &SessionsReply {
+                rows: rows.clone(),
+                orphans: Vec::new(),
+            },
+            Utc::now(),
+            Locale::En,
+        );
+        let line = text
+            .lines()
+            .find(|l| l.starts_with("refund-v2::main"))
+            .unwrap();
+        assert!(line.contains("paused"), "{text}");
+        let line = text
+            .lines()
+            .find(|l| l.starts_with("refund-v2::idle"))
+            .unwrap();
+        assert!(line.contains("stopped"), "{text}");
+    }
+
+    #[test]
     fn the_listing_names_each_session_and_its_state() {
         let now = Utc::now();
         let mut running = row("claude-1", Some("reviewer"), HostState::Running);

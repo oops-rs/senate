@@ -313,6 +313,11 @@ impl Engine {
             age: age(&checkpoint),
             checkpoint,
             brief,
+            paused: self
+                .committees
+                .get(&committee)
+                .and_then(|state| state.presence.get(&agent))
+                .is_some_and(|p| p.paused),
         };
         self.draft_answer(committee, root, agent, question, Some(takeover))
             .await;

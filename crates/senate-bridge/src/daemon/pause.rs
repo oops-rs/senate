@@ -34,8 +34,8 @@
 use super::host_policy::HostAuthority;
 use super::hosts::StopTarget;
 use super::*;
-use chrono::Utc;
 use crate::ipc::{HostedModel, PAUSE_TIMEOUT_SECS, PauseReply, ResumeReply};
+use chrono::Utc;
 
 /// How often a pause looks for the checkpoint it asked for.
 const PAUSE_POLL: Duration = Duration::from_millis(100);
@@ -197,7 +197,11 @@ impl Shared {
         };
         let selector = SessionSelector::default();
         let reply = self
-            .on_hosted_restore(&selector, &AliasName::bare(primary.clone()), HostedModel::default())
+            .on_hosted_restore(
+                &selector,
+                &AliasName::bare(primary.clone()),
+                HostedModel::default(),
+            )
             .await?;
         let checkpoint = match paused.checkpoint {
             Some(seq) => Some(seq),
@@ -261,12 +265,17 @@ impl Shared {
         if running.is_empty() {
             return;
         }
-        tracing::info!(count = running.len(), "pausing hosted sessions for shutdown");
+        tracing::info!(
+            count = running.len(),
+            "pausing hosted sessions for shutdown"
+        );
         // Each is recorded paused up front: one the cap cuts off is paused
         // all the same.
         for row in &running {
             if let Some(committee) = &row.committee
-                && let Err(error) = self.store.mark_paused(&row.primary, committee, Utc::now(), None)
+                && let Err(error) =
+                    self.store
+                        .mark_paused(&row.primary, committee, Utc::now(), None)
             {
                 tracing::warn!(senator = %row.primary, %error, "recording a shutdown pause");
             }
@@ -306,7 +315,7 @@ impl Shared {
             });
         }
         let all = async { while tasks.join_next().await.is_some() {} };
-        if tokio::time::timeout_at(deadline.into(), all).await.is_err() {
+        if tokio::time::timeout_at(deadline, all).await.is_err() {
             tracing::warn!("the shutdown pause cap passed; the rest are recorded paused");
         }
     }

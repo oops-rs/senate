@@ -578,7 +578,7 @@ impl Brief {
                 out,
                 "- {} {}",
                 Address::senator(&p.agent).in_text(),
-                p.state.label(locale)
+                crate::continuity::presence_label(p.state, p.paused, locale)
             );
             if let Some(owner) = &p.new_owner {
                 let _ = write!(out, " → {}", Address::senator(owner).in_text());

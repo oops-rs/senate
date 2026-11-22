@@ -607,6 +607,7 @@ async fn a_takeover_answers_from_the_checkpoint_and_says_when_it_does_not_cover(
         committee: refund(),
         context: fixture.log.clone(),
         takeover: Some(crate::Takeover {
+            paused: false,
             checkpoint: alice_checkpoint(),
             age: std::time::Duration::from_secs(3 * 3_600),
             brief: Some(brief),
@@ -1636,6 +1637,7 @@ const DEPLOY_DUTY: &str = "负责回答 退款服务的部署、架构和使用�
 fn seats() -> Vec<crate::CommitteeSeat> {
     vec![
         crate::CommitteeSeat {
+            paused: false,
             target: "codex".into(),
             shown: None,
             duty: Some("owns the retry path".into()),
@@ -1643,6 +1645,7 @@ fn seats() -> Vec<crate::CommitteeSeat> {
             presence: None,
         },
         crate::CommitteeSeat {
+            paused: false,
             target: "carol-desk::responder".into(),
             shown: Some("refund-dev（carol-desk）".into()),
             duty: Some(DEPLOY_DUTY.into()),
@@ -1650,6 +1653,7 @@ fn seats() -> Vec<crate::CommitteeSeat> {
             presence: None,
         },
         crate::CommitteeSeat {
+            paused: false,
             target: "carol-desk::archivist".into(),
             shown: None,
             duty: None,

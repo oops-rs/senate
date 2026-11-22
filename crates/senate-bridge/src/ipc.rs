@@ -697,7 +697,9 @@ pub enum Request {
     /// `senate session resume`: restore a paused `senator` into the same
     /// conversation and send it a note pointing at its last checkpoint
     /// ([`ResumeReply`]). The CLI only.
-    Resume { senator: AliasName },
+    Resume {
+        senator: AliasName,
+    },
     /// Every Senate-hosted session this machine has a record of, and every
     /// host running with none ([`SessionsReply`]).
     Sessions,
@@ -1952,6 +1954,10 @@ pub struct StatusReply {
     pub server_url: String,
     pub committees: Vec<CommitteeStatus>,
     pub sessions: Vec<Session>,
+    /// Agents whose hosted session is recorded paused (`senate session
+    /// pause`).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub paused: std::collections::BTreeSet<SenatorName>,
     /// Live terminal hosts by session ID, with the latest refused native ID if any.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub hosted: std::collections::BTreeMap<String, Option<String>>,

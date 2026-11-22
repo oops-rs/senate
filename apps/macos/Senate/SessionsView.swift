@@ -78,6 +78,7 @@ private struct HostedRow: View {
                 Tag(text: h.runtime)
                 if let model = h.model { Tag(text: model) }
                 if h.attached { Tag(text: L("sessions.attached"), tint: .blue) }
+                if h.paused { Tag(text: L("sessions.paused"), tint: .orange) }
                 Spacer()
                 if busy { ProgressView().controlSize(.small) }
             }
@@ -106,6 +107,10 @@ private struct HostedRow: View {
                         .help(L("sessions.attach_help"))
                     Button(L("sessions.stop")) { Task { await store.stop(h) } }
                         .help(L("sessions.stop_help"))
+                } else if h.paused {
+                    Button(L("sessions.resume")) { Task { await store.resume(h) } }
+                        .buttonStyle(.borderedProminent)
+                        .help(L("sessions.resume_help"))
                 } else {
                     Button(L("sessions.restore")) { Task { await store.restore(h) } }
                         .help(L("sessions.restore_help"))

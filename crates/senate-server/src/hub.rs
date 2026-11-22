@@ -965,6 +965,10 @@ impl ServerHub {
                     .filter(|t| t.waits().is_some())
                     .count(),
                 duty: duties.get(agent).cloned(),
+                paused: presence
+                    .iter()
+                    .find(|p| &p.agent == agent)
+                    .is_some_and(|p| p.paused),
             });
         }
         let mut covered = BTreeMap::new();

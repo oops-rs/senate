@@ -2096,6 +2096,23 @@
         }
       }
     },
+    "sessions.paused": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "paused"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已暂停"
+          }
+        }
+      }
+    },
     "sessions.restore": {
       "extractionState": "manual",
       "localizations": {
@@ -2126,6 +2143,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "在后台以上次的模型恢复它"
+          }
+        }
+      }
+    },
+    "sessions.resume": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Resume"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "继续"
+          }
+        }
+      }
+    },
+    "sessions.resume_help": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bring it back in the same conversation, pointed at its last checkpoint"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在同一个对话中恢复它，并指向它最后的检查点"
           }
         }
       }

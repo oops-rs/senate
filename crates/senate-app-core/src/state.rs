@@ -80,6 +80,9 @@ pub struct HostedSession {
     /// a Codex or Claude Code permission prompt, not a choice only seen on
     /// the screen.
     pub prompt_answerable: bool,
+    /// Recorded paused (`senate session pause`): resume brings it back
+    /// where it was.
+    pub paused: bool,
 }
 
 impl From<&SessionRow> for HostedSession {
@@ -100,6 +103,7 @@ impl From<&SessionRow> for HostedSession {
             prompt_since: r.prompt.as_ref().map(|p| p.since.into()),
             prompt_answerable: r.prompt.as_ref().is_some_and(|p| !p.screen)
                 && matches!(r.runtime, Runtime::Claude | Runtime::Codex),
+            paused: r.paused,
         }
     }
 }

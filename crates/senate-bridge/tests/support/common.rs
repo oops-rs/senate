@@ -1071,6 +1071,7 @@ async fn docket(
         items,
         covered: BTreeMap::new(),
         seats: vec![senate_core::docket::SeatFacts {
+            paused: false,
             agent: chair.clone(),
             connected: *connected,
             presence: None,

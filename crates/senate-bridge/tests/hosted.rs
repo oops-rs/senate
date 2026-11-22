@@ -3849,3 +3849,392 @@ async fn replace_refuses_an_unknown_seat_and_hands_nothing_over_when_the_spawn_f
     assert_eq!(rows.rows[0].state, ipc::HostState::Running);
     assert!(h.store().replacements().unwrap().is_empty());
 }
+
+// ---- pause and resume -------------------------------------------------------
+
+fn git(dir: &std::path::Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// `session pause` asks the session for a checkpoint with a Senate note,
+/// waits for it and for the session to go quiet, stops the terminal and
+/// records it paused: its presence goes absent and paused, and mail for it
+/// waits. `session resume` restores it into the same conversation, points
+/// it at that checkpoint, and the held mail reaches it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pause_waits_for_the_checkpoint_and_resume_points_at_it() {
+    use senate_bridge::ipc::{HookEvent, HookReply, PauseReply, ResumeReply, SessionSelector};
+    use senate_core::{Address, Kind, NewEvent};
+
+    let fixture = HostedClaude::launch(false).await;
+    let h = &fixture.h;
+    git(&fixture.project, &["init", "-q", "-b", "main"]);
+    std::fs::write(fixture.project.join("README.md"), "hi\n").unwrap();
+    git(&fixture.project, &["add", "README.md"]);
+    git(&fixture.project, &["commit", "-q", "-m", "first"]);
+    let native = fixture.seat.session_id.clone();
+    let senator = fixture.seat.senator.clone();
+    let report = |pid: u32, event, source, inbox: &common::FakeInbox| {
+        let mut hook = fixture.hook(&native, event, source, Some(pid), &[pid]);
+        let Request::SessionHook(report) = &mut hook else {
+            unreachable!()
+        };
+        report.socket = Some(inbox.path.clone());
+        hook
+    };
+    let first = common::FakeInbox::bind(h.dir.path().join("first-inbox.sock"));
+    let _: HookReply = call(
+        h,
+        &report(fixture.pid(), HookEvent::UserPromptSubmit, None, &first),
+    )
+    .await;
+
+    let started = std::time::Instant::now();
+    let pausing = tokio::spawn({
+        let socket = h.socket();
+        let senator = senator.clone();
+        async move {
+            ipc::request::<PauseReply>(
+                &socket,
+                &Request::Pause {
+                    senator: senator.into(),
+                    force: false,
+                    timeout_secs: Some(20),
+                },
+                TIMEOUT,
+                Duration::from_secs(40),
+            )
+            .await
+        }
+    });
+    // The note asking for a checkpoint reaches the session.
+    eventually("the pause note pushed", TIMEOUT, || {
+        first
+            .messages()
+            .into_iter()
+            .find(|text| text.contains("about to be paused") && text.contains("checkpoint"))
+    })
+    .await;
+    assert!(!pausing.is_finished(), "it waits for the checkpoint");
+    let checkpoint: senate_bridge::ipc::CheckpointReply = call(
+        h,
+        &Request::Checkpoint {
+            session: SessionSelector {
+                session_id: Some(native.clone()),
+                claude_pid: None,
+            },
+            summary: Some("paused mid-review".into()),
+            progress: Some("- reviewing the gateway\n".into()),
+            decisions: None,
+            open: None,
+            push: false,
+            id: None,
+        },
+    )
+    .await;
+    let paused = pausing.await.unwrap().unwrap();
+    assert_eq!(paused.checkpoint, Some(checkpoint.posted.seq));
+    assert!(
+        started.elapsed() < Duration::from_secs(15),
+        "not the whole timeout: {:?}",
+        started.elapsed()
+    );
+
+    // Stopped, and recorded paused.
+    let reply: ipc::SessionsReply = call(h, &Request::Sessions).await;
+    let row = reply.rows.iter().find(|r| r.primary == senator).unwrap();
+    assert_eq!(row.state, ipc::HostState::Stopped);
+    assert!(row.paused, "{row:?}");
+    let (ok, listed) = senate(h, &["session", "list"]).await;
+    assert!(ok && listed.contains("paused"), "{listed}");
+    let events = h.server.events("refund-v2");
+    assert!(
+        events
+            .iter()
+            .any(|e| e.kind == Kind::Note && e.body.contains("paused the hosted terminal")),
+        "the audit note says paused: {events:#?}"
+    );
+    eventually("the leave says paused", TIMEOUT, || {
+        h.server
+            .heartbeats_of("refund-v2", senator.as_str())
+            .into_iter()
+            .find(|beat| beat.left && beat.paused)
+    })
+    .await;
+    std::fs::remove_file(&first.path).unwrap();
+    drop(first);
+
+    // Mail for it waits.
+    let body = "a note for the paused senator";
+    h.server.append(
+        NewEvent::new(
+            committee(),
+            Kind::Note,
+            Address::senior(&h.config.person),
+            body,
+        )
+        .to(Address::senator(&senator)),
+    );
+
+    // Resume restores it in the same conversation and points it at the
+    // checkpoint.
+    let resumed: ResumeReply = ipc::request(
+        &h.socket(),
+        &Request::Resume {
+            senator: path("seat-fixture").into(),
+        },
+        TIMEOUT,
+        Duration::from_secs(30),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resumed.senator, senator);
+    assert_eq!(resumed.checkpoint, Some(checkpoint.posted.seq));
+    let note = resumed.note.expect("the resumed note was posted");
+    let note = h
+        .server
+        .events("refund-v2")
+        .into_iter()
+        .find(|e| e.seq == note)
+        .unwrap();
+    assert!(
+        note.body.contains("resumed")
+            && note
+                .body
+                .contains(&format!("seq {}", checkpoint.posted.seq)),
+        "{}",
+        note.body
+    );
+    assert_eq!(note.to, vec![Address::senator(&senator)]);
+    let reply: ipc::SessionsReply = call(h, &Request::Sessions).await;
+    let row = reply.rows.iter().find(|r| r.primary == senator).unwrap();
+    assert_eq!(row.state, ipc::HostState::Running);
+    assert!(!row.paused);
+    // Resuming again: it is not paused.
+    let again = ipc::request::<ResumeReply>(
+        &h.socket(),
+        &Request::Resume {
+            senator: path("seat-fixture").into(),
+        },
+        TIMEOUT,
+        TIMEOUT,
+    )
+    .await
+    .unwrap_err();
+    assert!(again.to_string().contains("not paused"), "{again}");
+
+    // The held mail and the resumed note reach the restored terminal.
+    let terminal: PathBuf = call(h, &HostedClaude::attach_request()).await;
+    let pid: u32 = std::fs::read_to_string(terminal.with_file_name("owner"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let inbox = common::FakeInbox::bind(h.dir.path().join("resumed-inbox.sock"));
+    let _: HookReply = call(
+        h,
+        &report(pid, HookEvent::SessionStart, Some("resume"), &inbox),
+    )
+    .await;
+    eventually("the held note and the resumed note pushed", TIMEOUT, || {
+        let all = inbox.messages().join("\n");
+        (all.contains(body) && all.contains("resumed after a pause")).then_some(())
+    })
+    .await;
+    rustix::process::kill_process_group(
+        rustix::process::Pid::from_raw(pid as i32).unwrap(),
+        rustix::process::Signal::TERM,
+    )
+    .unwrap();
+    drop(fixture);
+}
+
+/// A session typed into lately is skipped unless `--force`; `--dry-run`
+/// pauses nothing; a pause with no checkpoint in time still records it
+/// paused; and `session resume` brings back only what is paused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pause_cli_spares_recent_typing_dry_runs_and_resumes() {
+    let (h, _typed) = watched_sessions(&["main"]).await;
+    let label = "refund-v2::main";
+    attach(&h, label, b"hello\r\x1d").await;
+    eventually("the typing is seen", TIMEOUT, || {
+        let reply = futures::executor::block_on(ipc::request::<ipc::SessionsReply>(
+            &h.socket(),
+            &Request::Sessions,
+            TIMEOUT,
+            TIMEOUT,
+        ))
+        .ok()?;
+        reply.rows[0].typed_secs_ago.map(|_| ())
+    })
+    .await;
+
+    let (ok, said) = senate(&h, &["session", "pause", "--all", "--dry-run"]).await;
+    assert!(ok, "{said}");
+    assert!(said.contains(&format!("skipped {label}")), "{said}");
+    assert!(!said.contains("would pause"), "{said}");
+    let (ok, said) = senate(&h, &["session", "pause", label]).await;
+    assert!(!ok && said.contains("someone typed into it"), "{said}");
+    let (ok, said) = senate(&h, &["session", "pause", "--all", "--force", "--dry-run"]).await;
+    assert!(
+        ok && said.contains(&format!("would pause {label}")),
+        "{said}"
+    );
+    let reply: ipc::SessionsReply = call(&h, &Request::Sessions).await;
+    assert_eq!(reply.rows[0].state, ipc::HostState::Running, "dry run");
+
+    let (ok, said) = senate(
+        &h,
+        &[
+            "session",
+            "pause",
+            "--committee",
+            "refund-v2",
+            "--force",
+            "--timeout",
+            "1",
+        ],
+    )
+    .await;
+    assert!(ok, "{said}");
+    assert!(
+        said.contains(&format!("paused {label} (no new checkpoint")),
+        "{said}"
+    );
+    let reply: ipc::SessionsReply = call(&h, &Request::Sessions).await;
+    assert!(reply.rows[0].paused, "{reply:?}");
+    assert_eq!(reply.rows[0].state, ipc::HostState::Stopped);
+
+    let (ok, said) = senate(&h, &["session", "resume", "--all", "--dry-run"]).await;
+    assert!(
+        ok && said.contains(&format!("would resume {label}")),
+        "{said}"
+    );
+    let (ok, said) = senate(&h, &["session", "resume", "main"]).await;
+    assert!(ok, "{said}");
+    assert!(said.contains(&format!("resumed {label}")), "{said}");
+    let reply: ipc::SessionsReply = call(&h, &Request::Sessions).await;
+    assert_eq!(reply.rows[0].state, ipc::HostState::Running);
+    assert!(!reply.rows[0].paused);
+
+    // Stopped on purpose, it is not paused, and resume leaves it.
+    let (ok, said) = senate(&h, &["session", "stop", label, "--force"]).await;
+    assert!(ok, "{said}");
+    let (ok, said) = senate(&h, &["session", "resume", "main"]).await;
+    assert!(
+        !ok && said.contains("no paused hosted session named main"),
+        "{said}"
+    );
+}
+
+/// With `pause_on_shutdown`, the daemon's SIGTERM step pauses every
+/// running session within its cap: one that never checkpoints is recorded
+/// paused all the same. With `resume_on_start`, the next daemon resumes
+/// what is recorded paused, and never a session stopped on purpose.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_pauses_within_its_cap_and_start_resumes_only_the_paused() {
+    let (mut h, project, _typed) = fixture_daemon(2).await;
+    for alias in ["kept", "ended"] {
+        let _: SpawnReply = call(
+            &h,
+            &Request::Spawn {
+                session: Default::default(),
+                runtime: HostedRuntime::Claude,
+                committee: committee(),
+                alias: Some(path(alias)),
+                cwd: project.clone(),
+                chair: false,
+                prompt: None,
+                model: Default::default(),
+            },
+        )
+        .await;
+    }
+    let (ok, said) = senate(&h, &["session", "stop", "refund-v2::ended"]).await;
+    assert!(ok, "{said}");
+
+    // Off: SIGTERM's step does nothing.
+    h.daemon.as_ref().unwrap().pause_for_shutdown().await;
+    let reply: ipc::SessionsReply = call(&h, &Request::Sessions).await;
+    assert!(reply.rows.iter().all(|r| !r.paused), "{reply:?}");
+
+    // On, with a cap of 2 s: the session never checkpoints.
+    h.stop().await;
+    h.config.pause_on_shutdown = true;
+    let mut timing = fast_timing();
+    timing.shutdown_pause = Duration::from_secs(2);
+    h.daemon = Some(
+        start_with_host_binary(
+            DaemonOptions {
+                paths: h.paths.clone(),
+                config: h.config.clone(),
+                timing,
+                desktop: None,
+            },
+            BIN.into(),
+        )
+        .await
+        .unwrap(),
+    );
+    let began = std::time::Instant::now();
+    h.daemon.as_ref().unwrap().pause_for_shutdown().await;
+    assert!(
+        began.elapsed() < Duration::from_secs(6),
+        "within the cap: {:?}",
+        began.elapsed()
+    );
+    let reply: ipc::SessionsReply = call(&h, &Request::Sessions).await;
+    let row = |reply: &ipc::SessionsReply, label: &str| {
+        reply
+            .rows
+            .iter()
+            .find(|r| r.label() == label)
+            .cloned()
+            .unwrap()
+    };
+    let kept = row(&reply, "refund-v2::kept");
+    assert!(kept.paused, "{kept:?}");
+    assert_eq!(kept.state, ipc::HostState::Stopped);
+    assert!(
+        !row(&reply, "refund-v2::ended").paused,
+        "stopped on purpose"
+    );
+    h.stop().await;
+
+    // The next start resumes the paused one only.
+    h.config.resume_on_start = true;
+    start(&mut h).await;
+    eventually(
+        "the paused session resumed",
+        Duration::from_secs(15),
+        || {
+            let reply = futures::executor::block_on(ipc::request::<ipc::SessionsReply>(
+                &h.socket(),
+                &Request::Sessions,
+                TIMEOUT,
+                TIMEOUT,
+            ))
+            .ok()?;
+            (row(&reply, "refund-v2::kept").state == ipc::HostState::Running).then_some(reply)
+        },
+    )
+    .await;
+    let reply: ipc::SessionsReply = call(&h, &Request::Sessions).await;
+    assert!(!row(&reply, "refund-v2::kept").paused);
+    assert_eq!(
+        row(&reply, "refund-v2::ended").state,
+        ipc::HostState::Stopped,
+        "never resumed"
+    );
+}
