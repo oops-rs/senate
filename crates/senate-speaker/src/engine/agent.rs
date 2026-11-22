@@ -582,7 +582,8 @@ impl Engine {
                     Intent::Recall
                     | Intent::Remember { .. }
                     | Intent::Forget { .. }
-                    | Intent::Correct { .. } => Err(render::recall_needs_binding(l)),
+                    | Intent::Correct { .. }
+                    | Intent::EditMemoryByQuery { .. } => Err(render::recall_needs_binding(l)),
                     Intent::InviteToAgentGroup { .. } | Intent::SetOutputLevel { .. } => {
                         Err(render::agents_need_binding(l))
                     }

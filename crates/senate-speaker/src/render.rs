@@ -532,6 +532,30 @@ pub(crate) fn memory_list(l: Locale, query: &str, hits: &[senate_core::MemoryHit
     out
 }
 
+pub(crate) fn memory_edit_choices(
+    l: Locale,
+    query: &str,
+    hits: &[senate_core::MemoryHit],
+) -> String {
+    if hits.is_empty() {
+        return memory_list(l, query, hits);
+    }
+    let mut out = l
+        .pick(
+            "你指的是哪一条？请在请求中注明 seq。",
+            "Which point do you mean? Please repeat the request with its seq.",
+        )
+        .to_owned();
+    for hit in hits {
+        out.push_str(&format!(
+            "\n- seq {} · {}",
+            hit.point.seq,
+            item(&hit.point.text)
+        ));
+    }
+    out
+}
+
 pub(crate) fn describe_forget(l: Locale, targets: &[Seq]) -> String {
     let seqs = targets
         .iter()

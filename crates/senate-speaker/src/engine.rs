@@ -2949,6 +2949,36 @@ impl Engine {
                     .await?;
                 self.say(chat, &render::memory_list(l, &query, &hits)).await
             }
+            Intent::EditMemoryByQuery { query, replacement } => {
+                // Empty search terms would list the newest points.
+                let hits = if senate_core::memory::terms(&query).is_empty() {
+                    Vec::new()
+                } else {
+                    self.hub
+                        .memory_search(&committee, &query, MEMORY_LIST, false)
+                        .await?
+                };
+                let [hit] = hits.as_slice() else {
+                    return self
+                        .say(chat, &render::memory_edit_choices(l, &query, &hits))
+                        .await;
+                };
+                let target = hit.point.seq;
+                let intent = match replacement {
+                    Some(text) => Intent::Correct { target, text },
+                    None => Intent::Forget {
+                        targets: vec![target],
+                    },
+                };
+                Box::pin(self.run_bound(
+                    chat,
+                    Decision::Run {
+                        intent,
+                        confirm: true,
+                    },
+                ))
+                .await
+            }
             Intent::Forget { targets } => {
                 if let Some(seq) = targets
                     .iter()
@@ -3135,7 +3165,7 @@ impl Engine {
         if self.is_member(who) {
             return None;
         }
-        if changes_state(intent) {
+        if intent.changes_state() {
             return Some(render::guest_refused(l));
         }
         if matches!(
@@ -3773,7 +3803,8 @@ impl Engine {
             Intent::Recall
             | Intent::Remember { .. }
             | Intent::Forget { .. }
-            | Intent::Correct { .. } => Err(render::recall_needs_binding(l)),
+            | Intent::Correct { .. }
+            | Intent::EditMemoryByQuery { .. } => Err(render::recall_needs_binding(l)),
             Intent::InviteToAgentGroup { .. } | Intent::SetOutputLevel { .. } => {
                 Err(render::agents_need_binding(l))
             }
@@ -3963,26 +3994,6 @@ struct MirrorPlan {
 /// The group a copy's target names (`refund-backend#ack` → `refund-backend`).
 fn group_of_target(target: &str) -> &str {
     target.split_once('#').map_or(target, |(group, _)| group)
-}
-
-/// What only a person on the roster may ask for: everything that changes
-/// state (a binding, a decision, an invitation, the output level, a work
-/// order, a reassignment). The same list as [`Intent::changes_state`],
-/// spelled out so a new intent must be placed here on purpose.
-fn changes_state(intent: &Intent) -> bool {
-    matches!(
-        intent,
-        Intent::Bind { .. }
-            | Intent::Unbind
-            | Intent::Decide { .. }
-            | Intent::AdoptAgentGroup { .. }
-            | Intent::InviteToAgentGroup { .. }
-            | Intent::SetOutputLevel { .. }
-            | Intent::Work { .. }
-            | Intent::Reassign { .. }
-            | Intent::Forget { .. }
-            | Intent::Correct { .. }
-    )
 }
 
 /// A Speaker relay whose inline verdict parks it on its person.

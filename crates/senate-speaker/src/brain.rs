@@ -291,6 +291,13 @@ pub enum Intent {
     /// Correct the memory point at `target` to read `text`. A person's
     /// alone.
     Correct { target: Seq, text: String },
+    /// Find a single current point by description before proposing its deletion
+    /// (no replacement) or correction.
+    #[serde(rename = "edit_memory_by_query")]
+    EditMemoryByQuery {
+        query: String,
+        replacement: Option<String>,
+    },
     /// Nothing to do but say `reply` (which may be empty: say nothing).
     None { reply: String },
 }
