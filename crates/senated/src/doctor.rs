@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use senate_bridge::doctor::Check;
 use senate_core::Locale;
+use senate_speaker::{ModelReport, ModelVerdict};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::ParkedReason;
@@ -19,6 +20,11 @@ const ASK: Duration = Duration::from_secs(10);
 
 /// Every server check, for the configuration at `path`.
 pub async fn checks(path: &Path) -> Vec<Check> {
+    checks_with_model(path, true).await
+}
+
+/// Run the server checks, optionally making live model calls.
+pub async fn checks_with_model(path: &Path, probe_model: bool) -> Vec<Check> {
     let config = match SenatedConfig::load(path) {
         Ok(config) => config,
         Err(e) => {
@@ -54,7 +60,79 @@ pub async fn checks(path: &Path) -> Vec<Check> {
         ),
     });
     checks.extend(gateway_checks(&config, running.is_ok(), l));
+    if probe_model {
+        let secretary = crate::config::load_secretary(&config, path);
+        let report = Box::pin(crate::check_model(secretary.into(), None)).await;
+        checks.push(model_check(&report, l));
+    }
     checks
+}
+
+fn model_check(report: &ModelReport, l: Locale) -> Check {
+    if let Some(problem) = &report.problem {
+        return Check::warn(
+            "model",
+            l.pick(
+                format!("{problem}；固定语法仍可用"),
+                format!("{problem}. Fixed syntax still works."),
+            ),
+            None::<String>,
+        );
+    }
+
+    let mut fixes = Vec::new();
+    for tier in &report.tiers {
+        let name = &tier.tier;
+        if !tier.passed() {
+            fixes.push(l.pick(
+                format!("检查 {name} 的 base_url、密钥及工具调用支持"),
+                format!("check the {name} model's base_url, key and tool support"),
+            ));
+        }
+        if let Some(seconds) = tier.suggested_triage_deadline_secs {
+            fixes.push(l.pick(
+                format!("{name}：设置 triage_deadline_secs = {seconds}"),
+                format!("{name}: set triage_deadline_secs = {seconds}"),
+            ));
+        }
+    }
+    let fix = (!fixes.is_empty()).then(|| fixes.join("; "));
+    match report.verdict() {
+        ModelVerdict::Passed => {
+            let passed = l.pick(
+                "所有模型层均通过自检",
+                "all model tiers passed their self-checks",
+            );
+            if fix.is_some() {
+                Check::warn(
+                    "model",
+                    l.pick(
+                        format!("{passed}，但分流时限过短"),
+                        format!("{passed}, but the triage deadline is too short"),
+                    ),
+                    fix,
+                )
+            } else {
+                Check::ok("model", passed)
+            }
+        }
+        ModelVerdict::Degraded { serving } => Check::warn(
+            "model",
+            l.pick(
+                format!("部分模型自检失败，{serving} 仍在服务"),
+                format!("a model tier failed its self-checks. The {serving} tier is serving."),
+            ),
+            fix,
+        ),
+        ModelVerdict::Down => Check::fail(
+            "model",
+            l.pick(
+                "所有模型层均未通过自检，仅可使用固定语法",
+                "no model tier passed its self-checks. Only fixed syntax is available.",
+            ),
+            fix,
+        ),
+    }
 }
 
 async fn database_check(url: &str, l: Locale) -> Check {
@@ -300,6 +378,73 @@ mod tests {
     use senate_bridge::doctor::Status;
 
     #[test]
+    fn model_verdict_and_deadline_determine_severity_and_fix() {
+        use senate_speaker::{CheckResult, TierReport};
+
+        let tier = |name: &str, passed, suggestion| TierReport {
+            tier: name.into(),
+            provider: None,
+            model: None,
+            base_url: None,
+            wire: None,
+            checks: vec![CheckResult {
+                check: "triage".into(),
+                passed,
+                reason: "scripted result".into(),
+                millis: 4000,
+            }],
+            triage_deadline_secs: Some(5),
+            suggested_triage_deadline_secs: suggestion,
+        };
+        let check = |tiers| {
+            model_check(
+                &ModelReport {
+                    committee: None,
+                    problem: None,
+                    tiers,
+                },
+                Locale::En,
+            )
+        };
+        assert_eq!(check(vec![tier("primary", true, None)]).status, Status::Ok);
+        let slow = check(vec![tier("primary", true, Some(10))]);
+        assert_eq!(slow.status, Status::Warn);
+        assert_eq!(
+            slow.fix.as_deref(),
+            Some("primary: set triage_deadline_secs = 10")
+        );
+        for (primary, serving, failed) in [
+            (true, "primary", "fallback"),
+            (false, "fallback", "primary"),
+        ] {
+            let degraded = check(vec![
+                tier("primary", primary, None),
+                tier("fallback", !primary, None),
+            ]);
+            assert_eq!(degraded.status, Status::Warn);
+            assert!(
+                degraded
+                    .found
+                    .contains(&format!("{serving} tier is serving"))
+            );
+            assert!(degraded.fix.unwrap().contains(failed));
+        }
+        let down = check(vec![tier("primary", false, Some(10))]);
+        assert_eq!(down.status, Status::Fail);
+        let json = serde_json::to_value(&down).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"id":"model","status":"fail","found":down.found,"fix":down.fix})
+        );
+        assert!(
+            json["fix"]
+                .as_str()
+                .unwrap()
+                .contains("triage_deadline_secs = 10")
+        );
+    }
+
+    #[test]
     fn a_wildcard_listen_is_reached_on_loopback() {
         assert_eq!(reachable("0.0.0.0:7878").as_deref(), Some("127.0.0.1:7878"));
         assert_eq!(reachable("[::]:7878").as_deref(), Some("[::1]:7878"));
@@ -339,6 +484,7 @@ mod tests {
         .unwrap();
         let checks = checks(&file).await;
         assert_eq!(by_id(&checks, "config").status, Status::Ok, "{checks:#?}");
+        assert_eq!(by_id(&checks, "model").status, Status::Warn);
         let db = by_id(&checks, "database");
         assert_eq!(db.status, Status::Ok);
         assert!(db.found.contains("no log"), "{db:?}");

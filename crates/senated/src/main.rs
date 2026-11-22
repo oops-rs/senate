@@ -77,12 +77,15 @@ enum Command {
     },
     /// Check a Senate server and say how to fix what is wrong: the
     /// configuration, the log (read only, never created or migrated),
-    /// whether the server answers, and its chat gateway. Exits non-zero
+    /// whether the server answers, its chat gateway, and the Speaker's model. Exits non-zero
     /// when a check fails.
     Doctor {
         /// The server's senated.toml.
         #[arg(long, env = "SENATED_CONFIG")]
         config: PathBuf,
+        /// Skip the Speaker model check, which makes live provider calls.
+        #[arg(long)]
+        no_model: bool,
         /// Print JSON: {checks: [{id, status, found, fix?}], summary}.
         #[arg(long)]
         json: bool,
@@ -147,7 +150,11 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Some(Command::FlattenLog { database_url }) => return flatten_log(&database_url).await,
-        Some(Command::Doctor { config, json }) => return doctor(&config, json).await,
+        Some(Command::Doctor {
+            config,
+            json,
+            no_model,
+        }) => return doctor(&config, json, no_model).await,
         Some(Command::Secretary {
             command:
                 SecretaryCommand::Show {
@@ -205,8 +212,8 @@ async fn main() -> anyhow::Result<()> {
 
 /// `senated doctor`: every server check, printed; a failed one fails the
 /// command.
-async fn doctor(config: &std::path::Path, json: bool) -> anyhow::Result<()> {
-    let checks = senated::doctor::checks(config).await;
+async fn doctor(config: &std::path::Path, json: bool, no_model: bool) -> anyhow::Result<()> {
+    let checks = senated::doctor::checks_with_model(config, !no_model).await;
     let locale = SenatedConfig::load(config)
         .map(|c| c.server.locale)
         .unwrap_or_default();

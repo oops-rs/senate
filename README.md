@@ -610,8 +610,9 @@ nothing. What it checks, and what usually fixes it:
 | `senate.*` | the Senate served does not answer, the daemon's log epoch differs from the server's, or a cursor is ahead of the log | `senate setup service install --yes` (a restart resets them) |
 | `bindings.*` | saved worktree bindings expired (`senate setup clean --yes`), or name a committee with no messages yet | as shown |
 | `wsl.*` | systemd is off, linger is off, or the service's `PATH` has `/mnt/<drive>` directories | as shown |
+| `model` (server doctor) | a tier fails its self-check, the measured triage deadline is too short, or no model is configured | check the named tier’s endpoint, key and tool support, or set the suggested `triage_deadline_secs`. With no model, fixed syntax still works. |
 
-A server has its own: `senated doctor --config senated.toml [--json]` checks
+A server has its own: `senated doctor --config senated.toml [--json]` probes the Speaker’s configured models (use `--no-model` to skip live provider calls) and checks
 the configuration, the log (read only: never created or migrated), whether
 the server answers on its `listen` address, and with `[chat_gateway]`
 whether the socket is served, whether a platform adapter is attached, and
