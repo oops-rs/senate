@@ -45,11 +45,11 @@ struct MentionText: View {
 
     static func color(_ kind: MentionKind) -> Color {
         switch kind {
-        case .senior: .primary
-        case .junior, .anyAgent: .indigo
-        case .speaker, .speakerFor: .orange
-        case .committee: .teal
-        case .guest: .secondary
+        case .senior: Theme.onSurface
+        case .junior, .anyAgent: Theme.agent
+        case .speaker, .speakerFor: Theme.speaker
+        case .committee: Theme.committee
+        case .guest: Theme.onSurfaceVariant
         }
     }
 }

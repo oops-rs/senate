@@ -155,19 +155,6 @@ private struct ConnectionFooter: View {
     }
 }
 
-/// Online or not, with a label for VoiceOver.
-struct StatusDot: View {
-    let online: Bool
-    var size: CGFloat = 8
-
-    var body: some View {
-        Circle()
-            .fill(online ? Color.green : Color.secondary)
-            .frame(width: size, height: size)
-            .accessibilityLabel(online ? L("a11y.online") : L("a11y.offline"))
-    }
-}
-
 private struct ErrorBar: View {
     let message: String
     let dismiss: () -> Void
@@ -223,9 +210,4 @@ struct EmptyNote: View {
             )
         }
     }
-}
-
-/// `needs_human` → `needs human`.
-func words(_ s: String) -> String {
-    s.replacingOccurrences(of: "_", with: " ")
 }
