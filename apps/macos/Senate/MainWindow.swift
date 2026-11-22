@@ -64,7 +64,9 @@ struct MainWindow: View {
 }
 
 /// ⌘1…⌘5 open the sections in sidebar order; ⌘R reads everything again, or
-/// tries the daemon now while it cannot be reached.
+/// tries the daemon now while it cannot be reached. (⌘, is the store's:
+/// SwiftUI keeps that key for the Settings scene's own menu item, which a
+/// menu-bar-only app has no menu bar to reach.)
 /// Invisible buttons: the app has no menu bar of its own (it lives in the
 /// status item).
 private struct Shortcuts: View {

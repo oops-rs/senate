@@ -308,6 +308,14 @@ final class CoreStore {
         self.openWindow = openWindow
         self.openSettings = openSettings
         guard first else { return }
+        // ⌘, opens Settings from any of the app's windows.
+        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            let command = event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command
+            // The comma key by its place too: an input method may type "，" there.
+            guard command, event.charactersIgnoringModifiers == "," || event.keyCode == 43 else { return event }
+            MainActor.assumeIsolated { self?.openSettings?() }
+            return nil
+        }
         if let v = ProcessInfo.processInfo.environment[Self.showEnv], !v.isEmpty {
             show(.inbox)
         }

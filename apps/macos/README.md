@@ -8,7 +8,7 @@ serves. SwiftUI over the shared Rust core
 [`senate-app-core`](../../crates/senate-app-core), **macOS 26+**, English
 and Simplified Chinese.
 
-![The inbox](docs/screenshots/inbox.png)
+![Home: everything waiting on you](docs/screenshots/home.png)
 
 It is a **client of `senated --machine`**, the developer-machine daemon,
 over `$SENATE_HOME/bridge.sock` (default `~/.senate/bridge.sock`), the same
@@ -57,42 +57,64 @@ SENATE_HOME=/tmp/sh SENATE_APP_SHOW=1 build/Build/Products/Debug/Senate.app/Cont
 | `SENATE_HOME` | the Senate home; wins over the one chosen in Settings |
 | `SENATE_APP_SHOW=1` | open the window at launch |
 | `SENATE_APP_NOTIFICATIONS=0` | no notification permission prompt and no notifications |
-| `SENATE_APP_SNAPSHOT=<dir>` | Debug builds: write each section and Settings as PNGs of the app's own window, then quit (how `docs/screenshots/` is made) |
+| `SENATE_APP_SNAPSHOT=<dir>` | Debug builds: write home, a thread, each section, Settings and the status item's menu as PNGs of the app's own windows, then quit (how `docs/screenshots/` is made). `SENATE_APP_SNAPSHOT_APPEARANCE=light\|dark` picks the appearance whatever the system's is; `SENATE_APP_SNAPSHOT_PREFIX` goes before each file name (`zh-`) |
 | `SENATE_APP_PERF=1` | print state-apply and thread-read times and main-thread stalls, tour the sections, quit (`SENATE_APP_PERF_THREAD=<root>` opens that thread) |
 | `FAKE_THREADS=N` | the fake daemon: N more threads and a 5,000-event thread 990 |
 | `RUST_LOG` | the core's log filter (default `senate_app_core=info,senate_bridge=warn`) |
 
 ## What it does
 
-**Menu bar.** The icon (filled when online) with what waits on you:
-threads, approvals and terminals waiting for a permission. The menu:
-online as whom, the counts, the docket line while presiding, a line when a
-terminal waits, *Open Inbox* ⌘I, *Approvals* ⌘A, *Sessions* ⌘S, *Docket*
-⌘D, *Try Now* while offline, *Settings…* ⌘,, *About Senate*, *Quit* ⌘Q.
-Menu bar only (`LSUIElement`).
+**Menu bar.** Only what waits on you. The icon (filled when online) with
+the number waiting: threads, Codex approvals and terminals waiting for a
+permission. The menu is one line saying how much waits, then the first
+eight items, what holds an agent at a permission first: each a title and a
+line of where, who and how long, and each opens in the window (*Show All*
+beyond eight). Then *Open Senate* ⌘O and *Quit Senate* ⌘Q. Offline, the
+menu is one line. Everything else lives in the window. Menu bar only
+(`LSUIElement`).
 
-**Window** (⌘1–5 for the sections; ⌘R refresh). A sidebar with each
-section's count and the connection at its foot.
+![The menu](docs/screenshots/menu.png)
 
-- **Inbox**: the threads waiting on you, with what was last said and an
-  unread dot; search (⌘F) and an agent filter in the toolbar. The chosen
-  thread opens beside the list with every event (the latest 300; *Show
-  earlier* for more) and a reply box: *Send* (⌘↩) answers as you
-  (`[senator::alice]`). Reading a thread marks it seen. *Take* takes it
-  over; *Close* archives it, after confirming. Drafts outlive the app.
-- **Approvals**: permission prompts waiting in hosted terminals (*Attach to
-  decide*: they are decided in the terminal, never here), and Codex approval
-  requests (*Allow*, *Allow for session*, *Deny*, *Deny and stop*; the first
-  answer wins across the TUI, the app and any chat platform).
+**Window** (⌘1–5 for the sections; ⌘R reads everything again, or tries the
+daemon now while offline). Two columns. The sidebar has the sections, then
+*Waiting on you*: the threads as one-line rows with a dot while unread,
+searched (⌘F) and narrowed to an agent there. At its foot, who you are and
+the Senate's address; its menu opens *Settings…* and *About Senate*.
+Nothing is drawn above the content but what it needs at its top right.
+
+- **Home**: everything waiting on you, the same list as the menu bar's,
+  each row with what it asks or what was last said. A row opens what it
+  names.
+- **A thread** opens from the sidebar, home, the menu bar or a notification
+  and reads as a conversation: every event (the latest 300; *Show earlier*
+  for more), yours in a bubble on your side, and a reply box at the foot.
+  *Send* (⌘↩) answers as you (`[senator::alice]`). Reading a thread marks it
+  seen. At the top right, its state, *Take* (take it over) and a menu with
+  *Close* (archives it, after confirming). Once answered it no longer waits
+  on you and leaves the sidebar. Drafts outlive the app.
+- **Approvals**: one card per request. Permission prompts waiting in hosted
+  terminals (*Allow once*, *Always allow*, *Deny*, answered as you would in
+  the terminal; *Attach to decide* for any other choice), and Codex
+  approval requests (*Allow*, *Allow for session*, *Deny*, and *Deny and
+  stop* in the card's menu; the first answer wins across the TUI, the app
+  and any chat platform).
 - **Sessions**: this machine's hosted sessions (committee, runtime, model,
-  uptime, attached, a waiting prompt): *Attach* opens it in Terminal
-  (`senate attach`), *Stop* (never forced) and *Restore*; *Watch all*
-  (`senate session watch`). Below, the Codex threads, *Open in Terminal*.
+  uptime, attached, paused, a waiting prompt): *Attach* opens it in Terminal
+  (`senate attach`), *Stop* (never forced), *Resume* and *Restore*; *Watch
+  all* (`senate session watch`) at the top right. Below, the Codex threads,
+  *Open in Terminal*.
 - **Docket** (while one of your agents presides): what awaits that Speaker.
   Read-only: routing and covering are the presiding agent's own tools.
 - **Senates**: address, you, the Speaker, the registration above, each
   committee's chair, your agents with their duty and streams, and the
   Senates below with the seats they declare.
+
+**Design.** `Theme.swift` holds every colour, type size, gap and corner the
+views use: near-neutral surfaces that step in tone instead of being divided
+by lines, the accent (the blue of the icon) spent sparingly, and separate
+colours for what a state means, each for light, dark and Increase Contrast.
+`Components.swift` holds the pieces built from them (chips, pill buttons,
+cards, the reading column). Text is read at 700 pt, centred.
 
 **Names.** A mention reads as the name people are shown: an agent's alias
 on the committee in view, a person's name, `copilot (Speaker)`, a child
@@ -107,8 +129,9 @@ both needing the Mac unlocked); a prompt in a hosted terminal (*Attach*).
 Grouped by thread; clicking opens what it is about; each kind can be
 turned off in Settings.
 
-**Settings**: open at login (the app's own login item), notifications per
-kind, the Senate home, and the log streamed in Terminal.
+**Settings** (⌘,, or the sidebar's foot), one pane: open at login (the
+app's own login item), notifications per kind, the Senate home, and the log
+streamed in Terminal.
 
 ### In the app, and in the CLI
 

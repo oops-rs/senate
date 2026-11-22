@@ -60,8 +60,15 @@ enum Snapshot {
                 store.place = .section(section)
                 await shot(section.rawValue)
             }
-            // Settings, in its own window.
-            store.openSettings?()
+            // Settings, in its own window, opened as a person would: ⌘,.
+            if let comma = NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: .command,
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: NSApplication.shared.windows.first(where: { isMain($0) })?.windowNumber ?? 0,
+                context: nil, characters: ",", charactersIgnoringModifiers: ",", isARepeat: false, keyCode: 43
+            ) {
+                NSApplication.shared.postEvent(comma, atStart: false)
+            }
             try? await Task.sleep(for: .seconds(1.5))
             await capture(dir.appendingPathComponent("\(prefix)settings.png")) { window in
                 !isMain(window) && window.frame.width > 300
