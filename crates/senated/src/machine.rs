@@ -174,7 +174,7 @@ impl Machine {
         let path = paths.config();
         let config = BridgeConfig::load_unchecked(&path)?;
         let hosted = Hosted::load(&path)?;
-        Self::start_full(paths, config, hosted, timing, Some(desktop)).await
+        Self::start_full(paths, config, hosted, timing, Some(desktop), None).await
     }
 
     /// Start from a configuration already read: the hosted Senates first,
@@ -185,7 +185,20 @@ impl Machine {
         hosted: Hosted,
         timing: Timing,
     ) -> Result<Self, MachineError> {
-        Self::start_full(paths, config, hosted, timing, None).await
+        Self::start_full(paths, config, hosted, timing, None, None).await
+    }
+
+    /// Start the configured machine with a scripted model for end-to-end tests.
+    #[cfg(feature = "testing")]
+    pub async fn start_with_brain(
+        paths: Paths,
+        timing: Timing,
+        brain: Arc<dyn senate_speaker::Brain>,
+    ) -> Result<Self, MachineError> {
+        let path = paths.config();
+        let config = BridgeConfig::load_unchecked(&path)?;
+        let hosted = Hosted::load(&path)?;
+        Self::start_full(paths, config, hosted, timing, None, Some(brain)).await
     }
 
     async fn start_full(
@@ -194,6 +207,7 @@ impl Machine {
         hosted: Hosted,
         timing: Timing,
         desktop: Option<senate_bridge::notify::Desktop>,
+        brain: Option<Arc<dyn senate_speaker::Brain>>,
     ) -> Result<Self, MachineError> {
         hosted.validate(&config).map_err(MachineError::Invalid)?;
         // Before anything is hosted or spawned: a socket path that cannot
@@ -316,6 +330,9 @@ impl Machine {
                 _ => Assembly::new(config).without_speaker(),
             }
             .store(store);
+            if let Some(brain) = &brain {
+                assembly = assembly.brain(brain.clone());
+            }
             // The files are looked at whether or not a model runs them:
             // `senate status` lists what is wrong with them either way.
             if let Some(secretary) = secretary {

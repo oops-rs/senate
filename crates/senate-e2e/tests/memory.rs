@@ -11,14 +11,14 @@ mod common;
 use common::*;
 use senate_bridge::ipc::Registration;
 use senate_core::{Address, CommitteeId, DigestPayload, DigestPoint, Hub, Kind, Locale, Seq};
-use senate_speaker::DigestOut;
+use senate_speaker::{DigestOut, MemoryDraft, ScriptedBrain};
 
 fn refund() -> CommitteeId {
     committee()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_parents_digest_sees_what_crossed_up_and_nothing_said_below() {
+async fn a_child_secretary_digests_private_chat_and_only_the_answer_crosses_up() {
     let world = Setup::new()
         .server(|c| c.name = Some(name("acme")))
         .speaker(|s| {
@@ -33,9 +33,28 @@ async fn a_parents_digest_sees_what_crossed_up_and_nothing_said_below() {
         dir.path(),
         "alice",
         Locale::En,
-        &under(&world, "tok-alice", "secretaries = [\"claude\"]\n"),
+        &under(
+            &world,
+            "tok-alice",
+            "secretaries = [\"claude\", \"secretary\"]\n[model]\nmodel = \"scripted-model\"",
+        ),
     );
-    desk.start().await;
+    std::fs::write(
+        desk.paths.home().join("secretary.toml"),
+        "[memory]\nbusy_messages = 2\nquiet_mins = 0\n",
+    )
+    .unwrap();
+    let child_brain = ScriptedBrain::new();
+    desk.machine = Some(
+        senated::Machine::start_with_brain(desk.paths.clone(), fast_timing(), child_brain.clone())
+            .await
+            .unwrap(),
+    );
+    let child = &desk.senate().daemon;
+    assert_eq!(child.built_in_session(), Some(&path("secretary")));
+    let office = child.hub.office().unwrap();
+    assert_eq!(office.kind, senate_core::SenatorKind::Person);
+    assert!(office.desk.contains(&path("secretary")));
     assert_eq!(
         desk.wait_registration().await.registration,
         Registration::Registered
@@ -56,6 +75,57 @@ async fn a_parents_digest_sees_what_crossed_up_and_nothing_said_below() {
     // Below, in alice's own Senate: what stays there.
     desk.post("s-claude", "Internal: the retry rewrite is half done")
         .await;
+
+    // Append the two sourced chat events as a gateway would on the child's hub.
+    let chat = |who: &str, body: &str| {
+        senate_core::NewEvent::new(refund(), Kind::Chat, senator(who), body).with_source(
+            senate_core::Source {
+                platform: "chat".into(),
+                group_id: "child-private".into(),
+                group_name: None,
+                simulated: false,
+                simulated_by: None,
+            },
+        )
+    };
+    let private = child
+        .hub
+        .append(chat("alice", "Internal: the retry audit is due Friday"))
+        .await
+        .unwrap()
+        .event;
+    let summary = "Internal: Friday audit";
+    child_brain.digests(Ok(DigestOut {
+        points: vec![DigestPoint {
+            text: summary.into(),
+            refs: vec![private.seq],
+        }],
+        memory: vec![MemoryDraft {
+            text: summary.into(),
+            refs: vec![private.seq],
+            supersedes: vec![],
+        }],
+    }));
+    child
+        .hub
+        .append(chat("claude", "Internal: I will review it"))
+        .await
+        .unwrap();
+    let brief = eventually_async("the child's private memory", || async {
+        let brief = child.hub.brief(&refund()).await.unwrap();
+        (!brief.memory.is_empty()).then_some(brief)
+    })
+    .await;
+    assert_eq!(brief.memory[0].text, summary);
+    assert_eq!(brief.memory[0].refs, [private.seq]);
+    assert_eq!(brief.memory[0].by, Address::Speaker);
+    assert_eq!(brief.digest.unwrap().payload.points[0].refs, [private.seq]);
+    assert!(
+        child_brain.digest_inputs()[0]
+            .events
+            .iter()
+            .any(|e| e.body == private.body)
+    );
 
     // Above: a question crosses down and its answer comes up.
     world
@@ -140,12 +210,28 @@ async fn a_parents_digest_sees_what_crossed_up_and_nothing_said_below() {
         inputs[0]
             .events
             .iter()
-            .all(|e| !e.body.contains("Internal: the retry rewrite")),
+            .all(|e| !e.body.contains("Internal:")),
         "nothing said below: {shown:?}"
     );
     assert!(
         inputs[0].events.iter().all(|e| e.committee == refund()),
         "the parent's own log"
+    );
+    assert!(
+        world
+            .events_of(&refund())
+            .await
+            .iter()
+            .all(|e| !e.body.contains("Internal:"))
+    );
+    assert!(
+        world
+            .hub()
+            .brief(&refund())
+            .await
+            .unwrap()
+            .memory
+            .is_empty()
     );
     desk.stop().await;
     world.stop().await;
