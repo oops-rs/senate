@@ -16,6 +16,9 @@ pub async fn hook(
     runtime: Option<Runtime>,
     timeouts: HookTimeouts,
 ) -> Option<String> {
+    if kind == HookKind::Stop {
+        return hook::run_as(kind, socket, input, env, runtime, timeouts).await;
+    }
     let request = hook::prepare(kind, socket, input, env, runtime, timeouts.git).await?;
     match request {
         Request::SessionHook(report) => {

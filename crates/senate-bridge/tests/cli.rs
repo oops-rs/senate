@@ -368,7 +368,11 @@ fn install_is_a_dry_run_without_yes_and_idempotent_with_it() {
     let merged: Value = serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
     assert_eq!(merged["model"], "opus");
     assert_eq!(merged["permissions"], original["permissions"]);
-    assert_eq!(merged["hooks"]["Stop"], original["hooks"]["Stop"]);
+    assert_eq!(merged["hooks"]["Stop"][0], original["hooks"]["Stop"][0]);
+    assert_eq!(
+        merged["hooks"]["Stop"][1]["hooks"][0]["command"],
+        format!("{} hook stop --runtime claude", exe.display())
+    );
     assert_eq!(merged["crossSessionInbound"], "accept");
     for (event, sub) in [
         ("SessionStart", "session-start"),

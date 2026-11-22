@@ -2,7 +2,7 @@
 //!
 //! 1. Register the MCP server `senate` at user scope through the `claude`
 //!    CLI (`claude mcp add --scope user senate -- <abs exe> mcp`).
-//! 2. Merge three hooks into `<claude config dir>/settings.json`
+//! 2. Merge four hooks into `<claude config dir>/settings.json`
 //!    (SessionStart, UserPromptSubmit, SessionEnd → `<abs exe> hook …`),
 //!    keeping every other key and hook.
 //! 3. Set `"crossSessionInbound": "accept"` in the same file.
@@ -56,10 +56,11 @@ mod order;
 use order::KeyOrder;
 
 /// `(settings.json event name, hook subcommand)`.
-pub const HOOKS: [(&str, &str); 3] = [
+pub const HOOKS: [(&str, &str); 4] = [
     ("SessionStart", "session-start"),
     ("UserPromptSubmit", "user-prompt-submit"),
     ("SessionEnd", "session-end"),
+    ("Stop", "stop"),
 ];
 
 /// Seconds Claude Code gives each hook before killing it.
@@ -995,7 +996,7 @@ mod tests {
             }
         });
         let changes = merge_settings(&mut s, "/bin/senate").unwrap();
-        assert_eq!(changes.len(), 4);
+        assert_eq!(changes.len(), 5);
         assert_eq!(s["model"], "opus");
         assert_eq!(s["hooks"]["Stop"][0]["hooks"][0]["command"], "say done");
         assert_eq!(
@@ -1049,7 +1050,7 @@ mod tests {
         let mut s = json!({});
         merge_settings(&mut s, "/old/senate-bridge").unwrap();
         let changes = merge_settings(&mut s, "/new/senate").unwrap();
-        assert_eq!(changes.len(), 3);
+        assert_eq!(changes.len(), 4);
         assert!(changes.iter().all(|c| c.starts_with('~')));
         assert_eq!(s["hooks"]["SessionEnd"].as_array().unwrap().len(), 1);
         assert_eq!(

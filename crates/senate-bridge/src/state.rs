@@ -772,6 +772,15 @@ impl Store {
                 [],
             )?;
         }
+        if !conn
+            .prepare("SELECT 1 FROM pragma_table_info('queue') WHERE name = 'relay_reminded'")?
+            .exists([])?
+        {
+            conn.execute(
+                "ALTER TABLE queue ADD COLUMN relay_reminded INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
         Ok(Self {
             conn: Mutex::new(conn),
             has_host_id: true,
@@ -2103,6 +2112,40 @@ impl Store {
         self.items("status = 'queued' AND session_id = ?1", &[&session_id])
     }
 
+    /// Delivered roots from the uplink or an internal desk forward.
+    pub(crate) fn delivered_relays(
+        &self,
+        session: &str,
+        committee: &CommitteeId,
+        only_unreminded: bool,
+    ) -> Result<Vec<QueueItem>, StoreError> {
+        self.items(
+            "session_id = ?1 AND committee = ?2 AND status = 'delivered'
+            AND (NOT ?3 OR relay_reminded = 0) AND json_extract(event, '$.kind') = 'question'
+            AND json_extract(event, '$.thread') IS NULL
+            AND json_extract(event, '$.from') IN ('committee', 'speaker')
+            AND json_type(event, '$.meta.origin') = 'object'",
+            &[&session, &committee.as_str(), &only_unreminded],
+        )
+    }
+
+    pub(crate) fn mark_relay_reminded(
+        &self,
+        session: &str,
+        event: &Event,
+    ) -> Result<bool, StoreError> {
+        Ok(self.conn().execute(
+            "UPDATE queue SET relay_reminded = 1 WHERE session_id = ?1 AND committee = ?2
+            AND seq = ?3 AND json_extract(event, '$.id') = ?4 AND relay_reminded = 0",
+            params![
+                session,
+                event.committee.as_str(),
+                seq_sql(event.seq),
+                event.id.to_string()
+            ],
+        )? != 0)
+    }
+
     /// Every item in a state other than delivered (for tests and status).
     pub fn undelivered(&self) -> Result<Vec<QueueItem>, StoreError> {
         self.items("status NOT IN ('delivered', 'cancelled')", &[])
@@ -2658,6 +2701,46 @@ mod tests {
         let ro = Store::open_read_only(&path).unwrap();
         assert_eq!(ro.session("thread-1").unwrap().unwrap().agent, codex());
         assert_eq!(ro.sessions().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_delivered_desk_question_is_reminded_only_once_in_its_session() {
+        let s = Store::in_memory().unwrap();
+        let mut relay = event(1);
+        relay.meta.insert(
+            senate_core::meta::ORIGIN.into(),
+            serde_json::json!({
+                "locator": "/parent::refund-v2::speaker", "thread": 9
+            }),
+        );
+        for e in [&relay, &event(2)] {
+            s.enqueue(&claude(), e).unwrap();
+        }
+        assert!(
+            s.delivered_relays("mine", &committee(), true)
+                .unwrap()
+                .is_empty()
+        );
+        s.mark_read(&[key(&claude(), 1), key(&claude(), 2)], "mine")
+            .unwrap();
+        assert!(
+            s.delivered_relays("other", &committee(), true)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            s.delivered_relays("mine", &committee(), true)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(s.mark_relay_reminded("mine", &relay).unwrap());
+        assert!(!s.mark_relay_reminded("mine", &relay).unwrap());
+        assert!(
+            s.delivered_relays("mine", &committee(), true)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

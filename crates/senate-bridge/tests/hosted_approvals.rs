@@ -1449,6 +1449,70 @@ fn answer_notes(h: &Harness) -> Vec<Event> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hosted_stop_reminds_only_about_delivered_unanswered_relays_once() {
+    let (mut h, project) = fixture(false, Locale::En).await;
+    let _fake = h.codex();
+    start(&mut h).await;
+    let (launch, terminal) = Terminal::spawn(&h, project.clone(), HostedRuntime::Codex).await;
+    let mut roots = Vec::new();
+    for _ in 0..3 {
+        let root = h.server.append_silently(
+            senate_core::NewEvent::new(
+                committee(),
+                senate_core::Kind::Question,
+                Address::Committee,
+                "check this",
+            )
+            .to(Address::senator(&launch.senator))
+            .with_meta(
+                senate_core::meta::ORIGIN,
+                json!({"locator": "/parent::refund-v2::speaker", "thread": 7}),
+            ),
+        );
+        h.store().enqueue(&launch.senator, &root).unwrap();
+        h.store()
+            .mark_read(
+                &[(launch.senator.clone(), committee(), root.seq)],
+                &launch.session_id,
+            )
+            .unwrap();
+        roots.push(root.seq);
+    }
+    for (kind, root) in [
+        (senate_core::Kind::Answer, roots[0]),
+        (senate_core::Kind::Status, roots[1]),
+    ] {
+        h.server.append_silently(
+            senate_core::NewEvent::new(
+                committee(),
+                kind,
+                Address::senator(&launch.senator),
+                "reported",
+            )
+            .in_thread(root),
+        );
+    }
+    let reminder = h
+        .hook_codex(HookKind::Stop, &launch.session_id, &project)
+        .await
+        .unwrap();
+    assert_eq!(reminder["decision"], "block");
+    assert!(
+        reminder["reason"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("(thread {})", roots[2]))
+    );
+    assert!(
+        h.hook_codex(HookKind::Stop, &launch.session_id, &project)
+            .await
+            .is_none()
+    );
+    terminal.stop();
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_approve_answers_a_hosted_codex_prompt_through_its_app_server() {
     let (mut h, project) = fixture(true, Locale::En).await;
     let fake = h.codex();

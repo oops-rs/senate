@@ -14,7 +14,7 @@
 //! timeout = 10
 //! ```
 //!
-//! and the same for UserPromptSubmit and SessionEnd. The file is edited with
+//! and the same for UserPromptSubmit, SessionEnd and Stop. The file is edited with
 //! `toml_edit`, so every other table, key and comment stays as it was; keys
 //! the user added to `[mcp_servers.senate]` are kept. Senate's own tools are
 //! approved up front: a hosted Codex has nobody at its terminal to answer
@@ -113,7 +113,7 @@ fn hook_table(want: &str, event: &str) -> Table {
     hook
 }
 
-/// Merge the `senate` MCP server and the three hooks into `doc`. One line
+/// Merge the `senate` MCP server and the four hooks into `doc`. One line
 /// per change; empty when already up to date.
 pub fn merge(doc: &mut DocumentMut, exe: &str) -> Result<Vec<String>, String> {
     let mut changes = Vec::new();
@@ -384,7 +384,7 @@ trusted_hash = "sha256:abc"
 "#;
         let mut doc: DocumentMut = original.parse().unwrap();
         let changes = merge(&mut doc, EXE).unwrap();
-        assert_eq!(changes.len(), 5, "{changes:?}");
+        assert_eq!(changes.len(), 6, "{changes:?}");
         assert!(
             changes.contains(
                 &"+ mcp_servers.senate.default_tools_approval_mode = \"approve\"".to_owned()
@@ -422,7 +422,7 @@ trusted_hash = "sha256:abc"
             Some("/opt/bin/senate hook session-start --runtime codex")
         );
         assert_eq!(start[1]["hooks"][0]["timeout"].as_integer(), Some(10));
-        for event in ["UserPromptSubmit", "SessionEnd"] {
+        for event in ["UserPromptSubmit", "SessionEnd", "Stop"] {
             assert_eq!(parsed["hooks"][event].as_array().unwrap().len(), 1);
         }
         assert_eq!(
@@ -442,7 +442,7 @@ trusted_hash = "sha256:abc"
         merge(&mut doc, "/old/senate-bridge").unwrap();
         doc["mcp_servers"]["senate"]["default_tools_approval_mode"] = value("approve");
         let changes = merge(&mut doc, "/new/senate").unwrap();
-        assert_eq!(changes.len(), 4, "{changes:?}");
+        assert_eq!(changes.len(), 5, "{changes:?}");
         assert!(changes.iter().all(|c| c.starts_with('~')), "{changes:?}");
         let parsed: toml::Value = toml::from_str(&doc.to_string()).unwrap();
         assert_eq!(

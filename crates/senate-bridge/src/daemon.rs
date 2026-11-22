@@ -821,6 +821,25 @@ struct Common {
     codex_sessions: Arc<Mutex<BTreeMap<usize, Vec<String>>>>,
 }
 
+fn relay_handled(event: &Event, agent: &SenatorName) -> bool {
+    (event.kind == Kind::Answer && !is_provisional(event))
+        || (event.kind == Kind::Status
+            && (event.from.as_senator() == Some(agent)
+                || StatusPayload::of(event).is_some_and(|s| {
+                    s.takeover.is_some() || s.state == senate_core::StatusState::Archived
+                })))
+        || event
+            .meta
+            .get(meta::FORWARDED_TO)
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<senate_core::Locator>().ok())
+            .is_some_and(|seat| {
+                seat.address()
+                    .as_senator()
+                    .is_some_and(|target| target != agent)
+            })
+}
+
 impl Shared {
     /// The Senate's half of the daemon, its state in `db`.
     fn open(
@@ -3070,7 +3089,7 @@ impl Shared {
                 secretary,
             } => wrap(self.on_secretaries(&session, action, for_, secretary).await),
             Request::Roles => wrap(self.on_roles().await),
-            Request::Waiting { session_id } => wrap(self.on_waiting(&session_id)),
+            Request::Waiting { session_id } => wrap(self.on_waiting(&session_id).await),
             Request::SessionEnd { session_id, .. } => {
                 self.sessions_changed(wrap(self.on_session_end(&session_id, None).await))
             }
@@ -3823,17 +3842,52 @@ impl Shared {
     }
 
     /// How many messages wait for `session_id`'s next hook.
-    fn on_waiting(&self, session_id: &str) -> Result<crate::ipc::WaitingReply, IpcError> {
-        let waiting = match self.store.session(session_id).map_err(internal)? {
-            Some(session) if session.is_live() => match session.committee() {
-                Some(committee) => self.hook_items(&session, &committee.clone())?.len(),
-                None => 0,
-            },
-            _ => 0,
-        };
+    async fn on_waiting(&self, session_id: &str) -> Result<crate::ipc::WaitingReply, IpcError> {
+        let mut waiting = 0;
+        let mut unanswered = Vec::new();
+        if let Some(session) = self.store.session(session_id).map_err(internal)?
+            && session.is_live()
+            && let Some(committee) = session.committee()
+        {
+            if session.runtime == Runtime::Agy {
+                waiting = self.hook_items(&session, committee)?.len();
+            }
+            if waiting == 0
+                && self
+                    .store
+                    .session_host(session_id)
+                    .map_err(internal)?
+                    .is_some()
+            {
+                let mut checked = Vec::new();
+                for item in self
+                    .store
+                    .delivered_relays(session_id, committee, true)
+                    .map_err(internal)?
+                {
+                    let root = item.event;
+                    let (_, events) = self.thread_events(committee, root.clone()).await?;
+                    let handled = events.iter().any(|e| relay_handled(e, &session.agent));
+                    checked.push((root, handled));
+                }
+                for (root, handled) in checked {
+                    if self
+                        .store
+                        .mark_relay_reminded(session_id, &root)
+                        .map_err(internal)?
+                        && !handled
+                    {
+                        unanswered.push(root.seq);
+                    }
+                }
+            }
+        }
         // Asked by agy's `Stop`. With something waiting the turn goes on
         // to read it; with nothing, the session sits idle from here.
-        if waiting == 0 && session::Runtime::Agy.native_id(session_id).is_some() {
+        if waiting == 0
+            && unanswered.is_empty()
+            && session::Runtime::Agy.native_id(session_id).is_some()
+        {
             let spell = AGY_IDLE_SPELL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             lock(&self.agy_idle).insert(
                 session_id.to_owned(),
@@ -3847,7 +3901,10 @@ impl Shared {
         } else {
             lock(&self.agy_idle).remove(session_id);
         }
-        Ok(crate::ipc::WaitingReply { waiting })
+        Ok(crate::ipc::WaitingReply {
+            waiting,
+            unanswered,
+        })
     }
 
     /// Have the host of each idle hosted agy with something waiting type

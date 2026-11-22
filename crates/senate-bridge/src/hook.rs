@@ -252,12 +252,15 @@ async fn turn_end(
     runtime: Option<Runtime>,
     timeouts: HookTimeouts,
 ) -> Option<String> {
-    if runtime != Some(Runtime::Agy) || std::env::var_os(crate::companion::ENV_COMPANION).is_some()
-    {
+    if std::env::var_os(crate::companion::ENV_COMPANION).is_some() {
         return None;
     }
-    let input = serde_json::from_str::<AgyHookInput>(stdin).ok()?;
-    let session_id = session::agy_session_key(&input.conversation_id)?;
+    let session_id = if runtime == Some(Runtime::Agy) {
+        let input = serde_json::from_str::<AgyHookInput>(stdin).ok()?;
+        session::agy_session_key(&input.conversation_id)?
+    } else {
+        serde_json::from_str::<HookInput>(stdin).ok()?.session_id?
+    };
     let reply: ipc::WaitingReply = ipc::request(
         daemon_socket,
         &Request::Waiting { session_id },
@@ -266,6 +269,18 @@ async fn turn_end(
     )
     .await
     .ok()?;
+    if !reply.unanswered.is_empty() {
+        let threads = reply
+            .unanswered
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Some(json!({
+            "decision": if runtime == Some(Runtime::Agy) { "continue" } else { "block" },
+            "reason": format!("[senate] Your relayed question is still open (thread {threads}). Use mcp__senate__answer on each thread to send your conclusion to the asker, or report progress with mcp__senate__status.")
+        }).to_string());
+    }
     (reply.waiting > 0).then(|| {
         json!({
             "decision": "continue",

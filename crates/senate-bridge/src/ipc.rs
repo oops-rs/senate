@@ -377,9 +377,11 @@ impl From<HostedRuntime> for Runtime {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WaitingReply {
     pub waiting: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unanswered: Vec<Seq>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
