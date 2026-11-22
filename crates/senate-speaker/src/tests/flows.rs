@@ -1864,6 +1864,8 @@ async fn a_child_senates_seat_named_outright_is_that_seat() {
         &refund(),
         &[("reviewer", PresenceState::Online)],
     );
+    hub.declare_alias("north-desk", &refund(), "responder", "north-dev");
+    hub.declare_alias("south-desk", &refund(), "reviewer", "south-dev");
     let rig = Rig::start(hub).await;
     let relayed = |n: usize, target: &str| {
         let text = format!("/tell {target} 记得更新退款文档 {n}");
@@ -1918,26 +1920,82 @@ async fn a_child_senates_seat_named_outright_is_that_seat() {
         intended(&relay).as_deref(),
         Some("north-desk::refund-v2::senator::stranger")
     );
-    // The desk named outright stays the desk, and several recipients name
-    // no seat: one message carries one intended name.
+    // An explicit desk stays a desk. Explicit seats each get their own thread.
     let relay = relayed(14, "north-desk::speaker").await.expect("the desk");
     assert_eq!(relay.to, vec![desk_of("north-desk")]);
     assert_eq!(intended(&relay), None);
     rig.brain.interprets(Ok(Intent::Relay {
-        targets: vec!["north-desk::responder".into(), "alice".into()],
-        kind: RelayKind::Note,
-        body: "记得更新退款文档".into(),
+        targets: vec![
+            "north-desk::responder".into(),
+            "south-desk::reviewer".into(),
+        ],
+        kind: RelayKind::Question,
+        body: "谁负责群公告？".into(),
     }));
-    rig.append(mention(
-        "pm",
-        "告诉 north-desk 的 responder 和 alice 记得更新退款文档",
-        "m_n16",
-    ))
-    .await;
+    rig.append(mention("pm", "请两边核对群公告", "m_n16")).await;
     rig.settle().await;
-    let relay = last_relay(&rig);
-    assert_eq!(relay.to, vec![desk_of("north-desk"), agent("alice")]);
-    assert_eq!(intended(&relay), None);
+    let relays: Vec<_> = rig
+        .hub
+        .events(&refund())
+        .into_iter()
+        .filter(|e| e.kind == Kind::Question && e.body == "谁负责群公告？")
+        .collect();
+    assert_eq!(relays.len(), 2);
+    for (event, child, seat) in [
+        (&relays[0], "north-desk", "responder"),
+        (&relays[1], "south-desk", "reviewer"),
+    ] {
+        assert_eq!(event.to, vec![desk_of(child)]);
+        assert_eq!(
+            intended(event),
+            Some(format!("{child}::refund-v2::senator::{seat}"))
+        );
+    }
+    let receipts: Vec<_> = rig
+        .surface
+        .posts()
+        .into_iter()
+        .filter(|p| p.target == reply_to("m_n16"))
+        .map(|p| p.markdown)
+        .collect();
+    assert_eq!(
+        receipts,
+        ["已转给 north-dev（north-desk）、south-dev（south-desk）"]
+    );
+    for (event, child, seat) in [
+        (&relays[0], "north-desk", "responder"),
+        (&relays[1], "south-desk", "reviewer"),
+    ] {
+        rig.append(
+            NewEvent::new(
+                refund(),
+                Kind::Answer,
+                desk_of(child),
+                format!("answer from {seat}"),
+            )
+            .in_thread(event.seq)
+            .with_meta(
+                meta::ANSWERED_BY,
+                json!(format!("{child}::refund-v2::senator::{seat}")),
+            ),
+        )
+        .await;
+    }
+    rig.settle().await;
+    let replies: Vec<_> = rig
+        .surface
+        .posts()
+        .into_iter()
+        .filter(|p| p.target == reply_to("m_n16"))
+        .map(|p| p.markdown)
+        .collect();
+    assert_eq!(
+        &replies[1..],
+        [
+            "north-dev（north-desk） answer from responder",
+            "south-dev（south-desk） answer from reviewer"
+        ]
+    );
 }
 
 /// A senator of this Senate keeps its name: a child Senate's seat of the

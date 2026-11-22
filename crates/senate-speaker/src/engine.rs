@@ -3206,10 +3206,8 @@ impl Engine {
         if body.is_empty() {
             return self.say(chat, &render::empty_relay(l)).await;
         }
-        let mut to: Vec<Address> = Vec::new();
+        let mut recipients = Vec::new();
         let mut unknown = Vec::new();
-        // The seats named in child Senates, as qualified names.
-        let mut seats: Vec<senate_core::Locator> = Vec::new();
         for target in targets {
             let waiting = Waiting::Intent {
                 intent: Intent::Relay {
@@ -3220,37 +3218,26 @@ impl Engine {
                 said: target.clone(),
                 confirm: true,
             };
-            match self.settle_reach(chat, target, body, waiting).await? {
-                Settled::To(senator) => {
-                    let address = Address::Senator(senator);
-                    if !to.contains(&address) {
-                        to.push(address);
-                    }
-                }
+            let recipient = match self.settle_reach(chat, target, body, waiting).await? {
+                Settled::To(senator) => (Address::Senator(senator), None),
                 Settled::Child(target) => {
-                    // That Senate's Speaker's desk, which delivers to the
-                    // seat when one is named.
-                    let address = Address::Child {
-                        senate: target.senate.clone(),
-                        committee: target.committee.clone(),
-                    };
-                    if !to.contains(&address) {
-                        to.push(address);
-                    }
-                    if let Some(seat) = target
+                    let seat = target
                         .seat
                         .as_ref()
-                        .and_then(|seat| self.seat_locator(&target, seat))
-                    {
-                        seats.push(seat);
-                    }
+                        .and_then(|seat| self.seat_locator(&target, seat));
+                    (Address::child(target.senate, target.committee), seat)
                 }
-                Settled::Unknown => unknown.push(target.clone()),
-                // Carried on when the person answers which agent.
+                Settled::Unknown => {
+                    unknown.push(target.clone());
+                    continue;
+                }
                 Settled::Asked => return Ok(Flow::Done),
+            };
+            if !recipients.contains(&recipient) {
+                recipients.push(recipient);
             }
         }
-        if to.is_empty() || !unknown.is_empty() {
+        if recipients.is_empty() || !unknown.is_empty() {
             let text = render::unknown_targets(l, &unknown, &self.roster);
             return self.say(chat, &text).await;
         }
@@ -3263,17 +3250,11 @@ impl Engine {
         let committee = self.acting_committee(chat);
         let mut relay = NewEvent::new(committee.clone(), kind.clone(), Address::Speaker, body)
             .with_id(derived_event_id(&["relay", committee.as_str(), &seq]))
-            .with_to(to.clone())
             .on_behalf_of(chat.from.clone());
         if committee == chat.committee {
             // Acknowledged under the chat when processed; a relay on another
             // committee (after a Bind) is acknowledged in the plan's result.
             relay = relay.with_meta(meta::RELAYED_FROM, json!(chat.seq.0));
-        }
-        // One message carries one intended name: a relay to several
-        // recipients names no seat, and the desk there decides.
-        if let ([_], [seat]) = (to.as_slice(), seats.as_slice()) {
-            relay = relay.with_meta(meta::INTENDED, json!(seat.to_string()));
         }
         if kind == Kind::Question {
             // A task: judged before it is written, and the verdict travels
@@ -3288,7 +3269,10 @@ impl Engine {
                     committee: committee.clone(),
                     kind,
                     asker: chat.from.clone(),
-                    to,
+                    to: recipients
+                        .iter()
+                        .map(|(address, _)| address.clone())
+                        .collect(),
                     body: body.to_owned(),
                     seq: None,
                     context: self.context(&chat.committee, chat.seq).await?,
@@ -3302,13 +3286,67 @@ impl Engine {
         if let Some(source) = &chat.source {
             relay = relay.with_source(source.clone());
         }
-        if self.defer(PendingAction::Relay {
-            event: Box::new(relay.clone()),
-        }) {
-            return Ok(Flow::Done);
+        // A child desk can deliver one intended seat per root. Keep ordinary
+        // recipients together and give each named child seat its own root.
+        let mut ordinary = Vec::new();
+        let split = recipients.len() > 1;
+        let mut relays = Vec::new();
+        for (address, seat) in recipients {
+            if let Some(seat) = seat {
+                let mut directed = relay
+                    .clone()
+                    .to(address)
+                    .with_meta(meta::INTENDED, json!(seat.to_string()));
+                if split {
+                    directed = directed.with_id(derived_event_id(&[
+                        "relay",
+                        committee.as_str(),
+                        &seq,
+                        &seat.to_string(),
+                    ]));
+                }
+                relays.push(directed);
+            } else {
+                ordinary.push(address);
+            }
         }
-        // The acknowledgement is posted when the relay itself is processed.
-        self.append(relay).await.map(|_| Flow::Done)
+        if !ordinary.is_empty() {
+            relays.push(relay.with_to(ordinary));
+        }
+        let mut stored = Vec::new();
+        for event in relays {
+            if !self.defer(PendingAction::Relay {
+                event: Box::new(event.clone()),
+            }) && let Some(event) = self.append(event).await?
+            {
+                stored.push(event);
+            }
+        }
+        if stored.len() > 1
+            && let Some(mirror) = chat
+                .mirror
+                .as_ref()
+                .filter(|m| m.platform == self.surface.platform())
+            && let Some(source) = &chat.source
+        {
+            // Each child answer goes back under the same chat message. Record
+            // these links before acknowledging so replay can finish either step.
+            for event in &stored {
+                self.hub
+                    .put_mirror(MirrorRef {
+                        committee: event.committee.clone(),
+                        seq: event.seq,
+                        platform: mirror.platform.clone(),
+                        target: source.group_id.clone(),
+                        message_ref: mirror.message_ref.clone(),
+                        thread_ref: mirror.thread_ref.clone(),
+                    })
+                    .await?;
+            }
+            let ack = render::split_relay_ack(l, self.seat_names(), &stored);
+            self.reply_to_chat(chat, &ack).await?;
+        }
+        Ok(Flow::Done)
     }
 
     /// The pending confirmation `chat` answers: in its thread (or replying

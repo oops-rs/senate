@@ -102,6 +102,24 @@ impl SeatNames<'_> {
         })
     }
 
+    fn recipients(&self, l: Locale, event: &Event) -> Vec<String> {
+        let intended = senate_core::locator::intended(event);
+        event
+            .to
+            .iter()
+            .map(|address| {
+                if let Address::Child { senate, committee } = address
+                    && let Some(seat) = &intended
+                    && seat.senate().is_some_and(|path| path.name() == senate)
+                    && seat.committee() == Some(committee)
+                {
+                    return self.child(l, seat).unwrap_or_else(|| seat.in_text());
+                }
+                self.local(&event.committee, address)
+            })
+            .collect()
+    }
+
     /// The seat of `child` that gave an answer coming up from that
     /// child's desk ([`meta::ANSWERED_BY`]), as people are shown it.
     fn answered_by(&self, l: Locale, child: &Name, event: &Event) -> Option<String> {
@@ -221,6 +239,26 @@ pub(crate) fn discussion_proposal(l: Locale, event: &Event) -> String {
     }
 }
 
+/// The one chat acknowledgement for a relay split into child-seat threads.
+pub(crate) fn split_relay_ack(l: Locale, names: SeatNames<'_>, events: &[Event]) -> String {
+    let targets: Vec<_> = events.iter().flat_map(|e| names.recipients(l, e)).collect();
+    match l {
+        Locale::Zh => format!("已转给 {}", targets.join("、")),
+        Locale::En => {
+            let recipients = match targets.split_last() {
+                Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+                _ => targets.join(", "),
+            };
+            let verb = if events.first().is_some_and(|e| e.kind == Kind::Question) {
+                "Asked"
+            } else {
+                "Passed to"
+            };
+            format!("{verb} {recipients}")
+        }
+    }
+}
+
 /// `已记录决策（seq 131）` / `Decision recorded (seq 131)`.
 pub(crate) fn decision_ack(l: Locale, seq: Seq, simulated: bool) -> String {
     if simulated {
@@ -311,7 +349,7 @@ fn label(l: Locale, names: SeatNames<'_>, event: &Event) -> String {
     let author = author(l, names, event);
     let directed = matches!(event.kind, Kind::Question | Kind::Request) || event.thread.is_none();
     if directed && !event.to.is_empty() {
-        let to: Vec<String> = event.to.iter().map(Address::in_text).collect();
+        let to = names.recipients(l, event);
         format!("{author} → {}", to.join(", "))
     } else {
         author
@@ -1355,18 +1393,7 @@ pub(crate) fn relay_ack_for(
     roster: &Roster,
     names: SeatNames<'_>,
 ) -> String {
-    let ack = match (event.to.as_slice(), senate_core::locator::intended(event)) {
-        ([Address::Child { .. }], Some(seat)) => relay_ack_to(
-            l,
-            &names.child(l, &seat).unwrap_or_else(|| seat.in_text()),
-            event.seq,
-        ),
-        _ => relay_ack_to(
-            l,
-            &join(l, event.to.iter().map(|a| names.local(&event.committee, a))),
-            event.seq,
-        ),
-    };
+    let ack = relay_ack_to(l, &join(l, names.recipients(l, event)), event.seq);
     let parked = TriagePayload::of(event).is_some_and(|t| t.verdict == TriageVerdict::NeedsHuman);
     let owner = event.to.iter().find_map(|a| {
         let senator = a.as_senator()?;

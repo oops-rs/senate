@@ -826,7 +826,12 @@ impl Worker {
         let Some(asked_on) = origin.locator.committee().cloned() else {
             return Ok(());
         };
-        let answered_by = Locator::at(self.here(), event.committee.clone(), event.from.clone());
+        let answered_by = local_author(
+            &self.here(),
+            &event.committee,
+            &event.from,
+            event.meta.get(meta::ANSWERED_BY),
+        );
         let mut up = NewEvent::new(
             asked_on,
             Kind::Answer,
@@ -860,6 +865,25 @@ impl Worker {
     }
 }
 
+/// A desk-forwarded answer already carries the seat that wrote it.
+fn local_author(
+    here: &SenatePath,
+    committee: &CommitteeId,
+    sender: &Address,
+    by: Option<&serde_json::Value>,
+) -> Locator {
+    if sender == &Address::Speaker
+        && let Some(seat) = by
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<Locator>().ok())
+        && seat.senate() == Some(here)
+        && seat.address().as_senator().is_some()
+    {
+        return seat;
+    }
+    Locator::at(here.clone(), committee.clone(), sender.clone())
+}
+
 /// A connection failure (register again), or a refusal.
 fn lost_or_failed(e: &ApiClientError) -> Pass {
     match e {
@@ -876,4 +900,21 @@ fn derived(event: &Event, what: &str) -> EventId {
         u64::try_from(event.ts.timestamp_millis()).unwrap_or_default(),
         &format!("{what}:{}", event.id),
     )
+}
+
+#[cfg(test)]
+mod attribution_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    #[test]
+    fn desk_forwarded_answer_keeps_the_original_local_seat() {
+        let here = "/senate/child".parse().unwrap();
+        let committee = CommitteeId::new("desk").unwrap();
+        let by = serde_json::json!("/senate/child::work::senator::agy");
+        assert_eq!(
+            local_author(&here, &committee, &Address::Speaker, Some(&by)).to_string(),
+            by.as_str().unwrap()
+        );
+    }
 }
