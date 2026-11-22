@@ -665,36 +665,105 @@
         }
       }
     },
-    "header.offline": {
+    "home.clear": {
       "extractionState": "manual",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "daemon offline"
+            "value": "Hi %@, nothing is waiting on you"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "守护进程离线"
+            "value": "%@，没有事情在等你"
           }
         }
       }
     },
-    "header.online_as": {
+    "home.clear_detail": {
       "extractionState": "manual",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "online as %@"
+            "value": "Senate notifies you when something comes back to you."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "已作为 %@ 在线"
+            "value": "有事情回到你这里时，Senate 会通知你。"
+          }
+        }
+      }
+    },
+    "home.permissions": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting for your permission"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "等待你的许可"
+          }
+        }
+      }
+    },
+    "home.threads": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Threads"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "线程"
+          }
+        }
+      }
+    },
+    "home.waiting": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "Hi %1$@, %2$lld thing is waiting on you"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "Hi %1$@, %2$lld things are waiting on you"
+                }
+              }
+            }
+          }
+        },
+        "zh-Hans": {
+          "variations": {
+            "plural": {
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%1$@，有 %2$lld 件事在等你"
+                }
+              }
+            }
           }
         }
       }
@@ -882,40 +951,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "#%1$@ 来自 %2$@ · %3$@，已 %4$@"
-          }
-        }
-      }
-    },
-    "inbox.no_selection": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "No thread selected"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "未选择线程"
-          }
-        }
-      }
-    },
-    "inbox.no_selection_hint": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Choose a thread to read it and reply."
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "选择一个线程以阅读和回复。"
           }
         }
       }
@@ -2708,6 +2743,74 @@
         }
       }
     },
+    "sidebar.account": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Account and settings"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "账户与设置"
+          }
+        }
+      }
+    },
+    "sidebar.close_search": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Close search"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "关闭搜索"
+          }
+        }
+      }
+    },
+    "sidebar.no_matches": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No threads match."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "没有匹配的线程。"
+          }
+        }
+      }
+    },
+    "sidebar.waiting": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting on you"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "等你处理"
+          }
+        }
+      }
+    },
     "tab.approvals": {
       "extractionState": "manual",
       "localizations": {
@@ -2738,6 +2841,23 @@
           "stringUnit": {
             "state": "translated",
             "value": "议程"
+          }
+        }
+      }
+    },
+    "tab.home": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Home"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "主页"
           }
         }
       }
@@ -2857,6 +2977,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "重新读取所有收件箱、审批和议程"
+          }
+        }
+      }
+    },
+    "waiting.prompt": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ wants permission"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ 请求许可"
+          }
+        }
+      }
+    },
+    "waiting.prompt_detail": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A permission prompt in its terminal"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "终端中的权限提示"
           }
         }
       }

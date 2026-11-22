@@ -87,6 +87,12 @@ final class Mentions {
         return parts
     }
 
+    /// The text with each mention as its name and nothing else: for a menu
+    /// or a tooltip, which show plain text.
+    func plain(_ text: String, committee: String?) -> String {
+        parts(text, committee: committee).map { $0.display ?? $0.text }.joined()
+    }
+
     /// Called with each state: drop what was split under the old names.
     func update() {
         let now = mentionNamesVersion()

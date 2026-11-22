@@ -20,9 +20,17 @@ final class CoreStore {
     /// Makes the core: the real one reads `$SENATE_HOME`, else `~/.senate`.
     typealias MakeCore = () throws -> any AppCoreProtocol
 
-    /// The window's sections, in sidebar order.
+    /// The window's sections, in sidebar order. `inbox` is the home view:
+    /// everything waiting on you, or the thread chosen from it.
     enum Section: String, CaseIterable, Hashable {
         case inbox, approvals, sessions, docket, senates
+    }
+
+    /// What the sidebar has chosen: a section, or one of the threads waiting
+    /// on you.
+    enum Place: Hashable {
+        case section(Section)
+        case thread(String)
     }
 
     private(set) var state: AppState = .placeholder
@@ -178,6 +186,26 @@ final class CoreStore {
             }
         }
         return threads
+    }
+
+    /// The sidebar's choice, read from and written to `section` and
+    /// `selectedThread`: a thread opens in the home section's place, and
+    /// choosing the home section itself lets go of the thread.
+    var place: Place {
+        get {
+            if (section ?? .inbox) == .inbox, let row = selectedRow { return .thread(row.key) }
+            return .section(section ?? .inbox)
+        }
+        set {
+            switch newValue {
+            case let .section(section):
+                self.section = section
+                if section == .inbox { selectedThread = nil }
+            case let .thread(key):
+                section = .inbox
+                selectedThread = key
+            }
+        }
     }
 
     /// The selected thread's row, while it is in the inbox.

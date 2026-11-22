@@ -4,7 +4,8 @@ import ScreenCaptureKit
 import SenateCore
 
 /// Development only: with `SENATE_APP_SNAPSHOT=<dir>`, open the window, show
-/// each section in turn, write the window as `<dir>/<section>.png`, and quit.
+/// home, a thread and each section in turn, write the window as
+/// `<dir>/<name>.png`, and quit.
 /// The app draws its own window, so no screen-recording permission is
 /// needed. `SENATE_APP_SNAPSHOT_PREFIX` names the files (`zh-inbox.png`);
 /// `SENATE_APP_SNAPSHOT_APPEARANCE` (`light` or `dark`) draws the app in that
@@ -44,11 +45,17 @@ enum Snapshot {
                 window.setContentSize(size)
                 window.center()
             }
-            for section in store.sections {
-                store.section = section
-                if section == .inbox {
-                    store.selectedThread = store.state.inbox.first?.key
-                }
+            // Home, a thread, then each other section.
+            store.place = .section(.inbox)
+            try? await Task.sleep(for: .seconds(1.5))
+            await capture(dir.appendingPathComponent("\(prefix)home.png"))
+            if let thread = store.state.inbox.first {
+                store.place = .thread(thread.key)
+                try? await Task.sleep(for: .seconds(1.5))
+                await capture(dir.appendingPathComponent("\(prefix)thread.png"))
+            }
+            for section in store.sections where section != .inbox {
+                store.place = .section(section)
                 try? await Task.sleep(for: .seconds(1.5))
                 await capture(dir.appendingPathComponent("\(prefix)\(section.rawValue).png"))
             }

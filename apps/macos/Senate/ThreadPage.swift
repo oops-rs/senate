@@ -1,141 +1,24 @@
 import SwiftUI
 import SenateCore
 
-/// The open threads waiting on you, merged across your agents or narrowed to
-/// one, beside the chosen thread: read it, reply as yourself, take it over,
-/// or close it.
-struct InboxView: View {
+/// One thread waiting on you, opened from the sidebar, the home view, the
+/// menu bar or a notification: read it, reply as yourself, take it over, or
+/// close it.
+struct ThreadPage: View {
     @Bindable var store: CoreStore
-    @FocusState private var searching: Bool
+    let row: InboxThread
 
     var body: some View {
-        HSplitView {
-            list
-                .frame(minWidth: 260, idealWidth: 320, maxWidth: 480)
-            pane
-                .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .searchable(text: $store.search, placement: .toolbar, prompt: L("inbox.search"))
-        .searchFocused($searching)
-        .background {
-            // ⌘F: to the search field.
-            Button(L("inbox.search")) { searching = true }
-                .keyboardShortcut("f")
-                .opacity(0)
-                .frame(width: 0, height: 0)
-                .accessibilityHidden(true)
-        }
-        .toolbar {
-            if store.inboxAgents.count > 1 {
-                ToolbarItem {
-                    AgentFilter(store: store)
-                }
-            }
-        }
-    }
-
-    @ViewBuilder private var list: some View {
-        let threads = store.inbox
-        if threads.isEmpty {
-            if store.search.isEmpty {
-                EmptyNote(online: store.state.online, text: L("inbox.empty"), symbol: "tray")
-            } else {
-                ContentUnavailableView.search(text: store.search)
-            }
-        } else {
-            List(threads, selection: $store.selectedThread) { thread in
-                ThreadRow(thread: thread)
-                    .environment(\.mentionCommittee, thread.committee)
-                    .tag(thread.key)
-                    .contextMenu { RowMenu(store: store, thread: thread) }
-            }
-            .listStyle(.inset)
-        }
-    }
-
-    @ViewBuilder private var pane: some View {
-        if let row = store.selectedRow {
-            ThreadPane(store: store, row: row)
-                .id(row.key)
-                .environment(\.mentionCommittee, row.committee)
-                // Read again when something new is said in it.
-                .task(id: "\(row.key)@\(row.updated)") { await store.loadThread(row) }
-        } else {
-            ContentUnavailableView(
-                L("inbox.no_selection"),
-                systemImage: "text.bubble",
-                description: Text(verbatim: L("inbox.no_selection_hint"))
-            )
-        }
+        ThreadPane(store: store, row: row)
+            .id(row.key)
+            .environment(\.mentionCommittee, row.committee)
+            // Read again when something new is said in it.
+            .task(id: "\(row.key)@\(row.updated)") { await store.loadThread(row) }
     }
 }
 
-private struct AgentFilter: View {
-    @Bindable var store: CoreStore
-
-    var body: some View {
-        Picker(L("inbox.agent"), selection: $store.agentFilter) {
-            Text(verbatim: L("inbox.all_agents")).tag(String?.none)
-            ForEach(store.inboxAgents) { agent in
-                Text(verbatim: agent.pending > 0 ? "\(agent.path) (\(agent.pending))" : agent.path)
-                    .tag(Optional(agent.path))
-            }
-        }
-        .pickerStyle(.menu)
-        .help(L("inbox.agent"))
-    }
-}
-
-/// One thread in the list: whether it has news for you, its title, what was
-/// last said, where and how long ago.
-private struct ThreadRow: View {
-    let thread: InboxThread
-
-    var body: some View {
-        let t = thread
-        HStack(alignment: .top, spacing: 8) {
-            Circle()
-                .fill(t.unread ? Color.accentColor : .clear)
-                .frame(width: 8, height: 8)
-                .padding(.top, 5)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(alignment: .firstTextBaseline) {
-                    MentionText(t.title)
-                        .font(t.unread ? .body.weight(.semibold) : .body)
-                        .lineLimit(2)
-                    Spacer(minLength: 4)
-                    Ago(date: t.since)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                if let line = t.newsLine {
-                    MentionText(news(t, line))
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                }
-                HStack(spacing: 4) {
-                    Tag(text: t.committee)
-                    Tag(text: t.stateLabel, tint: t.state == "suspended" ? .orange : .blue)
-                    if t.escalated { Tag(text: L("inbox.escalated"), tint: .red) }
-                    if t.takeover != nil { Tag(text: L("inbox.taken"), tint: .purple) }
-                }
-            }
-        }
-        .padding(.vertical, 3)
-        .accessibilityElement(children: .combine)
-        .accessibilityValue(t.unread ? L("a11y.unread") : "")
-    }
-
-    private func news(_ t: InboxThread, _ line: String) -> String {
-        guard let from = t.newsFrom else { return line }
-        return "\(from) \(t.newsKindLabel ?? ""): \(line)"
-    }
-}
-
-/// The row's right-click menu: what the pane's buttons do.
-private struct RowMenu: View {
+/// A thread's right-click menu in the sidebar: what the thread's own buttons do.
+struct ThreadMenu: View {
     let store: CoreStore
     let thread: InboxThread
 

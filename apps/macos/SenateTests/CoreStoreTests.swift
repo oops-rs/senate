@@ -159,6 +159,37 @@ import SenateCore
         #expect(store.selectedThread == "refund-v2:7")
     }
 
+    @Test func theSidebarsPlaceIsASectionOrAWaitingThread() async throws {
+        let store = store()
+        core.push(online([thread(7, "which env?")]))
+        try await until(store) { $0.state.inbox.count == 1 }
+        #expect(store.place == .section(.inbox))
+        // A thread opens in the home section's place.
+        store.place = .thread("refund-v2:7")
+        #expect(store.section == .inbox)
+        #expect(store.selectedThread == "refund-v2:7")
+        #expect(store.place == .thread("refund-v2:7"))
+        // Another section keeps the thread for when you come back.
+        store.place = .section(.senates)
+        #expect(store.place == .section(.senates))
+        store.section = .inbox
+        #expect(store.place == .thread("refund-v2:7"))
+        // Choosing home itself lets go of it.
+        store.place = .section(.inbox)
+        #expect(store.selectedThread == nil)
+        #expect(store.place == .section(.inbox))
+    }
+
+    @Test func aThreadThatLeftTheInboxFallsBackToHome() async throws {
+        let store = store()
+        core.push(online([thread(7, "which env?")]))
+        try await until(store) { $0.state.inbox.count == 1 }
+        store.place = .thread("refund-v2:7")
+        core.push(online())
+        try await until(store) { $0.state.inbox.isEmpty }
+        #expect(store.place == .section(.inbox))
+    }
+
     @Test func notificationActionsReachTheCore() async throws {
         let store = store()
         await store.perform(.reply(committee: "refund-v2", root: 7, body: "yes"))
