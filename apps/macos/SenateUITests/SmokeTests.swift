@@ -60,10 +60,6 @@ final class SmokeTests: XCTestCase {
         XCTAssertTrue(window.buttons["Attach to decide"].firstMatch.waitForExistence(timeout: 5))
         window.typeKey("5", modifierFlags: .command)
         XCTAssertTrue(window.staticTexts["Address"].firstMatch.waitForExistence(timeout: 5), "the Senates section shows")
-
-        let shot = XCTAttachment(screenshot: window.screenshot())
-        shot.lifetime = .keepAlways
-        add(shot)
     }
 
     func testAccessibilityAudit() throws {
