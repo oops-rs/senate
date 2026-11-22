@@ -1081,6 +1081,10 @@ impl Shared {
             }).await.map_err(|_| IpcError::new(codes::SERVER, "timed out publishing the hosted session"))??;
             // The publication is committed. Losing the host at this point
             // is a liveness failure, not grounds to undo an acknowledged alias.
+            if restoring && runtime == HostedRuntime::Agy {
+                // --conversation opens at the input prompt without a seed turn or Stop hook.
+                self.mark_agy_idle(&session_id);
+            }
             published.send_replace(true);
             if let Some(mut ack) = publication.take()
                 && !tokio::time::timeout(Duration::from_secs(1), ack.write_all(&[host::PUBLISHED]))

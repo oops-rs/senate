@@ -192,8 +192,14 @@ async fn nudge_once(stream: &mut UnixStream, viewer: &Mutex<Viewer>, tty: &Tty, 
     }
     let quiet_ns = u64::try_from(quiet.as_nanos()).unwrap_or(u64::MAX);
     let since = now.saturating_sub(input_at);
-    if input_at > 0 && since < quiet_ns {
-        let wait = Duration::from_nanos(quiet_ns - since);
+    let wait = if prompt::looks_like_prompt(&tty.screen.rows()) {
+        Some(quiet)
+    } else if input_at > 0 && since < quiet_ns {
+        Some(Duration::from_nanos(quiet_ns - since))
+    } else {
+        None
+    };
+    if let Some(wait) = wait {
         let mut reply = vec![TYPED_RECENTLY];
         reply.extend_from_slice(
             &u64::try_from(wait.as_millis())

@@ -3482,9 +3482,19 @@ turn() {{
     done
     printf 'stop\n' >> .fixture-stops
 }}
+case "$1" in
+    --conversation=*)
+        stty -icanon -echo
+        printf 'New features\r\nEsc to dismiss\r\n'
+        dd bs=1 count=1 of=.fixture-dismiss 2>/dev/null
+        stty sane
+        printf '\033[2J\033[H'
+        ;;
+esac
 input | {BIN:?} hook session-start --runtime agy > /dev/null
-stop > /dev/null
-printf 'stop\n' >> .fixture-stops
+case "$1" in
+    --prompt-interactive=*) stop > /dev/null; printf 'stop\n' >> .fixture-stops ;;
+esac
 while IFS= read -r line; do
     case "$line" in
         paint) printf 'fixture TUI\n' ;;
@@ -3640,6 +3650,52 @@ async fn an_idle_hosted_agy_is_nudged_once_per_turn_and_never_over_a_person_typi
         "the draft was submitted: {}",
         typed()
     );
+    let _: ipc::PauseReply = call(
+        &h,
+        &Request::Pause {
+            senator: seat.senator.clone().into(),
+            force: true,
+            timeout_secs: Some(0),
+        },
+    )
+    .await;
+    note("backlog while paused");
+    let _: ipc::ResumeReply = call(
+        &h,
+        &Request::Resume {
+            senator: seat.senator.clone().into(),
+        },
+    )
+    .await;
+    tokio::time::timeout(TIMEOUT, async {
+        loop {
+            let list: ipc::SessionsReply = call(&h, &Request::Sessions).await;
+            if list.rows.iter().any(|row| {
+                row.session_id == seat.session_id
+                    && row.prompt.as_ref().is_some_and(|prompt| prompt.screen)
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the resumed agy's dismissal overlay appeared in session list");
+    attach_typing(&h, "idler", false, b"\x1b\x1d").await;
+    eventually("the viewer dismissed the overlay", TIMEOUT, || {
+        (read(".fixture-dismiss") == "\x1b").then_some(())
+    })
+    .await;
+    eventually(
+        "resumed without a seed turn and received the backlog",
+        TIMEOUT,
+        || {
+            read(".fixture-prompts")
+                .contains("backlog while paused")
+                .then_some(())
+        },
+    )
+    .await;
     h.stop().await;
 }
 

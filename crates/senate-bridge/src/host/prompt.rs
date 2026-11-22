@@ -12,7 +12,8 @@
 //!   `1.` then `2.`, on nearby lines, one of them marked by the selection
 //!   glyph a TUI puts before the highlighted option (`›`, `❯`, `>`, `▶`,
 //!   `→`). That is how Claude Code, Codex and agy draw a selection, and
-//!   prose rarely looks like it.
+//!   prose rarely looks like it. A standalone “Esc to dismiss” footer also
+//!   identifies a modal that needs input.
 //!
 //! While both hold the host keeps a marker file, `screen-prompt`, in its
 //! directory, holding only when the screen went quiet. The daemon reads it
@@ -104,6 +105,19 @@ pub(crate) fn looks_like_choice(rows: &[String]) -> bool {
         };
     }
     false
+}
+
+/// A modal can also end with a standalone dismissal hint inside a box.
+pub(super) fn looks_like_prompt(rows: &[String]) -> bool {
+    let footer = rows
+        .iter()
+        .rev()
+        .map(|row| row.trim_matches(|c: char| c.is_whitespace() || "│─╰╯└┘".contains(c)))
+        .find(|row| !row.is_empty());
+    footer.is_some_and(|text| {
+        text.eq_ignore_ascii_case("esc to dismiss")
+            || text.eq_ignore_ascii_case("press esc to dismiss")
+    }) || looks_like_choice(rows)
 }
 
 /// The options of the choice menu at the bottom of the screen, numbered in
@@ -202,7 +216,7 @@ pub(super) async fn watch(dir: &Path, screen: &Screen, quiet: Duration) -> anyho
         tick.tick().await;
         let since = screen.last_output();
         let waiting =
-            observed_at().saturating_sub(since) >= quiet && looks_like_choice(&screen.rows());
+            observed_at().saturating_sub(since) >= quiet && looks_like_prompt(&screen.rows());
         let now = waiting.then_some(ScreenPrompt { since });
         if now == shown {
             continue;
@@ -233,6 +247,24 @@ mod tests {
         let mut screen = vec![String::new(); 24 - rows.len().min(24)];
         screen.extend(rows.iter().map(|r| (*r).to_owned()));
         screen
+    }
+
+    #[test]
+    fn a_dismissible_overlay_waits_for_input() {
+        let rows = screen(&[
+            "│ New features │",
+            "│ Esc to dismiss │",
+            "╰────────────────╯",
+        ]);
+        assert!(looks_like_prompt(&rows));
+        assert_eq!(
+            permission_key(&rows, PermissionChoice::Once),
+            Err(NoChoice::NotShown)
+        );
+        assert!(!looks_like_prompt(&screen(&[
+            "Esc to dismiss",
+            "› Type your prompt"
+        ])));
     }
 
     #[test]

@@ -3498,10 +3498,6 @@ impl Shared {
     /// a fixed senator selected by their harness, file or environment.
     async fn on_hook(&self, report: HookReport, native: bool) -> Result<HookReply, IpcError> {
         let began = Instant::now();
-        // An agy hook (PreInvocation, SessionStart) ends its idle spell.
-        if report.runtime == Runtime::Agy {
-            lock(&self.agy_idle).remove(&report.session_id);
-        }
         if report.runtime.native_id(&report.session_id).is_none()
             || (matches!(report.runtime, Runtime::Agy | Runtime::Acp) && !native)
         {
@@ -3564,6 +3560,10 @@ impl Shared {
                 .wait_for(|published| *published)
                 .await
                 .map_err(|_| IpcError::bad_request("the hosted launch was rolled back"))?;
+        }
+        // A resumed agy can send SessionStart without starting a turn.
+        if report.runtime == Runtime::Agy && report.event == HookEvent::UserPromptSubmit {
+            lock(&self.agy_idle).remove(&report.session_id);
         }
         let (_binding, switched) = if native && report.runtime == Runtime::Claude {
             self.bind_claude_hook(&report, &mut upsert).await?
@@ -3888,16 +3888,7 @@ impl Shared {
             && unanswered.is_empty()
             && session::Runtime::Agy.native_id(session_id).is_some()
         {
-            let spell = AGY_IDLE_SPELL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            lock(&self.agy_idle).insert(
-                session_id.to_owned(),
-                AgyIdle {
-                    spell,
-                    nudged: false,
-                },
-            );
-            // Something held just as this was answered still gets its nudge.
-            self.work.notify_one();
+            self.mark_agy_idle(session_id);
         } else {
             lock(&self.agy_idle).remove(session_id);
         }
@@ -3905,6 +3896,19 @@ impl Shared {
             waiting,
             unanswered,
         })
+    }
+
+    fn mark_agy_idle(&self, session_id: &str) {
+        let spell = AGY_IDLE_SPELL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        lock(&self.agy_idle).insert(
+            session_id.to_owned(),
+            AgyIdle {
+                spell,
+                nudged: false,
+            },
+        );
+        // Something held just as this was answered still gets its nudge.
+        self.work.notify_one();
     }
 
     /// Have the host of each idle hosted agy with something waiting type
