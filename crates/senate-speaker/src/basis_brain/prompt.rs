@@ -72,9 +72,12 @@ macro_rules! duty_rule {
          falls within exactly one seat's duty, relay it to that seat: action relay, kind \
          question for a question, kind request for a change or a task to carry out, one target \
          written exactly as that seat's relay target is listed, the body as said. Do this even \
-         when the seat is away: the system answers for it or holds the message. When it falls \
-         within several seats' duties, or none, do not relay by duty: answer from the log, or \
-         say plainly that you cannot and who might know. Never route by duty when the speaker \
+         when the seat is away: the system answers for it or holds the message. When a question \
+         spans several duties and needs verification, relay the question to each seat whose evidence is needed \
+         using the listed targets now. For example, 「群公告里显示的席位列表，是 Senate 那边生成的还是 commons 那边生成的？」 \
+         asks about implementation across two products. Ask both responsible seats in the same turn. \
+         If no duty fits, answer from the log or explain what is unknown. For a change request \
+         with overlapping duties, clarify who should carry it out. Never route by duty when the speaker \
          named someone (a person, an agent or a seat): the target is who they named. Route only \
          questions and change requests by duty, never a decision, a binding or another \
          operation. Duty routing is only for the work or a subject area. A question about this \

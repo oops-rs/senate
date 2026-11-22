@@ -1684,7 +1684,8 @@ fn assert_seats_and_rule(fixture: &Fixture) {
     let system = request.system.as_deref().unwrap_or_default();
     for needle in [
         "within exactly one seat's duty, relay it to that seat: action relay, kind question",
-        "several seats' duties, or none, do not relay by duty",
+        "relay the question to each seat whose evidence is needed",
+        "群公告里显示的席位列表，是 Senate 那边生成的还是 commons 那边生成的？",
         "Never route by duty when the speaker named someone",
         "that seat's relay target exactly as the seats on this committee list it",
     ] {

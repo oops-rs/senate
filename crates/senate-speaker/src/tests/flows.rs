@@ -2353,14 +2353,21 @@ async fn an_unaddressed_question_reaches_the_local_seat_whose_duty_fits() {
     );
 }
 
-/// Two seats whose duties both fit: the model sees both, answers itself,
-/// and nothing is relayed. A child that has gone quiet shows its seats
-/// away, whatever it last declared.
+/// A cross-product implementation question goes to both responsible seats,
+/// including a child whose last declaration has gone stale.
 #[tokio::test]
-async fn several_seats_whose_duty_fits_are_not_routed() {
+async fn a_question_requiring_two_duties_reaches_both_seats() {
     let hub = duty_hub(&[
-        ("responder", PresenceState::Online, Some(DEPLOY_DUTY)),
-        ("operator", PresenceState::Online, Some(DEPLOY_DUTY)),
+        (
+            "responder",
+            PresenceState::Online,
+            Some("Senate announcements"),
+        ),
+        (
+            "operator",
+            PresenceState::Online,
+            Some("Commons integration"),
+        ),
     ])
     .await;
     hub.child_seen(
@@ -2368,38 +2375,32 @@ async fn several_seats_whose_duty_fits_are_not_routed() {
         Some(chrono::Utc::now() - chrono::Duration::hours(1)),
     );
     let rig = Rig::start(hub).await;
-    rig.brain.interprets(Ok(Intent::None {
-        reply: "这件事 responder 和 operator 都负责，请直接问其中一位。".into(),
+    let question = "群公告里显示的席位列表，是 Senate 那边生成的还是 commons 那边生成的？";
+    rig.brain.interprets(Ok(Intent::Relay {
+        targets: vec![
+            "carol-desk::responder".into(),
+            "carol-desk::operator".into(),
+        ],
+        kind: RelayKind::Question,
+        body: question.into(),
     }));
-    let before = rig.hub.events(&refund()).len();
-    rig.append(mention("pm", "退款服务是怎么部署的？", "m_d3"))
-        .await;
+    rig.append(mention("pm", question, "m_d3")).await;
     rig.settle().await;
     let seen = seats_seen(&rig);
-    assert!(
-        seen.contains(&(
-            "carol-desk::responder".to_owned(),
-            Some(DEPLOY_DUTY.to_owned()),
-            false
-        )) && seen.contains(&(
-            "carol-desk::operator".to_owned(),
-            Some(DEPLOY_DUTY.to_owned()),
-            false
-        )),
-        "{seen:?}"
-    );
-    let events = rig.hub.events(&refund());
-    assert_eq!(events.len(), before + 1, "only the question: {events:#?}");
-    assert!(
-        !events
-            .iter()
-            .any(|e| e.from == Address::Speaker && e.kind == Kind::Question),
-        "nothing relayed"
-    );
-    assert_eq!(
-        rig.surface.texts().last().map(String::as_str),
-        Some("这件事 responder 和 operator 都负责，请直接问其中一位。")
-    );
+    for (seat, duty) in [
+        ("responder", "Senate announcements"),
+        ("operator", "Commons integration"),
+    ] {
+        assert!(seen.contains(&(format!("carol-desk::{seat}"), Some(duty.into()), false)));
+        assert!(
+            rig.hub
+                .events(&refund())
+                .iter()
+                .any(|e| e.kind == Kind::Question
+                    && e.body == question
+                    && intended(e) == Some(format!("carol-desk::refund-v2::senator::{seat}")))
+        );
+    }
 }
 
 /// Thread 767: people are shown seats by alias, never by primary id. The
