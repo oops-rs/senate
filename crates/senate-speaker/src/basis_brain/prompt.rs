@@ -1575,6 +1575,34 @@ mod tests {
     }
 
     #[test]
+    fn memory_edit_wire_requires_one_selector_and_a_complete_correction() {
+        for bad in [
+            json!({"action":"forget"}),
+            json!({"action":"forget","memory_query":" ? "}),
+            json!({"action":"forget","memory_seq":0}),
+            json!({"action":"forget","memory_seq":2,"memory_query":"重试"}),
+            json!({"action":"correct","memory_seq":2,"body":" "}),
+            json!({"action":"forget","memory_seq":2,"body":"new point"}),
+        ] {
+            assert!(wire(bad.clone()).is_err(), "{bad}");
+        }
+        assert_eq!(
+            wire(json!({"action":"correct","memory_seq":2,"body":"五次"})),
+            Ok(Intent::Correct {
+                target: Seq(2),
+                text: "五次".into()
+            })
+        );
+        assert_eq!(
+            wire(json!({"action":"forget","memory_query":"retries"})),
+            Ok(Intent::EditMemoryByQuery {
+                query: "retries".into(),
+                replacement: None
+            })
+        );
+    }
+
+    #[test]
     fn the_wire_validates_per_action() {
         assert_eq!(
             wire(

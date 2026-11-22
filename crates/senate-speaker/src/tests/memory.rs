@@ -341,21 +341,22 @@ async fn a_brain_that_fails_writes_nothing_and_the_next_time_tries_again() {
     rig.stop().await;
 }
 
+fn point_of(text: &str, refs: Vec<Seq>) -> NewEvent {
+    NewEvent::new(orchard(), Kind::Note, Address::Speaker, text).with_meta(
+        meta::MEMORY,
+        MemoryPayload::Point {
+            refs,
+            supersedes: vec![],
+            digest: None,
+        }
+        .to_value(),
+    )
+}
+
 #[tokio::test]
 async fn people_list_correct_and_delete_what_the_committee_knows_by_command() {
     use super::rig::{STRANGER, mention_in, user};
     let rig = bound(config_in(senate_core::Locale::En)).await;
-    let point_of = |text: &str, refs: Vec<Seq>| {
-        NewEvent::new(orchard(), Kind::Note, Address::Speaker, text).with_meta(
-            meta::MEMORY,
-            MemoryPayload::Point {
-                refs,
-                supersedes: vec![],
-                digest: None,
-            }
-            .to_value(),
-        )
-    };
     let deploys = rig
         .append(point_of("Deploys happen at noon", vec![Seq(1)]))
         .await;
@@ -473,5 +474,143 @@ async fn a_simulated_forget_changes_nothing_the_committee_knows() {
     assert!(edits[0].is_simulated());
     let brief = rig.hub.brief(&orchard()).await.unwrap();
     assert_eq!(brief.memory.len(), 1, "and it deleted nothing");
+    rig.stop().await;
+}
+
+fn edit_by_topic(query: &str, replacement: Option<&str>) -> crate::Intent {
+    crate::Intent::EditMemoryByQuery {
+        query: query.into(),
+        replacement: replacement.map(str::to_owned),
+    }
+}
+
+#[tokio::test]
+async fn natural_memory_edits_wait_for_confirmation_in_both_brain_modes() {
+    use super::rig::{in_thread, mention_in, user};
+    use crate::{AgentTurn, SpeakerMode};
+    use senate_core::Locale;
+    for (locale, mode, original, request, topic, replacement) in [
+        (
+            Locale::En,
+            SpeakerMode::Intent,
+            "Retries stop after three attempts",
+            "Forget that point about retries",
+            "retries",
+            None,
+        ),
+        (
+            Locale::Zh,
+            SpeakerMode::Agent,
+            "重试上限是三次",
+            "更正一下，重试上限是五次",
+            "重试",
+            Some("重试上限是五次"),
+        ),
+    ] {
+        let mut config = config_in(locale);
+        config.mode = mode;
+        let rig = bound(config).await;
+        let old = rig.append(point_of(original, vec![Seq(1)])).await;
+        let intent = edit_by_topic(topic, replacement);
+        if mode == SpeakerMode::Agent {
+            rig.brain.converses(Ok(AgentTurn::act("", vec![intent])));
+        } else {
+            rig.brain.interprets(Ok(intent));
+        }
+        let ask = rig
+            .append(mention_in(&orchard(), GROUP, "alice", request, "ask"))
+            .await;
+        rig.settle().await;
+        assert_eq!(memory_points(&rig.hub).len(), 1);
+        let plan = rig.surface.posts().pop().unwrap();
+        assert!(
+            plan.markdown.contains(&format!("seq {}", old.seq)),
+            "{}",
+            plan.markdown
+        );
+        if let Some(text) = replacement {
+            assert!(plan.markdown.contains(text));
+        }
+        let mut yes = in_thread(
+            "alice",
+            locale.pick("对", "yes"),
+            "confirm",
+            ask.seq,
+            plan.thread_ref,
+            &plan.message_ref,
+        );
+        yes.committee = orchard();
+        rig.append(yes).await;
+        rig.settle().await;
+        let edits = memory_points(&rig.hub);
+        assert_eq!(edits.len(), 2);
+        let (event, payload) = &edits[1];
+        assert_eq!(event.on_behalf_of, Some(user("alice")));
+        match replacement {
+            Some(text) => {
+                assert_eq!(event.body, text);
+                assert_eq!(
+                    *payload,
+                    MemoryPayload::Correct {
+                        target: old.seq,
+                        refs: vec![Seq(1), ask.seq]
+                    }
+                );
+            }
+            None => assert_eq!(
+                *payload,
+                MemoryPayload::Delete {
+                    targets: vec![old.seq]
+                }
+            ),
+        }
+        rig.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn natural_memory_edits_refuse_guests_and_agents_and_list_ambiguous_points() {
+    use super::rig::{STRANGER, agent, mention_in, user};
+    let locale = senate_core::Locale::Zh;
+    let rig = bound(config_in(locale)).await;
+    let first = rig.append(point_of("重试间隔是一秒", vec![Seq(1)])).await;
+    let second = rig.append(point_of("重试上限是三次", vec![Seq(1)])).await;
+    for (from, id) in [
+        (sender(STRANGER), "guest"),
+        (agent("alice"), "agent"),
+        (user("alice"), "person"),
+    ] {
+        rig.brain.interprets(Ok(edit_by_topic("重试", None)));
+        let mut ask = mention_in(&orchard(), GROUP, "alice", "把关于重试那条记忆删掉", id);
+        ask.from = from;
+        let before = rig.surface.posts().len();
+        rig.append(ask).await;
+        rig.settle().await;
+        assert_eq!(rig.surface.posts().len(), before + 1, "{id}");
+        let reply = rig.surface.texts().pop().unwrap();
+        if id == "person" {
+            assert!(reply.contains("哪一条"), "{reply}");
+            for point in [&first, &second] {
+                assert!(
+                    reply.contains(&format!("seq {} · {}", point.seq, point.body)),
+                    "{reply}"
+                );
+            }
+        } else {
+            assert_eq!(reply, crate::render::guest_refused(locale));
+        }
+    }
+    rig.brain.interprets(Ok(edit_by_topic("排班", None)));
+    rig.append(mention_in(
+        &orchard(),
+        GROUP,
+        "alice",
+        "忘掉排班那条",
+        "missing",
+    ))
+    .await;
+    rig.settle().await;
+    assert!(rig.surface.texts().last().unwrap().contains("没有找到"));
+    assert_eq!(memory_points(&rig.hub).len(), 2);
     rig.stop().await;
 }
