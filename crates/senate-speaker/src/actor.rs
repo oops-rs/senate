@@ -142,11 +142,13 @@ pub enum SpeakerMsg {
         committee: CommitteeId,
         trigger: senate_core::DigestTrigger,
     },
-    /// A burst of discussion in `group`, last at `seq`, has gone quiet:
-    /// check it for an agreement to propose recording.
+    /// A burst of discussion in `group` (of simulated messages, or of
+    /// real ones), last at `seq`, has gone quiet: check it for an agreement
+    /// to propose recording.
     AgreementDue {
         committee: CommitteeId,
         group: String,
+        simulated: bool,
         seq: senate_core::Seq,
     },
     /// A Brain call the Speaker spawned has finished. Only the Speaker
@@ -261,8 +263,13 @@ impl Actor for Speaker {
             SpeakerMsg::AgreementDue {
                 committee,
                 group,
+                simulated,
                 seq,
-            } => engine.on_agreement_due(committee, group, seq).await,
+            } => {
+                engine
+                    .on_agreement_due(committee, group, simulated, seq)
+                    .await
+            }
             SpeakerMsg::Thought(thought) => engine.on_thought(thought.0).await,
             SpeakerMsg::Run(report) => engine.on_run(report.0).await,
             SpeakerMsg::Settle(reply) => state.settles.push(reply),

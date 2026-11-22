@@ -1,8 +1,9 @@
 //! Simulated chat ([`senate_core::chat_sim`]): who may inject a message,
 //! decided here, before the gateway sees it.
 //!
-//! - A person, as themselves: their token, `by` naming nobody or
-//!   themselves, the message from them.
+//! - A person, as any person on the roster: their token, `by` naming
+//!   nobody or themselves, the message from them or from another person.
+//!   The event names who injected it (`Source::simulated_by`).
 //! - The Speaker's office (`office`), as any person on the roster: who acts
 //!   is checked as for any write for the office ([`AppState::preside`]).
 //! - Never an agent (`by` naming one the person runs: the bridge names the
@@ -55,7 +56,7 @@ pub(super) async fn simulate(
             .map_err(|e| ApiFailure::forbidden(e.to_string()))?;
         if !roster.is_person(by) {
             return Err(ApiFailure::forbidden(format!(
-                "{} is an agent: only a person, as themselves, or the Speaker's office may simulate chat",
+                "{} is an agent: only a person, or the Speaker's office, may simulate chat",
                 Address::senator(by)
             )));
         }
@@ -71,11 +72,6 @@ pub(super) async fn simulate(
             probe = probe.with_meta(meta::ACTED_BY, serde_json::json!(acted_by.to_string()));
         }
         state.preside(&person, &mut probe)?;
-    } else if from != person.0 {
-        return Err(ApiFailure::forbidden(format!(
-            "{} may simulate only their own messages; the Speaker's office may simulate anyone's",
-            person.0
-        )));
     }
     if roster.principal(&from).is_none() {
         return Err(ApiFailure::forbidden(format!(
@@ -87,6 +83,7 @@ pub(super) async fn simulate(
         .simulate(SimRequest {
             committee,
             from,
+            by: person.0,
             text: request.text,
             group: request.group,
             reply_to: request.reply_to,

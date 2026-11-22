@@ -9,8 +9,10 @@
 //!
 //! - **Marked.** The `chat` event is from the person, as a real message from
 //!   them would be, with [`Source::simulated`](crate::Source::simulated)
-//!   set. The Speaker carries a chat's source onto what it derives from it,
-//!   so a relay, task or decision made from it is marked too.
+//!   set and [`Source::simulated_by`](crate::Source::simulated_by) naming
+//!   the person who injected it. The Speaker carries a chat's source onto
+//!   what it derives from it, so a relay, task or decision made from it is
+//!   marked too: "(simulated by bob)".
 //! - **Kept off the platform** unless `live`: whatever the Speaker posts for
 //!   a simulated message (replies under it, a task card for its relay, and
 //!   everything under those) is recorded in the conversation's
@@ -18,8 +20,10 @@
 //!   message itself is first posted into the real group (marked as
 //!   simulated) and everything answering it goes to the platform as well as
 //!   into the transcript.
-//! - **Who may**: a person, as themselves, or the Speaker's office, as any
-//!   person. Never an agent or a guest. The server enforces this.
+//! - **Who may**: a person, as anyone on the roster (themselves or another
+//!   person, so a script can have two people agree), or the Speaker's
+//!   office, as any person. Never an agent, and never as a guest or an
+//!   agent. The server enforces this.
 //!
 //! Transcripts are held by the daemon in memory: a restart forgets them.
 
@@ -59,7 +63,8 @@ pub struct SimulateChat {
     /// Who acts for the office, as `meta.acted_by` names it on a write.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acted_by: Option<SenatorName>,
-    /// Whom the message is from; `None`: the caller.
+    /// Whom the message is from, any person on the roster; `None`: the
+    /// caller.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub as_person: Option<Name>,
     /// The bound group; `None`: the committee's only bound group.
@@ -77,11 +82,13 @@ pub struct SimulateChat {
 }
 
 /// A simulate request once the server has checked who may make it: the
-/// message is from `from`, a person on the roster.
+/// message is from `from`, a person on the roster, injected by `by`, the
+/// person who called (`from` too, or anyone else).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SimRequest {
     pub committee: CommitteeId,
     pub from: Name,
+    pub by: Name,
     pub text: String,
     pub group: Option<String>,
     pub reply_to: Option<String>,
@@ -141,6 +148,10 @@ pub struct SimEntry {
     /// The person a message was injected as, or [`Address::Speaker`] for
     /// what the Speaker posted.
     pub from: Address,
+    /// Who injected a message ([`SimRequest::by`]); `None` for what the
+    /// Speaker posted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub simulated_by: Option<Name>,
     /// As posted: markdown, or a card's title and body.
     pub text: String,
     pub message_ref: String,

@@ -563,6 +563,7 @@ mod tests {
             group_id: "g".into(),
             group_name: None,
             simulated: false,
+            simulated_by: None,
         });
         assert!(is_discussion(&chat));
         chat.source.as_mut().unwrap().simulated = true;

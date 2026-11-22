@@ -9,10 +9,12 @@
 //! - every platform ref in it: the injected messages and what the Speaker
 //!   posted for them (a post replying to one of them is the conversation's);
 //! - every log event descended from it: its `chat` events, what the Speaker
-//!   relayed or decided from them (`meta.relayed_from`), and the replies in
-//!   those threads. A new root the Speaker posts for one of these (a relay's
-//!   task card in the Agent group) carries that event's operation id
-//!   ([`senate_speaker::operation_id`]), which is how it is recognised.
+//!   relayed or decided from them (`meta.relayed_from`), what it proposed
+//!   from them (`meta.sources`), and the replies in those threads. A new
+//!   root the Speaker posts for one of these (a relay's task card in the
+//!   Agent group, a decision proposed in the group) carries that event's
+//!   operation id ([`senate_speaker::operation_id`]), which is how it is
+//!   recognised.
 //!
 //! What the Speaker posts into a conversation is recorded as its transcript
 //! and, unless the conversation is `live`, never reaches the platform: the
@@ -111,13 +113,24 @@ impl Sims {
                 .and_then(|m| self.refs.get(&m.message_ref))
                 .map(|r| r.conversation.clone())
         } else {
+            // What it was relayed from, the thread it is in, or the
+            // messages it cites (a decision proposed from a discussion).
+            let cited = event
+                .meta
+                .get(meta::SOURCES)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_u64)
+                .map(Seq);
             let parent = event
                 .meta
                 .get(meta::RELAYED_FROM)
                 .and_then(Value::as_u64)
                 .map(Seq)
                 .into_iter()
-                .chain(event.thread);
+                .chain(event.thread)
+                .chain(cited);
             parent
                 .filter_map(|seq| self.seqs.get(&(event.committee.clone(), seq)))
                 .next()
@@ -230,6 +243,7 @@ impl Sims {
         conversation.entries.push(SimEntry {
             ts: Utc::now(),
             from: Address::Speaker,
+            simulated_by: None,
             text: text.to_owned(),
             message_ref: posted.message_ref.clone(),
             reply_to: route.reply_to.clone(),
@@ -251,6 +265,7 @@ impl Sims {
         conversation.entries.push(SimEntry {
             ts: Utc::now(),
             from: Address::Speaker,
+            simulated_by: None,
             text: text.to_owned(),
             message_ref: message_ref.to_owned(),
             reply_to: None,
@@ -295,9 +310,10 @@ pub(super) fn card_text(card: &senate_core::Card) -> String {
     }
 }
 
-/// How a live simulated message shows in the group: marked, and from whom.
-fn live_text(person: &str, text: &str) -> String {
-    format!("_(simulated)_ **{person}**: {text}")
+/// How a live simulated message shows in the group: marked, by whom, and
+/// whom it is from.
+fn live_text(by: &str, person: &str, text: &str) -> String {
+    format!("_(simulated by {by})_ **{person}**: {text}")
 }
 
 fn invalid(message: impl Into<String>) -> SimError {
@@ -414,7 +430,11 @@ impl ChatGateway {
             let posted = self
                 .inner
                 .surface
-                .post(target, &live_text(&name, &request.text), &operation)
+                .post(
+                    target,
+                    &live_text(request.by.as_str(), &name, &request.text),
+                    &operation,
+                )
                 .await
                 .map_err(|e| SimError::Unavailable(format!("the platform refused it: {e}")))?;
             (
@@ -447,6 +467,7 @@ impl ChatGateway {
                 c.entries.push(SimEntry {
                     ts: Utc::now(),
                     from: Address::senior(&request.from),
+                    simulated_by: Some(request.by.clone()),
                     text: request.text.clone(),
                     message_ref: message_ref.clone(),
                     reply_to: request.reply_to.clone(),
@@ -473,7 +494,7 @@ impl ChatGateway {
             mentions: Vec::new(),
             text: request.text,
         };
-        let seq = match self.deliver_marked(inbound, true).await? {
+        let seq = match self.deliver_marked(inbound, Some(&request.by)).await? {
             Delivered::Recorded(event) => {
                 lock(&self.inner.state).sims.observe(&event);
                 Some(event.seq)

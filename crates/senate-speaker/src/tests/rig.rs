@@ -129,6 +129,7 @@ pub(crate) fn source() -> Source {
         group_id: GROUP.into(),
         group_name: Some(GROUP_NAME.into()),
         simulated: false,
+        simulated_by: None,
     }
 }
 

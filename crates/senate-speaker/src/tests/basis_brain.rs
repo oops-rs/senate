@@ -222,6 +222,7 @@ fn group() -> GroupRef {
         group_id: GROUP.into(),
         group_name: None,
         simulated: false,
+        simulated_by: None,
     }
 }
 

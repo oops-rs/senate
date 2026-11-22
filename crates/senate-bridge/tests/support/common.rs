@@ -128,6 +128,7 @@ pub fn chat_source() -> Source {
         group_id: "backend".into(),
         group_name: Some("退款 v2 · 后端群".into()),
         simulated: false,
+        simulated_by: None,
     }
 }
 

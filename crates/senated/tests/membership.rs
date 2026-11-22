@@ -202,6 +202,7 @@ async fn binding(hub: &MemoryHub, to: &str, group: &str, action: BindingAction) 
                 group_id: group.into(),
                 group_name: None,
                 simulated: false,
+                simulated_by: None,
             })
             .with_binding(&BindingPayload {
                 action,
@@ -234,6 +235,7 @@ async fn chat_marked(hub: &MemoryHub, to: &str, group: &str, message_ref: &str, 
             group_id: group.into(),
             group_name: None,
             simulated,
+            simulated_by: None,
         })
         .with_mirror(Mirror {
             platform: "chat".into(),
@@ -822,6 +824,7 @@ fn simulated(text: &str) -> senate_core::chat_sim::SimRequest {
     senate_core::chat_sim::SimRequest {
         committee: committee("alpha"),
         from: Name::new("wendell").unwrap(),
+        by: Name::new("wendell").unwrap(),
         text: text.into(),
         group: None,
         reply_to: None,

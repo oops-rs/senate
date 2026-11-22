@@ -82,7 +82,7 @@ use async_trait::async_trait;
 use senate_core::chat_sim::SIM_REF_PREFIX;
 use senate_core::{
     Address, AdoptedGroup, AnnouncementSection, BindingAction, BindingPayload, Card, ChatSurface,
-    CommitteeId, CreatedGroup, Event, EventId, Guest, Hub, HubError, Kind, Mirror, NewEvent,
+    CommitteeId, CreatedGroup, Event, EventId, Guest, Hub, HubError, Kind, Mirror, Name, NewEvent,
     NewGroup, PostTarget, Posted, Roster, Seq, Source, SurfaceError, UnboundMention,
     is_provisional, meta, thread_participants,
 };
@@ -404,18 +404,19 @@ impl ChatGateway {
     /// Handle one message the platform delivered. Waits until the gateway
     /// runs (it needs the log).
     pub async fn deliver(&self, inbound: Inbound) -> Result<Delivered, GatewayError> {
-        self.deliver_marked(inbound, false).await
+        self.deliver_marked(inbound, None).await
     }
 
     /// [`ChatGateway::deliver`], the `chat` event's source marked
-    /// `simulated` when it is ([`ChatGateway::simulate`]).
+    /// `simulated` when it is ([`ChatGateway::simulate`]): `simulated_by`
+    /// names the person who injected it.
     async fn deliver_marked(
         &self,
         inbound: Inbound,
-        simulated: bool,
+        simulated_by: Option<&Name>,
     ) -> Result<Delivered, GatewayError> {
         let hub = self.inner.hub().await?;
-        let committee = self.remember_inbound(&inbound, simulated);
+        let committee = self.remember_inbound(&inbound, simulated_by.is_some());
         if inbound.text.trim().is_empty() {
             return Ok(Delivered::Dropped);
         }
@@ -424,7 +425,7 @@ impl ChatGateway {
             Some(committee) => {
                 let event = self
                     .inner
-                    .record(hub.as_ref(), &roster, &committee, &inbound, simulated)
+                    .record(hub.as_ref(), &roster, &committee, &inbound, simulated_by)
                     .await?;
                 Ok(Delivered::Recorded(Box::new(event)))
             }
@@ -641,7 +642,7 @@ impl Inner {
         roster: &Roster,
         committee: &CommitteeId,
         inbound: &Inbound,
-        simulated: bool,
+        simulated_by: Option<&Name>,
     ) -> Result<Event, GatewayError> {
         let id = EventId::derived(
             0,
@@ -654,7 +655,7 @@ impl Inner {
         let mut attempt = 1;
         loop {
             let result = match self
-                .chat_event(hub, roster, committee, inbound, simulated)
+                .chat_event(hub, roster, committee, inbound, simulated_by)
                 .await
             {
                 Ok(chat) => hub.append(chat.with_id(id.clone())).await,
@@ -681,7 +682,7 @@ impl Inner {
         roster: &Roster,
         committee: &CommitteeId,
         inbound: &Inbound,
-        simulated: bool,
+        simulated_by: Option<&Name>,
     ) -> Result<NewEvent, HubError> {
         let from = sender_address(roster, &self.platform, &inbound.sender);
         let mut chat = NewEvent::new(committee.clone(), Kind::Chat, from, inbound.text.clone())
@@ -689,7 +690,8 @@ impl Inner {
                 platform: self.platform.clone(),
                 group_id: inbound.group_id.clone(),
                 group_name: inbound.group_name.clone(),
-                simulated,
+                simulated: simulated_by.is_some(),
+                simulated_by: simulated_by.cloned(),
             })
             .with_mirror(Mirror {
                 platform: self.platform.clone(),

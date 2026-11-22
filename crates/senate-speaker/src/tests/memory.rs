@@ -36,6 +36,7 @@ fn said(from: &str, text: &str, n: u32) -> NewEvent {
 fn simulated(from: &str, text: &str, n: u32) -> NewEvent {
     said(from, text, n).with_source(Source {
         simulated: true,
+        simulated_by: None,
         ..source()
     })
 }
@@ -457,6 +458,7 @@ async fn a_simulated_forget_changes_nothing_the_committee_knows() {
         )
         .with_source(Source {
             simulated: true,
+            simulated_by: None,
             ..source()
         }),
     )

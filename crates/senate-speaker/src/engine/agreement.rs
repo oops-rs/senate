@@ -8,8 +8,12 @@
 //!
 //! # When
 //!
-//! A burst is a group's run of messages (never simulated ones) with gaps
-//! under [`BURST_GAP`]. Once a burst has been quiet for `[speaker.memory]
+//! A burst is a group's run of messages with gaps under [`BURST_GAP`].
+//! Simulated messages (`senate chat send`) make bursts of their own, never
+//! mixed with real ones, so a script can rehearse two people agreeing: the
+//! proposal carries their simulated source, so it stays in the simulated
+//! conversation and out of the brief and memory, and its topic never
+//! blocks a real proposal (nor a real one a rehearsal). Once a burst has been quiet for `[speaker.memory]
 //! agreement_quiet_secs`, has something new since it was last checked, and
 //! two people or more of the roster spoke in it, [`Brain::spot_agreement`]
 //! is asked. Its answer is written only when it holds:
@@ -53,6 +57,9 @@ const BURST_MESSAGES: usize = 60;
 /// How far back in the log a burst is looked for.
 const BURST_LOOKBACK: u64 = 400;
 
+/// A group's real discussion, or its simulated one.
+type BurstKey = (String, bool);
+
 /// One group's latest message of discussion.
 struct GroupBurst {
     last: Seq,
@@ -65,8 +72,10 @@ struct GroupBurst {
 /// The committee's bursts by group, and what was proposed before.
 #[derive(Default)]
 pub(super) struct Bursts {
-    groups: HashMap<String, GroupBurst>,
+    groups: HashMap<BurstKey, GroupBurst>,
     topics: BTreeSet<String>,
+    /// Topics of simulated proposals, kept apart from [`Self::topics`].
+    rehearsed: BTreeSet<String>,
     cited: BTreeSet<Seq>,
 }
 
@@ -74,22 +83,43 @@ impl Bursts {
     pub(super) fn observe(&mut self, event: &Event) {
         if is_discussion_proposal(event) {
             if let Some(topic) = event.meta.get(meta::TOPIC).and_then(Value::as_str) {
-                self.topics.insert(normalized(topic));
+                self.topics_mut(event.is_simulated())
+                    .insert(normalized(topic));
             }
             self.cited.extend(sources(event));
             return;
         }
-        if let Some(group) = burst_group(event) {
-            let entry = self.groups.entry(group.to_owned()).or_insert(GroupBurst {
-                last: Seq::ZERO,
-                ts: event.ts,
-                checked: Seq::ZERO,
-                timer: None,
-            });
+        if let Some((group, simulated)) = burst_group(event) {
+            let entry = self
+                .groups
+                .entry((group.to_owned(), simulated))
+                .or_insert(GroupBurst {
+                    last: Seq::ZERO,
+                    ts: event.ts,
+                    checked: Seq::ZERO,
+                    timer: None,
+                });
             if event.seq > entry.last {
                 entry.last = event.seq;
                 entry.ts = event.ts;
             }
+        }
+    }
+
+    /// What was proposed before, of real discussion or of simulated.
+    fn topics(&self, simulated: bool) -> &BTreeSet<String> {
+        if simulated {
+            &self.rehearsed
+        } else {
+            &self.topics
+        }
+    }
+
+    fn topics_mut(&mut self, simulated: bool) -> &mut BTreeSet<String> {
+        if simulated {
+            &mut self.rehearsed
+        } else {
+            &mut self.topics
         }
     }
 
@@ -102,13 +132,16 @@ impl Bursts {
     }
 }
 
-/// The group a message of discussion was said in: a person's `chat` with a
-/// platform source, never a simulated one.
-fn burst_group(event: &Event) -> Option<&str> {
-    if event.kind != Kind::Chat || event.is_simulated() {
+/// The group a message of discussion was said in, and whether it was
+/// simulated: a `chat` with a platform source.
+fn burst_group(event: &Event) -> Option<(&str, bool)> {
+    if event.kind != Kind::Chat {
         return None;
     }
-    event.source.as_ref().map(|s| s.group_id.as_str())
+    event
+        .source
+        .as_ref()
+        .map(|s| (s.group_id.as_str(), s.simulated))
 }
 
 /// The Speaker's proposal of a decision people agreed on.
@@ -145,7 +178,11 @@ fn checked(
 ) -> Option<Agreement> {
     let statement = one_line(&agreement.statement);
     let topic = one_line(&agreement.topic);
-    if statement.is_empty() || topic.is_empty() || bursts.topics.contains(&normalized(&topic)) {
+    let simulated = burst.iter().any(Event::is_simulated);
+    if statement.is_empty()
+        || topic.is_empty()
+        || bursts.topics(simulated).contains(&normalized(&topic))
+    {
         return None;
     }
     let mut refs: Vec<Seq> = agreement
@@ -182,14 +219,14 @@ impl Engine {
     /// After a message in a group: check its burst once it has been quiet
     /// for `agreement_quiet_secs`.
     pub(super) fn arm_agreement(&mut self, committee: &CommitteeId, event: &Event) {
-        let Some(group) = burst_group(event).map(str::to_owned) else {
+        let Some((group, simulated)) = burst_group(event).map(|(g, s)| (g.to_owned(), s)) else {
             return;
         };
         let quiet = self.config.memory.agreement_quiet();
         let Some(state) = self.committees.get_mut(committee) else {
             return;
         };
-        let Some(burst) = state.bursts.groups.get_mut(&group) else {
+        let Some(burst) = state.bursts.groups.get_mut(&(group.clone(), simulated)) else {
             return;
         };
         let (seq, ts) = (burst.last, burst.ts);
@@ -207,6 +244,7 @@ impl Engine {
                 SpeakerMsg::AgreementDue {
                     committee: message,
                     group,
+                    simulated,
                     seq,
                 }
             });
@@ -218,13 +256,14 @@ impl Engine {
         &mut self,
         committee: CommitteeId,
         group: String,
+        simulated: bool,
         seq: Seq,
     ) {
         self.catch_up(&committee).await;
         let Some(state) = self.committees.get_mut(&committee) else {
             return;
         };
-        let Some(burst) = state.bursts.groups.get_mut(&group) else {
+        let Some(burst) = state.bursts.groups.get_mut(&(group.clone(), simulated)) else {
             return;
         };
         if burst.last != seq || burst.checked >= seq {
@@ -232,13 +271,13 @@ impl Engine {
         }
         burst.timer = None;
         burst.checked = seq;
-        let proposed: Vec<String> = state.bursts.topics.iter().cloned().collect();
+        let proposed: Vec<String> = state.bursts.topics(simulated).iter().cloned().collect();
         let decisions = state
             .brief
             .as_ref()
             .map(|b| b.brief().decisions)
             .unwrap_or_default();
-        let events = match self.burst(&committee, &group, seq).await {
+        let events = match self.burst(&committee, &group, simulated, seq).await {
             Ok(events) => events,
             Err(error) => {
                 warn!(%committee, %error, "cannot read the burst; not checking it");
@@ -273,11 +312,13 @@ impl Engine {
         );
     }
 
-    /// The burst in `group` ending at `last`, oldest first.
+    /// The burst in `group` (simulated, or real) ending at `last`, oldest
+    /// first.
     async fn burst(
         &self,
         committee: &CommitteeId,
         group: &str,
+        simulated: bool,
         last: Seq,
     ) -> Result<Vec<Event>, senate_core::HubError> {
         let mut said = Vec::new();
@@ -288,7 +329,7 @@ impl Engine {
             after = tail.seq;
             said.extend(
                 page.into_iter()
-                    .filter(|e| e.seq <= last && burst_group(e) == Some(group)),
+                    .filter(|e| e.seq <= last && burst_group(e) == Some((group, simulated))),
             );
         }
         let gap = chrono::Duration::from_std(BURST_GAP).unwrap_or_default();

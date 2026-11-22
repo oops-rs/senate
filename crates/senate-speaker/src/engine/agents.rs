@@ -110,6 +110,7 @@ impl Engine {
                     group_id: created.group_id,
                     group_name: Some(name.clone()),
                     simulated: false,
+                    simulated_by: None,
                 };
                 let id = derived_event_id(&[
                     "agents-group",

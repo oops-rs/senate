@@ -31,6 +31,7 @@ enum Action {
     #[command(after_help = "Examples:
   senate chat send --committee refund-v2 \"ask bob's agent how long refunds take\"
   senate chat send --committee refund-v2 --in sim:01j… \"yes, record that\"
+  senate chat send --committee refund-v2 --as bob --in sim:01j… \"agreed\"
   senate chat send --committee refund-v2 --office --as alice \"/bind refund-v2\"")]
     Send {
         /// The message.
@@ -42,10 +43,11 @@ enum Action {
         /// The bound group (default: the committee's only one).
         #[arg(long)]
         group: Option<String>,
-        /// Whom it is from: you (default), or, with --office, any person.
+        /// Whom it is from: you (default), or any person on the roster. It
+        /// shows as simulated by you.
         #[arg(long = "as")]
         as_person: Option<Name>,
-        /// Act for the Speaker's office, which may send as any person.
+        /// Act for the Speaker's office.
         #[arg(long)]
         office: bool,
         /// Who acts for the office (default: you, or the one secretary you run).
@@ -189,7 +191,7 @@ pub(super) fn run(args: Chat) -> anyhow::Result<()> {
 }
 
 /// A conversation as the terminal shows it: numbered entries, the injected
-/// ones marked "(simulated)".
+/// ones marked "(simulated by <person>)".
 pub fn render(transcript: &SimTranscript) -> String {
     let mut out = format!(
         "conversation {} · {} · group {} · {}\n",
@@ -202,7 +204,10 @@ pub fn render(transcript: &SimTranscript) -> String {
         let who = if entry.from == Address::Speaker {
             "speaker".to_owned()
         } else {
-            format!("{} (simulated)", entry.from)
+            match &entry.simulated_by {
+                Some(by) => format!("{} (simulated by {by})", entry.from),
+                None => format!("{} (simulated)", entry.from),
+            }
         };
         let mut notes = vec![entry.message_ref.clone()];
         if let Some(seq) = entry.seq {
@@ -225,4 +230,38 @@ pub fn render(transcript: &SimTranscript) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use senate_core::chat_sim::SimEntry;
+    use senate_core::{CommitteeId, Name};
+
+    use super::*;
+
+    #[test]
+    fn an_injected_message_shows_who_simulated_it() {
+        let entry = |from: &str, by: Option<&str>| SimEntry {
+            ts: Utc::now(),
+            from: Address::senior(&Name::new(from).unwrap()),
+            simulated_by: by.map(|b| Name::new(b).unwrap()),
+            text: "agreed".into(),
+            message_ref: "sim:1".into(),
+            reply_to: None,
+            group_id: None,
+            card: false,
+            updates: None,
+            seq: None,
+        };
+        let shown = render(&SimTranscript {
+            conversation: "sim:1".into(),
+            committee: CommitteeId::new("refund-v2").unwrap(),
+            group_id: "g".into(),
+            live: false,
+            entries: vec![entry("alice", Some("bob")), entry("bob", None)],
+        });
+        assert!(shown.contains("alice (simulated by bob)"), "{shown}");
+        assert!(shown.contains("bob (simulated)"), "{shown}");
+    }
 }

@@ -518,6 +518,7 @@ impl CommitteeState {
                             group_id: binding.group_id,
                             group_name: binding.group_name,
                             simulated: false,
+                            simulated_by: None,
                         },
                         role: binding.role,
                         seq: event.seq,
@@ -1396,8 +1397,9 @@ impl Engine {
                 }
                 if memory::is_discussion(&event) {
                     self.arm_quiet(&committee);
-                    self.arm_agreement(&committee, &event);
                 }
+                // Simulated discussion too, in bursts of its own.
+                self.arm_agreement(&committee, &event);
                 if let Err(error) = self.hub.set_cursor(&committee, CURSOR, event.seq).await {
                     // Harmless: a restart reprocesses idempotently.
                     warn!(%committee, %error, "cannot persist the speaker cursor");
@@ -3474,6 +3476,7 @@ impl Engine {
                             group_id: group.group_id.clone(),
                             group_name: group.group_name.clone(),
                             simulated: group.simulated,
+                            simulated_by: group.simulated_by.clone(),
                         });
                 if let Some(chat) = chat {
                     decision = decision.with_meta(meta::RELAYED_FROM, json!(chat.0));
@@ -3513,6 +3516,7 @@ impl Engine {
                         group_id: group.group_id.clone(),
                         group_name: group.group_name.clone(),
                         simulated: group.simulated,
+                        simulated_by: group.simulated_by.clone(),
                     });
                 let recorded = self.append_action(edit, strict).await?;
                 Ok(recorded
@@ -4074,6 +4078,7 @@ fn group_ref(source: &Source) -> GroupRef {
         group_id: source.group_id.clone(),
         group_name: source.group_name.clone(),
         simulated: source.simulated,
+        simulated_by: source.simulated_by.clone(),
     }
 }
 
@@ -4083,6 +4088,7 @@ fn mention_group(mention: &UnboundMention) -> GroupRef {
         group_id: mention.group_id.clone(),
         group_name: mention.group_name.clone(),
         simulated: false,
+        simulated_by: None,
     }
 }
 
@@ -4142,6 +4148,7 @@ fn group_binding(
         group_id: group.group_id.clone(),
         group_name: group.group_name.clone(),
         simulated: group.simulated,
+        simulated_by: group.simulated_by.clone(),
     })
     .with_binding(&BindingPayload {
         action,

@@ -153,23 +153,68 @@ async fn two_people_agreeing_are_asked_and_a_persons_yes_records_it() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn one_person_alone_or_simulated_chat_is_never_checked() {
+async fn one_person_alone_is_never_checked() {
     let rig = bound().await;
     rig.append(said("alice", "I think we should cap retries", 1))
         .await;
     rig.append(said("alice", "at three, I mean", 2)).await;
     quiet(&rig).await;
+    assert!(rig.brain.agreement_inputs().is_empty());
+    assert!(proposals(&rig.hub).is_empty());
+    rig.stop().await;
+}
+
+/// Simulated messages make a burst of their own: never mixed with the real
+/// discussion around them, proposed marked as simulated, and a topic
+/// rehearsed never blocks the same topic for real.
+#[tokio::test(start_paused = true)]
+async fn simulated_chat_is_checked_apart_and_its_proposal_is_marked() {
+    let rig = bound().await;
     let rehearsal = |from: &str, text: &str, n: u32| {
         said(from, text, n).with_source(Source {
             simulated: true,
+            simulated_by: Some(senate_core::Name::new("alice").unwrap()),
             ..source()
         })
     };
-    rig.append(rehearsal("bob", "agreed", 3)).await;
-    rig.append(rehearsal("pm", "agreed too", 4)).await;
+    // Real alice, then simulated bob: one person in each burst.
+    let r = rig.append(said("alice", "Cap retries at three?", 1)).await;
+    let b = rig.append(rehearsal("bob", "agreed", 2)).await;
     quiet(&rig).await;
-    assert!(rig.brain.agreement_inputs().is_empty());
-    assert!(proposals(&rig.hub).is_empty());
+    assert!(rig.brain.agreement_inputs().is_empty(), "never mixed");
+
+    let a = rig
+        .append(rehearsal("alice", "Cap retries at three?", 3))
+        .await;
+    rig.brain.spots(Ok(Some(agreed(
+        "Retries are capped at three",
+        "retry cap",
+        &[b.seq, a.seq],
+        &["alice", "bob"],
+    ))));
+    quiet(&rig).await;
+    let inputs = rig.brain.agreement_inputs();
+    assert_eq!(inputs.len(), 1);
+    assert!(
+        inputs[0].events.iter().all(Event::is_simulated),
+        "{inputs:#?}"
+    );
+    let proposed = proposals(&rig.hub);
+    assert_eq!(proposed.len(), 1);
+    assert!(proposed[0].is_simulated(), "marked as what it came from");
+
+    // The same topic for real is still proposed.
+    let c = rig.append(said("bob", "So, three retries", 4)).await;
+    rig.brain.spots(Ok(Some(agreed(
+        "Retries are capped at three",
+        "retry cap",
+        &[r.seq, c.seq],
+        &["alice", "bob"],
+    ))));
+    quiet(&rig).await;
+    let proposed = proposals(&rig.hub);
+    assert_eq!(proposed.len(), 2, "{proposed:#?}");
+    assert!(!proposed[1].is_simulated());
     rig.stop().await;
 }
 

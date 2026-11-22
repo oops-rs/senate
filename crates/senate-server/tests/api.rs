@@ -351,6 +351,7 @@ async fn senators_cannot_state_server_provenance() {
                 group_id: "g".into(),
                 group_name: None,
                 simulated: false,
+                simulated_by: None,
             },
         ),
     ];

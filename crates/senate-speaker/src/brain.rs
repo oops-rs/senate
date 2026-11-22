@@ -30,6 +30,8 @@ pub struct GroupRef {
     /// What was said here was simulated ([`senate_core::Source::simulated`]),
     /// carried onto what the Speaker records from it.
     pub simulated: bool,
+    /// Who injected it, when simulated ([`senate_core::Source::simulated_by`]).
+    pub simulated_by: Option<senate_core::Name>,
 }
 
 /// Something a person said to the Speaker.

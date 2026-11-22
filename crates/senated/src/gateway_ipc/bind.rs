@@ -214,6 +214,7 @@ impl InboundHandler {
                 group_id: message.group_id.clone(),
                 group_name: message.group_name.clone(),
                 simulated: false,
+                simulated_by: None,
             };
             let label = source.group_name.as_deref().unwrap_or(&source.group_id);
             let event = NewEvent::new(

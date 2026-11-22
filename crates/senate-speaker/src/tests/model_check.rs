@@ -234,6 +234,7 @@ fn utterance() -> Utterance {
             group_id: GROUP.into(),
             group_name: None,
             simulated: false,
+            simulated_by: None,
         },
         context: Vec::new(),
         roster: Roster::default(),

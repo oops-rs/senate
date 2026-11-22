@@ -1,5 +1,5 @@
 //! Simulated chat (`senate chat send` / `senate chat thread`): a message
-//! injected at the gateway as a person's, interpreted and answered by the
+//! injected at the gateway as any person's, interpreted and answered by the
 //! Speaker exactly as a platform message is, with everything it posts kept
 //! off the platform unless `--live`.
 
@@ -94,7 +94,7 @@ async fn a_simulated_question_is_relayed_and_answered_in_the_log_only() {
     // The relay reaches the agent as any relay would, marked.
     let push = inbox.wait_for("退款多久到账").await;
     assert!(
-        push.contains("(simulated)") || push.contains("（模拟）"),
+        push.contains("(simulated by alice)") || push.contains("（由 alice 模拟）"),
         "{push}"
     );
     let thread = thread_of(&push, "退款多久到账");
@@ -183,7 +183,11 @@ async fn a_live_simulated_message_posts_through_the_surface() {
         })
         .await;
     assert!(root.is_root_in(GROUP), "{root:?}");
-    assert!(root.markdown.contains("(simulated)"), "{}", root.markdown);
+    assert!(
+        root.markdown.contains("(simulated by alice)"),
+        "{}",
+        root.markdown
+    );
     assert!(root.markdown.contains("定了什么"), "{}", root.markdown);
 
     let reply = world
@@ -204,11 +208,11 @@ async fn a_live_simulated_message_posts_through_the_surface() {
     world.stop().await;
 }
 
-/// Only a person, as themselves, may simulate: not an agent, not as
-/// someone else without the Speaker's office, and never so that the
-/// message would come from a guest.
+/// A person may simulate any person on the roster, and the message says who
+/// did; never an agent, never without the office's check when the office
+/// is claimed, and never so that the message would come from a guest.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn agents_and_impersonation_are_refused() {
+async fn anyone_may_be_simulated_by_a_person_but_never_by_an_agent() {
     let world = Setup::new().person("dave", false).start().await;
     world.bind().await;
     let mut bob = world.laptop("bob");
@@ -231,11 +235,10 @@ async fn agents_and_impersonation_are_refused() {
         .unwrap_err()
         .to_string();
     assert!(refused.contains("is an agent"), "{refused}");
-
-    // Bob as alice, without the office.
+    // Nor as someone else.
     let refused = bob
         .try_ipc::<SimulatedChat>(chat_send(
-            SessionSelector::default(),
+            Laptop::session("s-bob"),
             SimulateChat {
                 as_person: Some(name("alice")),
                 ..send("hi")
@@ -244,7 +247,7 @@ async fn agents_and_impersonation_are_refused() {
         .await
         .unwrap_err()
         .to_string();
-    assert!(refused.contains("only their own"), "{refused}");
+    assert!(refused.contains("is an agent"), "{refused}");
 
     // Bob is not the Speaker's office.
     let refused = bob
@@ -262,19 +265,151 @@ async fn agents_and_impersonation_are_refused() {
     assert!(refused.contains("office"), "{refused}");
 
     // Dave has no account on the platform: his message would come from a
-    // guest, so it is not simulated at all.
-    let mut dave = world.laptop("dave");
-    dave.open().await;
-    let refused = dave
-        .try_ipc::<SimulatedChat>(chat_send(SessionSelector::default(), send("hi")))
+    // guest, so it is not simulated at all, whoever sends it.
+    let refused = bob
+        .try_ipc::<SimulatedChat>(chat_send(
+            SessionSelector::default(),
+            SimulateChat {
+                as_person: Some(name("dave")),
+                ..send("hi")
+            },
+        ))
         .await
         .unwrap_err()
         .to_string();
     assert!(refused.contains("guest"), "{refused}");
-
+    // Nor anyone not on the roster.
+    let refused = bob
+        .try_ipc::<SimulatedChat>(chat_send(
+            SessionSelector::default(),
+            SimulateChat {
+                as_person: Some(name("mallory")),
+                ..send("hi")
+            },
+        ))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("not a person on the roster"), "{refused}");
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(chats(world.events().await), 0, "nothing was injected");
-    dave.close().await;
+
+    // Bob, as alice: from alice, marked as simulated by bob.
+    world.brain.interprets(Ok(Intent::Recall));
+    let sent: SimulatedChat = bob
+        .ipc(chat_send(
+            SessionSelector::default(),
+            SimulateChat {
+                as_person: Some(name("alice")),
+                ..send("定了什么？")
+            },
+        ))
+        .await;
+    let chat = world
+        .hub()
+        .get(&committee(), sent.seq.expect("recorded"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(chat.from, person("alice"));
+    assert!(chat.is_simulated());
+    assert_eq!(
+        chat.source.as_ref().and_then(|s| s.simulated_by.clone()),
+        Some(name("bob"))
+    );
+    let transcript = wait_thread(&bob, &sent.message_ref, None).await;
+    assert_eq!(transcript.entries[0].from, person("alice"));
+    assert_eq!(transcript.entries[0].simulated_by, Some(name("bob")));
+
+    bob.close().await;
+    world.stop().await;
+}
+
+/// Two people "agree" through simulated chat (one person scripting both):
+/// the Speaker proposes recording it as a decision, in the conversation
+/// only, marked, and the brief leaves it out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_people_agreeing_in_simulated_chat_get_a_decision_proposed() {
+    let world = Setup::new()
+        .speaker(|c| c.memory.agreement_quiet_secs = 1)
+        .start()
+        .await;
+    world.bind().await;
+    let mut bob = world.laptop("bob");
+    bob.open().await;
+    world.settle().await;
+    let posts_before = world.posts();
+
+    let ambient = |as_person: &str, text: &str, reply_to: Option<String>| {
+        chat_send(
+            SessionSelector::default(),
+            SimulateChat {
+                as_person: Some(name(as_person)),
+                ambient: true,
+                reply_to,
+                ..send(text)
+            },
+        )
+    };
+    let first: SimulatedChat = bob
+        .ipc(ambient("alice", "退款重试最多三次，可以吗？", None))
+        .await;
+    let second: SimulatedChat = bob
+        .ipc(ambient(
+            "bob",
+            "同意，三次。",
+            Some(first.message_ref.clone()),
+        ))
+        .await;
+    let (a, b) = (first.seq.expect("recorded"), second.seq.expect("recorded"));
+    world.brain.spots(Ok(Some(senate_speaker::Agreement {
+        statement: "退款重试最多三次".into(),
+        topic: "退款重试次数".into(),
+        refs: vec![a, b],
+        agreeing: vec![person("alice"), person("bob")],
+    })));
+
+    // The Speaker asks, in the conversation.
+    let proposal = eventually_async("the decision proposed", || async {
+        world
+            .events()
+            .await
+            .into_iter()
+            .find(|e| e.kind == Kind::Note && e.meta.contains_key(senate_core::meta::SOURCES))
+    })
+    .await;
+    assert_eq!(proposal.from, Address::Speaker);
+    assert_eq!(proposal.body, "退款重试最多三次");
+    assert!(proposal.is_simulated(), "marked as what it came from");
+    let inputs = world.brain.agreement_inputs();
+    assert!(
+        inputs
+            .iter()
+            .any(|i| i.events.iter().any(|e| e.seq == a) && i.events.iter().any(|e| e.seq == b)),
+        "{inputs:#?}"
+    );
+    let transcript = eventually_async("the proposal in the conversation", || async {
+        let t = wait_thread(&bob, &first.message_ref, None).await;
+        t.entries
+            .iter()
+            .any(|e| e.from == Address::Speaker && e.text.contains("退款重试最多三次"))
+            .then_some(t)
+    })
+    .await;
+    assert_eq!(transcript.entries[0].simulated_by, Some(name("bob")));
+
+    // Nothing reached the platform, and the brief leaves it out.
+    world.settle().await;
+    let after = world.posts();
+    assert_eq!(
+        after.len(),
+        posts_before.len(),
+        "posts made for a simulated discussion: {:#?}",
+        &after[posts_before.len()..]
+    );
+    let brief = world.hub().brief(&committee()).await.unwrap();
+    assert!(brief.decisions.is_empty(), "{brief:#?}");
+
     bob.close().await;
     world.stop().await;
 }

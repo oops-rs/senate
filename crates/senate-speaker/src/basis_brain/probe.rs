@@ -507,6 +507,7 @@ fn probe_utterance(committee: Option<&CommitteeId>) -> Utterance {
             group_id: "probe".into(),
             group_name: None,
             simulated: false,
+            simulated_by: None,
         },
         context: Vec::new(),
         roster: Roster::default(),

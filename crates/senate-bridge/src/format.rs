@@ -214,10 +214,12 @@ fn origin(event: &Event, locale: Locale) -> String {
     let platform = platform(event).unwrap_or_default();
     // Injected with `senate chat send`, or derived from such a message:
     // nobody said it on the platform.
-    let simulated = match (source.simulated, locale) {
-        (false, _) => "",
-        (true, Locale::Zh) => "（模拟）",
-        (true, Locale::En) => " (simulated)",
+    let simulated = match (source.simulated, &source.simulated_by, locale) {
+        (false, _, _) => String::new(),
+        (true, None, Locale::Zh) => "（模拟）".to_owned(),
+        (true, None, Locale::En) => " (simulated)".to_owned(),
+        (true, Some(by), Locale::Zh) => format!("（由 {by} 模拟）"),
+        (true, Some(by), Locale::En) => format!(" (simulated by {by})"),
     };
     match locale {
         Locale::Zh => format!(" 在 {platform} 群「{}」{simulated}", name.trim()),
@@ -1387,6 +1389,7 @@ mod tests {
             group_id: "backend".into(),
             group_name: None,
             simulated: false,
+            simulated_by: None,
         }
     }
 
@@ -1991,6 +1994,7 @@ mod tests {
         let e = NewEvent::new(committee(), Kind::Chat, pm(), "问一下 bob 的 agent")
             .with_source(Source {
                 simulated: true,
+                simulated_by: None,
                 ..chat_source()
             })
             .into_event(Seq(30), Utc::now());
@@ -2001,6 +2005,22 @@ mod tests {
         assert_eq!(
             header(&e, ZH),
             "[senate · refund-v2 · seq 30 · 来自 [senator::pm] 在 chat 群「backend」（模拟） · chat]"
+        );
+        // Injected by someone else, as pm: who did it shows.
+        let by = NewEvent::new(committee(), Kind::Chat, pm(), "agreed")
+            .with_source(Source {
+                simulated: true,
+                simulated_by: Some(Name::new("bob").unwrap()),
+                ..chat_source()
+            })
+            .into_event(Seq(31), Utc::now());
+        assert_eq!(
+            header(&by, EN),
+            "[senate · refund-v2 · seq 31 · from [senator::pm] in chat group「backend」 (simulated by bob) · chat]"
+        );
+        assert_eq!(
+            header(&by, ZH),
+            "[senate · refund-v2 · seq 31 · 来自 [senator::pm] 在 chat 群「backend」（由 bob 模拟） · chat]"
         );
     }
 

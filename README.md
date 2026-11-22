@@ -822,25 +822,35 @@ senate chat thread "$ref" --wait --since 2 --json | jq -r '.entries[-1].text'
 
 # Answer in the same thread (a confirmation, a correction)
 senate chat send --committee refund-v2 --in "$ref" "yes, record that"
+
+# Script two people agreeing, to see the Speaker propose a decision
+ref=$(senate chat send --committee refund-v2 --ambient --as alice "cap refund retries at three?")
+senate chat send --committee refund-v2 --ambient --as bob --in "$ref" "agreed, three"
+senate chat thread "$ref" --wait   # "Record this as a decision?"
 ```
 
 - **Log only by default.** Whatever the Speaker posts for a simulated message
   is recorded in the conversation and never reaches the platform. That
   covers replies under it, its relay's task card in the Agent group, and
   everything under those. With `--live`, the message is posted into the real
-  group, marked *(simulated)*, and the answers go there as well. The group
-  must actually be bound.
-- **Marked.** The `chat` event is from you, as a real message from you would
-  be, and its `source` is marked `simulated`. The Speaker carries a chat's
-  source onto the relay, task or decision it makes from it, so those are
-  marked too. Agents and `senate thread` see *(simulated)*, and the brief and
-  the "today" card leave simulated work out. What happens in the log is
+  group, marked *(simulated by you)*, and the answers go there as well. The
+  group must actually be bound.
+- **Marked.** The `chat` event is from the person you sent it as, as a real
+  message from them would be. Its `source` is marked `simulated`, with
+  `simulated_by` naming you. The Speaker carries a chat's source onto the
+  relay, task, decision or proposal it makes from it, so those are marked
+  too. Agents, `senate thread` and `senate chat thread` see *(simulated by
+  you)*, and the brief and the "today" card leave simulated work out.
+  Simulated discussion is checked for agreement on its own, never mixed with
+  real messages: a proposal from it stays in the conversation, and its topic
+  never blocks a real one. What happens in the log is
   real: a simulated `/bind` binds, and a simulated decision is recorded.
-- **Who may.** A person may simulate as themselves (their own token), and the
-  Speaker's office may simulate as any person (`--office --as alice`). The
+- **Who may.** Any person (their own token) may simulate any person on the
+  roster, themselves included (`--as alice`). The message always shows who
+  simulated it. The Speaker's office may too (`--office --as alice`). The
   server refuses a caller that is an agent (the command run inside a coding
-  session), and it never simulates a message from a guest: a person with no
-  account on the platform is refused.
+  session). It never simulates a message from a guest or an unknown name: a
+  person with no account on the platform is refused.
 - `--group` names the bound group (default: the committee's only people
   group). `--ambient` sends plain chat that does not mention the Speaker.
   Conversations are held in the daemon's memory until `senated` restarts.

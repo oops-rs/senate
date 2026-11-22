@@ -120,6 +120,12 @@ pub struct Source {
     /// out.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub simulated: bool,
+    /// Who injected a [`Self::simulated`] message: the person who ran
+    /// `senate chat send`, who may have sent it as someone else. Readers
+    /// show "(simulated by <person>)"; `None` on a real message, and on
+    /// simulated ones recorded before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub simulated_by: Option<crate::Name>,
 }
 
 /// The platform identity of an event that began on a platform: which message
