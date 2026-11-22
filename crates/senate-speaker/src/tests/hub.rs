@@ -138,6 +138,7 @@ impl MemoryHub {
                     alias: None,
                     duty: None,
                     presence: *presence,
+                    paused: false,
                 }),
         );
         child.last_seen = Some(chrono::Utc::now());

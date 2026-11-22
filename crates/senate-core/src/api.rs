@@ -402,6 +402,9 @@ pub struct ChildSeat {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duty: Option<String>,
     pub presence: PresenceState,
+    /// The absent senator paused the session and is expected to resume it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub paused: bool,
 }
 
 /// `PUT /v1/children/{name}/seats`: the child's whole set of declared
@@ -795,6 +798,7 @@ mod tests {
     fn a_child_seat_alias_is_additive_on_the_wire() {
         let old = json!({"committee": "refund-v2", "senator": "claude-1", "presence": "online"});
         let seat: ChildSeat = serde_json::from_value(old.clone()).unwrap();
+        assert!(!seat.paused);
         assert_eq!(seat.alias, None, "a child from before aliases sends none");
         assert_eq!(
             serde_json::to_value(&seat).unwrap(),
@@ -803,9 +807,12 @@ mod tests {
         );
         let aliased = ChildSeat {
             alias: Some(path("refund-dev")),
+            presence: PresenceState::Absent,
+            paused: true,
             ..seat
         };
         let wire = serde_json::to_value(&aliased).unwrap();
+        assert_eq!(wire["paused"], true);
         assert_eq!(wire["alias"], "refund-dev");
         assert_eq!(serde_json::from_value::<ChildSeat>(wire).unwrap(), aliased);
     }

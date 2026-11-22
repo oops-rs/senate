@@ -2482,6 +2482,7 @@ mod tests {
             alias: alias.map(path),
             duty: None,
             presence: senate_core::PresenceState::Online,
+            paused: false,
         });
         vec![child]
     }

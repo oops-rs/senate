@@ -1479,7 +1479,7 @@ pub(crate) fn offline(input: &OfflineInput, now: DateTime<Utc>) -> String {
                     "- {} on {} · {} when last declared · duty: {}",
                     Address::senator(&seat.senator).in_text(),
                     seat.committee,
-                    seat.presence,
+                    senate_core::presence_label(seat.presence, seat.paused, Locale::En),
                     seat.duty
                         .as_deref()
                         .map_or_else(|| "none set".to_owned(), |duty| cut(duty, 300)),

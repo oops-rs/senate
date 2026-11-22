@@ -478,6 +478,7 @@ impl Worker {
                 alias: aliases.alias_of(committee, &p.agent).cloned(),
                 senator: p.agent,
                 presence: p.state,
+                paused: p.paused,
             }));
         }
         tokio::time::timeout(

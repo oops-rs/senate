@@ -1003,6 +1003,97 @@ async fn the_parents_speaker_relays_to_a_child_senates_seat_and_hears_back() {
     world.stop().await;
 }
 
+/// A pause reaches the parent through the child's normal seat declaration.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_parent_reports_a_paused_child_seat() {
+    let world = Setup::new().locale(Locale::En).start().await;
+    world.bind().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut desk = Desk::new(
+        dir.path(),
+        "alice",
+        Locale::En,
+        &under(&world, "tok-alice", ""),
+    );
+    desk.start().await;
+    assert_eq!(
+        desk.wait_registration().await.registration,
+        Registration::Registered
+    );
+    let inbox = desk.inbox("s-claude");
+    desk.session_start("s-claude", &inbox).await.unwrap();
+    desk.wait_connected("claude", true).await;
+    desk.session_end("s-claude", &inbox).await;
+    desk.wait_connected("claude", false).await;
+    // The same leave heartbeat the bridge sends for a paused session.
+    desk.senate()
+        .daemon
+        .hub
+        .record_heartbeat(
+            &refund(),
+            senate_core::api::Heartbeat {
+                agent: path("claude"),
+                sessions: 0,
+                cursor: senate_core::Seq(0),
+                left: true,
+                paused: true,
+            },
+        )
+        .await
+        .unwrap();
+    eventually("the child declares its paused seat above", || {
+        world.daemon().hub.children().into_iter().find(|child| {
+            child.seats.iter().any(|s| {
+                s.committee == refund()
+                    && s.senator == path("claude")
+                    && s.presence == senate_core::PresenceState::Absent
+                    && s.paused
+            })
+        })
+    })
+    .await;
+    world
+        .say(senated::testing::Message::mention(
+            GROUP,
+            "u_pm",
+            "paused-status",
+            "/status",
+        ))
+        .await;
+    world
+        .wait_post("the parent shows the seat as paused", |p| {
+            p.markdown.contains("claude") && p.markdown.contains("paused (answers when resumed)")
+        })
+        .await;
+    world.brain.interprets(Ok(senate_speaker::Intent::None {
+        reply: "It will answer when resumed.".into(),
+    }));
+    world
+        .say(senated::testing::Message::mention(
+            GROUP,
+            "u_pm",
+            "paused-ask",
+            "When will Claude answer?",
+        ))
+        .await;
+    world
+        .wait_post("the answer about the paused seat", |p| {
+            p.markdown.contains("It will answer when resumed.")
+        })
+        .await;
+    let inputs = world.brain.utterances();
+    let seat = inputs
+        .last()
+        .unwrap()
+        .seats
+        .iter()
+        .find(|s| s.target == "alice-desk::claude")
+        .unwrap();
+    assert!(seat.paused && !seat.online);
+    desk.stop().await;
+    world.stop().await;
+}
+
 /// claude's session ends (as `senate session stop` ends a hosted one): its seat is
 /// away at once, here and as declared above, not once the two-minute
 /// presence threshold passes. A question then meant for it goes to alice's

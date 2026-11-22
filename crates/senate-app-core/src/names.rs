@@ -220,6 +220,7 @@ mod tests {
                     alias: Some("refund-dev".parse().unwrap()),
                     duty: None,
                     presence: PresenceState::Online,
+                    paused: false,
                 }],
                 ..ChildSenate::new(
                     Name::new("carol-desk").unwrap(),

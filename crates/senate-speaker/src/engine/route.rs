@@ -312,7 +312,7 @@ impl Engine {
                     } else {
                         PresenceState::Disconnected
                     }),
-                    paused: false,
+                    paused: child_online && seat.paused,
                 });
             }
         }

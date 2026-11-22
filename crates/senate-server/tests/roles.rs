@@ -1771,6 +1771,7 @@ async fn a_child_senate_declares_its_seats_as_its_speaker() {
             alias: Some(path("refund-desk")),
             duty: Some(duty.into()),
             presence: senate_core::continuity::PresenceState::Online,
+            paused: false,
         }],
     };
     // Not registered yet.

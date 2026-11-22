@@ -116,6 +116,7 @@ pub fn roles() -> senate_bridge::ipc::RolesReply {
                 alias: Some(path("refund-dev")),
                 duty: Some("reviews refunds".into()),
                 presence: PresenceState::Online,
+                paused: false,
             }],
             last_seen: Some(Utc::now()),
             ..ChildSenate::new(Name::new("carol-desk").unwrap(), path("claude-d333"))
