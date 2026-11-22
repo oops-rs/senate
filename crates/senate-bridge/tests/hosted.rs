@@ -2343,16 +2343,20 @@ async fn fixture_daemon(limit: usize) -> (Harness, PathBuf, PathBuf) {
     let project = h.workdir("watched", None);
     let typed = project.join(".typed");
     let fixture = h.dir.path().join("fixture-claude");
+    // A trapped WINCH can interrupt the shell's read mid-line. A separate
+    // reader inherits the terminal but handles no resize signals.
     std::fs::write(
         &fixture,
         format!(
             "#!/bin/sh\n{RECORD_HOSTED_ARGV}\n\
              trap 'printf \"resized to %s\\r\\n\" \"$(stty size)\"' WINCH\n\
              printf '\\033[2J\\033[H\\033[32mpainted before anyone looked\\033[m\\r\\n'\n\
+             exec 3<&0\n\
              while IFS= read -r line; do\n\
              \x20 if [ \"$line\" = paint ]; then printf 'fixture TUI\\r\\n'\n\
              \x20 else printf '%s\\n' \"$line\" >> {typed:?}; fi\n\
-             done\n",
+             done <&3 & reader=$!\n\
+             while kill -0 \"$reader\" 2>/dev/null; do wait \"$reader\"; done\n",
         ),
     )
     .unwrap();
@@ -2404,6 +2408,28 @@ async fn watched_sessions(aliases: &[&str]) -> (Harness, PathBuf) {
     (h, typed)
 }
 
+/// Read the PTY as one screen, including markers arriving in the same read.
+async fn wait_for_screen(
+    output: &mut (impl tokio::io::AsyncRead + Unpin),
+    rows: u16,
+    cols: u16,
+    ready: impl Fn(&str) -> bool,
+) {
+    let mut parser = vt100::Parser::new(rows.try_into().unwrap(), cols.try_into().unwrap(), 0);
+    let mut buf = [0; 4096];
+    let mut screen = String::new();
+    tokio::time::timeout(TIMEOUT, async {
+        while !ready(&screen) {
+            let n = output.read(&mut buf).await.unwrap();
+            assert_ne!(n, 0, "terminal closed: {screen}");
+            parser.process(&buf[..n]);
+            screen = parser.screen().contents();
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for screen: {screen}"));
+}
+
 /// `senate attach --read-only` shows the screen as it is, though it was
 /// painted before the viewer came, and what the session writes after. What
 /// is typed into it goes nowhere and is no activity of the session's
@@ -2420,14 +2446,10 @@ async fn a_read_only_attach_shows_the_screen_and_types_nothing() {
     pty.resize(pty_process::Size::new(30, 100)).unwrap();
     let mut child = pty_process::Command::from(cmd).spawn(pts).unwrap();
     let (mut output, mut input) = pty.into_split();
-    tokio::time::timeout(TIMEOUT, async {
-        // The screen the session painted before anyone looked, and the
-        // viewer's own line saying this is read-only.
-        wait_terminal_output(&mut output, b"painted before anyone looked").await;
-        wait_terminal_output(&mut output, b"read-only").await;
+    wait_for_screen(&mut output, 30, 100, |screen| {
+        screen.contains("painted before anyone looked") && screen.contains("read-only")
     })
-    .await
-    .expect("the session's screen");
+    .await;
 
     // Typing into it: a line, an arrow, and `q`.
     input.write_all(b"hello there\r\x1b[Aq").await.unwrap();
