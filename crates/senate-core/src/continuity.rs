@@ -143,7 +143,7 @@ pub struct CheckpointPayload {
     pub branch: String,
     /// The full commit id of `HEAD`.
     pub commit: String,
-    /// Whether the commit is on a remote-tracking branch, as the machine's
+    /// Whether the commit is on the branch's remote upstream, as the machine's
     /// git last saw the remote.
     pub pushed: bool,
     /// `origin`'s URL without credentials, if there is an `origin`.

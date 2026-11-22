@@ -4,8 +4,8 @@
 //! `<git root>/.senate/{PROGRESS,DECISIONS,OPEN}.md`. A checkpoint reads
 //! them (after the `checkpoint` tool has written whatever it was given),
 //! adds what git says about the worktree — branch, commit, `origin`'s URL
-//! without credentials, and whether the commit is on a remote-tracking
-//! branch — and the daemon appends it as a `checkpoint` event
+//! without credentials, and whether the branch’s upstream contains the
+//! commit — and the daemon appends it as a `checkpoint` event
 //! ([`senate_core::CheckpointPayload`]). Files too big for
 //! [`MAX_CHECKPOINT_BYTES`] are cut, largest first.
 //!
@@ -108,12 +108,26 @@ pub fn strip_credentials(url: &str) -> String {
     }
 }
 
-/// Whether `commit` is on some remote-tracking branch, as this clone last
+/// Whether `commit` is on the current branch's upstream, as this clone last
 /// saw its remotes (no network).
 pub async fn is_pushed(dir: &Path, commit: &str) -> bool {
-    git(dir, &["branch", "-r", "--contains", commit], GIT_TIMEOUT)
+    let Ok(upstream) = git(
+        dir,
+        &["rev-parse", "--symbolic-full-name", "@{upstream}"],
+        GIT_TIMEOUT,
+    )
+    .await
+    else {
+        return false;
+    };
+    upstream.starts_with("refs/remotes/")
+        && git(
+            dir,
+            &["merge-base", "--is-ancestor", commit, &upstream],
+            GIT_TIMEOUT,
+        )
         .await
-        .is_ok_and(|out| !out.trim().is_empty())
+        .is_ok()
 }
 
 /// `git push origin HEAD:<branch>`, refused on a detached `HEAD` or
@@ -126,15 +140,25 @@ pub async fn push(dir: &Path) -> Result<String, String> {
         return Err("there is no `origin` remote to push to".into());
     }
     let refspec = format!("HEAD:{branch}");
-    git(dir, &["push", "origin", &refspec], PUSH_TIMEOUT)
-        .await
-        .map(|out| {
-            if out.is_empty() {
-                format!("pushed {branch} to origin")
-            } else {
-                out
-            }
-        })
+    let mut args = vec!["push"];
+    if git(
+        dir,
+        &["config", "--get", &format!("branch.{branch}.merge")],
+        GIT_TIMEOUT,
+    )
+    .await
+    .is_err()
+    {
+        args.push("--set-upstream");
+    }
+    args.extend(["origin", &refspec]);
+    git(dir, &args, PUSH_TIMEOUT).await.map(|out| {
+        if out.is_empty() {
+            format!("pushed {branch} to origin")
+        } else {
+            out
+        }
+    })
 }
 
 fn file_paths(root: &Path) -> [(PathBuf, &'static str); 3] {

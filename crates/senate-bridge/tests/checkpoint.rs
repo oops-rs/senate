@@ -143,6 +143,16 @@ async fn the_tool_writes_the_files_and_a_handoff_pushes() {
         head,
         "the branch is on origin"
     );
+    h.store().join_session("s1", &committee()).unwrap();
+    git(&wd, &["switch", "-c", "new-topic"]);
+    assert!(!checkpoint(&h, "s1", None, false).await.pushed);
+    git(
+        &wd,
+        &["branch", "--set-upstream-to=origin/senate/refund-v2/alice"],
+    );
+    assert!(checkpoint(&h, "s1", None, false).await.pushed);
+    git(&wd, &["commit", "--allow-empty", "-m", "ahead"]);
+    assert!(!checkpoint(&h, "s1", None, false).await.pushed);
     h.stop().await;
 }
 

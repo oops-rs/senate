@@ -1663,7 +1663,7 @@ pub struct CheckpointReply {
     pub posted: Posted,
     pub branch: String,
     pub commit: String,
-    /// The commit is on a remote-tracking branch.
+    /// The branch's remote upstream contains the commit.
     pub pushed: bool,
     /// Files this call wrote.
     #[serde(default)]
