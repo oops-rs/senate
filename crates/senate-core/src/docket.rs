@@ -278,7 +278,9 @@ impl SpeakerDocket {
                 self.of_children.remove(&root);
             }
         }
-        if awaits_speaker(event) {
+        if awaits_speaker(event)
+            || (event.to.contains(&Address::Speaker) && event.is_hosted_approval(&self.people))
+        {
             self.open.insert(event.seq, event.clone());
             return;
         }

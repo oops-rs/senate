@@ -1514,7 +1514,7 @@ async fn hosted_stop_reminds_only_about_delivered_unanswered_relays_once() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_codex_approval_on_a_relay_reports_the_task_even_at_an_attended_terminal() {
-    let (mut h, project) = fixture(true, Locale::En).await;
+    let (mut h, project) = fixture(false, Locale::En).await;
     let fake = h.codex();
     start(&mut h).await;
     let (launch, terminal) = Terminal::spawn(&h, project, HostedRuntime::Codex).await;
@@ -1525,23 +1525,89 @@ async fn a_codex_approval_on_a_relay_reports_the_task_even_at_an_attended_termin
         (fake.subscribers(native) == 1).then_some(())
     })
     .await;
-    let root = h.server.append_silently(
+    {
+        let mut server = h.server.state.inner.lock().unwrap();
+        server
+            .roster
+            .name_speaker(Some(path("alice").into()))
+            .unwrap();
+        server
+            .roster
+            .set_secretaries(path("alice"), vec![launch.senator.clone()])
+            .unwrap();
+    }
+    let request = senate_core::NewEvent::new(
+        committee(),
+        senate_core::Kind::Request,
+        Address::Committee,
+        "check the build",
+    )
+    .to(Address::senator(&launch.senator))
+    .on_behalf_of(Address::senior(&h.config.person))
+    .with_source(senate_core::Source {
+        platform: "feishu".into(),
+        group_id: "team".into(),
+        group_name: None,
+        simulated: false,
+        simulated_by: None,
+    })
+    .with_meta(
+        senate_core::meta::INTENDED,
+        json!(format!(
+            "/parent/child::refund-v2::senator::{}",
+            launch.senator
+        )),
+    )
+    .with_meta(
+        senate_core::meta::ORIGIN,
+        json!({"locator": "/parent::refund-v2::speaker", "thread": 174}),
+    );
+    let incoming = h.server.append_silently(
         senate_core::NewEvent::new(
             committee(),
             senate_core::Kind::Request,
             Address::Committee,
-            "check the build",
+            "earlier task",
         )
-        .to(Address::senator(&launch.senator))
+        .to(Address::Speaker)
         .with_meta(
             senate_core::meta::ORIGIN,
-            json!({"locator": "/parent::refund-v2::speaker", "thread": 9}),
+            json!({"locator":"/parent::refund-v2::speaker", "thread":170}),
         ),
     );
-    h.store().enqueue(&launch.senator, &root).unwrap();
+    let older = h.server.append_silently(
+        senate_core::NewEvent::new(
+            committee(),
+            senate_core::Kind::Request,
+            Address::Speaker,
+            "earlier task",
+        )
+        .to(Address::senator(&launch.senator))
+        .with_meta(senate_core::meta::RELAYED_FROM, json!(incoming.seq)),
+    );
+    h.store().enqueue(&launch.senator, &older).unwrap();
     h.store()
-        .mark_read(&[(launch.senator.clone(), committee(), root.seq)], native)
+        .mark_read(&[(launch.senator.clone(), committee(), older.seq)], native)
         .unwrap();
+    let root = h.server.append_silently(request);
+    let mut status = StatusPayload::new(StatusState::Processing);
+    status.session = Some(native.clone());
+    status.title = Some("Running build checks".into());
+    status.steps = Some(vec![senate_core::task::Step {
+        id: "test".into(),
+        label: "Run the tests".into(),
+        done: false,
+    }]);
+    h.server.append_silently(
+        senate_core::NewEvent::new(
+            committee(),
+            senate_core::Kind::Status,
+            Address::senator(&launch.senator),
+            "",
+        )
+        .in_thread(root.seq)
+        .with_meta(senate_core::meta::STATUS, status.value()),
+    );
     let id = fake.request_approval(
         native,
         "item/commandExecution/requestApproval",
@@ -1550,11 +1616,32 @@ async fn a_codex_approval_on_a_relay_reports_the_task_even_at_an_attended_termin
     wait_relayed(&h, &format!("{native}:{id}")).await;
     approve_session(&h, &launch, Decision::Allow).await.unwrap();
     let notice = next_notice(&h, 1).await;
+    assert_eq!(notice.thread, Some(root.seq));
+    assert_eq!(notice.to, [Address::senior(&h.config.person)]);
     assert_eq!(
         notice.meta[senate_core::meta::APPROVAL_WAIT],
         json!({"thread":root.seq, "label":"run: cargo test"})
     );
     wait_archived(&h, notice.seq).await;
+    h.server.append_silently(
+        senate_core::NewEvent::new(
+            committee(),
+            senate_core::Kind::Answer,
+            Address::senator(&launch.senator),
+            "finished",
+        )
+        .in_thread(root.seq),
+    );
+    let next = fake.request_approval(
+        native,
+        "item/commandExecution/requestApproval",
+        json!({"threadId":native,"command":"cargo check"}),
+    );
+    wait_relayed(&h, &format!("{native}:{next}")).await;
+    let forwarded = next_notice(&h, 2).await;
+    assert_eq!(forwarded.thread, Some(older.seq));
+    approve_session(&h, &launch, Decision::Allow).await.unwrap();
+    wait_archived(&h, forwarded.seq).await;
     terminal.stop();
     h.stop().await;
 }

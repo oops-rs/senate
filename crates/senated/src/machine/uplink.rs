@@ -875,7 +875,10 @@ impl Worker {
             .filter(|s| s.takeover.is_none() && s.state == senate_core::StatusState::Suspended)
             .and_then(|s| s.escalated_to.map(|person| (person, s.reason)))
             .or_else(|| match event.to.as_slice() {
-                [to] if event.kind == Kind::Question && roster.is_person_address(to) => {
+                [to] if approval.is_none()
+                    && event.kind == Kind::Question
+                    && roster.is_person_address(to) =>
+                {
                     Some((to.as_senator()?.name().clone(), Some(event.body.clone())))
                 }
                 _ => None,

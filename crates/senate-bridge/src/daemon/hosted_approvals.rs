@@ -381,6 +381,13 @@ impl Shared {
         });
         Ok(if connected {
             Address::Chair
+        } else if docket
+            .office
+            .as_ref()
+            .is_some_and(|office| office.works_desk(&notice.agent))
+            || docket.speaker.as_ref().and_then(|seat| seat.senator()) == Some(&notice.agent)
+        {
+            Address::senior(&self.config.person)
         } else {
             Address::Speaker
         })
@@ -432,7 +439,10 @@ impl Shared {
         if session.runtime != Runtime::Codex {
             return Ok(());
         }
-        if let Some(thread) = self.approval_thread(&prompt.session_id, committee).await? {
+        if let Some(thread) = self
+            .approval_thread(&prompt.session_id, &session.agent, committee)
+            .await?
+        {
             // A relay's requester needs this update even with someone at the terminal
             // or when a remote decision arrives between two snapshots.
             self.edit_approvals(&host, |state| {
@@ -455,16 +465,63 @@ impl Shared {
         Ok(())
     }
 
-    // A command belongs in the asker's chat only when one open relay identifies it.
+    // Prefer this session's most recent status on an open relay. Without
+    // a status, a sole open relay addressed or delivered to it is unambiguous.
     async fn approval_thread(
         &self,
         native: &str,
+        agent: &SenatorName,
         committee: &CommitteeId,
     ) -> Result<Option<Seq>, PostError> {
-        let mut thread = None;
-        for item in self.store.delivered_relays(native, committee, false)? {
-            let seq = item.event.seq;
-            let (_, events) = self.thread_events(committee, item.event).await?;
+        let mut roots: BTreeMap<_, _> = self
+            .store
+            .delivered_relays(native, committee, false)?
+            .into_iter()
+            .map(|item| (item.event.seq, item.event))
+            .collect();
+        for task in self.api.threads(committee, Some(agent)).await?.threads {
+            if !matches!(task.from, Address::Speaker | Address::Committee)
+                || !matches!(task.kind, Kind::Question | Kind::Request)
+            {
+                continue;
+            }
+            if task.waits().is_none()
+                || task.takeover.is_some()
+                || task
+                    .owner
+                    .as_ref()
+                    .is_some_and(|o| o.session != native || &o.agent != agent)
+            {
+                roots.remove(&task.root);
+                continue;
+            }
+            if let std::collections::btree_map::Entry::Vacant(slot) = roots.entry(task.root) {
+                let root = self.fetch_event(committee, task.root).await?;
+                // A local Speaker relay may also be an ordinary chat. Only
+                // the incoming committee root establishes its uplink.
+                let incoming = if senate_core::Origin::of(&root).is_none()
+                    && root.from == Address::Speaker
+                    && let Some(seq) = root.meta.get(meta::RELAYED_FROM).and_then(|v| v.as_u64())
+                    && seq > 0
+                    && seq < root.seq.0
+                {
+                    Some(self.fetch_event(committee, Seq(seq)).await?)
+                } else {
+                    None
+                };
+                if senate_core::Origin::of(&root).is_some()
+                    || incoming.as_ref().is_some_and(|e| {
+                        e.from == Address::Committee && senate_core::Origin::of(e).is_some()
+                    })
+                {
+                    slot.insert(root);
+                }
+            }
+        }
+        let mut latest_status = None;
+        let mut open = Vec::new();
+        for (seq, root) in roots {
+            let (_, events) = self.thread_events(committee, root).await?;
             if events.iter().any(|e| {
                 (e.kind == Kind::Answer && !is_provisional(e))
                     || e.meta
@@ -482,11 +539,22 @@ impl Shared {
             }) {
                 continue;
             }
-            if thread.replace(seq).is_some() {
-                return Ok(None);
+            open.push(seq);
+            for event in events {
+                if event.from.as_senator() == Some(agent)
+                    && StatusPayload::of(&event)
+                        .is_some_and(|s| s.session.as_deref() == Some(native))
+                {
+                    latest_status = latest_status.max(Some((event.seq, seq)));
+                }
             }
         }
-        Ok(thread)
+        Ok(latest_status
+            .map(|(_, root)| root)
+            .or(match open.as_slice() {
+                [only] => Some(*only),
+                _ => None,
+            }))
     }
 
     async fn send_approval_notice(
@@ -527,7 +595,8 @@ impl Shared {
                 let relay_thread = if notice.append_attempted || notice.relay_thread.is_some() {
                     notice.relay_thread
                 } else {
-                    self.approval_thread(native, &notice.committee).await?
+                    self.approval_thread(native, &notice.agent, &notice.committee)
+                        .await?
                 };
                 // While looking up the recipient the viewer or a Claude
                 // result may have handled this before its first append.
@@ -566,7 +635,7 @@ impl Shared {
                         notice.tool.as_deref().map(tool_label).unwrap_or_else(|| {
                             self.locale.pick("终端提示", "terminal prompt").into()
                         });
-                    event = event.with_meta(
+                    event = event.in_thread(thread).with_meta(
                         meta::APPROVAL_WAIT,
                         serde_json::json!({"thread": thread, "label":label}),
                     );

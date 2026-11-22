@@ -225,10 +225,15 @@ impl Event {
     /// A hosted terminal needs a person to attend to a permission prompt.
     pub fn is_hosted_approval(&self, people: &crate::People) -> bool {
         self.kind == Kind::Question
-            && self.thread.is_none()
+            && self.thread.is_none_or(|root| {
+                self.meta
+                    .get(meta::APPROVAL_WAIT)
+                    .and_then(|wait| wait["thread"].as_u64())
+                    == Some(root.0)
+            })
             && people.is_agent_address(&self.from)
             && self.on_behalf_of.is_none()
-            && matches!(self.to.as_slice(), [Address::Chair | Address::Speaker])
+            && matches!(self.to.as_slice(), [to] if matches!(to, Address::Chair | Address::Speaker) || people.is_person_address(to))
             && self
                 .meta
                 .get(meta::HOSTED_APPROVAL)

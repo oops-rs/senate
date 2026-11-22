@@ -1108,7 +1108,7 @@ async fn docket(
         head: Seq(inner.head(&committee)),
         committee: CommitteeId::new(committee).unwrap(),
         speaker: inner.speaker.clone(),
-        office: None,
+        office: inner.roster.office(),
         items,
         covered: BTreeMap::new(),
         seats: vec![senate_core::docket::SeatFacts {

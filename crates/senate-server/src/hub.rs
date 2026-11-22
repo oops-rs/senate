@@ -856,13 +856,19 @@ impl ServerHub {
             // Carry the same open approval to the desk if its chair goes
             // away between the original notice and the viewer's input.
             let people = self.seats.snapshot().people();
+            let office = self.office();
             items.extend(
                 self.folded(&self.chair_dockets, committee)
                     .await?
                     .fold
                     .items()
                     .into_iter()
-                    .filter(|item| item.event.is_hosted_approval(&people)),
+                    .filter(|item| {
+                        item.event.is_hosted_approval(&people)
+                            && !item.event.from.as_senator().is_some_and(|agent| {
+                                office.as_ref().is_some_and(|o| o.works_desk(agent))
+                            })
+                    }),
             );
         }
         // A question put to a child Senate that is offline, with nothing

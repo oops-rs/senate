@@ -100,7 +100,9 @@ impl ChairDocket {
             .is_some_and(|s| self.chair.chair().is_some_and(|(chair, _)| chair == s));
         // Kept whoever wrote it: the chair's own root waits on the next
         // chair once the chair moves (left out while its author chairs).
-        if awaits_chair(event) {
+        if awaits_chair(event)
+            || (event.to.contains(&Address::Chair) && event.is_hosted_approval(&self.chair.people))
+        {
             self.open.insert(event.seq, event.clone());
             return;
         }

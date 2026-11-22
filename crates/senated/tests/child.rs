@@ -137,7 +137,7 @@ async fn a_machine_under_a_parent_hosts_its_senate_and_registers_it_there() {
     assert_eq!(children.len(), 1);
     assert_eq!(children[0].name.as_str(), "alice-desk");
     assert_eq!(children[0].speaker.as_str(), "alice");
-    // The hosted prompt for a child task travels as a note under the original question.
+    // The hosted prompt for a child task travels as a note under the original request.
     {
         use senate_core::{Address, CommitteeId, Hub, Kind, NewEvent, Origin, Seq, meta};
         let committee = CommitteeId::new("demo").unwrap();
@@ -145,7 +145,7 @@ async fn a_machine_under_a_parent_hosts_its_senate_and_registers_it_there() {
             .hub
             .append(NewEvent::new(
                 committee.clone(),
-                Kind::Question,
+                Kind::Request,
                 Address::Speaker,
                 "check",
             ))
@@ -163,7 +163,7 @@ async fn a_machine_under_a_parent_hosts_its_senate_and_registers_it_there() {
             .append(
                 NewEvent::new(
                     committee.clone(),
-                    Kind::Question,
+                    Kind::Request,
                     Address::Committee,
                     "check",
                 )
@@ -173,21 +173,40 @@ async fn a_machine_under_a_parent_hosts_its_senate_and_registers_it_there() {
             .await
             .unwrap()
             .event;
-        top.daemon
-            .hub
+        let client = ApiClient::new(&bridge.server_url, &bridge.token).unwrap();
+        let notice = client
             .append(
-                NewEvent::new(
+                &NewEvent::new(
                     committee.clone(),
                     Kind::Question,
                     Address::senator(&worker),
                     "permission prompt",
                 )
-                .to(Address::Speaker)
+                .to("senator::alice".parse().unwrap())
+                .in_thread(local.seq)
                 .with_meta(meta::HOSTED_APPROVAL, serde_json::json!(true))
                 .with_meta(
                     meta::APPROVAL_WAIT,
                     serde_json::json!({"thread":local.seq, "label":"cargo test"}),
                 ),
+            )
+            .await
+            .unwrap()
+            .event;
+        client
+            .append(
+                &NewEvent::new(
+                    committee.clone(),
+                    Kind::Status,
+                    Address::senator(&worker),
+                    "",
+                )
+                .in_thread(notice.seq)
+                .with_meta(
+                    meta::STATUS,
+                    senate_core::StatusPayload::new(senate_core::StatusState::Archived).value(),
+                )
+                .with_meta(meta::HOSTED_APPROVAL, serde_json::json!(notice.id)),
             )
             .await
             .unwrap();
@@ -200,6 +219,7 @@ async fn a_machine_under_a_parent_hosts_its_senate_and_registers_it_there() {
                 {
                     assert_eq!(note.thread, Some(asked.seq));
                     assert_eq!(note.kind, Kind::Note);
+                    assert!(!note.meta.contains_key(meta::RELAY_ASKED_PERSON));
                     assert!(note.body.contains("cargo test"));
                     assert_eq!(
                         note.meta[meta::ANSWERED_BY],
