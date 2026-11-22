@@ -83,6 +83,8 @@ pub struct Session {
     pub tty: PathBuf,
     /// Shown dimmed: paused, or otherwise not running now.
     pub dim: bool,
+    /// A running host currently has an interactive viewer.
+    pub attached: bool,
 }
 
 impl Session {
@@ -665,11 +667,15 @@ impl Viewer {
 /// What ended one stay in the viewer.
 enum Left {
     Quit,
+    AllAttached,
     /// Attach to this session, then come back.
     Attach(Session),
 }
 
-async fn stay(viewer: &mut Viewer, relist: &mut Option<Relist<'_>>) -> anyhow::Result<Left> {
+async fn stay(
+    viewer: &mut Viewer,
+    mut relist: Option<&mut GridListing<'_>>,
+) -> anyhow::Result<Left> {
     let terminal = RawTerminal::open(true).await?;
     let mut winch = signal(SignalKind::window_change())?;
     let mut hup = signal(SignalKind::hangup())?;
@@ -706,8 +712,9 @@ async fn stay(viewer: &mut Viewer, relist: &mut Option<Relist<'_>>) -> anyhow::R
             }
             _ = listing.tick(), if relist.is_some() => {
                 if let Some(relist) = relist.as_mut()
-                    && let Ok(sessions) = relist().await
+                    && let Ok(sessions) = (relist.fetch)().await
                 {
+                    let Some(sessions) = relist.visible(sessions) else { break Left::AllAttached };
                     viewer.list(sessions);
                     dirty = true;
                 }
@@ -754,6 +761,26 @@ async fn stay(viewer: &mut Viewer, relist: &mut Option<Relist<'_>>) -> anyhow::R
 type Listing = std::pin::Pin<Box<dyn Future<Output = anyhow::Result<Vec<Session>>> + Send>>;
 type Relist<'a> = Box<dyn FnMut() -> Listing + Send + 'a>;
 
+struct GridListing<'a> {
+    fetch: Relist<'a>,
+    all: bool,
+    just_detached: Option<String>,
+}
+
+impl GridListing<'_> {
+    /// None means there were sessions, but interactive viewers hid all of them.
+    fn visible(&mut self, mut sessions: Vec<Session>) -> Option<Vec<Session>> {
+        let just_detached = self.just_detached.take();
+        if self.all || sessions.is_empty() {
+            return Some(sessions);
+        }
+        // Returning from Enter can race the host publishing its detach.
+        // Protect that first refresh only, so later external attaches are observed.
+        sessions.retain(|s| !s.attached || Some(&s.key) == just_detached.as_ref());
+        (!sessions.is_empty()).then_some(sessions)
+    }
+}
+
 /// `senate attach --read-only`: show `session`'s terminal until Ctrl-],
 /// the person closes the terminal, or the session ends.
 pub async fn watch_one(session: Session) -> anyhow::Result<()> {
@@ -769,33 +796,48 @@ pub async fn watch_one(session: Session) -> anyhow::Result<()> {
         changed: Arc::new(Notify::new()),
     };
     viewer.list(vec![session]);
-    stay(&mut viewer, &mut None).await.map(drop)
+    stay(&mut viewer, None).await.map(drop)
 }
 
-/// `senate session watch`: every session `session list` lists, asked again every
+/// `senate session watch`: visible hosted sessions, asked again every
 /// couple of seconds, until `q` or Ctrl-]. Enter attaches to the focused
 /// one and comes back when that detaches.
 pub async fn watch_all(
     paths: &Paths,
-    sessions: impl FnMut() -> Listing + Send,
+    all: bool,
+    mut sessions: impl FnMut() -> Listing + Send,
 ) -> anyhow::Result<()> {
-    let mut relist: Option<Relist<'_>> = Some(Box::new(sessions));
+    let first = sessions().await?;
+    let mut grid = GridListing {
+        fetch: Box::new(sessions),
+        all,
+        just_detached: None,
+    };
+    const HINT: &str = "All hosted terminals have an interactive viewer. Use senate session watch --all to include them.";
+    let Some(first) = grid.visible(first) else {
+        println!("{HINT}");
+        return Ok(());
+    };
     let mut viewer = Viewer {
         mode: Mode::Grid,
         tiles: Vec::new(),
         focus: 0,
         changed: Arc::new(Notify::new()),
     };
-    if let Some(relist) = relist.as_mut() {
-        viewer.list(relist().await?);
-    }
+    viewer.list(first);
     loop {
-        match stay(&mut viewer, &mut relist).await? {
+        match stay(&mut viewer, Some(&mut grid)).await? {
             Left::Quit => return Ok(()),
+            Left::AllAttached => {
+                println!("{HINT}");
+                return Ok(());
+            }
             Left::Attach(session) => {
                 if let Err(error) = super::attach(&session.tty, paths).await {
                     eprintln!("{error:#}");
                     tokio::time::sleep(Duration::from_secs(2)).await;
+                } else {
+                    grid.just_detached = Some(session.key);
                 }
             }
         }
@@ -816,6 +858,32 @@ mod tests {
     /// What a terminal `rows` × `cols` shows after `painted`.
     fn shows(rows: u16, cols: u16, painted: &str) -> vt100::Parser {
         screen(rows, cols, painted.as_bytes())
+    }
+
+    #[test]
+    fn grid_visibility_tracks_interactive_viewers_and_the_return_from_enter() {
+        let mut listing = GridListing {
+            fetch: Box::new(|| unreachable!()),
+            all: false,
+            just_detached: None,
+        };
+        let north = viewer_session("north");
+        let mut south = viewer_session("south");
+        south.attached = true;
+        assert_eq!(
+            listing.visible(vec![north.clone(), south.clone()]),
+            Some(vec![north])
+        );
+        assert_eq!(listing.visible(vec![south.clone()]), None);
+        assert_eq!(listing.visible(vec![]), Some(vec![]));
+        listing.just_detached = Some(south.key.clone());
+        assert_eq!(
+            listing.visible(vec![south.clone()]),
+            Some(vec![south.clone()])
+        );
+        assert_eq!(listing.visible(vec![south.clone()]), None);
+        listing.all = true;
+        assert_eq!(listing.visible(vec![south.clone()]), Some(vec![south]));
     }
 
     #[test]
@@ -932,6 +1000,7 @@ mod tests {
                 title: format!("{alias} · refund-v2 · claude · live"),
                 tty: PathBuf::from(format!("/nowhere/{alias}/tty")),
                 dim,
+                attached: false,
             },
             shown: Arc::new(Mutex::new(Shown {
                 mirror: Some(mirror),
@@ -1068,6 +1137,7 @@ mod tests {
             title: alias.to_owned(),
             tty: PathBuf::from(format!("/nowhere/{alias}/tty")),
             dim: false,
+            attached: false,
         }
     }
 

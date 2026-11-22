@@ -679,7 +679,7 @@ enum SessionCmd {
     /// committee, runtime, model, state, uptime, who is at its terminal,
     /// and directory.
     List,
-    /// Watch every hosted senator's terminal, side by side.
+    /// Watch hosted terminals side by side, hiding those with an interactive viewer.
     ///
     /// A full-screen grid of read-only views of the sessions hosted on this
     /// machine, one tile a session, in pages when they do not all fit.
@@ -687,7 +687,11 @@ enum SessionCmd {
     /// between tiles, PgUp and PgDn between pages; Enter attaches to the
     /// tile's session (detaching comes back to the grid); q or Ctrl-]
     /// leaves.
-    Watch,
+    Watch {
+        /// Include sessions that already have an interactive viewer attached.
+        #[arg(long)]
+        all: bool,
+    },
     /// End hosted sessions' terminals (`senate session restore` reopens one).
     ///
     /// Each TUI is asked to end, then killed. A session someone typed into
@@ -1244,6 +1248,7 @@ async fn hosted_sessions(paths: &Paths) -> anyhow::Result<Vec<crate::host::view:
             // What a command takes: `committee::alias`, so it names one
             // session whatever other committees call theirs.
             alias: row.label(),
+            attached: row.is_running() && row.attached,
             dim: !row.is_running(),
             tty: row.tty,
         })
@@ -2491,6 +2496,7 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
                         title: alias.clone(),
                         key: alias.clone(),
                         alias,
+                        attached: false,
                         tty: socket,
                         dim: false,
                     })
@@ -2677,9 +2683,9 @@ fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
             );
             Ok(())
         }
-        SessionCmd::Watch => {
+        SessionCmd::Watch { all } => {
             let paths = Paths::from_env()?;
-            runtime(false)?.block_on(crate::host::view::watch_all(&paths, || {
+            runtime(false)?.block_on(crate::host::view::watch_all(&paths, all, || {
                 let paths = paths.clone();
                 Box::pin(async move { hosted_sessions(&paths).await })
             }))

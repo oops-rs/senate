@@ -19,7 +19,7 @@ senate join                         # in each repository: bind it to a committee
 
 - **Sessions and delivery**: Claude Code, Codex and Antigravity CLI (agy) sessions in a worktree join its committee; messages for an agent are pushed into its session, or held for its next hook.
 - **MCP tools and hooks** the coding agents call: ask, answer, status, checkpoint, join, duty, and the chair's and Speaker's tools for a session that holds those seats.
-- **Hosted sessions**: `senate spawn` starts an agent in a Senate-owned terminal; `senate attach` opens it (`--read-only` to look), and `senate session list|watch|stop|restore` lists them, shows every one side by side, and ends or reopens one.
+- **Hosted sessions**: `senate spawn` starts an agent in a Senate-owned terminal; `senate attach` opens it (`--read-only` to look), and `senate session list|watch|stop|restore` lists them, shows terminals without an interactive viewer side by side (use `watch --all` to include attached sessions), and ends or reopens one.
 - **A worktree's `.senate/`** follows its branch.
 
 It runs inside `senated --machine`; depend on this crate to embed the machine side in your own daemon.

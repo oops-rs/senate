@@ -521,7 +521,8 @@ one has them open:
 senate spawn claude --alias reviewer   # start one, seated on this committee
 senate attach reviewer                 # open its terminal (Ctrl-] detaches)
 senate session list                    # every hosted session on this machine
-senate session watch                   # all of them side by side, read-only
+senate session watch                   # read-only grid of terminals without an interactive viewer
+senate session watch --all             # also show terminals with an interactive viewer
 senate session approve reviewer        # answer its permission prompt (--always, --deny)
 senate session stop reviewer           # end its terminal...
 senate session restore reviewer        # ...and reopen it later

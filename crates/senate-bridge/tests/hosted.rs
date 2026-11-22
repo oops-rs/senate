@@ -2649,7 +2649,57 @@ async fn a_watcher_fits_an_unattached_session_and_never_an_attached_one() {
     watcher.until((9, 40), "resized to 9 40").await;
 }
 
-/// `senate session watch` shows every hosted session side by side, each under
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn watch_all_hints_when_every_viewer_is_attached_and_all_shows_them() {
+    let (h, _) = watched_sessions(&["north"]).await;
+    let tty: PathBuf = call(
+        &h,
+        &Request::Attach {
+            senator: path("north").into(),
+        },
+    )
+    .await;
+    let mut interactive = tokio::net::UnixStream::connect(&tty).await.unwrap();
+    assert_eq!(interactive.read_u8().await.unwrap(), 2);
+
+    let command = || {
+        let mut cmd = tokio::process::Command::new(BIN);
+        testenv::isolate_async(&mut cmd, h.dir.path());
+        cmd.args(["session", "watch"])
+            .env("SENATE_HOME", h.paths.home())
+            .kill_on_drop(true);
+        cmd
+    };
+    let out = tokio::time::timeout(TIMEOUT, command().output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let hint = std::str::from_utf8(&out.stdout).unwrap();
+    assert_eq!(hint.lines().count(), 1);
+    assert!(hint.contains("--all"), "{hint}");
+
+    let (pty, pts) = pty_process::open().unwrap();
+    pty.resize(pty_process::Size::new(24, 100)).unwrap();
+    let mut cmd = command();
+    cmd.arg("--all");
+    let mut child = pty_process::Command::from(cmd).spawn(pts).unwrap();
+    let (mut output, mut input) = pty.into_split();
+    wait_for_screen(&mut output, 24, 100, |s| {
+        s.contains("north · refund-v2 · claude")
+    })
+    .await;
+    input.write_all(b"q").await.unwrap();
+    assert!(
+        tokio::time::timeout(TIMEOUT, child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+}
+
+/// `senate session watch` shows unattached sessions side by side, each under
 /// its name. Enter attaches to the focused one as `senate attach` does,
 /// detaching comes back to the grid, and `q` leaves.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
