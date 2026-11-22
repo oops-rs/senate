@@ -45,7 +45,9 @@ struct SessionsToolbar: ToolbarContent {
     let store: CoreStore
 
     var body: some ToolbarContent {
-        ToolbarItemGroup {
+        // With no title drawn, this is what keeps them at the trailing edge.
+        ToolbarSpacer(.flexible)
+        ToolbarItemGroup(placement: .primaryAction) {
             Button {
                 store.openWatch()
             } label: {

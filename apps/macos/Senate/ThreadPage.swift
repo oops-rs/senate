@@ -3,17 +3,64 @@ import SenateCore
 
 /// One thread waiting on you, opened from the sidebar, the home view, the
 /// menu bar or a notification: read it, reply as yourself, take it over, or
-/// close it.
+/// close it. It is read like a conversation: a centred column, what others
+/// said as plain text, what you said in a bubble on your side, and the
+/// reply box floating at the foot.
 struct ThreadPage: View {
     @Bindable var store: CoreStore
     let row: InboxThread
+    @State private var confirmClose = false
 
     var body: some View {
-        ThreadPane(store: store, row: row)
+        Conversation(store: store, row: row)
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                Composer(store: store, row: row)
+            }
             .id(row.key)
             .environment(\.mentionCommittee, row.committee)
             // Read again when something new is said in it.
             .task(id: "\(row.key)@\(row.updated)") { await store.loadThread(row) }
+            .toolbar { toolbar }
+            .confirmationDialog(
+                L("inbox.close_title", Mentions.shared.plain(row.title, committee: row.committee)),
+                isPresented: $confirmClose
+            ) {
+                Button(L("inbox.close_confirm"), role: .destructive) { Task { await store.close(row) } }
+            } message: {
+                Text(verbatim: L("inbox.close_message", row.committee))
+            }
+    }
+
+    /// At the content's top right: the thread's state, and what can be done
+    /// with the thread as a whole.
+    @ToolbarContentBuilder private var toolbar: some ToolbarContent {
+        let busy = store.isBusy(row.key)
+        // With no title drawn, this is what keeps them at the trailing edge.
+        ToolbarSpacer(.flexible)
+        ToolbarItem(placement: .primaryAction) {
+            HStack(spacing: 6) {
+                if busy { ProgressView().controlSize(.small) }
+                Text(verbatim: row.triage == "needs_human" ? (row.triageLabel ?? row.stateLabel) : row.stateLabel)
+                    .font(Theme.Fonts.label)
+                    .foregroundStyle(Theme.onSurface)
+            }
+            .padding(.horizontal, Theme.Space.s)
+        }
+        ToolbarItemGroup(placement: .primaryAction) {
+            Button(L("inbox.take")) { Task { await store.take(row) } }
+                .help(L("inbox.take_help"))
+                .disabled(row.takeover != nil || busy || !store.state.online)
+            Menu {
+                Button(L("inbox.close"), role: .destructive) { confirmClose = true }
+                    .disabled(busy || !store.state.online)
+                Divider()
+                Button(L("toolbar.refresh")) { store.refresh() }
+                Button(L("mention.copy", "#\(row.root)")) { Mentions.copyText("#\(row.root)") }
+            } label: {
+                Label(L("thread.more"), systemImage: "ellipsis")
+            }
+            .menuIndicator(.hidden)
+        }
     }
 }
 
@@ -30,112 +77,103 @@ struct ThreadMenu: View {
     }
 }
 
-/// The open thread: what it is, every event in it, and the reply box.
-private struct ThreadPane: View {
-    @Bindable var store: CoreStore
+/// What the thread is, then every event in it, the latest at the foot.
+private struct Conversation: View {
+    let store: CoreStore
     let row: InboxThread
-    @State private var confirmClose = false
-
-    var body: some View {
-        VStack(spacing: 0) {
-            ThreadHeader(store: store, row: row, confirmClose: $confirmClose)
-            Divider()
-            events
-            Divider()
-            Composer(store: store, row: row)
-        }
-        .confirmationDialog(L("inbox.close_title", row.title), isPresented: $confirmClose) {
-            Button(L("inbox.close_confirm"), role: .destructive) { Task { await store.close(row) } }
-        } message: {
-            Text(verbatim: L("inbox.close_message", row.committee))
-        }
-    }
 
     /// How many of the latest events are drawn; "Show earlier" adds more.
     /// A thread of thousands opens as fast as a short one.
-    @State private var shown = ThreadPane.page
+    @State private var shown = Conversation.page
     static let page = 300
 
-    @ViewBuilder private var events: some View {
-        if let view = store.threadView(for: row) {
-            let hidden = max(0, view.events.count - shown)
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 10) {
+    var body: some View {
+        let view = store.threadView(for: row)
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: Theme.Space.xl) {
+                    ThreadHeader(row: row)
+                    if let view {
+                        let hidden = max(0, view.events.count - shown)
                         if hidden > 0 {
                             Button(L("inbox.show_earlier", Int64(hidden))) {
-                                shown += ThreadPane.page
+                                shown += Conversation.page
                             }
-                            .buttonStyle(.link)
+                            .buttonStyle(.pill)
                             .frame(maxWidth: .infinity)
                         }
                         ForEach(view.events.suffix(shown), id: \.seq) { event in
-                            EventBubble(event: event).id(event.seq)
+                            EventView(event: event).id(event.seq)
                         }
+                    } else if let error = store.threadError {
+                        VStack(alignment: .leading, spacing: Theme.Space.xs) {
+                            Text(verbatim: L("inbox.thread_failed"))
+                                .font(Theme.Fonts.heading)
+                                .foregroundStyle(Theme.onSurface)
+                            Text(verbatim: error)
+                                .font(Theme.Fonts.text)
+                                .foregroundStyle(Theme.onSurfaceVariant)
+                                .textSelection(.enabled)
+                        }
+                    } else {
+                        ProgressView()
+                            .controlSize(.small)
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, Theme.Space.xl)
                     }
-                    .padding(14)
                 }
-                .onAppear { proxy.scrollTo(view.events.last?.seq, anchor: .bottom) }
-                .onChange(of: view.events.last?.seq) { _, last in
+                .frame(maxWidth: Theme.readingWidth, alignment: .leading)
+                .padding(.horizontal, Theme.Space.xl)
+                .padding(.top, Theme.Space.s)
+                .padding(.bottom, Theme.Space.xl)
+                .frame(maxWidth: .infinity)
+            }
+            .onChange(of: view?.events.last?.seq, initial: true) { old, last in
+                guard let last else { return }
+                if old == nil {
+                    proxy.scrollTo(last, anchor: .bottom)
+                } else {
                     withAnimation { proxy.scrollTo(last, anchor: .bottom) }
                 }
             }
-        } else if let error = store.threadError {
-            ContentUnavailableView(
-                L("inbox.thread_failed"),
-                systemImage: "exclamationmark.bubble",
-                description: Text(verbatim: error)
-            )
-        } else {
-            ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 }
 
+/// The thread's title, where it is and why it waits on you.
 private struct ThreadHeader: View {
-    let store: CoreStore
     let row: InboxThread
-    @Binding var confirmClose: Bool
 
     var body: some View {
         let t = row
-        let busy = store.isBusy(t.key)
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline) {
-                MentionText(t.title)
-                    .font(.title3.weight(.semibold))
-                    .textSelection(.enabled)
-                Spacer()
-                if busy { ProgressView().controlSize(.small) }
-                Button(L("inbox.take")) { Task { await store.take(t) } }
-                    .help(L("inbox.take_help"))
-                    .disabled(t.takeover != nil || busy || !store.state.online)
-                Button(L("inbox.close"), role: .destructive) { confirmClose = true }
-                    .disabled(busy || !store.state.online)
-            }
-            HStack(spacing: 4) {
-                Tag(text: t.committee)
-                Tag(text: t.kindLabel)
-                Tag(text: t.stateLabel, tint: t.state == "suspended" ? .orange : .blue)
-                if let label = t.triageLabel {
-                    Tag(text: label, tint: t.triage == "needs_human" ? .red : .secondary)
+        VStack(alignment: .leading, spacing: Theme.Space.s) {
+            MentionText(t.title)
+                .font(Theme.Fonts.title)
+                .foregroundStyle(Theme.onSurface)
+                .textSelection(.enabled)
+                .accessibilityAddTraits(.isHeader)
+            VStack(alignment: .leading, spacing: 2) {
+                TimedMention(date: t.since) { ago in
+                    var line = L("inbox.meta", String(t.root), from(t), t.stateLabel, ago)
+                    if let owner = t.owner { line += L("inbox.owner", owner) }
+                    if let takeover = t.takeover { line += L("inbox.taken_by", takeover) }
+                    if let escalated = t.escalatedTo { line += L("inbox.escalated_to", escalated) }
+                    return line
                 }
-                if t.escalated { Tag(text: L("inbox.escalated"), tint: .red) }
+                if let why = why(t) {
+                    MentionText(why)
+                }
             }
-            TimedMention(date: t.since) { ago in
-                var line = L("inbox.meta", String(t.root), from(t), t.stateLabel, ago)
-                if let owner = t.owner { line += L("inbox.owner", owner) }
-                if let takeover = t.takeover { line += L("inbox.taken_by", takeover) }
-                if let escalated = t.escalatedTo { line += L("inbox.escalated_to", escalated) }
-                return line
-            }
-            .font(.callout)
-            .foregroundStyle(.secondary)
-            if let why = why(t) {
-                MentionText(why).font(.callout).foregroundStyle(.secondary)
+            .font(Theme.Fonts.row)
+            .foregroundStyle(Theme.onSurfaceVariant)
+            HStack(spacing: Theme.Space.xs) {
+                Chip(text: t.committee)
+                Chip(text: t.kindLabel)
+                if t.escalated { Chip(text: L("inbox.escalated"), tone: .attention) }
+                if t.takeover != nil { Chip(text: L("inbox.taken"), tone: .accent) }
             }
         }
-        .padding(14)
+        .padding(.top, Theme.Space.xl)
     }
 
     private func from(_ t: InboxThread) -> String {
@@ -149,36 +187,61 @@ private struct ThreadHeader: View {
     }
 }
 
-/// One event: who wrote it, its kind, when, and what was said. Yours sit on
-/// the other side, tinted.
-private struct EventBubble: View {
+/// One event. What others said is plain text under who said it; what you
+/// said sits on the other side in a bubble.
+private struct EventView: View {
     let event: ThreadEvent
 
     var body: some View {
-        HStack {
-            if event.mine { Spacer(minLength: 40) }
-            VStack(alignment: .leading, spacing: 4) {
+        if event.mine {
+            VStack(alignment: .trailing, spacing: Theme.Space.xs) {
+                MentionText(event.body)
+                    .font(Theme.Fonts.reading)
+                    .lineSpacing(Theme.readingLineSpacing)
+                    .foregroundStyle(Theme.onSurface)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, Theme.Space.l)
+                    .padding(.vertical, 10)
+                    .background(Theme.container, in: RoundedRectangle(cornerRadius: Theme.Radius.bubble))
                 HStack(spacing: 6) {
-                    MentionText(event.by).font(.caption.weight(.medium))
-                    Text(verbatim: event.kindLabel).font(.caption).foregroundStyle(.secondary)
-                    Ago(date: event.at).font(.caption).foregroundStyle(.secondary)
+                    Text(verbatim: event.kindLabel)
+                    Ago(date: event.at)
+                }
+                .font(Theme.Fonts.meta)
+                .foregroundStyle(Theme.onSurfaceVariant)
+                .padding(.trailing, Theme.Space.s)
+            }
+            .padding(.leading, 96)
+            .frame(maxWidth: .infinity, alignment: .trailing)
+            .accessibilityElement(children: .combine)
+        } else {
+            VStack(alignment: .leading, spacing: Theme.Space.xs) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    MentionText(event.by)
+                        .font(Theme.Fonts.label)
+                    Group {
+                        Text(verbatim: event.kindLabel)
+                        Ago(date: event.at)
+                    }
+                    .font(Theme.Fonts.meta)
+                    .foregroundStyle(Theme.onSurfaceVariant)
                 }
                 MentionText(event.body)
+                    .font(Theme.Fonts.reading)
+                    .lineSpacing(Theme.readingLineSpacing)
+                    .foregroundStyle(Theme.onSurface)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            .padding(10)
-            .background(
-                event.mine ? AnyShapeStyle(Color.accentColor.opacity(0.14)) : AnyShapeStyle(.quaternary.opacity(0.6)),
-                in: RoundedRectangle(cornerRadius: 10)
-            )
-            if !event.mine { Spacer(minLength: 40) }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityElement(children: .combine)
         }
-        .accessibilityElement(children: .combine)
     }
 }
 
-/// The reply box: answers in the thread as you, `[senator::<you>]`.
+/// The reply box: answers in the thread as you, `[senator::<you>]`. It
+/// floats over the foot of the conversation, a little wider than the text.
 private struct Composer: View {
     @Bindable var store: CoreStore
     let row: InboxThread
@@ -187,33 +250,71 @@ private struct Composer: View {
     var body: some View {
         let busy = store.isBusy(row.key)
         let empty = draft.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        VStack(alignment: .leading, spacing: 6) {
+        let ready = !(busy || empty || !store.state.online)
+        VStack(alignment: .leading, spacing: Theme.Space.xs) {
             TextEditor(text: draft)
-                .font(.body)
+                .font(Theme.Fonts.reading)
                 .scrollContentBackground(.hidden)
-                .frame(minHeight: 54, maxHeight: 140)
+                .frame(minHeight: 24, maxHeight: 190)
+                .fixedSize(horizontal: false, vertical: true)
                 .focused($focused)
                 .accessibilityLabel(L("inbox.reply"))
                 .overlay(alignment: .topLeading) {
                     if draft.wrappedValue.isEmpty {
                         Text(verbatim: L("inbox.reply_placeholder"))
-                            .foregroundStyle(.tertiary)
+                            .font(Theme.Fonts.reading)
+                            .foregroundStyle(Theme.onSurfaceVariant)
                             .padding(.leading, 5)
                             .allowsHitTesting(false)
+                            .accessibilityHidden(true)
                     }
                 }
-            HStack {
+            HStack(spacing: Theme.Space.s) {
                 Text(verbatim: L("inbox.replying_as", store.state.person ?? "?", String(row.root)))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .font(Theme.Fonts.meta)
+                    .foregroundStyle(Theme.onSurfaceVariant)
+                    .padding(.leading, 5)
                 Spacer()
-                Button(L("inbox.send")) { Task { await store.sendReply(row) } }
-                    .keyboardShortcut(.return, modifiers: .command)
-                    .buttonStyle(.borderedProminent)
-                    .disabled(busy || empty || !store.state.online)
+                Button {
+                    Task { await store.sendReply(row) }
+                } label: {
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(ready ? Theme.onPrimary : Theme.onSurfaceVariant)
+                        .frame(width: 30, height: 30)
+                        .background(ready ? Theme.primary : Theme.containerHigh, in: Circle())
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.return, modifiers: .command)
+                .disabled(!ready)
+                .help(L("inbox.send_help"))
+                .accessibilityLabel(L("inbox.send"))
             }
         }
-        .padding(12)
+        .padding(.horizontal, Theme.Space.m)
+        .padding(.top, 14)
+        .padding(.bottom, 10)
+        .background(Theme.bright, in: RoundedRectangle(cornerRadius: Theme.Radius.composer))
+        .overlay {
+            RoundedRectangle(cornerRadius: Theme.Radius.composer)
+                .strokeBorder(Theme.outline, lineWidth: 0.5)
+        }
+        .shadow(color: .black.opacity(0.07), radius: 14, y: 3)
+        .frame(maxWidth: Theme.composerWidth)
+        .padding(.horizontal, Theme.Space.s)
+        .padding(.top, Theme.Space.l)
+        .padding(.bottom, 10)
+        .frame(maxWidth: .infinity)
+        // The conversation fades out behind the box instead of showing
+        // through around it.
+        .background {
+            LinearGradient(
+                stops: [.init(color: Theme.surface.opacity(0), location: 0), .init(color: Theme.surface, location: 0.45)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        }
     }
 
     private var draft: Binding<String> {

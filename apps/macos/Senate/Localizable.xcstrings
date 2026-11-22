@@ -1057,6 +1057,23 @@
         }
       }
     },
+    "inbox.send_help": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Send (⌘↩)"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "发送（⌘↩）"
+          }
+        }
+      }
+    },
     "inbox.show_earlier": {
       "extractionState": "manual",
       "localizations": {
@@ -2943,6 +2960,23 @@
           "stringUnit": {
             "state": "translated",
             "value": "无法生成 Terminal 脚本"
+          }
+        }
+      }
+    },
+    "thread.more": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "More"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "更多"
           }
         }
       }
