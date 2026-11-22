@@ -34,6 +34,7 @@ struct Script {
     questions: Vec<Question>,
     briefs: Vec<Brief>,
     top_locales: Vec<Locale>,
+    top_edits: Vec<String>,
     picks: VecDeque<Step<Pick>>,
     pick_inputs: Vec<PickInput>,
     crossings: VecDeque<Step<Crossing>>,
@@ -178,6 +179,11 @@ impl ScriptedBrain {
         self.lock().top_locales.clone()
     }
 
+    /// Human edits supplied to each focus rewrite.
+    pub fn top_edits(&self) -> Vec<String> {
+        self.lock().top_edits.clone()
+    }
+
     /// Queue the next [`Brain::pick_agent`] result.
     pub fn picks(&self, result: Result<Pick, BrainError>) -> &Self {
         self.lock().picks.push_back(Step {
@@ -302,9 +308,19 @@ impl Brain for ScriptedBrain {
     }
 
     async fn brief_top(&self, brief: &Brief, locale: Locale) -> Result<String, BrainError> {
+        self.brief_top_with_edits(brief, "", locale).await
+    }
+
+    async fn brief_top_with_edits(
+        &self,
+        brief: &Brief,
+        edits: &str,
+        locale: Locale,
+    ) -> Result<String, BrainError> {
         let step = {
             let mut script = self.lock();
             script.briefs.push(brief.clone());
+            script.top_edits.push(edits.to_owned());
             script.top_locales.push(locale);
             script.tops.pop_front()
         };

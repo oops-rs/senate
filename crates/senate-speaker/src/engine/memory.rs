@@ -73,7 +73,8 @@ pub(super) struct Discussion {
     daily: Option<Timer>,
     /// The quiet timer, armed after the message at this seq.
     quiet: Option<(Seq, Timer)>,
-    drafting: bool,
+    /// Memory revision used by the outstanding draft.
+    drafting: Option<Seq>,
 }
 
 impl Discussion {
@@ -136,6 +137,45 @@ fn principal(event: &Event) -> Address {
         .unwrap_or_else(|| event.from.clone())
 }
 
+/// Human changes are instructions for subsequent summaries, even when a decision
+/// or an older discussion message still contains the original wording.
+pub(super) fn summary_edits(memory: &MemoryFold) -> String {
+    use std::fmt::Write;
+    let mut edits = String::new();
+    for (seq, old, replacement) in memory.human_edits() {
+        if edits.is_empty() {
+            edits.push_str("Human edits in order. These override conflicting claims anywhere above, including their source decisions. Never repeat a retired claim. Preserve unrelated facts.\n");
+        }
+        let refs: Vec<_> = old.refs.iter().map(ToString::to_string).collect();
+        let _ = writeln!(
+            edits,
+            "Edit seq {seq}: retired wording of seq {} (source seqs: {}): {}",
+            old.seq,
+            refs.join(", "),
+            old.text
+        );
+        if let Some(new) = replacement {
+            let _ = writeln!(edits, "Corrected wording: {}", new.text);
+        }
+    }
+    edits
+}
+
+/// Exact lines a person removed, excluding wording preserved or restored
+/// in a subsequent correction. Paraphrases are handled by the prompt.
+pub(super) fn retired_lines(memory: &MemoryFold) -> BTreeSet<&str> {
+    let mut lines = BTreeSet::new();
+    for (_, old, replacement) in memory.human_edits() {
+        lines.extend(old.text.lines().map(str::trim));
+        if let Some(new) = replacement {
+            for line in new.text.lines() {
+                lines.remove(line.trim());
+            }
+        }
+    }
+    lines
+}
+
 /// What may be written of `out`, given the seqs the Brain was shown and the
 /// memory as it stands. See the module docs.
 pub(super) fn checked(
@@ -143,6 +183,7 @@ pub(super) fn checked(
     shown: &BTreeSet<Seq>,
     memory: &MemoryFold,
 ) -> (Vec<DigestPoint>, Vec<MemoryDraft>) {
+    let retired = retired_lines(memory);
     let cite = |refs: Vec<Seq>| -> Vec<Seq> {
         let mut kept: Vec<Seq> = refs.into_iter().filter(|r| shown.contains(r)).collect();
         kept.sort();
@@ -155,7 +196,8 @@ pub(super) fn checked(
         .filter_map(|p| {
             let text = one_line(&p.text);
             let refs = cite(p.refs);
-            (!text.is_empty() && !refs.is_empty()).then_some(DigestPoint { text, refs })
+            (!text.is_empty() && !refs.is_empty() && !retired.contains(text.as_str()))
+                .then_some(DigestPoint { text, refs })
         })
         .take(MAX_DIGEST_POINTS)
         .collect();
@@ -168,6 +210,7 @@ pub(super) fn checked(
             let refs = cite(draft.refs);
             if text.is_empty()
                 || refs.is_empty()
+                || retired.contains(text.as_str())
                 || known.contains(&text.to_lowercase())
                 || refs.iter().any(|r| memory.is_deleted_ref(*r))
             {
@@ -285,7 +328,7 @@ impl Engine {
                 return;
             }
         }
-        if state.discussion.since.is_empty() || state.discussion.drafting {
+        if state.discussion.since.is_empty() || state.discussion.drafting.is_some() {
             debug!(%committee, ?trigger, "no digest: nothing new, or one is being drafted");
             return;
         }
@@ -299,12 +342,17 @@ impl Engine {
             return;
         }
         let through = state.discussion.through;
-        let (memory, decisions) = match &state.brief {
+        let revision = state
+            .brief
+            .as_ref()
+            .map_or(Seq::ZERO, |b| b.memory().last_human_edit());
+        let (memory, decisions, edits) = match &state.brief {
             Some(brief) => (
                 brief.memory().facts().cloned().collect(),
                 brief.brief().decisions,
+                summary_edits(brief.memory()),
             ),
-            None => (Vec::new(), Vec::new()),
+            None => (Vec::new(), Vec::new(), String::new()),
         };
         let events = match self.discussion_after(&committee, through).await {
             Ok(events) => events,
@@ -325,9 +373,10 @@ impl Engine {
             events,
             memory,
             decisions,
+            edits,
         };
         if let Some(state) = self.committees.get_mut(&committee) {
-            state.discussion.drafting = true;
+            state.discussion.drafting = Some(revision);
         }
         let brain = std::sync::Arc::clone(&self.brain);
         self.think(async move { brain.digest(input).await }, move |out| {
@@ -372,10 +421,11 @@ impl Engine {
         shown: BTreeSet<Seq>,
         out: Result<DigestOut, BrainError>,
     ) {
+        self.catch_up(&committee).await;
         let Some(state) = self.committees.get_mut(&committee) else {
             return;
         };
-        state.discussion.drafting = false;
+        let revision = state.discussion.drafting.take();
         let out = match out {
             Ok(out) => out,
             Err(error) => {
@@ -385,6 +435,10 @@ impl Engine {
         };
         let empty = MemoryFold::new();
         let memory = state.brief.as_ref().map_or(&empty, |b| b.memory());
+        if revision != Some(memory.last_human_edit()) {
+            self.arm_quiet(&committee);
+            return;
+        }
         let (points, drafts) = checked(out, &shown, memory);
         if points.is_empty() {
             warn!(%committee, "the digest had no usable point; next time");

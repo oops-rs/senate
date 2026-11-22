@@ -213,6 +213,7 @@ pub struct MemoryFold {
     head: Seq,
     points: BTreeMap<Seq, MemoryPoint>,
     retired: BTreeMap<Seq, Retired>,
+    last_human_edit: Seq,
     /// Every ref of a point a person deleted: a new point citing one of
     /// these would bring the deleted point back.
     deleted_refs: BTreeSet<Seq>,
@@ -344,6 +345,7 @@ impl MemoryFold {
                         refs: refs.clone(),
                     }];
                 }
+                self.last_human_edit = event.seq;
                 self.add(event, text, refs, vec![target], by);
             }
             MemoryPayload::Delete { targets } => {
@@ -352,6 +354,7 @@ impl MemoryFold {
                 }
                 for target in targets {
                     if let Some(point) = self.points.get(&target) {
+                        self.last_human_edit = event.seq;
                         self.deleted_refs.extend(point.refs.iter().copied());
                     }
                     self.retired.insert(target, Retired::Deleted(event.seq));
@@ -406,6 +409,34 @@ impl MemoryFold {
         self.in_force().filter(|p| {
             Some(p.seq) != self.focus && !self.digest.as_ref().is_some_and(|d| d.seq == p.seq)
         })
+    }
+
+    /// Most recent correction or deletion of a known point.
+    pub fn last_human_edit(&self) -> Seq {
+        self.last_human_edit
+    }
+
+    /// Human edits in log order, including edits to automatically refreshed summaries.
+    /// Each entry pairs the retired wording and its sources with the replacement
+    /// (or no replacement for a deletion). Automatic rewrites carry no authority
+    /// to undo these edits.
+    pub fn human_edits(&self) -> Vec<(Seq, &MemoryPoint, Option<&MemoryPoint>)> {
+        let mut edits = Vec::new();
+        for (target, reason) in &self.retired {
+            let Some(old) = self.points.get(target) else {
+                continue;
+            };
+            match reason {
+                Retired::Deleted(seq) => edits.push((*seq, old, None)),
+                Retired::Superseded(seq) => {
+                    if let Some(new) = self.points.get(seq).filter(|p| p.by_person()) {
+                        edits.push((*seq, old, Some(new)));
+                    }
+                }
+            }
+        }
+        edits.sort_by_key(|(seq, _, _)| *seq);
+        edits
     }
 
     /// The current focus as edited through the memory log.
@@ -644,6 +675,15 @@ mod tests {
             correct,
             delete,
         ]);
+        let edits: Vec<_> = fold
+            .human_edits()
+            .into_iter()
+            .map(|(seq, old, new)| (seq, old.seq, new.map(|p| p.seq)))
+            .collect();
+        assert_eq!(
+            edits,
+            [(Seq(30), Seq(20), Some(Seq(30))), (Seq(31), Seq(11), None)]
+        );
         let in_force: Vec<_> = fold.in_force().collect();
         assert_eq!(in_force.len(), 1);
         assert_eq!(in_force[0].text, "The release ships on Tuesday");

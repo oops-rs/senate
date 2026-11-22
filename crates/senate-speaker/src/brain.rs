@@ -432,6 +432,22 @@ pub trait Brain: Send + Sync + 'static {
         ))
     }
 
+    /// Rewrite with the human edits that take precedence over the brief's sources.
+    async fn brief_top_with_edits(
+        &self,
+        brief: &Brief,
+        edits: &str,
+        locale: Locale,
+    ) -> Result<String, BrainError> {
+        if edits.is_empty() {
+            self.brief_top(brief, locale).await
+        } else {
+            Err(BrainError::Unavailable(
+                "this brain does not apply summary edits".into(),
+            ))
+        }
+    }
+
     /// Judge an incoming root: the probabilities that it needs a person, that
     /// the agent can handle it, or that it is unclear, and one line of
     /// reason. No tools, no session; the Speaker bounds it by
@@ -551,6 +567,8 @@ pub struct DigestInput {
     pub memory: Vec<MemoryPoint>,
     /// The decisions in force, which points do not restate.
     pub decisions: Vec<BriefDecision>,
+    /// Human corrections and deletions that override older sources.
+    pub edits: String,
 }
 
 /// What [`Brain::digest`] returns.

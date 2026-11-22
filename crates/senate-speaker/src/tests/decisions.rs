@@ -683,6 +683,68 @@ async fn the_brief_top_is_written_once_per_debounce_and_skipped_without_a_model(
     rig.stop().await;
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_focus_rebuild_cannot_restore_a_corrected_claim_from_its_decision() {
+    let hub = bound_hub().await;
+    let brain = ScriptedBrain::new();
+    let rig = Rig::start_with(hub.clone(), FakeSurface::new(), brain.clone()).await;
+    let decision = rig
+        .append(NewEvent::new(
+            refund(),
+            Kind::Decision,
+            user("pm"),
+            "Use the flash model",
+        ))
+        .await;
+    let stale = format!("Speaker uses flash (seq {})", decision.seq);
+    let focus = rig
+        .append(
+            NewEvent::new(refund(), Kind::Note, Address::Speaker, &stale)
+                .with_meta(meta::BRIEF_TOP, json!(true)),
+        )
+        .await;
+    rig.append(mention(
+        "pm",
+        &format!("/correct {} Speaker uses pro", focus.seq),
+        "m_correct",
+    ))
+    .await;
+    rig.settle().await;
+    let corrected = hub.brief(&refund()).await.unwrap().top.unwrap();
+    assert_eq!(corrected.body, "Speaker uses pro");
+
+    for (message, draft, expected) in [
+        ("m_next", "Speaker uses pro", "Speaker uses pro"),
+        ("m_again", stale.as_str(), "Speaker uses pro"),
+    ] {
+        brain.writes_top(Ok(draft.to_owned()));
+        rig.append(mention("pm", "/decide Keep the weekly release", message))
+            .await;
+        rig.settle().await;
+        tokio::time::advance(Duration::from_secs(31)).await;
+        rig.settle().await;
+        let brief = hub.brief(&refund()).await.unwrap();
+        assert!(brief.decisions.iter().any(|d| d.seq == decision.seq));
+        assert_eq!(brief.top.unwrap().body, expected);
+    }
+    assert_eq!(brain.briefs().len(), 2);
+    for edits in brain.top_edits() {
+        assert!(edits.contains(&stale));
+        assert!(edits.contains("Corrected wording: Speaker uses pro"));
+    }
+    let generated = hub
+        .events(&refund())
+        .into_iter()
+        .filter(|e| e.seq > corrected.seq && e.meta.contains_key(meta::BRIEF_TOP))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        generated.len(),
+        1,
+        "the valid rebuild lands, the stale one does not"
+    );
+    rig.stop().await;
+}
+
 #[tokio::test]
 async fn a_brief_top_is_never_mirrored() {
     let hub = bound_hub().await;

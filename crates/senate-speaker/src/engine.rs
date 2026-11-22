@@ -1047,6 +1047,7 @@ pub(crate) enum ThoughtKind {
     TopWritten {
         committee: CommitteeId,
         basis: Seq,
+        head: Seq,
         top: Result<String, BrainError>,
     },
     /// A digest drafted from the discussion `from..=through`, which showed
@@ -1831,8 +1832,9 @@ impl Engine {
             ThoughtKind::TopWritten {
                 committee,
                 basis,
+                head,
                 top,
-            } => self.on_top_written(committee, basis, top).await,
+            } => self.on_top_written(committee, basis, head, top).await,
             ThoughtKind::Triaged {
                 committee,
                 seq,
@@ -2705,24 +2707,20 @@ impl Engine {
             return;
         }
         let basis = state.last_decision;
-        let brief = match self.hub.brief(&committee).await {
-            Ok(brief) => brief,
-            Err(error) => {
-                warn!(%committee, %error, "cannot read the brief; the top waits for the next decision");
-                return;
-            }
-        };
-        if let Some(state) = self.committees.get_mut(&committee) {
-            state.top.drafting = true;
-            state.top.forced = false;
-        }
+        let Some(builder) = &state.brief else { return };
+        let edits = memory::summary_edits(builder.memory());
+        let brief = builder.brief();
+        let head = brief.head;
+        state.top.drafting = true;
+        state.top.forced = false;
         let brain = Arc::clone(&self.brain);
         let locale = self.locale(&committee);
         self.think(
-            async move { brain.brief_top(&brief, locale).await },
+            async move { brain.brief_top_with_edits(&brief, &edits, locale).await },
             move |top| ThoughtKind::TopWritten {
                 committee,
                 basis,
+                head,
                 top,
             },
         );
@@ -2734,8 +2732,10 @@ impl Engine {
         &mut self,
         committee: CommitteeId,
         basis: Seq,
+        head: Seq,
         top: Result<String, BrainError>,
     ) {
+        self.catch_up(&committee).await;
         let again = match self.committees.get_mut(&committee) {
             Some(state) => {
                 state.top.drafting = false;
@@ -2750,7 +2750,17 @@ impl Engine {
                 String::new()
             }
         };
-        if !body.is_empty() {
+        let usable = self
+            .committees
+            .get(&committee)
+            .and_then(|s| s.brief.as_ref())
+            .is_some_and(|b| {
+                let memory = b.memory();
+                let retired = memory::retired_lines(memory);
+                memory.last_human_edit() <= head
+                    && !body.lines().any(|line| retired.contains(line.trim()))
+            });
+        if !body.is_empty() && usable {
             let note = NewEvent::new(committee.clone(), Kind::Note, Address::Speaker, body)
                 .with_id(derived_event_id(&[
                     "brief-top",

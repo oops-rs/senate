@@ -657,13 +657,14 @@ impl BasisBrain {
         &self,
         model: &ModelSettings,
         brief: &Brief,
+        edits: &str,
         locale: Locale,
     ) -> Result<String, BrainError> {
         let committee = Some(&brief.committee);
         let workspace = self.workspace(committee, model).await?;
         let spec = self
             .bounded(
-                RunSpec::new(prompt::brief_top(brief, locale)),
+                RunSpec::new(prompt::brief_top(brief, edits, locale)),
                 "speaker-brief-top",
                 committee,
                 model,
@@ -871,11 +872,20 @@ impl Brain for BasisBrain {
     }
 
     async fn brief_top(&self, brief: &Brief, locale: Locale) -> Result<String, BrainError> {
+        self.brief_top_with_edits(brief, "", locale).await
+    }
+
+    async fn brief_top_with_edits(
+        &self,
+        brief: &Brief,
+        edits: &str,
+        locale: Locale,
+    ) -> Result<String, BrainError> {
         self.tiered(
             "brief_top",
             Some(&brief.committee),
             None,
-            |tier| async move { self.brief_top_on(&tier.model, brief, locale).await },
+            |tier| async move { self.brief_top_on(&tier.model, brief, edits, locale).await },
         )
         .await
     }

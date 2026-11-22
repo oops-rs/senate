@@ -757,11 +757,12 @@ async fn brief_top_answers_from_the_brief_alone() {
     // The same brief for an English committee.
     fixture
         .brain
-        .brief_top(&brief, Locale::En)
+        .brief_top_with_edits(&brief, "Corrected wording: active model is pro", Locale::En)
         .await
         .expect("a top");
     let requests = fixture.model.requests();
     let prompt = format!("{:?}", requests[1].messages);
+    assert!(prompt.contains("Corrected wording: active model is pro"));
     assert!(prompt.contains("In English;"), "{prompt}");
     assert!(
         requests[1]
@@ -1904,6 +1905,7 @@ async fn digest_is_one_typed_turn_that_cites_seqs_and_marks_a_persons_points() {
             trigger: senate_core::DigestTrigger::Daily,
             events: digested.log.clone(),
             memory: vec![person_point],
+            edits: "Corrected wording: active model is pro".into(),
             decisions: Vec::new(),
         })
         .await
@@ -1918,6 +1920,7 @@ async fn digest_is_one_typed_turn_that_cites_seqs_and_marks_a_persons_points() {
         prompt.contains("seq 8 (by a person): Reviews need two approvals"),
         "{prompt}"
     );
+    assert!(prompt.contains("Corrected wording: active model is pro"));
     assert!(prompt.contains("Write in English"), "{prompt}");
 }
 

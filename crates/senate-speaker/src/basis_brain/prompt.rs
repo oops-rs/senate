@@ -336,14 +336,14 @@ pub(crate) fn interpret(utterance: &Utterance) -> String {
 /// Characters of the brief shown when asking for its top.
 const TOP_BRIEF_CHARS: usize = 6_000;
 
-pub(crate) fn brief_top(brief: &Brief, locale: Locale) -> String {
+pub(crate) fn brief_top(brief: &Brief, edits: &str, locale: Locale) -> String {
     // The current top is what is being rewritten; leave it out.
     let without_top = Brief {
         top: None,
         ..brief.clone()
     };
     format!(
-        "Below is the brief of committee {committee}, built from its shared log.\n\n{markdown}\n\n\
+        "Below is the brief of committee {committee}, built from its shared log.\n\n{markdown}\n\n{edits}\n\
          Write the facts that matter most for this committee right now, for every person's agent \
          to read first when a session starts:\n\
          - At most 3 lines, each one short sentence, the most important first.\n\
@@ -2115,7 +2115,7 @@ pub(crate) fn digest(input: &DigestInput) -> String {
          the last digest (and what crossed in from other committees), oldest first.\n\n\
          {discussion}\n\n\
          What we know (memory points in force):\n{memory}\n\n\
-         Decisions in force (already recorded; do not restate them):\n{decisions}\n\n\
+         Decisions in force (already recorded; do not restate them):\n{decisions}\n\n{edits}\n\
          Report:\n\
          - points: at most {max} one-line points of what was discussed, settled or left open, \
          most important first. Group the messages by topic; skip greetings and chit-chat.\n\
@@ -2126,6 +2126,7 @@ pub(crate) fn digest(input: &DigestInput) -> String {
          in {language}; keep names, numbers and identifiers as written. Use only what is above: \
          do not guess.",
         committee = input.committee,
+        edits = input.edits,
         discussion = discussion.join("\n"),
         max = senate_core::memory::MAX_DIGEST_POINTS,
         language = language(input.locale),

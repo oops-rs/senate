@@ -267,6 +267,9 @@ async fn a_newer_point_supersedes_the_speakers_but_never_a_persons() {
     }));
     due(&rig, DigestTrigger::Daily).await;
 
+    let edits = &rig.brain.digest_inputs()[0].edits;
+    assert!(edits.contains("Billing is owned by the platform team"));
+    assert!(edits.contains("Corrected wording: Billing is owned by the payments team"));
     let shown = &rig.brain.digest_inputs()[0].memory;
     assert_eq!(
         shown.iter().map(|p| p.seq).collect::<Vec<_>>(),
