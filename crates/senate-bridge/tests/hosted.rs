@@ -2664,20 +2664,14 @@ async fn watch_all_shows_every_session_and_enter_attaches_to_one() {
     pty.resize(pty_process::Size::new(30, 120)).unwrap();
     let mut child = pty_process::Command::from(cmd).spawn(pts).unwrap();
     let (mut output, mut input) = pty.into_split();
-    tokio::time::timeout(TIMEOUT, async {
-        // One paint holds both tiles: each session's header and screen.
-        wait_terminal_output(&mut output, b"north \xc2\xb7 refund-v2 \xc2\xb7 claude").await;
-        wait_terminal_output(&mut output, b"painted before anyone looked").await;
-        wait_terminal_output(&mut output, b"south \xc2\xb7 refund-v2 \xc2\xb7 claude").await;
-        wait_terminal_output(&mut output, b"painted before anyone looked").await;
-        wait_terminal_output(&mut output, b"2 sessions").await;
-        // Nobody is attached, so each session is fitted to its tile and
-        // repaints: two tiles side by side under the status line, each
-        // body its tile less the header row and the blank column.
-        wait_terminal_output(&mut output, b"resized to 28 59").await;
+    wait_for_screen(&mut output, 30, 120, |screen| {
+        screen.contains("north · refund-v2 · claude")
+            && screen.contains("south · refund-v2 · claude")
+            && screen.matches("painted before anyone looked").count() == 2
+            && screen.matches("resized to 28 59").count() == 2
+            && screen.contains("2 sessions")
     })
-    .await
-    .expect("both sessions in the grid, fitted to their tiles");
+    .await;
 
     // Typing in the grid reaches no session; the arrow moves to `south`,
     // and Enter attaches there.
@@ -2686,6 +2680,7 @@ async fn watch_all_shows_every_session_and_enter_attaches_to_one() {
         // A normal attach: it asks this terminal for its colours first.
         wait_terminal_output(&mut output, b"\x1b[c").await;
         input.write_all(b"\x1b[?62;22c").await.unwrap();
+        wait_terminal_output(&mut output, b"resized to 30 120").await;
         input.write_all(b"from the grid\rpaint\r").await.unwrap();
         wait_terminal_output(&mut output, b"fixture TUI").await;
         // Detaching comes back to the grid.
