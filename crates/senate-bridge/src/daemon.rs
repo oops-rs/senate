@@ -513,7 +513,7 @@ pub(crate) struct Shared {
     session_bindings: RwLock<()>,
     hosts: hosts::Launches,
     host_notices_ready: Notify,
-    active_stop_notices: Mutex<BTreeSet<EventId>>,
+    active_stop_notices: Mutex<BTreeMap<EventId, SenatorName>>,
     hosted_approvals: hosted_approvals::Monitor,
     hook_drops: Mutex<HookDrops>,
     codex_transport: crate::delivery::codex::Transport,
@@ -873,7 +873,7 @@ impl Shared {
             session_bindings: RwLock::new(()),
             hosts: hosts::Launches::default(),
             host_notices_ready: Notify::new(),
-            active_stop_notices: Mutex::new(BTreeSet::new()),
+            active_stop_notices: Mutex::new(BTreeMap::new()),
             hosted_approvals: hosted_approvals::Monitor::default(),
             hook_drops: Mutex::new(HookDrops::default()),
             codex_transport: common.codex.transport.clone(),
@@ -2464,6 +2464,14 @@ impl Shared {
         let _binding = self.session_bindings.read().await;
         let sid = session.session_id.as_str();
         let agent = &session.agent;
+        if session.runtime == Runtime::Codex
+            && lock(&self.active_stop_notices)
+                .values()
+                .any(|stopping| stopping == agent)
+        {
+            // Keep pending work queued until the stop finishes or is refused.
+            return Ok(false);
+        }
         // The routing pass may have selected this session before a join committed.
         if !self.store.session(sid)?.is_some_and(|s| {
             s.is_live() && s.agent == *agent && s.committee() == session.committee()

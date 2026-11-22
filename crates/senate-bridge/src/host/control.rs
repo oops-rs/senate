@@ -20,6 +20,10 @@ use crate::state::Store;
 
 const ATTENDED: u8 = 0;
 const ACCEPTED: u8 = 1;
+// The host checked attendance. The daemon may now interrupt the Codex turn.
+const READY_FOR_INTERRUPT: u8 = 11;
+const COMMIT_STOP: u8 = 12;
+const INTERRUPT_LIMIT: Duration = Duration::from_secs(4);
 const STOPPED: u8 = 1;
 const FAILED: u8 = 2;
 const END_UNCONFIRMED: u8 = 3;
@@ -67,6 +71,8 @@ pub(crate) enum Answer {
 
 #[derive(Serialize, Deserialize)]
 struct StopRequest {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    prepare_interrupt: bool,
     force: bool,
     unconfirmed_audit: NewEvent,
 }
@@ -144,6 +150,18 @@ pub(super) async fn next_stop(
         if attended && !request.force {
             let _ = stream.write_u8(ATTENDED).await;
             continue;
+        }
+        if request.prepare_interrupt {
+            if stream.write_u8(READY_FOR_INTERRUPT).await.is_err() {
+                continue;
+            }
+            // A failed interrupt or a disconnected daemon leaves the host running.
+            if !matches!(
+                tokio::time::timeout(INTERRUPT_LIMIT + HANDSHAKE, stream.read_u8()).await,
+                Ok(Ok(COMMIT_STOP))
+            ) {
+                continue;
+            }
         }
         if let Err(error) =
             Store::accept_host_stop(&paths.state_db(), host, &request.unconfirmed_audit)
@@ -321,14 +339,16 @@ pub(crate) async fn begin_stop(
     id: &EventId,
     force: bool,
     unconfirmed_audit: NewEvent,
+    codex: Option<(&crate::delivery::codex::Transport, &str)>,
 ) -> Result<UnixStream, IpcError> {
     let mut payload = serde_json::to_vec(&StopRequest {
+        prepare_interrupt: codex.is_some(),
         force,
         unconfirmed_audit,
     })
     .map_err(IpcError::internal)?;
     payload.push(b'\n');
-    tokio::time::timeout(HANDSHAKE, async {
+    let (mut stream, first) = tokio::time::timeout(HANDSHAKE, async {
         let mut stream = UnixStream::connect(socket(paths, id)).await.map_err(|error| {
             if error.kind() == io::ErrorKind::NotFound {
                 IpcError::bad_request("the host's stop socket is unavailable. If it was started before this update, attach and exit the terminal")
@@ -337,16 +357,55 @@ pub(crate) async fn begin_stop(
             }
         })?;
         stream.write_all(&payload).await.map_err(IpcError::internal)?;
-        match stream.read_u8().await {
-            Ok(ACCEPTED) => Ok(stream),
-            Ok(ATTENDED) => Err(IpcError::bad_request(
-                "a viewer is attending this terminal. Ask them to detach or have the operator run senate session stop --force",
-            )),
-            Ok(FAILED) => Err(IpcError::internal("the terminal host could not record the stop request")),
-            Ok(_) => Err(IpcError::internal("the host sent an invalid stop reply")),
-            Err(error) => Err(IpcError::internal(format!("the host did not acknowledge the stop: {error}"))),
-        }
-    }).await.map_err(|_| IpcError::internal("timed out waiting for the terminal host to accept stop"))?
+        let first = stream.read_u8().await.map_err(IpcError::internal)?;
+        Ok::<_, IpcError>((stream, first))
+    }).await.map_err(|_| IpcError::internal("timed out waiting for the terminal host to accept stop"))??;
+    if let Some((transport, thread)) = codex
+        && matches!(first, READY_FOR_INTERRUPT | ACCEPTED)
+    {
+        // Hosts from before the handshake already committed on ACCEPTED. Still
+        // interrupt their shared thread before reporting a successful stop.
+        let interrupt = async {
+            let mut server = crate::delivery::codex::AppServer::connect(transport).await?;
+            server.interrupt_for_stop(thread).await
+        };
+        tokio::time::timeout(INTERRUPT_LIMIT, interrupt)
+            .await
+            .map_err(|_| {
+                IpcError::internal(format!(
+                    "timed out waiting for Codex thread {thread} to stop"
+                ))
+            })?
+            .map_err(|e| {
+                IpcError::internal(format!(
+                    "could not confirm Codex thread {thread} stopped: {e}"
+                ))
+            })?;
+    }
+    let reply = if first == READY_FOR_INTERRUPT && codex.is_some() {
+        stream
+            .write_u8(COMMIT_STOP)
+            .await
+            .map_err(IpcError::internal)?;
+        tokio::time::timeout(HANDSHAKE, stream.read_u8())
+            .await
+            .map_err(|_| IpcError::internal("the terminal host did not commit stop in time"))?
+    } else {
+        Ok(first)
+    };
+    match reply {
+        Ok(ACCEPTED) => Ok(stream),
+        Ok(ATTENDED) => Err(IpcError::bad_request(
+            "a viewer is attending this terminal. Ask them to detach or have the operator run senate session stop --force",
+        )),
+        Ok(FAILED) => Err(IpcError::internal(
+            "the terminal host could not record the stop request",
+        )),
+        Ok(_) => Err(IpcError::internal("the host sent an invalid stop reply")),
+        Err(error) => Err(IpcError::internal(format!(
+            "the host did not acknowledge the stop: {error}"
+        ))),
+    }
 }
 
 pub(super) async fn acknowledge(mut stream: UnixStream, stopped: bool, recorded: bool) {

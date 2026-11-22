@@ -481,13 +481,58 @@ impl AppServer {
                 json!({"threadId": thread, "limit": 1, "itemsView": "notLoaded"}),
             )
             .await?;
-        Ok(r.get("data")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .find(|t| t.get("status").and_then(Value::as_str) == Some("inProgress"))
-            .and_then(|t| t.get("id")?.as_str())
-            .map(str::to_string))
+        let turns = r["data"]
+            .as_array()
+            .ok_or_else(|| CodexError::Protocol("thread/turns/list: missing data".into()))?;
+        let Some(turn) = turns.first() else {
+            return Ok(None);
+        };
+        match turn["status"].as_str() {
+            Some("inProgress") => turn["id"]
+                .as_str()
+                .filter(|id| !id.is_empty())
+                .map(|id| Some(id.to_owned()))
+                .ok_or_else(|| CodexError::Protocol("active turn has no ID".into())),
+            Some("completed" | "interrupted" | "failed") => Ok(None),
+            _ => Err(CodexError::Protocol(
+                "thread/turns/list: unknown turn status".into(),
+            )),
+        }
+    }
+
+    /// An interrupt acknowledgement precedes completion. Check the turn again,
+    /// including when it finished naturally while the request was in flight.
+    pub(crate) async fn interrupt_for_stop(&mut self, thread: &str) -> Result<(), CodexError> {
+        let mut interrupted = None;
+        loop {
+            let turn = match self.active_turn(thread).await {
+                Ok(Some(turn)) => turn,
+                Ok(None) | Err(CodexError::NotLoaded(_)) => return Ok(()),
+                Err(error) => return Err(error),
+            };
+            if interrupted.as_ref() != Some(&turn) {
+                if let Err(error) = self
+                    .request(
+                        "turn/interrupt",
+                        thread,
+                        json!({"threadId": thread, "turnId": turn}),
+                    )
+                    .await
+                {
+                    match error {
+                        CodexError::NotLoaded(_) => return Ok(()),
+                        CodexError::Rpc { .. } => match self.active_turn(thread).await {
+                            Ok(None) | Err(CodexError::NotLoaded(_)) => return Ok(()),
+                            Ok(Some(active)) if active != turn => continue,
+                            _ => return Err(error),
+                        },
+                        _ => return Err(error),
+                    }
+                }
+                interrupted = Some(turn);
+            }
+            tokio::time::sleep(Duration::from_millis(75)).await;
+        }
     }
 
     pub async fn turn_start(&mut self, thread: &str, text: &str) -> Result<String, CodexError> {

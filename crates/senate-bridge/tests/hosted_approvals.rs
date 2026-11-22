@@ -647,6 +647,93 @@ while IFS= read -r line; do :; done
     h.stop().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hosted_codex_stop_interrupts_an_attended_turn_only_when_forced_and_waits() {
+    let (mut h, project) = fixture(true, Locale::En).await;
+    let fake = h.codex();
+    start(&mut h).await;
+    let (launch, terminal) = Terminal::spawn(&h, project, HostedRuntime::Codex).await;
+    let thread = &launch.session_id;
+    fake.busy(thread, "running");
+    fake.state.lock().unwrap().defer_interrupt = true;
+    let mut viewer = terminal.viewer().await;
+    viewer.write_all(&[2, 0, 1, b'x']).await.unwrap();
+    eventually("viewer attended", WAIT, || {
+        (terminal.activity()?["input_at"].as_u64()? > 0).then_some(())
+    })
+    .await;
+    let stop = |force| Request::Stop {
+        session: Default::default(),
+        senator: launch.senator.clone().into(),
+        force,
+    };
+    let socket = h.socket();
+    let refused = ipc::request::<senate_bridge::ipc::StopReply>(&socket, &stop(false), WAIT, WAIT)
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("viewer"));
+    let interrupts = || {
+        fake.calls()
+            .into_iter()
+            .filter(|(m, _)| m == "turn/interrupt")
+            .map(|(_, p)| p)
+            .collect::<Vec<_>>()
+    };
+    assert!(interrupts().is_empty());
+    let force = stop(true);
+    let stopping = ipc::request::<senate_bridge::ipc::StopReply>(&socket, &force, WAIT, WAIT);
+    let confirm = async {
+        eventually("interrupt and subsequent status check", WAIT, || {
+            let calls = fake.methods();
+            let at = calls.iter().position(|m| m == "turn/interrupt")?;
+            calls[at + 1..]
+                .iter()
+                .any(|m| m == "thread/turns/list")
+                .then_some(())
+        })
+        .await;
+        assert_eq!(
+            interrupts(),
+            [json!({"threadId": thread, "turnId": "running"})]
+        );
+        assert!(terminal.socket.exists());
+        fake.idle(thread);
+    };
+    let (stopped, ()) = tokio::join!(stopping, confirm);
+    stopped.unwrap();
+    assert!(!terminal.socket.exists());
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hosted_codex_stop_can_be_retried_if_the_turn_does_not_end() {
+    let (mut h, project) = fixture(true, Locale::En).await;
+    let fake = h.codex();
+    start(&mut h).await;
+    let (launch, terminal) = Terminal::spawn(&h, project, HostedRuntime::Codex).await;
+    fake.busy(&launch.session_id, "slow");
+    fake.state.lock().unwrap().defer_interrupt = true;
+    let request = Request::Stop {
+        session: Default::default(),
+        senator: launch.senator.into(),
+        force: true,
+    };
+    let socket = h.socket();
+    let stop = || ipc::request::<senate_bridge::ipc::StopReply>(&socket, &request, WAIT, WAIT);
+    let error = stop().await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("timed out waiting for Codex thread"),
+        "{error}"
+    );
+    assert!(terminal.socket.exists());
+    fake.state.lock().unwrap().defer_interrupt = false;
+    stop().await.unwrap();
+    assert!(fake.active_turn(&launch.session_id).is_none());
+    h.stop().await;
+}
+
 /// What a hosted Codex restore does: it rejoins the same thread on the
 /// app-server, with no new `thread/start`. Codex keeps a loaded thread's MCP
 /// connections, and so the tools it listed, until the thread has had no
@@ -683,6 +770,7 @@ async fn a_hosted_codex_restore_rejoins_its_thread_and_starts_none() {
     )
     .await
     .unwrap();
+    assert!(!fake.methods().iter().any(|m| m == "turn/interrupt"));
     terminal.stop();
     let restored: SpawnReply = ipc::request(
         &h.socket(),

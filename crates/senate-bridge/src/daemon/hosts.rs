@@ -94,6 +94,7 @@ pub(super) struct RestoreTarget {
 pub(super) struct StopTarget {
     pub(super) committee: CommitteeId,
     pub(super) senator: SenatorName,
+    runtime: Runtime,
     host_id: EventId,
 }
 
@@ -106,6 +107,7 @@ impl Drop for StopAuditGuard<'_> {
     fn drop(&mut self) {
         lock(&self.shared.active_stop_notices).remove(&self.notice);
         self.shared.host_notices_ready.notify_one();
+        self.shared.work.notify_one();
     }
 }
 
@@ -470,7 +472,7 @@ impl Shared {
     fn recover_stop_notices(&self) -> Result<(), StoreError> {
         let paths = Paths::new(&self.home);
         for (notice, host) in self.store.awaiting_stop_notices()? {
-            if lock(&self.active_stop_notices).contains(&notice) {
+            if lock(&self.active_stop_notices).contains_key(&notice) {
                 continue;
             }
             match host::running(&paths, &host) {
@@ -484,8 +486,12 @@ impl Shared {
         Ok(())
     }
 
-    pub(super) fn track_stop_notice(&self, notice: EventId) -> StopAuditGuard<'_> {
-        lock(&self.active_stop_notices).insert(notice.clone());
+    pub(super) fn track_stop_notice(
+        &self,
+        notice: EventId,
+        senator: &SenatorName,
+    ) -> StopAuditGuard<'_> {
+        lock(&self.active_stop_notices).insert(notice.clone(), senator.clone());
         StopAuditGuard {
             shared: self,
             notice,
@@ -553,6 +559,7 @@ impl Shared {
         Ok(StopTarget {
             committee,
             senator: session.agent,
+            runtime: session.runtime,
             host_id,
         })
     }
@@ -563,7 +570,12 @@ impl Shared {
         force: bool,
         unconfirmed_audit: NewEvent,
     ) -> Result<(String, bool), IpcError> {
-        let binding = self.session_bindings.read().await;
+        let binding = if target.runtime == Runtime::Codex {
+            // Drain a push that started before this stop was marked.
+            tokio::sync::RwLockWriteGuard::downgrade(self.session_bindings.write().await)
+        } else {
+            self.session_bindings.read().await
+        };
         let current = self
             .store
             .session_for_host(&target.host_id)
@@ -587,8 +599,15 @@ impl Shared {
                 "this terminal host is still waiting for publication",
             ));
         }
-        let stop =
-            host::control::begin_stop(&paths, &target.host_id, force, unconfirmed_audit).await?;
+        let stop = host::control::begin_stop(
+            &paths,
+            &target.host_id,
+            force,
+            unconfirmed_audit,
+            (session.runtime == Runtime::Codex)
+                .then_some((&self.codex_transport, session.session_id.as_str())),
+        )
+        .await?;
         drop(binding);
         let recorded = host::control::wait_stopped(stop).await?;
         Ok((session.session_id, recorded))

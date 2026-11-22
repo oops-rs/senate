@@ -38,6 +38,7 @@ pub struct CodexState {
     /// new one (the user's turn ended and another began after the bridge
     /// looked).
     pub rotate_steers: u32,
+    pub defer_interrupt: bool,
     next_turn: u32,
     pub connections: usize,
     /// Per thread: the connections subscribed with `thread/resume`.
@@ -481,6 +482,16 @@ fn answer(st: &mut CodexState, method: &str, params: &Value) -> Result<Value, St
                 }
             };
             Ok(json!({"turn": {"id": turn, "status": "inProgress", "items": []}}))
+        }
+        "turn/interrupt" => {
+            let t = st.threads.get_mut(&thread_id).ok_or("thread not loaded")?;
+            if t.active.as_deref() != params["turnId"].as_str() {
+                return Err("wrong turn ID".into());
+            }
+            if !st.defer_interrupt {
+                t.active = None;
+            }
+            Ok(json!({}))
         }
         "turn/steer" => {
             if thread.as_ref().is_none_or(|t| !t.loaded) {

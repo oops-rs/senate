@@ -384,7 +384,7 @@ impl Shared {
             format!("{actor} 请求{verb}委员会 `{committee}` 中 {who} 的托管终端。终端主机已退出，停止结果未获确认。"),
             format!("{actor} requested a {verb} of the hosted terminal for {who} in committee `{committee}`. The host ended with the stop result unconfirmed."),
         );
-        let _audit = self.track_stop_notice(event.id.clone());
+        let _audit = self.track_stop_notice(event.id.clone(), primary);
         let (session_id, recorded) = self.stop_host(target, force, unconfirmed).await?;
         if !recorded {
             return Err(IpcError::internal(format!(
