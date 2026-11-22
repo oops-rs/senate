@@ -15,20 +15,25 @@
 //! - **Unsupported once.** A surface that cannot set this group's
 //!   announcement (no announcements, or no right to edit this one) gets one
 //!   notice in the group, and no more tries until the group is bound again
-//!   or the Speaker restarts. The notice's `operation_id` names the binding,
-//!   so a restart that finds it still unsupported does not post it twice.
+//!   or the Speaker restarts. Both retry the update. A receipt under the
+//!   Speaker's data directory suppresses repeat posts for the same log,
+//!   committee, platform and group until an update succeeds. An interrupted
+//!   post retries with its saved operation id.
 //!
 //! What was last sent is kept in memory only (like the pinned cards): a
 //! restart sends one refresh. Its `operation_id` names the committee's head
 //! when it was rendered, so a replay is a gateway duplicate and new content
 //! is always a new operation.
 
-use senate_core::{AnnouncementSection, BriefBuilder, StatusState};
+use std::{fs, io, path::Path};
+
+use senate_core::{AnnouncementSection, BriefBuilder, EventId, StatusState};
+use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 
 use super::{
     CommitteeId, CommitteeState, Duration, Engine, Outcome, PostTarget, STALL_RETRY, Seq, Stall,
-    Timer, debug, warn,
+    Timer, warn,
 };
 use crate::actor::SpeakerMsg;
 use crate::brain::CommitteeSeat;
@@ -48,6 +53,37 @@ pub(super) struct Announced {
     timer: Option<Timer>,
     /// The surface cannot set it here: no more tries for this binding.
     unsupported: bool,
+}
+
+/// Saved atomically for one logical binding. A repeat bind has a new log
+/// sequence but addresses the same group on the same platform.
+#[derive(Serialize, Deserialize)]
+enum Notice {
+    /// An update succeeded after an outage. The next outage needs a fresh key.
+    Recovered(EventId),
+    /// Written before posting, so even a rebind can retry an ambiguous delivery.
+    Posting(String),
+    Posted,
+}
+
+impl Notice {
+    fn load(path: &Path) -> io::Result<Option<Self>> {
+        match fs::File::open(path) {
+            Ok(file) => Ok(Some(serde_json::from_reader(file)?)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn save(&self, path: &Path) -> io::Result<()> {
+        let parent = path.parent().expect("notice path has a parent");
+        fs::create_dir_all(parent)?;
+        let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+        serde_json::to_writer(temp.as_file_mut(), self)?;
+        temp.as_file().sync_all()?;
+        temp.persist(path)?;
+        Ok(())
+    }
 }
 
 impl Engine {
@@ -156,45 +192,80 @@ impl Engine {
         let outcome = self
             .call(self.surface.set_announcement(group, &section, &operation))
             .await?;
+        let platform = self.surface.platform();
+        let key = crate::ids::derived_event_id(&[
+            self.epoch.as_deref().expect("checked by content_op_id"),
+            committee.as_str(),
+            platform,
+            group,
+        ]);
+        let path = self
+            .config
+            .speaker_dir()
+            .join("announcement-notices")
+            .join(key.to_string());
+        if let Outcome::Unsupported = outcome {
+            self.post_announcement_notice(committee, binding, group, l, &path)
+                .await?;
+        }
         let Some(entry) = self
             .committees
             .get_mut(committee)
-            .and_then(|state| state.announcements.get_mut(group))
+            .and_then(|s| s.announcements.get_mut(group))
         else {
             return Ok(());
         };
         match outcome {
             Outcome::Done(()) => {
+                if matches!(
+                    Notice::load(&path)?,
+                    Some(Notice::Posted | Notice::Posting(_))
+                ) {
+                    Notice::Recovered(EventId::new()).save(&path)?;
+                }
                 entry.last = Some(section);
                 entry.sent_at = Some(Instant::now());
             }
-            // Logged by `call`; the next change tries again, an hour on.
             Outcome::Refused => entry.sent_at = Some(Instant::now()),
-            Outcome::Unsupported => {
-                entry.unsupported = true;
-                let operation = self.op_id(
-                    committee,
-                    binding,
-                    &format!("{group}#announcement-unsupported"),
-                )?;
-                let notice = render::announcement_unsupported(l);
-                let target = PostTarget::NewRoot {
-                    group_id: group.to_owned(),
-                };
-                if let Err(stall) = self.post(target, &notice, &operation).await {
-                    // Try it all again: the notice's id makes a second
-                    // attempt one notice.
-                    if let Some(entry) = self
-                        .committees
-                        .get_mut(committee)
-                        .and_then(|state| state.announcements.get_mut(group))
-                    {
-                        entry.unsupported = false;
-                    }
-                    return Err(stall);
+            Outcome::Unsupported => entry.unsupported = true,
+        }
+        Ok(())
+    }
+
+    async fn post_announcement_notice(
+        &self,
+        committee: &CommitteeId,
+        binding: Seq,
+        group: &str,
+        locale: senate_core::Locale,
+        path: &Path,
+    ) -> Result<(), Stall> {
+        let operation = match Notice::load(path)? {
+            Some(Notice::Posted) => return Ok(()),
+            Some(Notice::Posting(id)) => id,
+            state => {
+                let mut target = format!("{group}#announcement-unsupported");
+                if let Some(Notice::Recovered(generation)) = state {
+                    target.push_str(&format!(":{generation}"));
                 }
-                debug!(%committee, %group, "the group's announcement cannot be set; said so");
+                let id = self.op_id(committee, binding, &target)?;
+                Notice::Posting(id.clone()).save(path)?;
+                id
             }
+        };
+        let target = PostTarget::NewRoot {
+            group_id: group.to_owned(),
+        };
+        if self
+            .post(
+                target,
+                &render::announcement_unsupported(locale),
+                &operation,
+            )
+            .await?
+            .is_some()
+        {
+            Notice::Posted.save(path)?;
         }
         Ok(())
     }

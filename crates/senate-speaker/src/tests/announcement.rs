@@ -154,7 +154,16 @@ async fn a_surface_without_it_says_so_once_and_stops_until_a_rebind_or_restart()
         announcements: false,
         ..Caps::ADOPTED
     });
-    let rig = Rig::start_with(hub.clone(), surface.clone(), ScriptedBrain::new()).await;
+    let dir = tempfile::tempdir().expect("speaker data");
+    let mut config = super::rig::config();
+    config.data_dir = dir.path().into();
+    let rig = Rig::start_config(
+        hub.clone(),
+        surface.clone(),
+        ScriptedBrain::new(),
+        config.clone(),
+    )
+    .await;
     pass(&rig, DEBOUNCE).await;
     assert_eq!(surface.announcements().len(), 1);
     assert_eq!(notices(&surface), 1);
@@ -176,20 +185,69 @@ async fn a_surface_without_it_says_so_once_and_stops_until_a_rebind_or_restart()
     assert_eq!(surface.announcements().len(), 1, "no more tries");
     assert_eq!(notices(&surface), 1);
 
-    // A restart tries once more; the notice it repeats is the same
-    // operation, so the group sees it once.
+    // The new gateway has no deduplication history. The receipt survives both
+    // the Speaker restart and a new binding event for the same group.
     rig.stop().await;
-    let rig = Rig::start_with(hub.clone(), surface.clone(), ScriptedBrain::new()).await;
+    let surface = FakeSurface::with(Caps {
+        announcements: false,
+        ..Caps::ADOPTED
+    });
+    let rig = Rig::start_config(hub, surface.clone(), ScriptedBrain::new(), config).await;
     pass(&rig, DEBOUNCE).await;
-    assert_eq!(surface.announcements().len(), 2);
-    assert_eq!(notices(&surface), 1, "one notice per binding");
-
-    // Bound again: tried again, and said again.
+    assert_eq!(surface.announcements().len(), 1);
+    assert_eq!(notices(&surface), 0);
     rig.append(bind_event(&refund(), GROUP)).await;
     pass(&rig, DEBOUNCE).await;
-    assert_eq!(surface.announcements().len(), 3);
-    assert_eq!(notices(&surface), 2);
+    assert_eq!(surface.announcements().len(), 2);
+    assert_eq!(notices(&surface), 0);
+    rig.append(bind_event(&refund(), "second-group")).await;
+    pass(&rig, DEBOUNCE).await;
+    let notices: Vec<_> = surface
+        .posts()
+        .into_iter()
+        .filter(|p| p.markdown.starts_with(NOTICE))
+        .collect();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(
+        notices[0].target,
+        PostTarget::NewRoot {
+            group_id: "second-group".into()
+        }
+    );
     rig.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_success_rearms_the_notice_even_at_the_same_binding_and_log_head() {
+    let dir = tempfile::tempdir().expect("speaker data");
+    let mut config = super::rig::config();
+    config.data_dir = dir.path().into();
+    let hub = hub_with_groups().await;
+    let unsupported = Caps {
+        announcements: false,
+        ..Caps::ADOPTED
+    };
+    let surface = FakeSurface::with(unsupported);
+    for (caps, expected_notices) in [(unsupported, 1), (Caps::ADOPTED, 1), (unsupported, 2)] {
+        surface.set_caps(caps);
+        let rig = Rig::start_config(
+            hub.clone(),
+            surface.clone(),
+            ScriptedBrain::new(),
+            config.clone(),
+        )
+        .await;
+        pass(&rig, DEBOUNCE).await;
+        assert_eq!(notices(&surface), expected_notices);
+        rig.stop().await;
+    }
+    let ids: Vec<_> = surface
+        .posts()
+        .into_iter()
+        .filter(|p| p.markdown.starts_with(NOTICE))
+        .map(|p| p.operation_id)
+        .collect();
+    assert_ne!(ids[0], ids[1]);
 }
 
 #[tokio::test(start_paused = true)]

@@ -254,6 +254,8 @@ pub(crate) const BRAIN_CONCURRENCY: usize = 4;
 /// A transient failure: retry this event later rather than pass it.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Stall {
+    #[error("announcement notice store unavailable: {0}")]
+    NoticeStore(#[from] std::io::Error),
     #[error("log unavailable: {0}")]
     Hub(#[from] HubError),
     #[error("chat surface unavailable: {0}")]
