@@ -58,7 +58,13 @@ say "building Senate $version (Release)"
 xcodegen generate --quiet
 team_flags=()
 if [[ "$identity" != "-" ]]; then
-  team="$(security find-identity -v -p codesigning | grep "$identity" | head -1 | sed -n 's/.*(\([A-Z0-9]*\))".*/\1/p')"
+  # Resolve the name to one certificate's hash: Xcode maps a bare
+  # "Apple Development" to the legacy "Mac Development" certificate, which
+  # a current account doesn't have.
+  match="$(security find-identity -v -p codesigning | grep -F "$identity" | head -1)"
+  [[ -n "$match" ]] || die "no codesigning identity matches \"$identity\""
+  team="$(sed -n 's/.*(\([A-Z0-9]*\))".*/\1/p' <<<"$match")"
+  identity="$(awk '{print $2}' <<<"$match")"
   team_flags=(DEVELOPMENT_TEAM="$team")
 fi
 xcodebuild -project Senate.xcodeproj -scheme Senate -configuration Release \
