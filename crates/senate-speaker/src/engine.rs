@@ -199,6 +199,7 @@ use std::time::Duration;
 use chrono::{DateTime, NaiveDate, Utc};
 use ractor::ActorRef;
 use ractor::concurrency::JoinHandle;
+use senate_core::api::{MAX_BACKOFF, UPLINK_POLL};
 use senate_core::{
     Address, BindingAction, BindingPayload, BriefBuilder, Card, ChatSurface, CommitteeId, Event,
     GroupRole, Hub, HubError, Kind, Locale, MirrorRef, Name, NewEvent, OutputLevel,
@@ -1251,7 +1252,7 @@ impl Engine {
             applied: None,
             me,
             started_at: Utc::now(),
-            seat_report_deadline: Instant::now() + senate_core::api::UPLINK_POLL,
+            seat_report_deadline: Instant::now() + MAX_BACKOFF + UPLINK_POLL,
             children: Vec::new(),
             aliases: Default::default(),
             told_problems: None,

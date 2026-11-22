@@ -343,6 +343,9 @@ pub struct SetSecretaries {
 /// How often a child uplink polls its parent and declares its seats.
 pub const UPLINK_POLL: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// Longest reconnect backoff after a child fails to register with its parent.
+pub const MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// A child Senate registered with this one: its name, and its Speaker (a
 /// principal of this Senate, who registered it).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -87,15 +87,12 @@ use senate_server::ServerHub;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
-pub use senate_core::api::UPLINK_POLL as POLL;
+pub use senate_core::api::{MAX_BACKOFF, UPLINK_POLL as POLL};
 
 /// Bound on one request to the Senate above.
 const TIMEOUT: Duration = Duration::from_secs(5);
 /// Events read per page.
 const PAGE: usize = 200;
-/// The longest the uplink waits between two tries to register: it starts
-/// at the poll period and doubles.
-pub const MAX_BACKOFF: Duration = Duration::from_secs(60);
 
 /// Registry key prefixes.
 const CURSOR: &str = "uplink:cursor:";

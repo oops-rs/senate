@@ -10,8 +10,10 @@
 //!   committee sends nothing.
 //! - **Startup seats.** Before the first send, read the hub's child reports.
 //!   Every registered child reports across committees, even when it has no
-//!   seats. Wait for reports dated since Speaker startup, up to one uplink
-//!   poll from startup. Only a send starts the hourly throttle.
+//!   seats. A child may be backing off after a failed request during the
+//!   parent restart. Wait for fresh reports up to the maximum reconnect
+//!   backoff plus one poll from Speaker startup. The first send starts
+//!   the hourly throttle.
 //! - **Coalesced and throttled.** One refresh is pending per group at a
 //!   time: `card_debounce_ms` after the first change, and never sooner than
 //!   [`ANNOUNCEMENT_INTERVAL`] after the last section sent there. Whatever
@@ -163,7 +165,7 @@ impl Engine {
                 .saturating_duration_since(Instant::now());
             if !ready && !remaining.is_zero() {
                 let delay = if self.card_debounce.is_zero() {
-                    remaining
+                    remaining.min(senate_core::api::UPLINK_POLL)
                 } else {
                     remaining.min(self.card_debounce)
                 };

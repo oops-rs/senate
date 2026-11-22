@@ -59,7 +59,7 @@ async fn first_announcement_waits_for_each_fresh_report_then_throttles() {
         &rig::refund(),
         &[("delegate", PresenceState::Online)],
     );
-    announcement::pass(&rig, debounce).await;
+    announcement::pass(&rig, Duration::from_secs(8)).await;
     assert!(
         rig.surface.announcements().is_empty(),
         "west has only a pre-start report"
@@ -87,7 +87,10 @@ async fn first_announcement_waits_for_each_fresh_report_then_throttles() {
 
 #[tokio::test(start_paused = true)]
 async fn first_announcement_uses_available_reports_at_the_uplink_deadline() {
-    use senate_core::{PresenceState, api::UPLINK_POLL};
+    use senate_core::{
+        PresenceState,
+        api::{MAX_BACKOFF, UPLINK_POLL},
+    };
     use std::time::Duration;
     let rig = startup_seats_rig().await;
     rig.hub.declare_seats(
@@ -96,7 +99,7 @@ async fn first_announcement_uses_available_reports_at_the_uplink_deadline() {
         &[("delegate", PresenceState::Online)],
     );
     let tick = Duration::from_millis(1);
-    announcement::pass(&rig, UPLINK_POLL - tick).await;
+    announcement::pass(&rig, MAX_BACKOFF + UPLINK_POLL - tick).await;
     assert!(rig.surface.announcements().is_empty());
     announcement::pass(&rig, tick).await;
     let sent = rig.surface.announcements();
