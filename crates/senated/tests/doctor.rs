@@ -14,7 +14,8 @@ fn no_model_skips_provider_calls_and_preserves_other_json_checks() {
          [model]\nmodel = \"scripted\"\nbase_url = \"http://{}/v1\"\ndeadline_secs = 1\ntriage_deadline_secs = 1\n",
         dir.path(), provider.local_addr().unwrap(),
     )).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_senated"))
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_senated"));
+    let output = senate_bridge::testenv::isolate(&mut cmd, dir.path())
         .args(["doctor", "--config"])
         .arg(config)
         .args(["--no-model", "--json"])
