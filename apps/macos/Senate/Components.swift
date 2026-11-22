@@ -191,3 +191,41 @@ struct EmptyState: View {
 func words(_ s: String) -> String {
     s.replacingOccurrences(of: "_", with: " ")
 }
+
+/// A section's name at the head of its column, and a note about it when
+/// there is one to give.
+struct PageHeading: View {
+    let text: String
+    var note: String? = nil
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.xs) {
+            Text(verbatim: text)
+                .font(Theme.Fonts.title)
+                .foregroundStyle(Theme.onSurface)
+                .accessibilityAddTraits(.isHeader)
+            if let note {
+                Text(verbatim: note)
+                    .font(Theme.Fonts.row)
+                    .foregroundStyle(Theme.onSurfaceVariant)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.top, Theme.Space.xl)
+        .padding(.leading, Theme.Space.xs)
+    }
+}
+
+/// A quiet line of facts under a name: a path, an age.
+struct MetaLine<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        HStack(spacing: Theme.Space.xs) {
+            content
+        }
+        .font(Theme.Fonts.row)
+        .foregroundStyle(Theme.onSurfaceVariant)
+        .lineLimit(1)
+    }
+}
