@@ -262,6 +262,7 @@ impl Default for Setup {
 }
 
 pub struct World {
+    listener: std::net::TcpListener,
     pub dir: tempfile::TempDir,
     pub config: SenatedConfig,
     pub daemon: Option<Senated>,
@@ -376,7 +377,13 @@ token = "tok-carol"
         if !setup.speaker_on {
             config.speaker = None;
         }
+        let listener = tokio::net::TcpListener::bind(&config.server.listen)
+            .await
+            .unwrap()
+            .into_std()
+            .unwrap();
         let mut world = Self {
+            listener,
             dir,
             config,
             daemon: None,
@@ -415,7 +422,13 @@ token = "tok-carol"
             self.chat = None;
             self.gateway = None;
         }
-        let daemon = assembly.start().await.unwrap();
+        // Keep the original socket open through shutdown so the parent address
+        // stays reserved while its replacement server starts.
+        let listener =
+            tokio::net::TcpListener::from_std(self.listener.try_clone().unwrap()).unwrap();
+        let daemon = senated::testing::start_on_listener(assembly, listener)
+            .await
+            .unwrap();
         // A restart binds the same address, so bridges find it again.
         self.config.server.listen = daemon.local_addr.to_string();
         self.daemon = Some(daemon);

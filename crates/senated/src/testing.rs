@@ -32,6 +32,14 @@ use senate_core::{
 
 use crate::chat::{Addressing, ChatGateway, Delivered, GatewayError, Inbound, PlatformMention};
 
+/// Start the test daemon on a listener its fixture keeps across restarts.
+pub async fn start_on_listener(
+    assembly: crate::Assembly,
+    listener: tokio::net::TcpListener,
+) -> Result<crate::Senated, crate::AssemblyError> {
+    assembly.start_with_listener(Some(listener)).await
+}
+
 /// The platform name.
 pub const PLATFORM: &str = "chat";
 
