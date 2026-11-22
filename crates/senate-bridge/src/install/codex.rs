@@ -116,6 +116,10 @@ fn hook_table(want: &str, event: &str) -> Table {
 /// Merge the `senate` MCP server and the four hooks into `doc`. One line
 /// per change; empty when already up to date.
 pub fn merge(doc: &mut DocumentMut, exe: &str) -> Result<Vec<String>, String> {
+    merge_entries(doc, exe).map(|(changes, _)| changes)
+}
+
+fn merge_entries(doc: &mut DocumentMut, exe: &str) -> Result<(Vec<String>, bool), String> {
     let mut changes = Vec::new();
     let root = doc.as_table_mut();
 
@@ -171,6 +175,7 @@ pub fn merge(doc: &mut DocumentMut, exe: &str) -> Result<Vec<String>, String> {
         });
     }
 
+    let server_changes = changes.len();
     // [[hooks.<Event>]]
     let hooks = root
         .entry("hooks")
@@ -243,7 +248,8 @@ pub fn merge(doc: &mut DocumentMut, exe: &str) -> Result<Vec<String>, String> {
         }
         changes.push(format!("+ hooks.{event}: {want}"));
     }
-    Ok(changes)
+    let hooks_changed = changes.len() > server_changes;
+    Ok((changes, hooks_changed))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -251,6 +257,7 @@ pub struct CodexPlan {
     pub path: PathBuf,
     pub existed: bool,
     pub after: String,
+    pub hooks_changed: bool,
     pub changes: Vec<String>,
 }
 
@@ -267,10 +274,11 @@ pub fn plan(path: &Path, exe: &str) -> anyhow::Result<CodexPlan> {
             path.display()
         )
     })?;
-    let changes = merge(&mut doc, exe).map_err(anyhow::Error::msg)?;
+    let (changes, hooks_changed) = merge_entries(&mut doc, exe).map_err(anyhow::Error::msg)?;
     Ok(CodexPlan {
         path: path.to_path_buf(),
         existed,
+        hooks_changed,
         after: doc.to_string(),
         changes,
     })
@@ -311,6 +319,12 @@ pub fn render(plan: &CodexPlan, exe: &str, applied: bool, locale: Locale, out: &
             }
         );
     }
+    if applied && plan.hooks_changed {
+        let _ = writeln!(out, "   {}", locale.pick(
+            "Codex 下次启动时会显示「Hooks need review」，请检查新增或变更的 Senate 钩子。",
+            "On the next start, Codex will show “Hooks need review”. Review the new or changed Senate hooks.",
+        ));
+    }
     let _ = writeln!(
         out,
         "   {}",
@@ -325,9 +339,9 @@ pub fn render(plan: &CodexPlan, exe: &str, applied: bool, locale: Locale, out: &
         out,
         "   - {}",
         locale.pick(
-            "信任钩子：在 Codex 里打开 /hooks，信任三个 senate 钩子。Codex 在钩子被信任之前\
+            "信任钩子：在 Codex 里打开 /hooks，信任senate 钩子。Codex 在钩子被信任之前\
              不会运行它，那样就没有 Codex 会话会加入 Senate。",
-            "Trust the hooks: in Codex, open /hooks and trust the three senate hooks. Codex \
+            "Trust the hooks: in Codex, open /hooks and trust the senate hooks. Codex \
              skips a hook until it is trusted, and then no Codex session joins Senate."
         )
     );
@@ -364,6 +378,35 @@ mod tests {
     use super::*;
 
     const EXE: &str = "/opt/bin/senate";
+
+    #[test]
+    fn only_applied_hook_changes_announce_the_next_start_review() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let warns = |applied| {
+            let plan = plan(&path, EXE).unwrap();
+            let mut output = String::new();
+            render(&plan, EXE, applied, Locale::En, &mut output);
+            output.contains("Hooks need review")
+        };
+        assert!(warns(true));
+        assert!(!warns(false));
+        let complete = excerpt(EXE);
+        std::fs::write(&path, &complete).unwrap();
+        assert!(!warns(true));
+        std::fs::write(
+            &path,
+            complete.replace("default_tools_approval_mode", "other_key"),
+        )
+        .unwrap();
+        assert!(!warns(true));
+        std::fs::write(
+            &path,
+            complete.replace("/opt/bin/senate hook", "/old/senate hook"),
+        )
+        .unwrap();
+        assert!(warns(true));
+    }
 
     #[test]
     fn merge_adds_once_and_keeps_the_rest() {
