@@ -22,7 +22,8 @@ async fn a_child_secretary_digests_private_chat_and_only_the_answer_crosses_up()
     let world = Setup::new()
         .server(|c| c.name = Some(name("acme")))
         .speaker(|s| {
-            s.memory.busy_messages = 3;
+            // The parent sees the command chat, the child answer, then both ambient chats.
+            s.memory.busy_messages = 4;
             s.memory.quiet_mins = 0;
         })
         .start()
