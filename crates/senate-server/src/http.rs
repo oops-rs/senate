@@ -464,7 +464,10 @@ async fn append(
     roles::reject_office_keys(&event, sender)?;
     let roster = state.hub.roster().await?;
     match sender {
-        Sender::Speaker => check_speaker_write(&event)?,
+        Sender::Speaker => {
+            check_speaker_write(&event)?;
+            inherit_uplink_source(&state, &mut event).await?;
+        }
         Sender::Child => {
             roles::check_child_write(&event)?;
             reject_speaker_keys(&event)?;
@@ -484,6 +487,45 @@ async fn append(
         event: appended.event,
         duplicate: appended.duplicate,
     }))
+}
+
+/// When a presiding senator routes or forwards an incoming item, attest only
+/// the unchanged message found in the local log. HTTP callers cannot submit
+/// platform provenance themselves.
+async fn inherit_uplink_source(state: &AppState, event: &mut NewEvent) -> Result<(), ApiFailure> {
+    if event.thread.is_some() {
+        return Ok(());
+    }
+    let routed = event
+        .meta
+        .get(meta::RELAYED_FROM)
+        .and_then(|v| v.as_u64())
+        .map(|seq| (event.committee.clone(), Seq(seq)));
+    let forwarded = senate_core::Origin::of_new(event)
+        .filter(|o| o.locator.senate() == Some(&state.hub.senate_path()))
+        .and_then(|o| Some((o.locator.committee()?.clone(), o.thread)));
+    if let Some((committee, seq)) = routed.or(forwarded)
+        && let Some(root) = state.hub.get(&committee, seq).await?
+        && root.from == Address::Committee
+        && root.is_directed_to(&Address::Speaker)
+        && senate_core::Origin::of(&root).is_some()
+        && root.body == event.body
+        && root.kind == event.kind
+    {
+        event.on_behalf_of = root.uplink_chat_sender().cloned();
+        event.source = root.source;
+        event.refs = root.refs;
+        let origin = senate_core::Origin {
+            locator: senate_core::Locator::at(
+                state.hub.senate_path(),
+                committee,
+                Address::Committee,
+            ),
+            thread: seq,
+        };
+        event.meta.insert(meta::ORIGIN.into(), origin.value());
+    }
+    Ok(())
 }
 
 /// Who an append is written as.

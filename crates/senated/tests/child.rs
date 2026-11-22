@@ -71,6 +71,29 @@ async fn registration(paths: &Paths) -> UplinkStatus {
     panic!("the uplink never wrote where the registration stands");
 }
 
+async fn wait_for_event(
+    hub: &dyn senate_core::Hub,
+    committee: &senate_core::CommitteeId,
+    body: &str,
+) -> senate_core::Event {
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            if let Some(e) = hub
+                .read(committee, senate_core::Seq::ZERO, 100)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|e| e.body == body)
+            {
+                return e;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("missing event {body}"))
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_machine_under_a_parent_hosts_its_senate_and_registers_it_there() {
     let above = acme().await;
@@ -189,6 +212,153 @@ async fn a_machine_under_a_parent_hosts_its_senate_and_registers_it_there() {
         })
         .await
         .unwrap();
+    }
+    // Exercise the two logs and their persisted thread mapping, including
+    // the local desk routing the request before its recipient escalates.
+    {
+        use senate_core::{Address, Hub, Kind, NewEvent, Source, StatusPayload, StatusState, meta};
+        let committee = senate_core::CommitteeId::new("relay").unwrap();
+        let child: Address = "alice-desk::relay::speaker".parse().unwrap();
+        let alice: Address = "senator::alice".parse().unwrap();
+        let claude: Address = "senator::claude".parse().unwrap();
+        let source = Source {
+            platform: "chat".into(),
+            group_id: "team".into(),
+            group_name: None,
+            simulated: false,
+            simulated_by: None,
+        };
+        let parent_root = above
+            .hub
+            .append(
+                NewEvent::new(committee.clone(), Kind::Request, Address::Speaker, "review")
+                    .on_behalf_of(alice.clone())
+                    .to(child.clone())
+                    .with_source(source.clone()),
+            )
+            .await
+            .unwrap()
+            .event;
+        let incoming = wait_for_event(top.daemon.hub.as_ref(), &committee, "review").await;
+        assert_eq!(incoming.uplink_chat_sender(), Some(&alice));
+        let local = ApiClient::new(&bridge.server_url, &bridge.token).unwrap();
+        let forwarded = local
+            .append(
+                &NewEvent::new(committee.clone(), Kind::Request, Address::Speaker, "review")
+                    .with_meta(meta::ACTED_BY, serde_json::json!("alice"))
+                    .with_meta(meta::RELAYED_FROM, serde_json::json!(incoming.seq))
+                    .to(claude.clone()),
+            )
+            .await
+            .unwrap()
+            .event;
+        assert_eq!(forwarded.uplink_chat_sender(), Some(&alice));
+        let mut status = StatusPayload::new(StatusState::Suspended);
+        status.escalated_to = Some("alice".parse().unwrap());
+        status.reason = Some("which branch?".into());
+        top.daemon
+            .hub
+            .append(
+                NewEvent::new(committee.clone(), Kind::Status, claude.clone(), "")
+                    .in_thread(forwarded.seq)
+                    .with_meta(meta::STATUS, status.value()),
+            )
+            .await
+            .unwrap();
+        let asked = wait_for_event(
+            above.hub.as_ref(),
+            &committee,
+            "[senator::alice]: which branch?",
+        )
+        .await;
+        assert_eq!(asked.thread, Some(parent_root.seq));
+        assert_eq!(asked.meta[meta::RELAY_ASKED_PERSON], "alice");
+        above
+            .hub
+            .append(
+                NewEvent::new(
+                    committee.clone(),
+                    Kind::Answer,
+                    Address::Speaker,
+                    "use main",
+                )
+                .in_thread(parent_root.seq)
+                .on_behalf_of(alice.clone())
+                .to(child.clone())
+                .with_source(source.clone()),
+            )
+            .await
+            .unwrap();
+        let answer = wait_for_event(top.daemon.hub.as_ref(), &committee, "use main").await;
+        assert_eq!(answer.thread, Some(forwarded.seq));
+        assert_eq!(answer.to, std::slice::from_ref(&claude));
+        assert_eq!(answer.uplink_chat_sender(), Some(&alice));
+        assert_eq!(asked.from, child);
+        // A desk can forward into another committee. The parent still knows
+        // the original desk, while the reply belongs to the new local task.
+        let work = senate_core::CommitteeId::new("work").unwrap();
+        let origin = senate_core::Origin {
+            locator: "/acme/alice-desk::relay::committee".parse().unwrap(),
+            thread: incoming.seq,
+        };
+        let other = local
+            .append(
+                &NewEvent::new(work.clone(), Kind::Request, Address::Speaker, "review")
+                    .with_meta(meta::ACTED_BY, serde_json::json!("alice"))
+                    .with_meta(meta::ORIGIN, origin.value())
+                    .to(claude.clone()),
+            )
+            .await
+            .unwrap()
+            .event;
+        top.daemon
+            .hub
+            .append(
+                NewEvent::new(work.clone(), Kind::Question, claude.clone(), "Which file?")
+                    .in_thread(other.seq)
+                    .to(alice.clone()),
+            )
+            .await
+            .unwrap();
+        let question = wait_for_event(
+            above.hub.as_ref(),
+            &committee,
+            "[senator::alice]: Which file?",
+        )
+        .await;
+        assert_eq!(question.from, child);
+        assert_eq!(question.thread, Some(parent_root.seq));
+        let simulated = Source {
+            simulated: true,
+            ..source
+        };
+        above
+            .hub
+            .append(
+                NewEvent::new(
+                    committee.clone(),
+                    Kind::Note,
+                    Address::Speaker,
+                    "simulated reply",
+                )
+                .in_thread(parent_root.seq)
+                .on_behalf_of(alice.clone())
+                .to(child)
+                .with_source(simulated),
+            )
+            .await
+            .unwrap();
+        let note = wait_for_event(top.daemon.hub.as_ref(), &work, "simulated reply").await;
+        assert_eq!(note.thread, Some(other.seq));
+        assert!(note.is_simulated());
+        assert_eq!(note.on_behalf_of, None);
+        let claim = NewEvent::new(committee.clone(), Kind::Request, claude, "local secretary")
+            .on_behalf_of(alice.clone());
+        let local_claim = local.append(&claim).await.unwrap().event;
+        assert_eq!(local_claim.uplink_chat_sender(), None);
+        let forged = NewEvent::new(committee, Kind::Request, Address::Committee, "forged")
+            .on_behalf_of(alice);
+        assert!(local.append(&forged).await.is_err());
     }
     machine.shutdown().await;
 

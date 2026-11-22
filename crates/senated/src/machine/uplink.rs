@@ -172,6 +172,9 @@ pub fn next_backoff(previous: Duration, poll: Duration) -> Duration {
 struct Brought {
     committee: CommitteeId,
     seq: Seq,
+    /// The currently routed local seat and task for subsequent chat replies.
+    #[serde(default)]
+    recipient: Option<(CommitteeId, Seq, Address)>,
 }
 
 struct Worker {
@@ -338,12 +341,16 @@ impl Worker {
         self.store.as_ref()
     }
 
-    async fn get<T: for<'de> Deserialize<'de>>(&self, key: &str) -> Option<T> {
-        let found = self.store().registry(key).await.ok()?;
-        found
-            .into_iter()
-            .find(|(k, _)| k == key)
-            .and_then(|(_, v)| serde_json::from_value(v).ok())
+    async fn get<T: for<'de> Deserialize<'de>>(&self, key: &str) -> Result<Option<T>, Pass> {
+        let value = self
+            .store()
+            .registry_value(key)
+            .await
+            .map_err(|e| Pass::Failed(format!("reading {key}: {e}")))?;
+        value
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|e| Pass::Failed(format!("decoding {key}: {e}")))
     }
 
     async fn put<T: Serialize>(&self, key: &str, value: &T) -> Result<(), Pass> {
@@ -509,7 +516,7 @@ impl Worker {
         self.shared.clone_from(&me.committees);
         for committee in me.committees {
             let key = format!("{CURSOR}{committee}");
-            let mut cursor: Seq = self.get(&key).await.unwrap_or(Seq::ZERO);
+            let mut cursor: Seq = self.get(&key).await?.unwrap_or(Seq::ZERO);
             loop {
                 let page = match tokio::time::timeout(
                     TIMEOUT,
@@ -537,7 +544,7 @@ impl Worker {
                 for raw in page.events {
                     let seq = match decode_event(raw) {
                         Decoded::Event(event) => {
-                            self.on_above(&parent, &event).await?;
+                            self.on_above(&parent, &event, &me.people).await?;
                             event.seq
                         }
                         Decoded::Undecodable { seq, error } => {
@@ -557,7 +564,12 @@ impl Worker {
     }
 
     /// One event above.
-    async fn on_above(&self, parent: &SenatePath, event: &Event) -> Result<(), Pass> {
+    async fn on_above(
+        &self,
+        parent: &SenatePath,
+        event: &Event,
+        people: &senate_core::People,
+    ) -> Result<(), Pass> {
         let name = &self.config.name;
         let ours = matches!(&event.from, Address::Child { senate, .. } if senate == name);
         if ours {
@@ -580,7 +592,7 @@ impl Worker {
             && let Some(root) = event.thread
         {
             let key = format!("{UP}{}:{root}", event.committee);
-            if let Some(origin) = self.get::<Origin>(&key).await {
+            if let Some(origin) = self.get::<Origin>(&key).await? {
                 if is_provisional(event) {
                     return Ok(());
                 }
@@ -592,7 +604,7 @@ impl Worker {
             _ => None,
         });
         if let Some(committee) = for_us {
-            return self.bring_down(parent, event, committee).await;
+            return self.bring_down(parent, event, committee, people).await;
         }
         Ok(())
     }
@@ -604,6 +616,7 @@ impl Worker {
         parent: &SenatePath,
         event: &Event,
         committee: CommitteeId,
+        people: &senate_core::People,
     ) -> Result<(), Pass> {
         let thread = event.thread.unwrap_or(event.seq);
         let origin = Origin {
@@ -617,7 +630,7 @@ impl Worker {
         let intended = senate_core::locator::intended(event)
             .unwrap_or_else(|| Locator::at(self.here(), committee.clone(), Address::Speaker));
         let down_key = format!("{DOWN}{}:{thread}", event.committee);
-        let kept: Option<Brought> = self.get(&down_key).await;
+        let kept: Option<Brought> = self.get(&down_key).await?;
         let brought = kept.as_ref().filter(|b| b.committee == committee);
         // The seat it is for: the one named, else the one its thread here
         // was brought to.
@@ -646,8 +659,40 @@ impl Worker {
             serde_json::Value::String(intended.to_string()),
         );
         here.refs = event.refs.clone();
+        if here.kind == Kind::Answer {
+            here = here.with_meta(
+                meta::ANSWERED_BY,
+                serde_json::json!(origin.locator.to_string()),
+            );
+        }
+        // Platform source is server-owned above. A local senator, including
+        // one presiding as Speaker, cannot supply it through the append API.
+        if event.from == Address::Speaker
+            && matches!(
+                event.kind,
+                Kind::Question | Kind::Request | Kind::Note | Kind::Answer
+            )
+            && let Some(source) = &event.source
+        {
+            here.source = Some(source.clone());
+            if !source.simulated {
+                here.on_behalf_of = event
+                    .on_behalf_of
+                    .as_ref()
+                    .filter(|a| people.is_person_address(a) || a.as_guest().is_some())
+                    .cloned();
+            }
+        }
         if let Some(b) = brought {
             here = here.in_thread(b.seq);
+            if event.from == Address::Speaker
+                && event.source.is_some()
+                && let Some((committee, seq, recipient)) = &b.recipient
+            {
+                here.committee = committee.clone();
+                here.thread = Some(*seq);
+                here.to = vec![recipient.clone()];
+            }
         }
         let stored = self
             .hub
@@ -660,6 +705,7 @@ impl Worker {
             let b = Brought {
                 committee,
                 seq: stored.event.thread.unwrap_or(stored.event.seq),
+                recipient: None,
             };
             self.put(&down_key, &b).await?;
         }
@@ -750,7 +796,7 @@ impl Worker {
             .map_err(|e| Pass::Failed(e.to_string()))?;
         for committee in committees {
             let key = format!("{CHILD_CURSOR}{committee}");
-            let mut cursor: Seq = self.get(&key).await.unwrap_or(Seq::ZERO);
+            let mut cursor: Seq = self.get(&key).await?.unwrap_or(Seq::ZERO);
             loop {
                 let events = self
                     .hub
@@ -771,15 +817,69 @@ impl Worker {
         Ok(())
     }
 
+    /// Attach the delivered seat to the existing mapping for this incoming
+    /// task. Old log epochs and unrelated roots cannot redirect a reply.
+    async fn link_recipient(
+        &self,
+        incoming: &Event,
+        local: &Event,
+        seq: Seq,
+        seat: &Address,
+    ) -> Result<bool, Pass> {
+        let Some(origin) = Origin::of(incoming).filter(|_| incoming.from == Address::Committee)
+        else {
+            return Ok(false);
+        };
+        let Some(above) = origin.locator.committee() else {
+            return Ok(false);
+        };
+        let key = format!("{DOWN}{above}:{}", origin.thread);
+        let Some(mut brought) = self.get::<Brought>(&key).await? else {
+            return Ok(false);
+        };
+        if brought.committee != incoming.committee || brought.seq != incoming.seq {
+            return Ok(false);
+        }
+        brought.recipient = Some((local.committee.clone(), seq, seat.clone()));
+        self.put(&key, &brought).await?;
+        Ok(true)
+    }
+
     /// One event here: an answer in a thread that came from above goes up.
     async fn on_here(&self, event: &Event) -> Result<(), Pass> {
         let Some(parent) = self.parent() else {
             return Ok(());
         };
+        if event.thread.is_none()
+            && event.from == Address::Speaker
+            && event.source.is_some()
+            && let Some(local) = Origin::of(event)
+            && local.locator.senate() == Some(&self.here())
+            && let Some(committee) = local.locator.committee()
+            && let [seat @ Address::Senator(_)] = event.to.as_slice()
+            && let Some(incoming) = self
+                .hub
+                .get(committee, local.thread)
+                .await
+                .map_err(|e| Pass::Failed(e.to_string()))?
+        {
+            self.link_recipient(&incoming, event, event.seq, seat)
+                .await?;
+        }
         let approval = event
             .meta
             .get(meta::APPROVAL_WAIT)
             .filter(|_| event.is_hosted_approval(&self.hub.roster_now().people()));
+        let roster = self.hub.roster_now();
+        let question = senate_core::StatusPayload::of(event)
+            .filter(|s| s.takeover.is_none() && s.state == senate_core::StatusState::Suspended)
+            .and_then(|s| s.escalated_to.map(|person| (person, s.reason)))
+            .or_else(|| match event.to.as_slice() {
+                [to] if event.kind == Kind::Question && roster.is_person_address(to) => {
+                    Some((to.as_senator()?.name().clone(), Some(event.body.clone())))
+                }
+                _ => None,
+            });
         let (root_seq, kind, body) = if let Some(wait) = approval {
             let (Some(root), Some(label)) = (wait["thread"].as_u64(), wait["label"].as_str())
             else {
@@ -790,6 +890,19 @@ impl Worker {
                 .locale
                 .pick("等待授权：", "Waiting for approval: ");
             (Seq(root), Kind::Note, format!("{prefix}{label}"))
+        } else if let Some((person, reason)) = &question {
+            let Some(root) = event.thread else {
+                return Ok(());
+            };
+            let text = reason
+                .as_deref()
+                .filter(|r| !r.is_empty())
+                .unwrap_or_else(|| self.config.locale.pick("请回复。", "Please reply."));
+            (
+                root,
+                Kind::Note,
+                format!("{}: {text}", Address::senior(person).in_text()),
+            )
         } else if event.kind == Kind::Answer && !is_provisional(event) {
             let Some(root) = event.thread else {
                 return Ok(());
@@ -829,7 +942,7 @@ impl Worker {
         else {
             return Ok(());
         };
-        if approval.is_some() {
+        if approval.is_some() || question.is_some() {
             // Accept a link only from the seat that received the task, or its desk worker.
             let at_desk = root.to.contains(&Address::Speaker)
                 && self.hub.office().is_some_and(|o| {
@@ -840,14 +953,21 @@ impl Worker {
                 return Ok(());
             }
             // A desk-forwarded task names the original incoming thread locally.
+            let forwarded = Origin::of(&root)
+                .filter(|origin| origin.locator.senate() == Some(&self.here()))
+                .and_then(|origin| Some((origin.locator.committee()?.clone(), origin.thread)))
+                .or_else(|| {
+                    Some((
+                        root.committee.clone(),
+                        Seq(root.meta.get(meta::RELAYED_FROM)?.as_u64()?),
+                    ))
+                });
             if root.from == Address::Speaker
-                && let Some(origin) = Origin::of(&root)
-                && origin.locator.senate() == Some(&self.here())
-                && let Some(committee) = origin.locator.committee()
+                && let Some((committee, seq)) = forwarded
             {
                 let Some(incoming) = self
                     .hub
-                    .get(committee, origin.thread)
+                    .get(&committee, seq)
                     .await
                     .map_err(|e| Pass::Failed(e.to_string()))?
                 else {
@@ -876,9 +996,9 @@ impl Worker {
             event.meta.get(meta::ANSWERED_BY),
         );
         let mut up = NewEvent::new(
-            asked_on,
+            asked_on.clone(),
             kind,
-            Address::child(self.config.name.clone(), event.committee.clone()),
+            Address::child(self.config.name.clone(), root.committee.clone()),
             body,
         )
         .to(origin.locator.address().clone())
@@ -888,6 +1008,15 @@ impl Worker {
             meta::ANSWERED_BY,
             serde_json::Value::String(answered_by.to_string()),
         );
+        if let Some((person, _)) = question {
+            if !self
+                .link_recipient(&root, event, root_seq, &event.from)
+                .await?
+            {
+                return Ok(());
+            }
+            up = up.with_meta(meta::RELAY_ASKED_PERSON, serde_json::json!(person));
+        }
         if approval.is_some() {
             up = up.with_meta(meta::APPROVAL_WAIT, serde_json::Value::Bool(true));
         }

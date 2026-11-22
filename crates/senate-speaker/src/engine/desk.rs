@@ -444,7 +444,12 @@ impl Engine {
         ]))
         .to(intended.address().clone())
         .with_meta(meta::ORIGIN, origin.value());
-        let root = self.stamped(root);
+        let mut root = self.stamped(root);
+        if event.from == Address::Committee && event.source.is_some() {
+            root.refs.clone_from(&event.refs);
+            root.source.clone_from(&event.source);
+            root.on_behalf_of = event.uplink_chat_sender().cloned();
+        }
         let forwarded = if intended.address().is_wildcard() {
             self.hub.resolve_and_append(root).await
         } else {

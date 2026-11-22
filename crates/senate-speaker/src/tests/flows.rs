@@ -2079,6 +2079,74 @@ async fn relayed_to_north(rig: &Rig, text: &str, message_ref: &str) -> Event {
     relay
 }
 
+#[tokio::test]
+async fn child_escalation_and_verified_reply_share_the_original_chat_thread() {
+    let rig = Rig::start(hub_with_child_seen(Some(0)).await).await;
+    let root = relayed_to_north(&rig, "/tell carol check the docs?", "m_root").await;
+    let child = desk_of("north-desk");
+    rig.append(
+        NewEvent::new(refund(), Kind::Note, child.clone(), "Waiting for approval")
+            .in_thread(root.seq)
+            .with_meta(meta::APPROVAL_WAIT, json!(true)),
+    )
+    .await;
+    rig.settle().await;
+    rig.append(in_thread(
+        "pm",
+        "yes",
+        "approval_chat",
+        root.seq,
+        None,
+        "m_root",
+    ))
+    .await;
+    rig.settle().await;
+    let informational = rig
+        .hub
+        .events(&refund())
+        .into_iter()
+        .find(|e| e.from == Address::Speaker && e.body == "yes")
+        .unwrap();
+    assert_eq!(informational.kind, Kind::Note);
+    assert!(!informational.meta.contains_key(meta::APPROVAL_WAIT));
+    assert!(!informational.meta.contains_key(meta::HOSTED_APPROVAL));
+    rig.append(
+        NewEvent::new(refund(), Kind::Note, child.clone(), "Which branch?")
+            .in_thread(root.seq)
+            .with_meta(meta::RELAY_ASKED_PERSON, json!("pm")),
+    )
+    .await;
+    rig.settle().await;
+    assert!(
+        rig.surface
+            .posts()
+            .iter()
+            .any(|p| p.target == reply_to("m_root") && p.markdown.contains("Which branch?"))
+    );
+    for (who, simulated, kind) in [
+        ("bob", false, Kind::Note),
+        ("pm", true, Kind::Note),
+        ("pm", false, Kind::Answer),
+    ] {
+        let body = format!("reply {who} {simulated}");
+        let mut chat = mention(who, &body, &body).in_thread(root.seq);
+        chat.source.as_mut().unwrap().simulated = simulated;
+        rig.append(chat).await;
+        rig.settle().await;
+        let reply = rig
+            .hub
+            .events(&refund())
+            .into_iter()
+            .find(|e| e.from == Address::Speaker && e.body == body)
+            .unwrap();
+        assert_eq!(
+            (reply.kind, reply.thread, reply.to),
+            (kind, Some(root.seq), vec![child.clone()])
+        );
+        assert_eq!(reply.on_behalf_of, (!simulated).then(|| user(who)));
+    }
+}
+
 /// A question relayed to a child Senate that is offline is still written
 /// for it, seat and all; the rules hold it, and the one who asked is told
 /// it is offline, once.

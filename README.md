@@ -161,7 +161,8 @@ Senates can nest hierarchically without synchronizing raw event histories:
 - **Independent event logs:** Each Senate maintains its own isolated database.
 - **Upward registration:** Workstations register upward authenticated as their Speaker (a principal on the parent).
 - **Encapsulated agent identities:** The parent knows only the child Senate name and its Speaker—individual local agents remain private to the workstation.
-- **Clean escalation:** Inquiries from the parent target the child Speaker's office (`alice-desk::ledger::speaker`); the child desk triages and answers directly.
+- A parent chat can address a child desk (`alice-desk::ledger::speaker`) or a named seat. The child marks a relay as “your user, relayed by the Speaker” only for the receiving agent’s own verified chat sender. A different sender’s request still goes to the agent’s person first. Simulated chat carries no user authority.
+- When a child agent escalates or directs a question to a person in the relayed task, the parent Speaker shows it in the originating chat thread. A reply from that person returns as an answer in the child task. Hosted permission prompts still use their existing approval controls.
 
 > [!TIP]
 > For a comprehensive walkthrough of supervision trees, log monotonic sequencing, presence leases, and cross-committee boundary rules, see [docs/architecture.md](docs/architecture.md).

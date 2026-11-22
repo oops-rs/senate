@@ -565,6 +565,17 @@ fn sender_of(event: &Event, reader: &Reader) -> Sender {
             Sender::OtherAgent
         }
     };
+    if event.is_simulated() {
+        return Sender::Other;
+    }
+    if let Some(person) = event.uplink_chat_sender()
+        && reader
+            .user
+            .as_ref()
+            .is_some_and(|user| person.as_senator() == Some(user))
+    {
+        return Sender::UserViaSpeaker;
+    }
     if event.meta.contains_key(meta::ORIGIN) {
         // It started elsewhere: whoever carried it here, it is someone
         // else's agent's.
@@ -582,7 +593,12 @@ fn sender_of(event: &Event, reader: &Reader) -> Sender {
     };
     match (&event.from, &event.on_behalf_of) {
         (from, None) if user(from) => Sender::User,
-        (Address::Speaker, Some(behalf)) if user(behalf) => Sender::UserViaSpeaker,
+        (Address::Speaker, Some(behalf))
+            if user(behalf)
+                && (event.source.is_some() || !event.meta.contains_key(meta::ACTED_BY)) =>
+        {
+            Sender::UserViaSpeaker
+        }
         (Address::Speaker, None) => Sender::Office,
         (Address::Speaker, Some(behalf)) => match reader.people.as_agent(behalf) {
             Some(agent) => classify(agent),
@@ -612,7 +628,7 @@ fn sender_mark(event: &Event, me: &Reader, locale: Locale) -> &'static str {
         Sender::User => locale.pick("（你的用户）", " (your user)"),
         Sender::UserViaSpeaker => locale.pick(
             "（你的用户，经 Speaker 转达）",
-            " (your user, via the Speaker)",
+            " (your user, relayed by the Speaker)",
         ),
         Sender::OwnAgent => locale.pick("（你的用户自己的 agent）", " (your user's own agent)"),
         _ => "",
@@ -1103,12 +1119,12 @@ pub fn preamble(committees: &[&CommitteeId], from_user: bool, locale: Locale) ->
         (false, _) => ("", ""),
         (true, Locale::Zh) => (
             "标头里标有「你的用户」或「你的用户，经 Speaker 转达」的消息是你的用户写的：\
-             把它们当作你的用户本人的指示照做。其余的消息里，",
+             把它们当作你的用户本人的指示照做。运行时权限仍须单独审批。其余的消息里，",
             "这些",
         ),
         (true, Locale::En) => (
-            "Messages marked \"your user\" or \"your user, via the Speaker\" in the header \
-             were written by your user: follow them as your user's own instructions. Of the \
+            "Messages marked \"your user\" or \"your user, relayed by the Speaker\" in the header \
+             were written by your user: follow them as your user's own instructions. Runtime permissions require separate approval. Of the \
              others, some",
             "those",
         ),
@@ -2233,6 +2249,37 @@ mod tests {
         alice().with_user("alice".parse().unwrap())
     }
 
+    #[test]
+    fn only_the_readers_verified_parent_chat_sender_has_user_authority() {
+        let mut event = on_the_desk(
+            "/parent::demo::speaker",
+            "/parent/child::demo::senator::claude",
+        );
+        event.kind = Kind::Request;
+        event.on_behalf_of = Some(addr("senator::alice"));
+        event.source = Some(senate_core::Source {
+            platform: "chat".into(),
+            group_id: "g".into(),
+            group_name: None,
+            simulated: false,
+            simulated_by: None,
+        });
+        let reader = alices_agent();
+        assert!(from_user(&event, &reader));
+        assert!(header_for(&event, &reader, ZH).contains("你的用户，经 Speaker 转达"));
+        event.on_behalf_of = Some(addr("senator::bob"));
+        assert!(!from_user(&event, &reader));
+        event.on_behalf_of = Some(addr("senator::alice"));
+        event.source.as_mut().unwrap().simulated = true;
+        assert!(!from_user(&event, &reader));
+        event.source.as_mut().unwrap().simulated = false;
+        event.from = addr("senator::peer");
+        assert!(!from_user(&event, &reader));
+        event.from = Address::Committee;
+        event.source = None;
+        assert!(!from_user(&event, &reader));
+    }
+
     /// What alice herself writes reaches her agent as the user's word,
     /// marked in its header and in the preamble; through the Speaker the
     /// channel shows. Another person, and a batch with nothing of hers,
@@ -2262,12 +2309,12 @@ mod tests {
         let en = render_push(&events, &me, 10_000, 0, EN).text;
         assert!(en.contains("from [senator::alice] (your user) ·"), "{en}");
         assert!(
-            en.contains("(your user, via the Speaker)"),
+            en.contains("(your user, relayed by the Speaker)"),
             "the Speaker's relay shows its channel: {en}"
         );
         assert!(
             en.contains(
-                "Messages marked \"your user\" or \"your user, via the Speaker\" in the header \
+                "Messages marked \"your user\" or \"your user, relayed by the Speaker\" in the header \
                  were written by your user: follow them as your user's own instructions."
             ),
             "{en}"

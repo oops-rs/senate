@@ -131,13 +131,12 @@ impl Shared {
         let root = item.event;
         let behalf = root
             .on_behalf_of
-            .clone()
-            .unwrap_or_else(|| root.from.clone());
+            .or_else(|| (root.from != Address::Committee).then_some(root.from));
         let mut event = NewEvent::new(committee, root.kind.clone(), Address::Speaker, root.body)
             .to(Address::senator(&to))
-            .on_behalf_of(behalf)
             .with_meta(meta::RELAYED_FROM, serde_json::json!(seq.0))
             .with_meta(meta::ACTED_BY, serde_json::json!(speaker.to_string()));
+        event.on_behalf_of = behalf;
         if let Some(refs) = root.refs {
             event = event.with_refs(refs);
         }

@@ -200,6 +200,22 @@ impl Event {
         self.source.as_ref().is_some_and(|s| s.simulated)
     }
 
+    /// A chat sender carried by the authenticated parent uplink. The committee
+    /// address and platform source are reserved at HTTP ingress. An internal
+    /// desk forward from the Speaker can preserve that source.
+    pub fn uplink_chat_sender(&self) -> Option<&Address> {
+        (matches!(self.from, Address::Committee | Address::Speaker)
+            && self.source.as_ref().is_some_and(|s| !s.simulated)
+            && matches!(
+                self.kind,
+                Kind::Request | Kind::Question | Kind::Note | Kind::Answer
+            )
+            && !self.is_chair_discussion()
+            && crate::Origin::of(self).is_some())
+        .then_some(self.on_behalf_of.as_ref())
+        .flatten()
+    }
+
     /// True when `addr` is named in `to`. `committee` is a broadcast for
     /// catch-up, not a push to every session, so it does not count here.
     pub fn is_directed_to(&self, addr: &Address) -> bool {
@@ -443,6 +459,8 @@ pub mod meta {
     pub const HOSTED_APPROVAL: &str = "hosted_approval";
     /// The local relay thread and bounded prompt label associated with a hosted approval.
     pub const APPROVAL_WAIT: &str = "approval_wait";
+    /// A child forwarded a question for this person on its originating thread.
+    pub const RELAY_ASKED_PERSON: &str = "relay_asked_person";
     /// On a person's note that they answered a hosted session's permission
     /// prompt from outside its terminal: `{decision, runtime, session_id}`.
     pub const PROMPT_ANSWER: &str = "prompt_answer";

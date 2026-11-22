@@ -371,6 +371,8 @@ struct CommitteeState {
     /// the "today" card with everything said in them, as the brief leaves
     /// them out.
     simulated_roots: HashSet<Seq>,
+    /// A single chat message can have copies for several child seats.
+    child_relays: HashMap<Seq, Vec<Seq>>,
     /// Each agent's latest event: `(seq, ts, what)`.
     activity: HashMap<SenatorName, (Seq, DateTime<Utc>, String)>,
     /// Each seat in a child Senate's latest event here, by its relay
@@ -470,6 +472,14 @@ impl CommitteeState {
     /// Observing is idempotent: a repeated step observes its event again.
     fn observe(&mut self, platform: &str, event: &Event) {
         self.board.observe(event);
+        if let Some(chat) = relayed_from(event)
+            && event.to.iter().any(|a| a.as_child().is_some())
+        {
+            let roots = self.child_relays.entry(chat).or_default();
+            if !roots.contains(&event.seq) {
+                roots.push(event.seq);
+            }
+        }
         if let Some(run) = work::work_root_run(event) {
             self.work.entry(event.seq).or_insert(run);
         } else if event.kind == Kind::Status
@@ -2133,8 +2143,46 @@ impl Engine {
             && event.kind == Kind::Note
             && !event.meta.contains_key(meta::CHILD_OFFLINE)
             && !senate_core::brief::is_seat_removed(event);
-        if event.kind == Kind::Status || own_note || approval {
+        if event.kind == Kind::Status
+            || own_note
+            || approval
+            || (event.from == Address::Speaker
+                && event.meta.contains_key(meta::RELAYED_FROM)
+                && event.to.iter().any(|a| a.as_child().is_some()))
+        {
             return Ok(Vec::new());
+        }
+        if event.from.as_child().is_some()
+            && event.kind == Kind::Note
+            && event.meta.contains_key(meta::RELAY_ASKED_PERSON)
+        {
+            let Some(relay) = self.hub.get(&event.committee, root).await? else {
+                return Ok(Vec::new());
+            };
+            if !relay.to.contains(&event.from) {
+                return Ok(Vec::new());
+            }
+            let Some(source) = relay.source.filter(|s| s.platform == platform) else {
+                return Ok(Vec::new());
+            };
+            let copy = self
+                .plain_copies(&event.committee, root)
+                .await?
+                .into_iter()
+                .find(|copy| copy.target == source.group_id);
+            return Ok(copy
+                .map(|copy| MirrorPlan {
+                    to: PostTarget::Reply {
+                        message_ref: copy.message_ref,
+                        in_thread: true,
+                    },
+                    text: render::thread_mirror(l, self.seat_names(), event),
+                    target: source.group_id,
+                    record_as: None,
+                    card: None,
+                })
+                .into_iter()
+                .collect());
         }
         let covering = self.covering_for(event, root).await?;
         let state = self.committees.get(&event.committee);
@@ -2740,6 +2788,9 @@ impl Engine {
             self.resolve_for_chat(index, chat).await?;
             return Ok(Flow::Done);
         }
+        if self.relay_chat_reply(chat, source).await? {
+            return Ok(Flow::Done);
+        }
         if self.confirm_proposal(chat).await? {
             return Ok(Flow::Done);
         }
@@ -2803,6 +2854,93 @@ impl Engine {
             },
         };
         self.run_bound(chat, decision).await
+    }
+
+    /// A reply to a child relay has a destination already. Keep the gateway's
+    /// verified sender and the original parent thread through delivery.
+    async fn relay_chat_reply(&self, chat: &Event, source: &Source) -> Result<bool, Stall> {
+        let Some(seq) = chat.thread else {
+            return Ok(false);
+        };
+        let Some(root) = self.hub.get(&chat.committee, seq).await? else {
+            return Ok(false);
+        };
+        let Some(original) = relayed_from(&root) else {
+            return Ok(false);
+        };
+        if !root
+            .source
+            .as_ref()
+            .is_some_and(|s| s.platform == source.platform && s.group_id == source.group_id)
+        {
+            return Ok(false);
+        }
+        let siblings = self
+            .committees
+            .get(&chat.committee)
+            .and_then(|s| s.child_relays.get(&original));
+        let seq = if let Some(siblings) = siblings.filter(|s| s.len() > 1) {
+            // The shared chat root alone cannot select one child's thread.
+            let Some(quoted) = chat.meta.get(meta::REPLY_TO).and_then(Value::as_str) else {
+                return Ok(false);
+            };
+            let Some(copy) = self.hub.mirror_of_message(&source.platform, quoted).await? else {
+                return Ok(false);
+            };
+            if copy.committee != chat.committee {
+                return Ok(false);
+            }
+            let Some(question) = self.hub.get(&chat.committee, copy.seq).await? else {
+                return Ok(false);
+            };
+            let Some(seq) = question.thread.filter(|seq| {
+                siblings.contains(seq)
+                    && question.from.as_child().is_some()
+                    && question.meta.contains_key(meta::RELAY_ASKED_PERSON)
+            }) else {
+                return Ok(false);
+            };
+            seq
+        } else {
+            seq
+        };
+        let thread = self.hub.thread(&chat.committee, seq).await?;
+        let Some(root) = thread.first().filter(|root| root.seq == seq) else {
+            return Ok(false);
+        };
+        let [child] = root.to.as_slice() else {
+            return Ok(false);
+        };
+        if child.as_child().is_none() {
+            return Ok(false);
+        }
+        let awaiting = thread.iter().filter(|e| e.seq < chat.seq).rev().find(|e| {
+            (&e.from == child && e.meta.contains_key(meta::RELAY_ASKED_PERSON))
+                || (e.kind == Kind::Answer && (&e.from == child || e.from == Address::Speaker))
+        });
+        let answer = !chat.is_simulated()
+            && self.is_member(&chat.from)
+            && awaiting.is_some_and(|e| {
+                &e.from == child
+                    && e.kind == Kind::Note
+                    && e.meta.get(meta::RELAY_ASKED_PERSON).and_then(Value::as_str)
+                        == chat.from.as_senator().map(|s| s.as_str())
+            });
+        let kind = if answer { Kind::Answer } else { Kind::Note };
+        let mut reply = NewEvent::new(chat.committee.clone(), kind, Address::Speaker, &chat.body)
+            .with_id(derived_event_id(&[
+                "child-chat-reply",
+                &chat.id.to_string(),
+            ]))
+            .in_thread(seq)
+            .to(child.clone())
+            .with_source(source.clone())
+            .with_meta(meta::RELAYED_FROM, json!(chat.seq.0));
+        if !chat.is_simulated() {
+            reply = reply.on_behalf_of(chat.from.clone());
+        }
+        self.append(reply).await?;
+        Ok(true)
     }
 
     /// The committee a step of `chat` acts on: the chat's own, or, in an agent
@@ -3254,8 +3392,10 @@ impl Engine {
         let seq = agent::event_key(chat);
         let committee = self.acting_committee(chat);
         let mut relay = NewEvent::new(committee.clone(), kind.clone(), Address::Speaker, body)
-            .with_id(derived_event_id(&["relay", committee.as_str(), &seq]))
-            .on_behalf_of(chat.from.clone());
+            .with_id(derived_event_id(&["relay", committee.as_str(), &seq]));
+        if !chat.is_simulated() {
+            relay = relay.on_behalf_of(chat.from.clone());
+        }
         if committee == chat.committee {
             // Acknowledged under the chat when processed; a relay on another
             // committee (after a Bind) is acknowledged in the plan's result.

@@ -687,7 +687,7 @@ impl TaskBoard {
         // A person speaking in the thread answers what was addressed to
         // them before, and ends an escalation to them: it lasts until they
         // act. A provisional answer is the Speaker's, not theirs.
-        let by_person = person_of(&event.from);
+        let by_person = person_of(event.uplink_chat_sender().unwrap_or(&event.from));
         let seen = seen_by_author(event);
         let mut acted = false;
         //
