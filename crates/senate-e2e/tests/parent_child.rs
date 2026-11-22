@@ -605,6 +605,16 @@ async fn on_desk(desk: &Desk, body: &str) -> senate_core::Event {
     .await
 }
 
+async fn uplink_store(desk: &Desk) -> std::sync::Arc<dyn senate_log::LogStore> {
+    let db = desk
+        .paths
+        .hosted(senate_bridge::paths::HOSTED_KEY)
+        .join("log.db");
+    senate_log::connect(&format!("sqlite:{}", db.display()))
+        .await
+        .unwrap()
+}
+
 /// What the uplink keeps in the hosted Senate's registry, by key. The
 /// machine is stopped while `f` has the store.
 async fn uplink_registry<T, F, Fut>(desk: &mut Desk, f: F) -> T
@@ -613,13 +623,7 @@ where
     Fut: std::future::Future<Output = T>,
 {
     desk.stop().await;
-    let db = desk
-        .paths
-        .hosted(senate_bridge::paths::HOSTED_KEY)
-        .join("log.db");
-    let store = senate_log::connect(&format!("sqlite:{}", db.display()))
-        .await
-        .unwrap();
+    let store = uplink_store(desk).await;
     let out = f(store).await;
     desk.start().await;
     out
@@ -659,9 +663,22 @@ async fn a_parent_whose_log_was_wiped_is_registered_with_and_read_again() {
         .await
         .unwrap();
     }
-    ask_desk(&world, "Asked last before the wipe").await;
+    let last = ask_desk(&world, "Asked last before the wipe").await;
     let old_root = on_desk(&desk, "Asked before the wipe").await;
     on_desk(&desk, "Asked last before the wipe").await;
+
+    // Delivering the question and committing the page cursor are separate writes.
+    let store = uplink_store(&desk).await;
+    let cursor = format!("uplink:cursor:{}", refund());
+    eventually_async("the old page cursor is committed", || async {
+        store
+            .registry(&cursor)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|(key, value)| key == &cursor && *value == serde_json::json!(last.seq))
+    })
+    .await;
 
     // The wipe: the same Senate at the same address, on an empty log.
     world.restart().await;
@@ -714,10 +731,7 @@ async fn a_parent_whose_log_was_wiped_is_registered_with_and_read_again() {
     assert_eq!(answer.from, alice_desk());
 
     // What is kept is about the new log only.
-    let kept = uplink_registry(&mut desk, |store| async move {
-        store.registry("uplink:").await.unwrap()
-    })
-    .await;
+    let kept = store.registry("uplink:").await.unwrap();
     let value = |key: &str| kept.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
     assert_eq!(value("uplink:epoch"), Some(serde_json::json!(new_epoch)));
     let downs: Vec<&String> = kept
