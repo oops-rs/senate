@@ -425,7 +425,10 @@ async fn the_language_can_change_while_running() {
     let (_dir, socket, world) = setup();
     let _daemon = FakeDaemon::start(&socket, world);
     let (driver, _) = driver(&socket, Locale::En);
-    until(&driver, "online", |s| s.online && s.inbox.len() == 2).await;
+    until(&driver, "inbox, approval and docket", |s| {
+        s.online && s.inbox.len() == 2 && s.approvals.len() == 1 && s.counts.docket == 2
+    })
+    .await;
 
     driver.set_locale(Locale::Zh);
     let s = state(&driver);
