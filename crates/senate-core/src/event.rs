@@ -441,6 +441,8 @@ pub mod meta {
     /// True on a hosted approval notice. Its archive status carries the
     /// root's event ID under the same key, pinning it across log epochs.
     pub const HOSTED_APPROVAL: &str = "hosted_approval";
+    /// The local relay thread and bounded prompt label associated with a hosted approval.
+    pub const APPROVAL_WAIT: &str = "approval_wait";
     /// On a person's note that they answered a hosted session's permission
     /// prompt from outside its terminal: `{decision, runtime, session_id}`.
     pub const PROMPT_ANSWER: &str = "prompt_answer";

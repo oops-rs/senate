@@ -1513,6 +1513,91 @@ async fn hosted_stop_reminds_only_about_delivered_unanswered_relays_once() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_codex_approval_on_a_relay_reports_the_task_even_at_an_attended_terminal() {
+    let (mut h, project) = fixture(true, Locale::En).await;
+    let fake = h.codex();
+    start(&mut h).await;
+    let (launch, terminal) = Terminal::spawn(&h, project, HostedRuntime::Codex).await;
+    let mut viewer = terminal.viewer().await;
+    viewer.write_all(&[2, 0, 1, b'x']).await.unwrap();
+    let native = &launch.session_id;
+    eventually("subscribed", WAIT, || {
+        (fake.subscribers(native) == 1).then_some(())
+    })
+    .await;
+    let root = h.server.append_silently(
+        senate_core::NewEvent::new(
+            committee(),
+            senate_core::Kind::Request,
+            Address::Committee,
+            "check the build",
+        )
+        .to(Address::senator(&launch.senator))
+        .with_meta(
+            senate_core::meta::ORIGIN,
+            json!({"locator": "/parent::refund-v2::speaker", "thread": 9}),
+        ),
+    );
+    h.store().enqueue(&launch.senator, &root).unwrap();
+    h.store()
+        .mark_read(&[(launch.senator.clone(), committee(), root.seq)], native)
+        .unwrap();
+    let id = fake.request_approval(
+        native,
+        "item/commandExecution/requestApproval",
+        json!({"threadId":native,"command":"cargo test"}),
+    );
+    wait_relayed(&h, &format!("{native}:{id}")).await;
+    approve_session(&h, &launch, Decision::Allow).await.unwrap();
+    let notice = next_notice(&h, 1).await;
+    assert_eq!(
+        notice.meta[senate_core::meta::APPROVAL_WAIT],
+        json!({"thread":root.seq, "label":"run: cargo test"})
+    );
+    wait_archived(&h, notice.seq).await;
+    terminal.stop();
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unseated_host_drops_the_notice_before_attempting_an_append() {
+    let (mut h, project) = fixture(false, Locale::En).await;
+    start(&mut h).await;
+    let (launch, terminal) = Terminal::spawn(&h, project, HostedRuntime::Claude).await;
+    h.server.state.inner.lock().unwrap().unseated = Some(launch.senator.clone());
+    claude_hook(
+        h.dir.path(),
+        &h,
+        terminal.host_id(),
+        json!({
+            "hook_event_name":"Notification", "session_id": launch.session_id,
+            "notification_type":"permission_prompt"
+        }),
+    )
+    .await;
+    eventually("the unseated notice was suppressed", WAIT, || {
+        let db = rusqlite::Connection::open(h.paths.state_db()).unwrap();
+        let suppressed: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM hosted_approvals,
+            json_each(state, '$.notices') WHERE json_extract(value, '$.unseated') = 1)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        suppressed.then_some(())
+    })
+    .await;
+    assert!(notices(&h).is_empty());
+    assert_eq!(
+        h.server.state.inner.lock().unwrap().hosted_approval_appends,
+        0
+    );
+    terminal.stop();
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_approve_answers_a_hosted_codex_prompt_through_its_app_server() {
     let (mut h, project) = fixture(true, Locale::En).await;
     let fake = h.codex();

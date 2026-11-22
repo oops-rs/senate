@@ -197,7 +197,9 @@ async fn commits_intervals_and_session_ends_checkpoint_on_their_own() {
     })
     .await;
     assert_eq!(payload.files.open.as_deref(), Some("- seq 9\n"));
-    // Ending the other session changes nothing: skipped.
+    // Even changed files must not produce a checkpoint after the seat was removed.
+    h.server.state.inner.lock().unwrap().unseated = Some(common::path("claude"));
+    std::fs::write(wd.join(".senate/OPEN.md"), "new work after removal").unwrap();
     let before = checkpoints(&h).len();
     h.hook(HookKind::SessionEnd, "s2", &wd, None).await;
     tokio::time::sleep(Duration::from_millis(500)).await;

@@ -2157,6 +2157,11 @@ impl Engine {
                         }
                         None => render::thread_mirror(l, self.seat_names(), event),
                     }
+                } else if event.kind == Kind::Note
+                    && event.from.as_child().is_some()
+                    && event.meta.get(meta::APPROVAL_WAIT) == Some(&Value::Bool(true))
+                {
+                    render::thread_mirror(l, self.seat_names(), event)
                 } else if event.kind == Kind::Answer || senate_core::brief::is_seat_removed(event) {
                     match &covering {
                         Some(old) => render::signed_covering(l, self.seat_names(), event, old),

@@ -114,6 +114,82 @@ async fn a_machine_under_a_parent_hosts_its_senate_and_registers_it_there() {
     assert_eq!(children.len(), 1);
     assert_eq!(children[0].name.as_str(), "alice-desk");
     assert_eq!(children[0].speaker.as_str(), "alice");
+    // The hosted prompt for a child task travels as a note under the original question.
+    {
+        use senate_core::{Address, CommitteeId, Hub, Kind, NewEvent, Origin, Seq, meta};
+        let committee = CommitteeId::new("demo").unwrap();
+        let asked = above
+            .hub
+            .append(NewEvent::new(
+                committee.clone(),
+                Kind::Question,
+                Address::Speaker,
+                "check",
+            ))
+            .await
+            .unwrap()
+            .event;
+        let worker = "claude".parse().unwrap();
+        let origin = Origin {
+            locator: "/acme::demo::speaker".parse().unwrap(),
+            thread: asked.seq,
+        };
+        let local = top
+            .daemon
+            .hub
+            .append(
+                NewEvent::new(
+                    committee.clone(),
+                    Kind::Question,
+                    Address::Committee,
+                    "check",
+                )
+                .to(Address::senator(&worker))
+                .with_meta(meta::ORIGIN, origin.value()),
+            )
+            .await
+            .unwrap()
+            .event;
+        top.daemon
+            .hub
+            .append(
+                NewEvent::new(
+                    committee.clone(),
+                    Kind::Question,
+                    Address::senator(&worker),
+                    "permission prompt",
+                )
+                .to(Address::Speaker)
+                .with_meta(meta::HOSTED_APPROVAL, serde_json::json!(true))
+                .with_meta(
+                    meta::APPROVAL_WAIT,
+                    serde_json::json!({"thread":local.seq, "label":"cargo test"}),
+                ),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                let events = above.hub.read(&committee, Seq::ZERO, 100).await.unwrap();
+                if let Some(note) = events
+                    .iter()
+                    .find(|e| e.meta.contains_key(meta::APPROVAL_WAIT))
+                {
+                    assert_eq!(note.thread, Some(asked.seq));
+                    assert_eq!(note.kind, Kind::Note);
+                    assert!(note.body.contains("cargo test"));
+                    assert_eq!(
+                        note.meta[meta::ANSWERED_BY],
+                        "/acme/alice-desk::demo::senator::claude"
+                    );
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
     machine.shutdown().await;
 
     // A restart registers again, and keeps its cursors.

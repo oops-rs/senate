@@ -272,7 +272,7 @@ impl Relay {
 
     fn resolved_for_host(&self, session_id: &str, request_id: Option<String>) {
         if let Some(observer) = &self.hosted {
-            let _ = observer.send(CodexApprovalSignal {
+            let _ = observer.send(CodexApprovalSignal::Resolved {
                 session_id: session_id.to_owned(),
                 request_id,
                 at: observed_at(),
@@ -370,6 +370,9 @@ impl Relay {
             .await;
         match sent {
             Ok(()) => {
+                if pending.hosted.is_some() {
+                    self.resolved_for_host(&pending.approval.session_id, Some(id.to_owned()));
+                }
                 self.publish(WatchEvent::ApprovalResolved {
                     id: id.to_string(),
                     session_id: pending.approval.session_id.clone(),
@@ -509,6 +512,9 @@ impl Relay {
                     })
             });
             tracing::info!(id = %approval.id, summary = %approval.summary, "a Codex approval is waiting");
+            let opened = hosted
+                .clone()
+                .filter(|_| !pending.contains_key(&approval.id));
             pending.insert(
                 approval.id.clone(),
                 Pending {
@@ -519,6 +525,9 @@ impl Relay {
                 },
             );
             drop(pending);
+            if let (Some(prompt), Some(observer)) = (opened, &self.hosted) {
+                let _ = observer.send(CodexApprovalSignal::Opened(prompt));
+            }
             self.publish(WatchEvent::ApprovalRequested(Box::new(approval)));
         }
     }

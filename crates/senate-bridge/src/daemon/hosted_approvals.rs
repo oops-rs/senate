@@ -21,6 +21,8 @@ enum PostError {
     Server(#[from] ApiClientError),
     #[error(transparent)]
     Store(#[from] StoreError),
+    #[error(transparent)]
+    Thread(#[from] IpcError),
 }
 
 struct PostBackoff {
@@ -140,18 +142,19 @@ impl Shared {
         Ok(serde_json::json!({}))
     }
 
-    fn observe_codex_resolution(&self, signal: CodexApprovalSignal) -> Result<(), StoreError> {
-        let Some((id, session)) = self.approval_host(&signal.session_id)? else {
+    fn observe_codex_resolution(
+        &self,
+        session_id: &str,
+        request_id: Option<&str>,
+        at: u64,
+    ) -> Result<(), StoreError> {
+        let Some((id, session)) = self.approval_host(session_id)? else {
             return Ok(());
         };
         if session.runtime == Runtime::Codex {
             self.edit_approvals(&id, |state| {
                 close_notices(state, |notice| {
-                    notice.at <= signal.at
-                        && signal
-                            .request_id
-                            .as_ref()
-                            .is_none_or(|key| &notice.prompt == key)
+                    notice.at <= at && request_id.is_none_or(|key| notice.prompt == key)
                 })
             })?;
         }
@@ -242,7 +245,7 @@ impl Shared {
         let notice = state
             .notices
             .iter()
-            .filter(|n| n.archive.is_none())
+            .filter(|n| !n.unseated && n.archive.is_none())
             .min_by_key(|n| n.at)?;
         let ago = observed_at().saturating_sub(notice.at);
         let since = chrono::Utc::now()
@@ -389,6 +392,9 @@ impl Shared {
         native: &str,
         notice: &ApprovalNotice,
     ) -> bool {
+        if notice.relay_thread.is_some() && notice.runtime == Runtime::Codex {
+            return true;
+        }
         if notice.archive.is_some() {
             // Recover the receipt of an append that may already exist, so
             // its archive can name the real seq.
@@ -413,12 +419,101 @@ impl Shared {
                     .any(|prompt| prompt.request_id == notice.prompt))
     }
 
+    async fn opened_codex_prompt(
+        &self,
+        prompt: crate::host_approval::CodexPrompt,
+    ) -> Result<(), PostError> {
+        let Some((host, session)) = self.approval_host(&prompt.session_id)? else {
+            return Ok(());
+        };
+        let Some(committee) = session.joined_committee.as_ref() else {
+            return Ok(());
+        };
+        if session.runtime != Runtime::Codex {
+            return Ok(());
+        }
+        if let Some(thread) = self.approval_thread(&prompt.session_id, committee).await? {
+            // A relay's requester needs this update even with someone at the terminal
+            // or when a remote decision arrives between two snapshots.
+            self.edit_approvals(&host, |state| {
+                let key = prompt.request_id;
+                open_notice(state, &session, prompt.at, key.clone(), Some(prompt.tool));
+                if let Some(n) = state
+                    .notices
+                    .iter_mut()
+                    .rev()
+                    .find(|n| n.prompt == key && !n.unseated && !n.append_attempted)
+                {
+                    n.relay_thread = Some(thread);
+                    return true;
+                }
+                false
+            })?;
+        } else {
+            self.reconcile_approval_hosts().await?;
+        }
+        Ok(())
+    }
+
+    // A command belongs in the asker's chat only when one open relay identifies it.
+    async fn approval_thread(
+        &self,
+        native: &str,
+        committee: &CommitteeId,
+    ) -> Result<Option<Seq>, PostError> {
+        let mut thread = None;
+        for item in self.store.delivered_relays(native, committee, false)? {
+            let seq = item.event.seq;
+            let (_, events) = self.thread_events(committee, item.event).await?;
+            if events.iter().any(|e| {
+                (e.kind == Kind::Answer && !is_provisional(e))
+                    || e.meta
+                        .get(meta::FORWARDED_TO)
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| s.parse::<Locator>().ok())
+                        .is_some_and(|target| {
+                            target.address() != &Address::Speaker
+                                || target.senate().is_some_and(|s| {
+                                    self.senate_path().is_none_or(|here| !here.ends_with(s))
+                                })
+                        })
+                    || StatusPayload::of(e)
+                        .is_some_and(|s| s.state == StatusState::Archived || s.takeover.is_some())
+            }) {
+                continue;
+            }
+            if thread.replace(seq).is_some() {
+                return Ok(None);
+            }
+        }
+        Ok(thread)
+    }
+
     async fn send_approval_notice(
         &self,
         host_id: &EventId,
         native: &str,
         notice: &ApprovalNotice,
     ) -> Result<(), PostError> {
+        if self
+            .api
+            .committee_seat_status(&notice.committee, &notice.agent)
+            .await?
+            .unseated
+        {
+            self.edit_approvals(host_id, |state| {
+                if notice.archive.is_some() {
+                    state.notices.retain(|n| n.id != notice.id);
+                    return true;
+                }
+                update_notice(state, &notice.id, |n| {
+                    n.unseated = true;
+                    n.relay_thread = None;
+                    n.append_attempted = false;
+                })
+            })?;
+            return Ok(());
+        }
         let sender = Address::senator(&notice.agent);
         match (notice.seq, notice.archive.as_ref()) {
             (None, _) => {
@@ -429,6 +524,11 @@ impl Shared {
                     Some(address) => address.clone(),
                     None => self.approval_recipient(notice).await?,
                 };
+                let relay_thread = if notice.append_attempted || notice.relay_thread.is_some() {
+                    notice.relay_thread
+                } else {
+                    self.approval_thread(native, &notice.committee).await?
+                };
                 // While looking up the recipient the viewer or a Claude
                 // result may have handled this before its first append.
                 if !self.can_append_approval(host_id, native, notice) {
@@ -438,17 +538,21 @@ impl Shared {
                     let Some(current) = state.notices.iter_mut().find(|n| n.id == notice.id) else {
                         return false;
                     };
-                    if current.archive.is_some() && !current.append_attempted {
+                    if current.archive.is_some()
+                        && !current.append_attempted
+                        && current.relay_thread.is_none()
+                    {
                         return false;
                     }
                     current.recipient = Some(recipient.clone());
+                    current.relay_thread = relay_thread;
                     current.append_attempted = true;
                     true
                 })?;
                 if !started {
                     return Ok(());
                 }
-                let event = NewEvent::new(
+                let mut event = NewEvent::new(
                     notice.committee.clone(),
                     Kind::Question,
                     sender,
@@ -457,7 +561,18 @@ impl Shared {
                 .with_id(notice.id.clone())
                 .to(recipient)
                 .with_meta(meta::HOSTED_APPROVAL, serde_json::json!(true));
+                if let Some(thread) = relay_thread {
+                    let label =
+                        notice.tool.as_deref().map(tool_label).unwrap_or_else(|| {
+                            self.locale.pick("终端提示", "terminal prompt").into()
+                        });
+                    event = event.with_meta(
+                        meta::APPROVAL_WAIT,
+                        serde_json::json!({"thread": thread, "label":label}),
+                    );
+                }
                 let posted = self.api.append(&event).await?;
+                tracing::info!(notice = %notice.id, committee = %notice.committee, seq = %posted.event.seq, ?relay_thread, "posted hosted approval notice");
                 self.edit_approvals(host_id, |state| {
                     update_notice(state, &notice.id, |n| {
                         n.seq = Some(posted.event.seq);
@@ -542,7 +657,7 @@ fn open_prompts(state: &HostApprovalState) -> Vec<EventId> {
     state
         .notices
         .iter()
-        .filter(|n| n.archive.is_none())
+        .filter(|n| !n.unseated && n.archive.is_none())
         .map(|n| n.id.clone())
         .collect()
 }
@@ -575,7 +690,7 @@ fn open_notice(
     prompt: String,
     tool: Option<String>,
 ) -> bool {
-    let Some(committee) = session.committee() else {
+    let Some(committee) = session.joined_committee.as_ref() else {
         return false;
     };
     if state
@@ -596,6 +711,8 @@ fn open_notice(
         committee: committee.clone(),
         recipient: None,
         seq: None,
+        relay_thread: None,
+        unseated: false,
         archive: None,
         append_attempted: false,
         failures: 0,
@@ -613,9 +730,9 @@ fn close_notices(state: &mut HostApprovalState, applies: impl Fn(&ApprovalNotice
             changed = true;
         }
     }
-    state
-        .notices
-        .retain(|n| n.archive.is_none() || n.append_attempted || n.seq.is_some());
+    state.notices.retain(|n| {
+        n.archive.is_none() || n.append_attempted || n.seq.is_some() || n.relay_thread.is_some()
+    });
     changed
 }
 
@@ -643,10 +760,19 @@ pub(super) async fn observe(
         tokio::select! {
             _ = shutdown.changed() => break,
             Some(signal) = signals.recv() => {
-                if let Err(error) = shared.observe_codex_resolution(signal) {
-                    tracing::warn!(%error, "recording Codex approval resolution");
+                match signal {
+                    CodexApprovalSignal::Opened(prompt) => {
+                        if let Err(error) = shared.opened_codex_prompt(prompt).await {
+                            tracing::warn!(%error, "recording Codex approval request");
+                        }
+                    }
+                    CodexApprovalSignal::Resolved { session_id, request_id, at } => {
+                        if let Err(error) = shared.observe_codex_resolution(&session_id, request_id.as_deref(), at) {
+                            tracing::warn!(%error, "recording Codex approval resolution");
+                        }
+                        continue;
+                    }
                 }
-                continue;
             }
             _ = retry.tick() => {
                 if let Err(error) = shared.reconcile_approval_hosts().await {
@@ -665,7 +791,9 @@ pub(super) async fn observe(
         let mut pending = BTreeSet::new();
         for (host, state) in states {
             for notice in state.notices.into_iter().filter(|n| {
-                n.failures < POST_FAILURE_LIMIT && (n.seq.is_none() || n.archive.is_some())
+                !n.unseated
+                    && n.failures < POST_FAILURE_LIMIT
+                    && (n.seq.is_none() || n.archive.is_some())
             }) {
                 let operation = notice
                     .seq
@@ -691,6 +819,7 @@ pub(super) async fn observe(
                         tracing::debug!(%error, "posting hosted approval notice");
                         if matches!(&error, PostError::Server(server) if server.definitive_notice_rejection())
                         {
+                            tracing::warn!(%error, notice = %notice.id, committee = %notice.committee, "server refused hosted approval notice");
                             shared.reject_approval_post(&host, &notice);
                         }
                     }

@@ -283,7 +283,7 @@ impl Shared {
         Ok(())
     }
 
-    async fn seat_is_unseated(
+    pub(super) async fn seat_is_unseated(
         &self,
         committee: &CommitteeId,
         senator: &SenatorName,

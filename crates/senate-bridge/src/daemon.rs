@@ -4136,7 +4136,9 @@ impl Shared {
             self.committees_changed.notify_one();
             self.work.notify_one();
             // The hook waits for this reply; the checkpoint does not keep it.
-            if let Some(session) = before.filter(|s| s.committee().is_some()) {
+            if let Some(session) = before.filter(|s| {
+                s.committee().is_some() && (registered.is_none() || s.joined_committee.is_some())
+            }) {
                 let shared = self.clone();
                 tokio::spawn(async move {
                     shared
@@ -4315,6 +4317,11 @@ impl Shared {
         let Some(committee) = session.committee().cloned() else {
             return;
         };
+        if trigger == CheckpointTrigger::SessionEnd
+            && self.seat_is_unseated(&committee, &session.agent).await != Ok(false)
+        {
+            return;
+        }
         let Some(root) = worktree(session).await else {
             return;
         };

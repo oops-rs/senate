@@ -55,11 +55,14 @@ pub(crate) struct CodexPrompt {
     pub tool: String,
 }
 
-/// The relay's positive evidence that particular requests are no longer pending.
-pub(crate) struct CodexApprovalSignal {
-    pub session_id: String,
-    pub request_id: Option<String>,
-    pub at: u64,
+/// Native request arrivals and resolutions, in observation order.
+pub(crate) enum CodexApprovalSignal {
+    Opened(CodexPrompt),
+    Resolved {
+        session_id: String,
+        request_id: Option<String>,
+        at: u64,
+    },
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -94,6 +97,10 @@ pub(crate) struct ApprovalNotice {
     /// Fixed before posting so a retry keeps the same recipient and event ID.
     pub recipient: Option<Address>,
     pub seq: Option<Seq>,
+    #[serde(default)]
+    pub relay_thread: Option<Seq>,
+    #[serde(default)]
+    pub unseated: bool,
     /// The stable ID of its archive status once a handling fact arrives.
     pub archive: Option<EventId>,
     /// The append may have reached the server even if its reply was lost.

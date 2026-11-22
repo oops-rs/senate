@@ -776,10 +776,26 @@ impl Worker {
         let Some(parent) = self.parent() else {
             return Ok(());
         };
-        if event.kind != Kind::Answer || is_provisional(event) {
-            return Ok(());
-        }
-        let Some(root) = event.thread else {
+        let approval = event
+            .meta
+            .get(meta::APPROVAL_WAIT)
+            .filter(|_| event.is_hosted_approval(&self.hub.roster_now().people()));
+        let (root_seq, kind, body) = if let Some(wait) = approval {
+            let (Some(root), Some(label)) = (wait["thread"].as_u64(), wait["label"].as_str())
+            else {
+                return Ok(());
+            };
+            let prefix = self
+                .config
+                .locale
+                .pick("等待授权：", "Waiting for approval: ");
+            (Seq(root), Kind::Note, format!("{prefix}{label}"))
+        } else if event.kind == Kind::Answer && !is_provisional(event) {
+            let Some(root) = event.thread else {
+                return Ok(());
+            };
+            (root, Kind::Answer, event.body.clone())
+        } else {
             return Ok(());
         };
         // What came down as an answer is not sent back up.
@@ -805,14 +821,41 @@ impl Worker {
         if brought {
             return Ok(());
         }
-        let Some(root) = self
+        let Some(mut root) = self
             .hub
-            .get(&event.committee, root)
+            .get(&event.committee, root_seq)
             .await
             .map_err(|e| Pass::Failed(e.to_string()))?
         else {
             return Ok(());
         };
+        if approval.is_some() {
+            // Accept a link only from the seat that received the task, or its desk worker.
+            let at_desk = root.to.contains(&Address::Speaker)
+                && self.hub.office().is_some_and(|o| {
+                    o.agent_workers()
+                        .any(|a| Some(a) == event.from.as_senator())
+                });
+            if root.thread.is_some() || (!root.to.contains(&event.from) && !at_desk) {
+                return Ok(());
+            }
+            // A desk-forwarded task names the original incoming thread locally.
+            if root.from == Address::Speaker
+                && let Some(origin) = Origin::of(&root)
+                && origin.locator.senate() == Some(&self.here())
+                && let Some(committee) = origin.locator.committee()
+            {
+                let Some(incoming) = self
+                    .hub
+                    .get(committee, origin.thread)
+                    .await
+                    .map_err(|e| Pass::Failed(e.to_string()))?
+                else {
+                    return Ok(());
+                };
+                root = incoming;
+            }
+        }
         let Some(origin) = Origin::of(&root) else {
             return Ok(());
         };
@@ -834,9 +877,9 @@ impl Worker {
         );
         let mut up = NewEvent::new(
             asked_on,
-            Kind::Answer,
+            kind,
             Address::child(self.config.name.clone(), event.committee.clone()),
-            &event.body,
+            body,
         )
         .to(origin.locator.address().clone())
         .in_thread(origin.thread)
@@ -845,6 +888,9 @@ impl Worker {
             meta::ANSWERED_BY,
             serde_json::Value::String(answered_by.to_string()),
         );
+        if approval.is_some() {
+            up = up.with_meta(meta::APPROVAL_WAIT, serde_json::Value::Bool(true));
+        }
         if let Some(acted_by) = event.meta.get(meta::ACTED_BY) {
             up = up.with_meta(meta::ACTED_BY, acted_by.clone());
         }
@@ -857,7 +903,7 @@ impl Worker {
                 Pass::Failed(why) => {
                     // Refused above: it will be refused again. Said, and
                     // passed over.
-                    tracing::warn!(id = %event.id, "the Senate above refused an answer: {why}");
+                    tracing::warn!(id = %event.id, "the Senate above refused the thread update: {why}");
                     Ok(())
                 }
             },

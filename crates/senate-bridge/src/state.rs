@@ -2117,15 +2117,16 @@ impl Store {
         &self,
         session: &str,
         committee: &CommitteeId,
-        only_unreminded: bool,
+        for_reminder: bool,
     ) -> Result<Vec<QueueItem>, StoreError> {
         self.items(
             "session_id = ?1 AND committee = ?2 AND status = 'delivered'
-            AND (NOT ?3 OR relay_reminded = 0) AND json_extract(event, '$.kind') = 'question'
+            AND json_extract(event, '$.kind') IN ('question', 'request')
+            AND (NOT ?3 OR (relay_reminded = 0 AND json_extract(event, '$.kind') = 'question'))
             AND json_extract(event, '$.thread') IS NULL
             AND json_extract(event, '$.from') IN ('committee', 'speaker')
             AND json_type(event, '$.meta.origin') = 'object'",
-            &[&session, &committee.as_str(), &only_unreminded],
+            &[&session, &committee.as_str(), &for_reminder],
         )
     }
 
