@@ -2,9 +2,10 @@ import AppKit
 import SwiftUI
 import SenateCore
 
-/// The Senate menu-bar app: a status item with the number waiting on you and
-/// a menu, and one window with the inbox, the approvals, the Codex threads,
-/// the docket of a Senate your agent presides over, and the Senates served.
+/// The Senate menu-bar app: a status item with the number waiting on you
+/// and a menu of just those items, and one window with everything else
+/// (the threads, the approvals, the sessions, the docket of a Senate your
+/// agent presides over, the Senates served, Settings).
 /// Everything shown comes from the Rust core (`CoreStore`).
 @main
 struct SenateApp: App {
@@ -26,7 +27,7 @@ struct SenateApp: App {
             MainWindow(store: store)
                 .frame(minWidth: 760, minHeight: 460)
         }
-        .defaultSize(width: 980, height: 660)
+        .defaultSize(width: 1120, height: 740)
         .windowToolbarStyle(.unified)
         .defaultLaunchBehavior(.suppressed)
 
@@ -36,25 +37,27 @@ struct SenateApp: App {
     }
 }
 
-/// The status item: an icon, and the number waiting on you next to it.
+/// The status item: an icon, and the number waiting on you next to it
+/// (threads, Codex approvals and terminal prompts) when there is any.
 struct MenuBarLabel: View {
     let store: CoreStore
     @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
 
     var body: some View {
+        let count = store.state.online ? store.waitingCount : 0
         HStack(spacing: 3) {
             Image(systemName: store.state.online
                 ? "building.columns.fill"
                 : "building.columns")
-            if let badge = store.state.menu.badge {
-                Text(verbatim: badge)
+            if count > 0 {
+                Text(verbatim: String(count))
             }
         }
         .help(store.state.menu.tooltip)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Senate")
-        .accessibilityValue(store.state.menu.tooltip)
+        .accessibilityValue(store.waitingMenu().header)
         .task {
             // The label is the one view alive from launch: hand the store
             // the window opener, for notifications and `SENATE_APP_SHOW`.
@@ -63,47 +66,30 @@ struct MenuBarLabel: View {
     }
 }
 
-/// The status item's menu.
+/// The status item's menu: what waits on you and nothing else. One line
+/// saying how much, the first few items (each opens in the window), then
+/// Open Senate and Quit. Settings, About and everything about the
+/// connection live in the window.
 struct MenuContent: View {
     let store: CoreStore
 
     var body: some View {
-        Text(verbatim: store.state.menu.title)
-        Text(verbatim: store.state.menu.pending)
-        if let docket = store.state.menu.docket {
-            Text(verbatim: docket)
-        }
-        if let prompts = store.state.menu.prompts {
-            Button(prompts) { store.show(.sessions) }
-        }
-        if let setup = store.setupError {
-            Text(verbatim: L("menu.setup", setup))
-        }
-        if !store.state.online {
-            Button(L("offline.retry")) { store.reconnect() }
-        }
-        if !store.state.menu.lines.isEmpty {
-            Divider()
-            ForEach(store.state.menu.lines, id: \.self) { line in
-                Text(verbatim: line)
+        let menu = store.waitingMenu()
+        Text(verbatim: menu.header)
+        ForEach(menu.rows) { row in
+            Button {
+                store.open(row.item)
+            } label: {
+                Text(verbatim: row.title)
+                Text(verbatim: row.subtitle)
             }
         }
-        Divider()
-        Button(L("menu.open_inbox")) { store.show(.inbox) }
-            .keyboardShortcut("i")
-        Button(L("menu.open_approvals")) { store.show(.approvals) }
-            .keyboardShortcut("a")
-        Button(L("menu.open_sessions")) { store.show(.sessions) }
-            .keyboardShortcut("s")
-        if store.state.menu.docket != nil {
-            Button(L("menu.open_docket")) { store.show(.docket) }
-                .keyboardShortcut("d")
+        if menu.truncated {
+            Button(L("menu.show_all", Int64(menu.total))) { store.showHome() }
         }
         Divider()
-        SettingsLink { Text(verbatim: L("menu.settings")) }
-            .keyboardShortcut(",")
-        Button(L("menu.about")) { About.show() }
-        Divider()
+        Button(L("menu.open")) { store.showWindow() }
+            .keyboardShortcut("o")
         Button(L("menu.quit")) { NSApplication.shared.terminate(nil) }
             .keyboardShortcut("q")
     }

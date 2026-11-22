@@ -322,8 +322,19 @@ final class CoreStore {
 
     func show(_ section: Section) {
         self.section = section
+        showWindow()
+    }
+
+    /// Bring the window forward, on whatever it last showed.
+    func showWindow() {
         openWindow?(id: Self.windowID)
         NSApplication.shared.activate()
+    }
+
+    /// The home view itself: everything that waits, no thread open.
+    func showHome() {
+        place = .section(.inbox)
+        showWindow()
     }
 
     // MARK: Actions

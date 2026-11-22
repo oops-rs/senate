@@ -190,6 +190,84 @@ import SenateCore
         #expect(store.place == .section(.inbox))
     }
 
+    // MARK: The menu bar
+
+    @Test func theMenuListsWhatWaitsWithPermissionsFirst() async throws {
+        let store = store()
+        var state = online([thread(7, "which env?"), thread(8, "ship it?")])
+        state.sessions = [prompting("lead", waited: 60), prompting("tester", tool: "rm -rf target", waited: 300)]
+        state.approvals = [approval("a1", "run: make release", command: "make release")]
+        core.push(state)
+        try await until(store) { $0.state.inbox.count == 2 }
+        #expect(store.waitingCount == 5)
+        let menu = store.waitingMenu()
+        #expect(menu.total == 5)
+        #expect(!menu.truncated)
+        // What holds an agent first, the longest wait first; then the threads.
+        #expect(menu.rows.map(\.item.id) == [
+            "prompt:refund-v2::tester", "prompt:refund-v2::lead", "approval:a1",
+            "thread:refund-v2:7", "thread:refund-v2:8",
+        ])
+        #expect(menu.rows[0].subtitle == "rm -rf target · refund-v2 · 5m")
+        #expect(menu.rows[2].title == "run: make release")
+        #expect(menu.rows[2].subtitle.hasPrefix("make release · "))
+        #expect(menu.rows[3].title == "which env?")
+        #expect(menu.rows[3].subtitle.hasPrefix("refund-v2 · "))
+        if !appLanguage().hasPrefix("zh") {
+            #expect(menu.header == "5 waiting on you")
+        }
+    }
+
+    @Test func theMenuShowsTheFirstEightAndSaysHowManyThereAre() async throws {
+        let store = store()
+        core.push(online((1...12).map { thread(UInt64($0), "t\($0)") }))
+        try await until(store) { $0.state.inbox.count == 12 }
+        let menu = store.waitingMenu()
+        #expect(menu.rows.count == WaitingMenu.limit)
+        #expect(menu.total == 12)
+        #expect(menu.truncated)
+    }
+
+    @Test func theMenuIsOneLineWhenNothingWaitsOrTheDaemonIsDown() async throws {
+        let store = store()
+        // Before the daemon answers: offline, and nothing listed.
+        #expect(store.waitingMenu().rows.isEmpty)
+        #expect(store.waitingMenu().header == L("menu.offline_short"))
+        core.push(online())
+        try await until(store) { $0.state.online }
+        #expect(store.waitingMenu().rows.isEmpty)
+        #expect(store.waitingMenu().header == L("menu.clear"))
+        #expect(store.waitingCount == 0)
+    }
+
+    @Test func aLongTitleOrCommandIsCutToOneShortLine() async throws {
+        let store = store()
+        var state = online([thread(7, String(repeating: "long ", count: 40))])
+        state.approvals = [approval("a1", "run", command: "echo one\necho two")]
+        core.push(state)
+        try await until(store) { $0.state.inbox.count == 1 }
+        let menu = store.waitingMenu()
+        #expect(menu.rows[0].subtitle.hasPrefix("echo one · "))
+        #expect(menu.rows[1].title.count == 64)
+        #expect(menu.rows[1].title.hasSuffix("…"))
+    }
+
+    @Test func openingAMenuItemGoesToWhatItNames() async throws {
+        let store = store()
+        var state = online([thread(7, "which env?")])
+        state.approvals = [approval("a1", "run: make release")]
+        core.push(state)
+        try await until(store) { $0.state.inbox.count == 1 }
+        let menu = store.waitingMenu()
+        store.open(menu.rows[1].item)
+        #expect(store.place == .thread("refund-v2:7"))
+        store.open(menu.rows[0].item)
+        #expect(store.place == .section(.approvals))
+        // "Show All" is home itself, whatever thread was open.
+        store.showHome()
+        #expect(store.place == .section(.inbox))
+    }
+
     @Test func notificationActionsReachTheCore() async throws {
         let store = store()
         await store.perform(.reply(committee: "refund-v2", root: 7, body: "yes"))

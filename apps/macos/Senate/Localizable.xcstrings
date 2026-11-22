@@ -1228,6 +1228,23 @@
         }
       }
     },
+    "menu.clear": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nothing waiting on you"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "没有等你处理的事项"
+          }
+        }
+      }
+    },
     "menu.daemon_down": {
       "extractionState": "manual",
       "localizations": {
@@ -1262,70 +1279,36 @@
         }
       }
     },
-    "menu.open_approvals": {
+    "menu.offline_short": {
       "extractionState": "manual",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Open Approvals"
+            "value": "Offline"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "打开审批"
+            "value": "离线"
           }
         }
       }
     },
-    "menu.open_docket": {
+    "menu.open": {
       "extractionState": "manual",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Open Docket"
+            "value": "Open Senate"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "打开议程"
-          }
-        }
-      }
-    },
-    "menu.open_inbox": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Open Inbox"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "打开收件箱"
-          }
-        }
-      }
-    },
-    "menu.open_sessions": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Open Sessions"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "打开会话"
+            "value": "打开 Senate"
           }
         }
       }
@@ -1364,19 +1347,54 @@
         }
       }
     },
-    "menu.setup": {
+    "menu.show_all": {
       "extractionState": "manual",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Setup: %@"
+            "value": "Show All %lld…"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "设置问题：%@"
+            "value": "显示全部 %lld 项…"
+          }
+        }
+      }
+    },
+    "menu.waiting": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld waiting on you"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld waiting on you"
+                }
+              }
+            }
+          }
+        },
+        "zh-Hans": {
+          "variations": {
+            "plural": {
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld 项等你处理"
+                }
+              }
+            }
           }
         }
       }

@@ -136,3 +136,20 @@ func online(_ inbox: [InboxThread] = [], agents: [AgentInfo] = [], docket: Bool 
     s.menu.docket = docket ? "Docket: 1 awaiting the Speaker" : nil
     return s
 }
+
+/// A hosted terminal with a permission prompt that has waited `waited` seconds.
+func prompting(_ name: String, tool: String = "cargo publish", waited: TimeInterval = 60) -> HostedSession {
+    HostedSession(
+        label: "refund-v2::\(name)", sessionId: "s-\(name)", mention: "[senator::\(name)]",
+        committee: "refund-v2", runtime: "claude", model: nil, dir: "/work",
+        running: true, startedAt: nil, attached: false, typedSecsAgo: nil,
+        promptTool: tool, promptSince: Date.now.addingTimeInterval(-waited), promptAnswerable: true,
+        paused: false)
+}
+
+/// A Codex approval request received `waited` seconds ago.
+func approval(_ id: String, _ summary: String, command: String? = nil, waited: TimeInterval = 30) -> ApprovalRequest {
+    ApprovalRequest(
+        id: id, thread: "019a-thread", kind: "command", summary: summary, command: command,
+        cwd: "/work", reason: nil, files: [], receivedAt: Date.now.addingTimeInterval(-waited))
+}
