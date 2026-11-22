@@ -157,6 +157,11 @@ fn xml(s: &str) -> String {
 }
 
 /// The launchd user agent's property list.
+/// How long the service manager waits for senated to exit after asking it
+/// to: above [`crate::config::SHUTDOWN_PAUSE_SECS`], so a shutdown pause
+/// finishes.
+pub const STOP_TIMEOUT_SECS: u64 = 120;
+
 pub fn launchd_plist(spec: &Spec, senated: &Path) -> String {
     let log = xml(&text(&spec.log()));
     let mut out = String::new();
@@ -174,6 +179,11 @@ pub fn launchd_plist(spec: &Spec, senated: &Path) -> String {
         xml(&text(senated))
     );
     out.push_str("  <key>RunAtLoad</key>\n  <true/>\n  <key>KeepAlive</key>\n  <true/>\n");
+    // Room for `pause_on_shutdown` (90 s at most) before launchd kills it.
+    let _ = writeln!(
+        out,
+        "  <key>ExitTimeOut</key>\n  <integer>{STOP_TIMEOUT_SECS}</integer>"
+    );
     let _ = writeln!(
         out,
         "  <key>StandardOutPath</key>\n  <string>{log}</string>\n  \
@@ -239,6 +249,8 @@ pub fn systemd_unit(spec: &Spec, senated: &Path) -> String {
     // The detached terminal hosts stay in the unit's cgroup. Only
     // senated should receive the service manager's stop signal.
     out.push_str("KillMode=process\nRestart=always\nRestartSec=5\n");
+    // Room for `pause_on_shutdown` (90 s at most) before systemd kills it.
+    let _ = writeln!(out, "TimeoutStopSec={STOP_TIMEOUT_SECS}");
     if let Some(path) = &spec.path {
         let _ = writeln!(
             out,
@@ -1470,6 +1482,8 @@ mod tests {
   <true/>
   <key>KeepAlive</key>
   <true/>
+  <key>ExitTimeOut</key>
+  <integer>120</integer>
   <key>StandardOutPath</key>
   <string>/Users/alice/.senate/senated.log</string>
   <key>StandardErrorPath</key>
@@ -1519,6 +1533,7 @@ mod tests {
              KillMode=process\n\
              Restart=always\n\
              RestartSec=5\n\
+             TimeoutStopSec=120\n\
              StandardOutput=append:/home/alice/.senate/senated.log\n\
              StandardError=append:/home/alice/.senate/senated.log\n\
              \n\

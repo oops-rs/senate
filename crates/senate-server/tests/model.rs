@@ -34,6 +34,7 @@ async fn seat(server: &TestServer, agents: &[&str]) {
                 ALICE,
             )
             .json(&senate_core::api::Heartbeat {
+                paused: false,
                 agent: path(agent),
                 sessions: 1,
                 cursor: Seq::ZERO,
@@ -120,6 +121,7 @@ async fn a_wildcard_reaches_only_the_agents_on_the_committee() {
             ALICE,
         )
         .json(&senate_core::api::Heartbeat {
+            paused: false,
             agent: path("codex"),
             sessions: 1,
             cursor: Seq::ZERO,

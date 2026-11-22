@@ -501,6 +501,9 @@ pub struct SessionRow {
     /// for and since when. A fact only: deciding stays in the terminal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<HostedPrompt>,
+    /// Recorded paused (`senate session pause`): stopped, to be resumed.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub paused: bool,
 }
 
 /// A permission prompt waiting in a hosted terminal ([`SessionRow::prompt`]).
@@ -567,6 +570,34 @@ pub struct StopReply {
     /// The stop note is queued after an uncertain append.
     #[serde(default, skip_serializing_if = "is_false")]
     pub audit_pending: bool,
+}
+
+/// How long `senate session pause` waits for a checkpoint by default.
+pub const PAUSE_TIMEOUT_SECS: u64 = 90;
+
+/// What [`Request::Pause`] did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PauseReply {
+    pub senator: SenatorName,
+    pub committee: CommitteeId,
+    /// The checkpoint it left after the request, if it left one in time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<Seq>,
+    /// Seconds spent waiting for it.
+    pub waited_secs: u64,
+}
+
+/// What [`Request::Resume`] did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResumeReply {
+    pub senator: SenatorName,
+    pub committee: CommitteeId,
+    /// The checkpoint the resumed note points at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<Seq>,
+    /// The resumed note's seq, when it was posted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<Seq>,
 }
 
 /// The hints available when a hook times out before reading its payload.
@@ -652,6 +683,21 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "is_false")]
         force: bool,
     },
+    /// `senate session pause`: ask `senator` to checkpoint, wait for it
+    /// (at most `timeout_secs`, default [`PAUSE_TIMEOUT_SECS`]), stop its
+    /// terminal as [`Request::Stop`] does, and record it paused
+    /// ([`PauseReply`]). The local operator's: the CLI only.
+    Pause {
+        senator: AliasName,
+        #[serde(default, skip_serializing_if = "is_false")]
+        force: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_secs: Option<u64>,
+    },
+    /// `senate session resume`: restore a paused `senator` into the same
+    /// conversation and send it a note pointing at its last checkpoint
+    /// ([`ResumeReply`]). The CLI only.
+    Resume { senator: AliasName },
     /// Every Senate-hosted session this machine has a record of, and every
     /// host running with none ([`SessionsReply`]).
     Sessions,

@@ -325,7 +325,7 @@ impl CommitteeState {
             // last session ended, `senate session stop` say): away now, not once
             // the threshold passes.
             self.args.presence.leave(&self.args.committee, agent);
-            self.leases.leave(agent, Instant::now());
+            self.leases.leave(agent, Instant::now(), heartbeat.paused);
             self.check_lease(agent).await;
             return Ok(());
         }

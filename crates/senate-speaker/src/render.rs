@@ -2841,6 +2841,7 @@ mod tests {
         );
 
         let presence = AgentPresence {
+            paused: false,
             agent: path("claude"),
             state: PresenceState::Absent,
             since: Utc::now(),
@@ -2891,6 +2892,7 @@ mod tests {
         assert_eq!(age(Locale::Zh, chrono::Duration::days(3)), "3 天");
 
         let reassigned = PresencePayload {
+            paused: false,
             agent: path("claude"),
             state: PresenceState::Reassigned,
             since: Utc::now(),

@@ -149,6 +149,7 @@ async fn beat(server: &TestServer, token: &str, agent: &str, cursor: u64) {
     let response = server
         .request(Method::POST, &heartbeat_path(&committee()), token)
         .json(&Heartbeat {
+            paused: false,
             agent: path(agent),
             sessions: 1,
             cursor: Seq(cursor),
@@ -352,6 +353,7 @@ async fn store_with_old_beat(age_secs: i64) -> (Arc<dyn LogStore>, chrono::DateT
         .record_heartbeat(
             &committee(),
             Heartbeat {
+                paused: false,
                 agent: path("claude"),
                 sessions: 1,
                 cursor: Seq(0),
@@ -419,6 +421,7 @@ async fn a_logged_disconnect_becomes_absent_once_the_downtime_passes_the_lease()
     let (store, beat) = store_with_old_beat(1000).await;
     // The first server had already written the disconnect.
     let disconnected = senate_core::PresencePayload {
+        paused: false,
         agent: path("claude"),
         state: PresenceState::Disconnected,
         since: beat + chrono::Duration::seconds(120),
@@ -476,6 +479,7 @@ async fn a_sqlite_store_restarts_into_what_the_clock_says() {
             .record_heartbeat(
                 &committee(),
                 Heartbeat {
+                    paused: false,
                     agent: path("claude"),
                     sessions: 1,
                     cursor: Seq(0),
@@ -613,6 +617,7 @@ async fn leave(server: &TestServer, token: &str, agent: &str, cursor: u64) {
     let response = server
         .request(Method::POST, &heartbeat_path(&committee()), token)
         .json(&Heartbeat {
+            paused: false,
             agent: path(agent),
             sessions: 0,
             cursor: Seq(cursor),

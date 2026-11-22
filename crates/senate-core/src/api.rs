@@ -551,6 +551,11 @@ pub struct Heartbeat {
     /// threshold passes; its next ordinary heartbeat brings it back.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub left: bool,
+    /// With `left`: the agent was paused (`senate session pause`), not
+    /// stopped, and is expected back. Its presence is written `absent` at
+    /// once with `paused` set.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub paused: bool,
 }
 
 /// Upper bound the server applies to a search `limit`.

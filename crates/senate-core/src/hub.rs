@@ -409,6 +409,7 @@ pub trait Hub: Send + Sync + 'static {
             }
         }
         let payload = PresencePayload {
+            paused: false,
             agent: agent.clone(),
             state: PresenceState::TakenOver,
             since: Utc::now(),
@@ -514,6 +515,7 @@ pub fn reassign_transition(
         }
     }
     Ok(Some(PresencePayload {
+        paused: false,
         agent: agent.clone(),
         state: if undo {
             PresenceState::Online
@@ -752,6 +754,7 @@ mod tests {
 
     fn at(agent: &str, state: PresenceState, owner: Option<&str>) -> AgentPresence {
         AgentPresence {
+            paused: false,
             agent: path(agent),
             state,
             since: Utc::now(),
@@ -1017,6 +1020,7 @@ mod tests {
             Err(HubError::Rejected(_))
         ));
         let transition = |agent: &str, state| PresencePayload {
+            paused: false,
             agent: path(agent),
             state,
             since: Utc::now(),

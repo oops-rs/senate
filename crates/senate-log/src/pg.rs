@@ -810,6 +810,7 @@ impl LogStore for PgStore {
                 Ok(HeartbeatRecord {
                     committee: committee.clone(),
                     heartbeat: Heartbeat {
+                        paused: false,
                         agent: agent.clone(),
                         sessions: u32::try_from(sessions)
                             .map_err(|_| LogError::Corrupt(format!("sessions {sessions}")))?,
@@ -844,6 +845,7 @@ impl LogStore for PgStore {
             committee: committee.clone(),
             agent: agent.clone(),
             heartbeat: Heartbeat {
+                paused: false,
                 agent: agent.clone(),
                 sessions: u32::try_from(sessions)
                     .map_err(|_| LogError::Corrupt(format!("sessions {sessions}")))?,

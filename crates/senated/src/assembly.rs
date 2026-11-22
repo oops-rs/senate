@@ -680,7 +680,9 @@ impl Senated {
     }
 }
 
-pub(crate) async fn shutdown_signal() -> anyhow::Result<()> {
+/// SIGINT or SIGTERM: whether it was SIGTERM (a service manager or the
+/// system stopping it, rather than a person at its terminal).
+pub(crate) async fn shutdown_signal() -> anyhow::Result<bool> {
     use anyhow::Context;
     #[cfg(unix)]
     {
@@ -688,13 +690,18 @@ pub(crate) async fn shutdown_signal() -> anyhow::Result<()> {
         let mut terminate =
             signal(SignalKind::terminate()).context("installing the SIGTERM handler")?;
         tokio::select! {
-            result = tokio::signal::ctrl_c() => result.context("waiting for ctrl-c")?,
-            _ = terminate.recv() => {}
+            result = tokio::signal::ctrl_c() => {
+                result.context("waiting for ctrl-c")?;
+                Ok(false)
+            }
+            _ = terminate.recv() => Ok(true),
         }
     }
     #[cfg(not(unix))]
-    tokio::signal::ctrl_c()
-        .await
-        .context("waiting for ctrl-c")?;
-    Ok(())
+    {
+        tokio::signal::ctrl_c()
+            .await
+            .context("waiting for ctrl-c")?;
+        Ok(false)
+    }
 }

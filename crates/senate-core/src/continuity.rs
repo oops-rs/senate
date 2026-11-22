@@ -354,6 +354,11 @@ pub struct PresencePayload {
     /// `reassigned`: the agent that has the work now.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new_owner: Option<SenatorName>,
+    /// Away on purpose: its terminal was paused (`senate session pause`)
+    /// and is expected back. The state is still `absent`, so a client that
+    /// does not know the flag treats it as any absent agent.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub paused: bool,
 }
 
 impl PresencePayload {
@@ -378,6 +383,7 @@ impl PresencePayload {
         presence_line(
             &self.agent,
             self.state,
+            self.paused,
             self.new_owner.as_ref(),
             self.lag,
             locale,
@@ -385,9 +391,19 @@ impl PresencePayload {
     }
 }
 
+/// The state in words, `paused` for an absent agent paused on purpose.
+pub fn presence_label(state: PresenceState, paused: bool, locale: Locale) -> &'static str {
+    if paused && state == PresenceState::Absent {
+        locale.pick("已暂停", "paused")
+    } else {
+        state.label(locale)
+    }
+}
+
 fn presence_line(
     agent: &SenatorName,
     state: PresenceState,
+    paused: bool,
     new_owner: Option<&SenatorName>,
     lag: Option<u64>,
     locale: Locale,
@@ -395,7 +411,7 @@ fn presence_line(
     let mut line = format!(
         "{} {}",
         Address::senator(agent).in_text(),
-        state.label(locale)
+        presence_label(state, paused, locale)
     );
     if let Some(owner) = new_owner {
         line.push_str(&format!(" → {}", Address::senator(owner).in_text()));
@@ -449,6 +465,9 @@ pub struct AgentPresence {
     /// presence from the committee's log; no `presence` event carries it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duty: Option<String>,
+    /// Paused, not gone; see [`PresencePayload::paused`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub paused: bool,
 }
 
 impl AgentPresence {
@@ -464,6 +483,7 @@ impl AgentPresence {
             lag: payload.lag,
             new_owner: payload.new_owner.clone(),
             duty: None,
+            paused: payload.paused,
         }
     }
 
@@ -472,6 +492,7 @@ impl AgentPresence {
         presence_line(
             &self.agent,
             self.state,
+            self.paused,
             self.new_owner.as_ref(),
             self.lag,
             locale,
@@ -562,6 +583,49 @@ mod tests {
     use crate::ids::Name;
     use crate::roster::{DelegationPresence, Principal, Roster, SeatedAgent};
     use crate::testing::assert_senate_vocabulary;
+
+    /// `paused` is additive: an older client, which knows only the fields
+    /// below, still parses a paused presence as plain `absent`; and a
+    /// presence written before the flag parses as not paused.
+    #[test]
+    fn paused_is_additive_on_the_wire() {
+        #[derive(Deserialize)]
+        struct OlderPresence {
+            agent: SenatorName,
+            state: PresenceState,
+        }
+        let paused = AgentPresence {
+            agent: "claude".parse().unwrap(),
+            state: PresenceState::Absent,
+            since: Utc::now(),
+            since_seq: Seq(4),
+            seq: Some(Seq(5)),
+            last_seen: None,
+            cursor: None,
+            lag: None,
+            new_owner: None,
+            duty: None,
+            paused: true,
+        };
+        let json = serde_json::to_value(&paused).unwrap();
+        assert_eq!(json["paused"], true);
+        assert_eq!(json["state"], "absent");
+        let older: OlderPresence = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(older.state, PresenceState::Absent);
+        assert_eq!(older.agent.to_string(), "claude");
+
+        let mut before = json;
+        before.as_object_mut().unwrap().remove("paused");
+        let parsed: AgentPresence = serde_json::from_value(before).unwrap();
+        assert!(!parsed.paused);
+        let plain = AgentPresence { paused: false, ..paused.clone() };
+        assert!(serde_json::to_value(&plain).unwrap().get("paused").is_none());
+        assert_eq!(
+            paused.line(Locale::En),
+            "[senator::claude] paused",
+            "shown paused"
+        );
+    }
 
     fn path(s: &str) -> SenatorName {
         s.parse().unwrap()
@@ -655,6 +719,7 @@ mod tests {
 
     fn transition(agent: &str, state: PresenceState, since: DateTime<Utc>) -> PresencePayload {
         PresencePayload {
+            paused: false,
             agent: path(agent),
             state,
             since,

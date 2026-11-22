@@ -268,6 +268,7 @@ async fn a_thread_owner_does_not_take_another_agents_follow_ups() {
 
 fn reassigned(who: &str, owner: Option<&str>, ms: i64) -> NewEvent {
     let payload = senate_core::PresencePayload {
+        paused: false,
         agent: path(who),
         state: if owner.is_some() {
             senate_core::PresenceState::Reassigned

@@ -128,6 +128,11 @@ pub fn cannot_watch(alias: &str) -> String {
     )
 }
 
+/// What a paused session's tile says.
+pub fn paused_note(alias: &str) -> String {
+    format!("paused; `senate session resume {alias}` brings it back")
+}
+
 impl Tile {
     /// Watch `session`; a tile that `fits` asks for its session to be
     /// fitted to it ([`Tile::fit_to`]).
@@ -138,7 +143,14 @@ impl Tile {
             let state = shown_.clone();
             let socket = session.watch_socket();
             let alias = session.alias.clone();
+            let dim = session.dim;
             async move {
+                if dim {
+                    // Paused: no terminal to watch until it is resumed.
+                    shown(&state).note = Some(paused_note(&alias));
+                    changed.notify_one();
+                    return;
+                }
                 let note = match Watch::open(&socket).await {
                     Ok(mut watch) => {
                         shown(&state).mirror = Some(Mirror::default());

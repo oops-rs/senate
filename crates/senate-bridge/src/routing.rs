@@ -356,6 +356,7 @@ mod tests {
 
     fn reassigned(agent: &str, owner: Option<&str>, seq: u64) -> Event {
         let payload = PresencePayload {
+            paused: false,
             agent: path(agent),
             state: if owner.is_some() {
                 PresenceState::Reassigned

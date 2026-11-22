@@ -31,6 +31,8 @@ pub enum StopSelector {
     Named(Vec<String>),
     /// The running sessions nobody is attached to.
     Idle,
+    /// Every running session of one committee.
+    Committee(senate_core::CommitteeId),
     /// Every running session.
     All,
 }
@@ -51,34 +53,7 @@ pub fn select_for_stop<'a>(
     selector: &StopSelector,
     force: bool,
 ) -> Result<StopPlan<'a>, String> {
-    let running = rows.iter().filter(|r| r.is_running());
-    let chosen: Vec<&SessionRow> = match selector {
-        StopSelector::All => running.collect(),
-        StopSelector::Idle => running.filter(|r| !r.attached).collect(),
-        StopSelector::Named(names) => {
-            let mut out = Vec::new();
-            for name in names {
-                let running = || rows.iter().filter(|r| r.is_running());
-                let exact = running().find(|r| r.label() == *name || r.primary.as_str() == name);
-                // A bare alias names the one running session that has it.
-                let by_alias: Vec<&SessionRow> = running()
-                    .filter(|r| r.alias.as_ref().is_some_and(|a| a.as_str() == name))
-                    .collect();
-                match (exact, by_alias.as_slice()) {
-                    (Some(row), _) | (None, &[row]) => out.push(row),
-                    (None, []) => return Err(format!("no running hosted session named {name}")),
-                    (None, several) => {
-                        let labels: Vec<String> = several.iter().map(|r| r.label()).collect();
-                        return Err(format!(
-                            "{name} names several running sessions; name one: {}",
-                            labels.join(", ")
-                        ));
-                    }
-                }
-            }
-            out
-        }
-    };
+    let chosen = select(rows, selector, SessionRow::is_running, "running")?;
     let mut plan = StopPlan::default();
     for row in chosen {
         match row.typed_secs_ago {
@@ -87,6 +62,55 @@ pub fn select_for_stop<'a>(
         }
     }
     Ok(plan)
+}
+
+/// The sessions `senate session resume` is for: those recorded paused. A
+/// name that matches no paused session is an error.
+pub fn select_for_resume<'a>(
+    rows: &'a [SessionRow],
+    selector: &StopSelector,
+) -> Result<Vec<&'a SessionRow>, String> {
+    select(rows, selector, |r| r.paused, "paused")
+}
+
+/// The rows `selector` picks among those `eligible` (`what` they are, for
+/// an error). A bare alias names the one eligible session that has it;
+/// several are an error listing them, to name one as `committee::alias`.
+fn select<'a>(
+    rows: &'a [SessionRow],
+    selector: &StopSelector,
+    eligible: impl Fn(&SessionRow) -> bool,
+    what: &str,
+) -> Result<Vec<&'a SessionRow>, String> {
+    let ok = || rows.iter().filter(|r| eligible(r));
+    Ok(match selector {
+        StopSelector::All => ok().collect(),
+        StopSelector::Idle => ok().filter(|r| !r.attached).collect(),
+        StopSelector::Committee(committee) => ok()
+            .filter(|r| r.committee.as_ref() == Some(committee))
+            .collect(),
+        StopSelector::Named(names) => {
+            let mut out = Vec::new();
+            for name in names {
+                let exact = ok().find(|r| r.label() == *name || r.primary.as_str() == name);
+                let by_alias: Vec<&SessionRow> = ok()
+                    .filter(|r| r.alias.as_ref().is_some_and(|a| a.as_str() == name))
+                    .collect();
+                match (exact, by_alias.as_slice()) {
+                    (Some(row), _) | (None, &[row]) => out.push(row),
+                    (None, []) => return Err(format!("no {what} hosted session named {name}")),
+                    (None, several) => {
+                        let labels: Vec<String> = several.iter().map(|r| r.label()).collect();
+                        return Err(format!(
+                            "{name} names several {what} sessions; name one: {}",
+                            labels.join(", ")
+                        ));
+                    }
+                }
+            }
+            out
+        }
+    })
 }
 
 /// How long since `since`, in the largest whole unit: `45s`, `12m`, `3h`,
@@ -183,6 +207,9 @@ pub fn render(reply: &SessionsReply, now: DateTime<Utc>, locale: Locale) -> Stri
 
 /// Its state, and the prompt waiting in its terminal, if one is.
 fn state(row: &SessionRow, locale: Locale) -> String {
+    if row.paused {
+        return locale.pick("已暂停", "paused").to_owned();
+    }
     let state = row.state.as_str();
     match &row.prompt {
         Some(prompt) if row.is_running() => {
@@ -256,6 +283,7 @@ mod tests {
 
     fn row(name: &str, alias: Option<&str>, state: HostState) -> SessionRow {
         SessionRow {
+            paused: false,
             host_id: EventId::new(),
             session_id: format!("s-{name}"),
             primary: name.parse().unwrap(),

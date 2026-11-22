@@ -257,6 +257,7 @@ fn away(who: &SenatorName, offset_ms: i64) -> NewEvent {
     presence_event(
         refund(),
         &PresencePayload {
+            paused: false,
             agent: who.clone(),
             state: PresenceState::Absent,
             since,

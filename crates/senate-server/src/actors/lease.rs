@@ -84,6 +84,11 @@ struct Agent {
     /// When its bridge said it left (no session bound any more), with no
     /// activity seen since: quiet from then on, whatever the threshold.
     left: Option<Instant>,
+    /// It left paused (`senate session pause`), with no activity since:
+    /// it goes `absent` with `paused` at once.
+    pausing: bool,
+    /// The committed state carries `paused`.
+    paused: bool,
 }
 
 impl Agent {
@@ -99,6 +104,8 @@ impl Agent {
             new_owner: None,
             restored: false,
             left: None,
+            pausing: false,
+            paused: false,
         }
     }
 }
@@ -165,6 +172,8 @@ impl Leases {
                     new_owner: p.new_owner.clone(),
                     restored: heard.is_some(),
                     left: None,
+                    pausing: p.paused,
+                    paused: p.paused,
                 },
             );
         }
@@ -236,6 +245,7 @@ impl Leases {
             entry.last_seen = Some(at);
             entry.restored = false;
             entry.left = None;
+            entry.pausing = false;
             let ago =
                 chrono::Duration::from_std(now.saturating_duration_since(at)).unwrap_or_default();
             entry.last_seen_wall = Some(wall - ago);
@@ -249,7 +259,15 @@ impl Leases {
             // Stands until it is handed back (module docs).
             return None;
         }
-        let target = if entry.left.is_some() && quiet < self.timing.lease {
+        let target = if entry.pausing {
+            // It said it paused: absent now, and paused, whatever the
+            // threshold. Taken over or reassigned, it stays so.
+            match current {
+                Some(PresenceState::Online | PresenceState::Disconnected) => PresenceState::Absent,
+                Some(PresenceState::Absent) if !entry.paused => PresenceState::Absent,
+                _ => return None,
+            }
+        } else if entry.left.is_some() && quiet < self.timing.lease {
             // It said it left: away now, not once the threshold passes.
             match current {
                 Some(PresenceState::Online) => PresenceState::Disconnected,
@@ -290,7 +308,9 @@ impl Leases {
             }
             _ => wall,
         };
-        (current != Some(target)).then(|| PresencePayload {
+        let paused = target == PresenceState::Absent && entry.pausing;
+        (current != Some(target) || paused != entry.paused).then(|| PresencePayload {
+            paused,
             agent: agent.clone(),
             state: target,
             since,
@@ -306,9 +326,10 @@ impl Leases {
     /// `agent`'s bridge said just now that it left: no session of it is
     /// bound to the committee any more. The next [`Self::decide`] makes it
     /// `disconnected` at once, unless activity after `now` came first.
-    pub(crate) fn leave(&mut self, agent: &SenatorName, now: Instant) {
+    pub(crate) fn leave(&mut self, agent: &SenatorName, now: Instant, paused: bool) {
         if let Some(entry) = self.agents.get_mut(agent) {
             entry.left = Some(now);
+            entry.pausing = paused;
         }
     }
 
@@ -334,6 +355,7 @@ impl Leases {
             entry.restored = false;
         }
         PresencePayload {
+            paused: false,
             agent: agent.clone(),
             state: PresenceState::Online,
             since: wall,
@@ -361,6 +383,7 @@ impl Leases {
             Some(PresenceState::TakenOver) => Ok(None),
             Some(PresenceState::Disconnected | PresenceState::Absent) => {
                 Ok(Some(PresencePayload {
+                    paused: false,
                     agent: agent.clone(),
                     state: PresenceState::TakenOver,
                     since: wall,
@@ -406,6 +429,7 @@ impl Leases {
         entry.seq = Some(seq);
         entry.new_owner = payload.new_owner.clone();
         entry.restored = false;
+        entry.paused = payload.paused;
     }
 
     /// Every agent with a state, lag measured against `head`.
@@ -414,6 +438,7 @@ impl Leases {
             .iter()
             .filter_map(|(agent, a)| {
                 Some(AgentPresence {
+                    paused: a.paused,
                     agent: agent.clone(),
                     state: a.state?,
                     since: a.since,
@@ -480,6 +505,52 @@ mod tests {
         *seq += 1;
         l.apply(&p, Seq(*seq));
         Some(p.state)
+    }
+
+    #[test]
+    fn a_paused_leave_is_absent_and_paused_at_once_until_activity() {
+        let c = Clock {
+            start: Instant::now(),
+            wall: Utc::now(),
+        };
+        let mut l = Leases::new(T);
+        let mut seq = 0;
+        step(&mut l, &c, 0, Some(0), &mut seq);
+        l.leave(&alice(), c.at(10).0, true);
+        assert_eq!(
+            step(&mut l, &c, 10, None, &mut seq),
+            Some(PresenceState::Absent),
+            "not disconnected first"
+        );
+        let view = l.view(Seq(10));
+        assert!(view[0].paused, "{view:?}");
+        assert_eq!(step(&mut l, &c, 2000, None, &mut seq), None, "it stays");
+        assert_eq!(
+            step(&mut l, &c, 2100, Some(2100), &mut seq),
+            Some(PresenceState::Online),
+            "resumed"
+        );
+        assert!(!l.view(Seq(10))[0].paused);
+
+        // An ordinary leave is still disconnected, never paused.
+        l.leave(&alice(), c.at(2200).0, false);
+        assert_eq!(
+            step(&mut l, &c, 2200, None, &mut seq),
+            Some(PresenceState::Disconnected)
+        );
+        assert!(!l.view(Seq(10))[0].paused);
+        // Absent already: pausing marks it paused.
+        assert_eq!(
+            step(&mut l, &c, 3200, None, &mut seq),
+            Some(PresenceState::Absent)
+        );
+        l.leave(&alice(), c.at(3300).0, true);
+        assert_eq!(
+            step(&mut l, &c, 3300, None, &mut seq),
+            Some(PresenceState::Absent)
+        );
+        assert!(l.view(Seq(10))[0].paused);
+        assert_eq!(step(&mut l, &c, 3400, None, &mut seq), None);
     }
 
     #[test]
@@ -585,6 +656,7 @@ mod tests {
         let carol = path("aider");
         let committee = senate_core::CommitteeId::new("f").unwrap();
         let mk = |agent: &SenatorName, state, ago: i64| PresencePayload {
+            paused: false,
             agent: agent.clone(),
             state,
             since: c.wall - chrono::Duration::seconds(ago),

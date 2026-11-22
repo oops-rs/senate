@@ -46,6 +46,7 @@ pub(crate) fn presence_of(who: &SenatorName, state: PresenceState, offset_ms: i6
     presence_event(
         refund(),
         &PresencePayload {
+            paused: false,
             agent: who.clone(),
             state,
             since,

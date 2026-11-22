@@ -127,7 +127,12 @@ pub struct Machine {
     /// What keeps `senate status` told of the built-in session's
     /// configuration errors.
     watches: Vec<SecretaryWatch>,
+    /// The running developer-machine side's shutdown pause.
+    pauser: Pauser,
 }
+
+/// Where the developer-machine side leaves its shutdown pause while it runs.
+type Pauser = Arc<std::sync::Mutex<Option<daemon::ShutdownPauser>>>;
 
 /// What the hosted Senate is, before it starts.
 struct Plan {
@@ -269,7 +274,9 @@ impl Machine {
                 locale,
             });
         bridge.validate().map_err(MachineError::Invalid)?;
+        let pauser = Pauser::default();
         let side = Arc::new(DeveloperMachine {
+            pauser: pauser.clone(),
             options: DaemonOptions {
                 paths: paths.clone(),
                 config: bridge.clone(),
@@ -360,6 +367,7 @@ impl Machine {
             bridge,
             uplink,
             watches,
+            pauser,
         })
     }
 
@@ -404,6 +412,19 @@ impl Machine {
         futures::future::select_all(waits).await.0
     }
 
+    /// The developer-machine side's `pause_on_shutdown`
+    /// ([`daemon::DaemonHandle::pause_for_shutdown`]), when it is running.
+    pub async fn pause_for_shutdown(&self) {
+        let pauser = self
+            .pauser
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(pauser) = pauser {
+            pauser.pause().await;
+        }
+    }
+
     /// Stop the uplink, the developer-machine side, then every hosted
     /// Senate.
     pub async fn shutdown(mut self) {
@@ -428,7 +449,11 @@ impl Machine {
     pub async fn run_until_signal(self) -> anyhow::Result<()> {
         let failed = tokio::select! {
             signal = crate::assembly::shutdown_signal() => {
-                signal?;
+                if signal? {
+                    // SIGTERM: `pause_on_shutdown` pauses the hosted
+                    // sessions while every Senate is still up.
+                    self.pause_for_shutdown().await;
+                }
                 None
             }
             why = self.failed() => Some(why),
@@ -747,6 +772,7 @@ pub fn nested_notice(agent: &str, dir: &Path, locale: Locale) -> String {
 /// assembly's supervision.
 struct DeveloperMachine {
     options: DaemonOptions,
+    pauser: Pauser,
 }
 
 #[async_trait]
@@ -757,7 +783,15 @@ impl Component for DeveloperMachine {
 
     async fn run(&self, ctx: ComponentContext) -> anyhow::Result<()> {
         let handle = daemon::start(self.options.clone()).await?;
+        let set = |pauser| {
+            *self
+                .pauser
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = pauser;
+        };
+        set(Some(handle.shutdown_pauser()));
         ctx.shutdown.cancelled().await;
+        set(None);
         handle.shutdown().await;
         Ok(())
     }

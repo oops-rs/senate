@@ -173,6 +173,7 @@ mod front;
 mod host_policy;
 mod hosted_approvals;
 mod hosts;
+mod pause;
 mod preside;
 mod remote_approve;
 mod replace;
@@ -246,6 +247,12 @@ pub struct Timing {
     /// How long a hosted TUI showing a choice must have written nothing
     /// before its host reports a prompt waiting ([`crate::host::prompt`]).
     pub screen_prompt_quiet: Duration,
+    /// How long a session asked to pause must be quiet after its
+    /// checkpoint before its terminal is stopped.
+    pub pause_quiet: Duration,
+    /// The most `pause_on_shutdown` spends pausing, all sessions together
+    /// ([`crate::config::SHUTDOWN_PAUSE_SECS`]).
+    pub shutdown_pause: Duration,
 }
 
 impl Default for Timing {
@@ -268,6 +275,8 @@ impl Default for Timing {
             checkpoint_interval: Duration::from_secs(2 * 3600),
             agy_nudge_quiet: Duration::from_secs(10),
             screen_prompt_quiet: crate::host::prompt::QUIET,
+            pause_quiet: Duration::from_secs(10),
+            shutdown_pause: Duration::from_secs(crate::config::SHUTDOWN_PAUSE_SECS),
         }
     }
 }
@@ -522,6 +531,10 @@ pub(crate) struct Shared {
     /// nudge since. Any later hook of the session removes it. Kept in
     /// memory: after a restart no agy is nudged until its next `Stop`.
     agy_idle: Mutex<HashMap<String, AgyIdle>>,
+    /// Each agent's latest checkpoint it wrote itself (the tool, not an
+    /// automatic one) this run: when, and its seq. `session pause` waits
+    /// for one newer than its request.
+    tool_checkpoints: Mutex<HashMap<SenatorName, (Instant, Seq)>>,
     companion_config: CompanionConfig,
     /// The companion running now, if any (one at a time).
     companion: Mutex<Option<companion::Running>>,
@@ -596,6 +609,22 @@ impl DaemonHandle {
         &self.front.senates()[0].store
     }
 
+    /// SIGTERM's first step, for each Senate with `pause_on_shutdown`:
+    /// pause every running hosted session, within
+    /// [`Timing::shutdown_pause`]. A session not paused by then is recorded
+    /// paused all the same. Nothing for a Senate without the option.
+    pub async fn pause_for_shutdown(&self) {
+        self.shutdown_pauser().pause().await;
+    }
+
+    /// What pauses this daemon's sessions at SIGTERM, for a supervisor that
+    /// receives the signal while the handle is with a component.
+    pub fn shutdown_pauser(&self) -> ShutdownPauser {
+        ShutdownPauser {
+            front: self.front.clone(),
+        }
+    }
+
     /// Stop every task, report final cursors, remove the socket.
     pub async fn shutdown(self) {
         // An error means every receiver is already gone, which is the goal.
@@ -612,15 +641,37 @@ impl DaemonHandle {
     }
 }
 
+/// [`DaemonHandle::pause_for_shutdown`], apart from the handle.
+#[derive(Clone)]
+pub struct ShutdownPauser {
+    front: Arc<Front>,
+}
+
+impl ShutdownPauser {
+    /// See [`DaemonHandle::pause_for_shutdown`].
+    pub async fn pause(&self) {
+        let pauses = self
+            .front
+            .senates()
+            .iter()
+            .filter(|shared| shared.config.pause_on_shutdown)
+            .map(|shared| shared.pause_all_within(shared.timing.shutdown_pause));
+        futures::future::join_all(pauses).await;
+    }
+}
+
 /// Run until SIGINT or SIGTERM.
 pub async fn run(options: DaemonOptions) -> anyhow::Result<()> {
     let handle = start(options).await?;
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    tokio::select! {
-        r = tokio::signal::ctrl_c() => r?,
-        _ = term.recv() => {}
-    }
+    let terminated = tokio::select! {
+        r = tokio::signal::ctrl_c() => { r?; false }
+        _ = term.recv() => true,
+    };
     tracing::info!("shutting down");
+    if terminated {
+        handle.pause_for_shutdown().await;
+    }
     handle.shutdown().await;
     Ok(())
 }
@@ -733,6 +784,11 @@ pub async fn start_with_host_binary(
         tasks.push(tokio::spawn(host_notices(shared.clone(), rx.clone())));
         tasks.push(tokio::spawn(checkpointer(shared.clone(), rx.clone())));
         shared.work.notify_one();
+        if shared.config.resume_on_start {
+            // Not one of the daemon's tasks: shutdown does not wait for it.
+            let shared = shared.clone();
+            tokio::spawn(async move { shared.resume_paused_on_start().await });
+        }
         tracing::info!(
             person = %shared.config.person,
             senate = %shared.senate_label(),
@@ -826,6 +882,7 @@ impl Shared {
             home: common.home.clone(),
             rebinds: Mutex::new(HashMap::new()),
             agy_idle: Mutex::new(HashMap::new()),
+            tool_checkpoints: Mutex::new(HashMap::new()),
             companion_config: common.companion_config.clone(),
             companion: Mutex::new(None),
             companion_tried: Mutex::new(BTreeSet::new()),
@@ -2215,6 +2272,7 @@ impl Shared {
             }
         };
         let beat = Heartbeat {
+            paused: false,
             agent: agent.clone(),
             sessions: u32::try_from(sessions).unwrap_or(u32::MAX),
             cursor,
@@ -2235,7 +2293,15 @@ impl Shared {
                 return;
             }
         };
+        // A paused seat is away on purpose: absent and paused at once.
+        let paused = self
+            .store
+            .paused(agent)
+            .ok()
+            .flatten()
+            .is_some_and(|p| &p.committee == committee);
         let beat = Heartbeat {
+            paused,
             agent: agent.clone(),
             sessions: 0,
             cursor,
@@ -2895,6 +2961,14 @@ impl Shared {
                 senator,
                 force,
             } => self.sessions_changed(wrap(self.on_hosted_stop(&session, &senator, force).await)),
+            Request::Pause {
+                senator,
+                force,
+                timeout_secs,
+            } => self.sessions_changed(wrap(self.on_pause(&senator, force, timeout_secs).await)),
+            Request::Resume { senator } => {
+                self.sessions_changed(wrap(self.on_resume(&senator).await))
+            }
             Request::Replace {
                 senator,
                 prompt,
@@ -3249,6 +3323,13 @@ impl Shared {
             .and_then(Result::ok);
         let mut rows = Vec::new();
         let mut known = BTreeSet::new();
+        let paused: BTreeSet<SenatorName> = self
+            .store
+            .all_paused()
+            .map_err(internal)?
+            .into_iter()
+            .map(|p| p.agent)
+            .collect();
         for (session, host_id) in self.store.hosted_sessions().map_err(internal)? {
             if !known.insert(host_id.clone()) {
                 continue;
@@ -3281,6 +3362,7 @@ impl Shared {
                 attached: facts.attached,
                 typed_secs_ago: facts.typed_secs_ago,
                 prompt,
+                paused: !facts.running && paused.contains(&session.agent),
             });
         }
         rows.sort_by(|a, b| {
@@ -4129,6 +4211,7 @@ impl Shared {
             entry.head.clone_from(&payload.commit);
             entry.last = Instant::now();
         }
+        lock(&self.tool_checkpoints).insert(session.agent.clone(), (Instant::now(), posted.seq));
         let present = [
             (&payload.files.progress, PROGRESS_FILE),
             (&payload.files.decisions, DECISIONS_FILE),

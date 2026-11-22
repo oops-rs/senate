@@ -45,6 +45,7 @@ impl CommitteeSeatChange {
     /// An explicit join grants a seat, even before the agent connects.
     pub fn joined_presence(&self, event: &Event) -> PresencePayload {
         PresencePayload {
+            paused: false,
             agent: self.senator.clone(),
             state: PresenceState::Absent,
             since: event.ts,

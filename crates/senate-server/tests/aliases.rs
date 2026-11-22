@@ -29,6 +29,7 @@ async fn sit(server: &TestServer, committee: &str, agent: &str) {
     let response = server
         .request(Method::POST, &api::heartbeat_path(&c(committee)), ALICE)
         .json(&Heartbeat {
+            paused: false,
             agent: path(agent),
             sessions: 1,
             cursor: Seq::ZERO,

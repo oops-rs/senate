@@ -822,6 +822,7 @@ async fn heartbeats_keep_the_latest_per_agent(store: Arc<dyn LogStore>) {
         .record_heartbeat(
             &f,
             Heartbeat {
+                paused: false,
                 agent: claude.clone(),
                 sessions: 1,
                 cursor: Seq(4),
@@ -833,6 +834,7 @@ async fn heartbeats_keep_the_latest_per_agent(store: Arc<dyn LogStore>) {
         .unwrap();
     let second = senate_log::now();
     let beat = Heartbeat {
+        paused: false,
         agent: claude.clone(),
         sessions: 2,
         cursor: Seq(9),
@@ -858,6 +860,7 @@ async fn heartbeats_keep_the_latest_per_agent(store: Arc<dyn LogStore>) {
             .is_none()
     );
     let other = Heartbeat {
+        paused: false,
         agent: codex.clone(),
         sessions: 1,
         cursor: Seq(1),

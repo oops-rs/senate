@@ -25,6 +25,11 @@
 //! # Optional: at most this many Senate-hosted sessions on the machine.
 //! # Absent: no limit. 0: none may start.
 //! hosted_session_limit = 4
+//! # Optional: on SIGTERM, pause every hosted session (ask it to checkpoint,
+//! # then stop it, 90 s at most in all), and on start resume those recorded
+//! # paused. Both off by default.
+//! pause_on_shutdown = true
+//! resume_on_start = true
 //!
 //! # Optional: the agent each kind of coding session speaks as. These are
 //! # the defaults.
@@ -106,6 +111,15 @@ pub struct BridgeConfig {
     /// sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hosted_session_limit: Option<usize>,
+    /// On SIGTERM (a logout, a shutdown, the service stopping), pause every
+    /// running hosted session as `senate session pause --all --force` does,
+    /// within [`SHUTDOWN_PAUSE_SECS`] in all. Off unless set.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pause_on_shutdown: bool,
+    /// When the daemon starts, resume each hosted session recorded paused
+    /// (never one stopped on purpose). Off unless set.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub resume_on_start: bool,
     /// First segment of a developer branch, `<prefix>/<committee>/<person>`.
     #[serde(default = "default_branch_prefix")]
     pub branch_prefix: String,
@@ -124,6 +138,10 @@ pub struct BridgeConfig {
     #[serde(skip)]
     pub uplink: Option<Uplink>,
 }
+
+/// The most `pause_on_shutdown` spends pausing, all sessions together;
+/// the service managers give the daemon 120 s to exit.
+pub const SHUTDOWN_PAUSE_SECS: u64 = 90;
 
 /// `[agent]`: defaults for every agent this machine seats.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -256,6 +274,8 @@ impl fmt::Debug for BridgeConfig {
             .field("committee_from_branch", &self.committee_from_branch)
             .field("free_after_days", &self.free_after_days)
             .field("hosted_session_limit", &self.hosted_session_limit)
+            .field("pause_on_shutdown", &self.pause_on_shutdown)
+            .field("resume_on_start", &self.resume_on_start)
             .field("branch_prefix", &self.branch_prefix)
             .field("agents", &self.agents)
             .field("agent", &self.agent)
@@ -708,6 +728,8 @@ impl BridgeConfig {
             committee_from_branch: false,
             free_after_days: default_free_after_days(),
             hosted_session_limit: None,
+            pause_on_shutdown: false,
+            resume_on_start: false,
             branch_prefix: default_branch_prefix(),
             agents: AgentNames::default(),
             agent: AgentDefaults::default(),

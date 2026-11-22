@@ -240,6 +240,7 @@ impl Shared {
         auth.check_target(&target.committee, false)?;
         self.check_restore_seat(&target.committee, &target.session.agent)
             .await?;
+        let launch_senator = target.session.agent.clone();
         let audit_auth = &auth;
         let launch = self
             .on_restore_with(
@@ -252,6 +253,10 @@ impl Shared {
                 },
             )
             .await?;
+        // Restored: no longer paused, however it was brought back.
+        if let Err(error) = self.store.clear_paused(&launch_senator) {
+            tracing::warn!(%error, senator = %launch_senator, "clearing a restored pause");
+        }
         Ok(launch.finish())
     }
 
@@ -327,13 +332,37 @@ impl Shared {
                 ));
             }
         }
+        // Stopped on purpose: not to be resumed.
+        self.store.clear_paused(primary).map_err(internal)?;
+        self.stop_audited(&auth, &target, force, false).await
+    }
+
+    /// Stop `target`'s terminal and leave the audit note for it: `paused`,
+    /// that it was paused rather than stopped.
+    pub(super) async fn stop_audited(
+        &self,
+        auth: &HostAuthority,
+        target: &super::hosts::StopTarget,
+        force: bool,
+        paused: bool,
+    ) -> Result<StopReply, IpcError> {
+        let primary = &target.senator;
         let actor = auth.actor();
         let who = Address::senator(primary).in_text();
         let committee = &target.committee;
-        let mut body = self.locale.pick(
-            format!("{actor} 停止了委员会 `{committee}` 中 {who} 的托管终端。"),
-            format!("{actor} stopped the hosted terminal for {who} in committee `{committee}`."),
-        );
+        let mut body = if paused {
+            self.locale.pick(
+                format!("{actor} 暂停了委员会 `{committee}` 中 {who} 的托管终端，稍后恢复。"),
+                format!(
+                    "{actor} paused the hosted terminal for {who} in committee `{committee}`, to be resumed."
+                ),
+            )
+        } else {
+            self.locale.pick(
+                format!("{actor} 停止了委员会 `{committee}` 中 {who} 的托管终端。"),
+                format!("{actor} stopped the hosted terminal for {who} in committee `{committee}`."),
+            )
+        };
         if force {
             body.push_str(
                 self.locale
@@ -352,7 +381,7 @@ impl Shared {
             format!("{actor} requested a {verb} of the hosted terminal for {who} in committee `{committee}`. The host ended with the stop result unconfirmed."),
         );
         let _audit = self.track_stop_notice(event.id.clone());
-        let (session_id, recorded) = self.stop_host(&target, force, unconfirmed).await?;
+        let (session_id, recorded) = self.stop_host(target, force, unconfirmed).await?;
         if !recorded {
             return Err(IpcError::internal(format!(
                 "the terminal for {who} stopped, but the daemon did not acknowledge its session end",

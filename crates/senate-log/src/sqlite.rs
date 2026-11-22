@@ -736,6 +736,7 @@ impl LogStore for SqliteStore {
                 out.push(HeartbeatRecord {
                     committee: committee.clone(),
                     heartbeat: Heartbeat {
+                        paused: false,
                         agent: agent.clone(),
                         sessions: u32::try_from(sessions)
                             .map_err(|_| LogError::Corrupt(format!("sessions {sessions}")))?,
@@ -773,6 +774,7 @@ impl LogStore for SqliteStore {
             Ok(Some(HeartbeatRecord {
                 committee,
                 heartbeat: Heartbeat {
+                    paused: false,
                     agent: agent.clone(),
                     sessions: u32::try_from(sessions)
                         .map_err(|_| LogError::Corrupt(format!("sessions {sessions}")))?,

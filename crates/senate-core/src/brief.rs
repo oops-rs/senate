@@ -996,6 +996,7 @@ mod tests {
         log.push(presence_event(
             c(),
             &PresencePayload {
+                paused: false,
                 agent: "copilot".parse().unwrap(),
                 state: PresenceState::Disconnected,
                 since,

@@ -267,6 +267,7 @@ async fn an_agent_is_seated_on_first_contact_by_any_request_that_acts_as_it() {
     let refused = server
         .request(Method::POST, &heartbeat_path(&f), ALICE)
         .json(&Heartbeat {
+            paused: false,
             agent: path("claude"),
             sessions: 1,
             cursor: Seq::ZERO,
@@ -284,6 +285,7 @@ async fn beat(server: &TestServer, token: &str, agent: &str, cursor: u64) {
     let response = server
         .request(Method::POST, &heartbeat_path(&committee()), token)
         .json(&Heartbeat {
+            paused: false,
             agent: path(agent),
             sessions: 1,
             cursor: Seq(cursor),
@@ -796,6 +798,7 @@ async fn heartbeat_is_recorded_per_agent() {
     let server = TestServer::start().await;
     let f = committee();
     let beat = Heartbeat {
+        paused: false,
         agent: path("claude"),
         sessions: 2,
         cursor: Seq(3),
@@ -819,6 +822,7 @@ async fn heartbeat_is_recorded_per_agent() {
 
     // A second agent of the same person beats separately.
     let other = Heartbeat {
+        paused: false,
         agent: path("aider"),
         sessions: 1,
         cursor: Seq(1),
@@ -898,6 +902,7 @@ async fn every_response_carries_the_epoch() {
     server.append("one").await;
     let after = |after: &str| format!("{}?after={after}", events_path(&f));
     let beat = Heartbeat {
+        paused: false,
         agent: path("claude"),
         sessions: 1,
         cursor: Seq(1),
@@ -1092,6 +1097,7 @@ async fn a_stream_without_heartbeats_stops_counting_after_the_grace() {
         let response = server
             .request(Method::POST, &heartbeat_path(&f), ALICE)
             .json(&Heartbeat {
+                paused: false,
                 agent: alice.clone(),
                 sessions: 1,
                 cursor: Seq::ZERO,

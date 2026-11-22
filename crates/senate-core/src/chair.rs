@@ -176,6 +176,7 @@ mod tests {
         presence_event(
             c(),
             &PresencePayload {
+                paused: false,
                 agent: name(agent),
                 state: PresenceState::Online,
                 since: Utc::now(),

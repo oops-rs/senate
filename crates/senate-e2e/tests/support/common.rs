@@ -645,6 +645,8 @@ pub fn fast_timing() -> Timing {
         checkpoint_interval: Duration::from_secs(7200),
         agy_nudge_quiet: Duration::from_secs(10),
         screen_prompt_quiet: Duration::from_secs(15),
+        pause_quiet: Duration::from_millis(300),
+        shutdown_pause: Duration::from_secs(90),
     }
 }
 

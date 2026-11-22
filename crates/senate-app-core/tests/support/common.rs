@@ -611,6 +611,7 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
 /// prompt waiting, and a stopped Codex `reviewer`.
 pub fn hosted_sessions() -> SessionsReply {
     let row = |name: &str, alias: Option<&str>, runtime: Runtime, state: HostState| SessionRow {
+        paused: false,
         host_id: EventId::new(),
         session_id: format!("s-{name}"),
         primary: path(name),

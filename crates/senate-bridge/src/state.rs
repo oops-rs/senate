@@ -170,6 +170,12 @@ CREATE TABLE IF NOT EXISTS owners (
     session_id TEXT NOT NULL,
     PRIMARY KEY (committee, root)
 );
+CREATE TABLE IF NOT EXISTS hosted_paused (
+    agent      TEXT PRIMARY KEY,
+    committee  TEXT NOT NULL,
+    paused_at  INTEGER NOT NULL,
+    checkpoint INTEGER
+);
 CREATE TABLE IF NOT EXISTS replacements (
     old     TEXT PRIMARY KEY,
     record  TEXT NOT NULL,
@@ -183,6 +189,15 @@ const SESSION_COLS: &str = "session_id, cwd, git_root, branch, inferred_committe
 
 /// Columns of a queue row, in the order [`item_from_row`] reads them.
 const ITEM_COLS: &str = "agent, event, status, session_id, enqueued_at, redelivered";
+
+/// A hosted session recorded paused ([`Store::mark_paused`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Paused {
+    pub(crate) agent: SenatorName,
+    pub(crate) committee: CommitteeId,
+    pub(crate) paused_at: DateTime<Utc>,
+    pub(crate) checkpoint: Option<Seq>,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -1132,6 +1147,77 @@ impl Store {
                 model: Some(model),
             }),
         )
+    }
+
+    /// Record `agent`'s hosted session on `committee` as paused (`senate
+    /// session pause`): away on purpose, to be resumed. `checkpoint`: the
+    /// seq of the checkpoint it left, if it left one.
+    pub(crate) fn mark_paused(
+        &self,
+        agent: &SenatorName,
+        committee: &CommitteeId,
+        at: DateTime<Utc>,
+        checkpoint: Option<Seq>,
+    ) -> Result<(), StoreError> {
+        self.conn().execute(
+            "INSERT OR REPLACE INTO hosted_paused (agent, committee, paused_at, checkpoint)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                agent_text(agent),
+                committee.as_str(),
+                at.timestamp_millis(),
+                checkpoint.map(|s| s.0.cast_signed())
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Forget that `agent` was paused: it was resumed, stopped on purpose,
+    /// or replaced. Whether it was.
+    pub(crate) fn clear_paused(&self, agent: &SenatorName) -> Result<bool, StoreError> {
+        Ok(self
+            .conn()
+            .execute("DELETE FROM hosted_paused WHERE agent = ?1", [agent_text(agent)])?
+            != 0)
+    }
+
+    /// `agent`'s pause, if it is recorded paused.
+    pub(crate) fn paused(&self, agent: &SenatorName) -> Result<Option<Paused>, StoreError> {
+        Ok(self
+            .all_paused()?
+            .into_iter()
+            .find(|p| &p.agent == agent))
+    }
+
+    /// Every hosted session recorded paused, oldest pause first.
+    pub(crate) fn all_paused(&self) -> Result<Vec<Paused>, StoreError> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT agent, committee, paused_at, checkpoint FROM hosted_paused
+             ORDER BY paused_at, agent",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (agent, committee, at, checkpoint) = row?;
+            out.push(Paused {
+                agent: agent
+                    .parse()
+                    .map_err(|e| StoreError::Corrupt(format!("paused agent {agent}: {e}")))?,
+                committee: CommitteeId::new(&committee)
+                    .map_err(|e| StoreError::Corrupt(format!("paused committee {committee}: {e}")))?,
+                paused_at: DateTime::from_timestamp_millis(at).unwrap_or_default(),
+                checkpoint: checkpoint.map(|s| Seq(s.cast_unsigned())),
+            });
+        }
+        Ok(out)
     }
 
     /// The model and effort a hosted session was last started with.

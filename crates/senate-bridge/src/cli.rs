@@ -737,6 +737,51 @@ enum SessionCmd {
         #[arg(long)]
         deny: bool,
     },
+    /// Pause hosted sessions, to resume them later where they were.
+    ///
+    /// Each is sent a Senate note asking it to finish its current step and
+    /// write a checkpoint. The pause waits up to 90 s for the checkpoint
+    /// (--timeout changes that), or until the session has been quiet for
+    /// 10 s after writing it. Then its terminal is stopped as `session
+    /// stop` stops one, and it is recorded paused: its presence shows
+    /// paused, and what is sent to it waits. A session someone typed into
+    /// in the last 5 minutes is skipped unless --force. With no name and
+    /// no --all or --committee, choose one from a list.
+    #[command(after_help = "Examples:
+  senate session pause reviewer          Pause one, by alias or committee::alias
+  senate session pause --committee refund-v2
+  senate session pause --all --dry-run   Show what would be paused
+  senate session pause --all --timeout 30")]
+    Pause {
+        #[command(flatten)]
+        which: PauseSelection,
+        /// Pause even a session typed into in the last 5 minutes, or with a
+        /// viewer attending it.
+        #[arg(long)]
+        force: bool,
+        /// List what would be paused, and pause nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Seconds to wait for each session's checkpoint (default 90).
+        #[arg(long, value_name = "SECS")]
+        timeout: Option<u64>,
+    },
+    /// Resume paused hosted sessions in the same conversation.
+    ///
+    /// Each session recorded paused is restored as `session restore` does,
+    /// then sent a note pointing at its last checkpoint. A session stopped
+    /// on purpose is not paused, and is not resumed. With no name and no
+    /// --all or --committee, choose one from a list.
+    #[command(after_help = "Examples:
+  senate session resume reviewer
+  senate session resume --all")]
+    Resume {
+        #[command(flatten)]
+        which: PauseSelection,
+        /// List what would be resumed, and resume nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Resume a stopped hosted senator in the background.
     ///
     /// The recorded session reopens in a detached Senate-owned terminal. A
@@ -838,6 +883,19 @@ enum SenatorCmd {
         #[arg(long)]
         session: Option<String>,
     },
+}
+
+/// Which sessions `session pause` and `resume` are for.
+#[derive(Args)]
+struct PauseSelection {
+    /// Sessions by name (`committee::alias`, an alias, or senator name).
+    names: Vec<String>,
+    /// Every one.
+    #[arg(long, conflicts_with_all = ["names", "committee"])]
+    all: bool,
+    /// Every one on this committee.
+    #[arg(long, conflicts_with = "names")]
+    committee: Option<CommitteeId>,
 }
 
 #[derive(Args)]
@@ -1161,11 +1219,12 @@ fn settings_here() -> (Paths, Settings) {
 /// a command takes it.
 async fn hosted_sessions(paths: &Paths) -> anyhow::Result<Vec<crate::host::view::Session>> {
     let reply: crate::ipc::SessionsReply = daemon_call(paths, &Request::Sessions).await?;
-    // Only a running host can be watched; the rows come ordered by name.
+    // Only a running host can be watched; a paused one is shown greyed
+    // out. The rows come ordered by name.
     Ok(reply
         .rows
         .into_iter()
-        .filter(crate::ipc::SessionRow::is_running)
+        .filter(|row| row.is_running() || row.paused)
         .map(|row| crate::host::view::Session {
             key: row.session_id.clone(),
             title: format!(
@@ -1176,7 +1235,11 @@ async fn hosted_sessions(paths: &Paths) -> anyhow::Result<Vec<crate::host::view:
                     .map_or_else(|| "-".to_owned(), ToString::to_string),
                 row.runtime.as_str(),
                 row.model.label(),
-                row.state.as_str()
+                if row.paused {
+                    "paused"
+                } else {
+                    row.state.as_str()
+                }
             ),
             // What a command takes: `committee::alias`, so it names one
             // session whatever other committees call theirs.
@@ -1367,6 +1430,223 @@ async fn stop_sessions(
         failed += kept.len();
     }
     anyhow::ensure!(failed == 0, "{failed} session(s) could not be stopped");
+    Ok(())
+}
+
+/// What `session pause` (or, `paused`, `resume`) is for: the names given,
+/// each resolved as `attach` resolves one (an alias several agents have is
+/// the person's to pick), a committee, or all; with none, the session the
+/// person picks from the eligible ones. `None` when the person cancels.
+fn pause_selector(
+    which: PauseSelection,
+    paused: bool,
+) -> anyhow::Result<Option<crate::sessions::StopSelector>> {
+    use crate::sessions::StopSelector;
+    if which.all {
+        return Ok(Some(StopSelector::All));
+    }
+    if let Some(committee) = which.committee {
+        return Ok(Some(StopSelector::Committee(committee)));
+    }
+    if which.names.is_empty() {
+        let paths = Paths::from_env()?;
+        let rt = runtime(false)?;
+        let reply: crate::ipc::SessionsReply =
+            rt.block_on(daemon_call(&paths, &Request::Sessions))?;
+        let eligible: Vec<crate::ipc::SessionRow> = reply
+            .rows
+            .into_iter()
+            .filter(|r| if paused { r.paused } else { r.is_running() })
+            .collect();
+        anyhow::ensure!(
+            !eligible.is_empty(),
+            "{}",
+            if paused {
+                "no hosted session is paused; `senate session list` lists them"
+            } else {
+                "no hosted session is running; `senate session list` lists them"
+            }
+        );
+        let prompt = if paused {
+            "Resume which session?"
+        } else {
+            "Pause which session?"
+        };
+        return Ok(rt
+            .block_on(crate::host::pick_session(&eligible, prompt))?
+            .map(|primary| StopSelector::Named(vec![primary.to_string()])));
+    }
+    let mut names = Vec::new();
+    for name in which.names {
+        let parsed: AliasName = name
+            .parse()
+            .map_err(|e| anyhow::anyhow!("{name}: {e}"))?;
+        names.push(pick_alias(parsed)?.to_string());
+    }
+    Ok(Some(StopSelector::Named(names)))
+}
+
+/// How long one pause may take the daemon: its checkpoint wait, the stop,
+/// and room for the notes.
+fn pause_request_timeout(timeout: Option<u64>) -> Duration {
+    Duration::from_secs(timeout.unwrap_or(crate::ipc::PAUSE_TIMEOUT_SECS) + 60)
+}
+
+/// `senate session pause`: pauses each chosen session, all at once, and
+/// says what it left and why. Fails when any pause failed, or a session
+/// named was skipped.
+async fn pause_sessions(
+    paths: &Paths,
+    selector: &crate::sessions::StopSelector,
+    force: bool,
+    dry_run: bool,
+    timeout: Option<u64>,
+    locale: Locale,
+) -> anyhow::Result<()> {
+    let reply: crate::ipc::SessionsReply = daemon_call(paths, &Request::Sessions).await?;
+    let crate::sessions::StopPlan { stop, kept } =
+        crate::sessions::select_for_stop(&reply.rows, selector, force)
+            .map_err(anyhow::Error::msg)?;
+    for (row, ago) in &kept {
+        eprintln!(
+            "{}",
+            locale.pick(
+                format!(
+                    "跳过 {}：{} 秒前有人在它的终端输入（加 --force 也暂停）",
+                    row.label(),
+                    ago
+                ),
+                format!(
+                    "skipped {}: someone typed into it {ago}s ago (--force pauses it too)",
+                    row.label()
+                ),
+            )
+        );
+    }
+    if stop.is_empty() && kept.is_empty() {
+        println!(
+            "{}",
+            locale.pick("没有要暂停的会话。", "No session to pause.")
+        );
+    }
+    if dry_run {
+        for row in &stop {
+            println!(
+                "{}",
+                locale.pick(
+                    format!("将暂停 {}", row.label()),
+                    format!("would pause {}", row.label())
+                )
+            );
+        }
+        return Ok(());
+    }
+    let pauses = stop.iter().map(|row| async move {
+        let request = Request::Pause {
+            senator: AliasName::bare(row.primary.clone()),
+            force,
+            timeout_secs: timeout,
+        };
+        let result: Result<crate::ipc::PauseReply, _> = ipc::request(
+            &paths.socket(),
+            &request,
+            Duration::from_secs(1),
+            pause_request_timeout(timeout),
+        )
+        .await;
+        (row, result)
+    });
+    let mut failed = 0;
+    for (row, result) in futures::future::join_all(pauses).await {
+        match result {
+            Ok(reply) => println!(
+                "{}",
+                match (reply.checkpoint, locale) {
+                    (Some(seq), Locale::Zh) => format!("已暂停 {}（检查点 seq {seq}）", row.label()),
+                    (Some(seq), Locale::En) =>
+                        format!("paused {} (checkpoint seq {seq})", row.label()),
+                    (None, Locale::Zh) => format!(
+                        "已暂停 {}（{} 秒内没有新的检查点）",
+                        row.label(),
+                        reply.waited_secs
+                    ),
+                    (None, Locale::En) => format!(
+                        "paused {} (no new checkpoint in {}s)",
+                        row.label(),
+                        reply.waited_secs
+                    ),
+                }
+            ),
+            Err(error) => {
+                failed += 1;
+                eprintln!("{}: {error}", row.label());
+            }
+        }
+    }
+    if matches!(selector, crate::sessions::StopSelector::Named(_)) {
+        failed += kept.len();
+    }
+    anyhow::ensure!(failed == 0, "{failed} session(s) could not be paused");
+    Ok(())
+}
+
+/// `senate session resume`: resumes each chosen paused session, one after
+/// another. Fails when any could not be resumed.
+async fn resume_sessions(
+    paths: &Paths,
+    selector: &crate::sessions::StopSelector,
+    dry_run: bool,
+    locale: Locale,
+) -> anyhow::Result<()> {
+    let reply: crate::ipc::SessionsReply = daemon_call(paths, &Request::Sessions).await?;
+    let chosen = crate::sessions::select_for_resume(&reply.rows, selector)
+        .map_err(anyhow::Error::msg)?;
+    if chosen.is_empty() {
+        println!(
+            "{}",
+            locale.pick("没有要恢复的会话。", "No session to resume.")
+        );
+    }
+    let mut failed = 0;
+    for row in chosen {
+        if dry_run {
+            println!(
+                "{}",
+                locale.pick(
+                    format!("将恢复 {}", row.label()),
+                    format!("would resume {}", row.label())
+                )
+            );
+            continue;
+        }
+        let request = Request::Resume {
+            senator: AliasName::bare(row.primary.clone()),
+        };
+        let result: Result<crate::ipc::ResumeReply, _> = ipc::request(
+            &paths.socket(),
+            &request,
+            Duration::from_secs(1),
+            REPLACE_TIMEOUT,
+        )
+        .await;
+        match result {
+            Ok(reply) => println!(
+                "{}",
+                match (reply.checkpoint, locale) {
+                    (Some(seq), Locale::Zh) => format!("已恢复 {}（检查点 seq {seq}）", row.label()),
+                    (Some(seq), Locale::En) =>
+                        format!("resumed {} (checkpoint seq {seq})", row.label()),
+                    (None, Locale::Zh) => format!("已恢复 {}", row.label()),
+                    (None, Locale::En) => format!("resumed {}", row.label()),
+                }
+            ),
+            Err(error) => {
+                failed += 1;
+                eprintln!("{}: {error}", row.label());
+            }
+        }
+    }
+    anyhow::ensure!(failed == 0, "{failed} session(s) could not be resumed");
     Ok(())
 }
 
@@ -2414,6 +2694,32 @@ fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
                 crate::sessions::StopSelector::Named(names)
             };
             runtime(false)?.block_on(stop_sessions(&paths, &selector, force, locale))
+        }
+        SessionCmd::Pause {
+            which,
+            force,
+            dry_run,
+            timeout,
+        } => {
+            let paths = Paths::from_env()?;
+            let locale = BridgeConfig::locale_at(&paths.config());
+            let Some(selector) = pause_selector(which, false)? else {
+                return Ok(());
+            };
+            runtime(false)?.block_on(pause_sessions(
+                &paths, &selector, force, dry_run, timeout, locale,
+            ))
+        }
+        SessionCmd::Resume { which, dry_run } => {
+            let paths = Paths::from_env()?;
+            let locale = BridgeConfig::locale_at(&paths.config());
+            let Some(selector) = pause_selector(which, true)? else {
+                return Ok(());
+            };
+            if !dry_run {
+                remember_terminal()?;
+            }
+            runtime(false)?.block_on(resume_sessions(&paths, &selector, dry_run, locale))
         }
         SessionCmd::Restore { senator, model } => {
             let senator = pick_alias(senator)?;

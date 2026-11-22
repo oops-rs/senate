@@ -137,6 +137,7 @@ impl TestServer {
             token,
         )
         .json(&Heartbeat {
+            paused: false,
             agent: path(agent),
             sessions: 1,
             cursor: Seq::ZERO,
