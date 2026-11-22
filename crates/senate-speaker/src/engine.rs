@@ -1172,6 +1172,10 @@ pub(crate) struct Engine {
     /// The built-in session's senator name: what it signs as
     /// [`meta::ACTED_BY`], and what an office or a secretary relation names.
     me: SenatorName,
+    /// Compare hub report timestamps with the wall clock and bound the wait
+    /// with the monotonic clock.
+    started_at: DateTime<Utc>,
+    seat_report_deadline: Instant,
     /// The child Senates registered here, as the hub said last.
     children: Vec<senate_core::ChildSenate>,
     /// Every committee's aliases here, as the hub said last: how people
@@ -1246,6 +1250,8 @@ impl Engine {
             secretary,
             applied: None,
             me,
+            started_at: Utc::now(),
+            seat_report_deadline: Instant::now() + senate_core::api::UPLINK_POLL,
             children: Vec::new(),
             aliases: Default::default(),
             told_problems: None,

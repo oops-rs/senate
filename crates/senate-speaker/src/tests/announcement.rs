@@ -29,7 +29,7 @@ async fn hub_with_groups() -> std::sync::Arc<MemoryHub> {
 }
 
 /// Let `by` pass on a paused clock, with the Speaker caught up either side.
-async fn pass(rig: &Rig, by: Duration) {
+pub(super) async fn pass(rig: &Rig, by: Duration) {
     rig.settle().await;
     tokio::time::advance(by).await;
     rig.settle().await;

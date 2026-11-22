@@ -8,6 +8,10 @@
 //!   refresh renders the section and sends it only if it differs from the
 //!   one last sent. Nothing in it is relative to the time, so an unchanged
 //!   committee sends nothing.
+//! - **Startup seats.** Before the first send, read the hub's child reports.
+//!   Every registered child reports across committees, even when it has no
+//!   seats. Wait for reports dated since Speaker startup, up to one uplink
+//!   poll from startup. Only a send starts the hourly throttle.
 //! - **Coalesced and throttled.** One refresh is pending per group at a
 //!   time: `card_debounce_ms` after the first change, and never sooner than
 //!   [`ANNOUNCEMENT_INTERVAL`] after the last section sent there. Whatever
@@ -139,6 +143,41 @@ impl Engine {
             return;
         };
         entry.timer = None;
+        if entry.sent_at.is_none() && !entry.unsupported {
+            // Seat reports do not append events. Read them even on a quiet
+            // committee, including on the last attempt at the deadline.
+            let ready = match self.hub.children().await {
+                Ok(children) => {
+                    self.children = children;
+                    self.children
+                        .iter()
+                        .all(|child| child.last_seen.is_some_and(|seen| seen >= self.started_at))
+                }
+                Err(error) => {
+                    tracing::debug!(%error, "cannot read startup seat reports");
+                    false
+                }
+            };
+            let remaining = self
+                .seat_report_deadline
+                .saturating_duration_since(Instant::now());
+            if !ready && !remaining.is_zero() {
+                let delay = if self.card_debounce.is_zero() {
+                    remaining
+                } else {
+                    remaining.min(self.card_debounce)
+                };
+                entry.timer =
+                    Some(
+                        self.myself
+                            .send_after(delay, move || SpeakerMsg::AnnouncementDue {
+                                committee,
+                                group,
+                            }),
+                    );
+                return;
+            }
+        }
         if let Err(stall) = self.refresh_announcement(&committee, &group).await {
             warn!(%committee, %group, error = %stall, "announcement deferred");
             let (message, again) = (committee.clone(), group.clone());

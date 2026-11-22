@@ -87,8 +87,8 @@ use senate_server::ServerHub;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
-/// How often the uplink reads what is new on either side.
-pub const POLL: Duration = Duration::from_secs(2);
+pub use senate_core::api::UPLINK_POLL as POLL;
+
 /// Bound on one request to the Senate above.
 const TIMEOUT: Duration = Duration::from_secs(5);
 /// Events read per page.
