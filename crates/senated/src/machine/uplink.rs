@@ -173,7 +173,7 @@ struct Brought {
     committee: CommitteeId,
     seq: Seq,
     /// The currently routed local seat and task for subsequent chat replies.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     recipient: Option<(CommitteeId, Seq, Address)>,
 }
 
