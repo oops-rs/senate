@@ -168,11 +168,13 @@ use crate::session::{self, Runtime, Session, SessionState};
 use crate::state::{ItemKey, ItemStatus, QueueItem, SessionUpsert, Store, StoreError};
 use crate::stream::{self, CommitteeWorker};
 
+mod approval_guard;
 mod front;
 mod host_policy;
 mod hosted_approvals;
 mod hosts;
 mod preside;
+mod remote_approve;
 mod replace;
 mod roles;
 mod secretary_work;
@@ -2579,7 +2581,7 @@ impl Shared {
         &self,
         id: &str,
         decision: crate::approvals::Decision,
-    ) -> Result<crate::approvals::Approval, String> {
+    ) -> Result<crate::approvals::Approval, IpcError> {
         self.relay
             .answer_with(id, decision, |approval| {
                 if self
@@ -2590,14 +2592,15 @@ impl Shared {
                     || self.hosts.unpublished(&approval.session_id)
                 {
                     let message = self.locale.pick(
-                        "请使用 senate attach 在托管会话的终端内处理此权限请求。",
-                        "Use senate attach to handle this approval in the hosted session's terminal.",
+                        "请使用 senate session approve（应用中会话的允许/拒绝按钮），或 senate attach 在托管会话的终端内处理此权限请求。",
+                        "Use senate session approve (the session's Allow and Deny buttons in the app), or senate attach to handle this approval in the hosted session's terminal.",
                     );
                     return Err(message.into());
                 }
                 Ok(())
             })
             .await
+            .map_err(IpcError::bad_request)
     }
 
     fn publish(&self, event: WatchEvent) {
@@ -3172,9 +3175,11 @@ impl Shared {
             Request::Approve { id, decision } => wrap(
                 self.answer_desktop_approval(&id, decision)
                     .await
-                    .map(|approval| ApproveReply { approval, decision })
-                    .map_err(IpcError::bad_request),
+                    .map(|approval| ApproveReply { approval, decision }),
             ),
+            Request::ApproveSession { senator, decision } => {
+                wrap(self.on_approve_session(&senator, decision).await)
+            }
             // Served by the connection itself (`serve_connection`).
             Request::Watch { .. } => Reply::err(IpcError::bad_request(
                 "watch turns a connection into a stream; send it as the connection's request",
@@ -5665,6 +5670,12 @@ async fn serve_ipc(
 async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watch::Receiver<bool>) {
     use tokio::io::AsyncWriteExt;
 
+    // Who is calling, from the socket: for the requests only a person makes.
+    let peer = stream
+        .peer_cred()
+        .ok()
+        .and_then(|cred| cred.pid())
+        .and_then(|pid| u32::try_from(pid).ok());
     let (read, mut write) = stream.into_split();
     let mut reader = tokio::io::BufReader::new(read);
     loop {
@@ -5677,6 +5688,12 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                     let _guard = app.then(|| AppClient::enter(shared.app_clients()));
                     serve_watch(&shared, reader, write, shutdown).await;
                     return;
+                }
+                Ok(request) if approval_guard::answers_a_prompt(&request) => {
+                    match shared.refuse_agent_caller(peer).await {
+                        Ok(()) => (shared.dispatch(request).await, false),
+                        Err(refused) => (Reply::err(refused), false),
+                    }
                 }
                 Ok(request) => (shared.dispatch(request).await, false),
                 Err(e) => (

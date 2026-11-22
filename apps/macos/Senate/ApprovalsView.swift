@@ -1,8 +1,9 @@
 import SwiftUI
 import SenateCore
 
-/// What waits for your permission: prompts in hosted terminals (decided
-/// there: attach to answer) and Codex approval requests the daemon relays
+/// What waits for your permission: prompts in hosted terminals (a
+/// permission prompt answered here, any other choice by attaching) and
+/// Codex approval requests the daemon relays
 /// (answered here; the first answer wins across the TUI, this app and any
 /// chat platform).
 struct ApprovalsView: View {
@@ -25,9 +26,7 @@ struct ApprovalsView: View {
                                     Tag(text: session.runtime)
                                 }
                                 if let since = session.promptSince {
-                                    PromptBanner(tool: session.promptTool, since: since) {
-                                        store.attach(session)
-                                    }
+                                    PromptBanner(store: store, session: session, since: since)
                                 }
                             }
                             .padding(.vertical, 4)

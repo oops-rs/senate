@@ -1116,6 +1116,12 @@ pub fn kill_all(paths: &Paths) {
     }
 }
 
+/// The host process's own pid, as it recorded it.
+pub(crate) fn host_pid(paths: &Paths, id: &EventId) -> Option<u32> {
+    recorded_pid(&directory(paths, id), HOST_PID)
+        .and_then(|pid| u32::try_from(pid.as_raw_nonzero().get()).ok())
+}
+
 pub(crate) fn child_pid(paths: &Paths, id: &EventId) -> Option<u32> {
     std::fs::read_to_string(directory(paths, id).join("owner"))
         .ok()?

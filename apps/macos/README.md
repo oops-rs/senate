@@ -161,6 +161,7 @@ lacks either language.
 | `answer` / `take` / `task archived` (as the person) | Reply, Take, Close |
 | `approve` | the approval buttons and notification actions |
 | `stop` / `restore` (as the person, never forced) | Sessions |
+| `approve_session` (as the person; the daemon checks the app is outside every agent's process tree) | a hosted terminal's permission prompt: Sessions, Approvals |
 
 ## Logs, crashes, performance
 

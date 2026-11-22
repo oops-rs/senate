@@ -296,13 +296,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Prompts in hosted terminals are decided in the terminal itself."
+            "value": "Permission prompts are answered here as you would in the terminal, and noted in the committee log. Any other choice is decided in the terminal itself."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "托管终端中的提示只能在终端内决定。"
+            "value": "权限提示可在此处回答，效果与在终端内相同，并记入委员会日志。其他选择只能在终端内决定。"
           }
         }
       }
@@ -1516,6 +1516,57 @@
         }
       }
     },
+    "prompt.allow": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow once"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允许一次"
+          }
+        }
+      }
+    },
+    "prompt.always": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Always allow"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "始终允许"
+          }
+        }
+      }
+    },
+    "prompt.always_help": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow it, and stop asking for the same thing in this session"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允许，并在本次会话中不再询问同类操作"
+          }
+        }
+      }
+    },
     "prompt.attach": {
       "extractionState": "manual",
       "localizations": {
@@ -1546,6 +1597,23 @@
           "stringUnit": {
             "state": "translated",
             "value": "打开终端，在那里决定该提示"
+          }
+        }
+      }
+    },
+    "prompt.deny": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deny"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "拒绝"
           }
         }
       }

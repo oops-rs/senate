@@ -53,7 +53,10 @@ impl Shared {
         Ok(())
     }
 
-    fn approval_host(&self, session: &str) -> Result<Option<(EventId, Session)>, StoreError> {
+    pub(super) fn approval_host(
+        &self,
+        session: &str,
+    ) -> Result<Option<(EventId, Session)>, StoreError> {
         let Some(id) = self.store.session_host(session)? else {
             return Ok(None);
         };
@@ -184,6 +187,51 @@ impl Shared {
             self.publish(WatchEvent::Sessions);
         }
         Ok(())
+    }
+
+    /// The Claude permission request a hosted session's hook reported and
+    /// no result or typing has settled: its tool and fingerprint.
+    pub(super) fn claude_candidate(
+        &self,
+        host_id: &EventId,
+        session_id: &str,
+    ) -> Result<Option<(String, String)>, StoreError> {
+        Ok(self
+            .store
+            .hosted_approval_states()?
+            .into_iter()
+            .find(|(id, state)| id == host_id && state.session_id == session_id)
+            .and_then(|(_, state)| state.claude)
+            .map(|candidate| (candidate.tool, candidate.fingerprint)))
+    }
+
+    /// A person answered the prompt from outside the terminal
+    /// ([`super::remote_approve`]): close its notice now, and forget the
+    /// Claude request answered, since a denial brings no result hook.
+    pub(super) fn settle_answered(
+        &self,
+        host_id: &EventId,
+        codex_request: Option<&str>,
+        claude_fingerprint: Option<&str>,
+    ) -> Result<(), StoreError> {
+        self.edit_approvals(host_id, |state| {
+            let forgotten = claude_fingerprint.is_some_and(|fingerprint| {
+                state
+                    .claude
+                    .take_if(|candidate| candidate.fingerprint == fingerprint)
+                    .is_some()
+            });
+            close_notices(state, |notice| {
+                !notice.screen
+                    && match (codex_request, claude_fingerprint) {
+                        (Some(request), _) => notice.prompt == request,
+                        (None, Some(fingerprint)) => {
+                            notice.prompt == fingerprint || notice.prompt == "claude:unspecified"
+                        }
+                        (None, None) => false,
+                    }
+            }) || forgotten
+        })
     }
 
     /// The prompt waiting in a host's terminal, for `sessions`: its oldest

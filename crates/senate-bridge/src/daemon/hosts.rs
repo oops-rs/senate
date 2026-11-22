@@ -210,7 +210,7 @@ impl Shared {
     /// an alias several agents have is refused with its candidates there).
     /// The runtime, path and committee must come from the local registry,
     /// including for a session started by hand.
-    async fn find_local_senator(
+    pub(super) async fn find_local_senator(
         &self,
         name: &AliasName,
         writer: Option<&CommitteeId>,

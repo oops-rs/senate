@@ -42,14 +42,14 @@ impl HostAuthority {
         Ok(())
     }
 
-    fn actor(&self) -> String {
+    pub(super) fn actor(&self) -> String {
         self.acted_by.as_ref().map_or_else(
             || self.sender.in_text(),
             |agent| Address::senator(agent).in_text(),
         )
     }
 
-    fn note(&self, committee: CommitteeId, body: String) -> NewEvent {
+    pub(super) fn note(&self, committee: CommitteeId, body: String) -> NewEvent {
         self.event(committee, Kind::Note, body)
     }
 

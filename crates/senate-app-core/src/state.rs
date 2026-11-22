@@ -11,6 +11,7 @@ use std::time::SystemTime;
 use chrono::{DateTime, Utc};
 use senate_bridge::approvals::Approval;
 use senate_bridge::ipc::{SenateDocket, SessionRow, StatusReply, StreamState};
+use senate_bridge::session::Runtime;
 use senate_core::{
     Address, Awaiting, DocketItem, Locale, Mention, SenatorName, SpeakerSeat, ThreadSummary,
 };
@@ -75,6 +76,10 @@ pub struct HostedSession {
     pub prompt_tool: Option<String>,
     /// Since when a prompt waits.
     pub prompt_since: Option<SystemTime>,
+    /// The prompt is one Senate can answer from here (`approve_session`):
+    /// a Codex or Claude Code permission prompt, not a choice only seen on
+    /// the screen.
+    pub prompt_answerable: bool,
 }
 
 impl From<&SessionRow> for HostedSession {
@@ -93,6 +98,8 @@ impl From<&SessionRow> for HostedSession {
             typed_secs_ago: r.typed_secs_ago,
             prompt_tool: r.prompt.as_ref().and_then(|p| p.tool.clone()),
             prompt_since: r.prompt.as_ref().map(|p| p.since.into()),
+            prompt_answerable: r.prompt.as_ref().is_some_and(|p| !p.screen)
+                && matches!(r.runtime, Runtime::Claude | Runtime::Codex),
         }
     }
 }

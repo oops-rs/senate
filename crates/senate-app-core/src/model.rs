@@ -541,6 +541,12 @@ pub enum Action {
     RestoreSession {
         senator: AliasName,
     },
+    /// Answer the permission prompt in a hosted session's terminal, as the
+    /// person (`senate session approve`).
+    ApproveSession {
+        senator: AliasName,
+        decision: Decision,
+    },
 }
 
 impl Action {
@@ -613,6 +619,9 @@ impl Action {
                 senator,
                 model: Default::default(),
             },
+            Action::ApproveSession { senator, decision } => {
+                Request::ApproveSession { senator, decision }
+            }
         })
     }
 
@@ -628,7 +637,8 @@ impl Action {
             | Action::Docket
             | Action::Approve { .. }
             | Action::StopSession { .. }
-            | Action::RestoreSession { .. } => None,
+            | Action::RestoreSession { .. }
+            | Action::ApproveSession { .. } => None,
         }
     }
 }

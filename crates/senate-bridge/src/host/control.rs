@@ -1,5 +1,5 @@
-//! Stop and nudge requests use a private socket so they can reach a host
-//! with a viewer.
+//! Stop, nudge and answer requests use a private socket so they can reach
+//! a host with a viewer.
 
 use std::io;
 use std::os::unix::fs::PermissionsExt;
@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
+use super::prompt::{self, NoChoice, PermissionChoice};
 use super::{Tty, Viewer, accept, directory, observed_at};
 use crate::ipc::{self, IpcError, codes};
 use crate::paths::Paths;
@@ -35,6 +36,34 @@ pub(crate) const AGY_NUDGE: &str = "[senate] new messages";
 /// Between the nudge's text and its Enter: sent together, a TUI can take
 /// the pair as a paste and the Enter as a newline in it.
 const NUDGE_ENTER_DELAY: Duration = Duration::from_millis(150);
+
+/// The answer replies.
+const ANSWERED: u8 = 7;
+const NO_DIALOG: u8 = 8;
+const NO_OPTION: u8 = 9;
+const UNCHANGED: u8 = 10;
+/// How long the TUI has to redraw after the key that answers its dialog.
+const ANSWER_SETTLE: Duration = Duration::from_secs(3);
+
+/// Type the key of `answer` into the Claude Code permission dialog on the
+/// screen ([`prompt::permission_key`]); nothing when there is none.
+#[derive(Serialize, Deserialize)]
+struct AnswerRequest {
+    answer: PermissionChoice,
+}
+
+/// Why a host typed no answer, or what came of the one it typed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Answer {
+    /// The key was typed and the TUI redrew.
+    Answered,
+    /// The screen shows no permission dialog.
+    NoDialog,
+    /// The dialog has no option for this choice.
+    NoOption,
+    /// The key was typed, but the screen did not change.
+    Unchanged,
+}
 
 #[derive(Serialize, Deserialize)]
 struct StopRequest {
@@ -99,6 +128,10 @@ pub(super) async fn next_stop(
                 Duration::from_millis(nudge.quiet_ms),
             )
             .await;
+            continue;
+        }
+        if let Ok(AnswerRequest { answer }) = serde_json::from_str::<AnswerRequest>(&line) {
+            answer_once(&mut stream, tty, answer).await;
             continue;
         }
         let Ok(request) = serde_json::from_str::<StopRequest>(&line) else {
@@ -171,6 +204,79 @@ async fn nudge_once(stream: &mut UnixStream, viewer: &Mutex<Viewer>, tty: &Tty, 
             let _ = stream.write_u8(FAILED).await;
         }
     }
+}
+
+/// Type the key that makes `choice` in the permission dialog on screen, as
+/// a person at the terminal would, and wait for the TUI to redraw. Never
+/// types when the screen shows no such dialog or option.
+async fn answer_once(stream: &mut UnixStream, tty: &Tty, choice: PermissionChoice) {
+    let before = tty.screen.rows();
+    let key = match prompt::permission_key(&before, choice) {
+        Ok(key) => key,
+        Err(NoChoice::NotShown) => {
+            let _ = stream.write_u8(NO_DIALOG).await;
+            return;
+        }
+        Err(NoChoice::NoOption) => {
+            let _ = stream.write_u8(NO_OPTION).await;
+            return;
+        }
+    };
+    let mut buf = [0; 4];
+    let typed = tty
+        .write
+        .lock()
+        .await
+        .write_all(key.encode_utf8(&mut buf).as_bytes())
+        .await;
+    if let Err(error) = typed {
+        tracing::warn!(%error, "typing a permission answer into the coding TUI");
+        let _ = stream.write_u8(FAILED).await;
+        return;
+    }
+    let deadline = tokio::time::Instant::now() + ANSWER_SETTLE;
+    let reply = loop {
+        if tty.screen.rows() != before {
+            break ANSWERED;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            break UNCHANGED;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    let _ = stream.write_u8(reply).await;
+}
+
+/// Ask host `id` to answer the Claude Code permission dialog on its screen.
+pub(crate) async fn answer(
+    paths: &Paths,
+    id: &EventId,
+    choice: PermissionChoice,
+) -> Result<Answer, IpcError> {
+    let mut payload =
+        serde_json::to_vec(&AnswerRequest { answer: choice }).map_err(IpcError::internal)?;
+    payload.push(b'\n');
+    tokio::time::timeout(HANDSHAKE + ANSWER_SETTLE, async {
+        let mut stream = UnixStream::connect(socket(paths, id))
+            .await
+            .map_err(IpcError::internal)?;
+        stream
+            .write_all(&payload)
+            .await
+            .map_err(IpcError::internal)?;
+        match stream.read_u8().await {
+            Ok(ANSWERED) => Ok(Answer::Answered),
+            Ok(NO_DIALOG) => Ok(Answer::NoDialog),
+            Ok(NO_OPTION) => Ok(Answer::NoOption),
+            Ok(UNCHANGED) => Ok(Answer::Unchanged),
+            Ok(_) => Err(IpcError::internal("the host could not type the answer")),
+            Err(error) => Err(IpcError::internal(format!(
+                "the host did not answer: {error}"
+            ))),
+        }
+    })
+    .await
+    .map_err(|_| IpcError::internal("timed out waiting for the terminal host to answer"))?
 }
 
 /// Ask host `id` to type the idle nudge into its TUI, unless a viewer typed

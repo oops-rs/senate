@@ -711,6 +711,32 @@ enum SessionCmd {
         #[arg(long)]
         force: bool,
     },
+    /// Answer the permission prompt waiting in a hosted session's terminal,
+    /// without attaching.
+    ///
+    /// Answered as you would in the terminal: Codex through its
+    /// app-server, Claude Code by choosing the option of its permission
+    /// dialog. A prompt Senate only saw on the screen is not answered this
+    /// way: attach to it. The answer is noted in the committee log. Refused
+    /// from inside a coding session (an agent cannot approve prompts).
+    #[command(after_help = "Examples:
+  senate session approve reviewer            Allow it once
+  senate session approve reviewer --always   Allow it for the session
+  senate session approve reviewer --deny     Refuse it")]
+    Approve {
+        /// The senator's alias (`committee::alias` for one on one
+        /// committee) or primary name.
+        senator: AliasName,
+        /// Allow it this once (the default).
+        #[arg(long, conflicts_with_all = ["always", "deny"])]
+        once: bool,
+        /// Allow it, and stop asking for the same thing this session.
+        #[arg(long, conflicts_with = "deny")]
+        always: bool,
+        /// Refuse it.
+        #[arg(long)]
+        deny: bool,
+    },
     /// Resume a stopped hosted senator in the background.
     ///
     /// The recorded session reopens in a detached Senate-owned terminal. A
@@ -2435,6 +2461,58 @@ fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
                 "{}",
                 output.text(&crate::sessions::render_replace(&reply, locale))
             );
+            Ok(())
+        }
+        SessionCmd::Approve {
+            senator,
+            once: _,
+            always,
+            deny,
+        } => {
+            use crate::approvals::Decision;
+            let paths = Paths::from_env()?;
+            let locale = BridgeConfig::locale_at(&paths.config());
+            let senator = pick_alias(senator)?;
+            let decision = if deny {
+                Decision::Deny
+            } else if always {
+                Decision::AllowForSession
+            } else {
+                Decision::Allow
+            };
+            let reply: crate::ipc::ApproveSessionReply = runtime(false)?.block_on(ipc::request(
+                &paths.socket(),
+                &Request::ApproveSession { senator, decision },
+                Duration::from_secs(1),
+                crate::host::REQUEST_TIMEOUT,
+            ))?;
+            let who = senate_core::Address::senator(&reply.senator).in_text();
+            let verb = match (decision, locale) {
+                (Decision::Allow, senate_core::Locale::En) => "allowed once",
+                (Decision::AllowForSession, senate_core::Locale::En) => "always allowed",
+                (_, senate_core::Locale::En) => "denied",
+                (Decision::Allow, senate_core::Locale::Zh) => "已允许一次",
+                (Decision::AllowForSession, senate_core::Locale::Zh) => "已始终允许",
+                (_, senate_core::Locale::Zh) => "已拒绝",
+            };
+            let tool = reply
+                .tool
+                .as_deref()
+                .map(|tool| format!(": {}", crate::host_approval::tool_label(tool)))
+                .unwrap_or_default();
+            match locale {
+                senate_core::Locale::En => println!("{verb} {who}'s prompt{tool}"),
+                senate_core::Locale::Zh => println!("{verb} {who} 的权限请求{tool}"),
+            }
+            if reply.audit_pending {
+                eprintln!(
+                    "{}",
+                    locale.pick(
+                        "记录已排队，稍后写入委员会日志。",
+                        "The note is queued for the committee log."
+                    )
+                );
+            }
             Ok(())
         }
         SessionCmd::Prune => {

@@ -441,6 +441,9 @@ pub mod meta {
     /// True on a hosted approval notice. Its archive status carries the
     /// root's event ID under the same key, pinning it across log epochs.
     pub const HOSTED_APPROVAL: &str = "hosted_approval";
+    /// On a person's note that they answered a hosted session's permission
+    /// prompt from outside its terminal: `{decision, runtime, session_id}`.
+    pub const PROMPT_ANSWER: &str = "prompt_answer";
     /// The Speaker's triage verdict, a
     /// [`TriagePayload`](crate::task::TriagePayload): on a Speaker `note` in
     /// the root's thread, or inline on a Speaker relay. Speaker only; the

@@ -82,9 +82,7 @@ private struct HostedRow: View {
                 if busy { ProgressView().controlSize(.small) }
             }
             if let since = h.promptSince {
-                PromptBanner(tool: h.promptTool, since: since) {
-                    store.attach(h)
-                }
+                PromptBanner(store: store, session: h, since: since)
             }
             HStack(spacing: 4) {
                 Text(verbatim: h.dir)
@@ -123,34 +121,54 @@ private struct HostedRow: View {
 }
 
 /// A permission prompt waiting in a hosted terminal: what for, since when,
-/// and the way to it. The app never answers it.
+/// and the ways to decide it. A Codex or Claude Code permission prompt is
+/// answered from here, as the person (`senate session approve`); a choice
+/// only seen on the screen is decided by attaching.
 struct PromptBanner: View {
-    let tool: String?
+    let store: CoreStore
+    let session: HostedSession
     let since: Date
-    let attach: () -> Void
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Image(systemName: "hand.raised.fill")
-                .foregroundStyle(.orange)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 2) {
-                TimedMention(date: since) { L("prompt.waiting", $0) }
-                    .font(.callout.weight(.medium))
-                if let tool {
-                    Text(verbatim: tool)
-                        .font(.callout.monospaced())
-                        .lineLimit(2)
-                        .textSelection(.enabled)
+        let busy = store.isBusy("session:\(session.label)")
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: "hand.raised.fill")
+                    .foregroundStyle(.orange)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    TimedMention(date: since) { L("prompt.waiting", $0) }
+                        .font(.callout.weight(.medium))
+                    if let tool = session.promptTool {
+                        Text(verbatim: tool)
+                            .font(.callout.monospaced())
+                            .lineLimit(2)
+                            .textSelection(.enabled)
+                    }
                 }
+                Spacer()
+                Button(L("prompt.attach")) { store.attach(session) }
+                    .help(L("prompt.attach_help"))
             }
-            Spacer()
-            Button(L("prompt.attach"), action: attach)
-                .help(L("prompt.attach_help"))
+            .accessibilityElement(children: .combine)
+            if session.promptAnswerable {
+                HStack {
+                    Button(L("prompt.allow")) { decide(.allow) }
+                        .buttonStyle(.borderedProminent)
+                    Button(L("prompt.always")) { decide(.allowForSession) }
+                        .help(L("prompt.always_help"))
+                    Button(L("prompt.deny"), role: .destructive) { decide(.deny) }
+                    if busy { ProgressView().controlSize(.small) }
+                }
+                .disabled(busy || !store.state.online)
+            }
         }
         .padding(8)
         .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
-        .accessibilityElement(children: .combine)
+    }
+
+    private func decide(_ decision: ApprovalDecision) {
+        Task { await store.decide(session, decision) }
     }
 }
 

@@ -17,7 +17,9 @@ use rustix::process::{Pid, Signal, kill_process_group};
 use senate_bridge::approvals::Decision;
 use senate_bridge::daemon::{DaemonOptions, start_with_host_binary};
 use senate_bridge::hook::HookKind;
-use senate_bridge::ipc::{self, ApprovalsReply, ApproveReply, HostedRuntime, Request, SpawnReply};
+use senate_bridge::ipc::{
+    self, ApprovalsReply, ApproveReply, ApproveSessionReply, HostedRuntime, Request, SpawnReply,
+};
 use senate_bridge::{Paths, testenv};
 use senate_core::{Address, Event, Locale, Seq, StatusPayload, StatusState};
 use serde_json::{Value, json};
@@ -1211,6 +1213,18 @@ async fn a_quiet_choice_on_the_screen_is_a_notice_until_someone_answers_it() {
         .expect("the row carries the waiting prompt");
     assert!(prompt.screen && prompt.tool.is_none(), "{prompt:?}");
 
+    // Senate cannot answer it from outside the terminal.
+    let refused = approve_session(&h, &launch, Decision::Allow)
+        .await
+        .unwrap_err();
+    assert!(
+        refused
+            .to_string()
+            .contains("not a permission prompt Senate knows of"),
+        "{refused}"
+    );
+    assert!(refused.to_string().contains("senate attach"), "{refused}");
+
     // Someone attaches and chooses: the TUI repaints and the notice closes.
     send_input(&terminal).await;
     wait_archived(&h, notice.seq).await;
@@ -1218,6 +1232,263 @@ async fn a_quiet_choice_on_the_screen_is_a_notice_until_someone_answers_it() {
     // The screen no longer shows a choice: nothing more is said.
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     assert_eq!(notices(&h).len(), 1);
+    terminal.stop();
+    h.stop().await;
+}
+
+// ---- answering from outside the terminal (`senate session approve`) --------
+
+async fn approve_session(
+    h: &Harness,
+    launch: &SpawnReply,
+    decision: Decision,
+) -> Result<ApproveSessionReply, ipc::ClientError> {
+    ipc::request(
+        &h.socket(),
+        &Request::ApproveSession {
+            senator: launch.senator.clone().into(),
+            decision,
+        },
+        WAIT,
+        WAIT,
+    )
+    .await
+}
+
+/// The person's notes that a prompt was answered from outside a terminal.
+fn answer_notes(h: &Harness) -> Vec<Event> {
+    h.server
+        .events("refund-v2")
+        .into_iter()
+        .filter(|event| event.meta.contains_key(senate_core::meta::PROMPT_ANSWER))
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_approve_answers_a_hosted_codex_prompt_through_its_app_server() {
+    let (mut h, project) = fixture(true, Locale::En).await;
+    let fake = h.codex();
+    start(&mut h).await;
+    let (launch, terminal) = Terminal::spawn(&h, project, HostedRuntime::Codex).await;
+    let thread = launch.session_id.clone();
+    eventually("the relay subscribed", WAIT, || {
+        (fake.subscribers(&thread) == 1).then_some(())
+    })
+    .await;
+    let nothing = approve_session(&h, &launch, Decision::Allow)
+        .await
+        .unwrap_err();
+    assert!(
+        nothing
+            .to_string()
+            .contains("has no permission prompt waiting"),
+        "{nothing}"
+    );
+    let method = "item/commandExecution/requestApproval";
+    let cases = [
+        (Decision::Allow, "accept", "allowed once"),
+        (
+            Decision::AllowForSession,
+            "acceptForSession",
+            "always allowed",
+        ),
+        (Decision::Deny, "decline", "denied"),
+    ];
+    for (n, (decision, wire, verb)) in cases.into_iter().enumerate() {
+        let command = format!("echo remote-{n}");
+        let native = fake.request_approval(
+            &thread,
+            method,
+            json!({"threadId": thread, "turnId": "turn", "itemId": "cmd", "command": command}),
+        );
+        wait_relayed(&h, &format!("{thread}:{native}")).await;
+        let reply = approve_session(&h, &launch, decision).await.unwrap();
+        assert_eq!(reply.decision, decision);
+        assert_eq!(reply.senator, launch.senator);
+        assert_eq!(
+            reply.tool.as_deref(),
+            Some(format!("run: {command}").as_str())
+        );
+        let responses = fake.responses();
+        assert_eq!(responses.len(), n + 1, "{responses:?}");
+        assert_eq!(responses[n].0, json!(native));
+        assert_eq!(responses[n].1, json!({"decision": wire}));
+        let note = eventually("the answer is noted in the log", WAIT, || {
+            answer_notes(&h).get(n).cloned()
+        })
+        .await;
+        assert_eq!(note.kind, senate_core::Kind::Note);
+        assert!(
+            note.body.contains(&format!(
+                "{verb} a permission prompt of {}",
+                Address::senator(&launch.senator).in_text()
+            )),
+            "{}",
+            note.body
+        );
+        assert!(
+            note.body.contains(&format!("\"run: {command}\"")),
+            "{}",
+            note.body
+        );
+        assert_eq!(
+            note.meta[senate_core::meta::PROMPT_ANSWER]["runtime"],
+            "codex"
+        );
+    }
+    let nothing = approve_session(&h, &launch, Decision::Deny)
+        .await
+        .unwrap_err();
+    assert!(
+        nothing
+            .to_string()
+            .contains("has no permission prompt waiting"),
+        "{nothing}"
+    );
+    assert_eq!(fake.responses().len(), 3);
+    terminal.stop();
+    h.stop().await;
+}
+
+/// Wait until the relay lists approval `id`.
+async fn wait_relayed(h: &Harness, id: &str) {
+    tokio::time::timeout(WAIT, async {
+        loop {
+            let pending: ApprovalsReply =
+                ipc::request(&h.socket(), &Request::Approvals, WAIT, WAIT)
+                    .await
+                    .unwrap();
+            if pending.approvals.iter().any(|a| a.id == id) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the relay holds the approval");
+}
+
+/// A Claude Code permission dialog that records each key it is answered
+/// with in `.keys`, then draws itself again.
+fn claude_dialog_program(h: &Harness) {
+    std::fs::write(
+        h.dir.path().join("tui"),
+        format!(
+            "#!/bin/sh\n{RECORD_HOSTED_ARGV}\n\
+             stty raw -echo\n\
+             dialog() {{ printf '\\033[2J\\033[H Bash command\\r\\n\\r\\n   echo approve-fixture\\r\\n\\r\\n Do you want to proceed?\\r\\n \\342\\235\\257 1. Yes\\r\\n   2. Yes, and do not ask again for echo commands\\r\\n   3. No, and tell Claude what to do differently (esc)\\r\\n'; }}\n\
+             dialog\n\
+             while :; do\n\
+               key=$(dd bs=1 count=1 2>/dev/null)\n\
+               printf '\\033[2J\\033[Hchose %s\\r\\n' \"$key\"\n\
+               sleep 0.3\n\
+               dialog\n\
+               printf '%s' \"$key\" >> .keys\n\
+             done\n"
+        ),
+    )
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_approve_chooses_the_option_of_a_hosted_claude_dialog() {
+    let (mut h, project) = fixture(true, Locale::En).await;
+    claude_dialog_program(&h);
+    start(&mut h).await;
+    let (launch, terminal) = Terminal::spawn(&h, project.clone(), HostedRuntime::Claude).await;
+    hosted_fixture_argv(&terminal.socket, &project, WAIT).await;
+    let request = json!({
+        "hook_event_name": "PermissionRequest", "session_id": launch.session_id,
+        "tool_name": "Bash", "tool_input": {"command": "echo approve-fixture"},
+    });
+    // No permission request heard: nothing is typed.
+    let nothing = approve_session(&h, &launch, Decision::Allow)
+        .await
+        .unwrap_err();
+    assert!(
+        nothing
+            .to_string()
+            .contains("has no permission prompt waiting"),
+        "{nothing}"
+    );
+    let keys = || std::fs::read_to_string(project.join(".keys")).unwrap_or_default();
+    let cases = [
+        (Decision::Allow, "1", "allowed once"),
+        (Decision::AllowForSession, "2", "always allowed"),
+        (Decision::Deny, "3", "denied"),
+    ];
+    let mut typed = String::new();
+    for (n, (decision, key, verb)) in cases.into_iter().enumerate() {
+        claude_hook(h.dir.path(), &h, terminal.host_id(), request.clone()).await;
+        let reply = approve_session(&h, &launch, decision).await.unwrap();
+        assert_eq!(reply.tool.as_deref(), Some("echo approve-fixture"));
+        typed.push_str(key);
+        eventually(
+            "the dialog took the key and drew itself again",
+            WAIT,
+            || (keys() == typed).then_some(()),
+        )
+        .await;
+        let note = eventually("the answer is noted in the log", WAIT, || {
+            answer_notes(&h).get(n).cloned()
+        })
+        .await;
+        assert!(note.body.contains(verb), "{}", note.body);
+        assert!(
+            note.body.contains("\"echo approve-fixture\""),
+            "{}",
+            note.body
+        );
+        assert_eq!(
+            note.meta[senate_core::meta::PROMPT_ANSWER]["runtime"],
+            "claude"
+        );
+        // Answered: a denial brings no result hook, and none is needed.
+        let again = approve_session(&h, &launch, decision).await.unwrap_err();
+        assert!(
+            again
+                .to_string()
+                .contains("has no permission prompt waiting"),
+            "{again}"
+        );
+    }
+    assert_eq!(keys(), "123");
+    terminal.stop();
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_approve_is_refused_inside_a_hosted_sessions_process_tree() {
+    let (mut h, project) = fixture(true, Locale::En).await;
+    // The hosted TUI itself asks to approve, as an agent would from a tool.
+    std::fs::write(
+        h.dir.path().join("tui"),
+        format!(
+            "#!/bin/sh\n{RECORD_HOSTED_ARGV}\n\
+             while [ ! -e .go ]; do sleep 0.05; done\n\
+             {BIN:?} session approve somebody > .guard.tmp 2>&1; echo \"exit $?\" >> .guard.tmp; mv .guard.tmp .guard\n\
+             while IFS= read -r line; do :; done\n"
+        ),
+    )
+    .unwrap();
+    start(&mut h).await;
+    let (launch, terminal) = Terminal::spawn(&h, project.clone(), HostedRuntime::Claude).await;
+    // Once the host is published as the senator's.
+    std::fs::write(project.join(".go"), "").unwrap();
+    let out = eventually("the TUI's approve came back", WAIT, || {
+        std::fs::read_to_string(project.join(".guard")).ok()
+    })
+    .await;
+    assert!(out.contains("exit 1"), "{out}");
+    assert!(
+        out.contains(&format!(
+            "inside the process tree of {}",
+            Address::senator(&launch.senator).in_text()
+        )),
+        "{out}"
+    );
+    assert!(out.contains("a person's decision"), "{out}");
+    assert!(answer_notes(&h).is_empty());
     terminal.stop();
     h.stop().await;
 }

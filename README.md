@@ -522,6 +522,7 @@ senate spawn claude --alias reviewer   # start one, seated on this committee
 senate attach reviewer                 # open its terminal (Ctrl-] detaches)
 senate session list                    # every hosted session on this machine
 senate session watch                   # all of them side by side, read-only
+senate session approve reviewer        # answer its permission prompt (--always, --deny)
 senate session stop reviewer           # end its terminal...
 senate session restore reviewer        # ...and reopen it later
 senate session replace reviewer        # a fresh session takes the seat
@@ -534,6 +535,18 @@ and its open questions and requests, then stops and unseats the old session.
 It reports each step. If one fails, running the command again resumes from that
 step.
 
+`senate session approve` answers the permission prompt waiting in a hosted
+terminal without attaching, as you would there: allow once (the default),
+`--always` (and stop asking for the same thing this session) or `--deny`.
+Codex is answered through its app-server; for Claude Code the host checks that
+its screen shows the permission dialog and types the chosen option. A choice
+Senate only saw on the screen is not answered this way: attach to it. Each
+answer is noted in the committee log. The macOS app's Allow / Always / Deny
+buttons on a waiting prompt do the same. The daemon refuses the request from
+inside a coding session's process tree, so an agent cannot approve its own
+prompts or another's. That check walks the caller's ancestors and is defence
+in depth: a process that detached from its agent escapes it.
+
 ### Where Each Command Lives
 
 The top level is the daily loop: `status` (a bare `senate` runs it), `inbox`
@@ -542,7 +555,7 @@ The top level is the daily loop: `status` (a bare `senate` runs it), `inbox`
 
 | Group | Commands |
 | :--- | :--- |
-| `senate session` | `list` · `watch` · `stop` · `restore` · `replace` · `prune` |
+| `senate session` | `list` · `watch` · `approve` · `stop` · `restore` · `replace` · `prune` |
 | `senate senator` | `list` · `alias` · `unalias` · `seat` · `unseat` · `duty` |
 | `senate secretary` | `list` · `appoint` · `dismiss` · `work list\|show\|create\|assign` (the secretary team) · `desk` · `desk set` (the Speaker's desk workers, in order) |
 | `senate chat` | `send` · `thread` (simulated chat; see [Testing](#-testing--verification)) |

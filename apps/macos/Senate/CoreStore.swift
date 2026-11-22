@@ -399,6 +399,15 @@ final class CoreStore {
         }
     }
 
+    /// Answer the permission prompt waiting in a hosted terminal, as the
+    /// person: the daemon answers it as they would there, and notes it in
+    /// the committee log.
+    func decide(_ session: HostedSession, _ decision: ApprovalDecision) async {
+        await run("session:\(session.label)") { core in
+            try await core.approveSession(label: session.label, decision: decision)
+        }
+    }
+
     func restore(_ session: HostedSession) async {
         await run("session:\(session.label)") { core in
             try await core.restoreSession(label: session.label)

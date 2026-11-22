@@ -245,6 +245,23 @@ async fn hosted_sessions_show_their_waiting_prompt_and_stop_and_restore() {
     assert!(attach.shell_line.ends_with("senate attach refund-v2::lead"));
     assert_eq!(core.watch_terminal().argv, ["senate", "session", "watch"]);
 
+    // The prompt is a permission prompt: the app may answer it, as the
+    // person, through the daemon.
+    assert!(lead.prompt_answerable);
+    core.approve_session("refund-v2::lead".into(), ApprovalDecision::AllowForSession)
+        .await
+        .unwrap();
+    until(&listener, "answered", |s| s.counts.prompts == 0).await;
+    assert!(matches!(
+        core.approve_session("refund-v2::lead".into(), ApprovalDecision::Deny).await,
+        Err(CoreError::Failed { message }) if message.contains("no permission prompt waiting")
+    ));
+    assert!(daemon.requests().iter().any(|r| matches!(
+        r,
+        Request::ApproveSession { senator, decision: Decision::AllowForSession }
+            if senator.to_string() == "refund-v2::lead"
+    )));
+
     core.stop_session("refund-v2::lead".into()).await.unwrap();
     let s = until(&listener, "stopped", |s| {
         s.sessions.iter().all(|x| !x.running) && s.counts.prompts == 0

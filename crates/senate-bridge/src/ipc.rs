@@ -261,6 +261,9 @@ pub mod codes {
     pub const NOT_PRESIDING: &str = "not_presiding";
     /// A chair op from a session whose agent does not chair its committee.
     pub const NOT_CHAIRING: &str = "not_chairing";
+    /// A request only a person may make came from inside a coding
+    /// session's process tree.
+    pub const NOT_A_PERSON: &str = "not_a_person";
     /// The Senate server refused or could not be reached.
     pub const SERVER: &str = "server";
     /// `senator::*` could reach several agents on the committee;
@@ -1122,6 +1125,17 @@ pub enum Request {
         id: String,
         decision: Decision,
     },
+    /// Answer the permission prompt waiting in a Senate-hosted session's
+    /// terminal, as the person would there ([`ApproveSessionReply`]):
+    /// Codex through its app-server, Claude Code by the host typing the
+    /// chosen option of its permission dialog. The daemon refuses it from
+    /// inside a coding session's process tree (see
+    /// `daemon::approval_guard`).
+    ApproveSession {
+        senator: AliasName,
+        /// `allow` (once), `allow_for_session` (always) or `deny`.
+        decision: Decision,
+    },
     /// Stream [`WatchEvent`]s on this connection until it closes. `app`:
     /// the client shows notifications itself (the desktop app), so the
     /// daemon posts no desktop notification while it is connected.
@@ -1513,6 +1527,21 @@ pub struct ApprovalsReply {
 pub struct ApproveReply {
     pub approval: Approval,
     pub decision: Decision,
+}
+
+/// A hosted session's permission prompt answered ([`Request::ApproveSession`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApproveSessionReply {
+    pub senator: SenatorName,
+    pub committee: CommitteeId,
+    pub runtime: Runtime,
+    /// What the prompt asked about, as the runtime said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    pub decision: Decision,
+    /// The log note is queued after an uncertain append.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub audit_pending: bool,
 }
 
 /// One line of a `watch` stream.

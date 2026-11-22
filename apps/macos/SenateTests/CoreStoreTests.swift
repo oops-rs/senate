@@ -169,6 +169,26 @@ import SenateCore
         #expect(core.calls.contains("approve 019a:3 deny"))
     }
 
+    @Test func answeringAHostedPromptAsksTheDaemonForThatSession() async throws {
+        let store = store()
+        let lead = HostedSession(
+            label: "refund-v2::lead", sessionId: "s-1", mention: "senator::claude",
+            committee: "refund-v2", runtime: "claude", model: nil, dir: "/work",
+            running: true, startedAt: nil, attached: false, typedSecsAgo: nil,
+            promptTool: "cargo publish", promptSince: .now, promptAnswerable: true)
+        await store.decide(lead, .allow)
+        await store.decide(lead, .allowForSession)
+        await store.decide(lead, .deny)
+        #expect(core.calls.contains("approve-session refund-v2::lead allow"))
+        #expect(core.calls.contains("approve-session refund-v2::lead allowForSession"))
+        #expect(core.calls.contains("approve-session refund-v2::lead deny"))
+        // The daemon's refusal (nothing waits, or not from here) is shown.
+        core.failNext = .Failed(message: "senator::claude has no permission prompt waiting.")
+        await store.decide(lead, .allow)
+        #expect(store.actionError?.contains("no permission prompt waiting") == true)
+        #expect(!store.isBusy("session:refund-v2::lead"))
+    }
+
     @Test func readingTheOpenThreadKeepsOnlyTheSelectedOne() async throws {
         let store = store()
         let a = thread(1, "a"), b = thread(2, "b")

@@ -447,9 +447,27 @@ impl AppCore {
         self.act(Action::RestoreSession { senator }).await
     }
 
+    /// Answer the permission prompt waiting in a hosted session's terminal
+    /// (`senate session approve <label>`), as the person: allow once,
+    /// always (`AllowForSession`) or deny. The daemon answers it as they
+    /// would at the terminal and notes it in the committee log; it refuses
+    /// a prompt it only saw on the screen, which is answered by attaching.
+    pub async fn approve_session(
+        &self,
+        label: String,
+        decision: ApprovalDecision,
+    ) -> Result<(), CoreError> {
+        let senator = self.session_label(&label)?;
+        self.act(Action::ApproveSession {
+            senator,
+            decision: decision.into(),
+        })
+        .await
+    }
+
     /// What to run to open a hosted session's terminal: `senate attach
-    /// <label>` (Ctrl-] detaches). A waiting permission prompt is decided
-    /// there, by the person, never by the app.
+    /// <label>` (Ctrl-] detaches). A prompt Senate cannot answer is decided
+    /// there.
     pub fn attach_terminal(&self, label: String) -> Result<TerminalCommand, CoreError> {
         let senator = self.session_label(&label)?;
         Ok(self.senate_command(&["attach", &senator.to_string()]))

@@ -55,7 +55,8 @@ pub(crate) fn read(paths: &Paths, id: &EventId) -> Option<ScreenPrompt> {
 
 /// One row as an option: its number, and whether it is marked selected.
 fn option(row: &str) -> Option<(u32, bool)> {
-    let row = row.trim_start();
+    // A dialog drawn in a box starts its rows with the box's side.
+    let row = row.trim_start_matches(|c: char| c == '│' || c.is_whitespace());
     let (selected, rest) = match row.chars().next() {
         Some(c) if SELECTED.contains(&c) => (true, row[c.len_utf8()..].trim_start()),
         _ => (false, row),
@@ -103,6 +104,90 @@ pub(crate) fn looks_like_choice(rows: &[String]) -> bool {
         };
     }
     false
+}
+
+/// The options of the choice menu at the bottom of the screen, numbered in
+/// order from 1, with the label of each, if [`looks_like_choice`] sees one.
+fn bottom_menu(rows: &[String]) -> Option<Vec<(u32, String)>> {
+    let end = rows
+        .iter()
+        .rposition(|row| !row.trim().is_empty())
+        .map_or(0, |last| last + 1);
+    let start = end.saturating_sub(BOTTOM_ROWS);
+    let mut runs: Vec<Vec<(u32, String)>> = Vec::new();
+    let mut last_at = 0;
+    for (at, row) in rows[start..end].iter().enumerate() {
+        let row = row.trim_matches(|c: char| c == '│' || c.is_whitespace());
+        let Some((n, _)) = option(row) else { continue };
+        let label = row
+            .trim_start_matches(|c: char| SELECTED.contains(&c) || c.is_whitespace())
+            .trim_start_matches(|c: char| c.is_ascii_digit())
+            .trim_start_matches(['.', ')'])
+            .trim()
+            .to_owned();
+        match runs.last_mut() {
+            Some(run)
+                if run.last().is_some_and(|(prev, _)| n == prev + 1)
+                    && at - last_at <= OPTION_GAP =>
+            {
+                run.push((n, label));
+            }
+            _ if n == 1 => runs.push(vec![(1, label)]),
+            _ => {}
+        }
+        last_at = at;
+    }
+    looks_like_choice(rows).then(|| runs.pop()).flatten()
+}
+
+/// How a person answers a Claude Code permission dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PermissionChoice {
+    /// `1. Yes`.
+    Once,
+    /// `Yes, and don't ask again …` or `Yes, allow all edits …`.
+    Always,
+    /// `No, and tell Claude what to do differently`.
+    Deny,
+}
+
+/// Why a choice cannot be made on this screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NoChoice {
+    /// The bottom of the screen is not Claude Code's permission dialog.
+    NotShown,
+    /// The dialog offers no such option (not every prompt has "always").
+    NoOption,
+}
+
+/// The key that picks `choice` in the Claude Code permission dialog at the
+/// bottom of the screen: the option's number, which Claude Code takes as
+/// choosing it. The dialog is told by its options: `1. Yes` first, an
+/// option starting `No` among them, and nothing that is neither.
+pub(crate) fn permission_key(rows: &[String], choice: PermissionChoice) -> Result<char, NoChoice> {
+    let menu = bottom_menu(rows).ok_or(NoChoice::NotShown)?;
+    let yes = |label: &str| label == "Yes";
+    let always = |label: &str| label.starts_with("Yes, ");
+    let no = |label: &str| label == "No" || label.starts_with("No,") || label.starts_with("No ");
+    let shaped = menu.first().is_some_and(|(_, label)| yes(label))
+        && menu.iter().any(|(_, label)| no(label))
+        && menu
+            .iter()
+            .all(|(_, label)| yes(label) || always(label) || no(label));
+    if !shaped || menu.len() > 9 {
+        return Err(NoChoice::NotShown);
+    }
+    let wanted: &dyn Fn(&str) -> bool = match choice {
+        PermissionChoice::Once => &yes,
+        PermissionChoice::Always => &always,
+        PermissionChoice::Deny => &no,
+    };
+    let (n, _) = menu
+        .iter()
+        .find(|(_, label)| wanted(label))
+        .ok_or(NoChoice::NoOption)?;
+    char::from_digit(*n, 10).ok_or(NoChoice::NotShown)
 }
 
 /// Keep the marker while the screen is quiet and shows a choice. Never
@@ -213,6 +298,78 @@ mod tests {
         let mut old = vec!["› 1. Yes".to_owned(), "  2. No".to_owned()];
         old.extend(std::iter::repeat_n("output".to_owned(), BOTTOM_ROWS));
         assert!(!looks_like_choice(&old));
+    }
+
+    /// Claude Code 2.x, a Bash permission dialog.
+    const BASH_DIALOG: &[&str] = &[
+        " Bash command",
+        "",
+        "   cargo test",
+        "   Run the tests",
+        "",
+        " Do you want to proceed?",
+        " ❯ 1. Yes",
+        "   2. Yes, and don't ask again for cargo test commands in /work",
+        "   3. No, and tell Claude what to do differently (esc)",
+    ];
+
+    #[test]
+    fn claude_permission_dialogs_are_answered_by_their_option_number() {
+        let rows = screen(BASH_DIALOG);
+        assert_eq!(permission_key(&rows, PermissionChoice::Once), Ok('1'));
+        assert_eq!(permission_key(&rows, PermissionChoice::Always), Ok('2'));
+        assert_eq!(permission_key(&rows, PermissionChoice::Deny), Ok('3'));
+        // An edit dialog drawn in a box; the selection moved.
+        let boxed = screen(&[
+            "│ Do you want to make this edit to main.rs?                  │",
+            "│   1. Yes                                                   │",
+            "│ ❯ 2. Yes, allow all edits during this session (shift+tab) │",
+            "│   3. No, and tell Claude what to do differently (esc)      │",
+        ]);
+        assert_eq!(permission_key(&boxed, PermissionChoice::Always), Ok('2'));
+        assert_eq!(permission_key(&boxed, PermissionChoice::Deny), Ok('3'));
+        // Without an "always" option, only that choice is refused.
+        let two = screen(&[" Do you want to proceed?", " ❯ 1. Yes", "   2. No"]);
+        assert_eq!(permission_key(&two, PermissionChoice::Deny), Ok('2'));
+        assert_eq!(
+            permission_key(&two, PermissionChoice::Always),
+            Err(NoChoice::NoOption)
+        );
+    }
+
+    #[test]
+    fn other_menus_are_not_permission_dialogs() {
+        // The trust question at startup has a Yes, but its options are not
+        // a permission dialog's.
+        let trust = screen(&[
+            " Do you trust the files in this folder?",
+            " ❯ 1. Yes, proceed",
+            "   2. No, exit",
+        ]);
+        assert_eq!(
+            permission_key(&trust, PermissionChoice::Once),
+            Err(NoChoice::NotShown)
+        );
+        let hooks = screen(&[
+            "› 1. Review hooks",
+            "  2. Trust all and continue",
+            "  3. Continue without them",
+        ]);
+        assert_eq!(
+            permission_key(&hooks, PermissionChoice::Deny),
+            Err(NoChoice::NotShown)
+        );
+        // An idle prompt, and a dialog scrolled away.
+        assert_eq!(
+            permission_key(&screen(&["> "]), PermissionChoice::Once),
+            Err(NoChoice::NotShown)
+        );
+        let mut old = screen(BASH_DIALOG);
+        old.extend(std::iter::repeat_n("output".to_owned(), BOTTOM_ROWS));
+        assert_eq!(
+            permission_key(&old, PermissionChoice::Once),
+            Err(NoChoice::NotShown)
+        );
     }
 
     #[tokio::test(start_paused = true)]

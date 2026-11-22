@@ -51,6 +51,9 @@ nonisolated final class FakeCore: AppCoreProtocol, @unchecked Sendable {
     func approve(id: String, decision: ApprovalDecision) async throws {
         try record("approve \(id) \(decision)")
     }
+    func approveSession(label: String, decision: ApprovalDecision) async throws {
+        try record("approve-session \(label) \(decision)")
+    }
     func attachTerminal(label: String) throws -> TerminalCommand {
         try record("attach \(label)")
         return TerminalCommand(argv: ["senate", "attach", label], cwd: nil, shellLine: "", appleScript: "")

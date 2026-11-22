@@ -1286,6 +1286,12 @@ impl Store {
         queue_host_notice(&conn, notice, Some(host))
     }
 
+    /// Queue a log note the daemon posts, with retries, once the server
+    /// takes it (a hosted-session audit whose first append was uncertain).
+    pub(crate) fn queue_host_notice(&self, notice: &NewEvent) -> Result<(), StoreError> {
+        queue_host_notice(&self.conn(), notice, None)
+    }
+
     pub(crate) fn awaiting_stop_notices(&self) -> Result<Vec<(EventId, EventId)>, StoreError> {
         let conn = self.conn();
         let mut query = conn.prepare(

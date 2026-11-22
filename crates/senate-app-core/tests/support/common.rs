@@ -553,6 +553,27 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
                 None => Reply::err(IpcError::bad_request(format!("no session {label}"))),
             }
         }
+        Request::ApproveSession { senator, decision } => {
+            let label = senator.to_string();
+            match w.sessions.rows.iter_mut().find(|r| r.label() == label) {
+                Some(row) if row.prompt.as_ref().is_some_and(|p| !p.screen) => {
+                    let tool = row.prompt.take().and_then(|p| p.tool);
+                    let _ = events.send(WatchEvent::Sessions);
+                    Reply::ok(&senate_bridge::ipc::ApproveSessionReply {
+                        senator: row.primary.clone(),
+                        committee: row.committee.clone().unwrap_or_else(committee),
+                        runtime: row.runtime,
+                        tool,
+                        decision,
+                        audit_pending: false,
+                    })
+                }
+                Some(_) => Reply::err(IpcError::bad_request(format!(
+                    "{label} has no permission prompt waiting."
+                ))),
+                None => Reply::err(IpcError::bad_request(format!("no session {label}"))),
+            }
+        }
         Request::Restore { senator, .. } => {
             let label = senator.to_string();
             match w.sessions.rows.iter_mut().find(|r| r.label() == label) {

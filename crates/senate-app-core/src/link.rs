@@ -450,7 +450,9 @@ impl<S: Sink> Driver<S> {
                 self.link.call::<Posted>(&request).await.map(to_value)
             }
             Action::MarkRead { .. } => self.link.call::<Value>(&request).await,
-            Action::StopSession { .. } | Action::RestoreSession { .. } => {
+            Action::StopSession { .. }
+            | Action::RestoreSession { .. }
+            | Action::ApproveSession { .. } => {
                 let r = self.link.call::<Value>(&request).await;
                 self.refresh_sessions().await;
                 r
