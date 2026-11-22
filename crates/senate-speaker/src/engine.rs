@@ -2936,9 +2936,9 @@ impl Engine {
             .to(child.clone())
             .with_source(source.clone())
             .with_meta(meta::RELAYED_FROM, json!(chat.seq.0));
-        if !chat.is_simulated() {
-            reply = reply.on_behalf_of(chat.from.clone());
-        }
+        // Attribution only: a simulated chat keeps its person for the record,
+        // and readers grant authority only to unsimulated uplink senders.
+        reply = reply.on_behalf_of(chat.from.clone());
         self.append(reply).await?;
         Ok(true)
     }
@@ -3393,9 +3393,9 @@ impl Engine {
         let committee = self.acting_committee(chat);
         let mut relay = NewEvent::new(committee.clone(), kind.clone(), Address::Speaker, body)
             .with_id(derived_event_id(&["relay", committee.as_str(), &seq]));
-        if !chat.is_simulated() {
-            relay = relay.on_behalf_of(chat.from.clone());
-        }
+        // Attribution only: a simulated chat keeps its person for the record,
+        // and readers grant authority only to unsimulated uplink senders.
+        relay = relay.on_behalf_of(chat.from.clone());
         if committee == chat.committee {
             // Acknowledged under the chat when processed; a relay on another
             // committee (after a Bind) is acknowledged in the plan's result.

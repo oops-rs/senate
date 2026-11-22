@@ -2140,10 +2140,11 @@ async fn child_escalation_and_verified_reply_share_the_original_chat_thread() {
             .find(|e| e.from == Address::Speaker && e.body == body)
             .unwrap();
         assert_eq!(
-            (reply.kind, reply.thread, reply.to),
+            (reply.kind.clone(), reply.thread, reply.to.clone()),
             (kind, Some(root.seq), vec![child.clone()])
         );
-        assert_eq!(reply.on_behalf_of, (!simulated).then(|| user(who)));
+        assert_eq!(reply.is_simulated(), simulated);
+        assert_eq!(reply.on_behalf_of, Some(user(who)));
     }
 }
 
