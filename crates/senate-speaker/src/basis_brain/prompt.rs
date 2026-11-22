@@ -520,7 +520,8 @@ const NO_WORK: &str = "There is no work action here: you do no coding work yours
 
 macro_rules! actions_described {
     () => {
-        concat!("relay: the speaker wants something passed to one or more colleagues' agents (e.g. \"tell alice's agent …\", 「告诉 alice 的 agent …」, \"ask bob's codex …\", 「问一下 bob 的 agent …」). decide: the speaker wants a decision recorded for the committee (e.g. \"note this: refunds are capped at 30 days\", 「记一下：退款上限 30 天」, \"remember, the idempotency key is always Idempotency-Key\", 「记住，幂等键统一用 Idempotency-Key」, \"decided: …\", 「定了：…」); it is restated for them to confirm. recall: the speaker asks what has been decided or what you remember about the committee (e.g. \"what do you remember\", 「你记得什么」, \"what's settled so far\", 「现在定了哪些」, \"what did we decide before\", 「之前决定了什么」); the brief is sent. bind: the speaker wants this group bound to a committee. unbind: the speaker wants this group's binding removed. status: the speaker asks what this group is bound to or which agents are online. adopt_agent_group: the speaker wants this group to be a committee's Agent group, where agents' traffic and task cards go (e.g. \"make this group refund-v2's agent group\", 「把这个群设为 refund-v2 的 agent 群」, \"this is the agent group\", 「这个群是 agent 群」). invite_to_agent_group: the speaker wants people pulled into the Agent group (e.g. \"add @alice to the agent group\", 「把 @alice 拉进 agent 群」). set_output_level: the speaker wants the Agent group to get less or more traffic (e.g. \"agent group: answers only\" / 「agent 群只回答案」 is answers, \"send status to the agent group\" / 「agent 群发状态」 is status, \"everything, every round trip\" / 「全部往返」 is all). ", work_described!(), " reassign: the speaker wants one colleague's work on this committee handed to another (e.g. \"hand alice's work on refund-v2 to bob\", 「把 alice 在 refund-v2 的工作交给 bob」), or handed back (e.g. \"give refund-v2 back to alice\", 「把 refund-v2 交还给 alice」: to is alice, from is whoever has it now if said, else alice too).")
+        concat!("forget: remove a point from discussion memory (e.g. 'forget that point about retries', 「把关于重试那条记忆删掉」). correct: amend a remembered point (e.g. 'actually the retry limit is five, not three', 「更正一下，重试上限是五次」). For either action use memory_seq only when the person explicitly identifies the point by seq. Otherwise give the topic of the existing point as memory_query, even if a lookup suggests a seq; the system resolves it and asks when several points match. A correction needs the complete replacement statement in body. ",
+        "relay: the speaker wants something passed to one or more colleagues' agents (e.g. \"tell alice's agent …\", 「告诉 alice 的 agent …」, \"ask bob's codex …\", 「问一下 bob 的 agent …」). decide: the speaker wants a decision recorded for the committee (e.g. \"note this: refunds are capped at 30 days\", 「记一下：退款上限 30 天」, \"remember, the idempotency key is always Idempotency-Key\", 「记住，幂等键统一用 Idempotency-Key」, \"decided: …\", 「定了：…」); it is restated for them to confirm. recall: the speaker asks what has been decided or what you remember about the committee (e.g. \"what do you remember\", 「你记得什么」, \"what's settled so far\", 「现在定了哪些」, \"what did we decide before\", 「之前决定了什么」); the brief is sent. bind: the speaker wants this group bound to a committee. unbind: the speaker wants this group's binding removed. status: the speaker asks what this group is bound to or which agents are online. adopt_agent_group: the speaker wants this group to be a committee's Agent group, where agents' traffic and task cards go (e.g. \"make this group refund-v2's agent group\", 「把这个群设为 refund-v2 的 agent 群」, \"this is the agent group\", 「这个群是 agent 群」). invite_to_agent_group: the speaker wants people pulled into the Agent group (e.g. \"add @alice to the agent group\", 「把 @alice 拉进 agent 群」). set_output_level: the speaker wants the Agent group to get less or more traffic (e.g. \"agent group: answers only\" / 「agent 群只回答案」 is answers, \"send status to the agent group\" / 「agent 群发状态」 is status, \"everything, every round trip\" / 「全部往返」 is all). ", work_described!(), " reassign: the speaker wants one colleague's work on this committee handed to another (e.g. \"hand alice's work on refund-v2 to bob\", 「把 alice 在 refund-v2 的工作交给 bob」), or handed back (e.g. \"give refund-v2 back to alice\", 「把 refund-v2 交还给 alice」: to is alice, from is whoever has it now if said, else alice too).")
     };
 }
 
@@ -576,7 +577,7 @@ fn full_intent_schema() -> Value {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["relay", "decide", "recall", "bind", "unbind", "status", "adopt_agent_group", "invite_to_agent_group", "set_output_level", "work", "reassign", "none"],
+                "enum": ["relay", "decide", "forget", "correct", "recall", "bind", "unbind", "status", "adopt_agent_group", "invite_to_agent_group", "set_output_level", "work", "reassign", "none"],
                 "description": INTENT_ACTION_DESCRIPTION
             },
             "targets": {
@@ -591,7 +592,15 @@ fn full_intent_schema() -> Value {
             },
             "body": {
                 "type": "string",
-                "description": "relay and decide. relay: the message for the agent, as a self-contained sentence in the speaker's language; drop the \"tell X's agent\" / 「告诉 X 的 agent」 framing. decide: the decision itself as one self-contained statement in the speaker's language; drop the \"note this\" / 「记一下」 framing. Either way keep every fact, number and name exactly as said, and add nothing."
+                "description": "relay, decide and correct. correct: the complete corrected point as stated. relay: the message for the agent, as a self-contained sentence in the speaker's language; drop the \"tell X's agent\" / 「告诉 X 的 agent」 framing. decide: the decision itself as one self-contained statement in the speaker's language; drop the \"note this\" / 「记一下」 framing. Either way keep every fact, number and name exactly as said, and add nothing."
+            },
+            "memory_seq": {
+                "type": "integer",
+                "description": "forget or correct only. The positive seq the person explicitly named."
+            },
+            "memory_query": {
+                "type": "string",
+                "description": "forget or correct only. Search words identifying the current point, in its language. Omit when memory_seq is given."
             },
             "supersedes": {
                 "type": "integer",
@@ -649,6 +658,8 @@ pub(crate) struct IntentWire {
     body: Option<String>,
     #[serde(default)]
     supersedes: Option<u64>,
+    memory_seq: Option<u64>,
+    memory_query: Option<String>,
     #[serde(default)]
     committee: Option<String>,
     #[serde(default)]
@@ -701,6 +712,24 @@ impl IntentWire {
                     _ => Ok(()),
                 }
             }
+            "forget" | "correct" => {
+                needs(
+                    matches!(
+                        (self.memory_seq, self.memory_query.as_deref()),
+                        (Some(1..), None)
+                    ) || (self.memory_seq.is_none()
+                        && self
+                            .memory_query
+                            .as_deref()
+                            .is_some_and(|q| !senate_core::memory::terms(q).is_empty())),
+                    "either a positive memory_seq or searchable memory_query",
+                )?;
+                if self.action == "correct" {
+                    needs(filled(&self.body), "a non-empty replacement body")
+                } else {
+                    needs(!filled(&self.body), "no replacement body")
+                }
+            }
             "decide" => needs(filled(&self.body), "a non-empty body"),
             "bind" => needs(filled(&self.committee), "a committee"),
             "invite_to_agent_group" => needs(!self.targets.is_empty(), "targets"),
@@ -735,6 +764,19 @@ impl IntentWire {
                 body: text(self.body),
                 supersedes: self.supersedes.map(Seq),
             },
+            "forget" | "correct" => {
+                let replacement = (self.action == "correct").then(|| text(self.body));
+                match (self.memory_seq.map(Seq), replacement) {
+                    (Some(target), Some(text)) => Intent::Correct { target, text },
+                    (Some(target), None) => Intent::Forget {
+                        targets: vec![target],
+                    },
+                    (None, replacement) => Intent::EditMemoryByQuery {
+                        query: text(self.memory_query),
+                        replacement,
+                    },
+                }
+            }
             "recall" => Intent::Recall,
             "bind" => Intent::Bind {
                 committee: text(self.committee),
@@ -1627,7 +1669,7 @@ mod tests {
         let actions = schema["properties"]["action"]["enum"]
             .as_array()
             .expect("enum");
-        assert_eq!(actions.len(), 12);
+        assert_eq!(actions.len(), 14);
         let action = schema["properties"]["action"]["description"]
             .as_str()
             .expect("description");
@@ -1788,7 +1830,7 @@ mod tests {
         let actions = action["properties"]["action"]["enum"]
             .as_array()
             .expect("enum");
-        assert_eq!(actions.len(), 11);
+        assert_eq!(actions.len(), 13);
         assert!(!actions.contains(&json!("none")));
         assert!(action["properties"].get("reply").is_none());
         for (name, property) in action["properties"].as_object().expect("properties") {
