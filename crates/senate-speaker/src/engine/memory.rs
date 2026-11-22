@@ -159,7 +159,7 @@ pub(super) fn checked(
         })
         .take(MAX_DIGEST_POINTS)
         .collect();
-    let known: BTreeSet<String> = memory.in_force().map(|p| p.text.to_lowercase()).collect();
+    let known: BTreeSet<String> = memory.facts().map(|p| p.text.to_lowercase()).collect();
     let drafts: Vec<MemoryDraft> = out
         .memory
         .into_iter()
@@ -301,7 +301,7 @@ impl Engine {
         let through = state.discussion.through;
         let (memory, decisions) = match &state.brief {
             Some(brief) => (
-                brief.memory().in_force().cloned().collect(),
+                brief.memory().facts().cloned().collect(),
                 brief.brief().decisions,
             ),
             None => (Vec::new(), Vec::new()),

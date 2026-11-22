@@ -172,7 +172,6 @@ pub struct BriefParticipant {
 pub struct BriefBuilder {
     committee: CommitteeId,
     head: Seq,
-    top: Option<BriefTop>,
     /// Every decision seen, by seq; superseded ones are removed.
     decisions: BTreeMap<Seq, BriefDecision>,
     /// Supersessions that named a decision not yet seen (or never stored).
@@ -192,7 +191,6 @@ impl BriefBuilder {
         Self {
             committee,
             head: Seq::ZERO,
-            top: None,
             decisions: BTreeMap::new(),
             superseded: Vec::new(),
             open: BTreeMap::new(),
@@ -284,13 +282,6 @@ impl BriefBuilder {
                     },
                 );
             }
-            Kind::Note if event.from == Address::Speaker && is_brief_top(event) => {
-                self.top = Some(BriefTop {
-                    seq: event.seq,
-                    ts: event.ts,
-                    body: event.body.clone(),
-                });
-            }
             // A checkpoint is an agent's (the server takes it from no one
             // else); one that is not from a senator is not kept.
             Kind::Checkpoint => {
@@ -364,7 +355,11 @@ impl BriefBuilder {
         Brief {
             committee: self.committee.clone(),
             head: self.head,
-            top: self.top.clone(),
+            top: self.memory.focus().map(|p| BriefTop {
+                seq: p.seq,
+                ts: p.ts,
+                body: p.text.clone(),
+            }),
             decisions,
             open_questions,
             groups: self.groups.clone(),
@@ -379,7 +374,7 @@ impl BriefBuilder {
                 })
                 .collect(),
             participants,
-            memory: last_n(self.memory.in_force(), MAX_BRIEF_POINTS),
+            memory: last_n(self.memory.facts(), MAX_BRIEF_POINTS),
             digest: self.memory.latest_digest().cloned(),
         }
     }
@@ -688,10 +683,6 @@ fn principal(event: &Event) -> Address {
         .on_behalf_of
         .clone()
         .unwrap_or_else(|| event.from.clone())
-}
-
-fn is_brief_top(event: &Event) -> bool {
-    event.meta.get(meta::BRIEF_TOP).and_then(|v| v.as_bool()) == Some(true)
 }
 
 /// `meta.supersedes` of a decision: one seq or a list of seqs.

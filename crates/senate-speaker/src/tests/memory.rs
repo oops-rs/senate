@@ -403,6 +403,13 @@ async fn people_list_correct_and_delete_what_the_committee_knows_by_command() {
         .await;
     rig.settle().await;
     let brief = rig.hub.brief(&orchard()).await.unwrap();
+    assert!(
+        rig.hub
+            .memory_search(&orchard(), "cache", 10, false)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     let known: Vec<(&str, &Address)> = brief
         .memory
         .iter()
@@ -426,55 +433,45 @@ async fn people_list_correct_and_delete_what_the_committee_knows_by_command() {
 }
 
 #[tokio::test]
-async fn a_simulated_forget_changes_nothing_the_committee_knows() {
+async fn simulated_memory_commands_can_search_but_cannot_edit() {
     use super::rig::mention_in;
-    let rig = bound(config_in(senate_core::Locale::En)).await;
-    let kept = rig
-        .append(
-            NewEvent::new(
-                orchard(),
-                Kind::Note,
-                Address::Speaker,
-                "The cache is shared",
-            )
-            .with_meta(
-                meta::MEMORY,
-                MemoryPayload::Point {
-                    refs: vec![Seq(1)],
-                    supersedes: vec![],
-                    digest: None,
-                }
-                .to_value(),
-            ),
-        )
-        .await;
-    rig.settle().await;
-    rig.append(
-        mention_in(
-            &orchard(),
-            GROUP,
-            "alice",
-            &format!("/forget {}", kept.seq),
-            "m_sim",
-        )
-        .with_source(Source {
-            simulated: true,
-            simulated_by: None,
-            ..source()
-        }),
-    )
-    .await;
-    rig.settle().await;
-    let edits: Vec<Event> = memory_points(&rig.hub)
-        .into_iter()
-        .map(|(e, _)| e)
-        .filter(|e| e.on_behalf_of.is_some())
-        .collect();
-    assert_eq!(edits.len(), 1, "recorded, as simulated");
-    assert!(edits[0].is_simulated());
-    let brief = rig.hub.brief(&orchard()).await.unwrap();
-    assert_eq!(brief.memory.len(), 1, "and it deleted nothing");
-    rig.stop().await;
+    use senate_core::Locale;
+    for (locale, reply) in [
+        (Locale::En, "Simulated messages do not change memory."),
+        (Locale::Zh, "模拟消息不会更改记忆。"),
+    ] {
+        let rig = bound(config_in(locale)).await;
+        let kept = rig
+            .append(point_of("The cache is shared", vec![Seq(1)]))
+            .await;
+        let command = |text: &str, id| {
+            mention_in(&orchard(), GROUP, "alice", text, id).with_source(Source {
+                simulated: true,
+                ..source()
+            })
+        };
+        rig.brain.interprets(Ok(edit_by_topic("cache", None)));
+        for (text, id) in [
+            (format!("/forget {}", kept.seq), "m_forget"),
+            (format!("/correct {} New value", kept.seq), "m_correct"),
+            ("Please forget that cache".into(), "m_topic"),
+        ] {
+            rig.append(command(&text, id)).await;
+            rig.settle().await;
+            assert_eq!(rig.surface.texts().last().unwrap(), reply);
+            assert_eq!(memory_points(&rig.hub).len(), 1);
+        }
+        rig.append(command("/memory cache", "m_read")).await;
+        rig.settle().await;
+        assert!(
+            rig.surface
+                .texts()
+                .last()
+                .unwrap()
+                .contains("The cache is shared")
+        );
+        rig.stop().await;
+    }
 }
 
 fn edit_by_topic(query: &str, replacement: Option<&str>) -> crate::Intent {
@@ -531,6 +528,23 @@ async fn natural_memory_edits_wait_for_confirmation_in_both_brain_modes() {
         if let Some(text) = replacement {
             assert!(plan.markdown.contains(text));
         }
+        let mut simulated_yes = in_thread(
+            "alice",
+            locale.pick("对", "yes"),
+            "simulated_confirm",
+            ask.seq,
+            plan.thread_ref.clone(),
+            &plan.message_ref,
+        )
+        .with_source(Source {
+            simulated: true,
+            ..source()
+        });
+        simulated_yes.committee = orchard();
+        rig.append(simulated_yes).await;
+        rig.settle().await;
+        assert_eq!(memory_points(&rig.hub).len(), 1);
+
         let mut yes = in_thread(
             "alice",
             locale.pick("对", "yes"),
@@ -613,4 +627,81 @@ async fn natural_memory_edits_refuse_guests_and_agents_and_list_ambiguous_points
     assert!(rig.surface.texts().last().unwrap().contains("没有找到"));
     assert_eq!(memory_points(&rig.hub).len(), 2);
     rig.stop().await;
+}
+
+#[tokio::test]
+async fn focus_notes_can_be_found_corrected_and_forgotten() {
+    use super::rig::mention_in;
+    for marker in [meta::BRIEF_TOP, meta::DIGEST] {
+        let rig = bound(config_in(senate_core::Locale::En)).await;
+        let old = "1. Check deploys\n2. Repair deepseek";
+        let payload = if marker == meta::BRIEF_TOP {
+            json!(true)
+        } else {
+            DigestPayload {
+                trigger: DigestTrigger::Daily,
+                from: Seq(1),
+                through: Seq(1),
+                points: vec![point(old, &[Seq(1)])],
+            }
+            .to_value()
+        };
+        let focus = rig
+            .append(
+                NewEvent::new(orchard(), Kind::Note, Address::Speaker, old)
+                    .with_meta(marker, payload),
+            )
+            .await;
+        rig.settle().await;
+        let command = |body: &str, id: &str| mention_in(&orchard(), GROUP, "alice", body, id);
+        rig.append(command("/memory deepseek", "m_search")).await;
+        rig.settle().await;
+        assert!(
+            rig.surface
+                .texts()
+                .last()
+                .unwrap()
+                .contains(&format!("seq {} ·", focus.seq))
+        );
+        rig.append(command(
+            &format!("/correct {} Deploys recovered", focus.seq),
+            "m_correct",
+        ))
+        .await;
+        rig.settle().await;
+        let brief = rig.hub.brief(&orchard()).await.unwrap();
+        let rendered = brief.to_markdown(senate_core::Locale::En, 10000);
+        assert!(
+            rendered.contains("Deploys recovered") && !rendered.contains("deepseek"),
+            "{rendered}"
+        );
+        let corrected = if marker == meta::BRIEF_TOP {
+            let top = brief.top.unwrap();
+            assert_eq!(top.body, "Deploys recovered");
+            top.seq
+        } else {
+            let digest = brief.digest.unwrap();
+            assert_eq!(digest.payload.points[0].text, "Deploys recovered");
+            digest.seq
+        };
+        rig.append(command(&format!("/forget {corrected}"), "m_delete"))
+            .await;
+        rig.settle().await;
+        let brief = rig.hub.brief(&orchard()).await.unwrap();
+        assert!(brief.top.is_none() && brief.digest.is_none());
+        assert!(
+            rig.hub
+                .memory_search(&orchard(), "deploys", 10, false)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let history = rig
+            .hub
+            .memory_search(&orchard(), "deploys", 10, true)
+            .await
+            .unwrap();
+        assert_eq!(history.len(), 2);
+        rig.stop().await;
+    }
 }

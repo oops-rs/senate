@@ -580,6 +580,13 @@ pub(crate) fn describe_correct(l: Locale, target: Seq, text: &str) -> String {
     }
 }
 
+pub(crate) fn simulated_memory_edit(l: Locale) -> &'static str {
+    l.pick(
+        "模拟消息不会更改记忆。",
+        "Simulated messages do not change memory.",
+    )
+}
+
 /// The acknowledgement once a correction or deletion is recorded.
 pub(crate) fn memory_edited(l: Locale, seq: Seq) -> String {
     match l {

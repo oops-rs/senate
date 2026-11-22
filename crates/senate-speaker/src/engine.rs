@@ -2838,6 +2838,11 @@ impl Engine {
             return self.say(chat, &refusal).await;
         }
         match intent {
+            Intent::Forget { .. } | Intent::Correct { .. } | Intent::EditMemoryByQuery { .. }
+                if chat.is_simulated() =>
+            {
+                self.say(chat, render::simulated_memory_edit(l)).await
+            }
             Intent::None { reply } => {
                 if reply.trim().is_empty() {
                     Ok(Flow::Done)
@@ -3332,6 +3337,16 @@ impl Engine {
         let Some(pending) = self.pending.get(index).cloned() else {
             return Ok(());
         };
+        if chat.is_simulated()
+            && pending
+                .actions
+                .iter()
+                .any(|a| matches!(a, PendingAction::Memory { .. }))
+        {
+            self.reply_to_chat(chat, render::simulated_memory_edit(l))
+                .await?;
+            return Ok(());
+        }
         let text = if is_affirmative(&chat.body) {
             let trigger = format!("{}:{}", chat.committee, chat.seq);
             self.execute_pending(index, &pending, &trigger).await?
@@ -3551,8 +3566,6 @@ impl Engine {
                     .with_id(derived_event_id(&["memory-edit", committee.as_str(), key]))
                     .on_behalf_of(requester.clone())
                     .with_meta(meta::MEMORY, payload.to_value())
-                    // Where it was asked: a simulated `/forget` changes
-                    // nothing the committee knows.
                     .with_source(Source {
                         platform: group.platform.clone(),
                         group_id: group.group_id.clone(),

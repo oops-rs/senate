@@ -17,6 +17,9 @@
 //!   fact worth keeping, from the Speaker. Its identity is its own seq. It
 //!   cites the seqs it came from (`refs`) and names the points it replaces
 //!   (`supersedes`). The body is the point.
+//! - **Current focus** ([`meta::BRIEF_TOP`]): the Speaker's multiline focus
+//!   note. Like a discussion digest, it is searchable and editable by seq.
+//!   Each new summary supersedes the preceding summary of its own kind.
 //! - **A correction** ([`MemoryPayload::Correct`]): a person's new wording of
 //!   a point. It is a point itself, and it supersedes its target.
 //! - **A deletion** ([`MemoryPayload::Delete`]): a person retracts points.
@@ -213,6 +216,8 @@ pub struct MemoryFold {
     /// Every ref of a point a person deleted: a new point citing one of
     /// these would bring the deleted point back.
     deleted_refs: BTreeSet<Seq>,
+    /// Current focus note or its correction. Retirement lives in `retired`.
+    focus: Option<Seq>,
     digest: Option<Digest>,
     /// The `through` of every digest, highest last.
     through: Seq,
@@ -240,8 +245,44 @@ impl MemoryFold {
         if event.is_simulated() {
             return;
         }
+        if event.kind == Kind::Note
+            && event.from == Address::Speaker
+            && event.meta.get(meta::BRIEF_TOP).and_then(Value::as_bool) == Some(true)
+        {
+            if event.body.trim().is_empty() {
+                return;
+            }
+            let previous = self.focus.into_iter().collect();
+            self.add(
+                event,
+                event.body.clone(),
+                Vec::new(),
+                previous,
+                Address::Speaker,
+            );
+            self.focus = Some(event.seq);
+            return;
+        }
         if let Some(digest) = DigestPayload::of(event) {
+            let previous = self.digest.iter().map(|d| d.seq).collect();
+            let refs = digest
+                .points
+                .iter()
+                .flat_map(|p| p.refs.iter().copied())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            let text = digest
+                .points
+                .iter()
+                .map(|p| p.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
             self.through = self.through.max(digest.through);
+            if text.trim().is_empty() {
+                return;
+            }
+            self.add(event, text, refs, previous, Address::Speaker);
             self.digest = Some(Digest {
                 seq: event.seq,
                 ts: event.ts,
@@ -266,7 +307,7 @@ impl MemoryFold {
                 if event.from != Address::Speaker || event.on_behalf_of.is_some() {
                     return;
                 }
-                self.add(event, refs, supersedes, by);
+                self.add(event, one_line(&event.body), refs, supersedes, by);
             }
             MemoryPayload::Correct { target, refs } => {
                 if by == Address::Speaker {
@@ -282,7 +323,28 @@ impl MemoryFold {
                 } else {
                     refs
                 };
-                self.add(event, refs, vec![target], by);
+                let is_focus = self.focus == Some(target) && self.is_in_force(target);
+                let is_digest = self.latest_digest().is_some_and(|d| d.seq == target);
+                let text = if is_focus || is_digest {
+                    event.body.trim().to_owned()
+                } else {
+                    one_line(&event.body)
+                };
+                if text.is_empty() {
+                    return;
+                }
+                if is_focus {
+                    self.focus = Some(event.seq);
+                }
+                if is_digest && let Some(digest) = &mut self.digest {
+                    digest.seq = event.seq;
+                    digest.ts = event.ts;
+                    digest.payload.points = vec![DigestPoint {
+                        text: text.clone(),
+                        refs: refs.clone(),
+                    }];
+                }
+                self.add(event, text, refs, vec![target], by);
             }
             MemoryPayload::Delete { targets } => {
                 if by == Address::Speaker {
@@ -298,8 +360,14 @@ impl MemoryFold {
         }
     }
 
-    fn add(&mut self, event: &Event, refs: Vec<Seq>, supersedes: Vec<Seq>, by: Address) {
-        let text = one_line(&event.body);
+    fn add(
+        &mut self,
+        event: &Event,
+        text: String,
+        refs: Vec<Seq>,
+        supersedes: Vec<Seq>,
+        by: Address,
+    ) {
         if text.is_empty() {
             return;
         }
@@ -333,6 +401,20 @@ impl MemoryFold {
             .filter(|p| !self.retired.contains_key(&p.seq))
     }
 
+    /// Facts for the "What we know" section; summaries have their own sections.
+    pub fn facts(&self) -> impl DoubleEndedIterator<Item = &MemoryPoint> {
+        self.in_force().filter(|p| {
+            Some(p.seq) != self.focus && !self.digest.as_ref().is_some_and(|d| d.seq == p.seq)
+        })
+    }
+
+    /// The current focus as edited through the memory log.
+    pub(crate) fn focus(&self) -> Option<&MemoryPoint> {
+        self.focus
+            .filter(|seq| self.is_in_force(*seq))
+            .and_then(|seq| self.points.get(&seq))
+    }
+
     /// Every point ever written, oldest first, with how it was retired.
     pub fn history(&self) -> impl DoubleEndedIterator<Item = MemoryHit> + '_ {
         self.points.values().map(|p| self.hit(p))
@@ -360,7 +442,7 @@ impl MemoryFold {
 
     /// The latest digest.
     pub fn latest_digest(&self) -> Option<&Digest> {
-        self.digest.as_ref()
+        self.digest.as_ref().filter(|d| self.is_in_force(d.seq))
     }
 
     /// The highest seq any digest covered: discussion after it is new.

@@ -353,7 +353,7 @@ fn announcement_section(
         // Newest first: the section shows the latest few.
         known: memory
             .map(|m| {
-                m.in_force()
+                m.facts()
                     .rev()
                     .map(|p| render::announcement_point(&p.text))
                     .collect()
