@@ -3805,6 +3805,119 @@ async fn replace_hands_the_seat_to_a_fresh_session_and_resumes_after_a_failure()
     assert!(h.store().replacements().unwrap().is_empty());
 }
 
+/// Starting the TUI succeeds, but the new senator never gets its SSE stream.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replace_stops_the_unconnected_session_and_preserves_the_old_seat() {
+    let (h, project, _) = fixture_daemon(2).await;
+    let old: SpawnReply = call(
+        &h,
+        &Request::Spawn {
+            session: Default::default(),
+            runtime: HostedRuntime::Claude,
+            committee: committee(),
+            alias: Some(path("reviewer")),
+            cwd: project,
+            chair: false,
+            prompt: None,
+            model: Default::default(),
+        },
+    )
+    .await;
+    let (ok, out) = senate(
+        &h,
+        &[
+            "senator",
+            "duty",
+            "reviews the gateway",
+            "--session",
+            &old.session_id,
+        ],
+    )
+    .await;
+    assert!(ok, "{out}");
+    let duty = h
+        .server
+        .events(committee().as_str())
+        .into_iter()
+        .find(|e| senate_core::DutyPayload::of(e).is_some())
+        .unwrap();
+    let open = h.server.append(common::question(
+        common::person("bob"),
+        senate_core::Address::senator(&old.senator),
+        "What remains to review?",
+    ));
+    eventually("old seat received its duty and question", TIMEOUT, || {
+        (h.store()
+            .delivered_cursor(&old.senator, &committee())
+            .ok()?
+            >= open.seq.max(duty.seq))
+        .then_some(())
+    })
+    .await;
+    let desk = vec![path("codex"), old.senator.clone()];
+    {
+        let mut inner = h.server.state.inner.lock().unwrap();
+        inner.secretaries.insert(path("alice"), desk.clone());
+        inner.chair = Some((old.senator.clone(), true));
+        inner.only_stream = Some(old.senator.to_string());
+    }
+    let (ok, out) = senate(
+        &h,
+        &[
+            "session",
+            "replace",
+            "reviewer",
+            "--prompt",
+            "Continue the review",
+        ],
+    )
+    .await;
+    assert!(!ok, "{out}");
+    assert!(
+        out.contains("started but was not seated and connected"),
+        "{out}"
+    );
+    assert!(out.contains("stopped at the spawn step"), "{out}");
+
+    let rows: ipc::SessionsReply = call(&h, &Request::Sessions).await;
+    assert_eq!(rows.rows.len(), 2, "{rows:?}");
+    let new = rows.rows.iter().find(|r| r.primary != old.senator).unwrap();
+    assert_eq!(new.state, ipc::HostState::Stopped);
+    assert!(!new.tty.exists());
+    let kept = rows.rows.iter().find(|r| r.primary == old.senator).unwrap();
+    assert_eq!(kept.state, ipc::HostState::Running);
+    assert!(kept.tty.exists());
+    assert!(h.store().replacements().unwrap().is_empty());
+    let events = h.server.events(committee().as_str());
+    assert_eq!(
+        events
+            .iter()
+            .filter_map(senate_core::DutyPayload::of)
+            .collect::<Vec<_>>(),
+        [senate_core::DutyPayload::of(&duty).unwrap()]
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| e.meta.contains_key(senate_core::meta::HANDED_TO)
+                || e.body == "Continue the review")
+    );
+    let inner = h.server.state.inner.lock().unwrap();
+    assert!(
+        inner
+            .stream_opens
+            .iter()
+            .any(|s| s.senator.as_deref() == Some(new.primary.as_str()) && !s.accepted)
+    );
+    assert_eq!(
+        inner.aliases.alias_of(&committee(), &old.senator),
+        Some(&path("reviewer"))
+    );
+    assert_eq!(inner.chair.as_ref().map(|c| &c.0), Some(&old.senator));
+    assert_eq!(inner.secretaries[&path("alice")], desk);
+    assert!(inner.unseated.is_none());
+}
+
 /// A name that is no hosted session here is refused, and so is a
 /// replacement whose new session cannot start (here: the machine is at its
 /// limit of hosted sessions): the spawn step fails, nothing is handed over,

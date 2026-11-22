@@ -248,6 +248,8 @@ pub struct Inner {
     /// What `/v1/me` says about a Speaker judging roots here.
     pub triaged: bool,
     pub offline: bool,
+    /// When set, only this senator can open a new event stream.
+    pub only_stream: Option<String>,
     /// Sent as `x-senate-epoch` on every `/v1` response; empty sends none.
     pub epoch: String,
     /// Every `GET .../search`: `(committee, q, limit)`.
@@ -1198,7 +1200,8 @@ async fn stream(
     let backlog: Vec<(Seq, String)> = {
         let mut inner = st.inner.lock().unwrap();
         let ahead = after.0 > inner.head(&committee);
-        let accepted = !inner.offline && !ahead;
+        let unavailable = inner.offline || inner.only_stream.as_ref().is_some_and(|s| s != &reader);
+        let accepted = !unavailable && !ahead;
         inner.stream_opens.push(StreamOpen {
             committee: committee.clone(),
             person: who,
@@ -1208,7 +1211,7 @@ async fn stream(
             accepted,
             ahead,
         });
-        if inner.offline {
+        if unavailable {
             return api_error(StatusCode::SERVICE_UNAVAILABLE, "internal", "offline");
         }
         if ahead {
@@ -1334,6 +1337,7 @@ impl FakeServer {
                 unseated: None,
                 triaged: true,
                 offline: false,
+                only_stream: None,
                 epoch: "epoch-1".into(),
                 searches: Vec::new(),
                 brief_broken: false,
