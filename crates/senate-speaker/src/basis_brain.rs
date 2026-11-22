@@ -38,8 +38,16 @@
 //! `pick_agent` is a typed turn of the same kind (`speaker_pick`: an agent
 //! path or null, and a reason), under the same deadline: given the task, who
 //! asked, and per candidate its presence, its latest checkpoint and its open
-//! task threads, it names one candidate or asks. Null, or anything that is not
-//! a candidate, is [`Pick::Ask`].
+//! task threads, it names one candidate or asks. Null is [`Pick::Ask`]; a
+//! name that is not a candidate goes back to the model to correct.
+//!
+//! **Validated output.** Every typed turn goes through [`typed`]: the
+//! answering tool's candidate is decoded and checked by its wire's
+//! `validate` (an enum value, a required field, a listed candidate) before
+//! it may end the run, and a rejection is the tool's error, so the model
+//! corrects itself in the same turn, at most [`MAX_CORRECTIONS`] times.
+//! Checks that need what the model does not see (digest refs, who agreed)
+//! stay with the engine.
 //!
 //! `interpret` is a typed turn (`run.output::<IntentWire>()` with the
 //! hand-written schema in `prompt`) that keeps its two log tools, so the
@@ -100,10 +108,14 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use basis::runtime::FileToolProfile;
 use basis::{
-    AllowAll, Config, ModelSelector, NullSink, RunOutcome, RunProfile, RunReport, RunSpec, Runtime,
-    RuntimeBuilder, ShellAccess, SystemPrompt, ToolRoster, Workspace,
+    AllowAll, Config, ModelSelector, NullSink, OutputAttempt, OutputDecision, OutputSpec,
+    PreparedRun, PromptPart, RunOutcome, RunProfile, RunReport, RunSpec, Runtime, RuntimeBuilder,
+    ShellAccess, SystemPrompt, ToolRoster, TurnOptions, Workspace,
 };
 use senate_core::{Brief, CommitteeId, Hub, Locale, TriagePayload};
+use serde::de::DeserializeOwned;
+use serde_json::Value;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
@@ -153,6 +165,10 @@ const TOOL_BUDGET: usize = 8;
 /// Tool calls one agent-mode turn may make: it may need the brief, a
 /// checkpoint and a couple of log reads before it plans.
 const AGENT_TOOL_BUDGET: usize = 16;
+/// Answering-tool calls a typed turn without other tools may make: its
+/// answer and the corrections it may need (every call counts against the
+/// run's tool budget, a rejected one too).
+const ANSWER_CALLS: usize = 1 + MAX_CORRECTIONS;
 
 /// Makes the private runtime each workspace runs on: provider, credential,
 /// history. The Brain adds its own posture on top (no file tools, no
@@ -407,7 +423,7 @@ impl BasisBrain {
         RunSpec::default()
             .with_session_name(name)
             .with_deadline(deadline)
-            .with_tool_budget(1)
+            .with_tool_budget(ANSWER_CALLS)
             .with_token_budget(bounds.tokens)
             .with_profile(self.speaking(Some(committee), locale))
     }
@@ -537,20 +553,20 @@ impl BasisBrain {
         let workspace = self.workspace(committee, model).await?;
         let spec = self
             .bounded(RunSpec::default(), "speaker-interpret", committee, model)
+            .with_tool_budget(TOOL_BUDGET + MAX_CORRECTIONS)
             .with_profile(self.speaking(committee, utterance.locale));
         let mut run = workspace
             .prepare(spec)
             .map_err(|e| BrainError::Unavailable(e.to_string()))?;
-        let output = run
-            .output::<IntentWire, _, _>(
-                prompt::interpret(utterance),
-                prompt::intent_spec(utterance.work),
-                NullSink,
-                AllowAll,
-            )
-            .await
-            .map_err(output_error)?;
-        output.value.into_intent(work)
+        let wire: IntentWire = typed(
+            &mut run,
+            "interpret",
+            prompt::interpret(utterance),
+            prompt::intent_spec(work),
+            move |wire: &IntentWire| wire.validate(work),
+        )
+        .await?;
+        Ok(wire.into_intent())
     }
 
     async fn answer_on(
@@ -594,21 +610,21 @@ impl BasisBrain {
         let workspace = self.workspace(committee, model).await?;
         let spec = self
             .bounded(RunSpec::default(), "speaker-agreement", committee, model)
-            .with_tool_budget(1)
+            .with_tool_budget(ANSWER_CALLS)
             .with_profile(self.speaking(committee, input.locale));
         let mut run = workspace
             .prepare(spec)
             .map_err(|e| BrainError::Unavailable(e.to_string()))?;
-        let output = run
-            .output::<AgreementWire, _, _>(
-                prompt::agreement(input),
-                prompt::agreement_spec(),
-                NullSink,
-                AllowAll,
-            )
-            .await
-            .map_err(output_error)?;
-        Ok(output.value.into_agreement())
+        // Who agreed and the refs are checked by the engine against the burst.
+        let wire: AgreementWire = typed(
+            &mut run,
+            "agreement",
+            prompt::agreement(input),
+            prompt::agreement_spec(),
+            |_: &AgreementWire| Ok(()),
+        )
+        .await?;
+        Ok(wire.into_agreement())
     }
 
     async fn digest_on(
@@ -620,21 +636,21 @@ impl BasisBrain {
         let workspace = self.workspace(committee, model).await?;
         let spec = self
             .bounded(RunSpec::default(), "speaker-digest", committee, model)
-            .with_tool_budget(1)
+            .with_tool_budget(ANSWER_CALLS)
             .with_profile(self.speaking(committee, input.locale));
         let mut run = workspace
             .prepare(spec)
             .map_err(|e| BrainError::Unavailable(e.to_string()))?;
-        let output = run
-            .output::<DigestWire, _, _>(
-                prompt::digest(input),
-                prompt::digest_spec(),
-                NullSink,
-                AllowAll,
-            )
-            .await
-            .map_err(output_error)?;
-        Ok(output.value.into_out())
+        // Every seq is checked by the engine against what it showed.
+        let wire: DigestWire = typed(
+            &mut run,
+            "digest",
+            prompt::digest(input),
+            prompt::digest_spec(),
+            |_: &DigestWire| Ok(()),
+        )
+        .await?;
+        Ok(wire.into_out())
     }
 
     async fn brief_top_on(
@@ -690,16 +706,15 @@ impl BasisBrain {
         let mut run = workspace
             .prepare(spec)
             .map_err(|e| BrainError::Unavailable(e.to_string()))?;
-        let output = run
-            .output::<TriageWire, _, _>(
-                prompt::triage(input),
-                prompt::triage_spec(),
-                NullSink,
-                AllowAll,
-            )
-            .await
-            .map_err(output_error)?;
-        output.value.into_payload()
+        let wire: TriageWire = typed(
+            &mut run,
+            "triage",
+            prompt::triage(input),
+            prompt::triage_spec(),
+            TriageWire::validate,
+        )
+        .await?;
+        Ok(wire.into_payload())
     }
 
     async fn converse_on(
@@ -732,21 +747,21 @@ impl BasisBrain {
                 committee.as_ref(),
                 model,
             )
-            .with_tool_budget(AGENT_TOOL_BUDGET)
+            .with_tool_budget(AGENT_TOOL_BUDGET + MAX_CORRECTIONS)
             .with_profile(profile);
         let mut run = workspace
             .prepare(spec)
             .map_err(|e| BrainError::Unavailable(e.to_string()))?;
-        let output = run
-            .output::<AgentTurnWire, _, _>(
-                prompt::converse(conversation, max_actions, &known),
-                prompt::agent_turn_spec(max_actions, conversation.utterance.work),
-                NullSink,
-                AllowAll,
-            )
-            .await
-            .map_err(output_error)?;
-        output.value.into_turn(conversation.utterance.work)
+        let work = conversation.utterance.work;
+        let wire: AgentTurnWire = typed(
+            &mut run,
+            "converse",
+            prompt::converse(conversation, max_actions, &known),
+            prompt::agent_turn_spec(max_actions, work),
+            move |wire: &AgentTurnWire| wire.validate(work, max_actions),
+        )
+        .await?;
+        Ok(wire.into_turn())
     }
 
     pub(crate) async fn pick_on(
@@ -776,16 +791,16 @@ impl BasisBrain {
         let mut run = workspace
             .prepare(spec)
             .map_err(|e| BrainError::Unavailable(e.to_string()))?;
-        let output = run
-            .output::<PickWire, _, _>(
-                prompt::pick(input, chrono::Utc::now()),
-                prompt::pick_spec(),
-                NullSink,
-                AllowAll,
-            )
-            .await
-            .map_err(output_error)?;
-        Ok(output.value.into_pick(&input.candidates))
+        let candidates = input.candidates.clone();
+        let wire: PickWire = typed(
+            &mut run,
+            "pick",
+            prompt::pick(input, chrono::Utc::now()),
+            prompt::pick_spec(),
+            move |wire: &PickWire| wire.validate(&candidates),
+        )
+        .await?;
+        Ok(wire.into_pick(&input.candidates))
     }
 
     async fn crossing_on(
@@ -798,16 +813,15 @@ impl BasisBrain {
         let mut run = workspace
             .prepare(spec)
             .map_err(|e| BrainError::Unavailable(e.to_string()))?;
-        let output = run
-            .output::<CrossingWire, _, _>(
-                prompt::crossing(input),
-                prompt::crossing_spec(),
-                NullSink,
-                AllowAll,
-            )
-            .await
-            .map_err(output_error)?;
-        output.value.into_crossing()
+        let wire: CrossingWire = typed(
+            &mut run,
+            "crossing",
+            prompt::crossing(input),
+            prompt::crossing_spec(),
+            CrossingWire::validate,
+        )
+        .await?;
+        Ok(wire.into_crossing())
     }
 
     async fn offline_on(
@@ -820,16 +834,15 @@ impl BasisBrain {
         let mut run = workspace
             .prepare(spec)
             .map_err(|e| BrainError::Unavailable(e.to_string()))?;
-        let output = run
-            .output::<OfflineWire, _, _>(
-                prompt::offline(input, chrono::Utc::now()),
-                prompt::offline_spec(),
-                NullSink,
-                AllowAll,
-            )
-            .await
-            .map_err(output_error)?;
-        output.value.into_offline()
+        let wire: OfflineWire = typed(
+            &mut run,
+            "offline",
+            prompt::offline(input, chrono::Utc::now()),
+            prompt::offline_spec(),
+            OfflineWire::validate,
+        )
+        .await?;
+        Ok(wire.into_offline())
     }
 
     /// The triage deadline of `committee`: what a quick call's tiers share.
@@ -934,10 +947,99 @@ impl Brain for BasisBrain {
 
 /// Why a typed turn has no value: the run's own reason, with its cause
 /// chain (a refused connection, the gateway's words), when it has one.
-pub(crate) fn output_error<S>(failure: basis::OutputFailure<S>) -> BrainError {
-    match failure.report.map(|report| report.outcome) {
-        Some(RunOutcome::Error { message }) => BrainError::Unavailable(message),
-        _ => BrainError::Unavailable(failure.error.to_string()),
+/// Corrections one typed turn may make: a candidate the validator rejects
+/// goes back to the model as the answering tool's error, at most this many
+/// times; the next rejection ends the turn as [`BrainError::Invalid`].
+pub(crate) const MAX_CORRECTIONS: usize = 2;
+
+/// One typed turn whose answer is checked before it may end the run.
+///
+/// The candidate is decoded as `W` and then put to `check`; either failing
+/// is returned to the model as the answering tool's error, so it corrects
+/// itself in the same turn (what a schema cannot say, such as "one of the
+/// listed agents", is said here). After [`MAX_CORRECTIONS`] the next
+/// rejection cancels the turn. Each rejection, and an answer accepted after
+/// one, is logged.
+pub(crate) async fn typed<W, C>(
+    run: &mut PreparedRun,
+    call: &'static str,
+    prompt: String,
+    spec: OutputSpec,
+    check: C,
+) -> Result<W, BrainError>
+where
+    W: DeserializeOwned + 'static,
+    C: Fn(&W) -> Result<(), String> + Send + Sync + 'static,
+{
+    let reservation = spec.reserve();
+    let tool = reservation.tool_name().to_owned();
+    let (options, cancel) = TurnOptions::cancellable();
+    let rejected = Arc::new(AtomicUsize::new(0));
+    let last = Arc::new(std::sync::Mutex::new(String::new()));
+    let validator = {
+        let rejected = Arc::clone(&rejected);
+        let last = Arc::clone(&last);
+        move |candidate: &Value| {
+            let verdict = serde_json::from_value::<W>(candidate.clone())
+                .map_err(|e| format!("The answer does not fit the schema: {e}."))
+                .and_then(|wire| check(&wire));
+            let Err(reason) = verdict else {
+                return OutputDecision::Accept(candidate.clone());
+            };
+            let round = rejected.fetch_add(1, Ordering::SeqCst) + 1;
+            info!(call, round, reason = %reason, "speaker answer rejected");
+            reason.clone_into(&mut last.lock().expect("last rejection"));
+            if round > MAX_CORRECTIONS {
+                cancel.cancel();
+            }
+            OutputDecision::Reject(format!(
+                "{reason} Call {tool} again with a corrected answer."
+            ))
+        }
+    };
+    let attempt = run
+        .output_parts_validated_with_options::<W, _, _, _>(
+            vec![PromptPart::text(prompt)],
+            reservation,
+            validator,
+            NullSink,
+            AllowAll,
+            options,
+        )
+        .await
+        .map_err(|e| BrainError::Unavailable(e.to_string()))?;
+    let corrections = rejected.load(Ordering::SeqCst);
+    match attempt.output {
+        OutputAttempt::Accepted(wire) => {
+            if corrections > 0 {
+                info!(
+                    call,
+                    corrections, "speaker answer accepted after correction"
+                );
+            }
+            Ok(wire)
+        }
+        // The validator decoded the same value, so this is not expected.
+        OutputAttempt::Mismatch(error) => Err(BrainError::Invalid(error.to_string())),
+        OutputAttempt::Missing if corrections > 0 => {
+            let reason = last.lock().expect("last rejection").clone();
+            warn!(call, corrections, reason = %reason, "speaker answer never corrected");
+            Err(BrainError::Invalid(format!(
+                "{call}: no valid answer after {corrections} rejected: {reason}"
+            )))
+        }
+        OutputAttempt::Missing => {
+            let why = match attempt.report.outcome {
+                RunOutcome::Error { message } => message,
+                _ => attempt
+                    .report
+                    .failure
+                    .map_or_else(|| "the run ended".to_owned(), |f| format!("{f:?}")),
+            };
+            Err(BrainError::Unavailable(format!(
+                "no answer through the terminal tool: {why}"
+            )))
+        }
     }
 }
 

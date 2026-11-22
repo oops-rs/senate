@@ -22,10 +22,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::brain::{
-    AgentCandidate, AgentTurn, Agreement, AgreementInput, Answer, BrainError, CommitteeSeat,
-    Conversation, Crossing, CrossingInput, DigestInput, DigestOut, Intent, MemoryDraft, Offline,
-    OfflineInput, Pick, PickInput, Question, RelayKind, Takeover, TriageInput, Utterance,
-    apply_threshold,
+    AgentCandidate, AgentTurn, Agreement, AgreementInput, Answer, CommitteeSeat, Conversation,
+    Crossing, CrossingInput, DigestInput, DigestOut, Intent, MemoryDraft, Offline, OfflineInput,
+    Pick, PickInput, Question, RelayKind, Takeover, TriageInput, Utterance, apply_threshold,
 };
 
 /// How much of one event body a prompt or tool result shows.
@@ -647,87 +646,104 @@ pub(crate) struct IntentWire {
     reply: Option<String>,
 }
 
+/// The relay kinds the schema offers.
+const RELAY_KINDS: [&str; 3] = ["question", "request", "note"];
+
+fn filled(field: &Option<String>) -> bool {
+    field.as_deref().is_some_and(|f| !f.trim().is_empty())
+}
+
 impl IntentWire {
-    /// `work` is accepted only when coding work is configured here
-    /// (`work`); the schema does not offer it otherwise.
-    pub(crate) fn into_intent(self, work: bool) -> Result<Intent, BrainError> {
+    /// The rules the schema states, checked before the answering tool may
+    /// end the run: a broken answer goes back to the model as a tool error
+    /// it can correct. `work` is accepted only when coding work is
+    /// configured here (`work`); the schema does not offer it otherwise.
+    pub(crate) fn validate(&self, work: bool) -> Result<(), String> {
+        let needs = |ok: bool, what: &str| {
+            if ok {
+                Ok(())
+            } else {
+                Err(format!("{} needs {what}.", self.action))
+            }
+        };
         match self.action.as_str() {
-            "work" if !work => Err(BrainError::Invalid(
-                "work is not available: no coding work is configured here".into(),
-            )),
+            "work" if !work => {
+                Err("work is not available: no coding work is configured here.".into())
+            }
             "relay" => {
-                let body = self.body.unwrap_or_default();
-                if self.targets.is_empty() || body.trim().is_empty() {
-                    return Err(BrainError::Invalid("relay needs targets and a body".into()));
+                needs(
+                    !self.targets.is_empty() && filled(&self.body),
+                    "targets and a non-empty body",
+                )?;
+                match self.kind.as_deref() {
+                    Some(kind) if !RELAY_KINDS.contains(&kind) => Err(format!(
+                        "kind {kind:?} is not one of question, request, note."
+                    )),
+                    _ => Ok(()),
                 }
-                let kind = match self.kind.as_deref() {
+            }
+            "decide" => needs(filled(&self.body), "a non-empty body"),
+            "bind" => needs(filled(&self.committee), "a committee"),
+            "invite_to_agent_group" => needs(!self.targets.is_empty(), "targets"),
+            "set_output_level" => needs(self.level.is_some(), "a level"),
+            "work" => needs(
+                filled(&self.target) && filled(&self.instruction),
+                "a target and an instruction",
+            ),
+            "reassign" => needs(filled(&self.to), "to"),
+            "recall" | "unbind" | "adopt_agent_group" | "status" | "none" => Ok(()),
+            other => Err(format!(
+                "action {other:?} is not one of the actions the schema lists."
+            )),
+        }
+    }
+
+    /// As an [`Intent`]; only for a wire [`validate`](Self::validate)
+    /// accepted.
+    pub(crate) fn into_intent(self) -> Intent {
+        let text = |field: Option<String>| field.unwrap_or_default();
+        match self.action.as_str() {
+            "relay" => Intent::Relay {
+                targets: self.targets,
+                kind: match self.kind.as_deref() {
                     Some("question") => RelayKind::Question,
                     Some("request") => RelayKind::Request,
                     _ => RelayKind::Note,
-                };
-                Ok(Intent::Relay {
-                    targets: self.targets,
-                    kind,
-                    body,
-                })
-            }
-            "decide" => match self.body {
-                Some(body) if !body.trim().is_empty() => Ok(Intent::Decide {
-                    body,
-                    supersedes: self.supersedes.map(Seq),
-                }),
-                _ => Err(BrainError::Invalid("decide needs a body".into())),
+                },
+                body: text(self.body),
             },
-            "recall" => Ok(Intent::Recall),
-            "bind" => match self.committee {
-                Some(committee) if !committee.trim().is_empty() => Ok(Intent::Bind { committee }),
-                _ => Err(BrainError::Invalid("bind needs a committee".into())),
+            "decide" => Intent::Decide {
+                body: text(self.body),
+                supersedes: self.supersedes.map(Seq),
             },
-            "unbind" => Ok(Intent::Unbind),
-            "adopt_agent_group" => Ok(Intent::AdoptAgentGroup {
+            "recall" => Intent::Recall,
+            "bind" => Intent::Bind {
+                committee: text(self.committee),
+            },
+            "unbind" => Intent::Unbind,
+            "adopt_agent_group" => Intent::AdoptAgentGroup {
                 committee: self.committee.filter(|f| !f.trim().is_empty()),
-            }),
-            "invite_to_agent_group" => {
-                if self.targets.is_empty() {
-                    return Err(BrainError::Invalid(
-                        "invite_to_agent_group needs targets".into(),
-                    ));
-                }
-                Ok(Intent::InviteToAgentGroup { who: self.targets })
-            }
-            "set_output_level" => match self.level {
-                Some(level) => Ok(Intent::SetOutputLevel { level }),
-                None => Err(BrainError::Invalid("set_output_level needs a level".into())),
             },
-            "work" => {
-                let target = self.target.unwrap_or_default();
-                let instruction = self.instruction.unwrap_or_default();
-                if target.trim().is_empty() || instruction.trim().is_empty() {
-                    return Err(BrainError::Invalid(
-                        "work needs a target and an instruction".into(),
-                    ));
-                }
-                Ok(Intent::Work {
-                    target,
-                    instruction,
-                })
-            }
+            "invite_to_agent_group" => Intent::InviteToAgentGroup { who: self.targets },
+            "set_output_level" => Intent::SetOutputLevel {
+                level: self.level.unwrap_or_default(),
+            },
+            "work" => Intent::Work {
+                target: text(self.target),
+                instruction: text(self.instruction),
+            },
             "reassign" => {
-                let to = self.to.unwrap_or_default();
-                if to.trim().is_empty() {
-                    return Err(BrainError::Invalid("reassign needs to".into()));
-                }
+                let to = text(self.to);
                 let from = self
                     .from
                     .filter(|f| !f.trim().is_empty())
                     .unwrap_or_else(|| to.clone());
-                Ok(Intent::Reassign { from, to })
+                Intent::Reassign { from, to }
             }
-            "status" => Ok(Intent::Status),
-            "none" => Ok(Intent::None {
-                reply: self.reply.unwrap_or_default(),
-            }),
-            other => Err(BrainError::Invalid(format!("unknown action {other:?}"))),
+            "status" => Intent::Status,
+            _ => Intent::None {
+                reply: text(self.reply),
+            },
         }
     }
 }
@@ -936,15 +952,32 @@ pub(crate) struct AgentTurnWire {
 }
 
 impl AgentTurnWire {
-    /// Each action is validated by the [`IntentWire`] rules; one out of
-    /// shape fails the turn (a plan is never run with a step silently
-    /// missing). `none` actions are dropped; when the turn says nothing
+    /// Each action by the [`IntentWire`] rules, and at most `max_actions`
+    /// of them (`none` aside): one out of shape rejects the whole turn, so
+    /// a plan is never run with a step silently missing.
+    pub(crate) fn validate(&self, work: bool, max_actions: usize) -> Result<(), String> {
+        for (i, wire) in self.actions.iter().enumerate() {
+            wire.validate(work)
+                .map_err(|reason| format!("actions[{i}]: {reason}"))?;
+        }
+        let planned = self.actions.iter().filter(|a| a.action != "none").count();
+        if planned > max_actions {
+            return Err(format!(
+                "{planned} actions, at most {max_actions}: list none of them and ask the \
+                 speaker in reply to split them up (awaiting_reply false)."
+            ));
+        }
+        Ok(())
+    }
+
+    /// As an [`AgentTurn`]; only for a wire [`validate`](Self::validate)
+    /// accepted. `none` actions are dropped; when the turn says nothing
     /// else, the first one's reply becomes the turn's.
-    pub(crate) fn into_turn(self, work: bool) -> Result<AgentTurn, BrainError> {
+    pub(crate) fn into_turn(self) -> AgentTurn {
         let mut reply = self.reply.trim().to_owned();
         let mut actions = Vec::new();
         for wire in self.actions {
-            match wire.into_intent(work)? {
+            match wire.into_intent() {
                 Intent::None { reply: said } => {
                     if reply.is_empty() {
                         reply = said.trim().to_owned();
@@ -953,11 +986,11 @@ impl AgentTurnWire {
                 intent => actions.push(intent),
             }
         }
-        Ok(AgentTurn {
+        AgentTurn {
             reply,
             actions,
             awaiting_reply: self.awaiting_reply,
-        })
+        }
     }
 }
 
@@ -1029,12 +1062,19 @@ pub(crate) struct TriageWire {
 }
 
 impl TriageWire {
-    pub(crate) fn into_payload(self) -> Result<TriagePayload, BrainError> {
+    pub(crate) fn validate(&self) -> Result<(), String> {
         let valid = |p: f32| p.is_finite() && (0.0..=1.0).contains(&p);
-        if !(valid(self.p_needs_human) && valid(self.p_agent) && valid(self.p_unsure)) {
-            return Err(BrainError::Invalid("probabilities must be in 0..1".into()));
+        if valid(self.p_needs_human) && valid(self.p_agent) && valid(self.p_unsure) {
+            Ok(())
+        } else {
+            Err("p_needs_human, p_agent and p_unsure must each be a number in 0..1.".into())
         }
-        Ok(apply_threshold(TriagePayload {
+    }
+
+    /// As a [`TriagePayload`], the threshold applied; only for a wire
+    /// [`validate`](Self::validate) accepted.
+    pub(crate) fn into_payload(self) -> TriagePayload {
+        apply_threshold(TriagePayload {
             verdict: senate_core::TriageVerdict::Unsure,
             p_needs_human: self.p_needs_human,
             p_agent: self.p_agent,
@@ -1044,7 +1084,7 @@ impl TriageWire {
                 .reason
                 .map(|r| r.trim().chars().take(120).collect::<String>())
                 .filter(|r| !r.is_empty()),
-        }))
+        })
     }
 }
 
@@ -1194,18 +1234,37 @@ pub(crate) struct PickWire {
 }
 
 impl PickWire {
-    /// The pick, when it names one of `candidates` (as a path, or as the
-    /// mention `[senator::<path>]`); [`Pick::Ask`] for null and for anything
-    /// else.
-    pub(crate) fn into_pick(self, candidates: &[AgentCandidate]) -> Pick {
-        tracing::debug!(agent = ?self.agent, reason = ?self.reason, "agent pick");
-        let Some(raw) = self.agent else {
-            return Pick::Ask;
+    /// The candidate `agent` names (as a path, or as the mention
+    /// `[senator::<path>]`); `Ok(None)` for null.
+    fn named(&self, candidates: &[AgentCandidate]) -> Result<Option<SenatorName>, String> {
+        let Some(raw) = &self.agent else {
+            return Ok(None);
         };
         let raw = raw.trim().trim_start_matches('[').trim_end_matches(']');
         let bare = raw.strip_prefix("senator::").unwrap_or(raw);
         match bare.parse::<SenatorName>() {
-            Ok(path) if candidates.iter().any(|c| c.agent == path) => Pick::Agent(path),
+            Ok(path) if candidates.iter().any(|c| c.agent == path) => Ok(Some(path)),
+            _ => {
+                let listed: Vec<String> = candidates.iter().map(|c| c.agent.to_string()).collect();
+                Err(format!(
+                    "agent {raw:?} is not one of the listed agents ({}): name one of them \
+                     exactly as listed, or null when you cannot tell.",
+                    listed.join(", ")
+                ))
+            }
+        }
+    }
+
+    pub(crate) fn validate(&self, candidates: &[AgentCandidate]) -> Result<(), String> {
+        self.named(candidates).map(|_| ())
+    }
+
+    /// The pick; [`Pick::Ask`] for null. Only for a wire
+    /// [`validate`](Self::validate) accepted against the same candidates.
+    pub(crate) fn into_pick(self, candidates: &[AgentCandidate]) -> Pick {
+        tracing::debug!(agent = ?self.agent, reason = ?self.reason, "agent pick");
+        match self.named(candidates) {
+            Ok(Some(path)) => Pick::Agent(path),
             _ => Pick::Ask,
         }
     }
@@ -1270,18 +1329,31 @@ pub(crate) struct CrossingWire {
 }
 
 impl CrossingWire {
-    pub(crate) fn into_crossing(self) -> Result<Crossing, BrainError> {
-        let reason = self
-            .reason
+    fn reason(&self) -> Option<String> {
+        self.reason
+            .as_deref()
             .map(|r| r.trim().chars().take(200).collect::<String>())
-            .filter(|r| !r.is_empty());
+            .filter(|r| !r.is_empty())
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), String> {
         match self.decision.trim() {
-            "forward" => Ok(Crossing::Forward),
-            "leave" => Ok(Crossing::Leave),
-            "refuse" => reason
-                .map(Crossing::Refuse)
-                .ok_or_else(|| BrainError::Invalid("a refusal needs a reason".into())),
-            other => Err(BrainError::Invalid(format!("unknown decision {other:?}"))),
+            "forward" | "leave" => Ok(()),
+            "refuse" if self.reason().is_some() => Ok(()),
+            "refuse" => Err("refuse needs a non-empty reason.".into()),
+            other => Err(format!(
+                "decision {other:?} is not one of forward, refuse, leave."
+            )),
+        }
+    }
+
+    /// As a [`Crossing`]; only for a wire [`validate`](Self::validate)
+    /// accepted.
+    pub(crate) fn into_crossing(self) -> Crossing {
+        match self.decision.trim() {
+            "forward" => Crossing::Forward,
+            "refuse" => Crossing::Refuse(self.reason().unwrap_or_default()),
+            _ => Crossing::Leave,
         }
     }
 }
@@ -1391,17 +1463,28 @@ pub(crate) struct OfflineWire {
 }
 
 impl OfflineWire {
-    pub(crate) fn into_offline(self) -> Result<Offline, BrainError> {
-        let answer = self
-            .answer
+    fn answer(&self) -> Option<String> {
+        self.answer
+            .as_deref()
             .map(|a| a.trim().to_owned())
-            .filter(|a| !a.is_empty());
+            .filter(|a| !a.is_empty())
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), String> {
         match self.decision.trim() {
-            "hold" => Ok(Offline::Hold),
-            "answer" => answer
-                .map(Offline::Answer)
-                .ok_or_else(|| BrainError::Invalid("an answer needs its text".into())),
-            other => Err(BrainError::Invalid(format!("unknown decision {other:?}"))),
+            "hold" => Ok(()),
+            "answer" if self.answer().is_some() => Ok(()),
+            "answer" => Err("answer needs its text in answer.".into()),
+            other => Err(format!("decision {other:?} is not one of answer, hold.")),
+        }
+    }
+
+    /// As an [`Offline`]; only for a wire [`validate`](Self::validate)
+    /// accepted.
+    pub(crate) fn into_offline(self) -> Offline {
+        match self.answer() {
+            Some(answer) if self.decision.trim() == "answer" => Offline::Answer(answer),
+            _ => Offline::Hold,
         }
     }
 }
@@ -1413,9 +1496,8 @@ mod tests {
     #[test]
     fn the_offline_wire_is_an_answer_with_its_text_or_a_hold() {
         let wire = |value: Value| {
-            serde_json::from_value::<OfflineWire>(value)
-                .expect("wire")
-                .into_offline()
+            let wire = serde_json::from_value::<OfflineWire>(value).expect("wire");
+            wire.validate().map(|()| wire.into_offline())
         };
         assert_eq!(wire(json!({"decision": "hold"})), Ok(Offline::Hold));
         assert_eq!(
@@ -1426,10 +1508,9 @@ mod tests {
         assert!(wire(json!({"decision": "forward"})).is_err());
     }
 
-    fn wire(value: Value) -> Result<Intent, BrainError> {
-        serde_json::from_value::<IntentWire>(value)
-            .map_err(|e| BrainError::Invalid(e.to_string()))
-            .and_then(|w| w.into_intent(true))
+    fn wire(value: Value) -> Result<Intent, String> {
+        let wire = serde_json::from_value::<IntentWire>(value).map_err(|e| e.to_string())?;
+        wire.validate(true).map(|()| wire.into_intent())
     }
 
     #[test]
@@ -1507,14 +1588,13 @@ mod tests {
     fn triage_applies_the_conservative_threshold() {
         use senate_core::TriageVerdict::{Agent, NeedsHuman, Unsure};
         let payload = |nh: f32, a: f32, u: f32| {
-            TriageWire {
+            let wire = TriageWire {
                 p_needs_human: nh,
                 p_agent: a,
                 p_unsure: u,
                 reason: None,
-            }
-            .into_payload()
-            .map(|p| p.verdict)
+            };
+            wire.validate().map(|()| wire.into_payload().verdict)
         };
         assert_eq!(payload(0.5, 0.5, 0.0), Ok(NeedsHuman));
         assert_eq!(payload(0.2, 0.7, 0.1), Ok(Agent));
@@ -1590,9 +1670,8 @@ mod tests {
 
         let work = json!({"action": "work", "target": "alice", "instruction": "加测试"});
         let parse = |value: &Value, work: bool| {
-            serde_json::from_value::<IntentWire>(value.clone())
-                .expect("wire")
-                .into_intent(work)
+            let wire = serde_json::from_value::<IntentWire>(value.clone()).expect("wire");
+            wire.validate(work).map(|()| wire.into_intent())
         };
         assert!(parse(&work, false).is_err());
         assert!(parse(&work, true).is_ok());
@@ -1757,7 +1836,7 @@ mod tests {
         }))
         .expect("wire");
         assert_eq!(
-            wire.into_turn(true),
+            wire.validate(true, 5).map(|()| wire.into_turn()),
             Ok(AgentTurn::act(
                 "请确认",
                 vec![Intent::Reassign {
@@ -1827,9 +1906,16 @@ mod tests {
         };
         let candidates = [candidate("claude"), candidate("codex")];
         let pick = |value: Value| {
+            let wire = serde_json::from_value::<PickWire>(value).expect("wire");
+            wire.validate(&candidates)
+                .map(|()| wire.into_pick(&candidates))
+                .unwrap_or_else(|reason| panic!("{reason}"))
+        };
+        let refused = |value: Value| {
             serde_json::from_value::<PickWire>(value)
                 .expect("wire")
-                .into_pick(&candidates)
+                .validate(&candidates)
+                .expect_err("not a candidate")
         };
         let codex: SenatorName = "codex".parse().expect("path");
         assert_eq!(
@@ -1840,13 +1926,11 @@ mod tests {
             pick(json!({ "agent": "[senator::codex]", "reason": "r" })),
             Pick::Agent(codex)
         );
-        for asked in [
-            json!({ "agent": null, "reason": "r" }),
-            json!({ "agent": "copilot", "reason": "r" }),
-            json!({ "agent": "alice", "reason": "r" }),
-            json!({ "agent": "", "reason": "r" }),
-        ] {
-            assert_eq!(pick(asked.clone()), Pick::Ask, "{asked}");
+        assert_eq!(pick(json!({ "agent": null, "reason": "r" })), Pick::Ask);
+        // Anything else goes back to the model, with the listed agents.
+        for named in ["copilot", "alice", ""] {
+            let reason = refused(json!({ "agent": named, "reason": "r" }));
+            assert!(reason.contains("claude, codex"), "{reason}");
         }
         assert!(serde_json::from_value::<PickWire>(json!({ "reason": "r" })).is_err());
     }

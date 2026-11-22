@@ -34,7 +34,7 @@ use crate::basis_brain::prompt::{
     PICK_DESCRIPTION, TRIAGE_DESCRIPTION,
 };
 use crate::basis_brain::{
-    AGENT_TOOLS, CHECKPOINT, COMMITTEE_BRIEF, COMMITTEE_STATUS, PRESENCE, TASKS,
+    AGENT_TOOLS, CHECKPOINT, COMMITTEE_BRIEF, COMMITTEE_STATUS, MAX_CORRECTIONS, PRESENCE, TASKS,
 };
 use crate::{
     AgentCandidate, AgentTurn, BasisBrain, Brain, BrainError, Conversation, GroupRef, Intent,
@@ -1034,7 +1034,8 @@ async fn converse_drops_none_and_refuses_a_plan_with_a_broken_step() {
         AgentTurn::act("在的", vec![Intent::Status])
     );
 
-    // Out of shape twice: the model and its one retry.
+    // Out of shape every time: each tier (the model and its one retry) is
+    // told why and may correct itself MAX_CORRECTIONS times, then gives up.
     let broken_plan = Round::Answer(json!({
         "reply": "",
         "actions": [
@@ -1043,13 +1044,22 @@ async fn converse_drops_none_and_refuses_a_plan_with_a_broken_step() {
         ],
         "awaiting_reply": false
     }));
-    let broken = fixture(vec![broken_plan.clone(), broken_plan]).await;
+    let per_tier = MAX_CORRECTIONS + 1;
+    let broken = fixture(vec![broken_plan; 2 * per_tier]).await;
     let error = broken
         .brain
         .converse(conversation(&broken, "记一下，再转告", Vec::new()))
         .await
         .expect_err("a relay with no targets");
     assert!(matches!(error, BrainError::Invalid(_)), "{error:?}");
+    let requests = broken.model.requests();
+    assert_eq!(requests.len(), 2 * per_tier, "bounded per tier");
+    let told = tool_results(&requests[1]);
+    assert!(
+        told.iter()
+            .any(|(text, error)| *error && text.contains("actions[1]: relay needs targets")),
+        "{told:?}"
+    );
 
     // A turn without awaiting_reply is not a turn.
     let partial = fixture(vec![Round::Answer(
@@ -1306,8 +1316,6 @@ async fn pick_agent_is_one_typed_turn_that_names_a_candidate_or_asks() {
     let fixture = fixture(vec![
         Round::Answer(json!({ "agent": "claude", "reason": "its own thread" })),
         Round::Answer(json!({ "agent": null, "reason": "either could" })),
-        Round::Answer(json!({ "agent": "copilot", "reason": "not a candidate" })),
-        Round::Answer(json!({ "agent": "gemini", "reason": "not seated" })),
     ])
     .await;
     let input = pick_input("把幂等键的重试做完");
@@ -1316,16 +1324,14 @@ async fn pick_agent_is_one_typed_turn_that_names_a_candidate_or_asks() {
         fixture.brain.pick_agent(input.clone()).await,
         Ok(Pick::Agent(agent_path("alice")))
     );
-    for _ in 0..3 {
-        assert_eq!(
-            fixture.brain.pick_agent(input.clone()).await,
-            Ok(Pick::Ask),
-            "null, or anything not among the candidates, is asked"
-        );
-    }
+    assert_eq!(
+        fixture.brain.pick_agent(input.clone()).await,
+        Ok(Pick::Ask),
+        "null is asked"
+    );
 
     let requests = fixture.model.requests();
-    assert_eq!(requests.len(), 4);
+    assert_eq!(requests.len(), 2);
     assert_eq!(
         requests[0].tools.len(),
         1,
@@ -1996,4 +2002,150 @@ async fn an_answer_for_an_agent_looks_at_what_the_committee_knows_first() {
             && prompt.contains("(from seq 2): The release is on Monday"),
         "{prompt}"
     );
+}
+
+// ---- Validated output: the model corrects itself in the same turn -------
+
+/// The error text of every rejected answer the model was shown.
+fn rejections(request: &Request<'_>) -> Vec<String> {
+    tool_results(request)
+        .into_iter()
+        .filter_map(|(text, error)| error.then_some(text))
+        .collect()
+}
+
+fn triage_input() -> TriageInput {
+    TriageInput {
+        committee: refund(),
+        kind: Kind::Question,
+        asker: agent("bob"),
+        to: vec![agent("alice")],
+        body: "下周能上线吗？".into(),
+        seq: None,
+        context: Vec::new(),
+        locale: Locale::Zh,
+    }
+}
+
+#[tokio::test]
+async fn a_pick_of_a_non_candidate_is_corrected_in_the_same_turn() {
+    let fixture = fixture(vec![
+        Round::Answer(json!({ "agent": "copilot", "reason": "not a candidate" })),
+        Round::Answer(json!({ "agent": "codex", "reason": "reviews the gateway" })),
+    ])
+    .await;
+    assert_eq!(
+        fixture.brain.pick_agent(pick_input("看一下网关")).await,
+        Ok(Pick::Agent(path("codex")))
+    );
+    let requests = fixture.model.requests();
+    assert_eq!(requests.len(), 2, "one turn, one correction");
+    let told = rejections(&requests[1]);
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert!(
+        told[0].contains("\"copilot\" is not one of the listed agents")
+            && told[0].contains("codex")
+            && told[0].contains("again with a corrected answer"),
+        "{told:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_intent_with_a_bad_action_is_corrected_in_the_same_turn() {
+    let fixture = fixture(vec![
+        Round::Answer(json!({ "action": "launch", "body": "x" })),
+        Round::Answer(json!({ "action": "relay", "targets": ["alice"], "body": "rebase first" })),
+    ])
+    .await;
+    let intent = fixture
+        .brain
+        .interpret(utterance(&fixture, "告诉 alice 先 rebase"))
+        .await
+        .expect("an intent");
+    assert_eq!(
+        intent,
+        Intent::Relay {
+            targets: vec!["alice".into()],
+            kind: RelayKind::Note,
+            body: "rebase first".into(),
+        }
+    );
+    let requests = fixture.model.requests();
+    assert_eq!(requests.len(), 2);
+    let told = rejections(&requests[1]);
+    assert!(
+        told.len() == 1 && told[0].contains("action \"launch\" is not one of"),
+        "{told:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_triage_out_of_range_is_corrected_in_the_same_turn() {
+    let fixture = fixture(vec![
+        Round::Answer(json!({ "p_needs_human": 3.0, "p_agent": 0.0, "p_unsure": 0.0 })),
+        Round::Answer(json!({ "p_needs_human": 0.8, "p_agent": 0.1, "p_unsure": 0.1 })),
+    ])
+    .await;
+    let triage = fixture
+        .brain
+        .triage(triage_input())
+        .await
+        .expect("a verdict");
+    assert_eq!(triage.verdict, senate_core::TriageVerdict::NeedsHuman);
+    let requests = fixture.model.requests();
+    assert_eq!(requests.len(), 2);
+    let told = rejections(&requests[1]);
+    assert!(
+        told.len() == 1 && told[0].contains("must each be a number in 0..1"),
+        "{told:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_answer_out_of_schema_is_corrected_too() {
+    // A shape error (a string where a number belongs) goes back like a rule.
+    let fixture = fixture(vec![
+        Round::Answer(json!({ "p_needs_human": "high", "p_agent": 0.0, "p_unsure": 0.0 })),
+        Round::Answer(json!({ "p_needs_human": 0.1, "p_agent": 0.8, "p_unsure": 0.1 })),
+    ])
+    .await;
+    let triage = fixture
+        .brain
+        .triage(triage_input())
+        .await
+        .expect("a verdict");
+    assert_eq!(triage.verdict, senate_core::TriageVerdict::Agent);
+    let told = rejections(&fixture.model.requests()[1]);
+    assert!(
+        told.len() == 1 && told[0].contains("does not fit the schema"),
+        "{told:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_stubborn_model_is_bounded_and_the_pick_falls_back() {
+    // Never a candidate: each tier rejects MAX_CORRECTIONS + 1 answers and
+    // gives up, so the Brain fails and the engine falls back to its rule.
+    let per_tier = MAX_CORRECTIONS + 1;
+    let fixture = fixture(vec![
+        Round::Answer(
+            json!({ "agent": "copilot", "reason": "stubborn" })
+        );
+        10
+    ])
+    .await;
+    let error = fixture
+        .brain
+        .pick_agent(pick_input("x"))
+        .await
+        .expect_err("never corrected");
+    assert!(matches!(error, BrainError::Invalid(_)), "{error:?}");
+    assert!(error.to_string().contains("copilot"), "{error}");
+    let requests = fixture.model.requests();
+    assert_eq!(
+        requests.len(),
+        2 * per_tier,
+        "the model and its retry, bounded"
+    );
+    assert_eq!(rejections(&requests[per_tier - 1]).len(), MAX_CORRECTIONS);
 }

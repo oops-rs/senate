@@ -400,30 +400,28 @@ impl BasisBrain {
         let mut run = workspace
             .prepare(spec)
             .map_err(|e| BrainError::Unavailable(e.to_string()))?;
-        let output = run
-            .output::<ReadyWire, _, _>(
-                "This is a connectivity check. Call the speaker_probe tool exactly once with \
-                 ready = true."
-                    .to_owned(),
-                OutputSpec::new(
-                    "speaker_probe",
-                    PROBE_DESCRIPTION,
-                    json!({
-                        "type": "object",
-                        "properties": { "ready": { "type": "boolean" } },
-                        "required": ["ready"],
-                        "additionalProperties": false
-                    }),
-                ),
-                NullSink,
-                AllowAll,
-            )
-            .await
-            .map_err(super::output_error)?;
-        Ok(format!(
-            "called speaker_probe (ready = {})",
-            output.value.ready
-        ))
+        // The typed path every call takes; one answering call and no room
+        // to correct, so a model that cannot answer in shape fails here.
+        let ready: ReadyWire = super::typed(
+            &mut run,
+            "probe",
+            "This is a connectivity check. Call the speaker_probe tool exactly once with \
+             ready = true."
+                .to_owned(),
+            OutputSpec::new(
+                "speaker_probe",
+                PROBE_DESCRIPTION,
+                json!({
+                    "type": "object",
+                    "properties": { "ready": { "type": "boolean" } },
+                    "required": ["ready"],
+                    "additionalProperties": false
+                }),
+            ),
+            |_: &ReadyWire| Ok(()),
+        )
+        .await?;
+        Ok(format!("called speaker_probe (ready = {})", ready.ready))
     }
 
     fn probe_deadline(&self, committee: Option<&CommitteeId>, model: &ModelSettings) -> Duration {
