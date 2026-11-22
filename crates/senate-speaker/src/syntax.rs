@@ -255,32 +255,40 @@ pub(crate) fn handoff(text: &str) -> Option<Option<String>> {
     None
 }
 
-/// Whether a reply to a restatement confirms it. Chinese 对 / 是 / 好 /
-/// 确认 (and 的-forms) or English yes / ok / confirm and close variants,
-/// whatever the committee's language; ignoring case, surrounding space and
-/// trailing punctuation. Anything longer is not a yes.
+// Advertise the common replies. The parser also accepts conversational variants.
+const ZH_CONFIRM: [&str; 2] = ["对", "是"];
+const EN_CONFIRM: &str = "yes";
+
+pub(crate) fn proposal_confirmation(l: Locale) -> String {
+    match l {
+        Locale::Zh => format!("回复「{}」或「{}」确认", ZH_CONFIRM[0], ZH_CONFIRM[1]),
+        Locale::En => format!("Reply \"{EN_CONFIRM}\" to confirm."),
+    }
+}
+
+/// Accept either language regardless of the locale of the proposal.
 pub(crate) fn is_affirmative(text: &str) -> bool {
-    matches!(
-        normalize(text).as_str(),
-        "对" | "是"
-            | "好"
-            | "确认"
-            | "对的"
-            | "是的"
-            | "好的"
-            | "可以"
-            | "yes"
-            | "y"
-            | "yep"
-            | "yeah"
-            | "ok"
-            | "okay"
-            | "sure"
-            | "confirm"
-            | "confirmed"
-            | "correct"
-            | "go ahead"
-    )
+    let word = normalize(text);
+    ZH_CONFIRM.contains(&word.as_str())
+        || word == EN_CONFIRM
+        || matches!(
+            word.as_str(),
+            "好" | "确认"
+                | "对的"
+                | "是的"
+                | "好的"
+                | "可以"
+                | "y"
+                | "yep"
+                | "yeah"
+                | "ok"
+                | "okay"
+                | "sure"
+                | "confirm"
+                | "confirmed"
+                | "correct"
+                | "go ahead"
+        )
 }
 
 /// One person's agent named in what a person wrote: `alice 的 codex`,

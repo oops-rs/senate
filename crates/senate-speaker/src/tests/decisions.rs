@@ -407,7 +407,7 @@ async fn an_agent_proposal_is_posted_and_a_members_yes_records_it_once() {
     assert_eq!(
         posts[0].markdown,
         format!(
-            "[senator::claude] 提议记为决策：幂等键统一用 Idempotency-Key（seq {}）回复「对」确认",
+            "[senator::claude] 提议记为决策：幂等键统一用 Idempotency-Key（seq {}）回复「对」或「是」确认",
             proposed.seq
         )
     );
@@ -449,7 +449,7 @@ async fn an_agent_proposal_is_posted_and_a_members_yes_records_it_once() {
         .append(
             in_thread(
                 "pm",
-                "对",
+                "是",
                 "m_t3",
                 proposed.seq,
                 thread_ref.clone(),

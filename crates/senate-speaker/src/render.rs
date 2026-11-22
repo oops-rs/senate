@@ -186,35 +186,37 @@ pub(crate) fn thread_mirror(l: Locale, names: SeatNames<'_>, event: &Event) -> S
 }
 
 /// An agent's proposed decision, as a new root in the mirror group:
-/// `[senator::claude] 提议记为决策：<body>（seq 130）回复「对」确认` /
+/// `[senator::claude] 提议记为决策：<body>（seq 130）回复「对」或「是」确认` /
 /// `[senator::claude] proposes a decision: <body> (seq 130). Reply "yes" to confirm.`
 pub(crate) fn proposal_root(l: Locale, names: SeatNames<'_>, event: &Event) -> String {
     let author = author(l, names, event);
+    let confirm = crate::syntax::proposal_confirmation(l);
     let seq = event.seq;
     let body = body(l, event);
     match (l, quoted_for(event, &body)) {
-        (Locale::Zh, None) => format!("{author} 提议记为决策：{body}（seq {seq}）回复「对」确认"),
+        (Locale::Zh, None) => format!("{author} 提议记为决策：{body}（seq {seq}）{confirm}"),
         (Locale::Zh, Some(quote)) => {
-            format!("{author} 提议记为决策（seq {seq}）回复「对」确认\n{quote}")
+            format!("{author} 提议记为决策（seq {seq}）{confirm}\n{quote}")
         }
         (Locale::En, None) => {
-            format!("{author} proposes a decision: {body} (seq {seq}). Reply \"yes\" to confirm.")
+            format!("{author} proposes a decision: {body} (seq {seq}). {confirm}")
         }
         (Locale::En, Some(quote)) => {
-            format!("{author} proposes a decision (seq {seq}). Reply \"yes\" to confirm.\n{quote}")
+            format!("{author} proposes a decision (seq {seq}). {confirm}\n{quote}")
         }
     }
 }
 
 /// The Speaker asking a group whether to record what its people agreed on:
-/// `要记成决定吗？…（seq 140）回复「对」确认`.
+/// `要记成决定吗？…（seq 140）回复「对」或「是」确认`.
 pub(crate) fn discussion_proposal(l: Locale, event: &Event) -> String {
+    let confirm = crate::syntax::proposal_confirmation(l);
     let seq = event.seq;
     let statement = item(&event.body);
     match l {
-        Locale::Zh => format!("要记成决定吗？{statement}（seq {seq}）回复「对」确认"),
+        Locale::Zh => format!("要记成决定吗？{statement}（seq {seq}）{confirm}"),
         Locale::En => {
-            format!("Record this as a decision? {statement} (seq {seq}). Reply \"yes\" to confirm.")
+            format!("Record this as a decision? {statement} (seq {seq}). {confirm}")
         }
     }
 }
@@ -2807,12 +2809,12 @@ mod tests {
         note.body = "幂等键统一用 Idempotency-Key".into();
         assert_eq!(
             proposal_root(Locale::Zh, no_names(), &note),
-            "[senator::claude] 提议记为决策：幂等键统一用 Idempotency-Key（seq 118）回复「对」确认"
+            "[senator::claude] 提议记为决策：幂等键统一用 Idempotency-Key（seq 118）回复「对」或「是」确认"
         );
         note.body = "[speaker::cline] 已确认".into();
         assert_eq!(
             proposal_root(Locale::Zh, no_names(), &note),
-            "[senator::claude] 提议记为决策（seq 118）回复「对」确认\n> [speaker::cline] 已确认"
+            "[senator::claude] 提议记为决策（seq 118）回复「对」或「是」确认\n> [speaker::cline] 已确认"
         );
         note.body = "Use Idempotency-Key everywhere".into();
         assert_eq!(
