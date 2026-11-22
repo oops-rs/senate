@@ -36,6 +36,9 @@ struct HomeView: View {
                             WaitingRow(store: store, item: Waiting(kind: .thread(thread)))
                         }
                     }
+                    // The lazy stack is an element of its own: name it.
+                    .accessibilityElement(children: .contain)
+                    .accessibilityLabel(L("home.threads"))
                 }
             }
         }
@@ -48,6 +51,15 @@ private struct WaitingRow: View {
     let store: CoreStore
     let item: Waiting
     @State private var hovered = false
+
+    /// What VoiceOver says after the title.
+    private var spoken: String {
+        var parts = [Mentions.shared.plain(item.detail, committee: item.committee)]
+        if let committee = item.committee { parts.append(committee) }
+        parts.append(item.since.formatted(.relative(presentation: .named)))
+        if item.unread { parts.append(L("a11y.unread")) }
+        return parts.joined(separator: ", ")
+    }
 
     var body: some View {
         Button {
@@ -101,7 +113,10 @@ private struct WaitingRow: View {
         .buttonStyle(.plain)
         .onHover { hovered = $0 }
         .environment(\.mentionCommittee, item.committee)
-        .accessibilityElement(children: .combine)
+        // One element, named as it reads: mentions as names, not as written.
+        .accessibilityElement(children: .ignore)
         .accessibilityAddTraits(.isButton)
+        .accessibilityLabel(Mentions.shared.plain(item.title, committee: item.committee))
+        .accessibilityValue(spoken)
     }
 }

@@ -2,9 +2,9 @@ import XCTest
 
 /// The app end to end against the core's fake daemon
 /// (`scripts/ui-test.sh` starts it and passes its Senate home): the window
-/// opens on the inbox, a thread opens and takes a reply, an approval is
-/// allowed, the sections answer ⌘1–5, and nothing fails an accessibility
-/// audit.
+/// opens on home with the waiting threads in the sidebar, a thread opens
+/// and takes a reply, an approval is allowed, the sections answer ⌘1–5,
+/// and nothing fails an accessibility audit.
 final class SmokeTests: XCTestCase {
     var app: XCUIApplication!
 
@@ -30,18 +30,18 @@ final class SmokeTests: XCTestCase {
         let window = app.windows.firstMatch
         XCTAssertTrue(window.waitForExistence(timeout: 10), "the window opens")
 
-        // The inbox lists the fake daemon's threads; one opens beside it.
-        let row = window.staticTexts["which env?"].firstMatch
-        XCTAssertTrue(row.waitForExistence(timeout: 10), "the inbox shows the thread")
+        // The sidebar lists the fake daemon's threads; one opens beside it.
+        let row = window.outlines.staticTexts["which env?"].firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 10), "the sidebar shows the thread")
         row.click()
         let reply = window.textViews.firstMatch
         XCTAssertTrue(reply.waitForExistence(timeout: 5), "the reply box is there")
         reply.click()
         reply.typeText("staging, please")
         window.typeKey(.return, modifierFlags: .command)
-        // Sent: the box empties.
-        let emptied = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == ''"), object: reply)
-        XCTAssertEqual(XCTWaiter.wait(for: [emptied], timeout: 10), .completed, "the reply was sent")
+        // Sent: answered, the thread no longer waits on you and leaves the sidebar.
+        let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: row)
+        XCTAssertEqual(XCTWaiter.wait(for: [gone], timeout: 10), .completed, "the reply was sent")
 
         // ⌘2: Approvals. Allowing the Codex request takes it off the list.
         window.typeKey("2", modifierFlags: .command)
@@ -59,7 +59,7 @@ final class SmokeTests: XCTestCase {
         window.typeKey("3", modifierFlags: .command)
         XCTAssertTrue(window.buttons["Attach to decide"].firstMatch.waitForExistence(timeout: 5))
         window.typeKey("5", modifierFlags: .command)
-        XCTAssertTrue(window.staticTexts["Chairs"].firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(window.staticTexts["Address"].firstMatch.waitForExistence(timeout: 5), "the Senates section shows")
 
         let shot = XCTAttachment(screenshot: window.screenshot())
         shot.lifetime = .keepAlways
@@ -70,9 +70,20 @@ final class SmokeTests: XCTestCase {
         let window = app.windows.firstMatch
         XCTAssertTrue(window.waitForExistence(timeout: 10))
         XCTAssertTrue(window.staticTexts["which env?"].firstMatch.waitForExistence(timeout: 10))
-        try app.performAccessibilityAudit(for: [.sufficientElementDescription, .hitRegion, .parentChild]) { issue in
-            // SwiftUI's own split-view divider has no description.
-            issue.element?.elementType == .splitter
+        // Which elements failed: the audit's own failure only names the kind of
+        // issue, so go on past it to list them.
+        continueAfterFailure = true
+        var failed: [String] = []
+        do {
+            try app.performAccessibilityAudit(for: [.sufficientElementDescription, .hitRegion, .parentChild]) { issue in
+                // SwiftUI's own split-view divider has no description.
+                if issue.element?.elementType == .splitter { return true }
+                failed.append("\(issue.compactDescription): \(issue.element?.debugDescription ?? "no element")")
+                return false
+            }
+        } catch {
+            XCTFail("\(error.localizedDescription) \(failed.joined(separator: " | "))")
         }
+        XCTAssertEqual(failed, [])
     }
 }

@@ -12,10 +12,23 @@ struct ThreadPage: View {
     @State private var confirmClose = false
 
     var body: some View {
-        Conversation(store: store, row: row)
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                Composer(store: store, row: row)
-            }
+        // The reply box sits under the conversation rather than over it (two
+        // things at one point confuse hit-testing for assistive tools); the
+        // conversation fades out above it, so it reads as floating.
+        VStack(spacing: 0) {
+            Conversation(store: store, row: row)
+                .overlay(alignment: .bottom) {
+                    LinearGradient(
+                        colors: [Theme.surface.opacity(0), Theme.surface],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                    .frame(height: Theme.Space.xl)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+                }
+            Composer(store: store, row: row)
+        }
             .id(row.key)
             .environment(\.mentionCommittee, row.committee)
             // Read again when something new is said in it.
@@ -122,6 +135,9 @@ private struct Conversation: View {
                             .padding(.top, Theme.Space.xl)
                     }
                 }
+                // The lazy stack is an element of its own: name it.
+                .accessibilityElement(children: .contain)
+                .accessibilityLabel(Mentions.shared.plain(row.title, committee: row.committee))
                 .frame(maxWidth: Theme.readingWidth, alignment: .leading)
                 .padding(.horizontal, Theme.Space.xl)
                 .padding(.top, Theme.Space.s)
@@ -241,7 +257,7 @@ private struct EventView: View {
 }
 
 /// The reply box: answers in the thread as you, `[senator::<you>]`. It
-/// floats over the foot of the conversation, a little wider than the text.
+/// sits at the foot of the conversation, a little wider than the text.
 private struct Composer: View {
     @Bindable var store: CoreStore
     let row: InboxThread
@@ -300,22 +316,15 @@ private struct Composer: View {
         .overlay {
             RoundedRectangle(cornerRadius: Theme.Radius.composer)
                 .strokeBorder(Theme.outline, lineWidth: 0.5)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
         }
         .shadow(color: .black.opacity(0.07), radius: 14, y: 3)
         .frame(maxWidth: Theme.composerWidth)
         .padding(.horizontal, Theme.Space.s)
-        .padding(.top, Theme.Space.l)
+        .padding(.top, Theme.Space.xs)
         .padding(.bottom, 10)
         .frame(maxWidth: .infinity)
-        // The conversation fades out behind the box instead of showing
-        // through around it.
-        .background {
-            LinearGradient(
-                stops: [.init(color: Theme.surface.opacity(0), location: 0), .init(color: Theme.surface, location: 0.45)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-        }
     }
 
     private var draft: Binding<String> {

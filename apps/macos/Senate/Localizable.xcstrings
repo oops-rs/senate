@@ -2846,23 +2846,6 @@
         }
       }
     },
-    "tab.inbox": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Inbox"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "收件箱"
-          }
-        }
-      }
-    },
     "tab.senates": {
       "extractionState": "manual",
       "localizations": {
@@ -2961,23 +2944,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "刷新"
-          }
-        }
-      }
-    },
-    "toolbar.refresh_help": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Re-read every inbox, the approvals and the docket"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "重新读取所有收件箱、审批和议程"
           }
         }
       }
