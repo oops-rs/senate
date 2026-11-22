@@ -59,8 +59,7 @@ final class SmokeTests: XCTestCase {
         window.typeKey("3", modifierFlags: .command)
         XCTAssertTrue(window.buttons["Attach to decide"].firstMatch.waitForExistence(timeout: 5))
         window.typeKey("5", modifierFlags: .command)
-        XCTAssertTrue(window.staticTexts["Chairs".uppercased()].firstMatch.waitForExistence(timeout: 5)
-            || window.staticTexts["Chairs"].firstMatch.waitForExistence(timeout: 1))
+        XCTAssertTrue(window.staticTexts["Chairs"].firstMatch.waitForExistence(timeout: 5))
 
         let shot = XCTAttachment(screenshot: window.screenshot())
         shot.lifetime = .keepAlways
