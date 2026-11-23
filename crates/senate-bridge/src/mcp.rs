@@ -2356,7 +2356,8 @@ impl SenateMcp {
                 effort,
             } => Request::Spawn {
                 session,
-                runtime,
+                runtime: Some(runtime),
+                profile: None,
                 committee: CommitteeId::new(committee.trim()).map_err(|error| error.to_string())?,
                 alias: alias.as_deref().map(parse_senator).transpose()?,
                 cwd,

@@ -2991,6 +2991,7 @@ impl Shared {
             Request::Spawn {
                 session,
                 runtime,
+                profile,
                 committee,
                 alias,
                 cwd,
@@ -2999,6 +3000,11 @@ impl Shared {
                 prompt,
                 model,
             } => {
+                let (runtime, alias, model) =
+                    match self.spawn_settings(runtime, profile, alias, model) {
+                        Ok(settings) => settings,
+                        Err(error) => return Reply::err(error),
+                    };
                 let order = host_policy::SpawnOrder {
                     runtime,
                     committee,

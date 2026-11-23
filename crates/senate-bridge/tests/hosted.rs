@@ -175,7 +175,8 @@ done
 
     let spawn = |alias| Request::Spawn {
         session: Default::default(),
-        runtime: HostedRuntime::Claude,
+        runtime: Some(HostedRuntime::Claude),
+        profile: None,
         committee: committee(),
         alias,
         cwd: project.clone(),
@@ -971,7 +972,8 @@ done
             &h,
             &Request::Spawn {
                 session: Default::default(),
-                runtime: HostedRuntime::Claude,
+                runtime: Some(HostedRuntime::Claude),
+                profile: None,
                 committee: committee(),
                 alias: Some(path("seat-fixture")),
                 cwd: project.clone(),
@@ -1087,7 +1089,8 @@ async fn a_chosen_model_and_effort_reach_the_tui_and_are_kept_for_restore() {
         &fixture.h.socket(),
         &Request::Spawn {
             session: Default::default(),
-            runtime: HostedRuntime::Claude,
+            runtime: Some(HostedRuntime::Claude),
+            profile: None,
             committee: committee(),
             alias: None,
             cwd: fixture.project.clone(),
@@ -1193,7 +1196,8 @@ async fn stop_cli_protects_an_attending_viewer_and_releases_the_slot() {
     let h = &fixture.h;
     let spare = Request::Spawn {
         session: Default::default(),
-        runtime: HostedRuntime::Claude,
+        runtime: Some(HostedRuntime::Claude),
+        profile: None,
         committee: committee(),
         alias: None,
         cwd: fixture.project.clone(),
@@ -2256,7 +2260,8 @@ async fn one_hosted_session() -> (Harness, PathBuf) {
         &h,
         &Request::Spawn {
             session: Default::default(),
-            runtime: HostedRuntime::Claude,
+            runtime: Some(HostedRuntime::Claude),
+            profile: None,
             committee: committee(),
             alias: None,
             cwd: project,
@@ -2376,7 +2381,8 @@ async fn watched_sessions(aliases: &[&str]) -> (Harness, PathBuf) {
             &h,
             &Request::Spawn {
                 session: Default::default(),
-                runtime: HostedRuntime::Claude,
+                runtime: Some(HostedRuntime::Claude),
+                profile: None,
                 committee: committee(),
                 alias: Some(path(alias)),
                 cwd: project.clone(),
@@ -2828,7 +2834,8 @@ async fn a_spawn_prompt_is_an_ordinary_request_to_the_new_seat() {
         &h,
         &Request::Spawn {
             session: Default::default(),
-            runtime: HostedRuntime::Claude,
+            runtime: Some(HostedRuntime::Claude),
+            profile: None,
             committee: committee(),
             alias: Some(path("reviewer")),
             cwd: project.clone(),
@@ -2888,6 +2895,91 @@ async fn senate(h: &Harness, args: &[&str]) -> (bool, String) {
     (out.status.success(), text)
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_spawn_profile_uses_its_alias_and_accepts_model_and_effort_overrides() {
+    let mut h = Harness::new().await;
+    h.dir = tempfile::tempdir_in("/tmp").unwrap();
+    h.paths = senate_bridge::Paths::new(h.dir.path().join("senate"));
+    h.paths.ensure_home().unwrap();
+    let project = h.workdir("profile-cli", None);
+    let fixture = agy_fixture(h.dir.path(), "3f2b8c1e-6d4a-4e7b-9c0d-1a2b3c4d5e6f");
+    let config = toml::to_string(&h.config).unwrap();
+    std::fs::write(
+        h.paths.config(),
+        format!(
+            r#"{config}
+[agy]
+bin = {fixture:?}
+[profiles.review]
+runtime = "agy"
+model = "not-in-catalog"
+effort = "low"
+note = "Use for review."
+"#
+        ),
+    )
+    .unwrap();
+    h.config = senate_bridge::BridgeConfig::load(&h.paths.config()).unwrap();
+    h.config.committees.push(committee());
+    start(&mut h).await;
+
+    let committee = committee();
+    let spawn = [
+        "--profile",
+        "review",
+        "--committee",
+        committee.as_str(),
+        "--dir",
+        project.to_str().unwrap(),
+    ];
+    let (ok, text) = senate(&h, &[&["spawn", "claude"], &spawn[..]].concat()).await;
+    assert!(
+        !ok && text.contains("conflicts with launch profile"),
+        "{text}"
+    );
+    let (ok, text) = senate(
+        &h,
+        &[
+            &["spawn", "agy"][..],
+            &spawn,
+            &["--model", "flash", "--effort", "minimal"],
+        ]
+        .concat(),
+    )
+    .await;
+    assert!(
+        !ok && text.contains("agy does not take the effort"),
+        "{text}"
+    );
+    let (ok, text) = senate(
+        &h,
+        &[
+            &["spawn", "agy"][..],
+            &spawn,
+            &["--model", "flash", "--effort", "high"],
+        ]
+        .concat(),
+    )
+    .await;
+    assert!(ok, "{text}");
+    assert!(text.contains("flash → gemini-3.8-flash"), "{text}");
+    let terminal: PathBuf = call(
+        &h,
+        &Request::Attach {
+            senator: path("review").into(),
+        },
+    )
+    .await;
+    let argv = hosted_fixture_argv(&terminal, &project, TIMEOUT).await;
+    assert!(
+        argv.contains(&"--model=gemini-3.8-flash".to_owned()),
+        "{argv:?}"
+    );
+    assert!(argv.contains(&"--effort=high".to_owned()), "{argv:?}");
+    assert!(!argv.contains(&"--effort=low".to_owned()), "{argv:?}");
+    h.stop().await;
+}
+
 /// `senate join` on a name the server has no event of opens the committee
 /// there with one note from the person, so a spawn right after it works;
 /// spawn itself still refuses a committee nobody opened, and joining again
@@ -2898,7 +2990,8 @@ async fn joining_a_new_committee_opens_it_so_a_spawn_works() {
     let fresh = senate_core::CommitteeId::new("fresh-work").unwrap();
     let spawn = Request::Spawn {
         session: Default::default(),
-        runtime: HostedRuntime::Claude,
+        runtime: Some(HostedRuntime::Claude),
+        profile: None,
         committee: fresh.clone(),
         alias: Some(path("main")),
         cwd: project.clone(),
@@ -3338,7 +3431,8 @@ async fn a_hosted_agy_names_its_conversation_through_its_first_hook_and_resumes_
         &h.socket(),
         &Request::Spawn {
             session: Default::default(),
-            runtime: HostedRuntime::Agy,
+            runtime: Some(HostedRuntime::Agy),
+            profile: None,
             committee: committee(),
             alias: None,
             cwd: project.clone(),
@@ -3363,7 +3457,8 @@ async fn a_hosted_agy_names_its_conversation_through_its_first_hook_and_resumes_
         &h,
         &Request::Spawn {
             session: Default::default(),
-            runtime: HostedRuntime::Agy,
+            runtime: Some(HostedRuntime::Agy),
+            profile: None,
             committee: committee(),
             alias: Some(path("triage")),
             cwd: project.clone(),
@@ -3471,7 +3566,8 @@ async fn a_hosted_agy_that_never_names_its_conversation_is_rolled_back() {
         &h.socket(),
         &Request::Spawn {
             session: Default::default(),
-            runtime: HostedRuntime::Agy,
+            runtime: Some(HostedRuntime::Agy),
+            profile: None,
             committee: committee(),
             alias: None,
             cwd: project,
@@ -3580,7 +3676,8 @@ async fn an_idle_hosted_agy_is_nudged_once_per_turn_and_never_over_a_person_typi
         &h,
         &Request::Spawn {
             session: Default::default(),
-            runtime: HostedRuntime::Agy,
+            runtime: Some(HostedRuntime::Agy),
+            profile: None,
             committee: committee(),
             alias: Some(path("idler")),
             cwd: project.clone(),
@@ -3765,7 +3862,8 @@ async fn a_codex_spawn_without_an_app_server_says_the_daemon_is_not_running() {
     start(&mut h).await;
     let request = Request::Spawn {
         session: Default::default(),
-        runtime: HostedRuntime::Codex,
+        runtime: Some(HostedRuntime::Codex),
+        profile: None,
         committee: committee(),
         alias: None,
         cwd: project,
@@ -3802,7 +3900,8 @@ async fn replace_hands_the_seat_to_a_fresh_session_and_resumes_after_a_failure()
         &h,
         &Request::Spawn {
             session: Default::default(),
-            runtime: HostedRuntime::Claude,
+            runtime: Some(HostedRuntime::Claude),
+            profile: None,
             committee: committee(),
             alias: Some(path("reviewer")),
             cwd: project.clone(),
@@ -3957,7 +4056,8 @@ async fn replace_stops_the_unconnected_session_and_preserves_the_old_seat() {
         &h,
         &Request::Spawn {
             session: Default::default(),
-            runtime: HostedRuntime::Claude,
+            runtime: Some(HostedRuntime::Claude),
+            profile: None,
             committee: committee(),
             alias: Some(path("reviewer")),
             cwd: project,
@@ -4078,7 +4178,8 @@ async fn replace_refuses_an_unknown_seat_and_hands_nothing_over_when_the_spawn_f
         &h,
         &Request::Spawn {
             session: Default::default(),
-            runtime: HostedRuntime::Claude,
+            runtime: Some(HostedRuntime::Claude),
+            profile: None,
             committee: committee(),
             alias: Some(path("reviewer")),
             cwd: project,
@@ -4411,7 +4512,8 @@ async fn shutdown_pauses_within_its_cap_and_start_resumes_only_the_paused() {
             &h,
             &Request::Spawn {
                 session: Default::default(),
-                runtime: HostedRuntime::Claude,
+                runtime: Some(HostedRuntime::Claude),
+                profile: None,
                 committee: committee(),
                 alias: Some(path(alias)),
                 cwd: project.clone(),

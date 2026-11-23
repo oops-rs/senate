@@ -511,6 +511,7 @@ stdin.")]
     #[command(after_help = "Examples:
   senate spawn claude                    On this directory's committee
   senate spawn codex --alias reviewer    With a name to address it by
+  senate spawn --profile review          Use this machine's review settings
   senate spawn claude --committee refund-v2 --dir ../refund
   senate spawn codex --prompt 'Review the open PR'
                                          Send it a first request once seated
@@ -520,13 +521,17 @@ stdin.")]
                                          An Antigravity CLI senator
   senate attach reviewer                 Open its terminal (Ctrl-] detaches)")]
     Spawn {
-        /// The coding agent to start.
-        runtime: HostedRuntime,
+        /// The coding agent to start. Must agree with --profile if both are given.
+        #[arg(required_unless_present = "profile")]
+        runtime: Option<HostedRuntime>,
+        /// Use a named launch profile from this machine. See `senate profiles`.
+        #[arg(long)]
+        profile: Option<String>,
         /// The committee to seat it on (default: the one `senate where`
         /// shows for this directory).
         #[arg(long)]
         committee: Option<CommitteeId>,
-        /// A role name such as reviewer. Defaults to a runtime name and counter.
+        /// A role name such as reviewer. Defaults to the profile name or a runtime name and counter.
         #[arg(long)]
         alias: Option<SenatorName>,
         /// Appoint the new senator as the committee chair.
@@ -2673,6 +2678,7 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
         }
         Cmd::Spawn {
             runtime: harness,
+            profile,
             committee,
             alias,
             chair,
@@ -2693,9 +2699,20 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
                 anyhow::bail!("the prompt is empty");
             }
             let committee = runtime(false)?.block_on(committee_here(committee))?;
+            let (runtime, profile) = match profile {
+                Some(name) => (
+                    None,
+                    Some(ipc::SpawnProfile {
+                        name,
+                        runtime: harness,
+                    }),
+                ),
+                None => (harness, None),
+            };
             launch(
                 &Request::Spawn {
-                    runtime: harness,
+                    runtime,
+                    profile,
                     committee,
                     chair,
                     secretary,

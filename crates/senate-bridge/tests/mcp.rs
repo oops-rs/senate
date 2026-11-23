@@ -348,7 +348,8 @@ async fn stop_tool_enforces_authority_and_records_the_actor() {
     let project = h.workdir("tui", None);
     let spawn = |alias, committee| Request::Spawn {
         session: Default::default(),
-        runtime: HostedRuntime::Claude,
+        runtime: Some(HostedRuntime::Claude),
+        profile: None,
         committee,
         alias: Some(path(alias)),
         cwd: project.clone(),

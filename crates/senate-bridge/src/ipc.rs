@@ -356,6 +356,15 @@ pub enum HostedRuntime {
     Agy,
 }
 
+/// A profile lookup at the daemon. Its runtime assertion travels inside
+/// this selection so an older daemon cannot silently launch without it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpawnProfile {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<HostedRuntime>,
+}
+
 /// The model and reasoning effort a hosted session was started with, as the
 /// runtime's own flags take them. Either left out is the runtime's own
 /// default. Senate keeps no model catalogue: a model name is passed through
@@ -676,7 +685,10 @@ pub enum Request {
     Spawn {
         #[serde(default)]
         session: SessionSelector,
-        runtime: HostedRuntime,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime: Option<HostedRuntime>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<SpawnProfile>,
         committee: CommitteeId,
         #[serde(default, skip_serializing_if = "is_false")]
         chair: bool,

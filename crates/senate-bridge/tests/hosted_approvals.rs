@@ -90,7 +90,8 @@ impl Terminal {
             &h.socket(),
             &Request::Spawn {
                 session: Default::default(),
-                runtime,
+                runtime: Some(runtime),
+                profile: None,
                 committee: committee(),
                 alias: None,
                 cwd,
@@ -533,7 +534,8 @@ async fn a_hosted_codex_thread_is_named_after_the_senators_alias() {
     };
     let spawn = |alias: Option<&str>| Request::Spawn {
         session: Default::default(),
-        runtime: HostedRuntime::Codex,
+        runtime: Some(HostedRuntime::Codex),
+        profile: None,
         committee: committee(),
         alias: alias.map(path),
         cwd: project.clone(),

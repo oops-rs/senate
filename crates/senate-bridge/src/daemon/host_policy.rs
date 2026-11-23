@@ -4,7 +4,7 @@ use senate_core::SenatorKind;
 
 use super::hosts::LaunchAudit;
 use super::*;
-use crate::ipc::{HostedModel, HostedRuntime, SpawnReply, StopReply};
+use crate::ipc::{HostedModel, HostedRuntime, SpawnProfile, SpawnReply, StopReply};
 
 const ROLE_TIMEOUT: Duration = Duration::from_secs(4);
 const AUDIT_TIMEOUT: Duration = Duration::from_secs(4);
@@ -157,6 +157,54 @@ impl Shared {
             desk: None,
             committees: me.committees,
         })
+    }
+
+    pub(super) fn spawn_settings(
+        &self,
+        runtime: Option<HostedRuntime>,
+        profile: Option<SpawnProfile>,
+        alias: Option<SenatorName>,
+        model: HostedModel,
+    ) -> Result<(HostedRuntime, Option<SenatorName>, HostedModel), IpcError> {
+        let Some(SpawnProfile {
+            name,
+            runtime: asserted_runtime,
+        }) = profile
+        else {
+            return runtime
+                .map(|runtime| (runtime, alias, model))
+                .ok_or_else(|| IpcError::bad_request("specify a runtime or launch profile"));
+        };
+        let profile = self.config.profiles.get(&name).ok_or_else(|| {
+            IpcError::bad_request(format!(
+                "unknown launch profile {name:?}; see senate profiles"
+            ))
+        })?;
+        if let Some(runtime) = [runtime, asserted_runtime]
+            .into_iter()
+            .flatten()
+            .find(|runtime| *runtime != profile.runtime)
+        {
+            return Err(IpcError::bad_request(format!(
+                "runtime {} conflicts with launch profile {name:?}, which uses {}",
+                Runtime::from(runtime).as_str(),
+                Runtime::from(profile.runtime).as_str()
+            )));
+        }
+        let alias = match alias {
+            Some(alias) => alias,
+            None => name.parse().map_err(|error| {
+                IpcError::bad_request(format!(
+                    "launch profile {name:?} cannot be used as a default alias: {error}; supply an alias"
+                ))
+            })?,
+        };
+        let model = HostedModel::new(model.model, model.effort);
+        Ok((
+            profile.runtime,
+            Some(alias),
+            profile.model.overridden_by(&model),
+        ))
     }
 
     pub(super) async fn on_hosted_spawn(
