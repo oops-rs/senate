@@ -9,6 +9,7 @@ import SenateCore
 /// Everything shown comes from the Rust core (`CoreStore`).
 @main
 struct SenateApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @State private var store = CoreStore.forApp()
 
     init() {
@@ -31,8 +32,11 @@ struct SenateApp: App {
         .windowToolbarStyle(.unified)
         .defaultLaunchBehavior(.suppressed)
 
+        .commands { SenateCommands(store: store) }
+
         Settings {
             SettingsView(store: store)
+                .onAppear { delegate.store = store }
         }
     }
 }
@@ -62,8 +66,10 @@ struct MenuBarLabel: View {
         .accessibilityValue(store.waitingMenu().header)
         .task {
             // The label is the one view alive from launch: hand the store
-            // the window opener, for notifications and `SENATE_APP_SHOW`.
+            // the window opener, for notifications and `SENATE_APP_SHOW`,
+            // and to the delegate, for a click on the Dock icon.
             store.attach(openWindow: openWindow, openSettings: openSettings)
+            (NSApplication.shared.delegate as? AppDelegate)?.store = store
         }
     }
 }
