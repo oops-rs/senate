@@ -541,7 +541,7 @@ senate attach reviewer                 # open its terminal (Ctrl-] detaches)
 senate session list                    # active hosted sessions on this machine
 senate session list --all               # include stopped and paused sessions
 senate session watch                   # read-only grid of terminals without an interactive viewer
-senate session watch --all             # include attached and inactive sessions
+senate session watch --all             # include attached, paused and stopped sessions
 senate session approve reviewer        # answer its permission prompt (--always, --deny)
 senate session stop reviewer           # end its terminal...
 senate session restore reviewer        # ...and reopen it later
