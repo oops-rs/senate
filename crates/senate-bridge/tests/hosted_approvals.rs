@@ -570,10 +570,10 @@ while IFS= read -r line; do :; done
 "#,
     )
     .unwrap();
-    let args_contain = |model: &str| {
+    let args_without_model_settings = || {
         std::fs::read_to_string(project.join("argv"))
             .ok()
-            .filter(|args| args.lines().any(|arg| arg == format!("--model={model}")))
+            .filter(|args| !args.contains("--model=") && !args.contains("model_reasoning_effort"))
             .map(|_| ())
     };
     let fake = h.codex();
@@ -590,6 +590,8 @@ while IFS= read -r line; do :; done
                 committee().as_str(),
                 "--model",
                 requested,
+                "--effort",
+                "xhigh",
             ]);
         cmd
     };
@@ -598,6 +600,7 @@ while IFS= read -r line; do :; done
     assert!(String::from_utf8_lossy(&unknown.stderr).contains("close matches"));
     assert!(!fake.methods().iter().any(|method| method == "thread/start"));
 
+    fake.state.lock().unwrap().reported_effort_override = Some("low".into());
     let out = spawn("astra").output().await.unwrap();
     assert!(out.status.success(), "{out:?}");
     let senator = path(std::str::from_utf8(&out.stdout).unwrap().trim());
@@ -606,9 +609,32 @@ while IFS= read -r line; do :; done
     assert!(
         fake.calls()
             .iter()
-            .any(|(method, params)| method == "thread/start" && params["model"] == resolved)
+            .any(|(method, params)| method == "thread/settings/update"
+                && params["model"] == resolved
+                && params["effort"] == "xhigh")
     );
-    eventually("spawned Codex model", WAIT, || args_contain(resolved)).await;
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("requested effort xhigh, running with low")
+    );
+    let listing: senate_bridge::ipc::SessionsReply =
+        ipc::request(&h.socket(), &Request::Sessions, WAIT, WAIT)
+            .await
+            .unwrap();
+    assert!(
+        listing.rows[0]
+            .model
+            .verification_warning
+            .as_deref()
+            .unwrap()
+            .contains("running with low")
+    );
+    eventually(
+        "spawned Codex settings are absent from TUI args",
+        WAIT,
+        args_without_model_settings,
+    )
+    .await;
+    fake.state.lock().unwrap().reported_effort_override = None;
     let list_count = || fake.methods().iter().filter(|m| *m == "model/list").count();
     let mut queries = list_count();
     let mut guard = None;
@@ -642,12 +668,29 @@ while IFS= read -r line; do :; done
         queries += if override_id.is_some() { 2 } else { 0 };
         assert_eq!(list_count(), queries);
         let terminal = Terminal::from_launch(&h, &reply).await;
-        eventually("restored Codex model", WAIT, || args_contain(expected)).await;
+        assert!(reply.model_warning.is_none(), "{reply:?}");
+        eventually(
+            "restored Codex settings are absent from TUI args",
+            WAIT,
+            args_without_model_settings,
+        )
+        .await;
+        assert!(
+            fake.calls()
+                .iter()
+                .rev()
+                .find(|(method, _)| method == "thread/settings/update")
+                .is_some_and(
+                    |(_, params)| params["model"] == expected && params["effort"] == "xhigh"
+                )
+        );
         let listing: senate_bridge::ipc::SessionsReply =
             ipc::request(&h.socket(), &Request::Sessions, WAIT, WAIT)
                 .await
                 .unwrap();
         assert_eq!(listing.rows[0].model.model.as_deref(), Some(expected));
+        assert_eq!(listing.rows[0].model.effort.as_deref(), Some("xhigh"));
+        assert!(listing.rows[0].model.verification_warning.is_none());
         // The next iteration stops this host through IPC.
         guard = Some(terminal);
     }

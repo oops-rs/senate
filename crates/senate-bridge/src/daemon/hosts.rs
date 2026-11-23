@@ -752,6 +752,7 @@ impl Shared {
             .as_ref()
             .map(|r| r.recorded_model.overridden_by(&model))
             .unwrap_or(model);
+        model.verification_warning = None;
         let (resume, seat, start_empty) = match resume {
             Some(resume) => (
                 Some(resume.session_id),
@@ -845,15 +846,21 @@ impl Shared {
             }
             HostedRuntime::Codex => {
                 let connect = || crate::delivery::codex::AppServer::connect(&self.codex_transport);
-                let mut server = tokio::time::timeout(CODEX_PUSH_TIMEOUT, connect())
-                    .await
-                    .map_err(|_| {
-                        IpcError::new(
-                            codes::SERVER,
-                            "timed out connecting to the Codex app-server",
-                        )
-                    })?
-                    .map_err(IpcError::internal)?;
+                let mut server = tokio::time::timeout(
+                    CODEX_PUSH_TIMEOUT,
+                    crate::delivery::codex::AppServer::connect_with_settings(
+                        &self.codex_transport,
+                        !model.is_default(),
+                    ),
+                )
+                .await
+                .map_err(|_| {
+                    IpcError::new(
+                        codes::SERVER,
+                        "timed out connecting to the Codex app-server",
+                    )
+                })?
+                .map_err(IpcError::internal)?;
                 if let Some(request) = &requested_model {
                     let catalog = tokio::time::timeout(CODEX_PUSH_TIMEOUT, server.model_ids())
                         .await
@@ -867,15 +874,12 @@ impl Shared {
                     if let Some(attempt) = attempt.as_deref_mut() {
                         attempt.begin_launch(&self.store)?;
                     }
-                    let id = tokio::time::timeout(
-                        CODEX_PUSH_TIMEOUT,
-                        server.create_thread(&cwd, model.model.as_deref()),
-                    )
-                    .await
-                    .map_err(|_| {
-                        IpcError::new(codes::SERVER, "timed out creating the Codex thread")
-                    })?
-                    .map_err(IpcError::internal)?;
+                    let id = tokio::time::timeout(CODEX_PUSH_TIMEOUT, server.create_thread(&cwd))
+                        .await
+                        .map_err(|_| {
+                            IpcError::new(codes::SERVER, "timed out creating the Codex thread")
+                        })?
+                        .map_err(IpcError::internal)?;
                     let seeded =
                         tokio::time::timeout(CODEX_PUSH_TIMEOUT, server.seed_hosted_thread(&id))
                             .await;
@@ -932,6 +936,7 @@ impl Shared {
         let session_runtime = Runtime::from(runtime);
         let mut reply = SpawnReply {
             display_name: name.clone(),
+            model_warning: None,
             resolved_model: model.model.clone().filter(|id| {
                 requested_model
                     .as_ref()
@@ -977,6 +982,7 @@ impl Shared {
         let mut audit_written = false;
         let mut alias_may_have_landed = false;
         let mut staged = None;
+        let mut recorded_model = model.clone();
         let result: Result<(), IpcError> = async {
             if unnamed {
                 // A new agy names its conversation only once it runs: start
@@ -1015,6 +1021,25 @@ impl Shared {
                 let (ready, ack) = await_ready(child, errors).await?;
                 process = Some(ready);
                 publication = Some(ack);
+            }
+            if let Some(server) = &mut app_server
+                && !model.is_default()
+            {
+                tokio::time::timeout(CODEX_PUSH_TIMEOUT, async {
+                    if restoring {
+                        server.hosted_settings(&session_id).await?;
+                    }
+                    server.update_hosted_settings(&session_id, &model).await
+                }).await
+                    .map_err(|_| IpcError::internal("timed out applying hosted Codex model settings"))?
+                    .map_err(IpcError::internal)?;
+                reply.model_warning = match tokio::time::timeout(
+                    CODEX_PUSH_TIMEOUT, server.hosted_settings(&session_id)
+                ).await {
+                    Ok(Ok(effective)) => crate::delivery::codex::AppServer::hosted_settings_warning(&effective, &model),
+                    _ => Some("Codex: could not verify the requested model settings after launch".into()),
+                };
+                recorded_model.verification_warning = reply.model_warning.clone();
             }
             // The hosted Claude hook can wait for this bounded phase within
             // its own IPC deadline. Existing Codex hooks do not wait here.
@@ -1078,7 +1103,7 @@ impl Shared {
                     &id,
                     &reply.committee,
                     cursor.map(|(_, seqs)| seqs),
-                    &model,
+                    &recorded_model,
                 )
                 .map_err(internal)?;
             if !restoring {
@@ -1157,12 +1182,13 @@ impl Shared {
                 )
                 .await;
             }
-            if !restoring && let Some(server) = &mut app_server {
-                record_rollback(
-                    &mut rollback,
-                    "archive Codex thread",
-                    server.archive_thread(&session_id),
-                )
+            if !restoring && app_server.is_some() {
+                record_rollback(&mut rollback, "archive Codex thread", async {
+                    crate::delivery::codex::AppServer::connect(&self.codex_transport)
+                        .await?
+                        .archive_thread(&session_id)
+                        .await
+                })
                 .await;
             }
             if audit_written {

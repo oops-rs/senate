@@ -114,7 +114,8 @@ CREATE TABLE IF NOT EXISTS hosted_native_seats (
 CREATE TABLE IF NOT EXISTS hosted_models (
     session_id TEXT PRIMARY KEY,
     model      TEXT,
-    effort     TEXT
+    effort     TEXT,
+    verification_warning TEXT
 );
 CREATE TABLE IF NOT EXISTS hosted_switch_notices (
     id TEXT PRIMARY KEY,
@@ -733,6 +734,15 @@ impl Store {
         let _mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))?;
         conn.pragma_update(None, "synchronous", "FULL")?;
         conn.execute_batch(SCHEMA)?;
+        let hosted_model_warning = conn
+            .prepare("SELECT 1 FROM pragma_table_info('hosted_models') WHERE name = 'verification_warning'")?
+            .exists([])?;
+        if !hosted_model_warning {
+            conn.execute(
+                "ALTER TABLE hosted_models ADD COLUMN verification_warning TEXT",
+                [],
+            )?;
+        }
         // A database from before cursors were dated: they were seen now.
         let dated = conn
             .prepare("SELECT 1 FROM pragma_table_info('cursors') WHERE name = 'touched'")?
@@ -1241,12 +1251,13 @@ impl Store {
         Ok(self
             .conn()
             .query_row(
-                "SELECT model, effort FROM hosted_models WHERE session_id = ?1",
+                "SELECT model, effort, verification_warning FROM hosted_models WHERE session_id = ?1",
                 [session_id],
                 |row| {
                     Ok(crate::ipc::HostedModel {
                         model: row.get(0)?,
                         effort: row.get(1)?,
+                        verification_warning: row.get(2)?,
                     })
                 },
             )
@@ -1522,8 +1533,8 @@ impl Store {
                 )?;
                 // The same TUI runs on: so does its model.
                 tx.execute(
-                    "INSERT OR REPLACE INTO hosted_models (session_id, model, effort)
-                     SELECT ?2, model, effort FROM hosted_models WHERE session_id = ?1",
+                    "INSERT OR REPLACE INTO hosted_models (session_id, model, effort, verification_warning)
+                     SELECT ?2, model, effort, verification_warning FROM hosted_models WHERE session_id = ?1",
                     params![first.session_id, s.session_id],
                 )?;
                 tx.execute(
@@ -1606,9 +1617,9 @@ impl Store {
             if let Some(binding) = &hosted {
                 if let Some(model) = binding.model {
                     tx.execute(
-                        "INSERT OR REPLACE INTO hosted_models (session_id, model, effort)
-                         VALUES (?1, ?2, ?3)",
-                        params![s.session_id, model.model, model.effort],
+                        "INSERT OR REPLACE INTO hosted_models (session_id, model, effort, verification_warning)
+                         VALUES (?1, ?2, ?3, ?4)",
+                        params![s.session_id, model.model, model.effort, model.verification_warning],
                     )?;
                 }
                 if s.runtime == Runtime::Claude {
@@ -3007,6 +3018,25 @@ mod tests {
         assert_eq!(s.delivered_cursor(&claude(), &other).unwrap(), Seq(5));
         // Facts of the old log go for everyone.
         assert_eq!(s.verdict(&committee(), Seq(1)).unwrap(), None);
+    }
+
+    #[test]
+    fn a_database_from_before_model_verification_keeps_its_choices() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE hosted_models (session_id TEXT PRIMARY KEY, model TEXT, effort TEXT);
+                 INSERT INTO hosted_models VALUES ('existing', 'gpt-6.2-sol', 'xhigh');",
+            )
+            .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store.hosted_model("existing").unwrap(),
+            crate::ipc::HostedModel::new(Some("gpt-6.2-sol".into()), Some("xhigh".into()))
+        );
     }
 
     #[test]

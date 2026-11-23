@@ -697,26 +697,15 @@ pub async fn run(
 }
 
 impl HostedRuntime {
-    /// The reasoning efforts the runtime documents, the only ones a hosted
-    /// session may ask for. Claude Code: `claude --help` (2.1.330). Codex:
-    /// the named `ReasoningEffort` levels of its protocol
-    /// (`codex-rs/protocol/src/openai_models.rs`, the values its
-    /// `model_reasoning_effort` setting takes).
+    /// Reasoning efforts offered by the hosted CLI. Codex uses the
+    /// intersection of its installed app-server's model/list catalog.
     pub fn efforts(self) -> &'static [&'static str] {
         match self {
             // agy: `agy --help` (1.5.14).
             Self::Claude | Self::Agy => &["low", "medium", "high", "xhigh", "max"],
-            Self::Codex => &[
-                "none",
-                "minimal",
-                "low",
-                "medium",
-                "high",
-                "xhigh",
-                "max",
-                "ultra",
-                "persistent",
-            ],
+            // Shared by every model in the installed Codex CLI catalog.
+            // Wire effort values and per-model choices are broader.
+            Self::Codex => &["low", "medium", "high", "xhigh"],
         }
     }
 }
@@ -733,6 +722,7 @@ impl HostedModel {
         Self {
             model: given(model),
             effort: given(effort),
+            verification_warning: None,
         }
     }
 
@@ -755,6 +745,7 @@ impl HostedModel {
         Self {
             model: other.model.clone().or_else(|| self.model.clone()),
             effort: other.effort.clone().or_else(|| self.effort.clone()),
+            verification_warning: None,
         }
     }
 
@@ -772,28 +763,21 @@ impl HostedModel {
         }
     }
 
-    /// The runtime's own flags for this choice. Claude Code: `--model`,
-    /// `--effort`. Codex: `--model` (`-m`) and the `model_reasoning_effort`
-    /// setting through `-c`. Joined with `=` so a value is never read as a
-    /// flag of its own.
+    /// Claude and agy take their settings on the command line. Hosted
+    /// Codex takes them on the app-server thread, never on its remote TUI.
     fn runtime_args(&self, runtime: HostedRuntime) -> Vec<String> {
-        let mut args = Vec::new();
-        if let Some(model) = &self.model {
-            args.push(format!("--model={model}"));
+        if runtime == HostedRuntime::Codex {
+            return Vec::new();
         }
-        if let Some(effort) = &self.effort {
-            match runtime {
-                HostedRuntime::Claude | HostedRuntime::Agy => {
-                    args.push(format!("--effort={effort}"));
-                }
-                // A checked effort is a bare word: quoted, it is a TOML string.
-                HostedRuntime::Codex => {
-                    args.push("-c".to_owned());
-                    args.push(format!("model_reasoning_effort=\"{effort}\""));
-                }
-            }
-        }
-        args
+        self.model
+            .iter()
+            .map(|model| format!("--model={model}"))
+            .chain(
+                self.effort
+                    .iter()
+                    .map(|effort| format!("--effort={effort}")),
+            )
+            .collect()
     }
 }
 
@@ -1389,19 +1373,7 @@ mod tests {
             both.runtime_args(HostedRuntime::Claude),
             ["--model=opus", "--effort=high"]
         );
-        assert_eq!(
-            both.runtime_args(HostedRuntime::Codex),
-            ["--model=opus", "-c", "model_reasoning_effort=\"high\""]
-        );
-        let effort = choice(None, Some("minimal"));
-        assert_eq!(
-            effort.runtime_args(HostedRuntime::Codex),
-            ["-c", "model_reasoning_effort=\"minimal\""]
-        );
-        assert_eq!(
-            choice(Some("gpt-5.5"), None).runtime_args(HostedRuntime::Codex),
-            ["--model=gpt-5.5"]
-        );
+        assert!(both.runtime_args(HostedRuntime::Codex).is_empty());
         // Neither set, or set blank: the runtime keeps its own default.
         for none in [choice(None, None), choice(Some("  "), Some(""))] {
             assert!(none.is_default());
@@ -1437,7 +1409,18 @@ mod tests {
             error.starts_with("codex does not take the effort \"extreme\""),
             "{error}"
         );
-        assert!(error.contains("none, minimal, low"), "{error}");
+        assert!(error.contains("low, medium, high, xhigh"), "{error}");
+        assert_eq!(
+            HostedRuntime::Codex.efforts(),
+            ["low", "medium", "high", "xhigh"]
+        );
+        for effort in ["none", "minimal", "max", "ultra", "persistent"] {
+            assert!(
+                choice(None, Some(effort))
+                    .check(HostedRuntime::Codex)
+                    .is_err()
+            );
+        }
         choice(Some("opus"), None)
             .check(HostedRuntime::Claude)
             .unwrap();

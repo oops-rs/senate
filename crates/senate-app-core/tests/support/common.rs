@@ -801,6 +801,7 @@ pub fn hosted_sessions() -> SessionsReply {
     lead.model = HostedModel {
         model: Some("opus".into()),
         effort: Some("high".into()),
+        ..HostedModel::default()
     };
     SessionsReply {
         rows: vec![
@@ -1366,6 +1367,7 @@ pub fn session_tree(w: &mut World) {
     l.model = HostedModel {
         model: Some("gpt-5.5-codex".into()),
         effort: Some("high".into()),
+        ..HostedModel::default()
     };
     // docs: its chair `scribe`, paused.
     let mut d = hosted("docs-1", scribe, "scribe", "docs", Runtime::Claude, true);
