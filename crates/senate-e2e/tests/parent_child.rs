@@ -1071,7 +1071,7 @@ async fn the_parent_reports_a_paused_child_seat() {
             GROUP,
             "u_pm",
             "paused-status",
-            "/status",
+            "/status --all",
         ))
         .await;
     world

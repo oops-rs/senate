@@ -301,16 +301,13 @@ impl Engine {
         for child in &children {
             let child_online = child.is_online(now);
             for seat in child.seats.iter().filter(|s| s.committee == *committee) {
+                let shown = seat.alias.as_ref().map(ToString::to_string).or_else(|| {
+                    let short = senate_core::alias::short_name(&seat.senator);
+                    (short != seat.senator.as_str()).then_some(short)
+                });
                 seats.push(CommitteeSeat {
                     target: format!("{}::{}", child.name, seat.senator),
-                    shown: Some(crate::render::child_seat_name(
-                        l,
-                        seat.alias.as_ref().map_or_else(
-                            || senate_core::alias::short_name(&seat.senator),
-                            ToString::to_string,
-                        ),
-                        &child.name,
-                    )),
+                    shown: shown.map(|name| crate::render::child_seat_name(l, name, &child.name)),
                     duty: seat.duty.clone(),
                     online: child_online && seat.presence == PresenceState::Online,
                     presence: Some(if child_online {

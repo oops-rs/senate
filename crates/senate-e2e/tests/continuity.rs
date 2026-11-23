@@ -234,9 +234,21 @@ async fn presence_is_visible() {
     let at = |p: &Post| posts.iter().position(|q| q.message_ref == p.message_ref);
     assert!(at(&gone) < at(&absent), "in order");
 
-    // `/status` in chat agrees.
     world
-        .say(Message::mention(GROUP, "u_pm", "m_status", "/status"))
+        .say(Message::mention(
+            GROUP,
+            "u_pm",
+            "m_status_active",
+            "/status",
+        ))
+        .await;
+    world
+        .wait_post("the active status hides the absent seat", |p| {
+            p.markdown.contains("本群绑定在委员会") && !p.markdown.contains("[senator::claude]")
+        })
+        .await;
+    world
+        .say(Message::mention(GROUP, "u_pm", "m_status", "/status --all"))
         .await;
     let status = world
         .wait_post("the /status reply", |p| {
