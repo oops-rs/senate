@@ -291,6 +291,11 @@ impl Shared {
             alias
         };
         if let Some(alias) = &alias {
+            // Refused here before anything starts. An alias claimed between
+            // this check and publication still fails at the final alias
+            // step, which unwinds the staged session; no test reaches that
+            // late path any more (the restart test now stops here), so it
+            // wants one that has the server claim the alias mid-launch.
             self.check_alias_free(&committee, alias).await?;
         }
         let audit_auth = auth;
