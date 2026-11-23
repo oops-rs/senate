@@ -375,6 +375,12 @@ pub struct LocalSenate {
     /// the next start.
     #[serde(default)]
     pub listen: Option<String>,
+    /// The launch profile ([`BridgeConfig::profiles`]) the default
+    /// secretary starts with. Absent: the first runtime configured on this
+    /// machine (`[companion] claude_bin`, `[codex] bin`, `[agy] bin`), else
+    /// Claude Code, each with its own default model.
+    #[serde(default)]
+    pub secretary_profile: Option<String>,
 }
 
 /// `[[preside]]`, as an older file wrote it: a Senate one level down,

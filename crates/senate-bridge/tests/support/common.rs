@@ -507,6 +507,7 @@ async fn secretaries(State(st): St, headers: HeaderMap) -> Response {
 }
 
 async fn set_secretaries(
+    method: axum::http::Method,
     State(st): St,
     UrlPath(principal): UrlPath<SenatorName>,
     headers: HeaderMap,
@@ -524,10 +525,29 @@ async fn set_secretaries(
             "injected secretaries refusal",
         );
     }
-    if request.secretaries.is_empty() {
+    // POST adds to the list (`spawn --secretary`), PUT replaces it, as the
+    // server does; the roster's desk follows.
+    let mut list = if method == axum::http::Method::POST {
+        inner
+            .secretaries
+            .get(&principal)
+            .cloned()
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    for secretary in request.secretaries {
+        if !list.contains(&secretary) {
+            list.push(secretary);
+        }
+    }
+    let _ = inner
+        .roster
+        .set_secretaries(principal.clone(), list.clone());
+    if list.is_empty() {
         inner.secretaries.remove(&principal);
     } else {
-        inner.secretaries.insert(principal, request.secretaries);
+        inner.secretaries.insert(principal, list);
     }
     Json(inner.secretaries.clone()).into_response()
 }
@@ -1445,7 +1465,7 @@ impl FakeServer {
             .route(senate_core::api::SECRETARIES_PATH, get(secretaries))
             .route(
                 "/v1/secretaries/{principal}",
-                axum::routing::put(set_secretaries),
+                axum::routing::put(set_secretaries).post(set_secretaries),
             )
             .route(senate_core::api::RESOLVE_PATH, get(resolve))
             .route(

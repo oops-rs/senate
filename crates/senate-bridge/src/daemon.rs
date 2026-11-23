@@ -168,6 +168,7 @@ use crate::state::{ItemKey, ItemStatus, QueueItem, SessionUpsert, Store, StoreEr
 use crate::stream::{self, CommitteeWorker};
 
 mod approval_guard;
+pub mod default_secretary;
 mod desk_decision;
 mod front;
 mod host_policy;
@@ -516,6 +517,8 @@ pub(crate) struct Shared {
     session_bindings: RwLock<()>,
     hosts: hosts::Launches,
     spawn_aliases: tokio::sync::Mutex<()>,
+    /// One default-secretary ensure at a time, so two never start two.
+    secretary_ensure: tokio::sync::Mutex<()>,
     /// Serializes the attempt lookup, launch, and durable receipt.
     spawn_attempts: tokio::sync::Mutex<()>,
     display_aliases: Mutex<Option<(Instant, senate_core::alias::KnownAliases)>>,
@@ -904,6 +907,7 @@ impl Shared {
             session_bindings: RwLock::new(()),
             hosts: hosts::Launches::default(),
             spawn_aliases: tokio::sync::Mutex::new(()),
+            secretary_ensure: tokio::sync::Mutex::new(()),
             spawn_attempts: tokio::sync::Mutex::new(()),
             display_aliases: Mutex::new(None),
             host_notices_ready: Notify::new(),
@@ -2986,6 +2990,10 @@ impl Shared {
                 wrap(result)
             }
             Request::OpenCommittee { committee } => wrap(self.on_open_committee(committee).await),
+            Request::DefaultSecretary => wrap(self.on_default_secretary().await),
+            Request::EnsureSecretary => {
+                self.sessions_changed(wrap(self.on_ensure_secretary().await))
+            }
             Request::Roster => wrap(self.on_roster().await),
             Request::SetAlias { senator, alias, committee } => {
                 wrap(self.on_set_alias(senator, alias, committee).await)
@@ -6070,6 +6078,18 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                         Err(error) => Reply::err(error),
                     };
                     (reply, false)
+                }
+                Ok(Request::EnsureSecretary) => {
+                    match shared
+                        .refuse_agent_caller(
+                            peer,
+                            "Only the person starts the default secretary: ask it from your own terminal or the Senate app",
+                        )
+                        .await
+                    {
+                        Ok(()) => (shared.dispatch(Request::EnsureSecretary).await, false),
+                        Err(refused) => (Reply::err(refused), false),
+                    }
                 }
                 Ok(request) if approval_guard::answers_a_prompt(&request) => {
                     match shared

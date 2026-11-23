@@ -396,9 +396,12 @@ impl Shared {
                 },
             )
             .await?;
-        // Restored: no longer paused, however it was brought back.
+        // Restored: no longer paused nor stopped, however it was brought back.
         if let Err(error) = self.store.clear_paused(&launch_senator) {
             tracing::warn!(%error, senator = %launch_senator, "clearing a restored pause");
+        }
+        if let Err(error) = self.store.clear_stopped(&launch_senator) {
+            tracing::warn!(%error, senator = %launch_senator, "clearing a restored stop");
         }
         Ok(launch.finish())
     }
@@ -475,9 +478,13 @@ impl Shared {
                 ));
             }
         }
-        // Stopped on purpose: not to be resumed.
+        // Stopped on purpose: not to be resumed, nor started again unasked.
         self.store.clear_paused(primary).map_err(internal)?;
-        self.stop_audited(&auth, &target, force, false).await
+        let reply = self.stop_audited(&auth, &target, force, false).await?;
+        self.store
+            .mark_stopped(primary, chrono::Utc::now())
+            .map_err(internal)?;
+        Ok(reply)
     }
 
     /// Stop `target`'s terminal and leave the audit note for it: `paused`,

@@ -1045,6 +1045,13 @@ pub enum Request {
     OpenCommittee {
         committee: CommitteeId,
     },
+    /// The machine's default secretary, changing nothing (`senate setup
+    /// doctor`, the app).
+    DefaultSecretary,
+    /// Make the machine's default secretary run: start, resume or restore
+    /// it ([`DefaultSecretary`]). The person's own request only: refused
+    /// from inside a coding session's process tree.
+    EnsureSecretary,
     /// Separate operation so an older daemon cannot silently ignore the name.
     /// The committees and their current rosters.
     Roster,
@@ -2200,6 +2207,64 @@ pub struct SearchReply {
     pub query: String,
     /// Best match first, as the server ranks them.
     pub events: Vec<Event>,
+}
+
+/// The machine's default secretary ([`Request::DefaultSecretary`],
+/// [`Request::EnsureSecretary`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DefaultSecretary {
+    /// Where it sits: `office`.
+    pub committee: CommitteeId,
+    /// Its alias there: `secretary`.
+    pub alias: SenatorName,
+    /// Its senator, once there is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub senator: Option<SenatorName>,
+    pub state: DefaultSecretaryState,
+    /// What an ensure did; absent for [`Request::DefaultSecretary`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<EnsureAction>,
+}
+
+/// Where the default secretary stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DefaultSecretaryState {
+    /// None yet: the first ask starts one.
+    NotRecorded,
+    Running,
+    /// Paused: the next ask resumes it.
+    Paused,
+    /// Its terminal ended without anyone stopping it (a restart): the next
+    /// ask restores it.
+    Ended,
+    /// Stopped on purpose: only `senate session restore` brings it back.
+    Stopped,
+    /// Its seat has no session on this machine.
+    Elsewhere,
+}
+
+impl DefaultSecretaryState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotRecorded => "not recorded",
+            Self::Running => "running",
+            Self::Paused => "paused",
+            Self::Ended => "ended",
+            Self::Stopped => "stopped on purpose",
+            Self::Elsewhere => "elsewhere",
+        }
+    }
+}
+
+/// What [`Request::EnsureSecretary`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnsureAction {
+    Started,
+    Resumed,
+    Restored,
+    AlreadyRunning,
 }
 
 /// What [`Request::OpenCommittee`] did: the note's seq when it opened the
