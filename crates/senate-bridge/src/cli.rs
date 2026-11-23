@@ -1257,16 +1257,29 @@ async fn hosted_sessions(
     verbose: bool,
 ) -> anyhow::Result<Vec<crate::host::view::Session>> {
     let reply: crate::ipc::SessionsReply = daemon_call(paths, &Request::Sessions).await?;
+    Ok(watch_tiles(reply.rows, all, verbose))
+}
+
+fn watch_tiles(
+    mut rows: Vec<crate::ipc::SessionRow>,
+    all: bool,
+    verbose: bool,
+) -> Vec<crate::host::view::Session> {
     // Only a running host can be watched; a paused one is shown greyed
-    // out. The rows come ordered by name.
-    Ok(reply
-        .rows
-        .into_iter()
-        .filter(|row| row.is_active() || all)
+    // out. Group by committee and put its chair first, keeping the daemon
+    // order within each group of chairs or members.
+    rows.retain(|row| row.is_active() || all);
+    rows.sort_by(|a, b| {
+        a.committee
+            .cmp(&b.committee)
+            .then_with(|| b.chair.cmp(&a.chair))
+    });
+    rows.into_iter()
         .map(|row| crate::host::view::Session {
             key: row.session_id.clone(),
             title: format!(
-                "{} · {} · {} · {} · {}",
+                "{}{} · {} · {} · {} · {}",
+                if row.chair { "[chair] " } else { "" },
                 row.display_name(verbose),
                 row.committee
                     .as_ref()
@@ -1286,7 +1299,44 @@ async fn hosted_sessions(
             dim: !row.is_running(),
             tty: row.tty,
         })
-        .collect())
+        .collect()
+}
+
+#[test]
+fn watch_tiles_group_each_committee_with_its_chair_first() {
+    let row = |committee: &str, alias: &str, chair: bool| {
+        serde_json::from_value::<crate::ipc::SessionRow>(serde_json::json!({
+            "host_id": senate_core::EventId::new(),
+            "session_id": format!("session-{committee}-{alias}"),
+            "primary": alias,
+            "alias": alias,
+            "committee": committee,
+            "chair": chair,
+            "runtime": "claude",
+            "state": "running",
+            "dir": "/fixture",
+            "tty": "/fixture/tty"
+        }))
+        .expect("hosted session row")
+    };
+    let tiles = watch_tiles(
+        vec![
+            row("west", "builder", false),
+            row("east", "builder", false),
+            row("west", "lead", true),
+            row("east", "lead", true),
+        ],
+        false,
+        false,
+    );
+    let labels: Vec<_> = tiles.iter().map(|tile| tile.alias.as_str()).collect();
+    assert_eq!(
+        labels,
+        ["east::lead", "east::builder", "west::lead", "west::builder"]
+    );
+    assert!(tiles[0].title.starts_with("[chair] "));
+    assert!(tiles[2].title.starts_with("[chair] "));
+    assert!(!tiles[1].title.starts_with("[chair] "));
 }
 
 async fn daemon_call<T: serde::de::DeserializeOwned>(

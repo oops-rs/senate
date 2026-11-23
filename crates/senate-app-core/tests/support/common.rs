@@ -645,6 +645,7 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
 pub fn hosted_sessions() -> SessionsReply {
     let row = |name: &str, alias: Option<&str>, runtime: Runtime, state: HostState| SessionRow {
         paused: false,
+        chair: false,
         shown_name: None,
         host_id: EventId::new(),
         session_id: format!("s-{name}"),

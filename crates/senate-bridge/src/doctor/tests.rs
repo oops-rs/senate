@@ -535,6 +535,7 @@ fn me(version: Option<&str>, epoch: &str, committees: &[&str]) -> Me {
 fn session(label: &str, running: bool, prompt: bool) -> SessionRow {
     SessionRow {
         paused: false,
+        chair: false,
         shown_name: None,
         host_id: EventId::new(),
         session_id: format!("s-{label}"),

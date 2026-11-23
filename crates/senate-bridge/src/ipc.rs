@@ -499,6 +499,9 @@ pub struct SessionRow {
     pub alias: Option<SenatorName>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub committee: Option<CommitteeId>,
+    /// Whether this senator is the chair of its session’s committee.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub chair: bool,
     /// The alias as displayed in this Senate, qualified when ambiguous.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shown_name: Option<String>,

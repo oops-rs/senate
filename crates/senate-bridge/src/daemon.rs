@@ -3382,6 +3382,7 @@ impl Shared {
             .await
             .ok()
             .and_then(Result::ok);
+        let chairs: BTreeMap<_, _> = self.known_chairs().into_iter().collect();
         let mut rows = Vec::new();
         let mut known = BTreeSet::new();
         let paused: BTreeSet<SenatorName> = self
@@ -3412,6 +3413,7 @@ impl Shared {
                     &session.agent,
                 )),
                 alias,
+                chair: committee.as_ref().and_then(|c| chairs.get(c)) == Some(&session.agent),
                 committee,
                 runtime: session.runtime,
                 model: self
