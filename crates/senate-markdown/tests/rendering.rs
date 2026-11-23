@@ -1,0 +1,551 @@
+#![allow(clippy::unwrap_used)]
+
+use std::collections::BTreeSet;
+use std::sync::Arc;
+
+use senate_markdown::{
+    Alignment, Block, Color, Diff, Document, Format, Inline, Part, RenderCache, RenderDiff,
+    Terminal,
+};
+use textwrap::core::display_width;
+
+const SPECIMEN: &str = include_str!("fixtures/specimen.md");
+const THREAD: &str = include_str!("fixtures/thread-2148.md");
+
+fn render(document: &Document, cache: &RenderCache, format: Format) -> String {
+    let mut out = String::new();
+    for entry in document.blocks() {
+        assert!(cache.write_block(entry.id, format, &mut out));
+    }
+    out
+}
+
+fn both(cache: &mut RenderCache, doc: &Document) -> RenderDiff {
+    let work = cache.render_document(doc, Format::Html, &mut String::new());
+    let other = cache.render_document(doc, Format::Terminal, &mut String::new());
+    assert_eq!(other.highlighted_lines, 0);
+    work
+}
+
+fn apply(cache: &mut RenderCache, doc: &Document, diff: &Diff) -> RenderDiff {
+    cache.invalidate(diff);
+    let mut combined = RenderDiff::default();
+    for &id in diff
+        .replaced
+        .iter()
+        .chain(&diff.inserted)
+        .chain(&diff.appended)
+    {
+        let work = cache.render_block(doc, id, Format::Html);
+        combined.blocks.extend(work.blocks);
+        combined.highlighted_lines += work.highlighted_lines;
+        combined.rendered_code_lines += work.rendered_code_lines;
+        assert_eq!(
+            cache
+                .render_block(doc, id, Format::Terminal)
+                .highlighted_lines,
+            0
+        );
+    }
+    combined
+}
+
+fn rendered(text: &str, format: Format, terminal: Terminal) -> String {
+    let document = Document::parse(text);
+    let mut cache = RenderCache::new(terminal);
+    cache.render_document(&document, format, &mut String::new());
+    render(&document, &cache, format)
+}
+
+#[test]
+fn both_specimens_render_as_typed_blocks() {
+    for example in [SPECIMEN, THREAD] {
+        let document = Document::parse(example);
+        assert!(
+            document
+                .blocks()
+                .windows(2)
+                .all(|pair| pair[0].id < pair[1].id)
+        );
+        assert!(document.blocks().iter().any(|entry| matches!(entry.block.as_ref(),
+            Block::Table { alignment, .. } if alignment == &[Alignment::Left, Alignment::Center, Alignment::Right, Alignment::Default]
+        )));
+        let mut cache = RenderCache::new(Terminal::new(48, Color::None));
+        both(&mut cache, &document);
+        let html = render(&document, &cache, Format::Html);
+        for value in [
+            "<strong>strong</strong>",
+            "<em>emphasis</em>",
+            "<del>struck</del>",
+            "<a href=\"https://senate.dev\">",
+            "<thead>",
+            "<ol",
+            "data-state=\"done\"",
+            "<blockquote>",
+            "<hr>",
+            "tok-keyword",
+            "中文",
+            "[senator::",
+        ] {
+            assert!(html.contains(value), "missing {value:?}");
+        }
+        let terminal = render(&document, &cache, Format::Terminal);
+        assert!(terminal.lines().all(|line| display_width(line) <= 48));
+        assert!(
+            terminal.contains("│") && terminal.contains("☑") && terminal.contains("[senator::")
+        );
+    }
+}
+
+#[test]
+fn existing_bracketed_mentions_remain_literal_even_with_link_definitions() {
+    let text = "请[senator::codex]看一下，[speaker]，[committee]。\n\n[senator::codex]: https://example.com\n[speaker]: https://example.com\n[committee]: https://example.com\n\n`[senator::codex]` and [guide][guide].\n\n[guide]: https://senate.dev";
+    let document = Document::parse(text);
+    let Block::Paragraph(inlines) = document.blocks()[0].block.as_ref() else {
+        panic!("paragraph")
+    };
+    assert!(
+        inlines
+            .iter()
+            .all(|inline| matches!(inline, Inline::Text(_)))
+    );
+    let html = rendered(text, Format::Html, Terminal::new(80, Color::None));
+    assert!(html.contains("请[senator::codex]看一下，[speaker]，[committee]。"));
+    assert!(html.contains("<code>[senator::codex]</code>"));
+    assert!(html.contains("<a href=\"https://senate.dev\">guide</a>"));
+}
+
+#[test]
+fn partial_constructs_keep_their_identity_and_settle() {
+    let mut document = Document::parse("Unchanged\n\n| name | age |\n");
+    let earlier = document.blocks()[0].block.clone();
+    let tail = document.blocks()[1].id;
+    let diff = document.update("Unchanged\n\n| name | age |\n| :--- | ---: |\n");
+    assert_eq!(diff.replaced, [tail]);
+    assert!(Arc::ptr_eq(&earlier, &document.blocks()[0].block));
+    assert!(matches!(document.block(tail), Some(Block::Table { .. })));
+
+    let mut document = Document::parse("Top\n\n**unfinished\n\n- thi");
+    let ids: Vec<_> = document.blocks().iter().map(|entry| entry.id).collect();
+    assert_eq!(
+        document
+            .update("Top\n\n**unfinished**\n\n- thing\n")
+            .replaced,
+        ids[1..]
+    );
+    assert!(
+        matches!(document.block(ids[1]), Some(Block::Paragraph(content)) if matches!(content[0], Inline::Strong(_)))
+    );
+    let diff = document.update("Top\n\nReplacement");
+    assert_eq!(diff.removed, [ids[2]]);
+    assert_eq!(diff.replaced, [ids[1]]);
+}
+
+#[test]
+fn completed_reference_can_replace_an_earlier_block() {
+    let mut document = Document::parse("[guide][later]\n\nSeveral blocks later.\n\n");
+    let first = document.blocks()[0].id;
+    let diff = document
+        .update("[guide][later]\n\nSeveral blocks later.\n\n[later]: https://senate.dev\n\n");
+    assert_eq!(diff.replaced, [first]);
+    assert!(diff.appended.is_empty());
+    assert_eq!(diff.unchanged, 1);
+}
+
+#[test]
+fn append_and_incomplete_lines_keep_multiline_highlight_and_code_prefix() {
+    let prefix = "Intro\n\n> ```rust\n> /* a comment\n> interior\n";
+    let terminal = Terminal::new(38, Color::TrueColor);
+    let mut document = Document::parse(prefix);
+    let mut cache = RenderCache::new(terminal);
+    let initial = both(&mut cache, &document);
+    assert_eq!(initial.highlighted_lines, 2);
+    let id = document.blocks()[1].id;
+    let text = format!("{prefix}> still a comment */\n");
+    let diff = document.update(&text);
+    let update = apply(&mut cache, &document, &diff);
+    assert_eq!(update.highlighted_lines, 1);
+    assert_eq!(update.rendered_code_lines, 1);
+    assert!(!update.blocks[0].layout_changed);
+    assert_eq!(update.blocks[0].code[0].from_line, 2);
+    assert!(cache.code_lines(id, 0, Format::Html).unwrap()[2].contains("tok-comment"));
+
+    let mut growing = format!("{text}> let ze");
+    let diff = document.update(&growing);
+    let update = apply(&mut cache, &document, &diff);
+    assert_eq!(update.highlighted_lines, 1);
+    growing.push_str("ro = 0;\n");
+    let diff = document.update(&growing);
+    let update = apply(&mut cache, &document, &diff);
+    assert_eq!(update.highlighted_lines, 1);
+    assert_eq!(update.blocks[0].code[0].from_line, 3);
+    assert_eq!(
+        render(&document, &cache, Format::Html),
+        rendered(&growing, Format::Html, terminal)
+    );
+}
+
+#[test]
+fn randomized_utf8_stream_patches_only_semantically_changed_blocks() {
+    let reply = format!(
+        "{SPECIMEN}\n\n{THREAD}\n\n```rust\n{}\n```\n",
+        "    let 結果 = 123; // some text\n".repeat(380)
+    );
+    let final_document = Document::parse(&reply);
+    let terminal = Terminal::new(72, Color::Ansi256);
+    let mut one_shot = RenderCache::new(terminal);
+    let full_work = both(&mut one_shot, &final_document);
+
+    for mut rng in [4_u32, 1783, 2188] {
+        let mut document = Document::default();
+        let mut cache = RenderCache::new(terminal);
+        let mut bytes = 0;
+        let mut total_lines = 0;
+        let mut updates = 0;
+        let mut full_ablation = 0;
+        while bytes < reply.len() {
+            rng ^= rng << 13;
+            rng ^= rng >> 17;
+            rng ^= rng << 5;
+            bytes = (bytes + 1 + rng as usize % 67).min(reply.len());
+            while !reply.is_char_boundary(bytes) {
+                bytes += 1;
+            }
+            let old = document.blocks().to_vec();
+            let diff = document.update(&reply[..bytes]);
+            let touched: BTreeSet<_> = diff
+                .replaced
+                .iter()
+                .chain(&diff.appended)
+                .chain(&diff.inserted)
+                .copied()
+                .collect();
+            let work = apply(&mut cache, &document, &diff);
+            total_lines += work.highlighted_lines;
+            updates += 1;
+            full_ablation += document
+                .blocks()
+                .iter()
+                .filter_map(|entry| {
+                    let Block::Code(code) = entry.block.as_ref() else {
+                        return None;
+                    };
+                    code.language
+                        .as_ref()
+                        .map(|_| code.text.split_inclusive('\n').count())
+                })
+                .sum::<usize>();
+            for patch in &work.blocks {
+                assert!(touched.contains(&patch.id));
+            }
+            for entry in document.blocks() {
+                if let Some(before) = old.iter().find(|before| before.id == entry.id) {
+                    assert_eq!(touched.contains(&entry.id), before.block != entry.block);
+                    if before.block == entry.block {
+                        assert!(Arc::ptr_eq(&before.block, &entry.block));
+                    }
+                }
+            }
+            for item in &diff.removed {
+                assert!(document.block(*item).is_none());
+            }
+            // This sample has no reference definitions. The only change
+            // before the last block can be a table absorbing a
+            // provisional paragraph for an unfinished final row.
+            if let Some(last) = old.last() {
+                for &id in &diff.replaced {
+                    let absorbed_partial_row =
+                        matches!(document.block(id), Some(Block::Table { .. }))
+                            && old
+                                .iter()
+                                .filter(|entry| entry.id > id)
+                                .all(|entry| diff.removed.contains(&entry.id));
+                    assert!(
+                        id == last.id || absorbed_partial_row,
+                        "append changed a block before the active tail at byte {bytes}: {diff:?}"
+                    );
+                }
+            }
+        }
+        assert_eq!(document, final_document);
+        for format in [Format::Html, Format::Terminal] {
+            assert_eq!(
+                render(&document, &cache, format),
+                render(&final_document, &one_shot, format)
+            );
+        }
+        assert!(total_lines < full_ablation / 10);
+        println!(
+            "{updates} updates, {total_lines} incremental highlighted lines, {full_ablation} full-refresh lines, {} one-shot lines",
+            full_work.highlighted_lines
+        );
+    }
+}
+
+#[test]
+fn output_from_hostile_markdown_stays_within_the_html_contract() {
+    let long = "x".repeat(70_000);
+    let text = format!(
+        "<script>alert(1)</script>\n\n<img src=x onerror=alert(2)>\n\n\
+        [x](javascript:alert%281%29) [x](JaVaScRiPt:alert%282%29) [x](jav&#x61;script:bad)\n\n\
+        [x](data:text/html,bad) [x](//bad.invalid) ![alt](https://bad.invalid/a.png)\n\n\
+        [safe](https://site.invalid/?x=\x22y\x22&z=1) <person@example.com>\n\n\
+        [[[[senator::codex]]]] `<script>&\x1b]52;evil\x07`\n\n\
+        ```rust\n{long}\n<svg onload=evil()>\x1b[31m\x00"
+    );
+    let terminal = Terminal::new(80, Color::None);
+    let html = rendered(&text, Format::Html, terminal);
+    let allowed = [
+        "p",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "ul",
+        "ol",
+        "li",
+        "span",
+        "pre",
+        "code",
+        "blockquote",
+        "table",
+        "thead",
+        "tbody",
+        "tr",
+        "th",
+        "td",
+        "hr",
+        "br",
+        "strong",
+        "em",
+        "del",
+        "a",
+    ];
+    for tag in html.split('<').skip(1) {
+        let (tag, _) = tag.split_once('>').unwrap();
+        let (name, mut attrs) = tag
+            .trim_start_matches('/')
+            .split_once(' ')
+            .unwrap_or((tag.trim_start_matches('/'), ""));
+        assert!(allowed.contains(&name), "emitted {name}");
+        while !attrs.is_empty() {
+            let (key, raw) = attrs.trim_start().split_once("=\"").unwrap();
+            let (value, remaining) = raw.split_once('"').unwrap();
+            assert!(
+                match (name, key) {
+                    ("a", "href") => ["https:", "http:", "mailto:"]
+                        .iter()
+                        .any(|scheme| value.starts_with(scheme)),
+                    ("span", "class") => [
+                        "task-marker",
+                        "tok-comment",
+                        "tok-string",
+                        "tok-keyword",
+                        "tok-number",
+                        "tok-name",
+                        "tok-type",
+                        "tok-operator"
+                    ]
+                    .contains(&value),
+                    ("ul" | "ol", "class") => value == "task-list",
+                    ("li", "class") => value == "task-item",
+                    ("td" | "th", "class") =>
+                        ["align-left", "align-center", "align-right"].contains(&value),
+                    ("span", "data-state") => value == "done" || value == "open",
+                    ("code", "data-language") => true,
+                    ("ol", "start") => value.parse::<usize>().is_ok(),
+                    _ => false,
+                },
+                "emitted {name} {key}={value}"
+            );
+            attrs = remaining.trim_start();
+        }
+    }
+    assert!(html.contains("&lt;script&gt;"));
+    assert!(!html.contains('\x1b') && !html.contains('\0'));
+    assert!(!html.contains("bad.invalid"));
+    let plain = rendered(&text, Format::Terminal, terminal);
+    assert!(!plain.contains('\x1b') && !plain.contains('\x07') && !plain.contains('\0'));
+    assert!(plain.lines().all(|line| display_width(line) <= 80));
+}
+
+#[test]
+fn exposes_code_parts_and_terminal_color_depth_explicitly() {
+    let mut document = Document::parse("```rust\nlet n = 123;\n```");
+    for (color, prefix) in [
+        (Color::None, ""),
+        (Color::Ansi16, "\x1b["),
+        (Color::Ansi256, "\x1b[38;5;"),
+        (Color::TrueColor, "\x1b[38;2;"),
+    ] {
+        let mut cache = RenderCache::new(Terminal::new(28, color));
+        both(&mut cache, &document);
+        let id = document.blocks()[0].id;
+        assert!(
+            cache
+                .parts(id, Format::Html)
+                .unwrap()
+                .any(|part| matches!(part, Part::Code { index: 0, lines } if lines.len() == 1))
+        );
+        let render = render(&document, &cache, Format::Terminal);
+        if color == Color::None {
+            assert!(!render.contains('\x1b'));
+        } else {
+            assert!(render.contains(prefix));
+        }
+    }
+    let diff = document.update("");
+    assert_eq!(diff.removed.len(), 1);
+}
+
+#[test]
+fn middle_insertions_keep_later_ids_and_indented_code_stays_literal() {
+    let mut document = Document::parse("Top\n\n\n\nBottom\n");
+    let bottom = document.blocks()[1].id;
+    let diff = document.update("Top\n\nMiddle\n\nBottom\n");
+    assert_eq!(diff.unchanged, 2);
+    assert!(diff.appended.is_empty());
+    assert_eq!(diff.inserted, [document.blocks()[1].id]);
+    assert_eq!(document.blocks()[2].id, bottom);
+
+    let code = "    [senator::codex] <raw>\n";
+    let document = Document::parse(code);
+    assert!(matches!(
+        document.blocks()[0].block.as_ref(),
+        Block::Code(block) if !block.fenced && block.language.is_none()
+    ));
+    let html = rendered(code, Format::Html, Terminal::new(80, Color::None));
+    assert_eq!(
+        html,
+        "<pre><code>[senator::codex] &lt;raw&gt;\n</code></pre>\n"
+    );
+}
+
+#[test]
+fn terminal_keeps_hard_breaks_marks_headings_and_aligns_task_children() {
+    let text = "# One\n## Two\n### Three\n#### Four\n\nhard  \nnext\nsoft\n\n- [x] Parent\n  - [ ] Child\n";
+    let plain = Terminal::new(80, Color::None);
+    let unicode = rendered(text, Format::Terminal, plain);
+    assert!(unicode.contains("# One\n## Two\n### Three\n#### Four\n"));
+    assert!(unicode.contains("hard\nnext soft\n"));
+    assert!(unicode.contains("☑ Parent\n  ☐ Child\n"));
+    let ascii = rendered(text, Format::Terminal, plain.with_utf8(false));
+    assert!(ascii.contains("[x] Parent\n    [ ] Child\n"));
+    let colored = rendered(text, Format::Terminal, Terminal::new(80, Color::Ansi16));
+    assert!(colored.contains("\x1b[1;36mOne\x1b[0m"));
+    assert!(!colored.contains("# One"));
+}
+
+#[test]
+fn required_fences_highlight_and_unknown_fences_stay_plain() {
+    let terminal = Terminal::new(80, Color::None);
+    for (lang, source) in [
+        ("rust", "let x = 3;"),
+        ("swift", "let x = 3"),
+        ("typescript", "const x: number = 3;"),
+        ("tsx", "const x = <Panel />;"),
+        ("javascript", "const x = 3;"),
+        ("jsx", "const x = <Panel />;"),
+        ("python", "def f(): return 3"),
+        ("go", "func f() int { return 3 }"),
+        ("c", "int x = 3;"),
+        ("c++", "int x = 3;"),
+        ("java", "class Foo {}"),
+        ("kotlin", "val x = 3"),
+        ("ruby", "def f; end"),
+        ("bash", "if true; then echo 3; fi"),
+        ("sh", "if true; then echo 3; fi"),
+        ("zsh", "if true; then echo 3; fi"),
+        ("json", "{\"x\": 3}"),
+        ("yaml", "x: 3"),
+        ("toml", "x = 3"),
+        ("html", "<section>Title</section>"),
+        ("css", "a { top: 3px; }"),
+        ("sql", "SELECT 3;"),
+        ("diff", "+let x = 3;"),
+        ("markdown", "# Hello"),
+        ("dockerfile", "FROM scratch"),
+        ("makefile", "x := 3"),
+    ] {
+        let doc = Document::parse(&format!("```{lang}\n{source}\n```"));
+        let mut cache = RenderCache::new(terminal);
+        assert_eq!(both(&mut cache, &doc).highlighted_lines, 1, "{lang}");
+        let html = render(&doc, &cache, Format::Html);
+        if matches!(lang, "jsx" | "tsx") {
+            assert!(
+                html.contains("<span class=\"tok-name\">Panel</span>"),
+                "{lang}: {html}"
+            );
+        }
+        if matches!(lang, "swift" | "typescript" | "kotlin" | "toml") {
+            assert!(html.contains("class=\"tok-"), "{lang}: {html}");
+        }
+    }
+    let doc = Document::parse("```unknown-fictional-language\nlet x = 3;\n```");
+    assert_eq!(
+        both(&mut RenderCache::new(terminal), &doc).highlighted_lines,
+        0
+    );
+}
+
+#[test]
+fn a_highlight_budget_can_disable_and_reenable_code_styles() {
+    let terminal = Terminal::new(80, Color::None);
+    let mut doc = Document::parse("```rust\nlet n = 1;\n");
+    assert_eq!(
+        both(&mut RenderCache::with_highlight_limit(terminal, 0), &doc).highlighted_lines,
+        0
+    );
+    let mut cache = RenderCache::with_highlight_limit(terminal, 18);
+    assert_eq!(both(&mut cache, &doc).highlighted_lines, 1);
+    let diff = doc.update("```rust\nlet n = 1;\nlet m = 2;\n");
+    let patch = apply(&mut cache, &doc, &diff);
+    assert_eq!(patch.highlighted_lines, 0);
+    assert_eq!(patch.blocks[0].code[0].from_line, 0);
+    assert!(!render(&doc, &cache, Format::Html).contains("tok-"));
+    let diff = doc.update("```rust\nlet n = 1;\n");
+    assert_eq!(apply(&mut cache, &doc, &diff).highlighted_lines, 1);
+}
+
+#[test]
+fn viewport_requests_defer_offscreen_blocks_and_share_lexing_between_formats() {
+    let mut text = "Intro\n\n```swift\nlet n = 1\n".to_string();
+    let mut document = Document::parse(&text);
+    let intro = document.blocks()[0].id;
+    let code = document.blocks()[1].id;
+    assert_eq!(document.blocks()[0].source_len, 5);
+    let Block::Code(block) = document.block(code).unwrap() else {
+        panic!("code")
+    };
+    assert_eq!(block.language.as_deref(), Some("swift"));
+    assert_eq!(block.line_count(), 1);
+    assert!(document.blocks()[1].source_len >= "```swift\nlet n = 1".len());
+
+    let mut cache = RenderCache::new(Terminal::new(80, Color::TrueColor));
+    assert!(cache.parts(code, Format::Html).is_none());
+    let work = cache.render_block(&document, intro, Format::Html);
+    assert_eq!(work.blocks.len(), 1);
+    assert_eq!(work.highlighted_lines, 0);
+    text.push_str("let m = 2\n");
+    cache.invalidate(&document.update(&text));
+    assert_eq!(
+        cache.render_block(&document, intro, Format::Html),
+        RenderDiff::default()
+    );
+    assert!(cache.parts(code, Format::Html).is_none());
+
+    let work = cache.render_block(&document, code, Format::Html);
+    assert_eq!((work.highlighted_lines, work.rendered_code_lines), (2, 2));
+    assert!(cache.parts(code, Format::Terminal).is_none());
+    text.push_str("let p = 3\n");
+    cache.invalidate(&document.update(&text));
+    assert!(cache.parts(code, Format::Html).is_none());
+    let work = cache.render_block(&document, code, Format::Html);
+    assert_eq!((work.highlighted_lines, work.rendered_code_lines), (1, 1));
+    assert!(!work.blocks[0].layout_changed);
+    assert_eq!(work.blocks[0].code[0].from_line, 2);
+    let work = cache.render_block(&document, code, Format::Terminal);
+    assert_eq!((work.highlighted_lines, work.rendered_code_lines), (0, 3));
+}
