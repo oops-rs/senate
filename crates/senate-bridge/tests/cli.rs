@@ -512,7 +512,10 @@ fn install_sets_up_codex_in_its_config_toml() {
 
     let text = install(false);
     assert!(
-        text.contains(&format!("4. {} (Codex)", config.display())),
+        text.contains(&format!(
+            "4. {} (Codex)",
+            config.canonicalize().unwrap().display()
+        )),
         "{text}"
     );
     assert!(
@@ -527,7 +530,7 @@ fn install_sets_up_codex_in_its_config_toml() {
         "{text}"
     );
     assert!(text.contains("[[hooks.UserPromptSubmit.hooks]]"), "{text}");
-    assert!(text.contains("open /hooks and trust"), "{text}");
+    assert!(text.contains("+ hooks.state."), "{text}");
     assert!(text.contains("codex app-server daemon start"), "{text}");
     assert!(text.contains("codex --remote unix://"), "{text}");
     assert_eq!(std::fs::read_to_string(&config).unwrap(), original);

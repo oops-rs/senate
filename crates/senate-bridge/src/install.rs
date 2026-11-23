@@ -242,7 +242,7 @@ impl InstallOptions {
                     .filter(|v| !v.is_empty())
                     .map(PathBuf::from)
             }) {
-                Some(home) => home,
+                Some(home) => codex::absolute_home(&home)?,
                 None => dirs::home_dir()
                     .context("cannot find the home directory")?
                     .join(".codex"),

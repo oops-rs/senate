@@ -22,12 +22,13 @@
 //! hosted TUI cannot set this for itself: `codex resume --remote` does not
 //! pass `mcp_servers.*` overrides on to the app-server, where the tools
 //! run. Codex runs a hook only once it is trusted in `/hooks`; `install`
-//! does not trust them on the user's behalf.
+//! records Codex's declaration hash for exact Senate hook groups.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
+use sha2::{Digest, Sha256};
 use toml_edit::{Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, Value, value};
 
 use senate_core::Locale;
@@ -43,10 +44,6 @@ pub fn hook_command(exe: &str, subcommand: &str) -> String {
     super::runtime_hook_command(exe, subcommand, "codex")
 }
 
-fn is_ours(command: &str, subcommand: &str) -> bool {
-    super::is_runtime_hook(command, subcommand, "codex")
-}
-
 /// What happened to one hook entry.
 enum Seen {
     Absent,
@@ -56,14 +53,16 @@ enum Seen {
 
 /// Look through one group's `hooks` list for ours; point a stale one at
 /// `want`.
-fn scan_group(group_hooks: Option<&mut Item>, sub: &str, want: &str) -> Seen {
+fn scan_group(group_hooks: Option<&mut Item>, sub: &str, want: &str, previous_exe: &str) -> Seen {
     let mut seen = Seen::Absent;
     let mut check = |command: Option<&str>| -> Option<String> {
         let command = command?;
         if command == want {
             seen = Seen::Present;
             None
-        } else if is_ours(command, sub) {
+        } else if command == hook_command(previous_exe, sub)
+            || command == format!("{} hook {sub} --codex", shell_quote(previous_exe))
+        {
             seen = Seen::Moved(command.to_string());
             Some(want.to_string())
         } else {
@@ -116,10 +115,6 @@ fn hook_table(want: &str, event: &str) -> Table {
 /// Merge the `senate` MCP server and the four hooks into `doc`. One line
 /// per change; empty when already up to date.
 pub fn merge(doc: &mut DocumentMut, exe: &str) -> Result<Vec<String>, String> {
-    merge_entries(doc, exe).map(|(changes, _)| changes)
-}
-
-fn merge_entries(doc: &mut DocumentMut, exe: &str) -> Result<(Vec<String>, bool), String> {
     let mut changes = Vec::new();
     let root = doc.as_table_mut();
 
@@ -156,7 +151,7 @@ fn merge_entries(doc: &mut DocumentMut, exe: &str) -> Result<(Vec<String>, bool)
         changes.push(if present {
             format!(
                 "~ mcp_servers.{SERVER_NAME}: {} {}  →  {want}",
-                command.unwrap_or_default(),
+                command.as_deref().unwrap_or_default(),
                 args.unwrap_or_default().join(" ")
             )
         } else {
@@ -175,7 +170,15 @@ fn merge_entries(doc: &mut DocumentMut, exe: &str) -> Result<(Vec<String>, bool)
         });
     }
 
-    let server_changes = changes.len();
+    let previous_exe = command
+        .as_deref()
+        .filter(|path| {
+            matches!(
+                Path::new(path).file_name().and_then(|name| name.to_str()),
+                Some("senate" | "senate-bridge")
+            )
+        })
+        .unwrap_or(exe);
     // [[hooks.<Event>]]
     let hooks = root
         .entry("hooks")
@@ -203,7 +206,7 @@ fn merge_entries(doc: &mut DocumentMut, exe: &str) -> Result<(Vec<String>, bool)
             }
             Some(Item::ArrayOfTables(groups)) => {
                 for group in groups.iter_mut() {
-                    let seen = scan_group(group.get_mut("hooks"), sub, &want);
+                    let seen = scan_group(group.get_mut("hooks"), sub, &want, previous_exe);
                     note(seen, &mut changes);
                 }
             }
@@ -213,7 +216,7 @@ fn merge_entries(doc: &mut DocumentMut, exe: &str) -> Result<(Vec<String>, bool)
                         continue;
                     };
                     let mut list = group.get("hooks").cloned().map(Item::Value);
-                    let seen = scan_group(list.as_mut(), sub, &want);
+                    let seen = scan_group(list.as_mut(), sub, &want, previous_exe);
                     if let Seen::Moved(_) = &seen
                         && let Some(Item::Value(v)) = list
                     {
@@ -248,8 +251,56 @@ fn merge_entries(doc: &mut DocumentMut, exe: &str) -> Result<(Vec<String>, bool)
         }
         changes.push(format!("+ hooks.{event}: {want}"));
     }
-    let hooks_changed = changes.len() > server_changes;
-    Ok((changes, hooks_changed))
+    Ok(changes)
+}
+
+/// Codex hashes sorted compact JSON of its normalized handler, including
+/// the default async=false. Local command hooks have no plugin content hash.
+fn trust_exact_hooks(doc: &mut DocumentMut, exe: &str, path: &Path) -> anyhow::Result<Vec<String>> {
+    let parsed: toml::Value = toml::from_str(&doc.to_string())?;
+    let hooks = doc["hooks"].as_table_mut().expect("merge created hooks");
+    let mut changes = Vec::new();
+    for (event, sub) in HOOKS {
+        let command = hook_command(exe, sub);
+        let label = sub.replace('-', "_");
+        let expected = serde_json::json!({"hooks": [{
+            "type": "command", "command": command, "timeout": timeout_for(event)
+        }]});
+        // Compare the complete group, including all handler fields, before
+        // using Codex's normalized identity. Both inline and table arrays
+        // deserialize to the same group.
+        let groups: Vec<serde_json::Value> = parsed["hooks"][event].clone().try_into()?;
+        for (index, group) in groups
+            .iter()
+            .enumerate()
+            .filter(|(_, group)| *group == &expected)
+        {
+            let mut identity = group.clone();
+            identity["hooks"][0]["async"] = false.into();
+            identity["event_name"] = label.clone().into();
+            identity.sort_all_objects();
+            let hash = format!(
+                "sha256:{:x}",
+                Sha256::digest(serde_json::to_vec(&identity)?)
+            );
+            let key = format!("{}:{label}:{index}:0", path.display());
+            let states = hooks
+                .entry("state")
+                .or_insert(Item::Table(Table::new()))
+                .as_table_like_mut()
+                .context("hooks.state must be a table")?;
+            let state = states
+                .entry(&key)
+                .or_insert(Item::Table(Table::new()))
+                .as_table_like_mut()
+                .context("hook state must be a table")?;
+            if state.get("trusted_hash").and_then(Item::as_str) != Some(&hash) {
+                state.insert("trusted_hash", value(hash));
+                changes.push(format!("+ hooks.state.{key}.trusted_hash"));
+            }
+        }
+    }
+    Ok(changes)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -257,8 +308,22 @@ pub struct CodexPlan {
     pub path: PathBuf,
     pub existed: bool,
     pub after: String,
-    pub hooks_changed: bool,
+    pub trust_changed: bool,
     pub changes: Vec<String>,
+}
+
+/// Codex canonicalizes an explicit CODEX_HOME. On a first install the
+/// directory may not exist yet, so resolve its existing parent first.
+pub(super) fn absolute_home(home: &Path) -> std::io::Result<PathBuf> {
+    let absolute = std::path::absolute(home)?;
+    for parent in absolute.ancestors() {
+        match parent.canonicalize() {
+            Ok(real) => return Ok(real.join(absolute.strip_prefix(parent).expect("ancestor"))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(absolute)
 }
 
 /// Read `path` and work out the changes. Writes nothing.
@@ -274,11 +339,14 @@ pub fn plan(path: &Path, exe: &str) -> anyhow::Result<CodexPlan> {
             path.display()
         )
     })?;
-    let (changes, hooks_changed) = merge_entries(&mut doc, exe).map_err(anyhow::Error::msg)?;
+    let mut changes = merge(&mut doc, exe).map_err(anyhow::Error::msg)?;
+    let trusts = trust_exact_hooks(&mut doc, exe, &std::path::absolute(path)?)?;
+    let trust_changed = !trusts.is_empty();
+    changes.extend(trusts);
     Ok(CodexPlan {
         path: path.to_path_buf(),
         existed,
-        hooks_changed,
+        trust_changed,
         after: doc.to_string(),
         changes,
     })
@@ -319,11 +387,15 @@ pub fn render(plan: &CodexPlan, exe: &str, applied: bool, locale: Locale, out: &
             }
         );
     }
-    if applied && plan.hooks_changed {
-        let _ = writeln!(out, "   {}", locale.pick(
-            "Codex 下次启动时会显示「Hooks need review」，请检查新增或变更的 Senate 钩子。",
-            "On the next start, Codex will show “Hooks need review”. Review the new or changed Senate hooks.",
-        ));
+    if applied && plan.trust_changed {
+        let _ = writeln!(
+            out,
+            "   {}",
+            locale.pick(
+                "已为与安装配置完全匹配的 Senate 钩子写入 Codex 信任记录。",
+                "Pre-trusted matching Senate hooks in Codex.",
+            )
+        );
     }
     let _ = writeln!(
         out,
@@ -334,16 +406,6 @@ pub fn render(plan: &CodexPlan, exe: &str, applied: bool, locale: Locale, out: &
             (true, false) => "Once, by hand:",
             (false, false) => "Once, by hand (after --yes):",
         }
-    );
-    let _ = writeln!(
-        out,
-        "   - {}",
-        locale.pick(
-            "信任钩子：在 Codex 里打开 /hooks，信任senate 钩子。Codex 在钩子被信任之前\
-             不会运行它，那样就没有 Codex 会话会加入 Senate。",
-            "Trust the hooks: in Codex, open /hooks and trust the senate hooks. Codex \
-             skips a hook until it is trusted, and then no Codex session joins Senate."
-        )
     );
     let _ = writeln!(
         out,
@@ -380,32 +442,108 @@ mod tests {
     const EXE: &str = "/opt/bin/senate";
 
     #[test]
-    fn only_applied_hook_changes_announce_the_next_start_review() {
+    fn trust_changes_are_reported_once_and_only_when_applied() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        let warns = |applied| {
-            let plan = plan(&path, EXE).unwrap();
+        let fresh = plan(&path, EXE).unwrap();
+        for applied in [false, true] {
             let mut output = String::new();
-            render(&plan, EXE, applied, Locale::En, &mut output);
-            output.contains("Hooks need review")
-        };
-        assert!(warns(true));
-        assert!(!warns(false));
-        let complete = excerpt(EXE);
-        std::fs::write(&path, &complete).unwrap();
-        assert!(!warns(true));
+            render(&fresh, EXE, applied, Locale::En, &mut output);
+            assert_eq!(output.contains("Pre-trusted"), applied);
+        }
+        std::fs::write(&path, fresh.after).unwrap();
+        assert!(!plan(&path, EXE).unwrap().trust_changed);
+    }
+
+    #[test]
+    fn only_the_installers_exact_declaration_receives_trust() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let command = hook_command(EXE, "stop");
+        let handler = format!(r#"type = "command", command = "{command}", timeout = 10"#);
+        let key = format!("{}:stop:0:0", path.display());
+        for group in [
+            format!("hooks = [{{ {handler}, async = false }}]"),
+            format!("hooks = [{{ {handler}, commandWindows = 'other' }}]"),
+            format!("matcher = 'startup', hooks = [{{ {handler} }}]"),
+            format!("hooks = [{{ {handler} }}, {{ {handler} }}]"),
+            format!("hooks = [{{ {} }}]", handler.replace("10", "11")),
+            format!(
+                "hooks = [{{ {} }}]",
+                handler.replace("/opt/bin", "/foreign")
+            ),
+            format!(
+                "hooks = [{{ {} }}]",
+                handler.replace(" hook", " extra hook")
+            ),
+            format!(
+                "hooks = [{{ {} }}]",
+                handler.replace(" --runtime codex", "")
+            ),
+        ] {
+            let original = format!("hooks.Stop = [{{ {group} }}]\n");
+            std::fs::write(&path, &original).unwrap();
+            let installed = plan(&path, EXE).unwrap();
+            let parsed: toml::Value = installed.after.parse().unwrap();
+            assert!(parsed["hooks"]["state"].get(&key).is_none(), "{group}");
+            let before: toml::Value = original.parse().unwrap();
+            assert_eq!(parsed["hooks"]["Stop"][0], before["hooks"]["Stop"][0]);
+            std::fs::write(&path, installed.after).unwrap();
+            assert!(plan(&path, EXE).unwrap().changes.is_empty(), "{group}");
+        }
+    }
+
+    #[test]
+    fn reinstall_does_not_refresh_trust_for_an_edited_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let installed = plan(&path, EXE).unwrap();
+        let changed = installed.after.replace(
+            "hook stop --runtime codex",
+            "hook stop --runtime codex extra",
+        );
+        std::fs::write(&path, &changed).unwrap();
+        let reinstalled = plan(&path, EXE).unwrap();
+        let parsed: toml::Value = reinstalled.after.parse().unwrap();
+        let original: toml::Value = installed.after.parse().unwrap();
+        let key = format!("{}:stop:0:0", path.display());
+        let new_key = format!("{}:stop:1:0", path.display());
+        let states = &parsed["hooks"]["state"];
+        assert_eq!(states[&key], original["hooks"]["state"][&key]);
+        assert_eq!(states[&new_key], states[&key]);
+        assert_eq!(
+            parsed["hooks"]["Stop"][0]["hooks"][0]["command"].as_str(),
+            Some("/opt/bin/senate hook stop --runtime codex extra")
+        );
+    }
+
+    #[test]
+    fn codex_hash_is_bound_to_the_exact_hook_at_its_group_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let old = format!("{}:stop:0:0", path.display());
+        let key = format!("{}:stop:1:0", path.display());
         std::fs::write(
             &path,
-            complete.replace("default_tools_approval_mode", "other_key"),
+            format!(
+                r#"hooks.Stop = [{{ hooks = [{{ type = "command", command = "other" }}] }}]
+[hooks.state."{old}"]
+trusted_hash = "keep"
+[hooks.state."{key}"]
+enabled = false
+"#
+            ),
         )
         .unwrap();
-        assert!(!warns(true));
-        std::fs::write(
-            &path,
-            complete.replace("/opt/bin/senate hook", "/old/senate hook"),
-        )
-        .unwrap();
-        assert!(warns(true));
+        let installed = plan(&path, EXE).unwrap();
+        let parsed: toml::Value = installed.after.parse().unwrap();
+        let states = &parsed["hooks"]["state"];
+        assert_eq!(states[&old]["trusted_hash"].as_str(), Some("keep"));
+        assert_eq!(states[&key]["enabled"].as_bool(), Some(false));
+        assert_eq!(
+            states[&key]["trusted_hash"].as_str(),
+            Some("sha256:b274be346cf8a365201b3cc41fa6c7a555aa8df778d70863895749eb72118b4f")
+        );
     }
 
     #[test]
@@ -544,7 +682,7 @@ trusted_hash = "sha256:abc"
 
     #[test]
     fn inline_hook_arrays_are_understood() {
-        let mut doc: DocumentMut = "hooks.SessionStart = [{ hooks = [{ type = \"command\", \
+        let mut doc: DocumentMut = "mcp_servers.senate.command = \"/old/senate\"\nhooks.SessionStart = [{ hooks = [{ type = \"command\", \
              command = \"/old/senate hook session-start --codex\" }] }]\n"
             .parse()
             .unwrap();
@@ -573,14 +711,5 @@ trusted_hash = "sha256:abc"
             let mut doc: DocumentMut = bad.parse().unwrap();
             assert!(merge(&mut doc, EXE).is_err(), "{bad}");
         }
-    }
-
-    #[test]
-    fn claude_hooks_are_not_mistaken_for_codex_ones() {
-        assert!(!is_ours("/x/senate hook session-start", "session-start"));
-        assert!(is_ours(
-            "/x/senate hook session-start --codex",
-            "session-start"
-        ));
     }
 }

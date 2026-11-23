@@ -223,6 +223,14 @@ senated --machine
 senate setup service install --yes
 ```
 
+For Codex, `senate setup install --yes` records per-hook trust in
+`config.toml` for the four lifecycle hooks that match Senate's installation,
+including the executable path, event and timeout. Setup reports when it adds
+trust. Codex reviews changes to a hook’s effective declaration and treats an
+explicit default such as `async = false` as equivalent to omitting it.
+If hook review blocks a hosted session, Senate alerts the chair so a person
+can attach.
+
 Now, navigate to any git repository and bind it:
 ```sh
 cd ~/developer/my-project
