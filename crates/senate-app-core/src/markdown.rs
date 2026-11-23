@@ -371,8 +371,32 @@ mod tests {
             "<a href=\"https://example.com\" onclick=\"alert(1)\">x</a>",
         ];
         const TAGS: &[&str] = &[
-            "p", "h1", "h2", "h3", "h4", "h5", "h6", "ul", "ol", "li", "pre", "code", "blockquote", "table",
-            "thead", "tbody", "tr", "th", "td", "hr", "br", "strong", "em", "del", "a", "span",
+            "p",
+            "h1",
+            "h2",
+            "h3",
+            "h4",
+            "h5",
+            "h6",
+            "ul",
+            "ol",
+            "li",
+            "pre",
+            "code",
+            "blockquote",
+            "table",
+            "thead",
+            "tbody",
+            "tr",
+            "th",
+            "td",
+            "hr",
+            "br",
+            "strong",
+            "em",
+            "del",
+            "a",
+            "span",
         ];
         const ATTRS: &[&str] = &["href", "start", "data-language", "data-state", "class"];
         let s = MarkdownStore::new();
@@ -386,7 +410,9 @@ mod tests {
                 let mut rest = html.as_str();
                 while let Some(at) = rest.find('<') {
                     rest = &rest[at + 1..];
-                    let end = rest.find('>').unwrap_or_else(|| panic!("an open tag in {html:?}"));
+                    let end = rest
+                        .find('>')
+                        .unwrap_or_else(|| panic!("an open tag in {html:?}"));
                     let tag = &rest[..end];
                     rest = &rest[end + 1..];
                     let tag = tag.trim_start_matches('/');
@@ -398,7 +424,9 @@ mod tests {
                         if k == "href" {
                             let v = v.trim_matches('"').to_ascii_lowercase();
                             assert!(
-                                v.starts_with("http://") || v.starts_with("https://") || v.starts_with("mailto:"),
+                                v.starts_with("http://")
+                                    || v.starts_with("https://")
+                                    || v.starts_with("mailto:"),
                                 "href {v:?} from {text:?}"
                             );
                         }
