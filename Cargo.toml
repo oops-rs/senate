@@ -82,8 +82,6 @@ clap_complete = { version = "=4.6.12", features = ["unstable-dynamic"] }
 strsim = "0.11"
 terminal_size = "0.4"
 comrak = { version = "=1.2.0", default-features = false }
-syntect = { version = "=5.3.0", default-features = false, features = ["parsing", "regex-fancy"] }
-two-face = { version = "=0.5.1", default-features = false, features = ["syntect-fancy"] }
 unicode-segmentation = "1.13"
 textwrap = { version = "0.16", default-features = false, features = ["unicode-width"] }
 tracing = "0.1"
