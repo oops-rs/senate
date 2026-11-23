@@ -1712,6 +1712,14 @@ fn timelines(w: &mut World) {
             },
         ),
     );
+    // Reasoning with no text is dropped; this one goes inside the search,
+    // which has no output of its own.
+    push(&mut lead, 27, think("  "));
+    push(
+        &mut lead,
+        27,
+        think("Where is the threshold decided? Search before editing."),
+    );
     push(
         &mut lead,
         27,
@@ -1732,6 +1740,11 @@ fn timelines(w: &mut World) {
         old: None,
         new: None,
     }));
+    push(
+        &mut lead,
+        22,
+        think("The edit compiles; run the whole crate's tests, not just the policy module."),
+    );
     push(
         &mut lead,
         22,
@@ -1759,6 +1772,12 @@ fn timelines(w: &mut World) {
             kind: Some("question".into()),
             text: "which env runs the migration — staging or prod-eu?".into(),
         },
+    );
+    // Reasoning before a reply, with no call between: behind "Thinking".
+    push(
+        &mut lead,
+        19,
+        think("Tests pass. codex asked about the environment; answer that after publishing."),
     );
     push(
         &mut lead,

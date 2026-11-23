@@ -417,9 +417,9 @@ private struct SessionConversation: View {
             if t.items.isEmpty {
                 Nothing(text: L("session.empty"), hosted: nil, store: store)
             }
-            ForEach(t.items) { item in
-                EntryView(store: store, entry: item, committee: session.committee)
-                    .id(item.seq)
+            ForEach(t.rows) { row in
+                RowView(store: store, row: row)
+                    .id(row.id)
             }
             if t.working {
                 HStack(spacing: Theme.Space.s) {
@@ -460,14 +460,13 @@ private struct Nothing: View {
     }
 }
 
-/// One item of the conversation.
-private struct EntryView: View {
+/// One row of the conversation.
+private struct RowView: View {
     let store: CoreStore
-    let entry: TimelineEntry
-    let committee: String?
+    let row: ConversationRow
 
     var body: some View {
-        switch entry.body {
+        switch row.kind {
         case let .user(text):
             Text(verbatim: text)
                 .font(Theme.Fonts.reading)
@@ -482,11 +481,14 @@ private struct EntryView: View {
                 .frame(maxWidth: .infinity, alignment: .trailing)
                 .padding(.top, Theme.Space.s)
         case let .assistant(text):
-            MarkdownText(text: text)
-        case let .reasoning(text):
-            Reasoning(text: text)
+            VStack(alignment: .leading, spacing: Theme.Space.xs) {
+                if !row.thinking.isEmpty {
+                    Thinking(texts: row.thinking)
+                }
+                MarkdownText(text: text)
+            }
         case let .tool(call):
-            ToolRow(call: call)
+            ToolRow(call: call, thinking: row.thinking)
         case let .todo(items):
             TodoList(items: items)
         case let .notice(level, text):
@@ -499,9 +501,10 @@ private struct EntryView: View {
     }
 }
 
-/// Its reasoning: one dimmed line, folded; open, the whole of it.
-private struct Reasoning: View {
-    let text: String
+/// The reasoning before a reply: a small "Thinking" disclosure, folded;
+/// open, the reasoning, dimmed.
+private struct Thinking: View {
+    let texts: [String]
     @State private var open = false
 
     var body: some View {
@@ -509,15 +512,13 @@ private struct Reasoning: View {
             Button {
                 open.toggle()
             } label: {
-                HStack(spacing: 6) {
+                HStack(spacing: 5) {
                     Image(systemName: open ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 9, weight: .semibold))
-                        .frame(width: 12)
-                    Text(verbatim: open ? L("session.reasoning") : firstLine(text))
-                        .lineLimit(1)
-                        .italic()
+                        .font(.system(size: 8, weight: .semibold))
+                        .frame(width: 10)
+                    Text(verbatim: L("session.reasoning"))
                 }
-                .font(Theme.Fonts.row)
+                .font(Theme.Fonts.meta)
                 .foregroundStyle(Theme.onSurfaceVariant)
                 .contentShape(Rectangle())
             }
@@ -525,14 +526,24 @@ private struct Reasoning: View {
             .accessibilityLabel(L("session.reasoning"))
             .accessibilityValue(open ? L("a11y.expanded") : L("a11y.collapsed"))
             if open {
-                Text(verbatim: text)
-                    .font(Theme.Fonts.text)
-                    .foregroundStyle(Theme.onSurfaceVariant)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.leading, 18)
+                ReasoningText(texts: texts)
+                    .padding(.leading, 15)
             }
         }
+    }
+}
+
+/// Reasoning as read: dimmed, italic, one paragraph per step.
+private struct ReasoningText: View {
+    let texts: [String]
+
+    var body: some View {
+        Text(verbatim: texts.joined(separator: "\n\n"))
+            .font(Theme.Fonts.row)
+            .italic()
+            .foregroundStyle(Theme.onSurfaceVariant)
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -540,11 +551,13 @@ private struct Reasoning: View {
 /// went. It opens to what it printed, or to its diff.
 private struct ToolRow: View {
     let call: ToolCall
+    /// The reasoning that led to the call, shown inside it, above its output.
+    var thinking: [String] = []
     @State private var open = false
     @State private var hovered = false
 
     var body: some View {
-        let more = call.output != nil || call.diff != nil
+        let more = call.output != nil || call.diff != nil || !thinking.isEmpty
         VStack(alignment: .leading, spacing: Theme.Space.xs) {
             Button {
                 if more { open.toggle() }
@@ -593,6 +606,10 @@ private struct ToolRow: View {
             }
             #endif
             if open {
+                if !thinking.isEmpty {
+                    ReasoningText(texts: thinking)
+                        .padding(.horizontal, Theme.Space.m)
+                }
                 if let diff = call.diff {
                     DiffView(diff: diff)
                 } else if let output = call.output {

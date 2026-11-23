@@ -607,3 +607,53 @@ import SenateCore
         }
     }
 }
+
+@Suite struct ConversationRowsTests {
+    private func think(_ seq: UInt64, _ text: String) -> TimelineEntry {
+        TimelineEntry(seq: seq, at: nil, truncated: false, body: .reasoning(text: text))
+    }
+
+    private func tool(_ seq: UInt64, _ title: String) -> TimelineEntry {
+        TimelineEntry(seq: seq, at: nil, truncated: false, body: .tool(call: ToolCall(
+            callId: "c\(seq)", name: "Bash", kind: "shell", status: "completed", statusLabel: "done",
+            title: title, cwd: nil, output: nil, exitCode: nil, diff: nil)))
+    }
+
+    @Test func reasoningGoesIntoTheCallOrReplyItLedTo() {
+        let rows = ConversationRows.rows([
+            entry(1, "go", user: true),
+            think(2, "read the policy first"),
+            tool(3, "cat policy.rs"),
+            think(4, "now test"),
+            think(5, "  "),                       // empty: dropped
+            tool(6, "cargo test"),
+            think(7, "it passes; say so"),
+            entry(8, "Done."),
+        ])
+        #expect(rows.map(\.id) == [1, 3, 6, 8], "no row of reasoning's own")
+        #expect(rows[1].thinking == ["read the policy first"])
+        #expect(rows[2].thinking == ["now test"])
+        #expect(rows[3].thinking == ["it passes; say so"])
+    }
+
+    @Test func aTodoOrSenateMessageBetweenKeepsItAPersonsMessageEndsIt() {
+        let todo = TimelineEntry(seq: 3, at: nil, truncated: false, body: .todo(items: []))
+        let rows = ConversationRows.rows([
+            think(1, "plan"),
+            entry(2, "ok?", user: true),       // ends it: "plan" is not shown
+            think(4, "first step"),
+            todo,                              // does not end it
+            tool(5, "ls"),
+            think(6, "still thinking"),        // trailing: not shown yet
+        ])
+        #expect(rows.map(\.id) == [2, 3, 5])
+        #expect(rows[0].thinking.isEmpty)
+        #expect(rows[2].thinking == ["first step"])
+    }
+
+    @Test func aRowKeepsItsIdentityWhenItsCallCompletes() {
+        let running = ConversationRows.rows([think(1, "x"), tool(2, "make")])
+        let done = ConversationRows.rows([think(1, "x"), tool(2, "make")])
+        #expect(running.map(\.id) == done.map(\.id))
+    }
+}

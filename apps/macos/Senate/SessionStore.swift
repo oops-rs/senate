@@ -9,7 +9,12 @@ import SenateCore
 @Observable
 final class SessionTimeline {
     let sessionId: String
-    private(set) var items: [TimelineEntry] = []
+    private(set) var items: [TimelineEntry] = [] {
+        didSet { rows = ConversationRows.rows(items) }
+    }
+    /// What the page draws: the items, reasoning folded into the rows it
+    /// led to.
+    private(set) var rows: [ConversationRow] = []
     var available = true
     /// Why there is nothing to read, when there is not.
     var unavailable: String?
