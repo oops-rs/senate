@@ -51,7 +51,7 @@ use unicode_width::UnicodeWidthStr as _;
 
 use super::scroll::{self, Mouse};
 use super::terminal::{RESET_DISPLAY, RawTerminal, split_input};
-use super::watch::{Mirror, Watch};
+use super::watch::{Mirror, SyncFrames, Watch};
 use crate::paths::Paths;
 
 /// The least a tile is given, its header row included.
@@ -175,13 +175,34 @@ impl Tile {
                             }
                         };
                         let reading = async {
+                            let mut sync = SyncFrames::default();
                             loop {
-                                match watch.next().await {
-                                    Ok(Some(frame)) => {
-                                        if let Some(mirror) = shown(&state).mirror.as_mut() {
-                                            mirror.apply(&frame);
+                                let next = watch.next();
+                                tokio::pin!(next);
+                                let result = if let Some(deadline) = sync.deadline() {
+                                    tokio::select! {
+                                        result = &mut next => result,
+                                        _ = tokio::time::sleep_until(deadline) => {
+                                            if let Some(mirror) = shown(&state).mirror.as_mut()
+                                                && sync.finish(mirror)
+                                            {
+                                                changed.notify_one();
+                                            }
+                                            // Keep the in-flight frame read: cancelling
+                                            // it could discard a partially read packet.
+                                            next.await
                                         }
-                                        changed.notify_one();
+                                    }
+                                } else {
+                                    next.await
+                                };
+                                match result {
+                                    Ok(Some(frame)) => {
+                                        if let Some(mirror) = shown(&state).mirror.as_mut()
+                                            && sync.apply(mirror, &frame)
+                                        {
+                                            changed.notify_one();
+                                        }
                                     }
                                     Ok(None) => break "the session ended".to_owned(),
                                     Err(error) => break format!("the watch broke: {error:#}"),

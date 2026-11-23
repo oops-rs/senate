@@ -1225,9 +1225,9 @@ async fn relay(mut stream: UnixStream, tty: &Tty, viewer: &Mutex<Viewer>) -> any
     // Subscribe alongside the snapshot and the modes. The output pump holds
     // the same emulation lock while it updates both.
     let (mirror, mut output, modes) = {
-        let emulation = tty.emulation();
+        let mut emulation = tty.emulation();
         let (mirror, output) = tty.screen.join();
-        (mirror, output, emulation.attach_preamble())
+        (mirror, output, emulation.attach())
     };
     tokio::time::timeout(Duration::from_secs(3), async {
         stream.write_all(&modes).await?;
