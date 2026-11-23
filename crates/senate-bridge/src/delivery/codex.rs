@@ -270,6 +270,13 @@ pub struct AppServer {
 impl AppServer {
     /// Connect, upgrade, `initialize`.
     pub async fn connect(transport: &Transport) -> Result<Self, CodexError> {
+        Self::connect_with_settings(transport, false).await
+    }
+
+    pub(crate) async fn connect_with_settings(
+        transport: &Transport,
+        experimental: bool,
+    ) -> Result<Self, CodexError> {
         let connect_error = |reason: String| CodexError::Connect {
             transport: transport.to_string(),
             reason,
@@ -328,13 +335,12 @@ impl AppServer {
             next_id: 1,
             _child: child,
         };
-        server
-            .request(
-                "initialize",
-                "",
-                json!({"clientInfo": {"name": CLIENT_NAME, "version": env!("CARGO_PKG_VERSION")}}),
-            )
-            .await?;
+        let mut params =
+            json!({"clientInfo": {"name": CLIENT_NAME, "version": env!("CARGO_PKG_VERSION")}});
+        if experimental {
+            params["capabilities"] = json!({"experimentalApi": true});
+        }
+        server.request("initialize", "", params).await?;
         server.notify("initialized", json!({})).await?;
         Ok(server)
     }
@@ -413,22 +419,71 @@ impl AppServer {
         }
     }
 
-    pub(crate) async fn create_thread(
-        &mut self,
-        cwd: &Path,
-        model: Option<&str>,
-    ) -> Result<String, CodexError> {
-        let mut params = json!({"cwd": cwd});
-        if let Some(model) = model {
-            params["model"] = json!(model);
-        }
-        let result = self.request("thread/start", "", params).await?;
+    pub(crate) async fn create_thread(&mut self, cwd: &Path) -> Result<String, CodexError> {
+        let result = self
+            .request("thread/start", "", json!({"cwd": cwd}))
+            .await?;
         result
             .pointer("/thread/id")
             .and_then(Value::as_str)
             .filter(|id| !id.is_empty())
             .map(str::to_owned)
             .ok_or_else(|| CodexError::Protocol("thread/start returned no thread ID".into()))
+    }
+
+    pub(crate) async fn update_hosted_settings(
+        &mut self,
+        id: &str,
+        choice: &crate::ipc::HostedModel,
+    ) -> Result<(), CodexError> {
+        let mut params = json!({"threadId": id});
+        if let Some(model) = &choice.model {
+            params["model"] = json!(model);
+        }
+        if let Some(effort) = &choice.effort {
+            params["effort"] = json!(effort);
+        }
+        self.request("thread/settings/update", id, params).await?;
+        Ok(())
+    }
+
+    /// A resume without overrides reports effective server settings. It also
+    /// loads an existing thread when a restore's TUI has not resumed it yet.
+    pub(crate) async fn hosted_settings(&mut self, id: &str) -> Result<Value, CodexError> {
+        self.request(
+            "thread/resume",
+            id,
+            json!({"threadId": id, "excludeTurns": true}),
+        )
+        .await
+    }
+
+    pub(crate) fn hosted_settings_warning(
+        effective: &Value,
+        choice: &crate::ipc::HostedModel,
+    ) -> Option<String> {
+        let messages: Vec<_> = [
+            ("model", "model", &choice.model),
+            ("reasoningEffort", "effort", &choice.effort),
+        ]
+        .into_iter()
+        .filter_map(|(key, label, requested)| {
+            let expected = requested.as_deref()?;
+            match effective.get(key) {
+                Some(Value::String(actual)) if actual == expected => None,
+                Some(Value::String(actual)) => Some(format!(
+                    "requested {label} {expected}, running with {actual}"
+                )),
+                Some(Value::Null) => Some(format!(
+                    "requested {label} {expected}, app-server reports no explicit {label}"
+                )),
+                _ => Some(format!(
+                    "app-server did not report the requested {label} {expected}"
+                )),
+            }
+        })
+        .collect();
+        (!messages.is_empty()).then(|| format!("Codex: {}", messages.join(", ")))
     }
 
     pub(crate) async fn seed_hosted_thread(&mut self, id: &str) -> Result<(), CodexError> {

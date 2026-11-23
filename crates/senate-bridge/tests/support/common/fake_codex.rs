@@ -26,12 +26,20 @@ pub struct FakeThread {
     pub active: Option<String>,
 }
 
+#[derive(Debug, Default, Clone)]
+struct ModelSettings {
+    model: Option<String>,
+    effort: Option<String>,
+}
+
 /// A subscribed connection: its number and its outgoing frames.
 type Subscriber = (usize, mpsc::UnboundedSender<Vec<u8>>);
 
 #[derive(Debug, Default)]
 pub struct CodexState {
     pub threads: HashMap<String, FakeThread>,
+    model_settings: HashMap<String, ModelSettings>,
+    pub reported_effort_override: Option<String>,
     /// Every request, `(method, params)`, in arrival order.
     pub calls: Vec<(String, Value)>,
     /// The next this many `turn/steer`s find the running turn replaced by a
@@ -435,6 +443,21 @@ fn answer(st: &mut CodexState, method: &str, params: &Value) -> Result<Value, St
         }
         "thread/inject_items" if thread.is_some() => Ok(json!({})),
         "thread/name/set" if thread.is_some() => Ok(json!({})),
+        "thread/settings/update" if thread.as_ref().is_some_and(|thread| thread.loaded) => {
+            let settings = st.model_settings.entry(thread_id.clone()).or_default();
+            if let Some(value) = params["model"].as_str() {
+                settings.model = Some(value.to_owned());
+            }
+            if let Some(value) = params["effort"].as_str() {
+                settings.effort = Some(
+                    st.reported_effort_override
+                        .as_deref()
+                        .unwrap_or(value)
+                        .to_owned(),
+                );
+            }
+            Ok(json!({}))
+        }
         "thread/read" => {
             let t = thread.ok_or(format!("thread not loaded: {thread_id}"))?;
             let status = match (&t.active, t.loaded) {
@@ -457,7 +480,16 @@ fn answer(st: &mut CodexState, method: &str, params: &Value) -> Result<Value, St
                 (Some(_), false) => json!({"type": "active", "activeFlags": []}),
                 (None, false) => json!({"type": "idle"}),
             };
-            Ok(json!({"thread": {"id": thread_id, "status": status, "turns": []}}))
+            let settings = st
+                .model_settings
+                .get(&thread_id)
+                .cloned()
+                .unwrap_or_default();
+            Ok(json!({
+                "thread": {"id": thread_id, "status": status, "turns": []},
+                "model": settings.model,
+                "reasoningEffort": settings.effort,
+            }))
         }
         "thread/turns/list" => {
             let t = thread.ok_or(format!("thread not loaded: {thread_id}"))?;

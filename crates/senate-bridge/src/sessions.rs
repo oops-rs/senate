@@ -198,6 +198,11 @@ pub fn render_with_ids(
     for line in &lines {
         row(&line.each_ref().map(String::as_str));
     }
+    for row in &reply.rows {
+        if let Some(warning) = &row.model.verification_warning {
+            let _ = writeln!(out, "{}: {warning}", row.display_name(verbose));
+        }
+    }
     for id in &reply.orphans {
         let _ = writeln!(
             out,

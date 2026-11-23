@@ -367,17 +367,18 @@ pub struct SpawnProfile {
     pub runtime: Option<HostedRuntime>,
 }
 
-/// The model and reasoning effort a hosted session was started with, as the
-/// runtime's own flags take them. Either left out is the runtime's own
-/// default. Senate keeps no model catalogue: a model name is passed through
-/// as given, and an effort is checked only against the runtime's documented
-/// levels ([`HostedRuntime::efforts`]).
+/// The requested model and reasoning effort for a hosted session. An omitted
+/// setting leaves the runtime in control. Some runtimes resolve model aliases
+/// through their live catalog ([`HostedRuntime::efforts`] covers effort).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostedModel {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// A launch-time mismatch or an unavailable verification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_warning: Option<String>,
 }
 
 impl From<HostedRuntime> for Runtime {
@@ -402,6 +403,8 @@ pub struct SpawnReply {
     /// Canonical model when an explicit alias was expanded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_warning: Option<String>,
     pub senator: SenatorName,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,

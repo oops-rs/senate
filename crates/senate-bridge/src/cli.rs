@@ -610,16 +610,15 @@ stdin.")]
     },
 }
 
-/// The runtime's own model and effort for a hosted session. Senate passes
-/// them through as the runtime's flags; left out, it uses its own default.
+/// The runtime's own model and effort for a hosted session. Omitted
+/// choices leave the runtime's settings in control.
 #[derive(Args)]
 struct ModelArgs {
     /// A model ID or family (e.g. astra). Claude Code resolves its own aliases.
     #[arg(long)]
     model: Option<String>,
-    /// The reasoning effort. Claude Code: low, medium, high, xhigh, max.
-    /// Codex: none, minimal, low, medium, high, xhigh, max, ultra,
-    /// persistent.
+    /// Reasoning effort. Codex: low, medium, high, xhigh.
+    /// Claude Code and agy also accept max.
     #[arg(long)]
     effort: Option<String>,
 }
@@ -1891,6 +1890,9 @@ fn launch(request: &Request, output: Output) -> anyhow::Result<()> {
     {
         eprintln!("{requested} → {resolved}");
     }
+    if let Some(warning) = &reply.model_warning {
+        eprintln!("{warning}");
+    }
     let locale = Paths::from_env()
         .map(|p| BridgeConfig::locale_at(&p.config()))
         .unwrap_or_default();
@@ -2826,7 +2828,7 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             prompt_quiet_ms,
         } => {
             let paths = Paths::from_env()?;
-            let model = crate::ipc::HostedModel { model, effort };
+            let model = crate::ipc::HostedModel::new(model, effort);
             let prompt_quiet = prompt_quiet_ms
                 .map_or(crate::host::prompt::QUIET, std::time::Duration::from_millis);
             runtime(false)?.block_on(crate::host::run(
