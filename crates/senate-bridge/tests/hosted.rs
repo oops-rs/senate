@@ -5227,3 +5227,42 @@ async fn shutdown_pauses_within_its_cap_and_start_resumes_only_the_paused() {
         "never resumed"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_taken_alias_is_refused_before_anything_starts() {
+    let (mut h, project) = watched_sessions(&["rev"]).await;
+    let spawn = |attempt_id: Option<String>| Request::Spawn {
+        attempt_id,
+        session: Default::default(),
+        runtime: Some(HostedRuntime::Claude),
+        profile: None,
+        committee: committee(),
+        alias: Some(path("rev")),
+        cwd: project.clone(),
+        chair: false,
+        secretary: false,
+        prompt: None,
+        model: Default::default(),
+    };
+    // Untracked and tracked (as the CLI sends it) alike: a plain refusal,
+    // never an unknown outcome to retry.
+    for attempt in [None, Some(uuid::Uuid::now_v7().to_string())] {
+        let error = ipc::request::<SpawnReply>(&h.socket(), &spawn(attempt), TIMEOUT, TIMEOUT)
+            .await
+            .unwrap_err();
+        let ipc::ClientError::Remote(error) = error else {
+            panic!("expected a daemon error, got {error}");
+        };
+        assert_eq!(error.code, ipc::codes::BAD_REQUEST, "{}", error.message);
+        assert!(
+            error.message.contains("rev is already the alias of")
+                && error.message.contains("`senate attach rev`")
+                && !error.message.contains("--attempt-id"),
+            "{}",
+            error.message
+        );
+    }
+    let reply: ipc::SessionsReply = call(&h, &Request::Sessions).await;
+    assert_eq!(reply.rows.len(), 1, "nothing else started");
+    h.stop().await;
+}

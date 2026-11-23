@@ -290,6 +290,9 @@ impl Shared {
         } else {
             alias
         };
+        if let Some(alias) = &alias {
+            self.check_alias_free(&committee, alias).await?;
+        }
         let audit_auth = auth;
         let launch = self
             .on_spawn_with(
@@ -606,6 +609,41 @@ impl Shared {
             .await
             .map_err(|_| IpcError::new(codes::SERVER, timeout_message))??;
         Ok(())
+    }
+
+    /// Refuse, before anything starts, an alias another senator already
+    /// goes by on `committee`, saying how to reach that one instead.
+    async fn check_alias_free(
+        &self,
+        committee: &CommitteeId,
+        alias: &SenatorName,
+    ) -> Result<(), IpcError> {
+        use senate_core::alias::AliasMatch;
+        let aliases = tokio::time::timeout(ROLE_TIMEOUT, self.api.aliases())
+            .await
+            .map_err(|_| IpcError::new(codes::SERVER, "could not check available aliases in time"))?
+            .map_err(server_error)?;
+        let qualified = AliasName {
+            committee: Some(committee.clone()),
+            alias: alias.clone(),
+        };
+        let AliasMatch::One(holder) = aliases.resolve(&qualified, Some(committee)) else {
+            return Ok(());
+        };
+        if aliases.alias_of(committee, &holder) != Some(alias) {
+            // An older server's Senate-wide alias for a senator elsewhere.
+            return Ok(());
+        }
+        let holder = senate_core::alias::short_name(&holder);
+        Err(IpcError::bad_request(self.locale.pick(
+            format!(
+                "{alias} 已是委员会 {committee} 上 {holder} 的别名。用 `senate attach {alias}` 打开它，或换一个别名。"
+            ),
+            format!(
+                "{alias} is already the alias of {holder} on {committee}. Open that one with \
+                 `senate attach {alias}`, or choose another alias."
+            ),
+        )))
     }
 
     async fn next_spawn_alias(
