@@ -2052,6 +2052,60 @@ fn run_doctor(json: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn wait_for_service(paths: &Paths, limit: Duration) -> bool {
+    let socket = paths.socket();
+    let attempt = Duration::from_millis(500);
+    tokio::time::timeout(limit, async {
+        loop {
+            if ipc::request::<ipc::Pong>(&socket, &Request::Ping, attempt, attempt)
+                .await
+                .is_ok()
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn service_readiness_requires_a_pong_before_the_deadline() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+    let home = tempfile::tempdir_in("/tmp").expect("test home");
+    let paths = Paths::new(home.path());
+    let server = async {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        let listener = UnixListener::bind(paths.socket()).expect("bind socket");
+        let (socket, _) = tokio::time::timeout(Duration::from_secs(3), listener.accept())
+            .await
+            .expect("install must ping the socket")
+            .expect("client");
+        let mut socket = BufReader::new(socket);
+        let mut line = String::new();
+        socket.read_line(&mut line).await.expect("read request");
+        assert!(matches!(serde_json::from_str(&line), Ok(Request::Ping)));
+        let pong = ipc::Reply::ok(
+            &serde_json::json!({"protocol":1,"pid":1,"person":"alice","locale":"en","version":"test"}),
+        );
+        let response = format!("{}\n", serde_json::to_string(&pong).expect("encode reply"));
+        socket
+            .get_mut()
+            .write_all(response.as_bytes())
+            .await
+            .expect("send pong");
+        listener
+    };
+    let (ready, listener) = tokio::join!(wait_for_service(&paths, Duration::from_secs(3)), server);
+    assert!(ready);
+    // A listening socket without a responding daemon still times out.
+    assert!(!wait_for_service(&paths, Duration::from_millis(100)).await);
+    drop(listener);
+}
+
 fn run_service(command: ServiceCmd, output: Output) -> anyhow::Result<()> {
     let (spec, locale) = service_spec()?;
     match command {
@@ -2068,6 +2122,17 @@ fn run_service(command: ServiceCmd, output: Output) -> anyhow::Result<()> {
             let plan = service::plan_install(&spec, &senated);
             if yes {
                 service::apply_install(&plan, &senated, &service::SystemManager)?;
+                let paths = Paths::new(&spec.senate_home);
+                if !runtime(false)?.block_on(wait_for_service(&paths, Duration::from_secs(5))) {
+                    anyhow::bail!(
+                        "{} {}",
+                        locale.pick(
+                            "服务已安装，但守护进程未在 5 秒内响应。套接字：",
+                            "Service installed, but the daemon did not answer within 5 seconds on"
+                        ),
+                        paths.socket().display()
+                    );
+                }
             }
             print!(
                 "{}",
