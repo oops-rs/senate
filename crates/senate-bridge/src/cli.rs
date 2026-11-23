@@ -2220,7 +2220,7 @@ async fn watch(
 }
 
 /// The words of a message, or stdin when they are a lone `-`.
-fn message_text(words: Vec<String>) -> anyhow::Result<String> {
+pub(super) fn message_text(words: Vec<String>) -> anyhow::Result<String> {
     let text = if words == ["-"] {
         let mut s = String::new();
         std::io::stdin()

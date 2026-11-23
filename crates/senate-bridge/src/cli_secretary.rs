@@ -39,6 +39,24 @@ struct Dismissal {
 
 #[derive(Subcommand)]
 enum Action {
+    /// Ask this machine's default secretary to do something, starting it
+    /// first if it is not running.
+    ///
+    /// The default secretary is a coding agent on the Speaker's desk,
+    /// `office::secretary`, working in a directory Senate owns. Asked to
+    /// carry work across projects, it opens a committee per project, starts
+    /// each chair, and reports back. The first ask starts it (with
+    /// `[local] secretary_profile`, or the first runtime configured); a
+    /// paused or ended one is brought back; one stopped on purpose is not.
+    #[command(after_help = "Examples:
+  senate secretary ask 'Open a committee for the refund bug in ~/dev/shop, chair main'
+  echo 'Fan the logging change out to ~/dev/api and ~/dev/web' | senate secretary ask -
+  senate thread 12 --committee office    Read its answer")]
+    Ask {
+        /// What to ask; `-` reads it from stdin.
+        #[arg(required = true)]
+        text: Vec<String>,
+    },
     /// List the secretary team's appointed sessions by their stable senator
     /// IDs.
     List,
@@ -126,6 +144,12 @@ pub(super) fn run(args: Secretary) -> anyhow::Result<()> {
     let paths = Paths::from_env()?;
     let principal = args.principal;
     let operation = match args.action {
+        Action::Ask { text } => {
+            if principal.is_some() {
+                anyhow::bail!("--for does not apply to `secretary ask`: it is your secretary");
+            }
+            return ask(&paths, super::message_text(text)?);
+        }
         Action::Desk { command } => {
             if principal.is_some() {
                 anyhow::bail!(
@@ -198,6 +222,60 @@ pub(super) fn run(args: Secretary) -> anyhow::Result<()> {
         },
     ))?;
     print_json(&reply)
+}
+
+/// `senate secretary ask`: make the default secretary run, saying on
+/// stderr what that took, then send it the request from the person.
+fn ask(paths: &Paths, text: String) -> anyhow::Result<()> {
+    use crate::ipc::{DefaultSecretary, EnsureAction};
+    let locale = crate::config::BridgeConfig::locale_at(&paths.config());
+    runtime(false)?.block_on(async {
+        let secretary: DefaultSecretary = crate::ipc::request(
+            &paths.socket(),
+            &Request::EnsureSecretary,
+            std::time::Duration::from_secs(1),
+            crate::host::REQUEST_TIMEOUT,
+        )
+        .await?;
+        let who = secretary
+            .senator
+            .as_ref()
+            .map_or_else(|| "secretary".to_owned(), ToString::to_string);
+        let said = match (secretary.action, locale) {
+            (Some(EnsureAction::Started), senate_core::Locale::Zh) => {
+                Some(format!("已启动默认 secretary（{who}）。"))
+            }
+            (Some(EnsureAction::Started), senate_core::Locale::En) => {
+                Some(format!("Started the default secretary ({who})."))
+            }
+            (Some(EnsureAction::Resumed), senate_core::Locale::Zh) => {
+                Some(format!("已恢复暂停的默认 secretary（{who}）。"))
+            }
+            (Some(EnsureAction::Resumed), senate_core::Locale::En) => {
+                Some(format!("Resumed the default secretary ({who})."))
+            }
+            (Some(EnsureAction::Restored), senate_core::Locale::Zh) => {
+                Some(format!("已重新打开默认 secretary（{who}）。"))
+            }
+            (Some(EnsureAction::Restored), senate_core::Locale::En) => {
+                Some(format!("Restored the default secretary ({who})."))
+            }
+            _ => None,
+        };
+        if let Some(said) = said {
+            eprintln!("{said}");
+        }
+        let sent = crate::speak::send(
+            &paths.socket(),
+            secretary.committee.clone(),
+            crate::ipc::SayKind::Request,
+            secretary.alias.as_str(),
+            text,
+        )
+        .await?;
+        println!("{}", sent.render(false));
+        Ok(())
+    })
 }
 
 fn change_member(paths: &Paths, request: Request) -> anyhow::Result<()> {
