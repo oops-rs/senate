@@ -388,6 +388,61 @@ impl Mirror {
         self.parser.process(bytes);
     }
 
+    /// Paint a real terminal once. Lines go through the terminal's main
+    /// screen so that its ordinary history holds them, even when the TUI
+    /// currently shows its alternate screen.
+    pub(super) fn attach_snapshot(&self) -> Vec<u8> {
+        let screen = self.screen();
+        let mut primary = Self::default();
+        *primary.parser.screen_mut() = screen.clone();
+        if screen.alternate_screen() {
+            primary.parser.process(b"\x1b[?47l");
+        }
+        let live = primary.screen().contents_formatted();
+        let history = primary.parser.screen_mut();
+        let (rows, cols) = history.size();
+        let mut output = b"\x1b[0m\x1b[9999;1H".to_vec();
+        let mut offset = history.scrollback_len();
+        while offset > 0 {
+            history.set_scrollback(offset);
+            let count = offset.min(usize::from(rows.get()));
+            for row in history.rows(0, cols.get()).take(count) {
+                output.extend_from_slice(row.as_bytes());
+                output.extend_from_slice(b"\r\n");
+            }
+            offset -= count;
+        }
+        // The separator and last history row have already moved up one
+        // line. Push them entirely into scrollback before painting live.
+        for _ in 1..rows.get() {
+            output.extend_from_slice(b"\r\n");
+        }
+        output.extend_from_slice(live.as_bytes());
+        if screen.alternate_screen() {
+            output.extend_from_slice(b"\x1b[?1049h");
+            output.extend_from_slice(screen.contents_formatted().as_bytes());
+        }
+        // Reporting modes are replayed separately by Emulation. The keypad
+        // and cursor modes come from the screen emulator.
+        if screen.application_keypad() {
+            output.extend_from_slice(b"\x1b=");
+        }
+        if screen.application_cursor() {
+            output.extend_from_slice(b"\x1b[?1h");
+        }
+        let style = match screen.cursor_style() {
+            vt100::CursorStyle::Default => 0,
+            vt100::CursorStyle::BlinkBlock => 1,
+            vt100::CursorStyle::SteadyBlock => 2,
+            vt100::CursorStyle::BlinkUnderline => 3,
+            vt100::CursorStyle::SteadyUnderline => 4,
+            vt100::CursorStyle::BlinkVerticalBar => 5,
+            vt100::CursorStyle::SteadyVerticalBar => 6,
+        };
+        output.extend_from_slice(format!("\x1b[{style} q").as_bytes());
+        output
+    }
+
     fn snapshot(&self) -> Vec<u8> {
         let screen = self.screen();
         let state = screen.state_formatted();
@@ -615,6 +670,38 @@ mod tests {
         frame.extend_from_slice(&rows.to_be_bytes());
         frame.extend_from_slice(&cols.to_be_bytes());
         frame
+    }
+
+    #[test]
+    fn attach_snapshot_preserves_primary_history_while_starting_in_alternate() {
+        let screen = Screen::new(3, 20);
+        screen.output(b"history-1\r\nhistory-2\r\nprimary-1\r\nprimary-2\r\nprimary-3");
+        screen.output(b"\x1b[?1049halternate");
+        let (mirror, _) = screen.join();
+        let bytes = mirror.attach_snapshot();
+        assert_eq!(
+            bytes.windows(9).filter(|row| *row == b"history-1").count(),
+            1
+        );
+        let mut viewer = vt100::Parser::new(dimension(3), dimension(20), HISTORY);
+        viewer.process(b"shell text\r\nseparator\r\n");
+        viewer.process(&bytes);
+        assert!(viewer.screen().alternate_screen());
+        assert_eq!(viewer.screen().contents(), "alternate");
+        viewer.process(b"\x1b[?1049l");
+        assert_eq!(
+            viewer.screen().contents(),
+            "primary-1\nprimary-2\nprimary-3"
+        );
+        let screen = viewer.screen_mut();
+        screen.set_scrollback(screen.scrollback_len());
+        assert!(
+            screen
+                .contents()
+                .contains("shell text\nseparator\nhistory-1")
+        );
+        screen.set_scrollback(1);
+        assert!(screen.contents().starts_with("history-2\nprimary-1"));
     }
 
     #[test]

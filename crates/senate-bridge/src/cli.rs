@@ -2769,7 +2769,7 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
                     })
                     .await;
                 }
-                crate::host::attach(&socket, &paths).await
+                crate::host::attach(&socket, &paths, &senator.to_string()).await
             })
         }
         Cmd::SessionHost {

@@ -138,7 +138,8 @@ impl Terminal {
         tokio::time::timeout(WAIT, async {
             loop {
                 let mut viewer = UnixStream::connect(&self.socket).await.unwrap();
-                if viewer.read_u8().await.unwrap() == 2 {
+                if viewer.read_u8().await.unwrap() == 3 {
+                    viewer.write_all(b"\x01\0\x18\0\x50").await.unwrap();
                     return viewer;
                 }
                 tokio::task::yield_now().await;

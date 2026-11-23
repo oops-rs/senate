@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 
 /// Reporting modes whose state the viewer's terminal has to share with the
 /// TUI. The attach client turns the same modes off when it detaches.
-const REPLAYED: [u16; 8] = [1000, 1002, 1003, 1004, 1006, 1016, 2004, 2031];
+const REPORTING: [u16; 5] = [9, 1000, 1001, 1002, 1003];
+const ENCODING: [u16; 4] = [1005, 1006, 1015, 1016];
+const OTHER_MODES: [u16; 3] = [1004, 2004, 2031];
 /// The terminal reports light/dark changes as `CSI ? 997 ; 1|2 n`.
 const THEME_NOTIFY: u16 = 2031;
 /// Longest unfinished sequence kept between two chunks of output.
@@ -223,9 +225,17 @@ impl Emulation {
                         .filter_map(|n| n.parse::<u16>().ok())
                 };
                 match last {
-                    b'h' => self
-                        .modes
-                        .extend(numbers().filter(|mode| REPLAYED.contains(mode))),
+                    b'h' => numbers().for_each(|mode| {
+                        if let Some(group) = [&REPORTING[..], &ENCODING[..]]
+                            .into_iter()
+                            .find(|group| group.contains(&mode))
+                        {
+                            self.modes.retain(|previous| !group.contains(previous));
+                            self.modes.insert(mode);
+                        } else if OTHER_MODES.contains(&mode) {
+                            self.modes.insert(mode);
+                        }
+                    }),
                     b'l' => numbers().for_each(|mode| {
                         self.modes.remove(&mode);
                     }),
@@ -275,17 +285,12 @@ impl Emulation {
                 }
                 Some((2 + len + terminator.len(), color.is_some()))
             }
+            b'c' => {
+                self.modes.clear();
+                Some((2, false))
+            }
             _ => Some((1, false)),
         }
-    }
-
-    pub(crate) fn mouse_preamble(&self) -> Vec<u8> {
-        let modes = self
-            .modes
-            .iter()
-            .copied()
-            .filter(|mode| matches!(mode, 1000 | 1002 | 1003 | 1006 | 1016));
-        Self::mode_preamble(modes)
     }
 
     /// What a newly attached viewer's terminal has to be told so that it is
@@ -366,6 +371,17 @@ mod tests {
         tui.output(b"\x1b[?1000l");
         assert_eq!(tui.attach_preamble(), b"\x1b[?1004;2004;2031h");
         assert!(Emulation::new(Scheme::Light).attach_preamble().is_empty());
+    }
+
+    #[test]
+    fn changing_mouse_protocols_does_not_resurrect_old_modes_on_attach() {
+        let mut tui = Emulation::new(Scheme::Light);
+        tui.output(b"\x1b[?1000;1005h\x1b[?1002;1006h");
+        assert_eq!(tui.attach_preamble(), b"\x1b[?1002;1006h");
+        tui.output(b"\x1b[?1002l");
+        assert_eq!(tui.attach_preamble(), b"\x1b[?1006h");
+        tui.output(b"\x1bc");
+        assert!(tui.attach_preamble().is_empty());
     }
 
     #[test]

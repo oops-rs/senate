@@ -65,6 +65,11 @@ async fn wait_for_session_end(h: &Harness, session_id: &str) {
     .await;
 }
 
+async fn begin_viewer(viewer: &mut tokio::net::UnixStream) {
+    assert_eq!(viewer.read_u8().await.unwrap(), 3);
+    viewer.write_all(b"\x01\0\x18\0\x50").await.unwrap();
+}
+
 async fn attach(h: &Harness, alias: &str, keys: &[u8]) {
     attach_typing(h, alias, true, keys).await;
 }
@@ -82,7 +87,7 @@ async fn attach_typing(h: &Harness, alias: &str, paint: bool, keys: &[u8]) {
     let mut child = pty_process::Command::from(cmd).spawn(pts).unwrap();
     let (mut output, mut input) = pty.into_split();
     tokio::time::timeout(TIMEOUT, async {
-        // The attach CLI sets raw mode, enters the alternate screen and
+        // The attach CLI sets raw mode and
         // asks this terminal for its colours, the device attributes last.
         // Answer as a light Ghostty does, then type straight on and
         // request fresh fixture output over the actual PTY.
@@ -330,7 +335,7 @@ done
     // will reach the registry, so the restarted daemon must use the lock.
     h.stop().await;
     let mut terminal = tokio::net::UnixStream::connect(&socket).await.unwrap();
-    assert_eq!(terminal.read_u8().await.unwrap(), 2);
+    begin_viewer(&mut terminal).await;
     terminal.write_all(b"\x02\x00\x02q\r").await.unwrap();
     tokio::time::timeout(TIMEOUT, async {
         while socket.exists() {
@@ -526,7 +531,7 @@ sleep 300
     let start = std::time::Instant::now();
     let mut viewer = loop {
         let mut viewer = tokio::net::UnixStream::connect(&socket).await.unwrap();
-        assert_eq!(viewer.read_u8().await.unwrap(), 2);
+        begin_viewer(&mut viewer).await;
         let mut preamble = [0; 13];
         let read =
             tokio::time::timeout(Duration::from_millis(200), viewer.read_exact(&mut preamble))
@@ -1214,7 +1219,7 @@ async fn stop_cli_protects_an_attending_viewer_and_releases_the_slot() {
     let mut viewer = tokio::net::UnixStream::connect(&fixture.terminal)
         .await
         .unwrap();
-    assert_eq!(viewer.read_u8().await.unwrap(), 2);
+    begin_viewer(&mut viewer).await;
     viewer.write_all(b"\x02\x00\x01x").await.unwrap();
     eventually("the host to observe viewer input", TIMEOUT, || {
         let fact: serde_json::Value = serde_json::from_slice(
@@ -1305,7 +1310,7 @@ async fn stop_cli_protects_an_attending_viewer_and_releases_the_slot() {
     let mut passive = tokio::net::UnixStream::connect(&fixture.terminal)
         .await
         .unwrap();
-    assert_eq!(passive.read_u8().await.unwrap(), 2);
+    begin_viewer(&mut passive).await;
     fixture
         .h
         .server
@@ -1464,7 +1469,7 @@ async fn claude_hook_changes_native_context_without_moving_the_seat_or_its_mail(
     let mut viewer = tokio::net::UnixStream::connect(&fixture.terminal)
         .await
         .unwrap();
-    assert_eq!(viewer.read_u8().await.unwrap(), 2);
+    begin_viewer(&mut viewer).await;
     viewer.write_all(b"\x02\x00\x07nested\n").await.unwrap();
     let deadline = tokio::time::Instant::now() + TIMEOUT;
     let status = eventually("the nested Claude CLI to finish", TIMEOUT, || {
@@ -2481,6 +2486,57 @@ async fn wait_for_screen(
     .unwrap_or_else(|_| panic!("timed out waiting for screen: {screen}"));
 }
 
+/// A real attach CLI and a hosted PTY, with no graphical terminal required.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interactive_attach_uses_the_native_screen_and_cleans_up_on_detach() {
+    let (h, alias, _typed) = watched_session().await;
+    let mut cmd = tokio::process::Command::new(BIN);
+    testenv::isolate_async(&mut cmd, h.dir.path());
+    cmd.args(["attach", &alias])
+        .env("SENATE_HOME", h.paths.home())
+        .kill_on_drop(true);
+    let (pty, pts) = pty_process::open().unwrap();
+    pty.resize(pty_process::Size::new(24, 80)).unwrap();
+    let mut child = pty_process::Command::from(cmd).spawn(pts).unwrap();
+    let (mut output, mut input) = pty.into_split();
+    let mut bytes = Vec::new();
+    let mut chunk = [0; 4096];
+    let initial = b"painted before anyone looked";
+    let mut answered = false;
+    tokio::time::timeout(TIMEOUT, async {
+        while !bytes.windows(initial.len()).any(|part| part == initial) {
+            let n = output.read(&mut chunk).await.unwrap();
+            assert_ne!(n, 0);
+            bytes.extend_from_slice(&chunk[..n]);
+            if !answered && bytes.windows(3).any(|part| part == b"\x1b[c") {
+                input.write_all(b"\x1b[?62;22c").await.unwrap();
+                answered = true;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(String::from_utf8_lossy(&bytes).contains(&format!("\x1b[2m── {alias} · ")));
+    assert!(!bytes.windows(6).any(|part| part == b"?1049h"));
+    assert!(!bytes.windows(5).any(|part| part == b"?1000"));
+    assert!(!bytes.windows(4).any(|part| part == b"\x1b[3J"));
+
+    input.write_all(b"\x1d").await.unwrap();
+    tokio::time::timeout(
+        TIMEOUT,
+        wait_terminal_output(&mut output, b"\x1b[?25h\x1b[9999;1H\r\n"),
+    )
+    .await
+    .unwrap();
+    assert!(
+        tokio::time::timeout(TIMEOUT, child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+}
+
 /// `senate attach --read-only` shows the screen as it is, though it was
 /// painted before the viewer came, and what the session writes after. What
 /// is typed into it goes nowhere and is no activity of the session's
@@ -2711,7 +2767,7 @@ async fn watch_all_hints_when_every_viewer_is_attached_and_all_shows_them() {
     )
     .await;
     let mut interactive = tokio::net::UnixStream::connect(&tty).await.unwrap();
-    assert_eq!(interactive.read_u8().await.unwrap(), 2);
+    begin_viewer(&mut interactive).await;
 
     let command = || {
         let mut cmd = tokio::process::Command::new(BIN);

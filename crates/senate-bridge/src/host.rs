@@ -47,6 +47,8 @@ const IO_CHUNK: usize = 8192;
 /// The host's greeting. A host from before terminal colours greets with
 /// [`ATTACHED_PLAIN`] and takes only resize and key frames.
 const ATTACHED: u8 = 2;
+/// The viewer uses its main screen and sends its size before the snapshot.
+const ATTACHED_NATIVE: u8 = 3;
 const ATTACHED_PLAIN: u8 = 1;
 const BUSY: u8 = 0;
 const RESIZE: u8 = 1;
@@ -72,6 +74,15 @@ impl Tty {
             attached: AtomicBool::new(false),
             screen: Arc::new(watch::Screen::new(rows, cols)),
         }
+    }
+
+    fn output(&self, bytes: &[u8]) -> (Vec<u8>, Vec<u8>) {
+        let mut emulation = self.emulation();
+        let (answer, display) = emulation.route(bytes);
+        if !display.is_empty() {
+            self.screen.output(&display);
+        }
+        (answer, display)
     }
 
     /// Set the PTY's size, the viewer's doing or a watcher's fit; watchers
@@ -551,7 +562,7 @@ pub async fn run(
             while let Ok(n @ 1..) = pty_read.read(&mut buf).await {
                 // A TUI asks its terminal for its colours as it starts,
                 // before anyone can have attached to answer.
-                let (answer, display) = tty.emulation().route(&buf[..n]);
+                let (answer, display) = tty.output(&buf[..n]);
                 if !answer.is_empty() {
                     // An answer the TUI does not read must not stop its
                     // output being drained.
@@ -567,7 +578,6 @@ pub async fn run(
                     }
                 }
                 if !display.is_empty() {
-                    tty.screen.output(&display);
                     let _ = feed.send(display);
                 }
             }
@@ -1215,27 +1225,40 @@ async fn serve(listener: &UnixListener, tty: &Tty, viewer: &Mutex<Viewer>) -> an
 }
 
 async fn relay(mut stream: UnixStream, tty: &Tty, viewer: &Mutex<Viewer>) -> anyhow::Result<()> {
-    let (mut mirror, mut output) = tty.screen.join();
-    let main_screen = AtomicBool::new(!mirror.screen().alternate_screen());
-    let (navigation, mut scrolling) = tokio::sync::mpsc::channel(16);
-    stream.write_u8(ATTACHED).await?;
-    // The viewer's terminal did not see what the TUI turned on before now.
-    let preamble = tty.emulation().attach_preamble();
-    stream.write_all(&preamble).await?;
-    if main_screen.load(Ordering::Relaxed) {
-        stream.write_all(scroll::MOUSE_ON).await?;
-        stream
-            .write_all(mirror.screen().contents_formatted().as_bytes())
-            .await?;
+    stream.write_u8(ATTACHED_NATIVE).await?;
+    let (rows, cols) = tokio::time::timeout(Duration::from_secs(3), async {
+        ensure!(
+            stream.read_u8().await? == RESIZE,
+            "attachment must start with its terminal size"
+        );
+        attachment_size(&mut stream).await
+    })
+    .await??;
+    if tty.screen.size() != (rows, cols) {
+        tty.resize(rows, cols).await?;
     }
+    // Subscribe alongside the snapshot and the modes. The output pump holds
+    // the same emulation lock while it updates both.
+    let (mirror, mut output, modes) = {
+        let emulation = tty.emulation();
+        let (mirror, output) = tty.screen.join();
+        (mirror, output, emulation.attach_preamble())
+    };
+    tokio::time::timeout(Duration::from_secs(3), async {
+        stream.write_all(&modes).await?;
+        stream.write_all(&mirror.attach_snapshot()).await
+    })
+    .await??;
     let (mut input, mut screen) = stream.into_split();
     let mut classify = input::Input::default();
     let cursor = std::sync::Mutex::new(input::CursorQueries::default());
     let from_terminal = async {
-        let mut first_resize = true;
+        // Wake TUIs that repaint on SIGWINCH even if the viewer is the
+        // same size. Later resizes need only the requested size.
+        tty.resize(rows.saturating_add(1), cols).await?;
+        tokio::time::sleep(Duration::from_millis(75)).await;
+        tty.resize(rows, cols).await?;
         let mut keys = [0; IO_CHUNK];
-        let mut mice = scroll::Input::default();
-        let mut mouse_deadline = tokio::time::Instant::now();
         let mut writes = tokio::time::interval(Duration::from_millis(100));
         writes.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -1244,12 +1267,6 @@ async fn relay(mut stream: UnixStream, tty: &Tty, viewer: &Mutex<Viewer>) -> any
             let mut tag = [0];
             let len = tokio::select! {
                 biased;
-                _ = tokio::time::sleep_until(mouse_deadline), if mice.waiting() => {
-                    let keys = mice.flush();
-                    let _ = navigation.send(None).await;
-                    forward_keys(tty, viewer, &cursor, &mut classify, &keys).await?;
-                    continue;
-                }
                 _ = writes.tick(), if dirty => {
                     Viewer::lock(viewer).record();
                     continue;
@@ -1263,25 +1280,11 @@ async fn relay(mut stream: UnixStream, tty: &Tty, viewer: &Mutex<Viewer>) -> any
                 len = input.read(&mut tag) => len?,
             };
             if len == 0 {
-                // The attach client can send a standalone Escape immediately
-                // before detaching. It cannot begin a report after EOF.
-                if mice.waiting() {
-                    forward_keys(tty, viewer, &cursor, &mut classify, &mice.flush()).await?;
-                }
                 return Ok(());
             }
             match tag[0] {
                 RESIZE => {
-                    let rows = input.read_u16().await?;
-                    let cols = input.read_u16().await?;
-                    ensure!(rows > 0 && cols > 0, "invalid attachment dimensions");
-                    if first_resize {
-                        // A same-size ioctl does not wake the TUI. Change
-                        // the size briefly so returning to it is a resize.
-                        tty.resize(rows.saturating_add(1), cols).await?;
-                        tokio::time::sleep(Duration::from_millis(75)).await;
-                        first_resize = false;
-                    }
+                    let (rows, cols) = attachment_size(&mut input).await?;
                     tty.resize(rows, cols).await?;
                 }
                 COLORS => {
@@ -1301,22 +1304,7 @@ async fn relay(mut stream: UnixStream, tty: &Tty, viewer: &Mutex<Viewer>) -> any
                     let n = usize::from(input.read_u16().await?);
                     ensure!(n <= keys.len(), "oversized terminal input");
                     input.read_exact(&mut keys[..n]).await?;
-                    let local = main_screen.load(Ordering::Acquire);
-                    let events = mice.feed(&keys[..n], local);
-                    mouse_deadline = tokio::time::Instant::now() + Duration::from_millis(35);
-                    for event in events {
-                        match event {
-                            scroll::Event::Scroll(rows) => {
-                                let _ = navigation.send(Some(rows)).await;
-                            }
-                            scroll::Event::Keys(keys) => {
-                                if local {
-                                    let _ = navigation.send(None).await;
-                                }
-                                forward_keys(tty, viewer, &cursor, &mut classify, &keys).await?;
-                            }
-                        }
-                    }
+                    forward_keys(tty, viewer, &cursor, &mut classify, &keys[..n]).await?;
                 }
                 _ => bail!("unknown terminal input frame"),
             }
@@ -1324,59 +1312,20 @@ async fn relay(mut stream: UnixStream, tty: &Tty, viewer: &Mutex<Viewer>) -> any
     };
     let to_terminal = async {
         loop {
-            tokio::select! {
-                // If a viewer falls behind, an incomplete escape stream cannot
-                // safely be replayed. Drop the connection and let it reattach.
-                change = output.recv() => match change? {
-                    watch::Change::Output(bytes) => {
-                        if mirror.live() {
-                            screen.write_all(mirror.screen().contents_formatted().as_bytes()).await?;
-                        }
-                        cursor
-                            .lock()
-                            .unwrap_or_else(|error| error.into_inner())
-                            .output(&bytes, observed_at());
-                        for (chunk, modes) in scroll::mode_chunks(&bytes) {
-                            let was_main = !mirror.screen().alternate_screen();
-                            mirror.output(chunk);
-                            let is_main = !mirror.screen().alternate_screen();
-                            screen.write_all(chunk).await?;
-                            if is_main && modes.exits_alternate {
-                                // The viewer itself uses the alternate screen.
-                                // Return to it before forwarding any more text.
-                                screen.write_all(b"\x1b[?1049h").await?;
-                                screen.write_all(mirror.screen().contents_formatted().as_bytes()).await?;
-                            }
-                            if is_main && (modes.exits_alternate || modes.mouse) {
-                                screen.write_all(scroll::MOUSE_ON).await?;
-                            } else if was_main && !is_main {
-                                screen.write_all(scroll::MOUSE_OFF).await?;
-                                let modes = tty.emulation().mouse_preamble();
-                                screen.write_all(&modes).await?;
-                            }
-                            main_screen.store(is_main, Ordering::Release);
-                        }
-                    }
-                    watch::Change::Size(rows, cols) => {
-                        let was_scrolled = mirror.live();
-                        mirror.resize(rows, cols);
-                        if was_scrolled {
-                            screen.write_all(mirror.screen().contents_formatted().as_bytes()).await?;
-                        }
-                    }
-                },
-                Some(scroll) = scrolling.recv() => {
-                    let changed = match scroll {
-                        Some(rows) => mirror.scroll(rows),
-                        None => mirror.live(),
-                    };
-                    if changed {
-                        screen.write_all(mirror.screen().contents_formatted().as_bytes()).await?;
-                        if mirror.screen().scrollback() != 0 {
-                            screen.write_all(b"\x1b[?25l").await?;
-                        }
-                    }
+            // An incomplete escape stream cannot be resumed. A lagging
+            // viewer reconnects and gets one new bounded history replay.
+            match output.recv().await? {
+                watch::Change::Output(bytes) => {
+                    cursor
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .output(&bytes, observed_at());
+                    tokio::time::timeout(Duration::from_secs(3), screen.write_all(&bytes))
+                        .await??;
                 }
+                // The terminal already resized itself. The TUI gets the
+                // PTY resize signal and paints what changed.
+                watch::Change::Size(..) => {}
             }
         }
     };
@@ -1391,6 +1340,15 @@ async fn relay(mut stream: UnixStream, tty: &Tty, viewer: &Mutex<Viewer>) -> any
     // The enclosing attachment records its detach and the final input in
     // one snapshot. While attached, input snapshots are coalesced.
     result
+}
+
+async fn attachment_size(
+    input: &mut (impl tokio::io::AsyncRead + Unpin),
+) -> anyhow::Result<(u16, u16)> {
+    let rows = input.read_u16().await?;
+    let cols = input.read_u16().await?;
+    ensure!(rows > 0 && cols > 0, "invalid attachment dimensions");
+    Ok((rows, cols))
 }
 
 async fn forward_keys(
@@ -1503,13 +1461,32 @@ mod tests {
         );
     }
 
+    async fn begin_viewer(viewer: &mut UnixStream, rows: u8, cols: u8) {
+        assert_eq!(viewer.read_u8().await.unwrap(), ATTACHED_NATIVE);
+        viewer.write_all(&[RESIZE, 0, rows, 0, cols]).await.unwrap();
+    }
+
+    async fn viewer_output(viewer: &mut UnixStream, marker: &[u8]) -> Vec<u8> {
+        let mut seen = Vec::new();
+        let mut buf = [0; 256];
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !seen.windows(marker.len()).any(|part| part == marker) {
+                let n = viewer.read(&mut buf).await.unwrap();
+                assert_ne!(n, 0, "closed before {marker:?}");
+                seen.extend_from_slice(&buf[..n]);
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("did not see {marker:?} in {seen:?}"));
+        seen
+    }
+
     #[tokio::test]
-    async fn a_main_screen_wheel_scrolls_without_becoming_session_input() {
+    async fn attach_passes_through_only_the_tuis_mouse_and_screen_modes() {
         let (pty, _pts) = pty_process::open().unwrap();
         let (_read, write) = pty.into_split();
         let tty = Tty::new(write, Scheme::Light, 3, 40);
-        tty.screen
-            .output(b"historic-0\r\nhistoric-1\r\nhistoric-2\r\nlive-0\r\nlive-1\r\nlive-2");
+        tty.output(b"historic-0\r\nhistoric-1\r\nhistoric-2\r\nlive-0\r\nlive-1\r\nlive-2");
         let dir = tempfile::tempdir().unwrap();
         let activity = Mutex::new(Viewer {
             path: dir.path().join("viewer.json"),
@@ -1518,53 +1495,82 @@ mod tests {
             draft: input::Draft::default(),
         });
         let (host, mut viewer) = UnixStream::pair().unwrap();
+        let check = async {
+            begin_viewer(&mut viewer, 3, 40).await;
+            let attach = viewer_output(&mut viewer, b"live-2").await;
+            assert!(attach.windows(10).any(|part| part == b"historic-0"));
+            assert!(!attach.windows(5).any(|part| part == b"?1000"));
+            assert!(!attach.windows(6).any(|part| part == b"?1049h"));
+            let live = b"\x1b[?1002;1006h\x1b[?1049hALT\x1b[?1049l\x1b[?1002;1006lMAIN";
+            tty.output(live);
+            let updates = viewer_output(&mut viewer, b"MAIN").await;
+            assert!(updates.ends_with(live), "{updates:?}");
 
-        async fn until(viewer: &mut UnixStream, marker: &[u8]) {
-            let mut seen = Vec::new();
-            let mut buf = [0; 256];
+            viewer.write_all(&[RESIZE, 0, 4, 0, 50]).await.unwrap();
             tokio::time::timeout(Duration::from_secs(3), async {
-                while !seen.windows(marker.len()).any(|part| part == marker) {
-                    let n = viewer.read(&mut buf).await.unwrap();
-                    assert_ne!(n, 0, "closed before {marker:?}");
-                    seen.extend_from_slice(&buf[..n]);
+                while tty.screen.size() != (4, 50) {
+                    tokio::task::yield_now().await;
                 }
             })
             .await
-            .unwrap_or_else(|_| panic!("did not see {marker:?} in {seen:?}"));
-        }
-
-        async fn send(viewer: &mut UnixStream, bytes: &[u8]) {
-            viewer.write_u8(KEYS).await.unwrap();
-            viewer
-                .write_u16(bytes.len().try_into().unwrap())
-                .await
-                .unwrap();
-            viewer.write_all(bytes).await.unwrap();
-        }
-
-        let check = async {
-            assert_eq!(viewer.read_u8().await.unwrap(), ATTACHED);
-            until(&mut viewer, b"live-2").await;
-            // Mouse packets may straddle client frames. No arrow conversion
-            // is needed because the viewer has requested SGR mouse reports.
-            send(&mut viewer, b"\x1b[<64;").await;
-            send(&mut viewer, b"9;2M").await;
-            until(&mut viewer, b"historic-2").await;
-            assert_eq!(Viewer::lock(&activity).activity.input_at, 0);
-
-            // Output brings the existing terminal surface to the live end.
-            tty.screen.output(b"\r\nnew-output");
-            until(&mut viewer, b"new-output").await;
-            send(&mut viewer, b"\x1b[<64;9;2M").await;
-            until(&mut viewer, b"live-0").await;
-
-            // A physical Up key is still a real key and resumes the live view.
-            send(&mut viewer, b"\x1b[A").await;
-            until(&mut viewer, b"new-output").await;
-            assert_ne!(Viewer::lock(&activity).activity.input_at, 0);
+            .unwrap();
+            tty.output(b"post-resize");
+            assert_eq!(
+                viewer_output(&mut viewer, b"post-resize").await,
+                b"post-resize"
+            );
             viewer.shutdown().await.unwrap();
         };
         let (result, ()) = tokio::join!(relay(host, &tty, &activity), check);
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_lagging_attachment_gets_one_fresh_history_replay_on_reconnect() {
+        let (pty, _pts) = pty_process::open().unwrap();
+        let (_read, write) = pty.into_split();
+        let tty = Tty::new(write, Scheme::Light, 3, 40);
+        tty.output(b"opening");
+        let dir = tempfile::tempdir().unwrap();
+        let activity = Mutex::new(Viewer {
+            path: dir.path().join("viewer.json"),
+            activity: ViewerActivity::default(),
+            dirty: false,
+            draft: input::Draft::default(),
+        });
+        let (host, mut viewer) = UnixStream::pair().unwrap();
+        let lag = async {
+            begin_viewer(&mut viewer, 3, 40).await;
+            viewer_output(&mut viewer, b"opening").await;
+            // The attachment cannot drain these until this task yields.
+            for row in 0..600 {
+                tty.output(format!("\r\nrow-{row:03}").as_bytes());
+            }
+        };
+        let (result, ()) = tokio::join!(relay(host, &tty, &activity), lag);
+        assert!(matches!(
+            result.unwrap_err().downcast_ref(),
+            Some(broadcast::error::RecvError::Lagged(_))
+        ));
+
+        let (host, mut viewer) = UnixStream::pair().unwrap();
+        let reattach = async {
+            begin_viewer(&mut viewer, 3, 40).await;
+            let output = viewer_output(&mut viewer, b"row-599").await;
+            assert!(!output.windows(7).any(|row| row == b"row-000"));
+            assert_eq!(
+                output.windows(7).filter(|row| *row == b"row-123").count(),
+                1
+            );
+            tty.output(b"\r\ncontinued");
+            assert!(
+                viewer_output(&mut viewer, b"continued")
+                    .await
+                    .ends_with(b"\r\ncontinued")
+            );
+            viewer.shutdown().await.unwrap();
+        };
+        let (result, ()) = tokio::join!(relay(host, &tty, &activity), reattach);
         result.unwrap();
     }
 
@@ -1573,7 +1579,7 @@ mod tests {
         let (pty, _pts) = pty_process::open().unwrap();
         let (_read, write) = pty.into_split();
         let tty = Tty::new(write, Scheme::Light, 24, 80);
-        tty.screen.output(b"\x1b[?1049h");
+        tty.screen.output(b"\x1b[?1049hSTART");
         let dir = tempfile::tempdir().unwrap();
         let activity = Mutex::new(Viewer {
             path: dir.path().join("viewer.json"),
@@ -1583,11 +1589,14 @@ mod tests {
         });
         let (host, mut viewer) = UnixStream::pair().unwrap();
         let view_only = async {
-            assert_eq!(viewer.read_u8().await.unwrap(), ATTACHED);
+            begin_viewer(&mut viewer, 24, 80).await;
+            viewer_output(&mut viewer, b"START").await;
             tty.screen.output(b"\x1b[6n");
-            let mut query = [0; 4];
-            viewer.read_exact(&mut query).await.unwrap();
-            assert_eq!(&query, b"\x1b[6n");
+            assert!(
+                viewer_output(&mut viewer, b"\x1b[6n")
+                    .await
+                    .ends_with(b"\x1b[6n")
+            );
             viewer
                 // The emulator's cursor position report, split into frames.
                 .write_all(b"\x01\0\x18\0P\x02\0\x02\x1b[\x02\0\x042;34")
@@ -1601,7 +1610,7 @@ mod tests {
 
         let (host, mut viewer) = UnixStream::pair().unwrap();
         let with_input = async {
-            assert_eq!(viewer.read_u8().await.unwrap(), ATTACHED);
+            begin_viewer(&mut viewer, 24, 80).await;
             viewer.write_all(&[KEYS, 0, 1, b'x']).await.unwrap();
             viewer.shutdown().await.unwrap();
         };
