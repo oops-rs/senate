@@ -775,7 +775,7 @@ enum SessionCmd {
   senate session approve reviewer            Allow it once
   senate session approve reviewer --always   Allow it for the session
   senate session approve reviewer --deny     Refuse it
-  senate session approve --once              The one prompt waiting, whoever's it is")]
+  senate session approve --once              The only prompt waiting")]
     Approve {
         /// The senator's alias (`committee::alias` for one on one
         /// committee) or primary name. Without one, the only session with
