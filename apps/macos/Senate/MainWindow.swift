@@ -423,74 +423,183 @@ struct AgentFilter: View {
     }
 }
 
-/// Who you are, at the sidebar's foot: your profile. Choosing the row
-/// opens it (the Senates you sit in, your agents, the Speaker and chairs);
-/// the menu beside it holds Settings, About, Refresh and Watch all.
+/// Who you are, at the sidebar's foot: one row (your initial with the
+/// online dot, your name, the Senate's address), shown selected while your
+/// profile is open. Choosing it opens the account popover: who you are,
+/// then Profile, Watch all, Settings…, Refresh and About Senate.
 private struct AccountRow: View {
     let store: CoreStore
     @State private var hovered = false
+    @State private var showing = false
 
     var body: some View {
         let state = store.state
         let name = state.person ?? "Senate"
         let selected = store.place == .section(.senates)
-        HStack(spacing: Theme.Space.xs) {
-            Button {
-                store.place = .section(.senates)
-            } label: {
-                HStack(spacing: 10) {
-                    Avatar(name: name, online: state.online, size: 28)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(verbatim: name)
-                            .font(Theme.Fonts.label)
-                            .foregroundStyle(Theme.onSurface)
-                            .lineLimit(1)
-                        Text(verbatim: Profile.place(state))
-                            .font(Theme.Fonts.meta)
-                            .foregroundStyle(Theme.onSurfaceVariant)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-                    Spacer(minLength: 0)
+        Button {
+            showing.toggle()
+        } label: {
+            HStack(spacing: 10) {
+                Avatar(name: name, online: state.online, size: 28)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(verbatim: name)
+                        .font(Theme.Fonts.label)
+                        .foregroundStyle(Theme.onSurface)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Text(verbatim: Profile.place(state))
+                        .font(Theme.Fonts.meta)
+                        .foregroundStyle(Theme.onSurfaceVariant)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                 }
-                .padding(.horizontal, Theme.Space.s)
-                .padding(.vertical, 6)
-                .background(selected ? Theme.selection : hovered ? Theme.containerHigh : .clear,
-                            in: RoundedRectangle(cornerRadius: 8))
-                .contentShape(Rectangle())
+                Spacer(minLength: 0)
             }
-            .buttonStyle(.plain)
-            .onHover { hovered = $0 }
-            .help(state.online ? (state.senates.first?.serverUrl ?? "") : (state.offlineReason ?? ""))
-            .accessibilityLabel(L("sidebar.profile_open", name))
-            .accessibilityValue(Profile.place(state))
-            .accessibilityAddTraits(selected ? .isSelected : [])
-            Menu {
-                Button(L("sessions.watch")) { store.openWatch() }
-                    .disabled(!state.online || state.sessions.allSatisfy { !$0.running })
-                Divider()
-                SettingsLink { Text(verbatim: L("menu.settings")) }
-                Button(L("menu.about")) { About.show() }
-                Divider()
-                Button(L("toolbar.refresh")) { store.refresh() }
-                    .disabled(!state.online)
-            } label: {
-                Image(systemName: "ellipsis")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Theme.onSurfaceVariant)
-                    .frame(width: 28, height: 28)
-                    .background(Theme.containerHigh.opacity(hovered ? 1 : 0), in: Circle())
-                    .contentShape(Circle())
-            }
-            .menuStyle(.button)
-            .buttonStyle(.plain)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .help(L("sidebar.account_menu"))
-            .accessibilityLabel(L("sidebar.account_menu"))
+            .padding(.horizontal, Theme.Space.s)
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(selected || showing ? Theme.selection : hovered ? Theme.containerHigh : .clear,
+                        in: RoundedRectangle(cornerRadius: 8))
+            .contentShape(RoundedRectangle(cornerRadius: 8))
         }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+        .help(state.online ? (state.senates.first?.serverUrl ?? "") : (state.offlineReason ?? ""))
+        .accessibilityLabel(L("sidebar.account"))
+        .accessibilityValue("\(name), \(Profile.place(state))")
+        .accessibilityHint(L("sidebar.account_hint"))
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .popover(isPresented: $showing, arrowEdge: .top) {
+            AccountPopover(store: store) { showing = false }
+        }
+        #if DEBUG
+        .onReceive(NotificationCenter.default.publisher(for: Snapshot.openAccount)) { _ in showing = true }
+        .onReceive(NotificationCenter.default.publisher(for: Snapshot.closeAccount)) { _ in showing = false }
+        #endif
         .padding(.horizontal, Theme.Space.s)
         .padding(.vertical, Theme.Space.s)
+    }
+}
+
+/// The account popover: who you are and where, then what you can do from
+/// here, as a short list. Arrow keys move, Return chooses; choosing one, a
+/// click outside or Escape closes it.
+private struct AccountPopover: View {
+    let store: CoreStore
+    let close: () -> Void
+    @FocusState private var focused: Int?
+
+    private struct Action {
+        let title: String
+        let symbol: String
+        let shortcut: String?
+        let enabled: Bool
+        let run: () -> Void
+    }
+
+    private var actions: [Action] {
+        let state = store.state
+        return [
+            Action(title: L("account.profile"), symbol: "person.crop.circle", shortcut: "⌘3", enabled: state.online) {
+                store.place = .section(.senates)
+            },
+            Action(title: L("sessions.watch"), symbol: "rectangle.split.3x1", shortcut: nil,
+                   enabled: state.online && state.sessions.contains { $0.running }) {
+                store.openWatch()
+            },
+            Action(title: L("menu.settings"), symbol: "gearshape", shortcut: "⌘,", enabled: true) {
+                store.openSettings?()
+            },
+            Action(title: L("toolbar.refresh"), symbol: "arrow.clockwise", shortcut: "⌘R", enabled: state.online) {
+                store.refresh()
+            },
+            Action(title: L("menu.about"), symbol: "info.circle", shortcut: nil, enabled: true) {
+                About.show()
+            },
+        ]
+    }
+
+    var body: some View {
+        let state = store.state
+        let name = state.person ?? "Senate"
+        let actions = actions
+        VStack(alignment: .leading, spacing: Theme.Space.s) {
+            HStack(spacing: Theme.Space.m) {
+                Avatar(name: name, online: state.online, size: 36)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(verbatim: name)
+                        .font(Theme.Fonts.heading)
+                        .foregroundStyle(Theme.onSurface)
+                    Text(verbatim: state.online
+                        ? L("profile.online_at", Profile.place(state))
+                        : (state.offlineReason ?? L("a11y.offline")))
+                        .font(Theme.Fonts.meta)
+                        .foregroundStyle(Theme.onSurfaceVariant)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(.horizontal, Theme.Space.s)
+            .padding(.top, Theme.Space.xs)
+            .accessibilityElement(children: .combine)
+            Divider()
+            VStack(spacing: 2) {
+                ForEach(Array(actions.enumerated()), id: \.offset) { i, action in
+                    Button {
+                        guard action.enabled else { return }
+                        close()
+                        action.run()
+                    } label: {
+                        HStack(spacing: Theme.Space.s) {
+                            Image(systemName: action.symbol)
+                                .frame(width: 18)
+                                .foregroundStyle(Theme.onSurfaceVariant)
+                                .accessibilityHidden(true)
+                            Text(verbatim: action.title)
+                                .foregroundStyle(action.enabled ? Theme.onSurface : Theme.onSurfaceVariant)
+                            Spacer(minLength: Theme.Space.m)
+                            if let shortcut = action.shortcut {
+                                Text(verbatim: shortcut)
+                                    .foregroundStyle(Theme.onSurfaceVariant)
+                                    .accessibilityHidden(true)
+                            }
+                        }
+                        .font(Theme.Fonts.row)
+                        .padding(.horizontal, Theme.Space.s)
+                        .frame(height: 28)
+                        .background(focused == i ? Theme.containerHigh : .clear, in: RoundedRectangle(cornerRadius: 6))
+                        .contentShape(RoundedRectangle(cornerRadius: 6))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!action.enabled)
+                    .focusable()
+                    .focused($focused, equals: i)
+                    .onHover { if $0 { focused = i } }
+                    .accessibilityAddTraits(.isButton)
+                }
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel(L("sidebar.account_menu"))
+            .onMoveCommand { direction in
+                let enabled = actions.indices.filter { actions[$0].enabled }
+                guard !enabled.isEmpty else { return }
+                let at = enabled.firstIndex(of: focused ?? -1)
+                switch direction {
+                case .down: focused = enabled[at.map { min($0 + 1, enabled.count - 1) } ?? 0]
+                case .up: focused = enabled[at.map { max($0 - 1, 0) } ?? enabled.count - 1]
+                default: break
+                }
+            }
+            .onKeyPress(.return) {
+                guard let i = focused, actions[i].enabled else { return .ignored }
+                close()
+                actions[i].run()
+                return .handled
+            }
+        }
+        .padding(Theme.Space.s)
+        .frame(width: 260)
+        .onAppear { focused = actions.firstIndex { $0.enabled } }
     }
 }
 

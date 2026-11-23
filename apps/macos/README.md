@@ -106,10 +106,12 @@ not the vendors' logos: `Senate/Assets.xcassets/RUNTIME-ICONS.md`)
 carrying the session's status. Sessions on no committee are last.
 Folded, a committee shows its most urgent session's status. The menu on
 the *Committees* header holds *Show inactive*. Search (⌘F) narrows the
-sessions and the inbox. At the foot, **you**: your name and the Senate's
-address; choosing it opens your profile (⌘3), and the menu beside it
-holds *Watch all* (every hosted terminal side by side, `senate session
-watch`), *Settings…*, *About Senate* and *Refresh*. Nothing is drawn
+sessions and the inbox. At the foot, **you**: one row with your initial
+(and the online dot), your name and the Senate's address, selected while
+your profile is open. Choosing it opens the account popover: who you are
+and where, then *Profile* (⌘3), *Watch all* (every hosted terminal side
+by side, `senate session watch`), *Settings…* (⌘,), *Refresh* (⌘R) and
+*About Senate*; arrow keys and Return work in it. Nothing is drawn
 above the content but what it needs at its top right.
 
 A session's **status**, most urgent first, on its mark: *needs you* (a
@@ -179,7 +181,7 @@ something to you that you have not read: an accent dot at its corner),
   its state, *Take* (take it over) and a menu with *Close* (archives it,
   after confirming). A thread that no longer waits on you (or never did)
   opens all the same, from what is read of it.
-- **Your profile** (the account row at the sidebar's foot): who you are
+- **Your profile** (⌘3, or *Profile* in the account popover): who you are
   and where (your name, the Senate's address, online or not), then each
   Senate the daemon serves: address, you, the Speaker, the registration
   above, each committee's chair, your agents with their duty and streams,

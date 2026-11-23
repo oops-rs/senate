@@ -137,6 +137,23 @@
         }
       }
     },
+    "account.profile": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Profile"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "个人资料"
+          }
+        }
+      }
+    },
     "approvals.allow": {
       "extractionState": "manual",
       "localizations": {
@@ -3325,6 +3342,40 @@
         }
       }
     },
+    "sidebar.account": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Account"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "账户"
+          }
+        }
+      }
+    },
+    "sidebar.account_hint": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Opens your account: your profile, Watch all, Settings, Refresh, About"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "打开账户：个人资料、全部查看、设置、刷新、关于"
+          }
+        }
+      }
+    },
     "sidebar.account_menu": {
       "extractionState": "manual",
       "localizations": {
@@ -3474,23 +3525,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "上一个会话"
-          }
-        }
-      }
-    },
-    "sidebar.profile_open": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%@, open your profile"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%@，打开个人资料"
           }
         }
       }
