@@ -35,6 +35,8 @@ final class CoreStore {
         case session(String)
         /// A committee's page, by name.
         case committee(String)
+        /// The machine's default secretary: its session's page once it runs.
+        case secretary
         /// A waiting item that is not a thread (a prompt, an approval, an
         /// item for the Speaker), by its `Waiting.id`: choosing it opens
         /// where it is answered.
@@ -352,6 +354,97 @@ final class CoreStore {
         if let timeline, let line = session(timeline.sessionId) {
             timeline.working = line.working || timeline.working && line.status == .working
         }
+        // The secretary read again when its session comes, goes or changes.
+        let seat = secretaryLine(in: next).map { "\($0.sessionId) \($0.status)" } ?? "none"
+        if state.online, seat != secretarySeat || secretary == nil {
+            secretarySeat = seat
+            Task { await refreshSecretary() }
+        }
+    }
+
+    // MARK: The default secretary
+
+    /// The machine's default secretary, as last read (nil: not read yet).
+    private(set) var secretary: SecretaryView?
+    /// A first message on its way: the secretary started, then seated.
+    private(set) var secretaryStarting = false
+    /// Why it could not be started, in the daemon's words.
+    private(set) var secretaryError: String?
+    /// What the person writes to it before it runs.
+    var secretaryDraft = ""
+    @ObservationIgnored private var secretarySeat = ""
+
+    /// Its session on this machine, when it has one.
+    var secretarySession: SessionLine? { secretaryLine(in: state) }
+
+    private func secretaryLine(in state: AppState) -> SessionLine? {
+        let committee = secretary?.committee ?? "office"
+        let alias = secretary?.alias ?? "secretary"
+        guard secretary?.state != .elsewhere else { return nil }
+        for group in state.groups {
+            if let line = group.sessions.first(where: { line in
+                line.committee == committee
+                    && (secretary?.senator.map { line.mention.contains($0) } ?? false || line.displayName == alias)
+            }) {
+                return line
+            }
+        }
+        return nil
+    }
+
+    func refreshSecretary() async {
+        guard let core, state.online else { return }
+        if let read = try? await core.defaultSecretary() { secretary = read }
+    }
+
+    /// Ask the secretary what the person wrote: start it first when it does
+    /// not run (the daemon's ensure, as the person), wait for its session to
+    /// be seated here, then say it as the composer does.
+    func askSecretary() async {
+        let body = secretaryDraft
+        guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            actionError = L("error.empty_reply")
+            return
+        }
+        guard let core else { return }
+        secretaryError = nil
+        if secretary?.state != .running || secretarySession == nil {
+            secretaryStarting = true
+            defer { secretaryStarting = false }
+            do {
+                secretary = try await core.ensureSecretary()
+            } catch {
+                secretaryError = describe(error)
+                await refreshSecretary()
+                return
+            }
+            // The daemon publishes the sessions after it; a minute at most.
+            for _ in 0..<600 where secretarySession == nil {
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+        }
+        guard let line = secretarySession else {
+            secretaryError = L("secretary.not_seated")
+            return
+        }
+        if await run("say:\(line.sessionId)", { core in
+            try await core.say(sessionId: line.sessionId, body: body)
+        }) {
+            secretaryDraft = ""
+        }
+    }
+
+    /// Bring back a secretary stopped on purpose.
+    func restoreSecretary() async {
+        secretaryError = nil
+        if let hosted = secretarySession?.hosted {
+            await restore(hosted)
+        } else {
+            await run("session:office::secretary") { core in
+                try await core.restoreSession(label: "\(self.secretary?.committee ?? "office")::\(self.secretary?.alias ?? "secretary")")
+            }
+        }
+        await refreshSecretary()
     }
 
     // MARK: Notifications

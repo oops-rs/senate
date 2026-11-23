@@ -41,6 +41,8 @@ struct MainWindow: View {
             return store.state.person ?? Section.senates.title
         case let .section(section):
             return section.title
+        case .secretary:
+            return L("secretary.title")
         case .item:
             break
         }
@@ -71,6 +73,7 @@ struct MainWindow: View {
                     EmptyState(text: L("session.gone"))
                 }
             case let .committee(name): CommitteePage(store: store, name: name)
+            case .secretary: SecretaryPage(store: store)
             case .item, .section(.inbox): InboxView(store: store)
             case .section(.approvals): ApprovalsView(store: store)
             case .section(.senates): SenatesView(store: store)
@@ -174,6 +177,9 @@ private struct Sidebar: View {
     private var list: some View {
         List(selection: place) {
             Section {
+                // Pinned: the machine's default secretary, always here.
+                SecretaryRow(store: store)
+                    .tag(CoreStore.Place.secretary)
                 ForEach(store.sections, id: \.self) { section in
                     Label(section.title, systemImage: section.symbol)
                         .badge(store.state.online ? store.count(section) : 0)
@@ -666,5 +672,41 @@ private struct ErrorBanner: View {
         .padding(.horizontal, Theme.Space.xl)
         .padding(.bottom, Theme.Space.s)
         .frame(maxWidth: .infinity)
+    }
+}
+
+/// The pinned Secretary row: its glyph carries its state as a session's
+/// does (working, needs you, paused, stopped), "starting" while a first
+/// message starts it.
+private struct SecretaryRow: View {
+    let store: CoreStore
+
+    var body: some View {
+        let line = store.secretarySession
+        let state = store.secretary?.state
+        HStack(spacing: Theme.Space.s) {
+            if let line {
+                SessionMark(runtime: line.runtime, status: line.status)
+                    .frame(width: 18)
+            } else {
+                Image(systemName: "person.crop.circle")
+                    .foregroundStyle(Theme.onSurfaceVariant)
+                    .frame(width: 18)
+                    .accessibilityHidden(true)
+            }
+            Text(verbatim: L("sidebar.secretary"))
+            Spacer(minLength: 0)
+            if store.secretaryStarting {
+                ProgressView().controlSize(.mini)
+            } else if let line, line.unread > 0 {
+                Text(verbatim: String(line.unread))
+                    .font(Theme.Fonts.meta)
+                    .foregroundStyle(Theme.onSurfaceVariant)
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(L("sidebar.secretary"))
+        .accessibilityValue(store.secretaryStarting ? L("secretary.starting")
+            : line?.status.label ?? state?.label ?? "")
     }
 }

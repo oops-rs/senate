@@ -64,6 +64,7 @@ SENATE_HOME=/tmp/sh SENATE_APP_SHOW=1 build/Build/Products/Debug/Senate.app/Cont
 | `SENATE_APP_PERF=1` | print state-apply and thread-read times and main-thread stalls, tour a thread, Inbox, Approvals and a session, quit (`SENATE_APP_PERF_THREAD=<root>` opens that thread) |
 | `FAKE_THREADS=N` | the fake daemon: N more threads and a 5,000-event thread 990 |
 | `FAKE_TIMELINE_EVERY=<s>` | the fake daemon: how often a watched timeline grows (default 6; 0 never) |
+| `FAKE_SECRETARY=<state>` | the fake daemon: the default secretary already there (`running`, `paused`, `ended`, `stopped`, `elsewhere`); none by default |
 | `FAKE_STREAM=1` | the fake daemon: a session, `stream`, whose reply arrives a few characters every 20-40 ms while watched |
 | `FAKE_WORKING=N` | the fake daemon: N more sessions, all working, cycling the four runtimes |
 | `SENATE_APP_MD_DEBUG=1` | the conversation page starts with its debug overlay (⌥D): blocks replaced and appended, lines highlighted, render times |
@@ -142,6 +143,14 @@ something to you that you have not read: an accent dot at its corner),
   tools). Each card names its session or committee and opens it.
 
   ![Approvals](docs/screenshots/approvals.png)
+- **Secretary** (pinned above Inbox): the machine's default secretary,
+  on committee `office`. Once it runs here, its row opens its session's
+  page. Before that, the page says where it stands, and your first
+  message starts it (the daemon's `ensure_secretary`, as you), shows
+  *Starting…* until its session is seated, then sends. Paused or ended,
+  that message brings it back; stopped on purpose, the page says so and
+  offers *Restore*; a seat that is someone else's, or on another Mac, has
+  no composer.
 - **A session**: its name, title, committee, runtime · model · effort,
   directory and branch, status, and *Attach* (opens it in Terminal,
   `senate attach`), *Pause* / *Resume*, *Stop* (never forced) or

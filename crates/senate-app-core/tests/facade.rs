@@ -585,3 +585,59 @@ async fn a_settled_thread_reads_with_its_title_without_an_inbox_row() {
     assert_eq!(view.title, "Reviewed the threshold change; fine by me.");
     assert!(!view.kind_label.is_empty());
 }
+
+#[tokio::test]
+async fn the_default_secretary_is_read_then_ensured_and_a_stopped_one_refused() {
+    use senate_app_core::ffi::SecretaryState;
+    let (dir, socket, world) = setup();
+    let daemon = FakeDaemon::start(&socket, Arc::clone(&world));
+    let core = AppCore::new(Some(dir.path().display().to_string()), Some("en".into())).unwrap();
+    let listener = Arc::new(Listener::default());
+    core.start(listener.clone()).unwrap();
+
+    // Read: none yet, and reading changes nothing.
+    let none = core.default_secretary().await.unwrap();
+    assert_eq!(
+        (none.committee.as_str(), none.alias.as_str()),
+        ("office", "secretary")
+    );
+    assert_eq!(none.state, SecretaryState::NotRecorded);
+    assert_eq!((none.senator, none.action), (None, None));
+    assert_eq!(
+        core.default_secretary().await.unwrap().state,
+        SecretaryState::NotRecorded
+    );
+
+    // Ensure: started, then seated where the sidebar finds it.
+    let started = core.ensure_secretary().await.unwrap();
+    assert_eq!(started.state, SecretaryState::Running);
+    assert_eq!(started.action.as_deref(), Some("started"));
+    assert_eq!(started.senator.as_deref(), Some(common::SECRETARY));
+    until(&listener, "the secretary's session", |s| {
+        s.groups.iter().any(|g| {
+            g.sessions
+                .iter()
+                .any(|l| l.committee.as_deref() == Some("office") && l.display_name == "secretary")
+        })
+    })
+    .await;
+    assert_eq!(
+        core.ensure_secretary().await.unwrap().action.as_deref(),
+        Some("already_running")
+    );
+    assert!(daemon.requests().contains(&Request::EnsureSecretary));
+
+    // Stopped on purpose: refused, with the daemon's words.
+    common::seat_secretary(
+        &mut world.lock().unwrap(),
+        senate_bridge::ipc::DefaultSecretaryState::Stopped,
+    );
+    match core.ensure_secretary().await {
+        Err(e) => assert!(
+            e.to_string()
+                .contains("senate session restore office::secretary"),
+            "{e}"
+        ),
+        Ok(s) => panic!("a stopped secretary was ensured: {s:?}"),
+    }
+}

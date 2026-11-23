@@ -323,6 +323,8 @@ pub struct World {
     /// A session that grows on its own clock instead: a step every `min`
     /// to `max` milliseconds (a reply streamed a few characters at a time).
     pub stream_ms: std::collections::BTreeMap<String, (u64, u64)>,
+    /// The machine's default secretary, as `default_secretary` reads it.
+    pub secretary: senate_bridge::ipc::DefaultSecretaryState,
     /// Roots of threads that are settled: readable, in no inbox.
     pub settled: Vec<u64>,
 }
@@ -369,6 +371,7 @@ impl World {
             growth: Default::default(),
             grow_every: None,
             stream_ms: Default::default(),
+            secretary: senate_bridge::ipc::DefaultSecretaryState::NotRecorded,
             settled: Vec::new(),
         }
     }
@@ -821,8 +824,35 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
                 None => Reply::err(IpcError::bad_request(format!("no session {label}"))),
             }
         }
+        Request::DefaultSecretary => Reply::ok(&secretary_reply(&w, None)),
+        Request::EnsureSecretary => {
+            use senate_bridge::ipc::{DefaultSecretaryState as St, EnsureAction};
+            let action = match w.secretary {
+                St::Stopped => {
+                    return Reply::err(IpcError::bad_request(
+                        "The secretary was stopped on purpose; `senate session restore office::secretary` brings it back."
+                            .to_string(),
+                    ));
+                }
+                St::Elsewhere => {
+                    return Reply::err(IpcError::bad_request(
+                        "office::secretary is someone else's seat.".to_string(),
+                    ));
+                }
+                St::NotRecorded => EnsureAction::Started,
+                St::Paused => EnsureAction::Resumed,
+                St::Ended => EnsureAction::Restored,
+                St::Running => EnsureAction::AlreadyRunning,
+            };
+            seat_secretary(&mut w, St::Running);
+            let _ = events.send(WatchEvent::Sessions);
+            Reply::ok(&secretary_reply(&w, Some(action)))
+        }
         Request::Restore { senator, .. } => {
             let label = senator.to_string();
+            if label == "office::secretary" {
+                seat_secretary(&mut w, senate_bridge::ipc::DefaultSecretaryState::Running);
+            }
             match w.sessions.rows.iter_mut().find(|r| r.label() == label) {
                 Some(row) => {
                     row.state = HostState::Running;
@@ -2268,4 +2298,86 @@ pub fn streaming(w: &mut World) {
     }
     w.growth.insert(id.into(), growth);
     w.stream_ms.insert(id.into(), (20, 40));
+}
+
+/// The default secretary's senator in the fake.
+pub const SECRETARY: &str = "claude-5ec2e7a1-0b1c-4d2e-8f3a-4b5c6d7e8f90";
+
+fn secretary_reply(
+    w: &World,
+    action: Option<senate_bridge::ipc::EnsureAction>,
+) -> senate_bridge::ipc::DefaultSecretary {
+    use senate_bridge::ipc::DefaultSecretaryState as St;
+    senate_bridge::ipc::DefaultSecretary {
+        committee: CommitteeId::new("office").unwrap(),
+        alias: "secretary".parse().unwrap(),
+        senator: (w.secretary != St::NotRecorded).then(|| SECRETARY.parse().unwrap()),
+        state: w.secretary,
+        action,
+    }
+}
+
+/// `FAKE_SECRETARY=<state>` in the fake daemon (`running`, `paused`,
+/// `ended`, `stopped`, `elsewhere`; none recorded by default), and what an
+/// ensure leaves: its session, on `office`, as `secretary`, on this machine
+/// unless its seat is elsewhere.
+pub fn seat_secretary(w: &mut World, state: senate_bridge::ipc::DefaultSecretaryState) {
+    use senate_bridge::ipc::{DefaultSecretaryState as St, LocalSessionRow};
+    w.secretary = state;
+    let id = "secretary-1";
+    w.sessions.rows.retain(|r| r.session_id != id);
+    w.sessions.local_rows.retain(|r| r.session_id != id);
+    if matches!(state, St::NotRecorded | St::Elsewhere) {
+        return;
+    }
+    let host = match state {
+        St::Running => HostState::Running,
+        _ => HostState::Stopped,
+    };
+    w.sessions.rows.push(SessionRow {
+        paused: state == St::Paused,
+        chair: false,
+        shown_name: Some("secretary".into()),
+        host_id: EventId::new(),
+        session_id: id.into(),
+        primary: path(SECRETARY),
+        alias: Some(path("secretary")),
+        committee: Some(CommitteeId::new("office").unwrap()),
+        runtime: Runtime::Claude,
+        model: HostedModel::default(),
+        dir: "/Users/alice/.senate/secretary".into(),
+        state: host,
+        started_at: (host == HostState::Running).then(Utc::now),
+        attached: false,
+        typed_secs_ago: None,
+        tty: "/tmp/none".into(),
+        prompt: None,
+        working: false,
+        last_activity: Utc::now(),
+        title: Some("Your secretary".into()),
+        branch: None,
+    });
+    w.sessions.local_rows.push(LocalSessionRow {
+        session_id: id.into(),
+        primary: path(SECRETARY),
+        alias: Some(path("secretary")),
+        committee: Some(CommitteeId::new("office").unwrap()),
+        chair: false,
+        shown_name: Some("secretary".into()),
+        runtime: Runtime::Claude,
+        dir: "/Users/alice/.senate/secretary".into(),
+        branch: None,
+        working: false,
+        last_activity: Utc::now(),
+        title: Some("Your secretary".into()),
+    });
+    w.timelines.entry(id.into()).or_insert_with(|| {
+        vec![item(
+            1,
+            0,
+            TimelineKind::AssistantMessage {
+                text: "I'm your secretary. Tell me what you're working on: I open a committee per project, give each chair a brief, and follow up through the chairs.".into(),
+            },
+        )]
+    });
 }

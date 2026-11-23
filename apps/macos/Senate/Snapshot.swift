@@ -84,7 +84,10 @@ enum Snapshot {
             store.place = .section(.inbox)
             store.folded = []
             await shot("inbox")
-            // Every session state in the sidebar at once, stopped included.
+            // The pinned Secretary row's page (the fake's FAKE_SECRETARY).
+            store.place = .secretary
+            await shot("secretary")
+                        // Every session state in the sidebar at once, stopped included.
             store.showInactive = true
             await shot("sidebar-states")
             store.showInactive = false

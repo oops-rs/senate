@@ -70,7 +70,8 @@ final class SmokeTests: XCTestCase {
         lead.click()
         XCTAssertTrue(window.buttons["Attach to decide"].firstMatch.waitForExistence(timeout: 5), "its prompt waits")
         XCTAssertTrue(window.descendants(matching: .any)
-            .matching(NSPredicate(format: "label CONTAINS 'cargo publish -p refund'")).firstMatch
+            // The conversation is a web page: its text is a value, not a label.
+            .matching(NSPredicate(format: "label CONTAINS 'cargo publish -p refund' OR value CONTAINS 'cargo publish -p refund' OR title CONTAINS 'cargo publish -p refund'")).firstMatch
             .waitForExistence(timeout: 5), "its conversation shows")
         XCTAssertTrue(window.textViews["Message"].firstMatch.exists, "the composer is there")
 
@@ -159,3 +160,28 @@ final class SmokeTests: XCTestCase {
         XCTAssertEqual(failed, [])
     }
 }
+
+extension SmokeTests {
+    /// The pinned Secretary row: none yet, a first message starts it, and
+    /// its session's page opens with the message sent.
+    func testTheFirstMessageStartsTheSecretary() throws {
+        let window = app.windows.firstMatch
+        XCTAssertTrue(window.waitForExistence(timeout: 10))
+        let row = window.outlines.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == 'Secretary'")).firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 10), "the pinned Secretary row")
+        row.click()
+        let page = XCTNSPredicateExpectation(predicate: NSPredicate(format: "title == 'Your secretary'"), object: window)
+        XCTAssertEqual(XCTWaiter.wait(for: [page], timeout: 5), .completed, "its page, before it runs")
+        let composer = window.textViews.firstMatch
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        composer.click()
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString("I'm working on the refund flow.", forType: .string)
+        composer.typeKey("v", modifierFlags: .command)
+        window.typeKey(.return, modifierFlags: .command)
+        // Started and seated: its own session page, with Attach.
+        XCTAssertTrue(window.buttons["Attach"].firstMatch.waitForExistence(timeout: 20), "the secretary's session page")
+    }
+}
+
