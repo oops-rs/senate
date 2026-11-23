@@ -602,7 +602,66 @@ fn healthy() -> Live {
             row("/w/old", "gone", Some("branch gone")),
         ],
         codex: None,
+        secretary: None,
     }
+}
+
+#[test]
+fn the_default_secretary_is_reported_and_only_a_stop_on_purpose_needs_a_command() {
+    use crate::ipc::{DefaultSecretary, DefaultSecretaryState as S};
+    let mut machine = healthy();
+    assert!(
+        live(&machine, EN)
+            .iter()
+            .all(|c| c.id != "secretary.default"),
+        "not asked: not shown"
+    );
+    let secretary = |state, senator: Option<&str>| DefaultSecretary {
+        committee: senate_core::CommitteeId::new("office").unwrap(),
+        alias: "secretary".parse().unwrap(),
+        senator: senator.map(|s| s.parse().unwrap()),
+        state,
+        action: None,
+    };
+    for (state, said) in [
+        (
+            S::NotRecorded,
+            "not recorded yet; the first `senate secretary ask` starts it",
+        ),
+        (S::Running, "office::secretary (claude-1) running"),
+        (
+            S::Paused,
+            "office::secretary (claude-1) paused; the next ask resumes it",
+        ),
+        (
+            S::Ended,
+            "office::secretary (claude-1) not running; the next ask restores it",
+        ),
+    ] {
+        let senator = (state != S::NotRecorded).then_some("claude-1");
+        machine.secretary = Some(secretary(state, senator));
+        let checks = live(&machine, EN);
+        let check = by_id(&checks, "secretary.default");
+        assert_eq!(check.status, Status::Ok, "{state:?}");
+        assert_eq!(check.found, said);
+    }
+    machine.secretary = Some(secretary(S::Stopped, Some("claude-1")));
+    let checks = live(&machine, EN);
+    let check = by_id(&checks, "secretary.default");
+    assert_eq!(check.status, Status::Warn);
+    assert_eq!(
+        check.found,
+        "office::secretary (claude-1) stopped on purpose; an ask does not start it"
+    );
+    assert_eq!(
+        check.fix.as_deref(),
+        Some("senate session restore office::secretary")
+    );
+    assert!(
+        by_id(&live(&machine, Locale::Zh), "secretary.default")
+            .found
+            .contains("被有意停止")
+    );
 }
 
 #[test]

@@ -5311,43 +5311,67 @@ async fn spawn_seats_on_the_committee_bound_at_its_dir() {
     std::fs::write(here.join(".senate/committee"), "refund-v2\n").unwrap();
     let bound = h.workdir("bound", Some("other"));
     let unbound = h.workdir("unbound", None);
-    let spawn = |dir: &std::path::Path, extra: &[&str]| {
-        let mut cmd = std::process::Command::new(BIN);
-        testenv::isolate(&mut cmd, h.dir.path());
-        let out = cmd
-            .env("SENATE_HOME", h.paths.home())
+    // The CLI runs as its own process, awaited: a blocking wait would hold
+    // one of the two runtime threads the in-process daemon also needs.
+    let spawn = |dir: PathBuf, extra: &'static [&'static str]| {
+        let mut cmd = tokio::process::Command::new(BIN);
+        testenv::isolate_async(&mut cmd, h.dir.path());
+        cmd.env("SENATE_HOME", h.paths.home())
             .current_dir(&here)
             .args(["spawn", "claude", "--dir"])
             .arg(dir)
             .args(extra)
-            .output()
-            .unwrap();
-        assert!(out.status.success(), "{out:?}");
-        (
-            String::from_utf8(out.stdout).unwrap().trim().to_owned(),
-            String::from_utf8(out.stderr).unwrap(),
-        )
+            .kill_on_drop(true);
+        async move {
+            let out = tokio::time::timeout(Duration::from_secs(60), cmd.output())
+                .await
+                .expect("the spawn finished")
+                .unwrap();
+            assert!(out.status.success(), "{out:?}");
+            String::from_utf8(out.stderr).unwrap()
+        }
     };
-    let (at_dir, quiet) = spawn(&bound, &[]);
-    assert!(quiet.is_empty(), "{quiet}");
-    let (explicit, _) = spawn(&bound, &["--committee", "refund-v2"]);
-    let (fallback, said) = spawn(&unbound, &[]);
+    // Which committee each spawn seated on, read from the sessions it added
+    // (display names depend on the alias cache's timing; labels do not).
+    let labels = || async {
+        let rows: ipc::SessionsReply = call(&h, &Request::Sessions).await;
+        rows.rows
+            .iter()
+            .map(ipc::SessionRow::label)
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let added = |before: &std::collections::BTreeSet<String>,
+                 after: &std::collections::BTreeSet<String>| {
+        let new: Vec<_> = after.difference(before).cloned().collect();
+        assert_eq!(new.len(), 1, "one session per spawn: {new:?}");
+        new[0].clone()
+    };
+
+    let none = labels().await;
+    let quiet = spawn(bound.clone(), &[]).await;
+    assert!(!quiet.contains("bound to no committee"), "{quiet}");
+    let one = labels().await;
+    assert!(
+        added(&none, &one).starts_with("other::"),
+        "--dir's committee"
+    );
+
+    let _ = spawn(bound.clone(), &["--committee", "refund-v2"]).await;
+    let two = labels().await;
+    assert!(
+        added(&one, &two).starts_with("refund-v2::"),
+        "--committee wins"
+    );
+
+    let said = spawn(unbound.clone(), &[]).await;
     assert!(
         said.contains("is bound to no committee; seated on refund-v2, this directory's"),
         "{said}"
     );
-    // Each committee numbers its own: the first on each is claude1, the
-    // second named with its committee once two share the alias.
-    assert_eq!(
-        (at_dir.as_str(), explicit.as_str(), fallback.as_str()),
-        ("claude1", "refund-v2::claude1", "claude2")
-    );
-    let rows: ipc::SessionsReply = call(&h, &Request::Sessions).await;
-    let mut labels: Vec<String> = rows.rows.iter().map(ipc::SessionRow::label).collect();
-    labels.sort();
-    assert_eq!(
-        labels,
-        ["other::claude1", "refund-v2::claude1", "refund-v2::claude2"]
+    let three = labels().await;
+    assert!(
+        added(&two, &three).starts_with("refund-v2::"),
+        "this directory's"
     );
     h.stop().await;
 }

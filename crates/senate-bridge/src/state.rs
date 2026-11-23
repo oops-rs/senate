@@ -177,6 +177,10 @@ CREATE TABLE IF NOT EXISTS hosted_paused (
     paused_at  INTEGER NOT NULL,
     checkpoint INTEGER
 );
+CREATE TABLE IF NOT EXISTS hosted_stopped (
+    agent      TEXT PRIMARY KEY,
+    stopped_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS spawn_attempts (
     id      TEXT PRIMARY KEY,
     record  TEXT NOT NULL,
@@ -1204,6 +1208,36 @@ impl Store {
             "DELETE FROM hosted_paused WHERE agent = ?1",
             [agent_text(agent)],
         )? != 0)
+    }
+
+    /// Record that `agent`'s hosted terminal was stopped on purpose (`senate
+    /// session stop`, the `spawn` tool's stop): nothing brings it back on
+    /// its own. A restore clears it ([`Store::clear_stopped`]).
+    pub(crate) fn mark_stopped(
+        &self,
+        agent: &SenatorName,
+        at: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        self.conn().execute(
+            "INSERT OR REPLACE INTO hosted_stopped (agent, stopped_at) VALUES (?1, ?2)",
+            params![agent_text(agent), at.timestamp_millis()],
+        )?;
+        Ok(())
+    }
+
+    /// Forget that `agent` was stopped on purpose: it was restored.
+    pub(crate) fn clear_stopped(&self, agent: &SenatorName) -> Result<bool, StoreError> {
+        Ok(self.conn().execute(
+            "DELETE FROM hosted_stopped WHERE agent = ?1",
+            [agent_text(agent)],
+        )? != 0)
+    }
+
+    /// Whether `agent`'s hosted terminal was stopped on purpose.
+    pub(crate) fn stopped_on_purpose(&self, agent: &SenatorName) -> Result<bool, StoreError> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT 1 FROM hosted_stopped WHERE agent = ?1")?;
+        Ok(stmt.exists([agent_text(agent)])?)
     }
 
     /// `agent`'s pause, if it is recorded paused.

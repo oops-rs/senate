@@ -58,6 +58,9 @@ pub struct Live {
     /// Whether the Codex app-server answered: `None` when there is no
     /// Codex to ask (no `codex` and no `codex.listen`).
     pub codex: Option<Result<(), CodexProbe>>,
+    /// The machine's default secretary; `None` with the daemon down, or
+    /// when the daemon could not say.
+    pub secretary: Option<crate::ipc::DefaultSecretary>,
 }
 
 /// Why the Codex app-server did not answer.
@@ -149,6 +152,17 @@ pub async fn gather(paths: &Paths) -> Live {
         .ok(),
         Err(_) => None,
     };
+    let secretary = match &daemon {
+        Ok(_) => ipc::request::<crate::ipc::DefaultSecretary>(
+            &paths.socket(),
+            &Request::DefaultSecretary,
+            Duration::from_millis(500),
+            ASK,
+        )
+        .await
+        .ok(),
+        Err(_) => None,
+    };
     let mut live = Live {
         version: env!("CARGO_PKG_VERSION").to_owned(),
         config: Ok(()),
@@ -162,6 +176,7 @@ pub async fn gather(paths: &Paths) -> Live {
         ahead: Vec::new(),
         bindings: binding::list(paths),
         codex: probe_codex(paths).await,
+        secretary,
     };
     let config = match BridgeConfig::load_unchecked(&paths.config()) {
         Ok(config) => config,
@@ -348,6 +363,9 @@ pub fn live(live: &Live, l: Locale) -> Vec<Check> {
     if let Some(codex) = &live.codex {
         checks.push(codex_check(codex, l));
     }
+    if let Some(secretary) = &live.secretary {
+        checks.push(secretary_check(secretary, l));
+    }
     if let Some(parent) = &live.parent {
         checks.push(reach("uplink.parent", parent, l));
         checks.push(registration_check(live.registration.as_ref(), l));
@@ -365,6 +383,44 @@ pub fn live(live: &Live, l: Locale) -> Vec<Check> {
         }
     }
     checks
+}
+
+/// The default secretary's state. Nothing here is wrong in itself: one not
+/// started yet, paused or ended starts with the next `senate secretary
+/// ask`; only one stopped on purpose needs a command to come back.
+fn secretary_check(secretary: &crate::ipc::DefaultSecretary, l: Locale) -> Check {
+    use crate::ipc::DefaultSecretaryState as S;
+    let name = format!("{}::{}", secretary.committee, secretary.alias);
+    let who = secretary
+        .senator
+        .as_ref()
+        .map(|s| format!(" ({s})"))
+        .unwrap_or_default();
+    let found = match (secretary.state, l) {
+        (S::NotRecorded, Locale::Zh) => "还没有；第一次 `senate secretary ask` 会启动它".to_owned(),
+        (S::NotRecorded, Locale::En) => {
+            "not recorded yet; the first `senate secretary ask` starts it".to_owned()
+        }
+        (S::Running, Locale::Zh) => format!("{name}{who} 在运行"),
+        (S::Running, Locale::En) => format!("{name}{who} running"),
+        (S::Paused, Locale::Zh) => format!("{name}{who} 已暂停；下次提问时恢复"),
+        (S::Paused, Locale::En) => format!("{name}{who} paused; the next ask resumes it"),
+        (S::Ended, Locale::Zh) => format!("{name}{who} 的终端已结束；下次提问时重新打开"),
+        (S::Ended, Locale::En) => {
+            format!("{name}{who} not running; the next ask restores it")
+        }
+        (S::Stopped, Locale::Zh) => format!("{name}{who} 被有意停止；提问不会启动它"),
+        (S::Stopped, Locale::En) => {
+            format!("{name}{who} stopped on purpose; an ask does not start it")
+        }
+        (S::Elsewhere, Locale::Zh) => format!("{name}{who} 在别的机器上"),
+        (S::Elsewhere, Locale::En) => format!("{name}{who} has no session on this machine"),
+    };
+    let id = "secretary.default";
+    match secretary.state {
+        S::Stopped => Check::warn(id, found, Some("senate session restore office::secretary")),
+        _ => Check::ok(id, found),
+    }
 }
 
 fn session_checks(sessions: &SessionsReply, l: Locale) -> Vec<Check> {
