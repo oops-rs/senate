@@ -23,10 +23,7 @@
 //! so the bytes it writes mean nothing to someone who was not there from
 //! the start. The host therefore keeps the screen itself: every byte the
 //! TUI writes goes through a terminal emulator ([`vt100`]) held at the
-//! PTY's size. That is all it keeps: the visible screen, no scrollback, so
-//! one host holds one grid of cells (rows × columns, a few dozen bytes a
-//! cell: about half a megabyte for a 50 × 200 terminal) however long the
-//! session runs.
+//! PTY's size, retaining a bounded number of main-screen history rows.
 //!
 //! A watcher is first told the size and sent the screen as it is, then
 //! every change in order: the TUI's output, and each new size. The two are
@@ -86,6 +83,7 @@ const MAX_SCREEN: usize = 8 << 20;
 /// Changes a watcher may fall behind by before it is sent the screen
 /// again instead.
 const BACKLOG: usize = 256;
+const HISTORY: usize = 512;
 
 /// The file name of a host's watch socket, in its directory. As long as
 /// `tty`, whose path is the one checked against the socket path limit
@@ -97,7 +95,7 @@ fn dimension(n: u16) -> NonZeroU16 {
 }
 
 #[derive(Clone)]
-enum Change {
+pub(super) enum Change {
     Size(u16, u16),
     Output(Arc<[u8]>),
 }
@@ -125,8 +123,11 @@ pub(super) struct Screen {
 impl Screen {
     pub(super) fn new(rows: u16, cols: u16) -> Self {
         Self {
-            // No scrollback: the visible screen is all a watcher is shown.
-            parser: Mutex::new(vt100::Parser::new(dimension(rows), dimension(cols), 0)),
+            parser: Mutex::new(vt100::Parser::new(
+                dimension(rows),
+                dimension(cols),
+                HISTORY,
+            )),
             changes: broadcast::channel(BACKLOG).0,
             fit: Mutex::new(None),
             fit_due: Notify::new(),
@@ -220,12 +221,12 @@ impl Screen {
         parser.screen().rows(0, cols.get()).collect()
     }
 
-    /// The size and the screen as they are, and every change after them.
-    fn join(&self) -> (u16, u16, Vec<u8>, broadcast::Receiver<Change>) {
+    /// The screen as it is, and every change after it.
+    pub(super) fn join(&self) -> (Mirror, broadcast::Receiver<Change>) {
         let parser = self.parser();
-        let (rows, cols) = parser.screen().size();
-        let state = parser.screen().state_formatted().into_bytes();
-        (rows.get(), cols.get(), state, self.changes.subscribe())
+        let mut mirror = Mirror::default();
+        *mirror.parser.screen_mut() = parser.screen().clone();
+        (mirror, self.changes.subscribe())
     }
 }
 
@@ -251,10 +252,12 @@ async fn send_screen(
     to: &mut (impl AsyncWrite + Unpin),
     screen: &Screen,
 ) -> anyhow::Result<broadcast::Receiver<Change>> {
-    let (rows, cols, state, changes) = screen.join();
+    let (mirror, changes) = screen.join();
+    let (rows, cols) = mirror.screen().size();
+    let state = mirror.snapshot();
     to.write_u8(SIZE).await?;
-    to.write_u16(rows).await?;
-    to.write_u16(cols).await?;
+    to.write_u16(rows.get()).await?;
+    to.write_u16(cols.get()).await?;
     to.write_u8(SCREEN).await?;
     to.write_u32(u32::try_from(state.len())?).await?;
     to.write_all(&state).await?;
@@ -357,7 +360,7 @@ pub(crate) struct Mirror {
 impl Default for Mirror {
     fn default() -> Self {
         Self {
-            parser: vt100::Parser::new(dimension(24), dimension(80), 0),
+            parser: vt100::Parser::new(dimension(24), dimension(80), HISTORY),
         }
     }
 }
@@ -365,6 +368,57 @@ impl Default for Mirror {
 impl Mirror {
     pub(crate) fn screen(&self) -> &vt100::Screen {
         self.parser.screen()
+    }
+
+    pub(super) fn live(&mut self) -> bool {
+        self.scroll(-isize::MAX)
+    }
+
+    pub(super) fn scroll(&mut self, rows: isize) -> bool {
+        let screen = self.parser.screen_mut();
+        !screen.alternate_screen() && super::scroll::move_by(screen, rows)
+    }
+
+    pub(super) fn resize(&mut self, rows: u16, cols: u16) {
+        self.parser.set_size(dimension(rows), dimension(cols));
+    }
+
+    pub(super) fn output(&mut self, bytes: &[u8]) {
+        self.live();
+        self.parser.process(bytes);
+    }
+
+    fn snapshot(&self) -> Vec<u8> {
+        let screen = self.screen();
+        let state = screen.state_formatted();
+        if screen.alternate_screen() {
+            let mut primary = Self::default();
+            *primary.parser.screen_mut() = screen.clone();
+            primary.parser.process(b"\x1b[?47l");
+            let mut bytes = primary.snapshot();
+            let alternate = [b"\x1b[?1049h", state.as_bytes()].concat();
+            if bytes.len() + alternate.len() <= MAX_SCREEN {
+                bytes.extend_from_slice(&alternate);
+                return bytes;
+            }
+            return alternate;
+        }
+        if screen.scrollback_len() > 0 {
+            // Replay history through the ordinary screen frame so older viewers
+            // still get the same visible screen. The final snapshot restores
+            // exact live contents, cursor and attributes.
+            let mut capture = String::new();
+            let _ = screen.write_contents_formatted_basic(
+                &mut capture,
+                vt100::capture::BasicFormattedCaptureRange::Full(&mut Default::default()),
+            );
+            let mut bytes = capture.replace('\n', "\r\n").into_bytes();
+            if bytes.len() + state.len() <= MAX_SCREEN {
+                bytes.extend_from_slice(state.as_bytes());
+                return bytes;
+            }
+        }
+        state.into_bytes()
     }
 
     /// The session's size, rows then columns.
@@ -377,14 +431,14 @@ impl Mirror {
     /// Take in what the host said.
     pub(crate) fn apply(&mut self, frame: &Frame) {
         match frame {
-            Frame::Size(rows, cols) => self.parser.set_size(dimension(*rows), dimension(*cols)),
+            Frame::Size(rows, cols) => self.resize(*rows, *cols),
             Frame::Screen(state) => {
                 // Forget what was shown: the screen starts from this.
                 let (rows, cols) = self.parser.screen().size();
-                self.parser = vt100::Parser::new(rows, cols, 0);
+                self.parser = vt100::Parser::new(rows, cols, HISTORY);
                 self.parser.process(state);
             }
-            Frame::Output(bytes) => self.parser.process(bytes),
+            Frame::Output(bytes) => self.output(bytes),
         }
     }
 }
@@ -484,6 +538,36 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), wait)
             .await
             .unwrap_or_else(|_| panic!("never showed {text:?}"));
+    }
+
+    #[tokio::test]
+    async fn a_watch_snapshot_contains_bounded_main_screen_history() {
+        let screen = Screen::new(3, 20);
+        screen.output(b"historic-0\r\nhistoric-1\r\nhistoric-2\r\nlive-0\r\nlive-1\r\nlive-2");
+        screen.output(b"\x1b[?1049halternate");
+        let (host, mut watcher) = UnixStream::pair().unwrap();
+        let check = async {
+            assert_eq!(watcher.read_u8().await.unwrap(), WATCHING);
+            let mut mirror = Mirror::default();
+            until(&mut watcher, &mut mirror, "alternate").await;
+            assert!(mirror.screen().alternate_screen());
+            assert!(!mirror.scroll(3));
+
+            screen.output(b"\x1b[?1049l");
+            until(&mut watcher, &mut mirror, "live-2").await;
+            assert!(mirror.scroll(3));
+            assert_eq!(
+                mirror.screen().contents(),
+                "historic-0\nhistoric-1\nhistoric-2"
+            );
+
+            screen.output(b"\r\nnew-output");
+            until(&mut watcher, &mut mirror, "new-output").await;
+            assert_eq!(mirror.screen().scrollback(), 0);
+            watcher.shutdown().await.unwrap();
+        };
+        let (result, ()) = tokio::join!(watch(host, &screen), check);
+        result.unwrap();
     }
 
     #[tokio::test]

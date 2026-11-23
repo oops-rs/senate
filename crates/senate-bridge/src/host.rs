@@ -7,6 +7,7 @@ mod input;
 mod paste;
 mod picker;
 pub(crate) mod prompt;
+mod scroll;
 mod terminal;
 pub mod view;
 pub(crate) mod watch;
@@ -637,7 +638,7 @@ pub async fn run(
             tracing::warn!(dir = %dir.display(), "the host's directory is gone; stopping its TUI");
             stop_group(&mut child, pid).await
         }
-        served = serve(&listener, &tty, &output, &viewer) => served,
+        served = serve(&listener, &tty, &viewer) => served,
         served = watch::serve(&watchers, &tty.screen) => served,
         prompted = prompt::watch(&dir, &tty.screen, session.prompt_quiet) => prompted,
         fitted = tty.fit() => fitted,
@@ -1166,12 +1167,7 @@ async fn accept(listener: &UnixListener) -> (UnixStream, tokio::net::unix::Socke
     }
 }
 
-async fn serve(
-    listener: &UnixListener,
-    tty: &Tty,
-    output: &broadcast::Sender<Vec<u8>>,
-    viewer: &Mutex<Viewer>,
-) -> anyhow::Result<()> {
+async fn serve(listener: &UnixListener, tty: &Tty, viewer: &Mutex<Viewer>) -> anyhow::Result<()> {
     loop {
         let (stream, _) = accept(listener).await;
         {
@@ -1181,7 +1177,7 @@ async fn serve(
         }
         tty.attached.store(true, Ordering::Release);
         {
-            let relay = relay(stream, tty, output.subscribe(), viewer);
+            let relay = relay(stream, tty, viewer);
             tokio::pin!(relay);
             loop {
                 tokio::select! {
@@ -1216,22 +1212,28 @@ async fn serve(
     }
 }
 
-async fn relay(
-    mut stream: UnixStream,
-    tty: &Tty,
-    mut output: broadcast::Receiver<Vec<u8>>,
-    viewer: &Mutex<Viewer>,
-) -> anyhow::Result<()> {
+async fn relay(mut stream: UnixStream, tty: &Tty, viewer: &Mutex<Viewer>) -> anyhow::Result<()> {
+    let (mut mirror, mut output) = tty.screen.join();
+    let main_screen = AtomicBool::new(!mirror.screen().alternate_screen());
+    let (navigation, mut scrolling) = tokio::sync::mpsc::channel(16);
     stream.write_u8(ATTACHED).await?;
     // The viewer's terminal did not see what the TUI turned on before now.
     let preamble = tty.emulation().attach_preamble();
     stream.write_all(&preamble).await?;
+    if main_screen.load(Ordering::Relaxed) {
+        stream.write_all(scroll::MOUSE_ON).await?;
+        stream
+            .write_all(mirror.screen().contents_formatted().as_bytes())
+            .await?;
+    }
     let (mut input, mut screen) = stream.into_split();
     let mut classify = input::Input::default();
     let cursor = std::sync::Mutex::new(input::CursorQueries::default());
     let from_terminal = async {
         let mut first_resize = true;
         let mut keys = [0; IO_CHUNK];
+        let mut mice = scroll::Input::default();
+        let mut mouse_deadline = tokio::time::Instant::now();
         let mut writes = tokio::time::interval(Duration::from_millis(100));
         writes.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -1240,6 +1242,12 @@ async fn relay(
             let mut tag = [0];
             let len = tokio::select! {
                 biased;
+                _ = tokio::time::sleep_until(mouse_deadline), if mice.waiting() => {
+                    let keys = mice.flush();
+                    let _ = navigation.send(None).await;
+                    forward_keys(tty, viewer, &cursor, &mut classify, &keys).await?;
+                    continue;
+                }
                 _ = writes.tick(), if dirty => {
                     Viewer::lock(viewer).record();
                     continue;
@@ -1253,6 +1261,11 @@ async fn relay(
                 len = input.read(&mut tag) => len?,
             };
             if len == 0 {
+                // The attach client can send a standalone Escape immediately
+                // before detaching. It cannot begin a report after EOF.
+                if mice.waiting() {
+                    forward_keys(tty, viewer, &cursor, &mut classify, &mice.flush()).await?;
+                }
                 return Ok(());
             }
             match tag[0] {
@@ -1286,22 +1299,21 @@ async fn relay(
                     let n = usize::from(input.read_u16().await?);
                     ensure!(n <= keys.len(), "oversized terminal input");
                     input.read_exact(&mut keys[..n]).await?;
-                    if n != 0 {
-                        // Timestamp before forwarding: these keys can cause
-                        // the next prompt, whose episode they must not clear.
-                        let at = observed_at();
-                        {
-                            let mut queries =
-                                cursor.lock().unwrap_or_else(|error| error.into_inner());
-                            let mut viewer = Viewer::lock(viewer);
-                            if let Some(human_at) = classify.observe(&keys[..n], at, &mut queries) {
-                                viewer.input(human_at);
+                    let local = main_screen.load(Ordering::Acquire);
+                    let events = mice.feed(&keys[..n], local);
+                    mouse_deadline = tokio::time::Instant::now() + Duration::from_millis(35);
+                    for event in events {
+                        match event {
+                            scroll::Event::Scroll(rows) => {
+                                let _ = navigation.send(Some(rows)).await;
                             }
-                            // Terminal reports are escape sequences, which
-                            // the draft passes over.
-                            viewer.draft.observe(&keys[..n]);
+                            scroll::Event::Keys(keys) => {
+                                if local {
+                                    let _ = navigation.send(None).await;
+                                }
+                                forward_keys(tty, viewer, &cursor, &mut classify, &keys).await?;
+                            }
                         }
-                        tty.write.lock().await.write_all(&keys[..n]).await?;
                     }
                 }
                 _ => bail!("unknown terminal input frame"),
@@ -1310,14 +1322,60 @@ async fn relay(
     };
     let to_terminal = async {
         loop {
-            // If a viewer falls behind, an incomplete escape stream cannot
-            // safely be replayed. Drop the connection and let it reattach.
-            let bytes = output.recv().await?;
-            cursor
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .output(&bytes, observed_at());
-            screen.write_all(&bytes).await?;
+            tokio::select! {
+                // If a viewer falls behind, an incomplete escape stream cannot
+                // safely be replayed. Drop the connection and let it reattach.
+                change = output.recv() => match change? {
+                    watch::Change::Output(bytes) => {
+                        if mirror.live() {
+                            screen.write_all(mirror.screen().contents_formatted().as_bytes()).await?;
+                        }
+                        cursor
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .output(&bytes, observed_at());
+                        for (chunk, modes) in scroll::mode_chunks(&bytes) {
+                            let was_main = !mirror.screen().alternate_screen();
+                            mirror.output(chunk);
+                            let is_main = !mirror.screen().alternate_screen();
+                            screen.write_all(chunk).await?;
+                            if is_main && modes.exits_alternate {
+                                // The viewer itself uses the alternate screen.
+                                // Return to it before forwarding any more text.
+                                screen.write_all(b"\x1b[?1049h").await?;
+                                screen.write_all(mirror.screen().contents_formatted().as_bytes()).await?;
+                            }
+                            if is_main && (modes.exits_alternate || modes.mouse) {
+                                screen.write_all(scroll::MOUSE_ON).await?;
+                            } else if was_main && !is_main {
+                                screen.write_all(scroll::MOUSE_OFF).await?;
+                                let modes = tty.emulation().mouse_preamble();
+                                screen.write_all(&modes).await?;
+                            }
+                            main_screen.store(is_main, Ordering::Release);
+                        }
+                    }
+                    watch::Change::Size(rows, cols) => {
+                        let was_scrolled = mirror.live();
+                        mirror.resize(rows, cols);
+                        if was_scrolled {
+                            screen.write_all(mirror.screen().contents_formatted().as_bytes()).await?;
+                        }
+                    }
+                },
+                Some(scroll) = scrolling.recv() => {
+                    let changed = match scroll {
+                        Some(rows) => mirror.scroll(rows),
+                        None => mirror.live(),
+                    };
+                    if changed {
+                        screen.write_all(mirror.screen().contents_formatted().as_bytes()).await?;
+                        if mirror.screen().scrollback() != 0 {
+                            screen.write_all(b"\x1b[?25l").await?;
+                        }
+                    }
+                }
+            }
         }
     };
     let result = tokio::select! {
@@ -1331,6 +1389,29 @@ async fn relay(
     // The enclosing attachment records its detach and the final input in
     // one snapshot. While attached, input snapshots are coalesced.
     result
+}
+
+async fn forward_keys(
+    tty: &Tty,
+    viewer: &Mutex<Viewer>,
+    cursor: &Mutex<input::CursorQueries>,
+    classify: &mut input::Input,
+    keys: &[u8],
+) -> anyhow::Result<()> {
+    // Timestamp before forwarding: these keys can cause the next prompt,
+    // whose episode they must not clear.
+    let at = observed_at();
+    {
+        let mut queries = cursor.lock().unwrap_or_else(|error| error.into_inner());
+        let mut viewer = Viewer::lock(viewer);
+        if let Some(human_at) = classify.observe(keys, at, &mut queries) {
+            viewer.input(human_at);
+        }
+        // Terminal reports are escape sequences, which the draft passes over.
+        viewer.draft.observe(keys);
+    }
+    tty.write.lock().await.write_all(keys).await?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1421,11 +1502,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_main_screen_wheel_scrolls_without_becoming_session_input() {
+        let (pty, _pts) = pty_process::open().unwrap();
+        let (_read, write) = pty.into_split();
+        let tty = Tty::new(write, Scheme::Light, 3, 40);
+        tty.screen
+            .output(b"historic-0\r\nhistoric-1\r\nhistoric-2\r\nlive-0\r\nlive-1\r\nlive-2");
+        let dir = tempfile::tempdir().unwrap();
+        let activity = Mutex::new(Viewer {
+            path: dir.path().join("viewer.json"),
+            activity: ViewerActivity::default(),
+            dirty: false,
+            draft: input::Draft::default(),
+        });
+        let (host, mut viewer) = UnixStream::pair().unwrap();
+
+        async fn until(viewer: &mut UnixStream, marker: &[u8]) {
+            let mut seen = Vec::new();
+            let mut buf = [0; 256];
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while !seen.windows(marker.len()).any(|part| part == marker) {
+                    let n = viewer.read(&mut buf).await.unwrap();
+                    assert_ne!(n, 0, "closed before {marker:?}");
+                    seen.extend_from_slice(&buf[..n]);
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("did not see {marker:?} in {seen:?}"));
+        }
+
+        async fn send(viewer: &mut UnixStream, bytes: &[u8]) {
+            viewer.write_u8(KEYS).await.unwrap();
+            viewer
+                .write_u16(bytes.len().try_into().unwrap())
+                .await
+                .unwrap();
+            viewer.write_all(bytes).await.unwrap();
+        }
+
+        let check = async {
+            assert_eq!(viewer.read_u8().await.unwrap(), ATTACHED);
+            until(&mut viewer, b"live-2").await;
+            // Mouse packets may straddle client frames. No arrow conversion
+            // is needed because the viewer has requested SGR mouse reports.
+            send(&mut viewer, b"\x1b[<64;").await;
+            send(&mut viewer, b"9;2M").await;
+            until(&mut viewer, b"historic-2").await;
+            assert_eq!(Viewer::lock(&activity).activity.input_at, 0);
+
+            // Output brings the existing terminal surface to the live end.
+            tty.screen.output(b"\r\nnew-output");
+            until(&mut viewer, b"new-output").await;
+            send(&mut viewer, b"\x1b[<64;9;2M").await;
+            until(&mut viewer, b"live-0").await;
+
+            // A physical Up key is still a real key and resumes the live view.
+            send(&mut viewer, b"\x1b[A").await;
+            until(&mut viewer, b"new-output").await;
+            assert_ne!(Viewer::lock(&activity).activity.input_at, 0);
+            viewer.shutdown().await.unwrap();
+        };
+        let (result, ()) = tokio::join!(relay(host, &tty, &activity), check);
+        result.unwrap();
+    }
+
+    #[tokio::test]
     async fn a_viewer_can_answer_a_tui_query_without_reporting_human_input() {
         let (pty, _pts) = pty_process::open().unwrap();
         let (_read, write) = pty.into_split();
         let tty = Tty::new(write, Scheme::Light, 24, 80);
-        let (output, _) = broadcast::channel(1);
+        tty.screen.output(b"\x1b[?1049h");
         let dir = tempfile::tempdir().unwrap();
         let activity = Mutex::new(Viewer {
             path: dir.path().join("viewer.json"),
@@ -1436,7 +1582,7 @@ mod tests {
         let (host, mut viewer) = UnixStream::pair().unwrap();
         let view_only = async {
             assert_eq!(viewer.read_u8().await.unwrap(), ATTACHED);
-            output.send(b"\x1b[6n".to_vec()).unwrap();
+            tty.screen.output(b"\x1b[6n");
             let mut query = [0; 4];
             viewer.read_exact(&mut query).await.unwrap();
             assert_eq!(&query, b"\x1b[6n");
@@ -1448,7 +1594,7 @@ mod tests {
             viewer.write_all(&[KEYS, 0, 1, b'R']).await.unwrap();
             viewer.shutdown().await.unwrap();
         };
-        let _ = tokio::join!(relay(host, &tty, output.subscribe(), &activity), view_only);
+        let _ = tokio::join!(relay(host, &tty, &activity), view_only);
         assert_eq!(Viewer::lock(&activity).activity.input_at, 0);
 
         let (host, mut viewer) = UnixStream::pair().unwrap();
@@ -1457,7 +1603,7 @@ mod tests {
             viewer.write_all(&[KEYS, 0, 1, b'x']).await.unwrap();
             viewer.shutdown().await.unwrap();
         };
-        let _ = tokio::join!(relay(host, &tty, output.subscribe(), &activity), with_input);
+        let _ = tokio::join!(relay(host, &tty, &activity), with_input);
         assert_ne!(Viewer::lock(&activity).activity.input_at, 0);
     }
 

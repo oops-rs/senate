@@ -130,6 +130,7 @@ impl<'a> List<'a> {
             Key::Down | Key::Right => self.focus = (self.focus + 1).min(last),
             Key::PageUp => self.focus = self.focus.saturating_sub(page),
             Key::PageDown => self.focus = (self.focus + page).min(last),
+            Key::Scroll(_) | Key::Typing => {}
             Key::Open => return Some(Some(self.focus)),
             Key::Quit | Key::Detach => return Some(None),
         }

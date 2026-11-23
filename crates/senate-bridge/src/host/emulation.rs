@@ -279,14 +279,28 @@ impl Emulation {
         }
     }
 
+    pub(crate) fn mouse_preamble(&self) -> Vec<u8> {
+        let modes = self
+            .modes
+            .iter()
+            .copied()
+            .filter(|mode| matches!(mode, 1000 | 1002 | 1003 | 1006 | 1016));
+        Self::mode_preamble(modes)
+    }
+
     /// What a newly attached viewer's terminal has to be told so that it is
     /// in the state the TUI believes its terminal is in.
     pub(crate) fn attach_preamble(&self) -> Vec<u8> {
-        if self.modes.is_empty() {
-            return Vec::new();
+        Self::mode_preamble(self.modes.iter().copied())
+    }
+
+    fn mode_preamble(modes: impl Iterator<Item = u16>) -> Vec<u8> {
+        let modes: Vec<String> = modes.map(|mode| mode.to_string()).collect();
+        if modes.is_empty() {
+            Vec::new()
+        } else {
+            format!("\x1b[?{}h", modes.join(";")).into_bytes()
         }
-        let modes: Vec<String> = self.modes.iter().map(u16::to_string).collect();
-        format!("\x1b[?{}h", modes.join(";")).into_bytes()
     }
 
     fn scheme(&self) -> Option<Scheme> {

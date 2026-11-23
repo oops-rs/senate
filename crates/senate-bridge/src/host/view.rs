@@ -34,7 +34,8 @@
 //! | `q`, Ctrl-] | leave |
 //!
 //! `senate attach --read-only` is the one tile, full screen, under one
-//! status line. Every key but Ctrl-] is dropped.
+//! status line. The wheel scrolls main-screen history in the focused tile;
+//! Ctrl-] leaves a read-only attach.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -48,6 +49,7 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use unicode_width::UnicodeWidthStr as _;
 
+use super::scroll::{self, Mouse};
 use super::terminal::{RESET_DISPLAY, RawTerminal, split_input};
 use super::watch::{Mirror, Watch};
 use crate::paths::Paths;
@@ -329,6 +331,9 @@ fn color(out: &mut String, color: vt100::Color, foreground: bool) {
 /// the last line with anything on it, or the cursor's.
 fn top_row(screen: &vt100::Screen, rows: u16) -> u16 {
     let (height, width) = screen.size();
+    if screen.scrollback() != 0 {
+        return 0;
+    }
     let last_written = screen
         .rows(0, width.get())
         .enumerate()
@@ -447,7 +452,8 @@ fn paint_screen(
         out.push_str("\x1b[0m");
     }
     let (cursor_row, cursor_col) = screen.cursor_position();
-    (!screen.hide_cursor()
+    (screen.scrollback() == 0
+        && !screen.hide_cursor()
         && cursor_row >= top
         && cursor_row - top < area.rows
         && cursor_col < area.cols)
@@ -520,6 +526,8 @@ pub(super) enum Key {
     Down,
     PageUp,
     PageDown,
+    Scroll(isize),
+    Typing,
     Open,
     /// `q`: leaves the grid; a key like any other in a read-only attach.
     Quit,
@@ -530,12 +538,27 @@ pub(super) enum Key {
 /// The keys in `pending`, leaving behind only the start of one that may
 /// still be arriving. Anything that is no key of the viewer is dropped.
 pub(super) fn keys(pending: &mut Vec<u8>) -> Vec<Key> {
+    decode_keys(pending, None)
+}
+
+fn decode_keys(pending: &mut Vec<u8>, unknown: Option<Key>) -> Vec<Key> {
     let mut out = Vec::new();
     // The detach key ends everything, wherever it stands.
     let (before, detach) = split_input(pending);
     let mut at = 0;
     while at < before {
         let rest = &pending[at..before];
+        match scroll::mouse(rest) {
+            Mouse::Report { len, scroll } => {
+                if scroll != 0 {
+                    out.push(Key::Scroll(scroll));
+                }
+                at += len;
+                continue;
+            }
+            Mouse::Incomplete if !detach => break,
+            _ => {}
+        }
         let (key, len) = match rest {
             // Ctrl-C, in raw mode a plain byte.
             [b'q' | 0x03, ..] => (Some(Key::Quit), 1),
@@ -552,7 +575,7 @@ pub(super) fn keys(pending: &mut Vec<u8>) -> Vec<Key> {
             [0x1b, b'[', b'6', b'~', ..] => (Some(Key::PageDown), 4),
             // The start of one of those, still arriving.
             [0x1b] | [0x1b, b'[' | b'O'] | [0x1b, b'[', b'5' | b'6'] if !detach => break,
-            _ => (None, 1),
+            _ => (unknown, 1),
         };
         out.extend(key);
         at += len;
@@ -570,7 +593,7 @@ pub(super) fn keys(pending: &mut Vec<u8>) -> Vec<Key> {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
-    /// `senate attach --read-only`: the one session, nothing but detach.
+    /// `senate attach --read-only`: show one session.
     One,
     /// `senate session watch`.
     Grid,
@@ -692,6 +715,29 @@ impl Viewer {
         out
     }
 
+    fn focused_shown(&self) -> Option<MutexGuard<'_, Shown>> {
+        self.tiles.get(self.focus).map(|tile| shown(&tile.shown))
+    }
+
+    fn captures_wheel(&self) -> bool {
+        self.focused_shown().is_some_and(|state| {
+            state.note.is_none()
+                && state
+                    .mirror
+                    .as_ref()
+                    .is_some_and(|mirror| !mirror.screen().alternate_screen())
+        })
+    }
+
+    fn scroll(&self, rows: Option<isize>) -> bool {
+        self.focused_shown().is_some_and(|mut state| {
+            state.mirror.as_mut().is_some_and(|mirror| match rows {
+                Some(rows) => mirror.scroll(rows),
+                None => mirror.live(),
+            })
+        })
+    }
+
     /// Move the focus by `key`, on a grid `across` wide showing `per_page`.
     fn step(&mut self, key: Key, across: usize, per_page: usize) {
         let last = self.tiles.len().saturating_sub(1);
@@ -702,7 +748,7 @@ impl Viewer {
             Key::Down => self.focus + across,
             Key::PageUp => self.focus.saturating_sub(per_page),
             Key::PageDown => self.focus + per_page,
-            Key::Open | Key::Quit | Key::Detach => self.focus,
+            Key::Open | Key::Quit | Key::Detach | Key::Scroll(_) | Key::Typing => self.focus,
         }
         .min(last);
     }
@@ -730,16 +776,27 @@ async fn stay(
     let mut input = [0u8; 256];
     let mut dirty = true;
     let mut stuck = false;
+    let mut captures_wheel = false;
     let left = loop {
         if dirty {
             let (rows, cols) = terminal.window()?;
-            let frame = viewer.paint(rows, cols);
+            let mut frame = viewer.paint(rows, cols);
+            let capture = viewer.captures_wheel();
+            if capture != captures_wheel {
+                let mode = if capture {
+                    scroll::MOUSE_ON
+                } else {
+                    scroll::MOUSE_OFF
+                };
+                frame.push_str(std::str::from_utf8(mode).unwrap_or_default());
+            }
             // A terminal that is not taking output must not keep the keys
             // from being read: leaving has to work. What was cut short is
             // painted whole the next time round.
             match tokio::time::timeout(STUCK, terminal.draw(frame.as_bytes())).await {
                 Ok(drawn) => {
                     drawn?;
+                    captures_wheel = capture;
                     dirty = false;
                     // A busy session changes many times a second.
                     tokio::time::sleep(FRAME).await;
@@ -772,12 +829,18 @@ async fn stay(
                 let (rows, cols) = terminal.window()?;
                 let (across, down) = grid(viewer.tiles.len(), rows, cols);
                 let mut leave = None;
-                for key in keys(&mut pending) {
+                let keys = decode_keys(&mut pending, Some(Key::Typing));
+                for key in keys {
+                    if let Key::Scroll(rows) = key {
+                        dirty |= viewer.scroll(Some(rows));
+                        continue;
+                    }
+                    dirty |= viewer.scroll(None);
                     match (&viewer.mode, key) {
                         (_, Key::Detach) | (Mode::Grid, Key::Quit) => leave = Some(Left::Quit),
                         // In a read-only attach every other key is typing,
                         // and typing goes nowhere.
-                        (Mode::One, _) => {}
+                        (Mode::One, _) | (Mode::Grid, Key::Typing) => {}
                         (Mode::Grid, Key::Open) => {
                             if let Some(tile) = viewer.tiles.get(viewer.focus) {
                                 leave = Some(Left::Attach(tile.session.clone()));
