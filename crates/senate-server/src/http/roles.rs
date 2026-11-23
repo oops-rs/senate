@@ -23,14 +23,25 @@ use super::{
 /// it there. A senator carrying one could pass a message off as the
 /// desk's, or have the server relay a "Speaker's" answer into another
 /// committee's thread.
-const OFFICE_KEYS: [&str; 4] = [
+const OFFICE_KEYS: [&str; 6] = [
     meta::ACTED_BY,
     meta::ORIGIN,
     meta::FORWARDED_TO,
     meta::ANSWERED_BY,
+    meta::DESK_PERSON,
+    meta::DESK_OUTCOME,
 ];
 
 pub(super) fn reject_office_keys(event: &NewEvent, sender: Sender) -> Result<(), ApiFailure> {
+    if sender != Sender::Speaker
+        && [meta::DESK_PERSON, meta::DESK_OUTCOME]
+            .iter()
+            .any(|key| event.meta.contains_key(*key))
+    {
+        return Err(ApiFailure::forbidden(
+            "only the Speaker's office writes desk receipts",
+        ));
+    }
     if sender != Sender::Senator {
         return Ok(());
     }

@@ -48,6 +48,22 @@ nonisolated final class FakeCore: AppCoreProtocol, @unchecked Sendable {
 
     // MARK: AppCoreProtocol
 
+    func deskItem(committee: String, seq: UInt64) async throws -> DeskItemView {
+        try record("desk-item \(committee) \(seq)")
+        let item = ThreadEvent(seq: seq, kind: "request", kindLabel: "Request", by: "tester",
+                               to: ["speaker"], body: "Full request", at: Date(), mine: false)
+        let thread = ThreadView(committee: committee, root: seq, title: "Full request",
+                                state: nil, stateLabel: nil, kindLabel: "Request", events: [item])
+        return DeskItemView(eventId: "source-item", item: item, thread: thread, origin: nil,
+                            destination: "payments::senator::ledger", blocked: nil)
+    }
+    func newDeskActionId() -> String { "desk-test-action" }
+    func decideDeskItem(committee: String, seq: UInt64, itemId: String, id: String, reason: String?) async throws -> DeskOutcomeView {
+        try record("desk-decide \(committee) \(seq) \(id) \(reason ?? "forward")")
+        return DeskOutcomeView(delivered: reason == nil, destination: "payments::senator::ledger",
+                               committee: "payments", seq: 75)
+    }
+
     func approve(id: String, decision: ApprovalDecision) async throws {
         try record("approve \(id) \(decision)")
     }

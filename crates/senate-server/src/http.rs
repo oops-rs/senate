@@ -221,6 +221,15 @@ impl AppState {
                 person.0
             )));
         }
+        if let Some(approved_by) = event.meta.get(meta::DESK_PERSON)
+            && (!roster.principal(&person.0).is_some_and(|principal| {
+                principal.kind == senate_core::roster::PrincipalKind::Person
+            }) || approved_by.as_str() != Some(person.0.as_str()))
+        {
+            return Err(ApiFailure::forbidden(
+                "desk_person must name the authenticated human principal",
+            ));
+        }
         event.meta.insert(
             meta::ACTED_BY.into(),
             serde_json::Value::String(acted_by.to_string()),

@@ -313,6 +313,41 @@ fn with_acted_by(event: NewEvent, who: &str) -> NewEvent {
 }
 
 #[tokio::test]
+async fn desk_audit_names_the_person_authenticating_the_office_write() {
+    let server = start(None, office_of_alice).await;
+    let note = || {
+        with_acted_by(
+            from_speaker(committee(), Kind::Note, "Desk receipt"),
+            "alice",
+        )
+    };
+    let event = stored(
+        &server,
+        ALICE,
+        &note().with_meta(meta::DESK_PERSON, json!("alice")),
+    )
+    .await;
+    assert_eq!(event.meta.get(meta::DESK_PERSON), Some(&json!("alice")));
+    api_error(
+        server
+            .post_event(ALICE, &note().with_meta(meta::DESK_PERSON, json!("bob")))
+            .await,
+        StatusCode::FORBIDDEN,
+        "forbidden",
+    )
+    .await;
+    api_error(
+        server
+            .post_event(BOB, &note().with_meta(meta::DESK_PERSON, json!("bob")))
+            .await,
+        StatusCode::FORBIDDEN,
+        "forbidden",
+    )
+    .await;
+    server.running.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn writing_as_the_speaker_names_who_acts() {
     let server = start(Some("clerk"), office_of_alice).await;
     let office = me(&server, CAROL).await.office.unwrap();

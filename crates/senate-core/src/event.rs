@@ -576,6 +576,10 @@ pub mod meta {
     /// On an event `from: speaker`: the senator who acted for the Speaker's
     /// office (the Speaker itself, or which secretary), as a name.
     pub const ACTED_BY: &str = "acted_by";
+    /// The authenticated person who chose a desk action in person.
+    pub const DESK_PERSON: &str = "desk_person";
+    /// The receipt written to the original thread by the desk.
+    pub const DESK_OUTCOME: &str = "desk_outcome";
     /// On the desk's note in an asker's thread: where the message was
     /// forwarded, as a qualified name.
     pub const FORWARDED_TO: &str = "forwarded_to";

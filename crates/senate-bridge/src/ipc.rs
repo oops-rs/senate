@@ -1241,6 +1241,17 @@ pub enum Request {
         agent_file: Option<String>,
     },
     /// What awaits the Speaker of the Senate the session presides over.
+    DeskItem {
+        committee: CommitteeId,
+        seq: Seq,
+    },
+    DeskDecide {
+        committee: CommitteeId,
+        seq: Seq,
+        item_id: EventId,
+        id: EventId,
+        decision: DeskDecision,
+    },
     Docket {
         session: SessionSelector,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1538,6 +1549,39 @@ impl SendReply {
     pub fn on_the_desk(&self) -> bool {
         self.posted.to.contains(&Address::Speaker) && self.intended.is_some()
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DeskDecision {
+    Forward,
+    Refuse { reason: String },
+}
+
+/// An outcome stored on the original request's audit event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DeskOutcome {
+    Delivered {
+        destination: String,
+        committee: CommitteeId,
+        seq: Seq,
+    },
+    Refused {
+        destination: String,
+        committee: CommitteeId,
+        #[serde(default)]
+        seq: Seq,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeskItemDetail {
+    pub item: Event,
+    pub events: Vec<Event>,
+    pub origin: Option<String>,
+    pub destination: Option<String>,
+    pub blocked: Option<String>,
 }
 
 /// A desk item passed on.

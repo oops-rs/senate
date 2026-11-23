@@ -168,6 +168,7 @@ use crate::state::{ItemKey, ItemStatus, QueueItem, SessionUpsert, Store, StoreEr
 use crate::stream::{self, CommitteeWorker};
 
 mod approval_guard;
+mod desk_decision;
 mod front;
 mod host_policy;
 mod hosted_approvals;
@@ -540,6 +541,7 @@ pub(crate) struct Shared {
     agy_idle: Mutex<HashMap<String, AgyIdle>>,
     /// Prompt hooks without a matching Stop or SessionEnd in this daemon run.
     working_sessions: Mutex<HashMap<String, Instant>>,
+    desk_decisions: tokio::sync::Mutex<()>,
     session_titles: Arc<Mutex<crate::timeline::TitleCache>>,
     /// Each agent's latest checkpoint it wrote itself (the tool, not an
     /// automatic one) this run: when, and its seq. `session pause` waits
@@ -916,6 +918,7 @@ impl Shared {
             rebinds: Mutex::new(HashMap::new()),
             agy_idle: Mutex::new(HashMap::new()),
             working_sessions: Mutex::new(HashMap::new()),
+            desk_decisions: tokio::sync::Mutex::new(()),
             session_titles: Arc::new(Mutex::new(crate::timeline::TitleCache::default())),
             tool_checkpoints: Mutex::new(HashMap::new()),
             companion_config: common.companion_config.clone(),
@@ -3091,6 +3094,8 @@ impl Shared {
             }
             // The front serves these: they span Senates.
             Request::Presides { .. }
+            | Request::DeskItem { .. }
+            | Request::DeskDecide { .. }
             | Request::Docket { .. }
             | Request::Route { .. }
             | Request::Cover { .. }
@@ -6057,6 +6062,13 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                         Ok(()) => (shared.dispatch(request).await, false),
                         Err(refused) => (Reply::err(refused), false),
                     }
+                }
+                Ok(Request::DeskDecide { committee, seq, item_id, id, decision }) => {
+                    let reply = match shared.refuse_agent_caller(peer, "Decide a desk request from your own terminal or the Senate app").await {
+                        Ok(()) => wrap(shared.primary().on_desk_decide(committee, seq, item_id, id, decision).await),
+                        Err(error) => Reply::err(error),
+                    };
+                    (reply, false)
                 }
                 Ok(request) if approval_guard::answers_a_prompt(&request) => {
                     match shared

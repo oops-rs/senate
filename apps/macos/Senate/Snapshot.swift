@@ -63,6 +63,11 @@ enum Snapshot {
             }
             store.place = .section(.approvals)
             await shot("approvals")
+            if let item = store.docketEntries.first(where: { $0.seq == 60 }) {
+                store.deskSelection = item
+                await shot("desk-forward")
+                store.deskSelection = nil
+            }
             if let busiest = store.roster.max(by: { $0.activeMembers < $1.activeMembers }) {
                 store.place = .committee(busiest.committee)
                 await shot("committee")

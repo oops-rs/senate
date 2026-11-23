@@ -685,10 +685,11 @@ async fn append(
             .and_then(Value::as_str)
             .and_then(|value| value.parse::<SenatorName>().ok())
             .filter(|actor| {
-                inner
-                    .roster
-                    .office()
-                    .is_some_and(|office| office.works_desk(actor))
+                inner.roster.may_act_for_office(&name(&who), actor)
+                    && inner
+                        .roster
+                        .office()
+                        .is_some_and(|office| office.built_in.as_ref() != Some(actor))
             })
     } else {
         ev.from.as_senator().cloned()
@@ -1097,13 +1098,44 @@ async fn docket(
         return error;
     }
     let inner = st.inner.lock().unwrap();
-    let Some((chair, connected)) = &inner.chair else {
-        return StatusCode::NOT_FOUND.into_response();
+    let speaker_items = || {
+        let events = inner
+            .events
+            .get(&committee)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        events
+            .iter()
+            .filter_map(|event| {
+                let intended = event
+                    .meta
+                    .get(senate_core::meta::INTENDED)?
+                    .as_str()?
+                    .parse()
+                    .ok()?;
+                (event.kind == Kind::Request
+                    && event.to.contains(&Address::Speaker)
+                    && !events.iter().any(|reply| {
+                        reply.thread == Some(event.seq)
+                            && reply.from == Address::Speaker
+                            && (reply.kind == Kind::Answer
+                                || reply.meta.contains_key(senate_core::meta::FORWARDED_TO))
+                    }))
+                .then(|| senate_core::DocketItem {
+                    event: event.clone(),
+                    awaiting: senate_core::Awaiting::Addressed,
+                    intended: Some(intended),
+                })
+            })
+            .collect::<Vec<_>>()
     };
     let items = match q.role.as_deref() {
         Some("chair") => chair_items(&inner.events.get(&committee).cloned().unwrap_or_default()),
-        _ => Vec::new(),
+        _ => speaker_items(),
     };
+    if inner.chair.is_none() && inner.roster.office().is_none() && items.is_empty() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     Json(senate_core::DocketPage {
         head: Seq(inner.head(&committee)),
         committee: CommitteeId::new(committee).unwrap(),
@@ -1111,16 +1143,20 @@ async fn docket(
         office: inner.roster.office(),
         items,
         covered: BTreeMap::new(),
-        seats: vec![senate_core::docket::SeatFacts {
-            paused: false,
-            agent: chair.clone(),
-            connected: *connected,
-            presence: None,
-            last_seen: None,
-            checkpoint: None,
-            open_threads: 0,
-            duty: None,
-        }],
+        seats: inner
+            .chair
+            .iter()
+            .map(|(chair, connected)| senate_core::docket::SeatFacts {
+                paused: false,
+                agent: chair.clone(),
+                connected: *connected,
+                presence: None,
+                last_seen: None,
+                checkpoint: None,
+                open_threads: 0,
+                duty: None,
+            })
+            .collect(),
     })
     .into_response()
 }

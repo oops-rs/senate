@@ -20,9 +20,9 @@
 //! serves, their agents, what waits on them (an inbox per agent and a merged
 //! one, Codex approvals, the Codex panel). When one of their sessions
 //! presides over a Senate as its Speaker, the app also lists that Senate's
-//! docket, **read-only**: routing, covering and referring are the presiding
-//! agent's own tools (`speaker_route`, `speaker_cover`, `speaker_escalate`),
-//! run by that agent in its session, never by a person clicking in the app.
+//! docket. The Speaker or the owner of the presiding Speaker agent can
+//! forward or refuse a pending local cross-committee request in person.
+//! Routing, covering, and referring use the presiding agent's own tools.
 //!
 //! # Languages
 //!
@@ -52,7 +52,7 @@ pub use ffi::{
     AppCore, ApprovalDecision, CoreError, CoreListener, MentionKind, TerminalCommand, TextPart,
     TimelineListener, split_mentions,
 };
-pub use reads::{ThreadEvent, ThreadView};
+pub use reads::{DeskItemView, DeskOutcomeView, ThreadEvent, ThreadView};
 pub use state::{
     AgentInfo, AppState, ApprovalRequest, ChairLine, ChildLine, ChildSeatLine, CodexThreadInfo,
     CommitteeLine, Counts, DocketCommittee, DocketEntry, DocketSenate, HostedSession, InboxThread,

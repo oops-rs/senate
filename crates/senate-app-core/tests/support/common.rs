@@ -18,10 +18,10 @@ use chrono::Utc;
 use senate_bridge::agent::AgentSource;
 use senate_bridge::approvals::{Approval, ApprovalKind, ResolvedBy};
 use senate_bridge::ipc::{
-    ApprovalsReply, ApproveReply, CommitteeStatus, DocketReply, HostState, HostedModel,
-    HostedPrompt, InboxReply, IpcError, Posted, Reply, Request, SenateDocket, SessionRow,
-    SessionsReply, StatusReply, StreamState, ThreadReply, TimelineDirection, TimelineItem,
-    TimelineKind, TimelineReply, TimelineUpdate, WatchEvent,
+    ApprovalsReply, ApproveReply, CommitteeStatus, DeskDecision, DeskItemDetail, DeskOutcome,
+    DocketReply, HostState, HostedModel, HostedPrompt, InboxReply, IpcError, Posted, Reply,
+    Request, SenateDocket, SessionRow, SessionsReply, StatusReply, StreamState, ThreadReply,
+    TimelineDirection, TimelineItem, TimelineKind, TimelineReply, TimelineUpdate, WatchEvent,
 };
 use senate_bridge::session::{Runtime, Session, SessionState};
 use senate_bridge::state::QueueCounts;
@@ -304,6 +304,8 @@ pub struct World {
     pub threads: Vec<ThreadSummary>,
     pub approvals: Vec<Approval>,
     pub docket: DocketReply,
+    desk_receipts: std::collections::BTreeMap<EventId, DeskOutcome>,
+    desk_sources: std::collections::BTreeMap<(CommitteeId, Seq), Event>,
     pub requests: Vec<Request>,
     /// The committee of each thread not on [`committee`], by root.
     pub committee_of: std::collections::BTreeMap<u64, CommitteeId>,
@@ -354,6 +356,8 @@ impl World {
             sessions: SessionsReply::default(),
             long: Default::default(),
             docket: docket(),
+            desk_receipts: Default::default(),
+            desk_sources: Default::default(),
             requests: Vec::new(),
             committee_of: Default::default(),
             aliases: None,
@@ -561,6 +565,75 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
             }
             Reply::ok(&posted(thread))
         }
+        Request::DeskItem { committee, seq } => {
+            let item = w
+                .docket
+                .senates
+                .iter()
+                .flat_map(|s| &s.pages)
+                .filter(|page| page.committee == committee)
+                .flat_map(|page| &page.items)
+                .find(|entry| entry.event.seq == seq);
+            match item {
+                Some(entry) => Reply::ok(&DeskItemDetail {
+                    item: entry.event.clone(), events: vec![entry.event.clone()],
+                    origin: None,
+                    destination: entry.intended.as_ref().map(|_| "payments::senator::ledger".into()),
+                    blocked: match seq.0 {
+                        60 | 61 => None,
+                        62 => Some("Only the Speaker or the owner of the agent serving as Speaker can decide this request.".into()),
+                        _ => Some("This card can only decide requests for another committee in this Senate.".into()),
+                    },
+                }),
+                None => Reply::err(IpcError::bad_request("desk item not found")),
+            }
+        }
+        Request::DeskDecide {
+            committee,
+            seq,
+            item_id: _,
+            id,
+            decision,
+        } => {
+            if let Some(outcome) = w.desk_receipts.get(&id) {
+                return Reply::ok(outcome);
+            }
+            if seq == Seq(61) && matches!(decision, DeskDecision::Forward) {
+                return Reply::err(IpcError::bad_request(
+                    "The destination is temporarily unavailable.",
+                ));
+            }
+            if seq != Seq(60) && seq != Seq(61) {
+                return Reply::err(IpcError::new(
+                    "not_presiding",
+                    "Only the Speaker may decide this request.",
+                ));
+            }
+            let receipt = match decision {
+                DeskDecision::Forward => DeskOutcome::Delivered {
+                    destination: "payments::senator::ledger".into(),
+                    committee: CommitteeId::new("payments").unwrap(),
+                    seq: Seq(75),
+                },
+                DeskDecision::Refuse { reason } if !reason.trim().is_empty() => {
+                    DeskOutcome::Refused {
+                        destination: "refund-v2::senator::tester".into(),
+                        committee: committee.clone(),
+                        seq: Seq(76),
+                    }
+                }
+                DeskDecision::Refuse { .. } => {
+                    return Reply::err(IpcError::bad_request("A refusal reason is required."));
+                }
+            };
+            for page in w.docket.senates.iter_mut().flat_map(|s| &mut s.pages) {
+                if page.committee == committee {
+                    page.items.retain(|entry| entry.event.seq != seq);
+                }
+            }
+            w.desk_receipts.insert(id, receipt.clone());
+            Reply::ok(&receipt)
+        }
         Request::Docket { session, committee } => {
             assert_eq!(
                 session,
@@ -569,6 +642,17 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
             );
             assert_eq!(committee, None);
             Reply::ok(&w.docket)
+        }
+        Request::Thread {
+            thread,
+            committee: Some(c),
+            ..
+        } if let Some(event) = w.desk_sources.get(&(c.clone(), thread)) => {
+            Reply::ok(&ThreadReply {
+                committee: c,
+                root: thread,
+                events: vec![event.clone()],
+            })
         }
         Request::Thread {
             thread,
@@ -905,7 +989,41 @@ pub fn setup() -> (tempfile::TempDir, PathBuf, Arc<Mutex<World>>) {
 /// waiting on her, tasks her agents are still working on, and an item put
 /// to the Speaker on another committee. `examples/fake_daemon.rs` serves it;
 /// the tests keep the plain world.
+pub fn desk_fixture(w: &mut World) {
+    let page = &mut w.docket.senates[0].pages[0];
+    let template = page.items[0].event.clone();
+    for (seq, body) in [
+        (
+            60,
+            "Please confirm the revised refund threshold with the payments owner. The threshold and handoff are recorded in this original thread.",
+        ),
+        (61, "Please send the audit summary to the payments owner."),
+        (
+            62,
+            "Please pass this request to payments. The signed-in account may inspect it here.",
+        ),
+    ] {
+        let mut event = template.clone();
+        event.id = EventId::new();
+        event.seq = Seq(seq);
+        event.kind = Kind::Request;
+        event.from = Address::senator(&path("tester"));
+        event.to = vec![Address::Speaker];
+        event.body = body.into();
+        let intended = "payments::chair".parse().unwrap();
+        w.desk_sources
+            .insert((page.committee.clone(), Seq(seq)), event.clone());
+        page.items.push(DocketItem {
+            event,
+            awaiting: Awaiting::Addressed,
+            intended: Some(intended),
+        });
+    }
+    page.head = Seq(62);
+}
+
 pub fn busy_senate(w: &mut World) {
+    desk_fixture(w);
     use senate_bridge::ipc::{RosterCommittee, RosterMember};
     use senate_core::{Directed, Escalation};
 
