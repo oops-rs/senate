@@ -516,7 +516,7 @@ stdin.")]
   senate spawn claude                    On this directory's committee
   senate spawn codex --alias reviewer    With a name to address it by
   senate spawn --profile review          Use this machine's review settings
-  senate spawn claude --committee refund-v2 --dir ../refund
+  senate spawn claude --dir ../refund    On the committee bound in ../refund
   senate spawn codex --prompt 'Review the open PR'
                                          Send it a first request once seated
   senate spawn claude --model opus --effort high
@@ -534,8 +534,8 @@ stdin.")]
         /// Use a named launch profile from this machine. See `senate profiles`.
         #[arg(long, add = ArgValueCandidates::new(completion::profiles))]
         profile: Option<String>,
-        /// The committee to seat it on (default: the one `senate where`
-        /// shows for this directory).
+        /// The committee to seat it on (default: the one bound at --dir,
+        /// else the one `senate where` shows for this directory).
         #[arg(long, add = ArgValueCandidates::new(completion::committees))]
         committee: Option<CommitteeId>,
         /// A role name such as reviewer. Defaults to the profile name or a runtime name and counter.
@@ -1298,6 +1298,47 @@ async fn committee_here(named: Option<CommitteeId>) -> anyhow::Result<CommitteeI
             }
         }
     }
+}
+
+/// The committee `senate spawn` seats on: `--committee`; else, with
+/// `--dir` elsewhere, the one bound there; else this directory's. When
+/// `--dir` binds none, says on stderr which committee was used instead.
+async fn spawn_committee(
+    named: Option<CommitteeId>,
+    dir: &std::path::Path,
+) -> anyhow::Result<CommitteeId> {
+    if named.is_some() {
+        return committee_here(named).await;
+    }
+    let same = |a: &std::path::Path, b: &std::path::Path| {
+        a.canonicalize()
+            .ok()
+            .is_some_and(|a| b.canonicalize().ok() == Some(a))
+    };
+    let cwd = std::env::current_dir()?;
+    if same(dir, &cwd) {
+        return committee_here(None).await;
+    }
+    let (paths, settings) = settings_here();
+    if let Some(committee) = binding::directory_committee(&paths, dir, &settings).await {
+        return Ok(committee);
+    }
+    let committee = committee_here(None).await?;
+    eprintln!(
+        "{}",
+        cli_locale().pick(
+            format!(
+                "{} 没有绑定委员会；按当前目录，坐到 {committee}（用 --committee 选别的）。",
+                dir.display()
+            ),
+            format!(
+                "{} is bound to no committee; seated on {committee}, this directory's \
+                 (--committee chooses another).",
+                dir.display()
+            ),
+        )
+    );
+    Ok(committee)
 }
 
 /// The committee a message to `to` goes to: `--committee`, else this
@@ -3231,7 +3272,8 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             if prompt.as_deref().is_some_and(|p| p.trim().is_empty()) {
                 anyhow::bail!("the prompt is empty");
             }
-            let committee = runtime(false)?.block_on(committee_here(committee))?;
+            let dir = std::path::absolute(dir)?;
+            let committee = runtime(false)?.block_on(spawn_committee(committee, &dir))?;
             let (runtime, profile) = match profile {
                 Some(name) => (
                     None,
@@ -3251,7 +3293,7 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
                     chair,
                     secretary,
                     alias,
-                    cwd: std::path::absolute(dir)?,
+                    cwd: dir,
                     session: SessionSelector::default(),
                     prompt,
                     model: model.into(),

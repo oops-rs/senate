@@ -567,6 +567,7 @@ senate committees                      # chairs, active members and pending thre
 senate status --all                     # include inactive entries
 senate spawn claude --alias reviewer    # seat a member on this committee
 senate spawn codex --chair --alias lead --attach # appoint the chair and open its terminal
+senate spawn claude --dir ../ledger     # on the committee bound in ../ledger
 senate spawn claude --secretary --alias desk # add a Speaker’s desk secretary
 senate attach reviewer                 # restore or resume as needed (Ctrl-] detaches)
 senate session list                    # active hosted sessions on this machine
@@ -581,6 +582,10 @@ senate session pause --all             # checkpoint, then stop each one...
 senate session resume --all            # ...and bring them back where they were
 senate session replace reviewer        # a fresh session takes the seat
 ```
+
+`senate spawn` seats the session on `--committee` when given, else on the
+committee bound in `--dir`, else on this directory's; when `--dir` binds
+none, it says on stderr which committee it used.
 
 A senator is active while present online or while its hosted terminal is
 running. `senate committees` shows every committee, even without active

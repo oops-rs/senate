@@ -5294,3 +5294,52 @@ async fn restoring_a_running_session_says_how_to_open_it() {
     );
     h.stop().await;
 }
+
+/// `senate spawn --dir`: an explicit `--committee` wins; else the committee
+/// bound at `--dir`; else this directory's, said on stderr.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn spawn_seats_on_the_committee_bound_at_its_dir() {
+    let (mut h, here, _) = fixture_daemon(3).await;
+    std::fs::write(here.join(".senate/committee"), "refund-v2\n").unwrap();
+    let bound = h.workdir("bound", Some("other"));
+    let unbound = h.workdir("unbound", None);
+    let spawn = |dir: &std::path::Path, extra: &[&str]| {
+        let mut cmd = std::process::Command::new(BIN);
+        testenv::isolate(&mut cmd, h.dir.path());
+        let out = cmd
+            .env("SENATE_HOME", h.paths.home())
+            .current_dir(&here)
+            .args(["spawn", "claude", "--dir"])
+            .arg(dir)
+            .args(extra)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        (
+            String::from_utf8(out.stdout).unwrap().trim().to_owned(),
+            String::from_utf8(out.stderr).unwrap(),
+        )
+    };
+    let (at_dir, quiet) = spawn(&bound, &[]);
+    assert!(quiet.is_empty(), "{quiet}");
+    let (explicit, _) = spawn(&bound, &["--committee", "refund-v2"]);
+    let (fallback, said) = spawn(&unbound, &[]);
+    assert!(
+        said.contains("is bound to no committee; seated on refund-v2, this directory's"),
+        "{said}"
+    );
+    // Each committee numbers its own: the first on each is claude1, the
+    // second named with its committee once two share the alias.
+    assert_eq!(
+        (at_dir.as_str(), explicit.as_str(), fallback.as_str()),
+        ("claude1", "refund-v2::claude1", "claude2")
+    );
+    let rows: ipc::SessionsReply = call(&h, &Request::Sessions).await;
+    let mut labels: Vec<String> = rows.rows.iter().map(ipc::SessionRow::label).collect();
+    labels.sort();
+    assert_eq!(
+        labels,
+        ["other::claude1", "refund-v2::claude1", "refund-v2::claude2"]
+    );
+    h.stop().await;
+}
