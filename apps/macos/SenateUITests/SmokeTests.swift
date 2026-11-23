@@ -5,7 +5,7 @@ import XCTest
 /// (`scripts/ui-test.sh` starts it and passes its Senate home): the window
 /// opens on the inbox, a thread opens and takes a reply, an approval is
 /// allowed, a session opens from the sidebar with its conversation and its
-/// prompt, a committee opens, ⌘1–⌘3 answer, the account row's menu opens, and nothing fails an
+/// prompt, a committee opens, ⌘1–⌘3 answer, the account popover opens, and nothing fails an
 /// accessibility audit.
 final class SmokeTests: XCTestCase {
     var app: XCUIApplication!
@@ -85,12 +85,14 @@ final class SmokeTests: XCTestCase {
         // ⌘3: your profile (the Senates you sit in), also the account row.
         window.typeKey("3", modifierFlags: .command)
         XCTAssertTrue(window.staticTexts["Address"].firstMatch.waitForExistence(timeout: 5), "the profile shows")
-        // The menu beside the account row: Watch all, Settings, About, Refresh.
-        let more = window.menuButtons["More"].firstMatch
-        XCTAssertTrue(more.waitForExistence(timeout: 5), "the account row's menu is there")
-        more.click()
-        XCTAssertTrue(app.menuItems["Watch all"].firstMatch.waitForExistence(timeout: 5), "Watch all is in it")
-        XCTAssertTrue(app.menuItems["Settings…"].firstMatch.exists, "and Settings")
+        // The account row opens its popover: Profile, Watch all, Settings…,
+        // Refresh, About.
+        let account = window.buttons["Account"].firstMatch
+        XCTAssertTrue(account.waitForExistence(timeout: 5), "the account row is there")
+        account.click()
+        XCTAssertTrue(app.buttons["Watch all"].firstMatch.waitForExistence(timeout: 5), "Watch all is in its popover")
+        XCTAssertTrue(app.buttons["Settings…"].firstMatch.exists, "and Settings")
+        XCTAssertTrue(app.buttons["Profile"].firstMatch.exists, "and Profile")
         window.typeKey(.escape, modifierFlags: [])
     }
 

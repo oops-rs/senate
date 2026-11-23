@@ -19,6 +19,9 @@ enum Snapshot {
     /// Posted with an item's seq to scroll the open conversation to it
     /// (its top; `userInfo["anchor"] == "bottom"`: its foot).
     static let scrollToItem = Notification.Name("SenateSnapshotScrollToItem")
+    /// Posted to open and close the account popover at the sidebar's foot.
+    static let openAccount = Notification.Name("SenateSnapshotOpenAccount")
+    static let closeAccount = Notification.Name("SenateSnapshotCloseAccount")
     /// Posted to open every tool call's output in the open conversation.
     static let expandTools = Notification.Name("SenateSnapshotExpandTools")
 
@@ -143,6 +146,11 @@ enum Snapshot {
             }
             store.place = .section(.senates)
             await shot("profile")
+            // The account popover, opened from the foot.
+            NotificationCenter.default.post(name: openAccount, object: nil)
+            try? await Task.sleep(for: .milliseconds(800))
+            await capture(dir.appendingPathComponent("\(prefix)account.png")) { isMain($0) }
+            NotificationCenter.default.post(name: closeAccount, object: nil)
             // Settings, in its own window, opened as a person would: ⌘,.
             if let comma = NSEvent.keyEvent(
                 with: .keyDown, location: .zero, modifierFlags: .command,
