@@ -15,6 +15,9 @@ const ENCODING: [u16; 4] = [1005, 1006, 1015, 1016];
 const OTHER_MODES: [u16; 3] = [1004, 2004, 2031];
 /// The terminal reports light/dark changes as `CSI ? 997 ; 1|2 n`.
 const THEME_NOTIFY: u16 = 2031;
+const SYNCHRONIZED_OUTPUT: u16 = 2026;
+pub(super) const BEGIN_SYNC: &[u8] = b"\x1b[?2026h";
+pub(super) const END_SYNC: &[u8] = b"\x1b[?2026l";
 /// Longest unfinished sequence kept between two chunks of output.
 const CARRY: usize = 32;
 /// Primary device attributes of a VT220 with ANSI colour, as common
@@ -146,6 +149,8 @@ pub(crate) struct Emulation {
     modes: BTreeSet<u16>,
     system: Colors,
     viewer: Colors,
+    viewer_ready: bool,
+    synchronized: bool,
     carry: Vec<u8>,
 }
 
@@ -155,6 +160,8 @@ impl Emulation {
             modes: BTreeSet::new(),
             system: Colors::system_palette(scheme),
             viewer: Colors::default(),
+            viewer_ready: false,
+            synchronized: false,
             carry: Vec::new(),
         }
     }
@@ -226,6 +233,9 @@ impl Emulation {
                 };
                 match last {
                     b'h' => numbers().for_each(|mode| {
+                        if mode == SYNCHRONIZED_OUTPUT {
+                            self.synchronized = true;
+                        }
                         if let Some(group) = [&REPORTING[..], &ENCODING[..]]
                             .into_iter()
                             .find(|group| group.contains(&mode))
@@ -237,8 +247,24 @@ impl Emulation {
                         }
                     }),
                     b'l' => numbers().for_each(|mode| {
+                        if mode == SYNCHRONIZED_OUTPUT {
+                            self.synchronized = false;
+                        }
                         self.modes.remove(&mode);
                     }),
+                    b'$' if numbers().eq([SYNCHRONIZED_OUTPUT]) && *data.get(end + 1)? == b'p' => {
+                        // An attached terminal answers for itself. Before the
+                        // subscriber exists, answer for the virtual terminal.
+                        if !self.viewer_ready {
+                            let reply = if self.synchronized {
+                                b"\x1b[?2026;1$y"
+                            } else {
+                                b"\x1b[?2026;2$y"
+                            };
+                            answers.colors.extend_from_slice(reply);
+                        }
+                        return Some((end + 2, !self.viewer_ready));
+                    }
                     b'n' if numbers().eq([996]) => {
                         if let Some(scheme) = self.scheme() {
                             answers.colors.extend_from_slice(scheme.report());
@@ -299,6 +325,17 @@ impl Emulation {
         Self::mode_preamble(self.modes.iter().copied())
     }
 
+    /// Called with the same lock used to subscribe to TUI output, so a
+    /// forwarded terminal query always has a receiver.
+    pub(super) fn attach(&mut self) -> Vec<u8> {
+        self.viewer_ready = true;
+        let mut preamble = self.attach_preamble();
+        if self.synchronized {
+            preamble.extend_from_slice(BEGIN_SYNC);
+        }
+        preamble
+    }
+
     fn mode_preamble(modes: impl Iterator<Item = u16>) -> Vec<u8> {
         let modes: Vec<String> = modes.map(|mode| mode.to_string()).collect();
         if modes.is_empty() {
@@ -325,6 +362,7 @@ impl Emulation {
     }
 
     pub(crate) fn detach(&mut self) -> &'static [u8] {
+        self.viewer_ready = false;
         let had_viewer_scheme = self.viewer.scheme.is_some();
         self.viewer = Colors::default();
         // A terminal may have sent its own theme reports directly during
@@ -358,6 +396,23 @@ mod tests {
         fn output(&mut self, bytes: &[u8]) -> Vec<u8> {
             self.route(bytes).0
         }
+    }
+
+    #[test]
+    fn a_headless_tui_can_discover_synchronized_output() {
+        let mut tui = Emulation::new(Scheme::Light);
+        assert_eq!(tui.route(b"\x1b[?2026$"), (vec![], vec![]));
+        let (answer, display) = tui.route(b"p");
+        assert_eq!(answer, b"\x1b[?2026;2$y");
+        assert!(display.is_empty());
+        assert_eq!(tui.route(BEGIN_SYNC).1, BEGIN_SYNC);
+        assert_eq!(tui.route(b"\x1b[?2026$p").0, b"\x1b[?2026;1$y");
+        assert_eq!(tui.attach(), BEGIN_SYNC);
+        let (answer, display) = tui.route(b"\x1b[?2026$p\x1b[?2026l");
+        assert!(answer.is_empty());
+        assert_eq!(display, b"\x1b[?2026$p\x1b[?2026l");
+        tui.detach();
+        assert_eq!(tui.route(b"\x1b[?2026$p").0, b"\x1b[?2026;2$y");
     }
 
     #[test]

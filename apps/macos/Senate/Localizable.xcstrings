@@ -137,6 +137,23 @@
         }
       }
     },
+    "account.profile": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Profile"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "个人资料"
+          }
+        }
+      }
+    },
     "approvals.allow": {
       "extractionState": "manual",
       "localizations": {
@@ -580,23 +597,6 @@
         }
       }
     },
-    "desk.refuse_heading": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Refuse this request"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "拒绝此请求"
-          }
-        }
-      }
-    },
     "desk.confirm_refuse": {
       "extractionState": "manual",
       "localizations": {
@@ -780,6 +780,23 @@
           "stringUnit": {
             "state": "translated",
             "value": "拒绝…"
+          }
+        }
+      }
+    },
+    "desk.refuse_heading": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Refuse this request"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "拒绝此请求"
           }
         }
       }
@@ -1737,6 +1754,23 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "message.copy_code": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Copy code"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "拷贝代码"
           }
         }
       }
@@ -2736,13 +2770,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Open its terminal in Terminal (senate attach); Ctrl-] detaches"
+            "value": "Open its terminal, restoring or resuming it if needed. Ctrl-] detaches."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "在终端中打开它（senate attach）；Ctrl-] 脱离"
+            "value": "打开终端，必要时重新打开或恢复暂停的会话。Ctrl-] 脱离。"
           }
         }
       }
@@ -3308,6 +3342,40 @@
         }
       }
     },
+    "sidebar.account": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Account"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "账户"
+          }
+        }
+      }
+    },
+    "sidebar.account_hint": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Opens your account: your profile, Watch all, Settings, Refresh, About"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "打开账户：个人资料、全部查看、设置、刷新、关于"
+          }
+        }
+      }
+    },
     "sidebar.account_menu": {
       "extractionState": "manual",
       "localizations": {
@@ -3457,23 +3525,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "上一个会话"
-          }
-        }
-      }
-    },
-    "sidebar.profile_open": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%@, open your profile"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%@，打开个人资料"
           }
         }
       }

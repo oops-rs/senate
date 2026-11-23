@@ -16,6 +16,12 @@ enum Snapshot {
     static let env = "SENATE_APP_SNAPSHOT"
     /// Posted to scroll the open session's conversation to its top.
     static let scrollToTop = Notification.Name("SenateSnapshotScrollToTop")
+    /// Posted with an item's seq to scroll the open conversation to it
+    /// (its top; `userInfo["anchor"] == "bottom"`: its foot).
+    static let scrollToItem = Notification.Name("SenateSnapshotScrollToItem")
+    /// Posted to open and close the account popover at the sidebar's foot.
+    static let openAccount = Notification.Name("SenateSnapshotOpenAccount")
+    static let closeAccount = Notification.Name("SenateSnapshotCloseAccount")
     /// Posted to open every tool call's output in the open conversation.
     static let expandTools = Notification.Name("SenateSnapshotExpandTools")
 
@@ -125,12 +131,26 @@ enum Snapshot {
                 store.place = .session(working.sessionId)
                 await shot("session-working")
             }
+            // The Markdown specimen, at the top of the reply that holds it.
+            if let scratch = store.shownSessions.first(where: { $0.sessionId == "scratch-1" }) {
+                store.place = .session(scratch.sessionId)
+                try? await Task.sleep(for: .seconds(1.5))
+                NotificationCenter.default.post(name: scrollToItem, object: UInt64(4))
+                await shot("markdown")
+                NotificationCenter.default.post(name: scrollToItem, object: UInt64(4), userInfo: ["anchor": "bottom"])
+                await shot("markdown-end")
+            }
             if let unreadable = sessions.first(where: { !$0.readable }) {
                 store.place = .session(unreadable.sessionId)
                 await shot("session-unreadable")
             }
             store.place = .section(.senates)
             await shot("profile")
+            // The account popover, opened from the foot.
+            NotificationCenter.default.post(name: openAccount, object: nil)
+            try? await Task.sleep(for: .milliseconds(800))
+            await capture(dir.appendingPathComponent("\(prefix)account.png")) { isMain($0) }
+            NotificationCenter.default.post(name: closeAccount, object: nil)
             // Settings, in its own window, opened as a person would: ⌘,.
             if let comma = NSEvent.keyEvent(
                 with: .keyDown, location: .zero, modifierFlags: .command,

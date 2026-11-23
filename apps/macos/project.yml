@@ -7,11 +7,17 @@ options:
   deploymentTarget:
     macOS: "26.0"
   createIntermediateGroups: true
+# swift-markdown (Apache-2.0): the CommonMark/GFM parser behind messages'
+# Markdown (MarkdownRenderer.swift); swift-cmark comes with it.
+packages:
+  swift-markdown:
+    url: https://github.com/swiftlang/swift-markdown
+    exactVersion: 0.9.0
 settings:
   base:
     # The app's version: the workspace's (Cargo.toml `[workspace.package]
     # version`). scripts/build-core.sh fails the build when they differ.
-    MARKETING_VERSION: "0.10.0"
+    MARKETING_VERSION: "0.11.0"
     CURRENT_PROJECT_VERSION: "1"
     SWIFT_VERSION: "6.0"
     SWIFT_STRICT_CONCURRENCY: complete
@@ -58,6 +64,8 @@ targets:
     platform: macOS
     dependencies:
       - target: SenateCore
+      - package: swift-markdown
+        product: Markdown
     sources:
       - path: Senate
         excludes:

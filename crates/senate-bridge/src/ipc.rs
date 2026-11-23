@@ -669,9 +669,30 @@ pub struct PauseReply {
     pub waited_secs: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AttachTarget {
+    Session {
+        session_id: String,
+    },
+    Senator {
+        senator: senate_core::alias::AliasName,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachInfo {
+    pub session_id: String,
+    pub primary: SenatorName,
+    pub tty: Option<PathBuf>,
+    pub paused: bool,
+}
+
 /// What [`Request::Resume`] did.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResumeReply {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     pub senator: SenatorName,
     pub committee: CommitteeId,
     /// The checkpoint the resumed note points at.
@@ -718,6 +739,8 @@ pub struct TimelineReply {
     pub session_id: String,
     pub runtime: crate::session::Runtime,
     pub available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<TimelineUnavailable>,
     pub items: Vec<TimelineItem>,
     pub first_seq: Option<u64>,
     pub last_seq: Option<u64>,
@@ -725,6 +748,13 @@ pub struct TimelineReply {
     pub has_newer: bool,
     /// This daemon observed a prompt hook and has yet to observe its turn end.
     pub working: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimelineUnavailable {
+    UnsupportedSchema,
+    TemporarilyUnreadable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -761,6 +791,8 @@ pub enum TimelineKind {
         call_id: String,
         name: String,
         status: TimelineToolStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
         detail: TimelineToolDetail,
     },
     Todo {
@@ -939,6 +971,11 @@ pub enum Request {
     /// operator's: the CLI only.
     PruneHosts,
     /// Resolve a locally hosted terminal for the person attaching to it.
+    /// Look up a hosted session without starting its terminal.
+    AttachInfo {
+        #[serde(flatten)]
+        target: AttachTarget,
+    },
     Attach {
         senator: AliasName,
     },

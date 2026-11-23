@@ -309,6 +309,15 @@ async fn hosted_sessions_show_their_waiting_prompt_and_stop_and_restore() {
     assert_eq!(attach.argv, ["senate", "attach", "refund-v2::lead"]);
     assert!(attach.shell_line.starts_with("SENATE_HOME="));
     assert!(attach.shell_line.ends_with("senate attach refund-v2::lead"));
+    let exact = core.attach_terminal_for_session(lead.session_id.clone());
+    assert_eq!(
+        exact.argv,
+        [
+            "senate",
+            "attach",
+            &format!("--session={}", lead.session_id)
+        ]
+    );
     assert_eq!(core.watch_terminal().argv, ["senate", "session", "watch"]);
 
     // The prompt is a permission prompt: the app may answer it, as the
@@ -462,7 +471,7 @@ async fn sessions_by_committee_their_timelines_and_the_composer() {
         .iter()
         .find(|x| x.display_name == "oncall")
         .unwrap();
-    assert!(!oncall.readable, "agy keeps no transcript Senate reads");
+    assert!(oncall.readable, "Antigravity timelines are supported");
     // A request put to alice is hers to decide; a plain question is not.
     let request = s.inbox.iter().find(|t| t.root == 210).unwrap();
     assert!(request.to_decide);
@@ -482,10 +491,10 @@ async fn sessions_by_committee_their_timelines_and_the_composer() {
         .unwrap();
     assert!(!older.has_older);
     assert_eq!(older.last_seq.unwrap() + 1, page.first_seq.unwrap());
-    // agy: nothing to read, and why.
+    // This Antigravity fixture has not created a conversation database yet.
     let none = core.timeline("ops-1".into(), None, None).await.unwrap();
     assert!(!none.available);
-    assert!(none.unavailable.unwrap().contains("agy"));
+    assert!(none.unavailable.unwrap().contains("No transcript"));
 
     // Watched, the running call completes in place, then more is said.
     let seen = Arc::new(Timeline::default());

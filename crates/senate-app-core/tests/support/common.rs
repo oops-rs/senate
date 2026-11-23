@@ -1325,6 +1325,7 @@ fn timeline_page(
         session_id: session_id.to_string(),
         runtime,
         available: all.is_some(),
+        unavailable_reason: None,
         has_older: first.is_some_and(|f| all_first.is_some_and(|a| a < f)),
         has_newer: last.is_some_and(|l| all_last.is_some_and(|a| a > l)),
         first_seq: first,
@@ -1581,6 +1582,7 @@ fn timelines(w: &mut World) {
         call_id: id.into(),
         name: name.into(),
         status,
+        output: None,
         detail,
     };
     let shell = |command: &str, output: Option<&str>, exit: Option<i64>| D::Shell {
@@ -1712,6 +1714,14 @@ fn timelines(w: &mut World) {
             },
         ),
     );
+    // Reasoning with no text is dropped; this one goes inside the search,
+    // which has no output of its own.
+    push(&mut lead, 27, think("  "));
+    push(
+        &mut lead,
+        27,
+        think("Where is the threshold decided? Search before editing."),
+    );
     push(
         &mut lead,
         27,
@@ -1732,6 +1742,11 @@ fn timelines(w: &mut World) {
         old: None,
         new: None,
     }));
+    push(
+        &mut lead,
+        22,
+        think("The edit compiles; run the whole crate's tests, not just the policy module."),
+    );
     push(
         &mut lead,
         22,
@@ -1759,6 +1774,12 @@ fn timelines(w: &mut World) {
             kind: Some("question".into()),
             text: "which env runs the migration — staging or prod-eu?".into(),
         },
+    );
+    // Reasoning before a reply, with no call between: behind "Thinking".
+    push(
+        &mut lead,
+        19,
+        think("Tests pass. codex asked about the environment; answer that after publishing."),
     );
     push(
         &mut lead,
@@ -1908,6 +1929,226 @@ fn timelines(w: &mut World) {
         vec![
             item(1, 131, user("Try the new parser on the fixtures.")),
             item(2, 130, said("All 212 fixtures parse.")),
+            item(
+                3,
+                129,
+                user("Show me every Markdown element you can write."),
+            ),
+            // One reply with every element the page draws, English and
+            // Chinese: the renderer's specimen.
+            item(4, 128, said(include_str!("specimen.md"))),
         ],
     );
+}
+
+/// A long, busy session shaped like a real chair's: `n` items of what a
+/// coding agent does (the person's request, reasoning, shell calls with
+/// small and 64 KiB outputs, edits, Markdown-heavy replies, to-do lists),
+/// and growth that keeps it busy while watched: a running call whose
+/// output grows in place, then completes, then the next. `FAKE_BIG=N` in
+/// the fake daemon; what `SENATE_APP_PERF=session` measures.
+pub fn marathon(w: &mut World, n: usize) {
+    use senate_bridge::ipc::{
+        LocalSessionRow, TimelineTodo, TimelineToolDetail as D, TimelineToolStatus as S,
+    };
+    let id = "marathon-1";
+    w.sessions.local_rows.push(LocalSessionRow {
+        session_id: id.into(),
+        primary: path("claude-6d1e0f2a-3b4c-4d5e-8f6a-7b8c9d0e1f2a"),
+        alias: Some(path("marathon")),
+        committee: Some(committee()),
+        chair: false,
+        shown_name: Some("marathon".into()),
+        runtime: Runtime::Claude,
+        dir: "/Users/alice/dev/senate".into(),
+        branch: Some("feat/app-sessions".into()),
+        working: true,
+        last_activity: Utc::now(),
+        title: Some("A long chair session".into()),
+    });
+    let big: String = (0..900)
+        .map(|i| format!("   Compiling crate-{i:04} v0.1.0 (/Users/alice/dev/senate/vendor/crate-{i:04}) [{}]\n", "=".repeat(i % 7)))
+        .collect();
+    let reply = |i: usize| {
+        format!(
+            "## Step {i}\n\nThe change to `link.rs` is in: the **sessions** re-read is coalesced, and the watch keeps its *place*. What I checked:\n\n1. `cargo test -p senate-app-core` passes ({} tests)\n2. the fake daemon's tour runs\n   - light and dark\n   - English and 中文\n3. clippy is clean\n\n```rust\nfn coalesce(&self) {{\n    if self.due.swap(true, Ordering::AcqRel) {{ return; }}\n}}\n```\n\n> Next: measure the scroll, then the watch.\n\nSee [the README](https://example.com/readme) for the numbers.",
+            40 + i % 9
+        )
+    };
+    let shell = |cmd: String, out: Option<String>, status: S| TimelineKind::ToolCall {
+        call_id: format!("c-{cmd}"),
+        name: "Bash".into(),
+        status,
+        output: None,
+        detail: D::Shell {
+            command: cmd,
+            cwd: Some("/Users/alice/dev/senate".into()),
+            output: out,
+            exit_code: Some(0),
+        },
+    };
+    let mut items = Vec::with_capacity(n);
+    let mut seq = 0u64;
+    let mut push = |items: &mut Vec<TimelineItem>, kind: TimelineKind| {
+        seq += 1;
+        items.push(item(seq, 0, kind));
+    };
+    let mut i = 0;
+    while items.len() < n {
+        match i % 8 {
+            0 => push(
+                &mut items,
+                TimelineKind::UserMessage {
+                    text: format!("Now step {i}: tighten the watch and measure it."),
+                },
+            ),
+            1 => push(
+                &mut items,
+                TimelineKind::Reasoning {
+                    text: format!(
+                        "Step {i}: read link.rs first, then the store; the cost is in the re-read."
+                    ),
+                },
+            ),
+            2 => push(
+                &mut items,
+                shell(
+                    format!("rg -n coalesce crates/{i}"),
+                    Some("crates/senate-app-core/src/link.rs:412: fn sessions_soon".into()),
+                    S::Completed,
+                ),
+            ),
+            3 => push(
+                &mut items,
+                shell(
+                    format!("cargo build -vv #{i}"),
+                    Some(if i % 24 == 3 {
+                        big.clone()
+                    } else {
+                        "Finished `dev` profile in 4.2s".into()
+                    }),
+                    S::Completed,
+                ),
+            ),
+            4 => push(
+                &mut items,
+                TimelineKind::ToolCall {
+                    call_id: format!("e-{i}"),
+                    name: "Edit".into(),
+                    status: S::Completed,
+                    output: None,
+                    detail: D::Edit {
+                        path: "crates/senate-app-core/src/link.rs".into(),
+                        unified_diff: Some(format!(
+                            "@@ -1,3 +1,4 @@\n fn a() {{}}\n-fn b{i}() {{}}\n+fn b{i}() {{ todo!() }}\n+fn c{i}() {{}}\n"
+                        )),
+                        old: None,
+                        new: None,
+                    },
+                },
+            ),
+            5 => push(
+                &mut items,
+                TimelineKind::AssistantMessage { text: reply(i) },
+            ),
+            6 if i % 16 == 6 => push(
+                &mut items,
+                TimelineKind::Todo {
+                    items: vec![
+                        TimelineTodo {
+                            text: "Measure".into(),
+                            status: "completed".into(),
+                        },
+                        TimelineTodo {
+                            text: "Fix".into(),
+                            status: "in_progress".into(),
+                        },
+                        TimelineTodo {
+                            text: "Measure again".into(),
+                            status: "pending".into(),
+                        },
+                    ],
+                },
+            ),
+            _ => push(
+                &mut items,
+                TimelineKind::AssistantMessage {
+                    text: format!("Step {i} done."),
+                },
+            ),
+        }
+        i += 1;
+    }
+    // Growth: a call that runs, its output growing in place, then done;
+    // then a reply; again.
+    let mut growth = std::collections::VecDeque::new();
+    let mut next = seq;
+    for round in 0..400 {
+        next += 1;
+        let call = next;
+        let mut out = String::new();
+        for step in 0..4 {
+            out.push_str(&format!("test step {round}.{step} ... ok\n"));
+            growth.push_back(Growth {
+                item: item(
+                    call,
+                    0,
+                    shell(
+                        format!("cargo test #{round}"),
+                        Some(out.clone()),
+                        S::Running,
+                    ),
+                ),
+                working: true,
+            });
+        }
+        growth.push_back(Growth {
+            item: item(
+                call,
+                0,
+                shell(format!("cargo test #{round}"), Some(out), S::Completed),
+            ),
+            working: true,
+        });
+        next += 1;
+        growth.push_back(Growth {
+            item: item(
+                next,
+                0,
+                TimelineKind::AssistantMessage { text: reply(round) },
+            ),
+            working: true,
+        });
+    }
+    w.timelines.insert(id.into(), items);
+    w.growth.insert(id.into(), growth);
+}
+
+/// `FAKE_WORKING=N` in the fake daemon: N more sessions, all working, on no
+/// committee, cycling Claude Code, Codex, Antigravity and ACP: the
+/// sidebar's working marks, to look at and to measure.
+pub fn working_sessions(w: &mut World, n: usize) {
+    use senate_bridge::ipc::LocalSessionRow;
+    let runtimes = [Runtime::Claude, Runtime::Codex, Runtime::Agy, Runtime::Acp];
+    for i in 0..n {
+        let runtime = runtimes[i % runtimes.len()];
+        let name = format!("{}-{}", runtime.as_str(), i / runtimes.len() + 1);
+        w.sessions.local_rows.push(LocalSessionRow {
+            session_id: format!("working-{i}"),
+            primary: path(&format!(
+                "{}-0000{i:04}-0000-4000-8000-000000000000",
+                runtime.as_str()
+            )),
+            alias: Some(path(&name)),
+            committee: None,
+            chair: false,
+            shown_name: Some(name),
+            runtime,
+            dir: "/Users/alice/dev/scratch".into(),
+            branch: Some("main".into()),
+            working: true,
+            last_activity: Utc::now(),
+            title: None,
+        });
+    }
 }

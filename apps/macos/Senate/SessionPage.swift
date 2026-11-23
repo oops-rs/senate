@@ -68,11 +68,9 @@ private struct SessionHeader: View {
                 if let h = s.hosted {
                     HStack(spacing: Theme.Space.s) {
                         if store.isBusy("session:\(h.label)") { ProgressView().controlSize(.small) }
-                        if h.running {
-                            Button(L("sessions.attach")) { store.attach(h) }
-                                .buttonStyle(.pill)
-                                .help(L("sessions.attach_help"))
-                        }
+                        Button(L("sessions.attach")) { store.attach(h) }
+                            .buttonStyle(.pill)
+                            .help(L("sessions.attach_help"))
                         SessionActions(store: store, hosted: h, style: .buttons)
                     }
                     .disabled(store.isBusy("session:\(h.label)") || !store.state.online)
@@ -241,7 +239,9 @@ private struct WorkingRing: View {
 
 /// A session's one leading mark: its runtime glyph, carrying its status.
 /// Needs you: the glyph in the attention colour with a dot at its corner.
-/// Working: a ring turning around it. Unread: an accent dot at its corner.
+/// Working: the glyph's own frame carries the progress, a segment of its
+/// outline travelling round it (WorkingRuntimeMark). Unread: an accent dot
+/// at its corner.
 /// Idle: the glyph as it is. Paused: dimmed, with a pause badge. Stopped:
 /// faint. The names after it line up in one column.
 struct SessionMark: View {
@@ -249,14 +249,15 @@ struct SessionMark: View {
     let status: SessionStatus
 
     var body: some View {
-        RuntimeMark(runtime: runtime, tint: tint)
+        Group {
+            if status == .working {
+                WorkingRuntimeMark(runtime: runtime)
+            } else {
+                RuntimeMark(runtime: runtime, tint: tint)
+            }
+        }
             .opacity(status == .stopped ? 0.4 : status == .paused ? 0.6 : 1)
             .frame(width: 20, height: 20)
-            .overlay {
-                if status == .working {
-                    TurningRing(size: 20, width: 1.4)
-                }
-            }
             .overlay(alignment: .topTrailing) { badge.offset(x: 2, y: -1) }
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("\(runtime), \(status.label)")
@@ -289,24 +290,6 @@ struct SessionMark: View {
         Circle().fill(color)
             .frame(width: 7, height: 7)
             .overlay { Circle().stroke(Theme.sidebar, lineWidth: 1.5) }
-    }
-}
-
-/// A ring that turns while a session works, around its mark.
-struct TurningRing: View {
-    var size: CGFloat = 9
-    var width: CGFloat = 1.6
-    @State private var turning = false
-
-    var body: some View {
-        Circle()
-            .trim(from: 0, to: 0.3)
-            .stroke(Theme.primary, style: StrokeStyle(lineWidth: width, lineCap: .round))
-            .frame(width: size, height: size)
-            .rotationEffect(.degrees(turning ? 360 : 0))
-            .animation(.linear(duration: 1.1).repeatForever(autoreverses: false), value: turning)
-            .onAppear { turning = true }
-            .accessibilityHidden(true)
     }
 }
 
@@ -368,16 +351,28 @@ private struct SessionConversation: View {
             .padding(.top, Theme.Space.s)
             .padding(.bottom, Theme.Space.xl)
             // Shorter than the view, it starts at the top all the same.
-            .frame(maxWidth: .infinity, minHeight: geometry.size.height, alignment: .top)
+            // Only for a short conversation: a minimum height makes the lazy
+            // stack estimate its whole height, which a long one pays for on
+            // every layout.
+            .frame(maxWidth: .infinity, minHeight: (t?.rows.count ?? 0) < 24 ? geometry.size.height : nil,
+                   alignment: .top)
         }
         // Opens at the foot, and stays there as items arrive while you are
         // there; scrolled up, what you read stays put.
         .defaultScrollAnchor(.bottom)
         .defaultScrollAnchor(.bottom, for: .sizeChanges)
         .scrollPosition($position)
+        .onReceive(NotificationCenter.default.publisher(for: Perf.scrollToRow)) { note in
+            if let id = note.object as? UInt64 { position.scrollTo(id: id, anchor: .center) }
+        }
         #if DEBUG
         // The snapshot tour scrolls to the top, to check that reading the
         // page before keeps what is on screen where it is.
+        .onReceive(NotificationCenter.default.publisher(for: Snapshot.scrollToItem)) { note in
+            guard let seq = note.object as? UInt64 else { return }
+            let bottom = (note.userInfo?["anchor"] as? String) == "bottom"
+            position.scrollTo(id: seq, anchor: bottom ? .bottom : .top)
+        }
         .onReceive(NotificationCenter.default.publisher(for: Snapshot.scrollToTop)) { _ in
             position.scrollTo(edge: .top)
         }
@@ -394,6 +389,7 @@ private struct SessionConversation: View {
         guard t.firstSeq != first else { return }
         var still = Transaction()
         still.disablesAnimations = true
+        // The row that was first is on screen: hold it where it is.
         withTransaction(still) { position.scrollTo(id: first, anchor: .top) }
     }
 
@@ -419,9 +415,12 @@ private struct SessionConversation: View {
             if t.items.isEmpty {
                 Nothing(text: L("session.empty"), hosted: nil, store: store)
             }
-            ForEach(t.items) { item in
-                EntryView(store: store, entry: item, committee: session.committee)
-                    .id(item.seq)
+            ForEach(t.rows) { row in
+                // Equatable: a row redraws only when it changed, not when
+                // another item, or the sidebar's data, did.
+                RowView(store: store, row: row, committee: session.committee)
+                    .equatable()
+                    .id(row.id)
             }
             if t.working {
                 HStack(spacing: Theme.Space.s) {
@@ -453,7 +452,7 @@ private struct Nothing: View {
                 .font(Theme.Fonts.text)
                 .foregroundStyle(Theme.onSurfaceVariant)
                 .fixedSize(horizontal: false, vertical: true)
-            if let hosted, hosted.running {
+            if let hosted {
                 Button(L("sessions.attach")) { store.attach(hosted) }
                     .buttonStyle(.pill(.filled))
             }
@@ -462,14 +461,18 @@ private struct Nothing: View {
     }
 }
 
-/// One item of the conversation.
-private struct EntryView: View {
+/// One row of the conversation.
+private struct RowView: View, Equatable {
     let store: CoreStore
-    let entry: TimelineEntry
+    let row: ConversationRow
     let committee: String?
 
+    nonisolated static func == (a: RowView, b: RowView) -> Bool {
+        a.row == b.row && a.committee == b.committee
+    }
+
     var body: some View {
-        switch entry.body {
+        switch row.kind {
         case let .user(text):
             Text(verbatim: text)
                 .font(Theme.Fonts.reading)
@@ -484,11 +487,14 @@ private struct EntryView: View {
                 .frame(maxWidth: .infinity, alignment: .trailing)
                 .padding(.top, Theme.Space.s)
         case let .assistant(text):
-            MarkdownText(text: text)
-        case let .reasoning(text):
-            Reasoning(text: text)
+            VStack(alignment: .leading, spacing: Theme.Space.xs) {
+                if !row.thinking.isEmpty {
+                    Thinking(texts: row.thinking)
+                }
+                MessageText(text: text, committee: committee)
+            }
         case let .tool(call):
-            ToolRow(call: call)
+            ToolRow(call: call, thinking: row.thinking)
         case let .todo(items):
             TodoList(items: items)
         case let .notice(level, text):
@@ -501,9 +507,10 @@ private struct EntryView: View {
     }
 }
 
-/// Its reasoning: one dimmed line, folded; open, the whole of it.
-private struct Reasoning: View {
-    let text: String
+/// The reasoning before a reply: a small "Thinking" disclosure, folded;
+/// open, the reasoning, dimmed.
+private struct Thinking: View {
+    let texts: [String]
     @State private var open = false
 
     var body: some View {
@@ -511,15 +518,13 @@ private struct Reasoning: View {
             Button {
                 open.toggle()
             } label: {
-                HStack(spacing: 6) {
+                HStack(spacing: 5) {
                     Image(systemName: open ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 9, weight: .semibold))
-                        .frame(width: 12)
-                    Text(verbatim: open ? L("session.reasoning") : firstLine(text))
-                        .lineLimit(1)
-                        .italic()
+                        .font(.system(size: 8, weight: .semibold))
+                        .frame(width: 10)
+                    Text(verbatim: L("session.reasoning"))
                 }
-                .font(Theme.Fonts.row)
+                .font(Theme.Fonts.meta)
                 .foregroundStyle(Theme.onSurfaceVariant)
                 .contentShape(Rectangle())
             }
@@ -527,14 +532,24 @@ private struct Reasoning: View {
             .accessibilityLabel(L("session.reasoning"))
             .accessibilityValue(open ? L("a11y.expanded") : L("a11y.collapsed"))
             if open {
-                Text(verbatim: text)
-                    .font(Theme.Fonts.text)
-                    .foregroundStyle(Theme.onSurfaceVariant)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.leading, 18)
+                ReasoningText(texts: texts)
+                    .padding(.leading, 15)
             }
         }
+    }
+}
+
+/// Reasoning as read: dimmed, italic, one paragraph per step.
+private struct ReasoningText: View {
+    let texts: [String]
+
+    var body: some View {
+        Text(verbatim: texts.joined(separator: "\n\n"))
+            .font(Theme.Fonts.row)
+            .italic()
+            .foregroundStyle(Theme.onSurfaceVariant)
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -542,11 +557,13 @@ private struct Reasoning: View {
 /// went. It opens to what it printed, or to its diff.
 private struct ToolRow: View {
     let call: ToolCall
+    /// The reasoning that led to the call, shown inside it, above its output.
+    var thinking: [String] = []
     @State private var open = false
     @State private var hovered = false
 
     var body: some View {
-        let more = call.output != nil || call.diff != nil
+        let more = call.output != nil || call.diff != nil || !thinking.isEmpty
         VStack(alignment: .leading, spacing: Theme.Space.xs) {
             Button {
                 if more { open.toggle() }
@@ -589,12 +606,19 @@ private struct ToolRow: View {
             .accessibilityLabel("\(call.name): \(call.title)")
             .accessibilityValue(call.statusLabel)
             .accessibilityAddTraits(more ? .isButton : [])
+            .onReceive(NotificationCenter.default.publisher(for: Perf.openCall)) { note in
+                if (note.object as? String) == call.callId { open = true }
+            }
             #if DEBUG
             .onReceive(NotificationCenter.default.publisher(for: Snapshot.expandTools)) { _ in
                 if more { open = true }
             }
             #endif
             if open {
+                if !thinking.isEmpty {
+                    ReasoningText(texts: thinking)
+                        .padding(.horizontal, Theme.Space.m)
+                }
                 if let diff = call.diff {
                     DiffView(diff: diff)
                 } else if let output = call.output {

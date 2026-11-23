@@ -15,6 +15,9 @@ mod cli_legacy;
 mod cli_secretary;
 
 use std::io::{Read, Write};
+#[path = "cli_completion.rs"]
+mod completion;
+use clap_complete::engine::ArgValueCandidates;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -97,7 +100,7 @@ enum MemoryCmd {
         #[arg(required = true)]
         seqs: Vec<u64>,
         /// The committee (default: the one `senate where` shows for this directory).
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(completion::committees))]
         committee: Option<CommitteeId>,
     },
     /// Correct a point to read <text>.
@@ -108,7 +111,7 @@ enum MemoryCmd {
         #[arg(required = true)]
         text: Vec<String>,
         /// The committee (default: the one `senate where` shows for this directory).
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(completion::committees))]
         committee: Option<CommitteeId>,
     },
 }
@@ -140,6 +143,7 @@ enum Cmd {
                                  Name a session from another terminal")]
     Join {
         /// The committee (default: derived from repository and branch).
+        #[arg(add = ArgValueCandidates::new(completion::committees))]
         committee: Option<CommitteeId>,
         /// The alias sessions in this worktree are offered, e.g. reviewer;
         /// also given to the calling coding session.
@@ -224,7 +228,7 @@ enum Cmd {
   senate thread 12            Read one of the threads listed")]
     Inbox {
         /// The committee (default: the one `senate where` shows for this directory).
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(completion::committees))]
         committee: Option<CommitteeId>,
         /// Also list threads whose last word is an answer (they wait on no
         /// one) and seated senators with nothing going on.
@@ -268,7 +272,7 @@ stdin.")]
         #[arg(required = true, num_args = 1..)]
         text: Vec<String>,
         /// The committee (default: the one `senate where` shows for this directory).
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(completion::committees))]
         committee: Option<CommitteeId>,
         /// Stay until an answer arrives in the thread, or it is escalated to
         /// you (default 120 seconds), and print it; without it, return at once.
@@ -297,7 +301,7 @@ stdin.")]
         #[arg(required = true, num_args = 1..)]
         text: Vec<String>,
         /// The committee (default: the one `senate where` shows for this directory).
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(completion::committees))]
         committee: Option<CommitteeId>,
         /// Print the daemon's result as JSON.
         #[arg(long)]
@@ -317,7 +321,7 @@ stdin.")]
         #[arg(required = true, num_args = 1..)]
         text: Vec<String>,
         /// The committee (default: the one `senate where` shows for this directory).
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(completion::committees))]
         committee: Option<CommitteeId>,
         /// Stay until the agent answers or escalates to you in that thread
         /// (default 120 seconds) and print it; without it, return at once.
@@ -346,7 +350,7 @@ stdin.")]
         #[arg(required = true, num_args = 1..)]
         text: Vec<String>,
         /// The committee (default: the one `senate where` shows for this directory).
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(completion::committees))]
         committee: Option<CommitteeId>,
         /// Print the daemon's result as JSON.
         #[arg(long)]
@@ -376,7 +380,7 @@ stdin.")]
         #[arg(long)]
         all: bool,
         /// The committee (default: the one `senate where` shows for this directory).
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(completion::committees))]
         committee: Option<CommitteeId>,
         /// Print the daemon's result as JSON.
         #[arg(long)]
@@ -390,7 +394,7 @@ stdin.")]
         /// A seq in the thread.
         seq: u64,
         /// The committee (default: the one `senate where` shows for this directory).
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(completion::committees))]
         committee: Option<CommitteeId>,
         /// Print the daemon's result as JSON.
         #[arg(long)]
@@ -401,7 +405,7 @@ stdin.")]
         /// The thread's root seq.
         thread: u64,
         /// The committee (default: the one `senate where` shows for this directory).
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(completion::committees))]
         committee: Option<CommitteeId>,
     },
     /// Run the Senate MCP server over stdio.
@@ -468,7 +472,7 @@ stdin.")]
         /// The new role name.
         alias: SenatorName,
         /// Committee to rename the senator on, if omitted from the senator.
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(completion::committees))]
         committee: Option<CommitteeId>,
     },
     /// Check the Codex app-server connection.
@@ -507,7 +511,7 @@ stdin.")]
     /// Starts the Claude Code, Codex or Antigravity (agy) TUI in a
     /// Senate-owned terminal,
     /// seats it on the committee and prints its senator name. Open its
-    /// terminal with `senate attach`.
+    /// terminal with `--attach` or `senate attach`.
     #[command(after_help = "Examples:
   senate spawn claude                    On this directory's committee
   senate spawn codex --alias reviewer    With a name to address it by
@@ -525,14 +529,14 @@ stdin.")]
         #[arg(long)]
         attempt_id: Option<String>,
         /// The coding agent to start. Must agree with --profile if both are given.
-        #[arg(required_unless_present = "profile")]
+        #[arg(value_enum, required_unless_present = "profile")]
         runtime: Option<HostedRuntime>,
         /// Use a named launch profile from this machine. See `senate profiles`.
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(completion::profiles))]
         profile: Option<String>,
         /// The committee to seat it on (default: the one `senate where`
         /// shows for this directory).
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(completion::committees))]
         committee: Option<CommitteeId>,
         /// A role name such as reviewer. Defaults to the profile name or a runtime name and counter.
         #[arg(long)]
@@ -554,10 +558,15 @@ stdin.")]
         /// Like --prompt, read from a file.
         #[arg(long, value_name = "PATH")]
         prompt_file: Option<PathBuf>,
+        /// Attach to the new terminal after it is ready. Requires a TTY.
+        #[arg(short = 'a', long)]
+        attach: bool,
         #[command(flatten)]
         model: ModelArgs,
     },
-    /// Open a hosted senator's terminal. Press Ctrl-] to detach.
+    /// Open a hosted terminal, starting it if needed.
+    ///
+    /// Stopped sessions are restored and paused ones resumed. Press Ctrl-] to detach.
     ///
     /// After /new or /clear in hosted Codex, Senate still delivers to the
     /// original thread, which the TUI no longer shows. Exit that TUI and use
@@ -570,12 +579,16 @@ stdin.")]
     ///
     /// With --read-only the terminal is only shown: nothing typed reaches
     /// the session, its size is left as it is, and any number of people can
-    /// look at once, beside whoever is attached. Ctrl-] leaves.
+    /// look at once, beside whoever is attached. It never starts a session. Ctrl-] leaves.
     Attach {
         /// The senator's primary name or alias (`committee::alias` for an
-        /// alias on one committee). Without one, choose a running session
+        /// alias on one committee). Without one, choose a hosted session
         /// from a list.
+        #[arg(add = ArgValueCandidates::new(completion::sessions))]
         senator: Option<AliasName>,
+        /// Select an exact native session ID (used by the app).
+        #[arg(long, hide = true, conflicts_with = "senator")]
+        session: Option<String>,
         /// Look without typing: every key but Ctrl-] is dropped.
         #[arg(long)]
         read_only: bool,
@@ -619,7 +632,7 @@ struct ModelArgs {
     model: Option<String>,
     /// Reasoning effort. Codex: low, medium, high, xhigh.
     /// Claude Code and agy also accept max.
-    #[arg(long)]
+    #[arg(long, add = ArgValueCandidates::new(completion::efforts))]
     effort: Option<String>,
 }
 
@@ -635,7 +648,7 @@ struct DisplayScope {
     #[arg(long, conflicts_with = "committee")]
     global: bool,
     /// Show this committee. Defaults to the current worktree's committee.
-    #[arg(long)]
+    #[arg(long, add = ArgValueCandidates::new(completion::committees))]
     committee: Option<CommitteeId>,
 }
 
@@ -682,7 +695,7 @@ enum DebugCmd {
         /// The event's seq.
         seq: u64,
         /// The committee (default: the one `senate where` shows for this directory).
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(completion::committees))]
         committee: Option<CommitteeId>,
         /// Print the daemon's result as JSON.
         #[arg(long)]
@@ -737,7 +750,7 @@ enum SessionCmd {
   senate session stop --all --force  Stop all, even if typed into lately")]
     Stop {
         /// Sessions by name (`committee::alias`, an alias, or senator name).
-        #[arg(required_unless_present_any = ["idle", "all"])]
+        #[arg(required_unless_present_any = ["idle", "all"], add = ArgValueCandidates::new(completion::sessions))]
         names: Vec<String>,
         /// Every running session nobody is attached to.
         #[arg(long, conflicts_with_all = ["names", "all"])]
@@ -765,6 +778,7 @@ enum SessionCmd {
     Approve {
         /// The senator's alias (`committee::alias` for one on one
         /// committee) or primary name.
+        #[arg(add = ArgValueCandidates::new(completion::sessions))]
         senator: AliasName,
         /// Allow it this once (the default).
         #[arg(long, conflicts_with_all = ["always", "deny"])]
@@ -829,9 +843,11 @@ enum SessionCmd {
     Restore {
         /// The senator's primary name or alias (`committee::alias` for an
         /// alias on one committee).
+        #[arg(add = ArgValueCandidates::new(completion::sessions))]
         senator: AliasName,
-        /// Each given replaces the recorded one, for this restore and
-        /// those after it.
+        /// Attach to the new terminal after it is ready. Requires a TTY.
+        #[arg(short = 'a', long)]
+        attach: bool,
         #[command(flatten)]
         model: ModelArgs,
     },
@@ -853,6 +869,7 @@ enum SessionCmd {
     Replace {
         /// The senator's alias (`committee::alias` for one on one
         /// committee) or primary name.
+        #[arg(add = ArgValueCandidates::new(completion::sessions))]
         senator: AliasName,
         /// A first instruction for the new session, sent once the seat is
         /// handed over, as an ordinary Senate request from you.
@@ -862,6 +879,9 @@ enum SessionCmd {
         #[arg(long, value_name = "PATH")]
         prompt_file: Option<PathBuf>,
         /// Each given replaces the old session's for the new one.
+        /// Attach to the new terminal after it is ready. Requires a TTY.
+        #[arg(short = 'a', long)]
+        attach: bool,
         #[command(flatten)]
         model: ModelArgs,
     },
@@ -892,7 +912,7 @@ enum SenatorCmd {
         /// The alias, e.g. reviewer.
         alias: SenatorName,
         /// The committee (default: the session's current committee).
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(completion::committees))]
         committee: Option<CommitteeId>,
         /// Full session ID. Defaults to the calling coding session.
         #[arg(long)]
@@ -920,7 +940,7 @@ enum SenatorCmd {
         /// The duty. An empty string clears it.
         duty: String,
         /// The committee (default: the session's current committee).
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(completion::committees))]
         committee: Option<CommitteeId>,
         /// Full session ID. Defaults to the calling coding session.
         #[arg(long)]
@@ -932,12 +952,13 @@ enum SenatorCmd {
 #[derive(Args)]
 struct PauseSelection {
     /// Sessions by name (`committee::alias`, an alias, or senator name).
+    #[arg(add = ArgValueCandidates::new(completion::sessions))]
     names: Vec<String>,
     /// Every one.
     #[arg(long, conflicts_with_all = ["names", "committee"])]
     all: bool,
     /// Every one on this committee.
-    #[arg(long, conflicts_with = "names")]
+    #[arg(long, conflicts_with = "names", add = ArgValueCandidates::new(completion::committees))]
     committee: Option<CommitteeId>,
 }
 
@@ -962,6 +983,12 @@ struct SeatArgs {
 
 #[derive(Subcommand)]
 enum SetupCmd {
+    /// Print shell completion registration for sourcing.
+    Completions {
+        /// Shell to register with (zsh, bash or fish).
+        #[arg(value_enum)]
+        shell: completion::Shell,
+    },
     /// Write the profile for using Senate alone on this machine.
     ///
     /// Writes `senate.toml` in the Senate home, with a local top Senate
@@ -1784,22 +1811,121 @@ async fn resume_sessions(
     Ok(())
 }
 
-/// `senate attach` with no name: the running hosted sessions, in the
-/// picker; `None` when the person cancels.
-fn pick_running_session() -> anyhow::Result<Option<SenatorName>> {
+/// Return the picker choice's native session, including paused and stopped rows.
+fn pick_attach_session() -> anyhow::Result<Option<ipc::AttachTarget>> {
     let paths = Paths::from_env()?;
     let rt = runtime(false)?;
-    let reply: crate::ipc::SessionsReply = rt.block_on(daemon_call(&paths, &Request::Sessions))?;
-    let running: Vec<crate::ipc::SessionRow> =
-        reply.rows.into_iter().filter(|r| r.is_running()).collect();
+    let reply: ipc::SessionsReply = rt.block_on(daemon_call(&paths, &Request::Sessions))?;
     anyhow::ensure!(
-        !running.is_empty(),
-        "no hosted session is running; `senate spawn` starts one, `senate session list` lists them"
+        !reply.rows.is_empty(),
+        "no hosted sessions; use senate spawn to start one"
     );
-    rt.block_on(crate::host::pick_session(
-        &running,
+    let chosen = rt.block_on(crate::host::pick_session(
+        &reply.rows,
         "Attach to which session?",
-    ))
+    ))?;
+    Ok(chosen
+        .and_then(|primary| reply.rows.into_iter().find(|row| row.primary == primary))
+        .map(|row| ipc::AttachTarget::Session {
+            session_id: row.session_id,
+        }))
+}
+
+fn require_attach_terminal() -> anyhow::Result<()> {
+    use std::io::IsTerminal as _;
+    anyhow::ensure!(
+        std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
+        "attach needs a terminal on stdin and stdout"
+    );
+    Ok(())
+}
+
+async fn attach_launched(paths: &Paths, session_id: String, label: &str) -> anyhow::Result<()> {
+    let info: ipc::AttachInfo = daemon_call(
+        paths,
+        &Request::AttachInfo {
+            target: ipc::AttachTarget::Session { session_id },
+        },
+    )
+    .await?;
+    let tty = info
+        .tty
+        .context("the session launched but its terminal is no longer running")?;
+    crate::host::attach(&tty, paths, label).await
+}
+
+async fn attach_target(
+    paths: &Paths,
+    target: ipc::AttachTarget,
+    label: Option<String>,
+    read_only: bool,
+) -> anyhow::Result<()> {
+    use std::io::Write as _;
+    let info: ipc::AttachInfo = daemon_call(paths, &Request::AttachInfo { target }).await?;
+    let label = label.unwrap_or_else(|| info.primary.to_string());
+    if let Some(tty) = info.tty {
+        if read_only {
+            return crate::host::view::watch_one(crate::host::view::Session {
+                title: label.clone(),
+                key: label.clone(),
+                alias: label,
+                attached: false,
+                tty,
+                dim: false,
+            })
+            .await;
+        }
+        return crate::host::attach(&tty, paths, &label).await;
+    }
+    anyhow::ensure!(
+        !read_only,
+        "{label}'s terminal is not running; use senate attach {label} to bring it back"
+    );
+    require_attach_terminal()?;
+    let senator = AliasName::bare(info.primary);
+    let locale = BridgeConfig::locale_at(&paths.config());
+    let action = if info.paused {
+        locale.pick(
+            format!("正在恢复暂停的 {label}…"),
+            format!("Resuming {label}…"),
+        )
+    } else {
+        locale.pick(
+            format!("正在重新打开 {label}…"),
+            format!("Restoring {label}…"),
+        )
+    };
+    eprintln!("{action}");
+    let native = if info.paused {
+        let reply: ipc::ResumeReply = ipc::request(
+            &paths.socket(),
+            &Request::Resume { senator },
+            Duration::from_secs(1),
+            REPLACE_TIMEOUT,
+        )
+        .await?;
+        reply
+            .session_id
+            .context("the daemon did not return the resumed session ID")?
+    } else {
+        let reply: SpawnReply = ipc::request(
+            &paths.socket(),
+            &Request::Restore {
+                senator,
+                session: SessionSelector::default(),
+                model: ipc::HostedModel::default(),
+            },
+            Duration::from_secs(1),
+            crate::host::REQUEST_TIMEOUT,
+        )
+        .await?;
+        if let Some(warning) = &reply.model_warning {
+            eprintln!("{warning}");
+        }
+        reply.session_id
+    };
+    std::io::stdout().flush()?;
+    attach_launched(paths, native, &label).await
 }
 
 /// Let the person pick one of an alias's `candidates`: on a terminal,
@@ -1864,7 +1990,7 @@ fn choose_alias(
     }
 }
 
-fn launch(request: &Request, output: Output) -> anyhow::Result<()> {
+fn launch(request: &Request, output: Output, attach: bool) -> anyhow::Result<()> {
     let reply: SpawnReply = if matches!(request, Request::Spawn { .. }) {
         let paths = Paths::from_env()?;
         runtime(false)?.block_on(ipc::request_spawn(
@@ -1907,6 +2033,12 @@ fn launch(request: &Request, output: Output) -> anyhow::Result<()> {
                 ),
             )
         );
+    }
+    if attach {
+        use std::io::Write as _;
+        std::io::stdout().flush()?;
+        let paths = Paths::from_env()?;
+        return runtime(false)?.block_on(attach_launched(&paths, reply.session_id, &name));
     }
     if output.terminal.is_some() {
         eprintln!(
@@ -2224,6 +2356,7 @@ fn run_doctor(json: bool) -> anyhow::Result<()> {
         manager: &service::SystemManager,
         wsl: wsl.as_ref(),
     });
+    checks.extend(completion::doctor(locale));
     let live = runtime(false)?.block_on(crate::doctor::gather(&paths));
     checks.extend(crate::doctor::live(&live, locale));
     checks.extend(crate::doctor::worktree_checks(
@@ -2259,6 +2392,31 @@ async fn wait_for_service(paths: &Paths, limit: Duration) -> bool {
     })
     .await
     .is_ok()
+}
+
+#[test]
+#[allow(clippy::unwrap_used)]
+fn hosted_launch_commands_parse_attach_in_both_spellings() {
+    let spawn = Cli::try_parse_from([
+        "senate", "spawn", "codex", "--attach", "--prompt", "fixture",
+    ])
+    .unwrap();
+    assert!(matches!(
+        spawn.command,
+        Some(Cmd::Spawn { attach: true, .. })
+    ));
+    for operation in ["replace", "restore"] {
+        let cmd =
+            Cli::try_parse_from(["senate", "session", operation, "refund-v2::reviewer", "-a"])
+                .unwrap();
+        assert!(matches!(
+            cmd.command,
+            Some(Cmd::Session {
+                command: SessionCmd::Restore { attach: true, .. }
+                    | SessionCmd::Replace { attach: true, .. }
+            })
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -2746,7 +2904,11 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             prompt,
             prompt_file,
             model,
+            attach,
         } => {
+            if attach {
+                require_attach_terminal()?;
+            }
             let prompt = match prompt_file {
                 Some(path) => Some(
                     std::fs::read_to_string(&path)
@@ -2783,36 +2945,29 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
                     model: model.into(),
                 },
                 output,
+                attach,
             )
         }
-        Cmd::Attach { senator, read_only } => {
-            let senator = match senator {
-                Some(senator) => pick_alias(senator)?,
-                None => match pick_running_session()? {
-                    Some(primary) => AliasName::bare(primary),
+        Cmd::Attach {
+            senator,
+            session,
+            read_only,
+        } => {
+            let (target, label) = match (session, senator) {
+                (Some(session_id), _) => (ipc::AttachTarget::Session { session_id }, None),
+                (None, Some(name)) => (
+                    ipc::AttachTarget::Senator {
+                        senator: pick_alias(name.clone())?,
+                    },
+                    Some(name.to_string()),
+                ),
+                (None, None) => match pick_attach_session()? {
+                    Some(target) => (target, None),
                     None => return Ok(()),
                 },
             };
             let paths = Paths::from_env()?;
-            runtime(false)?.block_on(async {
-                let request = Request::Attach {
-                    senator: senator.clone(),
-                };
-                let socket: PathBuf = daemon_call(&paths, &request).await?;
-                if read_only {
-                    let alias = senator.to_string();
-                    return crate::host::view::watch_one(crate::host::view::Session {
-                        title: alias.clone(),
-                        key: alias.clone(),
-                        alias,
-                        attached: false,
-                        tty: socket,
-                        dim: false,
-                    })
-                    .await;
-                }
-                crate::host::attach(&socket, &paths, &senator.to_string()).await
-            })
+            runtime(false)?.block_on(attach_target(&paths, target, label, read_only))
         }
         Cmd::SessionHost {
             id,
@@ -3080,7 +3235,14 @@ fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
             };
             runtime(false)?.block_on(resume_sessions(&paths, &selector, dry_run, locale))
         }
-        SessionCmd::Restore { senator, model } => {
+        SessionCmd::Restore {
+            senator,
+            model,
+            attach,
+        } => {
+            if attach {
+                require_attach_terminal()?;
+            }
             let senator = pick_alias(senator)?;
             launch(
                 &Request::Restore {
@@ -3089,6 +3251,7 @@ fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
                     model: model.into(),
                 },
                 output,
+                attach,
             )
         }
         SessionCmd::Replace {
@@ -3096,7 +3259,11 @@ fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
             prompt,
             prompt_file,
             model,
+            attach,
         } => {
+            if attach {
+                require_attach_terminal()?;
+            }
             let prompt = match prompt_file {
                 Some(path) => Some(
                     std::fs::read_to_string(&path)
@@ -3124,6 +3291,15 @@ fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
                 "{}",
                 output.text(&crate::sessions::render_replace(&reply, locale))
             );
+            if attach {
+                use std::io::Write as _;
+                std::io::stdout().flush()?;
+                return runtime(false)?.block_on(attach_launched(
+                    &paths,
+                    reply.session_id,
+                    &reply.new.to_string(),
+                ));
+            }
             Ok(())
         }
         SessionCmd::Approve {
@@ -3359,6 +3535,7 @@ fn seat(action: CommitteeSeatAction, args: SeatArgs, output: Output) -> anyhow::
 fn run_setup(command: SetupCmd, output: Output) -> anyhow::Result<()> {
     let Output { terminal, verbose } = output;
     match command {
+        SetupCmd::Completions { shell } => completion::register(shell),
         SetupCmd::Init {
             local,
             person,
@@ -3446,6 +3623,7 @@ fn run_setup(command: SetupCmd, output: Output) -> anyhow::Result<()> {
             } else {
                 print!("{}", install::render_brief(&plan, &opts, terminal));
             }
+            println!("{}", completion::install_hint(locale));
             // An upgrade does not reach a service that runs its own copy.
             if let Ok((spec, _)) = service_spec()
                 && let Some(senated) = std::env::current_exe().ok().and_then(|exe| {
@@ -3531,6 +3709,7 @@ fn describe_error(error: &anyhow::Error) -> String {
 /// the command: the `senate-bridge` and `senate` packages both install a
 /// binary that only calls it.
 pub fn main() -> ExitCode {
+    completion::complete();
     let terminal = Terminal::stdout();
     let cli = cli_help::parse(terminal);
     let command = cli.command.unwrap_or(Cmd::Status {

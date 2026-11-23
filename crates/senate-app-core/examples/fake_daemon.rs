@@ -62,6 +62,30 @@ async fn main() {
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(6);
     w.grow_every = (grow > 0).then(|| Duration::from_secs(grow));
+    // FAKE_TIMELINE_EVERY_MS=<ms>: grow that often instead (a busy session).
+    if let Some(ms) = std::env::var("FAKE_TIMELINE_EVERY_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        w.grow_every = (ms > 0).then(|| Duration::from_millis(ms));
+    }
+    // FAKE_BIG=N: one more session, `marathon`, with N items shaped like a
+    // long chair session, growing while watched (`SENATE_APP_PERF=session`).
+    if let Some(n) = std::env::var("FAKE_BIG")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        common::marathon(&mut w, n);
+        println!("marathon-1: {n} items");
+    }
+    // FAKE_WORKING=N: N more sessions, all working (the sidebar's marks).
+    if let Some(n) = std::env::var("FAKE_WORKING")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        common::working_sessions(&mut w, n);
+        println!("{n} working sessions");
+    }
     let world = Arc::new(Mutex::new(w));
     let daemon = common::FakeDaemon::start(&socket, Arc::clone(&world));
     println!("fake daemon on {}", socket.display());
