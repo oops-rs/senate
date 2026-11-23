@@ -1,6 +1,23 @@
 {
   "sourceLanguage": "en",
   "strings": {
+    "a11y.collapsed": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Collapsed"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已折叠"
+          }
+        }
+      }
+    },
     "a11y.dismiss": {
       "extractionState": "manual",
       "localizations": {
@@ -14,6 +31,23 @@
           "stringUnit": {
             "state": "translated",
             "value": "关闭"
+          }
+        }
+      }
+    },
+    "a11y.expanded": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Expanded"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已展开"
           }
         }
       }
@@ -205,6 +239,40 @@
         }
       }
     },
+    "approvals.desk": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The Speaker's desk"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Speaker 的案头"
+          }
+        }
+      }
+    },
+    "approvals.desk_meta": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ · %2$@ ago"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ · %2$@前"
+          }
+        }
+      }
+    },
     "approvals.empty": {
       "extractionState": "manual",
       "localizations": {
@@ -273,6 +341,40 @@
         }
       }
     },
+    "approvals.open_session": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open the session"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "打开会话"
+          }
+        }
+      }
+    },
+    "approvals.open_thread": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open the thread to answer"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "打开线程回答"
+          }
+        }
+      }
+    },
     "approvals.terminals": {
       "extractionState": "manual",
       "localizations": {
@@ -303,126 +405,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "权限提示可在此处回答，效果与在终端内相同，并记入委员会日志。其他选择只能在终端内决定。"
-          }
-        }
-      }
-    },
-    "codex.new": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "New Codex in Terminal"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "在终端中打开新的 Codex"
-          }
-        }
-      }
-    },
-    "codex.no_committee": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "no committee"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "无 committee"
-          }
-        }
-      }
-    },
-    "codex.open": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Open in Terminal"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "在终端中打开"
-          }
-        }
-      }
-    },
-    "codex.seen": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": " · seen %@ ago"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": " · %@前活跃"
-          }
-        }
-      }
-    },
-    "codex.show_approvals": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Show approvals"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "查看审批"
-          }
-        }
-      }
-    },
-    "codex.waiting": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "variations": {
-            "plural": {
-              "one": {
-                "stringUnit": {
-                  "state": "translated",
-                  "value": "%lld approval waiting"
-                }
-              },
-              "other": {
-                "stringUnit": {
-                  "state": "translated",
-                  "value": "%lld approvals waiting"
-                }
-              }
-            }
-          }
-        },
-        "zh-Hans": {
-          "variations": {
-            "plural": {
-              "other": {
-                "stringUnit": {
-                  "state": "translated",
-                  "value": "%lld 个审批等待中"
-                }
-              }
-            }
           }
         }
       }
@@ -462,23 +444,6 @@
         }
       }
     },
-    "committees.all": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "All committees"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "所有委员会"
-          }
-        }
-      }
-    },
     "committees.chair": {
       "extractionState": "manual",
       "localizations": {
@@ -492,23 +457,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "主席"
-          }
-        }
-      }
-    },
-    "committees.empty": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "No committees yet."
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "还没有委员会。"
           }
         }
       }
@@ -564,37 +512,19 @@
         }
       }
     },
-    "committees.open_threads": {
+    "committees.sessions": {
       "extractionState": "manual",
       "localizations": {
         "en": {
-          "variations": {
-            "plural": {
-              "one": {
-                "stringUnit": {
-                  "state": "translated",
-                  "value": "%lld open thread"
-                }
-              },
-              "other": {
-                "stringUnit": {
-                  "state": "translated",
-                  "value": "%lld open threads"
-                }
-              }
-            }
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sessions on this Mac"
           }
         },
         "zh-Hans": {
-          "variations": {
-            "plural": {
-              "other": {
-                "stringUnit": {
-                  "state": "translated",
-                  "value": "%lld 个进行中的线程"
-                }
-              }
-            }
+          "stringUnit": {
+            "state": "translated",
+            "value": "本机的会话"
           }
         }
       }
@@ -612,41 +542,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "你的 agent 正在处理"
-          }
-        }
-      }
-    },
-    "committees.waiting": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "variations": {
-            "plural": {
-              "one": {
-                "stringUnit": {
-                  "state": "translated",
-                  "value": "%lld waiting on you"
-                }
-              },
-              "other": {
-                "stringUnit": {
-                  "state": "translated",
-                  "value": "%lld waiting on you"
-                }
-              }
-            }
-          }
-        },
-        "zh-Hans": {
-          "variations": {
-            "plural": {
-              "other": {
-                "stringUnit": {
-                  "state": "translated",
-                  "value": "%lld 项等你处理"
-                }
-              }
-            }
           }
         }
       }
@@ -685,36 +580,19 @@
         }
       }
     },
-    "docket.checkpoint": {
+    "docket.child_offline": {
       "extractionState": "manual",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "checkpoint: %@"
+            "value": "a Senate below is offline"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "检查点：%@"
-          }
-        }
-      }
-    },
-    "docket.empty": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Nothing awaits the Speaker."
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "没有等待 Speaker 的事项。"
+            "value": "下级 Senate 离线"
           }
         }
       }
@@ -770,57 +648,6 @@
         }
       }
     },
-    "docket.seated": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Agents seated"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "已就座的 agent"
-          }
-        }
-      }
-    },
-    "docket.senate": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Senate"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Senate"
-          }
-        }
-      }
-    },
-    "docket.speaker": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Speaker: %@"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Speaker：%@"
-          }
-        }
-      }
-    },
     "error.already_started": {
       "extractionState": "manual",
       "localizations": {
@@ -855,23 +682,6 @@
         }
       }
     },
-    "error.prompt_gone": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "That prompt is no longer waiting: its session has ended or was replaced."
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "该授权请求已不再等待：会话已结束或已被替换。"
-          }
-        }
-      }
-    },
     "error.not_started": {
       "extractionState": "manual",
       "localizations": {
@@ -885,6 +695,23 @@
           "stringUnit": {
             "state": "translated",
             "value": "核心尚未启动"
+          }
+        }
+      }
+    },
+    "error.prompt_gone": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "That prompt is no longer waiting: its session has ended or was replaced."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "该授权请求已不再等待：会话已结束或已被替换。"
           }
         }
       }
@@ -954,75 +781,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "有事情回到你这里时，Senate 会通知你。"
-          }
-        }
-      }
-    },
-    "home.permissions": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Waiting for your permission"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "等待你的许可"
-          }
-        }
-      }
-    },
-    "home.threads": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Threads"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "线程"
-          }
-        }
-      }
-    },
-    "home.waiting": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "variations": {
-            "plural": {
-              "one": {
-                "stringUnit": {
-                  "state": "translated",
-                  "value": "Hi %1$@, %2$lld thing is waiting on you"
-                }
-              },
-              "other": {
-                "stringUnit": {
-                  "state": "translated",
-                  "value": "Hi %1$@, %2$lld things are waiting on you"
-                }
-              }
-            }
-          }
-        },
-        "zh-Hans": {
-          "variations": {
-            "plural": {
-              "other": {
-                "stringUnit": {
-                  "state": "translated",
-                  "value": "%1$@，有 %2$lld 件事在等你"
-                }
-              }
-            }
           }
         }
       }
@@ -1125,23 +883,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "关闭“%@”？"
-          }
-        }
-      }
-    },
-    "inbox.empty": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Nothing waits on you."
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "没有等你处理的事项。"
           }
         }
       }
@@ -1282,19 +1023,37 @@
         }
       }
     },
-    "inbox.search": {
+    "inbox.see_approvals": {
       "extractionState": "manual",
       "localizations": {
         "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Search threads"
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld waits for your yes or no in Approvals"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld wait for your yes or no in Approvals"
+                }
+              }
+            }
           }
         },
         "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "搜索线程"
+          "variations": {
+            "plural": {
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "审批里有 %lld 件事等你决定"
+                }
+              }
+            }
           }
         }
       }
@@ -1466,6 +1225,41 @@
           "stringUnit": {
             "state": "translated",
             "value": "分流：%@"
+          }
+        }
+      }
+    },
+    "inbox.waiting": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "Hi %1$@, %2$lld thread is waiting on you"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "Hi %1$@, %2$lld threads are waiting on you"
+                }
+              }
+            }
+          }
+        },
+        "zh-Hans": {
+          "variations": {
+            "plural": {
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%1$@，有 %2$lld 个线程在等你"
+                }
+              }
+            }
           }
         }
       }
@@ -2392,6 +2186,244 @@
         }
       }
     },
+    "session.active_ago": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "active %@ ago"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@前活动"
+          }
+        }
+      }
+    },
+    "session.earlier": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Show earlier"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "显示更早的"
+          }
+        }
+      }
+    },
+    "session.empty": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nothing said in this session yet."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这个会话还没有内容。"
+          }
+        }
+      }
+    },
+    "session.gone": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This session is no longer on this Mac."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这个会话已不在本机。"
+          }
+        }
+      }
+    },
+    "session.open_thread": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open its thread"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "打开它的线程"
+          }
+        }
+      }
+    },
+    "session.pause": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pause"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暂停"
+          }
+        }
+      }
+    },
+    "session.pause_help": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ask it to checkpoint, then stop its terminal; Resume brings it back where it was"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "让它先写检查点，再停止终端；“继续”会让它回到原处"
+          }
+        }
+      }
+    },
+    "session.reasoning": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Thinking"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "思考过程"
+          }
+        }
+      }
+    },
+    "session.say": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Message"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "消息"
+          }
+        }
+      }
+    },
+    "session.say_placeholder": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Say something to %@…"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "对 %@ 说点什么…"
+          }
+        }
+      }
+    },
+    "session.saying_as": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A note from %1$@ in %2$@, not typed into its terminal"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "以 %1$@ 的身份在 %2$@ 留言，不会输入到它的终端"
+          }
+        }
+      }
+    },
+    "session.todos": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "To do"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "待办"
+          }
+        }
+      }
+    },
+    "session.unreadable": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Senate cannot read this session's conversation. Attach to see it."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Senate 读不到这个会话的对话。接入终端可以看到它。"
+          }
+        }
+      }
+    },
+    "session.yours": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "started by you"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "你启动的"
+          }
+        }
+      }
+    },
     "sessions.attach": {
       "extractionState": "manual",
       "localizations": {
@@ -2439,74 +2471,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "已连接"
-          }
-        }
-      }
-    },
-    "sessions.codex": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Codex threads"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Codex 线程"
-          }
-        }
-      }
-    },
-    "sessions.empty": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "No hosted sessions or Codex threads on this machine."
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "本机没有托管会话或 Codex 线程。"
-          }
-        }
-      }
-    },
-    "sessions.hosted": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Hosted sessions"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "托管会话"
-          }
-        }
-      }
-    },
-    "sessions.paused": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "paused"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "已暂停"
           }
         }
       }
@@ -2613,40 +2577,6 @@
         }
       }
     },
-    "sessions.typed": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "typed %@ ago"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%@ 前输入"
-          }
-        }
-      }
-    },
-    "sessions.up": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "up %@"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "已运行 %@"
-          }
-        }
-      }
-    },
     "sessions.watch": {
       "extractionState": "manual",
       "localizations": {
@@ -2660,23 +2590,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "全部查看"
-          }
-        }
-      }
-    },
-    "sessions.watch_help": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Watch every hosted terminal side by side in Terminal (senate session watch)"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "在终端中并排查看所有托管终端（senate session watch）"
           }
         }
       }
@@ -3089,41 +3002,6 @@
         }
       }
     },
-    "sidebar.agents_working": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "variations": {
-            "plural": {
-              "one": {
-                "stringUnit": {
-                  "state": "translated",
-                  "value": "With your agents (%lld)"
-                }
-              },
-              "other": {
-                "stringUnit": {
-                  "state": "translated",
-                  "value": "With your agents (%lld)"
-                }
-              }
-            }
-          }
-        },
-        "zh-Hans": {
-          "variations": {
-            "plural": {
-              "other": {
-                "stringUnit": {
-                  "state": "translated",
-                  "value": "你的 agent 在处理（%lld）"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "sidebar.close_search": {
       "extractionState": "manual",
       "localizations": {
@@ -3137,6 +3015,74 @@
           "stringUnit": {
             "state": "translated",
             "value": "关闭搜索"
+          }
+        }
+      }
+    },
+    "sidebar.committees": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Committees"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "委员会"
+          }
+        }
+      }
+    },
+    "sidebar.filter": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Filter"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "筛选"
+          }
+        }
+      }
+    },
+    "sidebar.next_session": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Next session"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "下一个会话"
+          }
+        }
+      }
+    },
+    "sidebar.no_committee": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No committee"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无委员会"
           }
         }
       }
@@ -3158,6 +3104,57 @@
         }
       }
     },
+    "sidebar.no_sessions": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No sessions on this Mac"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "本机没有会话"
+          }
+        }
+      }
+    },
+    "sidebar.previous_session": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Previous session"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "上一个会话"
+          }
+        }
+      }
+    },
+    "sidebar.search": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Search sessions and threads"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "搜索会话和线程"
+          }
+        }
+      }
+    },
     "sidebar.waiting": {
       "extractionState": "manual",
       "localizations": {
@@ -3171,6 +3168,143 @@
           "stringUnit": {
             "state": "translated",
             "value": "等你处理"
+          }
+        }
+      }
+    },
+    "sidebar.waiting_count": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld waiting on you"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld waiting on you"
+                }
+              }
+            }
+          }
+        },
+        "zh-Hans": {
+          "variations": {
+            "plural": {
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld 件等你处理"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "status.idle": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "idle"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "空闲"
+          }
+        }
+      }
+    },
+    "status.needs_you": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "needs you"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "等你决定"
+          }
+        }
+      }
+    },
+    "status.paused": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "paused"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已暂停"
+          }
+        }
+      }
+    },
+    "status.stopped": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "stopped"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已停止"
+          }
+        }
+      }
+    },
+    "status.unread": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "unread"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "有未读"
+          }
+        }
+      }
+    },
+    "status.working": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "working"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "工作中"
           }
         }
       }
@@ -3192,53 +3326,19 @@
         }
       }
     },
-    "tab.committees": {
+    "tab.inbox": {
       "extractionState": "manual",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Committees"
+            "value": "Inbox"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "委员会"
-          }
-        }
-      }
-    },
-    "tab.docket": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Docket"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "议程"
-          }
-        }
-      }
-    },
-    "tab.home": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Home"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "主页"
+            "value": "收件箱"
           }
         }
       }
@@ -3256,23 +3356,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Senate"
-          }
-        }
-      }
-    },
-    "tab.sessions": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Sessions"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "会话"
           }
         }
       }
@@ -3307,6 +3390,23 @@
           "stringUnit": {
             "state": "translated",
             "value": "无法生成 Terminal 脚本"
+          }
+        }
+      }
+    },
+    "thread.gone": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This thread no longer waits on you."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这个线程已不在等你。"
           }
         }
       }

@@ -256,28 +256,55 @@ private struct EventView: View {
     }
 }
 
-/// The reply box: answers in the thread as you, `[senator::<you>]`. It
-/// sits at the foot of the conversation, a little wider than the text.
+/// The reply box: answers in the thread as you, `[senator::<you>]`.
 private struct Composer: View {
     @Bindable var store: CoreStore
     let row: InboxThread
+
+    var body: some View {
+        MessageComposer(
+            text: Binding(
+                get: { store.drafts[row.key] ?? "" },
+                set: { store.drafts[row.key] = $0.isEmpty ? nil : $0 }
+            ),
+            label: L("inbox.reply"),
+            placeholder: L("inbox.reply_placeholder"),
+            footnote: L("inbox.replying_as", store.state.person ?? "?", String(row.root)),
+            busy: store.isBusy(row.key),
+            online: store.state.online
+        ) {
+            Task { await store.sendReply(row) }
+        }
+    }
+}
+
+/// A box to write in at the foot of a conversation, a little wider than
+/// the text above it, and its send button (⌘↩).
+struct MessageComposer: View {
+    @Binding var text: String
+    let label: String
+    let placeholder: String
+    /// Under the text: who it is sent as, and where.
+    let footnote: String
+    let busy: Bool
+    let online: Bool
+    let send: () -> Void
     @FocusState private var focused: Bool
 
     var body: some View {
-        let busy = store.isBusy(row.key)
-        let empty = draft.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        let ready = !(busy || empty || !store.state.online)
+        let empty = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let ready = !(busy || empty || !online)
         VStack(alignment: .leading, spacing: Theme.Space.xs) {
-            TextEditor(text: draft)
+            TextEditor(text: $text)
                 .font(Theme.Fonts.reading)
                 .scrollContentBackground(.hidden)
                 .frame(minHeight: 24, maxHeight: 190)
                 .fixedSize(horizontal: false, vertical: true)
                 .focused($focused)
-                .accessibilityLabel(L("inbox.reply"))
+                .accessibilityLabel(label)
                 .overlay(alignment: .topLeading) {
-                    if draft.wrappedValue.isEmpty {
-                        Text(verbatim: L("inbox.reply_placeholder"))
+                    if text.isEmpty {
+                        Text(verbatim: placeholder)
                             .font(Theme.Fonts.reading)
                             .foregroundStyle(Theme.onSurfaceVariant)
                             .padding(.leading, 5)
@@ -286,15 +313,14 @@ private struct Composer: View {
                     }
                 }
             HStack(spacing: Theme.Space.s) {
-                Text(verbatim: L("inbox.replying_as", store.state.person ?? "?", String(row.root)))
+                Text(verbatim: footnote)
                     .font(Theme.Fonts.meta)
                     .foregroundStyle(Theme.onSurfaceVariant)
                     .lineLimit(1)
                     .padding(.leading, 5)
                 Spacer()
-                Button {
-                    Task { await store.sendReply(row) }
-                } label: {
+                if busy { ProgressView().controlSize(.small) }
+                Button(action: send) {
                     Image(systemName: "arrow.up")
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(ready ? Theme.onPrimary : Theme.onSurfaceVariant)
@@ -325,12 +351,5 @@ private struct Composer: View {
         .padding(.top, Theme.Space.xs)
         .padding(.bottom, 10)
         .frame(maxWidth: .infinity)
-    }
-
-    private var draft: Binding<String> {
-        Binding(
-            get: { store.drafts[row.key] ?? "" },
-            set: { store.drafts[row.key] = $0.isEmpty ? nil : $0 }
-        )
     }
 }

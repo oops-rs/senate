@@ -10,7 +10,8 @@ enum NotificationAction: Equatable, Sendable {
     case take(committee: String, root: UInt64)
     case openApprovals
     case approve(id: String, allow: Bool)
-    case openSessions
+    /// Open the page of the session with this exact id.
+    case openSession(sessionId: String)
     /// Attach to the hosted session with this exact id (resolved when
     /// tapped: an alias may since have passed to a replacement).
     case attach(sessionId: String)
@@ -250,11 +251,11 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
             default: return .openApprovals
             }
         case Category.prompt:
-            guard let id = info["session"] as? String else { return .openSessions }
+            guard let id = info["session"] as? String else { return .openApprovals }
             switch action {
             case Action.attach: return .attach(sessionId: id)
             case UNNotificationDismissActionIdentifier: return nil
-            default: return .openSessions
+            default: return .openSession(sessionId: id)
             }
         default:
             return nil

@@ -20,20 +20,24 @@ final class CoreStore {
     /// Makes the core: the real one reads `$SENATE_HOME`, else `~/.senate`.
     typealias MakeCore = () throws -> any AppCoreProtocol
 
-    /// The window's sections, in sidebar order. `inbox` is the home view:
-    /// everything waiting on you, or the thread chosen from it.
+    /// The window's fixed pages. Inbox and Approvals head the sidebar;
+    /// Senates opens from the account menu at its foot.
     enum Section: String, CaseIterable, Hashable {
-        case inbox, approvals, committees, sessions, docket, senates
+        case inbox, approvals, senates
     }
 
-    /// What the sidebar has chosen: a section, or one of the threads waiting
-    /// on you.
+    /// What the window shows: a page, a thread, a session, a committee.
     enum Place: Hashable {
         case section(Section)
+        /// A thread waiting on you, by `InboxThread.key`.
         case thread(String)
+        /// A session on this machine, by its session id.
+        case session(String)
+        /// A committee's page, by name.
+        case committee(String)
         /// A waiting item that is not a thread (a prompt, an approval, an
         /// item for the Speaker), by its `Waiting.id`: choosing it opens
-        /// the section it lives in.
+        /// where it is answered.
         case item(String)
     }
 
@@ -43,27 +47,33 @@ final class CoreStore {
     /// The last local failure (an empty reply, Terminal); the core's own
     /// `lastError` covers what reached the daemon.
     var actionError: String?
-    var section: Section? = .inbox
+    /// What the window shows.
+    var place: Place = .section(.inbox) {
+        didSet { placeChanged(from: oldValue) }
+    }
     /// Show only the threads for (or escalated past) this agent's path;
     /// `nil` is every agent.
     var agentFilter: String?
     /// The inbox search field.
     var search = ""
-    /// The thread open beside the inbox, by key.
-    var selectedThread: String?
     /// The open thread as last read, and a failure to read it.
     private(set) var thread: ThreadView?
     private(set) var threadError: String?
-    /// The committee open in the Committees section; `nil` lists them all.
-    var selectedCommittee: String?
+    /// The open session's conversation, as read and followed.
+    var timeline: SessionTimeline?
+    /// What the person is writing to each session, by session id.
+    var sessionDrafts: [String: String] = [:]
+    /// Committees folded in the sidebar.
+    var folded: Set<String> = [] {
+        didSet { defaults.set(Array(folded), forKey: Self.foldedKey) }
+    }
+    private static let foldedKey = "foldedCommittees"
     /// Show agents, sessions and committees that are no longer active
     /// (the roster's own rule, from the core). Off by default; remembered.
     var showInactive = false {
         didSet { defaults.set(showInactive, forKey: Self.showInactiveKey) }
     }
     private static let showInactiveKey = "showInactive"
-    /// Which presided Senate's docket is shown, by key; `nil` is the first.
-    var docketSenate: String?
     /// Reply drafts by thread key. They outlive the app.
     var drafts: [String: String] = [:] {
         didSet { defaults.set(drafts, forKey: Self.draftsKey) }
@@ -89,6 +99,7 @@ final class CoreStore {
         self.defaults = defaults
         drafts = defaults.dictionary(forKey: Self.draftsKey) as? [String: String] ?? [:]
         showInactive = defaults.bool(forKey: Self.showInactiveKey)
+        folded = Set(defaults.stringArray(forKey: Self.foldedKey) ?? [])
         if notifications {
             notifier.handle = { [weak self] action in await self?.perform(action) }
             notifier.setUp()
@@ -130,7 +141,7 @@ final class CoreStore {
         core = nil
         state = .placeholder
         thread = nil
-        selectedThread = nil
+        place = .section(.inbox)
         connect()
     }
 
@@ -206,6 +217,9 @@ final class CoreStore {
             || waitingByCommittee.contains { $0.committee == committee.committee }
     }
 
+    /// The search, trimmed; empty when not searching.
+    var query: String { search.trimmingCharacters(in: .whitespaces) }
+
     /// The inbox, narrowed to one agent when a filter is set and to what
     /// matches the search. A thread put to the person waits on them
     /// whichever agent it was for, so it stays in every agent's view.
@@ -224,27 +238,23 @@ final class CoreStore {
         return threads
     }
 
-    /// The sidebar's choice, read from and written to `section` and
-    /// `selectedThread`: a thread opens in the home section's place, and
-    /// choosing the home section itself lets go of the thread.
-    var place: Place {
-        get {
-            if (section ?? .inbox) == .inbox, let row = selectedRow { return .thread(row.key) }
-            return .section(section ?? .inbox)
-        }
-        set {
-            switch newValue {
-            case let .section(section):
-                self.section = section
-                if section == .inbox { selectedThread = nil }
-                if section == .committees { selectedCommittee = nil }
-            case let .item(id):
-                if let item = waiting.first(where: { $0.id == id }) { open(item) }
-            case let .thread(key):
-                section = .inbox
-                selectedThread = key
+    /// Open an item that is not a thread where it is answered.
+    private func placeChanged(from old: Place) {
+        if case let .item(id) = place {
+            if let item = waiting.first(where: { $0.id == id }) {
+                open(item)
+            } else {
+                place = old
             }
+            return
         }
+        if old != place { syncTimeline() }
+    }
+
+    /// The open thread, while it is in the inbox.
+    var selectedThread: String? {
+        if case let .thread(key) = place { return key }
+        return nil
     }
 
     /// The selected thread's row, while it is in the inbox.
@@ -253,28 +263,30 @@ final class CoreStore {
         return state.inbox.first { $0.key == key }
     }
 
-    /// The sections shown: the docket only while one of your agents presides.
-    var sections: [Section] {
-        Section.allCases.filter { $0 != .docket || state.menu.docket != nil }
+    /// The open session, while this machine has it.
+    var selectedSession: SessionLine? {
+        guard case let .session(id) = place else { return nil }
+        return session(id)
     }
 
-    /// What waits in a section, for its badge.
-    func count(_ section: Section) -> UInt32 {
-        let c = state.counts
-        switch section {
-        case .inbox: return c.threads
-        // A prompt waiting in a hosted terminal is something to approve
-        // too, though it is answered there.
-        case .approvals: return c.approvals + c.prompts
-        case .sessions: return c.prompts
-        case .docket: return c.docket
-        case .committees, .senates: return 0
+    func session(_ id: String) -> SessionLine? {
+        for group in state.groups {
+            if let s = group.sessions.first(where: { $0.sessionId == id }) { return s }
         }
+        return nil
     }
 
-    /// The docket shown: the chosen presided Senate, else the first.
-    var docket: DocketSenate? {
-        state.docket.first { $0.senate == docketSenate } ?? state.docket.first
+    /// The fixed pages at the head of the sidebar.
+    var sections: [Section] { [.inbox, .approvals] }
+
+    /// What waits in a section, for its badge: the threads for you (not
+    /// those to decide), and everything waiting for a yes or a no.
+    func count(_ section: Section) -> Int {
+        switch section {
+        case .inbox: inboxThreads.count
+        case .approvals: approvalsCount
+        case .senates: 0
+        }
     }
 
     // MARK: From the core
@@ -302,8 +314,8 @@ final class CoreStore {
         if let filter = agentFilter, !state.agents.contains(where: { $0.path == filter }) {
             agentFilter = nil
         }
-        if let open = selectedCommittee, !roster.contains(where: { $0.committee == open }) {
-            selectedCommittee = nil
+        if let timeline, let line = session(timeline.sessionId) {
+            timeline.working = line.working || timeline.working && line.status == .working
         }
     }
 
@@ -313,8 +325,8 @@ final class CoreStore {
     func perform(_ action: NotificationAction) async {
         switch action {
         case let .openThread(committee, root):
-            selectedThread = "\(committee):\(root)"
-            show(.inbox)
+            place = .thread("\(committee):\(root)")
+            showWindow()
         case let .reply(committee, root, body):
             await reply(committee: committee, root: root, body: body, key: "\(committee):\(root)")
         case let .take(committee, root):
@@ -327,14 +339,21 @@ final class CoreStore {
             await run("approval:\(id)") { core in
                 try await core.approve(id: id, decision: allow ? .allow : .deny)
             }
-        case .openSessions:
-            show(.sessions)
+        case let .openSession(sessionId):
+            // That exact session's page; if it has gone, the approvals, and why.
+            if session(sessionId) != nil {
+                place = .session(sessionId)
+                showWindow()
+            } else {
+                actionError = L("error.prompt_gone")
+                show(.approvals)
+            }
         case let .attach(sessionId):
             // That exact session, and only while its prompt still waits:
             // never whatever holds its alias now.
             guard let session = waitingSession(sessionId) else {
                 actionError = L("error.prompt_gone")
-                show(.sessions)
+                show(.approvals)
                 return
             }
             attach(session)
@@ -383,8 +402,7 @@ final class CoreStore {
     }
 
     func show(_ section: Section) {
-        self.section = section
-        if section == .committees { selectedCommittee = nil }
+        place = .section(section)
         showWindow()
     }
 
@@ -510,6 +528,27 @@ final class CoreStore {
         }
     }
 
+    func pause(_ session: HostedSession) async {
+        await run("session:\(session.label)") { core in
+            try await core.pauseSession(label: session.label)
+        }
+    }
+
+    /// Say what the person wrote to a session's senator, as them: a note in
+    /// its committee's log, delivered to the session.
+    func say(to session: SessionLine) async {
+        let body = sessionDrafts[session.sessionId] ?? ""
+        guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            actionError = L("error.empty_reply")
+            return
+        }
+        if await run("say:\(session.sessionId)", { core in
+            try await core.say(sessionId: session.sessionId, body: body)
+        }) {
+            sessionDrafts[session.sessionId] = nil
+        }
+    }
+
     func restore(_ session: HostedSession) async {
         await run("session:\(session.label)") { core in
             try await core.restoreSession(label: session.label)
@@ -535,7 +574,7 @@ final class CoreStore {
     func isBusy(_ key: String) -> Bool { busy.contains(key) }
 
     @discardableResult
-    private func run(_ key: String, _ op: (any AppCoreProtocol) async throws -> Void) async -> Bool {
+    func run(_ key: String, _ op: (any AppCoreProtocol) async throws -> Void) async -> Bool {
         guard let core else { return false }
         busy.insert(key)
         defer { busy.remove(key) }
@@ -611,6 +650,7 @@ extension AppState {
         codex: [],
         docket: [],
         sessions: [],
+        groups: [],
         counts: Counts(threads: 0, approvals: 0, codex: 0, docket: 0, prompts: 0, forPerson: 0, pending: 0),
         lastError: nil
     )

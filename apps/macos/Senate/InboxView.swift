@@ -1,44 +1,58 @@
 import SwiftUI
 import SenateCore
 
-/// Home: everything waiting on you, the most pressing first. What holds an
-/// agent at a permission, then each committee's requests, escalations,
-/// threads with news for you and items put to the Speaker, each with who
-/// asks. Below, folded, what your agents are still working on: it waits on
-/// them, not on you. A row opens what it names.
-struct HomeView: View {
+/// Inbox: the threads waiting on you for a reply, by committee, each with
+/// who asks. What waits for a yes or a no (permissions, approvals, what is
+/// put to you through the Speaker's desk) is in Approvals. Below, folded,
+/// what your agents are working on: it waits on them, not on you. A row
+/// opens the thread.
+struct InboxView: View {
     let store: CoreStore
     @State private var agentsOpen = false
 
     var body: some View {
-        let permissions = store.permissionsWaiting
-        let groups = store.waitingByCommittee
-        let working = store.agentThreads
+        let shown = Set(store.inbox.map(\.key))
+        let threads = store.inboxThreads.filter { shown.contains($0.key) }
+        let groups = Dictionary(grouping: threads, by: \.committee)
+            .map { CommitteeWaiting(committee: $0.key, items: $0.value.sorted { $0.since < $1.since }.map { Waiting(kind: .thread($0)) }) }
+            .sorted { ($0.items.first?.since ?? .now, $0.committee) < ($1.items.first?.since ?? .now, $1.committee) }
+        let working = store.agentThreads.filter { shown.contains($0.key) }
         let name = store.state.person ?? ""
-        let total = store.waitingCount
-        if total == 0 && working.isEmpty {
-            EmptyState(text: L("home.clear", name), detail: L("home.clear_detail"))
+        let decide = store.approvalsCount
+        if threads.isEmpty && working.isEmpty {
+            EmptyState(
+                text: store.query.isEmpty ? L("home.clear", name) : L("sidebar.no_matches"),
+                detail: decide > 0 ? L("inbox.see_approvals", Int64(decide)) : L("home.clear_detail")
+            )
         } else {
             ReadingColumn(spacing: Theme.Space.xs) {
-                Text(verbatim: total == 0 ? L("home.clear", name) : L("home.waiting", name, Int64(total)))
+                Text(verbatim: threads.isEmpty ? L("home.clear", name) : L("inbox.waiting", name, Int64(threads.count)))
                     .font(Theme.Fonts.display)
                     .foregroundStyle(Theme.onSurface)
                     .padding(.top, Theme.Space.xxxl)
-                    .padding(.bottom, Theme.Space.l)
                     .padding(.leading, Theme.Space.xs)
                     .accessibilityAddTraits(.isHeader)
-                if !permissions.isEmpty {
-                    SectionHeader(L("home.permissions"))
-                    ForEach(permissions) { item in
-                        WaitingRow(store: store, item: item, showsCommittee: true)
+                if decide > 0 {
+                    Button {
+                        store.place = .section(.approvals)
+                    } label: {
+                        Label(L("inbox.see_approvals", Int64(decide)), systemImage: "checkmark.shield")
+                            .font(Theme.Fonts.row)
+                            .foregroundStyle(Theme.attention)
                     }
+                    .buttonStyle(.plain)
+                    .padding(.leading, Theme.Space.xs)
                 }
+                Color.clear.frame(height: Theme.Space.s)
                 ForEach(groups) { group in
                     CommitteeHeader(store: store, committee: group.committee, count: group.items.count)
                     // Lazy: a committee with thousands draws what is on screen.
                     LazyVStack(alignment: .leading, spacing: Theme.Space.xs) {
                         ForEach(group.items) { item in
                             WaitingRow(store: store, item: item)
+                                .contextMenu {
+                                    if case let .thread(t) = item.kind { ThreadMenu(store: store, thread: t) }
+                                }
                         }
                     }
                     .accessibilityElement(children: .contain)
@@ -76,8 +90,7 @@ struct CommitteeHeader: View {
     var body: some View {
         let chair = store.roster.first { $0.committee == committee }
         Button {
-            store.show(.committees)
-            store.selectedCommittee = committee
+            store.place = .committee(committee)
         } label: {
             HStack(spacing: 6) {
                 Text(verbatim: committee)

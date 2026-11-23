@@ -68,8 +68,9 @@ extension Perf {
     }
 
     /// With `SENATE_APP_PERF=1`: once online, open the window, open the
-    /// thread `SENATE_APP_PERF_THREAD` (else the first), show each section
-    /// for two seconds, and quit. Any build, so Release can be measured.
+    /// thread `SENATE_APP_PERF_THREAD` (else the first), Inbox, Approvals and
+    /// the first session
+    /// for two seconds each, and quit. Any build, so Release can be measured.
     static func tour(_ store: CoreStore) {
         guard printing else { return }
         Task {
@@ -79,15 +80,24 @@ extension Perf {
             store.show(.inbox)
             try? await Task.sleep(for: .seconds(1))
             let root = ProcessInfo.processInfo.environment["SENATE_APP_PERF_THREAD"]
-            store.selectedThread = store.state.inbox.first { root == String($0.root) }?.key
-                ?? store.state.inbox.first?.key
+            if let key = store.state.inbox.first(where: { root == String($0.root) })?.key
+                ?? store.state.inbox.first?.key {
+                report("-- thread")
+                store.place = .thread(key)
+                try? await Task.sleep(for: .seconds(2))
+            }
             for section in store.sections {
                 report("-- \(section.rawValue)")
-                store.section = section
+                store.place = .section(section)
+                try? await Task.sleep(for: .seconds(2))
+            }
+            if let session = store.shownSessions.first {
+                report("-- session")
+                store.place = .session(session.sessionId)
                 try? await Task.sleep(for: .seconds(2))
             }
             report("-- inbox again")
-            store.section = .inbox
+            store.place = .section(.inbox)
             try? await Task.sleep(for: .seconds(2))
             NSApplication.shared.terminate(nil)
         }
