@@ -7,6 +7,10 @@ import WebKit
 enum ConversationSource: Hashable {
     case session(String)
     case thread(committee: String, root: UInt64)
+    #if DEBUG
+    /// Tests: these messages, as an agent's replies.
+    case fixture([String])
+    #endif
 }
 
 /// The conversation, as one web page in one `WKWebView` kept for the app's
@@ -75,7 +79,7 @@ final class ConversationPage: NSObject {
     /// The find bar's state, which its view reads.
     let find = PageFind()
 
-    init(store: CoreStore) {
+    init(store: CoreStore?) {
         self.store = store
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .nonPersistent()
@@ -160,6 +164,10 @@ final class ConversationPage: NSObject {
                 }
             case .thread:
                 _ = (store.thread, store.threadError)
+            #if DEBUG
+            case .fixture:
+                break
+            #endif
             }
         } onChange: { [weak self] in
             Task { @MainActor in
@@ -178,18 +186,26 @@ final class ConversationPage: NSObject {
     }
 
     private func rows() -> (rows: [Row], state: [String: Bool])? {
-        guard let store, let source else { return nil }
+        guard let source else { return nil }
         switch source {
         case let .session(id):
-            guard let t = store.timeline, t.sessionId == id else { return ([], [:]) }
+            guard let t = store?.timeline, t.sessionId == id else { return ([], [:]) }
             let rows = t.loading ? [] : t.rows
             return (rows.map { row in Row(id: row.id, value: row) { [unowned self] in encode(row, session: id, committee: t.committee) } },
                     ["hasOlder": t.hasOlder, "loadingOlder": t.loadingOlder, "working": t.working])
         case let .thread(committee, root):
-            guard let view = store.thread, view.committee == committee, view.root == root else { return ([], [:]) }
+            guard let view = store?.thread, view.committee == committee, view.root == root else { return ([], [:]) }
             let events = view.events.suffix(shownEvents)
             return (events.map { event in Row(id: event.seq, value: event) { [unowned self] in encode(event, committee: committee, root: root) } },
                     ["hasOlder": view.events.count > shownEvents, "loadingOlder": false, "working": false])
+        #if DEBUG
+        case let .fixture(texts):
+            return (texts.enumerated().map { i, text in
+                Row(id: UInt64(i + 1), value: text) { [unowned self] in
+                    ["id": i + 1, "kind": "assistant", "thinking": [String](), "md": markdown("f/\(i)", text)]
+                }
+            }, ["hasOlder": false, "loadingOlder": false, "working": false])
+        #endif
         }
     }
 
@@ -300,6 +316,10 @@ final class ConversationPage: NSObject {
         case let .thread(committee, root):
             prefix = "t/\(committee)/\(root)/"
             ids = (store?.thread?.events ?? []).suffix(3).map(\.seq)
+        #if DEBUG
+        case .fixture:
+            return []
+        #endif
         }
         return ids.suffix(3).compactMap { id in
             let key = prefix + String(id)
@@ -468,7 +488,7 @@ final class ConversationPage: NSObject {
                       view.events.count > shownEvents else { return }
                 shownEvents += Self.eventPage
                 push()
-            case nil:
+            default:
                 return
             }
         case "render":

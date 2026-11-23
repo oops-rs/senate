@@ -331,6 +331,83 @@ mod tests {
         assert_eq!((u.unchanged, u.replaced.len(), u.appended.len()), (2, 0, 0));
     }
 
+    /// Hostile Markdown: whatever it says, the HTML holds only the
+    /// renderer's tags and attributes, and links only http(s) and mailto.
+    #[test]
+    fn hostile_markdown_renders_only_the_fixed_set() {
+        const CORPUS: &[&str] = &[
+            "<script>alert(1)</script>",
+            "<img src=x onerror=alert(1)>",
+            "<svg/onload=alert(1)>",
+            "<iframe src=\"https://example.com\"></iframe>",
+            "<a href=\"javascript:alert(1)\">x</a>",
+            "[x](javascript:alert(1))",
+            "[x](JaVaScRiPt:alert(1))",
+            "[x](java\tscript:alert(1))",
+            "[x](data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==)",
+            "[x](vbscript:msgbox(1))",
+            "[x](file:///etc/passwd)",
+            "![x](https://example.com/a.png)",
+            "![x\\\"onerror=\"alert(1)](x)",
+            "<div style=\"background:url(https://example.com)\">x</div>",
+            "<style>body{display:none}</style>",
+            "<form action=https://example.com><input name=a></form>",
+            "<math><mi xlink:href=\"javascript:alert(1)\">x</mi></math>",
+            "<object data=x></object><embed src=x>",
+            "<!-- <script>alert(1)</script> -->",
+            "<base href=\"https://example.com/\">",
+            "<meta http-equiv=refresh content=\"0;url=https://example.com\">",
+            "<link rel=stylesheet href=https://example.com/x.css>",
+            "`<script>`  and <scr<script>ipt>alert(1)</script>",
+            "[x](https://example.com \"title\\\" onmouseover=\\\"alert(1)\")",
+            "<https://example.com/\"onmouseover=\"alert(1)>",
+            "| a | b |\n|---|---|\n| <img src=x onerror=alert(1)> | [x](javascript:1) |",
+            "- [ ] <b onclick=alert(1)>task</b>\n- [x] done",
+            "```html\n<script>alert(1)</script>\n```",
+            "```\"><script>alert(1)</script>\nx\n```",
+            "> <script>alert(1)</script>\n> [x](javascript:1)",
+            "&lt;script&gt; &#x3C;script&#x3E; &#60;img src=x onerror=1&#62;",
+            "<details open ontoggle=alert(1)>x</details>",
+            "<a href=\"https://example.com\" onclick=\"alert(1)\">x</a>",
+        ];
+        const TAGS: &[&str] = &[
+            "p", "h1", "h2", "h3", "h4", "h5", "h6", "ul", "ol", "li", "pre", "code", "blockquote", "table",
+            "thead", "tbody", "tr", "th", "td", "hr", "br", "strong", "em", "del", "a", "span",
+        ];
+        const ATTRS: &[&str] = &["href", "start", "data-language", "data-state", "class"];
+        let s = MarkdownStore::new();
+        for (i, text) in CORPUS.iter().enumerate() {
+            let key = format!("h{i}");
+            let u = s.update(key.clone(), (*text).to_string());
+            let r = s.render(key, u.blocks.iter().map(|b| b.id.clone()).collect(), true);
+            for b in r.blocks {
+                let html = b.html.unwrap_or_default();
+                // Every tag, and every attribute in it, from the fixed set.
+                let mut rest = html.as_str();
+                while let Some(at) = rest.find('<') {
+                    rest = &rest[at + 1..];
+                    let end = rest.find('>').unwrap_or_else(|| panic!("an open tag in {html:?}"));
+                    let tag = &rest[..end];
+                    rest = &rest[end + 1..];
+                    let tag = tag.trim_start_matches('/');
+                    let name = tag.split([' ', '/']).next().unwrap_or("");
+                    assert!(TAGS.contains(&name), "tag {name:?} from {text:?}: {html}");
+                    for attr in tag.split(' ').skip(1) {
+                        let (k, v) = attr.split_once('=').unwrap_or((attr, ""));
+                        assert!(ATTRS.contains(&k), "attribute {k:?} from {text:?}: {html}");
+                        if k == "href" {
+                            let v = v.trim_matches('"').to_ascii_lowercase();
+                            assert!(
+                                v.starts_with("http://") || v.starts_with("https://") || v.starts_with("mailto:"),
+                                "href {v:?} from {text:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn raw_html_stays_text() {
         let s = MarkdownStore::new();

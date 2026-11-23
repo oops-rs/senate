@@ -491,21 +491,25 @@
       }
       if (tag === "UL" || tag === "OL") {
         let i = Number(n.getAttribute("start") || 1);
-        out.push("\n");
+        if (!indent) out.push("\n");
         for (const li of n.children) {
           if (li.tagName !== "LI") continue;
           let marker = tag === "OL" ? (i++) + ". " : "- ";
           const box = li.querySelector(":scope > .task-marker");
           if (box) marker = "- " + (box.dataset.state === "done" ? "[x] " : "[ ] ");
           out.push("\n" + indent + marker);
+          let lead = true;
           for (const c of li.childNodes) {
             if (c === box) continue;
+            // The item's text starts right after its marker.
+            if (lead && c.nodeType === Node.TEXT_NODE) { out.push(c.data.replace(/^\s+/, "").replace(/\s+/g, " ")); lead = false; continue; }
+            lead = false;
             if (c.nodeType === Node.ELEMENT_NODE && (c.tagName === "UL" || c.tagName === "OL")) walk(c, indent + "  ");
             else if (c.nodeType === Node.ELEMENT_NODE && c.tagName === "P") { for (const g of c.childNodes) walk(g, indent); }
             else walk(c, indent);
           }
         }
-        out.push("\n");
+        if (!indent) out.push("\n");
         return;
       }
       const block = BLOCK.has(tag);
@@ -521,13 +525,18 @@
       .trim();
   }
 
+  // The text of some copied nodes, chrome left out.
+  function copied(frag) {
+    for (const c of frag.querySelectorAll(CHROME)) c.remove();
+    return plain(frag);
+  }
+
   document.addEventListener("copy", (e) => {
     const sel = window.getSelection();
     if (!sel || sel.isCollapsed) return;
     const frag = document.createDocumentFragment();
     for (let i = 0; i < sel.rangeCount; i++) frag.appendChild(sel.getRangeAt(i).cloneContents());
-    for (const c of frag.querySelectorAll(CHROME)) c.remove();
-    e.clipboardData.setData("text/plain", plain(frag));
+    e.clipboardData.setData("text/plain", copied(frag));
     e.preventDefault();
   });
 
@@ -653,7 +662,7 @@
     find,
     selectAll,
     renderAll,
-    plainText: () => plain(main()),
+    plainText: () => { const f = document.createDocumentFragment(); f.appendChild(main().cloneNode(true)); return copied(f); },
     theme(vars) { for (const k in vars) document.documentElement.style.setProperty("--" + k, vars[k]); },
     labels(l) { labels = Object.assign(labels, l); },
     debug(on) { document.querySelector(".debug").hidden = !on; debug.note("debug overlay on (⌥D)"); },
