@@ -1838,6 +1838,22 @@ fn pick_attach_session() -> anyhow::Result<Option<ipc::AttachTarget>> {
         }))
 }
 
+/// How to add a launch profile, for `senate profiles` with none.
+fn profiles_example(config: &std::path::Path, locale: Locale) -> String {
+    let example = "[profiles.review]\nruntime = \"codex\"\neffort = \"high\"\nnote = \"Independent diff review.\"";
+    match locale {
+        Locale::Zh => format!(
+            "在 {} 里加一个，例如：\n\n{example}\n\n然后重启 daemon，用 `senate spawn --profile review` 启动。",
+            config.display()
+        ),
+        Locale::En => format!(
+            "Add one to {}, for example:\n\n{example}\n\nthen restart the daemon and start it \
+             with `senate spawn --profile review`.",
+            config.display()
+        ),
+    }
+}
+
 /// `senate spawn` with neither a runtime nor --profile: what to add.
 fn no_runtime(profiles: &[String], locale: Locale) -> String {
     let first = match locale {
@@ -2988,6 +3004,11 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             let config = BridgeConfig::load_unchecked(&paths.config())?;
             if config.profiles.is_empty() {
                 println!("No launch profiles configured.");
+                // The how-to goes to stderr: stdout stays as scripts read it.
+                eprintln!(
+                    "{}",
+                    profiles_example(&paths.config(), BridgeConfig::locale_at(&paths.config()))
+                );
             }
             for (name, profile) in config.profiles {
                 println!(
@@ -4037,4 +4058,29 @@ fn a_spawn_without_a_runtime_names_the_runtimes_and_profiles() {
     );
     let zh = no_runtime(&["review".to_owned()], Locale::Zh);
     assert!(zh.contains("`senate spawn --profile review`"), "{zh}");
+}
+
+#[cfg(test)]
+#[test]
+fn no_profiles_shows_one_to_copy_and_where() {
+    let text = profiles_example(
+        std::path::Path::new("/home/a/.senate/senate.toml"),
+        Locale::En,
+    );
+    assert!(
+        text.starts_with("Add one to /home/a/.senate/senate.toml"),
+        "{text}"
+    );
+    assert!(
+        text.contains("[profiles.review]\nruntime = \"codex\""),
+        "{text}"
+    );
+    assert!(text.ends_with("`senate spawn --profile review`."), "{text}");
+    // What it shows parses as a profile.
+    let toml = text.split("\n\n").nth(1).unwrap();
+    let parsed: toml::Table = toml.parse().unwrap();
+    assert_eq!(
+        parsed["profiles"]["review"]["runtime"].as_str(),
+        Some("codex")
+    );
 }

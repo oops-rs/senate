@@ -645,7 +645,10 @@ effort = "high"
 note = "Use for independent diff review."
 ```
 
-Run `senate profiles` to see the configured names, settings, and notes.
+Run `senate profiles` to see the configured names, settings, and notes. Its
+output is one tab-separated line per profile; with none it prints `No launch
+profiles configured.` and, on stderr, an example to copy and the file to put
+it in.
 `senate setup doctor` reports profile configuration errors by name. Restart
 the machine daemon after editing a profile so new launches pick up the change.
 
