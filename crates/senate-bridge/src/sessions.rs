@@ -281,9 +281,11 @@ pub fn render_replace(reply: &crate::ipc::ReplaceReply, locale: Locale) -> Strin
             report.detail
         ));
     }
+    // By the alias it took over, the name the person knows it by.
+    let name = reply.alias.as_ref().unwrap_or(&reply.new);
     out.push_str(&match locale {
-        Locale::Zh => format!("用 `senate attach {}` 打开它的终端。", reply.new),
-        Locale::En => format!("Open its terminal with `senate attach {}`.", reply.new),
+        Locale::Zh => format!("用 `senate attach {name}` 打开它的终端。"),
+        Locale::En => format!("Open its terminal with `senate attach {name}`."),
     });
     out
 }
@@ -467,4 +469,31 @@ pub(crate) mod tests {
         assert!(text.contains("running · prompt in terminal"), "{text}");
         assert!(text.contains("running · approval: Bash"), "{text}");
     }
+}
+
+#[cfg(test)]
+#[test]
+fn replace_names_the_new_seat_by_the_alias_it_took_over() {
+    use senate_core::CommitteeId;
+    let reply = |alias: Option<&str>| crate::ipc::ReplaceReply {
+        committee: CommitteeId::new("refund").unwrap(),
+        old: "claude-5bde5f64".parse().unwrap(),
+        new: "claude-9b630d87".parse().unwrap(),
+        session_id: "s".into(),
+        steps: Vec::new(),
+        alias: alias.map(|a| a.parse().unwrap()),
+    };
+    let named = render_replace(&reply(Some("rev")), Locale::En);
+    assert!(
+        named.ends_with("Open its terminal with `senate attach rev`."),
+        "{named}"
+    );
+    let zh = render_replace(&reply(Some("rev")), Locale::Zh);
+    assert!(
+        zh.ends_with("用 `senate attach rev` 打开它的终端。"),
+        "{zh}"
+    );
+    // No alias to take over: by its senator name, as before.
+    let bare = render_replace(&reply(None), Locale::En);
+    assert!(bare.ends_with("`senate attach claude-9b630d87`."), "{bare}");
 }
