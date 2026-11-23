@@ -82,7 +82,7 @@ pub const LEASE_SECS: u64 = 900;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckpointTrigger {
-    /// A new commit on a bound session's branch.
+    /// The checked-out commit or branch of a bound session changed.
     Commit,
     /// The session ended.
     SessionEnd,

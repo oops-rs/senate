@@ -144,7 +144,22 @@ async fn the_tool_writes_the_files_and_a_handoff_pushes() {
         "the branch is on origin"
     );
     h.store().join_session("s1", &committee()).unwrap();
-    git(&wd, &["switch", "-c", "new-topic"]);
+    let saved = "senate/refund-v2/alice";
+    git(&wd, &["push", "origin", &format!("{saved}:main")]);
+    git(&wd, &["config", "branch.autoSetupMerge", "false"]);
+    git(&wd, &["switch", "-c", "new-topic", "origin/main"]);
+    assert_eq!(git(&wd, &["rev-parse", "HEAD"]), head);
+    assert_eq!(
+        git(
+            &wd,
+            &[
+                "for-each-ref",
+                "--format=%(upstream)",
+                "refs/heads/new-topic"
+            ]
+        ),
+        ""
+    );
     assert!(!checkpoint(&h, "s1", None, false).await.pushed);
     git(
         &wd,
@@ -196,6 +211,47 @@ async fn commits_intervals_and_session_ends_checkpoint_on_their_own() {
     })
     .await;
     assert_eq!(payload.files.progress.as_deref(), Some("- 写重试\n"));
+
+    // A branch switch at the same commit must replace the older pushed
+    // checkpoint even when the handover files have not changed.
+    let remote = h.dir.path().join("origin.git");
+    git(
+        h.dir.path(),
+        &["init", "-q", "--bare", remote.to_str().unwrap()],
+    );
+    git(&wd, &["remote", "add", "origin", remote.to_str().unwrap()]);
+    h.store().join_session("s1", &committee()).unwrap();
+    h.store().join_session("s2", &committee()).unwrap();
+    git(&wd, &["push", "--set-upstream", "origin", "HEAD"]);
+    git(&wd, &["push", "origin", "HEAD:main"]);
+    std::fs::remove_file(wd.join(".senate/PROGRESS.md")).unwrap();
+    let (pushed, _) = eventually("a pushed checkpoint with no notes", WAIT, || {
+        checkpoints(&h)
+            .pop()
+            .filter(|(payload, _)| payload.pushed && payload.files == Default::default())
+    })
+    .await;
+    git(&wd, &["config", "branch.autoSetupMerge", "false"]);
+    git(&wd, &["switch", "-c", "untracked-topic", "origin/main"]);
+    let (fresh, _) = eventually("an automatic checkpoint for the new branch", WAIT, || {
+        checkpoints(&h)
+            .pop()
+            .filter(|(payload, _)| payload.branch == "untracked-topic")
+    })
+    .await;
+    assert_eq!(fresh.trigger, CheckpointTrigger::Commit);
+    assert_eq!(fresh.commit, pushed.commit);
+    assert_eq!(fresh.files, pushed.files);
+    assert!(!fresh.pushed);
+    git(&wd, &["branch", "--set-upstream-to=origin/main"]);
+    let (tracked, _) = eventually("a checkpoint for the now-tracked branch", WAIT, || {
+        checkpoints(&h)
+            .pop()
+            .filter(|(payload, _)| payload.branch == fresh.branch && payload.pushed)
+    })
+    .await;
+    assert_eq!(tracked.commit, fresh.commit);
+    assert_eq!(tracked.files, fresh.files);
 
     // The session ends after another change.
     std::fs::write(wd.join(".senate/OPEN.md"), "- seq 9\n").unwrap();

@@ -91,12 +91,11 @@
 //! # Checkpoints
 //!
 //! Besides the `checkpoint` tool ([`crate::checkpoint`]), the daemon writes
-//! one on its own — never pushing — when a bound session's worktree gets a
-//! new commit (`git rev-parse HEAD`, polled every
-//! [`Timing::checkpoint_poll`]), every [`Timing::checkpoint_interval`] while
-//! a session stays open, and when a session ends. An automatic checkpoint is
-//! skipped when the log's latest checkpoint of this agent already has the
-//! same commit and files. Worktrees are tracked by (agent, root), so two
+//! one on its own when a bound worktree changes commit or branch (polled
+//! every [`Timing::checkpoint_poll`]), every [`Timing::checkpoint_interval`]
+//! while a session stays open, and when a session ends. An automatic
+//! checkpoint is skipped if the agent's latest one has the same branch,
+//! commit, pushed state and files. Worktrees are tracked by (agent, root), so two
 //! sessions of one agent in one worktree write one checkpoint, and two
 //! agents in one worktree each write their own (from the same
 //! `.senate/` files, which belong to the worktree).
@@ -588,8 +587,9 @@ pub(crate) struct Shared {
 /// What the automatic checkpoints know of one worktree.
 #[derive(Debug)]
 struct AutoCheckpoint {
-    /// `HEAD` when last polled.
+    /// The commit and branch of `HEAD` when last polled.
     head: String,
+    branch: Option<String>,
     /// The last automatic checkpoint considered (or when the worktree was
     /// first seen).
     last: Instant,
@@ -4242,25 +4242,19 @@ impl Shared {
             .unwrap_or_else(|| session.clone())
     }
 
-    /// Append a checkpoint of the worktree at `root` for `session`, as the
-    /// session's agent: a checkpoint is one agent's handover note.
+    /// Append a snapshot as the session's agent.
     async fn append_checkpoint(
         &self,
         session: &Session,
         committee: CommitteeId,
-        root: &Path,
-        trigger: CheckpointTrigger,
+        payload: &CheckpointPayload,
         summary: Option<String>,
         id: Option<EventId>,
-    ) -> Result<(CheckpointPayload, bool, Posted), IpcError> {
-        let (payload, truncated) =
-            checkpoint::snapshot(root, trigger, session.transcript_path.as_deref())
-                .await
-                .map_err(IpcError::bad_request)?;
+    ) -> Result<Posted, IpcError> {
         let body = summary
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| default_summary(&payload));
+            .unwrap_or_else(|| default_summary(payload));
         let mut event = NewEvent::new(
             committee,
             Kind::Checkpoint,
@@ -4281,11 +4275,11 @@ impl Shared {
             agent = %session.agent,
             committee = %posted.committee,
             seq = %posted.seq,
-            trigger = trigger.as_str(),
+            trigger = payload.trigger.as_str(),
             at = %payload.at(),
             "checkpoint"
         );
-        Ok((payload, truncated, posted))
+        Ok(posted)
     }
 
     async fn on_checkpoint(
@@ -4324,11 +4318,16 @@ impl Shared {
         } else {
             CheckpointTrigger::Tool
         };
-        let (payload, truncated, posted) = self
-            .append_checkpoint(&session, committee, &root, trigger, summary, id)
+        let (payload, truncated) =
+            checkpoint::snapshot(&root, trigger, session.transcript_path.as_deref())
+                .await
+                .map_err(IpcError::bad_request)?;
+        let posted = self
+            .append_checkpoint(&session, committee, &payload, summary, id)
             .await?;
         if let Some(entry) = lock(&self.auto).get_mut(&(session.agent.clone(), root.clone())) {
             entry.head.clone_from(&payload.commit);
+            entry.branch.clone_from(&session.branch);
             entry.last = Instant::now();
         }
         lock(&self.tool_checkpoints).insert(session.agent.clone(), (Instant::now(), posted.seq));
@@ -4370,13 +4369,17 @@ impl Shared {
         let Some(root) = worktree(session).await else {
             return;
         };
-        let Some(head) = checkpoint::head(&root).await else {
+        let Ok((payload, _)) =
+            checkpoint::snapshot(&root, trigger, session.transcript_path.as_deref()).await
+        else {
             return;
         };
-        let files = checkpoint::read_files(&root);
         match self.api.latest_checkpoint(&committee, &session.agent).await {
             Ok(Some(latest))
-                if latest.checkpoint.commit == head && latest.checkpoint.files == files =>
+                if latest.checkpoint.commit == payload.commit
+                    && latest.checkpoint.branch == payload.branch
+                    && latest.checkpoint.pushed == payload.pushed
+                    && latest.checkpoint.files == payload.files =>
             {
                 tracing::debug!(%committee, trigger = trigger.as_str(), "checkpoint unchanged; skipped");
                 return;
@@ -4388,15 +4391,15 @@ impl Shared {
             }
         }
         if let Err(e) = self
-            .append_checkpoint(session, committee.clone(), &root, trigger, None, None)
+            .append_checkpoint(session, committee.clone(), &payload, None, None)
             .await
         {
             tracing::warn!(%committee, trigger = trigger.as_str(), "automatic checkpoint failed: {e}");
         }
     }
 
-    /// One poll of every live bound session's worktree: a new commit, or a
-    /// session open for another interval, is a checkpoint.
+    /// Poll each live bound worktree for a commit or branch change, or an
+    /// elapsed checkpoint interval.
     async fn poll_checkpoints(&self) {
         let sessions = match self.checked_live_sessions() {
             Ok(s) => s,
@@ -4426,10 +4429,12 @@ impl Shared {
                 let mut auto = lock(&self.auto);
                 let entry = auto.entry(key.clone()).or_insert_with(|| AutoCheckpoint {
                     head: head.clone(),
+                    branch: session.branch.clone(),
                     last: Instant::now(),
                 });
-                if entry.head != head {
+                if entry.head != head || entry.branch != session.branch {
                     entry.head.clone_from(&head);
+                    entry.branch.clone_from(&session.branch);
                     Some(CheckpointTrigger::Commit)
                 } else if entry.last.elapsed() >= self.timing.checkpoint_interval {
                     Some(CheckpointTrigger::Interval)
