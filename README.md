@@ -774,39 +774,60 @@ in its `data_dir` on every attach and detach and whenever that changes).
 
 ## Remote machines
 
-A developer machine can opt into direct access from another Mac on a LAN or an
-existing mesh network. Configure the **target** machine's
-`$SENATE_HOME/senate.toml` (normally `~/.senate/senate.toml`) with its own
-reachable LAN or mesh address. Substitute the address below. The listener is
-off unless this table has both a `listen` value and `experimental = true`.
-Remote access is experimental and has not been hardened. Start the updated `senated --machine`
-with this profile in your normal service or terminal.
+Direct LAN or mesh access is experimental and off by default. A target needs
+administrator access and a controlling terminal. The listener needs both the
+administrator's policy and the following setting in the target's
+`$SENATE_HOME/senate.toml` (normally `~/.senate/senate.toml`).
 
 ```toml
 [remote]
 experimental = true
-listen = "192.168.1.42:9443"
 ```
 
-Use a stable address on the target. Restrict reachability to the LAN or mesh you
-intend. The pairing stores that address for future connections. On the target's own terminal run:
+Use matching builds on both machines. On the target, inspect the helper
+artifact from the trusted release or build:
 
 ```sh
-senate setup remote pair --attach
+senate setup remote install-helper ./senate-remote-admin
 ```
 
-On the client Mac run:
+Compare its printed SHA-256 with the release checksum obtained through your
+trusted release channel. Run the printed installation commands only after it
+matches, then check the copy with
+`shasum -a 256 /usr/local/libexec/senate-remote-admin`.
+The helper is installed root-owned with mode 0755. Its parent directories and
+`/etc/senate/remote` must be root-owned and protected from non-root writes.
+A source build can publish its own artifact hash. To build a CLI that verifies
+it in `senate setup doctor`, build the helper first, stage the helper artifact,
+and build `senate` with `SENATE_REMOTE_ADMIN_SHA256` set to that artifact's
+SHA-256. Without a build-time hash, doctor reports the installed hash as
+unverified. Never run the user-installed `senate` executable as root.
+
+With the daemon running as your own user, prepare its host key and listen
+address:
 
 ```sh
-senate setup remote connect wyak --device laptop
+senate setup remote enable --listen 192.168.1.42:9443
 ```
 
-Paste the full offer from the target into the client terminal. The offer expires
-after two minutes and can be claimed once. Enter the six-digit code printed by
-the client back on the target only when it matches what you see on your own
-client. Use `pair` for list and watch, `pair --list-only` for metadata, and add
-`--attach` only when you want that device to type in terminals. A grant expires
-after 30 days by default. Set `--valid-secs` to give a shorter grant.
+Replace that address with the target's stable LAN or mesh address. Run the
+printed `sudo -k` command after checking the address and host key. A public or
+otherwise routable address must be typed back in full. Restart the target's
+daemon as your user to bind the new policy.
+
+On the target run `senate setup remote pair --attach` from your own terminal.
+On the client run `senate setup remote connect wyak --device laptop` and paste
+the offer. It expires after two minutes and can be claimed once. Compare the
+candidate's name and key on the two machines. On the target run the printed
+administrator command. Read the ten-digit comparison code from **your client
+device** and enter it in the helper's terminal. Review the scopes and expiry
+there before confirming. The code appears only on the client. The helper
+accepts one answer per invocation and records failures in the protected
+profile. Three wrong answers require a fresh pairing offer.
+Use `pair` for list and watch, `pair --list-only` for metadata, and add
+`--attach` only for a device that may type in terminals. A grant lasts at most
+30 days. Use `--valid-secs` for a shorter grant. Older experimental clients
+must pair again.
 
 ```sh
 senate session list --machine wyak
@@ -815,48 +836,55 @@ senate session watch --machine wyak
 senate attach --machine wyak main
 ```
 
-A remote attach selects an already-running hosted session. Use the
-committee-qualified name if the alias is ambiguous. The host allows one
-interactive viewer at a time. An attach grant lets the device type what the
-terminal accepts, including prompt answers. Watch is read-only and starts
-with a fresh snapshot after reconnect. A remote attach uses the existing bounded history
-replay. If the connection drops, attach again to start a new stream. Terminal
-input is never replayed. Paired names are offered by completion. The
-all-machines list reports unreachable contexts by name.
+A remote attach selects an already-running hosted session. The host allows one
+interactive viewer at a time. Attach grants permit typing, including prompt
+answers. Reconnecting to watch fetches a fresh snapshot. Reconnecting to
+attach replays the host's bounded history once. Input is never retried. Quiet
+streams close after 30 minutes. The all-machines list names unreachable targets.
+
+Use `senate setup remote devices` to list grants on the target. Run
+`senate setup remote revoke <device-id>` and follow the printed administrator
+command to remove one grant and close its active streams. To close the
+listener and remove all its grants, follow the command printed by
+`senate setup remote disable`. After disabling it, uninstall the helper with
+`sudo -k /bin/rm /usr/local/libexec/senate-remote-admin` if no other user on
+this machine needs it. You can also remove the experimental setting.
 
 ### Trust and storage
 
-- TLS 1.3 authenticates both ends, pins the offered target certificate and
-  checks the device certificate against the target's local grants. Early
-  data and session resumption are disabled. The pairing offer is a secret
-  until claimed or expired. Share it only with your own device and confirm
-  its comparison code locally. Pairing and revocation use the target's local
-  person check.
-- Public certificates and key references live in
-  `$SENATE_HOME/remote/host.json` and `remote/machines/<name>.json`.
-  Private keys are generic-password items in the macOS user's Keychain under
-  service `dev.senate.remote`, with a random UUID as the account. Systems
-  without an available Keychain use a private `remote/key-<uuid>.json` file
-  with mode 0600 inside a mode-0700 directory. A Keychain access denial fails
-  instead of writing a fallback copy.
-- Hook and agent APIs expose no key material. A same-user agent on the
-  **client** can try to run the same Senate CLI. If the OS grants that
-  executable Keychain access, or the key is in a file the agent can read,
-  the agent can exercise the device's granted scopes. Stronger isolation
-  requires a separate OS identity or a user-presence-gated signing broker
-  with keys inaccessible to agents. Keep interactive attach off on devices
-  where that risk is unacceptable.
-- The target writes a local `remote/audit.jsonl` with device fingerprints and
-  remote actions. Run `senate setup remote devices` on the target to list
-  grants and `senate setup remote revoke <device-id>` to remove one and
-  disconnect its streams. A lost device can act within its grants until it
-  expires or is revoked.
-- This opt-in sends session metadata and, with the relevant grant, live
-  terminal content over the encrypted connection. Transcript bodies,
-  replies, approvals, lifecycle commands and a relay are outside this
-  version of the remote API. The scope names `timeline`, `reply`, `approve`,
-  and `lifecycle` are reserved for later versions. The parent Senate and
-  local hooks do not participate in remote transport.
+- TLS 1.3 pins the offered host certificate and authenticates device public
+  keys by their SPKI hash. The comparison code is derived from the TLS
+  enrollment exporter, host and device keys, and the single-use offer.
+  Only the device holding the approved key can connect with its grant.
+- The root helper owns the authorization boundary on the target. The official
+  daemon reads the protected policy and grants under `/etc/senate/remote`.
+  Editing same-user files cannot authorize that daemon's listener, add a
+  grant, or restore a revoked grant. This helps protect against a sandboxed
+  agent that can talk to `bridge.sock` but has no network access. A same-user
+  process with network access can still run its own service. A hostile local
+  account, a compromised administrator, or root access is outside this
+  guarantee.
+- The installed helper is trusted code. Each printed command uses
+  `sudo -k` to ignore a cached credential. Standard tty-scoped sudo caches
+  are tied to a terminal session, so a separately hosted PTY does not
+  normally inherit another terminal's timestamp. Custom sudo policies can
+  differ. Passwordless sudo, compromised sudo credentials, or carrying a
+  live sudo timestamp into an agent's terminal weakens this boundary. Keep
+  the helper out of passwordless sudo rules. The helper reads confirmation
+  from its controlling terminal.
+- Key references live in `$SENATE_HOME/remote/host.json` and
+  `remote/machines/<name>.json`. On macOS the TLS private keys use the login
+  Keychain under `dev.senate.remote`; platforms without a Keychain use
+  private mode-0600 files. These TLS keys do not authorize listener changes
+  or enrollments. A same-user client agent can exercise a device's scopes
+  if it can read the key or run an executable with Keychain access. Keep
+  attach off for devices where that risk is unacceptable.
+- The target keeps a bounded local audit log in `remote/audit.jsonl` and
+  one rotated file. Logging failures do not prevent removal of a grant.
+  This opt-in sends session metadata and approved terminal content to the
+  paired device. The parent Senate and local hooks do not participate in
+  transport. Timeline bodies, replies, approvals, lifecycle and relay are
+  outside this experimental API.
 
 ## 🤖 Agent Ecosystem & MCP
 

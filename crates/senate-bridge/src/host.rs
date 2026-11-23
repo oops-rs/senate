@@ -44,7 +44,7 @@ pub(crate) use terminal::attach_stream;
 
 pub(crate) const START_TIMEOUT: Duration = Duration::from_secs(10);
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
-const IO_CHUNK: usize = 8192;
+pub(crate) const IO_CHUNK: usize = 8192;
 /// The host's greeting. A host from before terminal colours greets with
 /// [`ATTACHED_PLAIN`] and takes only resize and key frames.
 const ATTACHED: u8 = 2;
@@ -52,10 +52,10 @@ const ATTACHED: u8 = 2;
 const ATTACHED_NATIVE: u8 = 3;
 const ATTACHED_PLAIN: u8 = 1;
 const BUSY: u8 = 0;
-const RESIZE: u8 = 1;
-const KEYS: u8 = 2;
+pub(crate) const RESIZE: u8 = 1;
+pub(crate) const KEYS: u8 = 2;
 /// What the viewer's terminal says about its colours, as JSON.
-const COLORS: u8 = 3;
+pub(crate) const COLORS: u8 = 3;
 
 /// The TUI's side of the PTY, shared by the output pump, which answers for
 /// an absent viewer, and the relay of an attached one.

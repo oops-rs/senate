@@ -161,10 +161,13 @@ so the asker never has to watch another committee.
 
 For a person's own paired device, an explicitly enabled remote machine listener
 adds a separate direct connection to the target daemon. Its versioned typed
-API shares no Senate or agent token. The target's local person guard controls
-pairing, grant confirmation and revocation. The target checks the pinned TLS
-device certificate and its current grant for each connection. The original
-committee and parent routing rules still apply to Senate messages.
+API shares no Senate or agent token. A root-owned administrator tool sets
+the listener policy and grants. The normal daemon reads that policy and
+checks the device public-key pin and current grant for each connection.
+Local person checks guard enrollment preparation. The administrator tool
+confirms an enrollment using the comparison code from the client and stores
+the approved grant independently of the user-owned bridge files. The
+original committee and parent routing rules still apply to Senate messages.
 
 The remote API exposes hosted-session metadata, read-only terminal bytes and,
 by a separate device grant, an interactive terminal. A remote watch sends no

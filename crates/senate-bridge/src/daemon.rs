@@ -782,7 +782,13 @@ pub async fn start_with_host_binary(
     };
     let shared = Shared::open(config, &paths.state_db(), 0, &common)?;
     verify_person(&shared).await?;
-    let remote = crate::remote::Service::open(&paths).await?;
+    let remote = match crate::remote::Service::open(&paths).await {
+        Ok(remote) => remote,
+        Err(error) => {
+            tracing::warn!(%error, "remote access disabled; local bridge remains available");
+            None
+        }
+    };
     let mut front = Front::new(shared.clone(), relay, watch, app_clients);
     front.remote = remote.as_ref().map(|(service, _)| service.clone());
     let front = Arc::new(front);
@@ -6124,9 +6130,15 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                 Ok(Request::RemoteControl { command }) => {
                     let reply = match shared.refuse_agent_caller(peer, "Manage remote device pairing from your own terminal").await {
                         Err(error) => Reply::err(error),
-                        Ok(()) => match &shared.remote {
-                            Some(remote) => wrap(remote.control(command).map_err(|e| IpcError::bad_request(e.to_string()))),
-                            None => Reply::err(IpcError::bad_request("remote access is disabled on this machine")),
+                        Ok(()) => match command {
+                            crate::remote::Control::PrepareEnable { listen } => wrap(
+                                crate::remote::prepare_enable(&Paths::new(&shared.primary().home), listen)
+                                    .map_err(|error| IpcError::bad_request(error.to_string()))
+                            ),
+                            command => match &shared.remote {
+                                Some(remote) => wrap(remote.control(command).map_err(|e| IpcError::bad_request(e.to_string()))),
+                                None => Reply::err(IpcError::bad_request("remote access is disabled on this machine")),
+                            },
                         },
                     };
                     (reply, false)
