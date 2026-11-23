@@ -15,6 +15,7 @@ use tokio::net::UnixStream;
 use tokio::signal::unix::{SignalKind, signal};
 
 use super::emulation::{Colors, Scheme};
+use super::paste::Pastes;
 use super::{ATTACHED, ATTACHED_PLAIN, BUSY, COLORS, IO_CHUNK, KEYS, RESIZE};
 use crate::paths::Paths;
 
@@ -282,11 +283,15 @@ impl Drop for RawTerminal {
 }
 
 /// Attach until Ctrl-], the person closes the terminal, or the host exits.
-pub async fn attach(path: &Path, _paths: &Paths) -> anyhow::Result<()> {
+pub async fn attach(path: &Path, paths: &Paths) -> anyhow::Result<()> {
     ensure!(
         crate::testenv::confined(path),
         "terminal socket is outside the test directory"
     );
+    let drops = super::hosts(paths).canonicalize().ok().and_then(|hosts| {
+        let session = path.parent()?.canonicalize().ok()?;
+        (session.parent() == Some(&hosts)).then(|| session.join("drops"))
+    });
     let mut stream = UnixStream::connect(path)
         .await
         .context("connect to the hosted terminal")?;
@@ -315,13 +320,17 @@ pub async fn attach(path: &Path, _paths: &Paths) -> anyhow::Result<()> {
         }
         terminal.size(&mut keys).await?;
         let mut input = [0u8; IO_CHUNK];
-        let mut pending = typed;
+        let mut pastes = Pastes::default();
+        let (bytes, detaching) = pastes.feed(&typed, drops.as_deref()).await;
+        send_keys(&mut keys, &bytes).await?;
+        if detaching {
+            return Ok(());
+        }
         loop {
             let n = tokio::select! {
-                n = terminal.input.async_io(Interest::READABLE, |fd| (&fd.file).read(&mut input)) => n?,
-                _ = tokio::time::sleep(Duration::from_millis(35)), if !pending.is_empty() => {
-                    send_keys(&mut keys, &pending).await?;
-                    pending.clear();
+                n = terminal.read(&mut input) => n?,
+                _ = tokio::time::sleep(Duration::from_millis(35)), if pastes.waiting_for_key() => {
+                    send_keys(&mut keys, &pastes.flush_key()).await?;
                     continue;
                 }
                 _ = winch.recv() => {
@@ -332,13 +341,11 @@ pub async fn attach(path: &Path, _paths: &Paths) -> anyhow::Result<()> {
             if n == 0 {
                 return Ok(());
             }
-            pending.extend_from_slice(&input[..n]);
-            let (send, detach) = split_input(&pending);
-            send_keys(&mut keys, &pending[..send]).await?;
-            if detach {
+            let (bytes, detaching) = pastes.feed(&input[..n], drops.as_deref()).await;
+            send_keys(&mut keys, &bytes).await?;
+            if detaching {
                 return Ok(());
             }
-            pending.drain(..send);
         }
     };
     let to_screen = async {

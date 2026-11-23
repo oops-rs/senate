@@ -4,6 +4,7 @@
 pub(crate) mod control;
 mod emulation;
 mod input;
+mod paste;
 mod picker;
 pub(crate) mod prompt;
 mod terminal;

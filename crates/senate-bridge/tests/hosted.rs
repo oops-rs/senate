@@ -2397,6 +2397,50 @@ async fn watched_sessions(aliases: &[&str]) -> (Harness, PathBuf) {
     (h, typed)
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_quoted_screenshot_drop_outlives_the_original() {
+    let (h, alias, typed) = watched_session().await;
+    let session = watched_hosts(&h).pop().unwrap().canonicalize().unwrap();
+    let ephemeral = h
+        .dir
+        .path()
+        .join("TemporaryItems/NSIRD_screencaptureui_fixture");
+    std::fs::create_dir_all(&ephemeral).unwrap();
+    let original = ephemeral.join("Screenshot with spaces.png");
+    std::fs::write(&original, b"fixture image bytes").unwrap();
+
+    let keys = format!("\x1b[200~\"{}\"\x1b[201~\r\x1d", original.display());
+    attach(&h, &alias, keys.as_bytes()).await;
+    let pasted = eventually("the hosted TUI to receive the paste", TIMEOUT, || {
+        std::fs::read_to_string(&typed).ok()
+    })
+    .await;
+    std::fs::remove_file(&original).unwrap();
+    let path = pasted
+        .trim_end_matches('\n')
+        .strip_prefix("\x1b[200~\"")
+        .and_then(|paste| paste.strip_suffix("\"\x1b[201~"))
+        .expect("the paste retains its quotes and framing");
+    let copied = PathBuf::from(path);
+    assert_eq!(
+        std::fs::read(&copied).expect("the pasted path is readable after temporary-file cleanup"),
+        b"fixture image bytes"
+    );
+    assert!(copied.starts_with(session.join("drops")));
+    assert_eq!(copied.file_name(), original.file_name());
+
+    let _: senate_bridge::ipc::StopReply = call(
+        &h,
+        &Request::Stop {
+            session: Default::default(),
+            senator: common::path(&alias).into(),
+            force: false,
+        },
+    )
+    .await;
+    assert!(!copied.exists(), "the session owns the staged file");
+}
+
 /// Read the PTY as one screen, including markers arriving in the same read.
 async fn wait_for_screen(
     output: &mut (impl tokio::io::AsyncRead + Unpin),
