@@ -57,6 +57,50 @@ fn hook_input(session: &str, cwd: &Path, event: &str) -> String {
 }
 
 #[test]
+fn profiles_list_configured_settings_and_doctor_reports_an_invalid_profile() {
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let paths = senate_bridge::Paths::new(dir.path().join("senate"));
+    paths.ensure_home().unwrap();
+    let config = r#"
+person = "alice"
+[local]
+[profiles.review]
+runtime = "codex"
+model = "astra"
+effort = "high"
+note = "Use for independent diff review."
+[profiles.investigate]
+runtime = "claude"
+note = "Use for diagnosis."
+"#;
+    std::fs::write(paths.config(), config).unwrap();
+    let command = || bridge(dir.path(), paths.home());
+    let out = command().arg("profiles").output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        concat!(
+            "investigate\tclaude\tdefault\tdefault\tUse for diagnosis.\n",
+            "review\tcodex\tastra\thigh\tUse for independent diff review.\n"
+        )
+    );
+
+    std::fs::write(paths.config(), config.replace("high", "unsupported")).unwrap();
+    let out = command()
+        .args(["setup", "doctor", "--json"])
+        .env("PATH", dir.path())
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{out:?}");
+    let report = String::from_utf8(out.stdout).unwrap();
+    assert!(report.contains("[profiles.review]"), "{report}");
+    assert!(
+        report.contains("codex does not take the effort"),
+        "{report}"
+    );
+}
+
+#[test]
 fn hooks_exit_zero_and_skip_git_without_a_daemon() {
     let dir = tempfile::tempdir().unwrap();
     let git = dir.path().join("git");

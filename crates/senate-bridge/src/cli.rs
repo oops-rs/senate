@@ -500,6 +500,8 @@ stdin.")]
         #[arg(last = true, required = true, num_args = 1..)]
         command: Vec<std::ffi::OsString>,
     },
+    /// List this machine's named launch profiles and when to use them.
+    Profiles,
     /// Start a coding agent in the background as a senator.
     ///
     /// Starts the Claude Code, Codex or Antigravity (agy) TUI in a
@@ -2651,6 +2653,23 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
                 &std::env::current_dir()?,
                 &command,
             ))
+        }
+        Cmd::Profiles => {
+            let paths = Paths::from_env()?;
+            let config = BridgeConfig::load_unchecked(&paths.config())?;
+            if config.profiles.is_empty() {
+                println!("No launch profiles configured.");
+            }
+            for (name, profile) in config.profiles {
+                println!(
+                    "{name}\t{}\t{}\t{}\t{}",
+                    crate::session::Runtime::from(profile.runtime).as_str(),
+                    profile.model.model.as_deref().unwrap_or("default"),
+                    profile.model.effort.as_deref().unwrap_or("default"),
+                    profile.note
+                );
+            }
+            Ok(())
         }
         Cmd::Spawn {
             runtime: harness,
