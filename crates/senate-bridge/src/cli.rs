@@ -3506,6 +3506,9 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
                 ),
             };
             print!("{text}");
+            if let Some(note) = crate::remote::experimental_notice(&paths) {
+                println!("{note}");
+            }
             Ok(())
         }
         Cmd::Debug {

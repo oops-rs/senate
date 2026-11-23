@@ -778,11 +778,13 @@ A developer machine can opt into direct access from another Mac on a LAN or an
 existing mesh network. Configure the **target** machine's
 `$SENATE_HOME/senate.toml` (normally `~/.senate/senate.toml`) with its own
 reachable LAN or mesh address. Substitute the address below. The listener is
-off when this table has no `listen` value. Start the updated `senated --machine`
+off unless this table has both a `listen` value and `experimental = true`.
+Remote access is experimental and has not been hardened. Start the updated `senated --machine`
 with this profile in your normal service or terminal.
 
 ```toml
 [remote]
+experimental = true
 listen = "192.168.1.42:9443"
 ```
 
