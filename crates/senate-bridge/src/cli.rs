@@ -529,7 +529,7 @@ stdin.")]
         #[arg(long)]
         attempt_id: Option<String>,
         /// The coding agent to start. Must agree with --profile if both are given.
-        #[arg(value_enum, required_unless_present = "profile")]
+        #[arg(value_enum)]
         runtime: Option<HostedRuntime>,
         /// Use a named launch profile from this machine. See `senate profiles`.
         #[arg(long, add = ArgValueCandidates::new(completion::profiles))]
@@ -1838,6 +1838,34 @@ fn pick_attach_session() -> anyhow::Result<Option<ipc::AttachTarget>> {
         }))
 }
 
+/// `senate spawn` with neither a runtime nor --profile: what to add.
+fn no_runtime(profiles: &[String], locale: Locale) -> String {
+    let first = match locale {
+        Locale::Zh => {
+            "要启动哪个 agent？写出运行时：`senate spawn claude`（或 codex、agy），".to_owned()
+        }
+        Locale::En => {
+            "Which agent? Name a runtime: `senate spawn claude` (or codex, agy), ".to_owned()
+        }
+    };
+    match (profiles.first(), locale) {
+        (None, Locale::Zh) => {
+            format!("{first}或用 --profile 选一个启动配置（`senate profiles`，目前没有）。")
+        }
+        (None, Locale::En) => format!(
+            "{first}or a launch profile with --profile (`senate profiles`; none is configured yet)."
+        ),
+        (Some(example), Locale::Zh) => format!(
+            "{first}或 `senate spawn --profile {example}`。启动配置：{}。",
+            profiles.join(", ")
+        ),
+        (Some(example), Locale::En) => format!(
+            "{first}or `senate spawn --profile {example}`. Launch profiles: {}.",
+            profiles.join(", ")
+        ),
+    }
+}
+
 fn on_a_terminal() -> bool {
     use std::io::IsTerminal as _;
     std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
@@ -2986,6 +3014,14 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             model,
             attach,
         } => {
+            if harness.is_none() && profile.is_none() {
+                let profiles = Paths::from_env()
+                    .ok()
+                    .and_then(|paths| BridgeConfig::load_unchecked(&paths.config()).ok())
+                    .map(|config| config.profiles.into_keys().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                anyhow::bail!("{}", no_runtime(&profiles, cli_locale()));
+            }
             if attach {
                 require_attach_terminal()?;
             }
@@ -3983,4 +4019,22 @@ fn a_list_without_a_terminal_names_the_command_and_the_sessions() {
         zh.contains("`senate session pause reviewer`（或 --all）"),
         "{zh}"
     );
+}
+
+#[cfg(test)]
+#[test]
+fn a_spawn_without_a_runtime_names_the_runtimes_and_profiles() {
+    let none = no_runtime(&[], Locale::En);
+    assert!(
+        none.contains("`senate spawn claude` (or codex, agy)")
+            && none.contains("none is configured yet"),
+        "{none}"
+    );
+    let some = no_runtime(&["review".to_owned(), "fast".to_owned()], Locale::En);
+    assert!(
+        some.ends_with("or `senate spawn --profile review`. Launch profiles: review, fast."),
+        "{some}"
+    );
+    let zh = no_runtime(&["review".to_owned()], Locale::Zh);
+    assert!(zh.contains("`senate spawn --profile review`"), "{zh}");
 }
