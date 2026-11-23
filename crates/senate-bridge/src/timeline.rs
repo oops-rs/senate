@@ -1,10 +1,17 @@
 //! Session transcripts belong to the person on this machine. Timeline items
 //! and titles go only over the local bridge.sock to the person's app. The
 //! bridge never sends transcript contents to a Senate server or committee log.
+//!
+//! Working state is based on observed hooks and liveness. A non-hosted
+//! Codex process without a known PID can exit without reporting Stop or
+//! SessionEnd. The daemon cannot reliably clear its working state then.
 
 mod claude;
 mod codex;
 mod parse;
+mod titles;
+
+pub(crate) use titles::{SidebarTranscript, TitleCache};
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs::{File, Metadata, OpenOptions};
@@ -165,18 +172,6 @@ impl Transcript {
             // parsed, keep at most a modest buffer for the next record.
             self.record.shrink_to(RETAINED_RECORD_CAPACITY);
         }
-    }
-
-    pub(crate) fn title(&mut self) -> io::Result<Option<String>> {
-        let end = self.snapshot_len()?;
-        while let Some(change) = self.next(end)? {
-            if let TimelineKind::UserMessage { text } = change.item.kind
-                && let Some(first) = text.lines().next()
-            {
-                return Ok(Some(first.chars().take(60).collect()));
-            }
-        }
-        Ok(None)
     }
 
     pub(crate) fn page(

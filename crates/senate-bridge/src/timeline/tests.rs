@@ -51,9 +51,13 @@ fn claude_folds_tool_results_and_keeps_only_the_main_conversation() {
     );
     write!(file, "{{\"type\":\"user\"").unwrap();
 
-    let mut reader = Transcript::open(file.path().into(), Runtime::Claude).unwrap();
+    let titles = TitleCache::default().refresh(vec![(
+        "test".to_string(),
+        Runtime::Claude,
+        file.path().into(),
+    )]);
     assert_eq!(
-        reader.title().unwrap().as_deref(),
+        titles["test"].title.as_deref(),
         Some("The first real prompt")
     );
     let mut reader = Transcript::open(file.path().into(), Runtime::Claude).unwrap();

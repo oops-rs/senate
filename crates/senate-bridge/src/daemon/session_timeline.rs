@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::ipc::{TimelineDirection, TimelineReply, TimelineUpdate};
-use crate::timeline::{self, Transcript};
+use crate::timeline::{self, SidebarTranscript, Transcript};
 use chrono::{DateTime, Utc};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -24,6 +24,27 @@ impl Shared {
         if lock(&self.working_sessions).remove(id).is_some() {
             self.publish(WatchEvent::Sessions);
         }
+    }
+
+    /// Only called by the person-authorized sessions request. Run one
+    /// blocking task for the whole list and prune entries for missing rows.
+    pub(super) async fn sidebar_transcripts<'a>(
+        &self,
+        sessions: impl Iterator<Item = &'a Session>,
+    ) -> HashMap<String, SidebarTranscript> {
+        let visible: Vec<_> = sessions
+            .filter_map(|session| {
+                Some((
+                    session.session_id.clone(),
+                    session.runtime,
+                    timeline::path(session)?,
+                ))
+            })
+            .collect();
+        let cache = self.session_titles.clone();
+        tokio::task::spawn_blocking(move || lock(&cache).refresh(visible))
+            .await
+            .unwrap_or_default()
     }
 
     pub(super) async fn on_timeline(
@@ -71,38 +92,21 @@ impl Shared {
     }
 }
 
-/// Read a title only for a caller accepted by the person-only process guard.
 /// Ended rows keep their last recorded activity even when their file is gone.
-pub(super) async fn sidebar_metadata(
+pub(super) fn sidebar_metadata(
     session: &Session,
     host_started_at: Option<DateTime<Utc>>,
-    include_transcript: bool,
+    transcript: Option<SidebarTranscript>,
 ) -> (DateTime<Utc>, Option<String>) {
     let last_activity =
         host_started_at.map_or(session.last_seen, |start| start.max(session.last_seen));
-    let Some(path) = include_transcript
-        .then(|| timeline::path(session))
-        .flatten()
-    else {
-        return (last_activity, None);
-    };
-    let runtime = session.runtime;
-    tokio::task::spawn_blocking(move || {
-        let modified = std::fs::symlink_metadata(&path)
-            .ok()
-            .filter(|meta| meta.is_file())
-            .and_then(|meta| meta.modified().ok())
-            .map(DateTime::<Utc>::from);
-        let title = Transcript::open(path, runtime)
-            .ok()
-            .and_then(|mut file| file.title().ok().flatten());
-        (
+    match transcript {
+        Some(SidebarTranscript { modified, title }) => (
             modified.map_or(last_activity, |time| time.max(last_activity)),
             title,
-        )
-    })
-    .await
-    .unwrap_or((last_activity, None))
+        ),
+        None => (last_activity, None),
+    }
 }
 
 pub(super) async fn serve(

@@ -8,40 +8,7 @@ pub(super) fn events(record: &Value) -> Vec<Event> {
         return Vec::new();
     }
     match record["type"].as_str() {
-        Some("user") => {
-            let injected = record["isMeta"] == true
-                || record["isVisibleInTranscriptOnly"] == true
-                || record["isCompactSummary"] == true;
-            let content = &record["message"]["content"];
-            let user = |text: &str| {
-                // Some versions mark a delivered Senate user message as meta.
-                if injected && !text.trim_start().starts_with("[senate") {
-                    Vec::new()
-                } else {
-                    parse::user_text(text)
-                }
-            };
-            if let Some(text) = content.as_str() {
-                return user(text);
-            }
-            let mut events = Vec::new();
-            for block in content.as_array().into_iter().flatten() {
-                match block["type"].as_str() {
-                    Some("text") => {
-                        if let Some(text) = block["text"].as_str() {
-                            events.extend(user(text));
-                        }
-                    }
-                    Some("tool_result") => {
-                        if let Some(id) = block["tool_use_id"].as_str() {
-                            events.push(result(id, block, &record["toolUseResult"]));
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            events
-        }
+        Some("user") => user_events(record, true),
         Some("assistant") => record["message"]["content"]
             .as_array()
             .into_iter()
@@ -85,6 +52,44 @@ pub(super) fn events(record: &Value) -> Vec<Event> {
         },
         _ => Vec::new(),
     }
+}
+
+pub(super) fn user_events(record: &Value, include_results: bool) -> Vec<Event> {
+    if record["type"] != "user" || record["isSidechain"] == true {
+        return Vec::new();
+    }
+    let injected = record["isMeta"] == true
+        || record["isVisibleInTranscriptOnly"] == true
+        || record["isCompactSummary"] == true;
+    let content = &record["message"]["content"];
+    let user = |text: &str| {
+        // Some versions mark a delivered Senate user message as meta.
+        if injected && !text.trim_start().starts_with("[senate") {
+            Vec::new()
+        } else {
+            parse::user_text(text)
+        }
+    };
+    if let Some(text) = content.as_str() {
+        return user(text);
+    }
+    let mut events = Vec::new();
+    for block in content.as_array().into_iter().flatten() {
+        match block["type"].as_str() {
+            Some("text") => {
+                if let Some(text) = block["text"].as_str() {
+                    events.extend(user(text));
+                }
+            }
+            Some("tool_result") if include_results => {
+                if let Some(id) = block["tool_use_id"].as_str() {
+                    events.push(result(id, block, &record["toolUseResult"]));
+                }
+            }
+            _ => {}
+        }
+    }
+    events
 }
 
 fn result(id: &str, block: &Value, metadata: &Value) -> Event {

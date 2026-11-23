@@ -540,6 +540,7 @@ pub(crate) struct Shared {
     agy_idle: Mutex<HashMap<String, AgyIdle>>,
     /// Prompt hooks without a matching Stop or SessionEnd in this daemon run.
     working_sessions: Mutex<HashMap<String, Instant>>,
+    session_titles: Arc<Mutex<crate::timeline::TitleCache>>,
     /// Each agent's latest checkpoint it wrote itself (the tool, not an
     /// automatic one) this run: when, and its seq. `session pause` waits
     /// for one newer than its request.
@@ -915,6 +916,7 @@ impl Shared {
             rebinds: Mutex::new(HashMap::new()),
             agy_idle: Mutex::new(HashMap::new()),
             working_sessions: Mutex::new(HashMap::new()),
+            session_titles: Arc::new(Mutex::new(crate::timeline::TitleCache::default())),
             tool_checkpoints: Mutex::new(HashMap::new()),
             companion_config: common.companion_config.clone(),
             companion: Mutex::new(None),
@@ -3417,19 +3419,39 @@ impl Shared {
             .into_iter()
             .map(|p| p.agent)
             .collect();
-        for (session, host_id) in self.store.hosted_sessions().map_err(internal)? {
-            if !known.insert(host_id.clone()) {
-                continue;
+        let mut hosted = self.store.hosted_sessions().map_err(internal)?;
+        hosted.retain(|(_, host_id)| known.insert(host_id.clone()));
+        let mut local = Vec::new();
+        for session in self.store.sessions().map_err(internal)? {
+            if session.is_live()
+                && !self.hosts.unpublished(&session.session_id)
+                && self
+                    .store
+                    .session_host(&session.session_id)
+                    .map_err(internal)?
+                    .is_none()
+            {
+                local.push(session);
             }
+        }
+        let mut transcripts = if include_transcript {
+            self.sidebar_transcripts(hosted.iter().map(|(session, _)| session).chain(&local))
+                .await
+        } else {
+            HashMap::new()
+        };
+        for (session, host_id) in hosted {
             let facts = crate::host::facts(&paths, &host_id).map_err(IpcError::internal)?;
             let prompt = self.hosted_prompt(&host_id);
             let committee = session.committee().cloned();
             let alias = committee
                 .as_ref()
                 .and_then(|c| aliases.as_ref()?.alias_of(c, &session.agent).cloned());
-            let (last_activity, title) =
-                session_timeline::sidebar_metadata(&session, facts.started_at, include_transcript)
-                    .await;
+            let (last_activity, title) = session_timeline::sidebar_metadata(
+                &session,
+                facts.started_at,
+                transcripts.remove(&session.session_id),
+            );
             rows.push(SessionRow {
                 tty: crate::host::socket(&paths, &host_id),
                 host_id,
@@ -3477,23 +3499,16 @@ impl Shared {
             .filter(|id| !known.contains(id) && !self.hosts.launching(id))
             .collect();
         let mut local_rows = Vec::new();
-        for session in self.store.sessions().map_err(internal)? {
-            if !session.is_live()
-                || self.hosts.unpublished(&session.session_id)
-                || self
-                    .store
-                    .session_host(&session.session_id)
-                    .map_err(internal)?
-                    .is_some()
-            {
-                continue;
-            }
+        for session in local {
             let committee = session.committee().cloned();
             let alias = committee
                 .as_ref()
                 .and_then(|c| aliases.as_ref()?.alias_of(c, &session.agent).cloned());
-            let (last_activity, title) =
-                session_timeline::sidebar_metadata(&session, None, include_transcript).await;
+            let (last_activity, title) = session_timeline::sidebar_metadata(
+                &session,
+                None,
+                transcripts.remove(&session.session_id),
+            );
             let working = self.session_working(&session);
             local_rows.push(LocalSessionRow {
                 session_id: session.session_id,
