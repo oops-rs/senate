@@ -774,12 +774,15 @@ enum SessionCmd {
     #[command(after_help = "Examples:
   senate session approve reviewer            Allow it once
   senate session approve reviewer --always   Allow it for the session
-  senate session approve reviewer --deny     Refuse it")]
+  senate session approve reviewer --deny     Refuse it
+  senate session approve --once              The one prompt waiting, whoever's it is")]
     Approve {
         /// The senator's alias (`committee::alias` for one on one
-        /// committee) or primary name.
+        /// committee) or primary name. Without one, the only session with
+        /// a prompt waiting; the answer must then be given (--once,
+        /// --always or --deny), and what it answers is printed first.
         #[arg(add = ArgValueCandidates::new(completion::sessions))]
-        senator: AliasName,
+        senator: Option<AliasName>,
         /// Allow it this once (the default).
         #[arg(long, conflicts_with_all = ["always", "deny"])]
         once: bool,
@@ -1836,6 +1839,73 @@ fn pick_attach_session() -> anyhow::Result<Option<ipc::AttachTarget>> {
         .map(|row| ipc::AttachTarget::Session {
             session_id: row.session_id,
         }))
+}
+
+/// `senate session approve` with no name: the one session whose
+/// permission prompt Senate can answer, and the line saying which (and what
+/// it asks about). Refused unless the answer was given, when no prompt or
+/// several wait.
+fn the_waiting_prompt(
+    rows: &[ipc::SessionRow],
+    answer_given: bool,
+    locale: Locale,
+) -> Result<(SenatorName, String), String> {
+    let waiting: Vec<&ipc::SessionRow> = rows
+        .iter()
+        .filter(|row| row.prompt.as_ref().is_some_and(|p| !p.screen))
+        .collect();
+    let about = |row: &ipc::SessionRow| {
+        row.prompt
+            .as_ref()
+            .and_then(|p| p.tool.as_deref())
+            .map(crate::host_approval::tool_label)
+            .unwrap_or_else(|| locale.pick("（未说明）", "(not said)").to_owned())
+    };
+    match waiting.as_slice() {
+        [] => Err(locale
+            .pick(
+                "没有托管会话在等权限请求的回答；`senate session list` 列出会话。",
+                "No hosted session has a permission prompt waiting; `senate session list` lists them.",
+            )
+            .to_owned()),
+        [row] if answer_given => {
+            let name = row.display_name(false);
+            let about = about(row);
+            Ok((
+                row.primary.clone(),
+                match locale {
+                    Locale::Zh => format!("回答 {name} 的权限请求：{about}"),
+                    Locale::En => format!("Answering {name}'s prompt: {about}"),
+                },
+            ))
+        }
+        [row] => {
+            let name = row.display_name(false);
+            let about = about(row);
+            Err(match locale {
+                Locale::Zh => format!(
+                    "{name} 在等权限请求：{about}。不写名字时要写明回答：`senate session approve --once`、`--always` 或 `--deny`（或 `senate session approve {name}`）。"
+                ),
+                Locale::En => format!(
+                    "{name} has a prompt waiting: {about}. Without a name, give the answer: \
+                     `senate session approve --once`, `--always` or `--deny` (or `senate session approve {name}`)."
+                ),
+            })
+        }
+        several => {
+            let list = several
+                .iter()
+                .map(|row| format!("\n  {}  {}", row.display_name(false), about(row)))
+                .collect::<String>();
+            Err(match locale {
+                Locale::Zh => format!("有 {} 个会话在等权限请求；写出名字：{list}", several.len()),
+                Locale::En => format!(
+                    "{} sessions have a prompt waiting; name one (`senate session approve <name>`):{list}",
+                    several.len()
+                ),
+            })
+        }
+    }
 }
 
 /// How to add a launch profile, for `senate profiles` with none.
@@ -3448,14 +3518,30 @@ fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
         }
         SessionCmd::Approve {
             senator,
-            once: _,
+            once,
             always,
             deny,
         } => {
             use crate::approvals::Decision;
             let paths = Paths::from_env()?;
             let locale = BridgeConfig::locale_at(&paths.config());
-            let senator = pick_alias(senator)?;
+            let senator = match senator {
+                Some(senator) => pick_alias(senator)?,
+                None => {
+                    let rows = runtime(false)?
+                        .block_on(daemon_call::<ipc::SessionsReply>(
+                            &paths,
+                            &Request::Sessions,
+                        ))?
+                        .rows;
+                    let (senator, announcement) =
+                        the_waiting_prompt(&rows, once || always || deny, locale)
+                            .map_err(|message| anyhow::anyhow!(message))?;
+                    // Said before the answer is sent, so it is never a surprise.
+                    eprintln!("{announcement}");
+                    AliasName::bare(senator)
+                }
+            };
             let decision = if deny {
                 Decision::Deny
             } else if always {
@@ -4082,5 +4168,48 @@ fn no_profiles_shows_one_to_copy_and_where() {
     assert_eq!(
         parsed["profiles"]["review"]["runtime"].as_str(),
         Some("codex")
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn approve_without_a_name_takes_only_the_one_waiting_prompt_and_says_so() {
+    use crate::ipc::{HostState, HostedPrompt};
+    use crate::sessions::tests::row;
+    let asking = |name: &str, alias: &str, screen: bool| {
+        let mut row = row(name, Some(alias), HostState::Running);
+        row.prompt = Some(HostedPrompt {
+            tool: Some("Bash".into()),
+            since: chrono::Utc::now(),
+            screen,
+        });
+        row
+    };
+    let quiet = row("codex-9", Some("quiet"), HostState::Running);
+    let one = [asking("claude-1", "reviewer", false), quiet.clone()];
+    let (senator, said) = the_waiting_prompt(&one, true, Locale::En).unwrap();
+    assert_eq!(senator.as_str(), "claude-1");
+    assert!(said.starts_with("Answering reviewer's prompt: "), "{said}");
+    // The answer is never assumed when the session is.
+    let refused = the_waiting_prompt(&one, false, Locale::En).unwrap_err();
+    assert!(
+        refused.contains("give the answer: `senate session approve --once`"),
+        "{refused}"
+    );
+    // A choice only seen on the screen is not one approve can answer.
+    let screen = [asking("claude-1", "reviewer", true), quiet.clone()];
+    assert!(
+        the_waiting_prompt(&screen, true, Locale::En)
+            .unwrap_err()
+            .starts_with("No hosted session")
+    );
+    let two = [
+        asking("claude-1", "reviewer", false),
+        asking("claude-2", "builder", false),
+    ];
+    let listed = the_waiting_prompt(&two, true, Locale::En).unwrap_err();
+    assert!(
+        listed.starts_with("2 sessions have a prompt waiting") && listed.contains("\n  builder  "),
+        "{listed}"
     );
 }

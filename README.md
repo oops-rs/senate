@@ -563,6 +563,7 @@ senate session list --all               # include stopped and paused sessions
 senate session watch                   # read-only grid of terminals without an interactive viewer
 senate session watch --all             # include attached, paused and stopped sessions
 senate session approve reviewer        # answer its permission prompt (--always, --deny)
+senate session approve --once          # the one prompt waiting, whoever's it is
 senate session stop reviewer           # end its terminal...
 senate session restore reviewer        # ...and reopen it later (add --attach to enter)
 senate session pause --all             # checkpoint, then stop each one...
@@ -601,6 +602,10 @@ step.
 `senate session approve` answers the permission prompt waiting in a hosted
 terminal without attaching, as you would there: allow once (the default),
 `--always` (and stop asking for the same thing this session) or `--deny`.
+Without a name it answers the one session with a prompt waiting, and only
+when the answer is given (`--once`, `--always` or `--deny`); it prints which
+session and what the prompt asks about before answering, and lists them when
+several wait.
 Codex is answered through its app-server; for Claude Code the host checks that
 its screen shows the permission dialog and types the chosen option. A choice
 Senate only saw on the screen is not answered this way: attach to it. Each
