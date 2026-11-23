@@ -75,7 +75,7 @@ Senate operates across developer machines and team servers through a resilient s
  │ senated --machine                        │ HTTP │ senated --config senated.toml                          │
  │                                          │ SSE  │                                                        │
  │ ┌──────────────────────────────────────┐ │      │ ┌────────────────────────────────────────────────────┐ │
- │ │ developer-machine side: senate-bridge│ │◀─────┼─┤ senate-server (Axum HTTP & SSE API)                 │ │
+ │ │ developer-machine side: senate-bridge│ │◀─────┼─┤ senate-server (Axum HTTP & SSE API)                │ │
  │ │                                      │ │      │ └─────────────────────────┬──────────────────────────┘ │
  │ │  • Session Manager (Claude/Codex/agy)│ │      │                           │ in-process                 │
  │ │  • SSE Streams & Delivery Ladder     │ │      │                           ▼                            │
