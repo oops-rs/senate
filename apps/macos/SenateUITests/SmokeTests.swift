@@ -1,10 +1,12 @@
+import AppKit
 import XCTest
 
 /// The app end to end against the core's fake daemon
 /// (`scripts/ui-test.sh` starts it and passes its Senate home): the window
-/// opens on home with the waiting threads in the sidebar, a thread opens
-/// and takes a reply, an approval is allowed, a committee opens, the
-/// sections answer ⌘1–6, and nothing fails an accessibility audit.
+/// opens on the inbox, a thread opens and takes a reply, an approval is
+/// allowed, a session opens from the sidebar with its conversation and its
+/// prompt, a committee opens, ⌘1 and ⌘2 answer, and nothing fails an
+/// accessibility audit.
 final class SmokeTests: XCTestCase {
     var app: XCUIApplication!
 
@@ -26,21 +28,27 @@ final class SmokeTests: XCTestCase {
         app?.terminate()
     }
 
-    func testInboxReplyApprovalsAndSections() throws {
+    func testInboxReplyApprovalsSessionsAndCommittees() throws {
         let window = app.windows.firstMatch
         XCTAssertTrue(window.waitForExistence(timeout: 10), "the window opens")
 
-        // The sidebar lists the fake daemon's threads; one opens beside it.
-        let row = window.outlines.staticTexts["which env?"].firstMatch
-        XCTAssertTrue(row.waitForExistence(timeout: 10), "the sidebar shows the thread")
+        // The inbox lists the fake daemon's threads; one opens.
+        let row = window.buttons["which env?"].firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 10), "the inbox shows the thread")
         row.click()
         let reply = window.textViews.firstMatch
         XCTAssertTrue(reply.waitForExistence(timeout: 5), "the reply box is there")
         reply.click()
-        reply.typeText("staging, please")
+        // Pasted, not typed: an input method (pinyin, say) would turn typed
+        // letters into candidates.
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString("staging, please", forType: .string)
+        reply.typeKey("v", modifierFlags: .command)
         window.typeKey(.return, modifierFlags: .command)
-        // Sent: answered, the thread no longer waits on you and leaves the sidebar.
-        let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: row)
+        // Sent: answered, the thread no longer waits on you and leaves the inbox.
+        window.typeKey("1", modifierFlags: .command)
+        let gone = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"), object: window.buttons["which env?"].firstMatch)
         XCTAssertEqual(XCTWaiter.wait(for: [gone], timeout: 10), .completed, "the reply was sent")
 
         // ⌘2: Approvals. Allowing the Codex request takes it off the list.
@@ -55,23 +63,30 @@ final class SmokeTests: XCTestCase {
         )
         XCTAssertEqual(XCTWaiter.wait(for: [fewer], timeout: 10), .completed, "the approval was answered")
 
-        // ⌘3 Committees: one card per committee; one opens on its roster.
-        window.typeKey("3", modifierFlags: .command)
-        let payments = window.buttons.matching(NSPredicate(format: "label BEGINSWITH 'payments'")).firstMatch
-        XCTAssertTrue(payments.waitForExistence(timeout: 5), "the committees are listed")
-        payments.click()
-        XCTAssertTrue(window.buttons["All committees"].firstMatch.waitForExistence(timeout: 5), "a committee opens")
-        // ⌘4 Sessions, ⌘6 Senates (the fake presides, so ⌘5 is the docket).
-        window.typeKey("4", modifierFlags: .command)
-        XCTAssertTrue(window.buttons["Attach to decide"].firstMatch.waitForExistence(timeout: 5))
-        window.typeKey("6", modifierFlags: .command)
-        XCTAssertTrue(window.staticTexts["Address"].firstMatch.waitForExistence(timeout: 5), "the Senates section shows")
+        // A session from the sidebar: its conversation, its prompt, the composer.
+        let lead = window.outlines.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == 'lead'")).firstMatch
+        XCTAssertTrue(lead.waitForExistence(timeout: 5), "the sidebar lists the sessions")
+        lead.click()
+        XCTAssertTrue(window.buttons["Attach to decide"].firstMatch.waitForExistence(timeout: 5), "its prompt waits")
+        XCTAssertTrue(window.descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS 'cargo publish -p refund'")).firstMatch
+            .waitForExistence(timeout: 5), "its conversation shows")
+        XCTAssertTrue(window.textViews["Message"].firstMatch.exists, "the composer is there")
+
+        // A committee from the sidebar: its sessions and members.
+        window.outlines.descendants(matching: .any)
+            .matching(NSPredicate(format: "label BEGINSWITH 'payments'")).firstMatch.click()
+        let opened = XCTNSPredicateExpectation(predicate: NSPredicate(format: "title == 'payments'"), object: window)
+        XCTAssertEqual(XCTWaiter.wait(for: [opened], timeout: 5), .completed, "a committee opens")
+        XCTAssertTrue(window.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == 'ledger'")).count >= 2, "with its sessions on this Mac")
     }
 
     func testAccessibilityAudit() throws {
         let window = app.windows.firstMatch
         XCTAssertTrue(window.waitForExistence(timeout: 10))
-        XCTAssertTrue(window.staticTexts["which env?"].firstMatch.waitForExistence(timeout: 10))
+        XCTAssertTrue(window.buttons["which env?"].firstMatch.waitForExistence(timeout: 10))
         // Which elements failed: the audit's own failure only names the kind of
         // issue, so go on past it to list them.
         continueAfterFailure = true

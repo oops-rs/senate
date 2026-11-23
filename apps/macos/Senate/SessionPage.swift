@@ -263,6 +263,7 @@ struct RuntimeMark: View {
 private struct SessionConversation: View {
     @Bindable var store: CoreStore
     let session: SessionLine
+    @State private var position = ScrollPosition(edge: .bottom)
 
     var body: some View {
         let t = store.timeline.flatMap { $0.sessionId == session.sessionId ? $0 : nil }
@@ -289,7 +290,27 @@ private struct SessionConversation: View {
         // there; scrolled up, what you read stays put.
         .defaultScrollAnchor(.bottom)
         .defaultScrollAnchor(.bottom, for: .sizeChanges)
+        .scrollPosition($position)
+        #if DEBUG
+        // The snapshot tour scrolls to the top, to check that reading the
+        // page before keeps what is on screen where it is.
+        .onReceive(NotificationCenter.default.publisher(for: Snapshot.scrollToTop)) { _ in
+            position.scrollTo(edge: .top)
         }
+        #endif
+        }
+    }
+
+    /// Read the page before, keeping what was first on screen where it was:
+    /// without this, at the very top the view would stay at offset zero and
+    /// jump onto what was just read.
+    private func older(_ t: SessionTimeline) async {
+        guard t.hasOlder, !t.loadingOlder, let first = t.firstSeq else { return }
+        await store.loadOlder()
+        guard t.firstSeq != first else { return }
+        var still = Transaction()
+        still.disablesAnimations = true
+        withTransaction(still) { position.scrollTo(id: first, anchor: .top) }
     }
 
     @ViewBuilder private func body(_ t: SessionTimeline) -> some View {
@@ -304,18 +325,19 @@ private struct SessionConversation: View {
                     if t.loadingOlder {
                         ProgressView().controlSize(.small)
                     } else {
-                        Button(L("session.earlier")) { Task { await store.loadOlder() } }
+                        Button(L("session.earlier")) { Task { await older(t) } }
                             .buttonStyle(.pill)
                     }
                     Spacer()
                 }
-                .onAppear { Task { await store.loadOlder() } }
+                .onAppear { Task { await older(t) } }
             }
             if t.items.isEmpty {
                 Nothing(text: L("session.empty"), hosted: nil, store: store)
             }
             ForEach(t.items) { item in
                 EntryView(store: store, entry: item, committee: session.committee)
+                    .id(item.seq)
             }
             if t.working {
                 HStack(spacing: Theme.Space.s) {
@@ -483,11 +505,16 @@ private struct ToolRow: View {
             .accessibilityLabel("\(call.name): \(call.title)")
             .accessibilityValue(call.statusLabel)
             .accessibilityAddTraits(more ? .isButton : [])
+            #if DEBUG
+            .onReceive(NotificationCenter.default.publisher(for: Snapshot.expandTools)) { _ in
+                if more { open = true }
+            }
+            #endif
             if open {
                 if let diff = call.diff {
                     DiffView(diff: diff)
                 } else if let output = call.output {
-                    CodeBlock(text: output, lines: 40)
+                    BoundedLines(text: output)
                 }
             }
         }
@@ -520,39 +547,59 @@ private struct ToolRow: View {
     }
 }
 
-/// A unified diff, its added and removed lines in their colours.
+/// A unified diff, its added and removed lines in their colours, in a
+/// bounded block that scrolls.
 private struct DiffView: View {
     let diff: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            ForEach(Array(diff.split(separator: "\n", omittingEmptySubsequences: false).prefix(200).enumerated()),
-                    id: \.offset) { _, line in
-                Text(verbatim: line.isEmpty ? " " : String(line))
-                    .font(Theme.Fonts.code)
-                    .foregroundStyle(color(line))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, Theme.Space.m)
-                    .background(background(line))
-            }
+        BoundedLines(text: diff) { line in
+            if line.hasPrefix("+") && !line.hasPrefix("+++") { return (Theme.success, Theme.successContainer) }
+            if line.hasPrefix("-") && !line.hasPrefix("---") { return (Theme.danger, Theme.dangerContainer) }
+            if line.hasPrefix("@@") { return (Theme.onSurfaceVariant, .clear) }
+            return (Theme.onSurface, .clear)
         }
-        .padding(.vertical, Theme.Space.s)
-        .textSelection(.enabled)
+    }
+}
+
+/// What a tool printed, or a diff: at most `maxHeight` tall, scrolling
+/// inside, its lines drawn as they come into view, so a 64 KiB output costs
+/// what is on screen. A line longer than `lineLimit` characters is cut.
+struct BoundedLines: View {
+    let text: String
+    var maxHeight: CGFloat = 320
+    var style: (Substring) -> (Color, Color) = { _ in (Theme.onSurface, .clear) }
+    static let lineLimit = 2_000
+
+    init(text: String, maxHeight: CGFloat = 320, style: @escaping (Substring) -> (Color, Color) = { _ in (Theme.onSurface, .clear) }) {
+        self.text = text
+        self.maxHeight = maxHeight
+        self.style = style
+    }
+
+    var body: some View {
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        ScrollView(.vertical) {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                ForEach(lines.indices, id: \.self) { i in
+                    let line = lines[i]
+                    let (fg, bg) = style(line)
+                    Text(verbatim: line.isEmpty ? " " : line.count > Self.lineLimit
+                        ? String(line.prefix(Self.lineLimit)) + "…" : String(line))
+                        .font(Theme.Fonts.code)
+                        .foregroundStyle(fg)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, Theme.Space.m)
+                        .background(bg)
+                }
+            }
+            .padding(.vertical, Theme.Space.s)
+            .textSelection(.enabled)
+        }
+        .frame(maxHeight: maxHeight)
+        .fixedSize(horizontal: false, vertical: lines.count < 16)
         .background(Theme.containerHigh, in: RoundedRectangle(cornerRadius: Theme.Radius.code))
         .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.code))
-    }
-
-    private func color(_ line: Substring) -> Color {
-        if line.hasPrefix("+") { return Theme.success }
-        if line.hasPrefix("-") { return Theme.danger }
-        if line.hasPrefix("@@") { return Theme.onSurfaceVariant }
-        return Theme.onSurface
-    }
-
-    private func background(_ line: Substring) -> Color {
-        if line.hasPrefix("+") && !line.hasPrefix("+++") { return Theme.successContainer }
-        if line.hasPrefix("-") && !line.hasPrefix("---") { return Theme.dangerContainer }
-        return .clear
     }
 }
 
@@ -590,7 +637,7 @@ private struct TodoList: View {
 }
 
 /// A Senate message delivered to the session: who, what kind, its first
-/// lines. It opens its thread while that waits on you, else its committee.
+/// lines. It opens its thread.
 private struct SenateCard: View {
     let store: CoreStore
     let message: SenateLine
@@ -647,8 +694,8 @@ private struct SenateCard: View {
 
     private func open() {
         guard let committee = message.committee else { return }
-        if let root = message.thread, store.state.inbox.contains(where: { $0.committee == committee && $0.root == root }) {
-            store.place = .thread("\(committee):\(root)")
+        if let root = message.thread {
+            store.openThread(committee: committee, root: root)
         } else {
             store.place = .committee(committee)
         }

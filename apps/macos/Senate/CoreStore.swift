@@ -248,6 +248,12 @@ final class CoreStore {
             }
             return
         }
+        if case let .thread(key) = place, !state.inbox.contains(where: { $0.key == key }),
+           thread.map({ "\($0.committee):\($0.root)" }) != key,
+           let colon = key.lastIndex(of: ":"), let root = UInt64(key[key.index(after: colon)...]) {
+            threadError = nil
+            Task { await loadThread(committee: String(key[..<colon]), root: root) }
+        }
         if old != place { syncTimeline() }
     }
 
@@ -257,10 +263,19 @@ final class CoreStore {
         return nil
     }
 
-    /// The selected thread's row, while it is in the inbox.
+    /// The selected thread's row: its inbox row, else one made from what
+    /// was read of it (a thread no longer, or never, in the inbox).
     var selectedRow: InboxThread? {
         guard let key = selectedThread else { return nil }
-        return state.inbox.first { $0.key == key }
+        if let row = state.inbox.first(where: { $0.key == key }) { return row }
+        guard let thread, "\(thread.committee):\(thread.root)" == key else { return nil }
+        return InboxThread(read: thread)
+    }
+
+    /// Open a thread by its committee and root, whether or not it waits on
+    /// you: what is not in the inbox is read first (`placeChanged`).
+    func openThread(committee: String, root: UInt64) {
+        place = .thread("\(committee):\(root)")
     }
 
     /// The open session, while this machine has it.
@@ -437,16 +452,21 @@ final class CoreStore {
     /// Read the open thread (which marks it seen). Called when it is
     /// chosen and whenever its row says something new was said.
     func loadThread(_ row: InboxThread) async {
+        await loadThread(committee: row.committee, root: row.root)
+    }
+
+    func loadThread(committee: String, root: UInt64) async {
         guard let core else { return }
+        let key = "\(committee):\(root)"
         do {
-            let view = try await Perf.measure("thread", "#\(row.root)") {
-                try await core.thread(committee: row.committee, thread: row.root)
+            let view = try await Perf.measure("thread", "#\(root)") {
+                try await core.thread(committee: committee, thread: root)
             }
-            guard selectedThread == row.key else { return }
+            guard selectedThread == key else { return }
             thread = view
             threadError = nil
         } catch {
-            guard selectedThread == row.key else { return }
+            guard selectedThread == key else { return }
             threadError = describe(error)
         }
     }
@@ -654,6 +674,22 @@ extension AppState {
         counts: Counts(threads: 0, approvals: 0, codex: 0, docket: 0, prompts: 0, forPerson: 0, pending: 0),
         lastError: nil
     )
+}
+
+extension InboxThread {
+    /// A thread that is in no inbox, as its read says: its title, kind and
+    /// state, and nothing waiting on anyone.
+    init(read view: ThreadView) {
+        let root = view.events.first { $0.seq == view.root } ?? view.events.first
+        self.init(
+            committee: view.committee, root: view.root, updated: view.events.last?.seq ?? view.root,
+            title: view.title, kind: root?.kind ?? "", kindLabel: view.kindLabel,
+            state: view.state ?? "active", stateLabel: view.stateLabel ?? "",
+            from: root?.by ?? "", onBehalfOf: nil, to: root?.to ?? [], since: root?.at ?? .now,
+            owner: nil, triage: nil, triageLabel: nil, reason: nil, escalatedTo: nil, takeover: nil,
+            answered: false, forPerson: false, asker: root?.by ?? "", forAgents: [], escalated: false,
+            toDecide: false, unread: false, newsFrom: nil, newsKind: nil, newsKindLabel: nil, newsLine: nil)
+    }
 }
 
 extension InboxThread: @retroactive Identifiable {

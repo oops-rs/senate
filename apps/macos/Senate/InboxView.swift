@@ -26,12 +26,18 @@ struct InboxView: View {
             )
         } else {
             ReadingColumn(spacing: Theme.Space.xs) {
-                Text(verbatim: threads.isEmpty ? L("home.clear", name) : L("inbox.waiting", name, Int64(threads.count)))
-                    .font(Theme.Fonts.display)
-                    .foregroundStyle(Theme.onSurface)
-                    .padding(.top, Theme.Space.xxxl)
-                    .padding(.leading, Theme.Space.xs)
-                    .accessibilityAddTraits(.isHeader)
+                HStack(alignment: .firstTextBaseline) {
+                    Text(verbatim: threads.isEmpty ? L("home.clear", name) : L("inbox.waiting", name, Int64(threads.count)))
+                        .font(Theme.Fonts.display)
+                        .foregroundStyle(Theme.onSurface)
+                        .accessibilityAddTraits(.isHeader)
+                    Spacer(minLength: Theme.Space.m)
+                    if store.inboxAgents.count > 1 {
+                        AgentFilter(store: store)
+                    }
+                }
+                .padding(.top, Theme.Space.xxxl)
+                .padding(.leading, Theme.Space.xs)
                 if decide > 0 {
                     Button {
                         store.place = .section(.approvals)

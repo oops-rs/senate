@@ -57,8 +57,10 @@ struct MainWindow: View {
             case .thread:
                 if let row = store.selectedRow {
                     ThreadPage(store: store, row: row)
+                } else if let error = store.threadError {
+                    EmptyState(text: L("inbox.thread_failed"), detail: error)
                 } else {
-                    EmptyState(text: L("thread.gone"))
+                    ProgressView().controlSize(.small)
                 }
             case .session:
                 if let session = store.selectedSession {
@@ -173,11 +175,7 @@ private struct Sidebar: View {
                             .selectionDisabled()
                     }
                 } header: {
-                    HStack {
-                        Text(verbatim: L("sidebar.committees"))
-                        Spacer()
-                        SidebarFilter(store: store)
-                    }
+                    Text(verbatim: L("sidebar.committees"))
                 }
             }
         }
@@ -349,30 +347,26 @@ extension CoreStore.Section {
     }
 }
 
-/// The sidebar's filter: the agent whose inbox is shown, and *Show inactive*.
-private struct SidebarFilter: View {
+/// Narrow the inbox to one agent's threads (what was put to you stays).
+struct AgentFilter: View {
     @Bindable var store: CoreStore
 
     var body: some View {
         Menu {
-            if store.inboxAgents.count > 1 {
-                Picker(L("inbox.agent"), selection: $store.agentFilter) {
-                    Text(verbatim: L("inbox.all_agents")).tag(String?.none)
-                    ForEach(store.inboxAgents) { agent in
-                        Text(verbatim: agent.pending > 0 ? "\(agent.displayName) (\(agent.pending))" : agent.displayName)
-                            .help(agent.path)
-                            .tag(Optional(agent.path))
-                    }
+            Picker(L("inbox.agent"), selection: $store.agentFilter) {
+                Text(verbatim: L("inbox.all_agents")).tag(String?.none)
+                ForEach(store.inboxAgents) { agent in
+                    Text(verbatim: agent.pending > 0 ? "\(agent.displayName) (\(agent.pending))" : agent.displayName)
+                        .help(agent.path)
+                        .tag(Optional(agent.path))
                 }
-                .pickerStyle(.inline)
-                Divider()
             }
-            Toggle(L("roster.show_inactive"), isOn: $store.showInactive)
+            .pickerStyle(.inline)
         } label: {
-            Image(systemName: store.agentFilter == nil && !store.showInactive
+            Image(systemName: store.agentFilter == nil
                 ? "line.3.horizontal.decrease"
                 : "line.3.horizontal.decrease.circle.fill")
-                .foregroundStyle(store.agentFilter == nil && !store.showInactive ? Theme.onSurfaceVariant : Theme.primary)
+                .foregroundStyle(store.agentFilter == nil ? Theme.onSurfaceVariant : Theme.primary)
                 .frame(width: 24, height: 24)
                 .contentShape(Rectangle())
         }
@@ -380,8 +374,8 @@ private struct SidebarFilter: View {
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
         .fixedSize()
-        .help(L("sidebar.filter"))
-        .accessibilityLabel(L("sidebar.filter"))
+        .help(L("inbox.agent"))
+        .accessibilityLabel(L("inbox.agent"))
     }
 }
 
@@ -396,6 +390,7 @@ private struct AccountRow: View {
         Menu {
             Button(L("tab.senates")) { store.place = .section(.senates) }
                 .disabled(!state.online)
+            Toggle(L("roster.show_inactive"), isOn: Bindable(store).showInactive)
             Button(L("sessions.watch")) { store.openWatch() }
                 .disabled(!state.online || state.sessions.allSatisfy { !$0.running })
             Divider()

@@ -488,3 +488,22 @@ async fn sessions_by_committee_their_timelines_and_the_composer() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn a_settled_thread_reads_with_its_title_without_an_inbox_row() {
+    let (dir, socket, world) = setup();
+    {
+        let mut w = world.lock().unwrap();
+        common::busy_senate(&mut w);
+        common::session_tree(&mut w);
+    }
+    let _daemon = FakeDaemon::start(&socket, Arc::clone(&world));
+    let core = AppCore::new(Some(dir.path().display().to_string()), Some("en-US".into())).unwrap();
+    let listener = Arc::new(Listener::default());
+    core.start(listener.clone()).unwrap();
+    until(&listener, "online", |s| s.online).await;
+    let view = core.thread("refund-v2".into(), 140).await.unwrap();
+    assert!(!view.events.is_empty());
+    assert_eq!(view.title, "Reviewed the threshold change; fine by me.");
+    assert!(!view.kind_label.is_empty());
+}

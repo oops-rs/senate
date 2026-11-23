@@ -318,6 +318,8 @@ pub struct World {
     pub growth: std::collections::BTreeMap<String, std::collections::VecDeque<Growth>>,
     /// How often a watched timeline grows; `None`: never (the tests).
     pub grow_every: Option<std::time::Duration>,
+    /// Roots of threads that are settled: readable, in no inbox.
+    pub settled: Vec<u64>,
 }
 
 /// One step of a watched timeline: an item appended, or one replaced in
@@ -359,6 +361,7 @@ impl World {
             timelines: Default::default(),
             growth: Default::default(),
             grow_every: None,
+            settled: Vec::new(),
         }
     }
 }
@@ -584,6 +587,27 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
                     None => thread_events(t),
                 },
             }),
+            // A settled thread, no longer in any inbox: a note and its reply.
+            None if w.settled.contains(&thread.0) => {
+                let mut t = suspended(
+                    thread.0,
+                    "Reviewed the threshold change; fine by me.",
+                    "claude",
+                );
+                t.kind = Kind::Note;
+                t.from = Address::senator(&path("reviewer"));
+                t.on_behalf_of = None;
+                t.reason = None;
+                let mut events = thread_events(&t);
+                for e in &mut events {
+                    e.committee = c.clone();
+                }
+                Reply::ok(&ThreadReply {
+                    committee: c,
+                    root: thread,
+                    events,
+                })
+            }
             None => Reply::err(IpcError::bad_request(format!("no thread {thread}"))),
         },
         // `claude` goes by `lead` on refund-v2.
@@ -1406,6 +1430,7 @@ pub fn session_tree(w: &mut World) {
         local_rows: vec![codex, audit, ops, scratch],
     };
     timelines(w);
+    w.settled.push(140);
 }
 
 /// Canned timelines: `lead`'s is long (older pages to scroll back to) and
@@ -1478,6 +1503,47 @@ fn timelines(w: &mut World) {
             said(&format!("Fixtures for step {} pass.", i + 1)),
         );
     }
+    // A build with a long log (64 KiB) and a large diff: the page stays
+    // responsive with both open.
+    let log: String = (0..1200)
+        .map(|i| {
+            format!(
+                "   Compiling crate-{i:04} v0.1.0 (/Users/alice/dev/refund/vendor/crate-{i:04})\n"
+            )
+        })
+        .collect();
+    push(
+        &mut lead,
+        33,
+        tool(
+            "build-1",
+            "Bash",
+            S::Completed,
+            shell("cargo build -vv", Some(&log), Some(0)),
+        ),
+    );
+    let diff: String = std::iter::once("@@ -1,600 +1,600 @@\n".to_string())
+        .chain((0..600).map(|i| {
+            format!(
+                "-    let fee_{i} = Money::eur({i});\n+    let fee_{i} = Money::eur({i}) * RATE;\n"
+            )
+        }))
+        .collect();
+    push(
+        &mut lead,
+        32,
+        tool(
+            "fmt-1",
+            "Edit",
+            S::Completed,
+            D::Edit {
+                path: "crates/refund/src/fees.rs".into(),
+                unified_diff: Some(diff),
+                old: None,
+                new: None,
+            },
+        ),
+    );
     push(
         &mut lead,
         30,

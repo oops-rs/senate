@@ -3036,23 +3036,6 @@
         }
       }
     },
-    "sidebar.filter": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Filter"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "筛选"
-          }
-        }
-      }
-    },
     "sidebar.next_session": {
       "extractionState": "manual",
       "localizations": {
@@ -3390,23 +3373,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "无法生成 Terminal 脚本"
-          }
-        }
-      }
-    },
-    "thread.gone": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "This thread no longer waits on you."
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "这个线程已不在等你。"
           }
         }
       }

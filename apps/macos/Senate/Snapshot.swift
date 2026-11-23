@@ -5,14 +5,19 @@ import SwiftUI
 import SenateCore
 
 /// Development only: with `SENATE_APP_SNAPSHOT=<dir>`, open the window, show
-/// the inbox, a thread, approvals, a committee, sessions and the Senates, then Settings and the status
-/// item's menu; write each as `<dir>/<name>.png`, and quit.
+/// the inbox, a thread, approvals, a committee, sessions and the Senates,
+/// then Settings and the status item's menu; write each as
+/// `<dir>/<name>.png`, and quit.
 /// The app draws its own windows, so no screen-recording permission is
-/// needed. `SENATE_APP_SNAPSHOT_PREFIX` names the files (`zh-home.png`);
+/// needed. `SENATE_APP_SNAPSHOT_PREFIX` names the files (`zh-inbox.png`);
 /// `SENATE_APP_SNAPSHOT_APPEARANCE` (`light` or `dark`) draws the app in that
 /// appearance whatever the system's is.
 enum Snapshot {
     static let env = "SENATE_APP_SNAPSHOT"
+    /// Posted to scroll the open session's conversation to its top.
+    static let scrollToTop = Notification.Name("SenateSnapshotScrollToTop")
+    /// Posted to open every tool call's output in the open conversation.
+    static let expandTools = Notification.Name("SenateSnapshotExpandTools")
 
     /// The window's size in every snapshot.
     static let size = NSSize(width: 1120, height: 740)
@@ -69,6 +74,21 @@ enum Snapshot {
                 store.place = .session(prompt.sessionId)
                 try? await Task.sleep(for: .seconds(1.5))
                 await shot("session")
+            }
+            // Scrolled to the top, the page before is read: what is on screen
+            // stays where it is (compare the two pictures).
+            if sessions.contains(where: { $0.status == .needsYou }) {
+                NotificationCenter.default.post(name: scrollToTop, object: nil)
+                try? await Task.sleep(for: .milliseconds(300))
+                await capture(dir.appendingPathComponent("\(prefix)session-top.png")) { isMain($0) }
+                await shot("session-older")
+                // Every call open, the 64 KiB log and the 600-line diff with
+                // them: how long the main thread is held.
+                let start = ContinuousClock.now
+                NotificationCenter.default.post(name: expandTools, object: nil)
+                await Task.yield()
+                print("snapshot: opening every tool call held the main thread \(ContinuousClock.now - start)")
+                await shot("session-expanded")
             }
             if let working = sessions.first(where: { $0.status == .working && $0.readable }) {
                 store.place = .session(working.sessionId)

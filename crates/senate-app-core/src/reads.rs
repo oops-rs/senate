@@ -16,6 +16,15 @@ pub struct ThreadView {
     pub committee: String,
     /// The root's seq.
     pub root: u64,
+    /// Its title, as its task board folds it (else the root's first line):
+    /// what the page heads with when the thread is not in the inbox.
+    pub title: String,
+    /// Its state (`processing`, `suspended`, `active`, `archived`) and
+    /// that in words, when it is a task thread.
+    pub state: Option<String>,
+    pub state_label: Option<String>,
+    /// What kind its root is, in words.
+    pub kind_label: String,
     pub events: Vec<ThreadEvent>,
 }
 
@@ -39,7 +48,23 @@ pub struct ThreadEvent {
 
 pub(crate) fn thread_view(reply: ThreadReply, person: Option<&Name>, locale: Locale) -> ThreadView {
     let me = person.map(Address::senior);
+    let mut board = senate_core::TaskBoard::new(crate::names::current().people.clone());
+    for e in &reply.events {
+        board.observe(e);
+    }
+    let summary = board.get(reply.root);
+    let root = reply.events.iter().find(|e| e.seq == reply.root);
     ThreadView {
+        title: summary.map_or_else(
+            || {
+                root.map(|e| e.body.lines().next().unwrap_or_default().trim().to_string())
+                    .unwrap_or_default()
+            },
+            |t| t.title.clone(),
+        ),
+        state: summary.map(|t| crate::state::wire(&t.state)),
+        state_label: summary.map(|t| text::state(locale, t.state).to_string()),
+        kind_label: root.map_or_else(String::new, |e| text::kind(locale, &e.kind)),
         committee: reply.committee.to_string(),
         root: reply.root.0,
         events: reply

@@ -91,8 +91,31 @@ nonisolated final class FakeCore: AppCoreProtocol, @unchecked Sendable {
     }
     func thread(committee: String, thread: UInt64) async throws -> ThreadView {
         try record("thread \(committee) \(thread)")
-        return threadView ?? ThreadView(committee: committee, root: thread, events: [])
+        return threadView ?? ThreadView(committee: committee, root: thread, title: "", state: nil, stateLabel: nil, kindLabel: "", events: [])
     }
+    /// What `timeline` returns, by session id.
+    var timelines: [String: TimelinePage] = [:]
+    /// The listener of the session watched last.
+    var timelineListener: TimelineListener?
+
+    func timeline(sessionId: String, before: UInt64?, limit: UInt32?) async throws -> TimelinePage {
+        try record("timeline \(sessionId) \(before.map(String.init) ?? "tail")")
+        return timelines[sessionId] ?? TimelinePage(
+            sessionId: sessionId, available: false, unavailable: "none", items: [], hasOlder: false,
+            firstSeq: nil, lastSeq: nil, working: false)
+    }
+    func watchTimeline(sessionId: String, after: UInt64, listener: TimelineListener) throws {
+        try record("watch \(sessionId) \(after)")
+        timelineListener = listener
+    }
+    func stopTimeline(sessionId: String) {
+        lock.withLock { _calls.append("unwatch \(sessionId)") }
+    }
+    func say(sessionId: String, body: String) async throws {
+        try record("say \(sessionId) \(body)")
+    }
+    func pauseSession(label: String) async throws { try record("pause \(label)") }
+
     func watchTerminal() -> TerminalCommand {
         TerminalCommand(argv: [], cwd: nil, shellLine: "", appleScript: "")
     }
@@ -106,14 +129,15 @@ func thread(
     for agents: [String] = ["claude"],
     escalated: Bool = false,
     news: String? = nil,
-    forPerson: Bool = true
+    forPerson: Bool = true,
+    toDecide: Bool? = nil
 ) -> InboxThread {
     InboxThread(
         committee: committee, root: root, updated: root, title: title,
         kind: "question", kindLabel: "question", state: "suspended", stateLabel: "suspended",
         from: "[senator::claude]", onBehalfOf: nil, to: agents.map { "[senator::\($0)]" },
         since: .now, owner: nil, triage: nil, triageLabel: nil, reason: nil, escalatedTo: nil,
-        takeover: nil, answered: false, forPerson: forPerson, asker: "[senator::claude]", forAgents: agents, escalated: escalated, unread: news != nil,
+        takeover: nil, answered: false, forPerson: forPerson, asker: "[senator::claude]", forAgents: agents, escalated: escalated, toDecide: toDecide ?? (forPerson && escalated), unread: news != nil,
         newsFrom: news.map { _ in "[senator::claude]" }, newsKind: nil, newsKindLabel: nil,
         newsLine: news
     )
@@ -183,4 +207,45 @@ func committee(_ name: String, chair: String? = nil, live: Bool = false, members
         committee: name, chairId: chair, chairDisplayName: chair, chairLive: live,
         activeMembers: UInt32(members.filter(\.1).count), pending: 0,
         members: members.map { RosterMember(senatorId: $0.0, displayName: $0.0, active: $0.1) })
+}
+
+/// A session on this machine; hosted (with a prompt) when `prompt` is set.
+func sessionLine(
+    _ name: String, committee: String? = "refund-v2", status: SessionStatus = .idle,
+    active: Bool = true, hosted: HostedSession? = nil
+) -> SessionLine {
+    SessionLine(
+        sessionId: hosted?.sessionId ?? "s-\(name)", displayName: name, mention: "[senator::\(name)]",
+        committee: committee, chair: false, runtime: "claude", model: nil, dir: "/work", branch: nil,
+        title: nil, status: status, statusLabel: "\(status)", working: status == .working, unread: 0,
+        lastActivity: .now, active: active, hosted: hosted, readable: true)
+}
+
+/// The sidebar's tree: these sessions under their committees.
+func groups(_ sessions: [SessionLine]) -> [SessionGroup] {
+    Dictionary(grouping: sessions, by: \.committee).map { committee, lines in
+        SessionGroup(
+            committee: committee, title: committee ?? "No committee", waiting: 0,
+            status: lines.map(\.status).min { $0.rank < $1.rank }, active: lines.contains(where: \.active),
+            sessions: lines)
+    }
+    .sorted { ($0.committee ?? "~") < ($1.committee ?? "~") }
+}
+
+extension SessionStatus {
+    var rank: Int {
+        switch self {
+        case .needsYou: 0
+        case .working: 1
+        case .unread: 2
+        case .idle: 3
+        case .paused: 4
+        case .stopped: 5
+        }
+    }
+}
+
+/// A timeline entry: what the person said, or the agent's reply.
+func entry(_ seq: UInt64, _ text: String, user: Bool = false) -> TimelineEntry {
+    TimelineEntry(seq: seq, at: nil, truncated: false, body: user ? .user(text: text) : .assistant(text: text))
 }
