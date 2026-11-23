@@ -194,7 +194,7 @@ async fn remote_test_child() {
     std::fs::write(
         target.paths.config(),
         format!(
-            "[remote]\nlisten = \"127.0.0.1:0\"\n[companion]\nclaude_bin = {:?}\n",
+            "[remote]\nexperimental = true\nlisten = \"127.0.0.1:0\"\n[companion]\nclaude_bin = {:?}\n",
             program.to_str().unwrap()
         ),
     )

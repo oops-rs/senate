@@ -266,12 +266,32 @@ impl Identity {
 #[serde(deny_unknown_fields)]
 struct Config {
     listen: Option<SocketAddr>,
+    #[serde(default)]
+    experimental: bool,
 }
 
 #[derive(Deserialize, Default)]
 struct ConfigFile {
     #[serde(default)]
     remote: Config,
+}
+
+fn read_config(paths: &Paths) -> anyhow::Result<Config> {
+    match std::fs::read_to_string(paths.config()) {
+        Ok(text) => Ok(toml::from_str::<ConfigFile>(&text)?.remote),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub(crate) fn experimental_notice(paths: &Paths) -> Option<&'static str> {
+    let config = read_config(paths).ok()?;
+    config.listen?;
+    Some(if config.experimental {
+        "Remote access is experimental and not hardened (opted in by configuration)."
+    } else {
+        "Remote access is experimental and not hardened (disabled without [remote] experimental = true)."
+    })
 }
 
 struct Offer {
@@ -306,14 +326,17 @@ pub(crate) struct Service {
 
 impl Service {
     pub(crate) async fn open(paths: &Paths) -> anyhow::Result<Option<(Arc<Self>, TcpListener)>> {
-        let config = match std::fs::read_to_string(paths.config()) {
-            Ok(text) => toml::from_str::<ConfigFile>(&text)?.remote,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Config::default(),
-            Err(error) => return Err(error.into()),
-        };
+        let config = read_config(paths)?;
         let Some(at) = config.listen else {
             return Ok(None);
         };
+        if !config.experimental {
+            tracing::warn!(
+                "remote access is experimental and not hardened; listener disabled without [remote] experimental = true"
+            );
+            return Ok(None);
+        }
+        tracing::warn!("remote access is experimental and not hardened; listener opted in");
         ensure!(
             !at.ip().is_unspecified() && !at.ip().is_multicast(),
             "remote listen needs an explicit unicast address"
@@ -934,5 +957,26 @@ mod tests {
             );
         }
         assert!(serde_json::from_str::<Envelope>(r#"{"version":1,"call":{"op":"list"}}"#).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod experimental_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn configured_listener_without_opt_in_leaves_no_remote_state() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let paths = Paths::new(dir.path());
+        for opt_in in ["", "experimental = false\n"] {
+            std::fs::write(
+                paths.config(),
+                format!("[remote]\nlisten = \"127.0.0.1:0\"\n{opt_in}"),
+            )?;
+            assert!(Service::open(&paths).await?.is_none());
+            assert!(!state_dir(&paths).exists());
+            assert!(experimental_notice(&paths).is_some_and(|note| note.contains("disabled")));
+        }
+        Ok(())
     }
 }
