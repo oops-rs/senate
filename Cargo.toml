@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.9.0"
+version = "0.9.1"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
@@ -13,14 +13,14 @@ repository = "https://github.com/oops-rs/senate"
 # `workspace = true`.
 [workspace.dependencies]
 # Members, bottom of the stack first.
-senate-core = { path = "crates/senate-core", version = "0.9.0" }
-senate-log = { path = "crates/senate-log", version = "0.9.0" }
-senate-server = { path = "crates/senate-server", version = "0.9.0" }
-senate-work = { path = "crates/senate-work", version = "0.9.0" }
-senate-speaker = { path = "crates/senate-speaker", version = "0.9.0" }
-senate-bridge = { path = "crates/senate-bridge", version = "0.9.0" }
-senate-app-core = { path = "crates/senate-app-core", version = "0.9.0" }
-senated = { path = "crates/senated", version = "0.9.0" }
+senate-core = { path = "crates/senate-core", version = "0.9.1" }
+senate-log = { path = "crates/senate-log", version = "0.9.1" }
+senate-server = { path = "crates/senate-server", version = "0.9.1" }
+senate-work = { path = "crates/senate-work", version = "0.9.1" }
+senate-speaker = { path = "crates/senate-speaker", version = "0.9.1" }
+senate-bridge = { path = "crates/senate-bridge", version = "0.9.1" }
+senate-app-core = { path = "crates/senate-app-core", version = "0.9.1" }
+senated = { path = "crates/senated", version = "0.9.1" }
 senate-e2e = { path = "crates/senate-e2e" }
 
 # The agent harness behind the built-in Speaker. basis re-exports every
