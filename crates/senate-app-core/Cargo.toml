@@ -25,6 +25,7 @@ bindgen = ["uniffi/cli"]
 [dependencies]
 senate-bridge = { workspace = true }
 senate-core = { workspace = true }
+senate-markdown = { workspace = true }
 uniffi = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }

@@ -86,6 +86,12 @@ async fn main() {
         common::working_sessions(&mut w, n);
         println!("{n} working sessions");
     }
+    // FAKE_STREAM=1: one more session, `stream`, whose reply arrives as a
+    // token stream while watched.
+    if std::env::var("FAKE_STREAM").is_ok_and(|v| v == "1") {
+        common::streaming(&mut w);
+        println!("stream-1: a streamed reply");
+    }
     let world = Arc::new(Mutex::new(w));
     let daemon = common::FakeDaemon::start(&socket, Arc::clone(&world));
     println!("fake daemon on {}", socket.display());

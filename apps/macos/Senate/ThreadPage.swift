@@ -90,67 +90,41 @@ struct ThreadMenu: View {
     }
 }
 
-/// What the thread is, then every event in it, the latest at the foot.
+/// What the thread is (native), then every event in it, the latest at the
+/// foot: the window's one web page (ConversationPage), shown for this
+/// thread. It shows the latest events, a page more at a time.
 private struct Conversation: View {
     let store: CoreStore
     let row: InboxThread
 
-    /// How many of the latest events are drawn; "Show earlier" adds more.
-    /// A thread of thousands opens as fast as a short one.
-    @State private var shown = Conversation.page
-    static let page = 300
-
     var body: some View {
-        let view = store.threadView(for: row)
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: Theme.Space.xl) {
-                    ThreadHeader(row: row)
-                    if let view {
-                        let hidden = max(0, view.events.count - shown)
-                        if hidden > 0 {
-                            Button(L("inbox.show_earlier", Int64(hidden))) {
-                                shown += Conversation.page
-                            }
-                            .buttonStyle(.pill)
-                            .frame(maxWidth: .infinity)
-                        }
-                        ForEach(view.events.suffix(shown), id: \.seq) { event in
-                            EventView(event: event, committee: row.committee).id(event.seq)
-                        }
-                    } else if let error = store.threadError {
-                        VStack(alignment: .leading, spacing: Theme.Space.xs) {
-                            Text(verbatim: L("inbox.thread_failed"))
-                                .font(Theme.Fonts.heading)
-                                .foregroundStyle(Theme.onSurface)
-                            Text(verbatim: error)
-                                .font(Theme.Fonts.text)
-                                .foregroundStyle(Theme.onSurfaceVariant)
-                                .textSelection(.enabled)
-                        }
-                    } else {
-                        ProgressView()
-                            .controlSize(.small)
-                            .frame(maxWidth: .infinity)
-                            .padding(.top, Theme.Space.xl)
-                    }
-                }
-                // The lazy stack is an element of its own: name it.
-                .accessibilityElement(children: .contain)
-                .accessibilityLabel(Mentions.shared.plain(row.title, committee: row.committee))
+        VStack(spacing: 0) {
+            ThreadHeader(row: row)
                 .frame(maxWidth: Theme.readingWidth, alignment: .leading)
                 .padding(.horizontal, Theme.Space.xl)
-                .padding(.top, Theme.Space.s)
-                .padding(.bottom, Theme.Space.xl)
+                .padding(.bottom, Theme.Space.s)
                 .frame(maxWidth: .infinity)
-            }
-            .onChange(of: view?.events.last?.seq, initial: true) { old, last in
-                guard let last else { return }
-                if old == nil {
-                    proxy.scrollTo(last, anchor: .bottom)
-                } else {
-                    withAnimation { proxy.scrollTo(last, anchor: .bottom) }
+            if store.threadView(for: row) != nil {
+                ConversationPane(store: store, source: .thread(committee: row.committee, root: row.root))
+            } else if let error = store.threadError {
+                VStack(alignment: .leading, spacing: Theme.Space.xs) {
+                    Text(verbatim: L("inbox.thread_failed"))
+                        .font(Theme.Fonts.heading)
+                        .foregroundStyle(Theme.onSurface)
+                    Text(verbatim: error)
+                        .font(Theme.Fonts.text)
+                        .foregroundStyle(Theme.onSurfaceVariant)
+                        .textSelection(.enabled)
                 }
+                .frame(maxWidth: Theme.readingWidth, alignment: .leading)
+                .padding(Theme.Space.xl)
+                Spacer()
+            } else {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, Theme.Space.xl)
+                Spacer()
             }
         }
     }
@@ -200,51 +174,6 @@ private struct ThreadHeader: View {
     private func why(_ t: InboxThread) -> String? {
         let parts = [t.triageLabel.map { L("inbox.triage", $0) }, t.reason].compactMap { $0 }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
-    }
-}
-
-/// One event. What others said is plain text under who said it; what you
-/// said sits on the other side in a bubble.
-private struct EventView: View {
-    let event: ThreadEvent
-    /// The thread's committee: its mentions are named for it.
-    let committee: String
-
-    var body: some View {
-        if event.mine {
-            VStack(alignment: .trailing, spacing: Theme.Space.xs) {
-                MessageText(text: event.body, committee: committee)
-                    .padding(.horizontal, Theme.Space.l)
-                    .padding(.vertical, 10)
-                    .background(Theme.container, in: RoundedRectangle(cornerRadius: Theme.Radius.bubble))
-                HStack(spacing: 6) {
-                    Text(verbatim: event.kindLabel)
-                    Ago(date: event.at)
-                }
-                .font(Theme.Fonts.meta)
-                .foregroundStyle(Theme.onSurfaceVariant)
-                .padding(.trailing, Theme.Space.s)
-            }
-            .padding(.leading, 96)
-            .frame(maxWidth: .infinity, alignment: .trailing)
-            .accessibilityElement(children: .combine)
-        } else {
-            VStack(alignment: .leading, spacing: Theme.Space.xs) {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    MentionText(event.by)
-                        .font(Theme.Fonts.label)
-                    Group {
-                        Text(verbatim: event.kindLabel)
-                        Ago(date: event.at)
-                    }
-                    .font(Theme.Fonts.meta)
-                    .foregroundStyle(Theme.onSurfaceVariant)
-                }
-                MessageText(text: event.body, committee: committee)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .accessibilityElement(children: .combine)
-        }
     }
 }
 

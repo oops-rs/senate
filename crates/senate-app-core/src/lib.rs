@@ -38,6 +38,7 @@
 
 pub mod ffi;
 pub mod link;
+pub mod markdown;
 pub mod model;
 pub mod names;
 #[cfg(target_os = "macos")]

@@ -10,15 +10,7 @@ import SenateCore
 final class SessionTimeline {
     let sessionId: String
     private(set) var items: [TimelineEntry] = [] {
-        didSet {
-            rows = ConversationRows.rows(items)
-            // Replies rendered ahead, off the main thread.
-            let replies = rows.compactMap { row -> String? in
-                if case let .assistant(text) = row.kind { return text }
-                return nil
-            }
-            MarkdownCache.shared.prepare(replies, committee: committee)
-        }
+        didSet { rows = ConversationRows.rows(items) }
     }
     /// The session's committee: its mentions are named for it.
     var committee: String?

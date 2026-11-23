@@ -63,6 +63,23 @@ enum Snapshot {
                 try? await Task.sleep(for: .seconds(1.5))
                 await capture(dir.appendingPathComponent("\(prefix)\(name).png")) { isMain($0) }
             }
+            // SPIKE: SENATE_APP_SNAPSHOT_MD=1, only the Markdown samples (for
+            // the styles' contact sheet), then quit.
+            if ProcessInfo.processInfo.environment["SENATE_APP_SNAPSHOT_MD"] == "1" {
+                for _ in 0..<50 where !store.shownSessions.contains(where: { $0.sessionId == "scratch-1" }) {
+                    try? await Task.sleep(for: .milliseconds(200))
+                }
+                store.place = .session("scratch-1")
+                try? await Task.sleep(for: .seconds(2.5))
+                for (name, item, anchor) in [("md-specimen", 4, "top"), ("md-specimen-code", 4, "middle"),
+                                             ("md-specimen-end", 4, "bottom"), ("md-2148", 6, "top"),
+                                             ("md-2148-end", 6, "bottom")] {
+                    NotificationCenter.default.post(name: scrollToItem, object: UInt64(item), userInfo: ["anchor": anchor])
+                    await shot(name)
+                }
+                NSApplication.shared.terminate(nil)
+                return
+            }
             // Inbox, a thread, Approvals, a committee, sessions, Senates.
             store.place = .section(.inbox)
             store.folded = []
@@ -139,6 +156,16 @@ enum Snapshot {
                 await shot("markdown")
                 NotificationCenter.default.post(name: scrollToItem, object: UInt64(4), userInfo: ["anchor": "bottom"])
                 await shot("markdown-end")
+            }
+            // SPIKE: the streamed reply (FAKE_STREAM=1), early and later.
+            if store.shownSessions.contains(where: { $0.sessionId == "stream-1" }) {
+                store.place = .session("stream-1")
+                try? await Task.sleep(for: .seconds(1))
+                await shot("stream-a")
+                try? await Task.sleep(for: .seconds(9))
+                await shot("stream-b")
+                try? await Task.sleep(for: .seconds(14))
+                await shot("stream-c")
             }
             if let unreadable = sessions.first(where: { !$0.readable }) {
                 store.place = .session(unreadable.sessionId)

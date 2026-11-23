@@ -40,3 +40,26 @@ fn needs_approval(refund: &Refund) -> bool {
 这是一段中文，混合 English 与 `代码`，测试**中日韩**文字和全角标点：逗号、句号。
 - 第一项
 - 第二项，带[链接](https://example.com)
+
+## More languages
+
+```swift
+struct Refund { let amount: Decimal; var needsApproval: Bool { amount > 1_000 } }
+```
+
+```python
+def needs_approval(refund):  # a person approves above 1,000 EUR
+    return refund.amount > 1000 or refund.customer.flagged
+```
+
+```typescript
+const needsApproval = (r: Refund): boolean => r.amount > 1000 || r.customer.flagged;
+```
+
+```bash
+cargo test -p refund && cargo publish -p refund --dry-run
+```
+
+```json
+{ "refund": { "amount": 1200, "currency": "EUR", "approved": false } }
+```

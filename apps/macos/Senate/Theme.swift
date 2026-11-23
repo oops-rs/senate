@@ -138,3 +138,22 @@ enum Theme {
     /// The height of every sidebar row.
     static let rowHeight: CGFloat = 32
 }
+
+// SPIKE (web-rust demo): the content's face and the code token colours.
+extension Theme {
+    /// Messages' Markdown and what people typed: one value to switch back.
+    /// Monospaced (Wendell, seq 2187), with PingFang for Chinese.
+    static let contentFont = #"ui-monospace, "SF Mono", Menlo, "PingFang SC", monospace"#
+
+    /// The renderer's token classes (`tok-*`), after Xcode's Default
+    /// (Light) and Default (Dark) themes. Operators read as plain text.
+    enum Token {
+        static let keyword = dynamic(0x9B2393, 0xFC5FA3)
+        static let string = dynamic(0xC41A16, 0xFC6A5D)
+        static let number = dynamic(0x1C00CF, 0xD0BF69)
+        static let comment = dynamic(0x5D6C79, 0x7F8C98)
+        static let type = dynamic(0x0B4F79, 0x5DD8FF)
+        static let name = dynamic(0x326D74, 0x67B7A4)
+        static let operator_ = onSurface
+    }
+}
