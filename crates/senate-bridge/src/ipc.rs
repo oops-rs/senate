@@ -676,6 +676,7 @@ pub struct HookDropStatus {
 pub enum Request {
     Ping,
     Status,
+    Profiles,
     /// A diagnostic for a stalled read, with no native hook payload.
     HookDropped(HookDropReport),
     /// Fixed-seat registrations from previous bridge clients.

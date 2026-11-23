@@ -3051,6 +3051,7 @@ impl Shared {
                 wrap(result.map_err(server_error))
             }
             Request::Status => wrap(self.on_status()),
+            Request::Profiles => wrap(Ok(&self.config.profiles)),
             Request::Sessions => wrap(self.on_sessions().await),
             Request::PruneHosts => wrap(self.on_prune_hosts().await),
             Request::HookDropped(report) => {

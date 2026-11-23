@@ -594,7 +594,7 @@ in depth: a process that detached from its agent escapes it.
 
 The top level is the daily loop: `status` (a bare `senate` runs it), `inbox`
 (`--follow` to watch), `thread`, `ask`, `tell`, `request`, `reply`, `take`,
-`join`, `leave`, `where`, `spawn` and `attach`. Everything else is in a group:
+`join`, `leave`, `where`, `profiles`, `spawn` and `attach`. Everything else is in a group:
 
 | Group | Commands |
 | :--- | :--- |
@@ -606,6 +606,38 @@ The top level is the daily loop: `status` (a bare `senate` runs it), `inbox`
 
 The names before this grouping (`sessions`, `watch`, `pin`, `install`, …) still
 work for one more minor release and print the command that replaces them.
+
+### Launch profiles
+
+Save launch settings and a note about when to use them in the machine's
+`senate.toml` (by default, `~/.senate/senate.toml`).
+
+```toml
+[profiles.review]
+runtime = "codex"
+model = "gpt-6.2-astra"
+effort = "high"
+note = "Use for independent diff review."
+```
+
+Run `senate profiles` to see the configured names, settings, and notes.
+`senate setup doctor` reports profile configuration errors by name. Restart
+the machine daemon after editing a profile so new launches pick up the change.
+
+```bash
+senate spawn --profile review --committee refund-v2
+senate spawn codex --profile review --alias second-review --effort xhigh
+```
+
+`model` and `effort` are optional and use the runtime's defaults when omitted.
+The CLI's explicit `--model` and `--effort` override profile values. A runtime
+given alongside a profile must match it. Model aliases resolve through the
+runtime's usual lookup at launch. If you omit `--alias`, Senate uses the profile
+name and applies the usual roster alias rules.
+
+In MCP, call `launch_profiles` to read the available profiles and their notes,
+then pass the chosen name in the `profile` field of `spawn`. The same chair and
+Speaker's office permissions apply to launches with a profile.
 
 ### Troubleshooting
 

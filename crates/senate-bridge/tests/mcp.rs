@@ -216,7 +216,7 @@ fn at(text: &str, needle: &str) -> usize {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn chair_spawns_agy_with_model_and_runtime_specific_effort() {
+async fn chair_discovers_and_spawns_a_profile_with_existing_role_checks() {
     use senate_bridge::daemon::{DaemonOptions, start_with_host_binary};
     use senate_bridge::ipc::{HookReply, SpawnReply};
 
@@ -226,7 +226,23 @@ async fn chair_spawns_agy_with_model_and_runtime_specific_effort() {
     h.paths.ensure_home().unwrap();
     let project = h.workdir("project", None);
     let fixture = agy_fixture(h.dir.path(), "8b135e59-a160-4ed4-a0e9-105ed957be07");
-    std::fs::write(h.paths.config(), format!("[agy]\nbin = {fixture:?}\n")).unwrap();
+    let config = toml::to_string(&h.config).unwrap();
+    std::fs::write(
+        h.paths.config(),
+        format!(
+            r#"{config}
+[agy]
+bin = {fixture:?}
+[profiles.triage]
+runtime = "agy"
+model = "flash"
+effort = "high"
+note = "Use for test triage."
+"#
+        ),
+    )
+    .unwrap();
+    h.config = senate_bridge::BridgeConfig::load(&h.paths.config()).unwrap();
     h.config.committees.push(committee());
     h.daemon = Some(
         start_with_host_binary(
@@ -264,30 +280,44 @@ async fn chair_spawns_agy_with_model_and_runtime_specific_effort() {
         .iter()
         .find(|v| v["properties"].get("runtime").is_some())
         .unwrap();
+    assert!(schema["properties"].get("profile").is_some(), "{schema}");
+    assert!(schema["properties"].get("model").is_none(), "{schema}");
+    assert!(schema["properties"].get("effort").is_none(), "{schema}");
+    assert!(
+        tools["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == "launch_profiles")
+    );
+    let (error, profiles) = chair.call("launch_profiles", json!({})).await;
+    assert!(!error, "{profiles}");
     assert_eq!(
-        schema["properties"]["runtime"]["enum"],
-        json!(["codex", "claude", "agy"]),
-        "{schema}"
+        serde_json::from_str::<Value>(&profiles).unwrap(),
+        json!({"triage":{"runtime":"agy","model":"flash","effort":"high","note":"Use for test triage."}})
     );
 
-    let args = |effort| {
-        json!({"action":"spawn","runtime":"agy","committee":committee(),"cwd":project,
-                               "model":"flash","effort":effort})
-    };
-    let (error, message) = chair.call("spawn", args("minimal")).await;
-    assert!(
-        error && message.contains("agy does not take the effort"),
-        "{message}"
-    );
-    assert!(std::fs::read_dir(&project).unwrap().all(|f| {
-        !f.unwrap()
-            .file_name()
-            .to_string_lossy()
-            .starts_with(".fixture-argv-")
-    }));
-    let (error, message) = chair.call("spawn", args("high")).await;
+    let args = json!({
+        "action":"spawn", "profile":"triage", "committee":committee(), "cwd":project, "alias":"fast-review"
+    });
+    for (field, value) in [
+        ("chair", json!(true)),
+        ("secretary", json!(true)),
+        ("committee", json!("other")),
+    ] {
+        let mut denied = args.clone();
+        denied[field] = value;
+        let (error, message) = chair.call("spawn", denied).await;
+        assert!(
+            error && message.contains("only the Speaker's office"),
+            "{message}"
+        );
+    }
+    let (error, message) = chair.call("spawn", args.clone()).await;
     assert!(!error, "{message}");
     let seat: SpawnReply = serde_json::from_str(&message).unwrap();
+    assert_eq!(seat.resolved_model.as_deref(), Some("gemini-3.8-flash"));
+    assert_eq!(seat.display_name.as_deref(), Some("fast-review"));
     let terminal: PathBuf = ipc::request(
         &h.socket(),
         &Request::Attach {
@@ -570,6 +600,7 @@ async fn ask_answer_and_catch_up_end_to_end() {
             "escalate",
             "inbox",
             "join",
+            "launch_profiles",
             "memory_search",
             "post",
             "propose_decision",
