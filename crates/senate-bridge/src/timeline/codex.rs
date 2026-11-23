@@ -215,6 +215,7 @@ fn native_tool(item: &Value, complete: bool) -> Vec<Event> {
                     call_id: format!("file_change:{id}:{index}"),
                     name: "apply_patch".into(),
                     status,
+                    output: None,
                     detail: Detail::Edit {
                         path: path.clone(),
                         unified_diff: parse::string(change, &["unified_diff"]),
@@ -229,6 +230,7 @@ fn native_tool(item: &Value, complete: bool) -> Vec<Event> {
                 call_id: format!("web_search:{id}"),
                 name: "web_search".into(),
                 status,
+                output: None,
                 detail: Detail::Search {
                     query: parse::string(item, &["query"]).unwrap_or_default(),
                 },

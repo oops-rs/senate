@@ -223,7 +223,7 @@ fn status(prompt: bool, working: bool, unread: u32, paused: bool, running: bool)
 
 /// Whether Senate can read a transcript of this runtime.
 pub fn readable(runtime: Runtime) -> bool {
-    matches!(runtime, Runtime::Claude | Runtime::Codex)
+    matches!(runtime, Runtime::Claude | Runtime::Codex | Runtime::Agy)
 }
 
 fn time(t: DateTime<Utc>) -> SystemTime {
