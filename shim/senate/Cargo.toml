@@ -9,7 +9,7 @@
 
 [package]
 name = "senate"
-version = "0.8.1"
+version = "0.8.2"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
@@ -24,6 +24,6 @@ name = "senate"
 path = "src/main.rs"
 
 [dependencies]
-senate-bridge = { path = "../../crates/senate-bridge", version = "0.8.1" }
+senate-bridge = { path = "../../crates/senate-bridge", version = "0.8.2" }
 
 [workspace]
