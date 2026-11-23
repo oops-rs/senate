@@ -2507,6 +2507,7 @@ dependencies = [
  "chrono",
  "senate-bridge",
  "senate-core",
+ "senate-markdown",
  "serde",
  "serde_json",
  "tempfile",

@@ -320,6 +320,9 @@ pub struct World {
     pub growth: std::collections::BTreeMap<String, std::collections::VecDeque<Growth>>,
     /// How often a watched timeline grows; `None`: never (the tests).
     pub grow_every: Option<std::time::Duration>,
+    /// A session that grows on its own clock instead: a step every `min`
+    /// to `max` milliseconds (a reply streamed a few characters at a time).
+    pub stream_ms: std::collections::BTreeMap<String, (u64, u64)>,
     /// Roots of threads that are settled: readable, in no inbox.
     pub settled: Vec<u64>,
 }
@@ -365,6 +368,7 @@ impl World {
             timelines: Default::default(),
             growth: Default::default(),
             grow_every: None,
+            stream_ms: Default::default(),
             settled: Vec::new(),
         }
     }
@@ -1379,14 +1383,28 @@ async fn watch_timeline(
     if out.write_all(format!("{l}\n").as_bytes()).await.is_err() {
         return;
     }
-    let every = world.lock().unwrap().grow_every;
+    let (every, stream) = {
+        let w = world.lock().unwrap();
+        (w.grow_every, w.stream_ms.get(session_id).copied())
+    };
+    let every = stream.map(|(min, _)| std::time::Duration::from_millis(min)).or(every);
+    let mut jitter: u64 = 0x9e37_79b9_7f4a_7c15;
     let Some(every) = every else {
         // Hold the stream open, as the daemon does, until the app lets go.
         std::future::pending::<()>().await;
         return;
     };
     loop {
-        tokio::time::sleep(every).await;
+        let wait = match stream {
+            Some((min, max)) if max > min => {
+                jitter ^= jitter << 13;
+                jitter ^= jitter >> 7;
+                jitter ^= jitter << 17;
+                std::time::Duration::from_millis(min + jitter % (max - min + 1))
+            }
+            _ => every,
+        };
+        tokio::time::sleep(wait).await;
         let update = {
             let mut w = world.lock().unwrap();
             let Some(step) = w.growth.get_mut(session_id).and_then(|g| g.pop_front()) else {
@@ -1937,6 +1955,8 @@ fn timelines(w: &mut World) {
             // One reply with every element the page draws, English and
             // Chinese: the renderer's specimen.
             item(4, 128, said(include_str!("specimen.md"))),
+            item(5, 127, user("And the thread-2148 sample.")),
+            item(6, 126, said(include_str!("../../../senate-markdown/tests/fixtures/thread-2148.md"))),
         ],
     );
 }
@@ -1969,9 +1989,22 @@ pub fn marathon(w: &mut World, n: usize) {
     let big: String = (0..900)
         .map(|i| format!("   Compiling crate-{i:04} v0.1.0 (/Users/alice/dev/senate/vendor/crate-{i:04}) [{}]\n", "=".repeat(i % 7)))
         .collect();
+    // Code in several languages, and the whole specimen now and then.
+    let code = [
+        ("rust", "fn coalesce(&self) {\n    if self.due.swap(true, Ordering::AcqRel) { return; }\n}"),
+        ("swift", "func coalesce() async {\n    guard !due else { return }\n    due = true // one re-read\n}"),
+        ("python", "def coalesce(self):\n    if self.due:  # already queued\n        return\n    self.due = True"),
+        ("typescript", "const coalesce = (s: Store): void => { if (s.due) return; s.due = true; };"),
+        ("bash", "cargo test -p senate-app-core && rg -n 'coalesce' crates/ | wc -l"),
+        ("json", "{ \"due\": true, \"reads\": 1, \"note\": \"coalesced\" }"),
+    ];
     let reply = |i: usize| {
+        if i % 400 == 5 {
+            return include_str!("specimen.md").to_string();
+        }
+        let (lang, body) = code[(i / 8) % code.len()];
         format!(
-            "## Step {i}\n\nThe change to `link.rs` is in: the **sessions** re-read is coalesced, and the watch keeps its *place*. What I checked:\n\n1. `cargo test -p senate-app-core` passes ({} tests)\n2. the fake daemon's tour runs\n   - light and dark\n   - English and 中文\n3. clippy is clean\n\n```rust\nfn coalesce(&self) {{\n    if self.due.swap(true, Ordering::AcqRel) {{ return; }}\n}}\n```\n\n> Next: measure the scroll, then the watch.\n\nSee [the README](https://example.com/readme) for the numbers.",
+            "## Step {i}\n\nThe change to `link.rs` is in: the **sessions** re-read is coalesced, and the watch keeps its *place*. What I checked:\n\n1. `cargo test -p senate-app-core` passes ({} tests)\n2. the fake daemon's tour runs\n   - light and dark\n   - English and 中文\n3. clippy is clean\n\n```{lang}\n{body}\n```\n\n> Next: measure the scroll, then the watch.\n\nSee [the README](https://example.com/readme) for the numbers.",
             40 + i % 9
         )
     };
@@ -2151,4 +2184,59 @@ pub fn working_sessions(w: &mut World, n: usize) {
             title: None,
         });
     }
+}
+
+/// `FAKE_STREAM=1` in the fake daemon: a session, `stream`, whose replies
+/// arrive as a token stream (a few characters every 20 to 40 ms, the one
+/// message growing in place): prose, a long Rust and a Swift block, a
+/// table, a list; then another request, and the reply again. Real sessions
+/// deliver whole messages; this shows the renderer's streaming path.
+pub fn streaming(w: &mut World) {
+    use senate_bridge::ipc::LocalSessionRow;
+    let id = "stream-1";
+    w.sessions.local_rows.push(LocalSessionRow {
+        session_id: id.into(),
+        primary: path("claude-5f7a9c1e-2b3d-4e5f-8a6b-7c8d9e0f1a2b"),
+        alias: Some(path("stream")),
+        committee: None,
+        chair: false,
+        shown_name: Some("stream".into()),
+        runtime: Runtime::Claude,
+        dir: "/Users/alice/dev/senate".into(),
+        branch: Some("main".into()),
+        working: true,
+        last_activity: Utc::now(),
+        title: Some("A streamed reply".into()),
+    });
+    let user = |text: &str| TimelineKind::UserMessage { text: text.into() };
+    let said = |text: &str| TimelineKind::AssistantMessage { text: text.into() };
+    let ask = "Show me how the coalescing works, with the Rust side and the Swift side.";
+    w.timelines.insert(id.into(), vec![item(1, 1, user(ask))]);
+    let reply = include_str!("stream.md");
+    let mut growth = std::collections::VecDeque::new();
+    let mut seq = 1;
+    for round in 0..20 {
+        if round > 0 {
+            seq += 1;
+            growth.push_back(Growth { item: item(seq, 0, user("Once more, please.")), working: true });
+        }
+        seq += 1;
+        // Chunks of 1 to 6 characters, on character boundaries.
+        let mut at = 0;
+        let mut n: usize = 7 + round;
+        while at < reply.len() {
+            n = n.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            let mut end = (at + 1 + (n >> 16) % 6).min(reply.len());
+            while !reply.is_char_boundary(end) {
+                end += 1;
+            }
+            at = end;
+            growth.push_back(Growth {
+                item: item(seq, 0, said(&reply[..at])),
+                working: at < reply.len(),
+            });
+        }
+    }
+    w.growth.insert(id.into(), growth);
+    w.stream_ms.insert(id.into(), (20, 40));
 }

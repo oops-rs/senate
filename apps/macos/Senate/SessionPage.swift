@@ -53,7 +53,7 @@ struct SessionPage: View {
 
 /// The session's name, where it works, what it runs, its state, and its
 /// actions.
-private struct SessionHeader: View {
+struct SessionHeader: View {
     let store: CoreStore
     let session: SessionLine
 
@@ -324,124 +324,34 @@ struct RuntimeMark: View {
 
 // MARK: - The conversation
 
-/// The header, then the conversation, the latest at the foot. It stays at
-/// the foot as the session goes on, unless you scrolled up; reaching the
-/// top reads the page before.
+/// SPIKE: the header (native), then the conversation as one web page.
 private struct SessionConversation: View {
     @Bindable var store: CoreStore
     let session: SessionLine
-    @State private var position = ScrollPosition(edge: .bottom)
 
     var body: some View {
         let t = store.timeline.flatMap { $0.sessionId == session.sessionId ? $0 : nil }
-        GeometryReader { geometry in
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: Theme.Space.l) {
-                SessionHeader(store: store, session: session)
-                if let t {
-                    body(t)
-                } else {
-                    ProgressView().controlSize(.small).frame(maxWidth: .infinity)
-                }
-            }
-            .accessibilityElement(children: .contain)
-            .accessibilityLabel(session.displayName)
-            .frame(maxWidth: Theme.readingWidth, alignment: .leading)
-            .padding(.horizontal, Theme.Space.xl)
-            .padding(.top, Theme.Space.s)
-            .padding(.bottom, Theme.Space.xl)
-            // Shorter than the view, it starts at the top all the same.
-            // Only for a short conversation: a minimum height makes the lazy
-            // stack estimate its whole height, which a long one pays for on
-            // every layout.
-            .frame(maxWidth: .infinity, minHeight: (t?.rows.count ?? 0) < 24 ? geometry.size.height : nil,
-                   alignment: .top)
-        }
-        // Opens at the foot, and stays there as items arrive while you are
-        // there; scrolled up, what you read stays put.
-        .defaultScrollAnchor(.bottom)
-        .defaultScrollAnchor(.bottom, for: .sizeChanges)
-        .scrollPosition($position)
-        .onReceive(NotificationCenter.default.publisher(for: Perf.scrollToRow)) { note in
-            if let id = note.object as? UInt64 { position.scrollTo(id: id, anchor: .center) }
-        }
-        #if DEBUG
-        // The snapshot tour scrolls to the top, to check that reading the
-        // page before keeps what is on screen where it is.
-        .onReceive(NotificationCenter.default.publisher(for: Snapshot.scrollToItem)) { note in
-            guard let seq = note.object as? UInt64 else { return }
-            let bottom = (note.userInfo?["anchor"] as? String) == "bottom"
-            position.scrollTo(id: seq, anchor: bottom ? .bottom : .top)
-        }
-        .onReceive(NotificationCenter.default.publisher(for: Snapshot.scrollToTop)) { _ in
-            position.scrollTo(edge: .top)
-        }
-        #endif
-        }
-    }
-
-    /// Read the page before, keeping what was first on screen where it was:
-    /// without this, at the very top the view would stay at offset zero and
-    /// jump onto what was just read.
-    private func older(_ t: SessionTimeline) async {
-        guard t.hasOlder, !t.loadingOlder, let first = t.firstSeq else { return }
-        await store.loadOlder()
-        guard t.firstSeq != first else { return }
-        var still = Transaction()
-        still.disablesAnimations = true
-        // The row that was first is on screen: hold it where it is.
-        withTransaction(still) { position.scrollTo(id: first, anchor: .top) }
-    }
-
-    @ViewBuilder private func body(_ t: SessionTimeline) -> some View {
-        if t.loading {
-            ProgressView().controlSize(.small).frame(maxWidth: .infinity).padding(.top, Theme.Space.xl)
-        } else if !t.available || !session.readable {
-            Nothing(text: t.unavailable ?? L("session.unreadable"), hosted: session.hosted, store: store)
-        } else {
-            if t.hasOlder {
-                HStack {
-                    Spacer()
-                    if t.loadingOlder {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Button(L("session.earlier")) { Task { await older(t) } }
-                            .buttonStyle(.pill)
-                    }
-                    Spacer()
-                }
-                .onAppear { Task { await older(t) } }
-            }
-            if t.items.isEmpty {
-                Nothing(text: L("session.empty"), hosted: nil, store: store)
-            }
-            ForEach(t.rows) { row in
-                // Equatable: a row redraws only when it changed, not when
-                // another item, or the sidebar's data, did.
-                RowView(store: store, row: row, committee: session.committee)
-                    .equatable()
-                    .id(row.id)
-            }
-            if t.working {
-                HStack(spacing: Theme.Space.s) {
-                    WorkingRing()
-                    Text(verbatim: L("status.working"))
-                        .font(Theme.Fonts.meta)
-                        .foregroundStyle(Theme.onSurfaceVariant)
-                }
-                .padding(.leading, Theme.Space.xs)
-            }
-            if let error = t.error {
-                Text(verbatim: error)
-                    .font(Theme.Fonts.meta)
-                    .foregroundStyle(Theme.danger)
+        // Read here, so the web view is told when any of it changes.
+        let _ = (t?.rows, t?.loading, t?.hasOlder, t?.loadingOlder, t?.working)
+        VStack(spacing: 0) {
+            SessionHeader(store: store, session: session)
+                .frame(maxWidth: Theme.readingWidth, alignment: .leading)
+                .padding(.horizontal, Theme.Space.xl)
+                .frame(maxWidth: .infinity)
+            if let t, !t.loading, !t.available || !session.readable {
+                Nothing(text: t.unavailable ?? L("session.unreadable"), hosted: session.hosted, store: store)
+                    .frame(maxWidth: Theme.readingWidth)
+                    .padding(Theme.Space.xl)
+                Spacer()
+            } else {
+                WebConversation(store: store, session: session, timeline: t)
             }
         }
     }
 }
 
 /// Why there is nothing to read, and the way to see it anyway.
-private struct Nothing: View {
+struct Nothing: View {
     let text: String
     let hosted: HostedSession?
     let store: CoreStore

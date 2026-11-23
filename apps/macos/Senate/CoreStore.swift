@@ -425,6 +425,9 @@ final class CoreStore {
         if let v = ProcessInfo.processInfo.environment[Self.showEnv], !v.isEmpty {
             show(.inbox)
         }
+        // SPIKE: the Markdown store, and its highlighter warmed off the main
+        // thread, at launch rather than at the first conversation.
+        _ = WebConversation.Coordinator.markdown
         Perf.tour(self)
         Perf.sessionTour(self)
         #if DEBUG

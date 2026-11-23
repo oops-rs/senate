@@ -112,6 +112,29 @@ extension Perf {
     static let scrollToRow = Notification.Name("SenatePerfScrollToRow")
     /// Posted with a tool call's id to open it.
     static let openCall = Notification.Name("SenatePerfOpenCall")
+    /// SPIKE: the web conversation's own frame timing and memory, if shown.
+    static var pageStats: (() async -> String)?
+    /// TRIAL: a timestamp on the open path, during the session tour.
+    static var markedFrom: ContinuousClock.Instant?
+    static func mark(_ what: String) {
+        guard sessionTourOn, let from = markedFrom else { return }
+        let d = ContinuousClock.now - from
+        report("mark +\(d.components.seconds * 1000 + d.components.attoseconds / 1_000_000_000_000_000) ms: \(what)")
+    }
+    /// TRIAL: waits until the web page has drawn rows (nil: native).
+    static var pageShown: (() async -> Void)?
+    /// TRIAL: a process's resident memory in MB, from ps.
+    static func rss(_ pid: Int32) -> Int {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/ps")
+        p.arguments = ["-o", "rss=", "-p", String(pid)]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        try? p.run()
+        p.waitUntilExit()
+        let out = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        return (Int(out.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0) / 1024
+    }
 
     /// Frames and stalls over a phase: every frame's interval from the
     /// display link, and how late a 4 ms tick on the main actor runs.
@@ -196,10 +219,32 @@ extension Perf {
                 probe.start(in: view)
                 await body()
                 probe.stop(name)
+                report("phase \(name): app RSS \(rss(getpid())) MB")
+                report("phase \(name): rows \(store.timeline?.rows.count ?? 0), older \(store.timeline?.hasOlder ?? false)")
+                if let stats = await pageStats?() { report("phase \(name): \(stats)") }
             }
             try? await Task.sleep(for: .seconds(1))
             await phase("open") {
+                let t0 = ContinuousClock.now
+                markedFrom = t0
                 store.place = .session("marathon-1")
+                while ContinuousClock.now - t0 < .seconds(10),
+                      store.timeline?.loading ?? true || store.timeline?.rows.isEmpty ?? true {
+                    try? await Task.sleep(for: .milliseconds(1))
+                }
+                mark("timeline read")
+                if let shown = pageShown {
+                    await shown()
+                } else {
+                    let frames = Probe()
+                    frames.start(in: view)
+                    while frames.frames < 2 { try? await Task.sleep(for: .milliseconds(1)) }
+                    frames.stop("(open frames)")
+                }
+                mark("rows drawn")
+                markedFrom = nil
+                let d = ContinuousClock.now - t0
+                report("open: \(d.components.seconds * 1000 + d.components.attoseconds / 1_000_000_000_000_000) ms to rows drawn")
                 try? await Task.sleep(for: .seconds(2.5))
             }
             let rows = { store.timeline?.rows.map(\.id) ?? [] }
