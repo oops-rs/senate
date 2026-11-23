@@ -1719,7 +1719,7 @@ fn pause_selector(
             "Pause which session?"
         };
         return Ok(rt
-            .block_on(crate::host::pick_session(&eligible, prompt))?
+            .block_on(crate::host::pick(&session_choices(&eligible), prompt))?
             .map(|primary| StopSelector::Named(vec![primary.to_string()])));
     }
     let mut names = Vec::new();
@@ -1906,8 +1906,8 @@ fn pick_attach_session() -> anyhow::Result<Option<ipc::AttachTarget>> {
         "no hosted sessions; use senate spawn to start one"
     );
     require_picker_terminal("senate attach", &reply.rows, false)?;
-    let chosen = rt.block_on(crate::host::pick_session(
-        &reply.rows,
+    let chosen = rt.block_on(crate::host::pick(
+        &session_choices(&reply.rows),
         "Attach to which session?",
     ))?;
     Ok(chosen
@@ -2026,6 +2026,24 @@ fn no_runtime(profiles: &[String], locale: Locale) -> String {
             profiles.join(", ")
         ),
     }
+}
+
+/// The picker's lines for `rows`, each named as `senate session list` names
+/// it (its alias, or the short senator name), its committee leading the
+/// rest of the line.
+fn session_choices(rows: &[ipc::SessionRow]) -> Vec<crate::host::Choice> {
+    rows.iter()
+        .map(|row| {
+            let mut choice = crate::host::Choice::of_row(row);
+            choice.label = row.display_name(false);
+            if let Some(committee) = &row.committee
+                && !choice.label.contains("::")
+            {
+                choice.detail = format!("{committee} · {}", choice.detail);
+            }
+            choice
+        })
+        .collect()
 }
 
 fn on_a_terminal() -> bool {
@@ -4299,4 +4317,28 @@ fn approve_without_a_name_takes_only_the_one_waiting_prompt_and_says_so() {
         listed.starts_with("2 sessions have a prompt waiting") && listed.contains("\n  builder  "),
         "{listed}"
     );
+}
+
+#[cfg(test)]
+#[test]
+fn the_picker_names_sessions_as_the_list_does() {
+    use crate::ipc::HostState;
+    use crate::sessions::tests::row;
+    let named = row("claude-1", Some("reviewer"), HostState::Running);
+    let unnamed = row(
+        "claude-5bde5f64-db8f-4881-bd49-7c2dd8107ed3",
+        None,
+        HostState::Stopped,
+    );
+    let choices = session_choices(&[named.clone(), unnamed.clone()]);
+    assert_eq!(choices[0].label, named.display_name(false));
+    assert_eq!(choices[0].label, "reviewer");
+    assert!(
+        choices[0].detail.starts_with("refund-v2 · codex · running"),
+        "{:?}",
+        choices[0]
+    );
+    assert_eq!(choices[1].label, "claude-5bde5f64");
+    assert!(choices[1].dim);
+    assert_eq!(choices[1].primary, unnamed.primary);
 }
