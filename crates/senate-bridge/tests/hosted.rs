@@ -4852,7 +4852,9 @@ async fn paused_claude_and_agy_remain_on_the_hosted_roster() {
 
     let mut cmd = tokio::process::Command::new(BIN);
     testenv::isolate_async(&mut cmd, h.dir.path());
-    cmd.args(["session", "watch"])
+    // Paused sessions have no terminal to watch: the grid shows them only
+    // with `--all`.
+    cmd.args(["session", "watch", "--all"])
         .env("SENATE_HOME", h.paths.home())
         .kill_on_drop(true);
     let (pty, pts) = pty_process::open().unwrap();
