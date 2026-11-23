@@ -897,14 +897,15 @@ The Senate workspace contains 9 tightly scoped crates:
 
 | Crate | Version | Description |
 | :--- | :--- | :--- |
-| [`senate-core`](crates/senate-core) | `0.10.0` | Core domain types: identifiers, addressing, event envelopes, roster models, and `Hub` seams. |
-| [`senate-log`](crates/senate-log) | `0.10.0` | Append-only log engine supporting `MemoryStore`, `SqliteStore`, and `PgStore` (PostgreSQL). |
-| [`senate-server`](crates/senate-server) | `0.10.0` | Axum-powered HTTP API, Server-Sent Events (SSE) streaming, authentication, and presence leases. |
-| [`senate-speaker`](crates/senate-speaker) | `0.10.0` | Built-in model session engine (actor-based via `ractor`), triage, cover generation, and task synthesis. |
-| [`senate-work`](crates/senate-work) | `0.10.0` | Containerized autonomous worker (`DockerRunner`) and GitHub Pull Request automation (`GhForge`). |
-| [`senate-bridge`](crates/senate-bridge) | `0.10.0` | Developer workstation bridge daemon, local IPC socket, MCP server, hooks, and the `senate` CLI. |
-| [`senated`](crates/senated) | `0.10.0` | Universal daemon executable (`--config`, `--machine`) and extensible assembly library (`Assembly`). |
-| [`senate-app-core`](crates/senate-app-core) | `0.10.0` | UniFFI Rust bridge backing the native SwiftUI macOS companion app. |
+| [`senate-core`](crates/senate-core) | `0.11.0` | Core domain types: identifiers, addressing, event envelopes, roster models, and `Hub` seams. |
+| [`senate-log`](crates/senate-log) | `0.11.0` | Append-only log engine supporting `MemoryStore`, `SqliteStore`, and `PgStore` (PostgreSQL). |
+| [`senate-server`](crates/senate-server) | `0.11.0` | Axum-powered HTTP API, Server-Sent Events (SSE) streaming, authentication, and presence leases. |
+| [`senate-speaker`](crates/senate-speaker) | `0.11.0` | Built-in model session engine (actor-based via `ractor`), triage, cover generation, and task synthesis. |
+| [`senate-work`](crates/senate-work) | `0.11.0` | Containerized autonomous worker (`DockerRunner`) and GitHub Pull Request automation (`GhForge`). |
+| [`senate-markdown`](crates/senate-markdown) | `0.11.0` | Markdown as a block tree with streaming diffs, and lazy HTML and terminal rendering with syntax highlighting. |
+| [`senate-bridge`](crates/senate-bridge) | `0.11.0` | Developer workstation bridge daemon, local IPC socket, MCP server, hooks, and the `senate` CLI. |
+| [`senated`](crates/senated) | `0.11.0` | Universal daemon executable (`--config`, `--machine`) and extensible assembly library (`Assembly`). |
+| [`senate-app-core`](crates/senate-app-core) | `0.11.0` | UniFFI Rust bridge backing the native SwiftUI macOS companion app. |
 | [`senate-e2e`](crates/senate-e2e) | — | Comprehensive end-to-end integration and lifecycle verification test suite. |
 
 ---
