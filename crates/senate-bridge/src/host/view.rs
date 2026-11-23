@@ -51,7 +51,7 @@ use unicode_width::UnicodeWidthStr as _;
 
 use super::scroll::{self, Mouse};
 use super::terminal::{RESET_DISPLAY, RawTerminal, split_input};
-use super::watch::{Mirror, Watch};
+use super::watch::{Mirror, SyncFrames, Watch};
 use crate::paths::Paths;
 
 /// The least a tile is given, its header row included.
@@ -175,13 +175,34 @@ impl Tile {
                             }
                         };
                         let reading = async {
+                            let mut sync = SyncFrames::default();
                             loop {
-                                match watch.next().await {
-                                    Ok(Some(frame)) => {
-                                        if let Some(mirror) = shown(&state).mirror.as_mut() {
-                                            mirror.apply(&frame);
+                                let next = watch.next();
+                                tokio::pin!(next);
+                                let result = if let Some(deadline) = sync.deadline() {
+                                    tokio::select! {
+                                        result = &mut next => result,
+                                        _ = tokio::time::sleep_until(deadline) => {
+                                            if let Some(mirror) = shown(&state).mirror.as_mut()
+                                                && sync.finish(mirror)
+                                            {
+                                                changed.notify_one();
+                                            }
+                                            // Keep the in-flight frame read: cancelling
+                                            // it could discard a partially read packet.
+                                            next.await
                                         }
-                                        changed.notify_one();
+                                    }
+                                } else {
+                                    next.await
+                                };
+                                match result {
+                                    Ok(Some(frame)) => {
+                                        if let Some(mirror) = shown(&state).mirror.as_mut()
+                                            && sync.apply(mirror, &frame)
+                                        {
+                                            changed.notify_one();
+                                        }
                                     }
                                     Ok(None) => break "the session ended".to_owned(),
                                     Err(error) => break format!("the watch broke: {error:#}"),
@@ -347,11 +368,63 @@ fn top_row(screen: &vt100::Screen, rows: u16) -> u16 {
         .min(height.get().saturating_sub(rows))
 }
 
+/// A frame is made of positioned, non-overlapping row regions. Compare
+/// the rendered bytes of each region, so wide glyph clipping and styling
+/// are identical in full and incremental paints.
+#[derive(Default)]
+struct Frame {
+    size: (u16, u16),
+    regions: Vec<((u16, u16), String)>,
+    cursor: Option<(u16, u16)>,
+}
+
+impl Frame {
+    fn region(&mut self, row: u16, col: u16) -> &mut String {
+        let index = self.regions.len();
+        self.regions.push(((row, col), String::new()));
+        &mut self.regions[index].1
+    }
+
+    fn changes(&self, previous: Option<&Self>, recover: bool) -> String {
+        let comparable = previous.filter(|prev| {
+            self.size == prev.size
+                && self
+                    .regions
+                    .iter()
+                    .map(|(at, _)| at)
+                    .eq(prev.regions.iter().map(|(at, _)| at))
+        });
+        let mut out = String::new();
+        if recover || (previous.is_some() && comparable.is_none()) {
+            out.push_str("\x1b[2J");
+        }
+        if self.cursor.is_none() && previous.is_none_or(|prev| prev.cursor.is_some()) {
+            out.push_str("\x1b[?25l");
+        }
+        for (index, &((row, col), ref bytes)) in self.regions.iter().enumerate() {
+            if comparable.is_some_and(|prev| prev.regions[index].1 == *bytes) {
+                continue;
+            }
+            at(&mut out, row, col);
+            out.push_str(bytes);
+        }
+        if let Some((row, col)) = self.cursor
+            && (!out.is_empty() || previous.is_none_or(|prev| prev.cursor != self.cursor))
+        {
+            at(&mut out, row, col);
+            if previous.is_none_or(|prev| prev.cursor.is_none()) {
+                out.push_str("\x1b[?25h");
+            }
+        }
+        out
+    }
+}
+
 /// Paint `rows` × `cols` of `screen` from its row `top`, left edge, at
 /// (`row`, `col`). Returns where the session's cursor is in the terminal,
 /// when it is shown and inside what was painted.
 fn paint_screen(
-    out: &mut String,
+    frame: &mut Frame,
     screen: &vt100::Screen,
     area: Rect,
     top: u16,
@@ -359,7 +432,7 @@ fn paint_screen(
 ) -> Option<(u16, u16)> {
     let reset = if dim { "\x1b[0;2m" } else { "\x1b[0m" };
     for line in 0..area.rows {
-        at(out, area.row + line, area.col);
+        let out = frame.region(area.row + line, area.col);
         out.push_str(reset);
         erase(out, area.cols);
         let mut current = None;
@@ -461,10 +534,10 @@ fn paint_screen(
 }
 
 /// Paint lines of plain text into `area`, the rest of it blank.
-fn paint_note(out: &mut String, area: Rect, note: &str) {
+fn paint_note(frame: &mut Frame, area: Rect, note: &str) {
     let lines = wrapped(note, usize::from(area.cols));
     for line in 0..area.rows {
-        at(out, area.row + line, area.col);
+        let out = frame.region(area.row + line, area.col);
         let text = lines.get(usize::from(line)).map_or("", String::as_str);
         out.push_str("\x1b[0;2m");
         erase(out, area.cols);
@@ -475,10 +548,10 @@ fn paint_note(out: &mut String, area: Rect, note: &str) {
 
 /// Paint one tile: its header, then its session's screen or why there is
 /// none.
-fn paint_tile(out: &mut String, tile: &Tile, area: Rect, focused: bool) -> Option<(u16, u16)> {
+fn paint_tile(frame: &mut Frame, tile: &Tile, area: Rect, focused: bool) -> Option<(u16, u16)> {
     let state = shown(&tile.shown);
     let dim = tile.session.dim || state.note.is_some();
-    at(out, area.row, area.col);
+    let out = frame.region(area.row, area.col);
     let style = match (focused, dim) {
         (true, _) => "\x1b[0;1;7m",
         (false, true) => "\x1b[0;2;4m",
@@ -499,18 +572,19 @@ fn paint_tile(out: &mut String, tile: &Tile, area: Rect, focused: bool) -> Optio
     };
     if body.cols < area.cols {
         for line in 0..body.rows {
-            at(out, body.row + line, area.col + body.cols);
-            erase(out, 1);
+            let gutter = frame.region(body.row + line, area.col + body.cols);
+            gutter.push_str("\x1b[0m");
+            erase(gutter, 1);
         }
     }
     tile.fit_to(body.rows, body.cols);
     match (&state.mirror, &state.note) {
         (Some(mirror), None) => {
             let screen = mirror.screen();
-            paint_screen(out, screen, body, top_row(screen, body.rows), dim)
+            paint_screen(frame, screen, body, top_row(screen, body.rows), dim)
         }
         (_, note) => {
-            paint_note(out, body, note.as_deref().unwrap_or("connecting…"));
+            paint_note(frame, body, note.as_deref().unwrap_or("connecting…"));
             None
         }
     }
@@ -633,8 +707,11 @@ impl Viewer {
             .min(self.tiles.len().saturating_sub(1));
     }
 
-    fn paint(&self, rows: u16, cols: u16) -> String {
-        let mut out = String::from("\x1b[?25l");
+    fn compose(&self, rows: u16, cols: u16) -> Frame {
+        let mut frame = Frame {
+            size: (rows, cols),
+            ..Frame::default()
+        };
         let status_row = rows.saturating_sub(1);
         let mut cursor = None;
         let status = match self.mode {
@@ -646,24 +723,29 @@ impl Viewer {
                     cols,
                 };
                 let Some(tile) = self.tiles.first() else {
-                    return out;
+                    return frame;
                 };
                 let state = shown(&tile.shown);
                 match (&state.mirror, &state.note) {
                     (Some(mirror), None) => {
                         let screen = mirror.screen();
-                        cursor =
-                            paint_screen(&mut out, screen, area, top_row(screen, area.rows), false);
+                        cursor = paint_screen(
+                            &mut frame,
+                            screen,
+                            area,
+                            top_row(screen, area.rows),
+                            false,
+                        );
                     }
                     (_, note) => {
-                        paint_note(&mut out, area, note.as_deref().unwrap_or("connecting…"));
+                        paint_note(&mut frame, area, note.as_deref().unwrap_or("connecting…"));
                     }
                 }
                 format!(" read-only · {} · Ctrl-] leaves", tile.session.title)
             }
             Mode::Grid if self.tiles.is_empty() => {
                 paint_note(
-                    &mut out,
+                    &mut frame,
                     Rect {
                         row: 0,
                         col: 0,
@@ -689,9 +771,14 @@ impl Viewer {
                     );
                     match self.tiles.get(page * per_page + slot) {
                         Some(tile) => {
-                            paint_tile(&mut out, tile, area, page * per_page + slot == self.focus);
+                            paint_tile(
+                                &mut frame,
+                                tile,
+                                area,
+                                page * per_page + slot == self.focus,
+                            );
                         }
-                        None => paint_note(&mut out, area, ""),
+                        None => paint_note(&mut frame, area, ""),
                     }
                 }
                 let paging = if pages > 1 {
@@ -705,16 +792,18 @@ impl Viewer {
                 )
             }
         };
-        at(&mut out, status_row, 0);
+        let out = frame.region(status_row, 0);
         out.push_str("\x1b[0;7m");
-        erase(&mut out, cols);
+        erase(out, cols);
         out.push_str(&fit(&status, usize::from(cols)));
         out.push_str("\x1b[0m");
-        if let Some((row, col)) = cursor {
-            at(&mut out, row, col);
-            out.push_str("\x1b[?25h");
-        }
-        out
+        frame.cursor = cursor;
+        frame
+    }
+
+    #[cfg(test)]
+    fn paint(&self, rows: u16, cols: u16) -> String {
+        self.compose(rows, cols).changes(None, false)
     }
 
     fn focused_shown(&self) -> Option<MutexGuard<'_, Shown>> {
@@ -779,40 +868,52 @@ async fn stay(
     let mut dirty = true;
     let mut stuck = false;
     let mut captures_wheel = false;
+    let mut previous = None;
+    let mut recover = false;
     let left = loop {
         if dirty {
             let (rows, cols) = terminal.window()?;
-            let mut frame = viewer.paint(rows, cols);
+            let frame = viewer.compose(rows, cols);
+            let mut changes = frame.changes(previous.as_ref(), recover);
             let capture = viewer.captures_wheel();
-            if capture != captures_wheel {
+            if recover || capture != captures_wheel {
                 let mode = if capture {
                     scroll::MOUSE_ON
                 } else {
                     scroll::MOUSE_OFF
                 };
-                frame.push_str(std::str::from_utf8(mode).unwrap_or_default());
+                changes.push_str(std::str::from_utf8(mode).unwrap_or_default());
             }
-            // A terminal that is not taking output must not keep the keys
-            // from being read: leaving has to work. What was cut short is
-            // painted whole the next time round.
-            match tokio::time::timeout(STUCK, terminal.draw(frame.as_bytes())).await {
-                Ok(drawn) => {
-                    drawn?;
-                    captures_wheel = capture;
-                    dirty = false;
-                    // A busy session changes many times a second.
+            if !changes.is_empty() {
+                // Terminals that support synchronized output present the
+                // whole patch at once. Other terminals ignore the brackets.
+                // Cancel an old partial CSI and release its synchronized
+                // paint before starting the recovery frame.
+                let prefix = if recover { "\x18\x1b[?2026l" } else { "" };
+                let patch = format!("{prefix}\x1b[?2026h{changes}\x1b[?2026l");
+                match tokio::time::timeout(STUCK, terminal.draw(patch.as_bytes())).await {
+                    Ok(drawn) => drawn?,
+                    Err(_) => {
+                        stuck = true;
+                        recover = true;
+                        previous = None;
+                    }
+                }
+            }
+            if !stuck {
+                previous = Some(frame);
+                captures_wheel = capture;
+                recover = false;
+                dirty = false;
+                if !changes.is_empty() {
                     tokio::time::sleep(FRAME).await;
                 }
-                Err(_) => stuck = true,
             }
         }
         tokio::select! {
             () = viewer.changed.notified(), if !dirty => dirty = true,
             () = tokio::time::sleep(FRAME), if std::mem::take(&mut stuck) => {}
-            _ = winch.recv() => {
-                terminal.draw(b"\x1b[2J").await?;
-                dirty = true;
-            }
+            _ = winch.recv() => dirty = true,
             _ = listing.tick(), if relist.is_some() => {
                 if let Some(relist) = relist.as_mut()
                     && let Ok(sessions) = (relist.fetch)().await
@@ -863,7 +964,8 @@ async fn stay(
             _ = interrupt.recv() => break Left::Quit,
         }
     };
-    let _ = tokio::time::timeout(Duration::from_millis(250), terminal.draw(RESET_DISPLAY)).await;
+    let cleanup = [b"\x18\x1b[?2026l".as_slice(), RESET_DISPLAY].concat();
+    let _ = tokio::time::timeout(Duration::from_millis(250), terminal.draw(&cleanup)).await;
     Ok(left)
 }
 
@@ -1051,7 +1153,7 @@ mod tests {
         assert_eq!(top_row(session.screen(), 20), 0, "all of it fits");
 
         // Painted into a 4 x 12 area at (2, 5) of a 10 x 40 terminal.
-        let mut out = String::new();
+        let mut out = Frame::default();
         let area = Rect {
             row: 2,
             col: 5,
@@ -1059,7 +1161,7 @@ mod tests {
             cols: 12,
         };
         let cursor = paint_screen(&mut out, session.screen(), area, 3, false);
-        let terminal = shows(10, 40, &out);
+        let terminal = shows(10, 40, &out.changes(None, false));
         let rows: Vec<String> = terminal.screen().rows(0, 40).collect();
         assert_eq!(rows[1], "");
         assert_eq!(rows[2], "     line 3 is lo");
@@ -1078,7 +1180,7 @@ mod tests {
         );
 
         // Colours and weight come through; nothing leaks past the area.
-        let mut out = String::new();
+        let mut out = Frame::default();
         let area = Rect {
             row: 0,
             col: 0,
@@ -1086,7 +1188,7 @@ mod tests {
             cols: 4,
         };
         paint_screen(&mut out, session.screen(), area, 0, false);
-        let terminal = shows(4, 20, &out);
+        let terminal = shows(4, 20, &out.changes(None, false));
         let cell = terminal.screen().cell(0, 0).unwrap();
         assert_eq!(cell.contents(), "b");
         assert!(cell.bold());
@@ -1290,7 +1392,7 @@ mod tests {
     #[test]
     fn a_wide_character_cut_by_the_edge_is_a_blank() {
         let session = screen(2, 10, "ab你好".as_bytes());
-        let mut out = String::new();
+        let mut out = Frame::default();
         // Three columns: `a`, `b`, and half of 你.
         let area = Rect {
             row: 0,
@@ -1299,7 +1401,7 @@ mod tests {
             cols: 3,
         };
         paint_screen(&mut out, session.screen(), area, 0, false);
-        let terminal = shows(2, 10, &out);
+        let terminal = shows(2, 10, &out.changes(None, false));
         assert_eq!(terminal.screen().rows(0, 10).next().unwrap(), "ab ");
     }
 
@@ -1314,7 +1416,7 @@ mod tests {
             .apply(&super::super::watch::Frame::Output(
                 source.as_bytes().to_vec(),
             ));
-        let mut out = String::new();
+        let mut out = Frame::default();
         paint_tile(
             &mut out,
             &left,
@@ -1327,7 +1429,7 @@ mod tests {
             false,
         );
         let before = "NNNNNNNNN\r\n".repeat(6);
-        let terminal = shows(7, 9, &(before + &out));
+        let terminal = shows(7, 9, &(before + &out.changes(None, false)));
         let lines: Vec<_> = terminal.screen().rows(0, 9).collect();
         assert_eq!(lines[1], "NNab你 NN");
         for line in &lines[2..6] {
@@ -1338,6 +1440,56 @@ mod tests {
         for symbol in ["›", "•", "⏺", "─"] {
             assert_eq!(paint_width(symbol), 2);
         }
+    }
+
+    #[tokio::test]
+    async fn changing_one_grid_row_repaints_only_that_region() {
+        let left = tile("north", "before", false);
+        let right = tile("south", "unchanged", false);
+        let viewer = Viewer {
+            mode: Mode::Grid,
+            tiles: vec![left, right],
+            focus: 0,
+            changed: Arc::new(Notify::new()),
+        };
+        let (rows, cols) = (24, 100);
+        let first = viewer.compose(rows, cols);
+        assert!(
+            viewer
+                .compose(rows, cols)
+                .changes(Some(&first), false)
+                .is_empty()
+        );
+        shown(&viewer.tiles[0].shown)
+            .mirror
+            .as_mut()
+            .unwrap()
+            .apply(&super::super::watch::Frame::Output(b"\rnew text".to_vec()));
+        let next = viewer.compose(rows, cols);
+        let patch = next.changes(Some(&first), false);
+        assert!(patch.contains("new text"));
+        assert!(!patch.contains("south") && !patch.contains("north"));
+        assert!(!patch.contains("unchanged"));
+        assert_eq!(
+            patch.matches('X').count(),
+            1,
+            "only one region erases its cells"
+        );
+        let mut incremental = shows(rows, cols, &first.changes(None, false));
+        incremental.process(patch.as_bytes());
+        let full = shows(rows, cols, &next.changes(None, false));
+        for row in 0..rows {
+            for col in 0..cols {
+                assert_eq!(
+                    incremental.screen().cell(row, col),
+                    full.screen().cell(row, col)
+                );
+            }
+        }
+        assert_eq!(
+            incremental.screen().hide_cursor(),
+            full.screen().hide_cursor()
+        );
     }
 
     #[test]

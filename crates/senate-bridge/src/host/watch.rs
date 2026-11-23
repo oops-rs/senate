@@ -352,6 +352,101 @@ pub(crate) enum Frame {
     Output(Vec<u8>),
 }
 
+/// Withhold a TUI's synchronized frame from the visible mirror until
+/// its end, including when the watch socket splits either bracket. A
+/// missing end cannot freeze the display or grow an unbounded buffer.
+#[derive(Default)]
+pub(super) struct SyncFrames {
+    partial: Vec<u8>,
+    held: Vec<u8>,
+    deadline: Option<tokio::time::Instant>,
+}
+
+impl SyncFrames {
+    const MAX_BYTES: usize = 256 * 1024;
+    const TIMEOUT: Duration = Duration::from_millis(150);
+
+    pub(super) fn deadline(&self) -> Option<tokio::time::Instant> {
+        self.deadline
+    }
+
+    pub(super) fn finish(&mut self, mirror: &mut Mirror) -> bool {
+        self.deadline = None;
+        if self.held.is_empty() {
+            return false;
+        }
+        mirror.parser.process(&self.held);
+        self.held.clear();
+        true
+    }
+
+    pub(super) fn apply(&mut self, mirror: &mut Mirror, frame: &Frame) -> bool {
+        match frame {
+            Frame::Output(bytes) => self.output(mirror, bytes),
+            Frame::Screen(_) => {
+                // The new snapshot supersedes bytes from the old stream.
+                *self = Self::default();
+                mirror.apply(frame);
+                true
+            }
+            Frame::Size(..) => {
+                self.finish(mirror);
+                mirror.apply(frame);
+                true
+            }
+        }
+    }
+
+    fn output(&mut self, mirror: &mut Mirror, bytes: &[u8]) -> bool {
+        use super::emulation::{BEGIN_SYNC, END_SYNC};
+        let mut prefix = std::mem::take(&mut self.partial);
+        let data = if prefix.is_empty() {
+            bytes
+        } else {
+            prefix.extend_from_slice(bytes);
+            &prefix
+        };
+        let mut changed = false;
+        let mut start = 0;
+        let mut seek = 0;
+        while let Some(offset) = data[seek..].iter().position(|&byte| byte == 0x1b) {
+            let at = seek + offset;
+            let rest = &data[at..];
+            if rest.starts_with(BEGIN_SYNC) {
+                changed |= self.write(mirror, &data[start..at]);
+                self.deadline
+                    .get_or_insert_with(|| tokio::time::Instant::now() + Self::TIMEOUT);
+                start = at + BEGIN_SYNC.len();
+                seek = start;
+            } else if rest.starts_with(END_SYNC) {
+                changed |= self.write(mirror, &data[start..at]);
+                changed |= self.finish(mirror);
+                start = at + END_SYNC.len();
+                seek = start;
+            } else if BEGIN_SYNC.starts_with(rest) || END_SYNC.starts_with(rest) {
+                self.partial.extend_from_slice(rest);
+                return changed | self.write(mirror, &data[start..at]);
+            } else {
+                seek = at + 1;
+            }
+        }
+        changed | self.write(mirror, &data[start..])
+    }
+
+    fn write(&mut self, mirror: &mut Mirror, bytes: &[u8]) -> bool {
+        if bytes.is_empty() {
+            return false;
+        }
+        if self.deadline.is_some() && bytes.len() <= Self::MAX_BYTES - self.held.len() {
+            self.held.extend_from_slice(bytes);
+            return false;
+        }
+        self.finish(mirror);
+        mirror.parser.process(bytes);
+        true
+    }
+}
+
 /// A watcher's copy of a session's screen, at the session's own size.
 pub(crate) struct Mirror {
     parser: vt100::Parser,
@@ -670,6 +765,37 @@ mod tests {
         frame.extend_from_slice(&rows.to_be_bytes());
         frame.extend_from_slice(&cols.to_be_bytes());
         frame
+    }
+
+    #[test]
+    fn watched_synchronized_frames_publish_only_on_completion_or_timeout() {
+        let mut mirror = Mirror::default();
+        mirror.parser.process(b"initial");
+        let mut sync = SyncFrames::default();
+        assert!(!sync.apply(&mut mirror, &Frame::Output(b"\x1b[?20".to_vec())));
+        assert!(!sync.apply(&mut mirror, &Frame::Output(b"26h\rpartial".to_vec())));
+        assert_eq!(
+            mirror.screen().rows(0, 80).next().as_deref(),
+            Some("initial")
+        );
+        assert!(!sync.apply(&mut mirror, &Frame::Output(b" frame\x1b[?2026".to_vec())));
+        assert!(sync.apply(&mut mirror, &Frame::Output(b"l".to_vec())));
+        assert_eq!(
+            mirror.screen().rows(0, 80).next().as_deref(),
+            Some("partial frame")
+        );
+        assert!(sync.deadline().is_none());
+
+        assert!(!sync.apply(
+            &mut mirror,
+            &Frame::Output(b"\x1b[?2026h\n\rtimeout".to_vec())
+        ));
+        assert!(sync.deadline().is_some());
+        assert!(sync.finish(&mut mirror));
+        assert_eq!(
+            mirror.screen().rows(0, 80).nth(1).as_deref(),
+            Some("timeout")
+        );
     }
 
     #[test]
