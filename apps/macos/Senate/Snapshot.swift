@@ -16,6 +16,9 @@ enum Snapshot {
     static let env = "SENATE_APP_SNAPSHOT"
     /// Posted to scroll the open session's conversation to its top.
     static let scrollToTop = Notification.Name("SenateSnapshotScrollToTop")
+    /// Posted with an item's seq to scroll the open conversation to it
+    /// (its top; `userInfo["anchor"] == "bottom"`: its foot).
+    static let scrollToItem = Notification.Name("SenateSnapshotScrollToItem")
     /// Posted to open every tool call's output in the open conversation.
     static let expandTools = Notification.Name("SenateSnapshotExpandTools")
 
@@ -124,6 +127,15 @@ enum Snapshot {
             if let working = sessions.first(where: { $0.status == .working && $0.readable }) {
                 store.place = .session(working.sessionId)
                 await shot("session-working")
+            }
+            // The Markdown specimen, at the top of the reply that holds it.
+            if let scratch = store.shownSessions.first(where: { $0.sessionId == "scratch-1" }) {
+                store.place = .session(scratch.sessionId)
+                try? await Task.sleep(for: .seconds(1.5))
+                NotificationCenter.default.post(name: scrollToItem, object: UInt64(4))
+                await shot("markdown")
+                NotificationCenter.default.post(name: scrollToItem, object: UInt64(4), userInfo: ["anchor": "bottom"])
+                await shot("markdown-end")
             }
             if let unreadable = sessions.first(where: { !$0.readable }) {
                 store.place = .session(unreadable.sessionId)

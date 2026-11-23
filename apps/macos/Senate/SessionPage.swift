@@ -366,16 +366,28 @@ private struct SessionConversation: View {
             .padding(.top, Theme.Space.s)
             .padding(.bottom, Theme.Space.xl)
             // Shorter than the view, it starts at the top all the same.
-            .frame(maxWidth: .infinity, minHeight: geometry.size.height, alignment: .top)
+            // Only for a short conversation: a minimum height makes the lazy
+            // stack estimate its whole height, which a long one pays for on
+            // every layout.
+            .frame(maxWidth: .infinity, minHeight: (t?.rows.count ?? 0) < 24 ? geometry.size.height : nil,
+                   alignment: .top)
         }
         // Opens at the foot, and stays there as items arrive while you are
         // there; scrolled up, what you read stays put.
         .defaultScrollAnchor(.bottom)
         .defaultScrollAnchor(.bottom, for: .sizeChanges)
         .scrollPosition($position)
+        .onReceive(NotificationCenter.default.publisher(for: Perf.scrollToRow)) { note in
+            if let id = note.object as? UInt64 { position.scrollTo(id: id, anchor: .center) }
+        }
         #if DEBUG
         // The snapshot tour scrolls to the top, to check that reading the
         // page before keeps what is on screen where it is.
+        .onReceive(NotificationCenter.default.publisher(for: Snapshot.scrollToItem)) { note in
+            guard let seq = note.object as? UInt64 else { return }
+            let bottom = (note.userInfo?["anchor"] as? String) == "bottom"
+            position.scrollTo(id: seq, anchor: bottom ? .bottom : .top)
+        }
         .onReceive(NotificationCenter.default.publisher(for: Snapshot.scrollToTop)) { _ in
             position.scrollTo(edge: .top)
         }
@@ -392,6 +404,7 @@ private struct SessionConversation: View {
         guard t.firstSeq != first else { return }
         var still = Transaction()
         still.disablesAnimations = true
+        // The row that was first is on screen: hold it where it is.
         withTransaction(still) { position.scrollTo(id: first, anchor: .top) }
     }
 
@@ -418,7 +431,10 @@ private struct SessionConversation: View {
                 Nothing(text: L("session.empty"), hosted: nil, store: store)
             }
             ForEach(t.rows) { row in
-                RowView(store: store, row: row)
+                // Equatable: a row redraws only when it changed, not when
+                // another item, or the sidebar's data, did.
+                RowView(store: store, row: row, committee: session.committee)
+                    .equatable()
                     .id(row.id)
             }
             if t.working {
@@ -461,9 +477,14 @@ private struct Nothing: View {
 }
 
 /// One row of the conversation.
-private struct RowView: View {
+private struct RowView: View, Equatable {
     let store: CoreStore
     let row: ConversationRow
+    let committee: String?
+
+    nonisolated static func == (a: RowView, b: RowView) -> Bool {
+        a.row == b.row && a.committee == b.committee
+    }
 
     var body: some View {
         switch row.kind {
@@ -485,7 +506,7 @@ private struct RowView: View {
                 if !row.thinking.isEmpty {
                     Thinking(texts: row.thinking)
                 }
-                MarkdownText(text: text)
+                MessageText(text: text, committee: committee)
             }
         case let .tool(call):
             ToolRow(call: call, thinking: row.thinking)
@@ -600,6 +621,9 @@ private struct ToolRow: View {
             .accessibilityLabel("\(call.name): \(call.title)")
             .accessibilityValue(call.statusLabel)
             .accessibilityAddTraits(more ? .isButton : [])
+            .onReceive(NotificationCenter.default.publisher(for: Perf.openCall)) { note in
+                if (note.object as? String) == call.callId { open = true }
+            }
             #if DEBUG
             .onReceive(NotificationCenter.default.publisher(for: Snapshot.expandTools)) { _ in
                 if more { open = true }

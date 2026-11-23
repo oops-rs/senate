@@ -141,10 +141,12 @@ something to you that you have not read: an accent dot at its corner),
   `senate attach`), *Pause* / *Resume*, *Stop* (never forced) or
   *Restore* as they apply. Below, its conversation as its transcript has
   it, in the reading column: what was typed in a bubble, the agent's
-  replies as Markdown, its reasoning dimmed and folded, each tool call one
-  row (an icon by kind, the command or path, how it went) that opens to
-  its output or diff in a bounded block, todo lists as a checklist, a
-  Senate message delivered to it as a card that opens its thread. The
+  replies as Markdown (below), each tool call one row (an icon by kind,
+  the command or path, how it went) that opens to its output or diff in a
+  bounded block, todo lists as a checklist, a Senate message delivered to
+  it as a card that opens its thread. Reasoning has no row of its own: it
+  opens inside the tool call it led to, above its output, or behind a
+  small *Thinking* line on the reply it led to. The
   latest page is read first and older ones as you scroll up (what you are
   reading stays put); new items follow live and the page stays at the
   foot unless you scrolled up. A prompt waiting in it is a card above the
@@ -152,6 +154,18 @@ something to you that you have not read: an accent dot at its corner),
   committee's log (`senate tell`); it is not typed into the terminal. A
   session Senate cannot read (agy, ACP, no transcript yet) says why and
   offers *Attach*.
+- **Markdown** (a session's replies, a thread's messages): CommonMark and
+  GFM, drawn as one text view per message, so a drag selects across its
+  paragraphs, lists and code, and ⌘C copies plain text (line breaks, list
+  markers, code as written, a table as tab-separated rows). Headings,
+  nested and task lists with hanging indents, fenced code on a tinted
+  block that wraps long lines with a copy button, inline code, quotes, a
+  rule, tables with their declared alignment that scroll sideways when
+  wide, links and bare URLs, mentions as names, CJK. The fake daemon's
+  session `claude-5e1f2a3b` (no committee) holds a specimen of every
+  element.
+
+  ![Markdown](docs/screenshots/markdown.png)
 - **A committee**: its chair and how many are active, what waits on you
   there, its sessions on this machine, the threads your agents are working
   on there, and its members (the chair first).
@@ -256,6 +270,18 @@ SwiftUI views ─► CoreStore (@Observable, main actor) ─► AppCoreProtocol 
 - **Swift** is the store and views. Swift 6, strict concurrency, main actor
   by default; the core's callbacks only yield into an `AsyncStream` that one
   main-actor task reads, in order.
+- **Messages' Markdown**: `MarkdownRenderer.swift` turns swift-markdown's
+  tree into one attributed string per message (off the main thread);
+  `MarkdownCache.swift` keeps them and their measured heights, across
+  sessions; `ConversationRows.swift` folds a session's timeline into the
+  rows drawn (reasoning into the call or reply it led to);
+  `SessionStore.swift` reads and follows the timeline. These are Foundation
+  and SwiftUI only. **macOS-only**: `MessageText.swift` (the TextKit 2
+  `NSTextView` that shows a message, draws its code blocks, quotes, rules
+  and tables, and copies as plain text) and the app's other AppKit
+  plumbing (`Dock.swift`, `Notifier.swift`, `Terminal.swift`,
+  `Snapshot.swift`, `Perf.swift`). An iOS app would replace
+  `MessageText.swift` with a `UITextView` behind the same `MessageText`.
 
 ### Languages
 
@@ -297,6 +323,21 @@ thread is read in about 95 ms off it and drawn 300 events at a time; section
 switches stall the main thread 25-150 ms, the same with 10 threads as with
 2,003. Signposts mark state applies and thread reads in Instruments.
 
+**The session page, measured.** With the fake daemon's long session
+(`FAKE_BIG=3000 FAKE_TIMELINE_EVERY_MS=200`: 3,000 items shaped like a
+chair's session, 64 KiB outputs, Markdown-heavy replies, an update five
+times a second) and `SENATE_APP_PERF=session` (a Release build), the app
+opens it, scrolls up through it at speed (older pages read on the way)
+and down again, reads in the middle while it updates, opens a 64 KiB tool
+call, and switches between two sessions; for each phase it prints the
+frames drawn, those over 25 ms (a hitch a person sees: the refresh rate
+adapts, so its own target is no measure), the worst frame, the worst
+main-thread stall, and how many Markdown renders and height measurements
+ran on the main thread (few: they are cached, and rendered ahead off it).
+`SENATE_APP_PERF_PHASE=<phase>` repeats one phase for a profile. On this
+Mac the numbers move about 2× with the machine's load: run it several
+times and compare distributions, not single runs.
+
 ## Release
 
 `scripts/release.sh` archives a universal Release build signed with a
@@ -323,6 +364,13 @@ another Mac).
 
 The UI smoke run needs macOS UI automation enabled once for the test
 runner (approve the prompt when it appears, or `automationmodetool enable-automationmode-without-authentication`).
+
+## Acknowledgements
+
+- [swift-markdown](https://github.com/swiftlang/swift-markdown) (Apache
+  License 2.0) parses messages' CommonMark and GFM, with
+  [swift-cmark](https://github.com/swiftlang/swift-cmark) (BSD-2-Clause,
+  cmark-gfm), both pinned at 0.9.0.
 
 ## Not yet
 

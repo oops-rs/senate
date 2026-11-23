@@ -3,7 +3,7 @@ import SenateCore
 
 /// One row of a session's conversation as the page draws it. Reasoning
 /// never has a row of its own: it rides on the row it led to.
-struct ConversationRow: Identifiable, Equatable {
+nonisolated struct ConversationRow: Identifiable, Equatable, Sendable {
     enum Kind: Equatable {
         case user(String)
         case assistant(String)
@@ -21,7 +21,7 @@ struct ConversationRow: Identifiable, Equatable {
     let thinking: [String]
 }
 
-enum ConversationRows {
+nonisolated enum ConversationRows {
     /// The rows for `items` (oldest first), one rule:
     /// - reasoning whose text is empty is dropped;
     /// - reasoning before a tool call goes inside that call (the first
@@ -62,3 +62,4 @@ enum ConversationRows {
         return rows
     }
 }
+

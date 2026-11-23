@@ -580,23 +580,6 @@
         }
       }
     },
-    "desk.refuse_heading": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Refuse this request"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "拒绝此请求"
-          }
-        }
-      }
-    },
     "desk.confirm_refuse": {
       "extractionState": "manual",
       "localizations": {
@@ -780,6 +763,23 @@
           "stringUnit": {
             "state": "translated",
             "value": "拒绝…"
+          }
+        }
+      }
+    },
+    "desk.refuse_heading": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Refuse this request"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "拒绝此请求"
           }
         }
       }
@@ -1737,6 +1737,23 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "message.copy_code": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Copy code"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "拷贝代码"
           }
         }
       }
