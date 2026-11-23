@@ -312,7 +312,14 @@ done
     let conflict = ipc::request::<SpawnReply>(&h.socket(), &request, TIMEOUT, TIMEOUT)
         .await
         .unwrap_err();
-    assert!(conflict.to_string().contains("already taken"), "{conflict}");
+    // The alias the surviving host holds is refused before a second
+    // child starts; nothing is left staged either way.
+    assert!(
+        conflict
+            .to_string()
+            .contains("fixture is already the alias of"),
+        "{conflict}"
+    );
     assert_eq!(h.store().all_sessions().unwrap().len(), 1);
     {
         let server = h.server.state.inner.lock().unwrap();
@@ -3604,7 +3611,8 @@ async fn sessions_lists_stops_by_name_and_prunes_an_orphan() {
 async fn attach_without_a_name_picks_from_the_running_sessions() {
     let (mut h, root) = one_hosted_session().await;
     let reply: ipc::SessionsReply = call(&h, &Request::Sessions).await;
-    let label = reply.rows[0].label();
+    // Named as `senate session list` names it.
+    let label = reply.rows[0].display_name(false);
     let open = || {
         let mut cmd = tokio::process::Command::new(BIN);
         testenv::isolate_async(&mut cmd, h.dir.path());

@@ -3565,13 +3565,6 @@ fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
         SessionCmd::Watch { all } => {
             let paths = Paths::from_env()?;
             let locale = BridgeConfig::locale_at(&paths.config());
-            require_terminal(
-                "senate session watch",
-                locale.pick(
-                    "`senate session list` 以文本列出同样的会话。",
-                    "`senate session list` prints the same sessions as text.",
-                ),
-            )?;
             runtime(false)?.block_on(crate::host::view::watch_all(&paths, all, || {
                 let paths = paths.clone();
                 Box::pin(async move { hosted_sessions(&paths, all, output.verbose, locale).await })
