@@ -1835,7 +1835,18 @@ async fn inbox(
         },
     )
     .await?;
-    let mut out = person::render_inbox(&threads, locale, mcp::ShowAll::Flag);
+    let aliases = if verbose {
+        None
+    } else {
+        daemon_call::<KnownAliases>(paths, &Request::Aliases)
+            .await
+            .ok()
+    };
+    let mut out = if verbose {
+        person::render_inbox(&threads, locale, mcp::ShowAll::Flag)
+    } else {
+        person::render_named_inbox(&threads, locale, aliases.as_ref())
+    };
     if mark_read {
         let marks = person::unread_marks(&threads);
         if !marks.is_empty() {
@@ -1881,7 +1892,6 @@ async fn inbox(
         }
     }
     if !verbose {
-        let aliases: Option<KnownAliases> = daemon_call(paths, &Request::Aliases).await.ok();
         out = crate::format::display_bylines(&out, aliases.as_ref(), Some(&committee));
     }
     Ok(out)
@@ -1998,15 +2008,33 @@ fn speak_new(
         let committee = committee_here(committee).await?;
         let socket = paths.socket();
         let sent = speak::send(&socket, committee, kind, &to, text).await?;
+        let aliases = if !json && !output.verbose {
+            daemon_call::<KnownAliases>(&paths, &Request::Aliases)
+                .await
+                .ok()
+        } else {
+            None
+        };
+        let display = |line: &str| {
+            if output.verbose {
+                line.to_owned()
+            } else {
+                senate_core::alias::display_mentions(
+                    line,
+                    aliases.as_ref(),
+                    Some(&sent.posted.committee),
+                )
+            }
+        };
         let Some(secs) = wait else {
             if json {
                 return print_json(&sent.posted);
             }
-            output.print(&sent.render(false));
+            output.print(&display(&sent.render(false)));
             return Ok(());
         };
         if !json {
-            output.print(&sent.render(true));
+            output.print(&display(&sent.render(true)));
             std::io::stdout().flush()?;
         }
         match speak::wait_answer(&socket, &sent, Duration::from_secs(secs)).await? {
@@ -2014,7 +2042,12 @@ fn speak_new(
                 print_json(&serde_json::json!({ "posted": sent.posted, "answer": answer }))
             }
             Some(answer) => {
-                output.print(&speak::render_arrival(&answer, sent.locale));
+                let text = speak::render_arrival(&answer, sent.locale);
+                if let Some((heading, body)) = text.split_once('\n') {
+                    println!("{}\n{body}", display(heading));
+                } else {
+                    println!("{}", display(&text));
+                }
                 Ok(())
             }
             None => anyhow::bail!(speak::render_timeout(sent.posted.seq, secs, sent.locale)),
@@ -2421,7 +2454,17 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
                 if json {
                     print_json(&posted)
                 } else {
-                    output.print(&speak::render_replied(Seq(thread), &posted, locale));
+                    let mut text = speak::render_replied(Seq(thread), &posted, locale);
+                    if !verbose {
+                        let aliases: Option<KnownAliases> =
+                            daemon_call(&paths, &Request::Aliases).await.ok();
+                        text = senate_core::alias::display_mentions(
+                            &text,
+                            aliases.as_ref(),
+                            Some(&posted.committee),
+                        );
+                    }
+                    output.print(&text);
                     Ok(())
                 }
             })

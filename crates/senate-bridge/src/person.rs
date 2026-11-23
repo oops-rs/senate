@@ -72,7 +72,12 @@ fn indented_lines(text: &str, max: usize, root: senate_core::Seq, locale: Locale
 /// One thread that waits on the person: its title, what is new (who wrote
 /// it, what kind, its first line), the escalation with its reason, and the
 /// commands to read and answer.
-fn person_thread(reply: &InboxReply, t: &ThreadSummary, locale: Locale) -> String {
+fn person_thread(
+    reply: &InboxReply,
+    t: &ThreadSummary,
+    locale: Locale,
+    display_byline: &impl Fn(String) -> String,
+) -> String {
     let seen = reply.seen_of(t.root);
     let unread = t.unread_for(&reply.person, seen);
     let title = format::one_line(&t.title);
@@ -86,13 +91,13 @@ fn person_thread(reply: &InboxReply, t: &ThreadSummary, locale: Locale) -> Strin
         if d.escalated {
             shown_escalation = true;
         }
-        out.push_str(&directed_line(t, d, escalation, locale));
+        out.push_str(&directed_line(t, d, escalation, locale, display_byline));
     }
     if let Some(e) = escalation
         && !shown_escalation
     {
         // Seen, but it still waits: it lasts until they act.
-        let by = byline(&e.by, None);
+        let by = display_byline(byline(&e.by, None));
         out.push_str(&format!(
             "\n    {by} {}{}",
             did(&Kind::Status, true, locale),
@@ -125,8 +130,9 @@ fn directed_line(
     d: &Directed,
     escalation: Option<&senate_core::Escalation>,
     locale: Locale,
+    display_byline: &impl Fn(String) -> String,
 ) -> String {
-    let by = byline(&d.from, d.on_behalf_of.as_ref());
+    let by = display_byline(byline(&d.from, d.on_behalf_of.as_ref()));
     let verb = did(&d.kind, d.escalated, locale);
     if d.escalated {
         let reason = escalation
@@ -156,6 +162,25 @@ fn directed_line(
 /// how many settled ones were left out. With nothing for the person it is
 /// the agents' listing ([`mcp::render_inbox`]).
 pub fn render_inbox(reply: &InboxReply, locale: Locale, how: ShowAll) -> String {
+    render_person_inbox(reply, locale, how, |by| by)
+}
+
+pub(crate) fn render_named_inbox(
+    reply: &InboxReply,
+    locale: Locale,
+    aliases: Option<&senate_core::alias::KnownAliases>,
+) -> String {
+    render_person_inbox(reply, locale, ShowAll::Flag, |by| {
+        senate_core::alias::display_mentions(&by, aliases, Some(&reply.committee))
+    })
+}
+
+fn render_person_inbox(
+    reply: &InboxReply,
+    locale: Locale,
+    how: ShowAll,
+    display_byline: impl Fn(String) -> String,
+) -> String {
     let (mut mine, others): (Vec<&ThreadSummary>, Vec<&ThreadSummary>) = reply
         .threads
         .iter()
@@ -177,7 +202,7 @@ pub fn render_inbox(reply: &InboxReply, locale: Locale, how: ShowAll) -> String 
         Locale::En => format!("{n} thread(s) on {c} wait on you ({me}); {news} with news:"),
     };
     for t in &mine {
-        out.push_str(&person_thread(reply, t, locale));
+        out.push_str(&person_thread(reply, t, locale, &display_byline));
     }
     if others.is_empty() {
         if let Some(line) = mcp::settled_line(reply.settled, how, locale) {

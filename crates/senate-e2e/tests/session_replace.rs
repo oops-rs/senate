@@ -188,7 +188,7 @@ async fn replacing_a_hosted_chair_transfers_its_alias_and_prompt_on_the_server()
         .find(|row| row.committee == committee())
         .unwrap()
         .pending;
-    world
+    let question = world
         .hub()
         .append(
             NewEvent::new(
@@ -202,6 +202,30 @@ async fn replacing_a_hosted_chair_transfers_its_alias_and_prompt_on_the_server()
         )
         .await
         .unwrap();
+    world
+        .hub()
+        .append(
+            NewEvent::new(
+                committee(),
+                Kind::Answer,
+                Address::senator(&kept.primary),
+                "The gateway review.",
+            )
+            .in_thread(question.event.seq)
+            .to(person("alice")),
+        )
+        .await
+        .unwrap();
+    let inbox = list(&["inbox", "--committee", committee().as_str()])
+        .output()
+        .await
+        .unwrap();
+    assert!(inbox.status.success(), "{inbox:?}");
+    assert!(
+        String::from_utf8(inbox.stdout)
+            .unwrap()
+            .contains("lead answered")
+    );
     let notes = senate_core::CommitteeId::new("notes").unwrap();
     world
         .hub()
