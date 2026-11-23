@@ -1277,10 +1277,11 @@ fn watch_tiles(
     verbose: bool,
     locale: Locale,
 ) -> Vec<crate::host::view::Session> {
-    // Only a running host can be watched; a paused one is shown greyed
-    // out. Group by committee and put its chair first, keeping the daemon
-    // order within each group of chairs or members.
-    rows.retain(|row| row.is_active() || all);
+    // Only a running host has a terminal to watch. A paused or stopped one
+    // is left out unless `--all` asks for it, and is then shown greyed out.
+    // Group by committee and put its chair first, keeping the daemon order
+    // within each group of chairs or members.
+    rows.retain(|row| row.is_running() || all);
     rows.sort_by(|a, b| {
         a.committee
             .cmp(&b.committee)
@@ -1351,6 +1352,45 @@ fn watch_tiles_group_each_committee_with_its_chair_first() {
     assert!(tiles[0].title.starts_with("[chair] "));
     assert!(tiles[2].title.starts_with("[chair] "));
     assert!(!tiles[1].title.starts_with("[chair] "));
+}
+
+#[test]
+fn watch_leaves_out_paused_and_stopped_sessions_unless_all() {
+    let row = |alias: &str, state: &str, paused: bool| {
+        serde_json::from_value::<crate::ipc::SessionRow>(serde_json::json!({
+            "host_id": senate_core::EventId::new(),
+            "session_id": format!("session-{alias}"),
+            "primary": alias,
+            "alias": alias,
+            "committee": "west",
+            "runtime": "claude",
+            "state": state,
+            "paused": paused,
+            "dir": "/fixture",
+            "tty": "/fixture/tty"
+        }))
+        .expect("hosted session row")
+    };
+    let rows = || {
+        vec![
+            row("running", "running", false),
+            row("paused", "stopped", true),
+            row("stopped", "stopped", false),
+        ]
+    };
+    let labels = |all| -> Vec<String> {
+        watch_tiles(rows(), all, false, Locale::En)
+            .into_iter()
+            .map(|tile| tile.alias)
+            .collect()
+    };
+    assert_eq!(labels(false), ["west::running"]);
+    assert_eq!(
+        labels(true),
+        ["west::running", "west::paused", "west::stopped"]
+    );
+    let all = watch_tiles(rows(), true, false, Locale::En);
+    assert!(all[1].dim && all[1].title.ends_with("paused"));
 }
 
 async fn daemon_call<T: serde::de::DeserializeOwned>(
