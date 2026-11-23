@@ -253,6 +253,31 @@ impl Shared {
         })
     }
 
+    /// A hosted Claude session's turn ended (its Stop hook): no permission
+    /// dialog can be waiting in it any more, so its Claude notices and its
+    /// request opened before now are settled, however the dialog was
+    /// answered. This is what closes a notice whose own result never came
+    /// (an interrupted command, or a Notification that arrived after the
+    /// person had already answered by typing). A tool result alone does not
+    /// say this: a parallel tool can finish while a dialog is up.
+    pub(super) async fn on_claude_turn_end(&self, session_id: &str) -> Result<(), StoreError> {
+        let at = observed_at();
+        let _binding = self.session_bindings.read().await;
+        let Some((id, session)) = self.approval_host(session_id)? else {
+            return Ok(());
+        };
+        if session.runtime != Runtime::Claude {
+            return Ok(());
+        }
+        self.edit_approvals(&id, |state| {
+            if state.session_id != session_id {
+                return false;
+            }
+            let candidate = state.claude.take_if(|c| c.at <= at).is_some();
+            close_notices(state, |n| !n.screen && n.at <= at) || candidate
+        })
+    }
+
     /// The prompt waiting in a host's terminal, for `sessions`: its oldest
     /// open notice, dated on the wall clock.
     pub(super) fn hosted_prompt(&self, host_id: &EventId) -> Option<HostedPrompt> {

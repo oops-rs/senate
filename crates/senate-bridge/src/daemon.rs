@@ -3999,6 +3999,10 @@ impl Shared {
 
     /// How many messages wait for `session_id`'s next hook.
     async fn on_waiting(&self, session_id: &str) -> Result<crate::ipc::WaitingReply, IpcError> {
+        // Asked by the Stop hook: the turn ended, so no dialog waits.
+        if let Err(error) = self.on_claude_turn_end(session_id).await {
+            tracing::warn!(%error, session_id, "settling hosted approvals at turn end");
+        }
         let turn = lock(&self.working_sessions).get(session_id).copied();
         let mut waiting = 0;
         let mut unanswered = Vec::new();

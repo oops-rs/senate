@@ -2100,3 +2100,89 @@ async fn session_approve_is_refused_inside_a_hosted_sessions_process_tree() {
     terminal.stop();
     h.stop().await;
 }
+
+/// A Claude notice opened after the person had already answered by typing
+/// (the Notification came late) and whose own result never came is settled
+/// when the session's turn ends, and not by a parallel tool's result.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_late_claude_notice_closes_when_the_turn_ends_not_on_another_tools_result() {
+    let (mut h, project) = fixture(false, Locale::En).await;
+    start(&mut h).await;
+    let (launch, terminal) = Terminal::spawn(&h, project.clone(), HostedRuntime::Claude).await;
+    hosted_fixture_argv(&terminal.socket, &project, WAIT).await;
+    let signal = |event: &str, command: &str| {
+        json!({
+            "hook_event_name": event, "session_id": launch.session_id,
+            "tool_name": "Bash", "tool_input": {"command": command},
+        })
+    };
+    let notify = json!({
+        "hook_event_name": "Notification", "session_id": launch.session_id,
+        "notification_type": "permission_prompt",
+    });
+    let send = |input| claude_hook(h.dir.path(), &h, terminal.host_id(), input);
+
+    let stop_hook = || async {
+        let mut cmd = tokio::process::Command::new(BIN);
+        testenv::isolate_async(&mut cmd, h.dir.path());
+        let mut stop = cmd
+            .args(["hook", "stop"])
+            .env("SENATE_HOME", h.paths.home())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        stop.stdin
+            .take()
+            .unwrap()
+            .write_all(
+                json!({"hook_event_name": "Stop", "session_id": launch.session_id, "cwd": project})
+                    .to_string()
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let out = tokio::time::timeout(WAIT, stop.wait_with_output())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(out.status.success());
+    };
+    let waiting = || async {
+        let sessions: ipc::SessionsReply =
+            ipc::request(&h.socket(), &Request::Sessions, WAIT, WAIT)
+                .await
+                .unwrap();
+        sessions.rows[0].prompt.clone()
+    };
+
+    // A prompt with its command, answered by no Senate keystroke and with
+    // no result of its own (an interrupted command, say).
+    send(signal("PermissionRequest", "python3 - <<'EOF'")).await;
+    send(notify.clone()).await;
+    let named = next_notice(&h, 1).await;
+    assert!(named.body.contains("python3"), "{}", named.body);
+    // A parallel tool finishing is no sign the dialog is gone.
+    send(signal("PostToolUse", "ls")).await;
+    view_without_input(&terminal).await;
+    assert!(archived(&h, named.seq).is_none(), "still open");
+    assert!(waiting().await.is_some(), "still listed as waiting");
+    // The turn ends: no dialog can be waiting.
+    stop_hook().await;
+    wait_archived(&h, named.seq).await;
+    assert!(waiting().await.is_none());
+
+    // Answered by typing before Claude's Notification arrived: the notice
+    // opens after the answer, so typing cannot close it; the turn's end does.
+    send(signal("PermissionRequest", "echo late")).await;
+    send_input(&terminal).await;
+    send(notify.clone()).await;
+    let late = next_notice(&h, 2).await;
+    send(signal("PostToolUse", "ls")).await;
+    assert!(archived(&h, late.seq).is_none(), "still open");
+    stop_hook().await;
+    wait_archived(&h, late.seq).await;
+    assert!(waiting().await.is_none());
+    h.stop().await;
+}

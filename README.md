@@ -626,7 +626,10 @@ session and what the prompt asks about before answering, and lists them when
 several wait.
 Codex is answered through its app-server; for Claude Code the host checks that
 its screen shows the permission dialog and types the chosen option. A choice
-Senate only saw on the screen is not answered this way: attach to it. Each
+Senate only saw on the screen is not answered this way: attach to it. A
+Claude prompt Senate shows as waiting is settled when it is answered (by
+its result, a key typed in its terminal, or an answer from Senate) and, at
+the latest, when the session's turn ends. Each
 answer is noted in the committee log. The macOS app's Allow / Always / Deny
 buttons on a waiting prompt do the same. The daemon refuses the request from
 inside a coding session's process tree, so an agent cannot approve its own
