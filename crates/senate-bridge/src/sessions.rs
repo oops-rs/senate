@@ -166,7 +166,7 @@ pub fn render_with_ids(
                     .map_or_else(|| "-".to_owned(), ToString::to_string),
                 row.runtime.as_str().to_owned(),
                 row.model.label(),
-                state(row, locale),
+                first_line_within(&state(row, locale), CELL_COLUMNS),
                 row.started_at
                     .map_or_else(|| "-".to_owned(), |at| uptime(at, now)),
                 viewer(row, locale),
@@ -219,6 +219,48 @@ pub fn render_with_ids(
     out.trim_end().to_owned()
 }
 
+/// Most columns a waiting prompt's command takes in the STATE cell: a
+/// multi-line heredoc must not push the other columns off the screen.
+/// `senate session approve` shows the whole of it.
+const PROMPT_COLUMNS: usize = 40;
+
+/// Most columns any cell but the last (DIR) takes, whatever it holds.
+const CELL_COLUMNS: usize = 60;
+
+/// The first non-blank line of `text`, its control characters made spaces,
+/// cut to `max` display columns with `…` when longer.
+fn first_line_within(text: &str, max: usize) -> String {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    let more_lines = text.trim().lines().count() > 1;
+    let line: String = line
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let mut out = String::new();
+    let mut width = 0;
+    for c in line.chars() {
+        let w = unicode_width_of(c);
+        if width + w > max.saturating_sub(1) {
+            out.push('…');
+            return out;
+        }
+        width += w;
+        out.push(c);
+    }
+    if more_lines {
+        out.push('…');
+    }
+    out
+}
+
+fn unicode_width_of(c: char) -> usize {
+    textwrap::core::display_width(c.encode_utf8(&mut [0; 4]))
+}
+
 /// Its state, and the prompt waiting in its terminal, if one is.
 fn state(row: &SessionRow, locale: Locale) -> String {
     if row.paused {
@@ -229,10 +271,13 @@ fn state(row: &SessionRow, locale: Locale) -> String {
         Some(prompt) if row.is_running() => {
             let what = match (&prompt.tool, prompt.screen) {
                 (_, true) => locale.pick("等待终端提示", "prompt in terminal").to_owned(),
-                (Some(tool), false) => match locale {
-                    Locale::Zh => format!("等待批准 {tool}"),
-                    Locale::En => format!("approval: {tool}"),
-                },
+                (Some(tool), false) => {
+                    let tool = first_line_within(tool, PROMPT_COLUMNS);
+                    match locale {
+                        Locale::Zh => format!("等待批准 {tool}"),
+                        Locale::En => format!("approval: {tool}"),
+                    }
+                }
                 (None, false) => locale.pick("等待批准", "approval").to_owned(),
             };
             format!("{state} · {what}")
@@ -468,6 +513,40 @@ pub(crate) mod tests {
         let text = render(&reply, now, Locale::En);
         assert!(text.contains("running · prompt in terminal"), "{text}");
         assert!(text.contains("running · approval: Bash"), "{text}");
+    }
+
+    #[test]
+    fn a_long_waiting_command_never_widens_the_table() {
+        let now = Utc::now();
+        let mut asking = row("claude-1", Some("app"), HostState::Running);
+        let heredoc = format!(
+            "python3 - <<'EOF'\nimport json\n{}\nEOF",
+            "print('x' * 400)\n".repeat(50)
+        );
+        asking.prompt = Some(crate::ipc::HostedPrompt {
+            tool: Some(heredoc),
+            since: now,
+            screen: false,
+        });
+        let reply = SessionsReply {
+            rows: vec![asking],
+            local_rows: Vec::new(),
+            orphans: Vec::new(),
+        };
+        let text = render(&reply, now, Locale::En);
+        assert_eq!(text.lines().count(), 2, "one header, one row: {text}");
+        let line = text.lines().nth(1).unwrap();
+        assert!(
+            line.contains("running · approval: python3 - <<'EOF'…"),
+            "{line}"
+        );
+        assert!(line.ends_with("/work/refund"), "DIR still shows: {line}");
+        assert!(textwrap::core::display_width(line) < 160, "{line}");
+        assert_eq!(first_line_within("ls -la", 40), "ls -la");
+        assert_eq!(
+            first_line_within(&"a".repeat(50), 10),
+            format!("{}…", "a".repeat(9))
+        );
     }
 }
 

@@ -572,7 +572,7 @@ senate spawn codex --chair --alias lead --attach # appoint the chair and open it
 senate spawn claude --dir ../ledger     # on the committee bound in ../ledger
 senate spawn claude --secretary --alias desk # add a Speaker’s desk secretary
 senate attach reviewer                 # restore or resume as needed (Ctrl-] detaches)
-senate session list                    # active hosted sessions on this machine
+senate session list                    # active hosted sessions (a waiting command: its first line)
 senate session list --all               # include stopped and paused sessions
 senate session watch                   # read-only grid of terminals without an interactive viewer
 senate session watch --all             # include attached, paused and stopped sessions
