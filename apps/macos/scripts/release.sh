@@ -12,7 +12,8 @@
 #   SENATE_NOTARY_PROFILE  notarytool keychain profile (default "senate-notary"),
 #                          made once with `xcrun notarytool store-credentials`
 #
-# Output in build/release/: Senate.app, Senate-<version>.dmg.
+# Output in build/release/: Senate.app, Senate-<version>.dmg, and the
+# separate remote administrator helper and its SHA-256 checksum.
 set -euo pipefail
 
 app_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -110,6 +111,9 @@ if [[ $notarize == 1 ]]; then
   xcrun stapler staple "$dmg"
   spctl --assess --type open --context context:primary-signature --verbose=2 "$dmg"
 fi
+
+say "building the separate remote administrator artifact"
+"$app_dir/../../deploy/build-remote-admin.sh" "$app_dir/$out"
 
 say "done: $app, $dmg"
 if [[ $notarize == 0 ]]; then

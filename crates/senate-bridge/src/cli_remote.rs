@@ -35,7 +35,7 @@ pub(super) enum Command {
         /// Only grant metadata listing, with no terminal streams.
         #[arg(long, conflicts_with = "attach")]
         list_only: bool,
-        /// Number of seconds the grant stays valid after confirmation.
+        /// Maximum grant lifetime in seconds from the start of enrollment.
         #[arg(long, default_value_t = 30 * 86400)]
         valid_secs: u64,
     },
@@ -93,34 +93,58 @@ pub(super) fn run(command: Command) -> anyhow::Result<()> {
         Command::InstallHelper { artifact } => {
             use sha2::{Digest, Sha256};
             remote::authority::check_install_location()?;
+            ensure!(
+                artifact.symlink_metadata()?.is_file(),
+                "helper source must be a regular file, not a symlink"
+            );
             let artifact = artifact.canonicalize()?;
             let source = artifact.to_str().context("helper path must be UTF-8")?;
             ensure!(
-                !source.chars().any(char::is_control),
-                "helper path contains control characters"
+                !source.chars().any(remote::authority::unsafe_display),
+                "helper path contains unsafe display characters"
             );
             let digest = hex::encode(Sha256::digest(std::fs::read(&artifact)?));
             println!(
-                "Helper SHA-256 {digest}. Compare it with the trusted release or build before and after installation."
+                "Source SHA-256 {digest}. Use the checksum from a trusted release channel as your reference."
             );
+            println!("Run these commands in your native target terminal:");
             println!(
                 "sudo -k /usr/bin/install -d -o root -m 0755 /usr/local/libexec {}",
                 remote::authority::SYSTEM_DIR
             );
             println!(
-                "sudo -k /usr/bin/install -o root -m 0755 '{}' {}",
-                source.replace('\'', "'\"'\"'"),
+                r#"stage=$(sudo -k /usr/bin/mktemp -d /usr/local/libexec/.senate-remote-admin.XXXXXXXX)"#
+            );
+            println!(
+                r#"sudo -k /usr/bin/install -m 0700 /dev/null "${{stage:?create the root staging directory first}}/senate-remote-admin""#
+            );
+            // The shell opens the source as the ordinary user, before sudo.
+            // Root never resolves any pathname from the download directory.
+            println!(
+                r#"test ! -L '{0}' && sudo -k /bin/sh -c 'exec /bin/cat > "$1"' sh "${{stage:?create the root staging directory first}}/senate-remote-admin" < '{0}'"#,
+                source.replace('\'', "'\"'\"'")
+            );
+            println!(
+                r#"sudo -k /usr/bin/shasum -a 256 "${{stage:?create the root staging directory first}}/senate-remote-admin""#
+            );
+            println!(
+                "Stop here unless the staged SHA-256 matches the independently obtained reference."
+            );
+            println!(
+                r#"sudo -k /bin/mv -f "${{stage:?create the root staging directory first}}/senate-remote-admin" {}"#,
                 remote::authority::HELPER
             );
+            println!("sudo -k /bin/chmod 0755 {}", remote::authority::HELPER);
+            println!(r#"sudo -k /bin/rmdir "${{stage:?create the root staging directory first}}""#);
         }
         Command::Enable { listen } => {
             let request: String = local(&rt, &paths, Control::PrepareEnable { listen })?;
-            print_admin("enable", Some(&request));
+            print_admin("enable", Some(&request))?;
             println!(
                 "Set [remote] experimental = true and restart the daemon after authorization."
             );
         }
-        Command::Disable => print_admin("disable", None),
+        Command::Disable => print_admin("disable", None)?,
         Command::Pair {
             attach,
             list_only,
@@ -164,7 +188,7 @@ pub(super) fn run(command: Command) -> anyhow::Result<()> {
                 candidate.valid_secs
             );
             let request: String = local(&rt, &paths, Control::PrepareEnroll)?;
-            print_admin("enroll", Some(&request));
+            print_admin("enroll", Some(&request))?;
         }
         Command::Connect { machine, device } => {
             print!("Paste the target's pairing code: ");
@@ -199,23 +223,37 @@ pub(super) fn run(command: Command) -> anyhow::Result<()> {
                 remote::authority::pin(&device),
                 "expected the full device SPKI"
             );
-            print_admin("revoke", Some(&device));
+            print_admin("revoke", Some(&device))?;
         }
     }
     Ok(())
 }
 
-fn print_admin(action: &str, argument: Option<&str>) {
+fn print_admin(action: &str, argument: Option<&str>) -> anyhow::Result<()> {
+    if let Some(argument) = argument {
+        ensure!(
+            !argument.is_empty()
+                && argument.len() <= remote::authority::REQUEST_LIMIT
+                && argument
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')),
+            "invalid administrator request argument"
+        );
+    }
     let helper = remote::authority::HELPER;
     print!("sudo -k {helper} {action}");
     if let Some(argument) = argument {
         print!(" {argument}");
     }
     println!();
+    Ok(())
 }
 
 fn label(row: &Row, machine: &Name) -> String {
-    crate::terminal::printable(&format!("{machine} · {} · {}", row.label, row.runtime)).into_owned()
+    crate::terminal::printable(&format!("{machine} · {} · {}", row.label, row.runtime))
+        .chars()
+        .filter(|ch| !remote::authority::unsafe_display(*ch))
+        .collect()
 }
 
 fn state(row: &Row) -> &'static str {

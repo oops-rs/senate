@@ -791,17 +791,29 @@ artifact from the trusted release or build:
 senate setup remote install-helper ./senate-remote-admin
 ```
 
-Compare its printed SHA-256 with the release checksum obtained through your
-trusted release channel. Run the printed installation commands only after it
-matches, then check the copy with
-`shasum -a 256 /usr/local/libexec/senate-remote-admin`.
-The helper is installed root-owned with mode 0755. Its parent directories and
-`/etc/senate/remote` must be root-owned and protected from non-root writes.
-A source build can publish its own artifact hash. To build a CLI that verifies
-it in `senate setup doctor`, build the helper first, stage the helper artifact,
-and build `senate` with `SENATE_REMOTE_ADMIN_SHA256` set to that artifact's
-SHA-256. Without a build-time hash, doctor reports the installed hash as
-unverified. Never run the user-installed `senate` executable as root.
+Obtain the helper's published SHA-256 from the trusted release channel before
+installing. The download and the CLI that prints these commands are ordinary
+user files. Use a native terminal and review the printed staging commands.
+The download is opened as your user. The bytes are copied into a unique
+root-only directory under `/usr/local/libexec`, with mode 0700. Compare the
+SHA-256 calculated **as root over that staged copy** with the independent
+reference. Only after they match, run the printed move and chmod commands.
+A checksum printed from the original download cannot close the file swap
+window. Without an out-of-band reference, an installation is trust on first
+use. Symlink source files are refused.
+
+The installed helper and its parent directories must be root-owned and
+protected against other users writing to them. The helper is mode 0755.
+Never run the user-installed `senate` executable as root.
+`senate setup doctor` reports the installed hash and store permissions.
+It can compare automatically when the CLI was built with
+`SENATE_REMOTE_ADMIN_SHA256` set to the reference, though the installed
+root-owned copy and independent reference are the installation check.
+
+For a release, run `deploy/build-remote-admin.sh <artifact-directory>`.
+It produces the helper and `senate-remote-admin.sha256` for that platform.
+The macOS release script runs the same step. Publish the checksum in the
+authenticated release channel so people can verify the staged copy.
 
 With the daemon running as your own user, prepare its host key and listen
 address:
@@ -819,15 +831,16 @@ On the target run `senate setup remote pair --attach` from your own terminal.
 On the client run `senate setup remote connect wyak --device laptop` and paste
 the offer. It expires after two minutes and can be claimed once. Compare the
 candidate's name and key on the two machines. On the target run the printed
-administrator command. Read the ten-digit comparison code from **your client
-device** and enter it in the helper's terminal. Review the scopes and expiry
-there before confirming. The code appears only on the client. The helper
-accepts one answer per invocation and records failures in the protected
-profile. Three wrong answers require a fresh pairing offer.
+administrator command. Read the twenty-character comparison code from **your client device** and enter
+it in the helper's terminal. The client also displays the granted scopes and
+UTC expiry. Check them against the helper. The helper accepts one answer
+per invocation and records failures in the protected profile. Three wrong
+answers for the same approval require a fresh offer.
 Use `pair` for list and watch, `pair --list-only` for metadata, and add
 `--attach` only for a device that may type in terminals. A grant lasts at most
-30 days. Use `--valid-secs` for a shorter grant. Older experimental clients
-must pair again.
+30 days. Use `--valid-secs` for a shorter grant. Targets from prior experimental
+builds must enable the listener again and pair their devices afresh. Older
+grants are ignored.
 
 ```sh
 senate session list --machine wyak
@@ -853,9 +866,13 @@ this machine needs it. You can also remove the experimental setting.
 ### Trust and storage
 
 - TLS 1.3 pins the offered host certificate and authenticates device public
-  keys by their SPKI hash. The comparison code is derived from the TLS
-  enrollment exporter, host and device keys, and the single-use offer.
-  Only the device holding the approved key can connect with its grant.
+  keys by their SPKI hash. The client and daemon verify a TLS-exporter
+  proof for the offer and approval fields. The helper cannot verify that
+  TLS session. The typed 100-bit digest binds the approved host key,
+  device key, name, scopes, and exact expiry. It detects substitution of
+  those fields when you type the value shown by your trusted client. An
+  attacker enrolling their own key can calculate its digest, so the
+  digest is not a substitute for administrator authentication.
 - The root helper owns the authorization boundary on the target. The official
   daemon reads the protected policy and grants under `/etc/senate/remote`.
   Editing same-user files cannot authorize that daemon's listener, add a
@@ -868,10 +885,14 @@ this machine needs it. You can also remove the experimental setting.
   `sudo -k` to ignore a cached credential. Standard tty-scoped sudo caches
   are tied to a terminal session, so a separately hosted PTY does not
   normally inherit another terminal's timestamp. Custom sudo policies can
-  differ. Passwordless sudo, compromised sudo credentials, or carrying a
-  live sudo timestamp into an agent's terminal weakens this boundary. Keep
-  the helper out of passwordless sudo rules. The helper reads confirmation
-  from its controlling terminal.
+  differ. Passwordless sudo, compromised sudo credentials, or a live
+  sudo timestamp in an agent's terminal weakens this boundary. Keep the
+  helper out of passwordless sudo rules. Run it in a native terminal window
+  outside tmux, an editor terminal or a hosted Senate session. The helper
+  discards queued input before reading from its controlling terminal. A
+  process that can inject into that terminal can still type after the
+  prompt. Never authenticate an unexpected sudo or Touch ID request,
+  even if no password is requested.
 - Key references live in `$SENATE_HOME/remote/host.json` and
   `remote/machines/<name>.json`. On macOS the TLS private keys use the login
   Keychain under `dev.senate.remote`; platforms without a Keychain use
@@ -879,8 +900,10 @@ this machine needs it. You can also remove the experimental setting.
   or enrollments. A same-user client agent can exercise a device's scopes
   if it can read the key or run an executable with Keychain access. Keep
   attach off for devices where that risk is unacceptable.
-- The target keeps a bounded local audit log in `remote/audit.jsonl` and
-  one rotated file. Logging failures do not prevent removal of a grant.
+- The target separates routine records in `remote/audit.jsonl` from attach,
+  pair and revoke records in `remote/audit-important.jsonl`, with independent
+  bounded rotation. The protected profile stores a bounded administrator
+  history. Logging failures do not prevent removal of a grant.
   This opt-in sends session metadata and approved terminal content to the
   paired device. The parent Senate and local hooks do not participate in
   transport. Timeline bodies, replies, approvals, lifecycle and relay are
