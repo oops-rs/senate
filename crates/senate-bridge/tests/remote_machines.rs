@@ -165,8 +165,16 @@ async fn pair(
     );
     let approval = admin(target, &["enroll", request], comparison);
     assert!(approval.contains("test-client") && approval.contains("attach="));
-    assert!(!approval.contains(comparison));
-    assert!(!candidate.contains(comparison));
+    let compact = comparison.replace('-', "");
+    for displayed in [&approval, &candidate] {
+        assert!(!displayed.contains(comparison));
+        assert!(!displayed.contains(&compact));
+        assert!(!displayed.as_bytes().windows(20).any(|window| {
+            window
+                .iter()
+                .all(|byte| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(byte))
+        }));
+    }
 
     assert!(
         tokio::time::timeout(WAIT, pairing.wait())
@@ -246,6 +254,8 @@ async fn terminal(client: &Harness, args: &[&str], attach: bool) {
 async fn remote_test_child() {
     assert!(std::env::var_os(testenv::CONFINE_ENV).is_some());
     let mut target = Harness::with_committees(&["refund-v2"]).await;
+    let recording = senate_bridge::notify::Recording::new();
+    target.desktop = Some(senate_bridge::notify::Desktop::new(recording.clone()));
     let mut client = Harness::new().await;
     let project = target.workdir("project", None);
     let program = target.dir.path().join("fixture");
@@ -312,7 +322,7 @@ async fn remote_test_child() {
                 paths: target.paths.clone(),
                 config: target.config.clone(),
                 timing: fast_timing(),
-                desktop: None,
+                desktop: target.desktop.clone(),
             },
             BIN.into(),
         )
@@ -467,7 +477,7 @@ async fn remote_test_child() {
     let root = std::path::PathBuf::from(std::env::var_os(testenv::CONFINE_ENV).unwrap());
     let profile = root
         .join("authorization")
-        .join(format!("{}.v2.json", senate_bridge::service::current_uid()));
+        .join(format!("{}.v3.json", senate_bridge::service::current_uid()));
     let older_profile = std::fs::read(&profile).unwrap();
     admin(&target, &["revoke", &device.id], "revoke");
     closed(&mut viewer).await;
@@ -507,7 +517,7 @@ async fn remote_test_child() {
     let audit_backup = audit_path.with_extension("saved");
     tokio::time::timeout(WAIT, async {
         loop {
-            if std::fs::read_to_string(&audit_path)
+            if std::fs::read_to_string(target.paths.home().join("remote/audit-attach.jsonl"))
                 .is_ok_and(|log| log.contains("\"action\":\"attach\""))
             {
                 break;
@@ -539,7 +549,8 @@ async fn remote_test_child() {
     assert!(listed.contains("target:\n  unreachable"), "{listed}");
 
     let audit = std::fs::read_to_string(audit_backup).unwrap()
-        + &std::fs::read_to_string(target.paths.home().join("remote/audit.jsonl")).unwrap();
+        + &std::fs::read_to_string(target.paths.home().join("remote/audit.jsonl")).unwrap()
+        + &std::fs::read_to_string(target.paths.home().join("remote/audit-attach.jsonl")).unwrap();
     for action in [
         "pair",
         "connect",
@@ -588,6 +599,38 @@ async fn remote_test_child() {
     .await
     .unwrap();
     let _: ipc::StatusReply = request(&target, &Request::Status).await;
+    tokio::time::timeout(WAIT, async {
+        loop {
+            let entries = recording.posted();
+            if entries
+                .iter()
+                .any(|(_, body)| body.contains("listener was enabled"))
+                && entries
+                    .iter()
+                    .any(|(_, body)| body.contains("device was enrolled"))
+                && entries
+                    .iter()
+                    .any(|(_, body)| body.contains("listener was disabled"))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let status = senate(target.paths.home())
+        .arg("status")
+        .output()
+        .await
+        .unwrap();
+    assert!(String::from_utf8_lossy(&status.stdout).contains("remote listener was disabled"));
+    let doctor = senate(target.paths.home())
+        .args(["setup", "doctor", "--json"])
+        .output()
+        .await
+        .unwrap();
+    assert!(String::from_utf8_lossy(&doctor.stdout).contains("remote.last_administration"));
     // A trusted disable also advances the rollback floor.
     std::fs::write(&profile, latest_profile).unwrap();
     tokio::time::sleep(Duration::from_millis(550)).await;

@@ -16,7 +16,10 @@ use subtle::ConstantTimeEq;
 
 pub const HELPER: &str = "/usr/local/libexec/senate-remote-admin";
 pub const SYSTEM_DIR: &str = "/etc/senate/remote";
-const VERSION: u8 = 2;
+pub const SUDOERS_PATH: &str = "/etc/sudoers.d/99-senate-remote-admin";
+pub const SUDOERS_RULE: &str =
+    "Defaults!/usr/local/libexec/senate-remote-admin timestamp_timeout=0";
+const VERSION: u8 = 3;
 pub const REQUEST_LIMIT: usize = 2048;
 pub const MAX_VALID_SECS: u64 = 30 * 86400;
 pub const OFFER_SECONDS: u64 = 120;
@@ -58,12 +61,10 @@ pub struct Scopes {
 #[serde(deny_unknown_fields)]
 pub struct Device {
     pub id: String,
-    /// Connection acknowledgement, supplied by the daemon. This has no
-    /// authority and is intentionally excluded from the operator digest.
-    pub grant: String,
     pub name: String,
     pub scopes: Scopes,
     pub expires: i64,
+    pub deadline: i64,
 }
 
 const STORE_LIMIT: u64 = 128 * 1024;
@@ -89,7 +90,6 @@ pub struct Policy {
 pub struct Enrollment {
     pub policy: Policy,
     pub device: Device,
-    pub deadline: i64,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -130,10 +130,11 @@ struct FailedConfirmation {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct History {
-    at: i64,
-    action: String,
-    subject: String,
+pub struct History {
+    pub generation: u64,
+    pub at: i64,
+    pub action: String,
+    pub subject: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -146,7 +147,11 @@ pub struct Profile {
     #[serde(default)]
     failures: BTreeMap<String, FailedConfirmation>,
     #[serde(default)]
-    history: Vec<History>,
+    pub history: Vec<History>,
+    #[serde(default)]
+    approved: BTreeMap<String, i64>,
+    #[serde(default)]
+    revoked: BTreeMap<String, i64>,
 }
 
 impl Default for Profile {
@@ -158,6 +163,8 @@ impl Default for Profile {
             devices: BTreeMap::new(),
             failures: BTreeMap::new(),
             history: Vec::new(),
+            approved: BTreeMap::new(),
+            revoked: BTreeMap::new(),
         }
     }
 }
@@ -168,6 +175,7 @@ pub struct Store {
     uid: u32,
     owner: u32,
     isolated: bool,
+    gid: Option<u32>,
 }
 
 impl Store {
@@ -177,6 +185,7 @@ impl Store {
             uid,
             owner: 0,
             isolated: false,
+            gid: None,
         }
     }
 
@@ -188,6 +197,7 @@ impl Store {
             uid,
             owner: uid,
             isolated: true,
+            gid: None,
         }
     }
 
@@ -213,7 +223,7 @@ impl Store {
     }
 
     fn profile_path(&self, dir: &Path) -> PathBuf {
-        dir.join(format!("{}.v2.json", self.uid))
+        dir.join(format!("{}.v3.json", self.uid))
     }
 
     pub fn read(&self) -> anyhow::Result<Profile> {
@@ -281,12 +291,30 @@ impl Store {
             "remote grant store is full"
         );
         let mut file = tempfile::NamedTempFile::new_in(&dir)?;
+        if let Some(gid) = self.gid {
+            set_profile_group(file.as_file(), gid)?;
+        }
         file.as_file()
-            .set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o644))?;
+            .set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o640))?;
         file.write_all(&bytes)?;
         file.as_file().sync_all()?;
         file.persist(self.profile_path(&dir))?;
-        File::open(dir)?.sync_all()?;
+        if matches!(command, Command::Enable(_)) {
+            let legacy = dir.join(format!("{}.json", self.uid));
+            if fs::symlink_metadata(&legacy)
+                .is_ok_and(|meta| verify_node(&meta, self.owner, false).is_ok())
+                && let Err(error) = fs::remove_file(legacy)
+            {
+                writeln!(tty, "Could not remove the old profile: {error}").ok();
+            }
+        }
+        if let Err(error) = File::open(dir).and_then(|dir| dir.sync_all()) {
+            writeln!(
+                tty,
+                "Authorization committed. Could not sync the directory: {error}"
+            )
+            .ok();
+        }
         ensure!(
             approved,
             "comparison did not match; confirmation denied and recorded"
@@ -374,7 +402,6 @@ impl Profile {
         ensure!(
             self.devices.iter().all(|(id, entry)| id == &entry.id
                 && pin(id)
-                && pin(&entry.grant)
                 && canonical_name(&entry.name).is_ok()),
             "invalid protected device grant"
         );
@@ -393,6 +420,8 @@ impl Profile {
             .generation
             .checked_add(1)
             .context("authorization generation exhausted")?;
+        self.approved.retain(|_, expiry| *expiry > wall);
+        self.revoked.retain(|_, expiry| *expiry > wall);
         let (action, subject) = match command {
             Command::Enable(listener) => {
                 ensure!(
@@ -420,11 +449,18 @@ impl Profile {
                     !self.devices.contains_key(&device.id),
                     "device is already enrolled"
                 );
+                let approval = hex::encode(digest(&enrollment.policy.listener.host_pin, device)?);
+                ensure!(
+                    !self.approved.contains_key(&approval),
+                    "approval was already used"
+                );
+                self.approved.insert(approval, device.expires);
                 self.devices.insert(device.id.clone(), device.clone());
                 ("enroll", device.id.clone())
             }
             Command::Revoke(id) => {
-                ensure!(self.devices.remove(id).is_some(), "unknown device");
+                let device = self.devices.remove(id).context("unknown device")?;
+                self.revoked.insert(id.clone(), device.expires);
                 ("revoke", id.clone())
             }
         };
@@ -437,6 +473,7 @@ impl Profile {
             self.history.remove(0);
         }
         self.history.push(History {
+            generation: self.generation,
             at,
             action: action.into(),
             subject,
@@ -450,15 +487,21 @@ impl Profile {
             "listener policy changed"
         );
         ensure!(
-            enrollment.deadline > wall && enrollment.deadline <= wall + OFFER_SECONDS as i64,
+            device.deadline > wall && device.deadline <= wall + OFFER_SECONDS as i64,
             "authorization request expired or out of bounds"
         );
         ensure!(
             pin(&device.id)
-                && pin(&device.grant)
                 && device.expires > wall
                 && device.expires <= wall + MAX_VALID_SECS as i64,
             "invalid device authorization"
+        );
+        ensure!(
+            !self
+                .revoked
+                .get(&device.id)
+                .is_some_and(|expiry| *expiry > wall),
+            "device was revoked; pair with a new key"
         );
         let attempt_key = hex::encode(digest(&enrollment.policy.listener.host_pin, device)?);
         ensure!(
@@ -548,13 +591,14 @@ pub fn digest(host_pin: &str, device: &Device) -> anyhow::Result<[u8; 32]> {
         "invalid enrollment public-key pin"
     );
     let mut digest = Sha256::new();
-    digest.update(b"senate-remote-approval-v1\0");
+    digest.update(b"senate-remote-approval-v2\0");
     digest.update(hex::decode(host_pin)?);
     digest.update(hex::decode(&device.id)?);
     digest.update((name.len() as u16).to_be_bytes());
     digest.update(name.as_bytes());
     digest.update([u8::from(device.scopes.watch) | (u8::from(device.scopes.attach) << 1)]);
     digest.update(device.expires.to_be_bytes());
+    digest.update(device.deadline.to_be_bytes());
     Ok(digest.finalize().into())
 }
 
@@ -656,7 +700,7 @@ fn authorize(
                 tty,
                 "Host {} (SPKI {}), device {} (SPKI {}).",
                 request.policy.listener.at,
-                request.policy.listener.host_pin,
+                &request.policy.listener.host_pin[..16],
                 device.name,
                 &device.id[..16]
             )?;
@@ -682,6 +726,7 @@ fn authorize(
     }
     tty.flush()?;
     let answer = tty.answer()?;
+    ensure!(!answer.trim().is_empty(), "authorization cancelled");
     if matches!(command, Command::Enroll(_)) {
         Ok(normalize(&answer)
             .is_some_and(|answer| bool::from(answer.as_slice().ct_eq(expected.as_bytes()))))
@@ -693,9 +738,21 @@ fn authorize(
 }
 
 #[allow(unsafe_code)]
-fn check_sudo() -> anyhow::Result<u32> {
-    // SAFETY: geteuid is scalar. getpwuid returns a pointer we only test
-    // for null in this single-threaded privileged process, never dereference.
+fn set_profile_group(file: &File, gid: u32) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: the descriptor refers to the new root-owned temporary profile.
+    if unsafe { libc::fchown(file.as_raw_fd(), !0, gid) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[allow(unsafe_code)]
+fn check_sudo() -> anyhow::Result<(u32, u32)> {
+    // SAFETY: geteuid is scalar. getpwuid returns a pointer to libc-owned
+    // storage. This process is single-threaded and copies pw_gid before
+    // making another account lookup.
     ensure!(
         unsafe { libc::geteuid() } == 0,
         "run the installed helper through sudo"
@@ -703,11 +760,11 @@ fn check_sudo() -> anyhow::Result<u32> {
     let uid: u32 = std::env::var("SUDO_UID")
         .context("missing sudo identity")?
         .parse()?;
-    ensure!(
-        uid != 0 && !unsafe { libc::getpwuid(uid) }.is_null(),
-        "sudo must name a real non-root user"
-    );
-    Ok(uid)
+    let account = unsafe { libc::getpwuid(uid).as_ref() };
+    let account = account
+        .filter(|_| uid != 0)
+        .context("sudo must name a real non-root user")?;
+    Ok((uid, account.pw_gid))
 }
 
 #[allow(unsafe_code)]
@@ -734,8 +791,23 @@ fn current_uid() -> u32 {
 }
 
 pub fn run() -> anyhow::Result<()> {
-    let uid = check_sudo()?;
+    let (uid, gid) = check_sudo()?;
     verify_helper()?;
+    // The sudoers timeout is command-specific. A copy at a different path
+    // is not covered by that rule.
+    ensure!(
+        std::env::current_exe()?.canonicalize()? == Path::new(HELPER),
+        "run the helper at its protected installation path"
+    );
+    ensure!(
+        std::env::var("SUDO_COMMAND")
+            .ok()
+            .as_deref()
+            .and_then(|command| command.split_whitespace().next())
+            == Some(HELPER),
+        "invoke the protected helper directly through sudo"
+    );
+    verify_sudoers_drop_in()?;
     set_private_umask();
     let args = std::env::args_os()
         .skip(1)
@@ -754,7 +826,35 @@ pub fn run() -> anyhow::Result<()> {
         tty.is_terminal(),
         "remote authorization requires a controlling terminal"
     );
-    Store::system(uid).transaction(command, &mut tty)
+    Store {
+        gid: Some(gid),
+        ..Store::system(uid)
+    }
+    .transaction(command, &mut tty)
+}
+
+pub fn verify_sudoers_drop_in() -> anyhow::Result<()> {
+    // /etc itself is a system symlink on macOS.
+    let etc = Path::new("/etc").canonicalize()?;
+    let path = etc.join("sudoers.d/99-senate-remote-admin");
+    verify_system_chain(&path, false).context("verify the helper's sudoers drop-in")?;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    let meta = file.metadata()?;
+    verify_node(&meta, 0, false)?;
+    ensure!(
+        meta.mode() & 0o7777 == 0o440,
+        "helper sudoers drop-in mode must be 0440"
+    );
+    let mut contents = String::new();
+    file.take(256).read_to_string(&mut contents)?;
+    ensure!(
+        contents == format!("{SUDOERS_RULE}\n"),
+        "unexpected helper sudoers rule"
+    );
+    Ok(())
 }
 
 fn verify_helper() -> anyhow::Result<()> {
@@ -827,20 +927,21 @@ mod tests {
         let host = "a".repeat(64);
         let mut device = Device {
             id: "b".repeat(64),
-            grant: "c".repeat(64),
+
             name: "test-client".into(),
             scopes: Scopes {
                 watch: true,
                 attach: false,
             },
             expires: 1_750_000_000,
+            deadline: 1_749_999_990,
         };
         assert_eq!(
             hex::encode(digest(&host, &device)?),
-            "5bf290d3a1dddee8346162565e508474467359d1934daa818d137855c770d137"
+            "f8fff8a1ce406e4ddd87074cba7f8abfd221bd040baeea25441ed2df1c1c923d"
         );
         let code = comparison(&host, &device)?;
-        assert_eq!(code, "BFS91MX1VQFEGD31C9B5");
+        assert_eq!(code, "Z3ZZH8EE81Q4VQC70X6B");
         assert_eq!(
             normalize(&grouped(&code).to_ascii_lowercase())
                 .as_ref()
@@ -853,14 +954,15 @@ mod tests {
         );
         assert!(normalize("1234").is_none());
         assert!(normalize("12💥34").is_none());
-        device.grant = "d".repeat(64);
-        assert_eq!(comparison(&host, &device)?, code);
         device.scopes.attach = true;
         assert_ne!(comparison(&host, &device)?, code);
         device.scopes.attach = false;
         device.expires += 1;
         assert_ne!(comparison(&host, &device)?, code);
         device.expires -= 1;
+        device.deadline += 1;
+        assert_ne!(comparison(&host, &device)?, code);
+        device.deadline -= 1;
         device.name.push_str("-other");
         assert_ne!(comparison(&host, &device)?, code);
         assert!(canonical_name("bad\u{202e}name").is_err());
@@ -893,6 +995,41 @@ mod tests {
     }
 
     #[test]
+    fn a_changed_generation_requires_confirmation_again() -> anyhow::Result<()> {
+        struct ChangingConsole {
+            store: Store,
+            command: [String; 2],
+        }
+        impl Write for ChangingConsole {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        impl Terminal for ChangingConsole {
+            fn answer(&mut self) -> io::Result<String> {
+                test_authorize(self.store.clone(), &self.command, "enable")
+                    .map_err(io::Error::other)?;
+                Ok("enable".into())
+            }
+        }
+        let root = tempfile::tempdir()?;
+        let store = Store::isolated(root.path());
+        let listener = listener()?;
+        let command = ["enable".into(), encode(&listener)?];
+        let mut tty = ChangingConsole {
+            store: store.clone(),
+            command,
+        };
+        let result = store.transaction(Command::Enable(listener), &mut tty);
+        assert!(result.is_err_and(|error| error.to_string().contains("authorization changed")));
+        assert_eq!(store.read()?.generation, 1);
+        Ok(())
+    }
+
+    #[test]
     fn administrator_transaction_requires_confirmation_and_removes_grants() -> anyhow::Result<()> {
         let root = tempfile::tempdir()?;
         let store = Store::isolated(root.path());
@@ -903,20 +1040,43 @@ mod tests {
         let profile = store.read()?;
         let device = Device {
             id: "b".repeat(64),
-            grant: "c".repeat(64),
+
             name: "test-client".into(),
             scopes: Scopes {
                 watch: true,
                 attach: false,
             },
             expires: now() + 60,
+            deadline: now() + 30,
         };
         let enroll = Enrollment {
             policy: profile.policy.context("enabled policy")?,
             device: device.clone(),
-            deadline: now() + 30,
         };
         let command = ["enroll".into(), encode(&enroll)?];
+        let before_empty = store.read()?.generation;
+        assert!(test_authorize(store.clone(), &command, "").is_err());
+        assert_eq!(store.read()?.generation, before_empty);
+        let mut expired = enroll.clone();
+        expired.device.deadline = now() - 1;
+        assert!(
+            test_authorize(
+                store.clone(),
+                &["enroll".into(), encode(expired)?],
+                "ignored"
+            )
+            .is_err()
+        );
+        let mut changed_policy = enroll.clone();
+        changed_policy.policy.revision += 1;
+        assert!(
+            test_authorize(
+                store.clone(),
+                &["enroll".into(), encode(changed_policy)?],
+                "ignored"
+            )
+            .is_err()
+        );
         assert!(test_authorize(store.clone(), &command, "no").is_err());
         assert!(store.read()?.devices.is_empty());
         let code = comparison(&enroll.policy.listener.host_pin, &device)?;
@@ -927,7 +1087,15 @@ mod tests {
         assert!(store.read()?.devices.is_empty());
         test_authorize(store.clone(), &command, &code)?;
         assert_eq!(store.read()?.devices.get(&device.id), Some(&device));
+        assert!(
+            test_authorize(store.clone(), &command, &code)
+                .is_err_and(|error| error.to_string().contains("already enrolled"))
+        );
         test_authorize(store.clone(), &["revoke".into(), device.id], "revoke")?;
+        assert!(
+            test_authorize(store.clone(), &command, &code)
+                .is_err_and(|error| error.to_string().contains("revoked"))
+        );
         assert!(store.read()?.devices.is_empty());
         assert_eq!(store.read()?.generation, 5);
         test_authorize(store.clone(), &["disable".into()], "disable")?;
@@ -949,15 +1117,15 @@ mod tests {
             policy: store.read()?.policy.context("enabled policy")?,
             device: Device {
                 id: "b".repeat(64),
-                grant: "c".repeat(64),
+
                 name: "dev".into(),
                 scopes: Scopes {
                     watch: true,
                     attach: false,
                 },
                 expires: now() + 60,
+                deadline: now() + 30,
             },
-            deadline: now() + 30,
         };
         let command = ["enroll".into(), encode(&enrollment)?];
         for _ in 0..MAX_ATTEMPTS {
@@ -997,18 +1165,18 @@ mod tests {
         let profile = Profile::default().apply(&Command::Enable(listener()?), true, wall)?;
         let device = Device {
             id: "b".repeat(64),
-            grant: "c".repeat(64),
+
             name: "device".into(),
             scopes: Scopes {
                 watch: false,
                 attach: true,
             },
             expires: wall + MAX_VALID_SECS as i64 + 1,
+            deadline: wall + 60,
         };
         let enroll = Enrollment {
             policy: profile.policy.clone().context("enabled policy")?,
             device,
-            deadline: wall + 60,
         };
         assert!(profile.apply(&Command::Enroll(enroll), true, wall).is_err());
         Ok(())

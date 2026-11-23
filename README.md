@@ -797,13 +797,20 @@ user files. Use a native terminal and review the printed staging commands.
 The download is opened as your user. The bytes are copied into a unique
 root-only directory under `/usr/local/libexec`, with mode 0700. Compare the
 SHA-256 calculated **as root over that staged copy** with the independent
-reference. Only after they match, run the printed move and chmod commands.
-A checksum printed from the original download cannot close the file swap
-window. Without an out-of-band reference, an installation is trust on first
-use. Symlink source files are refused.
+reference. For signed release builds, the CLI also prints a root-run signature
+check against the release's Apple signing team and helper identifier. Only
+after those checks pass, follow the printed activation commands. The source
+hash alone cannot close the file swap window. Treat self-built or unsigned
+installs as trust on first use. Symlink source files are refused.
 
 The installed helper and its parent directories must be root-owned and
-protected against other users writing to them. The helper is mode 0755.
+protected against other users writing to them. Read the initial root-run
+`stat` output before proceeding. The helper is mode 0755. The installer
+stages a root-owned mode-0440 sudoers rule that sets
+`timestamp_timeout=0` for the installed helper path. It validates the
+fragment with `visudo -cf` before moving it into `/etc/sudoers.d`. Check
+that the final `visudo -c` output lists the fragment. Site sudo policy
+can still permit passwordless execution.
 Never run the user-installed `senate` executable as root.
 `senate setup doctor` reports the installed hash and store permissions.
 It can compare automatically when the CLI was built with
@@ -812,8 +819,12 @@ root-owned copy and independent reference are the installation check.
 
 For a release, run `deploy/build-remote-admin.sh <artifact-directory>`.
 It produces the helper and `senate-remote-admin.sha256` for that platform.
-The macOS release script runs the same step. Publish the checksum in the
-authenticated release channel so people can verify the staged copy.
+The macOS release script builds the helper first, signs it with the app's
+configured identity when available and hashes the resulting bytes. It embeds
+that hash in the matching release CLI for doctor. Publish the helper checksum
+in the authenticated release notes and attach `senate-remote-admin.sha256`
+and the helper binary to the release for the Git tag. Keep the platform
+artifacts distinct.
 When publishing the Rust crates, publish `senate-remote-admin` before
 `senate-bridge`, which depends on it.
 
@@ -837,7 +848,10 @@ administrator command. Read the twenty-character comparison code from **your cli
 it in the helper's terminal. The client also displays the granted scopes and
 UTC expiry. Check them against the helper. The helper accepts one answer
 per invocation and records failures in the protected profile. Three wrong
-answers for the same approval require a fresh offer.
+answers for the same approval require a fresh offer. Trust the client's
+paired message only after the administrator helper printed its success line.
+The client checks an operational connection to the pinned host before saving
+the pairing.
 Use `pair` for list and watch, `pair --list-only` for metadata, and add
 `--attach` only for a device that may type in terminals. A grant lasts at most
 30 days. Use `--valid-secs` for a shorter grant. Targets from prior experimental
@@ -863,7 +877,10 @@ command to remove one grant and close its active streams. To close the
 listener and remove all its grants, follow the command printed by
 `senate setup remote disable`. After disabling it, uninstall the helper with
 `sudo -k /bin/rm /usr/local/libexec/senate-remote-admin` if no other user on
-this machine needs it. You can also remove the experimental setting.
+this machine needs it. Remove the matching sudoers fragment with
+`sudo -k /bin/rm /etc/sudoers.d/99-senate-remote-admin` in that case and
+check the result with `sudo -k /usr/sbin/visudo -c`. You can also remove
+the experimental setting.
 
 ### Trust and storage
 
@@ -871,10 +888,11 @@ this machine needs it. You can also remove the experimental setting.
   keys by their SPKI hash. The client and daemon verify a TLS-exporter
   proof for the offer and approval fields. The helper cannot verify that
   TLS session. The typed 100-bit digest binds the approved host key,
-  device key, name, scopes, and exact expiry. It detects substitution of
-  those fields when you type the value shown by your trusted client. An
-  attacker enrolling their own key can calculate its digest, so the
-  digest is not a substitute for administrator authentication.
+  device key, name, scopes, absolute grant expiry and approval deadline.
+  It protects against substitution when you type the value shown by your
+  trusted client. An attacker can calculate the digest for their own key.
+  Administrator authentication and control of the terminal remain the
+  authorization boundary.
 - The root helper owns the authorization boundary on the target. The official
   daemon reads the protected policy and grants under `/etc/senate/remote`.
   Editing same-user files cannot authorize that daemon's listener, add a
@@ -886,10 +904,11 @@ this machine needs it. You can also remove the experimental setting.
 - The installed helper is trusted code. Each printed command uses
   `sudo -k` to ignore a cached credential. Standard tty-scoped sudo caches
   are tied to a terminal session, so a separately hosted PTY does not
-  normally inherit another terminal's timestamp. Custom sudo policies can
-  differ. Passwordless sudo, compromised sudo credentials, or a live
-  sudo timestamp in an agent's terminal weakens this boundary. Keep the
-  helper out of passwordless sudo rules. Run it in a native terminal window
+  normally inherit another terminal's timestamp. The command-specific
+  sudoers rule disables cached authentication for the installed helper.
+  Passwordless sudo and custom policy can weaken this boundary. With
+  Touch ID for sudo, an unexpected request may need only one tap.
+  Keep the helper out of passwordless sudo rules. Run it in a native terminal window
   outside tmux, an editor terminal or a hosted Senate session. The helper
   discards queued input before reading from its controlling terminal. A
   process that can inject into that terminal can still type after the
@@ -902,10 +921,16 @@ this machine needs it. You can also remove the experimental setting.
   or enrollments. A same-user client agent can exercise a device's scopes
   if it can read the key or run an executable with Keychain access. Keep
   attach off for devices where that risk is unacceptable.
-- The target separates routine records in `remote/audit.jsonl` from attach,
-  pair and revoke records in `remote/audit-important.jsonl`, with independent
-  bounded rotation. The protected profile stores a bounded administrator
-  history. Logging failures do not prevent removal of a grant.
+- The target separates routine records in `remote/audit.jsonl`, sampled attach
+  records in `remote/audit-attach.jsonl`, and pair and revoke records in
+  `remote/audit-important.jsonl`. The mode-0640 profile is readable by the
+  target UID's primary group. Its protected history records administrator
+  actions. The daemon posts a desktop notification for new entries when
+  notifications are enabled. `senate status` and doctor show the latest
+  protected entry. Users who can interfere with the desktop can suppress
+  notifications. Logging failures do not prevent grant removal.
+- Several network sources can temporarily exhaust the pre-authentication
+  connection budget. Use a private LAN or mesh network and restrict reachability.
   This opt-in sends session metadata and approved terminal content to the
   paired device. The parent Senate and local hooks do not participate in
   transport. Timeline bodies, replies, approvals, lifecycle and relay are

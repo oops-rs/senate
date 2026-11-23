@@ -2730,6 +2730,9 @@ fn run_doctor(json: bool) -> anyhow::Result<()> {
     });
     checks.extend(completion::doctor(locale));
     checks.extend(crate::remote::authority::installation_checks());
+    if let Some(line) = crate::remote::authority::latest_history(&paths) {
+        checks.push(crate::doctor::Check::ok("remote.last_administration", line));
+    }
     let live = runtime(false)?.block_on(crate::doctor::gather(&paths));
     checks.extend(crate::doctor::live(&live, locale));
     checks.extend(crate::doctor::worktree_checks(
@@ -3509,6 +3512,9 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             print!("{text}");
             if let Some(note) = crate::remote::experimental_notice(&paths) {
                 println!("{note}");
+            }
+            if let Some(line) = crate::remote::authority::latest_history(&paths) {
+                println!("{line}");
             }
             Ok(())
         }

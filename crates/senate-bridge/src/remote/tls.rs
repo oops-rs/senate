@@ -199,13 +199,14 @@ mod tests {
             id.clone(),
             super::super::Device {
                 id,
-                grant: "a".repeat(64),
+
                 name: "dev".into(),
                 scopes: super::super::Scopes {
                     watch: false,
                     attach: false,
                 },
                 expires: now() + 60,
+                deadline: now() + 30,
             },
         );
         assert!(!accepted(config.clone(), client(&rustls::version::TLS12, true)?).await?);
