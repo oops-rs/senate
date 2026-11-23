@@ -564,7 +564,9 @@ stdin.")]
         #[command(flatten)]
         model: ModelArgs,
     },
-    /// Open a hosted terminal, restoring or resuming it if stopped. Ctrl-] detaches.
+    /// Open a hosted terminal, starting it if needed.
+    ///
+    /// Stopped sessions are restored and paused ones resumed. Press Ctrl-] to detach.
     ///
     /// After /new or /clear in hosted Codex, Senate still delivers to the
     /// original thread, which the TUI no longer shows. Exit that TUI and use
@@ -983,6 +985,7 @@ struct SeatArgs {
 enum SetupCmd {
     /// Print shell completion registration for sourcing.
     Completions {
+        /// Shell to register with (zsh, bash or fish).
         #[arg(value_enum)]
         shell: completion::Shell,
     },
