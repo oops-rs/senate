@@ -6,25 +6,35 @@ import SenateCore
 /// waiting in one is decided there, by you. Starting a senator, joining and
 /// setup stay in the CLI.
 struct SessionsView: View {
-    let store: CoreStore
+    @Bindable var store: CoreStore
 
     var body: some View {
         let s = store.state
+        // Inactive: a stopped terminal (not paused, no prompt in it) and a
+        // Codex thread no longer live with nothing to approve.
+        let sessions = s.sessions.filter { store.showInactive || $0.active || $0.paused || $0.promptSince != nil }
+        let codex = s.codex.filter { store.showInactive || $0.state == "live" || $0.approvals > 0 }
+        let hidden = s.sessions.count - sessions.count + s.codex.count - codex.count
         if s.sessions.isEmpty && s.codex.isEmpty {
             EmptyState(text: L("sessions.empty"))
         } else {
             ReadingColumn {
-                PageHeading(text: L("tab.sessions"))
-                if !s.sessions.isEmpty {
+                HStack(alignment: .top) {
+                    PageHeading(text: L("tab.sessions"))
+                    Spacer(minLength: Theme.Space.m)
+                    InactiveToggle(store: store, hidden: hidden)
+                        .padding(.top, Theme.Space.xl)
+                }
+                if !sessions.isEmpty {
                     SectionHeader(L("sessions.hosted"))
-                    ForEach(s.sessions, id: \.sessionId) { session in
+                    ForEach(sessions, id: \.sessionId) { session in
                         HostedCard(store: store, session: session)
                             .environment(\.mentionCommittee, session.committee)
                     }
                 }
-                if !s.codex.isEmpty {
+                if !codex.isEmpty {
                     SectionHeader(L("sessions.codex"))
-                    ForEach(s.codex) { thread in
+                    ForEach(codex) { thread in
                         CodexCard(store: store, thread: thread)
                             .environment(\.mentionCommittee, thread.committee)
                     }
@@ -73,7 +83,7 @@ private struct HostedCard: View {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(spacing: 6) {
                         StatusDot(online: h.running)
-                        MentionText(h.mention)
+                        SenatorName(name: h.displayName, id: Mentions.id(h.mention))
                             .font(Theme.Fonts.heading)
                         if let committee = h.committee { Chip(text: committee) }
                         Chip(text: h.runtime)
@@ -138,7 +148,7 @@ private struct CodexCard: View {
                     Text(verbatim: c.committee ?? L("codex.no_committee"))
                         .font(Theme.Fonts.heading)
                         .foregroundStyle(Theme.onSurface)
-                    MentionText(c.agent)
+                    MentionText("[senator::\(c.agent)]")
                         .font(Theme.Fonts.text)
                     Chip(text: c.stateLabel, tone: c.state == "live" ? .success : .neutral)
                     if c.approvals > 0 {

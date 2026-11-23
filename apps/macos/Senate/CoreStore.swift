@@ -23,7 +23,7 @@ final class CoreStore {
     /// The window's sections, in sidebar order. `inbox` is the home view:
     /// everything waiting on you, or the thread chosen from it.
     enum Section: String, CaseIterable, Hashable {
-        case inbox, approvals, sessions, docket, senates
+        case inbox, approvals, committees, sessions, docket, senates
     }
 
     /// What the sidebar has chosen: a section, or one of the threads waiting
@@ -31,6 +31,10 @@ final class CoreStore {
     enum Place: Hashable {
         case section(Section)
         case thread(String)
+        /// A waiting item that is not a thread (a prompt, an approval, an
+        /// item for the Speaker), by its `Waiting.id`: choosing it opens
+        /// the section it lives in.
+        case item(String)
     }
 
     private(set) var state: AppState = .placeholder
@@ -50,6 +54,14 @@ final class CoreStore {
     /// The open thread as last read, and a failure to read it.
     private(set) var thread: ThreadView?
     private(set) var threadError: String?
+    /// The committee open in the Committees section; `nil` lists them all.
+    var selectedCommittee: String?
+    /// Show agents, sessions and committees that are no longer active
+    /// (the roster's own rule, from the core). Off by default; remembered.
+    var showInactive = false {
+        didSet { defaults.set(showInactive, forKey: Self.showInactiveKey) }
+    }
+    private static let showInactiveKey = "showInactive"
     /// Which presided Senate's docket is shown, by key; `nil` is the first.
     var docketSenate: String?
     /// Reply drafts by thread key. They outlive the app.
@@ -76,6 +88,7 @@ final class CoreStore {
         self.makeCore = makeCore
         self.defaults = defaults
         drafts = defaults.dictionary(forKey: Self.draftsKey) as? [String: String] ?? [:]
+        showInactive = defaults.bool(forKey: Self.showInactiveKey)
         if notifications {
             notifier.handle = { [weak self] action in await self?.perform(action) }
             notifier.setUp()
@@ -165,9 +178,32 @@ final class CoreStore {
         setupError ?? actionError ?? state.lastError
     }
 
-    /// The agents whose inbox the app can read.
+    /// The agents whose inbox the app can read: the active ones, and any
+    /// with something waiting, unless inactive ones are shown too.
     var inboxAgents: [AgentInfo] {
-        state.agents.filter { $0.inbox }
+        state.agents.filter { $0.inbox && (showInactive || $0.active || $0.pending > 0) }
+    }
+
+    /// Every committee of the primary Senate with its chair and members,
+    /// as the core's roster reads them. A daemon too old to read the roster
+    /// gives the chairs alone.
+    var roster: [RosterCommittee] {
+        guard let senate = state.senates.first else { return [] }
+        if !senate.roster.isEmpty { return senate.roster }
+        return senate.chairs.map { chair in
+            RosterCommittee(
+                committee: chair.committee,
+                chairId: chair.chair.map(Mentions.id),
+                chairDisplayName: nil, chairLive: false, activeMembers: 0, pending: 0, members: []
+            )
+        }
+    }
+
+    /// Whether a committee is worth showing without "Show inactive": an
+    /// active member or chair, or something waiting on the person there.
+    func isActive(_ committee: RosterCommittee) -> Bool {
+        committee.activeMembers > 0 || committee.chairLive
+            || waitingByCommittee.contains { $0.committee == committee.committee }
     }
 
     /// The inbox, narrowed to one agent when a filter is set and to what
@@ -201,6 +237,9 @@ final class CoreStore {
             case let .section(section):
                 self.section = section
                 if section == .inbox { selectedThread = nil }
+                if section == .committees { selectedCommittee = nil }
+            case let .item(id):
+                if let item = waiting.first(where: { $0.id == id }) { open(item) }
             case let .thread(key):
                 section = .inbox
                 selectedThread = key
@@ -229,7 +268,7 @@ final class CoreStore {
         case .approvals: return c.approvals + c.prompts
         case .sessions: return c.prompts
         case .docket: return c.docket
-        case .senates: return 0
+        case .committees, .senates: return 0
         }
     }
 
@@ -262,6 +301,9 @@ final class CoreStore {
         state = next
         if let filter = agentFilter, !state.agents.contains(where: { $0.path == filter }) {
             agentFilter = nil
+        }
+        if let open = selectedCommittee, !roster.contains(where: { $0.committee == open }) {
+            selectedCommittee = nil
         }
     }
 
@@ -330,6 +372,7 @@ final class CoreStore {
 
     func show(_ section: Section) {
         self.section = section
+        if section == .committees { selectedCommittee = nil }
         showWindow()
     }
 
@@ -556,7 +599,7 @@ extension AppState {
         codex: [],
         docket: [],
         sessions: [],
-        counts: Counts(threads: 0, approvals: 0, codex: 0, docket: 0, prompts: 0, pending: 0),
+        counts: Counts(threads: 0, approvals: 0, codex: 0, docket: 0, prompts: 0, forPerson: 0, pending: 0),
         lastError: nil
     )
 }
@@ -595,6 +638,14 @@ extension DocketCommittee: @retroactive Identifiable {
 
 extension DocketEntry: @retroactive Identifiable {
     public var id: String { "\(committee):\(seq)" }
+}
+
+extension RosterCommittee: @retroactive Identifiable {
+    public var id: String { committee }
+}
+
+extension RosterMember: @retroactive Identifiable {
+    public var id: String { senatorId }
 }
 
 extension SeatLine: @retroactive Identifiable {

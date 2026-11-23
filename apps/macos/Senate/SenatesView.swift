@@ -5,23 +5,36 @@ import SenateCore
 /// holds the Speaker's seat, the committees' chairs, your agents and their
 /// streams, the Senates registered below it, and its registration above.
 struct SenatesView: View {
-    let store: CoreStore
+    @Bindable var store: CoreStore
 
     var body: some View {
         if store.state.senates.isEmpty {
             EmptyState(text: L("senates.empty"))
         } else {
             ReadingColumn {
-                PageHeading(
-                    text: L("tab.senates"),
-                    note: store.state.senates.count > 1 ? L("senates.inbox_note") : nil
-                )
+                HStack(alignment: .top) {
+                    PageHeading(
+                        text: L("tab.senates"),
+                        note: store.state.senates.count > 1 ? L("senates.inbox_note") : nil
+                    )
+                    Spacer(minLength: Theme.Space.m)
+                    InactiveToggle(store: store, hidden: hidden)
+                        .padding(.top, Theme.Space.xl)
+                }
                 .padding(.bottom, Theme.Space.s)
                 ForEach(store.state.senates) { senate in
                     SenateCard(store: store, senate: senate)
                 }
             }
         }
+    }
+}
+
+extension SenatesView {
+    /// The agents and streams "Show inactive" hides now.
+    private var hidden: Int {
+        store.state.agents.filter { !$0.active }.count
+            + store.state.senates.flatMap(\.committees).filter { !$0.live }.count
     }
 }
 
@@ -66,12 +79,13 @@ private struct SenateCard: View {
                     }
                 }
             }
-            let agents = store.state.agents.filter { $0.senate == senate.key }
+            let agents = store.state.agents.filter { $0.senate == senate.key && (store.showInactive || $0.active) }
             if !agents.isEmpty {
                 Group_(L("senates.agents")) {
                     ForEach(agents) { agent in
                         HStack(spacing: 6) {
-                            MentionText(agent.mention)
+                            SenatorName(name: agent.displayName, id: agent.path)
+                            if !agent.active { Chip(text: L("roster.inactive")) }
                             if let runtime = agent.runtime { Chip(text: runtime) }
                             if agent.presiding { Chip(text: L("senates.presiding"), tone: .accent) }
                             if agent.sessions > 0 {
@@ -84,9 +98,10 @@ private struct SenateCard: View {
                     }
                 }
             }
-            if !senate.committees.isEmpty {
+            let streams = senate.committees.filter { store.showInactive || $0.live }
+            if !streams.isEmpty {
                 Group_(L("senates.streams")) {
-                    ForEach(senate.committees) { line in
+                    ForEach(streams) { line in
                         HStack(spacing: 6) {
                             StatusDot(online: line.live, size: 6)
                             MentionText("[senator::\(line.agent)]")

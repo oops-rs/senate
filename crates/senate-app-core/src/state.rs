@@ -140,7 +140,12 @@ pub struct Counts {
     pub docket: u32,
     /// Hosted terminals with a permission prompt waiting for a person.
     pub prompts: u32,
-    /// `threads + approvals`: what waits on the person.
+    /// The threads of `threads` that wait on the person rather than on
+    /// their agents.
+    pub for_person: u32,
+    /// What waits on the person: the threads for them, approvals, terminal
+    /// prompts and what awaits a Speaker their agent holds. The number
+    /// beside the menu bar icon.
     pub pending: u32,
 }
 
@@ -303,6 +308,13 @@ pub struct InboxThread {
     pub escalated_to: Option<String>,
     pub takeover: Option<String>,
     pub answered: bool,
+    /// It waits on the person, not on their agents: escalated or addressed
+    /// to them, something said to them they have not read, or parked on
+    /// them. Threads without it are their agents' work in progress.
+    pub for_person: bool,
+    /// Who asks the person, as a mention: who escalated it to them, else
+    /// who said what they have not read, else who opened the thread.
+    pub asker: String,
     /// The person's agents (paths) it was addressed to.
     pub for_agents: Vec<String>,
     /// It was put to the person: it waits on them whichever agent it was for.
@@ -463,19 +475,21 @@ impl AppState {
         } else {
             0
         };
+        let for_person = waiting.iter().filter(|w| w.for_person).count();
         let counts = Counts {
             threads: count(waiting.len()),
+            for_person: count(for_person),
             approvals: count(approvals.len()),
             codex: count(codex.len()),
             docket: count(docket_items),
             prompts: count(prompts),
-            pending: count(waiting.len() + approvals.len() + prompts),
+            pending: count(for_person + approvals.len() + prompts + docket_items),
         };
         let offline_reason = model.offline.as_ref().map(|o| o.text(locale));
         let menu = menu(
             model,
             &senates,
-            waiting.len(),
+            for_person,
             approvals.len(),
             docket_items,
             prompts,
@@ -536,7 +550,7 @@ fn menu(
             )
         })
         .collect();
-    let total = threads + approvals + prompts;
+    let total = threads + approvals + prompts + docket_items;
     MenuState {
         title: text::online_title(locale, &person),
         tooltip: format!("Senate · {pending}"),
@@ -723,6 +737,23 @@ fn agents(model: &Model, waiting: &[Waiting]) -> Vec<AgentInfo> {
     out
 }
 
+/// Who asks the person about the thread ([`InboxThread::asker`]).
+fn asker(w: &Waiting) -> String {
+    let t = &w.thread;
+    let author = |from: &Address, on_behalf_of: Option<&Address>| {
+        Mention::author(from, on_behalf_of).map_or_else(|| from.in_text(), |m| m.to_string())
+    };
+    if w.escalated
+        && let Some(e) = &t.escalation
+    {
+        return author(&e.by, None);
+    }
+    if let Some(d) = &w.unread {
+        return author(&d.from, d.on_behalf_of.as_ref());
+    }
+    author(&t.from, t.on_behalf_of.as_ref())
+}
+
 pub(crate) fn inbox_thread(w: &Waiting, locale: Locale) -> InboxThread {
     let t: &ThreadSummary = &w.thread;
     let author = Mention::author(&t.from, t.on_behalf_of.as_ref());
@@ -754,6 +785,8 @@ pub(crate) fn inbox_thread(w: &Waiting, locale: Locale) -> InboxThread {
         escalated_to: escalated_to_now(t).map(|n| Address::senior(n).in_text()),
         takeover: t.takeover.as_ref().map(|n| Address::senior(n).in_text()),
         answered: t.answered,
+        for_person: w.for_person,
+        asker: asker(w),
         for_agents: w.for_agents.iter().map(ToString::to_string).collect(),
         escalated: w.escalated,
         unread: w.unread.is_some(),

@@ -98,29 +98,30 @@ nonisolated final class FakeCore: AppCoreProtocol, @unchecked Sendable {
     }
 }
 
-/// A thread waiting on alice.
+/// A thread waiting on alice (`forPerson`), or only on her agents.
 func thread(
     _ root: UInt64,
     _ title: String,
     committee: String = "refund-v2",
     for agents: [String] = ["claude"],
     escalated: Bool = false,
-    news: String? = nil
+    news: String? = nil,
+    forPerson: Bool = true
 ) -> InboxThread {
     InboxThread(
         committee: committee, root: root, updated: root, title: title,
         kind: "question", kindLabel: "question", state: "suspended", stateLabel: "suspended",
         from: "[senator::claude]", onBehalfOf: nil, to: agents.map { "[senator::\($0)]" },
         since: .now, owner: nil, triage: nil, triageLabel: nil, reason: nil, escalatedTo: nil,
-        takeover: nil, answered: false, forAgents: agents, escalated: escalated, unread: news != nil,
+        takeover: nil, answered: false, forPerson: forPerson, asker: "[senator::claude]", forAgents: agents, escalated: escalated, unread: news != nil,
         newsFrom: news.map { _ in "[senator::claude]" }, newsKind: nil, newsKindLabel: nil,
         newsLine: news
     )
 }
 
-func agent(_ path: String, pending: UInt32 = 0) -> AgentInfo {
+func agent(_ path: String, pending: UInt32 = 0, active: Bool = true) -> AgentInfo {
     AgentInfo(
-        path: path, mention: "[senator::\(path)]", senate: "", runtime: "claude",
+        displayName: path, active: active, path: path, mention: "[senator::\(path)]", senate: "", runtime: "claude",
         sessions: 1, pending: pending, presiding: false, inbox: true
     )
 }
@@ -140,7 +141,7 @@ func online(_ inbox: [InboxThread] = [], agents: [AgentInfo] = [], docket: Bool 
 /// A hosted terminal with a permission prompt that has waited `waited` seconds.
 func prompting(_ name: String, tool: String = "cargo publish", waited: TimeInterval = 60) -> HostedSession {
     HostedSession(
-        label: "refund-v2::\(name)", sessionId: "s-\(name)", mention: "[senator::\(name)]",
+        displayName: name, active: true, label: "refund-v2::\(name)", sessionId: "s-\(name)", mention: "[senator::\(name)]",
         committee: "refund-v2", runtime: "claude", model: nil, dir: "/work",
         running: true, startedAt: nil, attached: false, typedSecsAgo: nil,
         promptTool: tool, promptSince: Date.now.addingTimeInterval(-waited), promptAnswerable: true,
@@ -152,4 +153,34 @@ func approval(_ id: String, _ summary: String, command: String? = nil, waited: T
     ApprovalRequest(
         id: id, thread: "019a-thread", kind: "command", summary: summary, command: command,
         cwd: "/work", reason: nil, files: [], receivedAt: Date.now.addingTimeInterval(-waited))
+}
+
+/// An item put to the Speaker on `committee`.
+func docketEntry(_ seq: UInt64, _ body: String, committee: String = "payments") -> DocketEntry {
+    DocketEntry(
+        committee: committee, seq: seq, kindLabel: "question", by: "[senator::auditor]", body: body,
+        awaiting: "addressed", why: "addressed to the Speaker", agents: [], since: .now)
+}
+
+/// The docket of the one Senate, holding these items.
+func docket(_ entries: [DocketEntry]) -> [DocketSenate] {
+    let committees = Dictionary(grouping: entries, by: \.committee).map {
+        DocketCommittee(committee: $0.key, items: $0.value, seats: [])
+    }
+    return [DocketSenate(senate: "alice-desk", title: "alice-desk", speaker: nil, committees: committees)]
+}
+
+/// The one Senate, with this roster and these chairs.
+func senate(roster: [RosterCommittee], chairs: [ChairLine] = []) -> SenateInfo {
+    SenateInfo(
+        key: "alice-desk", title: "alice-desk", senate: "alice-desk", primary: true,
+        serverUrl: "http://127.0.0.1:7001", me: "[senator::alice]", speaker: nil, presidingAgent: nil,
+        committees: [], roster: roster, chairs: chairs, children: [], uplink: nil)
+}
+
+func committee(_ name: String, chair: String? = nil, live: Bool = false, members: [(String, Bool)] = []) -> RosterCommittee {
+    RosterCommittee(
+        committee: name, chairId: chair, chairDisplayName: chair, chairLive: live,
+        activeMembers: UInt32(members.filter(\.1).count), pending: 0,
+        members: members.map { RosterMember(senatorId: $0.0, displayName: $0.0, active: $0.1) })
 }

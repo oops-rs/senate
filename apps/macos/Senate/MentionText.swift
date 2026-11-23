@@ -102,6 +102,13 @@ final class Mentions {
         }
     }
 
+    /// The id inside a senator mention: `[senator::claude]` → `claude`.
+    static func id(_ mention: String) -> String {
+        let prefix = "[senator::"
+        guard mention.hasPrefix(prefix), mention.hasSuffix("]") else { return mention }
+        return String(mention.dropFirst(prefix.count).dropLast())
+    }
+
     /// Copy a mention's id, bracketed as it is written in running text.
     static func copy(_ id: String) {
         copyText("[\(id)]")

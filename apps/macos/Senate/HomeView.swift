@@ -2,20 +2,25 @@ import SwiftUI
 import SenateCore
 
 /// Home: everything waiting on you, the most pressing first. What holds an
-/// agent at a permission, then the threads, each with what was last said.
-/// A row opens what it names.
+/// agent at a permission, then each committee's requests, escalations,
+/// threads with news for you and items put to the Speaker, each with who
+/// asks. Below, folded, what your agents are still working on: it waits on
+/// them, not on you. A row opens what it names.
 struct HomeView: View {
     let store: CoreStore
+    @State private var agentsOpen = false
 
     var body: some View {
         let permissions = store.permissionsWaiting
-        let threads = store.state.inbox
+        let groups = store.waitingByCommittee
+        let working = store.agentThreads
         let name = store.state.person ?? ""
-        if permissions.isEmpty && threads.isEmpty {
+        let total = store.waitingCount
+        if total == 0 && working.isEmpty {
             EmptyState(text: L("home.clear", name), detail: L("home.clear_detail"))
         } else {
             ReadingColumn(spacing: Theme.Space.xs) {
-                Text(verbatim: L("home.waiting", name, Int64(permissions.count + threads.count)))
+                Text(verbatim: total == 0 ? L("home.clear", name) : L("home.waiting", name, Int64(total)))
                     .font(Theme.Fonts.display)
                     .foregroundStyle(Theme.onSurface)
                     .padding(.top, Theme.Space.xxxl)
@@ -25,31 +30,86 @@ struct HomeView: View {
                 if !permissions.isEmpty {
                     SectionHeader(L("home.permissions"))
                     ForEach(permissions) { item in
-                        WaitingRow(store: store, item: item)
+                        WaitingRow(store: store, item: item, showsCommittee: true)
                     }
                 }
-                if !threads.isEmpty {
-                    SectionHeader(L("home.threads"))
-                    // Lazy: an inbox of thousands draws what is on screen.
+                ForEach(groups) { group in
+                    CommitteeHeader(store: store, committee: group.committee, count: group.items.count)
+                    // Lazy: a committee with thousands draws what is on screen.
                     LazyVStack(alignment: .leading, spacing: Theme.Space.xs) {
-                        ForEach(threads) { thread in
-                            WaitingRow(store: store, item: Waiting(kind: .thread(thread)))
+                        ForEach(group.items) { item in
+                            WaitingRow(store: store, item: item)
                         }
                     }
-                    // The lazy stack is an element of its own: name it.
                     .accessibilityElement(children: .contain)
-                    .accessibilityLabel(L("home.threads"))
+                    .accessibilityLabel(group.committee)
+                }
+                if !working.isEmpty {
+                    DisclosureGroup(isExpanded: $agentsOpen) {
+                        LazyVStack(alignment: .leading, spacing: Theme.Space.xs) {
+                            ForEach(working) { thread in
+                                WaitingRow(store: store, item: Waiting(kind: .thread(thread)), showsCommittee: true)
+                            }
+                        }
+                        .padding(.top, Theme.Space.xs)
+                    } label: {
+                        Text(verbatim: L("home.agents_working", Int64(working.count)))
+                            .font(Theme.Fonts.row)
+                            .foregroundStyle(Theme.onSurfaceVariant)
+                            .accessibilityAddTraits(.isHeader)
+                    }
+                    .padding(.top, Theme.Space.l)
+                    .padding(.leading, Theme.Space.xs)
                 }
             }
         }
     }
 }
 
+/// A committee's name over what waits on you there, with its chair; it
+/// opens the committee.
+struct CommitteeHeader: View {
+    let store: CoreStore
+    let committee: String
+    let count: Int
+
+    var body: some View {
+        let chair = store.roster.first { $0.committee == committee }
+        Button {
+            store.show(.committees)
+            store.selectedCommittee = committee
+        } label: {
+            HStack(spacing: 6) {
+                Text(verbatim: committee)
+                    .font(Theme.Fonts.row.weight(.semibold))
+                    .foregroundStyle(Theme.onSurface)
+                Text(verbatim: "\(count)")
+                    .font(Theme.Fonts.row)
+                    .foregroundStyle(Theme.onSurfaceVariant)
+                if let chair, let id = chair.chairId {
+                    Text(verbatim: "·").foregroundStyle(Theme.onSurfaceVariant)
+                    ChairName(name: chair.chairDisplayName, id: id, live: chair.chairLive, committee: committee)
+                        .font(Theme.Fonts.row)
+                }
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.top, Theme.Space.l)
+        .padding(.leading, Theme.Space.xs)
+        .help(L("committees.open", committee))
+        .accessibilityAddTraits(.isHeader)
+    }
+}
+
 /// One waiting item: what it is, what it asks or what was last said, where
 /// and for how long. The whole row opens it.
-private struct WaitingRow: View {
+struct WaitingRow: View {
     let store: CoreStore
     let item: Waiting
+    /// Say which committee it is on (where rows are not grouped by one).
+    var showsCommittee = false
     @State private var hovered = false
 
     /// What VoiceOver says after the title.
@@ -92,7 +152,10 @@ private struct WaitingRow: View {
                 }
                 Spacer(minLength: Theme.Space.m)
                 HStack(spacing: 6) {
-                    if let committee = item.committee {
+                    if let kind = item.kindLabel {
+                        Text(verbatim: kind)
+                    }
+                    if showsCommittee, let committee = item.committee {
                         Text(verbatim: committee)
                     }
                     Ago(date: item.since)

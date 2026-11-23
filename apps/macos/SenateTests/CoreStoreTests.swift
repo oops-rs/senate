@@ -218,6 +218,82 @@ import SenateCore
         }
     }
 
+    @Test func requestsEscalationsAndDocketItemsWaitOnYouByCommitteeButAgentsWorkIsApart() async throws {
+        let store = store()
+        var state = online([
+            thread(1, "agents at work", committee: "infra", forPerson: false),
+            thread(2, "approve the window?", committee: "payments"),
+            thread(3, "publish the docs?", committee: "docs", escalated: true),
+        ])
+        state.docket = docket([docketEntry(40, "who signs off?\nabove 10k", committee: "payments")])
+        core.push(state)
+        try await until(store) { $0.state.inbox.count == 3 }
+        #expect(store.agentThreads.map(\.root) == [1])
+        // The agents' own work is not counted and not in the menu.
+        #expect(store.waitingCount == 3)
+        #expect(store.waitingMenu().rows.map(\.item.id) == [
+            "thread:payments:2", "docket:payments:40", "thread:docs:3",
+        ])
+        #expect(store.waitingByCommittee.map(\.committee) == ["payments", "docs"])
+        let item = store.waitingByCommittee[0].items[1]
+        #expect(item.title == "who signs off?")
+        #expect(item.asker == "[senator::auditor]")
+        // An item for the Speaker opens the docket; from the sidebar too.
+        store.place = .item(item.id)
+        #expect(store.place == .section(.docket))
+    }
+
+    @Test func inactiveAgentsAreHiddenUntilAskedFor() async throws {
+        let store = store()
+        core.push(online([thread(1, "x")], agents: [
+            agent("claude"), agent("claude-0a1b2c3d", active: false),
+            agent("codex-01a1e8ff", pending: 1, active: false),
+        ]))
+        try await until(store) { $0.state.inbox.count == 1 }
+        // An inactive agent with something waiting stays in the filter.
+        #expect(store.inboxAgents.map(\.path) == ["claude", "codex-01a1e8ff"])
+        store.showInactive = true
+        #expect(store.inboxAgents.count == 3)
+        // The choice is remembered.
+        #expect(defaults.bool(forKey: "showInactive"))
+    }
+
+    @Test func committeesComeFromTheRosterAndHideWhenNothingIsActive() async throws {
+        let store = store()
+        var state = online([thread(2, "approve?", committee: "payments")])
+        state.senates = [senate(roster: [
+            committee("docs", chair: "scribe", members: [("scribe", false)]),
+            committee("payments", chair: "ledger", members: [("ledger", false)]),
+            committee("infra", members: [("oncall", true)]),
+        ])]
+        core.push(state)
+        try await until(store) { $0.state.inbox.count == 1 }
+        // docs: no one active, nothing waiting; payments: something waits.
+        #expect(store.roster.filter(store.isActive).map(\.committee) == ["payments", "infra"])
+        store.selectedCommittee = "payments"
+        store.place = .section(.committees)
+        #expect(store.selectedCommittee == nil, "the section opens on the list")
+        // A committee that left the roster closes.
+        store.selectedCommittee = "docs"
+        state.senates = [senate(roster: [committee("infra")])]
+        core.push(state)
+        try await until(store) { $0.selectedCommittee == nil }
+    }
+
+    @Test func anOlderDaemonsChairsStandInForTheRoster() async throws {
+        let store = store()
+        var state = online()
+        state.senates = [senate(roster: [], chairs: [
+            ChairLine(committee: "refund-v2", chair: "[senator::claude]"),
+            ChairLine(committee: "infra", chair: nil),
+        ])]
+        core.push(state)
+        try await until(store) { !$0.state.senates.isEmpty }
+        #expect(store.roster.map(\.committee) == ["refund-v2", "infra"])
+        #expect(store.roster[0].chairId == "claude")
+        #expect(store.roster[1].chairId == nil)
+    }
+
     @Test func theMenuShowsTheFirstEightAndSaysHowManyThereAre() async throws {
         let store = store()
         core.push(online((1...12).map { thread(UInt64($0), "t\($0)") }))
@@ -281,7 +357,7 @@ import SenateCore
     @Test func answeringAHostedPromptAsksTheDaemonForThatSession() async throws {
         let store = store()
         let lead = HostedSession(
-            label: "refund-v2::lead", sessionId: "s-1", mention: "senator::claude",
+            displayName: "lead", active: true, label: "refund-v2::lead", sessionId: "s-1", mention: "senator::claude",
             committee: "refund-v2", runtime: "claude", model: nil, dir: "/work",
             running: true, startedAt: nil, attached: false, typedSecsAgo: nil,
             promptTool: "cargo publish", promptSince: .now, promptAnswerable: true, paused: false)

@@ -78,8 +78,9 @@ async fn snapshots_and_actions_through_the_facade() {
     .await;
     assert_eq!(s.person.as_deref(), Some("alice"));
     assert_eq!(s.menu.title, "Senate: online as alice");
-    assert_eq!(s.menu.badge.as_deref(), Some("3"));
-    assert_eq!(s.counts.pending, 3);
+    // Two threads, one approval, two items awaiting the Speaker.
+    assert_eq!(s.menu.badge.as_deref(), Some("5"));
+    assert_eq!(s.counts.pending, 5);
     assert_eq!(s.counts.docket, 2);
     assert_eq!(s.senates.len(), 1, "the daemon serves one Senate");
     assert_eq!(s.inbox[0].state, "suspended");
@@ -147,8 +148,8 @@ async fn snapshots_and_actions_through_the_facade() {
     // the same snapshot.
     let s = until(&listener, "answered", |s| s.inbox.len() == 1).await;
     assert_eq!(s.counts.threads, 1);
-    assert_eq!(s.counts.pending, 2);
-    assert_eq!(s.menu.badge.as_deref(), Some("2"));
+    assert_eq!(s.counts.pending, 4);
+    assert_eq!(s.menu.badge.as_deref(), Some("4"));
     assert_eq!(s.menu.pending, "1 pending thread, 1 approval");
     core.close("refund-v2".into(), 131).await.unwrap();
     until(&listener, "closed", |s| s.inbox.is_empty()).await;
@@ -230,8 +231,8 @@ async fn hosted_sessions_show_their_waiting_prompt_and_stop_and_restore() {
     assert_eq!(lead.prompt_tool.as_deref(), Some("cargo publish"));
     assert_eq!(lead.model.as_deref(), Some("opus · high"));
     assert_eq!(s.counts.prompts, 1);
-    // Two threads, one approval, one waiting terminal.
-    assert_eq!(s.menu.badge.as_deref(), Some("4"));
+    // Two threads, one approval, one waiting terminal, two docket items.
+    assert_eq!(s.menu.badge.as_deref(), Some("6"));
     assert_eq!(
         s.menu.prompts.as_deref(),
         Some("1 terminal waiting for your permission")

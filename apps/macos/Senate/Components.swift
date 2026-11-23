@@ -246,3 +246,64 @@ struct MetaLine<Content: View>: View {
         .lineLimit(1)
     }
 }
+
+/// A senator by the name people are shown (its alias on the committee in
+/// view, from the core), the full id one step away: in the tooltip, the
+/// context menu (Copy) and for VoiceOver.
+struct SenatorName: View {
+    let name: String
+    let id: String
+
+    var body: some View {
+        Text(verbatim: name)
+            .fontWeight(.medium)
+            .foregroundStyle(Theme.agent)
+            .lineLimit(1)
+            .help("[senator::\(id)]")
+            .contextMenu {
+                Button(L("mention.copy", "[senator::\(id)]")) { Mentions.copy("senator::\(id)") }
+            }
+            .accessibilityCustomContent(Text(verbatim: L("a11y.ids")), Text(verbatim: id))
+    }
+}
+
+/// A committee's chair: live or not, by name.
+struct ChairName: View {
+    let name: String?
+    let id: String
+    let live: Bool
+    let committee: String
+
+    var body: some View {
+        HStack(spacing: 4) {
+            StatusDot(online: live, size: 6)
+            if let name {
+                SenatorName(name: name, id: id)
+            } else {
+                MentionText("[senator::\(id)]").environment(\.mentionCommittee, committee)
+            }
+        }
+    }
+}
+
+/// "Show inactive": the one switch for agents, sessions and committees no
+/// longer active, with how many it hides now.
+struct InactiveToggle: View {
+    @Bindable var store: CoreStore
+    let hidden: Int
+
+    var body: some View {
+        HStack(spacing: Theme.Space.s) {
+            if !store.showInactive && hidden > 0 {
+                Text(verbatim: L("roster.hidden", Int64(hidden)))
+                    .font(Theme.Fonts.meta)
+                    .foregroundStyle(Theme.onSurfaceVariant)
+            }
+            Toggle(L("roster.show_inactive"), isOn: $store.showInactive)
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .font(Theme.Fonts.row)
+        }
+        .fixedSize()
+    }
+}

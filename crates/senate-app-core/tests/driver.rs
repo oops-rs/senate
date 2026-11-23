@@ -157,17 +157,17 @@ async fn offline_then_online_with_every_part_of_the_model() {
         Some("lint config moved to the repo root")
     );
 
-    // The menu: threads and approvals wait on the person, the docket on the
-    // presiding agent.
+    // The menu: threads, approvals and what awaits the Speaker the
+    // person's agent holds all wait on the person.
     assert_eq!(s.menu.title, "Senate: online as alice");
     assert_eq!(s.menu.pending, "2 pending threads, 1 approval");
-    assert_eq!(s.menu.badge.as_deref(), Some("3"));
+    assert_eq!(s.menu.badge.as_deref(), Some("5"));
     assert_eq!(
         s.menu.docket.as_deref(),
         Some("Docket: 2 awaiting the Speaker")
     );
     assert_eq!(s.menu.lines[0], "claude · refund-v2 · live · seq 120");
-    assert_eq!(s.counts.pending, 3);
+    assert_eq!(s.counts.pending, 5);
 }
 
 #[tokio::test]
@@ -248,7 +248,7 @@ async fn reply_take_and_close_round_trip() {
     let s = until(&driver, "answered thread gone", |s| s.inbox.len() == 1).await;
     assert_eq!(s.inbox[0].root, 131);
     assert_eq!(s.menu.pending, "1 pending thread, 1 approval");
-    assert_eq!(s.menu.badge.as_deref(), Some("2"));
+    assert_eq!(s.menu.badge.as_deref(), Some("4"));
     assert!(daemon.requests().iter().any(|r| matches!(
         r,
         Request::Answer { thread: Seq(118), body, committee: Some(c), as_person: true, agent: None, .. }

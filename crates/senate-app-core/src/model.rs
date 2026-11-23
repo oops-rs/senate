@@ -217,6 +217,9 @@ pub struct Waiting {
     /// the thread is unread for them. A thread can wait on the person for
     /// this alone, though its last word is an answer.
     pub unread: Option<Directed>,
+    /// It waits on the person, not on their agents: the
+    /// person's rule, or parked on them.
+    pub for_person: bool,
 }
 
 impl Model {
@@ -441,6 +444,7 @@ impl Model {
                     continue;
                 }
                 let unread = wait.and_then(|w| w.unread).cloned();
+                let for_person = wait.is_some() || person.is_some_and(|p| parked_on(t, p));
                 let entry = merged
                     .entry((committee.clone(), t.root))
                     .or_insert_with(|| Waiting {
@@ -449,6 +453,7 @@ impl Model {
                         for_agents: Vec::new(),
                         escalated: person.is_some_and(|p| is_escalated_to(t, p)),
                         unread,
+                        for_person,
                     });
                 if t.is_for(agent) && !entry.for_agents.contains(agent) {
                     entry.for_agents.push(agent.clone());
@@ -668,6 +673,21 @@ pub(crate) fn escalated_to_now(t: &ThreadSummary) -> Option<&senate_core::Name> 
 /// Whether the thread is (still) escalated to `person`.
 fn is_escalated_to(t: &ThreadSummary, person: &senate_core::Name) -> bool {
     escalated_to_now(t) == Some(person)
+}
+
+/// Whether a thread parked on a person ([`WaitsOn::Person`]) is parked on
+/// `person`: the escalation in force or the takeover names them, or names
+/// no one (an older server records neither), and this machine's person is
+/// the one who can act on it.
+fn parked_on(t: &ThreadSummary, person: &senate_core::Name) -> bool {
+    if t.waits() != Some(senate_core::WaitsOn::Person) {
+        return false;
+    }
+    match (escalated_to_now(t), t.takeover.as_ref()) {
+        (Some(to), _) => to == person,
+        (None, Some(by)) => by == person,
+        (None, None) => true,
+    }
 }
 
 /// Whether a thread from `inbox` still waits on an agent or is parked on a
@@ -967,6 +987,61 @@ mod tests {
     }
 
     #[test]
+    fn a_thread_waits_on_the_person_or_only_on_their_agents() {
+        let mut m = Model::default();
+        m.connected();
+        m.apply(WatchEvent::Status(Box::new(status(&[("claude", "a")]))));
+        let mut reply = inbox("claude", "a", &[]);
+        let alice = Name::new("alice").unwrap();
+        let bob = Name::new("bob").unwrap();
+        // A task the agent is working on: its own.
+        let mut working = thread(1, "claude");
+        working.state = StatusState::Processing;
+        // A request to alice she has not read.
+        let asked = answered_to_alice(2, directed("alice", 2, Kind::Request, false, "May I?"));
+        // Parked on alice by an escalation, on bob by another, on no one
+        // named (an older server), and taken over by bob.
+        let on = |root: u64, to: &Name| {
+            let mut t = thread(root, "claude");
+            t.escalated_to = Some(to.clone());
+            t
+        };
+        let mut taken = thread(6, "claude");
+        taken.takeover = Some(bob.clone());
+        reply.threads = vec![
+            working,
+            asked,
+            on(3, &alice),
+            on(4, &bob),
+            thread(5, "claude"),
+            taken,
+        ];
+        m.set_inbox(reply);
+        let mine: Vec<(u64, bool)> = m
+            .waiting()
+            .iter()
+            .map(|w| (w.thread.root.0, w.for_person))
+            .collect();
+        assert_eq!(
+            mine.iter().copied().collect::<BTreeMap<_, _>>(),
+            BTreeMap::from([
+                (1, false),
+                (2, true),
+                (3, true),
+                (4, false),
+                (5, true),
+                (6, false)
+            ])
+        );
+        let s = crate::state::AppState::from_model(&m, Utc::now());
+        assert_eq!(s.counts.threads, 6);
+        assert_eq!(s.counts.for_person, 3);
+        assert_eq!(s.counts.pending, 3, "the agents' own work is not counted");
+        let asked = s.inbox.iter().find(|t| t.root == 2).unwrap();
+        assert_eq!(asked.asker, "[senator::claude]");
+    }
+
+    #[test]
     fn an_answer_the_person_has_not_seen_waits_on_them_until_they_have() {
         let mut m = Model::default();
         m.connected();
@@ -1048,6 +1123,7 @@ mod tests {
                 for_agents: Vec::new(),
                 escalated: false,
                 unread: None,
+                for_person: false,
             };
             crate::state::inbox_thread(&w, Locale::En).escalated_to
         };

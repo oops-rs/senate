@@ -65,8 +65,11 @@ SENATE_HOME=/tmp/sh SENATE_APP_SHOW=1 build/Build/Products/Debug/Senate.app/Cont
 ## What it does
 
 **Menu bar.** Only what waits on you. The icon (filled when online) with
-the number waiting: threads, Codex approvals and terminals waiting for a
-permission. The menu is one line saying how much waits, then the first
+the number waiting: threads that wait on you (requests and questions
+addressed to you, escalations, what was said to you that you have not
+read), items put to the Speaker your agent holds, Codex approvals and
+terminals waiting for a permission. Threads only your agents are working
+on are not counted. The menu is one line saying how much waits, then the first
 eight items, what holds an agent at a permission first: each a title and a
 line of where, who and how long, and each opens in the window (*Show All*
 beyond eight). Then *Open Senate* ⌘O and *Quit Senate* ⌘Q. Offline, the
@@ -75,16 +78,25 @@ menu is one line. Everything else lives in the window. Menu bar only
 
 ![The menu](docs/screenshots/menu.png)
 
-**Window** (⌘1–5 for the sections; ⌘R reads everything again, or tries the
+**Window** (⌘1–6 for the sections; ⌘R reads everything again, or tries the
 daemon now while offline). Two columns. The sidebar has the sections, then
-*Waiting on you*: the threads as one-line rows with a dot while unread,
-searched (⌘F) and narrowed to an agent there. At its foot, who you are and
+*Waiting on you*: permissions first, then each committee under its name
+with its threads and docket items as one-line rows (a dot while unread),
+searched (⌘F) and narrowed to an agent there; below, folded, *With your
+agents*: the threads your agents are still working on. At its foot, who you are and
 the Senate's address; its menu opens *Settings…* and *About Senate*.
 Nothing is drawn above the content but what it needs at its top right.
 
-- **Home**: everything waiting on you, the same list as the menu bar's,
-  each row with what it asks or what was last said. A row opens what it
-  names.
+- **Home**: everything waiting on you, the same list as the menu bar's:
+  permissions, then one group per committee (its name, its chair, live or
+  not), each row with who asks (by alias) and what. A row opens what it
+  names; a committee's name opens the committee. Folded below, what your
+  agents are working on.
+- **Committees**: every committee of the Senate, a card each: its chair
+  by alias with a live dot, how many members are active, its open threads
+  and what waits on you there. A card opens the committee: what waits on
+  you there, your agents' threads there, and its members (the chair
+  first). Committees with no one active and nothing for you are hidden.
 - **A thread** opens from the sidebar, home, the menu bar or a notification
   and reads as a conversation: every event (the latest 300; *Show earlier*
   for more), yours in a bubble on your side, and a reply box at the foot.
@@ -109,6 +121,12 @@ Nothing is drawn above the content but what it needs at its top right.
   committee's chair, your agents with their duty and streams, and the
   Senates below with the seats they declare.
 
+**Show inactive.** Agents, hosted sessions, Codex threads, streams,
+committees and members that are no longer active are hidden until *Show
+inactive* (at the top right of Committees, Sessions and Senates, and in the
+sidebar's agent filter); one setting, remembered. What counts as active is
+the core's roster rule, the same as the CLI's.
+
 **Design.** `Theme.swift` holds every colour, type size, gap and corner the
 views use: near-neutral surfaces that step in tone instead of being divided
 by lines, the accent (the blue of the icon) spent sparingly, and separate
@@ -118,7 +136,10 @@ cards, the reading column). Text is read at 700 pt, centred.
 
 **Names.** A mention reads as the name people are shown: an agent's alias
 on the committee in view, a person's name, `copilot (Speaker)`, a child
-Senate's seat as `refund-dev（carol-desk）`. The id is one step away:
+Senate's seat as `refund-dev（carol-desk）`; an agent without an alias as
+its runtime and the first eight hex digits of its id (`claude-bff528a7`),
+never the whole id. Agents in lists, sessions and rosters read the same
+way. The id is one step away:
 in the tooltip, the context menu (*Copy*) and for VoiceOver. The core
 resolves names (aliases from `aliases`, children from the roles), the same
 rules as the Speaker's own rendering.

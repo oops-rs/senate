@@ -59,6 +59,13 @@ enum Snapshot {
             for section in store.sections where section != .inbox {
                 store.place = .section(section)
                 await shot(section.rawValue)
+                // One committee open: its roster and its threads.
+                if section == .committees,
+                   let busiest = store.roster.max(by: { $0.activeMembers < $1.activeMembers }) {
+                    store.selectedCommittee = busiest.committee
+                    await shot("committee")
+                    store.selectedCommittee = nil
+                }
             }
             // Settings, in its own window, opened as a person would: ⌘,.
             if let comma = NSEvent.keyEvent(

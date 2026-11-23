@@ -53,9 +53,11 @@ struct MainWindow: View {
             switch store.place {
             case .thread:
                 if let row = store.selectedRow { ThreadPage(store: store, row: row) }
+            case .item: HomeView(store: store)
             case .section(.inbox): HomeView(store: store)
             case .section(.approvals): ApprovalsView(store: store)
             case .section(.sessions): SessionsView(store: store)
+            case .section(.committees): CommitteesView(store: store)
             case .section(.docket): DocketView(store: store)
             case .section(.senates): SenatesView(store: store)
             }
@@ -94,6 +96,7 @@ private struct Shortcuts: View {
 private struct Sidebar: View {
     @Bindable var store: CoreStore
     @State private var searching = false
+    @State private var agentsOpen = false
     @FocusState private var searchFocused: Bool
 
     var body: some View {
@@ -143,29 +146,17 @@ private struct Sidebar: View {
             // Offline, nothing is known to wait: say nothing rather than
             // "nothing waits on you".
             if store.state.online {
-              Section {
-                let threads = store.inbox
-                ForEach(threads) { thread in
-                    ThreadRow(thread: thread)
-                        .environment(\.mentionCommittee, thread.committee)
-                        .tag(CoreStore.Place.thread(thread.key))
-                        .contextMenu { ThreadMenu(store: store, thread: thread) }
-                }
-                if threads.isEmpty {
-                    Text(verbatim: store.search.isEmpty ? L("inbox.empty") : L("sidebar.no_matches"))
-                        .font(Theme.Fonts.row)
-                        .foregroundStyle(Theme.onSurfaceVariant)
-                        .selectionDisabled()
-                }
-            } header: {
-                HStack {
-                    Text(verbatim: L("sidebar.waiting"))
-                    Spacer()
-                    if store.inboxAgents.count > 1 {
-                        AgentFilter(store: store)
+                waitingSection
+                let working = store.inbox.filter { !$0.forPerson }
+                if !working.isEmpty {
+                    Section(isExpanded: $agentsOpen) {
+                        ForEach(working) { thread in
+                            threadRow(thread)
+                        }
+                    } header: {
+                        Text(verbatim: L("sidebar.agents_working", Int64(working.count)))
                     }
                 }
-              }
             }
         }
         .listStyle(.sidebar)
@@ -179,7 +170,7 @@ private struct Sidebar: View {
     private func badge(_ section: CoreStore.Section) -> Int {
         switch section {
         case .approvals, .docket: Int(store.count(section))
-        case .inbox, .sessions, .senates: 0
+        case .inbox, .committees, .sessions, .senates: 0
         }
     }
 
@@ -219,6 +210,82 @@ private struct Sidebar: View {
         searching = false
     }
 
+    /// What waits on you: permissions first, then each committee under its
+    /// name, the threads narrowed by the search and the agent filter.
+    @ViewBuilder private var waitingSection: some View {
+        let shown = Set(store.inbox.map(\.key))
+        let filtering = store.agentFilter != nil || !store.search.trimmingCharacters(in: .whitespaces).isEmpty
+        let permissions = filtering ? [] : store.permissionsWaiting
+        let groups = store.waitingByCommittee.compactMap { group -> CommitteeWaiting? in
+            let items = group.items.filter { item in
+                switch item.kind {
+                case let .thread(thread): shown.contains(thread.key)
+                default: !filtering
+                }
+            }
+            return items.isEmpty ? nil : CommitteeWaiting(committee: group.committee, items: items)
+        }
+        Section {
+            ForEach(permissions) { item in
+                itemRow(item)
+            }
+            ForEach(groups) { group in
+                Text(verbatim: group.committee)
+                    .font(Theme.Fonts.meta.weight(.semibold))
+                    .foregroundStyle(Theme.onSurfaceVariant)
+                    .padding(.top, Theme.Space.xs)
+                    .selectionDisabled()
+                    .accessibilityAddTraits(.isHeader)
+                ForEach(group.items) { item in
+                    if case let .thread(thread) = item.kind {
+                        threadRow(thread)
+                    } else {
+                        itemRow(item)
+                    }
+                }
+            }
+            if permissions.isEmpty && groups.isEmpty {
+                Text(verbatim: filtering ? L("sidebar.no_matches") : L("inbox.empty"))
+                    .font(Theme.Fonts.row)
+                    .foregroundStyle(Theme.onSurfaceVariant)
+                    .selectionDisabled()
+            }
+        } header: {
+            HStack {
+                Text(verbatim: L("sidebar.waiting"))
+                Spacer()
+                if store.inboxAgents.count > 1 {
+                    AgentFilter(store: store)
+                }
+            }
+        }
+    }
+
+    private func threadRow(_ thread: InboxThread) -> some View {
+        ThreadRow(thread: thread)
+            .environment(\.mentionCommittee, thread.committee)
+            .tag(CoreStore.Place.thread(thread.key))
+            .contextMenu { ThreadMenu(store: store, thread: thread) }
+    }
+
+    /// A prompt, an approval or an item for the Speaker: its symbol and
+    /// title; choosing it opens where it is answered.
+    private func itemRow(_ item: Waiting) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: item.symbol)
+                .font(.system(size: 11))
+                .foregroundStyle(item.isPermission ? Theme.attention : Theme.onSurfaceVariant)
+                .frame(width: 14)
+                .accessibilityHidden(true)
+            MentionText(item.title)
+                .font(Theme.Fonts.row)
+                .lineLimit(1)
+        }
+        .environment(\.mentionCommittee, item.committee)
+        .help(Mentions.shared.plain(item.detail, committee: item.committee))
+        .tag(CoreStore.Place.item(item.id))
+    }
+
     private var place: Binding<CoreStore.Place?> {
         Binding(
             get: { store.place },
@@ -232,6 +299,7 @@ extension CoreStore.Section {
         switch self {
         case .inbox: L("tab.home")
         case .approvals: L("tab.approvals")
+        case .committees: L("tab.committees")
         case .sessions: L("tab.sessions")
         case .docket: L("tab.docket")
         case .senates: L("tab.senates")
@@ -242,6 +310,7 @@ extension CoreStore.Section {
         switch self {
         case .inbox: "house"
         case .approvals: "checkmark.shield"
+        case .committees: "person.3"
         case .sessions: "terminal"
         case .docket: "list.bullet.rectangle"
         case .senates: "building.columns"
@@ -273,7 +342,7 @@ private struct ThreadRow: View {
     }
 
     private var whereAndWho: String {
-        let from = Mentions.shared.plain(thread.newsFrom ?? thread.from, committee: thread.committee)
+        let from = Mentions.shared.plain(thread.asker, committee: thread.committee)
         return "\(thread.committee) · \(from) · \(Ago.text(thread.since, now: .now))"
     }
 }
@@ -287,11 +356,14 @@ private struct AgentFilter: View {
             Picker(L("inbox.agent"), selection: $store.agentFilter) {
                 Text(verbatim: L("inbox.all_agents")).tag(String?.none)
                 ForEach(store.inboxAgents) { agent in
-                    Text(verbatim: agent.pending > 0 ? "\(agent.path) (\(agent.pending))" : agent.path)
+                    Text(verbatim: agent.pending > 0 ? "\(agent.displayName) (\(agent.pending))" : agent.displayName)
+                        .help(agent.path)
                         .tag(Optional(agent.path))
                 }
             }
             .pickerStyle(.inline)
+            Divider()
+            Toggle(L("roster.show_inactive"), isOn: $store.showInactive)
         } label: {
             Image(systemName: store.agentFilter == nil
                 ? "line.3.horizontal.decrease"
