@@ -19,6 +19,9 @@ enum Snapshot {
     /// Posted to open every tool call's output in the open conversation.
     static let expandTools = Notification.Name("SenateSnapshotExpandTools")
 
+    nonisolated static let deskPresentation = Notification.Name("SenateSnapshotDeskPresentation")
+    enum DeskPresentation { case delivered, failed, refusing, dismissRefusal }
+
     /// The window's size in every snapshot.
     static let size = NSSize(width: 1120, height: 740)
 
@@ -64,8 +67,26 @@ enum Snapshot {
             store.place = .section(.approvals)
             await shot("approvals")
             if let item = store.docketEntries.first(where: { $0.seq == 60 }) {
+                func present(_ scene: DeskPresentation) {
+                    NotificationCenter.default.post(name: deskPresentation, object: scene)
+                }
                 store.deskSelection = item
                 await shot("desk-forward")
+                present(.delivered)
+                await shot("desk-delivered")
+                present(.refusing)
+                await shot("desk-refusal")
+                present(.dismissRefusal)
+                if let failing = store.docketEntries.first(where: { $0.seq == 61 }) {
+                    store.deskSelection = failing
+                    try? await Task.sleep(for: .seconds(1))
+                    present(.failed)
+                    await shot("desk-failed")
+                }
+                if let blocked = store.docketEntries.first(where: { $0.seq == 62 }) {
+                    store.deskSelection = blocked
+                    await shot("desk-read-only")
+                }
                 store.deskSelection = nil
             }
             if let busiest = store.roster.max(by: { $0.activeMembers < $1.activeMembers }) {

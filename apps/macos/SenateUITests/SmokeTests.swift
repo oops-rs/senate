@@ -107,7 +107,8 @@ final class SmokeTests: XCTestCase {
         let receipt = window.staticTexts["desk-outcome"].firstMatch
         XCTAssertTrue(receipt.waitForExistence(timeout: 5))
         let message = receipt.value as? String ?? receipt.label
-        XCTAssertTrue(message.contains("payments::senator::ledger"), receipt.debugDescription)
+        XCTAssertTrue(message.contains("ledger in payments") || message.contains("payments::senator::ledger"),
+                      receipt.debugDescription)
         XCTAssertTrue(message.contains("#75"), receipt.debugDescription)
     }
 

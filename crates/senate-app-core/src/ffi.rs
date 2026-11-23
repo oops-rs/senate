@@ -511,7 +511,7 @@ impl AppCore {
                 Ok(outcome)
             })
             .await?;
-        Ok(outcome.into())
+        Ok(DeskOutcomeView::new(outcome, self.locale()))
     }
 
     /// End a hosted session's terminal, as the person (`senate session

@@ -53,6 +53,7 @@ pub struct DeskItemView {
     pub thread: ThreadView,
     pub origin: Option<String>,
     pub destination: Option<String>,
+    pub destination_label: Option<String>,
     pub blocked: Option<String>,
 }
 
@@ -60,12 +61,13 @@ pub struct DeskItemView {
 pub struct DeskOutcomeView {
     pub delivered: bool,
     pub destination: String,
+    pub destination_label: String,
     pub committee: String,
     pub seq: u64,
 }
 
-impl From<DeskOutcome> for DeskOutcomeView {
-    fn from(value: DeskOutcome) -> Self {
+impl DeskOutcomeView {
+    pub(crate) fn new(value: DeskOutcome, locale: Locale) -> Self {
         let delivered = matches!(value, DeskOutcome::Delivered { .. });
         let (destination, committee, seq) = match value {
             DeskOutcome::Delivered {
@@ -80,6 +82,7 @@ impl From<DeskOutcome> for DeskOutcomeView {
             } => (destination, committee, seq),
         };
         Self {
+            destination_label: crate::names::current().desk_destination(&destination, locale),
             delivered,
             destination,
             committee: committee.to_string(),
@@ -107,6 +110,10 @@ pub(crate) fn desk_item_view(
             locale,
         ),
         origin: detail.origin,
+        destination_label: detail
+            .destination
+            .as_deref()
+            .map(|raw| crate::names::current().desk_destination(raw, locale)),
         destination: detail.destination,
         blocked: detail.blocked,
     }

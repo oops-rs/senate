@@ -76,6 +76,24 @@ impl Names {
         senate_bridge::person::plain(text, |m| self.display(m, committee))
     }
 
+    /// A local desk destination uses the seat's name on its own committee.
+    pub(crate) fn desk_destination(&self, raw: &str, locale: Locale) -> String {
+        let Ok(locator) = raw.parse::<Locator>() else {
+            return raw.to_owned();
+        };
+        let Some(senator) = locator.address().as_senator() else {
+            return raw.to_owned();
+        };
+        let name = self.senator(senator, locator.committee());
+        match locator.committee() {
+            Some(committee) => locale.pick(
+                format!("{committee} 的 {name}"),
+                format!("{name} in {committee}"),
+            ),
+            None => name,
+        }
+    }
+
     fn senator(&self, p: &SenatorName, committee: Option<&CommitteeId>) -> String {
         senate_core::alias::display_name(self.aliases.as_ref(), committee, p)
     }
@@ -210,6 +228,20 @@ mod tests {
     fn shown(n: &Names, text: &str, c: Option<&str>) -> String {
         let found = Mention::scan(text).into_iter().next().unwrap();
         n.display(&found.mention, c.map(committee).as_ref())
+    }
+
+    #[test]
+    fn desk_destinations_use_the_alias_on_the_destination_committee() {
+        let names = names(Locale::En);
+        let address = "senate::senator::claude-a956";
+        assert_eq!(
+            names.desk_destination(address, Locale::En),
+            "senate-chair in senate"
+        );
+        assert_eq!(
+            names.desk_destination(address, Locale::Zh),
+            "senate 的 senate-chair"
+        );
     }
 
     #[test]

@@ -204,9 +204,11 @@ private struct DeskEntryDetail: View {
                         Text(verbatim: L("desk.origin", origin)).font(Theme.Fonts.meta)
                             .foregroundStyle(Theme.onSurfaceVariant)
                     }
-                    if let destination = detail.destination {
-                        Text(verbatim: L("desk.destination", destination)).font(Theme.Fonts.text)
+                    if outcome == nil, let destination = detail.destination, let label = detail.destinationLabel {
+                        Text(verbatim: L("desk.destination", label)).font(Theme.Fonts.text)
                             .foregroundStyle(Theme.onSurface)
+                            .help(destination)
+                            .accessibilityLabel(L("desk.destination", destination))
                     }
                     controls(detail)
                 }
@@ -238,14 +240,64 @@ private struct DeskEntryDetail: View {
             }
         }
         .task { await load() }
+        .sheet(isPresented: $refusing) { refusalSheet }
+        #if DEBUG
+        .onReceive(NotificationCenter.default.publisher(for: Snapshot.deskPresentation)) { note in
+            if let scene = note.object as? Snapshot.DeskPresentation { showSnapshot(scene) }
+        }
+        #endif
     }
+
+    private var refusalSheet: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.m) {
+            Text(verbatim: L("desk.refuse_heading")).font(Theme.Fonts.heading)
+            TextField(L("desk.reason"), text: $reason, axis: .vertical)
+                .accessibilityIdentifier("desk-reason")
+            HStack(spacing: Theme.Space.s) {
+                Spacer()
+                Button(L("desk.cancel")) { refusing = false }
+                    .buttonStyle(.pill)
+                    .keyboardShortcut(.cancelAction)
+                Button(L("desk.confirm_refuse")) {
+                    refusing = false
+                    Task { await submit(reason) }
+                }
+                .buttonStyle(.pill(.danger))
+                .disabled(busy || !store.state.online || reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(Theme.Space.xl)
+        .frame(width: 420)
+    }
+
+    #if DEBUG
+    private func showSnapshot(_ scene: Snapshot.DeskPresentation) {
+        switch scene {
+        case .delivered:
+            guard let detail, let destination = detail.destination,
+                  let label = detail.destinationLabel else { return }
+            outcome = DeskOutcomeView(delivered: true, destination: destination, destinationLabel: label,
+                                      committee: "payments", seq: 75)
+        case .failed:
+            attempt = Attempt(id: "", reason: nil)
+            actionError = "The destination is temporarily unavailable."
+        case .refusing:
+            outcome = nil
+            refusing = true
+        case .dismissRefusal:
+            refusing = false
+        }
+    }
+    #endif
 
     @ViewBuilder private func controls(_ detail: DeskItemView) -> some View {
         if let outcome {
             let message = L(outcome.delivered ? "desk.delivered" : "desk.refused",
-                            outcome.destination, String(outcome.seq))
+                            outcome.destinationLabel, String(outcome.seq))
             Text(verbatim: message)
-                .accessibilityLabel(message)
+                .help(outcome.destination)
+                .accessibilityLabel(L(outcome.delivered ? "desk.delivered" : "desk.refused",
+                                      outcome.destination, String(outcome.seq)))
                 .accessibilityIdentifier("desk-outcome")
         } else if let actionError {
             Text(verbatim: actionError)
@@ -270,13 +322,7 @@ private struct DeskEntryDetail: View {
                 if busy { ProgressView().controlSize(.small) }
             }
             .disabled(busy || !store.state.online)
-            if refusing {
-                TextField(L("desk.reason"), text: $reason, axis: .vertical)
-                    .accessibilityIdentifier("desk-reason")
-                Button(L("desk.confirm_refuse")) { Task { await submit(reason) } }
-                    .buttonStyle(.pill(.danger))
-                    .disabled(busy || !store.state.online || reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
+
         }
     }
 
