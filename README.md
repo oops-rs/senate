@@ -729,6 +729,7 @@ Running `senate setup install --yes` registers these tools into your agent runti
 - `speaker_docket`: Inspect picks, committee crossings, and unattended agent questions.
 - `speaker_route`, `speaker_cover`, `speaker_escalate`: Re-route queries, provide checkpoint answers for absent agents, or escalate to human principals.
 - `speaker_forward`, `speaker_refuse`: Forward committee crossings or reject out-of-boundary requests.
+- `open_committee`: At the person's request, open a committee for a project directory and start its chair there in one step. A committee the office did not open is refused (use `spawn`); calling again after the chair failed to start finishes it without opening twice, and never replaces a chair.
 - `chair_docket`, `chair_route`, `chair_cover`: Coordinate single-committee agent queues.
 
 ---

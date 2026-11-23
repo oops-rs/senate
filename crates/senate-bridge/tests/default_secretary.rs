@@ -23,7 +23,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 /// alice's machine, where alice is the Speaker; Claude Code is a fixture.
 async fn machine() -> Harness {
     let mut h = Harness::new().await;
-    h.config.hosted_session_limit = Some(3);
+    h.config.hosted_session_limit = Some(4);
     h.dir = tempfile::tempdir_in("/tmp").unwrap();
     h.paths = senate_bridge::Paths::new(h.dir.path().join("senate"));
     h.paths.ensure_home().unwrap();
@@ -231,5 +231,148 @@ async fn another_seat_aliased_secretary_is_never_taken_over() {
     );
     let rows: ipc::SessionsReply = call(&h, &Request::Sessions).await;
     assert_eq!(rows.rows.len(), 1, "nothing started");
+    h.stop().await;
+}
+
+fn as_session(
+    rows: &ipc::SessionsReply,
+    senator: &senate_core::SenatorName,
+) -> ipc::SessionSelector {
+    let row = rows
+        .rows
+        .iter()
+        .find(|row| &row.primary == senator)
+        .expect("its session");
+    ipc::SessionSelector {
+        session_id: Some(row.session_id.clone()),
+        claude_pid: None,
+    }
+}
+
+fn open(session: ipc::SessionSelector, committee: &str, cwd: &std::path::Path) -> Request {
+    Request::DeskOpenCommittee {
+        session,
+        committee: CommitteeId::new(committee).unwrap(),
+        cwd: cwd.to_path_buf(),
+        runtime: Some(HostedRuntime::Claude),
+        profile: None,
+        alias: Some(path("main")),
+        prompt: Some("Fix the refund rounding bug; report to the secretary.".into()),
+    }
+}
+
+/// `open_committee`: only a desk worker; refused for a committee the
+/// office did not open; a failed chair is finished by calling again, with
+/// one opening note; a chair is never replaced.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_the_desk_opens_a_committee_and_a_retry_finishes_it() {
+    let mut h = machine().await;
+    let secretary: DefaultSecretary = call(&h, &Request::EnsureSecretary).await;
+    let secretary = secretary.senator.unwrap();
+    // A chair and a member of refund-v2, for the refusals.
+    let spawn = |chair: bool, alias: &str| Request::Spawn {
+        attempt_id: None,
+        session: Default::default(),
+        runtime: Some(HostedRuntime::Claude),
+        profile: None,
+        committee: common::committee(),
+        alias: Some(path(alias)),
+        cwd: h.dir.path().to_path_buf(),
+        chair,
+        secretary: false,
+        prompt: None,
+        model: Default::default(),
+    };
+    let chair: SpawnReply = call(&h, &spawn(true, "lead")).await;
+    let member: SpawnReply = call(&h, &spawn(false, "helper")).await;
+    let rows: ipc::SessionsReply = call(&h, &Request::Sessions).await;
+    let project = h.dir.path().join("ledger");
+
+    for who in [&chair.senator, &member.senator] {
+        let message = match ipc::request::<serde_json::Value>(
+            &h.socket(),
+            &open(as_session(&rows, who), "ledger-fix", &project),
+            TIMEOUT,
+            TIMEOUT,
+        )
+        .await
+        {
+            Err(ipc::ClientError::Remote(error)) => {
+                assert!(
+                    [ipc::codes::NOT_PRESIDING, ipc::codes::NOT_CHAIRING]
+                        .contains(&error.code.as_str()),
+                    "{who}: {error:?}"
+                );
+                error.message
+            }
+            other => panic!("{who}: expected a refusal, got {other:?}"),
+        };
+        assert!(!message.is_empty());
+    }
+    assert!(h.server.events("ledger-fix").is_empty(), "nothing opened");
+    // This test server keeps one chair for all committees: forget refund-v2's.
+    h.server.state.inner.lock().unwrap().chair = None;
+
+    let desk = as_session(&rows, &secretary);
+    // A committee the office did not open.
+    let message = refused(&h, &open(desk.clone(), "refund-v2", &project)).await;
+    assert!(
+        message.contains("add a chair or members to it with `spawn`"),
+        "{message}"
+    );
+
+    // The project directory does not exist yet: opened, chair not started.
+    let message = refused(&h, &open(desk.clone(), "ledger-fix", &project)).await;
+    assert!(
+        message.contains("committee ledger-fix is open, but its chair did not start")
+            && message.contains("Call open_committee again"),
+        "{message}"
+    );
+    let opening = h.server.events("ledger-fix");
+    assert_eq!(opening.len(), 1);
+    assert_eq!(
+        opening[0].meta.get(senate_core::meta::ACTED_BY),
+        Some(&serde_json::json!(secretary)),
+        "recorded as the secretary acting for the office"
+    );
+    assert_eq!(opening[0].from, senate_core::Address::Speaker);
+
+    // Called again once the directory is there: no second note, a chair.
+    std::fs::create_dir_all(&project).unwrap();
+    let done: ipc::DeskOpenReply = call(&h, &open(desk.clone(), "ledger-fix", &project)).await;
+    assert_eq!(done.opened, None);
+    let started = done.chair.expect("the chair started");
+    let notes = h
+        .server
+        .events("ledger-fix")
+        .into_iter()
+        .filter(|e| e.id == opening[0].id)
+        .count();
+    assert_eq!(notes, 1, "opened once");
+    assert_eq!(
+        h.server
+            .state
+            .inner
+            .lock()
+            .unwrap()
+            .chair
+            .as_ref()
+            .map(|(c, _)| c),
+        Some(&started.senator),
+    );
+    let brief = h
+        .server
+        .events("ledger-fix")
+        .into_iter()
+        .find(|e| e.kind == senate_core::Kind::Request)
+        .expect("the chair's first request");
+    assert!(brief.body.contains("refund rounding"));
+
+    // Again: the chair stands; nothing new starts.
+    let again: ipc::DeskOpenReply = call(&h, &open(desk, "ledger-fix", &project)).await;
+    assert!(again.chair.is_none());
+    assert_eq!(again.existing_chair.as_ref(), Some(&started.senator));
+    let rows: ipc::SessionsReply = call(&h, &Request::Sessions).await;
+    assert_eq!(rows.rows.len(), 4, "secretary, lead, helper, main");
     h.stop().await;
 }

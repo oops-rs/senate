@@ -1071,12 +1071,10 @@ async fn chair(State(st): St, UrlPath(committee): UrlPath<String>, headers: Head
         return error;
     }
     let inner = st.inner.lock().unwrap();
-    let Some((chair, _)) = &inner.chair else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
+    // As the server: no chair is `chair: null`, not an error.
     Json(senate_core::api::ChairInfo {
         committee: CommitteeId::new(committee).unwrap(),
-        chair: Some(chair.clone()),
+        chair: inner.chair.as_ref().map(|(chair, _)| chair.clone()),
         source: None,
     })
     .into_response()

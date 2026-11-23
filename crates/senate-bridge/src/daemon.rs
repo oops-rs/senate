@@ -170,6 +170,7 @@ use crate::stream::{self, CommitteeWorker};
 mod approval_guard;
 pub mod default_secretary;
 mod desk_decision;
+mod desk_open;
 mod front;
 mod host_policy;
 mod hosted_approvals;
@@ -2942,6 +2943,7 @@ impl Shared {
             Request::SecretaryCover { session, .. } => ("secretary_cover", session),
             Request::ChairEscalate { session, .. } => ("chair_escalate", session),
             Request::Spawn { session, .. } => ("spawn", session),
+            Request::DeskOpenCommittee { session, .. } => ("open_committee", session),
             Request::Restore { session, .. } => ("restore", session),
             Request::Stop { session, .. } => ("stop", session),
             _ => return None,
@@ -2990,6 +2992,28 @@ impl Shared {
                 wrap(result)
             }
             Request::OpenCommittee { committee } => wrap(self.on_open_committee(committee).await),
+            Request::DeskOpenCommittee {
+                session,
+                committee,
+                cwd,
+                runtime,
+                profile,
+                alias,
+                prompt,
+            } => self.sessions_changed(wrap(
+                self.on_desk_open_committee(
+                    &session,
+                    committee,
+                    desk_open::ChairOrder {
+                        cwd,
+                        runtime,
+                        profile,
+                        alias,
+                        prompt,
+                    },
+                )
+                .await,
+            )),
             Request::DefaultSecretary => wrap(self.on_default_secretary().await),
             Request::EnsureSecretary => {
                 self.sessions_changed(wrap(self.on_ensure_secretary().await))
