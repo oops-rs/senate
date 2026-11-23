@@ -179,6 +179,8 @@ pub fn launchd_plist(spec: &Spec, senated: &Path) -> String {
         xml(&text(senated))
     );
     out.push_str("  <key>RunAtLoad</key>\n  <true/>\n  <key>KeepAlive</key>\n  <true/>\n");
+    // The daemon hosts interactive PTYs and their coding agents.
+    out.push_str("  <key>ProcessType</key>\n  <string>Interactive</string>\n");
     // Room for `pause_on_shutdown` (90 s at most) before launchd kills it.
     let _ = writeln!(
         out,
@@ -1482,6 +1484,8 @@ mod tests {
   <true/>
   <key>KeepAlive</key>
   <true/>
+  <key>ProcessType</key>
+  <string>Interactive</string>
   <key>ExitTimeOut</key>
   <integer>120</integer>
   <key>StandardOutPath</key>

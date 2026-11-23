@@ -105,6 +105,25 @@ fn a_current_running_service_that_finds_its_programs_is_ok() {
 }
 
 #[test]
+fn a_launch_agent_without_interactive_scheduling_needs_reinstall() {
+    let tmp = tempfile::tempdir().unwrap();
+    let spec = spec(tmp.path(), "/usr/bin");
+    let senated = program(tmp.path(), "senated");
+    let plan = service::plan_install(&spec, &senated);
+    let legacy = plan.contents.replace(
+        "  <key>ProcessType</key>\n  <string>Interactive</string>\n",
+        "",
+    );
+    std::fs::create_dir_all(plan.file.parent().unwrap()).unwrap();
+    std::fs::write(&plan.file, legacy).unwrap();
+    let checks = service_checks(&spec, Some(&senated), &manager(true), EN);
+    let file = by_id(&checks, "service.file");
+    assert_eq!(file.status, Status::Fail);
+    assert!(file.found.contains("ProcessType"), "{file:?}");
+    assert_eq!(file.fix.as_deref(), Some(SERVICE_INSTALL));
+}
+
+#[test]
 fn a_stale_stopped_service_that_misses_a_program_fails() {
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path();

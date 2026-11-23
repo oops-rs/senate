@@ -15,6 +15,11 @@ senate setup service install --yes  # keep the daemon running, from login
 senate join                         # in each repository: bind it to a committee
 ```
 
+On macOS, the daemon hosts interactive terminals. To check the loaded job, run
+`launchctl print gui/$(id -u)/dev.senate.senated` and look for
+`spawn type = interactive`. If the installed plist predates this setting,
+`senate setup doctor` reports the difference and gives the reinstall command.
+
 ## What it does
 
 - **Sessions and delivery**: Claude Code, Codex and Antigravity CLI (agy) sessions in a worktree join its committee; messages for an agent are pushed into its session, or held for its next hook.
