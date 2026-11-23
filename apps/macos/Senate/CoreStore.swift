@@ -61,6 +61,7 @@ final class CoreStore {
     private(set) var threadError: String?
     /// The open session's conversation, as read and followed.
     var timeline: SessionTimeline?
+    var deskSelection: DocketEntry?
     /// What the person is writing to each session, by session id.
     var sessionDrafts: [String: String] = [:]
     /// Committees folded in the sidebar.
@@ -141,6 +142,7 @@ final class CoreStore {
         core = nil
         state = .placeholder
         thread = nil
+        deskSelection = nil
         place = .section(.inbox)
         connect()
     }
@@ -451,6 +453,21 @@ final class CoreStore {
 
     /// Read the open thread (which marks it seen). Called when it is
     /// chosen and whenever its row says something new was said.
+    func deskItem(_ entry: DocketEntry) async throws -> DeskItemView {
+        guard let core else { throw CoreError.NotStarted }
+        return try await core.deskItem(committee: entry.committee, seq: entry.seq)
+    }
+
+    func newDeskActionId() throws -> String {
+        guard let core else { throw CoreError.NotStarted }
+        return core.newDeskActionId()
+    }
+
+    func decideDeskItem(_ entry: DocketEntry, itemId: String, id: String, reason: String?) async throws -> DeskOutcomeView {
+        guard let core else { throw CoreError.NotStarted }
+        return try await core.decideDeskItem(committee: entry.committee, seq: entry.seq, itemId: itemId, id: id, reason: reason)
+    }
+
     func loadThread(_ row: InboxThread) async {
         await loadThread(committee: row.committee, root: row.root)
     }

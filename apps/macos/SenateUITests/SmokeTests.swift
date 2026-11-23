@@ -94,6 +94,30 @@ final class SmokeTests: XCTestCase {
         window.typeKey(.escape, modifierFlags: [])
     }
 
+    func testSpeakerDeskShowsTheForwardingReceipt() throws {
+        let window = app.windows.firstMatch
+        XCTAssertTrue(window.waitForExistence(timeout: 10))
+        let approvals = window.outlines.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == 'Approvals'")).firstMatch
+        XCTAssertTrue(approvals.waitForExistence(timeout: 10))
+        app.activate()
+        approvals.click()
+        let opened = XCTNSPredicateExpectation(predicate: NSPredicate(format: "title == 'Approvals'"), object: window)
+        XCTAssertEqual(XCTWaiter.wait(for: [opened], timeout: 5), .completed)
+        let entry = window.buttons["desk-open-refund-v2:60"].firstMatch
+        XCTAssertTrue(entry.waitForExistence(timeout: 10))
+        entry.click()
+        let forward = window.buttons["desk-forward"].firstMatch
+        XCTAssertTrue(forward.waitForExistence(timeout: 5))
+        forward.click()
+        let receipt = window.staticTexts["desk-outcome"].firstMatch
+        XCTAssertTrue(receipt.waitForExistence(timeout: 5))
+        let message = receipt.value as? String ?? receipt.label
+        XCTAssertTrue(message.contains("ledger in payments") || message.contains("payments::senator::ledger"),
+                      receipt.debugDescription)
+        XCTAssertTrue(message.contains("#75"), receipt.debugDescription)
+    }
+
     func testAccessibilityAudit() throws {
         let window = app.windows.firstMatch
         XCTAssertTrue(window.waitForExistence(timeout: 10))

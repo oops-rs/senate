@@ -599,6 +599,11 @@ impl<S: Sink> Driver<S> {
             .map_err(|e| Failure::Daemon(message(&e)))
     }
 
+    pub(crate) async fn refresh_desk(&self) {
+        self.refresh_docket().await;
+        self.changed();
+    }
+
     /// Re-read every inbox of the primary Senate on `committee`, then
     /// re-render: after an action there, or reading a thread (which marks
     /// it seen).

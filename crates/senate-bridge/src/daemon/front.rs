@@ -121,6 +121,9 @@ impl Front {
             Request::Presides {
                 session, runtime, ..
             } => wrap(self.on_presides(&session, runtime).await),
+            Request::DeskItem { committee, seq } => {
+                wrap(self.primary().on_desk_item(committee, seq).await)
+            }
             Request::Docket { session, committee } => {
                 wrap(self.on_docket(&session, committee).await)
             }

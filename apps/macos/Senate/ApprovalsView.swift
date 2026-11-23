@@ -16,7 +16,9 @@ struct ApprovalsView: View {
         let approvals = store.state.approvals
         let desk = store.deskThreads
         let docket = store.docketEntries
-        if prompts.isEmpty && approvals.isEmpty && desk.isEmpty && docket.isEmpty {
+        if let selected = store.deskSelection {
+            DeskEntryDetail(store: store, item: selected).id(selected.id)
+        } else if prompts.isEmpty && approvals.isEmpty && desk.isEmpty && docket.isEmpty {
             EmptyState(text: L("approvals.empty"))
         } else {
             ReadingColumn {
@@ -68,13 +70,6 @@ struct ApprovalsView: View {
                     ForEach(docket) { item in
                         EntryCard(store: store, item: item)
                             .environment(\.mentionCommittee, item.committee)
-                    }
-                    if !docket.isEmpty {
-                        Text(verbatim: L("docket.note"))
-                            .font(Theme.Fonts.meta)
-                            .foregroundStyle(Theme.onSurfaceVariant)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .padding(.horizontal, Theme.Space.xs)
                     }
                 }
             }
@@ -130,10 +125,6 @@ private struct DeskCard: View {
     }
 }
 
-/// One item awaiting the Speaker your agent holds: what kind, what the
-/// Speaker is to do with it, what was said, and why it is here. Read-only:
-/// routing and covering are the presiding agent's own tools. Its committee
-/// opens.
 private struct EntryCard: View {
     let store: CoreStore
     let item: DocketEntry
@@ -166,8 +157,198 @@ private struct EntryCard: View {
             MentionText(item.why)
                 .font(Theme.Fonts.row)
                 .foregroundStyle(Theme.onSurfaceVariant)
+            Button(L("desk.open_item")) { store.deskSelection = item }
+                .buttonStyle(.pill)
+                .accessibilityIdentifier("desk-open-\(item.id)")
         }
         .card()
+    }
+}
+
+private struct DeskEntryDetail: View {
+    let store: CoreStore
+    let item: DocketEntry
+
+    private struct Attempt {
+        let id: String
+        let reason: String?
+    }
+
+    @State private var detail: DeskItemView?
+    @State private var loadError: String?
+    @State private var actionError: String?
+    @State private var attempt: Attempt?
+    @State private var outcome: DeskOutcomeView?
+    @State private var busy = false
+    @State private var refusing = false
+    @State private var reason = ""
+
+    var body: some View {
+        ReadingColumn {
+            Button(L("desk.back")) { store.deskSelection = nil }
+                .buttonStyle(.pill)
+            PageHeading(text: L("desk.item_heading", item.committee, String(item.seq)))
+            if let detail {
+                VStack(alignment: .leading, spacing: Theme.Space.m) {
+                    HStack {
+                        Button(L("desk.original_thread")) {
+                            store.openThread(committee: detail.thread.committee, root: detail.thread.root)
+                        }
+                        .buttonStyle(.pill)
+                        Button(L("committees.open", item.committee)) {
+                            store.place = .committee(item.committee)
+                        }
+                        .buttonStyle(.pill)
+                    }
+                    if let origin = detail.origin {
+                        Text(verbatim: L("desk.origin", origin)).font(Theme.Fonts.meta)
+                            .foregroundStyle(Theme.onSurfaceVariant)
+                    }
+                    if outcome == nil, let destination = detail.destination, let label = detail.destinationLabel {
+                        Text(verbatim: L("desk.destination", label)).font(Theme.Fonts.text)
+                            .foregroundStyle(Theme.onSurface)
+                            .help(destination)
+                            .accessibilityLabel(L("desk.destination", destination))
+                    }
+                    controls(detail)
+                }
+                .card()
+                .environment(\.mentionCommittee, item.committee)
+                ForEach(detail.thread.events, id: \.seq) { event in
+                    VStack(alignment: .leading, spacing: Theme.Space.s) {
+                        HStack {
+                            Chip(text: event.kindLabel)
+                            MentionText(event.by)
+                            Spacer()
+                            Text(verbatim: "#\(event.seq)").font(Theme.Fonts.meta)
+                        }
+                        MentionText(event.body)
+                            .font(Theme.Fonts.text)
+                            .textSelection(.enabled)
+                    }
+                    .card()
+                    .environment(\.mentionCommittee, item.committee)
+                }
+            } else if let loadError {
+                VStack(alignment: .leading, spacing: Theme.Space.s) {
+                    Text(verbatim: loadError).foregroundStyle(Theme.onSurface)
+                    Button(L("desk.retry")) { Task { await load() } }
+                        .buttonStyle(.pill)
+                }.card()
+            } else {
+                ProgressView().accessibilityLabel(L("desk.loading"))
+            }
+        }
+        .task { await load() }
+        .sheet(isPresented: $refusing) { refusalSheet }
+        #if DEBUG
+        .onReceive(NotificationCenter.default.publisher(for: Snapshot.deskPresentation)) { note in
+            if let scene = note.object as? Snapshot.DeskPresentation { showSnapshot(scene) }
+        }
+        #endif
+    }
+
+    private var refusalSheet: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.m) {
+            Text(verbatim: L("desk.refuse_heading")).font(Theme.Fonts.heading)
+            TextField(L("desk.reason"), text: $reason, axis: .vertical)
+                .accessibilityIdentifier("desk-reason")
+            HStack(spacing: Theme.Space.s) {
+                Spacer()
+                Button(L("desk.cancel")) { refusing = false }
+                    .buttonStyle(.pill)
+                    .keyboardShortcut(.cancelAction)
+                Button(L("desk.confirm_refuse")) {
+                    refusing = false
+                    Task { await submit(reason) }
+                }
+                .buttonStyle(.pill(.danger))
+                .disabled(busy || !store.state.online || reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(Theme.Space.xl)
+        .frame(width: 420)
+    }
+
+    #if DEBUG
+    private func showSnapshot(_ scene: Snapshot.DeskPresentation) {
+        switch scene {
+        case .delivered:
+            guard let detail, let destination = detail.destination,
+                  let label = detail.destinationLabel else { return }
+            outcome = DeskOutcomeView(delivered: true, destination: destination, destinationLabel: label,
+                                      committee: "payments", seq: 75)
+        case .failed:
+            attempt = Attempt(id: "", reason: nil)
+            actionError = "The destination is temporarily unavailable."
+        case .refusing:
+            outcome = nil
+            refusing = true
+        case .dismissRefusal:
+            refusing = false
+        }
+    }
+    #endif
+
+    @ViewBuilder private func controls(_ detail: DeskItemView) -> some View {
+        if let outcome {
+            let message = L(outcome.delivered ? "desk.delivered" : "desk.refused",
+                            outcome.destinationLabel, String(outcome.seq))
+            Text(verbatim: message)
+                .help(outcome.destination)
+                .accessibilityLabel(L(outcome.delivered ? "desk.delivered" : "desk.refused",
+                                      outcome.destination, String(outcome.seq)))
+                .accessibilityIdentifier("desk-outcome")
+        } else if let actionError {
+            Text(verbatim: actionError)
+                .foregroundStyle(Theme.attention)
+                .textSelection(.enabled)
+                .accessibilityIdentifier("desk-action-error")
+            if let attempt {
+                Button(L("desk.retry")) { Task { await run(attempt) } }
+                    .buttonStyle(.pill)
+                    .disabled(busy || !store.state.online)
+            }
+        } else if let blocked = detail.blocked {
+            Text(verbatim: blocked).foregroundStyle(Theme.onSurfaceVariant)
+                .accessibilityIdentifier("desk-read-only")
+        } else {
+            HStack(spacing: Theme.Space.s) {
+                Button(L("desk.forward")) { Task { await submit(nil) } }
+                    .buttonStyle(.pill(.filled))
+                    .accessibilityIdentifier("desk-forward")
+                Button(L("desk.refuse")) { refusing = true }
+                    .buttonStyle(.pill)
+                if busy { ProgressView().controlSize(.small) }
+            }
+            .disabled(busy || !store.state.online)
+
+        }
+    }
+
+    private func load() async {
+        loadError = nil
+        do { detail = try await store.deskItem(item) }
+        catch { loadError = describe(error) }
+    }
+
+    private func submit(_ reason: String?) async {
+        guard !busy else { return }
+        do {
+            let value = Attempt(id: try store.newDeskActionId(), reason: reason)
+            attempt = value
+            await run(value)
+        } catch { actionError = describe(error) }
+    }
+
+    private func run(_ attempt: Attempt) async {
+        guard !busy, let detail else { return }
+        busy = true
+        defer { busy = false }
+        do {
+            outcome = try await store.decideDeskItem(item, itemId: detail.eventId, id: attempt.id, reason: attempt.reason)
+            actionError = nil
+        } catch { actionError = describe(error) }
     }
 }
 

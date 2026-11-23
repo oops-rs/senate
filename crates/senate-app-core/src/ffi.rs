@@ -17,16 +17,17 @@ use senate_bridge::Paths;
 use senate_bridge::approvals::{Approval, Decision};
 use senate_bridge::delivery::codex::CodexConfig;
 use senate_bridge::ipc::{
-    Request, SessionRow, SessionSelector, ThreadReply, TimelineDirection, TimelineReply,
+    DeskDecision, DeskItemDetail, DeskOutcome, Request, SessionRow, SessionSelector, ThreadReply,
+    TimelineDirection, TimelineReply,
 };
 use senate_core::alias::AliasName;
-use senate_core::{CommitteeId, Locale, Mention, Seq};
+use senate_core::{CommitteeId, EventId, Locale, Mention, Seq};
 use tokio::runtime::{Handle, Runtime};
 
 use crate::link::{Backoff, Driver, Link, Sink};
 use crate::model::{self, Action, Failure, Model, Refresh};
 use crate::names;
-use crate::reads::{self, ThreadView};
+use crate::reads::{self, DeskItemView, DeskOutcomeView, ThreadView};
 use crate::state::{AppState, ApprovalRequest, HostedSession};
 use crate::text;
 use crate::timeline::{self, TimelineDelta, TimelinePage};
@@ -445,6 +446,72 @@ impl AppCore {
             .next()
             .map(|s| s.person.clone());
         Ok(reads::thread_view(reply, person.as_ref(), locale))
+    }
+
+    pub async fn desk_item(&self, committee: String, seq: u64) -> Result<DeskItemView, CoreError> {
+        let committee = self.committee_id(&committee)?;
+        let request = Request::DeskItem {
+            committee,
+            seq: Seq(seq),
+        };
+        let detail: DeskItemDetail = self
+            .on_runtime(move |driver| async move { driver.read(&request).await })
+            .await?;
+        let person = self
+            .driver()?
+            .model()
+            .senates()
+            .next()
+            .map(|s| s.person.clone());
+        Ok(reads::desk_item_view(
+            detail,
+            person.as_ref(),
+            self.locale(),
+        ))
+    }
+
+    /// Keep this ID across retries of a single decision.
+    pub fn new_desk_action_id(&self) -> String {
+        EventId::new().to_string()
+    }
+
+    /// A missing reason forwards the item. A present reason refuses it.
+    pub async fn decide_desk_item(
+        &self,
+        committee: String,
+        seq: u64,
+        item_id: String,
+        id: String,
+        reason: Option<String>,
+    ) -> Result<DeskOutcomeView, CoreError> {
+        let committee = self.committee_id(&committee)?;
+        let event_id = |value: &str| {
+            value
+                .parse::<EventId>()
+                .map_err(|error| CoreError::Invalid {
+                    message: error.to_string(),
+                })
+        };
+        let item_id = event_id(&item_id)?;
+        let id = event_id(&id)?;
+        let decision = reason.map_or(DeskDecision::Forward, |reason| DeskDecision::Refuse {
+            reason,
+        });
+        let request = Request::DeskDecide {
+            committee,
+            seq: Seq(seq),
+            item_id,
+            id,
+            decision,
+        };
+        let outcome: DeskOutcome = self
+            .on_runtime(move |driver| async move {
+                let outcome = driver.read(&request).await?;
+                tokio::spawn(async move { driver.refresh_desk().await });
+                Ok(outcome)
+            })
+            .await?;
+        Ok(DeskOutcomeView::new(outcome, self.locale()))
     }
 
     /// End a hosted session's terminal, as the person (`senate session

@@ -5,7 +5,7 @@
 
 use std::time::SystemTime;
 
-use senate_bridge::ipc::ThreadReply;
+use senate_bridge::ipc::{DeskItemDetail, DeskOutcome, ThreadReply};
 use senate_core::{Address, Event, Locale, Name};
 
 use crate::text;
@@ -44,6 +44,79 @@ pub struct ThreadEvent {
     pub at: SystemTime,
     /// The person wrote it (`senator::<person>`): the app's own side.
     pub mine: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct DeskItemView {
+    pub event_id: String,
+    pub item: ThreadEvent,
+    pub thread: ThreadView,
+    pub origin: Option<String>,
+    pub destination: Option<String>,
+    pub destination_label: Option<String>,
+    pub blocked: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct DeskOutcomeView {
+    pub delivered: bool,
+    pub destination: String,
+    pub destination_label: String,
+    pub committee: String,
+    pub seq: u64,
+}
+
+impl DeskOutcomeView {
+    pub(crate) fn new(value: DeskOutcome, locale: Locale) -> Self {
+        let delivered = matches!(value, DeskOutcome::Delivered { .. });
+        let (destination, committee, seq) = match value {
+            DeskOutcome::Delivered {
+                destination,
+                committee,
+                seq,
+            }
+            | DeskOutcome::Refused {
+                destination,
+                committee,
+                seq,
+            } => (destination, committee, seq),
+        };
+        Self {
+            destination_label: crate::names::current().desk_destination(&destination, locale),
+            delivered,
+            destination,
+            committee: committee.to_string(),
+            seq: seq.0,
+        }
+    }
+}
+
+pub(crate) fn desk_item_view(
+    detail: DeskItemDetail,
+    person: Option<&Name>,
+    locale: Locale,
+) -> DeskItemView {
+    let me = person.map(Address::senior);
+    DeskItemView {
+        event_id: detail.item.id.to_string(),
+        item: thread_event(&detail.item, me.as_ref(), locale),
+        thread: thread_view(
+            ThreadReply {
+                committee: detail.item.committee,
+                root: detail.item.thread.unwrap_or(detail.item.seq),
+                events: detail.events,
+            },
+            person,
+            locale,
+        ),
+        origin: detail.origin,
+        destination_label: detail
+            .destination
+            .as_deref()
+            .map(|raw| crate::names::current().desk_destination(raw, locale)),
+        destination: detail.destination,
+        blocked: detail.blocked,
+    }
 }
 
 pub(crate) fn thread_view(reply: ThreadReply, person: Option<&Name>, locale: Locale) -> ThreadView {

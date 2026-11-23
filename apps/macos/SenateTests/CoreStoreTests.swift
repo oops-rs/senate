@@ -29,6 +29,25 @@ import SenateCore
         #expect(ok(store))
     }
 
+    @Test func deskDecisionKeepsTheActionIdOnRetry() async throws {
+        let store = store()
+        let item = DocketEntry(committee: "refund-v2", seq: 60, kindLabel: "Request",
+                               by: "tester", body: "Preview", awaiting: "addressed", why: "",
+                               agents: [], since: Date())
+        store.deskSelection = item
+        let detail = try await store.deskItem(item)
+        #expect(detail.item.body == "Full request")
+        let id = try store.newDeskActionId()
+        core.failNext = .Failed(message: "The destination is temporarily unavailable.")
+        await #expect(throws: CoreError.self) {
+            _ = try await store.decideDeskItem(item, itemId: detail.eventId, id: id, reason: nil)
+        }
+        let receipt = try await store.decideDeskItem(item, itemId: detail.eventId, id: id, reason: nil)
+        #expect(receipt.delivered && receipt.seq == 75)
+        #expect(core.calls.filter { $0 == "desk-decide refund-v2 60 desk-test-action forward" }.count == 2)
+        #expect(store.deskSelection == item)
+    }
+
     @Test func statesArriveInTheOrderTheCoreSentThem() async throws {
         let store = store()
         #expect(core.calls == ["start"])

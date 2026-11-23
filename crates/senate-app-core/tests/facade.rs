@@ -59,6 +59,71 @@ async fn until(listener: &Listener, what: &str, ok: impl Fn(&AppState) -> bool) 
 }
 
 #[tokio::test]
+async fn the_desk_action_returns_its_receipt_and_preserves_a_daemon_refusal() {
+    let (dir, socket, world) = setup();
+    common::desk_fixture(&mut world.lock().unwrap());
+    let daemon = FakeDaemon::start(&socket, world);
+    let core = AppCore::new(Some(dir.path().display().to_string()), Some("en".into())).unwrap();
+    core.start(Arc::new(Listener::default())).unwrap();
+
+    let committee = "refund-v2".to_owned();
+    let full = core.desk_item(committee.clone(), 60).await.unwrap();
+    assert!(full.item.body.contains("revised refund threshold"));
+    assert_eq!(full.thread.root, 60);
+    assert!(full.blocked.is_none());
+    let id = core.new_desk_action_id();
+    let forwarded = core
+        .decide_desk_item(
+            committee.clone(),
+            60,
+            full.event_id.clone(),
+            id.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(forwarded.seq, 75);
+    assert!(forwarded.delivered);
+    assert_eq!(
+        core.decide_desk_item(committee.clone(), 60, full.event_id, id, None)
+            .await
+            .unwrap(),
+        forwarded
+    );
+    let original = core.thread(committee.clone(), 60).await.unwrap();
+    assert_eq!(original.events[0].body, full.item.body);
+    let failed_item = core.desk_item(committee.clone(), 61).await.unwrap();
+    let fail = core
+        .decide_desk_item(
+            committee.clone(),
+            61,
+            failed_item.event_id.clone(),
+            core.new_desk_action_id(),
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        fail.to_string().contains("temporarily unavailable"),
+        "{fail}"
+    );
+    let refused = core
+        .decide_desk_item(
+            committee.clone(),
+            61,
+            failed_item.event_id,
+            core.new_desk_action_id(),
+            Some("Outside policy".into()),
+        )
+        .await
+        .unwrap();
+    assert!(!refused.delivered);
+    let blocked = core.desk_item(committee, 62).await.unwrap();
+    assert!(blocked.blocked.unwrap().contains("Only the Speaker"));
+    daemon.stop();
+}
+
+#[tokio::test]
 async fn snapshots_and_actions_through_the_facade() {
     let (dir, socket, world) = setup();
     let daemon = FakeDaemon::start(&socket, world);
