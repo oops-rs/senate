@@ -583,7 +583,7 @@ stdin.")]
     Attach {
         /// The senator's primary name or alias (`committee::alias` for an
         /// alias on one committee). Without one, choose a hosted session
-        /// from a list.
+        /// from a list (in a terminal).
         #[arg(add = ArgValueCandidates::new(completion::sessions))]
         senator: Option<AliasName>,
         /// Select an exact native session ID (used by the app).
@@ -799,7 +799,7 @@ enum SessionCmd {
     /// stop` stops one, and it is recorded paused: its presence shows
     /// paused, and what is sent to it waits. A session someone typed into
     /// in the last 5 minutes is skipped unless --force. With no name and
-    /// no --all or --committee, choose one from a list.
+    /// no --all or --committee, choose one from a list (in a terminal).
     #[command(after_help = "Examples:
   senate session pause reviewer          Pause one, by alias or committee::alias
   senate session pause --committee refund-v2
@@ -824,7 +824,7 @@ enum SessionCmd {
     /// Each session recorded paused is restored as `session restore` does,
     /// then sent a note pointing at its last checkpoint. A session stopped
     /// on purpose is not paused, and is not resumed. With no name and no
-    /// --all or --committee, choose one from a list.
+    /// --all or --committee, choose one from a list (in a terminal).
     #[command(after_help = "Examples:
   senate session resume reviewer
   senate session resume --all")]
@@ -1628,6 +1628,12 @@ fn pause_selector(
                 "no hosted session is running; `senate session list` lists them"
             }
         );
+        let command = if paused {
+            "senate session resume"
+        } else {
+            "senate session pause"
+        };
+        require_picker_terminal(command, &eligible, true)?;
         let prompt = if paused {
             "Resume which session?"
         } else {
@@ -1820,6 +1826,7 @@ fn pick_attach_session() -> anyhow::Result<Option<ipc::AttachTarget>> {
         !reply.rows.is_empty(),
         "no hosted sessions; use senate spawn to start one"
     );
+    require_picker_terminal("senate attach", &reply.rows, false)?;
     let chosen = rt.block_on(crate::host::pick_session(
         &reply.rows,
         "Attach to which session?",
@@ -1831,13 +1838,80 @@ fn pick_attach_session() -> anyhow::Result<Option<ipc::AttachTarget>> {
         }))
 }
 
-fn require_attach_terminal() -> anyhow::Result<()> {
+fn on_a_terminal() -> bool {
     use std::io::IsTerminal as _;
+    std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+}
+
+fn cli_locale() -> Locale {
+    Paths::from_env().map_or(Locale::En, |paths| BridgeConfig::locale_at(&paths.config()))
+}
+
+/// `--attach` on spawn, restore or replace: refused before anything starts
+/// when there is no terminal to attach, saying how to open it later.
+fn require_attach_terminal() -> anyhow::Result<()> {
     anyhow::ensure!(
-        std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
-        "attach needs a terminal on stdin and stdout"
+        on_a_terminal(),
+        "{}",
+        cli_locale().pick(
+            "--attach 需要 stdin 和 stdout 都是终端。去掉 --attach，之后在终端里用 `senate attach <名字>` 打开它。",
+            "--attach needs a terminal on stdin and stdout. Leave it out, then open the session \
+             from a terminal with `senate attach <name>`.",
+        )
     );
     Ok(())
+}
+
+/// `command` (`senate attach`, `senate session watch`) needs a terminal;
+/// `instead` says what works without one.
+fn require_terminal(command: &str, instead: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        on_a_terminal(),
+        "{}",
+        cli_locale().pick(
+            format!("`{command}` 需要 stdin 和 stdout 都是终端。{instead}"),
+            format!("`{command}` needs a terminal on stdin and stdout. {instead}"),
+        )
+    );
+    Ok(())
+}
+
+/// Before a list to choose from: without a terminal, say which sessions
+/// `command` could take and how to name one.
+fn require_picker_terminal(
+    command: &str,
+    rows: &[ipc::SessionRow],
+    all_flag: bool,
+) -> anyhow::Result<()> {
+    if on_a_terminal() {
+        return Ok(());
+    }
+    anyhow::bail!("{}", picker_refusal(command, rows, all_flag, cli_locale()))
+}
+
+fn picker_refusal(
+    command: &str,
+    rows: &[ipc::SessionRow],
+    all_flag: bool,
+    locale: Locale,
+) -> String {
+    let names: Vec<String> = rows.iter().map(|row| row.display_name(false)).collect();
+    let example = names.first().map_or("<name>", String::as_str);
+    let all = if all_flag {
+        locale.pick("（或 --all）", " (or --all)")
+    } else {
+        ""
+    };
+    let list = names.join(", ");
+    match locale {
+        Locale::Zh => format!(
+            "不给名字时，`{command}` 在终端里列出会话供选择，而这里没有终端。请写出名字：`{command} {example}`{all}。可选：{list}。"
+        ),
+        Locale::En => format!(
+            "Without a name, `{command}` lets you choose from a list, which needs a terminal. \
+             Name one instead: `{command} {example}`{all}. To choose from: {list}."
+        ),
+    }
 }
 
 async fn attach_launched(paths: &Paths, session_id: String, label: &str) -> anyhow::Result<()> {
@@ -1881,7 +1955,13 @@ async fn attach_target(
         !read_only,
         "{label}'s terminal is not running; use senate attach {label} to bring it back"
     );
-    require_attach_terminal()?;
+    require_terminal(
+        "senate attach",
+        cli_locale().pick(
+            "在终端里运行它；`senate session list` 不需要终端也能显示它的状态。",
+            "Run it in a terminal; `senate session list` shows its state without one.",
+        ),
+    )?;
     let senator = AliasName::bare(info.primary);
     let locale = BridgeConfig::locale_at(&paths.config());
     let action = if info.paused {
@@ -3190,6 +3270,13 @@ fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
         SessionCmd::Watch { all } => {
             let paths = Paths::from_env()?;
             let locale = BridgeConfig::locale_at(&paths.config());
+            require_terminal(
+                "senate session watch",
+                locale.pick(
+                    "`senate session list` 以文本列出同样的会话。",
+                    "`senate session list` prints the same sessions as text.",
+                ),
+            )?;
             runtime(false)?.block_on(crate::host::view::watch_all(&paths, all, || {
                 let paths = paths.clone();
                 Box::pin(async move { hosted_sessions(&paths, all, output.verbose, locale).await })
@@ -3868,4 +3955,32 @@ async fn set_duty(
         (Locale::En, false) => format!("Set the duty on {c} (seq {seq})."),
         (Locale::En, true) => format!("Cleared the duty on {c} (seq {seq})."),
     })
+}
+
+#[cfg(test)]
+#[test]
+fn a_list_without_a_terminal_names_the_command_and_the_sessions() {
+    use crate::ipc::HostState;
+    use crate::sessions::tests::row;
+    let rows = [
+        row("claude-1", Some("reviewer"), HostState::Running),
+        row("codex-2", Some("builder"), HostState::Running),
+    ];
+    let en = picker_refusal("senate session resume", &rows, true, Locale::En);
+    assert!(
+        en.contains("`senate session resume reviewer` (or --all)")
+            && en.contains("To choose from: reviewer, builder.")
+            && !en.contains("attach"),
+        "{en}"
+    );
+    let attach = picker_refusal("senate attach", &rows, false, Locale::En);
+    assert!(
+        attach.contains("`senate attach reviewer`.") && !attach.contains("--all"),
+        "{attach}"
+    );
+    let zh = picker_refusal("senate session pause", &rows, true, Locale::Zh);
+    assert!(
+        zh.contains("`senate session pause reviewer`（或 --all）"),
+        "{zh}"
+    );
 }

@@ -289,13 +289,13 @@ pub fn render_replace(reply: &crate::ipc::ReplaceReply, locale: Locale) -> Strin
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::ipc::HostState;
     use crate::session::Runtime;
     use senate_core::{CommitteeId, EventId};
 
-    fn row(name: &str, alias: Option<&str>, state: HostState) -> SessionRow {
+    pub(crate) fn row(name: &str, alias: Option<&str>, state: HostState) -> SessionRow {
         SessionRow {
             paused: false,
             chair: false,
