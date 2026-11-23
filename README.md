@@ -692,6 +692,11 @@ Speaker's office permissions apply to launches with a profile.
 
 ### Troubleshooting
 
+`locale` in `senate.toml` (`en` or `zh`) is read by the daemon when it
+starts, and the daemon words what the CLI prints. After changing it,
+`senate status` says so until the daemon restarts (`senate setup service
+install --yes` restarts the service).
+
 When something does not arrive or a session sits idle, start with:
 
 ```bash

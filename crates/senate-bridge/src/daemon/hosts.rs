@@ -633,9 +633,10 @@ impl Shared {
             || (session.runtime == Runtime::Agy
                 && session::agy_conversation_open(&session.session_id) == Some(true))
         {
-            return Err(IpcError::bad_request(
+            return Err(IpcError::bad_request(self.locale.pick(
+                "原来的会话仍在运行；先退出它，再恢复。",
                 "the original session is still running; exit it before restoring",
-            ));
+            )));
         }
         let start_empty = session.runtime == Runtime::Claude
             && self
@@ -668,9 +669,10 @@ impl Shared {
             && host::running(paths, &id).map_err(IpcError::internal)?
         {
             if host::awaiting_publication(paths, &id) {
-                return Err(IpcError::bad_request(
-                    "this terminal host is still waiting for publication",
-                ));
+                return Err(IpcError::bad_request(self.locale.pick(
+                    "这个终端主机还在等待发布；稍后再试。",
+                    "this terminal host is still waiting for publication; try again shortly",
+                )));
             }
             let name = self.shown_session_name(session_id);
             return Err(IpcError::bad_request(self.locale.pick(
@@ -775,9 +777,10 @@ impl Shared {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
             if host::awaiting_publication(&paths, &id) {
-                return Err(IpcError::bad_request(
-                    "this terminal host is still waiting for publication",
-                ));
+                return Err(IpcError::bad_request(self.locale.pick(
+                    "这个终端主机还在等待发布；稍后再试。",
+                    "this terminal host is still waiting for publication; try again shortly",
+                )));
             }
             Some(host::socket(&paths, &id))
         } else {

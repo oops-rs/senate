@@ -1739,13 +1739,20 @@ fn pause_selector(
             .into_iter()
             .filter(|r| if paused { r.paused } else { r.is_running() })
             .collect();
+        let locale = cli_locale();
         anyhow::ensure!(
             !eligible.is_empty(),
             "{}",
             if paused {
-                "no hosted session is paused; `senate session list` lists them"
+                locale.pick(
+                    "没有暂停的托管会话；`senate session list` 列出它们。",
+                    "no hosted session is paused; `senate session list` lists them",
+                )
             } else {
-                "no hosted session is running; `senate session list` lists them"
+                locale.pick(
+                    "没有运行中的托管会话；`senate session list` 列出它们。",
+                    "no hosted session is running; `senate session list` lists them",
+                )
             }
         );
         let command = if paused {
@@ -1944,7 +1951,11 @@ fn pick_attach_session() -> anyhow::Result<Option<ipc::AttachTarget>> {
     let reply: ipc::SessionsReply = rt.block_on(daemon_call(&paths, &Request::Sessions))?;
     anyhow::ensure!(
         !reply.rows.is_empty(),
-        "no hosted sessions; use senate spawn to start one"
+        "{}",
+        cli_locale().pick(
+            "没有托管会话；用 `senate spawn` 启动一个。",
+            "no hosted sessions; use senate spawn to start one",
+        )
     );
     require_picker_terminal("senate attach", &reply.rows, false)?;
     let chosen = rt.block_on(crate::host::pick(

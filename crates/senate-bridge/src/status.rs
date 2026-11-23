@@ -61,6 +61,9 @@ pub struct StatusView {
     /// Errors in the built-in session's configuration files, one per
     /// broken file and line.
     pub secretary_problems: Vec<SecretaryProblem>,
+    /// The language senate.toml asks for now, when the running daemon
+    /// (which words what it says) read another one at start.
+    pub file_locale: Option<Locale>,
 }
 
 impl StatusView {
@@ -115,6 +118,7 @@ impl StatusView {
             speaker: reply.speaker,
             roles: reply.roles,
             secretary_problems: Vec::new(),
+            file_locale: None,
         }
     }
 }
@@ -139,6 +143,8 @@ pub async fn collect(paths: &Paths) -> anyhow::Result<StatusView> {
         Ok(reply) => {
             let mut view = StatusView::from_reply(reply, socket);
             view.secretary_problems = secretary_problems(paths);
+            let file = BridgeConfig::locale_at(&paths.config());
+            view.file_locale = (file != view.locale).then_some(file);
             Ok(view)
         }
         Err(ClientError::Connect { .. } | ClientError::Timeout) => offline(paths),
@@ -260,6 +266,7 @@ fn offline(paths: &Paths) -> anyhow::Result<StatusView> {
         speaker: None,
         roles,
         secretary_problems: secretary_problems(paths),
+        file_locale: None,
     };
     if !paths.state_db().exists() {
         return Ok(view);
@@ -449,6 +456,9 @@ pub(crate) fn render_committees(
 fn advisories(view: &StatusView) -> Vec<String> {
     let l = view.locale;
     let mut lines = Vec::new();
+    if let Some(file) = view.file_locale {
+        lines.push(locale_advisory(file, view.locale));
+    }
     if let Some(drops) = &view.dropped_hooks {
         let count = drops.count;
         let kind = drops.last.kind.event_name();
@@ -588,6 +598,27 @@ fn render_secretary_problems(problems: &[SecretaryProblem], l: Locale, out: &mut
 }
 
 /// Who holds a Senate's Speaker's seat, in words.
+/// senate.toml asks for `file`; the running daemon still speaks `running`.
+/// Said in the language asked for, since that is what the person wants.
+fn locale_advisory(file: Locale, running: Locale) -> String {
+    let name = |l: Locale| match l {
+        Locale::Zh => "zh",
+        Locale::En => "en",
+    };
+    file.pick(
+        format!(
+            "senate.toml 的 locale 是 {}，但守护进程启动时读的是 {}，重启后才生效：`senate setup service install --yes`（自己运行 senated --machine 时，重启它）。",
+            name(file),
+            name(running)
+        ),
+        format!(
+            "senate.toml says locale = {}, but the daemon started with {}; it applies once the daemon restarts: `senate setup service install --yes` (or restart senated --machine if you run it yourself).",
+            name(file),
+            name(running)
+        ),
+    )
+}
+
 fn speaker_words(seat: Option<&senate_core::SpeakerSeat>, locale: Locale) -> String {
     match (seat, locale) {
         (Some(senate_core::SpeakerSeat::BuiltIn), Locale::Zh) => "内置 Speaker".into(),
@@ -978,6 +1009,7 @@ mod tests {
             speaker: None,
             roles: None,
             secretary_problems: Vec::new(),
+            file_locale: None,
         }
     }
 
@@ -997,6 +1029,28 @@ mod tests {
             "{text}"
         );
         assert_eq!(text.matches("daemon:").count(), 1);
+    }
+
+    #[test]
+    fn a_locale_the_daemon_has_not_read_yet_is_said_with_how_to_apply_it() {
+        let now = Utc::now();
+        let mut v = view(Locale::En);
+        assert!(!render(&v, now).contains("locale"), "none when they agree");
+        v.file_locale = Some(Locale::Zh);
+        let text = render(&v, now);
+        assert!(
+            text.contains("senate.toml 的 locale 是 zh，但守护进程启动时读的是 en")
+                && text.contains("`senate setup service install --yes`"),
+            "{text}"
+        );
+        let mut v = view(Locale::Zh);
+        v.file_locale = Some(Locale::En);
+        assert!(
+            render(&v, now)
+                .contains("senate.toml says locale = en, but the daemon started with zh"),
+            "{}",
+            render(&v, now)
+        );
     }
 
     #[test]
