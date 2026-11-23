@@ -99,6 +99,15 @@ nonisolated final class FakeCore: AppCoreProtocol, @unchecked Sendable {
         try record("reply \(committee) \(thread) \(body)")
     }
     func restoreSession(label: String) async throws { try record("restore \(label)") }
+    var secretary = SecretaryView(committee: "office", alias: "secretary", senator: nil, state: .notRecorded, action: nil)
+    func defaultSecretary() async throws -> SecretaryView { secretary }
+    func ensureSecretary() async throws -> SecretaryView {
+        try record("ensure secretary")
+        secretary.state = .running
+        secretary.senator = "claude-secretary"
+        secretary.action = "started"
+        return secretary
+    }
     func senateHome() -> String { "/tmp/fake-senate" }
     func setLanguage(language: String?) {}
     func snapshot() -> AppState { .placeholder }

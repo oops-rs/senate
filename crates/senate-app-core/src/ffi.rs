@@ -17,8 +17,9 @@ use senate_bridge::Paths;
 use senate_bridge::approvals::{Approval, Decision};
 use senate_bridge::delivery::codex::CodexConfig;
 use senate_bridge::ipc::{
-    DeskDecision, DeskItemDetail, DeskOutcome, Request, SessionRow, SessionSelector, ThreadReply,
-    TimelineDirection, TimelineReply,
+    DefaultSecretary, DefaultSecretaryState, DeskDecision, DeskItemDetail, DeskOutcome,
+    EnsureAction, Request, SessionRow, SessionSelector, ThreadReply, TimelineDirection,
+    TimelineReply,
 };
 use senate_core::alias::AliasName;
 use senate_core::{CommitteeId, EventId, Locale, Mention, Seq};
@@ -514,6 +515,26 @@ impl AppCore {
         Ok(DeskOutcomeView::new(outcome, self.locale()))
     }
 
+    /// The machine's default secretary, as it stands: where it sits, its
+    /// senator once there is one, and its state. Changes nothing.
+    pub async fn default_secretary(&self) -> Result<SecretaryView, CoreError> {
+        let s: DefaultSecretary = self
+            .on_runtime(|driver| async move { driver.read(&Request::DefaultSecretary).await })
+            .await?;
+        Ok(s.into())
+    }
+
+    /// Make sure the default secretary is running, as the person: start it
+    /// (none yet), resume it (paused) or restore it (its terminal ended).
+    /// It may take as long as a spawn. Refused, with the daemon's message,
+    /// when it was stopped on purpose or its seat is someone else's.
+    pub async fn ensure_secretary(&self) -> Result<SecretaryView, CoreError> {
+        let s: DefaultSecretary = self
+            .on_runtime(|driver| async move { driver.read(&Request::EnsureSecretary).await })
+            .await?;
+        Ok(s.into())
+    }
+
     /// End a hosted session's terminal, as the person (`senate session
     /// stop <label>`). Never forced: the daemon spares a terminal someone
     /// is typing in, and says so.
@@ -1000,5 +1021,63 @@ mod tests {
                 MentionKind::Junior,
             ]
         );
+    }
+}
+
+/// The machine's default secretary ([`AppCore::default_secretary`]).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct SecretaryView {
+    /// Where it sits: `office`.
+    pub committee: String,
+    /// Its alias there: `secretary`.
+    pub alias: String,
+    /// Its senator's name, once there is one.
+    pub senator: Option<String>,
+    pub state: SecretaryState,
+    /// What an ensure did: `started`, `resumed`, `restored`,
+    /// `already_running`; none for a plain read.
+    pub action: Option<String>,
+}
+
+/// Where the default secretary stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum SecretaryState {
+    /// None yet: the first message starts one.
+    NotRecorded,
+    Running,
+    /// Paused: the next message resumes it.
+    Paused,
+    /// Its terminal ended (a restart): the next message restores it.
+    Ended,
+    /// Stopped on purpose: only a restore brings it back.
+    Stopped,
+    /// Its seat has no session on this machine.
+    Elsewhere,
+}
+
+impl From<DefaultSecretary> for SecretaryView {
+    fn from(s: DefaultSecretary) -> Self {
+        Self {
+            committee: s.committee.to_string(),
+            alias: s.alias.to_string(),
+            senator: s.senator.map(|n| n.to_string()),
+            state: match s.state {
+                DefaultSecretaryState::NotRecorded => SecretaryState::NotRecorded,
+                DefaultSecretaryState::Running => SecretaryState::Running,
+                DefaultSecretaryState::Paused => SecretaryState::Paused,
+                DefaultSecretaryState::Ended => SecretaryState::Ended,
+                DefaultSecretaryState::Stopped => SecretaryState::Stopped,
+                DefaultSecretaryState::Elsewhere => SecretaryState::Elsewhere,
+            },
+            action: s.action.map(|a| {
+                match a {
+                    EnsureAction::Started => "started",
+                    EnsureAction::Resumed => "resumed",
+                    EnsureAction::Restored => "restored",
+                    EnsureAction::AlreadyRunning => "already_running",
+                }
+                .to_string()
+            }),
+        }
     }
 }

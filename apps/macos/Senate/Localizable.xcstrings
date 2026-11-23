@@ -2252,6 +2252,244 @@
         }
       }
     },
+    "secretary.ask": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ask your secretary"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "问你的秘书"
+          }
+        }
+      }
+    },
+    "secretary.elsewhere": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The seat office::secretary has no session on this machine: it is someone else's, or it runs on another Mac."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "office::secretary 这个席位在本机上没有会话：它属于别人，或在另一台 Mac 上运行。"
+          }
+        }
+      }
+    },
+    "secretary.ended": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your secretary's terminal ended (a restart, perhaps). Your next message brings it back."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "你的秘书的终端已结束（也许是因为重启）。你的下一条消息会让它恢复。"
+          }
+        }
+      }
+    },
+    "secretary.footnote": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "As %@, in office; your first message starts it"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "以 %@ 的身份，在 office；你的第一条消息会启动它"
+          }
+        }
+      }
+    },
+    "secretary.not_recorded": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your secretary isn't running yet. Tell it what you're working on and it starts: it opens a committee for each project, gives each chair a brief, and follows up through the chairs."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "你的秘书还没有运行。告诉它你在做什么，它就会启动：为每个项目开一个委员会，给每位主席一份简报，并通过主席跟进。"
+          }
+        }
+      }
+    },
+    "secretary.not_seated": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your secretary started, but its session hasn't appeared here yet. Try again in a moment."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "你的秘书已启动，但它的会话还没有出现在这里。请稍后再试。"
+          }
+        }
+      }
+    },
+    "secretary.paused": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your secretary is paused. Your next message resumes it where it was."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "你的秘书已暂停。你的下一条消息会让它从原处继续。"
+          }
+        }
+      }
+    },
+    "secretary.placeholder": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "What are you working on?"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "你在做什么？"
+          }
+        }
+      }
+    },
+    "secretary.restore": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restore"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "恢复"
+          }
+        }
+      }
+    },
+    "secretary.starting": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Starting your secretary…"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在启动你的秘书…"
+          }
+        }
+      }
+    },
+    "secretary.state.elsewhere": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "not on this machine"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "不在本机"
+          }
+        }
+      }
+    },
+    "secretary.state.not_recorded": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "not started"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未启动"
+          }
+        }
+      }
+    },
+    "secretary.stopped": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your secretary was stopped on purpose, so a message won't start it. Restore it to talk to it again."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "你的秘书是被有意停止的，所以消息不会启动它。恢复它就能再次和它说话。"
+          }
+        }
+      }
+    },
+    "secretary.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your secretary"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "你的秘书"
+          }
+        }
+      }
+    },
     "senates.above": {
       "extractionState": "manual",
       "localizations": {
@@ -3644,6 +3882,23 @@
           "stringUnit": {
             "state": "translated",
             "value": "搜索会话和线程"
+          }
+        }
+      }
+    },
+    "sidebar.secretary": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Secretary"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "秘书"
           }
         }
       }

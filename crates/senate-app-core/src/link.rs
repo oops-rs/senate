@@ -39,6 +39,9 @@ const READ_TIMEOUT: Duration = Duration::from_secs(5);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(20);
 /// A pause: the daemon's own wait for the checkpoint, and a margin.
 const PAUSE_TIMEOUT: Duration = Duration::from_secs(senate_bridge::ipc::PAUSE_TIMEOUT_SECS + 15);
+/// Ensuring the default secretary may start it: as long as a spawn.
+const SPAWN_TIMEOUT: Duration =
+    Duration::from_secs(senate_bridge::host::REQUEST_TIMEOUT.as_secs() + 15);
 
 /// The daemon's socket.
 #[derive(Debug, Clone)]
@@ -68,6 +71,7 @@ impl Link {
             | Request::Say { .. } => WRITE_TIMEOUT,
             // It waits for the agent's checkpoint (90 s at most).
             Request::Pause { .. } => PAUSE_TIMEOUT,
+            Request::EnsureSecretary => SPAWN_TIMEOUT,
             _ => READ_TIMEOUT,
         };
         ipc::request(&self.socket, request, CONNECT_TIMEOUT, timeout).await

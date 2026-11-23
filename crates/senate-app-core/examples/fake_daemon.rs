@@ -92,6 +92,20 @@ async fn main() {
         common::streaming(&mut w);
         println!("stream-1: a streamed reply");
     }
+    // FAKE_SECRETARY=<state>: the default secretary already there
+    // (running, paused, ended, stopped, elsewhere); none by default.
+    if let Ok(v) = std::env::var("FAKE_SECRETARY") {
+        use senate_bridge::ipc::DefaultSecretaryState as St;
+        let state = match v.as_str() {
+            "running" => St::Running,
+            "paused" => St::Paused,
+            "ended" => St::Ended,
+            "stopped" => St::Stopped,
+            "elsewhere" => St::Elsewhere,
+            _ => St::NotRecorded,
+        };
+        common::seat_secretary(&mut w, state);
+    }
     let world = Arc::new(Mutex::new(w));
     let daemon = common::FakeDaemon::start(&socket, Arc::clone(&world));
     println!("fake daemon on {}", socket.display());
