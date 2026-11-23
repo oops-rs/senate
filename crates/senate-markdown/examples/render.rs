@@ -33,31 +33,22 @@ fn main() -> Result<(), Box<dyn Error>> {
     let text = std::fs::read_to_string(input)?;
     let mut cache = RenderCache::new(Terminal::stdout(width));
     let document = if stream {
-        replay(&text, &mut cache)
+        replay(&text, &mut cache, html.is_some())
     } else {
-        let document = Document::parse(&text);
-        cache.reset(&document);
-        document
+        Document::parse(&text)
     };
     let mut terminal = String::new();
-    let mut markup = String::new();
-    for (index, entry) in document.blocks().iter().enumerate() {
-        if index != 0 {
-            terminal.push('\n');
-        }
-        cache.write_block(entry.id, Format::Terminal, &mut terminal);
-        if html.is_some() {
-            cache.write_block(entry.id, Format::Html, &mut markup);
-        }
-    }
+    cache.render_document(&document, Format::Terminal, &mut terminal);
     print!("{terminal}");
     if let Some(path) = html {
+        let mut markup = String::new();
+        cache.render_document(&document, Format::Html, &mut markup);
         std::fs::write(path, format!("{HTML_START}{markup}</body></html>\n"))?;
     }
     Ok(())
 }
 
-fn replay(text: &str, cache: &mut RenderCache) -> Document {
+fn replay(text: &str, cache: &mut RenderCache, html: bool) -> Document {
     let mut document = Document::default();
     let mut end = 0;
     let mut random = 2172_u32;
@@ -74,7 +65,26 @@ fn replay(text: &str, cache: &mut RenderCache) -> Document {
         let changes = document.update(&text[..end]);
         let parse = start.elapsed();
         let start = Instant::now();
-        let rendered = cache.apply(&document, &changes);
+        cache.invalidate(&changes);
+        let mut blocks = 0;
+        let mut highlighted = 0;
+        let mut formatted = 0;
+        for id in changes
+            .replaced
+            .iter()
+            .chain(&changes.inserted)
+            .chain(&changes.appended)
+        {
+            let work = cache.render_block(&document, *id, Format::Terminal);
+            blocks += work.blocks.len();
+            highlighted += work.highlighted_lines;
+            formatted += work.rendered_code_lines;
+            if html {
+                let work = cache.render_block(&document, *id, Format::Html);
+                highlighted += work.highlighted_lines;
+                formatted += work.rendered_code_lines;
+            }
+        }
         eprintln!(
             "+{:>2} bytes at {:>5}  kept={} replaced={} appended={} removed={} patched={} highlighted_lines={} rendered_code_lines={} parse={:?} render={:?}",
             end - previous,
@@ -83,9 +93,9 @@ fn replay(text: &str, cache: &mut RenderCache) -> Document {
             changes.replaced.len(),
             changes.appended.len() + changes.inserted.len(),
             changes.removed.len(),
-            rendered.blocks.len(),
-            rendered.highlighted_lines,
-            rendered.rendered_code_lines,
+            blocks,
+            highlighted,
+            formatted,
             parse,
             start.elapsed()
         );

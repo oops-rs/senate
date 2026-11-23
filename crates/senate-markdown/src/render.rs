@@ -1,6 +1,8 @@
 use std::collections::HashMap;
+use std::ops::Range;
+use std::sync::Arc;
 
-use crate::highlight::{Lexer, syntax};
+use crate::highlight::{Lexer, Token, syntax};
 use crate::terminal::{Indent, Terminal};
 use crate::{Block, BlockId, CodeBlock, Diff, Document, html};
 
@@ -8,6 +10,15 @@ use crate::{Block, BlockId, CodeBlock, Diff, Document, html};
 pub enum Format {
     Html,
     Terminal,
+}
+
+impl Format {
+    fn index(self) -> usize {
+        match self {
+            Self::Html => 0,
+            Self::Terminal => 1,
+        }
+    }
 }
 
 /// A rendered top-level block is markup/text interleaved with independently
@@ -36,16 +47,25 @@ pub struct BlockPatch {
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct RenderDiff {
-    pub removed: Vec<BlockId>,
     pub blocks: Vec<BlockPatch>,
-    /// Every source code line rendered by both renderers during this update.
+    /// Source code lines formatted for the requested output.
     pub rendered_code_lines: usize,
     /// Source lines successfully processed by the syntax highlighter.
     pub highlighted_lines: usize,
 }
 
-/// Keep one cache per streamed document and terminal configuration. Calls
-/// to apply must use consecutive diffs from that document.
+impl RenderDiff {
+    fn extend(&mut self, other: Self) {
+        self.blocks.extend(other.blocks);
+        self.rendered_code_lines += other.rendered_code_lines;
+        self.highlighted_lines += other.highlighted_lines;
+    }
+}
+
+/// A lazy cache for one document and one terminal configuration. A caller
+/// can schedule requests in any order. No entry exists before its first
+/// request. HTML and terminal share code highlighting but format their
+/// requested blocks independently.
 pub struct RenderCache {
     terminal: Terminal,
     max_highlight_bytes: usize,
@@ -58,8 +78,8 @@ impl RenderCache {
     }
 
     /// Render a code block as plain text when it exceeds this byte budget.
-    /// Zero disables highlighting. To defer all highlighting, first render
-    /// with a zero budget and reset a second cache when the view is ready.
+    /// Zero disables highlighting. To defer all highlighting, use a zero
+    /// budget first and create a highlighting cache when the view is ready.
     pub fn with_highlight_limit(terminal: Terminal, max_bytes: usize) -> Self {
         Self {
             terminal,
@@ -68,45 +88,107 @@ impl RenderCache {
         }
     }
 
-    /// Render a document from scratch. Report the work and initial blocks
-    /// with the same shape as subsequent updates.
-    pub fn reset(&mut self, document: &Document) -> RenderDiff {
-        self.blocks.clear();
-        let mut changes = RenderDiff::default();
-        for entry in document.blocks() {
-            self.refresh(entry.id, &entry.block, &mut changes);
-        }
-        changes
-    }
-
-    pub fn apply(&mut self, document: &Document, diff: &Diff) -> RenderDiff {
-        let mut changes = RenderDiff {
-            removed: diff.removed.clone(),
-            ..RenderDiff::default()
-        };
+    /// Drop removed blocks and mark previously requested replacements
+    /// stale. Existing lexer checkpoints survive until the next request.
+    pub fn invalidate(&mut self, diff: &Diff) {
         for id in &diff.removed {
             self.blocks.remove(id);
         }
-        for &id in diff
-            .replaced
-            .iter()
-            .chain(&diff.inserted)
-            .chain(&diff.appended)
-        {
-            if let Some(block) = document.block(id) {
-                self.refresh(id, block, &mut changes);
+        for id in &diff.replaced {
+            if let Some(block) = self.blocks.get_mut(id) {
+                block
+                    .layouts
+                    .iter_mut()
+                    .for_each(|layout| layout.ready = false);
             }
         }
-        changes
     }
 
-    /// Access a single block without joining any of its code lines.
+    /// Render only this block for the requested format. Missing IDs and
+    /// already-cached output do no work.
+    pub fn render_block(&mut self, document: &Document, id: BlockId, format: Format) -> RenderDiff {
+        let Some(entry) = document.entry(id) else {
+            return RenderDiff::default();
+        };
+        let mut work = RenderDiff::default();
+        let cache = self
+            .blocks
+            .entry(id)
+            .or_insert_with(|| CachedBlock::new(entry.block.clone()));
+        if !Arc::ptr_eq(&cache.source, &entry.block) {
+            cache.source = entry.block.clone();
+            cache
+                .layouts
+                .iter_mut()
+                .for_each(|layout| layout.ready = false);
+        }
+        let slot = &mut cache.layouts[format.index()];
+        if slot.ready {
+            return work;
+        }
+
+        let layout = match format {
+            Format::Html => html::layout(&entry.block),
+            Format::Terminal => self.terminal.layout(&entry.block),
+        };
+        let mut code_blocks = Vec::new();
+        code_in(&entry.block, &mut code_blocks);
+        debug_assert_eq!(code_blocks.len(), layout.indents.len());
+        cache.code.truncate(code_blocks.len());
+        cache
+            .code
+            .resize_with(code_blocks.len(), CodeCache::default);
+
+        let layout_changed = slot.layout.as_ref() != Some(&layout);
+        let mut patch = BlockPatch {
+            id,
+            layout_changed,
+            code: Vec::new(),
+        };
+        for (index, (code, indent)) in code_blocks.into_iter().zip(&layout.indents).enumerate() {
+            let cache = &mut cache.code[index];
+            let highlight =
+                self.max_highlight_bytes > 0 && code.text.len() <= self.max_highlight_bytes;
+            cache.refresh(code, highlight, &mut work);
+            if let Some(from_line) = cache.format(format, indent, self.terminal, &mut work) {
+                patch.code.push(CodePatch { index, from_line });
+            }
+        }
+        if layout_changed {
+            slot.layout = Some(layout);
+        }
+        slot.ready = true;
+        if layout_changed || !patch.code.is_empty() {
+            work.blocks.push(patch);
+        }
+        work
+    }
+
+    /// Render and concatenate each block in document order. Use the
+    /// per-block API when a view can defer offscreen content.
+    pub fn render_document(
+        &mut self,
+        document: &Document,
+        format: Format,
+        out: &mut String,
+    ) -> RenderDiff {
+        let mut work = RenderDiff::default();
+        for (index, entry) in document.blocks().iter().enumerate() {
+            work.extend(self.render_block(document, entry.id, format));
+            if index > 0 && format == Format::Terminal {
+                out.push('\n');
+            }
+            self.write_block(entry.id, format, out);
+        }
+        work
+    }
+
+    /// Access one ready block without joining its code lines. Stale and
+    /// unrequested output is absent.
     pub fn parts(&self, id: BlockId, format: Format) -> Option<impl Iterator<Item = Part<'_>>> {
         let cached = self.blocks.get(&id)?;
-        let layout = match format {
-            Format::Html => &cached.html,
-            Format::Terminal => &cached.terminal,
-        };
+        let slot = &cached.layouts[format.index()];
+        let layout = slot.ready.then_some(slot.layout.as_ref()).flatten()?;
         Some(layout.pieces.iter().map(move |piece| match piece {
             Piece::Text(text) => Part::Text(text),
             Piece::Code(index) => Part::Code {
@@ -117,12 +199,13 @@ impl RenderCache {
     }
 
     pub fn code_lines(&self, id: BlockId, index: usize, format: Format) -> Option<&[String]> {
-        Some(self.blocks.get(&id)?.code.get(index)?.lines(format))
+        let block = self.blocks.get(&id)?;
+        block.layouts[format.index()]
+            .ready
+            .then_some(block.code.get(index)?.lines(format))
     }
 
-    /// Convenience export for a client that wants one complete HTML element
-    /// or a plain/ANSI terminal block. Streaming clients can use the parts
-    /// and patches without allocating this concatenation.
+    /// Append an already rendered block. Returns false if it is not ready.
     pub fn write_block(&self, id: BlockId, format: Format, out: &mut String) -> bool {
         let Some(parts) = self.parts(id, format) else {
             return false;
@@ -135,56 +218,28 @@ impl RenderCache {
         }
         true
     }
+}
 
-    fn refresh(&mut self, id: BlockId, block: &Block, changes: &mut RenderDiff) {
-        let html = html::layout(block);
-        let terminal = self.terminal.layout(block);
-        let mut code_blocks = Vec::new();
-        code_in(block, &mut code_blocks);
-        debug_assert_eq!(code_blocks.len(), html.indents.len());
-        debug_assert_eq!(code_blocks.len(), terminal.indents.len());
+struct CachedBlock {
+    source: Arc<Block>,
+    layouts: [OutputLayout; 2],
+    code: Vec<CodeCache>,
+}
 
-        let existing = self.blocks.get_mut(&id);
-        let layout_changed = existing
-            .as_ref()
-            .is_none_or(|old| old.html != html || old.terminal != terminal);
-        let cached = match existing {
-            Some(existing) => existing,
-            None => self.blocks.entry(id).or_default(),
-        };
-        let mut patch = BlockPatch {
-            id,
-            layout_changed,
+impl CachedBlock {
+    fn new(source: Arc<Block>) -> Self {
+        Self {
+            source,
+            layouts: Default::default(),
             code: Vec::new(),
-        };
-        cached.code.truncate(code_blocks.len());
-        cached
-            .code
-            .resize_with(code_blocks.len(), CodeCache::default);
-        for (index, (code, indent)) in code_blocks.into_iter().zip(&terminal.indents).enumerate() {
-            let highlight =
-                self.max_highlight_bytes > 0 && code.text.len() <= self.max_highlight_bytes;
-            if let Some(from_line) =
-                cached.code[index].refresh(code, indent, self.terminal, highlight, changes)
-            {
-                patch.code.push(CodePatch { index, from_line });
-            }
-        }
-        if layout_changed {
-            cached.html = html;
-            cached.terminal = terminal;
-        }
-        if layout_changed || !patch.code.is_empty() {
-            changes.blocks.push(patch);
         }
     }
 }
 
 #[derive(Default)]
-struct CachedBlock {
-    html: Layout,
-    terminal: Layout,
-    code: Vec<CodeCache>,
+struct OutputLayout {
+    ready: bool,
+    layout: Option<Layout>,
 }
 
 #[derive(Default, PartialEq, Eq)]
@@ -233,48 +288,42 @@ fn code_in<'a>(block: &'a Block, out: &mut Vec<&'a CodeBlock>) {
 struct CodeCache {
     highlight: bool,
     language: Option<String>,
-    indent: Indent,
     source: String,
-    html: Vec<String>,
-    terminal: Vec<String>,
+    spans: Vec<Vec<(Option<Token>, Range<usize>)>>,
     lexer: Option<Lexer>,
     before_last: Option<Lexer>,
     last_offset: usize,
+    rendered: [CodeOutput; 2],
+}
+
+#[derive(Default)]
+struct CodeOutput {
+    indent: Indent,
+    lines: Vec<String>,
+    valid: usize,
 }
 
 impl CodeCache {
     fn lines(&self, format: Format) -> &[String] {
-        match format {
-            Format::Html => &self.html,
-            Format::Terminal => &self.terminal,
-        }
+        &self.rendered[format.index()].lines
     }
 
-    fn refresh(
-        &mut self,
-        code: &CodeBlock,
-        indent: &Indent,
-        terminal: Terminal,
-        highlight: bool,
-        stats: &mut RenderDiff,
-    ) -> Option<usize> {
-        let same_context =
-            self.highlight == highlight && self.language == code.language && &self.indent == indent;
+    fn refresh(&mut self, code: &CodeBlock, highlight: bool, stats: &mut RenderDiff) {
+        let same_context = self.highlight == highlight && self.language == code.language;
         if same_context && self.source == code.text {
-            return None;
+            return;
         }
         let (offset, from_line) =
             if same_context && self.source.ends_with('\n') && code.text.starts_with(&self.source) {
-                (self.source.len(), self.html.len())
+                (self.source.len(), self.spans.len())
             } else if same_context
                 && self.last_offset > 0
                 && code.text.starts_with(&self.source[..self.last_offset])
             {
                 self.lexer = self.before_last.take();
-                (self.last_offset, self.html.len() - 1)
+                (self.last_offset, self.spans.len() - 1)
             } else {
                 self.language.clone_from(&code.language);
-                self.indent.clone_from(indent);
                 self.highlight = highlight;
                 self.lexer = if highlight {
                     syntax(code.language.as_deref()).map(Lexer::new)
@@ -284,8 +333,10 @@ impl CodeCache {
                 (0, 0)
             };
 
-        self.html.truncate(from_line);
-        self.terminal.truncate(from_line);
+        self.spans.truncate(from_line);
+        self.rendered
+            .iter_mut()
+            .for_each(|output| output.valid = output.valid.min(from_line));
         self.source.truncate(offset);
         let mut at = offset;
         for line in code.text[offset..].split_inclusive('\n') {
@@ -296,21 +347,61 @@ impl CodeCache {
                 stats.highlighted_lines += 1;
             }
             let plain = [(None, line)];
-            let spans = spans.as_deref().unwrap_or(&plain);
-            self.html.push(html::code(spans));
-            self.terminal
-                .push(terminal.code(spans, indent, self.terminal.is_empty()));
-            stats.rendered_code_lines += 1;
+            let mut position = at;
+            self.spans.push(
+                spans
+                    .as_deref()
+                    .unwrap_or(&plain)
+                    .iter()
+                    .map(|&(token, value)| {
+                        let end = position + value.len();
+                        let range = position..end;
+                        position = end;
+                        (token, range)
+                    })
+                    .collect(),
+            );
             at += line.len();
         }
         self.source.push_str(&code.text[offset..]);
-        // A suffix can disappear, such as a line turning into a closing
-        // fence. The old final checkpoint is no longer a valid checkpoint
-        // for a future rewrite in that situation.
+        // A line turning into a closing fence may remove a suffix.
         if at == offset {
             self.last_offset = 0;
             self.before_last = None;
         }
-        Some(from_line)
+    }
+
+    fn format(
+        &mut self,
+        format: Format,
+        indent: &Indent,
+        terminal: Terminal,
+        stats: &mut RenderDiff,
+    ) -> Option<usize> {
+        let output = &mut self.rendered[format.index()];
+        if &output.indent != indent {
+            output.indent.clone_from(indent);
+            output.valid = 0;
+        }
+        let from = output.valid;
+        if from == self.spans.len() && from == output.lines.len() {
+            return None;
+        }
+        output.lines.truncate(from);
+        let mut spans = Vec::new();
+        for line in &self.spans[from..] {
+            spans.clear();
+            spans.extend(
+                line.iter()
+                    .map(|(token, range)| (*token, &self.source[range.clone()])),
+            );
+            output.lines.push(match format {
+                Format::Html => html::code(&spans),
+                Format::Terminal => terminal.code(&spans, indent, output.lines.is_empty()),
+            });
+            stats.rendered_code_lines += 1;
+        }
+        output.valid = self.spans.len();
+        Some(from)
     }
 }

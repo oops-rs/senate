@@ -4,7 +4,8 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use senate_markdown::{
-    Alignment, Block, Color, Document, Format, Inline, Part, RenderCache, Terminal,
+    Alignment, Block, Color, Diff, Document, Format, Inline, Part, RenderCache, RenderDiff,
+    Terminal,
 };
 use textwrap::core::display_width;
 
@@ -19,10 +20,40 @@ fn render(document: &Document, cache: &RenderCache, format: Format) -> String {
     out
 }
 
+fn both(cache: &mut RenderCache, doc: &Document) -> RenderDiff {
+    let work = cache.render_document(doc, Format::Html, &mut String::new());
+    let other = cache.render_document(doc, Format::Terminal, &mut String::new());
+    assert_eq!(other.highlighted_lines, 0);
+    work
+}
+
+fn apply(cache: &mut RenderCache, doc: &Document, diff: &Diff) -> RenderDiff {
+    cache.invalidate(diff);
+    let mut combined = RenderDiff::default();
+    for &id in diff
+        .replaced
+        .iter()
+        .chain(&diff.inserted)
+        .chain(&diff.appended)
+    {
+        let work = cache.render_block(doc, id, Format::Html);
+        combined.blocks.extend(work.blocks);
+        combined.highlighted_lines += work.highlighted_lines;
+        combined.rendered_code_lines += work.rendered_code_lines;
+        assert_eq!(
+            cache
+                .render_block(doc, id, Format::Terminal)
+                .highlighted_lines,
+            0
+        );
+    }
+    combined
+}
+
 fn rendered(text: &str, format: Format, terminal: Terminal) -> String {
     let document = Document::parse(text);
     let mut cache = RenderCache::new(terminal);
-    cache.reset(&document);
+    cache.render_document(&document, format, &mut String::new());
     render(&document, &cache, format)
 }
 
@@ -40,7 +71,7 @@ fn both_specimens_render_as_typed_blocks() {
             Block::Table { alignment, .. } if alignment == &[Alignment::Left, Alignment::Center, Alignment::Right, Alignment::Default]
         )));
         let mut cache = RenderCache::new(Terminal::new(48, Color::None));
-        cache.reset(&document);
+        both(&mut cache, &document);
         let html = render(&document, &cache, Format::Html);
         for value in [
             "<strong>strong</strong>",
@@ -127,12 +158,12 @@ fn append_and_incomplete_lines_keep_multiline_highlight_and_code_prefix() {
     let terminal = Terminal::new(38, Color::TrueColor);
     let mut document = Document::parse(prefix);
     let mut cache = RenderCache::new(terminal);
-    let initial = cache.reset(&document);
+    let initial = both(&mut cache, &document);
     assert_eq!(initial.highlighted_lines, 2);
     let id = document.blocks()[1].id;
     let text = format!("{prefix}> still a comment */\n");
     let diff = document.update(&text);
-    let update = cache.apply(&document, &diff);
+    let update = apply(&mut cache, &document, &diff);
     assert_eq!(update.highlighted_lines, 1);
     assert_eq!(update.rendered_code_lines, 1);
     assert!(!update.blocks[0].layout_changed);
@@ -141,11 +172,11 @@ fn append_and_incomplete_lines_keep_multiline_highlight_and_code_prefix() {
 
     let mut growing = format!("{text}> let ze");
     let diff = document.update(&growing);
-    let update = cache.apply(&document, &diff);
+    let update = apply(&mut cache, &document, &diff);
     assert_eq!(update.highlighted_lines, 1);
     growing.push_str("ro = 0;\n");
     let diff = document.update(&growing);
-    let update = cache.apply(&document, &diff);
+    let update = apply(&mut cache, &document, &diff);
     assert_eq!(update.highlighted_lines, 1);
     assert_eq!(update.blocks[0].code[0].from_line, 3);
     assert_eq!(
@@ -163,7 +194,7 @@ fn randomized_utf8_stream_patches_only_semantically_changed_blocks() {
     let final_document = Document::parse(&reply);
     let terminal = Terminal::new(72, Color::Ansi256);
     let mut one_shot = RenderCache::new(terminal);
-    let full_work = one_shot.reset(&final_document);
+    let full_work = both(&mut one_shot, &final_document);
 
     for mut rng in [4_u32, 1783, 2188] {
         let mut document = Document::default();
@@ -189,7 +220,7 @@ fn randomized_utf8_stream_patches_only_semantically_changed_blocks() {
                 .chain(&diff.inserted)
                 .copied()
                 .collect();
-            let work = cache.apply(&document, &diff);
+            let work = apply(&mut cache, &document, &diff);
             total_lines += work.highlighted_lines;
             updates += 1;
             full_ablation += document
@@ -350,7 +381,7 @@ fn exposes_code_parts_and_terminal_color_depth_explicitly() {
         (Color::TrueColor, "\x1b[38;2;"),
     ] {
         let mut cache = RenderCache::new(Terminal::new(28, color));
-        cache.reset(&document);
+        both(&mut cache, &document);
         let id = document.blocks()[0].id;
         assert!(
             cache
@@ -440,7 +471,7 @@ fn required_fences_highlight_and_unknown_fences_stay_plain() {
     ] {
         let doc = Document::parse(&format!("```{lang}\n{source}\n```"));
         let mut cache = RenderCache::new(terminal);
-        assert_eq!(cache.reset(&doc).highlighted_lines, 1, "{lang}");
+        assert_eq!(both(&mut cache, &doc).highlighted_lines, 1, "{lang}");
         let html = render(&doc, &cache, Format::Html);
         if matches!(lang, "jsx" | "tsx") {
             assert!(
@@ -453,7 +484,10 @@ fn required_fences_highlight_and_unknown_fences_stay_plain() {
         }
     }
     let doc = Document::parse("```unknown-fictional-language\nlet x = 3;\n```");
-    assert_eq!(RenderCache::new(terminal).reset(&doc).highlighted_lines, 0);
+    assert_eq!(
+        both(&mut RenderCache::new(terminal), &doc).highlighted_lines,
+        0
+    );
 }
 
 #[test]
@@ -461,18 +495,57 @@ fn a_highlight_budget_can_disable_and_reenable_code_styles() {
     let terminal = Terminal::new(80, Color::None);
     let mut doc = Document::parse("```rust\nlet n = 1;\n");
     assert_eq!(
-        RenderCache::with_highlight_limit(terminal, 0)
-            .reset(&doc)
-            .highlighted_lines,
+        both(&mut RenderCache::with_highlight_limit(terminal, 0), &doc).highlighted_lines,
         0
     );
     let mut cache = RenderCache::with_highlight_limit(terminal, 18);
-    assert_eq!(cache.reset(&doc).highlighted_lines, 1);
+    assert_eq!(both(&mut cache, &doc).highlighted_lines, 1);
     let diff = doc.update("```rust\nlet n = 1;\nlet m = 2;\n");
-    let patch = cache.apply(&doc, &diff);
+    let patch = apply(&mut cache, &doc, &diff);
     assert_eq!(patch.highlighted_lines, 0);
     assert_eq!(patch.blocks[0].code[0].from_line, 0);
     assert!(!render(&doc, &cache, Format::Html).contains("tok-"));
     let diff = doc.update("```rust\nlet n = 1;\n");
-    assert_eq!(cache.apply(&doc, &diff).highlighted_lines, 1);
+    assert_eq!(apply(&mut cache, &doc, &diff).highlighted_lines, 1);
+}
+
+#[test]
+fn viewport_requests_defer_offscreen_blocks_and_share_lexing_between_formats() {
+    let mut text = "Intro\n\n```swift\nlet n = 1\n".to_string();
+    let mut document = Document::parse(&text);
+    let intro = document.blocks()[0].id;
+    let code = document.blocks()[1].id;
+    assert_eq!(document.blocks()[0].source_len, 5);
+    let Block::Code(block) = document.block(code).unwrap() else {
+        panic!("code")
+    };
+    assert_eq!(block.language.as_deref(), Some("swift"));
+    assert_eq!(block.line_count(), 1);
+    assert!(document.blocks()[1].source_len >= "```swift\nlet n = 1".len());
+
+    let mut cache = RenderCache::new(Terminal::new(80, Color::TrueColor));
+    assert!(cache.parts(code, Format::Html).is_none());
+    let work = cache.render_block(&document, intro, Format::Html);
+    assert_eq!(work.blocks.len(), 1);
+    assert_eq!(work.highlighted_lines, 0);
+    text.push_str("let m = 2\n");
+    cache.invalidate(&document.update(&text));
+    assert_eq!(
+        cache.render_block(&document, intro, Format::Html),
+        RenderDiff::default()
+    );
+    assert!(cache.parts(code, Format::Html).is_none());
+
+    let work = cache.render_block(&document, code, Format::Html);
+    assert_eq!((work.highlighted_lines, work.rendered_code_lines), (2, 2));
+    assert!(cache.parts(code, Format::Terminal).is_none());
+    text.push_str("let p = 3\n");
+    cache.invalidate(&document.update(&text));
+    assert!(cache.parts(code, Format::Html).is_none());
+    let work = cache.render_block(&document, code, Format::Html);
+    assert_eq!((work.highlighted_lines, work.rendered_code_lines), (1, 1));
+    assert!(!work.blocks[0].layout_changed);
+    assert_eq!(work.blocks[0].code[0].from_line, 2);
+    let work = cache.render_block(&document, code, Format::Terminal);
+    assert_eq!((work.highlighted_lines, work.rendered_code_lines), (0, 3));
 }

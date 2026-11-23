@@ -24,6 +24,8 @@ pub struct BlockId {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
     pub id: BlockId,
+    /// UTF-8 bytes covered by the original source span.
+    pub source_len: usize,
     pub block: Arc<Block>,
 }
 
@@ -62,6 +64,12 @@ pub struct CodeBlock {
     pub fenced: bool,
     pub language: Option<String>,
     pub text: String,
+}
+
+impl CodeBlock {
+    pub fn line_count(&self) -> usize {
+        self.text.lines().count()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,12 +121,16 @@ impl Document {
         &self.blocks
     }
 
-    pub fn block(&self, id: BlockId) -> Option<&Block> {
+    pub(crate) fn entry(&self, id: BlockId) -> Option<&Entry> {
         let at = self
             .blocks
             .binary_search_by_key(&id, |entry| entry.id)
             .ok()?;
-        Some(&self.blocks[at].block)
+        self.blocks.get(at)
+    }
+
+    pub fn block(&self, id: BlockId) -> Option<&Block> {
+        Some(&self.entry(id)?.block)
     }
 
     /// Reparse the message so constructs that refer across blocks can

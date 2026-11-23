@@ -24,6 +24,7 @@ pub(crate) fn document(text: &str) -> Vec<Entry> {
                     line: start.line,
                     column: start.column,
                 },
+                source_len: source.span(node.data().sourcepos).map_or(0, str::len),
                 block: Arc::new(source.block(node)?),
             })
         })

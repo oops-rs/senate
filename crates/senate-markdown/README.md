@@ -7,25 +7,29 @@ use senate_markdown::{Color, Document, Format, RenderCache, Terminal};
 
 let mut message = Document::parse("A **message**\n\n```rust\nlet n = 1;\n");
 let mut view = RenderCache::new(Terminal::new(80, Color::None));
-view.reset(&message);
+let visible = message.blocks()[1].id;
+view.render_block(&message, visible, Format::Html);
 
 let diff = message.update("A **message**\n\n```rust\nlet n = 1;\nlet m = 2;\n");
-let changes = view.apply(&message, &diff);
+view.invalidate(&diff);
+let changes = view.render_block(&message, visible, Format::Html);
 assert_eq!(changes.highlighted_lines, 1);
 
 let mut html = String::new();
-for entry in message.blocks() {
-    view.write_block(entry.id, Format::Html, &mut html);
-}
+view.render_document(&message, Format::Html, &mut html);
 ```
 
 ## Streaming
 
 Every top-level block has a source-position ID. Position lets a frontend replace a partially written paragraph when it becomes a table or heading. A replacement that shifts a position may remove and insert that block. `Document::update` reparses the full input and compares the normalized blocks so a late reference definition can change an earlier paragraph. Unchanged blocks retain their allocation and the diff lists only changes.
 
-Call `RenderCache::reset` for a fresh document or terminal configuration. Apply consecutive document diffs to the same cache. A block patch with `layout_changed` calls for replacing that block using `parts` or `write_block`. Code bodies are separate parts, including fences nested in lists or quotes. When the wrappers stay the same, use each patch's `from_line` to replace only the suffix of that code body. The cache keeps the previous lines and their output. An appended line uses carried syntax state. Growth of a partial last line revises that one line. Changes before the last line can re-lex that code block. `write_block` explicitly joins the cached output if a client needs a complete string.
+Parsing returns the tree. Each entry exposes its UTF-8 source length and block variant. Code blocks expose their language and line count. Use that metadata to decide what fits in a viewport before asking the renderer to do any work.
 
-Comrak runs with defaults disabled and the four GFM extensions above enabled. Syntect (MIT) uses the pure-Rust regex engine and the linked two-face 0.5.1 syntax pack. The supported fence labels cover Rust, Swift, TypeScript, TSX, JavaScript, JSX, Python, Go, C, C#, C++, Java, Kotlin, Ruby, Bash, JSON, YAML, TOML, HTML, CSS, SQL, Diff, Markdown, Dockerfile, Makefile, Lua, Perl, PHP, Scala and XML. JSX uses the pack's JSX-capable TypeScriptReact grammar. Unknown labels and individual lines above 16 KiB render as plain code. Use `RenderCache::with_highlight_limit` to skip highlighting on larger blocks or pass zero to defer all highlighting until a fresh reset with a highlighting cache.
+Keep one cache per document and terminal configuration. Call `invalidate` after each document diff and request the visible blocks with `render_block`. This renders only the requested format. A block that was never requested has no cache entry, and invalidation alone never renders a block. HTML and terminal share already-highlighted lines.
+
+A block patch with `layout_changed` calls for replacing that block using `parts` or `write_block`. Code bodies are separate parts, including fences nested in lists or quotes. When the wrappers stay the same, use each patch's `from_line` to replace only the suffix of that code body. Consecutive requests retain the syntax state and previous output. Growth of a partial last line revises that one line. Changes before the last line can re-lex that code block. Use `render_document` to render and concatenate all blocks for a given format.
+
+Comrak runs with defaults disabled and the four GFM extensions above enabled. Syntect (MIT) uses the pure-Rust regex engine and the linked two-face 0.5.1 syntax pack. The supported fence labels cover Rust, Swift, TypeScript, TSX, JavaScript, JSX, Python, Go, C, C#, C++, Java, Kotlin, Ruby, Bash, JSON, YAML, TOML, HTML, CSS, SQL, Diff, Markdown, Dockerfile, Makefile, Lua, Perl, PHP, Scala and XML. JSX uses the pack's JSX-capable TypeScriptReact grammar. Unknown labels and individual lines above 16 KiB render as plain code. Use `RenderCache::with_highlight_limit` to skip highlighting on larger blocks or pass zero to defer all highlighting until a later request with a highlighting cache.
 
 Two-face is dual licensed under MIT or Apache-2.0. The linked grammar data has separate licenses, including MIT for Swift, Dockerfile and TOML, and Apache-2.0 for Kotlin and TypeScript/TSX. The [bundled syntax notices](THIRD-PARTY-SYNTAX-NOTICES.md) cover the linked pack, including internal grammar dependencies. Carry the notice file and the dependency notices with binary distributions. The [upstream full acknowledgement list](https://github.com/CosmicHorrorDev/two-face/blob/v0.5.1/generated/acknowledgements_full.md) records the licenses of the individual assets.
 
