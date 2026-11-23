@@ -1,7 +1,7 @@
 # Default secretary — parked design (not implemented)
 
-Status: on hold at Wendell's request (thread 2092, seq 2097). Nothing built.
-Branch feat/default-secretary from 349356f8.
+Status: slices 1-3 built on feat/default-secretary (thread 2092): de0e1dcd,
+5e271864, e29c2241, 229e259a. Slice 4 (the app) is for `app`; see the end.
 
 ## Sources
 - Design: seq 2094. Chair's conditions: seq 2095. Wendell's answers: seq 2096.
@@ -36,3 +36,32 @@ Branch feat/default-secretary from 349356f8.
 2. `open_committee` presiding tool + authority tests (desk worker yes; chair or member no; ACTED_BY audit).
 3. CLI `secretary ask`, setup template, doctor, README, role brief file.
 4. App, after thread 2038 merges.
+
+## Slice 4, for `app`: what the core exposes
+
+Both are ordinary daemon IPC requests on the machine socket, in the same
+envelope as every other request the app sends (`{"op": ...}`).
+
+- `{"op":"default_secretary"}` → `DefaultSecretary`, changing nothing:
+  `{"committee":"office","alias":"secretary","senator":"claude-…"?,
+    "state":"not_recorded"|"running"|"paused"|"ended"|"stopped"|"elsewhere"}`.
+  Use it to draw the pinned "Secretary" row: its senator (when present) is the
+  session whose page to open; `stopped` means an ask will be refused.
+- `{"op":"ensure_secretary"}` → the same shape plus
+  `"action":"started"|"resumed"|"restored"|"already_running"`.
+  It may take as long as a spawn (use the spawn timeout, crate::host::REQUEST_TIMEOUT).
+  Refused (an error with the message to show) when the secretary was stopped
+  on purpose (the message names `senate session restore office::secretary`),
+  or when `office::secretary` is someone else's seat. The daemon refuses it
+  from inside a coding session's process tree; the app is not one.
+  The daemon publishes `WatchEvent::Sessions` after it, so the session list
+  updates on its own.
+- Speaking to it: what the session page's composer already sends to a
+  senator, as the person, on committee `office`, to the senator above (or
+  `senate secretary ask` sends a `request`). Call `ensure_secretary` first
+  when the row's state is not `running`.
+
+Proposed, not built: the row shows the state from `default_secretary`; the
+first send calls `ensure_secretary`, then the composer's usual send; a
+`stopped` secretary shows the restore command instead of a composer. Not in
+scope: a menu-bar "Ask the secretary…".
