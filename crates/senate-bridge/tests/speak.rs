@@ -1282,8 +1282,10 @@ async fn the_desktop_is_told_once_per_burst_and_says_who_and_the_first_line() {
     let root = h.server.append(
         NewEvent::new(committee(), Kind::Request, person("alice"), "do it").to(claude("alice")),
     );
-    h.server
-        .append(answer_to_alice(root.seq, "Plan is ready\nsecond line"));
+    h.server.append(answer_to_alice(
+        root.seq,
+        "Plan is ready for [senator::alice]\nsecond line",
+    ));
     eventually("one notification", WAIT, || {
         (!rec.posted().is_empty()).then_some(())
     })
@@ -1292,7 +1294,9 @@ async fn the_desktop_is_told_once_per_burst_and_says_who_and_the_first_line() {
         rec.posted(),
         [(
             "Senate · refund-v2".to_string(),
-            "[senator::claude] answered: Plan is ready".to_string()
+            // Named as the app names them, in the byline and the line:
+            // never a bracketed id.
+            "claude answered: Plan is ready for alice".to_string()
         )]
     );
     // A burst: several events within the window are one notification.
@@ -1312,7 +1316,7 @@ async fn the_desktop_is_told_once_per_burst_and_says_who_and_the_first_line() {
     assert_eq!(posted.len(), 2, "{posted:?}");
     assert_eq!(
         posted[1].1,
-        "3 new for you, the latest: [senator::claude] escalated this to you: three"
+        "3 new for you, the latest: claude escalated this to you: three"
     );
     // Not for the person: nothing.
     h.server.append(

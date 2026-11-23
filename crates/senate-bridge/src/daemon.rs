@@ -2019,17 +2019,22 @@ impl Shared {
             }
         }
         if let Some(notifications) = &self.notifications {
-            let by = crate::person::byline(&event.from, event.on_behalf_of.as_ref());
-            let verb = crate::person::did(&event.kind, attention.escalated, self.locale);
-            let line = format::one_line(attention.text.lines().next().unwrap_or_default().trim());
-            let sep = self.locale.pick("：", ": ");
+            // Named as the app names them: aliases as last read, else the
+            // short form; never a bracketed id.
+            let aliases = lock(&self.display_aliases).as_ref().map(|(_, a)| a.clone());
+            let locale = self.locale;
+            let line = crate::person::notification_line(
+                &event.from,
+                event.on_behalf_of.as_ref(),
+                &event.kind,
+                attention.escalated,
+                &attention.text,
+                locale,
+                |m| crate::person::shown(m, Some(&event.committee), aliases.as_ref(), locale),
+            );
             notifications.push(News {
                 committee: event.committee.clone(),
-                line: if line.is_empty() {
-                    format!("{by} {verb}")
-                } else {
-                    format!("{by} {verb}{sep}{line}")
-                },
+                line,
             });
         }
         self.publish(WatchEvent::ForPerson {

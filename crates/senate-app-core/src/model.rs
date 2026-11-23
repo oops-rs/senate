@@ -310,19 +310,22 @@ impl Model {
                 escalated,
                 text,
             } => {
-                let by = senate_bridge::person::byline(&news.from, news.on_behalf_of.as_ref());
-                let verb = senate_bridge::person::did(&news.kind, escalated, self.locale);
-                let line = text.lines().next().unwrap_or_default().trim().to_string();
-                let sep = self.locale.pick("：", ": ");
+                // Named as everywhere in the app: never a bracketed id.
+                let names = crate::names::current();
+                let body = senate_bridge::person::notification_line(
+                    &news.from,
+                    news.on_behalf_of.as_ref(),
+                    &news.kind,
+                    escalated,
+                    &text,
+                    self.locale,
+                    |m| names.display(m, Some(&news.committee)),
+                );
                 fx.notices.push(Notice::ForPerson {
                     committee: news.committee.clone(),
                     thread: news.thread.unwrap_or(news.seq),
                     title: format!("Senate · {}", news.committee),
-                    body: if line.is_empty() {
-                        format!("{by} {verb}")
-                    } else {
-                        format!("{by} {verb}{sep}{line}")
-                    },
+                    body,
                 });
                 fx.refresh.push(Refresh::AllInboxes);
             }
@@ -1242,16 +1245,27 @@ mod tests {
 
     #[test]
     fn something_for_the_person_is_a_notice_in_the_apps_language_and_a_refresh() {
+        // Named as the app names them everywhere: the short form of an
+        // agent without an alias, in the byline and in the quoted line;
+        // never a bracketed id.
+        let agy = "agy-36358e84-ac54-409e-beb4-9b57f93310e0";
+        let text = format!("Idempotency-Key, as [senator::{agy}] said\nmore");
         for (locale, body) in [
-            (Locale::En, "[senator::claude] answered: Idempotency-Key"),
-            (Locale::Zh, "[senator::claude] 回答了：Idempotency-Key"),
+            (
+                Locale::En,
+                "agy-36358e84 answered: Idempotency-Key, as agy-36358e84 said",
+            ),
+            (
+                Locale::Zh,
+                "agy-36358e84 回答了：Idempotency-Key, as agy-36358e84 said",
+            ),
         ] {
             let mut m = Model::new(locale);
             let event = senate_core::NewEvent::new(
                 committee("a"),
                 Kind::Answer,
-                Address::senator(&path("claude")),
-                "Idempotency-Key\nmore",
+                Address::senator(&path(agy)),
+                &text,
             )
             .to(Address::senior(&Name::new("alice").unwrap()))
             .in_thread(Seq(3))
@@ -1259,7 +1273,7 @@ mod tests {
             let fx = m.apply(WatchEvent::ForPerson {
                 news: Box::new(event),
                 escalated: false,
-                text: "Idempotency-Key\nmore".into(),
+                text: text.clone(),
             });
             assert_eq!(
                 fx.notices,

@@ -59,17 +59,21 @@ impl Names {
     /// How `mention` is shown on `committee` (`None`: no committee in
     /// view, so an alias counts when the agent has only one).
     pub fn display(&self, mention: &Mention, committee: Option<&CommitteeId>) -> String {
-        let l = self.locale;
         match mention {
-            Mention::Senator(p) => self.senator(p, committee),
-            Mention::AnyAgent => l.pick("任一代理", "any agent").to_string(),
-            Mention::Speaker => "Speaker".to_string(),
-            Mention::SpeakerFor(p) => role(l, &self.senator(p, committee), "Speaker"),
-            Mention::Chair => l.pick("主席", "chair").to_string(),
-            Mention::Committee => l.pick("委员会", "committee").to_string(),
-            Mention::Guest(g) => g.to_string(),
-            Mention::Locator(loc) => self.locator(loc),
+            // A seat in a child Senate: the alias it declares, which only
+            // the app knows.
+            Mention::Locator(loc) if loc.senate().is_some() => self.locator(loc),
+            // Everything else as the daemon's notifications name it too.
+            _ => {
+                senate_bridge::person::shown(mention, committee, self.aliases.as_ref(), self.locale)
+            }
         }
+    }
+
+    /// `text` with every mention in it as people are shown it on
+    /// `committee`: what a notification, which shows plain text, says.
+    pub fn plain(&self, text: &str, committee: Option<&CommitteeId>) -> String {
+        senate_bridge::person::plain(text, |m| self.display(m, committee))
     }
 
     fn senator(&self, p: &SenatorName, committee: Option<&CommitteeId>) -> String {

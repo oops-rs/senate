@@ -19,6 +19,102 @@ pub fn byline(from: &Address, on_behalf_of: Option<&Address>) -> String {
         .unwrap_or_else(|| format::mention(from))
 }
 
+/// How people are shown a mention, as the app shows it everywhere (its
+/// README, "Names"): an agent by its alias on `committee`, else its
+/// runtime and the first eight hex digits of its id (`agy-36358e84`); a
+/// person by their name; `copilot (Speaker)`; never brackets, `senator::`
+/// or a whole id. `aliases` is what is known of the Senate's aliases;
+/// without them, the short form. A seat in another Senate is its short
+/// name with that Senate's name (the app knows the alias a child declares,
+/// and says that instead).
+pub fn shown(
+    mention: &Mention,
+    committee: Option<&senate_core::CommitteeId>,
+    aliases: Option<&senate_core::alias::KnownAliases>,
+    locale: Locale,
+) -> String {
+    let senator = |p: &senate_core::SenatorName, c: Option<&senate_core::CommitteeId>| {
+        senate_core::alias::display_name(aliases, c, p)
+    };
+    match mention {
+        Mention::Senator(p) => senator(p, committee),
+        Mention::AnyAgent => locale.pick("任一代理", "any agent").to_string(),
+        Mention::Speaker => "Speaker".to_string(),
+        Mention::SpeakerFor(p) => role(locale, &senator(p, committee), "Speaker"),
+        Mention::Chair => locale.pick("主席", "chair").to_string(),
+        Mention::Committee => locale.pick("委员会", "committee").to_string(),
+        Mention::Guest(g) => g.to_string(),
+        Mention::Locator(loc) => {
+            let c = loc.committee();
+            match (Mention::of(loc.address()), loc.senate()) {
+                (Some(Mention::Senator(p)), Some(senate)) => role(
+                    locale,
+                    &senate_core::alias::short_name(&p),
+                    senate.name().as_str(),
+                ),
+                (Some(Mention::Senator(p)), None) => {
+                    let name = senator(&p, c);
+                    c.map_or(name.clone(), |c| role(locale, &name, c.as_str()))
+                }
+                (Some(other), _) => {
+                    let name = shown(&other, c, aliases, locale);
+                    c.map_or(name.clone(), |c| role(locale, &name, c.as_str()))
+                }
+                (None, _) => loc.to_string(),
+            }
+        }
+    }
+}
+
+/// `name (what)` / `name（what）`.
+pub fn role(locale: Locale, name: &str, what: &str) -> String {
+    match locale {
+        Locale::Zh => format!("{name}（{what}）"),
+        Locale::En => format!("{name} ({what})"),
+    }
+}
+
+/// `text` with every bracketed mention in it written as people are shown
+/// it (`name`: [`shown`], or the app's own resolution). Brackets that
+/// hold anything else (`[1]`, `[draft]`) stay.
+pub fn plain(text: &str, name: impl Fn(&Mention) -> String) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    for found in Mention::scan(text) {
+        out.push_str(&text[at..found.range.start]);
+        out.push_str(&name(&found.mention));
+        at = found.range.end;
+    }
+    out.push_str(&text[at..]);
+    out
+}
+
+/// What a desktop notification says about an event addressed to the
+/// person: who, what they did, and its first line, every mention named
+/// by `name` (`agy-36358e84 sent you a request: …`). The daemon's
+/// notifier and the app say it the same way.
+pub fn notification_line(
+    from: &Address,
+    on_behalf_of: Option<&Address>,
+    kind: &Kind,
+    escalated: bool,
+    text: &str,
+    locale: Locale,
+    name: impl Fn(&Mention) -> String,
+) -> String {
+    let by = plain(&byline(from, on_behalf_of), &name);
+    let verb = did(kind, escalated, locale);
+    let line = plain(
+        &format::one_line(text.lines().next().unwrap_or_default().trim()),
+        &name,
+    );
+    if line.is_empty() {
+        format!("{by} {verb}")
+    } else {
+        format!("{by} {verb}{}{line}", locale.pick("：", ": "))
+    }
+}
+
 /// What the writer did, in a clause that follows their byline.
 pub fn did(kind: &Kind, escalated: bool, locale: Locale) -> &'static str {
     if escalated {
@@ -316,4 +412,117 @@ pub fn render_watch_closed(locale: Locale) -> &'static str {
         "守护进程关闭了连接；重新运行 `senate inbox --follow`。",
         "the daemon closed the connection; run `senate inbox --follow` again.",
     )
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use senate_core::alias::{CommitteeAliases, KnownAliases};
+    use senate_core::{CommitteeId, SenatorName};
+
+    const AGY: &str = "agy-36358e84-ac54-409e-beb4-9b57f93310e0";
+
+    fn c(name: &str) -> CommitteeId {
+        CommitteeId::new(name).unwrap()
+    }
+
+    fn senator(name: &str) -> Address {
+        Address::senator(&name.parse::<SenatorName>().unwrap())
+    }
+
+    /// `ledger` is an alias of a Codex session on `payments`.
+    fn aliases() -> KnownAliases {
+        let mut t = CommitteeAliases::new();
+        t.set(
+            &c("payments"),
+            "ledger".parse().unwrap(),
+            "codex-01a206b8-8ed9-7a73-934c-f967b877774a"
+                .parse()
+                .unwrap(),
+        )
+        .unwrap();
+        KnownAliases::Scoped(t)
+    }
+
+    fn line(
+        from: &Address,
+        kind: Kind,
+        text: &str,
+        committee: &str,
+        aliases: Option<&KnownAliases>,
+    ) -> String {
+        let committee = c(committee);
+        notification_line(from, None, &kind, false, text, Locale::En, |m| {
+            shown(m, Some(&committee), aliases, Locale::En)
+        })
+    }
+
+    #[test]
+    fn wendells_two_notifications_name_the_agent_by_its_short_form() {
+        // As seen on 0.10.0 (before): the whole id, bracketed, in the
+        // byline and in the quoted line.
+        let request = format!("From `ibot::chair` ([senator::{AGY}]): please review the dial plan");
+        assert_eq!(
+            line(&senator(AGY), Kind::Request, &request, "ibot", None),
+            "agy-36358e84 sent you a request: From `ibot::chair` (agy-36358e84): please review the dial plan"
+        );
+        assert_eq!(
+            line(
+                &senator(AGY),
+                Kind::Question,
+                "(Re-sending from `ibot` thread 99 because `dial::chair` is currently not seated.)",
+                "ibot",
+                None,
+            ),
+            "agy-36358e84 asked you: (Re-sending from `ibot` thread 99 because `dial::chair` is currently not seated.)"
+        );
+    }
+
+    #[test]
+    fn an_agent_with_an_alias_a_person_and_the_speaker() {
+        let a = aliases();
+        let ledger = senator("codex-01a206b8-8ed9-7a73-934c-f967b877774a");
+        // With its alias on the committee in view.
+        assert_eq!(
+            line(&ledger, Kind::Answer, "done", "payments", Some(&a)),
+            "ledger answered: done"
+        );
+        // On another committee, where it has none: the short form.
+        assert_eq!(
+            line(&ledger, Kind::Answer, "done", "docs", Some(&a)),
+            "codex-01a206b8 answered: done"
+        );
+        // A person by their name.
+        assert_eq!(
+            line(
+                &senator("alice"),
+                Kind::Note,
+                "hi [senator::bob]",
+                "docs",
+                None
+            ),
+            "alice left a note: hi bob"
+        );
+        // The Speaker, and the Speaker speaking for an agent.
+        let speaker = Address::Speaker;
+        assert_eq!(
+            line(&speaker, Kind::Question, "", "docs", None),
+            "Speaker asked you"
+        );
+        assert_eq!(
+            shown(
+                &Mention::SpeakerFor("copilot".parse().unwrap()),
+                None,
+                None,
+                Locale::En
+            ),
+            "copilot (Speaker)"
+        );
+        // Brackets that are not a mention stay.
+        assert_eq!(
+            plain("see [1] and [draft]", |_| "x".into()),
+            "see [1] and [draft]"
+        );
+    }
 }

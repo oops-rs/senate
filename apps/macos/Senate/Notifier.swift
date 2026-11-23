@@ -150,7 +150,7 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
 
     func promptWaiting(_ session: HostedSession) {
         let content = UNMutableNotificationContent()
-        content.title = L("notify.prompt", session.label)
+        content.title = L("notify.prompt", session.displayName)
         content.body = session.promptTool ?? L("notify.prompt_body")
         content.sound = .default
         content.categoryIdentifier = Category.prompt
