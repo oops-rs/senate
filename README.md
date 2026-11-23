@@ -636,6 +636,39 @@ inside a coding session's process tree, so an agent cannot approve its own
 prompts or another's. That check walks the caller's ancestors and is defence
 in depth: a process that detached from its agent escapes it.
 
+### The Default Secretary
+
+Each machine has one default secretary: a coding agent on the Speaker's
+desk, `office::secretary`, working in a directory Senate owns
+(`$SENATE_HOME/secretary`). Ask it for Senate work in plain words:
+
+```sh
+senate secretary ask 'Open a committee for the refund bug in ~/dev/shop, chair main'
+senate secretary ask 'Carry the logging change to ~/dev/api and ~/dev/web'
+senate thread 12 --committee office   # its answer
+```
+
+The first `ask` starts it, with `[local] secretary_profile` (a launch
+profile) when set, else the first of Claude Code, Codex and agy configured
+on this machine at its default model. Until then it costs nothing. A paused
+secretary is resumed and one whose terminal ended is restored by the next
+`ask`; one stopped on purpose (`senate session stop`) is not, and `ask`
+says to run `senate session restore office::secretary`. Pause it like any
+session: `senate session pause office::secretary`. Only you start it:
+`ask` from inside a coding session is refused, and an agent's item on the
+desk waits rather than starting it. Once running, it works the desk like
+any desk worker.
+
+Asked to carry work across projects, it opens one committee per project
+with its `open_committee` tool, starting each chair in the directory you
+named with a self-contained brief, records a work item per committee
+(`senate secretary work list`), tells you their names, and follows up
+through the chairs. The committees and sessions it starts are ordinary
+ones, in `senate committees` and `senate session list`. Opening a committee
+is the one thing it may do that the Speaker's office could not do before;
+it starts chairs and members as `spawn` does, and only at your request.
+`senate setup doctor` shows its state.
+
 ### Where Each Command Lives
 
 The top level is the daily loop: `status` (a bare `senate` runs it), `inbox`
@@ -646,7 +679,7 @@ The top level is the daily loop: `status` (a bare `senate` runs it), `inbox`
 | :--- | :--- |
 | `senate session` | `list` · `watch` · `approve` · `stop` · `restore` · `pause` · `resume` · `replace` · `prune` |
 | `senate senator` | `list` · `alias` · `unalias` · `seat` · `unseat` · `duty` |
-| `senate secretary` | `list` · `appoint` · `dismiss` · `work list\|show\|create\|assign` (the secretary team) · `desk` · `desk set` (the Speaker's desk workers, in order) |
+| `senate secretary` | `ask` (your default secretary) · `list` · `appoint` · `dismiss` · `work list\|show\|create\|assign` (the secretary team) · `desk` · `desk set` (the Speaker's desk workers, in order) |
 | `senate chat` | `send` · `thread` (simulated chat; see [Testing](#-testing--verification)) |
 | `senate setup` | `init` · `install` · `completions <zsh\|bash\|fish>` · `service install\|uninstall\|status` · `doctor` · `clean` |
 
@@ -847,6 +880,7 @@ Running `senate setup install --yes` registers these tools into your agent runti
 - `speaker_docket`: Inspect picks, committee crossings, and unattended agent questions.
 - `speaker_route`, `speaker_cover`, `speaker_escalate`: Re-route queries, provide checkpoint answers for absent agents, or escalate to human principals.
 - `speaker_forward`, `speaker_refuse`: Forward committee crossings or reject out-of-boundary requests.
+- `open_committee`: At the person's request, open a committee for a project directory and start its chair there in one step. A committee the office did not open is refused (use `spawn`); calling again after the chair failed to start finishes it without opening twice, and never replaces a chair.
 - `chair_docket`, `chair_route`, `chair_cover`: Coordinate single-committee agent queues.
 
 ---

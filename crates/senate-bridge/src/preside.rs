@@ -127,13 +127,15 @@ pub fn orientation_as(
         Locale::Zh => {
             " 别的委员会的 agent 发来、要去另一个委员会的消息（标有「原本发给」），用 \
              mcp__senate__speaker_forward 转过去，或 mcp__senate__speaker_refuse 说明理由退回；\
-             mcp__senate__speaker_chair 可以指定委员会主席（chair）。你代表 Speaker 办公室写的每件事都会记下是你做的。"
+             mcp__senate__speaker_chair 可以指定委员会主席（chair）；你的用户要求时，mcp__senate__open_committee \
+             为一个项目开设委员会并启动它的主席。你代表 Speaker 办公室写的每件事都会记下是你做的。"
         }
         Locale::En => {
             " A message an agent meant for another committee (marked \"meant for\") is \
              passed on with mcp__senate__speaker_forward or sent back with a reason with \
-             mcp__senate__speaker_refuse; mcp__senate__speaker_chair names a committee's chair. \
-             Everything you write for the Speaker's office records that you acted."
+             mcp__senate__speaker_refuse; mcp__senate__speaker_chair names a committee's chair; \
+             at your user's request, mcp__senate__open_committee opens a committee for a project and \
+             starts its chair. Everything you write for the Speaker's office records that you acted."
         }
     };
     let senate = senate_words(senate, locale);
