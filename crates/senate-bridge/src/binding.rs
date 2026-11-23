@@ -1033,6 +1033,7 @@ pub fn free(
             }
         };
         let mut doomed: Vec<String> = Vec::new();
+        let paused: BTreeSet<_> = store.all_paused()?.into_iter().map(|p| p.agent).collect();
         for s in store.all_sessions()? {
             let ended = matches!(
                 s.state,
@@ -1042,7 +1043,7 @@ pub fn free(
                 s.claude_pid.is_some_and(|p| !session::pid_alive(p)) && s.last_seen < dead_before;
             if ended || dead {
                 if let Some(id) = store.session_host(&s.session_id)?
-                    && crate::host::running(paths, &id)?
+                    && (paused.contains(&s.agent) || crate::host::running(paths, &id)?)
                 {
                     continue;
                 }

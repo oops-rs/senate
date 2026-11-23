@@ -4571,10 +4571,10 @@ async fn pause_waits_for_the_checkpoint_and_resume_points_at_it() {
     let row = reply.rows.iter().find(|r| r.primary == senator).unwrap();
     assert_eq!(row.state, ipc::HostState::Stopped);
     assert!(row.paused, "{row:?}");
-    let (ok, listed) = senate(h, &["session", "list"]).await;
-    assert!(ok && !listed.contains("paused"), "{listed}");
-    let (ok, listed) = senate(h, &["session", "list", "--all"]).await;
-    assert!(ok && listed.contains("paused"), "{listed}");
+    for args in [&["session", "list"][..], &["session", "list", "--all"]] {
+        let (ok, listed) = senate(h, args).await;
+        assert!(ok && listed.contains("paused"), "{listed}");
+    }
     let events = h.server.events("refund-v2");
     assert!(
         events
@@ -4675,6 +4675,149 @@ async fn pause_waits_for_the_checkpoint_and_resume_points_at_it() {
     )
     .unwrap();
     drop(fixture);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn paused_claude_and_agy_remain_on_the_hosted_roster() {
+    let (mut h, project, _) = fixture_daemon(3).await;
+    let agy = agy_fixture(h.dir.path(), "3f2b8c1e-6d4a-4e7b-9c0d-1a2b3c4d5e6f");
+    let config = h.paths.config();
+    let claude_config = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(&config, format!("{claude_config}\n[agy]\nbin = {agy:?}\n")).unwrap();
+    for (runtime, alias) in [
+        (HostedRuntime::Claude, "dev"),
+        (HostedRuntime::Agy, "docs"),
+        (HostedRuntime::Claude, "ended"),
+    ] {
+        let _: SpawnReply = call(
+            &h,
+            &Request::Spawn {
+                attempt_id: None,
+                session: Default::default(),
+                runtime: Some(runtime),
+                profile: None,
+                committee: committee(),
+                alias: Some(path(alias)),
+                cwd: project.clone(),
+                chair: false,
+                secretary: false,
+                prompt: None,
+                model: Default::default(),
+            },
+        )
+        .await;
+    }
+    let (ok, out) = senate(&h, &["session", "stop", "ended", "--force"]).await;
+    assert!(ok, "{out}");
+    let (ok, out) = senate(
+        &h,
+        &[
+            "session",
+            "pause",
+            "refund-v2::dev",
+            "refund-v2::docs",
+            "--timeout",
+            "1",
+        ],
+    )
+    .await;
+    assert!(ok, "{out}");
+
+    let reply: ipc::SessionsReply = call(&h, &Request::Sessions).await;
+    let mut paused_ids = Vec::new();
+    for (alias, runtime) in [
+        ("dev", senate_bridge::session::Runtime::Claude),
+        ("docs", senate_bridge::session::Runtime::Agy),
+    ] {
+        let row = reply
+            .rows
+            .iter()
+            .find(|r| r.alias.as_ref() == Some(&path(alias)))
+            .unwrap();
+        assert_eq!(row.runtime, runtime);
+        assert_eq!(row.state, ipc::HostState::Stopped);
+        assert!(row.paused, "{row:?}");
+        paused_ids.push(row.session_id.clone());
+    }
+    for all in [true, false] {
+        let mut args = vec!["session", "list"];
+        if all {
+            args.push("--all");
+        }
+        let (ok, listed) = senate(&h, &args).await;
+        assert!(ok, "{listed}");
+        for alias in ["dev", "docs"] {
+            assert!(
+                listed
+                    .lines()
+                    .any(|line| line.split_whitespace().next() == Some(alias)
+                        && line.split_whitespace().any(|word| word == "paused")),
+                "{alias} missing or not paused in {args:?}: {listed}"
+            );
+        }
+        assert_eq!(
+            listed
+                .lines()
+                .any(|line| line.split_whitespace().next() == Some("ended")),
+            all,
+            "{listed}"
+        );
+    }
+    let roster: Vec<ipc::RosterCommittee> = call(&h, &Request::Roster).await;
+    let row = roster
+        .iter()
+        .find(|row| row.committee == committee())
+        .unwrap();
+    let active: Vec<_> = row
+        .members
+        .iter()
+        .filter(|m| m.active)
+        .map(|m| m.display_name.as_str())
+        .collect();
+    assert_eq!(active.len(), 2, "{roster:?}");
+    assert!(
+        active.contains(&"dev") && active.contains(&"docs"),
+        "{roster:?}"
+    );
+
+    // Cleanup can remove the stopped row but must keep both resumable sessions.
+    let store = h.store();
+    assert_eq!(store.delete_sessions(&paused_ids, &h.paths).unwrap(), 0);
+    store.prune(Duration::ZERO, &h.paths).unwrap();
+    let reply: ipc::SessionsReply = call(&h, &Request::Sessions).await;
+    assert_eq!(reply.rows.len(), 2, "{reply:?}");
+    assert!(reply.rows.iter().all(|row| row.paused), "{reply:?}");
+
+    let original = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(&config, format!("locale = \"zh\"\n{original}")).unwrap();
+    let (ok, listed) = senate(&h, &["session", "list"]).await;
+    assert!(ok, "{listed}");
+    assert_eq!(listed.matches("已暂停").count(), 2, "{listed}");
+
+    let mut cmd = tokio::process::Command::new(BIN);
+    testenv::isolate_async(&mut cmd, h.dir.path());
+    cmd.args(["session", "watch"])
+        .env("SENATE_HOME", h.paths.home())
+        .kill_on_drop(true);
+    let (pty, pts) = pty_process::open().unwrap();
+    pty.resize(pty_process::Size::new(24, 120)).unwrap();
+    let mut child = pty_process::Command::from(cmd).spawn(pts).unwrap();
+    let (mut output, mut input) = pty.into_split();
+    wait_for_screen(&mut output, 24, 120, |screen| {
+        screen.contains("refund-v2::dev · claude")
+            && screen.contains("refund-v2::docs · agy")
+            && screen.matches("已暂停").count() == 2
+    })
+    .await;
+    input.write_all(b"q").await.unwrap();
+    assert!(
+        tokio::time::timeout(TIMEOUT, child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+    h.stop().await;
 }
 
 /// A session typed into lately is skipped unless `--force`; `--dry-run`

@@ -3843,6 +3843,7 @@ impl Engine {
                         seat.presence
                     },
                     false,
+                    seat.paused,
                 )
             });
         }

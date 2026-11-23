@@ -607,8 +607,8 @@ struct Viewer {
 }
 
 impl Viewer {
-    /// Keep the tiles of the sessions still there, open the new ones, in
-    /// the order listed. The focus stays on its session when it can.
+    /// Keep tiles whose source is still the same, in the order listed.
+    /// The focus stays on its session when it can.
     fn list(&mut self, sessions: Vec<Session>) {
         let focused = self.tiles.get(self.focus).map(|t| t.session.key.clone());
         let mut known: BTreeMap<String, Tile> = std::mem::take(&mut self.tiles)
@@ -617,11 +617,13 @@ impl Viewer {
             .collect();
         for session in sessions {
             let tile = match known.remove(&session.key) {
-                Some(mut tile) => {
+                Some(mut tile)
+                    if tile.session.tty == session.tty && tile.session.dim == session.dim =>
+                {
                     tile.session = session;
                     tile
                 }
-                None => Tile::open(session, self.changed.clone(), self.mode == Mode::Grid),
+                _ => Tile::open(session, self.changed.clone(), self.mode == Mode::Grid),
             };
             self.tiles.push(tile);
         }
@@ -1249,6 +1251,31 @@ mod tests {
             dim: false,
             attached: false,
         }
+    }
+
+    #[tokio::test]
+    async fn a_tile_reopens_its_source_when_paused_or_resumed() {
+        let mut viewer = Viewer {
+            mode: Mode::Grid,
+            tiles: Vec::new(),
+            focus: 0,
+            changed: Arc::new(Notify::new()),
+        };
+        let mut session = viewer_session("north");
+        viewer.list(vec![session.clone()]);
+        let running = viewer.tiles[0].shown.clone();
+
+        session.dim = true;
+        viewer.list(vec![session.clone()]);
+        let paused = viewer.tiles[0].shown.clone();
+        assert!(!Arc::ptr_eq(&running, &paused));
+        viewer.list(vec![session.clone()]);
+        assert!(Arc::ptr_eq(&viewer.tiles[0].shown, &paused));
+
+        session.dim = false;
+        session.tty = PathBuf::from("/nowhere/resumed/tty");
+        viewer.list(vec![session]);
+        assert!(!Arc::ptr_eq(&viewer.tiles[0].shown, &paused));
     }
 
     #[test]

@@ -287,10 +287,10 @@ pub enum PresenceState {
     Reassigned,
 }
 
-/// A seat belongs in the current roster while the server reports it online
-/// or a local hosted process is running.
-pub fn roster_active(presence: Option<PresenceState>, hosted_running: bool) -> bool {
-    hosted_running || presence == Some(PresenceState::Online)
+/// A seat belongs in the current roster if it is online, its local host
+/// is running, or it is paused and can be resumed.
+pub fn roster_active(presence: Option<PresenceState>, hosted_running: bool, paused: bool) -> bool {
+    paused || hosted_running || presence == Some(PresenceState::Online)
 }
 
 impl PresenceState {
@@ -594,10 +594,14 @@ mod tests {
     /// below, still parses a paused presence as plain `absent`; and a
     /// presence written before the flag parses as not paused.
     #[test]
-    fn roster_activity_comes_from_presence_or_a_running_host() {
-        assert!(roster_active(Some(PresenceState::Online), false));
-        assert!(roster_active(None, true));
-        assert!(roster_active(Some(PresenceState::Disconnected), true));
+    fn roster_activity_comes_from_presence_a_running_host_or_a_pause() {
+        assert!(roster_active(Some(PresenceState::Online), false, false));
+        assert!(roster_active(None, true, false));
+        assert!(roster_active(
+            Some(PresenceState::Disconnected),
+            true,
+            false
+        ));
         for inactive in [
             None,
             Some(PresenceState::Disconnected),
@@ -605,7 +609,8 @@ mod tests {
             Some(PresenceState::TakenOver),
             Some(PresenceState::Reassigned),
         ] {
-            assert!(!roster_active(inactive, false));
+            assert!(!roster_active(inactive, false, false));
+            assert!(roster_active(inactive, false, true));
         }
     }
 

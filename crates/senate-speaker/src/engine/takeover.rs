@@ -123,7 +123,7 @@ impl Engine {
             agents.retain(|agent| {
                 presence.iter().any(|p| {
                     p.agent == *agent
-                        && senate_core::continuity::roster_active(Some(p.state), false)
+                        && senate_core::continuity::roster_active(Some(p.state), false, p.paused)
                 })
             });
         }

@@ -1863,7 +1863,8 @@ impl Store {
         let hosted = {
             let mut query = tx.prepare(
                 "SELECT session_id, host_id FROM sessions
-                 WHERE host_id IS NOT NULL AND state IN ('ended', 'stale') AND last_seen < ?1",
+                 WHERE host_id IS NOT NULL AND state IN ('ended', 'stale') AND last_seen < ?1
+                   AND agent NOT IN (SELECT agent FROM hosted_paused)",
             )?;
             let rows = query.query_map([cutoff], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)))
@@ -1929,7 +1930,15 @@ impl Store {
             {
                 continue;
             }
-            gone += tx.execute("DELETE FROM sessions WHERE session_id = ?1", [id])?;
+            let removed = tx.execute(
+                "DELETE FROM sessions WHERE session_id = ?1
+                   AND (host_id IS NULL OR agent NOT IN (SELECT agent FROM hosted_paused))",
+                [id],
+            )?;
+            if removed == 0 {
+                continue;
+            }
+            gone += removed;
             tx.execute("DELETE FROM session_ancestors WHERE session_id = ?1", [id])?;
             tx.execute(
                 "DELETE FROM hosted_native_seats WHERE session_id = ?1",

@@ -578,7 +578,7 @@ impl SessionRow {
     }
 
     pub fn is_active(&self) -> bool {
-        senate_core::continuity::roster_active(None, self.is_running())
+        senate_core::continuity::roster_active(None, self.is_running(), self.paused)
     }
 
     pub fn is_running(&self) -> bool {
@@ -2034,7 +2034,7 @@ impl CommitteeStatus {
     pub fn is_active(&self) -> bool {
         let presence = matches!(self.stream, Some(StreamState::Connected { .. }))
             .then_some(senate_core::PresenceState::Online);
-        senate_core::continuity::roster_active(presence, self.sessions > 0)
+        senate_core::continuity::roster_active(presence, self.sessions > 0, false)
     }
 }
 

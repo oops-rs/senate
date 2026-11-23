@@ -1258,22 +1258,24 @@ fn settings_here() -> (Paths, Settings) {
     (paths, settings)
 }
 
-/// The hosted sessions of this machine whose terminal host is running, as
+/// The hosted sessions of this machine, as
 /// `senate session watch` shows them: `senate session list`' rows, each named as
 /// a command takes it.
 async fn hosted_sessions(
     paths: &Paths,
     all: bool,
     verbose: bool,
+    locale: Locale,
 ) -> anyhow::Result<Vec<crate::host::view::Session>> {
     let reply: crate::ipc::SessionsReply = daemon_call(paths, &Request::Sessions).await?;
-    Ok(watch_tiles(reply.rows, all, verbose))
+    Ok(watch_tiles(reply.rows, all, verbose, locale))
 }
 
 fn watch_tiles(
     mut rows: Vec<crate::ipc::SessionRow>,
     all: bool,
     verbose: bool,
+    locale: Locale,
 ) -> Vec<crate::host::view::Session> {
     // Only a running host can be watched; a paused one is shown greyed
     // out. Group by committee and put its chair first, keeping the daemon
@@ -1298,7 +1300,7 @@ fn watch_tiles(
                 row.runtime.as_str(),
                 row.model.label(),
                 if row.paused {
-                    "paused"
+                    locale.pick("已暂停", "paused")
                 } else {
                     row.state.as_str()
                 }
@@ -1339,6 +1341,7 @@ fn watch_tiles_group_each_committee_with_its_chair_first() {
         ],
         false,
         false,
+        Locale::En,
     );
     let labels: Vec<_> = tiles.iter().map(|tile| tile.alias.as_str()).collect();
     assert_eq!(
@@ -1980,6 +1983,7 @@ fn drop_idle_seats(docket: &mut DocketReply) -> usize {
                     seat.presence
                 },
                 false,
+                seat.paused,
             )
         });
         idle += before - page.seats.len();
@@ -2988,9 +2992,10 @@ fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
         }
         SessionCmd::Watch { all } => {
             let paths = Paths::from_env()?;
+            let locale = BridgeConfig::locale_at(&paths.config());
             runtime(false)?.block_on(crate::host::view::watch_all(&paths, all, || {
                 let paths = paths.clone();
-                Box::pin(async move { hosted_sessions(&paths, all, output.verbose).await })
+                Box::pin(async move { hosted_sessions(&paths, all, output.verbose, locale).await })
             }))
         }
         SessionCmd::Stop {

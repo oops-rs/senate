@@ -71,6 +71,7 @@ impl StatusView {
             senate_core::continuity::roster_active(
                 presence,
                 self.hosted.contains_key(&s.session_id),
+                self.paused.contains(&s.agent),
             )
         });
         self.committees.retain(|c| {

@@ -10,8 +10,9 @@ impl Shared {
         let (me, aliases) =
             tokio::try_join!(self.api.me(), self.api.aliases()).map_err(server_error)?;
         let local = self.on_status()?;
+        let paused = self.store.all_paused().map_err(internal)?;
         futures::stream::iter(me.committees)
-            .map(|committee| self.roster_committee(committee, &aliases, &local))
+            .map(|committee| self.roster_committee(committee, &aliases, &local, &paused))
             .buffered(8)
             .try_collect()
             .await
@@ -22,6 +23,7 @@ impl Shared {
         committee: CommitteeId,
         aliases: &KnownAliases,
         local: &StatusReply,
+        paused: &[crate::state::Paused],
     ) -> Result<RosterCommittee, IpcError> {
         let selector = SessionSelector::default();
         let (chair, presence) =
@@ -42,8 +44,11 @@ impl Shared {
             .threads
             .len();
         let mut members = BTreeMap::new();
+        let mut chair_live = false;
         for p in presence.agents {
-            members.insert(p.agent, roster_active(Some(p.state), false));
+            let live = p.state == senate_core::PresenceState::Online;
+            chair_live |= live && chair.as_ref() == Some(&p.agent);
+            members.insert(p.agent, roster_active(Some(p.state), false, p.paused));
         }
         for agent in presence.duties.into_keys() {
             members.entry(agent).or_insert(false);
@@ -54,18 +59,19 @@ impl Shared {
             .filter(|s| s.committee() == Some(&committee))
         {
             let running = local.hosted.contains_key(&session.session_id);
-            *members.entry(session.agent.clone()).or_insert(false) |= roster_active(None, running);
+            chair_live |= running && chair.as_ref() == Some(&session.agent);
+            *members.entry(session.agent.clone()).or_insert(false) |=
+                roster_active(None, running, false);
+        }
+        // Paused sessions can already have ended in the local registry.
+        for pause in paused.iter().filter(|p| p.committee == committee) {
+            members.insert(pause.agent.clone(), true);
         }
         if let KnownAliases::Scoped(table) = aliases {
             for seat in table.iter().filter(|seat| seat.committee == committee) {
                 members.entry(seat.primary).or_insert(false);
             }
         }
-        let chair_live = chair
-            .as_ref()
-            .and_then(|c| members.get(c))
-            .copied()
-            .unwrap_or(false);
         let name = |senator: &SenatorName| display_name(Some(aliases), Some(&committee), senator);
         let chair_display_name = chair.as_ref().map(name);
         let members = members
