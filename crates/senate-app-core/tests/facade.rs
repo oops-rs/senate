@@ -353,7 +353,7 @@ async fn sessions_by_committee_their_timelines_and_the_composer() {
     let listener = Arc::new(Listener::default());
     core.start(listener.clone()).unwrap();
     let s = until(&listener, "the session tree", |s| {
-        s.groups.iter().map(|g| g.sessions.len()).sum::<usize>() == 8
+        s.groups.iter().map(|g| g.sessions.len()).sum::<usize>() == 9
     })
     .await;
 
@@ -392,7 +392,11 @@ async fn sessions_by_committee_their_timelines_and_the_composer() {
     let scribe = &group("docs").sessions[0];
     assert_eq!(scribe.status, SessionStatus::Unread);
     assert!(scribe.hosted.as_ref().unwrap().paused);
-    let oncall = &group("infra").sessions[0];
+    let oncall = group("infra")
+        .sessions
+        .iter()
+        .find(|x| x.display_name == "oncall")
+        .unwrap();
     assert!(!oncall.readable, "agy keeps no transcript Senate reads");
     // A request put to alice is hers to decide; a plain question is not.
     let request = s.inbox.iter().find(|t| t.root == 210).unwrap();

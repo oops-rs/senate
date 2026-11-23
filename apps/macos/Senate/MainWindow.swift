@@ -37,6 +37,8 @@ struct MainWindow: View {
             if let s = store.selectedSession { return s.displayName }
         case let .committee(name):
             return name.isEmpty ? L("sidebar.no_committee") : name
+        case .section(.senates):
+            return store.state.person ?? Section.senates.title
         case let .section(section):
             return section.title
         case .item:
@@ -77,7 +79,7 @@ struct MainWindow: View {
     }
 }
 
-/// ⌘1 Inbox, ⌘2 Approvals, ⌘3 Senates; ⌘⌥↑ and ⌘⌥↓ move between sessions; ⌘R reads
+/// ⌘1 Inbox, ⌘2 Approvals, ⌘3 your profile; ⌘⌥↑ and ⌘⌥↓ move between sessions; ⌘R reads
 /// everything again, or tries the daemon now while it cannot be reached.
 /// (⌘, is the store's: SwiftUI keeps that key for the Settings scene's own
 /// menu item, which a menu-bar-only app has no menu bar to reach.)
@@ -88,7 +90,7 @@ private struct Shortcuts: View {
 
     var body: some View {
         ZStack {
-            // ⌘1 Inbox, ⌘2 Approvals, ⌘3 Senates.
+            // ⌘1 Inbox, ⌘2 Approvals, ⌘3 your profile.
             ForEach(Array(CoreStore.Section.allCases.enumerated()), id: \.element) { index, section in
                 Button(section.title) { store.place = .section(section) }
                     .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: .command)
@@ -119,13 +121,20 @@ private struct Sidebar: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: Theme.Space.s) {
-                // The app's own icon, as the system draws it for the
-                // appearance in force.
-                Image(nsImage: NSApplication.shared.applicationIconImage)
-                    .resizable()
-                    .interpolation(.high)
-                    .frame(width: 24, height: 24)
-                    .accessibilityHidden(true)
+                // The chamber mark, no tile: its seats in the title's colour
+                // (rows fading), the Speaker's seat in the icon's amber; as
+                // tall as the title's capitals, so the two read as one.
+                ZStack {
+                    Image("SenateMark")
+                        .renderingMode(.template)
+                        .resizable()
+                        .foregroundStyle(Theme.onSurface)
+                    Image("SenateMarkSpeaker")
+                        .resizable()
+                }
+                .aspectRatio(contentMode: .fit)
+                .frame(height: 13)
+                .accessibilityHidden(true)
                 Text(verbatim: "Senate")
                     .font(.system(size: 18, weight: .medium))
                     .foregroundStyle(Theme.onSurface)
@@ -141,13 +150,8 @@ private struct Sidebar: View {
         .background(Theme.sidebar)
         .safeAreaInset(edge: .bottom, spacing: 0) {
             // On the sidebar's tone, so a long list scrolls under it unseen.
-            VStack(alignment: .leading, spacing: 0) {
-                if store.state.online {
-                    SidebarFoot(store: store)
-                }
-                AccountRow(store: store)
-            }
-            .background(Theme.sidebar)
+            AccountRow(store: store)
+                .background(Theme.sidebar)
         }
         .toolbar {
             ToolbarItem {
@@ -298,12 +302,11 @@ private struct SessionRow: View {
 
     var body: some View {
         HStack(spacing: 7) {
-            StatusMark(status: session.status)
+            SessionMark(runtime: session.runtime, status: session.status)
             Text(verbatim: session.displayName)
                 .font(Theme.Fonts.row.weight(session.status == .unread || session.status == .needsYou ? .semibold : .regular))
                 .foregroundStyle(session.active ? Theme.onSurface : Theme.onSurfaceVariant)
                 .lineLimit(1)
-            RuntimeMark(runtime: session.runtime)
             Spacer(minLength: Theme.Space.xs)
             Ago(date: session.lastActivity)
                 .font(Theme.Fonts.meta)
@@ -316,7 +319,7 @@ private struct SessionRow: View {
     }
 
     private var tooltip: String {
-        var lines = [session.title ?? session.displayName]
+        var lines = [session.title.map { "\($0) · \(session.runtime)" } ?? "\(session.displayName) · \(session.runtime)"]
         var place = session.dir
         if let branch = session.branch { place += " · \(branch)" }
         lines.append(place)
@@ -348,7 +351,7 @@ extension CoreStore.Section {
         switch self {
         case .inbox: L("tab.inbox")
         case .approvals: L("tab.approvals")
-        case .senates: L("tab.senates")
+        case .senates: L("tab.profile")
         }
     }
 
@@ -356,58 +359,8 @@ extension CoreStore.Section {
         switch self {
         case .inbox: "tray"
         case .approvals: "checkmark.shield"
-        case .senates: "building.columns"
+        case .senates: "person.crop.circle"
         }
-    }
-}
-
-/// The sidebar's quiet foot, pinned above the account: the Senates this
-/// machine serves, and every hosted terminal side by side.
-private struct SidebarFoot: View {
-    let store: CoreStore
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            FootRow(title: L("tab.senates"), symbol: "building.columns",
-                    selected: store.place == .section(.senates)) {
-                store.place = .section(.senates)
-            }
-            FootRow(title: L("sessions.watch"), symbol: "rectangle.split.3x1", selected: false) {
-                store.openWatch()
-            }
-            .disabled(store.state.sessions.allSatisfy { !$0.running })
-            .help(L("sidebar.watch_help"))
-        }
-        .padding(.horizontal, Theme.Space.s)
-        .padding(.top, Theme.Space.xs)
-    }
-}
-
-/// One row of the sidebar's foot: smaller and dimmer than Inbox and
-/// Approvals, highlighted while its page is open.
-private struct FootRow: View {
-    let title: String
-    let symbol: String
-    let selected: Bool
-    let action: () -> Void
-    @State private var hovered = false
-    @Environment(\.isEnabled) private var enabled
-
-    var body: some View {
-        Button(action: action) {
-            Label(title, systemImage: symbol)
-                .font(Theme.Fonts.row)
-                .foregroundStyle(selected ? Theme.onSurface : Theme.onSurfaceVariant)
-                .padding(.horizontal, Theme.Space.s)
-                .frame(maxWidth: .infinity, minHeight: 26, alignment: .leading)
-                .background(selected ? Theme.selection : hovered ? Theme.containerHigh : .clear,
-                            in: RoundedRectangle(cornerRadius: 6))
-                .contentShape(Rectangle())
-                .opacity(enabled ? 1 : 0.5)
-        }
-        .buttonStyle(.plain)
-        .onHover { hovered = $0 }
-        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
 
@@ -465,59 +418,101 @@ struct AgentFilter: View {
     }
 }
 
-/// Who this machine is online as and where, or that it is offline; its
-/// menu opens Settings and About, and reads everything again.
+/// Who you are, at the sidebar's foot: your profile. Choosing the row
+/// opens it (the Senates you sit in, your agents, the Speaker and chairs);
+/// the menu beside it holds Settings, About, Refresh and Watch all.
 private struct AccountRow: View {
     let store: CoreStore
+    @State private var hovered = false
 
     var body: some View {
         let state = store.state
         let name = state.person ?? "Senate"
-        Menu {
-            SettingsLink { Text(verbatim: L("menu.settings")) }
-            Button(L("menu.about")) { About.show() }
-            Divider()
-            Button(L("toolbar.refresh")) { store.refresh() }
-                .disabled(!state.online)
-        } label: {
-            HStack(spacing: 10) {
-                Text(verbatim: String(name.prefix(1)).uppercased())
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Theme.onPrimaryContainer)
-                    .frame(width: 28, height: 28)
-                    .background(Theme.primaryContainer, in: Circle())
-                    .overlay(alignment: .bottomTrailing) {
-                        StatusDot(online: state.online, size: 9)
-                            .overlay { Circle().stroke(Theme.sidebar, lineWidth: 2) }
-                            .offset(x: 2, y: 2)
+        let selected = store.place == .section(.senates)
+        HStack(spacing: Theme.Space.xs) {
+            Button {
+                store.place = .section(.senates)
+            } label: {
+                HStack(spacing: 10) {
+                    Avatar(name: name, online: state.online, size: 28)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(verbatim: name)
+                            .font(Theme.Fonts.label)
+                            .foregroundStyle(Theme.onSurface)
+                            .lineLimit(1)
+                        Text(verbatim: Profile.place(state))
+                            .font(Theme.Fonts.meta)
+                            .foregroundStyle(Theme.onSurfaceVariant)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
                     }
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(verbatim: name)
-                        .font(Theme.Fonts.label)
-                        .foregroundStyle(Theme.onSurface)
-                        .lineLimit(1)
-                    Text(verbatim: second(state))
-                        .font(Theme.Fonts.meta)
-                        .foregroundStyle(Theme.onSurfaceVariant)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                    Spacer(minLength: 0)
                 }
-                Spacer(minLength: 0)
+                .padding(.horizontal, Theme.Space.s)
+                .padding(.vertical, 6)
+                .background(selected ? Theme.selection : hovered ? Theme.containerHigh : .clear,
+                            in: RoundedRectangle(cornerRadius: 8))
+                .contentShape(Rectangle())
             }
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+            .onHover { hovered = $0 }
+            .help(state.online ? (state.senates.first?.serverUrl ?? "") : (state.offlineReason ?? ""))
+            .accessibilityLabel(L("sidebar.profile_open", name))
+            .accessibilityValue(Profile.place(state))
+            .accessibilityAddTraits(selected ? .isSelected : [])
+            Menu {
+                Button(L("sessions.watch")) { store.openWatch() }
+                    .disabled(!state.online || state.sessions.allSatisfy { !$0.running })
+                Divider()
+                SettingsLink { Text(verbatim: L("menu.settings")) }
+                Button(L("menu.about")) { About.show() }
+                Divider()
+                Button(L("toolbar.refresh")) { store.refresh() }
+                    .disabled(!state.online)
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Theme.onSurfaceVariant)
+                    .frame(width: 28, height: 28)
+                    .background(Theme.containerHigh.opacity(hovered ? 1 : 0), in: Circle())
+                    .contentShape(Circle())
+            }
+            .menuStyle(.button)
+            .buttonStyle(.plain)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help(L("sidebar.account_menu"))
+            .accessibilityLabel(L("sidebar.account_menu"))
         }
-        .menuStyle(.button)
-        .buttonStyle(.plain)
-        .menuIndicator(.hidden)
-        .padding(.horizontal, Theme.Space.l)
-        .padding(.vertical, Theme.Space.m)
-        .help(state.online ? (state.senates.first?.serverUrl ?? "") : (state.offlineReason ?? ""))
-        .accessibilityLabel(L("sidebar.account"))
-        .accessibilityValue("\(name), \(second(state))")
+        .padding(.horizontal, Theme.Space.s)
+        .padding(.vertical, Theme.Space.s)
     }
+}
 
-    /// Under the name: the Senate's address while online.
-    private func second(_ state: AppState) -> String {
+/// The person's initial on the accent, with a dot for online or not.
+struct Avatar: View {
+    let name: String
+    let online: Bool
+    var size: CGFloat = 28
+
+    var body: some View {
+        Text(verbatim: String(name.prefix(1)).uppercased())
+            .font(.system(size: size * 0.46, weight: .semibold))
+            .foregroundStyle(Theme.onPrimaryContainer)
+            .frame(width: size, height: size)
+            .background(Theme.primaryContainer, in: Circle())
+            .overlay(alignment: .bottomTrailing) {
+                StatusDot(online: online, size: size * 0.32)
+                    .overlay { Circle().stroke(Theme.sidebar, lineWidth: 2) }
+                    .offset(x: 2, y: 2)
+            }
+            .accessibilityHidden(true)
+    }
+}
+
+enum Profile {
+    /// Where you are: the Senate's address while online.
+    static func place(_ state: AppState) -> String {
         guard state.online else { return L("a11y.offline") }
         guard let address = state.senates.first?.serverUrl else { return L("a11y.online") }
         guard let url = URL(string: address), let host = url.host() else { return address }

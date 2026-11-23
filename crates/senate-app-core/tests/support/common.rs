@@ -1376,7 +1376,21 @@ pub fn session_tree(w: &mut World) {
     d.paused = true;
     d.title = Some("API reference move".into());
     d.last_activity = ago(60 * 20);
-    rows.extend([l, d]);
+    // infra: `deploy`, paused with nothing unread (every state shows).
+    let mut p = hosted(
+        "ops-2",
+        "claude-9a8b7c6d-1e2f-4a3b-8c4d-5e6f7a8b9c0d",
+        "deploy",
+        "infra",
+        Runtime::Claude,
+        false,
+    );
+    p.state = HostState::Stopped;
+    p.started_at = None;
+    p.paused = true;
+    p.title = Some("Roll the staging certificates".into());
+    p.last_activity = ago(60 * 5);
+    rows.extend([l, d, p]);
 
     let local = |id: &str,
                  primary: &str,

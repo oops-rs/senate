@@ -47,42 +47,61 @@ let light = Look(top: RGB(0xFCFBF7), bottom: RGB(0xEAE6DC), seats: RGB(0x1C2A55)
 let dark = Look(top: RGB(0x1E2A4A), bottom: RGB(0x0B1124), seats: RGB(0xFFFFFF), speaker: RGB(0xFFB547),
                 fade: [1, 0.82, 0.64])
 
-/// The mark alone, on a transparent 1024 canvas (the canvas is the tile):
-/// drawn on a 100-unit grid, y up, then scaled to 76 % and centred, which
-/// leaves it the margin system icons keep inside the tile.
-func mark(_ look: Look, _ px: Int = 1024) -> CGImage {
-    let s = CGFloat(px)
-    let ctx = CGContext(data: nil, width: px, height: px, bitsPerComponent: 8, bytesPerRow: 0,
-                        space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
-    let k: CGFloat = 0.76
-    let u = s * k / 100
-    // The mark spans y 17…71.75 on its grid: centre that on the canvas.
-    let dx = s * (1 - k) / 2, dy = s / 2 - 44.4 * u
-    func P(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: dx + x * u, y: dy + y * u) }
-    let centre = P(50, 27)
-    ctx.setLineCap(.butt)
-    ctx.setLineWidth(7.5 * u)
-    // Three rows of seats around the floor, the same gap between seats in
-    // every row.
-    for (row, (radius, seats)) in [(19.0, 4), (30.0, 6), (41.0, 8)].enumerated() {
-        ctx.setStrokeColor(look.seats.cg(look.fade[row]))
+/// The mark's shapes, once, on a 100-unit grid (y up): three rows of seats
+/// around the floor (the same gap between seats in every row), the
+/// Speaker's seat at the centre of the floor, and the floor's edge. Every
+/// picture of the mark (the icon's layers, the sidebar's and menu bar's
+/// assets, the SVG) fills these paths.
+enum Mark {
+    static let centre = CGPoint(x: 50, y: 27)
+    static let rows: [CGPath] = [(19.0, 4), (30.0, 6), (41.0, 8)].map { radius, seats in
+        let path = CGMutablePath()
         let gap = 0.16 / (radius / 19)
         let span = Double.pi / Double(seats)
         for i in 0..<seats {
             let a0 = Double(i) * span + gap / 2, a1 = Double(i + 1) * span - gap / 2
-            ctx.addArc(center: centre, radius: CGFloat(radius) * u,
-                       startAngle: CGFloat(a0), endAngle: CGFloat(a1), clockwise: false)
-            ctx.strokePath()
+            let arc = CGMutablePath()
+            arc.addArc(center: centre, radius: CGFloat(radius), startAngle: CGFloat(a0),
+                       endAngle: CGFloat(a1), clockwise: false)
+            path.addPath(arc.copy(strokingWithWidth: 7.5, lineCap: .butt, lineJoin: .miter, miterLimit: 10))
+        }
+        return path
+    }
+    static let speaker = CGPath(ellipseIn: CGRect(x: centre.x - 6, y: centre.y - 6, width: 12, height: 12),
+                                transform: nil)
+    static let floor = CGPath(roundedRect: CGRect(x: 14, y: 17, width: 72, height: 3.5),
+                              cornerWidth: 1.75, cornerHeight: 1.75, transform: nil)
+    /// Where the mark lies on its grid.
+    static let bounds = CGRect(x: 5.25, y: 17, width: 89.5, height: 54.75)
+
+    /// Fill the mark into `ctx`, already transformed to the grid.
+    static func fill(_ ctx: CGContext, seats: CGColor, speaker sp: CGColor?, fade: [CGFloat]) {
+        for (row, path) in rows.enumerated() {
+            ctx.addPath(path)
+            ctx.setFillColor(seats.copy(alpha: fade[row])!)
+            ctx.fillPath()
+        }
+        ctx.addPath(floor)
+        ctx.setFillColor(seats.copy(alpha: fade[1])!)
+        ctx.fillPath()
+        if let sp {
+            ctx.addPath(speaker)
+            ctx.setFillColor(sp)
+            ctx.fillPath()
         }
     }
-    // The Speaker, at the centre of the floor.
-    ctx.setFillColor(look.speaker.cg())
-    ctx.fillEllipse(in: CGRect(x: centre.x - 6 * u, y: centre.y - 6 * u, width: 12 * u, height: 12 * u))
-    // The floor's edge.
-    ctx.setFillColor(look.seats.cg(look.fade[1]))
-    let floor = CGRect(origin: P(14, 17), size: CGSize(width: 72 * u, height: 3.5 * u))
-    ctx.addPath(CGPath(roundedRect: floor, cornerWidth: 1.75 * u, cornerHeight: 1.75 * u, transform: nil))
-    ctx.fillPath()
+}
+
+/// The mark alone, on a transparent 1024 canvas (the canvas is the tile),
+/// scaled to 76 % and centred: the margin system icons keep in the tile.
+func mark(_ look: Look, _ px: Int = 1024) -> CGImage {
+    let s = CGFloat(px)
+    let ctx = CGContext(data: nil, width: px, height: px, bitsPerComponent: 8, bytesPerRow: 0,
+                        space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+    let u = s * 0.76 / 100
+    ctx.translateBy(x: s * 0.12, y: s / 2 - Mark.bounds.midY * u)
+    ctx.scaleBy(x: u, y: u)
+    Mark.fill(ctx, seats: look.seats.cg(), speaker: look.speaker.cg(), fade: look.fade)
     return ctx.makeImage()!
 }
 
@@ -121,6 +140,78 @@ let icon: [String: Any] = [
 try JSONSerialization.data(withJSONObject: icon, options: [.prettyPrinted, .sortedKeys])
     .write(to: doc.appendingPathComponent("icon.json"))
 print("make-icon: wrote \(doc.path)")
+
+// The mark without its tile, as vectors: for the sidebar beside "Senate"
+// (`SenateMark`: the seats, a template in the text's colour with the rows
+// fading; `SenateMarkSpeaker`: the Speaker's seat in amber, drawn over it),
+// for the menu bar (`SenateGlyph`: one colour, every row whole), and as the
+// logo's source, docs/logo/senate-mark.svg.
+let catalog = app.appendingPathComponent("Senate/Assets.xcassets")
+func pdfAsset(_ name: String, height: CGFloat, template: Bool, _ draw: (CGContext) -> Void) throws {
+    let set = catalog.appendingPathComponent("\(name).imageset")
+    try? FileManager.default.removeItem(at: set)
+    try FileManager.default.createDirectory(at: set, withIntermediateDirectories: true)
+    let k = height / Mark.bounds.height
+    var box = CGRect(x: 0, y: 0, width: Mark.bounds.width * k, height: height)
+    let url = set.appendingPathComponent("\(name).pdf")
+    let ctx = CGContext(url as CFURL, mediaBox: &box, nil)!
+    ctx.beginPDFPage(nil)
+    ctx.scaleBy(x: k, y: k)
+    ctx.translateBy(x: -Mark.bounds.minX, y: -Mark.bounds.minY)
+    draw(ctx)
+    ctx.endPDFPage()
+    ctx.closePDF()
+    let contents: [String: Any] = [
+        "images": [["idiom": "universal", "filename": "\(name).pdf"]],
+        "info": ["author": "xcode", "version": 1],
+        "properties": ["template-rendering-intent": template ? "template" : "original",
+                       "preserves-vector-representation": true],
+    ]
+    try JSONSerialization.data(withJSONObject: contents, options: [.prettyPrinted, .sortedKeys])
+        .write(to: set.appendingPathComponent("Contents.json"))
+}
+let black = CGColor(gray: 0, alpha: 1)
+try pdfAsset("SenateMark", height: 13, template: true) { Mark.fill($0, seats: black, speaker: nil, fade: dark.fade) }
+try pdfAsset("SenateMarkSpeaker", height: 13, template: false) {
+    $0.addPath(Mark.speaker)
+    $0.setFillColor(dark.speaker.cg())
+    $0.fillPath()
+}
+try pdfAsset("SenateGlyph", height: 16, template: true) {
+    Mark.fill($0, seats: black, speaker: black, fade: [1, 1, 1])
+}
+
+/// A path as SVG path data, in the mark's box with y down.
+func svgPath(_ path: CGPath) -> String {
+    var d = ""
+    func f(_ p: CGPoint) -> String {
+        String(format: "%.3f %.3f", p.x - Mark.bounds.minX, Mark.bounds.maxY - p.y)
+    }
+    path.applyWithBlock { e in
+        let pts = e.pointee.points
+        switch e.pointee.type {
+        case .moveToPoint: d += "M\(f(pts[0]))"
+        case .addLineToPoint: d += "L\(f(pts[0]))"
+        case .addQuadCurveToPoint: d += "Q\(f(pts[0])) \(f(pts[1]))"
+        case .addCurveToPoint: d += "C\(f(pts[0])) \(f(pts[1])) \(f(pts[2]))"
+        case .closeSubpath: d += "Z"
+        @unknown default: break
+        }
+    }
+    return d
+}
+var svg = String(format: "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 %.2f %.2f\">\n",
+                 Mark.bounds.width, Mark.bounds.height)
+svg += "  <title>Senate</title>\n"
+for (row, path) in Mark.rows.enumerated() {
+    svg += "  <path fill=\"#1C2A55\" fill-opacity=\"\(light.fade[row])\" d=\"\(svgPath(path))\"/>\n"
+}
+svg += "  <path fill=\"#1C2A55\" fill-opacity=\"\(light.fade[1])\" d=\"\(svgPath(Mark.floor))\"/>\n"
+svg += "  <path fill=\"#E4572E\" d=\"\(svgPath(Mark.speaker))\"/>\n</svg>\n"
+let logo = app.appendingPathComponent("docs/logo")
+try FileManager.default.createDirectory(at: logo, withIntermediateDirectories: true)
+try svg.write(to: logo.appendingPathComponent("senate-mark.svg"), atomically: true, encoding: .utf8)
+print("make-icon: wrote SenateMark, SenateMarkSpeaker, SenateGlyph and docs/logo/senate-mark.svg")
 
 // docs/screenshots/icon.png: the icon as macOS renders it, light and dark.
 let ictool = "/Applications/Xcode.app/Contents/Applications/Icon Composer.app/Contents/Executables/ictool"
