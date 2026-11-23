@@ -633,9 +633,10 @@ impl Shared {
             || (session.runtime == Runtime::Agy
                 && session::agy_conversation_open(&session.session_id) == Some(true))
         {
-            return Err(IpcError::bad_request(
+            return Err(IpcError::bad_request(self.locale.pick(
+                "原来的会话仍在运行；先退出它，再恢复。",
                 "the original session is still running; exit it before restoring",
-            ));
+            )));
         }
         let start_empty = session.runtime == Runtime::Claude
             && self
@@ -668,15 +669,40 @@ impl Shared {
             && host::running(paths, &id).map_err(IpcError::internal)?
         {
             if host::awaiting_publication(paths, &id) {
-                return Err(IpcError::bad_request(
-                    "this terminal host is still waiting for publication",
-                ));
+                return Err(IpcError::bad_request(self.locale.pick(
+                    "这个终端主机还在等待发布；稍后再试。",
+                    "this terminal host is still waiting for publication; try again shortly",
+                )));
             }
-            return Err(IpcError::bad_request(
-                "this senator already has a running terminal host; use senate attach",
-            ));
+            let name = self.shown_session_name(session_id);
+            return Err(IpcError::bad_request(self.locale.pick(
+                format!("{name} 的终端已在运行；用 `senate attach {name}` 打开它。"),
+                format!(
+                    "{name} already has a running terminal; open it with `senate attach {name}`."
+                ),
+            )));
         }
         Ok(())
+    }
+
+    /// What a person names the senator of `session_id` by: its alias on its
+    /// committee, as last read, else its short senator name.
+    fn shown_session_name(&self, session_id: &str) -> String {
+        let Ok(Some(session)) = self.store.session(session_id) else {
+            return "<name>".to_owned();
+        };
+        let aliases = lock(&self.display_aliases)
+            .as_ref()
+            .map(|(_, aliases)| aliases.clone());
+        match (aliases, session.committee()) {
+            (Some(aliases), Some(committee)) => {
+                aliases.alias_of(committee, &session.agent).map_or_else(
+                    || senate_core::alias::short_name(&session.agent),
+                    ToString::to_string,
+                )
+            }
+            _ => senate_core::alias::short_name(&session.agent),
+        }
     }
 
     pub(super) async fn on_attach(&self, senator: AliasName) -> Result<PathBuf, IpcError> {
@@ -751,9 +777,10 @@ impl Shared {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
             if host::awaiting_publication(&paths, &id) {
-                return Err(IpcError::bad_request(
-                    "this terminal host is still waiting for publication",
-                ));
+                return Err(IpcError::bad_request(self.locale.pick(
+                    "这个终端主机还在等待发布；稍后再试。",
+                    "this terminal host is still waiting for publication; try again shortly",
+                )));
             }
             Some(host::socket(&paths, &id))
         } else {

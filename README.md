@@ -480,6 +480,19 @@ senate inbox
 senate inbox --all
 ```
 
+Each command works on the committee this directory is bound to, or the one
+named with `--committee`. Outside a bound worktree, `ask`, `tell` and
+`request` to an alias that exists on exactly one committee go to that
+committee, and say so on stderr (`on committee refund (where rev is an
+alias)`); the commands they suggest then carry `--committee`. Otherwise the
+error lists the committees to choose from.
+
+On a terminal, `senate thread` and `senate inbox --follow` lay message bodies
+out as Markdown, wrapped to the window (in colour unless `NO_COLOR` is set or
+`TERM=dumb`), and print times in the local zone, naming it once
+(`local times (UTC+01:00)`). Piped, they print the text exactly as written,
+with every time in UTC.
+
 ### 2. Zero-Pollution Workspace Management
 
 Senate keeps your repositories completely clean:
@@ -556,19 +569,25 @@ senate committees                      # chairs, active members and pending thre
 senate status --all                     # include inactive entries
 senate spawn claude --alias reviewer    # seat a member on this committee
 senate spawn codex --chair --alias lead --attach # appoint the chair and open its terminal
+senate spawn claude --dir ../ledger     # on the committee bound in ../ledger
 senate spawn claude --secretary --alias desk # add a Speaker’s desk secretary
 senate attach reviewer                 # restore or resume as needed (Ctrl-] detaches)
-senate session list                    # active hosted sessions on this machine
+senate session list                    # active hosted sessions (a waiting command: its first line)
 senate session list --all               # include stopped and paused sessions
 senate session watch                   # read-only grid of terminals without an interactive viewer
 senate session watch --all             # include attached, paused and stopped sessions
 senate session approve reviewer        # answer its permission prompt (--always, --deny)
+senate session approve --once          # the one prompt waiting, whoever's it is
 senate session stop reviewer           # end its terminal...
 senate session restore reviewer        # ...and reopen it later (add --attach to enter)
 senate session pause --all             # checkpoint, then stop each one...
 senate session resume --all            # ...and bring them back where they were
 senate session replace reviewer        # a fresh session takes the seat
 ```
+
+`senate spawn` seats the session on `--committee` when given, else on the
+committee bound in `--dir`, else on this directory's; when `--dir` binds
+none, it says on stderr which committee it used.
 
 A senator is active while present online or while its hosted terminal is
 running. `senate committees` shows every committee, even without active
@@ -601,9 +620,16 @@ step.
 `senate session approve` answers the permission prompt waiting in a hosted
 terminal without attaching, as you would there: allow once (the default),
 `--always` (and stop asking for the same thing this session) or `--deny`.
+Without a name it answers the one session with a prompt waiting, and only
+when the answer is given (`--once`, `--always` or `--deny`); it prints which
+session and what the prompt asks about before answering, and lists them when
+several wait.
 Codex is answered through its app-server; for Claude Code the host checks that
 its screen shows the permission dialog and types the chosen option. A choice
-Senate only saw on the screen is not answered this way: attach to it. Each
+Senate only saw on the screen is not answered this way: attach to it. A
+Claude prompt Senate shows as waiting is settled when it is answered (by
+its result, a key typed in its terminal, or an answer from Senate) and, at
+the latest, when the session's turn ends. Each
 answer is noted in the committee log. The macOS app's Allow / Always / Deny
 buttons on a waiting prompt do the same. The daemon refuses the request from
 inside a coding session's process tree, so an agent cannot approve its own
@@ -645,7 +671,10 @@ effort = "high"
 note = "Use for independent diff review."
 ```
 
-Run `senate profiles` to see the configured names, settings, and notes.
+Run `senate profiles` to see the configured names, settings, and notes. Its
+output is one tab-separated line per profile; with none it prints `No launch
+profiles configured.` and, on stderr, an example to copy and the file to put
+it in.
 `senate setup doctor` reports profile configuration errors by name. Restart
 the machine daemon after editing a profile so new launches pick up the change.
 
@@ -665,6 +694,11 @@ then pass the chosen name in the `profile` field of `spawn`. The same chair and
 Speaker's office permissions apply to launches with a profile.
 
 ### Troubleshooting
+
+`locale` in `senate.toml` (`en` or `zh`) is read by the daemon when it
+starts, and the daemon words what the CLI prints. After changing it,
+`senate status` says so until the daemon restarts (`senate setup service
+install --yes` restarts the service).
 
 When something does not arrive or a session sits idle, start with:
 

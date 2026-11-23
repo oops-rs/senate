@@ -312,7 +312,14 @@ done
     let conflict = ipc::request::<SpawnReply>(&h.socket(), &request, TIMEOUT, TIMEOUT)
         .await
         .unwrap_err();
-    assert!(conflict.to_string().contains("already taken"), "{conflict}");
+    // The alias the surviving host holds is refused before a second
+    // child starts; nothing is left staged either way.
+    assert!(
+        conflict
+            .to_string()
+            .contains("fixture is already the alias of"),
+        "{conflict}"
+    );
     assert_eq!(h.store().all_sessions().unwrap().len(), 1);
     {
         let server = h.server.state.inner.lock().unwrap();
@@ -3604,7 +3611,8 @@ async fn sessions_lists_stops_by_name_and_prunes_an_orphan() {
 async fn attach_without_a_name_picks_from_the_running_sessions() {
     let (mut h, root) = one_hosted_session().await;
     let reply: ipc::SessionsReply = call(&h, &Request::Sessions).await;
-    let label = reply.rows[0].label();
+    // Named as `senate session list` names it.
+    let label = reply.rows[0].display_name(false);
     let open = || {
         let mut cmd = tokio::process::Command::new(BIN);
         testenv::isolate_async(&mut cmd, h.dir.path());
@@ -5226,4 +5234,120 @@ async fn shutdown_pauses_within_its_cap_and_start_resumes_only_the_paused() {
         ipc::HostState::Stopped,
         "never resumed"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_taken_alias_is_refused_before_anything_starts() {
+    let (mut h, project) = watched_sessions(&["rev"]).await;
+    let spawn = |attempt_id: Option<String>| Request::Spawn {
+        attempt_id,
+        session: Default::default(),
+        runtime: Some(HostedRuntime::Claude),
+        profile: None,
+        committee: committee(),
+        alias: Some(path("rev")),
+        cwd: project.clone(),
+        chair: false,
+        secretary: false,
+        prompt: None,
+        model: Default::default(),
+    };
+    // Untracked and tracked (as the CLI sends it) alike: a plain refusal,
+    // never an unknown outcome to retry.
+    for attempt in [None, Some(uuid::Uuid::now_v7().to_string())] {
+        let error = ipc::request::<SpawnReply>(&h.socket(), &spawn(attempt), TIMEOUT, TIMEOUT)
+            .await
+            .unwrap_err();
+        let ipc::ClientError::Remote(error) = error else {
+            panic!("expected a daemon error, got {error}");
+        };
+        assert_eq!(error.code, ipc::codes::BAD_REQUEST, "{}", error.message);
+        assert!(
+            error.message.contains("rev is already the alias of")
+                && error.message.contains("`senate attach rev`")
+                && !error.message.contains("--attempt-id"),
+            "{}",
+            error.message
+        );
+    }
+    let reply: ipc::SessionsReply = call(&h, &Request::Sessions).await;
+    assert_eq!(reply.rows.len(), 1, "nothing else started");
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restoring_a_running_session_says_how_to_open_it() {
+    let (mut h, _) = watched_sessions(&["rev"]).await;
+    let error = ipc::request::<SpawnReply>(
+        &h.socket(),
+        &Request::Restore {
+            session: Default::default(),
+            senator: "rev".parse().unwrap(),
+            model: Default::default(),
+        },
+        TIMEOUT,
+        TIMEOUT,
+    )
+    .await
+    .unwrap_err();
+    let ipc::ClientError::Remote(error) = error else {
+        panic!("expected a daemon error, got {error}");
+    };
+    assert!(
+        error
+            .message
+            .contains("rev already has a running terminal; open it with `senate attach rev`."),
+        "{}",
+        error.message
+    );
+    h.stop().await;
+}
+
+/// `senate spawn --dir`: an explicit `--committee` wins; else the committee
+/// bound at `--dir`; else this directory's, said on stderr.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn spawn_seats_on_the_committee_bound_at_its_dir() {
+    let (mut h, here, _) = fixture_daemon(3).await;
+    std::fs::write(here.join(".senate/committee"), "refund-v2\n").unwrap();
+    let bound = h.workdir("bound", Some("other"));
+    let unbound = h.workdir("unbound", None);
+    let spawn = |dir: &std::path::Path, extra: &[&str]| {
+        let mut cmd = std::process::Command::new(BIN);
+        testenv::isolate(&mut cmd, h.dir.path());
+        let out = cmd
+            .env("SENATE_HOME", h.paths.home())
+            .current_dir(&here)
+            .args(["spawn", "claude", "--dir"])
+            .arg(dir)
+            .args(extra)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        (
+            String::from_utf8(out.stdout).unwrap().trim().to_owned(),
+            String::from_utf8(out.stderr).unwrap(),
+        )
+    };
+    let (at_dir, quiet) = spawn(&bound, &[]);
+    assert!(quiet.is_empty(), "{quiet}");
+    let (explicit, _) = spawn(&bound, &["--committee", "refund-v2"]);
+    let (fallback, said) = spawn(&unbound, &[]);
+    assert!(
+        said.contains("is bound to no committee; seated on refund-v2, this directory's"),
+        "{said}"
+    );
+    // Each committee numbers its own: the first on each is claude1, the
+    // second named with its committee once two share the alias.
+    assert_eq!(
+        (at_dir.as_str(), explicit.as_str(), fallback.as_str()),
+        ("claude1", "refund-v2::claude1", "claude2")
+    );
+    let rows: ipc::SessionsReply = call(&h, &Request::Sessions).await;
+    let mut labels: Vec<String> = rows.rows.iter().map(ipc::SessionRow::label).collect();
+    labels.sort();
+    assert_eq!(
+        labels,
+        ["other::claude1", "refund-v2::claude1", "refund-v2::claude2"]
+    );
+    h.stop().await;
 }

@@ -486,6 +486,10 @@ pub struct ReplaceReply {
     pub new: SenatorName,
     pub session_id: String,
     pub steps: Vec<ReplaceStepReport>,
+    /// The alias the new seat took over from the old one, if it had one:
+    /// what to name it by from now on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<SenatorName>,
 }
 
 /// `Request::Sessions`: the hosted sessions on this machine, the running

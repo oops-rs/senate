@@ -841,9 +841,44 @@ impl ServerHub {
         if let Some(senator) = address.as_senator() {
             let roster = self.seats.snapshot();
             if !roster.knows(senator) {
-                let like = roster.named_like(senator.as_str(), 5);
-                let reason = if like.is_empty() {
+                // The committee's aliases first: what a person types.
+                let here: Vec<SenatorName> = self
+                    .aliases
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|q| q.committee == target)
+                    .map(|q| q.alias)
+                    .collect();
+                let written = senator.as_str().to_lowercase();
+                let mut like: Vec<SenatorName> = here
+                    .iter()
+                    .filter(|a| a.as_str().to_lowercase().starts_with(&written))
+                    .chain(here.iter().filter(|a| {
+                        let a = a.as_str().to_lowercase();
+                        !a.starts_with(&written) && a.contains(&written)
+                    }))
+                    .cloned()
+                    .collect();
+                for name in roster.named_like(senator.as_str(), 5) {
+                    if !like.contains(&name) {
+                        like.push(name);
+                    }
+                }
+                like.truncate(5);
+                let reason = if like.is_empty() && here.is_empty() {
                     format!("{path}::{target} has no senator {senator}")
+                } else if like.is_empty() {
+                    let mut listed = here
+                        .iter()
+                        .take(8)
+                        .map(|s| format!("[senator::{s}]"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    if here.len() > 8 {
+                        listed.push_str(", …");
+                    }
+                    format!("{path}::{target} has no senator {senator}; on {target}: {listed}")
                 } else {
                     let like = like
                         .iter()

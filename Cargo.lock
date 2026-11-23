@@ -2538,6 +2538,7 @@ dependencies = [
  "rusqlite",
  "rustix",
  "senate-core",
+ "senate-markdown",
  "serde",
  "serde_json",
  "sha2 0.10.9",

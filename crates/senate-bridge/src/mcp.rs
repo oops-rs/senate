@@ -963,10 +963,17 @@ pub fn render_inbox(reply: &InboxReply, locale: Locale, how: ShowAll) -> String 
         }
         out.push_str(&reason_block(t, locale));
     }
-    out.push_str(locale.pick(
-        "\n用 answer(thread=<n>) 回答；用 take(thread=<n>) 以你的用户的身份接管。",
-        "\nAnswer with answer(thread=<n>); take one over as your user with take(thread=<n>).",
-    ));
+    out.push_str(match how {
+        ShowAll::Param => locale.pick(
+            "\n用 answer(thread=<n>) 回答；用 take(thread=<n>) 以你的用户的身份接管。",
+            "\nAnswer with answer(thread=<n>); take one over as your user with take(thread=<n>).",
+        ),
+        // The person reads this in a terminal: the commands, not the tools.
+        ShowAll::Flag => locale.pick(
+            "\n用 `senate reply <n> <内容>` 回复；用 `senate take <n>` 接管（之后不再交给 agent）。",
+            "\nReply with `senate reply <n> <text>`; take one over (no more of it goes to agents) with `senate take <n>`.",
+        ),
+    });
     if let Some(line) = closing {
         out.push('\n');
         out.push_str(&line);
@@ -3489,9 +3496,25 @@ mod tests {
             "{en}"
         );
         assert!(en.contains("- thread 3 · processing in progress · which header? · question from [senator::claude] · not answered yet"), "{en}");
+        // The person is told the commands; an agent, its tools.
+        assert!(
+            en.contains("Reply with `senate reply <n> <text>`")
+                && en.contains("`senate take <n>`")
+                && !en.contains("answer(thread="),
+            "{en}"
+        );
+        let tool = render_inbox(&reply, Locale::En, ShowAll::Param);
+        assert!(
+            tool.contains("Answer with answer(thread=<n>)") && !tool.contains("senate reply"),
+            "{tool}"
+        );
         let zh = render_inbox(&reply, Locale::Zh, ShowAll::Flag);
         assert!(
             zh.contains("processing 进行中") && zh.contains("尚未回答"),
+            "{zh}"
+        );
+        assert!(
+            zh.contains("senate reply <n>") && zh.contains("senate take <n>"),
             "{zh}"
         );
         let empty = InboxReply {
