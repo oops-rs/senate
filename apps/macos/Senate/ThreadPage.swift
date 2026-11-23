@@ -116,7 +116,7 @@ private struct Conversation: View {
                             .frame(maxWidth: .infinity)
                         }
                         ForEach(view.events.suffix(shown), id: \.seq) { event in
-                            EventView(event: event).id(event.seq)
+                            EventView(event: event, committee: row.committee).id(event.seq)
                         }
                     } else if let error = store.threadError {
                         VStack(alignment: .leading, spacing: Theme.Space.xs) {
@@ -207,16 +207,13 @@ private struct ThreadHeader: View {
 /// said sits on the other side in a bubble.
 private struct EventView: View {
     let event: ThreadEvent
+    /// The thread's committee: its mentions are named for it.
+    let committee: String
 
     var body: some View {
         if event.mine {
             VStack(alignment: .trailing, spacing: Theme.Space.xs) {
-                MentionText(event.body)
-                    .font(Theme.Fonts.reading)
-                    .lineSpacing(Theme.readingLineSpacing)
-                    .foregroundStyle(Theme.onSurface)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
+                MessageText(text: event.body, committee: committee)
                     .padding(.horizontal, Theme.Space.l)
                     .padding(.vertical, 10)
                     .background(Theme.container, in: RoundedRectangle(cornerRadius: Theme.Radius.bubble))
@@ -243,12 +240,7 @@ private struct EventView: View {
                     .font(Theme.Fonts.meta)
                     .foregroundStyle(Theme.onSurfaceVariant)
                 }
-                MentionText(event.body)
-                    .font(Theme.Fonts.reading)
-                    .lineSpacing(Theme.readingLineSpacing)
-                    .foregroundStyle(Theme.onSurface)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
+                MessageText(text: event.body, committee: committee)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .accessibilityElement(children: .combine)

@@ -9,7 +9,22 @@ import SenateCore
 @Observable
 final class SessionTimeline {
     let sessionId: String
-    private(set) var items: [TimelineEntry] = []
+    private(set) var items: [TimelineEntry] = [] {
+        didSet {
+            rows = ConversationRows.rows(items)
+            // Replies rendered ahead, off the main thread.
+            let replies = rows.compactMap { row -> String? in
+                if case let .assistant(text) = row.kind { return text }
+                return nil
+            }
+            MarkdownCache.shared.prepare(replies, committee: committee)
+        }
+    }
+    /// The session's committee: its mentions are named for it.
+    var committee: String?
+    /// What the page draws: the items, reasoning folded into the rows it
+    /// led to.
+    private(set) var rows: [ConversationRow] = []
     var available = true
     /// Why there is nothing to read, when there is not.
     var unavailable: String?
@@ -99,6 +114,7 @@ extension CoreStore {
             return
         }
         let t = SessionTimeline(sessionId: open)
+        t.committee = session(open)?.committee
         timeline = t
         Task { await readTail(t) }
     }
@@ -150,7 +166,10 @@ extension CoreStore {
                         await self.readTail(t)
                         return
                     }
+                    let start = ContinuousClock.now
                     t.merge(delta)
+                    Perf.Probe.updates += 1
+                    Perf.Probe.updateTime += ContinuousClock.now - start
                 case let .end(error):
                     // The daemon let go (it restarted, or the session ended):
                     // read again in a moment and follow anew.

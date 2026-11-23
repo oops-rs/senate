@@ -426,6 +426,7 @@ final class CoreStore {
             show(.inbox)
         }
         Perf.tour(self)
+        Perf.sessionTour(self)
         #if DEBUG
         if let dir = Snapshot.directory {
             show(.inbox)
