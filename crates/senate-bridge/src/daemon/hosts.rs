@@ -922,6 +922,7 @@ impl Shared {
         };
         let session_runtime = Runtime::from(runtime);
         let mut reply = SpawnReply {
+            display_name: name.clone(),
             resolved_model: model.model.clone().filter(|id| {
                 requested_model
                     .as_ref()

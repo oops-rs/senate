@@ -95,6 +95,7 @@ impl Terminal {
                 alias: None,
                 cwd,
                 chair: false,
+                secretary: false,
                 prompt: None,
                 model: Default::default(),
             },
@@ -536,6 +537,7 @@ async fn a_hosted_codex_thread_is_named_after_the_senators_alias() {
         alias: alias.map(path),
         cwd: project.clone(),
         chair: false,
+        secretary: false,
         prompt: None,
         model: Default::default(),
     };

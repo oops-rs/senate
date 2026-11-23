@@ -127,7 +127,7 @@ pub fn uptime(since: DateTime<Utc>, now: DateTime<Utc>) -> String {
 
 /// `senate session list`: one line per session, the running first, then the
 /// hosts running with no session.
-pub fn render(reply: &SessionsReply, now: DateTime<Utc>, locale: Locale) -> String {
+pub fn render(reply: &SessionsReply, now: DateTime<Utc>, locale: Locale, verbose: bool) -> String {
     if reply.rows.is_empty() && reply.orphans.is_empty() {
         return locale
             .pick(
@@ -151,7 +151,7 @@ pub fn render(reply: &SessionsReply, now: DateTime<Utc>, locale: Locale) -> Stri
         .iter()
         .map(|row| {
             [
-                row.label(),
+                row.display_name(verbose),
                 row.committee
                     .as_ref()
                     .map_or_else(|| "-".to_owned(), ToString::to_string),
@@ -284,6 +284,7 @@ mod tests {
     fn row(name: &str, alias: Option<&str>, state: HostState) -> SessionRow {
         SessionRow {
             paused: false,
+            shown_name: None,
             host_id: EventId::new(),
             session_id: format!("s-{name}"),
             primary: name.parse().unwrap(),
@@ -376,16 +377,11 @@ mod tests {
             },
             Utc::now(),
             Locale::En,
+            false,
         );
-        let line = text
-            .lines()
-            .find(|l| l.starts_with("refund-v2::main"))
-            .unwrap();
+        let line = text.lines().find(|l| l.starts_with("main")).unwrap();
         assert!(line.contains("paused"), "{text}");
-        let line = text
-            .lines()
-            .find(|l| l.starts_with("refund-v2::idle"))
-            .unwrap();
+        let line = text.lines().find(|l| l.starts_with("idle")).unwrap();
         assert!(line.contains("stopped"), "{text}");
     }
 
@@ -403,7 +399,7 @@ mod tests {
             rows: vec![running, stopped],
             orphans: vec![orphan.clone()],
         };
-        let text = render(&reply, now, Locale::En);
+        let text = render(&reply, now, Locale::En, false);
         let lines: Vec<&str> = text.lines().collect();
         assert!(lines[0].starts_with("NAME"), "{text}");
         let column = lines[0].find("MODEL").unwrap();
@@ -422,7 +418,7 @@ mod tests {
             "{text}"
         );
         assert_eq!(
-            render(&SessionsReply::default(), now, Locale::En),
+            render(&SessionsReply::default(), now, Locale::En, false),
             "No hosted sessions on this machine."
         );
     }
@@ -446,7 +442,7 @@ mod tests {
             rows: vec![waiting, asking],
             orphans: Vec::new(),
         };
-        let text = render(&reply, now, Locale::En);
+        let text = render(&reply, now, Locale::En, false);
         assert!(text.contains("running · prompt in terminal"), "{text}");
         assert!(text.contains("running · approval: Bash"), "{text}");
     }

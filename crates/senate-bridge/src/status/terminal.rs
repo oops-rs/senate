@@ -109,7 +109,11 @@ pub fn render_terminal(
     sessions(view, now, full_ids, scope.is_none(), terminal, &mut out);
     connection(view, scope, terminal, &mut out);
     problems(view, terminal, &mut out);
-    out
+    if full_ids {
+        out
+    } else {
+        senate_core::alias::display_mentions(&out, view.aliases.as_ref(), scope)
+    }
 }
 
 /// The everyday view: whether the daemon runs, and the sessions that are
@@ -125,13 +129,6 @@ pub fn render_brief(
 ) -> String {
     let l = view.locale;
     let roles = view.roles.as_ref();
-    let name = |id: &str| {
-        if full_ids {
-            id.to_owned()
-        } else {
-            crate::terminal::brief_name(id).into_owned()
-        }
-    };
     let senate = roles
         .and_then(|r| r.senate.as_ref())
         .or(view.senate.as_ref())
@@ -151,7 +148,7 @@ pub fn render_brief(
                 |info| {
                     info.chair.as_ref().map_or_else(
                         || l.pick("暂无", "none").to_owned(),
-                        |chair| name(chair.as_str()),
+                        |chair| view.display(chair, Some(committee), full_ids),
                     )
                 },
             );
@@ -228,7 +225,6 @@ pub fn render_brief(
     let rows: Vec<Row> = view
         .sessions
         .iter()
-        .filter(|s| s.state != SessionState::Ended)
         .map(|s| {
             let mut state = match s.state {
                 SessionState::Live => l.pick("活跃", "live"),
@@ -240,7 +236,7 @@ pub fn render_brief(
                 state.push_str(l.pick(" · 推送失败", " · push failed"));
             }
             let mut cells = vec![
-                Cell::Text(name(s.agent.as_str())),
+                Cell::Text(view.display(&s.agent, s.committee(), full_ids)),
                 Cell::Text(state),
                 Cell::Text(ago(s.last_seen, now, l)),
             ];

@@ -129,11 +129,14 @@ impl Engine {
                     .iter()
                     .find(|c| c.agent == *agent)
                     .map(|c| (c.seq, now - c.ts));
-                render::presence_status(
-                    l,
-                    agent,
-                    presence.iter().find(|p| p.agent == *agent),
-                    checkpoint,
+                self.seat_names().display_bylines(
+                    &render::presence_status(
+                        l,
+                        agent,
+                        presence.iter().find(|p| p.agent == *agent),
+                        checkpoint,
+                    ),
+                    committee,
                 )
             })
             .collect()

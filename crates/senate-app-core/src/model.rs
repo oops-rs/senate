@@ -44,6 +44,8 @@ pub enum Refresh {
     },
     /// Every inbox of the primary Senate.
     AllInboxes,
+    /// The Senate-wide committee roster.
+    Roster,
     /// `approvals`, replacing the list.
     Approvals,
     /// `sessions`: this machine's hosted sessions and the prompts waiting
@@ -193,6 +195,7 @@ pub struct Model {
     /// since connecting.
     pub sessions: Option<SessionsReply>,
     pub last_error: Option<Failure>,
+    pub roster: Vec<senate_bridge::ipc::RosterCommittee>,
     /// Approvals already notified about, so a reconnect does not repeat them.
     notified: BTreeSet<String>,
     /// Hosted prompts already notified about, by session and when it opened.
@@ -264,6 +267,7 @@ impl Model {
                 // inbox and the docket: it is cheap, and it catches what the
                 // stream does not announce (a committee joined, a thread that
                 // aged, an item put to the Speaker).
+                fx.refresh.push(Refresh::Roster);
                 fx.refresh.push(Refresh::AllInboxes);
                 fx.refresh.push(Refresh::Docket);
                 // How agents are named (the driver reads them at most every
@@ -287,7 +291,7 @@ impl Model {
             }
             // Who works the desk changed: the docket may be another one.
             // What this machine's agents are comes with the next status.
-            WatchEvent::Roles => fx.refresh.push(Refresh::Docket),
+            WatchEvent::Roles => fx.refresh.extend([Refresh::Roster, Refresh::Docket]),
             WatchEvent::Sessions => fx.refresh.push(Refresh::Sessions),
             WatchEvent::Inbox {
                 agent, committee, ..

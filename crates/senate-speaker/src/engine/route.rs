@@ -279,11 +279,9 @@ impl Engine {
         let l = self.locale(committee);
         let mut seats = Vec::new();
         for agent in agents.into_iter().filter(|a| *a != self.me) {
+            let shown = self.aliases.display_name(Some(committee), &agent);
             seats.push(CommitteeSeat {
-                shown: self
-                    .aliases
-                    .alias_of(committee, &agent)
-                    .map(ToString::to_string),
+                shown: (shown != agent.as_str()).then_some(shown),
                 duty: page.duties.get(&agent).cloned(),
                 online: self.hub.is_agent_connected(committee, &agent).await,
                 presence: page
@@ -305,10 +303,14 @@ impl Engine {
             for seat in child.seats.iter().filter(|s| s.committee == *committee) {
                 seats.push(CommitteeSeat {
                     target: format!("{}::{}", child.name, seat.senator),
-                    shown: seat
-                        .alias
-                        .as_ref()
-                        .map(|alias| crate::render::child_seat_name(l, alias, &child.name)),
+                    shown: Some(crate::render::child_seat_name(
+                        l,
+                        seat.alias.as_ref().map_or_else(
+                            || senate_core::alias::short_name(&seat.senator),
+                            ToString::to_string,
+                        ),
+                        &child.name,
+                    )),
                     duty: seat.duty.clone(),
                     online: child_online && seat.presence == PresenceState::Online,
                     presence: Some(if child_online {

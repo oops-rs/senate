@@ -15,15 +15,16 @@ pub(super) struct HostAuthority {
     committee_scope: Option<CommitteeId>,
     may_appoint: bool,
     committees: Vec<CommitteeId>,
+    desk: Option<SenatorName>,
 }
 
 impl HostAuthority {
     pub(super) fn check_target(
         &self,
         committee: &CommitteeId,
-        appoint_chair: bool,
+        appoint_role: bool,
     ) -> Result<(), IpcError> {
-        if (appoint_chair && !self.may_appoint)
+        if (appoint_role && !self.may_appoint)
             || self
                 .committee_scope
                 .as_ref()
@@ -31,7 +32,7 @@ impl HostAuthority {
         {
             return Err(IpcError::new(
                 codes::NOT_PRESIDING,
-                "only the Speaker's office may start a chair or manage a hosted senator in another committee",
+                "only the Speaker's office may start a chair or secretary, or manage a hosted senator in another committee",
             ));
         }
         if !self.committees.contains(committee) {
@@ -69,9 +70,12 @@ pub(super) struct SpawnOrder {
     pub(super) runtime: HostedRuntime,
     pub(super) committee: CommitteeId,
     pub(super) alias: Option<SenatorName>,
+    pub(super) default_alias: bool,
     pub(super) cwd: PathBuf,
     /// Appoint the new senator as the committee's chair.
     pub(super) chair: bool,
+    /// Appoint the new senator to the Speaker’s desk.
+    pub(super) secretary: bool,
     /// The new seat's first request, if any.
     pub(super) prompt: Option<String>,
     /// The runtime's model and effort; unset, its own default.
@@ -94,10 +98,11 @@ impl Shared {
             .await
             .map_err(|_| IpcError::new(codes::SERVER, "could not verify Senate roles in time"))?
             .map_err(server_error)?;
+        let desk = me.office.as_ref().and_then(|o| o.speaker_here()).cloned();
         // The empty selector is the person's CLI. The MCP shim must supply
         // its session identity for every hosted-session action.
         if selector.session_id.is_none() && selector.claude_pid.is_none() {
-            let speaker = me.office.is_some_and(|office| {
+            let speaker = me.office.as_ref().is_some_and(|office| {
                 office.speaker.name().name() == &me.person
                     && !matches!(office.kind, SenatorKind::Agent | SenatorKind::BuiltIn)
             });
@@ -106,6 +111,7 @@ impl Shared {
                 acted_by: None,
                 committee_scope: None,
                 may_appoint: speaker,
+                desk,
                 committees: me.committees,
             });
         }
@@ -126,6 +132,7 @@ impl Shared {
                 acted_by: Some(session.agent),
                 committee_scope: None,
                 may_appoint: true,
+                desk,
                 committees: me.committees,
             });
         }
@@ -147,6 +154,7 @@ impl Shared {
             acted_by: None,
             committee_scope: Some(committee.clone()),
             may_appoint: false,
+            desk: None,
             committees: me.committees,
         })
     }
@@ -160,8 +168,10 @@ impl Shared {
             runtime,
             committee,
             alias,
+            default_alias,
             cwd,
             chair: appoint_chair,
+            secretary: appoint_secretary,
             prompt,
             model,
         } = order;
@@ -170,7 +180,27 @@ impl Shared {
         model.check(runtime).map_err(IpcError::bad_request)?;
         let prompt = prompt.filter(|p| !p.trim().is_empty());
         let auth = self.authorize_host_action(selector).await?;
-        auth.check_target(&committee, appoint_chair)?;
+        if appoint_chair && appoint_secretary {
+            return Err(IpcError::bad_request("choose either chair or secretary"));
+        }
+        auth.check_target(&committee, appoint_chair || appoint_secretary)?;
+        let desk = appoint_secretary
+            .then(|| {
+                auth.desk.as_ref().ok_or_else(|| {
+                    IpcError::bad_request("the Speaker’s desk is not in this Senate")
+                })
+            })
+            .transpose()?;
+        let alias_guard = if default_alias {
+            Some(self.spawn_aliases.lock().await)
+        } else {
+            None
+        };
+        let alias = if alias.is_none() && default_alias {
+            Some(self.next_spawn_alias(runtime.into(), &committee).await?)
+        } else {
+            alias
+        };
         let audit_auth = &auth;
         let launch = self
             .on_spawn_with(
@@ -187,8 +217,12 @@ impl Shared {
             )
             .await?;
         let mut reply = launch.finish();
+        drop(alias_guard);
         if appoint_chair {
             self.appoint_hosted_chair(&auth, &reply).await?;
+        }
+        if let Some(desk) = desk {
+            self.appoint_hosted_secretary(&auth, &reply, desk).await?;
         }
         if let Some(prompt) = prompt {
             // The seat is published: an ordinary request reaches it through
@@ -465,6 +499,74 @@ impl Shared {
             .await
             .map_err(|_| IpcError::new(codes::SERVER, timeout_message))??;
         Ok(())
+    }
+
+    async fn next_spawn_alias(
+        &self,
+        runtime: Runtime,
+        committee: &CommitteeId,
+    ) -> Result<SenatorName, IpcError> {
+        use senate_core::alias::AliasMatch;
+        let (aliases, me) = tokio::time::timeout(ROLE_TIMEOUT, async {
+            tokio::try_join!(self.api.aliases(), self.api.me())
+        })
+        .await
+        .map_err(|_| IpcError::new(codes::SERVER, "could not check available aliases in time"))?
+        .map_err(server_error)?;
+        for ordinal in 1..=u32::MAX {
+            let candidate = format!("{}{ordinal}", runtime.as_str())
+                .parse::<SenatorName>()
+                .map_err(IpcError::internal)?;
+            let qualified = AliasName {
+                committee: Some(committee.clone()),
+                alias: candidate.clone(),
+            };
+            if matches!(aliases.resolve(&qualified, None), AliasMatch::NotAlias)
+                && !me.people.is_person(&candidate)
+                && !me.agents.contains(&candidate)
+            {
+                return Ok(candidate);
+            }
+        }
+        Err(IpcError::bad_request("no default aliases available"))
+    }
+
+    async fn appoint_hosted_secretary(
+        &self,
+        auth: &HostAuthority,
+        reply: &SpawnReply,
+        desk: &SenatorName,
+    ) -> Result<(), IpcError> {
+        let appointment =
+            self.api
+                .add_secretary(desk, reply.senator.clone(), auth.acted_by.clone());
+        match tokio::time::timeout(AUDIT_TIMEOUT, appointment).await {
+            Ok(Ok(_)) => {
+                self.refresh_me().await;
+                Ok(())
+            }
+            outcome => {
+                let error = match outcome {
+                    Ok(Err(error)) => self.refusal(error),
+                    _ => IpcError::new(
+                        codes::SERVER,
+                        "the secretary appointment was not acknowledged",
+                    ),
+                };
+                Err(IpcError::new(
+                    &error.code,
+                    format!(
+                        "{} was started and recorded in `{}`. Secretary appointment could not be confirmed. {}",
+                        reply
+                            .display_name
+                            .as_deref()
+                            .unwrap_or(reply.senator.as_str()),
+                        reply.committee,
+                        error.message,
+                    ),
+                ))
+            }
+        }
     }
 
     /// After the launch is audited, appoint the chair on the spawner's

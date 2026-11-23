@@ -87,7 +87,10 @@ pub(crate) fn router(state: AppState) -> Router {
             get(roles::get_chair).put(roles::put_chair),
         )
         .route("/v1/secretaries", get(roles::secretaries))
-        .route("/v1/secretaries/{senator}", put(roles::put_secretaries))
+        .route(
+            "/v1/secretaries/{senator}",
+            put(roles::put_secretaries).post(roles::put_secretaries),
+        )
         .route(
             "/v1/secretary-teams/{person}/session",
             put(secretary_work::put_session),

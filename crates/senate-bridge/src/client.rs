@@ -600,6 +600,22 @@ impl ApiClient {
         Ok(checked(resp).await?.json().await?)
     }
 
+    /// Append a desk worker under the same authorization as replacing the desk.
+    pub(crate) async fn add_secretary(
+        &self,
+        senator: &SenatorName,
+        secretary: SenatorName,
+        acted_by: Option<SenatorName>,
+    ) -> Result<api::Secretaries, ApiClientError> {
+        let url = self.url(&api::secretaries_of_path(senator));
+        let body = api::SetSecretaries {
+            secretaries: vec![secretary],
+            acted_by,
+        };
+        let resp = self.authed(self.http.post(url)).json(&body).send().await?;
+        Ok(checked(resp).await?.json().await?)
+    }
+
     pub async fn set_secretary_session(
         &self,
         principal: &SenatorName,

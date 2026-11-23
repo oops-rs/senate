@@ -78,6 +78,7 @@ async fn replacing_a_hosted_chair_transfers_its_alias_and_prompt_on_the_server()
             alias: Some(path("reviewer")),
             cwd: laptop.work.clone(),
             chair: true,
+            secretary: false,
             prompt: None,
             model: Default::default(),
         })

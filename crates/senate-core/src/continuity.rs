@@ -287,6 +287,12 @@ pub enum PresenceState {
     Reassigned,
 }
 
+/// A seat belongs in the current roster while its presence lease is live
+/// or a local hosted process is running.
+pub fn roster_active(presence: Option<PresenceState>, hosted_running: bool) -> bool {
+    hosted_running || presence == Some(PresenceState::Online)
+}
+
 impl PresenceState {
     pub fn as_str(self) -> &'static str {
         match self {

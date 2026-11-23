@@ -110,6 +110,7 @@ pub struct ServerHub {
     notes: Vec<String>,
     children: RwLock<BTreeMap<Name, ChildSenate>>,
     aliases: tokio::sync::RwLock<CommitteeAliases>,
+    secretary_updates: tokio::sync::Mutex<()>,
     secretary_gate: tokio::sync::Mutex<()>,
     senate: Name,
     parent: RwLock<Option<SenatePath>>,
@@ -282,6 +283,7 @@ impl ServerHub {
             notes,
             children: RwLock::new(children),
             aliases: tokio::sync::RwLock::new(aliases),
+            secretary_updates: tokio::sync::Mutex::new(()),
             secretary_gate: tokio::sync::Mutex::new(()),
             senate,
             parent: RwLock::new(parent),
@@ -403,6 +405,31 @@ impl ServerHub {
     /// secretary is an agent seated here or the built-in session. The
     /// caller has checked who may.
     pub async fn set_secretaries(
+        &self,
+        principal: SenatorName,
+        secretaries: Vec<SenatorName>,
+    ) -> Result<Secretaries, HubError> {
+        let _guard = self.secretary_updates.lock().await;
+        self.write_secretaries(principal, secretaries).await
+    }
+
+    /// Add workers to the desk without losing simultaneous appointments.
+    pub(crate) async fn add_secretaries(
+        &self,
+        principal: SenatorName,
+        additions: Vec<SenatorName>,
+    ) -> Result<Secretaries, HubError> {
+        let _guard = self.secretary_updates.lock().await;
+        let mut secretaries = self.seats.snapshot().secretaries_of(&principal).to_vec();
+        for secretary in additions {
+            if !secretaries.contains(&secretary) {
+                secretaries.push(secretary);
+            }
+        }
+        self.write_secretaries(principal, secretaries).await
+    }
+
+    async fn write_secretaries(
         &self,
         principal: SenatorName,
         secretaries: Vec<SenatorName>,

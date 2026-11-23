@@ -396,6 +396,7 @@ pub(super) async fn secretaries(
 /// A senator's secretaries are registered by the senator itself, by the
 /// principal that runs it, or by the Speaker's office (naming who acts).
 pub(super) async fn put_secretaries(
+    method: axum::http::Method,
     State(state): State<AppState>,
     person: Person,
     path: Result<Path<String>, PathRejection>,
@@ -438,7 +439,12 @@ pub(super) async fn put_secretaries(
                 .map_err(|e| ApiFailure::forbidden(e.to_string()))?;
         }
     }
-    Ok(Json(state.hub.set_secretaries(senator, secretaries).await?))
+    let result = if method == axum::http::Method::POST {
+        state.hub.add_secretaries(senator, secretaries).await?
+    } else {
+        state.hub.set_secretaries(senator, secretaries).await?
+    };
+    Ok(Json(result))
 }
 
 pub(super) async fn children(

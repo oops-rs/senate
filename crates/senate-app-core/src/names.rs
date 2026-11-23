@@ -73,32 +73,7 @@ impl Names {
     }
 
     fn senator(&self, p: &SenatorName, committee: Option<&CommitteeId>) -> String {
-        let Some(aliases) = &self.aliases else {
-            return p.to_string();
-        };
-        if let Some(c) = committee {
-            return aliases
-                .alias_of(c, p)
-                .map_or_else(|| p.to_string(), ToString::to_string);
-        }
-        // No committee in view: an alias only when it is the agent's one.
-        let mut found: Vec<SenatorName> = match aliases {
-            KnownAliases::Scoped(table) => table
-                .iter()
-                .filter(|a| &a.primary == p)
-                .map(|a| a.alias)
-                .collect(),
-            KnownAliases::Unscoped(_) => aliases
-                .alias_of(&placeholder_committee(), p)
-                .cloned()
-                .into_iter()
-                .collect(),
-        };
-        found.dedup();
-        match found.as_slice() {
-            [one] => one.to_string(),
-            _ => p.to_string(),
-        }
+        senate_core::alias::display_name(self.aliases.as_ref(), committee, p)
     }
 
     fn locator(&self, loc: &Locator) -> String {
@@ -160,12 +135,6 @@ fn role(l: Locale, name: &str, what: &str) -> String {
         Locale::Zh => format!("{name}（{what}）"),
         Locale::En => format!("{name} ({what})"),
     }
-}
-
-/// Unscoped aliases (an older server) ignore the committee.
-fn placeholder_committee() -> CommitteeId {
-    #[allow(clippy::expect_used)]
-    CommitteeId::new("senate").expect("a valid committee id")
 }
 
 /// The id a mention stands for, as written without brackets.

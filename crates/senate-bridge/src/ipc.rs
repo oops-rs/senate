@@ -390,6 +390,8 @@ pub struct SpawnReply {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_model: Option<String>,
     pub senator: SenatorName,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     pub session_id: String,
     pub committee: CommitteeId,
     /// The request carrying the spawn's prompt, when it had one.
@@ -495,6 +497,9 @@ pub struct SessionRow {
     pub alias: Option<SenatorName>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub committee: Option<CommitteeId>,
+    /// The alias as displayed in this Senate, qualified when ambiguous.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shown_name: Option<String>,
     pub runtime: crate::session::Runtime,
     /// The model and effort it was last started with.
     #[serde(default, skip_serializing_if = "HostedModel::is_default")]
@@ -544,6 +549,20 @@ impl SessionRow {
             (Some(committee), Some(alias)) => format!("{committee}::{alias}"),
             _ => self.primary.to_string(),
         }
+    }
+
+    pub fn display_name(&self, verbose: bool) -> String {
+        if verbose {
+            return self.primary.to_string();
+        }
+        self.shown_name
+            .clone()
+            .or_else(|| self.alias.as_ref().map(ToString::to_string))
+            .unwrap_or_else(|| senate_core::alias::short_name(&self.primary))
+    }
+
+    pub fn is_active(&self) -> bool {
+        senate_core::continuity::roster_active(None, self.is_running())
     }
 
     pub fn is_running(&self) -> bool {
@@ -656,6 +675,8 @@ pub enum Request {
         committee: CommitteeId,
         #[serde(default, skip_serializing_if = "is_false")]
         chair: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        secretary: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         alias: Option<SenatorName>,
         cwd: PathBuf,
@@ -794,6 +815,14 @@ pub enum Request {
         committee: CommitteeId,
     },
     /// Separate operation so an older daemon cannot silently ignore the name.
+    /// The committees and their current rosters.
+    Roster,
+    /// Set a committee alias for a senator the person runs.
+    SetAlias {
+        senator: AliasName,
+        alias: SenatorName,
+        committee: Option<CommitteeId>,
+    },
     /// The Senate's aliases ([`KnownAliases`](senate_core::alias::KnownAliases)).
     Aliases,
     /// Remove `alias` while it stands for `primary`: from `committee`, or
@@ -1932,6 +1961,24 @@ pub enum StreamState {
     Stopped,
 }
 
+/// A committee as shown in the Senate roster.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RosterCommittee {
+    pub committee: CommitteeId,
+    pub chair: Option<SenatorName>,
+    pub chair_display_name: Option<String>,
+    pub chair_live: bool,
+    pub members: Vec<RosterMember>,
+    pub pending: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RosterMember {
+    pub senator: SenatorName,
+    pub display_name: String,
+    pub active: bool,
+}
+
 /// One agent's stream on one committee.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommitteeStatus {
@@ -1951,6 +1998,14 @@ pub struct CommitteeStatus {
     /// log last said; `None`: it has none, or it is not known yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duty: Option<String>,
+}
+
+impl CommitteeStatus {
+    pub fn is_active(&self) -> bool {
+        let presence = matches!(self.stream, Some(StreamState::Connected { .. }))
+            .then_some(senate_core::PresenceState::Online);
+        senate_core::continuity::roster_active(presence, self.sessions > 0)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

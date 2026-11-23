@@ -52,7 +52,7 @@ fn mentions(l: Locale, to: &[Address]) -> String {
 
 /// A child Senate's seat as people are shown it: its alias there with the
 /// child's name, `refund-dev（carol-desk）` / `refund-dev (carol-desk)`.
-pub(crate) fn child_seat_name(l: Locale, alias: &SenatorName, child: &Name) -> String {
+pub(crate) fn child_seat_name(l: Locale, alias: impl std::fmt::Display, child: &Name) -> String {
     match l {
         Locale::Zh => format!("{alias}（{child}）"),
         Locale::En => format!("{alias} ({child})"),
@@ -72,10 +72,43 @@ impl SeatNames<'_> {
     /// An agent here as people are shown it on `committee`: its alias
     /// there as a mention, else its id.
     pub(crate) fn local(&self, committee: &CommitteeId, address: &Address) -> String {
-        address
-            .as_senator()
-            .and_then(|agent| self.aliases.alias_of(committee, agent))
-            .map_or_else(|| address.in_text(), senator)
+        let Some(agent) = address.as_senator() else {
+            return address.in_text();
+        };
+        let shown = self.aliases.display_name(Some(committee), agent);
+        if shown == agent.as_str() {
+            address.in_text()
+        } else {
+            // Keep the mention syntax that chat surfaces use to pair an alias
+            // with an address. Qualified aliases are written in display form.
+            shown
+                .parse::<SenatorName>()
+                .map_or_else(|_| shown.clone(), |name| senator(&name))
+        }
+    }
+
+    pub(crate) fn display_bylines(&self, text: &str, committee: &CommitteeId) -> String {
+        // Preserve mention markup for ordinary identities and aliases so
+        // the chat adapter can render them as mentions.
+        let mut out = String::new();
+        let mut start = 0;
+        for found in senate_core::Mention::scan(text) {
+            let shown = match &found.mention {
+                senate_core::Mention::Senator(agent) => {
+                    self.local(committee, &Address::senator(agent))
+                }
+                senate_core::Mention::SpeakerFor(agent) => {
+                    let name = self.aliases.display_name(Some(committee), agent);
+                    format!("[speaker::{name}]")
+                }
+                _ => continue,
+            };
+            out.push_str(&text[start..found.range.start]);
+            out.push_str(&shown);
+            start = found.range.end;
+        }
+        out.push_str(&text[start..]);
+        out
     }
 
     /// A seat in a child Senate, when the child declares an alias for it.
@@ -98,7 +131,11 @@ impl SeatNames<'_> {
     pub(crate) fn child_or_id(&self, l: Locale, seat: &senate_core::Locator) -> Option<String> {
         self.child(l, seat).or_else(|| {
             let child = seat.senate()?.name();
-            Some(child_seat_name(l, seat.address().as_senator()?, child))
+            Some(child_seat_name(
+                l,
+                senate_core::alias::short_name(seat.address().as_senator()?),
+                child,
+            ))
         })
     }
 
@@ -333,13 +370,13 @@ fn author(l: Locale, names: SeatNames<'_>, event: &Event) -> String {
         return seat;
     }
     if let Some(byline) = event.byline(l) {
-        return byline;
+        return names.display_bylines(&byline, &event.committee);
     }
     match (&event.from, &event.on_behalf_of) {
         (Address::Speaker, Some(behalf)) => {
             format!("{} {}", Address::Speaker.in_text(), behalf.in_text())
         }
-        (from, _) => from.in_text(),
+        (from, _) => names.local(&event.committee, from),
     }
 }
 

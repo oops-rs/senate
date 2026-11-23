@@ -454,6 +454,21 @@ stdin.")]
         /// Show complete session and senator IDs.
         #[arg(long)]
         full_ids: bool,
+        /// Include inactive agents and sessions.
+        #[arg(long)]
+        all: bool,
+    },
+    /// List every committee with its chair, active members and pending threads.
+    Committees,
+    /// Set or rename a senator's alias on its committee.
+    Alias {
+        /// Full senator ID, alias, or committee::alias.
+        senator: AliasName,
+        /// The new role name.
+        alias: SenatorName,
+        /// Committee to rename the senator on, if omitted from the senator.
+        #[arg(long)]
+        committee: Option<CommitteeId>,
     },
     /// Check the Codex app-server connection.
     ///
@@ -511,6 +526,12 @@ stdin.")]
         /// A name to address the senator by, e.g. reviewer.
         #[arg(long)]
         alias: Option<SenatorName>,
+        /// Appoint the new senator as the committee chair.
+        #[arg(long, conflicts_with = "secretary")]
+        chair: bool,
+        /// Appoint the new senator as a secretary of the Speaker’s desk.
+        #[arg(long)]
+        secretary: bool,
         /// The directory where the coding session will run.
         #[arg(long, default_value = ".")]
         dir: PathBuf,
@@ -678,7 +699,11 @@ enum SessionCmd {
     /// Each session's name (`committee::alias`, else its senator),
     /// committee, runtime, model, state, uptime, who is at its terminal,
     /// and directory.
-    List,
+    List {
+        /// Include stopped hosted sessions.
+        #[arg(long)]
+        all: bool,
+    },
     /// Watch hosted terminals side by side, hiding those with an interactive viewer.
     ///
     /// A full-screen grid of read-only views of the sessions hosted on this
@@ -1221,19 +1246,23 @@ fn settings_here() -> (Paths, Settings) {
 /// The hosted sessions of this machine whose terminal host is running, as
 /// `senate session watch` shows them: `senate session list`' rows, each named as
 /// a command takes it.
-async fn hosted_sessions(paths: &Paths) -> anyhow::Result<Vec<crate::host::view::Session>> {
+async fn hosted_sessions(
+    paths: &Paths,
+    all: bool,
+    verbose: bool,
+) -> anyhow::Result<Vec<crate::host::view::Session>> {
     let reply: crate::ipc::SessionsReply = daemon_call(paths, &Request::Sessions).await?;
     // Only a running host can be watched; a paused one is shown greyed
     // out. The rows come ordered by name.
     Ok(reply
         .rows
         .into_iter()
-        .filter(|row| row.is_running() || row.paused)
+        .filter(|row| row.is_active() || all)
         .map(|row| crate::host::view::Session {
             key: row.session_id.clone(),
             title: format!(
                 "{} · {} · {} · {} · {}",
-                row.label(),
+                row.display_name(verbose),
                 row.committee
                     .as_ref()
                     .map_or_else(|| "-".to_owned(), ToString::to_string),
@@ -1727,9 +1756,17 @@ fn choose_alias(
     }
 }
 
-fn launch(request: &Request, terminal: Option<Terminal>) -> anyhow::Result<()> {
+fn launch(request: &Request, output: Output) -> anyhow::Result<()> {
     let reply: SpawnReply = host_call(request)?;
-    println!("{}", reply.senator);
+    let name = if output.verbose {
+        reply.senator.to_string()
+    } else {
+        reply
+            .display_name
+            .clone()
+            .unwrap_or_else(|| senate_core::alias::short_name(&reply.senator))
+    };
+    println!("{name}");
     if let Some(resolved) = &reply.resolved_model
         && let Request::Spawn { model, .. } | Request::Restore { model, .. } = request
         && let Some(requested) = &model.model
@@ -1751,17 +1788,17 @@ fn launch(request: &Request, terminal: Option<Terminal>) -> anyhow::Result<()> {
             )
         );
     }
-    if terminal.is_some() {
+    if output.terminal.is_some() {
         eprintln!(
             "{}",
             locale.pick(
                 format!(
                     "已在后台运行。用 `senate attach {}` 打开它的终端（Ctrl-] 脱离）。",
-                    reply.senator
+                    name
                 ),
                 format!(
                     "Running in the background. Open its terminal with `senate attach {}` (Ctrl-] detaches).",
-                    reply.senator
+                    name
                 ),
             )
         );
@@ -1813,7 +1850,7 @@ async fn inbox(
         paths,
         &Request::Docket {
             session: SessionSelector::default(),
-            committee: Some(committee),
+            committee: Some(committee.clone()),
         },
     )
     .await?;
@@ -1844,6 +1881,10 @@ async fn inbox(
                 ),
             ));
         }
+    }
+    if !verbose {
+        let aliases: Option<KnownAliases> = daemon_call(paths, &Request::Aliases).await.ok();
+        out = crate::format::display_bylines(&out, aliases.as_ref(), Some(&committee));
     }
     Ok(out)
 }
@@ -2388,7 +2429,17 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
                 if json {
                     print_json(&reply)
                 } else {
-                    output.print(&speak::render_thread(&reply, locale));
+                    let mut text = speak::render_thread(&reply, locale);
+                    if !verbose {
+                        let aliases: Option<KnownAliases> =
+                            daemon_call(&paths, &Request::Aliases).await.ok();
+                        text = crate::format::display_bylines(
+                            &text,
+                            aliases.as_ref(),
+                            Some(&reply.committee),
+                        );
+                    }
+                    output.print(&text);
                     Ok(())
                 }
             })
@@ -2502,6 +2553,8 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             runtime: harness,
             committee,
             alias,
+            chair,
+            secretary,
             dir,
             prompt,
             prompt_file,
@@ -2522,14 +2575,15 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
                 &Request::Spawn {
                     runtime: harness,
                     committee,
-                    chair: false,
+                    chair,
+                    secretary,
                     alias,
                     cwd: std::path::absolute(dir)?,
                     session: SessionSelector::default(),
                     prompt,
                     model: model.into(),
                 },
-                terminal,
+                output,
             )
         }
         Cmd::Attach { senator, read_only } => {
@@ -2636,14 +2690,52 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             let transport = config.transport().map_err(anyhow::Error::msg)?;
             runtime(false)?.block_on(codex_smoke(&transport, &thread, text.as_deref()))
         }
-        Cmd::Status { scope, full_ids } => {
+        Cmd::Committees => {
+            let paths = Paths::from_env()?;
+            let roster: Vec<ipc::RosterCommittee> =
+                runtime(false)?.block_on(daemon_call(&paths, &Request::Roster))?;
+            let locale = BridgeConfig::locale_at(&paths.config());
+            println!("{}", status::render_committees(&roster, locale, verbose));
+            Ok(())
+        }
+        Cmd::Alias {
+            senator,
+            alias,
+            committee,
+        } => {
+            let senator = if committee.is_none() {
+                pick_alias(senator)?
+            } else {
+                senator
+            };
+            let paths = Paths::from_env()?;
+            let alias: SenatorName = runtime(false)?.block_on(daemon_call(
+                &paths,
+                &Request::SetAlias {
+                    senator,
+                    alias,
+                    committee,
+                },
+            ))?;
+            println!("{alias}");
+            Ok(())
+        }
+        Cmd::Status {
+            scope,
+            full_ids,
+            all,
+        } => {
             let paths = Paths::from_env()?;
             let (view, committee) = runtime(false)?.block_on(async {
                 let scope = scope.resolve(&paths).await?;
-                let view = status::collect_for(&paths, scope.as_ref()).await?;
+                let mut view = status::collect_for(&paths, scope.as_ref()).await?;
+                if !all {
+                    view.retain_active();
+                }
                 Ok::<_, anyhow::Error>((view, scope))
             })?;
             let now = chrono::Utc::now();
+            let full_ids = full_ids || verbose;
             let text = match (verbose, terminal) {
                 (true, Some(terminal)) => {
                     status::render_terminal(&view, now, full_ids, committee.as_ref(), terminal)
@@ -2725,17 +2817,19 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
 const REPLACE_TIMEOUT: Duration = Duration::from_secs(300);
 
 fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
-    let terminal = output.terminal;
     match command {
-        SessionCmd::List => {
+        SessionCmd::List { all } => {
             let paths = Paths::from_env()?;
             let locale = BridgeConfig::locale_at(&paths.config());
             let rt = runtime(false)?;
-            let reply: crate::ipc::SessionsReply =
+            let mut reply: crate::ipc::SessionsReply =
                 rt.block_on(daemon_call(&paths, &Request::Sessions))?;
+            if !all {
+                reply.rows.retain(ipc::SessionRow::is_active);
+            }
             println!(
                 "{}",
-                crate::sessions::render(&reply, chrono::Utc::now(), locale)
+                crate::sessions::render(&reply, chrono::Utc::now(), locale, output.verbose)
             );
             Ok(())
         }
@@ -2743,7 +2837,7 @@ fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
             let paths = Paths::from_env()?;
             runtime(false)?.block_on(crate::host::view::watch_all(&paths, all, || {
                 let paths = paths.clone();
-                Box::pin(async move { hosted_sessions(&paths).await })
+                Box::pin(async move { hosted_sessions(&paths, all, output.verbose).await })
             }))
         }
         SessionCmd::Stop {
@@ -2794,7 +2888,7 @@ fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
                     session: SessionSelector::default(),
                     model: model.into(),
                 },
-                terminal,
+                output,
             )
         }
         SessionCmd::Replace {
@@ -3265,6 +3359,7 @@ pub fn main() -> ExitCode {
             committee: None,
         },
         full_ids: false,
+        all: false,
     });
     if let Cmd::Hook {
         event,

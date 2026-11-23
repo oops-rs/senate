@@ -55,6 +55,8 @@ pub struct AppState {
 /// One hosted session: a terminal this machine runs for a senator.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct HostedSession {
+    pub display_name: String,
+    pub active: bool,
     /// What commands take to name it: `committee::alias`, else its id.
     pub label: String,
     pub session_id: String,
@@ -89,6 +91,8 @@ impl From<&SessionRow> for HostedSession {
     fn from(r: &SessionRow) -> Self {
         Self {
             label: r.label(),
+            display_name: r.display_name(false),
+            active: r.is_active(),
             session_id: r.session_id.clone(),
             mention: Address::senator(&r.primary).in_text(),
             committee: r.committee.as_ref().map(ToString::to_string),
@@ -162,6 +166,8 @@ pub struct SenateInfo {
     /// The person's agent holding the seat, when it is one of theirs.
     pub presiding_agent: Option<String>,
     pub committees: Vec<CommitteeLine>,
+    /// All committees and their chairs in this Senate.
+    pub roster: Vec<RosterCommittee>,
     /// Each committee's chair, as this Senate's roles say.
     pub chairs: Vec<ChairLine>,
     /// The Senates registered below this one.
@@ -172,6 +178,25 @@ pub struct SenateInfo {
 }
 
 /// One committee's chair.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct RosterCommittee {
+    pub committee: String,
+    pub chair_id: Option<String>,
+    pub chair_display_name: Option<String>,
+    pub chair_live: bool,
+    pub active_members: u32,
+    pub pending: u32,
+    /// Every recorded member, with the same active flag as the CLI.
+    pub members: Vec<RosterMember>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct RosterMember {
+    pub senator_id: String,
+    pub display_name: String,
+    pub active: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct ChairLine {
     pub committee: String,
@@ -225,6 +250,8 @@ pub struct CommitteeLine {
 /// One of the person's agents in one Senate.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct AgentInfo {
+    pub display_name: String,
+    pub active: bool,
     /// `claude`: what an inbox filter compares.
     pub path: String,
     /// `[senator::claude]`.
@@ -405,7 +432,13 @@ impl AppState {
             model
                 .senates()
                 .enumerate()
-                .map(|(i, s)| senate_info(s, i == 0, locale, now))
+                .map(|(i, s)| {
+                    let mut info = senate_info(s, i == 0, locale, now);
+                    if i == 0 {
+                        info.roster = model.roster.iter().map(roster_committee).collect();
+                    }
+                    info
+                })
                 .collect()
         } else {
             Vec::new()
@@ -528,6 +561,7 @@ fn senate_info(s: &StatusReply, primary: bool, locale: Locale, now: DateTime<Utc
         me: Address::senior(&s.person).in_text(),
         speaker: s.speaker.as_ref().map(seat_mention),
         presiding_agent: presider_of(s).map(ToString::to_string),
+        roster: Vec::new(),
         committees: s
             .committees
             .iter()
@@ -561,6 +595,26 @@ fn senate_info(s: &StatusReply, primary: bool, locale: Locale, now: DateTime<Utc
             .as_ref()
             .and_then(|r| r.uplink.as_ref())
             .map(|u| text::uplink(locale, u)),
+    }
+}
+
+fn roster_committee(c: &senate_bridge::ipc::RosterCommittee) -> RosterCommittee {
+    RosterCommittee {
+        committee: c.committee.to_string(),
+        chair_id: c.chair.as_ref().map(ToString::to_string),
+        chair_display_name: c.chair_display_name.clone(),
+        chair_live: c.chair_live,
+        active_members: count(c.members.iter().filter(|m| m.active).count()),
+        pending: count(c.pending),
+        members: c
+            .members
+            .iter()
+            .map(|member| RosterMember {
+                senator_id: member.senator.to_string(),
+                display_name: member.display_name.clone(),
+                active: member.active,
+            })
+            .collect(),
     }
 }
 
@@ -607,12 +661,9 @@ fn agents(model: &Model, waiting: &[Waiting]) -> Vec<AgentInfo> {
             .as_ref()
             .map(ToString::to_string)
             .unwrap_or_default();
+        let names = crate::names::current();
         let mut paths: Vec<&SenatorName> = s.committees.iter().map(|c| &c.agent).collect();
-        for x in s
-            .sessions
-            .iter()
-            .filter(|x| x.state != senate_bridge::session::SessionState::Ended)
-        {
+        for x in s.sessions.iter() {
             paths.push(&x.agent);
         }
         paths.sort();
@@ -625,7 +676,27 @@ fn agents(model: &Model, waiting: &[Waiting]) -> Vec<AgentInfo> {
                     &x.agent == path && x.state != senate_bridge::session::SessionState::Ended
                 })
                 .collect();
+            let active = i == 0
+                && model
+                    .roster
+                    .iter()
+                    .flat_map(|c| &c.members)
+                    .any(|m| &m.senator == path && m.active)
+                || s.committees
+                    .iter()
+                    .any(|c| &c.agent == path && c.is_active())
+                || sessions
+                    .iter()
+                    .any(|x| s.hosted.contains_key(&x.session_id));
             out.push(AgentInfo {
+                display_name: names.display(
+                    &Mention::Senator(path.clone()),
+                    sessions
+                        .iter()
+                        .max_by_key(|s| s.last_seen)
+                        .and_then(|s| s.committee()),
+                ),
+                active,
                 path: path.to_string(),
                 mention: Address::senator(path).in_text(),
                 senate: senate.clone(),

@@ -330,6 +330,11 @@ impl<S: Sink> Driver<S> {
                     Err(e) => self.read_failed(ReadOf::Approvals, &e),
                 }
             }
+            Refresh::Roster => {
+                if let Ok(roster) = self.link.call(&Request::Roster).await {
+                    self.model().roster = roster;
+                }
+            }
             Refresh::Docket => self.refresh_docket().await,
             Refresh::Aliases => self.refresh_aliases(false).await,
             Refresh::Sessions => self.refresh_sessions().await,

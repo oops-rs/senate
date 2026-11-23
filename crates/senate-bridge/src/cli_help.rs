@@ -15,7 +15,7 @@ use super::Cli;
 const GROUPS: &[(&str, &[&str])] = &[
     (
         "See what is happening",
-        &["status", "inbox", "thread", "memory"],
+        &["status", "committees", "inbox", "thread", "memory"],
     ),
     (
         "Speak as yourself",
@@ -24,7 +24,14 @@ const GROUPS: &[(&str, &[&str])] = &[
     ("This worktree", &["join", "leave", "where"]),
     (
         "Senators and sessions",
-        &["spawn", "attach", "session", "senator", "secretary"],
+        &[
+            "spawn",
+            "attach",
+            "session",
+            "alias",
+            "senator",
+            "secretary",
+        ],
     ),
     ("Set up this machine", &["setup"]),
 ];

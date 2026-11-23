@@ -306,6 +306,117 @@ impl KnownAliases {
     }
 }
 
+/// A readable fallback for a legacy session identity. Keep ordinary names intact.
+pub fn short_name(primary: &SenatorName) -> String {
+    let raw = primary.as_str();
+    if primary.is_session_name()
+        && let Some((runtime, id)) = raw.split_once('-')
+        && let Some(first) = id.strip_prefix("h-").unwrap_or(id).get(..8)
+        && first.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return format!("{runtime}-{first}");
+    }
+    raw.to_owned()
+}
+
+/// Display a senate identity in a committee, or across the Senate when no
+/// committee is in view. Qualify aliases only when they name several agents.
+pub fn display_name(
+    aliases: Option<&KnownAliases>,
+    committee: Option<&CommitteeId>,
+    primary: &SenatorName,
+) -> String {
+    match aliases {
+        Some(KnownAliases::Scoped(table)) => table.display_name(committee, primary),
+        Some(KnownAliases::Unscoped(map)) => map
+            .iter()
+            .find_map(|(alias, target)| (target == primary).then(|| alias.to_string()))
+            .unwrap_or_else(|| short_name(primary)),
+        None => short_name(primary),
+    }
+}
+
+impl CommitteeAliases {
+    pub fn display_name(&self, committee: Option<&CommitteeId>, primary: &SenatorName) -> String {
+        if let Some(committee) = committee {
+            return self.alias_of(committee, primary).map_or_else(
+                || short_name(primary),
+                |alias| self.qualified_display(committee, alias),
+            );
+        }
+        let mut seats = self.iter().filter(|q| &q.primary == primary);
+        if let Some(first) = seats.next()
+            && seats.all(|seat| seat.alias == first.alias)
+        {
+            return self.qualified_display(&first.committee, &first.alias);
+        }
+        short_name(primary)
+    }
+
+    fn qualified_display(&self, committee: &CommitteeId, alias: &SenatorName) -> String {
+        if matches!(self.resolve_bare(alias, None), AliasMatch::Ambiguous { .. }) {
+            format!("{committee}{SEPARATOR}{alias}")
+        } else {
+            alias.to_string()
+        }
+    }
+}
+
+/// Render bracketed mentions without changing the underlying event or IDs.
+pub fn display_mentions(
+    text: &str,
+    aliases: Option<&KnownAliases>,
+    committee: Option<&CommitteeId>,
+) -> String {
+    let mut result = String::new();
+    let mut end = 0;
+    for found in crate::Mention::scan(text) {
+        let shown = match &found.mention {
+            crate::Mention::Senator(primary) => display_name(aliases, committee, primary),
+            crate::Mention::SpeakerFor(primary) => {
+                format!("{} (Speaker)", display_name(aliases, committee, primary))
+            }
+            _ => continue,
+        };
+        result.push_str(&text[end..found.range.start]);
+        result.push_str(&shown);
+        end = found.range.end;
+    }
+    result.push_str(&text[end..]);
+    result
+}
+
+/// Render generated push headers and footers, keeping the sender's quoted
+/// body and ordinary bracketed identities intact.
+pub fn display_event_bylines(
+    text: &str,
+    aliases: Option<&KnownAliases>,
+    committee: &CommitteeId,
+) -> String {
+    let mut result = String::new();
+    for line in text.split_inclusive('\n') {
+        if line.starts_with('│') {
+            result.push_str(line);
+        } else {
+            let mut start = 0;
+            for found in crate::Mention::scan(line) {
+                let crate::Mention::Senator(primary) = &found.mention else {
+                    continue;
+                };
+                let shown = display_name(aliases, Some(committee), primary);
+                if shown == primary.as_str() {
+                    continue;
+                }
+                result.push_str(&line[start..found.range.start]);
+                result.push_str(&shown);
+                start = found.range.end;
+            }
+            result.push_str(&line[start..]);
+        }
+    }
+    result
+}
+
 /// A name as written where an alias may be: `alias` or `committee::alias`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AliasName {

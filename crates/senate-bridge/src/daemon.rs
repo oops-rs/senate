@@ -179,6 +179,7 @@ mod preside;
 mod remote_approve;
 mod replace;
 mod roles;
+mod roster;
 mod secretary_work;
 
 use front::Front;
@@ -512,6 +513,8 @@ pub(crate) struct Shared {
     /// A manual rebind waits for pushes and hooks using the previous seat to finish.
     session_bindings: RwLock<()>,
     hosts: hosts::Launches,
+    spawn_aliases: tokio::sync::Mutex<()>,
+    display_aliases: Mutex<Option<(Instant, senate_core::alias::KnownAliases)>>,
     host_notices_ready: Notify,
     active_stop_notices: Mutex<BTreeMap<EventId, SenatorName>>,
     hosted_approvals: hosted_approvals::Monitor,
@@ -891,6 +894,8 @@ impl Shared {
             resyncs,
             session_bindings: RwLock::new(()),
             hosts: hosts::Launches::default(),
+            spawn_aliases: tokio::sync::Mutex::new(()),
+            display_aliases: Mutex::new(None),
             host_notices_ready: Notify::new(),
             active_stop_notices: Mutex::new(BTreeMap::new()),
             hosted_approvals: hosted_approvals::Monitor::default(),
@@ -1171,7 +1176,21 @@ impl Shared {
         for (committee, chair) in self.known_chairs() {
             reader = reader.with_chair(committee, chair);
         }
-        reader
+        reader.with_aliases(lock(&self.display_aliases).as_ref().map(|(_, a)| a.clone()))
+    }
+
+    async fn refresh_display_aliases(&self) {
+        if lock(&self.display_aliases)
+            .as_ref()
+            .is_some_and(|(at, _)| at.elapsed() < Duration::from_secs(10))
+        {
+            return;
+        }
+        if let Ok(Ok(aliases)) =
+            tokio::time::timeout(Duration::from_millis(750), self.api.aliases()).await
+        {
+            *lock(&self.display_aliases) = Some((Instant::now(), aliases));
+        }
     }
 
     /// The Senate's people, as `/v1/me` last named them: every other
@@ -2543,6 +2562,7 @@ impl Shared {
                 .iter()
                 .any(|k| resent.contains(k)),
         };
+        self.refresh_display_aliases().await;
         let rendered = format::render_push_noting(
             &events[..take],
             &self.reader(agent),
@@ -2938,8 +2958,18 @@ impl Shared {
                 locale: self.locale,
                 version: env!("CARGO_PKG_VERSION").to_string(),
             }),
-            Request::Aliases => wrap(self.api.aliases().await.map_err(server_error)),
+            Request::Aliases => {
+                let result = self.api.aliases().await.map_err(server_error);
+                if let Ok(aliases) = &result {
+                    *lock(&self.display_aliases) = Some((Instant::now(), aliases.clone()));
+                }
+                wrap(result)
+            }
             Request::OpenCommittee { committee } => wrap(self.on_open_committee(committee).await),
+            Request::Roster => wrap(self.on_roster().await),
+            Request::SetAlias { senator, alias, committee } => {
+                wrap(self.on_set_alias(senator, alias, committee).await)
+            }
             Request::RemoveAlias {
                 primary,
                 alias,
@@ -2965,6 +2995,7 @@ impl Shared {
                 alias,
                 cwd,
                 chair,
+                secretary,
                 prompt,
                 model,
             } => {
@@ -2972,8 +3003,10 @@ impl Shared {
                     runtime,
                     committee,
                     alias,
+                    default_alias: true,
                     cwd,
                     chair,
+                    secretary,
                     prompt,
                     model,
                 };
@@ -3373,6 +3406,11 @@ impl Shared {
                 host_id,
                 session_id: session.session_id.clone(),
                 primary: session.agent.clone(),
+                shown_name: Some(senate_core::alias::display_name(
+                    aliases.as_ref(),
+                    committee.as_ref(),
+                    &session.agent,
+                )),
                 alias,
                 committee,
                 runtime: session.runtime,
@@ -3664,6 +3702,7 @@ impl Shared {
         let reserved = reminder
             .as_ref()
             .map_or(0, |(_, text)| text.chars().count() + 2);
+        self.refresh_display_aliases().await;
         let (mut context, delivered) = self.hook_context(
             &session,
             context_event,

@@ -649,6 +649,7 @@ async fn streams_follow_sessions_and_configured_committees() {
     assert!(!status.people.is_person(&path("claude")));
     let text = senate_bridge::status::render(
         &senate_bridge::status::StatusView {
+            aliases: None,
             paused: Default::default(),
             daemon: Some(status.pid),
             socket: h.socket(),

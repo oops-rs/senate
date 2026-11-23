@@ -485,6 +485,7 @@ pub struct Reader {
     /// verification for now). `None`: nobody's messages count as the
     /// user's.
     pub user: Option<SenatorName>,
+    aliases: Option<senate_core::alias::KnownAliases>,
 }
 
 impl Reader {
@@ -495,7 +496,16 @@ impl Reader {
             own,
             chairs: BTreeMap::new(),
             user: None,
+            aliases: None,
         }
+    }
+
+    pub(crate) fn with_aliases(
+        mut self,
+        aliases: Option<senate_core::alias::KnownAliases>,
+    ) -> Self {
+        self.aliases = aliases;
+        self
     }
 
     /// The same reader, run by the person `user`.
@@ -514,6 +524,23 @@ impl Reader {
     pub fn anyone(me: Address) -> Self {
         Self::new(me, People::default(), BTreeSet::new())
     }
+}
+
+/// Render the bridge's own text while preserving quoted message bodies.
+pub(crate) fn display_bylines(
+    text: &str,
+    aliases: Option<&senate_core::alias::KnownAliases>,
+    committee: Option<&CommitteeId>,
+) -> String {
+    text.split_inclusive('\n')
+        .map(|line| {
+            if line.starts_with([' ', '\t']) || line.starts_with(FENCE) {
+                line.to_owned()
+            } else {
+                senate_core::alias::display_mentions(line, aliases, committee)
+            }
+        })
+        .collect()
 }
 
 fn from_word(locale: Locale) -> &'static str {
@@ -1086,7 +1113,7 @@ fn render_block(
         out.push('\n');
         out.push_str(&tools);
     }
-    out
+    senate_core::alias::display_event_bylines(&out, me.aliases.as_ref(), &event.committee)
 }
 
 /// One event as a block, with `body` in place of the event's own body (for

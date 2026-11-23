@@ -35,6 +35,7 @@ pub use terminal::{render_brief, render_terminal};
 /// Everything `status` prints.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StatusView {
+    pub aliases: Option<senate_core::alias::KnownAliases>,
     /// The daemon's pid, when it answered.
     pub daemon: Option<u32>,
     pub socket: PathBuf,
@@ -63,8 +64,43 @@ pub struct StatusView {
 }
 
 impl StatusView {
+    pub fn retain_active(&mut self) {
+        self.sessions.retain(|s| {
+            let connected = self.committees.iter().any(|c| {
+                c.agent == s.agent
+                    && Some(&c.committee) == s.committee()
+                    && matches!(c.stream, Some(StreamState::Connected { .. }))
+            });
+            let presence = (s.is_live() && connected).then_some(senate_core::PresenceState::Online);
+            senate_core::continuity::roster_active(
+                presence,
+                self.hosted.contains_key(&s.session_id),
+            )
+        });
+        self.committees.retain(|c| {
+            c.is_active()
+                || self
+                    .sessions
+                    .iter()
+                    .any(|s| s.agent == c.agent && s.committee() == Some(&c.committee))
+        });
+    }
+
+    fn display(
+        &self,
+        agent: &senate_core::SenatorName,
+        committee: Option<&senate_core::CommitteeId>,
+        full_ids: bool,
+    ) -> String {
+        if full_ids {
+            return agent.to_string();
+        }
+        senate_core::alias::display_name(self.aliases.as_ref(), committee, agent)
+    }
+
     fn from_reply(reply: StatusReply, socket: PathBuf) -> Self {
         Self {
+            aliases: None,
             daemon: Some(reply.pid),
             socket,
             person: Some(Address::senior(&reply.person).in_text()),
@@ -120,6 +156,16 @@ pub async fn collect_for(
     committee: Option<&senate_core::CommitteeId>,
 ) -> anyhow::Result<StatusView> {
     let mut view = collect(paths).await?;
+    if view.daemon.is_some() {
+        view.aliases = ipc::request(
+            &paths.socket(),
+            &Request::Aliases,
+            Duration::from_millis(500),
+            Duration::from_secs(2),
+        )
+        .await
+        .ok();
+    }
     if let Some(c) = committee {
         view.committees.retain(|s| &s.committee == c);
         view.sessions.retain(|s| s.committee() == Some(c));
@@ -189,6 +235,7 @@ fn offline(paths: &Paths) -> anyhow::Result<StatusView> {
         .or_else(|| BridgeConfig::load_unchecked(&paths.config()).ok());
     let roles = config.as_ref().and_then(|c| offline_roles(paths, c));
     let mut view = StatusView {
+        aliases: None,
         daemon: None,
         socket: paths.socket(),
         person: config
@@ -364,6 +411,42 @@ fn table(headers: &[&str], rows: &[Vec<String>]) -> String {
         out.push_str(&line(row.iter().map(String::as_str).collect()));
     }
     out
+}
+
+pub(crate) fn render_committees(
+    roster: &[crate::ipc::RosterCommittee],
+    locale: Locale,
+    full_ids: bool,
+) -> String {
+    let headers = locale.pick(
+        ["委员会", "主席", "状态", "活跃成员", "待处理"],
+        ["COMMITTEE", "CHAIR", "STATE", "ACTIVE MEMBERS", "PENDING"],
+    );
+    let rows: Vec<_> = roster
+        .iter()
+        .map(|row| {
+            let chair = if full_ids {
+                row.chair.as_ref().map(ToString::to_string)
+            } else {
+                row.chair_display_name.clone()
+            };
+            vec![
+                row.committee.to_string(),
+                chair.unwrap_or_else(|| "—".to_owned()),
+                if row.chair.is_none() {
+                    "—"
+                } else if row.chair_live {
+                    locale.pick("在线", "online")
+                } else {
+                    locale.pick("离线", "offline")
+                }
+                .to_owned(),
+                row.members.iter().filter(|m| m.active).count().to_string(),
+                row.pending.to_string(),
+            ]
+        })
+        .collect();
+    table(&headers, &rows)
 }
 
 fn advisories(view: &StatusView) -> Vec<String> {
@@ -735,7 +818,11 @@ fn render_senate(
             .map(|f| {
                 vec![
                     format!("{}{}", f.committee, if f.configured { " *" } else { "" }),
-                    Address::senator(&f.agent).in_text(),
+                    if full_ids {
+                        Address::senator(&f.agent).in_text()
+                    } else {
+                        view.display(&f.agent, Some(&f.committee), false)
+                    },
                     f.delivered.to_string(),
                     f.reported.to_string(),
                     f.sessions.to_string(),
@@ -793,7 +880,11 @@ fn render_senate(
                     },
                     format!(
                         "{} ({})",
-                        Address::senator(&s.agent).in_text(),
+                        if full_ids {
+                            Address::senator(&s.agent).in_text()
+                        } else {
+                            view.display(&s.agent, s.committee(), false)
+                        },
                         s.agent_source
                     ),
                     if s.state == SessionState::Ended && view.paused.contains(&s.agent) {
@@ -872,6 +963,7 @@ mod tests {
             duty: None,
         };
         StatusView {
+            aliases: None,
             daemon: None,
             socket: "/h/bridge.sock".into(),
             person: Some("[senator::alice]".into()),

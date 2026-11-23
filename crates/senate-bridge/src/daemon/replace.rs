@@ -411,8 +411,10 @@ impl Shared {
             runtime: record.runtime,
             committee: record.committee.clone(),
             alias: None,
+            default_alias: false,
             cwd: record.cwd.clone(),
             chair: false,
+            secretary: false,
             prompt: None,
             model: record.model.clone(),
         };
