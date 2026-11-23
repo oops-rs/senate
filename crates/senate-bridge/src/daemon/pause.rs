@@ -254,7 +254,7 @@ impl Shared {
     /// all the same (its terminal ends with the daemon or is stopped later).
     pub(super) async fn pause_all_within(self: &Arc<Self>, cap: Duration) {
         let deadline = Instant::now() + cap;
-        let rows = match self.on_sessions().await {
+        let rows = match self.on_sessions(false).await {
             Ok(reply) => reply.rows,
             Err(error) => {
                 tracing::warn!(%error, "listing hosted sessions to pause at shutdown");

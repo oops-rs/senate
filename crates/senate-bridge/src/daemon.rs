@@ -180,6 +180,7 @@ mod replace;
 mod roles;
 mod roster;
 mod secretary_work;
+mod session_timeline;
 mod spawn_attempt;
 
 use front::Front;
@@ -537,6 +538,8 @@ pub(crate) struct Shared {
     /// nudge since. Any later hook of the session removes it. Kept in
     /// memory: after a restart no agy is nudged until its next `Stop`.
     agy_idle: Mutex<HashMap<String, AgyIdle>>,
+    /// Prompt hooks without a matching Stop or SessionEnd in this daemon run.
+    working_sessions: Mutex<HashMap<String, Instant>>,
     /// Each agent's latest checkpoint it wrote itself (the tool, not an
     /// automatic one) this run: when, and its seq. `session pause` waits
     /// for one newer than its request.
@@ -911,6 +914,7 @@ impl Shared {
             home: common.home.clone(),
             rebinds: Mutex::new(HashMap::new()),
             agy_idle: Mutex::new(HashMap::new()),
+            working_sessions: Mutex::new(HashMap::new()),
             tool_checkpoints: Mutex::new(HashMap::new()),
             companion_config: common.companion_config.clone(),
             companion: Mutex::new(None),
@@ -1481,6 +1485,7 @@ impl Shared {
                 changed |= self
                     .store
                     .set_session_state(&s.session_id, SessionState::Stale)?;
+                self.no_longer_working(&s.session_id);
                 continue;
             }
             live.push(s);
@@ -2661,6 +2666,7 @@ impl Shared {
                     tracing::warn!(session = sid, %reason, "session unreachable; marking stale");
                     self.store.set_socket_ok(sid, false)?;
                     self.store.set_session_state(sid, SessionState::Stale)?;
+                    self.no_longer_working(sid);
                     lock(&self.pushes).remove(sid);
                     self.committees_changed.notify_one();
                     again = true;
@@ -3059,7 +3065,9 @@ impl Shared {
             }
             Request::Status => wrap(self.on_status()),
             Request::Profiles => wrap(Ok(&self.config.profiles)),
-            Request::Sessions => wrap(self.on_sessions().await),
+            Request::Sessions => wrap(self.on_sessions(false).await),
+            Request::Timeline { session_id, direction, cursor, limit } =>
+                wrap(self.on_timeline(session_id, direction, cursor, limit).await),
             Request::PruneHosts => wrap(self.on_prune_hosts().await),
             Request::HookDropped(report) => {
                 self.on_hook_dropped(report);
@@ -3330,7 +3338,7 @@ impl Shared {
                 wrap(self.on_approve_session(&senator, decision).await)
             }
             // Served by the connection itself (`serve_connection`).
-            Request::Watch { .. } => Reply::err(IpcError::bad_request(
+            Request::Watch { .. } | Request::TimelineWatch { .. } => Reply::err(IpcError::bad_request(
                 "watch turns a connection into a stream; send it as the connection's request",
             )),
         }
@@ -3387,8 +3395,11 @@ impl Shared {
 
     /// `senate session list`: each hosted session on record, with its host's
     /// state now, and each host running with no session.
-    async fn on_sessions(&self) -> Result<crate::ipc::SessionsReply, IpcError> {
-        use crate::ipc::{HostState, SessionRow, SessionsReply};
+    async fn on_sessions(
+        &self,
+        include_transcript: bool,
+    ) -> Result<crate::ipc::SessionsReply, IpcError> {
+        use crate::ipc::{HostState, LocalSessionRow, SessionRow, SessionsReply};
         let paths = Paths::new(&self.home);
         // An alias is the Senate's to say; one that does not answer in time
         // leaves each session under its senator's own name.
@@ -3416,6 +3427,9 @@ impl Shared {
             let alias = committee
                 .as_ref()
                 .and_then(|c| aliases.as_ref()?.alias_of(c, &session.agent).cloned());
+            let (last_activity, title) =
+                session_timeline::sidebar_metadata(&session, facts.started_at, include_transcript)
+                    .await;
             rows.push(SessionRow {
                 tty: crate::host::socket(&paths, &host_id),
                 host_id,
@@ -3435,6 +3449,10 @@ impl Shared {
                     .hosted_model(&session.session_id)
                     .map_err(internal)?,
                 dir: session.cwd.clone(),
+                branch: session.branch.clone(),
+                working: facts.running && self.session_working(&session),
+                last_activity,
+                title,
                 state: if facts.running {
                     HostState::Running
                 } else {
@@ -3458,7 +3476,54 @@ impl Shared {
             .into_iter()
             .filter(|id| !known.contains(id) && !self.hosts.launching(id))
             .collect();
-        Ok(SessionsReply { rows, orphans })
+        let mut local_rows = Vec::new();
+        for session in self.store.sessions().map_err(internal)? {
+            if !session.is_live()
+                || self.hosts.unpublished(&session.session_id)
+                || self
+                    .store
+                    .session_host(&session.session_id)
+                    .map_err(internal)?
+                    .is_some()
+            {
+                continue;
+            }
+            let committee = session.committee().cloned();
+            let alias = committee
+                .as_ref()
+                .and_then(|c| aliases.as_ref()?.alias_of(c, &session.agent).cloned());
+            let (last_activity, title) =
+                session_timeline::sidebar_metadata(&session, None, include_transcript).await;
+            let working = self.session_working(&session);
+            local_rows.push(LocalSessionRow {
+                session_id: session.session_id,
+                shown_name: Some(senate_core::alias::display_name(
+                    aliases.as_ref(),
+                    committee.as_ref(),
+                    &session.agent,
+                )),
+                alias,
+                chair: committee.as_ref().and_then(|c| chairs.get(c)) == Some(&session.agent),
+                committee,
+                primary: session.agent,
+                runtime: session.runtime,
+                dir: session.cwd,
+                branch: session.branch,
+                working,
+                last_activity,
+                title,
+            });
+        }
+        local_rows.sort_by(|a, b| {
+            b.last_activity
+                .cmp(&a.last_activity)
+                .then_with(|| a.session_id.cmp(&b.session_id))
+        });
+        Ok(SessionsReply {
+            rows,
+            local_rows,
+            orphans,
+        })
     }
 
     /// `senate session prune`: stop each orphaned host, then remove the
@@ -3466,7 +3531,7 @@ impl Shared {
     /// neither.
     async fn on_prune_hosts(&self) -> Result<crate::ipc::PruneReply, IpcError> {
         let paths = Paths::new(&self.home);
-        let orphans = self.on_sessions().await?.orphans;
+        let orphans = self.on_sessions(false).await?.orphans;
         for id in &orphans {
             crate::host::terminate(&paths, id, Duration::from_secs(5))
                 .await
@@ -3691,6 +3756,16 @@ impl Shared {
                 (session.branch.clone(), session.inferred_committee.clone()),
             );
         }
+        match report.event {
+            HookEvent::UserPromptSubmit if session.runtime != Runtime::Acp => {
+                lock(&self.working_sessions).insert(session.session_id.clone(), began);
+            }
+            HookEvent::SessionStart if report.source.as_deref() != Some("compact") => {
+                self.no_longer_working(&session.session_id);
+            }
+            _ => {}
+        }
+        self.publish(WatchEvent::Sessions);
         let was = before.map(|b| (b.agent.clone(), b.committee().cloned(), b.state));
         let now = (
             session.agent.clone(),
@@ -3898,6 +3973,7 @@ impl Shared {
 
     /// How many messages wait for `session_id`'s next hook.
     async fn on_waiting(&self, session_id: &str) -> Result<crate::ipc::WaitingReply, IpcError> {
+        let turn = lock(&self.working_sessions).get(session_id).copied();
         let mut waiting = 0;
         let mut unanswered = Vec::new();
         if let Some(session) = self.store.session(session_id).map_err(internal)?
@@ -3946,6 +4022,13 @@ impl Shared {
             self.mark_agy_idle(session_id);
         } else {
             lock(&self.agy_idle).remove(session_id);
+        }
+        if waiting == 0 && unanswered.is_empty() && turn.is_some() {
+            let mut working = lock(&self.working_sessions);
+            if working.get(session_id).copied() == turn {
+                working.remove(session_id);
+                self.publish(WatchEvent::Sessions);
+            }
         }
         Ok(crate::ipc::WaitingReply {
             waiting,
@@ -4186,6 +4269,7 @@ impl Shared {
             }
             _ => {}
         }
+        self.no_longer_working(session_id);
         let before = self.store.session(session_id).map_err(internal)?;
         if self
             .store
@@ -5916,8 +6000,49 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                     serve_watch(&shared, reader, write, shutdown).await;
                     return;
                 }
+                Ok(Request::TimelineWatch { session_id, after }) => {
+                    match shared
+                        .refuse_agent_caller(peer, "streaming session transcripts")
+                        .await
+                    {
+                        Ok(()) => {
+                            session_timeline::serve(
+                                shared.primary(),
+                                session_id,
+                                after,
+                                reader,
+                                write,
+                                shutdown,
+                            )
+                            .await
+                        }
+                        Err(refused) => {
+                            session_timeline::send(&mut write, &Reply::err(refused)).await;
+                        }
+                    }
+                    return;
+                }
+                Ok(Request::Sessions) => {
+                    let person = shared
+                        .refuse_agent_caller(peer, "reading session transcript titles")
+                        .await
+                        .is_ok();
+                    (wrap(shared.primary().on_sessions(person).await), false)
+                }
+                Ok(request) if matches!(request, Request::Timeline { .. }) => {
+                    match shared
+                        .refuse_agent_caller(peer, "reading session transcripts")
+                        .await
+                    {
+                        Ok(()) => (shared.dispatch(request).await, false),
+                        Err(refused) => (Reply::err(refused), false),
+                    }
+                }
                 Ok(request) if approval_guard::answers_a_prompt(&request) => {
-                    match shared.refuse_agent_caller(peer).await {
+                    match shared
+                        .refuse_agent_caller(peer, "answering a permission prompt")
+                        .await
+                    {
                         Ok(()) => (shared.dispatch(request).await, false),
                         Err(refused) => (Reply::err(refused), false),
                     }

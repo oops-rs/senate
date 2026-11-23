@@ -543,6 +543,10 @@ fn session(label: &str, running: bool, prompt: bool) -> SessionRow {
         alias: None,
         committee: None,
         runtime: crate::session::Runtime::Claude,
+        working: false,
+        last_activity: chrono::DateTime::default(),
+        title: None,
+        branch: None,
         model: Default::default(),
         dir: PathBuf::from("/w"),
         state: if running {
@@ -572,6 +576,7 @@ fn healthy() -> Live {
                 session("claude", true, false),
                 session("codex", false, false),
             ],
+            local_rows: Vec::new(),
             orphans: Vec::new(),
         }),
         served: Some(Probe {
@@ -666,6 +671,7 @@ fn every_live_problem_is_named_with_its_fix() {
     l.daemon = Ok(status_reply("0.3.9"));
     l.sessions = Some(SessionsReply {
         rows: vec![session("claude", true, true)],
+        local_rows: Vec::new(),
         orphans: vec![EventId::new()],
     });
     l.parent = Some(Probe {
