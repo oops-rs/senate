@@ -63,6 +63,7 @@
 //!
 //! Unknown keys are ignored so a newer file still loads.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -72,6 +73,7 @@ use senate_core::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::ipc::{HostedModel, HostedRuntime};
 use crate::session::Runtime;
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,6 +131,13 @@ pub struct BridgeConfig {
     /// Defaults for every agent this machine seats.
     #[serde(default, skip_serializing_if = "AgentDefaults::is_empty")]
     pub agent: AgentDefaults,
+    /// Named launch settings for hosted coding sessions on this machine.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_profiles",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub profiles: BTreeMap<String, LaunchProfile>,
     /// The Senate above the one this bridge serves, when the machine hosts
     /// its own Senate under a parent (`[local]` with `server_url` and
     /// `token`): `senated --machine` sets it, it is never read from the
@@ -137,6 +146,40 @@ pub struct BridgeConfig {
     /// them, and the desk's forward to a seat above as the child's office.
     #[serde(skip)]
     pub uplink: Option<Uplink>,
+}
+
+/// A machine-local launch profile. Model names are resolved by the runtime
+/// at launch, when its model catalog is available.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchProfile {
+    pub runtime: HostedRuntime,
+    #[serde(flatten)]
+    pub model: HostedModel,
+    pub note: String,
+}
+
+fn deserialize_profiles<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, LaunchProfile>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    BTreeMap::<String, toml::Value>::deserialize(deserializer)?
+        .into_iter()
+        .map(|(name, value)| {
+            let profile_error = |error: &dyn fmt::Display| {
+                serde::de::Error::custom(format!("[profiles.{name}]: {error}"))
+            };
+            let mut profile: LaunchProfile =
+                value.try_into().map_err(|error| profile_error(&error))?;
+            profile.model = HostedModel::new(profile.model.model, profile.model.effort);
+            profile
+                .model
+                .check(profile.runtime)
+                .map_err(|error| profile_error(&error))?;
+            Ok((name, profile))
+        })
+        .collect()
 }
 
 /// The most `pause_on_shutdown` spends pausing, all sessions together;
@@ -279,6 +322,7 @@ impl fmt::Debug for BridgeConfig {
             .field("branch_prefix", &self.branch_prefix)
             .field("agents", &self.agents)
             .field("agent", &self.agent)
+            .field("profiles", &self.profiles)
             .field("uplink", &self.uplink)
             .finish()
     }
@@ -733,6 +777,7 @@ impl BridgeConfig {
             branch_prefix: default_branch_prefix(),
             agents: AgentNames::default(),
             agent: AgentDefaults::default(),
+            profiles: BTreeMap::new(),
             uplink: None,
         }
     }
@@ -855,6 +900,60 @@ impl AgyConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launch_profiles_load_without_a_remote_senate() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("senate.toml");
+        std::fs::write(
+            &path,
+            r#"
+person = "alice"
+[local]
+[profiles.review]
+runtime = "codex"
+model = "astra"
+effort = "high"
+note = "Use for independent diff review."
+[profiles.investigate]
+runtime = "claude"
+note = "Use for diagnosis."
+"#,
+        )
+        .unwrap();
+
+        let config = BridgeConfig::load_unchecked(&path).unwrap();
+        let review = &config.profiles["review"];
+        assert_eq!(review.runtime, HostedRuntime::Codex);
+        assert_eq!(review.model.model.as_deref(), Some("astra"));
+        assert_eq!(review.model.effort.as_deref(), Some("high"));
+        assert_eq!(review.note, "Use for independent diff review.");
+        assert!(config.profiles["investigate"].model.is_default());
+        let encoded = toml::to_string(&config).unwrap();
+        assert_eq!(toml::from_str::<BridgeConfig>(&encoded).unwrap(), config);
+    }
+
+    #[test]
+    fn launch_profile_errors_name_the_profile_even_in_local_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("senate.toml");
+        for (runtime, effort, expected) in [
+            ("acp", "high", "unknown variant"),
+            ("claude", "minimal", "claude does not take the effort"),
+        ] {
+            std::fs::write(
+                &path,
+                format!(
+                    "person = \"alice\"\n[local]\n[profiles.review]\nruntime = {runtime:?}\neffort = {effort:?}\nnote = \"Review\"\n"
+                ),
+            )
+            .unwrap();
+
+            let error = BridgeConfig::load_unchecked(&path).unwrap_err().to_string();
+            assert!(error.contains("[profiles.review]"), "{error}");
+            assert!(error.contains(expected), "{error}");
+        }
+    }
 
     #[test]
     fn parses_and_redacts() {
