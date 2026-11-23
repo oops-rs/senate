@@ -2725,7 +2725,7 @@ async fn watch_all_hints_when_every_viewer_is_attached_and_all_shows_them() {
     let mut child = pty_process::Command::from(cmd).spawn(pts).unwrap();
     let (mut output, mut input) = pty.into_split();
     wait_for_screen(&mut output, 24, 100, |s| {
-        s.contains("north · refund-v2 · claude")
+        s.contains("refund-v2::north · claude")
     })
     .await;
     input.write_all(b"q").await.unwrap();
@@ -2754,8 +2754,8 @@ async fn watch_all_shows_every_session_and_enter_attaches_to_one() {
     let mut child = pty_process::Command::from(cmd).spawn(pts).unwrap();
     let (mut output, mut input) = pty.into_split();
     wait_for_screen(&mut output, 30, 120, |screen| {
-        screen.contains("north · refund-v2 · claude")
-            && screen.contains("south · refund-v2 · claude")
+        screen.contains("refund-v2::north · claude")
+            && screen.contains("refund-v2::south · claude")
             && screen.matches("painted before anyone looked").count() == 2
             && screen.matches("resized to 28 59").count() == 2
             && screen.contains("2 sessions")

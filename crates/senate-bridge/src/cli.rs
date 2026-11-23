@@ -1278,12 +1278,13 @@ fn watch_tiles(
         .map(|row| crate::host::view::Session {
             key: row.session_id.clone(),
             title: format!(
-                "{}{} · {} · {} · {} · {}",
+                "{}{} · {} · {} · {}",
                 if row.chair { "[chair] " } else { "" },
-                row.display_name(verbose),
-                row.committee
-                    .as_ref()
-                    .map_or_else(|| "-".to_owned(), ToString::to_string),
+                if !verbose && row.alias.is_some() {
+                    row.label()
+                } else {
+                    row.display_name(verbose)
+                },
                 row.runtime.as_str(),
                 row.model.label(),
                 if row.paused {

@@ -77,7 +77,7 @@ pub struct Session {
     pub key: String,
     /// The name a command takes for it: its alias, else its senator name.
     pub alias: String,
-    /// What the header says of it: alias, committee, runtime, model, state.
+    /// What the header says of it: name, runtime, model, state.
     pub title: String,
     /// The host's attach socket (`tty`).
     pub tty: PathBuf,
