@@ -1,5 +1,9 @@
 //! Versioned direct machine access. Local IPC controls enrollment. The
 //! remote transport accepts only this module's wire types.
+mod audit;
+pub(crate) mod authority;
+mod limits;
+mod terminal;
 mod tls;
 
 use std::collections::BTreeMap;
@@ -21,7 +25,8 @@ use tokio::sync::{oneshot, watch};
 use crate::paths::Paths;
 use senate_core::Name;
 
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
+const MAX_VALID_SECS: u64 = 30 * 86400;
 const HANDSHAKE: Duration = Duration::from_secs(6);
 const OFFER_TTL: Duration = Duration::from_secs(120);
 const MAX_REQUEST: usize = 4096;
@@ -37,13 +42,22 @@ pub struct Scopes {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Control {
+    PrepareEnable { listen: SocketAddr },
     Pair { scopes: Scopes, valid_secs: u64 },
-    Confirm { comparison: String },
+    Candidate,
+    PrepareEnroll,
     Devices,
-    Revoke { device: String },
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Deserialize, Serialize)]
+pub(crate) struct CandidateDetails {
+    pub(crate) name: Name,
+    pub(crate) key_prefix: String,
+    pub(crate) scopes: Scopes,
+    pub(crate) valid_secs: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Device {
     pub id: String,
@@ -120,14 +134,36 @@ fn now() -> i64 {
     chrono::Utc::now().timestamp()
 }
 
-fn fingerprint(cert: &[u8]) -> String {
-    hex::encode(Sha256::digest(cert))
+fn fingerprint(cert: &rustls::pki_types::CertificateDer<'_>) -> Result<String, rustls::Error> {
+    let key = rustls::server::ParsedCertificate::try_from(cert)?.subject_public_key_info();
+    Ok(hex::encode(Sha256::digest(key.as_ref())))
 }
 
-fn comparison_code(secret: &str, id: &str) -> String {
-    let digest = Sha256::digest(format!("{secret}:{id}"));
-    let n = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]);
-    format!("{:06}", n % 1_000_000)
+fn comparison_context(
+    secret: &str,
+    at: SocketAddr,
+    host: &str,
+    device: &str,
+) -> anyhow::Result<Vec<u8>> {
+    Ok(serde_json::to_vec(&(VERSION, secret, at, host, device))?)
+}
+
+fn binding(exporter: [u8; 32]) -> String {
+    hex::encode(Sha256::digest(exporter))
+}
+
+#[doc(hidden)]
+pub fn admin() -> anyhow::Result<()> {
+    authority::run()
+}
+
+async fn offer_expired((deadline, wall): (tokio::time::Instant, i64)) {
+    while tokio::time::Instant::now() < deadline && now() < wall {
+        tokio::time::sleep_until(
+            deadline.min(tokio::time::Instant::now() + Duration::from_secs(1)),
+        )
+        .await;
+    }
 }
 
 fn random() -> anyhow::Result<String> {
@@ -148,6 +184,28 @@ fn create_private_dir(path: &Path) -> anyhow::Result<()> {
         "remote state directory must be private"
     );
     Ok(())
+}
+
+fn test_root(paths: &Paths) -> anyhow::Result<Option<PathBuf>> {
+    let Some(root) = std::env::var_os(crate::testenv::CONFINE_ENV) else {
+        return Ok(None);
+    };
+    ensure!(
+        cfg!(debug_assertions),
+        "remote test mode is disabled in release builds"
+    );
+    let root = PathBuf::from(root).canonicalize()?;
+    let tmp = Path::new("/tmp").canonicalize()?;
+    let metadata = root.metadata()?;
+    ensure!(
+        root.parent() == Some(tmp.as_path())
+            && metadata.is_dir()
+            && metadata.uid() == crate::service::current_uid()
+            && metadata.mode() & 0o077 == 0
+            && crate::testenv::confined(paths.home()),
+        "remote test requires a private /tmp home and loopback"
+    );
+    Ok(Some(root))
 }
 
 fn state_dir(paths: &Paths) -> PathBuf {
@@ -177,11 +235,6 @@ fn durable<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<tempfile::Nam
     Ok(file)
 }
 
-fn save<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
-    durable(path, value)?.persist(path)?;
-    Ok(())
-}
-
 fn save_new<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
     durable(path, value)?.persist_noclobber(path)?;
     Ok(())
@@ -192,13 +245,13 @@ fn locked<T>(state: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 impl Identity {
-    fn create(dir: &Path) -> anyhow::Result<Self> {
+    fn create(dir: &Path, _isolated_test: bool) -> anyhow::Result<Self> {
         let rcgen::CertifiedKey { cert, signing_key } =
             rcgen::generate_simple_self_signed(vec![tls::HOST.into(), tls::PAIR.into()])?;
         let id = uuid::Uuid::new_v4().to_string();
         let secret = signing_key.serialize_der();
         #[cfg(target_os = "macos")]
-        if std::env::var_os(crate::testenv::CONFINE_ENV).is_none() {
+        if !_isolated_test {
             match security_framework::passwords::set_generic_password(
                 "dev.senate.remote",
                 &id,
@@ -278,20 +331,81 @@ struct ConfigFile {
 
 fn read_config(paths: &Paths) -> anyhow::Result<Config> {
     match std::fs::read_to_string(paths.config()) {
-        Ok(text) => Ok(toml::from_str::<ConfigFile>(&text)?.remote),
+        Ok(text) => Ok(toml::from_str::<ConfigFile>(&text)
+            .map_err(|_| anyhow!("invalid [remote] configuration"))?
+            .remote),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
         Err(error) => Err(error.into()),
     }
 }
 
 pub(crate) fn experimental_notice(paths: &Paths) -> Option<&'static str> {
-    let config = read_config(paths).ok()?;
-    config.listen?;
-    Some(if config.experimental {
-        "Remote access is experimental and not hardened (opted in by configuration)."
-    } else {
-        "Remote access is experimental and not hardened (disabled without [remote] experimental = true)."
+    let config = match read_config(paths) {
+        Ok(config) => config,
+        Err(_) => {
+            return Some("Remote access is disabled because its configuration could not be read.");
+        }
+    };
+    if !config.experimental {
+        return config.listen.map(
+            |_| "Remote access is experimental and disabled without [remote] experimental = true.",
+        );
+    }
+    Some(match authority_for(paths).and_then(|store| store.read()) {
+        Ok(profile) if profile.policy.is_some() => {
+            "Remote access is experimental. An administrator policy is installed."
+        }
+        Ok(_) => "Remote access is experimental and disabled until an administrator enables it.",
+        Err(_) => "Remote access is disabled because its administrator policy could not be read.",
     })
+}
+
+fn authority_for(paths: &Paths) -> anyhow::Result<authority::Store> {
+    Ok(match test_root(paths)? {
+        Some(root) => authority::Store::isolated(&root),
+        None => authority::Store::system(crate::service::current_uid()),
+    })
+}
+
+#[doc(hidden)]
+pub fn authorize_isolated_test(
+    paths: &Paths,
+    args: &[String],
+    answer: &str,
+) -> anyhow::Result<String> {
+    let root = test_root(paths)?.context("missing remote test confinement")?;
+    authority::test_authorize(authority::Store::isolated(&root), args, answer)
+}
+
+fn host_identity(dir: &Path, isolated: bool) -> anyhow::Result<Identity> {
+    create_private_dir(dir)?;
+    let path = dir.join("host.json");
+    if path.exists() {
+        return read(&path);
+    }
+    let identity = Identity::create(dir, isolated)?;
+    if let Err(error) = save_new(&path, &identity) {
+        identity.remove(dir);
+        return Err(error);
+    }
+    Ok(identity)
+}
+
+pub(crate) fn prepare_enable(paths: &Paths, at: SocketAddr) -> anyhow::Result<String> {
+    let isolated = test_root(paths)?.is_some();
+    ensure!(
+        !at.ip().is_unspecified()
+            && !at.ip().is_multicast()
+            && if isolated {
+                at.ip().is_loopback()
+            } else {
+                at.port() > 0
+            },
+        "remote listen needs an exact unicast address and nonzero port"
+    );
+    let identity = host_identity(&state_dir(paths), isolated)?;
+    let host_pin = fingerprint(&URL_SAFE_NO_PAD.decode(&identity.cert)?.into())?;
+    authority::encode(authority::Listener { at, host_pin })
 }
 
 struct Offer {
@@ -299,13 +413,22 @@ struct Offer {
     scopes: Scopes,
     valid_secs: u64,
     expires: tokio::time::Instant,
+    expires_wall: i64,
     candidate: Option<Candidate>,
+}
+
+impl Offer {
+    fn active(&self) -> bool {
+        self.expires > tokio::time::Instant::now() && self.expires_wall > now()
+    }
 }
 
 struct Candidate {
     id: String,
     name: Name,
-    comparison: String,
+    peer: SocketAddr,
+    binding: String,
+    approved: Option<Device>,
     accepted: oneshot::Sender<Device>,
 }
 
@@ -313,92 +436,92 @@ struct Candidate {
 struct State {
     offer: Option<Offer>,
     devices: BTreeMap<String, Device>,
+    generation: u64,
+    enabled: bool,
 }
 
 pub(crate) struct Service {
     dir: PathBuf,
     at: SocketAddr,
     identity: Identity,
+    authority: authority::Store,
+    policy: authority::Policy,
     state: Mutex<State>,
     changes: watch::Sender<()>,
-    audit_lock: Mutex<()>,
+    audit: audit::Audit,
 }
 
 impl Service {
     pub(crate) async fn open(paths: &Paths) -> anyhow::Result<Option<(Arc<Self>, TcpListener)>> {
         let config = read_config(paths)?;
-        let Some(at) = config.listen else {
-            return Ok(None);
-        };
         if !config.experimental {
-            tracing::warn!(
-                "remote access is experimental and not hardened; listener disabled without [remote] experimental = true"
-            );
+            if config.listen.is_some() {
+                tracing::warn!(
+                    "remote access is experimental; listener disabled without [remote] experimental = true"
+                );
+            }
             return Ok(None);
         }
-        tracing::warn!("remote access is experimental and not hardened; listener opted in");
-        ensure!(
-            !at.ip().is_unspecified() && !at.ip().is_multicast(),
-            "remote listen needs an explicit unicast address"
-        );
-        if std::env::var_os(crate::testenv::CONFINE_ENV).is_some() {
-            ensure!(
-                at.ip().is_loopback() && crate::testenv::confined(paths.home()),
-                "test listener must be isolated on loopback"
-            );
-        }
+        let authority = authority_for(paths)?;
+        let profile = authority.read()?;
+        let Some(policy) = profile.policy.clone() else {
+            tracing::warn!("remote listener disabled; no administrator policy is installed");
+            return Ok(None);
+        };
+        let generation = profile.generation;
+        let devices = profile.live_devices(now());
+        let at = policy.listener.at;
         let dir = state_dir(paths);
-        create_private_dir(&dir)?;
-        let path = dir.join("host.json");
-        let identity = if path.exists() {
-            read(&path)?
-        } else {
-            let identity = Identity::create(&dir)?;
-            if let Err(error) = save_new(&path, &identity) {
-                identity.remove(&dir);
-                return Err(error);
-            }
-            identity
-        };
-        // Check keys and saved grants before accepting connections.
+        let identity: Identity = read(&dir.join("host.json"))
+            .context("prepare the approved host identity as the daemon user")?;
         identity.secret(&dir)?;
-        let devices = if dir.join("devices.json").exists() {
-            read(&dir.join("devices.json"))?
-        } else {
-            BTreeMap::new()
-        };
+        let host_pin = fingerprint(&URL_SAFE_NO_PAD.decode(&identity.cert)?.into())?;
+        ensure!(
+            host_pin == policy.listener.host_pin,
+            "local host key differs from the administrator policy"
+        );
+        tracing::warn!(
+            "remote access is experimental; starting the administrator-approved listener"
+        );
         let listener = TcpListener::bind(at)
             .await
             .context("bind the configured remote address")?;
+        let audit = audit::Audit::open(&dir)?;
         let service = Arc::new(Self {
             dir,
             at: listener.local_addr()?,
             identity,
+            authority,
+            policy,
             state: Mutex::new(State {
                 devices,
                 offer: None,
+                generation,
+                enabled: true,
             }),
             changes: watch::channel(()).0,
-            audit_lock: Mutex::new(()),
+            audit,
         });
         Ok(Some((service, listener)))
     }
 
     fn device(&self, id: &str) -> Option<Device> {
-        locked(&self.state)
-            .devices
-            .get(id)
-            .filter(|d| d.expires > now())
-            .cloned()
+        let state = locked(&self.state);
+        if !state.enabled {
+            return None;
+        }
+        state.devices.get(id).filter(|d| d.expires > now()).cloned()
     }
 
     pub(crate) fn control(&self, request: Control) -> anyhow::Result<serde_json::Value> {
         let mut state = locked(&self.state);
+        ensure!(state.enabled, "remote authorization is disabled");
         match request {
+            Control::PrepareEnable { .. } => bail!("prepare the listener through the local bridge"),
             Control::Pair { scopes, valid_secs } => {
                 ensure!(
-                    (1..=365 * 86400).contains(&valid_secs),
-                    "device validity must be 1 second to 365 days"
+                    (1..=MAX_VALID_SECS).contains(&valid_secs),
+                    "device validity must be 1 second to 30 days"
                 );
                 let secret = random()?;
                 let code = OfferCode {
@@ -412,56 +535,104 @@ impl Service {
                     scopes,
                     valid_secs,
                     expires: tokio::time::Instant::now() + OFFER_TTL,
+                    expires_wall: now() + OFFER_TTL.as_secs() as i64,
                     candidate: None,
                 });
                 Ok(serde_json::json!(
                     URL_SAFE_NO_PAD.encode(serde_json::to_vec(&code)?)
                 ))
             }
-            Control::Confirm { comparison } => {
+            Control::Candidate => {
+                let offer = state
+                    .offer
+                    .as_ref()
+                    .filter(|offer| offer.active())
+                    .context("no active pairing")?;
+                let details = offer
+                    .candidate
+                    .as_ref()
+                    .filter(|candidate| !candidate.accepted.is_closed())
+                    .map(|candidate| CandidateDetails {
+                        name: candidate.name.clone(),
+                        key_prefix: candidate.id.chars().take(16).collect(),
+                        scopes: offer.scopes,
+                        valid_secs: offer.valid_secs,
+                    });
+                Ok(serde_json::to_value(details)?)
+            }
+            Control::PrepareEnroll => {
                 let offer = state
                     .offer
                     .as_mut()
-                    .filter(|offer| offer.expires > tokio::time::Instant::now())
+                    .filter(|offer| offer.active())
                     .context("no active pairing")?;
                 let candidate = offer
                     .candidate
-                    .as_ref()
+                    .as_mut()
+                    .filter(|candidate| !candidate.accepted.is_closed())
                     .context("the client has not requested pairing")?;
-                ensure!(
-                    comparison == candidate.comparison && !candidate.accepted.is_closed(),
-                    "comparison code does not match an active pairing"
-                );
-                let device = Device {
+                let device = candidate.approved.get_or_insert_with(|| Device {
                     id: candidate.id.clone(),
-                    grant: uuid::Uuid::new_v4().to_string(),
+                    grant: candidate.binding.clone(),
                     name: candidate.name.clone(),
                     scopes: offer.scopes,
-                    expires: now() + i64::try_from(offer.valid_secs)?,
-                };
-                let mut devices = state.devices.clone();
-                devices.insert(device.id.clone(), device.clone());
-                self.audit(&device.id, "pair", None)?;
-                save(&self.dir.join("devices.json"), &devices)?;
-                state.devices = devices;
-                if let Some(candidate) = state.offer.take().and_then(|offer| offer.candidate) {
-                    let _ = candidate.accepted.send(device.clone());
-                }
-                Ok(serde_json::to_value(device)?)
+                    expires: now() + offer.valid_secs as i64,
+                });
+                let request = authority::encode(authority::Enrollment {
+                    policy: self.policy.clone(),
+                    device: device.clone(),
+                    deadline: offer.expires_wall,
+                })?;
+                Ok(serde_json::Value::String(request))
             }
             Control::Devices => Ok(serde_json::to_value(
                 state.devices.values().collect::<Vec<_>>(),
             )?),
-            Control::Revoke { device } => {
-                let mut devices = state.devices.clone();
-                ensure!(devices.remove(&device).is_some(), "unknown device");
-                self.audit(&device, "revoke", None)?;
-                save(&self.dir.join("devices.json"), &devices)?;
-                state.devices = devices;
-                self.changes.send_replace(());
-                Ok(serde_json::Value::Null)
+        }
+    }
+
+    fn refresh_authority(&self) -> anyhow::Result<()> {
+        let profile = self.authority.read();
+        let mut state = locked(&self.state);
+        let valid = profile.as_ref().is_ok_and(|profile| {
+            profile.generation >= state.generation && profile.policy.as_ref() == Some(&self.policy)
+        });
+        if !valid {
+            state.enabled = false;
+            state.offer = None;
+            state.devices.clear();
+            self.changes.send_replace(());
+            bail!("administrator remote policy removed, rolled back or unreadable");
+        }
+        let profile = profile?;
+        if profile.generation == state.generation {
+            return Ok(());
+        }
+        state.generation = profile.generation;
+        let devices = profile.live_devices(now());
+        for (id, previous) in &state.devices {
+            if !devices.contains_key(id) {
+                self.audit.record(previous, "revoke", None, None);
             }
         }
+        state.devices = devices;
+        self.changes.send_replace(());
+        let accepted = state
+            .offer
+            .as_ref()
+            .filter(|offer| offer.active())
+            .and_then(|offer| offer.candidate.as_ref())
+            .and_then(|candidate| candidate.approved.as_ref())
+            .filter(|device| state.devices.get(&device.id) == Some(device))
+            .cloned();
+        if let Some(device) = accepted
+            && let Some(candidate) = state.offer.take().and_then(|offer| offer.candidate)
+        {
+            self.audit
+                .record(&device, "pair", Some(candidate.peer), None);
+            let _ = candidate.accepted.send(device);
+        }
+        Ok(())
     }
 
     fn enroll(
@@ -469,54 +640,41 @@ impl Service {
         id: String,
         secret: &str,
         name: Name,
-    ) -> anyhow::Result<(String, tokio::time::Instant, oneshot::Receiver<Device>)> {
+        peer: SocketAddr,
+        tls: &rustls::ServerConnection,
+    ) -> anyhow::Result<(
+        String,
+        (tokio::time::Instant, i64),
+        oneshot::Receiver<Device>,
+    )> {
         let mut state = locked(&self.state);
-        ensure!(
-            !state.devices.contains_key(&id),
-            "device key already enrolled"
-        );
+        ensure!(!state.devices.contains_key(&id), "pairing unavailable");
         let offer = state
             .offer
             .as_mut()
-            .filter(|offer| {
-                offer.expires > tokio::time::Instant::now() && offer.candidate.is_none()
-            })
-            .context("pairing code expired or already used")?;
+            .filter(|offer| offer.active() && offer.candidate.is_none())
+            .context("pairing unavailable")?;
         ensure!(
             bool::from(offer.secret.as_bytes().ct_eq(secret.as_bytes())),
-            "invalid pairing code"
+            "pairing unavailable"
         );
-        let comparison = comparison_code(secret, &id);
+        let context = comparison_context(secret, self.at, &self.policy.listener.host_pin, &id)?;
+        let binding = binding(tls.export_keying_material(
+            [0; 32],
+            b"EXPORTER-Senate-Pair-v2",
+            Some(&context),
+        )?);
+        let comparison = authority::comparison(&binding);
         let (accepted, result) = oneshot::channel();
         offer.candidate = Some(Candidate {
             id,
             name,
-            comparison: comparison.clone(),
+            peer,
+            binding,
+            approved: None,
             accepted,
         });
-        Ok((comparison, offer.expires, result))
-    }
-
-    fn audit(&self, device: &str, action: &str, session: Option<&str>) -> anyhow::Result<()> {
-        use std::io::Write as _;
-        let _lock = locked(&self.audit_lock);
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(self.dir.join("audit.jsonl"))?;
-        let metadata = file.metadata()?;
-        ensure!(
-            metadata.is_file() && metadata.mode() & 0o077 == 0,
-            "remote audit file must be private"
-        );
-        let mut line = serde_json::to_vec(&serde_json::json!({
-            "at": chrono::Utc::now(), "device": device, "action": action, "session": session
-        }))?;
-        line.push(b'\n');
-        file.write_all(&line)?;
-        Ok(())
+        Ok((comparison, (offer.expires, offer.expires_wall), result))
     }
 
     async fn revoked(&self, id: &str, grant: &str, mut change: watch::Receiver<()>) {
@@ -528,7 +686,7 @@ impl Service {
                 u64::try_from(device.expires.saturating_sub(now())).unwrap_or_default(),
             );
             tokio::select! {
-                _ = tokio::time::sleep(left) => {}
+                _ = tokio::time::sleep(left.min(Duration::from_secs(1))) => {}
                 result = change.changed() => if result.is_err() { return }
             }
         }
@@ -625,7 +783,14 @@ impl Client {
             )
             .await?;
             match read_message(&mut stream, MAX_REPLY).await? {
-                Reply::Refused { message } => bail!("{message}"),
+                Reply::Refused { message } => {
+                    let display: String = message
+                        .chars()
+                        .filter(|ch| !ch.is_control())
+                        .take(256)
+                        .collect();
+                    bail!("remote refused: {display}");
+                }
                 reply => Ok((stream, reply)),
             }
         })
@@ -664,12 +829,11 @@ impl Client {
         ensure!(code.len() <= 4096, "oversized pairing code");
         let offer: OfferCode = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(code.trim())?)?;
         ensure!(offer.v == VERSION, "unsupported pairing version");
-        if std::env::var_os(crate::testenv::CONFINE_ENV).is_some() {
-            ensure!(
-                offer.at.ip().is_loopback() && crate::testenv::confined(paths.home()),
-                "test pairing must be isolated on loopback"
-            );
-        }
+        let isolated_test = test_root(paths)?.is_some();
+        ensure!(
+            !isolated_test || offer.at.ip().is_loopback(),
+            "remote test pairing must stay on loopback"
+        );
         paths.ensure_home()?;
         let dir = state_dir(paths);
         create_private_dir(&dir)?;
@@ -679,7 +843,7 @@ impl Client {
         let machine = Machine {
             at: offer.at,
             host: offer.host,
-            identity: Identity::create(&dir)?,
+            identity: Identity::create(&dir, isolated_test)?,
         };
         let result = async {
             let config = tls::client(&dir, &machine)?;
@@ -691,7 +855,7 @@ impl Client {
                 .call(
                     Call::Enroll {
                         secret: offer.secret.clone(),
-                        name: device,
+                        name: device.clone(),
                     },
                     true,
                 )
@@ -699,12 +863,21 @@ impl Client {
             let Reply::Compare { code } = reply else {
                 bail!("unexpected pairing reply")
             };
-            let own = fingerprint(&URL_SAFE_NO_PAD.decode(&machine.identity.cert)?);
+            let own = fingerprint(&URL_SAFE_NO_PAD.decode(&machine.identity.cert)?.into())?;
+            let host = fingerprint(&URL_SAFE_NO_PAD.decode(&machine.host)?.into())?;
+            let context = comparison_context(&offer.secret, machine.at, &host, &own)?;
+            let binding = binding(stream.get_ref().get_ref().1.export_keying_material(
+                [0; 32],
+                b"EXPORTER-Senate-Pair-v2",
+                Some(&context),
+            )?);
+            let expected = authority::comparison(&binding);
             ensure!(
-                code == comparison_code(&offer.secret, &own),
+                bool::from(code.as_bytes().ct_eq(expected.as_bytes())),
                 "pairing comparison did not match this device"
             );
             println!("Comparison code {code}. Confirm it on the target machine.");
+            println!("Candidate {device} · key {}", &own[..16]);
             std::io::Write::flush(&mut std::io::stdout())?;
             let reply =
                 tokio::time::timeout(OFFER_TTL, read_message::<Reply, _>(&mut stream, MAX_REPLY))
@@ -713,6 +886,10 @@ impl Client {
             let Reply::Enrolled { device } = reply else {
                 bail!("pairing was declined or expired")
             };
+            ensure!(
+                device.id == own && device.grant == binding && device.expires > now(),
+                "the enrollment grant does not match this device and connection"
+            );
             save_new(&path, &machine)?;
             Ok(device)
         }
@@ -733,69 +910,69 @@ impl Service {
     ) -> anyhow::Result<()> {
         let ordinary = tls::server(&self, false)?;
         let pairing = tls::server(&self, true)?;
-        let slots = Arc::new(tokio::sync::Semaphore::new(64));
+        let limits = Arc::new(limits::Limits::default());
+        let mut backoff = limits::AcceptBackoff::default();
         let mut connections = tokio::task::JoinSet::new();
-        loop {
+        let mut authority_refresh = tokio::time::interval(Duration::from_millis(250));
+        authority_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let result = loop {
             tokio::select! {
                 biased;
-                _ = shutdown.changed() => break,
+                _ = shutdown.changed() => break Ok(()),
+                _ = authority_refresh.tick() => {
+                    if let Err(error) = self.refresh_authority() {
+                        break Err(error);
+                    }
+                }
                 _ = connections.join_next(), if !connections.is_empty() => {}
-                incoming = listener.accept() => {
-                    let (socket, _) = incoming?;
-                    let Ok(slot) = slots.clone().try_acquire_owned() else { continue };
+                _ = tokio::time::sleep_until(backoff.until()), if backoff.until() > tokio::time::Instant::now() => {}
+                incoming = listener.accept(), if backoff.until() <= tokio::time::Instant::now() => {
+                    let Some((socket, peer)) = backoff.accepted(incoming) else { continue };
+                    let Some(admission) = limits.handshake(peer.ip()) else { continue };
+                    let limits = limits.clone();
                     let service = self.clone();
                     let front = front.clone();
                     let ordinary = ordinary.clone();
                     let pairing = pairing.clone();
                     connections.spawn(async move {
-                        let _slot = slot;
-                        if let Err(error) = service.connection(socket, &front, ordinary, pairing).await {
-                            tracing::debug!(%error, "remote connection ended");
+                        if service.connection((socket, peer), &front, (ordinary, pairing), (&limits, admission)).await.is_err() {
+                            tracing::debug!("remote connection rejected or ended with a transport error");
                         }
                     });
                 }
             }
-        }
+        };
         connections.shutdown().await;
-        Ok(())
+        result
     }
 
     async fn connection(
         &self,
-        socket: TcpStream,
+        (socket, peer): (TcpStream, SocketAddr),
         front: &crate::daemon::Front,
-        ordinary: Arc<rustls::ServerConfig>,
-        enrollment: Arc<rustls::ServerConfig>,
+        (ordinary, enrollment): (Arc<rustls::ServerConfig>, Arc<rustls::ServerConfig>),
+        (limits, admission): (&limits::Limits, limits::Admission<std::net::IpAddr>),
     ) -> anyhow::Result<()> {
         socket.set_nodelay(true)?;
         let (pairing, mut wire, id, request) = tokio::time::timeout(HANDSHAKE, async {
             let hello =
                 tokio_rustls::LazyConfigAcceptor::new(rustls::server::Acceptor::default(), socket)
                     .await?;
-            let pairing = match hello.client_hello().server_name() {
-                Some(tls::PAIR) => true,
-                Some(tls::HOST) => false,
-                _ => bail!("unknown remote service"),
-            };
+            let pairing = tls::enrollment_name(hello.client_hello().server_name())?;
             let transport = hello
                 .into_stream(if pairing { enrollment } else { ordinary })
-                .await?;
+                .await;
+            if !pairing && transport.is_err() {
+                self.audit.rejected(peer);
+            }
+            let transport = transport?;
             let cert = transport
                 .get_ref()
                 .1
                 .peer_certificates()
                 .and_then(|certs| certs.first())
                 .context("missing device certificate")?;
-            let id = fingerprint(cert);
-            self.audit(
-                &id,
-                if pairing {
-                    "enrollment_connect"
-                } else {
-                    "connect"
-                },
-                None,
-            )?;
+            let id = fingerprint(cert)?;
             let mut wire = Pipe::new(transport);
             let request = read_message::<Envelope, _>(&mut wire, MAX_REQUEST).await?;
             ensure!(
@@ -810,12 +987,13 @@ impl Service {
             let Call::Enroll { secret, name } = request else {
                 bail!("enrollment connection only")
             };
-            match self.enroll(id, &secret, name) {
+            match self.enroll(id, &secret, name, peer, wire.get_ref().get_ref().1) {
                 Ok((code, deadline, accepted)) => {
+                    drop(admission);
                     tokio::time::timeout(HANDSHAKE, send(&mut wire, &Reply::Compare { code }))
                         .await??;
                     tokio::select! {
-                        _ = tokio::time::sleep_until(deadline) => {}
+                        _ = offer_expired(deadline) => {}
                         _ = wire.read_u8() => {}
                         device = accepted => {
                             if let Ok(device) = device {
@@ -841,19 +1019,30 @@ impl Service {
         }
         let changes = self.changes.subscribe();
         let device = self.device(&id).context("device expired or revoked")?;
+        let _slot = limits
+            .device(id.clone())
+            .context("remote request budget exhausted")?;
+        drop(admission);
         let grant = device.grant.clone();
+        self.audit.record(&device, "connect", Some(peer), None);
         tokio::select! {
             biased;
-            _ = self.revoked(&id, &grant, changes) => Ok(()),
-            result = self.action(wire, front, device, request) => result,
+            _ = self.revoked(&id, &grant, changes) => {},
+            result = self.action(wire, front, &device, peer, request) => {
+                self.audit.record(&device, "disconnect", Some(peer), None);
+                return result;
+            },
         }
+        self.audit.record(&device, "disconnect", Some(peer), None);
+        Ok(())
     }
 
     async fn action(
         &self,
         mut wire: Pipe<tokio_rustls::server::TlsStream<TcpStream>>,
         front: &crate::daemon::Front,
-        device: Device,
+        device: &Device,
+        peer: SocketAddr,
         request: Call,
     ) -> anyhow::Result<()> {
         async fn reply(wire: &mut (impl AsyncWrite + Unpin), value: Reply) -> anyhow::Result<()> {
@@ -862,7 +1051,7 @@ impl Service {
 
         let stream = match request {
             Call::List {} => {
-                self.audit(&device.id, "list", None)?;
+                self.audit.record(device, "list", Some(peer), None);
                 let rows = front.remote_sessions().await?;
                 return reply(&mut wire, Reply::Rows { rows }).await;
             }
@@ -873,15 +1062,16 @@ impl Service {
         let (allowed, attach, session) = stream;
         let action = if attach { "attach" } else { "watch" };
         if !allowed {
-            self.audit(
-                &device.id,
+            self.audit.record(
+                device,
                 if attach {
                     "attach_denied"
                 } else {
                     "watch_denied"
                 },
+                Some(peer),
                 None,
-            )?;
+            );
             return reply(
                 &mut wire,
                 Reply::Refused {
@@ -893,15 +1083,16 @@ impl Service {
         let path = match front.remote_terminal(&session, attach).await {
             Ok(path) => path,
             Err(_) => {
-                self.audit(
-                    &device.id,
+                self.audit.record(
+                    device,
                     if attach {
                         "attach_unavailable"
                     } else {
                         "watch_unavailable"
                     },
-                    Some(&session),
-                )?;
+                    Some(peer),
+                    None,
+                );
                 return reply(
                     &mut wire,
                     Reply::Refused {
@@ -911,29 +1102,11 @@ impl Service {
                 .await;
             }
         };
-        self.audit(&device.id, action, Some(&session))?;
-        let mut host =
-            tokio::time::timeout(HANDSHAKE, tokio::net::UnixStream::connect(path)).await??;
+        self.audit
+            .record(device, action, Some(peer), Some(&session));
+        let host = tokio::time::timeout(HANDSHAKE, tokio::net::UnixStream::connect(path)).await??;
         reply(&mut wire, Reply::Stream).await?;
-        if attach {
-            // The host grants one interactive viewer across local and
-            // remote connections. End both sides when either disconnects.
-            let (mut incoming, mut outgoing) = tokio::io::split(wire);
-            let (mut display, mut input) = host.split();
-            tokio::select! {
-                result = tokio::io::copy(&mut incoming, &mut input) => { result?; }
-                result = tokio::io::copy(&mut display, &mut outgoing) => { result?; }
-            }
-        } else {
-            // A remote watcher may read terminal bytes but cannot fit the
-            // PTY or send input. Any attempted input closes the watch.
-            let (mut incoming, mut outgoing) = tokio::io::split(wire);
-            tokio::select! {
-                _ = incoming.read_u8() => {}
-                result = tokio::io::copy(&mut host, &mut outgoing) => { result?; }
-            }
-        }
-        Ok(())
+        terminal::relay(wire, host, attach).await
     }
 }
 
@@ -942,21 +1115,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn device_pin_is_stable_across_certificates_for_the_same_key() -> anyhow::Result<()> {
+        let key = rcgen::KeyPair::generate()?;
+        let mut params = rcgen::CertificateParams::new(vec![tls::PAIR.into()])?;
+        params.serial_number = Some(1_u64.into());
+        let first = params.self_signed(&key)?;
+        params.serial_number = Some(2_u64.into());
+        let second = params.self_signed(&key)?;
+        let other = params.self_signed(&rcgen::KeyPair::generate()?)?;
+        assert_ne!(first.der(), second.der());
+        assert_eq!(fingerprint(first.der())?, fingerprint(second.der())?);
+        assert_ne!(fingerprint(first.der())?, fingerprint(other.der())?);
+        Ok(())
+    }
+
+    #[test]
     fn the_wire_has_no_actor_paths_or_disclosure_operations() {
         for request in [
-            r#"{"version":1,"call":{"op":"list","path":"/tmp/socket"}}"#,
-            r#"{"version":1,"call":{"op":"attach","session":"abc","actor":"person"}}"#,
-            r#"{"version":1,"call":{"op":"watch","session":"abc","selector":{"pid":1}}}"#,
-            r#"{"version":1,"call":{"op":"timeline","session":"abc"}}"#,
-            r#"{"version":1,"call":{"op":"approve","session":"abc"}}"#,
-            r#"{"version":1,"call":{"op":"stop","session":"abc"}}"#,
+            r#"{"version":2,"call":{"op":"list","path":"/tmp/socket"}}"#,
+            r#"{"version":2,"call":{"op":"attach","session":"abc","actor":"person"}}"#,
+            r#"{"version":2,"call":{"op":"watch","session":"abc","selector":{"pid":1}}}"#,
+            r#"{"version":2,"call":{"op":"timeline","session":"abc"}}"#,
+            r#"{"version":2,"call":{"op":"approve","session":"abc"}}"#,
+            r#"{"version":2,"call":{"op":"stop","session":"abc"}}"#,
         ] {
             assert!(
                 serde_json::from_str::<Envelope>(request).is_err(),
                 "{request}"
             );
         }
-        assert!(serde_json::from_str::<Envelope>(r#"{"version":1,"call":{"op":"list"}}"#).is_ok());
+        assert!(serde_json::from_str::<Envelope>(r#"{"version":2,"call":{"op":"list"}}"#).is_ok());
     }
 }
 

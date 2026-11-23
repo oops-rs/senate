@@ -2729,6 +2729,7 @@ fn run_doctor(json: bool) -> anyhow::Result<()> {
         wsl: wsl.as_ref(),
     });
     checks.extend(completion::doctor(locale));
+    checks.extend(crate::remote::authority::installation_checks());
     let live = runtime(false)?.block_on(crate::doctor::gather(&paths));
     checks.extend(crate::doctor::live(&live, locale));
     checks.extend(crate::doctor::worktree_checks(

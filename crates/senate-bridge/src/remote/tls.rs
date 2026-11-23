@@ -62,18 +62,13 @@ impl ClientCertVerifier for Clients {
         // Enrollment is a separate SNI and endpoint. It still verifies
         // possession through CertificateVerify, then requires the one-time
         // offer. Every operational handshake requires a live enrolled pin.
-        if !chain.is_empty()
-            || end.len() > 2048
-            || (!self.pairing
-                && self
-                    .service
-                    .upgrade()
-                    .and_then(|s| s.device(&fingerprint(end)))
-                    .is_none())
-        {
-            return Err(Error::InvalidCertificate(
-                rustls::CertificateError::UnknownIssuer,
-            ));
+        let rejected = || Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer);
+        if !chain.is_empty() || end.len() > 2048 {
+            return Err(rejected());
+        }
+        let id = fingerprint(end)?;
+        if !self.pairing && self.service.upgrade().and_then(|s| s.device(&id)).is_none() {
+            return Err(rejected());
         }
         Ok(ClientCertVerified::assertion())
     }
@@ -120,4 +115,111 @@ pub(super) fn server(service: &Arc<Service>, pairing: bool) -> anyhow::Result<Ar
     config.max_early_data_size = 0;
     config.send_tls13_tickets = 0;
     Ok(Arc::new(config))
+}
+
+pub(super) fn enrollment_name(name: Option<&str>) -> anyhow::Result<bool> {
+    match name {
+        Some(PAIR) => Ok(true),
+        Some(HOST) => Ok(false),
+        _ => anyhow::bail!("unknown remote service"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::remote::{State, audit, authority, locked, now};
+
+    #[tokio::test]
+    async fn listener_refuses_legacy_tls_missing_and_unenrolled_certificates() -> anyhow::Result<()>
+    {
+        let dir = tempfile::tempdir()?;
+        let host = Identity::create(dir.path(), true)?;
+        let client_identity = Identity::create(dir.path(), true)?;
+        let policy = authority::Policy {
+            revision: 1,
+            listener: authority::Listener {
+                at: "127.0.0.1:9443".parse()?,
+                host_pin: fingerprint(&URL_SAFE_NO_PAD.decode(&host.cert)?.into())?,
+            },
+        };
+        let service = Arc::new(Service {
+            dir: dir.path().into(),
+            at: policy.listener.at,
+            identity: host,
+            authority: authority::Store::isolated(dir.path()),
+            policy,
+            state: std::sync::Mutex::new(State {
+                enabled: true,
+                ..Default::default()
+            }),
+            changes: tokio::sync::watch::channel(()).0,
+            audit: audit::Audit::open(dir.path())?,
+        });
+
+        let config = server(&service, false)?;
+        let host_cert: CertificateDer<'static> =
+            URL_SAFE_NO_PAD.decode(&service.identity.cert)?.into();
+        let mut roots = RootCertStore::empty();
+        roots.add(host_cert)?;
+        let client = |version, authenticate| -> anyhow::Result<Arc<ClientConfig>> {
+            let builder = ClientConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_protocol_versions(&[version])?
+            .with_root_certificates(roots.clone());
+            let config = if authenticate {
+                let (cert, secret) = key(dir.path(), &client_identity)?;
+                builder.with_client_auth_cert(cert, secret)?
+            } else {
+                builder.with_no_client_auth()
+            };
+            Ok(Arc::new(config))
+        };
+
+        async fn accepted(
+            server: Arc<ServerConfig>,
+            client: Arc<ClientConfig>,
+        ) -> anyhow::Result<bool> {
+            let (remote, local) = tokio::io::duplex(16 * 1024);
+            let name = HOST.try_into()?;
+            let (_, connection) = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                tokio::join!(
+                    tokio_rustls::TlsConnector::from(client).connect(name, remote),
+                    tokio_rustls::TlsAcceptor::from(server).accept(local)
+                )
+            })
+            .await?;
+            Ok(connection.is_ok())
+        }
+
+        assert!(!accepted(config.clone(), client(&rustls::version::TLS13, true)?).await?);
+        let id = fingerprint(&URL_SAFE_NO_PAD.decode(&client_identity.cert)?.into())?;
+        locked(&service.state).devices.insert(
+            id.clone(),
+            super::super::Device {
+                id,
+                grant: "a".repeat(64),
+                name: "dev".parse()?,
+                scopes: super::super::Scopes {
+                    watch: false,
+                    attach: false,
+                },
+                expires: now() + 60,
+            },
+        );
+        assert!(!accepted(config.clone(), client(&rustls::version::TLS12, true)?).await?);
+        assert!(!accepted(config.clone(), client(&rustls::version::TLS13, false)?).await?);
+        assert!(accepted(config, client(&rustls::version::TLS13, true)?).await?);
+        Ok(())
+    }
+
+    #[test]
+    fn only_the_two_exact_server_names_select_a_role() -> anyhow::Result<()> {
+        assert!(enrollment_name(Some(PAIR))?);
+        assert!(!enrollment_name(Some(HOST))?);
+        assert!(enrollment_name(Some("other.senate.invalid")).is_err());
+        assert!(enrollment_name(None).is_err());
+        Ok(())
+    }
 }

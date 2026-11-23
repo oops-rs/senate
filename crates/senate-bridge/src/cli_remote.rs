@@ -1,4 +1,6 @@
 use std::io::{self, Write as _};
+use std::net::SocketAddr;
+use std::path::PathBuf;
 
 use anyhow::{Context, bail, ensure};
 use clap::Subcommand;
@@ -7,12 +9,25 @@ use clap_complete::engine::CompletionCandidate;
 use crate::host::{self, view::Session};
 use crate::ipc::Request;
 use crate::paths::Paths;
-use crate::remote::{self, Client, Control, Device, Row, Scopes};
+use crate::remote::{self, CandidateDetails, Client, Control, Device, Row, Scopes};
 use senate_core::Name;
 
 #[derive(Subcommand)]
 pub(super) enum Command {
-    /// Create an expiring offer on this machine and confirm its comparison code.
+    /// Show how to install the separately built administrator helper.
+    InstallHelper {
+        /// Path to the helper artifact from the trusted build or release.
+        artifact: PathBuf,
+    },
+    /// Prepare the exact host key and address for administrator approval.
+    Enable {
+        /// Exact IP address and port to authorize on the target.
+        #[arg(long)]
+        listen: SocketAddr,
+    },
+    /// Print the administrator command to disable the listener and its grants.
+    Disable,
+    /// Create an expiring offer and prepare the administrator enrollment command.
     Pair {
         /// Give the device its own interactive attach grant.
         #[arg(long)]
@@ -34,7 +49,7 @@ pub(super) enum Command {
     },
     /// List the device grants on this machine.
     Devices,
-    /// Revoke the grant and disconnect its active streams.
+    /// Print the administrator command to revoke a device and end its streams.
     Revoke {
         /// Device ID from the local device list.
         device: String,
@@ -75,6 +90,37 @@ pub(super) fn run(command: Command) -> anyhow::Result<()> {
     let paths = Paths::from_env()?;
     let rt = super::runtime(false)?;
     match command {
+        Command::InstallHelper { artifact } => {
+            use sha2::{Digest, Sha256};
+            remote::authority::check_install_location()?;
+            let artifact = artifact.canonicalize()?;
+            let source = artifact.to_str().context("helper path must be UTF-8")?;
+            ensure!(
+                !source.chars().any(char::is_control),
+                "helper path contains control characters"
+            );
+            let digest = hex::encode(Sha256::digest(std::fs::read(&artifact)?));
+            println!(
+                "Helper SHA-256 {digest}. Compare it with the trusted release or build before and after installation."
+            );
+            println!(
+                "sudo -k /usr/bin/install -d -o root -m 0755 /usr/local/libexec {}",
+                remote::authority::SYSTEM_DIR
+            );
+            println!(
+                "sudo -k /usr/bin/install -o root -m 0755 '{}' {}",
+                source.replace('\'', "'\"'\"'"),
+                remote::authority::HELPER
+            );
+        }
+        Command::Enable { listen } => {
+            let request: String = local(&rt, &paths, Control::PrepareEnable { listen })?;
+            print_admin("enable", Some(&request));
+            println!(
+                "Set [remote] experimental = true and restart the daemon after authorization."
+            );
+        }
+        Command::Disable => print_admin("disable", None),
         Command::Pair {
             attach,
             list_only,
@@ -92,16 +138,33 @@ pub(super) fn run(command: Command) -> anyhow::Result<()> {
                 },
             )?;
             println!("Pairing code, valid for two minutes:\n{code}");
-            print!("Enter the comparison code shown on the client: ");
-            io::stdout().flush()?;
-            let device: Device = local(
-                &rt,
-                &paths,
-                Control::Confirm {
-                    comparison: read()?,
-                },
-            )?;
-            println!("Paired {} ({})", device.name, device.id);
+            let candidate = rt.block_on(async {
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
+                loop {
+                    let pending: Option<CandidateDetails> = super::daemon_call(
+                        &paths,
+                        &Request::RemoteControl {
+                            command: Control::Candidate,
+                        },
+                    )
+                    .await?;
+                    if let Some(candidate) = pending {
+                        break Ok::<_, anyhow::Error>(candidate);
+                    }
+                    ensure!(tokio::time::Instant::now() < deadline, "pairing expired");
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                }
+            })?;
+            println!(
+                "Candidate {} · key {} · watch {} · attach {} · valid {}s",
+                candidate.name,
+                candidate.key_prefix,
+                candidate.scopes.watch,
+                candidate.scopes.attach,
+                candidate.valid_secs
+            );
+            let request: String = local(&rt, &paths, Control::PrepareEnroll)?;
+            print_admin("enroll", Some(&request));
         }
         Command::Connect { machine, device } => {
             print!("Paste the target's pairing code: ");
@@ -132,11 +195,23 @@ pub(super) fn run(command: Command) -> anyhow::Result<()> {
             }
         }
         Command::Revoke { device } => {
-            let _: serde_json::Value = local(&rt, &paths, Control::Revoke { device })?;
-            println!("Revoked device");
+            ensure!(
+                remote::authority::pin(&device),
+                "expected the full device SPKI"
+            );
+            print_admin("revoke", Some(&device));
         }
     }
     Ok(())
+}
+
+fn print_admin(action: &str, argument: Option<&str>) {
+    let helper = remote::authority::HELPER;
+    print!("sudo -k {helper} {action}");
+    if let Some(argument) = argument {
+        print!(" {argument}");
+    }
+    println!();
 }
 
 fn label(row: &Row, machine: &Name) -> String {

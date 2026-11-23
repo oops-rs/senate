@@ -6,7 +6,7 @@ mod common;
 use common::{Harness, committee, fast_timing, name, path};
 use senate_bridge::daemon::{DaemonOptions, start_with_host_binary};
 use senate_bridge::ipc::{self, HostedRuntime, Request, SpawnReply};
-use senate_bridge::remote::{Client, Control, Device, Scopes};
+use senate_bridge::remote::{Client, Control, Device, Scopes, authorize_isolated_test};
 use senate_bridge::{Paths, testenv};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -28,6 +28,7 @@ fn senate(home: &Path) -> tokio::process::Command {
 #[tokio::test]
 async fn remote_machines_loopback() {
     let temp = tempfile::tempdir_in("/tmp").unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
     child.args(["--exact", "remote_test_child", "--ignored", "--nocapture"]);
     testenv::isolate_async(&mut child, temp.path());
@@ -51,24 +52,51 @@ async fn control<T: serde::de::DeserializeOwned>(target: &Harness, command: Cont
     request(target, &Request::RemoteControl { command }).await
 }
 
+fn admin(target: &Harness, args: &[&str], answer: &str) -> String {
+    authorize_isolated_test(
+        &target.paths,
+        &args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>(),
+        answer,
+    )
+    .unwrap()
+}
+
 async fn pair(
     target: &Harness,
     client: &Harness,
+    person: &Paths,
     alias: &str,
     attach: bool,
+    watch: bool,
     valid_secs: u64,
 ) -> (Device, String) {
-    let code: String = control(
-        target,
-        Control::Pair {
-            scopes: Scopes {
-                attach,
-                watch: true,
-            },
-            valid_secs,
-        },
-    )
-    .await;
+    let mut command = senate(person.home());
+    command.args([
+        "setup",
+        "remote",
+        "pair",
+        "--valid-secs",
+        &valid_secs.to_string(),
+    ]);
+    if attach {
+        command.arg("--attach");
+    } else if !watch {
+        command.arg("--list-only");
+    }
+    command.stdin(Stdio::piped()).stdout(Stdio::piped());
+    let mut pairing = command.spawn().unwrap();
+    drop(pairing.stdin.take());
+    let mut target_out = BufReader::new(pairing.stdout.take().unwrap());
+    let mut header = String::new();
+    let mut code = String::new();
+    tokio::time::timeout(WAIT, async {
+        target_out.read_line(&mut header).await.unwrap();
+        target_out.read_line(&mut code).await.unwrap();
+    })
+    .await
+    .unwrap();
+    assert!(header.contains("Pairing code"), "{header}");
+    let code = code.trim().to_owned();
     let mut cmd = senate(client.paths.home());
     cmd.args([
         "setup",
@@ -101,13 +129,46 @@ async fn pair(
         .split('.')
         .next()
         .unwrap();
-    let device: Device = control(
-        target,
-        Control::Confirm {
-            comparison: comparison.to_owned(),
-        },
-    )
-    .await;
+    let mut candidate = String::new();
+    tokio::time::timeout(WAIT, target_out.read_line(&mut candidate))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        candidate.contains("Candidate test-client") && candidate.contains("key "),
+        "{candidate}"
+    );
+    let mut command = String::new();
+    tokio::time::timeout(WAIT, target_out.read_line(&mut command))
+        .await
+        .unwrap()
+        .unwrap();
+    let command = command.trim();
+    let request = command
+        .strip_prefix("sudo -k /usr/local/libexec/senate-remote-admin enroll ")
+        .unwrap();
+    let devices: Vec<Device> = control(target, Control::Devices).await;
+    assert!(
+        !devices
+            .iter()
+            .any(|device| candidate.contains(&device.id[..16]))
+    );
+    assert!(
+        authorize_isolated_test(&target.paths, &["enroll".into(), request.into()], "wrong")
+            .is_err()
+    );
+    let approval = admin(target, &["enroll", request], comparison);
+    assert!(approval.contains("test-client") && approval.contains("attach="));
+    assert!(!approval.contains(comparison));
+    assert!(!candidate.contains(comparison));
+
+    assert!(
+        tokio::time::timeout(WAIT, pairing.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
     assert!(
         tokio::time::timeout(WAIT, joining.wait())
             .await
@@ -115,6 +176,11 @@ async fn pair(
             .unwrap()
             .success()
     );
+    let devices: Vec<Device> = control(target, Control::Devices).await;
+    let device = devices
+        .into_iter()
+        .find(|device| candidate.contains(&device.id[..16]))
+        .unwrap();
     (device, code)
 }
 
@@ -199,6 +265,48 @@ async fn remote_test_child() {
         ),
     )
     .unwrap();
+    let helper = env!("CARGO_BIN_EXE_senate-remote-admin");
+    let mut admin_attempt = tokio::process::Command::new(helper);
+    let root = std::env::var_os(testenv::CONFINE_ENV).unwrap();
+    testenv::isolate_async(&mut admin_attempt, Path::new(&root));
+    let not_root = admin_attempt
+        .env_remove("SUDO_UID")
+        .arg("disable")
+        .output()
+        .await
+        .unwrap();
+    assert!(!not_root.status.success());
+    assert!(String::from_utf8_lossy(&not_root.stderr).contains("sudo"));
+
+    // The old local listener flag alone cannot enable machine access.
+    target.start().await;
+    let unauthorized = ipc::request::<String>(
+        &target.socket(),
+        &Request::RemoteControl {
+            command: Control::PrepareEnroll,
+        },
+        WAIT,
+        WAIT,
+    )
+    .await
+    .unwrap_err();
+    assert!(unauthorized.to_string().contains("disabled"));
+    let enable: String = control(
+        &target,
+        Control::PrepareEnable {
+            listen: "127.0.0.1:0".parse().unwrap(),
+        },
+    )
+    .await;
+    admin(&target, &["enable", &enable], "enable");
+    target.stop().await;
+
+    // A user-owned legacy registry is outside the authority store.
+    std::fs::write(
+        target.paths.home().join("remote/devices-v2.json"),
+        "tampered user registry",
+    )
+    .unwrap();
     target.daemon = Some(
         start_with_host_binary(
             DaemonOptions {
@@ -212,6 +320,21 @@ async fn remote_test_child() {
         .await
         .unwrap(),
     );
+    // The CLI binary speaks its real wire protocol. In-process test clients
+    // stand in for an external person because this test itself runs under
+    // a coding session. Every hosted-agent refusal below uses the real socket.
+    let person = Paths::new(target.dir.path().join("cli"));
+    std::fs::create_dir(person.home()).unwrap();
+    let forwarding = tokio::net::UnixListener::bind(person.socket()).unwrap();
+    let target_socket = target.socket();
+    let person_fixture = tokio::spawn(async move {
+        while let Ok((mut client, _)) = forwarding.accept().await {
+            let Ok(mut bridge) = tokio::net::UnixStream::connect(&target_socket).await else {
+                break;
+            };
+            let _ = tokio::io::copy_bidirectional(&mut client, &mut bridge).await;
+        }
+    });
     client.start().await;
     let disabled = ipc::request::<String>(
         &client.socket(),
@@ -248,13 +371,32 @@ async fn remote_test_child() {
         },
     )
     .await;
-    let (device, used) = pair(&target, &client, "target", false, 60).await;
+    let (device, used) = pair(&target, &client, &person, "target", false, true, 60).await;
     let remote = Client::open(&client.paths, &name("target")).unwrap();
     let rows = remote.list().await.unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].label, "refund-v2::main");
     let session = rows[0].session.clone();
     assert_eq!(session, launched.session_id);
+    pair(&target, &client, &person, "metadata", false, false, 60).await;
+    let metadata = Client::open(&client.paths, &name("metadata")).unwrap();
+    assert_eq!(metadata.list().await.unwrap().len(), 1);
+    assert!(
+        metadata
+            .stream(session.clone(), false)
+            .await
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("no watch grant")
+    );
+    let mut input_watch = remote.stream(session.clone(), false).await.unwrap();
+    until(&mut input_watch, b"terminal fixture").await;
+    input_watch
+        .write_all(b"unexpected watch input")
+        .await
+        .unwrap();
+    closed(&mut input_watch).await;
     let mut viewer = remote.stream(session.clone(), false).await.unwrap();
     until(&mut viewer, b"terminal fixture").await;
     assert!(
@@ -307,7 +449,7 @@ async fn remote_test_child() {
         .unwrap()
         .unwrap();
     assert!(!result.status.success());
-    assert!(String::from_utf8_lossy(&result.stderr).contains("already used"));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("pairing unavailable"));
 
     let machine_path = client.paths.home().join("remote/machines/target.json");
     let good = std::fs::read(&machine_path).unwrap();
@@ -323,14 +465,14 @@ async fn remote_test_child() {
     );
     std::fs::write(&machine_path, &good).unwrap();
 
-    let _: serde_json::Value = control(&target, Control::Revoke { device: device.id }).await;
+    admin(&target, &["revoke", &device.id], "revoke");
     closed(&mut viewer).await;
     assert!(
         remote.list().await.is_err(),
         "revoked client key must fail a new handshake"
     );
 
-    let (device, _) = pair(&target, &client, "interactive", true, 60).await;
+    let (device, _) = pair(&target, &client, &person, "interactive", true, true, 60).await;
     let remote = Client::open(&client.paths, &name("interactive")).unwrap();
     terminal(
         &client,
@@ -357,10 +499,26 @@ async fn remote_test_child() {
             std::fs::read_to_string(project.join("guard-result"))
         )
     });
-    let _: serde_json::Value = control(&target, Control::Revoke { device: device.id }).await;
+    let audit_path = target.paths.home().join("remote/audit.jsonl");
+    let audit_backup = audit_path.with_extension("saved");
+    tokio::time::timeout(WAIT, async {
+        loop {
+            if std::fs::read_to_string(&audit_path)
+                .is_ok_and(|log| log.contains("\"action\":\"attach\""))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    std::fs::rename(&audit_path, &audit_backup).unwrap();
+    std::fs::create_dir(&audit_path).unwrap();
+    admin(&target, &["revoke", &device.id], "revoke");
     closed(&mut attached).await;
 
-    let (_, _) = pair(&target, &client, "short-lived", false, 3).await;
+    let (_, _) = pair(&target, &client, &person, "short-lived", false, true, 3).await;
     let short = Client::open(&client.paths, &name("short-lived")).unwrap();
     let mut watch = short.stream(session, false).await.unwrap();
     until(&mut watch, b"terminal fixture").await;
@@ -376,20 +534,34 @@ async fn remote_test_child() {
     let listed = String::from_utf8(result.stdout).unwrap();
     assert!(listed.contains("target:\n  unreachable"), "{listed}");
 
-    let audit = std::fs::read_to_string(target.paths.home().join("remote/audit.jsonl")).unwrap();
+    let audit = std::fs::read_to_string(audit_backup).unwrap();
     for action in [
+        "pair",
         "connect",
         "list",
         "watch",
         "attach_denied",
         "attach",
         "revoke",
+        "disconnect",
     ] {
         assert!(
             audit.contains(&format!("\"action\":\"{action}\"")),
             "{audit}"
         );
     }
+    assert!(!audit.contains("enrollment_connect"), "{audit}");
+
+    admin(&target, &["disable"], "disable");
+    tokio::time::timeout(WAIT, async {
+        while metadata.list().await.is_ok() {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let _: ipc::StatusReply = request(&target, &Request::Status).await;
+    person_fixture.abort();
     client.stop().await;
     target.stop().await;
 }
@@ -407,9 +579,7 @@ async fn remote_agent_child() {
             },
             valid_secs: 60,
         },
-        Control::Confirm {
-            comparison: "123456".into(),
-        },
+        Control::PrepareEnroll,
     ] {
         let result = ipc::request::<serde_json::Value>(
             &paths.socket(),
