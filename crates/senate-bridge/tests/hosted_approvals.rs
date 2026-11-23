@@ -1545,7 +1545,7 @@ async fn a_codex_approval_on_a_relay_reports_the_task_even_at_an_attended_termin
     .to(Address::senator(&launch.senator))
     .on_behalf_of(Address::senior(&h.config.person))
     .with_source(senate_core::Source {
-        platform: "feishu".into(),
+        platform: "chat".into(),
         group_id: "team".into(),
         group_name: None,
         simulated: false,
