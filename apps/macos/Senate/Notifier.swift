@@ -11,7 +11,9 @@ enum NotificationAction: Equatable, Sendable {
     case openApprovals
     case approve(id: String, allow: Bool)
     case openSessions
-    case attach(label: String)
+    /// Attach to the hosted session with this exact id (resolved when
+    /// tapped: an alias may since have passed to a replacement).
+    case attach(sessionId: String)
 }
 
 /// macOS notifications: something came back to you (Reply, Take), a Codex
@@ -153,7 +155,9 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         content.categoryIdentifier = Category.prompt
         content.threadIdentifier = "prompts"
         content.interruptionLevel = .timeSensitive
-        content.userInfo = ["session": session.label]
+        // The exact session, never its alias: `senate session replace` hands
+        // the alias to a new session, and this banner is about this one.
+        content.userInfo = ["session": session.sessionId]
         post(.prompt, id: "prompt:\(session.sessionId)", content)
     }
 
@@ -246,9 +250,9 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
             default: return .openApprovals
             }
         case Category.prompt:
-            guard let label = info["session"] as? String else { return .openSessions }
+            guard let id = info["session"] as? String else { return .openSessions }
             switch action {
-            case Action.attach: return .attach(label: label)
+            case Action.attach: return .attach(sessionId: id)
             case UNNotificationDismissActionIdentifier: return nil
             default: return .openSessions
             }

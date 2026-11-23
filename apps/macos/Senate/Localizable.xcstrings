@@ -855,6 +855,23 @@
         }
       }
     },
+    "error.prompt_gone": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "That prompt is no longer waiting: its session has ended or was replaced."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "该授权请求已不再等待：会话已结束或已被替换。"
+          }
+        }
+      }
+    },
     "error.not_started": {
       "extractionState": "manual",
       "localizations": {

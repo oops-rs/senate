@@ -148,7 +148,9 @@ rules as the Speaker's own rendering.
 
 **Notifications**, asked for when the first one is posted: something came
 back to you (*Reply* inline, *Take*); a Codex approval (*Allow*, *Deny*,
-both needing the Mac unlocked); a prompt in a hosted terminal (*Attach*).
+both needing the Mac unlocked); a prompt in a hosted terminal (*Attach*: to that exact session, found
+when tapped; if it has ended, been replaced, or its prompt was answered,
+Sessions opens and says so, rather than whatever holds its alias now).
 Grouped by thread; clicking opens what it is about; each kind can be
 turned off in Settings.
 

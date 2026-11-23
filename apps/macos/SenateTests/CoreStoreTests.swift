@@ -354,6 +354,52 @@ import SenateCore
         #expect(core.calls.contains("approve 019a:3 deny"))
     }
 
+    @Test func aPromptBannerAttachesToItsOwnSessionNotItsAliasesNextHolder() async throws {
+        let store = store()
+        // A prompt waits in `reviewer`; its banner carries the session's id.
+        let original = prompting("reviewer")
+        var state = online()
+        state.sessions = [original]
+        core.push(state)
+        try await until(store) { $0.state.sessions.count == 1 }
+        let tap = Notifier.action(
+            category: "HOSTED_PROMPT", action: "ATTACH",
+            info: ["session": original.sessionId], text: nil)
+        #expect(tap == .attach(sessionId: "s-reviewer"))
+
+        // While it waits, the tap attaches to it.
+        await store.perform(tap!)
+        #expect(core.calls.filter { $0.hasPrefix("attach") } == ["attach refund-v2::reviewer"])
+
+        // `senate session replace`: the alias passes to a new session,
+        // with a prompt of its own waiting.
+        var replacement = prompting("reviewer")
+        replacement.sessionId = "s-reviewer-2"
+        state.sessions = [replacement]
+        core.push(state)
+        try await until(store) { $0.state.sessions.first?.sessionId == "s-reviewer-2" }
+
+        // The old banner does not open the replacement: Sessions, and why.
+        await store.perform(tap!)
+        #expect(core.calls.filter { $0.hasPrefix("attach") } == ["attach refund-v2::reviewer"])
+        #expect(store.section == .sessions)
+        #expect(store.actionError == L("error.prompt_gone"))
+    }
+
+    @Test func aPromptThatWasAnsweredNoLongerAttaches() async throws {
+        let store = store()
+        var session = prompting("reviewer")
+        var state = online()
+        session.promptTool = nil
+        session.promptSince = nil
+        state.sessions = [session]
+        core.push(state)
+        try await until(store) { $0.state.sessions.count == 1 }
+        await store.perform(.attach(sessionId: session.sessionId))
+        #expect(!core.calls.contains { $0.hasPrefix("attach") })
+        #expect(store.section == .sessions)
+    }
+
     @Test func answeringAHostedPromptAsksTheDaemonForThatSession() async throws {
         let store = store()
         let lead = HostedSession(
@@ -410,9 +456,9 @@ import SenateCore
             == .approve(id: "019a:3", allow: false))
         #expect(Notifier.action(category: "CODEX_APPROVAL", action: "x", info: approval, text: nil)
             == .openApprovals)
-        let prompt: [AnyHashable: Any] = ["session": "refund-v2::lead"]
+        let prompt: [AnyHashable: Any] = ["session": "s-lead"]
         #expect(Notifier.action(category: "HOSTED_PROMPT", action: "ATTACH", info: prompt, text: nil)
-            == .attach(label: "refund-v2::lead"))
+            == .attach(sessionId: "s-lead"))
         #expect(Notifier.action(category: "HOSTED_PROMPT", action: "x", info: prompt, text: nil)
             == .openSessions)
         #expect(Notifier.action(category: "OTHER", action: "x", info: [:], text: nil) == nil)

@@ -329,9 +329,21 @@ final class CoreStore {
             }
         case .openSessions:
             show(.sessions)
-        case let .attach(label):
-            runInTerminal { try $0.attachTerminal(label: label) }
+        case let .attach(sessionId):
+            // That exact session, and only while its prompt still waits:
+            // never whatever holds its alias now.
+            guard let session = waitingSession(sessionId) else {
+                actionError = L("error.prompt_gone")
+                show(.sessions)
+                return
+            }
+            attach(session)
         }
+    }
+
+    /// The hosted session with this id, if a prompt still waits in it.
+    func waitingSession(_ sessionId: String) -> HostedSession? {
+        state.sessions.first { $0.sessionId == sessionId && $0.promptSince != nil }
     }
 
     /// Ask for notification permission (Settings).
