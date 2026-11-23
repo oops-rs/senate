@@ -324,7 +324,10 @@ private struct SessionRow: View {
                 .foregroundStyle(Theme.onSurfaceVariant)
         }
         .help(tooltip)
+        // One element, read as text as the sidebar's other rows are: its
+        // name, then its state, runtime and how long since it did anything.
         .accessibilityElement(children: .ignore)
+        .accessibilityAddTraits(.isStaticText)
         .accessibilityLabel(session.displayName)
         .accessibilityValue("\(session.statusLabel), \(session.runtime), \(session.lastActivity.formatted(.relative(presentation: .named)))")
     }
@@ -705,6 +708,7 @@ private struct SecretaryRow: View {
             }
         }
         .accessibilityElement(children: .ignore)
+        .accessibilityAddTraits(.isStaticText)
         .accessibilityLabel(L("sidebar.secretary"))
         .accessibilityValue(store.secretaryStarting ? L("secretary.starting")
             : line?.status.label ?? state?.label ?? "")

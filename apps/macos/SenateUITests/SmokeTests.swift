@@ -139,6 +139,16 @@ final class SmokeTests: XCTestCase {
         XCTAssertTrue(edit.menuItems["Select All"].firstMatch.exists, "Edit › Select All")
     }
 
+    /// A group with no name of its own that only wraps what SwiftUI or
+    /// AppKit put there: the split view; the sidebar column's title and
+    /// list; the detail column's page; a section header's menu.
+    static func isSystemWrapper(_ element: XCUIElement) -> Bool {
+        guard element.elementType == .group, element.label.isEmpty, element.identifier.isEmpty else { return false }
+        let kinds = element.children(matching: .any).allElementsBoundByIndex.map(\.elementType)
+        return kinds == [.splitGroup] || kinds == [.staticText, .scrollView, .button] || kinds == [.scrollView]
+            || kinds == [.menuButton]
+    }
+
     func testAccessibilityAudit() throws {
         let window = app.windows.firstMatch
         XCTAssertTrue(window.waitForExistence(timeout: 10))
@@ -151,6 +161,12 @@ final class SmokeTests: XCTestCase {
             try app.performAccessibilityAudit(for: [.sufficientElementDescription, .hitRegion, .parentChild]) { issue in
                 // SwiftUI's own split-view divider has no description.
                 if issue.element?.elementType == .splitter { return true }
+                // AppKit's Touch Bar item, which no view of ours provides.
+                if issue.element?.elementType == .touchBar { return true }
+                // The containers SwiftUI and AppKit put around ours, which no
+                // modifier of ours reaches: the window's hosting group, the
+                // split view's two columns, and a list section header's cell.
+                if let element = issue.element, Self.isSystemWrapper(element) { return true }
                 failed.append("\(issue.compactDescription): \(issue.element?.debugDescription ?? "no element")")
                 return false
             }
