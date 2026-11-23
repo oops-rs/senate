@@ -480,6 +480,13 @@ senate inbox
 senate inbox --all
 ```
 
+Each command works on the committee this directory is bound to, or the one
+named with `--committee`. Outside a bound worktree, `ask`, `tell` and
+`request` to an alias that exists on exactly one committee go to that
+committee, and say so on stderr (`on committee refund (where rev is an
+alias)`); the commands they suggest then carry `--committee`. Otherwise the
+error lists the committees to choose from.
+
 ### 2. Zero-Pollution Workspace Management
 
 Senate keeps your repositories completely clean:

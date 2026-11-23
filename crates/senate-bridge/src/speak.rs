@@ -408,12 +408,29 @@ pub struct Sent {
     pub locale: Locale,
     /// The person's own handle.
     pub me: Name,
+    /// The committee is not the one this directory binds: the commands
+    /// suggested name it with `--committee`.
+    pub elsewhere: bool,
 }
 
 impl Sent {
     /// What was sent, to whom it resolved, and the thread seq.
     pub fn render(&self, waiting: bool) -> String {
-        render_sent(self.kind, &self.wrote, &self.posted, waiting, self.locale)
+        let mut out = render_sent(self.kind, &self.wrote, &self.posted, waiting, self.locale);
+        if self.elsewhere {
+            let seq = self.posted.seq;
+            let flag = format!(" --committee {}", self.posted.committee);
+            out = out
+                .replace(
+                    &format!("`senate thread {seq}`"),
+                    &format!("`senate thread {seq}{flag}`"),
+                )
+                .replace(
+                    &format!("`senate reply {seq} "),
+                    &format!("`senate reply{flag} {seq} "),
+                );
+        }
+        out
     }
 }
 
@@ -472,6 +489,7 @@ pub async fn send(
         posted,
         locale,
         me,
+        elsewhere: false,
     })
 }
 
@@ -805,4 +823,37 @@ mod tests {
             assert_ne!(e.message(Locale::En), e.message(Locale::Zh));
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn a_message_sent_to_another_committee_names_it_in_the_commands_it_suggests() {
+    let posted = Posted {
+        committee: CommitteeId::new("refund").unwrap(),
+        seq: senate_core::Seq(35),
+        to: Vec::new(),
+        thread: None,
+        duplicate: false,
+        unseen_escalation: None,
+    };
+    let sent = |elsewhere| Sent {
+        kind: SayKind::Question,
+        wrote: "senator::rev".parse().unwrap(),
+        posted: posted.clone(),
+        locale: Locale::En,
+        me: Name::new("alice").unwrap(),
+        elsewhere,
+    };
+    let here = sent(false).render(false);
+    assert!(
+        here.contains("`senate thread 35`; follow up with `senate reply 35 <text>`"),
+        "{here}"
+    );
+    let there = sent(true).render(false);
+    assert!(
+        there.contains(
+            "`senate thread 35 --committee refund`; follow up with `senate reply --committee refund 35 <text>`"
+        ),
+        "{there}"
+    );
 }

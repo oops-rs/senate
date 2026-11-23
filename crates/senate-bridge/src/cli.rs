@@ -1278,7 +1278,83 @@ async fn codex_smoke(
 /// (`senate where`).
 async fn committee_here(named: Option<CommitteeId>) -> anyhow::Result<CommitteeId> {
     let (paths, settings) = settings_here();
-    binding::committee_here(&paths, named, &settings).await
+    match binding::committee_here(&paths, named, &settings).await {
+        Ok(committee) => Ok(committee),
+        // Nothing binds one here: name the committees there are to choose.
+        Err(error) => {
+            match daemon_call::<Vec<ipc::RosterCommittee>>(&paths, &Request::Roster).await {
+                Ok(rows) if !rows.is_empty() => {
+                    let list = rows
+                        .iter()
+                        .map(|row| row.committee.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    Err(anyhow::anyhow!(cli_locale().pick(
+                        format!("{error:#}。委员会：{list}"),
+                        format!("{error:#}. Committees: {list}"),
+                    )))
+                }
+                _ => Err(error),
+            }
+        }
+    }
+}
+
+/// The committee a message to `to` goes to: `--committee`, else this
+/// directory's; with neither, the one committee where `to` is an alias,
+/// said on stderr so it is never a surprise. Otherwise the error names the
+/// committees to choose from. Whether it was found that way, so the
+/// commands suggested after name it.
+async fn committee_for(
+    paths: &Paths,
+    named: Option<CommitteeId>,
+    to: &str,
+    locale: Locale,
+) -> anyhow::Result<(CommitteeId, bool)> {
+    let unbound = match committee_here(named).await {
+        Ok(committee) => return Ok((committee, false)),
+        Err(error) => error,
+    };
+    let candidates = match to.parse::<SenatorName>() {
+        Ok(alias) => match daemon_call::<KnownAliases>(paths, &Request::Aliases).await {
+            Ok(KnownAliases::Scoped(table)) => {
+                let mut committees: Vec<CommitteeId> = table
+                    .matches(&alias)
+                    .into_iter()
+                    .map(|q| q.committee)
+                    .collect();
+                committees.dedup();
+                committees
+            }
+            _ => Vec::new(),
+        },
+        // `*`, `speaker`, a qualified name: not an alias to look up.
+        Err(_) => Vec::new(),
+    };
+    match candidates.as_slice() {
+        [committee] => {
+            eprintln!(
+                "{}",
+                locale.pick(
+                    format!("在委员会 {committee} 上（{to} 是那里的别名）"),
+                    format!("on committee {committee} (where {to} is an alias)"),
+                )
+            );
+            Ok((committee.clone(), true))
+        }
+        [] => Err(unbound),
+        several => {
+            let list = several
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(anyhow::anyhow!(locale.pick(
+                format!("{to} 是多个委员会上的别名：{list}。用 --committee 选一个。"),
+                format!("{to} is an alias on more than one committee: {list}. Choose one with --committee."),
+            )))
+        }
+    }
 }
 
 fn settings_here() -> (Paths, Settings) {
@@ -2447,9 +2523,10 @@ fn speak_new(
     let paths = Paths::from_env()?;
     let text = message_text(text)?;
     runtime(false)?.block_on(async {
-        let committee = committee_here(committee).await?;
+        let (committee, elsewhere) = committee_for(&paths, committee, &to, cli_locale()).await?;
         let socket = paths.socket();
-        let sent = speak::send(&socket, committee, kind, &to, text).await?;
+        let mut sent = speak::send(&socket, committee, kind, &to, text).await?;
+        sent.elsewhere = elsewhere;
         let aliases = if !json && !output.verbose {
             daemon_call::<KnownAliases>(&paths, &Request::Aliases)
                 .await
