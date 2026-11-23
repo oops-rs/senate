@@ -20,7 +20,7 @@ Anyone writing a Senate component or client in Rust: a chat gateway, a custom Sp
 
 ```toml
 [dependencies]
-senate-core = "0.8"
+senate-core = "0.9"
 ```
 
 ## Part of Senate

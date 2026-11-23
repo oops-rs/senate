@@ -24,7 +24,7 @@ Senate has no chat platform of its own. A layer that connects it to a company's 
 
 ```toml
 [dependencies]
-senated = "0.8"
+senated = "0.9"
 ```
 
 ## A chat platform in its own process

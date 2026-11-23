@@ -15,7 +15,7 @@ Runs inside [`senated`](https://crates.io/crates/senated) when a model is config
 
 ```toml
 [dependencies]
-senate-speaker = "0.8"
+senate-speaker = "0.9"
 ```
 
 ## Part of Senate

@@ -1490,14 +1490,14 @@ dependencies = [
 
 [[package]]
 name = "senate"
-version = "0.8.3"
+version = "0.9.0"
 dependencies = [
  "senate-bridge",
 ]
 
 [[package]]
 name = "senate-bridge"
-version = "0.8.3"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1526,13 +1526,14 @@ dependencies = [
  "toml_edit",
  "tracing",
  "tracing-subscriber",
+ "unicode-width",
  "uuid",
  "vt100",
 ]
 
 [[package]]
 name = "senate-core"
-version = "0.8.3"
+version = "0.9.0"
 dependencies = [
  "async-trait",
  "chrono",

@@ -15,7 +15,7 @@ Used by the built-in Speaker when `[speaker.work]` is configured.
 
 ```toml
 [dependencies]
-senate-work = "0.8"
+senate-work = "0.9"
 ```
 
 ## Part of Senate
