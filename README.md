@@ -191,6 +191,25 @@ untouched, so the service keeps running the old version until you run
 copy is behind. (`senate-bridge` installs the same `senate` binary
 as the `senate` package; install one of them, not both.)
 
+### Shell Completion
+
+Add the line for your shell to its startup file. Setup prints the
+registration script, so the installed CLI supplies the current commands and
+flags each time you complete. Names are offered when the daemon answers
+within 150 ms.
+
+```sh
+# zsh (~/.zshrc)
+autoload -Uz compinit && compinit && source <(senate setup completions zsh)
+# bash (~/.bashrc)
+source <(senate setup completions bash)
+# fish (~/.config/fish/config.fish)
+senate setup completions fish | source
+```
+
+`senate setup install` prints this guidance and `senate setup doctor` looks for
+the registration in your shell's startup files.
+
 ### Build from Source (Contributors)
 
 ```sh
@@ -236,6 +255,7 @@ Now, navigate to any git repository and bind it:
 cd ~/developer/my-project
 senate join       # automatically names the committee from your repo & branch
 senate status     # inspect the active Senate, committee, and agent sessions
+senate spawn codex --alias review --attach # start Codex and open its terminal
 ```
 
 ### Mode 2: Connect Workstation to a Shared Team Server
@@ -535,16 +555,16 @@ one has them open:
 senate committees                      # chairs, active members and pending threads
 senate status --all                     # include inactive entries
 senate spawn claude --alias reviewer    # seat a member on this committee
-senate spawn codex --chair --alias lead # appoint the committee chair
+senate spawn codex --chair --alias lead --attach # appoint the chair and open its terminal
 senate spawn claude --secretary --alias desk # add a Speaker’s desk secretary
-senate attach reviewer                 # open its terminal (Ctrl-] detaches)
+senate attach reviewer                 # restore or resume as needed (Ctrl-] detaches)
 senate session list                    # active hosted sessions on this machine
 senate session list --all               # include stopped and paused sessions
 senate session watch                   # read-only grid of terminals without an interactive viewer
 senate session watch --all             # include attached, paused and stopped sessions
 senate session approve reviewer        # answer its permission prompt (--always, --deny)
 senate session stop reviewer           # end its terminal...
-senate session restore reviewer        # ...and reopen it later
+senate session restore reviewer        # ...and reopen it later (add --attach to enter)
 senate session pause --all             # checkpoint, then stop each one...
 senate session resume --all            # ...and bring them back where they were
 senate session replace reviewer        # a fresh session takes the seat
@@ -602,7 +622,12 @@ The top level is the daily loop: `status` (a bare `senate` runs it), `inbox`
 | `senate senator` | `list` · `alias` · `unalias` · `seat` · `unseat` · `duty` |
 | `senate secretary` | `list` · `appoint` · `dismiss` · `work list\|show\|create\|assign` (the secretary team) · `desk` · `desk set` (the Speaker's desk workers, in order) |
 | `senate chat` | `send` · `thread` (simulated chat; see [Testing](#-testing--verification)) |
-| `senate setup` | `init` · `install` · `service install\|uninstall\|status` · `doctor` · `clean` |
+| `senate setup` | `init` · `install` · `completions <zsh\|bash\|fish>` · `service install\|uninstall\|status` · `doctor` · `clean` |
+
+`spawn`, `session restore`, and `session replace` accept `--attach` (`-a`).
+Without a name, `attach` offers running, paused, and stopped hosted sessions.
+`attach --read-only` opens a running terminal for watching only. It never
+opens a stopped terminal.
 
 The names before this grouping (`sessions`, `watch`, `pin`, `install`, …) still
 work for one more minor release and print the command that replaces them.

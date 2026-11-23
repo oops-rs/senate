@@ -77,6 +77,11 @@ nonisolated final class FakeCore: AppCoreProtocol, @unchecked Sendable {
         try record("attach \(label)")
         return TerminalCommand(argv: ["senate", "attach", label], cwd: nil, shellLine: "", appleScript: "")
     }
+    func attachTerminalForSession(sessionId: String) -> TerminalCommand {
+        try? record("attach-session \(sessionId)")
+        return TerminalCommand(argv: ["senate", "attach", "--session=\(sessionId)"],
+                               cwd: nil, shellLine: "", appleScript: "")
+    }
     func close(committee: String, thread: UInt64) async throws {
         try record("close \(committee) \(thread)")
     }

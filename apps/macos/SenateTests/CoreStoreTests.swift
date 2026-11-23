@@ -477,7 +477,7 @@ import SenateCore
 
         // While it waits, the tap attaches to it.
         await store.perform(tap!)
-        #expect(core.calls.filter { $0.hasPrefix("attach") } == ["attach refund-v2::reviewer"])
+        #expect(core.calls.filter { $0.hasPrefix("attach") } == ["attach-session \(original.sessionId)"])
 
         // `senate session replace`: the alias passes to a new session,
         // with a prompt of its own waiting.
@@ -489,7 +489,7 @@ import SenateCore
 
         // The old banner does not open the replacement: Approvals, and why.
         await store.perform(tap!)
-        #expect(core.calls.filter { $0.hasPrefix("attach") } == ["attach refund-v2::reviewer"])
+        #expect(core.calls.filter { $0.hasPrefix("attach") } == ["attach-session \(original.sessionId)"])
         #expect(store.place == .section(.approvals))
         #expect(store.actionError == L("error.prompt_gone"))
     }

@@ -3064,6 +3064,7 @@ impl Shared {
                 prompt,
                 model,
             } => self.sessions_changed(wrap(self.on_replace(&senator, prompt, model).await)),
+            Request::AttachInfo { target } => wrap(self.on_attach_info(target).await),
             Request::Attach { senator } => wrap(self.on_attach(senator).await),
             Request::Receipt { committee, seq } => wrap(self.receipt(&committee, seq).await),
             Request::SetCommitteeSeat { committee, request } => {

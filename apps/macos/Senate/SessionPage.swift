@@ -68,11 +68,9 @@ private struct SessionHeader: View {
                 if let h = s.hosted {
                     HStack(spacing: Theme.Space.s) {
                         if store.isBusy("session:\(h.label)") { ProgressView().controlSize(.small) }
-                        if h.running {
-                            Button(L("sessions.attach")) { store.attach(h) }
-                                .buttonStyle(.pill)
-                                .help(L("sessions.attach_help"))
-                        }
+                        Button(L("sessions.attach")) { store.attach(h) }
+                            .buttonStyle(.pill)
+                            .help(L("sessions.attach_help"))
                         SessionActions(store: store, hosted: h, style: .buttons)
                     }
                     .disabled(store.isBusy("session:\(h.label)") || !store.state.online)
@@ -453,7 +451,7 @@ private struct Nothing: View {
                 .font(Theme.Fonts.text)
                 .foregroundStyle(Theme.onSurfaceVariant)
                 .fixedSize(horizontal: false, vertical: true)
-            if let hosted, hosted.running {
+            if let hosted {
                 Button(L("sessions.attach")) { store.attach(hosted) }
                     .buttonStyle(.pill(.filled))
             }

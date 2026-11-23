@@ -309,6 +309,15 @@ async fn hosted_sessions_show_their_waiting_prompt_and_stop_and_restore() {
     assert_eq!(attach.argv, ["senate", "attach", "refund-v2::lead"]);
     assert!(attach.shell_line.starts_with("SENATE_HOME="));
     assert!(attach.shell_line.ends_with("senate attach refund-v2::lead"));
+    let exact = core.attach_terminal_for_session(lead.session_id.clone());
+    assert_eq!(
+        exact.argv,
+        [
+            "senate",
+            "attach",
+            &format!("--session={}", lead.session_id)
+        ]
+    );
     assert_eq!(core.watch_terminal().argv, ["senate", "session", "watch"]);
 
     // The prompt is a permission prompt: the app may answer it, as the
