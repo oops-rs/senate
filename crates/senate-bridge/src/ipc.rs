@@ -490,6 +490,8 @@ pub struct ReplaceReply {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct SessionsReply {
     pub rows: Vec<SessionRow>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub local_rows: Vec<LocalSessionRow>,
     /// Hosts running with no session on record: what `senate session list
     /// prune` stops.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -517,10 +519,18 @@ pub struct SessionRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shown_name: Option<String>,
     pub runtime: crate::session::Runtime,
+    #[serde(default)]
+    pub working: bool,
+    #[serde(default)]
+    pub last_activity: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// The model and effort it was last started with.
     #[serde(default, skip_serializing_if = "HostedModel::is_default")]
     pub model: HostedModel,
     pub dir: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
     pub state: HostState,
     /// When its host started; `None` when it is not running.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -555,6 +565,24 @@ pub struct HostedPrompt {
     /// a permission prompt.
     #[serde(default, skip_serializing_if = "is_false")]
     pub screen: bool,
+}
+
+/// A live session without a Senate terminal host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalSessionRow {
+    pub session_id: String,
+    pub primary: SenatorName,
+    pub alias: Option<SenatorName>,
+    pub committee: Option<CommitteeId>,
+    pub chair: bool,
+    pub shown_name: Option<String>,
+    pub runtime: crate::session::Runtime,
+    pub dir: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    pub working: bool,
+    pub last_activity: DateTime<Utc>,
+    pub title: Option<String>,
 }
 
 impl SessionRow {
@@ -673,6 +701,133 @@ pub struct HookDropStatus {
     pub hosted_last_at: std::collections::BTreeMap<String, chrono::DateTime<chrono::Utc>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimelineDirection {
+    #[default]
+    Tail,
+    Before,
+    After,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineReply {
+    pub session_id: String,
+    pub runtime: crate::session::Runtime,
+    pub available: bool,
+    pub items: Vec<TimelineItem>,
+    pub first_seq: Option<u64>,
+    pub last_seq: Option<u64>,
+    pub has_older: bool,
+    pub has_newer: bool,
+    /// This daemon observed a prompt hook and has yet to observe its turn end.
+    pub working: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineUpdate {
+    pub items: Vec<TimelineItem>,
+    pub working: bool,
+    /// The transcript changed identity. Fetch a fresh tail and reconnect.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub reset: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineItem {
+    pub seq: u64,
+    pub ts: Option<DateTime<Utc>>,
+    pub truncated: bool,
+    #[serde(flatten)]
+    pub kind: TimelineKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TimelineKind {
+    UserMessage {
+        text: String,
+    },
+    AssistantMessage {
+        text: String,
+    },
+    Reasoning {
+        text: String,
+    },
+    ToolCall {
+        call_id: String,
+        name: String,
+        status: TimelineToolStatus,
+        detail: TimelineToolDetail,
+    },
+    Todo {
+        items: Vec<TimelineTodo>,
+    },
+    Notice {
+        level: String,
+        text: String,
+    },
+    SenateMessage {
+        committee: Option<String>,
+        #[serde(rename = "senate_seq")]
+        seq: Option<u64>,
+        thread: Option<u64>,
+        from: Option<String>,
+        #[serde(rename = "senate_kind")]
+        kind: Option<String>,
+        text: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineTodo {
+    pub text: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimelineToolStatus {
+    Running,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TimelineToolDetail {
+    Shell {
+        command: String,
+        cwd: Option<String>,
+        output: Option<String>,
+        exit_code: Option<i64>,
+    },
+    Read {
+        path: String,
+    },
+    Edit {
+        path: String,
+        unified_diff: Option<String>,
+        old: Option<String>,
+        new: Option<String>,
+    },
+    Write {
+        path: String,
+    },
+    Search {
+        query: String,
+    },
+    Fetch {
+        url: String,
+    },
+    SubAgent {
+        description: String,
+    },
+    Other {
+        summary: String,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
@@ -763,6 +918,19 @@ pub enum Request {
     /// Every Senate-hosted session this machine has a record of, and every
     /// host running with none ([`SessionsReply`]).
     Sessions,
+    Timeline {
+        session_id: String,
+        #[serde(default)]
+        direction: TimelineDirection,
+        #[serde(default)]
+        cursor: Option<u64>,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
+    TimelineWatch {
+        session_id: String,
+        after: u64,
+    },
     /// Stop every host running with no session on record, and remove the
     /// directories of hosts that have ended ([`PruneReply`]). The local
     /// operator's: the CLI only.

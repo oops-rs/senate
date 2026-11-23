@@ -54,6 +54,14 @@ async fn main() {
     }
     w.status.roles = Some(common::roles());
     common::busy_senate(&mut w);
+    // Every session state on every committee, and their timelines, which
+    // grow while watched (`FAKE_TIMELINE_EVERY=<s>`, 0 for never).
+    common::session_tree(&mut w);
+    let grow = std::env::var("FAKE_TIMELINE_EVERY")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(6);
+    w.grow_every = (grow > 0).then(|| Duration::from_secs(grow));
     let world = Arc::new(Mutex::new(w));
     let daemon = common::FakeDaemon::start(&socket, Arc::clone(&world));
     println!("fake daemon on {}", socket.display());

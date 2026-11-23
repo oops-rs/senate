@@ -293,6 +293,27 @@ pub fn model_label(model: Option<&str>, effort: Option<&str>) -> Option<String> 
     }
 }
 
+pub fn no_session(locale: Locale, id: &str) -> String {
+    match locale {
+        Locale::Zh => format!("本机没有会话 {id}"),
+        Locale::En => format!("no session {id} on this machine"),
+    }
+}
+
+pub fn say_needs_committee(locale: Locale) -> String {
+    locale
+        .pick(
+            "这个会话不在任何委员会，没有地方可以对它说话。",
+            "This session is on no committee, so there is nowhere to speak to it.",
+        )
+        .to_string()
+}
+
+/// The sidebar group of sessions on no committee.
+pub fn no_committee(locale: Locale) -> &'static str {
+    locale.pick("无委员会", "No committee")
+}
+
 pub fn docket_word(locale: Locale) -> &'static str {
     locale.pick("议程", "docket")
 }

@@ -142,52 +142,45 @@ import SenateCore
         #expect(core.calls == ["start"])
     }
 
-    @Test func theDocketSectionIsThereOnlyWhileAnAgentPresides() async throws {
+    @Test func theSidebarHeadsWithInboxAndApprovals() async throws {
         let store = store()
-        core.push(online())
-        try await until(store) { $0.state.online }
-        #expect(!store.sections.contains(.docket))
-        core.push(online(docket: true))
-        try await until(store) { $0.sections.contains(.docket) }
+        #expect(store.sections == [.inbox, .approvals])
     }
 
     @Test func openingAThreadFromANotificationSelectsIt() async throws {
         let store = store()
-        store.section = .senates
-        await store.perform(.openThread(committee: "refund-v2", root: 7))
-        #expect(store.section == .inbox)
-        #expect(store.selectedThread == "refund-v2:7")
-    }
-
-    @Test func theSidebarsPlaceIsASectionOrAWaitingThread() async throws {
-        let store = store()
-        core.push(online([thread(7, "which env?")]))
-        try await until(store) { $0.state.inbox.count == 1 }
-        #expect(store.place == .section(.inbox))
-        // A thread opens in the home section's place.
-        store.place = .thread("refund-v2:7")
-        #expect(store.section == .inbox)
-        #expect(store.selectedThread == "refund-v2:7")
-        #expect(store.place == .thread("refund-v2:7"))
-        // Another section keeps the thread for when you come back.
         store.place = .section(.senates)
-        #expect(store.place == .section(.senates))
-        store.section = .inbox
+        await store.perform(.openThread(committee: "refund-v2", root: 7))
         #expect(store.place == .thread("refund-v2:7"))
-        // Choosing home itself lets go of it.
-        store.place = .section(.inbox)
-        #expect(store.selectedThread == nil)
-        #expect(store.place == .section(.inbox))
+        #expect(store.selectedThread == "refund-v2:7")
     }
 
-    @Test func aThreadThatLeftTheInboxFallsBackToHome() async throws {
+    @Test func thePlaceIsAPageAThreadASessionOrACommittee() async throws {
         let store = store()
         core.push(online([thread(7, "which env?")]))
         try await until(store) { $0.state.inbox.count == 1 }
-        store.place = .thread("refund-v2:7")
-        core.push(online())
-        try await until(store) { $0.state.inbox.isEmpty }
         #expect(store.place == .section(.inbox))
+        store.place = .thread("refund-v2:7")
+        #expect(store.selectedThread == "refund-v2:7")
+        #expect(store.selectedRow?.title == "which env?")
+        store.place = .committee("payments")
+        #expect(store.selectedThread == nil)
+        store.place = .section(.inbox)
+        #expect(store.place == .section(.inbox))
+    }
+
+    @Test func aThreadNotInTheInboxOpensFromWhatIsRead() async throws {
+        let store = store()
+        core.threadView = ThreadView(
+            committee: "refund-v2", root: 140, title: "Reviewed; fine by me.", state: nil, stateLabel: nil,
+            kindLabel: "note", events: [])
+        core.push(online())
+        try await until(store) { $0.state.online }
+        store.openThread(committee: "refund-v2", root: 140)
+        try await until(store) { $0.selectedRow != nil }
+        #expect(core.calls.contains("thread refund-v2 140"))
+        #expect(store.selectedRow?.title == "Reviewed; fine by me.")
+        #expect(store.selectedRow?.forPerson == false)
     }
 
     // MARK: The menu bar
@@ -231,16 +224,22 @@ import SenateCore
         #expect(store.agentThreads.map(\.root) == [1])
         // The agents' own work is not counted and not in the menu.
         #expect(store.waitingCount == 3)
-        #expect(store.waitingMenu().rows.map(\.item.id) == [
+        #expect(Set(store.waitingMenu().rows.map(\.item.id)) == [
             "thread:payments:2", "docket:payments:40", "thread:docs:3",
         ])
-        #expect(store.waitingByCommittee.map(\.committee) == ["payments", "docs"])
-        let item = store.waitingByCommittee[0].items[1]
+        // (Each committee oldest first; these were made in the same instant.)
+        #expect(Set(store.waitingByCommittee.map(\.committee)) == ["payments", "docs"])
+        let payments = try #require(store.waitingByCommittee.first { $0.committee == "payments" })
+        let item = try #require(payments.items.first { $0.id == "docket:payments:40" })
         #expect(item.title == "who signs off?")
         #expect(item.asker == "[senator::auditor]")
-        // An item for the Speaker opens the docket; from the sidebar too.
+        // An item for the Speaker opens the approvals; from the menu too.
         store.place = .item(item.id)
-        #expect(store.place == .section(.docket))
+        #expect(store.place == .section(.approvals))
+        // Escalated to alice: the Speaker's desk, not the inbox.
+        #expect(store.deskThreads.map(\.root) == [3])
+        #expect(store.inboxThreads.map(\.root) == [2])
+        #expect(store.approvalsCount == 2)
     }
 
     @Test func inactiveAgentsAreHiddenUntilAskedFor() async throws {
@@ -270,14 +269,88 @@ import SenateCore
         try await until(store) { $0.state.inbox.count == 1 }
         // docs: no one active, nothing waiting; payments: something waits.
         #expect(store.roster.filter(store.isActive).map(\.committee) == ["payments", "infra"])
-        store.selectedCommittee = "payments"
-        store.place = .section(.committees)
-        #expect(store.selectedCommittee == nil, "the section opens on the list")
-        // A committee that left the roster closes.
-        store.selectedCommittee = "docs"
-        state.senates = [senate(roster: [committee("infra")])]
+    }
+
+    // MARK: Sessions
+
+    @Test func theSidebarListsActiveSessionsByCommitteeAndMovesBetweenThem() async throws {
+        let store = store()
+        var state = online()
+        state.groups = groups([
+            sessionLine("lead", status: .needsYou),
+            sessionLine("codex", status: .working),
+            sessionLine("reviewer", status: .stopped, active: false),
+            sessionLine("ledger", committee: "payments"),
+            sessionLine("scratch", committee: nil),
+        ])
         core.push(state)
-        try await until(store) { $0.selectedCommittee == nil }
+        try await until(store) { !$0.state.groups.isEmpty }
+        #expect(store.shownGroups.map(\.title) == ["payments", "refund-v2", "No committee"])
+        #expect(store.shownSessions.map(\.displayName) == ["ledger", "lead", "codex", "scratch"])
+        store.showInactive = true
+        #expect(store.shownSessions.count == 5)
+        store.showInactive = false
+        // The search narrows sessions too.
+        store.search = "led"
+        #expect(store.shownSessions.map(\.displayName) == ["ledger"])
+        store.search = ""
+        // ⌘⌥↓ from elsewhere: the first; then the next; ⌘⌥↑ back.
+        store.moveSession(1)
+        #expect(store.place == .session("s-ledger"))
+        store.moveSession(1)
+        #expect(store.place == .session("s-lead"))
+        store.moveSession(-1)
+        #expect(store.place == .session("s-ledger"))
+        // Folded committees are remembered.
+        store.folded.insert("payments")
+        #expect(defaults.stringArray(forKey: "foldedCommittees") == ["payments"])
+    }
+
+    @Test func aSessionPageReadsItsTailFollowsItAndLetsGo() async throws {
+        let store = store()
+        var state = online()
+        state.groups = groups([sessionLine("lead"), sessionLine("codex")])
+        core.timelines["s-lead"] = TimelinePage(
+            sessionId: "s-lead", available: true, unavailable: nil,
+            items: [entry(1, "plan", user: true), entry(2, "done")], hasOlder: true,
+            firstSeq: 1, lastSeq: 2, working: true)
+        core.push(state)
+        try await until(store) { !$0.state.groups.isEmpty }
+        store.place = .session("s-lead")
+        try await until(store) { $0.timeline?.loading == false }
+        #expect(store.timeline?.items.map(\.seq) == [1, 2])
+        #expect(core.calls.contains("timeline s-lead tail"))
+        #expect(core.calls.contains("watch s-lead 2"))
+        // A watch update replaces an item in place and appends the new.
+        core.timelineListener?.onDelta(delta: TimelineDelta(
+            items: [entry(2, "done, really"), entry(3, "next")], working: false, reset: false))
+        try await until(store) { $0.timeline?.items.count == 3 }
+        if case let .assistant(text) = store.timeline?.items[1].body { #expect(text == "done, really") }
+        #expect(store.timeline?.working == false)
+        // Older pages go before.
+        core.timelines["s-lead"] = TimelinePage(
+            sessionId: "s-lead", available: true, unavailable: nil, items: [entry(0, "older")],
+            hasOlder: false, firstSeq: 0, lastSeq: 0, working: false)
+        await store.loadOlder()
+        #expect(store.timeline?.items.map(\.seq) == [0, 1, 2, 3])
+        #expect(store.timeline?.hasOlder == false)
+        // Leaving the session lets go of its watch.
+        store.place = .session("s-codex")
+        #expect(core.calls.contains("unwatch s-lead"))
+        #expect(store.timeline?.sessionId == "s-codex")
+    }
+
+    @Test func theComposerSaysANoteToTheSessionAndClearsItsDraft() async throws {
+        let store = store()
+        let lead = sessionLine("lead")
+        core.push(online())
+        try await until(store) { $0.state.online }
+        await store.say(to: lead)
+        #expect(store.actionError != nil, "nothing to say")
+        store.sessionDrafts[lead.sessionId] = "Ship it."
+        await store.say(to: lead)
+        #expect(core.calls.contains("say s-lead Ship it."))
+        #expect(store.sessionDrafts[lead.sessionId] == nil)
     }
 
     @Test func anOlderDaemonsChairsStandInForTheRoster() async throws {
@@ -379,10 +452,10 @@ import SenateCore
         core.push(state)
         try await until(store) { $0.state.sessions.first?.sessionId == "s-reviewer-2" }
 
-        // The old banner does not open the replacement: Sessions, and why.
+        // The old banner does not open the replacement: Approvals, and why.
         await store.perform(tap!)
         #expect(core.calls.filter { $0.hasPrefix("attach") } == ["attach refund-v2::reviewer"])
-        #expect(store.section == .sessions)
+        #expect(store.place == .section(.approvals))
         #expect(store.actionError == L("error.prompt_gone"))
     }
 
@@ -397,7 +470,7 @@ import SenateCore
         try await until(store) { $0.state.sessions.count == 1 }
         await store.perform(.attach(sessionId: session.sessionId))
         #expect(!core.calls.contains { $0.hasPrefix("attach") })
-        #expect(store.section == .sessions)
+        #expect(store.place == .section(.approvals))
     }
 
     @Test func answeringAHostedPromptAsksTheDaemonForThatSession() async throws {
@@ -425,7 +498,7 @@ import SenateCore
         let a = thread(1, "a"), b = thread(2, "b")
         core.push(online([a, b]))
         try await until(store) { $0.state.inbox.count == 2 }
-        store.selectedThread = b.key
+        store.place = .thread(b.key)
         await store.loadThread(a)
         #expect(store.threadView(for: a) == nil, "a read for a thread no longer selected is dropped")
         await store.loadThread(b)
@@ -460,7 +533,7 @@ import SenateCore
         #expect(Notifier.action(category: "HOSTED_PROMPT", action: "ATTACH", info: prompt, text: nil)
             == .attach(sessionId: "s-lead"))
         #expect(Notifier.action(category: "HOSTED_PROMPT", action: "x", info: prompt, text: nil)
-            == .openSessions)
+            == .openSession(sessionId: "s-lead"))
         #expect(Notifier.action(category: "OTHER", action: "x", info: [:], text: nil) == nil)
     }
 }

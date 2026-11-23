@@ -5,14 +5,19 @@ import SwiftUI
 import SenateCore
 
 /// Development only: with `SENATE_APP_SNAPSHOT=<dir>`, open the window, show
-/// home, a thread and each section in turn, then Settings and the status
-/// item's menu; write each as `<dir>/<name>.png`, and quit.
+/// the inbox, a thread, approvals, a committee, sessions and the Senates,
+/// then Settings and the status item's menu; write each as
+/// `<dir>/<name>.png`, and quit.
 /// The app draws its own windows, so no screen-recording permission is
-/// needed. `SENATE_APP_SNAPSHOT_PREFIX` names the files (`zh-home.png`);
+/// needed. `SENATE_APP_SNAPSHOT_PREFIX` names the files (`zh-inbox.png`);
 /// `SENATE_APP_SNAPSHOT_APPEARANCE` (`light` or `dark`) draws the app in that
 /// appearance whatever the system's is.
 enum Snapshot {
     static let env = "SENATE_APP_SNAPSHOT"
+    /// Posted to scroll the open session's conversation to its top.
+    static let scrollToTop = Notification.Name("SenateSnapshotScrollToTop")
+    /// Posted to open every tool call's output in the open conversation.
+    static let expandTools = Notification.Name("SenateSnapshotExpandTools")
 
     /// The window's size in every snapshot.
     static let size = NSSize(width: 1120, height: 740)
@@ -49,24 +54,52 @@ enum Snapshot {
                 try? await Task.sleep(for: .seconds(1.5))
                 await capture(dir.appendingPathComponent("\(prefix)\(name).png")) { isMain($0) }
             }
-            // Home, a thread, then each other section.
+            // Inbox, a thread, Approvals, a committee, sessions, Senates.
             store.place = .section(.inbox)
-            await shot("home")
-            if let thread = store.state.inbox.first {
+            await shot("inbox")
+            if let thread = store.inboxThreads.first {
                 store.place = .thread(thread.key)
                 await shot("thread")
             }
-            for section in store.sections where section != .inbox {
-                store.place = .section(section)
-                await shot(section.rawValue)
-                // One committee open: its roster and its threads.
-                if section == .committees,
-                   let busiest = store.roster.max(by: { $0.activeMembers < $1.activeMembers }) {
-                    store.selectedCommittee = busiest.committee
-                    await shot("committee")
-                    store.selectedCommittee = nil
-                }
+            store.place = .section(.approvals)
+            await shot("approvals")
+            if let busiest = store.roster.max(by: { $0.activeMembers < $1.activeMembers }) {
+                store.place = .committee(busiest.committee)
+                await shot("committee")
             }
+            // A session at a prompt (its conversation, the prompt card), then
+            // one with nothing to read; each as the sidebar lists it.
+            let sessions = store.shownSessions
+            if let prompt = sessions.first(where: { $0.status == .needsYou }) {
+                store.place = .session(prompt.sessionId)
+                try? await Task.sleep(for: .seconds(1.5))
+                await shot("session")
+            }
+            // Scrolled to the top, the page before is read: what is on screen
+            // stays where it is (compare the two pictures).
+            if sessions.contains(where: { $0.status == .needsYou }) {
+                NotificationCenter.default.post(name: scrollToTop, object: nil)
+                try? await Task.sleep(for: .milliseconds(300))
+                await capture(dir.appendingPathComponent("\(prefix)session-top.png")) { isMain($0) }
+                await shot("session-older")
+                // Every call open, the 64 KiB log and the 600-line diff with
+                // them: how long the main thread is held.
+                let start = ContinuousClock.now
+                NotificationCenter.default.post(name: expandTools, object: nil)
+                await Task.yield()
+                print("snapshot: opening every tool call held the main thread \(ContinuousClock.now - start)")
+                await shot("session-expanded")
+            }
+            if let working = sessions.first(where: { $0.status == .working && $0.readable }) {
+                store.place = .session(working.sessionId)
+                await shot("session-working")
+            }
+            if let unreadable = sessions.first(where: { !$0.readable }) {
+                store.place = .session(unreadable.sessionId)
+                await shot("session-unreadable")
+            }
+            store.place = .section(.senates)
+            await shot("senates")
             // Settings, in its own window, opened as a person would: ⌘,.
             if let comma = NSEvent.keyEvent(
                 with: .keyDown, location: .zero, modifierFlags: .command,

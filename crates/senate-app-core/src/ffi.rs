@@ -16,7 +16,9 @@ use chrono::Utc;
 use senate_bridge::Paths;
 use senate_bridge::approvals::{Approval, Decision};
 use senate_bridge::delivery::codex::CodexConfig;
-use senate_bridge::ipc::{Request, SessionRow, SessionSelector, ThreadReply};
+use senate_bridge::ipc::{
+    Request, SessionRow, SessionSelector, ThreadReply, TimelineDirection, TimelineReply,
+};
 use senate_core::alias::AliasName;
 use senate_core::{CommitteeId, Locale, Mention, Seq};
 use tokio::runtime::{Handle, Runtime};
@@ -27,6 +29,7 @@ use crate::names;
 use crate::reads::{self, ThreadView};
 use crate::state::{AppState, ApprovalRequest, HostedSession};
 use crate::text;
+use crate::timeline::{self, TimelineDelta, TimelinePage};
 
 /// Why a call failed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, uniffi::Error)]
@@ -215,6 +218,15 @@ fn kind_of(mention: &Mention, people: &senate_core::People) -> MentionKind {
     }
 }
 
+/// Told what a timeline watch sees, on the core's threads.
+#[uniffi::export(foreign)]
+pub trait TimelineListener: Send + Sync {
+    fn on_delta(&self, delta: TimelineDelta);
+    /// The watch ended: the daemon closed it, a `reset` asked for a fresh
+    /// read, or it failed (`error`).
+    fn on_end(&self, error: Option<String>);
+}
+
 /// The core: a runtime, the Senate home, and the driver once started.
 #[derive(uniffi::Object)]
 pub struct AppCore {
@@ -223,6 +235,8 @@ pub struct AppCore {
     handle: Handle,
     locale: Mutex<Locale>,
     driver: OnceLock<Arc<Driver<ListenerSink>>>,
+    /// The timeline watches running, by session id.
+    watches: Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>,
 }
 
 #[uniffi::export]
@@ -261,6 +275,7 @@ impl AppCore {
             runtime: Mutex::new(Some(runtime)),
             locale: Mutex::new(locale),
             driver: OnceLock::new(),
+            watches: Mutex::default(),
         }))
     }
 
@@ -470,6 +485,141 @@ impl AppCore {
     pub async fn resume_session(&self, label: String) -> Result<(), CoreError> {
         let senator = self.session_label(&label)?;
         self.act(Action::ResumeSession { senator }).await
+    }
+
+    /// Pause a hosted session (`senate session pause <label>`): it is asked
+    /// to checkpoint (the daemon waits up to 90 s), its terminal stops and
+    /// it is recorded paused; Resume brings it back where it was.
+    pub async fn pause_session(&self, label: String) -> Result<(), CoreError> {
+        let senator = self.session_label(&label)?;
+        self.act(Action::PauseSession { senator }).await
+    }
+
+    /// Say something to the senator of a session, as the person: a note
+    /// to it in its committee's log (`senate tell`), which the daemon
+    /// delivers to the session. Nothing is typed into its terminal.
+    pub async fn say(&self, session_id: String, body: String) -> Result<(), CoreError> {
+        let (to, committee) = {
+            let driver = self.driver()?;
+            let model = driver.model();
+            let reply = model.sessions.as_ref();
+            let hosted = reply
+                .and_then(|r| r.rows.iter().find(|x| x.session_id == session_id))
+                .map(|x| (x.primary.clone(), x.committee.clone()));
+            let local = || {
+                reply
+                    .and_then(|r| r.local_rows.iter().find(|x| x.session_id == session_id))
+                    .map(|x| (x.primary.clone(), x.committee.clone()))
+            };
+            hosted.or_else(local).ok_or_else(|| CoreError::Invalid {
+                message: text::no_session(self.locale(), &session_id),
+            })?
+        };
+        let committee = committee.ok_or_else(|| CoreError::Invalid {
+            message: text::say_needs_committee(self.locale()),
+        })?;
+        if body.trim().is_empty() {
+            return Err(CoreError::Invalid {
+                message: text::empty_reply(self.locale()),
+            });
+        }
+        self.act(Action::Say {
+            committee,
+            to,
+            body,
+        })
+        .await
+    }
+
+    /// A page of a session's conversation: the latest `limit` items (60 by
+    /// default) when `before` is `None`, else the `limit` before that seq.
+    pub async fn timeline(
+        &self,
+        session_id: String,
+        before: Option<u64>,
+        limit: Option<u32>,
+    ) -> Result<TimelinePage, CoreError> {
+        let request = Request::Timeline {
+            session_id,
+            direction: if before.is_some() {
+                TimelineDirection::Before
+            } else {
+                TimelineDirection::Tail
+            },
+            cursor: before,
+            limit: limit.map(|l| l as usize),
+        };
+        let locale = self.locale();
+        let reply: TimelineReply = self
+            .on_runtime(move |driver| async move { driver.read::<TimelineReply>(&request).await })
+            .await?;
+        Ok(timeline::page(reply, locale))
+    }
+
+    /// Follow a session's conversation from after `after` (the last seq
+    /// read): each change is a [`TimelineListener::on_delta`] until
+    /// [`AppCore::stop_timeline`], or [`TimelineListener::on_end`] says it
+    /// ended (on a `reset` delta, read the tail again and watch anew). A
+    /// second watch of the same session replaces the first.
+    pub fn watch_timeline(
+        &self,
+        session_id: String,
+        after: u64,
+        listener: Arc<dyn TimelineListener>,
+    ) -> Result<(), CoreError> {
+        let key = session_id.clone();
+        let link = self.driver()?.link().clone();
+        let locale = self.locale();
+        let task = self.handle.spawn(async move {
+            let mut stream = match link.timeline_watch(&session_id, after).await {
+                Ok(s) => s,
+                Err(e) => {
+                    listener.on_end(Some(model::message(&e)));
+                    return;
+                }
+            };
+            loop {
+                match stream.next().await {
+                    Ok(Some(update)) => {
+                        let reset = update.reset;
+                        listener.on_delta(timeline::delta(update, locale));
+                        if reset {
+                            listener.on_end(None);
+                            return;
+                        }
+                    }
+                    Ok(None) => {
+                        listener.on_end(None);
+                        return;
+                    }
+                    Err(e) => {
+                        listener.on_end(Some(model::message(&e)));
+                        return;
+                    }
+                }
+            }
+        });
+        let old = self
+            .watches
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key, task);
+        if let Some(old) = old {
+            old.abort();
+        }
+        Ok(())
+    }
+
+    /// Stop following a session's conversation.
+    pub fn stop_timeline(&self, session_id: String) {
+        let task = self
+            .watches
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&session_id);
+        if let Some(task) = task {
+            task.abort();
+        }
     }
 
     /// What to run to open a hosted session's terminal: `senate attach

@@ -1,93 +1,6 @@
 import SwiftUI
 import SenateCore
 
-/// Every committee of the Senate, one card each: its chair (by name, live
-/// or not), how many members are active, and what waits on you there. A
-/// card opens the committee: its roster and its threads. Committees with
-/// no one active and nothing for you are hidden until "Show inactive".
-/// Who counts as active, and every name, come from the core's roster.
-struct CommitteesView: View {
-    @Bindable var store: CoreStore
-
-    var body: some View {
-        if let name = store.selectedCommittee, let committee = store.roster.first(where: { $0.committee == name }) {
-            CommitteePage(store: store, committee: committee)
-        } else {
-            list
-        }
-    }
-
-    @ViewBuilder private var list: some View {
-        let all = store.roster
-        let shown = store.showInactive ? all : all.filter { store.isActive($0) }
-        if all.isEmpty {
-            EmptyState(text: L("committees.empty"))
-        } else {
-            ReadingColumn {
-                HStack(alignment: .top) {
-                    PageHeading(text: L("tab.committees"))
-                    Spacer(minLength: Theme.Space.m)
-                    InactiveToggle(store: store, hidden: all.count - shown.count)
-                        .padding(.top, Theme.Space.xl)
-                }
-                .padding(.bottom, Theme.Space.s)
-                ForEach(shown) { committee in
-                    CommitteeCard(store: store, committee: committee)
-                }
-            }
-        }
-    }
-}
-
-/// One committee in the list: name, chair, members active, what waits on
-/// you there. The whole card opens it.
-private struct CommitteeCard: View {
-    let store: CoreStore
-    let committee: RosterCommittee
-    @State private var hovered = false
-
-    var body: some View {
-        let waiting = store.waitingByCommittee.first { $0.committee == committee.committee }?.items.count ?? 0
-        Button {
-            store.selectedCommittee = committee.committee
-        } label: {
-            VStack(alignment: .leading, spacing: Theme.Space.s) {
-                HStack(spacing: Theme.Space.s) {
-                    Text(verbatim: committee.committee)
-                        .font(Theme.Fonts.heading)
-                        .foregroundStyle(Theme.onSurface)
-                    if waiting > 0 {
-                        Chip(text: L("committees.waiting", Int64(waiting)), tone: .attention)
-                    }
-                    Spacer(minLength: Theme.Space.s)
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(Theme.onSurfaceVariant)
-                        .accessibilityHidden(true)
-                }
-                HStack(spacing: Theme.Space.m) {
-                    ChairLine(committee: committee, copyable: false)
-                    Text(verbatim: L("committees.active", Int64(committee.activeMembers)))
-                        .foregroundStyle(Theme.onSurfaceVariant)
-                    if committee.pending > 0 {
-                        Text(verbatim: L("committees.open_threads", Int64(committee.pending)))
-                            .foregroundStyle(Theme.onSurfaceVariant)
-                    }
-                }
-                .font(Theme.Fonts.row)
-                .lineLimit(1)
-            }
-            .padding(Theme.Space.l)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(hovered ? Theme.containerHigh : Theme.container,
-                        in: RoundedRectangle(cornerRadius: Theme.Radius.card))
-            .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.card))
-        }
-        .buttonStyle(.plain)
-        .onHover { hovered = $0 }
-    }
-}
-
 /// `chair ● ledger`, or that the committee has none.
 private struct ChairLine: View {
     let committee: RosterCommittee
@@ -107,47 +20,47 @@ private struct ChairLine: View {
     }
 }
 
-/// One committee: its chair, what waits on you there, the threads your
-/// agents are working on there, and its members.
-private struct CommitteePage: View {
+/// One committee: its chair, what waits on you there, its sessions on this
+/// machine, the threads your agents are working on there, and its members.
+/// The page of no committee lists the sessions on none.
+struct CommitteePage: View {
     @Bindable var store: CoreStore
-    let committee: RosterCommittee
+    let name: String
 
     var body: some View {
-        let name = committee.committee
+        let roster = store.roster.first { $0.committee == name }
+        let group = store.state.groups.first { ($0.committee ?? "") == name }
+        let sessions = (group?.sessions ?? []).filter { store.showInactive || $0.active }
         let waiting = store.waitingByCommittee.first { $0.committee == name }?.items ?? []
         let working = store.agentThreads.filter { $0.committee == name }
-        let members = committee.members
-            .filter { store.showInactive || $0.active }
-            .sorted { a, b in
-                // The chair first, then by name.
-                let chairA = a.senatorId == committee.chairId, chairB = b.senatorId == committee.chairId
-                return chairA != chairB ? chairA : a.displayName < b.displayName
-            }
         ReadingColumn(spacing: Theme.Space.xs) {
-            Button {
-                store.selectedCommittee = nil
-            } label: {
-                Label(L("committees.all"), systemImage: "chevron.left")
-                    .font(Theme.Fonts.row)
+            PageHeading(text: name.isEmpty ? L("sidebar.no_committee") : name)
+            if let roster {
+                HStack(spacing: Theme.Space.m) {
+                    ChairLine(committee: roster)
+                    Text(verbatim: L("committees.active", Int64(roster.activeMembers)))
+                        .foregroundStyle(Theme.onSurfaceVariant)
+                }
+                .font(Theme.Fonts.row)
+                .padding(.leading, Theme.Space.xs)
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(Theme.onSurfaceVariant)
-            .padding(.top, Theme.Space.l)
-            .padding(.leading, Theme.Space.xs)
-            PageHeading(text: name)
-            HStack(spacing: Theme.Space.m) {
-                ChairLine(committee: committee)
-                Text(verbatim: L("committees.active", Int64(committee.activeMembers)))
-                    .foregroundStyle(Theme.onSurfaceVariant)
-            }
-            .font(Theme.Fonts.row)
-            .padding(.leading, Theme.Space.xs)
-            .padding(.bottom, Theme.Space.m)
+            Color.clear.frame(height: Theme.Space.m)
             if !waiting.isEmpty {
                 SectionHeader(L("sidebar.waiting"))
                 ForEach(waiting) { item in
                     WaitingRow(store: store, item: item)
+                }
+            }
+            if !sessions.isEmpty {
+                HStack(alignment: .bottom) {
+                    SectionHeader(L("committees.sessions"))
+                    Spacer(minLength: Theme.Space.m)
+                    InactiveToggle(store: store, hidden: (group?.sessions.count ?? 0) - sessions.count)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(sessions) { session in
+                        SessionLink(store: store, session: session)
+                    }
                 }
             }
             if !working.isEmpty {
@@ -156,32 +69,86 @@ private struct CommitteePage: View {
                     WaitingRow(store: store, item: Waiting(kind: .thread(thread)))
                 }
             }
-            HStack(alignment: .bottom) {
-                SectionHeader(L("committees.members"))
-                Spacer(minLength: Theme.Space.m)
-                InactiveToggle(store: store, hidden: committee.members.count - members.count)
-            }
-            VStack(alignment: .leading, spacing: Theme.Space.s) {
-                ForEach(members) { member in
-                    HStack(spacing: 6) {
-                        StatusDot(online: member.active, size: 6)
-                        SenatorName(name: member.displayName, id: member.senatorId)
-                        if member.senatorId == committee.chairId {
-                            Chip(text: L("committees.chair"), tone: .accent)
-                        }
-                        if !member.active {
-                            Chip(text: L("roster.inactive"))
+            if let roster {
+                let members = roster.members
+                    .filter { store.showInactive || $0.active }
+                    .sorted { a, b in
+                        // The chair first, then by name.
+                        let chairA = a.senatorId == roster.chairId, chairB = b.senatorId == roster.chairId
+                        return chairA != chairB ? chairA : a.displayName < b.displayName
+                    }
+                HStack(alignment: .bottom) {
+                    SectionHeader(L("committees.members"))
+                    Spacer(minLength: Theme.Space.m)
+                    InactiveToggle(store: store, hidden: roster.members.count - members.count)
+                }
+                VStack(alignment: .leading, spacing: Theme.Space.s) {
+                    ForEach(members) { member in
+                        HStack(spacing: 6) {
+                            StatusDot(online: member.active, size: 6)
+                            SenatorName(name: member.displayName, id: member.senatorId)
+                            if member.senatorId == roster.chairId {
+                                Chip(text: L("committees.chair"), tone: .accent)
+                            }
+                            if !member.active {
+                                Chip(text: L("roster.inactive"))
+                            }
                         }
                     }
+                    if members.isEmpty {
+                        Text(verbatim: L("committees.no_members"))
+                            .foregroundStyle(Theme.onSurfaceVariant)
+                    }
                 }
-                if members.isEmpty {
-                    Text(verbatim: L("committees.no_members"))
-                        .foregroundStyle(Theme.onSurfaceVariant)
-                }
+                .font(Theme.Fonts.text)
+                .card()
             }
-            .font(Theme.Fonts.text)
-            .card()
         }
-        .environment(\.mentionCommittee, name)
+        .environment(\.mentionCommittee, name.isEmpty ? nil : name)
+    }
+}
+
+/// A session on the committee's page: its status, name, title and age;
+/// it opens the session.
+private struct SessionLink: View {
+    let store: CoreStore
+    let session: SessionLine
+    @State private var hovered = false
+
+    var body: some View {
+        Button {
+            store.place = .session(session.sessionId)
+        } label: {
+            HStack(spacing: Theme.Space.s) {
+                StatusMark(status: session.status)
+                Text(verbatim: session.displayName)
+                    .font(Theme.Fonts.text.weight(.medium))
+                    .foregroundStyle(Theme.onSurface)
+                RuntimeMark(runtime: session.runtime)
+                if let title = session.title {
+                    Text(verbatim: title)
+                        .font(Theme.Fonts.row)
+                        .foregroundStyle(Theme.onSurfaceVariant)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: Theme.Space.s)
+                Text(verbatim: session.statusLabel)
+                    .font(Theme.Fonts.meta)
+                    .foregroundStyle(Theme.onSurfaceVariant)
+                Ago(date: session.lastActivity)
+                    .font(Theme.Fonts.meta)
+                    .foregroundStyle(Theme.onSurfaceVariant)
+            }
+            .padding(.horizontal, Theme.Space.m)
+            .padding(.vertical, 9)
+            .background(hovered ? Theme.container : .clear, in: RoundedRectangle(cornerRadius: Theme.Radius.card))
+            .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.card))
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+        .accessibilityElement(children: .ignore)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityLabel(session.displayName)
+        .accessibilityValue("\(session.statusLabel), \(session.title ?? "")")
     }
 }

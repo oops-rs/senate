@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use senate_bridge::approvals::Approval;
 use senate_bridge::ipc::{
     self, ApprovalsReply, ApproveReply, ClientError, DocketReply, InboxReply, MAX_LINE, Posted,
-    Reply, Request, SessionRow, SessionSelector, SessionsReply, WatchEvent,
+    Reply, Request, SessionRow, SessionSelector, SessionsReply, TimelineUpdate, WatchEvent,
 };
 use senate_core::alias::KnownAliases;
 use senate_core::{CommitteeId, Locale, SenatorName};
@@ -27,6 +27,9 @@ use tokio::net::UnixStream;
 
 use crate::model::{Action, Effects, Failure, Model, Notice, Offline, ReadOf, Refresh, message};
 
+/// How often `sessions` is read at most while the daemon keeps saying it
+/// changed.
+const SESSIONS_EVERY: Duration = Duration::from_millis(300);
 /// How often the aliases are read again on a status sweep.
 const ALIASES_EVERY: Duration = Duration::from_secs(300);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -34,6 +37,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// Ops that append to the server's log through the daemon.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(20);
+/// A pause: the daemon's own wait for the checkpoint, and a margin.
+const PAUSE_TIMEOUT: Duration = Duration::from_secs(senate_bridge::ipc::PAUSE_TIMEOUT_SECS + 15);
 
 /// The daemon's socket.
 #[derive(Debug, Clone)]
@@ -59,7 +64,10 @@ impl Link {
             | Request::Take { .. }
             | Request::Task { .. }
             | Request::Stop { .. }
-            | Request::Restore { .. } => WRITE_TIMEOUT,
+            | Request::Restore { .. }
+            | Request::Say { .. } => WRITE_TIMEOUT,
+            // It waits for the agent's checkpoint (90 s at most).
+            Request::Pause { .. } => PAUSE_TIMEOUT,
             _ => READ_TIMEOUT,
         };
         ipc::request(&self.socket, request, CONNECT_TIMEOUT, timeout).await
@@ -95,6 +103,82 @@ impl Link {
             (true, _) => Ok(stream),
             (false, Some(e)) => Err(ClientError::Remote(e)),
             (false, None) => Err(ClientError::Protocol("error without detail".into())),
+        }
+    }
+}
+
+impl Link {
+    /// Follow one session's timeline (`timeline_watch`) from after `after`:
+    /// its own connection, whose lines are [`TimelineUpdate`]s, the first
+    /// one the catch-up. A refusal comes as a reply instead.
+    pub async fn timeline_watch(
+        &self,
+        session_id: &str,
+        after: u64,
+    ) -> Result<TimelineStream, ClientError> {
+        let stream =
+            match tokio::time::timeout(CONNECT_TIMEOUT, UnixStream::connect(&self.socket)).await {
+                Ok(Ok(s)) => s,
+                Ok(Err(source)) => {
+                    return Err(ClientError::Connect {
+                        path: self.socket.clone(),
+                        source,
+                    });
+                }
+                Err(_) => return Err(ClientError::Timeout),
+            };
+        let mut lines = WatchStream {
+            reader: BufReader::new(stream),
+        };
+        let mut line = serde_json::to_string(&Request::TimelineWatch {
+            session_id: session_id.to_string(),
+            after,
+        })
+        .map_err(|e| ClientError::Protocol(e.to_string()))?;
+        line.push('\n');
+        lines.reader.get_mut().write_all(line.as_bytes()).await?;
+        let first = tokio::time::timeout(READ_TIMEOUT, lines.line())
+            .await
+            .map_err(|_| ClientError::Timeout)??
+            .ok_or_else(|| ClientError::Protocol("connection closed".into()))?;
+        if let Ok(update) = serde_json::from_str::<TimelineUpdate>(&first) {
+            return Ok(TimelineStream {
+                lines,
+                first: Some(update),
+            });
+        }
+        let reply: Reply =
+            serde_json::from_str(&first).map_err(|e| ClientError::Protocol(e.to_string()))?;
+        Err(match reply.error {
+            Some(e) => ClientError::Remote(e),
+            None => ClientError::Protocol("timeline_watch: no update".into()),
+        })
+    }
+}
+
+/// An open `timeline_watch` connection. Dropping it stops watching.
+pub struct TimelineStream {
+    lines: WatchStream,
+    first: Option<TimelineUpdate>,
+}
+
+impl TimelineStream {
+    /// The next update; `None` when the daemon closed the stream.
+    pub async fn next(&mut self) -> Result<Option<TimelineUpdate>, ClientError> {
+        if let Some(first) = self.first.take() {
+            return Ok(Some(first));
+        }
+        loop {
+            let Some(line) = self.lines.line().await? else {
+                return Ok(None);
+            };
+            if line.trim().is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<TimelineUpdate>(&line) {
+                Ok(update) => return Ok(Some(update)),
+                Err(e) => tracing::debug!("skipping timeline line: {e}"),
+            }
         }
     }
 }
@@ -192,6 +276,8 @@ pub struct Driver<S: Sink> {
     model: Mutex<Model>,
     sink: S,
     backoff: Backoff,
+    /// A `sessions` read is scheduled ([`SESSIONS_EVERY`]).
+    sessions_due: std::sync::atomic::AtomicBool,
 }
 
 impl<S: Sink> Driver<S> {
@@ -203,6 +289,7 @@ impl<S: Sink> Driver<S> {
             model: Mutex::new(Model::new(locale)),
             sink,
             backoff,
+            sessions_due: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -299,14 +386,40 @@ impl<S: Sink> Driver<S> {
                     .for_person(committee.as_str(), thread.0, &title, &body),
             }
         }
-        if fx.refresh.is_empty() {
+        let mut refresh = fx.refresh;
+        // The daemon says `sessions` on every hook of every session: one
+        // read at most every [`SESSIONS_EVERY`], after the latest.
+        if refresh.contains(&Refresh::Sessions) {
+            refresh.retain(|r| *r != Refresh::Sessions);
+            self.sessions_soon();
+        }
+        if refresh.is_empty() {
             return;
         }
+        let fx = Effects {
+            refresh,
+            notices: Vec::new(),
+        };
         let this = Arc::clone(self);
         tokio::spawn(async move {
             for r in fx.refresh {
                 this.refresh(r).await;
             }
+        });
+    }
+
+    /// Read `sessions` once [`SESSIONS_EVERY`] has passed, unless a read
+    /// is already due: what arrives meanwhile is in that read.
+    fn sessions_soon(self: &Arc<Self>) {
+        use std::sync::atomic::Ordering;
+        if self.sessions_due.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let this = Arc::clone(self);
+        tokio::spawn(async move {
+            tokio::time::sleep(SESSIONS_EVERY).await;
+            this.sessions_due.store(false, Ordering::Release);
+            this.refresh(Refresh::Sessions).await;
         });
     }
 
@@ -451,14 +564,16 @@ impl<S: Sink> Driver<S> {
                 }
                 r.map(to_value)
             }
-            Action::Answer { .. } | Action::Take { .. } | Action::Close { .. } => {
-                self.link.call::<Posted>(&request).await.map(to_value)
-            }
+            Action::Answer { .. }
+            | Action::Take { .. }
+            | Action::Close { .. }
+            | Action::Say { .. } => self.link.call::<Posted>(&request).await.map(to_value),
             Action::MarkRead { .. } => self.link.call::<Value>(&request).await,
             Action::StopSession { .. }
             | Action::RestoreSession { .. }
             | Action::ApproveSession { .. }
-            | Action::ResumeSession { .. } => {
+            | Action::ResumeSession { .. }
+            | Action::PauseSession { .. } => {
                 let r = self.link.call::<Value>(&request).await;
                 self.refresh_sessions().await;
                 r

@@ -13,7 +13,7 @@ use senate_bridge::approvals::Approval;
 use senate_bridge::ipc::{SenateDocket, SessionRow, StatusReply, StreamState};
 use senate_bridge::session::Runtime;
 use senate_core::{
-    Address, Awaiting, DocketItem, Locale, Mention, SenatorName, SpeakerSeat, ThreadSummary,
+    Address, Awaiting, DocketItem, Kind, Locale, Mention, SenatorName, SpeakerSeat, ThreadSummary,
 };
 use serde::Serialize;
 
@@ -47,6 +47,10 @@ pub struct AppState {
     pub docket: Vec<DocketSenate>,
     /// This machine's hosted sessions, running first.
     pub sessions: Vec<HostedSession>,
+    /// The sidebar's tree: each committee with this machine's sessions on
+    /// it (hosted or started by the person), the sessions of no committee
+    /// last.
+    pub groups: Vec<crate::tree::SessionGroup>,
     pub counts: Counts,
     /// The last failed action or read.
     pub last_error: Option<String>,
@@ -319,6 +323,10 @@ pub struct InboxThread {
     pub for_agents: Vec<String>,
     /// It was put to the person: it waits on them whichever agent it was for.
     pub escalated: bool,
+    /// It asks the person for a yes or a no rather than a reply: escalated
+    /// to them, or a request or a decision waiting on them. Listed on the
+    /// Speaker's desk, among the approvals, not in the inbox.
+    pub to_decide: bool,
     /// Something was said to the person in it that they have not seen:
     /// `news_*` describe the latest such event. It may be listed for this
     /// alone, with `state` `active` (answered).
@@ -507,6 +515,11 @@ impl AppState {
             codex,
             docket,
             sessions,
+            groups: if model.online {
+                crate::tree::groups(model, &waiting)
+            } else {
+                Vec::new()
+            },
             counts,
             last_error: model.last_error.as_ref().map(|f| f.text(locale)),
         }
@@ -789,6 +802,8 @@ pub(crate) fn inbox_thread(w: &Waiting, locale: Locale) -> InboxThread {
         asker: asker(w),
         for_agents: w.for_agents.iter().map(ToString::to_string).collect(),
         escalated: w.escalated,
+        to_decide: w.for_person
+            && (w.escalated || matches!(t.kind, Kind::Request | Kind::Decision)),
         unread: w.unread.is_some(),
         news_from: w.unread.as_ref().map(|d| {
             Mention::author(&d.from, d.on_behalf_of.as_ref())

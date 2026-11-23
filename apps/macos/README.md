@@ -1,14 +1,14 @@
 # Senate for macOS
 
 The Senate menu-bar app: what waits on you (your inbox across agents,
-Codex approvals, permission prompts in hosted terminals), the threads
-themselves with a reply box, this machine's hosted sessions, the docket of
-a Senate one of your agents presides over, and the Senates your machine
-serves. SwiftUI over the shared Rust core
+and in one Approvals tab the permission prompts in hosted terminals, Codex
+approvals and what is put to you through the Speaker's desk), the threads
+themselves with a reply box, and each committee's coding sessions on this
+machine, each one's conversation read live from its transcript. SwiftUI over the shared Rust core
 [`senate-app-core`](../../crates/senate-app-core), **macOS 26+**, English
 and Simplified Chinese.
 
-![Home: everything waiting on you](docs/screenshots/home.png)
+![A session: its conversation, the prompt waiting in it, the composer](docs/screenshots/session.png)
 
 It is a **client of `senated --machine`**, the developer-machine daemon,
 over `$SENATE_HOME/bridge.sock` (default `~/.senate/bridge.sock`), the same
@@ -41,9 +41,12 @@ core (state folding, names, sessions, both languages, the FFI against a
 fake daemon); it never touches `~/.senate`.
 
 Without a Senate server, run the core's fake daemon. It serves `alice`
-with `claude` (alias `lead`, presiding, a hosted terminal with a waiting
-permission prompt) and `codex`, canned threads, a docket, a child Senate,
-and an approval every 20 s. It refuses to run unless `SENATE_HOME` names a
+with four committees, eight sessions on this machine in every state
+(`lead` chairs refund-v2 with a permission prompt waiting, `ledger` and
+`codex` at work, `scribe` paused, an agy session, one on no committee),
+their timelines (which grow while watched: a tool call completes, a Senate
+message arrives, the agent answers), canned threads, a docket, a child
+Senate, and an approval every 20 s. It refuses to run unless `SENATE_HOME` names a
 scratch directory, and the socket path must be short:
 
 ```sh
@@ -57,9 +60,10 @@ SENATE_HOME=/tmp/sh SENATE_APP_SHOW=1 build/Build/Products/Debug/Senate.app/Cont
 | `SENATE_HOME` | the Senate home; wins over the one chosen in Settings |
 | `SENATE_APP_SHOW=1` | open the window at launch |
 | `SENATE_APP_NOTIFICATIONS=0` | no notification permission prompt and no notifications |
-| `SENATE_APP_SNAPSHOT=<dir>` | Debug builds: write home, a thread, each section, Settings and the status item's menu as PNGs of the app's own windows, then quit (how `docs/screenshots/` is made). `SENATE_APP_SNAPSHOT_APPEARANCE=light\|dark` picks the appearance whatever the system's is; `SENATE_APP_SNAPSHOT_PREFIX` goes before each file name (`zh-`) |
-| `SENATE_APP_PERF=1` | print state-apply and thread-read times and main-thread stalls, tour the sections, quit (`SENATE_APP_PERF_THREAD=<root>` opens that thread) |
+| `SENATE_APP_SNAPSHOT=<dir>` | Debug builds: write the inbox, a thread, approvals, a committee, sessions (at a prompt, scrolled up to older items, every tool call open, at work, unreadable), the Senates, Settings and the status item's menu as PNGs of the app's own windows, then quit (how `docs/screenshots/` is made). `SENATE_APP_SNAPSHOT_APPEARANCE=light\|dark` picks the appearance whatever the system's is; `SENATE_APP_SNAPSHOT_PREFIX` goes before each file name (`zh-`) |
+| `SENATE_APP_PERF=1` | print state-apply and thread-read times and main-thread stalls, tour a thread, Inbox, Approvals and a session, quit (`SENATE_APP_PERF_THREAD=<root>` opens that thread) |
 | `FAKE_THREADS=N` | the fake daemon: N more threads and a 5,000-event thread 990 |
+| `FAKE_TIMELINE_EVERY=<s>` | the fake daemon: how often a watched timeline grows (default 6; 0 never) |
 | `RUST_LOG` | the core's log filter (default `senate_app_core=info,senate_bridge=warn`) |
 
 ## What it does
@@ -78,56 +82,79 @@ menu is one line. Everything else lives in the window. Menu bar only
 
 ![The menu](docs/screenshots/menu.png)
 
-**Window** (⌘1–6 for the sections; ⌘R reads everything again, or tries the
-daemon now while offline). Two columns. The sidebar has the sections, then
-*Waiting on you*: permissions first, then each committee under its name
-with its threads and docket items as one-line rows (a dot while unread),
-searched (⌘F) and narrowed to an agent there; below, folded, *With your
-agents*: the threads your agents are still working on. At its foot, who you are and
-the Senate's address; its menu opens *Settings…* and *About Senate*.
-Nothing is drawn above the content but what it needs at its top right.
+**Window** (⌘1 Inbox, ⌘2 Approvals, ⌘⌥↑ and ⌘⌥↓ from session to session;
+⌘R reads everything again, or tries the daemon now while offline). Two
+columns. The sidebar has two fixed rows, **Inbox** and **Approvals** (each
+with how much waits there), then one folding group per committee: its name
+(which opens the committee) with what waits on you there, and under it each
+session of that committee on this machine, hosted by Senate or started by
+you, the chair first: its status, its name (the alias), its runtime, and
+how long since it last did something. Sessions on no committee are last.
+Folded, a committee shows its most urgent session's status. Search (⌘F)
+narrows the sessions and the inbox. At the foot, who you are and the
+Senate's address; its menu opens *Senates*, *Show inactive*, *Watch all*
+(`senate session watch`), *Settings…* and *About Senate*. Nothing is drawn
+above the content but what it needs at its top right.
 
-- **Home**: everything waiting on you, the same list as the menu bar's:
-  permissions, then one group per committee (its name, its chair, live or
-  not), each row with who asks (by alias) and what. A row opens what it
-  names; a committee's name opens the committee. Folded below, what your
-  agents are working on.
-- **Committees**: every committee of the Senate, a card each: its chair
-  by alias with a live dot, how many members are active, its open threads
-  and what waits on you there. A card opens the committee: what waits on
-  you there, your agents' threads there, and its members (the chair
-  first). Committees with no one active and nothing for you are hidden.
+A session's **status**, most urgent first, one mark each: *needs you* (a
+permission prompt waits: the attention colour), *working* (a turning
+ring), *unread* (it said something to you that you have not read: the
+accent dot), *idle*, *paused*, *stopped*. The core decides it.
 
-  ![Committees](docs/screenshots/committees.png)
-- **A thread** opens from the sidebar, home, the menu bar or a notification
-  and reads as a conversation: every event (the latest 300; *Show earlier*
-  for more), yours in a bubble on your side, and a reply box at the foot.
-  *Send* (⌘↩) answers as you (`[senator::alice]`). Reading a thread marks it
-  seen. At the top right, its state, *Take* (take it over) and a menu with
-  *Close* (archives it, after confirming). Once answered it no longer waits
-  on you and leaves the sidebar. Drafts outlive the app.
-- **Approvals**: one card per request. Permission prompts waiting in hosted
-  terminals (*Allow once*, *Always allow*, *Deny*, answered as you would in
-  the terminal; *Attach to decide* for any other choice), and Codex
-  approval requests (*Allow*, *Allow for session*, *Deny*, and *Deny and
-  stop* in the card's menu; the first answer wins across the TUI, the app
-  and any chat platform).
-- **Sessions**: this machine's hosted sessions (committee, runtime, model,
-  uptime, attached, paused, a waiting prompt): *Attach* opens it in Terminal
-  (`senate attach`), *Stop* (never forced), *Resume* and *Restore*; *Watch
-  all* (`senate session watch`) at the top right. Below, the Codex threads,
-  *Open in Terminal*.
-- **Docket** (while one of your agents presides): what awaits that Speaker.
-  Read-only: routing and covering are the presiding agent's own tools.
-- **Senates**: address, you, the Speaker, the registration above, each
-  committee's chair, your agents with their duty and streams, and the
-  Senates below with the seats they declare.
+- **Inbox**: the threads waiting on you for a reply (questions, answers
+  and notes you have not read), one group per committee (its name, its
+  chair), each row with who asks and what; a row opens the thread. Folded
+  below, what your agents are working on. What waits for a yes or a no is
+  in Approvals, and the inbox says how much.
+- **Approvals**: everything waiting for your yes or no, in three parts.
+  Permission prompts in hosted terminals (*Allow once*, *Always allow*,
+  *Deny*, answered as you would in the terminal; *Attach to decide* for
+  any other choice); Codex approval requests (*Allow*, *Allow for
+  session*, *Deny*, and *Deny and stop* in the card's menu; the first
+  answer wins across the TUI, the app and any chat platform); and **the
+  Speaker's desk**: escalations, requests and decisions put to you (each
+  opens its thread, where you answer) and what awaits a Speaker your agent
+  holds (read-only: routing and covering are the presiding agent's own
+  tools). Each card names its session or committee and opens it.
 
-**Show inactive.** Agents, hosted sessions, Codex threads, streams,
-committees and members that are no longer active are hidden until *Show
-inactive* (at the top right of Committees, Sessions and Senates, and in the
-sidebar's agent filter); one setting, remembered. What counts as active is
-the core's roster rule, the same as the CLI's.
+  ![Approvals](docs/screenshots/approvals.png)
+- **A session**: its name, title, committee, runtime · model · effort,
+  directory and branch, status, and *Attach* (opens it in Terminal,
+  `senate attach`), *Pause* / *Resume*, *Stop* (never forced) or
+  *Restore* as they apply. Below, its conversation as its transcript has
+  it, in the reading column: what was typed in a bubble, the agent's
+  replies as Markdown, its reasoning dimmed and folded, each tool call one
+  row (an icon by kind, the command or path, how it went) that opens to
+  its output or diff in a bounded block, todo lists as a checklist, a
+  Senate message delivered to it as a card that opens its thread. The
+  latest page is read first and older ones as you scroll up (what you are
+  reading stays put); new items follow live and the page stays at the
+  foot unless you scrolled up. A prompt waiting in it is a card above the
+  composer. The composer says a **note** to its senator as you, in its
+  committee's log (`senate tell`); it is not typed into the terminal. A
+  session Senate cannot read (agy, ACP, no transcript yet) says why and
+  offers *Attach*.
+- **A committee**: its chair and how many are active, what waits on you
+  there, its sessions on this machine, the threads your agents are working
+  on there, and its members (the chair first).
+
+  ![A committee](docs/screenshots/committee.png)
+- **A thread** opens from the inbox, the Approvals, a session's Senate
+  message, the menu bar or a notification, and reads as a conversation:
+  every event (the latest 300; *Show earlier* for more), yours in a bubble
+  on your side, and a reply box at the foot. *Send* (⌘↩) answers as you
+  (`[senator::alice]`). Reading a thread marks it seen. At the top right,
+  its state, *Take* (take it over) and a menu with *Close* (archives it,
+  after confirming). A thread that no longer waits on you (or never did)
+  opens all the same, from what is read of it.
+- **Senates** (from the account menu): address, you, the Speaker, the
+  registration above, each committee's chair, your agents with their duty
+  and streams, and the Senates below with the seats they declare.
+
+**Show inactive.** Agents, sessions, streams, committees and members that
+are no longer active are hidden until *Show inactive* (in the account
+menu, and beside the lists that hide something); one setting, remembered.
+What counts as active is the core's roster rule, the same as the CLI's.
 
 **Design.** `Theme.swift` holds every colour, type size, gap and corner the
 views use: near-neutral surfaces that step in tone instead of being divided
@@ -150,8 +177,9 @@ rules as the Speaker's own rendering.
 back to you (*Reply* inline, *Take*); a Codex approval (*Allow*, *Deny*,
 both needing the Mac unlocked); a prompt in a hosted terminal (*Attach*: to that exact session, found
 when tapped; if it has ended, been replaced, or its prompt was answered,
-Sessions opens and says so, rather than whatever holds its alias now).
-Grouped by thread; clicking opens what it is about; each kind can be
+Approvals opens and says so, rather than whatever holds its alias now).
+Grouped by thread; clicking opens what it is about (a prompt's, its
+session's page); each kind can be
 turned off in Settings.
 
 **Settings** (⌘,, or the sidebar's foot), one pane: open at login (the
@@ -160,8 +188,10 @@ streamed in Terminal.
 
 ### In the app, and in the CLI
 
-In the app: reading and answering what waits on you, approvals, seeing and
-attaching to hosted sessions (stop, restore), the docket, the Senates.
+In the app: reading and answering what waits on you, approvals, each
+committee's sessions and their conversations, a note to a session's
+senator, attaching to hosted sessions (pause, resume, stop, restore), the
+Speaker's desk, the Senates.
 In the CLI and the agents: `spawn`, `join`/`leave`, `setup` (install, the
 daemon service), aliases and seats, secretaries, `prune`, and
 asking, posting, search, the brief and checkpoints.
@@ -177,7 +207,9 @@ SwiftUI views ─► CoreStore (@Observable, main actor) ─► AppCoreProtocol 
 - **`crates/senate-app-core`** is the app's logic: `model.rs` folds the
   daemon's `watch` stream and maps actions to IPC requests; `link.rs` holds
   the socket, reconnects and runs actions; `state.rs` flattens the model
-  into the snapshot; `reads.rs` is what is read on demand (a thread);
+  into the snapshot; `tree.rs` is the sidebar's committee → sessions
+  tree and each session's status; `reads.rs` is what is read on demand (a
+  thread); `timeline.rs` a session's conversation (pages and the watch);
   `names.rs` names mentions; `text.rs` writes its sentences in either
   language; `oslog` sends its `tracing` to the unified log; `ffi.rs` is the
   UniFFI facade.
@@ -204,12 +236,15 @@ lacks either language.
 | `watch {app: true}` | held open; `status`, `inbox`, `for_person`, `approval_*`, `roles`, `sessions`, `lagged` drive everything |
 | `inbox`, `docket`, `approvals` | on status sweeps, on their events, after actions, on Refresh |
 | `aliases` | on connect, at most every 5 min on a sweep, on Refresh |
-| `sessions` | on connect, on the `sessions` line, after a stop or restore, on lagged |
+| `sessions` | on connect, on the `sessions` line (at most every 300 ms), after a stop, pause or restore, on lagged |
+| `timeline` (tail, before) / `timeline_watch` | a session's page: its latest page, older pages on scroll-up, and a watch while it is open (a `reset` reads the tail again) |
+| `say {kind: note, to: [senator]}` (as the person) | a session page's composer |
+| `pause` (as the person) | a session's *Pause* |
 | `thread {mark_seen: true}` | opening a thread |
 | `answer` / `take` / `task archived` (as the person) | Reply, Take, Close |
 | `approve` | the approval buttons and notification actions |
-| `stop` / `restore` (as the person, never forced) | Sessions |
-| `approve_session` (as the person; the daemon checks the app is outside every agent's process tree) | a hosted terminal's permission prompt: Sessions, Approvals |
+| `stop` / `restore` / `resume` (as the person, never forced) | a session's page and its sidebar menu |
+| `approve_session` (as the person; the daemon checks the app is outside every agent's process tree) | a hosted terminal's permission prompt: its session's page, Approvals |
 
 ## Logs, crashes, performance
 

@@ -561,6 +561,19 @@ pub enum Action {
     ResumeSession {
         senator: AliasName,
     },
+    /// Pause a hosted session (`senate session pause`): it checkpoints, its
+    /// terminal stops, and it is recorded paused.
+    PauseSession {
+        senator: AliasName,
+    },
+    /// The person says something to one of the committee's senators, as
+    /// themselves: a note in the committee log (the session page's
+    /// composer). Not typed into its terminal.
+    Say {
+        committee: CommitteeId,
+        to: SenatorName,
+        body: String,
+    },
 }
 
 impl Action {
@@ -637,6 +650,31 @@ impl Action {
                 Request::ApproveSession { senator, decision }
             }
             Action::ResumeSession { senator } => Request::Resume { senator },
+            Action::PauseSession { senator } => Request::Pause {
+                senator,
+                force: false,
+                timeout_secs: None,
+            },
+            Action::Say {
+                committee,
+                to,
+                body,
+            } => {
+                let body = body.trim().to_string();
+                if body.is_empty() {
+                    return Err(Failure::EmptyReply);
+                }
+                Request::Say {
+                    session,
+                    committee: Some(committee),
+                    kind: senate_bridge::ipc::SayKind::Note,
+                    to: vec![senate_core::Address::senator(&to)],
+                    at: None,
+                    body,
+                    thread: None,
+                    id: None,
+                }
+            }
         })
     }
 
@@ -647,14 +685,16 @@ impl Action {
             | Action::Answer { committee, .. }
             | Action::Take { committee, .. }
             | Action::Close { committee, .. }
-            | Action::MarkRead { committee, .. } => Some(committee),
+            | Action::MarkRead { committee, .. }
+            | Action::Say { committee, .. } => Some(committee),
             Action::Approvals
             | Action::Docket
             | Action::Approve { .. }
             | Action::StopSession { .. }
             | Action::RestoreSession { .. }
             | Action::ApproveSession { .. }
-            | Action::ResumeSession { .. } => None,
+            | Action::ResumeSession { .. }
+            | Action::PauseSession { .. } => None,
         }
     }
 }

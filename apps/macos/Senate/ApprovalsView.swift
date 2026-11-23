@@ -1,18 +1,22 @@
 import SwiftUI
 import SenateCore
 
-/// What waits for your permission: prompts in hosted terminals (a
-/// permission prompt answered here, any other choice by attaching) and
-/// Codex approval requests the daemon relays
-/// (answered here; the first answer wins across the TUI, this app and any
-/// chat platform). One card each: what is asked, then the ways to answer.
+/// Everything waiting for your yes or no, one list in three parts: the
+/// permission prompts in hosted terminals (answered here; any other choice
+/// by attaching), Codex approval requests the daemon relays (the first
+/// answer wins across the TUI, this app and any chat platform), and the
+/// Speaker's desk: what is put to you (escalations, requests and decisions
+/// waiting on you) and what awaits the Speaker your agent holds. Each card
+/// names its session or committee and opens it.
 struct ApprovalsView: View {
     let store: CoreStore
 
     var body: some View {
         let prompts = store.prompts
         let approvals = store.state.approvals
-        if prompts.isEmpty && approvals.isEmpty {
+        let desk = store.deskThreads
+        let docket = store.docketEntries
+        if prompts.isEmpty && approvals.isEmpty && desk.isEmpty && docket.isEmpty {
             EmptyState(text: L("approvals.empty"))
         } else {
             ReadingColumn {
@@ -22,8 +26,20 @@ struct ApprovalsView: View {
                     ForEach(prompts, id: \.sessionId) { session in
                         VStack(alignment: .leading, spacing: Theme.Space.m) {
                             HStack(spacing: 6) {
-                                MentionText(session.mention)
-                                    .font(Theme.Fonts.heading)
+                                Button {
+                                    store.place = .session(session.sessionId)
+                                } label: {
+                                    HStack(spacing: 4) {
+                                        MentionText(session.mention)
+                                            .font(Theme.Fonts.heading)
+                                        Image(systemName: "chevron.right")
+                                            .font(.system(size: 10, weight: .semibold))
+                                            .foregroundStyle(Theme.onSurfaceVariant)
+                                            .accessibilityHidden(true)
+                                    }
+                                }
+                                .buttonStyle(.plain)
+                                .help(L("approvals.open_session"))
                                 if let committee = session.committee { Chip(text: committee) }
                                 Chip(text: session.runtime)
                             }
@@ -44,8 +60,114 @@ struct ApprovalsView: View {
                         ApprovalCard(store: store, approval: approval)
                     }
                 }
+                if !desk.isEmpty || !docket.isEmpty {
+                    SectionHeader(L("approvals.desk"))
+                    ForEach(desk) { thread in
+                        DeskCard(store: store, thread: thread)
+                    }
+                    ForEach(docket) { item in
+                        EntryCard(store: store, item: item)
+                            .environment(\.mentionCommittee, item.committee)
+                    }
+                    if !docket.isEmpty {
+                        Text(verbatim: L("docket.note"))
+                            .font(Theme.Fonts.meta)
+                            .foregroundStyle(Theme.onSurfaceVariant)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.horizontal, Theme.Space.xs)
+                    }
+                }
             }
         }
+    }
+}
+
+/// Something put to you: an escalation, a request or a decision waiting on
+/// you. It opens its thread, where you answer.
+private struct DeskCard: View {
+    let store: CoreStore
+    let thread: InboxThread
+    @State private var hovered = false
+
+    var body: some View {
+        let t = thread
+        Button {
+            store.place = .thread(t.key)
+        } label: {
+            VStack(alignment: .leading, spacing: Theme.Space.s) {
+                HStack(spacing: 6) {
+                    Chip(text: t.escalated ? L("inbox.escalated") : t.kindLabel, tone: .attention)
+                    Chip(text: t.committee)
+                    Spacer(minLength: Theme.Space.s)
+                    TimedMention(date: t.since) { ago in L("approvals.desk_meta", t.asker, ago) }
+                        .font(Theme.Fonts.meta)
+                        .foregroundStyle(Theme.onSurfaceVariant)
+                        .lineLimit(1)
+                }
+                MentionText(t.title)
+                    .font(Theme.Fonts.heading)
+                    .foregroundStyle(Theme.onSurface)
+                    .multilineTextAlignment(.leading)
+                if let line = t.newsLine ?? t.reason {
+                    MentionText(line)
+                        .font(Theme.Fonts.text)
+                        .foregroundStyle(Theme.onSurfaceVariant)
+                        .lineLimit(3)
+                        .multilineTextAlignment(.leading)
+                }
+            }
+            .padding(Theme.Space.l)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(hovered ? Theme.containerHigh : Theme.container,
+                        in: RoundedRectangle(cornerRadius: Theme.Radius.card))
+            .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.card))
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+        .environment(\.mentionCommittee, t.committee)
+        .help(L("approvals.open_thread"))
+        .contextMenu { ThreadMenu(store: store, thread: t) }
+    }
+}
+
+/// One item awaiting the Speaker your agent holds: what kind, what the
+/// Speaker is to do with it, what was said, and why it is here. Read-only:
+/// routing and covering are the presiding agent's own tools. Its committee
+/// opens.
+private struct EntryCard: View {
+    let store: CoreStore
+    let item: DocketEntry
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.s) {
+            HStack(spacing: 6) {
+                Chip(text: L("waiting.to_speaker"), tone: .accent)
+                Button {
+                    store.place = .committee(item.committee)
+                } label: {
+                    Chip(text: item.committee)
+                }
+                .buttonStyle(.plain)
+                .help(L("committees.open", item.committee))
+                Chip(text: L("docket.\(item.awaiting)"), tone: item.awaiting == "away" ? .attention : .neutral)
+                Spacer(minLength: Theme.Space.s)
+                TimedMention(date: item.since) { ago in
+                    L("docket.meta", String(item.seq), item.by, ago)
+                }
+                .font(Theme.Fonts.meta)
+                .foregroundStyle(Theme.onSurfaceVariant)
+                .lineLimit(1)
+            }
+            MentionText(item.body)
+                .font(Theme.Fonts.text)
+                .foregroundStyle(Theme.onSurface)
+                .lineLimit(4)
+                .textSelection(.enabled)
+            MentionText(item.why)
+                .font(Theme.Fonts.row)
+                .foregroundStyle(Theme.onSurfaceVariant)
+        }
+        .card()
     }
 }
 
@@ -124,6 +246,20 @@ private struct ApprovalCard: View {
                         .lineLimit(3)
                     Chip(text: words(a.kind))
                     Spacer(minLength: 0)
+                    if let session = store.session(a.thread) {
+                        Button {
+                            store.place = .session(session.sessionId)
+                        } label: {
+                            HStack(spacing: 4) {
+                                Text(verbatim: session.displayName)
+                                Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold))
+                            }
+                            .font(Theme.Fonts.label)
+                            .foregroundStyle(Theme.agent)
+                        }
+                        .buttonStyle(.plain)
+                        .help(L("approvals.open_session"))
+                    }
                 }
                 if let command = a.command {
                     CodeBlock(text: command)

@@ -1,16 +1,16 @@
 import SwiftUI
 import SenateCore
 
-/// The window: a sidebar with the sections and the threads waiting on you,
-/// and beside it the chosen section or thread. Nothing sits above the
-/// content but what it needs at its top right.
+/// The window: a sidebar with Inbox, Approvals and each committee's
+/// sessions on this machine, and beside it what is chosen. Nothing sits
+/// above the content but what it needs at its top right.
 struct MainWindow: View {
     @Bindable var store: CoreStore
 
     var body: some View {
         NavigationSplitView {
             Sidebar(store: store)
-                .navigationSplitViewColumnWidth(min: 200, ideal: Theme.sidebarWidth, max: 320)
+                .navigationSplitViewColumnWidth(min: 220, ideal: Theme.sidebarWidth, max: 340)
         } detail: {
             content
                 // Wide enough that nothing in it wraps into a tall column.
@@ -24,25 +24,28 @@ struct MainWindow: View {
                 .navigationTitle(title)
                 .toolbar(removing: .title)
                 .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
-                .toolbar {
-                    if store.state.online, store.setupError == nil, store.place == .section(.sessions) {
-                        SessionsToolbar(store: store)
-                    }
-                }
         }
         .background { Shortcuts(store: store) }
-        .onChange(of: store.state.menu.docket == nil) { _, gone in
-            if gone && store.section == .docket { store.section = .inbox }
-        }
     }
 
     /// The window's name, for Mission Control and VoiceOver; it is not drawn.
     private var title: String {
-        if case .thread = store.place, let row = store.selectedRow {
-            return Mentions.shared.plain(row.title, committee: row.committee)
+        switch store.place {
+        case .thread:
+            if let row = store.selectedRow { return Mentions.shared.plain(row.title, committee: row.committee) }
+        case .session:
+            if let s = store.selectedSession { return s.displayName }
+        case let .committee(name):
+            return name.isEmpty ? L("sidebar.no_committee") : name
+        case let .section(section):
+            return section.title
+        case .item:
+            break
         }
-        return (store.section ?? .inbox).title
+        return Section.inbox.title
     }
+
+    private typealias Section = CoreStore.Section
 
     @ViewBuilder private var content: some View {
         if let problem = store.setupError {
@@ -52,23 +55,32 @@ struct MainWindow: View {
         } else {
             switch store.place {
             case .thread:
-                if let row = store.selectedRow { ThreadPage(store: store, row: row) }
-            case .item: HomeView(store: store)
-            case .section(.inbox): HomeView(store: store)
+                if let row = store.selectedRow {
+                    ThreadPage(store: store, row: row)
+                } else if let error = store.threadError {
+                    EmptyState(text: L("inbox.thread_failed"), detail: error)
+                } else {
+                    ProgressView().controlSize(.small)
+                }
+            case .session:
+                if let session = store.selectedSession {
+                    SessionPage(store: store, session: session)
+                } else {
+                    EmptyState(text: L("session.gone"))
+                }
+            case let .committee(name): CommitteePage(store: store, name: name)
+            case .item, .section(.inbox): InboxView(store: store)
             case .section(.approvals): ApprovalsView(store: store)
-            case .section(.sessions): SessionsView(store: store)
-            case .section(.committees): CommitteesView(store: store)
-            case .section(.docket): DocketView(store: store)
             case .section(.senates): SenatesView(store: store)
             }
         }
     }
 }
 
-/// ⌘1…⌘5 open the sections in sidebar order; ⌘R reads everything again, or
-/// tries the daemon now while it cannot be reached. (⌘, is the store's:
-/// SwiftUI keeps that key for the Settings scene's own menu item, which a
-/// menu-bar-only app has no menu bar to reach.)
+/// ⌘1 Inbox, ⌘2 Approvals; ⌘⌥↑ and ⌘⌥↓ move between sessions; ⌘R reads
+/// everything again, or tries the daemon now while it cannot be reached.
+/// (⌘, is the store's: SwiftUI keeps that key for the Settings scene's own
+/// menu item, which a menu-bar-only app has no menu bar to reach.)
 /// Invisible buttons: the app has no menu bar of its own (it lives in the
 /// status item).
 private struct Shortcuts: View {
@@ -80,6 +92,10 @@ private struct Shortcuts: View {
                 Button(section.title) { store.place = .section(section) }
                     .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: .command)
             }
+            Button(L("sidebar.previous_session")) { store.moveSession(-1) }
+                .keyboardShortcut(.upArrow, modifiers: [.command, .option])
+            Button(L("sidebar.next_session")) { store.moveSession(1) }
+                .keyboardShortcut(.downArrow, modifiers: [.command, .option])
             Button(L("toolbar.refresh")) {
                 if store.state.online { store.refresh() } else { store.reconnect() }
             }
@@ -91,12 +107,12 @@ private struct Shortcuts: View {
     }
 }
 
-/// The sidebar: the app's name, the sections, the threads waiting on you
-/// (searched and narrowed to an agent here), and who you are at its foot.
+/// The sidebar: the app's name, Inbox and Approvals, then one folding
+/// group per committee with this machine's sessions on it (searched here),
+/// and who you are at its foot.
 private struct Sidebar: View {
     @Bindable var store: CoreStore
     @State private var searching = false
-    @State private var agentsOpen = false
     @FocusState private var searchFocused: Bool
 
     var body: some View {
@@ -128,9 +144,9 @@ private struct Sidebar: View {
                 Button {
                     if searching { closeSearch() } else { openSearch() }
                 } label: {
-                    Label(L("inbox.search"), systemImage: "magnifyingglass")
+                    Label(L("sidebar.search"), systemImage: "magnifyingglass")
                 }
-                .help(L("inbox.search"))
+                .help(L("sidebar.search"))
                 .keyboardShortcut("f")
             }
         }
@@ -141,23 +157,25 @@ private struct Sidebar: View {
             Section {
                 ForEach(store.sections, id: \.self) { section in
                     Label(section.title, systemImage: section.symbol)
-                        .badge(badge(section))
+                        .badge(store.state.online ? store.count(section) : 0)
                         .tag(CoreStore.Place.section(section))
                 }
             }
-            // Offline, nothing is known to wait: say nothing rather than
-            // "nothing waits on you".
+            // Offline, nothing is known: say nothing rather than "no sessions".
             if store.state.online {
-                waitingSection
-                let working = store.inbox.filter { !$0.forPerson }
-                if !working.isEmpty {
-                    Section(isExpanded: $agentsOpen) {
-                        ForEach(working) { thread in
-                            threadRow(thread)
-                        }
-                    } header: {
-                        Text(verbatim: L("sidebar.agents_working", Int64(working.count)))
+                let groups = store.shownGroups
+                Section {
+                    ForEach(groups) { group in
+                        CommitteeGroup(store: store, group: group, searching: !store.query.isEmpty)
                     }
+                    if groups.isEmpty {
+                        Text(verbatim: store.query.isEmpty ? L("sidebar.no_sessions") : L("sidebar.no_matches"))
+                            .font(Theme.Fonts.row)
+                            .foregroundStyle(Theme.onSurfaceVariant)
+                            .selectionDisabled()
+                    }
+                } header: {
+                    Text(verbatim: L("sidebar.committees"))
                 }
             }
         }
@@ -166,22 +184,12 @@ private struct Sidebar: View {
         .environment(\.defaultMinListRowHeight, Theme.rowHeight)
     }
 
-    /// A count beside a section only where it is not shown elsewhere in the
-    /// sidebar: the threads are listed below, and a terminal's prompt is
-    /// already among the approvals.
-    private func badge(_ section: CoreStore.Section) -> Int {
-        switch section {
-        case .approvals, .docket: Int(store.count(section))
-        case .inbox, .committees, .sessions, .senates: 0
-        }
-    }
-
     private var searchField: some View {
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass")
                 .foregroundStyle(Theme.onSurfaceVariant)
                 .accessibilityHidden(true)
-            TextField(L("inbox.search"), text: $store.search)
+            TextField(L("sidebar.search"), text: $store.search)
                 .textFieldStyle(.plain)
                 .font(Theme.Fonts.row)
                 .focused($searchFocused)
@@ -212,82 +220,6 @@ private struct Sidebar: View {
         searching = false
     }
 
-    /// What waits on you: permissions first, then each committee under its
-    /// name, the threads narrowed by the search and the agent filter.
-    @ViewBuilder private var waitingSection: some View {
-        let shown = Set(store.inbox.map(\.key))
-        let filtering = store.agentFilter != nil || !store.search.trimmingCharacters(in: .whitespaces).isEmpty
-        let permissions = filtering ? [] : store.permissionsWaiting
-        let groups = store.waitingByCommittee.compactMap { group -> CommitteeWaiting? in
-            let items = group.items.filter { item in
-                switch item.kind {
-                case let .thread(thread): shown.contains(thread.key)
-                default: !filtering
-                }
-            }
-            return items.isEmpty ? nil : CommitteeWaiting(committee: group.committee, items: items)
-        }
-        Section {
-            ForEach(permissions) { item in
-                itemRow(item)
-            }
-            ForEach(groups) { group in
-                Text(verbatim: group.committee)
-                    .font(Theme.Fonts.meta.weight(.semibold))
-                    .foregroundStyle(Theme.onSurfaceVariant)
-                    .padding(.top, Theme.Space.xs)
-                    .selectionDisabled()
-                    .accessibilityAddTraits(.isHeader)
-                ForEach(group.items) { item in
-                    if case let .thread(thread) = item.kind {
-                        threadRow(thread)
-                    } else {
-                        itemRow(item)
-                    }
-                }
-            }
-            if permissions.isEmpty && groups.isEmpty {
-                Text(verbatim: filtering ? L("sidebar.no_matches") : L("inbox.empty"))
-                    .font(Theme.Fonts.row)
-                    .foregroundStyle(Theme.onSurfaceVariant)
-                    .selectionDisabled()
-            }
-        } header: {
-            HStack {
-                Text(verbatim: L("sidebar.waiting"))
-                Spacer()
-                if store.inboxAgents.count > 1 {
-                    AgentFilter(store: store)
-                }
-            }
-        }
-    }
-
-    private func threadRow(_ thread: InboxThread) -> some View {
-        ThreadRow(thread: thread)
-            .environment(\.mentionCommittee, thread.committee)
-            .tag(CoreStore.Place.thread(thread.key))
-            .contextMenu { ThreadMenu(store: store, thread: thread) }
-    }
-
-    /// A prompt, an approval or an item for the Speaker: its symbol and
-    /// title; choosing it opens where it is answered.
-    private func itemRow(_ item: Waiting) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: item.symbol)
-                .font(.system(size: 11))
-                .foregroundStyle(item.isPermission ? Theme.attention : Theme.onSurfaceVariant)
-                .frame(width: 14)
-                .accessibilityHidden(true)
-            MentionText(item.title)
-                .font(Theme.Fonts.row)
-                .lineLimit(1)
-        }
-        .environment(\.mentionCommittee, item.committee)
-        .help(Mentions.shared.plain(item.detail, committee: item.committee))
-        .tag(CoreStore.Place.item(item.id))
-    }
-
     private var place: Binding<CoreStore.Place?> {
         Binding(
             get: { store.place },
@@ -296,61 +228,127 @@ private struct Sidebar: View {
     }
 }
 
+/// One committee: its name (which opens its page) with what waits on you
+/// there, folding its sessions; folded, it shows its most urgent one's
+/// status.
+private struct CommitteeGroup: View {
+    @Bindable var store: CoreStore
+    let group: SessionGroup
+    /// While searching every group is open.
+    let searching: Bool
+
+    var body: some View {
+        DisclosureGroup(isExpanded: expanded) {
+            ForEach(group.sessions) { session in
+                SessionRow(session: session)
+                    .tag(CoreStore.Place.session(session.sessionId))
+                    .contextMenu { SessionMenu(store: store, session: session) }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Text(verbatim: group.title)
+                    .font(Theme.Fonts.row.weight(.semibold))
+                    .foregroundStyle(group.committee == nil ? Theme.onSurfaceVariant : Theme.onSurface)
+                    .lineLimit(1)
+                Spacer(minLength: Theme.Space.xs)
+                if !expanded.wrappedValue, let status = group.status {
+                    StatusMark(status: status)
+                }
+                if group.waiting > 0 {
+                    Text(verbatim: "\(group.waiting)")
+                        .font(Theme.Fonts.meta.weight(.semibold))
+                        .monospacedDigit()
+                        .foregroundStyle(Theme.attention)
+                        .accessibilityLabel(L("sidebar.waiting_count", Int64(group.waiting)))
+                }
+            }
+            .help(group.committee.map { L("committees.open", $0) } ?? "")
+        }
+        .tag(CoreStore.Place.committee(group.committee ?? ""))
+    }
+
+    private var expanded: Binding<Bool> {
+        Binding(
+            get: { searching || !store.folded.contains(group.id) },
+            set: { open in
+                if open { store.folded.remove(group.id) } else { store.folded.insert(group.id) }
+            }
+        )
+    }
+}
+
+/// One session: its status, its name, its runtime, and how long since it
+/// last did something. Its title and directory are in the tooltip.
+private struct SessionRow: View {
+    let session: SessionLine
+
+    var body: some View {
+        HStack(spacing: 7) {
+            StatusMark(status: session.status)
+            Text(verbatim: session.displayName)
+                .font(Theme.Fonts.row.weight(session.status == .unread || session.status == .needsYou ? .semibold : .regular))
+                .foregroundStyle(session.active ? Theme.onSurface : Theme.onSurfaceVariant)
+                .lineLimit(1)
+            RuntimeMark(runtime: session.runtime)
+            Spacer(minLength: Theme.Space.xs)
+            Ago(date: session.lastActivity)
+                .font(Theme.Fonts.meta)
+                .foregroundStyle(Theme.onSurfaceVariant)
+        }
+        .help(tooltip)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(session.displayName)
+        .accessibilityValue("\(session.statusLabel), \(session.runtime), \(session.lastActivity.formatted(.relative(presentation: .named)))")
+    }
+
+    private var tooltip: String {
+        var lines = [session.title ?? session.displayName]
+        var place = session.dir
+        if let branch = session.branch { place += " · \(branch)" }
+        lines.append(place)
+        lines.append(session.statusLabel)
+        return lines.joined(separator: "\n")
+    }
+}
+
+/// A session's right-click menu in the sidebar: what its page's buttons do.
+private struct SessionMenu: View {
+    let store: CoreStore
+    let session: SessionLine
+
+    var body: some View {
+        if let h = session.hosted {
+            if h.running {
+                Button(L("sessions.attach")) { store.attach(h) }
+            }
+            SessionActions(store: store, hosted: h, style: .menu)
+            Divider()
+            Button(L("mention.copy", h.label)) { Mentions.copyText(h.label) }
+        }
+        Button(L("mention.copy", session.sessionId)) { Mentions.copyText(session.sessionId) }
+    }
+}
+
 extension CoreStore.Section {
     var title: String {
         switch self {
-        case .inbox: L("tab.home")
+        case .inbox: L("tab.inbox")
         case .approvals: L("tab.approvals")
-        case .committees: L("tab.committees")
-        case .sessions: L("tab.sessions")
-        case .docket: L("tab.docket")
         case .senates: L("tab.senates")
         }
     }
 
     var symbol: String {
         switch self {
-        case .inbox: "house"
+        case .inbox: "tray"
         case .approvals: "checkmark.shield"
-        case .committees: "person.2.crop.square.stack"
-        case .sessions: "terminal"
-        case .docket: "list.bullet.rectangle"
         case .senates: "building.columns"
         }
     }
 }
 
-/// One waiting thread: its title on one line, heavier with a dot while it
-/// has news you have not read. Where it is and who spoke last are in the
-/// tooltip, and in the home view.
-private struct ThreadRow: View {
-    let thread: InboxThread
-
-    var body: some View {
-        HStack(spacing: 6) {
-            MentionText(thread.title)
-                .font(Theme.Fonts.row.weight(thread.unread ? .semibold : .regular))
-                .lineLimit(1)
-                .accessibilityValue(thread.unread ? L("a11y.unread") : "")
-            Spacer(minLength: Theme.Space.xs)
-            if thread.unread {
-                Circle()
-                    .fill(Theme.primary)
-                    .frame(width: 7, height: 7)
-                    .accessibilityHidden(true)
-            }
-        }
-        .help(whereAndWho)
-    }
-
-    private var whereAndWho: String {
-        let from = Mentions.shared.plain(thread.asker, committee: thread.committee)
-        return "\(thread.committee) · \(from) · \(Ago.text(thread.since, now: .now))"
-    }
-}
-
-/// Narrow the waiting threads to one agent's.
-private struct AgentFilter: View {
+/// Narrow the inbox to one agent's threads (what was put to you stays).
+struct AgentFilter: View {
     @Bindable var store: CoreStore
 
     var body: some View {
@@ -364,8 +362,6 @@ private struct AgentFilter: View {
                 }
             }
             .pickerStyle(.inline)
-            Divider()
-            Toggle(L("roster.show_inactive"), isOn: $store.showInactive)
         } label: {
             Image(systemName: store.agentFilter == nil
                 ? "line.3.horizontal.decrease"
@@ -392,6 +388,12 @@ private struct AccountRow: View {
         let state = store.state
         let name = state.person ?? "Senate"
         Menu {
+            Button(L("tab.senates")) { store.place = .section(.senates) }
+                .disabled(!state.online)
+            Toggle(L("roster.show_inactive"), isOn: Bindable(store).showInactive)
+            Button(L("sessions.watch")) { store.openWatch() }
+                .disabled(!state.online || state.sessions.allSatisfy { !$0.running })
+            Divider()
             SettingsLink { Text(verbatim: L("menu.settings")) }
             Button(L("menu.about")) { About.show() }
             Divider()

@@ -301,6 +301,10 @@ mod tests {
             alias: alias.map(|a| a.parse().unwrap()),
             committee: Some(CommitteeId::new("refund-v2").unwrap()),
             runtime: Runtime::Codex,
+            working: false,
+            last_activity: chrono::DateTime::default(),
+            title: None,
+            branch: None,
             model: crate::ipc::HostedModel::default(),
             dir: "/work/refund".into(),
             state,
@@ -383,6 +387,7 @@ mod tests {
         let text = render(
             &SessionsReply {
                 rows: rows.clone(),
+                local_rows: Vec::new(),
                 orphans: Vec::new(),
             },
             Utc::now(),
@@ -406,6 +411,7 @@ mod tests {
         let orphan = EventId::new();
         let reply = SessionsReply {
             rows: vec![running, stopped],
+            local_rows: Vec::new(),
             orphans: vec![orphan.clone()],
         };
         let text = render(&reply, now, Locale::En);
@@ -449,6 +455,7 @@ mod tests {
         });
         let reply = SessionsReply {
             rows: vec![waiting, asking],
+            local_rows: Vec::new(),
             orphans: Vec::new(),
         };
         let text = render(&reply, now, Locale::En);

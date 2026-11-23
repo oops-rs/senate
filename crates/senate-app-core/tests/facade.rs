@@ -320,3 +320,190 @@ async fn the_senate_shows_its_chairs_children_and_uplink() {
         Some("registered as alice-desk with /acme")
     );
 }
+
+/// What a timeline watch saw.
+#[derive(Default)]
+struct Timeline {
+    deltas: Mutex<Vec<senate_app_core::TimelineDelta>>,
+    ended: Mutex<Option<Option<String>>>,
+}
+
+impl senate_app_core::TimelineListener for Timeline {
+    fn on_delta(&self, delta: senate_app_core::TimelineDelta) {
+        self.deltas.lock().unwrap().push(delta);
+    }
+    fn on_end(&self, error: Option<String>) {
+        *self.ended.lock().unwrap() = Some(error);
+    }
+}
+
+#[tokio::test]
+async fn sessions_by_committee_their_timelines_and_the_composer() {
+    use senate_app_core::{EntryBody, SessionStatus};
+
+    let (dir, socket, world) = setup();
+    {
+        let mut w = world.lock().unwrap();
+        common::busy_senate(&mut w);
+        common::session_tree(&mut w);
+        w.grow_every = Some(Duration::from_millis(50));
+    }
+    let _daemon = FakeDaemon::start(&socket, Arc::clone(&world));
+    let core = AppCore::new(Some(dir.path().display().to_string()), Some("en-US".into())).unwrap();
+    let listener = Arc::new(Listener::default());
+    core.start(listener.clone()).unwrap();
+    let s = until(&listener, "the session tree", |s| {
+        s.groups.iter().map(|g| g.sessions.len()).sum::<usize>() == 8
+    })
+    .await;
+
+    // Every committee, by name; the sessions of no committee last.
+    let names: Vec<_> = s.groups.iter().map(|g| g.title.as_str()).collect();
+    assert_eq!(
+        names,
+        ["docs", "infra", "payments", "refund-v2", "No committee"]
+    );
+    let group = |name: &str| s.groups.iter().find(|g| g.title == name).unwrap();
+    // refund-v2: its chair first, waiting at a prompt; the committee shows it.
+    let refund = group("refund-v2");
+    assert_eq!(refund.sessions[0].display_name, "lead");
+    assert!(refund.sessions[0].chair);
+    assert_eq!(refund.sessions[0].status, SessionStatus::NeedsYou);
+    assert_eq!(refund.status, Some(SessionStatus::NeedsYou));
+    assert!(
+        refund
+            .sessions
+            .iter()
+            .any(|x| x.hosted.is_none() && x.status == SessionStatus::Working)
+    );
+    assert!(
+        refund
+            .sessions
+            .iter()
+            .any(|x| x.status == SessionStatus::Stopped)
+    );
+    // payments: the chair works; the request it put to alice counts there.
+    let payments = group("payments");
+    assert_eq!(payments.sessions[0].display_name, "ledger");
+    assert_eq!(payments.sessions[0].status, SessionStatus::Working);
+    assert!(payments.waiting >= 2, "the request and the docket item");
+    // docs: its chair is paused, but what it escalated to alice is unread,
+    // which comes first.
+    let scribe = &group("docs").sessions[0];
+    assert_eq!(scribe.status, SessionStatus::Unread);
+    assert!(scribe.hosted.as_ref().unwrap().paused);
+    let oncall = &group("infra").sessions[0];
+    assert!(!oncall.readable, "agy keeps no transcript Senate reads");
+    // A request put to alice is hers to decide; a plain question is not.
+    let request = s.inbox.iter().find(|t| t.root == 210).unwrap();
+    assert!(request.to_decide);
+
+    // lead's conversation: the tail, then older pages back to the start.
+    let page = core
+        .timeline("s-claude".into(), None, Some(20))
+        .await
+        .unwrap();
+    assert!(page.available && page.has_older);
+    assert_eq!(page.items.len(), 20);
+    let last = page.items.last().unwrap();
+    assert!(matches!(&last.body, EntryBody::Tool { call } if call.status == "running"));
+    let older = core
+        .timeline("s-claude".into(), page.first_seq, Some(300))
+        .await
+        .unwrap();
+    assert!(!older.has_older);
+    assert_eq!(older.last_seq.unwrap() + 1, page.first_seq.unwrap());
+    // agy: nothing to read, and why.
+    let none = core.timeline("ops-1".into(), None, None).await.unwrap();
+    assert!(!none.available);
+    assert!(none.unavailable.unwrap().contains("agy"));
+
+    // Watched, the running call completes in place, then more is said.
+    let seen = Arc::new(Timeline::default());
+    core.watch_timeline("s-claude".into(), page.last_seq.unwrap(), seen.clone())
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while seen.deltas.lock().unwrap().len() < 4 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the timeline did not grow"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    core.stop_timeline("s-claude".into());
+    let deltas = seen.deltas.lock().unwrap().clone();
+    assert!(deltas[0].items.is_empty(), "nothing after the tail yet");
+    let done = &deltas[1].items[0];
+    assert_eq!(done.seq, last.seq, "the same item, updated");
+    assert!(matches!(&done.body, EntryBody::Tool { call } if call.status == "completed"));
+    assert!(
+        matches!(&deltas[2].items[0].body, EntryBody::Senate { message } if message.thread == Some(140))
+    );
+    assert!(!deltas[3].working);
+
+    // The composer: a note to lead on refund-v2, as alice.
+    core.say("s-claude".into(), "Ship it.".into())
+        .await
+        .unwrap();
+    let said = world
+        .lock()
+        .unwrap()
+        .requests
+        .iter()
+        .rev()
+        .find_map(|r| match r {
+            Request::Say {
+                committee,
+                to,
+                body,
+                kind,
+                ..
+            } => Some((committee.clone(), to.clone(), body.clone(), *kind)),
+            _ => None,
+        });
+    let (committee, to, body, kind) = said.expect("a say request");
+    assert_eq!(committee.unwrap().as_str(), "refund-v2");
+    assert_eq!(
+        to,
+        vec![senate_core::Address::senator(&common::path("claude"))]
+    );
+    assert_eq!(body, "Ship it.");
+    assert_eq!(kind, senate_bridge::ipc::SayKind::Note);
+    assert!(
+        matches!(
+            core.say("scratch-1".into(), "hi".into()).await,
+            Err(CoreError::Invalid { .. })
+        ),
+        "a session on no committee has nowhere to be spoken to"
+    );
+
+    // Pause: stopped and recorded paused.
+    let lead = refund.sessions[0].hosted.clone().unwrap();
+    core.pause_session(lead.label.clone()).await.unwrap();
+    until(&listener, "lead paused", |s| {
+        s.groups
+            .iter()
+            .flat_map(|g| &g.sessions)
+            .any(|x| x.session_id == "s-claude" && x.status == SessionStatus::Paused)
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_settled_thread_reads_with_its_title_without_an_inbox_row() {
+    let (dir, socket, world) = setup();
+    {
+        let mut w = world.lock().unwrap();
+        common::busy_senate(&mut w);
+        common::session_tree(&mut w);
+    }
+    let _daemon = FakeDaemon::start(&socket, Arc::clone(&world));
+    let core = AppCore::new(Some(dir.path().display().to_string()), Some("en-US".into())).unwrap();
+    let listener = Arc::new(Listener::default());
+    core.start(listener.clone()).unwrap();
+    until(&listener, "online", |s| s.online).await;
+    let view = core.thread("refund-v2".into(), 140).await.unwrap();
+    assert!(!view.events.is_empty());
+    assert_eq!(view.title, "Reviewed the threshold change; fine by me.");
+    assert!(!view.kind_label.is_empty());
+}

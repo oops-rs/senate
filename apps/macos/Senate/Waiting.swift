@@ -140,6 +140,23 @@ extension CoreStore {
         state.inbox.filter(\.forPerson)
     }
 
+    /// The Inbox: threads that wait on the person for a reply, not for a
+    /// yes or a no.
+    var inboxThreads: [InboxThread] {
+        state.inbox.filter { $0.forPerson && !$0.toDecide }
+    }
+
+    /// What the Speaker's desk puts to the person: escalations, and requests
+    /// and decisions waiting on them. Listed among the approvals.
+    var deskThreads: [InboxThread] {
+        state.inbox.filter { $0.forPerson && $0.toDecide }
+    }
+
+    /// Everything waiting for a yes or a no: the Approvals badge.
+    var approvalsCount: Int {
+        prompts.count + state.approvals.count + deskThreads.count + docketEntries.count
+    }
+
     /// Threads their agents are still working on: listed apart, not counted.
     var agentThreads: [InboxThread] {
         state.inbox.filter { !$0.forPerson }
@@ -192,18 +209,19 @@ extension CoreStore {
         return prompts + approvals
     }
 
-    /// Open the window on what waits: a thread itself, a prompt or an
-    /// approval among the approvals, an item for the Speaker in the docket.
+    /// Open the window on what waits: a prompt on its session's page, a
+    /// thread itself, an approval or an item for the Speaker among the
+    /// approvals.
     func open(_ item: Waiting) {
         switch item.kind {
-        case .prompt, .approval:
-            show(.approvals)
+        case let .prompt(session):
+            place = .session(session.sessionId)
+        case .approval, .docket:
+            place = .section(.approvals)
         case let .thread(thread):
-            selectedThread = thread.key
-            show(.inbox)
-        case .docket:
-            show(.docket)
+            place = .thread(thread.key)
         }
+        showWindow()
     }
 }
 

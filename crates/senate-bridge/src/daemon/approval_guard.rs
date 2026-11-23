@@ -50,7 +50,11 @@ pub(super) fn answers_a_prompt(request: &Request) -> bool {
 
 impl Front {
     /// Refuse a caller inside a coding session's process tree.
-    pub(super) async fn refuse_agent_caller(&self, peer: Option<u32>) -> Result<(), IpcError> {
+    pub(super) async fn refuse_agent_caller(
+        &self,
+        peer: Option<u32>,
+        guidance: &str,
+    ) -> Result<(), IpcError> {
         let Some(peer) = peer else {
             return Err(refusal(
                 "the daemon could not tell which process sent this request",
@@ -69,7 +73,8 @@ impl Front {
         let Some(chain) = ancestry(peer, process).await else {
             tracing::warn!(
                 peer,
-                "refused a prompt answer: the caller's ancestry is unreadable"
+                guidance,
+                "refused person-only IPC: the caller's ancestry is unreadable"
             );
             return Err(refusal(
                 "the daemon could not read the calling process's ancestry",
@@ -84,13 +89,17 @@ impl Front {
         });
         match owner {
             Some(owner) => {
-                tracing::warn!(peer, %owner, "refused a prompt answer from inside a coding session's process tree");
+                tracing::warn!(peer, %owner, guidance, "refused person-only IPC from inside a coding session's process tree");
                 Err(refusal(&format!(
-                    "this request comes from inside the process tree of {owner}. A permission prompt is a person's decision: answer it from your own terminal or the Senate app"
+                    "this request comes from inside the process tree of {owner}. {guidance}"
                 )))
             }
             None => {
-                tracing::info!(peer, "a prompt answer passed the process-tree check");
+                tracing::debug!(
+                    peer,
+                    guidance,
+                    "person-only IPC passed the process-tree check"
+                );
                 Ok(())
             }
         }

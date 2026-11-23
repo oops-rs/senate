@@ -60,7 +60,7 @@ impl Front {
     }
 
     /// The Senate served.
-    fn primary(&self) -> &Arc<Shared> {
+    pub(super) fn primary(&self) -> &Arc<Shared> {
         &self.senates[0]
     }
 

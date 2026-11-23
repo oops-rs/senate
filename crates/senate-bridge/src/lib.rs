@@ -95,6 +95,7 @@ pub mod status;
 mod stream;
 pub mod terminal;
 pub mod testenv;
+mod timeline;
 pub mod wsl;
 
 pub use config::BridgeConfig;

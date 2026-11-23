@@ -489,3 +489,35 @@ async fn reconnect_now_cuts_a_long_wait_short() {
     driver.reconnect_now();
     until(&driver, "online at once", |s| s.online).await;
 }
+
+/// The daemon says `sessions` on every hook of every session: a burst of
+/// them is one read (after the burst), not one each.
+#[tokio::test]
+async fn a_burst_of_sessions_lines_is_one_read() {
+    let (_dir, socket, world) = setup();
+    world.lock().unwrap().sessions = common::hosted_sessions();
+    let daemon = FakeDaemon::start(&socket, Arc::clone(&world));
+    let (driver, _sink) = driver(&socket, Locale::En);
+    until(&driver, "the sessions", |s| s.sessions.len() == 2).await;
+    let reads = || {
+        daemon
+            .requests()
+            .iter()
+            .filter(|r| matches!(r, Request::Sessions))
+            .count()
+    };
+    let before = reads();
+    world.lock().unwrap().sessions.rows[0].working = true;
+    for _ in 0..50 {
+        daemon.emit(WatchEvent::Sessions);
+    }
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    let after = reads() - before;
+    assert!((1..=2).contains(&after), "{after} reads for 50 lines");
+    // The read came after the change: what changed is in the model.
+    let s = until(&driver, "working", |s| {
+        s.groups.iter().flat_map(|g| &g.sessions).any(|x| x.working)
+    })
+    .await;
+    assert!(!s.groups.is_empty());
+}
