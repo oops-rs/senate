@@ -7,7 +7,7 @@
 html, body { margin: 0; background: var(--surface); color: var(--fg); }
 body { font: 14px/1.5 -apple-system, "SF Pro Text", "PingFang SC", sans-serif; -webkit-font-smoothing: antialiased; }
 main { max-width: 700px; margin: 0 auto; padding: 8px 24px 24px; }
-.row { margin: 18px 0; overflow-wrap: anywhere; content-visibility: auto; contain-intrinsic-size: auto 120px; }
+.row { margin: 18px 0; overflow-wrap: anywhere; }
 /* What people typed, and Senate messages' text: the content face. */
 .typed { font: 13.5px/1.7 var(--content-font, ui-monospace, monospace); white-space: pre-wrap; }
 .k-user { display: flex; justify-content: flex-end; }

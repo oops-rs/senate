@@ -49,6 +49,8 @@ enum ConversationSource: Hashable {
 @MainActor
 final class ConversationPage: NSObject {
     let web: PageWebView
+    /// The view showing the web view now.
+    weak var host: PageHost?
     private let bridge = WKContentWorld.world(name: "senate")
     private weak var store: CoreStore?
     private(set) var source: ConversationSource?
@@ -703,30 +705,43 @@ final class PageWebView: WKWebView {
     }
 }
 
-/// Shows the page's one web view where a page wants it.
+/// Shows the page's one web view where a page wants it. A page left
+/// behind (SwiftUI may keep its view a while, and update it) never takes
+/// the web view back: only a host that comes into a window claims it.
 struct ConversationView: NSViewRepresentable {
     let page: ConversationPage
     let source: ConversationSource
 
-    func makeNSView(context: Context) -> NSView {
-        let box = NSView()
+    func makeNSView(context: Context) -> PageHost {
+        let host = PageHost()
+        host.page = page
+        host.source = source
+        return host
+    }
+
+    func updateNSView(_ host: PageHost, context: Context) {
+        host.source = source
+        if page.host === host { page.show(source) }
+    }
+
+    static func dismantleNSView(_ host: PageHost, coordinator: ()) {
+        if host.page?.host === host { host.page?.host = nil }
+    }
+}
+
+final class PageHost: NSView {
+    weak var page: ConversationPage?
+    var source: ConversationSource?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard window != nil, let page, let source else { return }
+        page.host = self
         page.web.translatesAutoresizingMaskIntoConstraints = true
         page.web.autoresizingMask = [.width, .height]
-        page.web.frame = box.bounds
-        box.addSubview(page.web)
-        return box
-    }
-
-    func updateNSView(_ box: NSView, context: Context) {
-        if page.web.superview !== box {
-            page.web.frame = box.bounds
-            box.addSubview(page.web)
-        }
+        page.web.frame = bounds
+        addSubview(page.web)
         page.show(source)
-    }
-
-    static func dismantleNSView(_ box: NSView, coordinator: ()) {
-        for view in box.subviews { view.removeFromSuperview() }
     }
 }
 

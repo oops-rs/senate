@@ -289,6 +289,21 @@ extension Perf {
                     try? await Task.sleep(for: .seconds(1))
                 }
             }
+            await phase("switch session and thread") {
+                for _ in 0..<3 {
+                    store.openThread(committee: "refund-v2", root: 118)
+                    try? await Task.sleep(for: .seconds(1))
+                    store.place = .session("marathon-1")
+                    try? await Task.sleep(for: .seconds(1))
+                }
+            }
+            // Memory after the six-language specimen, every block rendered.
+            await phase("specimen") {
+                store.place = .session("scratch-1")
+                try? await Task.sleep(for: .seconds(4))
+            }
+            report("memory: app RSS \(rss(getpid())) MB (tour done)")
+            try? await Task.sleep(for: .seconds(2))
             NSApplication.shared.terminate(nil)
         }
     }

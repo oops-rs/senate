@@ -427,7 +427,9 @@ final class CoreStore {
         if let v = ProcessInfo.processInfo.environment[Self.showEnv], !v.isEmpty {
             show(.inbox)
         }
-        // The Markdown store, its highlighter warmed off the main thread.
+        // The Markdown store, warmed off the main thread. (The page itself
+        // loads when first shown: a web view loaded outside a window does
+        // not draw once it is put in one.)
         _ = ConversationPage.markdown
         Perf.tour(self)
         Perf.sessionTour(self)

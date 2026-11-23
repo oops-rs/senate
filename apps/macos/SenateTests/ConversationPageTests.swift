@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Testing
 import WebKit
@@ -138,5 +139,23 @@ struct ConversationPageTests {
             )
             #expect(raw as? String == "refused")
         }
+    }
+}
+
+extension ConversationPageTests {
+    @Test func framesAndObserversRunInTheBridgeWorld() async throws {
+        let page = try await page(["Hello"])
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 400), styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = page.web
+        window.orderFrontRegardless()
+        defer { window.orderOut(nil) }
+        try await Task.sleep(for: .milliseconds(300))
+        let raf = await page.evaluate("return await Promise.race([new Promise(r => requestAnimationFrame(() => r('frame'))), new Promise(r => setTimeout(() => r('none'), 2000))])")
+        #expect(raf as? String == "frame")
+        let io = await page.evaluate("""
+            return await Promise.race([new Promise(r => { const o = new IntersectionObserver(() => r('observed'));
+              o.observe(document.querySelector('.row')) }), new Promise(r => setTimeout(() => r('none'), 2000))])
+            """)
+        #expect(io as? String == "observed")
     }
 }
