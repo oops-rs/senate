@@ -35,7 +35,7 @@ fn claude_folds_tool_results_and_keeps_only_the_main_conversation() {
         &mut file,
         r#"{"type":"user","isSidechain":true,"message":{"content":[{"type":"tool_result","tool_use_id":"b","content":"child data"}]}}"#,
     );
-    let large_output = "é".repeat(40_000);
+    let large_output = "é".repeat(9 * 1024 * 1024);
     append(&mut file, &serde_json::json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"a","content":large_output}]}}).to_string());
     append(
         &mut file,

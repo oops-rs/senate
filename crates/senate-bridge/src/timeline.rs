@@ -21,7 +21,7 @@ use crate::ipc::{
 use crate::session::{Runtime, Session};
 
 const FRAME_BUDGET: usize = MAX_LINE - 8192;
-const MAX_RECORD_BYTES: usize = 16 * 1024 * 1024;
+const RETAINED_RECORD_CAPACITY: usize = 1024 * 1024;
 const MAX_ITEMS: usize = 300;
 
 pub(crate) fn path(session: &Session) -> Option<PathBuf> {
@@ -57,7 +57,6 @@ pub(crate) struct Transcript {
     offset: u64,
     anchor: Vec<u8>,
     record: Vec<u8>,
-    oversized: bool,
     reduced: Reducer,
     // A physical line can yield several items. Keep its unconsumed changes
     // when a watch batch hits the wire limit.
@@ -80,7 +79,6 @@ impl Transcript {
             offset: 0,
             anchor: Vec::new(),
             record: Vec::new(),
-            oversized: false,
             reduced: Reducer::default(),
             changes: VecDeque::new(),
         })
@@ -129,12 +127,7 @@ impl Transcript {
             }
             let newline = buffered.iter().position(|byte| *byte == b'\n');
             let consumed = newline.map_or(buffered.len(), |at| at + 1);
-            if !self.oversized && self.record.len() + consumed <= MAX_RECORD_BYTES {
-                self.record.extend_from_slice(&buffered[..consumed]);
-            } else {
-                self.oversized = true;
-                self.record.clear();
-            }
+            self.record.extend_from_slice(&buffered[..consumed]);
             self.file.consume(consumed);
             self.offset += consumed as u64;
             if newline.is_some() {
@@ -152,9 +145,7 @@ impl Transcript {
             if !self.read_record(until)? {
                 return Ok(None);
             }
-            if !self.oversized
-                && let Ok(record) = serde_json::from_slice::<Value>(&self.record)
-            {
+            if let Ok(record) = serde_json::from_slice::<Value>(&self.record) {
                 let ts = record["timestamp"]
                     .as_str()
                     .and_then(|value| value.parse().ok());
@@ -170,7 +161,9 @@ impl Transcript {
                 }
             }
             self.record.clear();
-            self.oversized = false;
+            // A large valid result still completes its original call. Once
+            // parsed, keep at most a modest buffer for the next record.
+            self.record.shrink_to(RETAINED_RECORD_CAPACITY);
         }
     }
 
