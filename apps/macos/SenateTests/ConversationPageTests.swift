@@ -159,3 +159,23 @@ extension ConversationPageTests {
         #expect(io as? String == "observed")
     }
 }
+
+extension ConversationPageTests {
+    @Test func findAndSelectAllReachEveryBlock() async throws {
+        let long = (1...40).map { "Paragraph \($0) of a long reply, with the word needle once." }.joined(separator: "\n\n")
+        let page = try await page([long, "No match here.", "Another needle, and a NEEDLE."])
+        _ = await page.evaluate("await window.senate.find('needle', true, false); return true")
+        let found = await page.evaluate("return CSS.highlights.get('find').size") as? Int
+        #expect(found == 42)
+        _ = await page.evaluate("await window.senate.find('needle', true, true); return true")
+        let now = await page.evaluate("return CSS.highlights.get('find-now').size") as? Int
+        #expect(now == 1)
+        _ = await page.evaluate("await window.senate.find(null, true, false); return true")
+        let cleared = await page.evaluate("return CSS.highlights.has('find')") as? Bool
+        #expect(cleared == false)
+        _ = await page.evaluate("await window.senate.selectAll(); return true")
+        let selected = await page.evaluate("return window.getSelection().toString()") as? String ?? ""
+        #expect(selected.contains("Paragraph 40 of a long reply"))
+        #expect(selected.contains("Another needle"))
+    }
+}
