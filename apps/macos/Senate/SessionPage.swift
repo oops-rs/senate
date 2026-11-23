@@ -239,7 +239,9 @@ private struct WorkingRing: View {
 
 /// A session's one leading mark: its runtime glyph, carrying its status.
 /// Needs you: the glyph in the attention colour with a dot at its corner.
-/// Working: a ring turning around it. Unread: an accent dot at its corner.
+/// Working: the glyph's own frame carries the progress, a segment of its
+/// outline travelling round it (WorkingRuntimeMark). Unread: an accent dot
+/// at its corner.
 /// Idle: the glyph as it is. Paused: dimmed, with a pause badge. Stopped:
 /// faint. The names after it line up in one column.
 struct SessionMark: View {
@@ -247,14 +249,15 @@ struct SessionMark: View {
     let status: SessionStatus
 
     var body: some View {
-        RuntimeMark(runtime: runtime, tint: tint)
+        Group {
+            if status == .working {
+                WorkingRuntimeMark(runtime: runtime)
+            } else {
+                RuntimeMark(runtime: runtime, tint: tint)
+            }
+        }
             .opacity(status == .stopped ? 0.4 : status == .paused ? 0.6 : 1)
             .frame(width: 20, height: 20)
-            .overlay {
-                if status == .working {
-                    TurningRing(size: 20, width: 1.4)
-                }
-            }
             .overlay(alignment: .topTrailing) { badge.offset(x: 2, y: -1) }
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("\(runtime), \(status.label)")
@@ -287,24 +290,6 @@ struct SessionMark: View {
         Circle().fill(color)
             .frame(width: 7, height: 7)
             .overlay { Circle().stroke(Theme.sidebar, lineWidth: 1.5) }
-    }
-}
-
-/// A ring that turns while a session works, around its mark.
-struct TurningRing: View {
-    var size: CGFloat = 9
-    var width: CGFloat = 1.6
-    @State private var turning = false
-
-    var body: some View {
-        Circle()
-            .trim(from: 0, to: 0.3)
-            .stroke(Theme.primary, style: StrokeStyle(lineWidth: width, lineCap: .round))
-            .frame(width: size, height: size)
-            .rotationEffect(.degrees(turning ? 360 : 0))
-            .animation(.linear(duration: 1.1).repeatForever(autoreverses: false), value: turning)
-            .onAppear { turning = true }
-            .accessibilityHidden(true)
     }
 }
 

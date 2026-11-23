@@ -78,6 +78,14 @@ async fn main() {
         common::marathon(&mut w, n);
         println!("marathon-1: {n} items");
     }
+    // FAKE_WORKING=N: N more sessions, all working (the sidebar's marks).
+    if let Some(n) = std::env::var("FAKE_WORKING")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        common::working_sessions(&mut w, n);
+        println!("{n} working sessions");
+    }
     let world = Arc::new(Mutex::new(w));
     let daemon = common::FakeDaemon::start(&socket, Arc::clone(&world));
     println!("fake daemon on {}", socket.display());

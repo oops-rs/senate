@@ -2123,3 +2123,32 @@ pub fn marathon(w: &mut World, n: usize) {
     w.timelines.insert(id.into(), items);
     w.growth.insert(id.into(), growth);
 }
+
+/// `FAKE_WORKING=N` in the fake daemon: N more sessions, all working, on no
+/// committee, cycling Claude Code, Codex, Antigravity and ACP: the
+/// sidebar's working marks, to look at and to measure.
+pub fn working_sessions(w: &mut World, n: usize) {
+    use senate_bridge::ipc::LocalSessionRow;
+    let runtimes = [Runtime::Claude, Runtime::Codex, Runtime::Agy, Runtime::Acp];
+    for i in 0..n {
+        let runtime = runtimes[i % runtimes.len()];
+        let name = format!("{}-{}", runtime.as_str(), i / runtimes.len() + 1);
+        w.sessions.local_rows.push(LocalSessionRow {
+            session_id: format!("working-{i}"),
+            primary: path(&format!(
+                "{}-0000{i:04}-0000-4000-8000-000000000000",
+                runtime.as_str()
+            )),
+            alias: Some(path(&name)),
+            committee: None,
+            chair: false,
+            shown_name: Some(name),
+            runtime,
+            dir: "/Users/alice/dev/scratch".into(),
+            branch: Some("main".into()),
+            working: true,
+            last_activity: Utc::now(),
+            title: None,
+        });
+    }
+}
