@@ -352,6 +352,19 @@ pub fn render_news(
     text: &str,
     locale: Locale,
 ) -> String {
+    render_news_with(event, escalated, text, locale, None)
+}
+
+/// [`render_news`] with the text laid out by `lay_out` (Markdown for a
+/// terminal: [`format::terminal_markdown`]) before its first lines are
+/// taken.
+pub fn render_news_with(
+    event: &senate_core::Event,
+    escalated: bool,
+    text: &str,
+    locale: Locale,
+    lay_out: Option<&dyn Fn(&str) -> String>,
+) -> String {
     let root = event.thread.unwrap_or(event.seq);
     let by = format::author(event, locale);
     let verb = did(&event.kind, escalated, locale);
@@ -366,7 +379,8 @@ pub fn render_news(
             event.ts.format("%Y-%m-%d %H:%M UTC")
         ),
     };
-    let lines: Vec<&str> = text.trim().lines().collect();
+    let laid_out = lay_out.map(|lay_out| lay_out(text.trim()));
+    let lines: Vec<&str> = laid_out.as_deref().unwrap_or(text).trim().lines().collect();
     if lines.is_empty() {
         out.push_str(&format!(
             "\n  {}",
@@ -375,7 +389,12 @@ pub fn render_news(
     }
     for line in lines.iter().take(NEWS_LINES) {
         out.push_str("\n  ");
-        out.push_str(&format::one_line(line));
+        if laid_out.is_some() {
+            // Already made printable, with its styles kept.
+            out.push_str(line);
+        } else {
+            out.push_str(&format::one_line(line));
+        }
     }
     if lines.len() > NEWS_LINES {
         out.push_str("\n  …");
@@ -525,4 +544,31 @@ mod tests {
             "see [1] and [draft]"
         );
     }
+}
+
+#[cfg(test)]
+#[test]
+fn followed_news_is_laid_out_as_markdown_only_when_asked() {
+    use senate_core::{Address, CommitteeId, Kind, Name, NewEvent, Seq};
+    let event = NewEvent::new(
+        CommitteeId::new("refund").unwrap(),
+        Kind::Answer,
+        "senator::rev".parse::<Address>().unwrap(),
+        "The **limit** is in `config.rs`.",
+    )
+    .to(Address::senior(&Name::new("alice").unwrap()))
+    .into_event(Seq(9), chrono::Utc::now());
+    let raw = render_news(&event, false, &event.body, Locale::En);
+    assert!(
+        raw.contains("\n  The **limit** is in `config.rs`."),
+        "{raw}"
+    );
+    let plain = senate_markdown::Terminal::new(60, senate_markdown::Color::None);
+    let lay_out = |text: &str| format::markdown_for(plain, text);
+    let laid = render_news_with(&event, false, &event.body, Locale::En, Some(&lay_out));
+    assert!(laid.contains("\n  The limit is in config.rs."), "{laid}");
+    assert!(
+        laid.contains("read: `senate thread 9 --committee refund`"),
+        "{laid}"
+    );
 }

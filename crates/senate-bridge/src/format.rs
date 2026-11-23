@@ -2543,3 +2543,36 @@ mod tests {
         assert_eq!(footer(&answer, &alice(), EN), None);
     }
 }
+
+/// The indent a message body gets under its byline in `senate thread` and
+/// `senate inbox`.
+pub const BODY_INDENT: usize = 2;
+
+/// A body laid out as Markdown for this terminal, when stdout is one:
+/// wrapped to its width less [`BODY_INDENT`], in colour unless `NO_COLOR`
+/// or `TERM=dumb` says otherwise. `None` when stdout is not a terminal:
+/// what is piped stays the text as written.
+pub fn terminal_markdown() -> Option<impl Fn(&str) -> String> {
+    use std::io::IsTerminal as _;
+    if !std::io::stdout().is_terminal() {
+        return None;
+    }
+    let width = terminal_size::terminal_size()
+        .map(|(width, _)| usize::from(width.0))
+        .or_else(|| std::env::var("COLUMNS").ok()?.parse().ok())
+        .unwrap_or(80);
+    let terminal = senate_markdown::Terminal::stdout(Some(width.saturating_sub(BODY_INDENT)));
+    Some(move |text: &str| markdown_for(terminal, text))
+}
+
+/// `text` laid out as Markdown for `terminal`.
+pub fn markdown_for(terminal: senate_markdown::Terminal, text: &str) -> String {
+    let document = senate_markdown::Document::parse(text);
+    let mut out = String::new();
+    senate_markdown::RenderCache::new(terminal).render_document(
+        &document,
+        senate_markdown::Format::Terminal,
+        &mut out,
+    );
+    out.trim_end().to_owned()
+}

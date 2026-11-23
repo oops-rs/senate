@@ -336,8 +336,19 @@ fn one_status(event: &Event, locale: Locale) -> Option<String> {
     Some(line)
 }
 
-/// `senate thread`: each event with its byline, time and body.
+/// `senate thread`: each event with its byline, time and body, the body as
+/// written (what is piped).
 pub fn render_thread(reply: &ThreadReply, locale: Locale) -> String {
+    render_thread_with(reply, locale, &|body| body.to_owned())
+}
+
+/// [`render_thread`] with each body laid out by `body` first (Markdown for a
+/// terminal: [`crate::format::terminal_markdown`]).
+pub fn render_thread_with(
+    reply: &ThreadReply,
+    locale: Locale,
+    lay_out: &dyn Fn(&str) -> String,
+) -> String {
     let n = reply.events.len();
     let mut out = match locale {
         Locale::Zh => format!("{} 的 thread {}，共 {n} 条：", reply.committee, reply.root),
@@ -370,7 +381,7 @@ pub fn render_thread(reply: &ThreadReply, locale: Locale) -> String {
         let text = if body.is_empty() {
             one_status(e, locale).unwrap_or_default()
         } else {
-            body.to_string()
+            lay_out(body)
         };
         for line in text.lines() {
             out.push_str("\n  ");
@@ -810,6 +821,41 @@ mod tests {
         );
         assert!(zh.contains("\n  状态 processing"), "{zh}");
         assert!(zh.contains("[speaker::claude] 接管 · "), "{zh}");
+
+        // On a terminal the bodies are laid out as Markdown; piped, the text
+        // above stays as it was written.
+        let md = ThreadReply {
+            events: vec![
+                NewEvent::new(
+                    reply.committee.clone(),
+                    Kind::Question,
+                    Address::senior(&senate_core::Name::new("alice").unwrap()),
+                    "Is the **retry** limit in `config.rs`?\n\n- one\n- two",
+                )
+                .into_event(Seq(7), at),
+            ],
+            ..reply.clone()
+        };
+        assert!(
+            render_thread(&md, Locale::En).contains("\n  Is the **retry** limit in `config.rs`?")
+        );
+        let plain = senate_markdown::Terminal::new(40, senate_markdown::Color::None);
+        let laid = render_thread_with(&md, Locale::En, &|body| {
+            crate::format::markdown_for(plain, body)
+        });
+        assert!(
+            laid.contains("\n  Is the retry limit in config.rs?"),
+            "{laid}"
+        );
+        assert!(
+            laid.contains("\n  - one\n  - two") || laid.contains("\n  • one\n  • two"),
+            "{laid}"
+        );
+        let ansi = senate_markdown::Terminal::new(40, senate_markdown::Color::Ansi16);
+        let coloured = render_thread_with(&md, Locale::En, &|body| {
+            crate::format::markdown_for(ansi, body)
+        });
+        assert!(coloured.contains("\u{1b}[1mretry"), "{coloured}");
     }
 
     #[test]

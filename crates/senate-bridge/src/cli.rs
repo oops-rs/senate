@@ -2473,7 +2473,14 @@ async fn watch(
         let line = if json {
             serde_json::to_string(&event)?
         } else {
-            let text = person::render_news(news, *escalated, text, pong.locale);
+            let markdown = crate::format::terminal_markdown();
+            let text = person::render_news_with(
+                news,
+                *escalated,
+                text,
+                pong.locale,
+                markdown.as_ref().map(|m| m as &dyn Fn(&str) -> String),
+            );
             let text = if output.verbose {
                 text
             } else {
@@ -3026,7 +3033,10 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
                 if json {
                     print_json(&reply)
                 } else {
-                    let mut text = speak::render_thread(&reply, locale);
+                    let mut text = match crate::format::terminal_markdown() {
+                        Some(markdown) => speak::render_thread_with(&reply, locale, &markdown),
+                        None => speak::render_thread(&reply, locale),
+                    };
                     if !verbose {
                         let aliases: Option<KnownAliases> =
                             daemon_call(&paths, &Request::Aliases).await.ok();

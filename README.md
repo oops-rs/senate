@@ -487,6 +487,10 @@ committee, and say so on stderr (`on committee refund (where rev is an
 alias)`); the commands they suggest then carry `--committee`. Otherwise the
 error lists the committees to choose from.
 
+On a terminal, `senate thread` and `senate inbox --follow` lay message bodies
+out as Markdown, wrapped to the window (in colour unless `NO_COLOR` is set or
+`TERM=dumb`). Piped, they print the text exactly as written.
+
 ### 2. Zero-Pollution Workspace Management
 
 Senate keeps your repositories completely clean:

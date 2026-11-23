@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 senate-core = { workspace = true }
+senate-markdown = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time", "sync", "process", "signal", "fs", "io-util"] }
 futures = { workspace = true }
 async-trait = { workspace = true }
