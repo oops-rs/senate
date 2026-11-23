@@ -129,6 +129,12 @@ async fn pair(
         .split('.')
         .next()
         .unwrap();
+    let mut client_details = String::new();
+    tokio::time::timeout(WAIT, output.read_line(&mut client_details))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(client_details.contains("list, watch=") && client_details.contains("expires"));
     let mut candidate = String::new();
     tokio::time::timeout(WAIT, target_out.read_line(&mut candidate))
         .await
@@ -265,19 +271,12 @@ async fn remote_test_child() {
         ),
     )
     .unwrap();
-    let helper = env!("CARGO_BIN_EXE_senate-remote-admin");
-    let mut admin_attempt = tokio::process::Command::new(helper);
-    let root = std::env::var_os(testenv::CONFINE_ENV).unwrap();
-    testenv::isolate_async(&mut admin_attempt, Path::new(&root));
-    let not_root = admin_attempt
-        .env_remove("SUDO_UID")
-        .arg("disable")
-        .output()
-        .await
-        .unwrap();
-    assert!(!not_root.status.success());
-    assert!(String::from_utf8_lossy(&not_root.stderr).contains("sudo"));
-
+    let valid_config = std::fs::read(target.paths.config()).unwrap();
+    std::fs::write(target.paths.config(), "[remote]\nexperimental = \"bad\"\n").unwrap();
+    target.start().await;
+    let _: ipc::StatusReply = request(&target, &Request::Status).await;
+    target.stop().await;
+    std::fs::write(target.paths.config(), valid_config).unwrap();
     // The old local listener flag alone cannot enable machine access.
     target.start().await;
     let unauthorized = ipc::request::<String>(
@@ -465,6 +464,11 @@ async fn remote_test_child() {
     );
     std::fs::write(&machine_path, &good).unwrap();
 
+    let root = std::path::PathBuf::from(std::env::var_os(testenv::CONFINE_ENV).unwrap());
+    let profile = root
+        .join("authorization")
+        .join(format!("{}.v2.json", senate_bridge::service::current_uid()));
+    let older_profile = std::fs::read(&profile).unwrap();
     admin(&target, &["revoke", &device.id], "revoke");
     closed(&mut viewer).await;
     assert!(
@@ -499,7 +503,7 @@ async fn remote_test_child() {
             std::fs::read_to_string(project.join("guard-result"))
         )
     });
-    let audit_path = target.paths.home().join("remote/audit.jsonl");
+    let audit_path = target.paths.home().join("remote/audit-important.jsonl");
     let audit_backup = audit_path.with_extension("saved");
     tokio::time::timeout(WAIT, async {
         loop {
@@ -534,7 +538,8 @@ async fn remote_test_child() {
     let listed = String::from_utf8(result.stdout).unwrap();
     assert!(listed.contains("target:\n  unreachable"), "{listed}");
 
-    let audit = std::fs::read_to_string(audit_backup).unwrap();
+    let audit = std::fs::read_to_string(audit_backup).unwrap()
+        + &std::fs::read_to_string(target.paths.home().join("remote/audit.jsonl")).unwrap();
     for action in [
         "pair",
         "connect",
@@ -552,6 +557,28 @@ async fn remote_test_child() {
     }
     assert!(!audit.contains("enrollment_connect"), "{audit}");
 
+    let latest_profile = std::fs::read(&profile).unwrap();
+    std::fs::write(&profile, &older_profile).unwrap();
+    tokio::time::timeout(WAIT, async {
+        while metadata.list().await.is_ok() {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let _: ipc::StatusReply = request(&target, &Request::Status).await;
+    std::fs::write(&profile, &latest_profile).unwrap();
+    tokio::time::timeout(WAIT, async {
+        while metadata.list().await.is_err() {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        remote.list().await.is_err(),
+        "restoring current policy must not restore the revoked grant"
+    );
     admin(&target, &["disable"], "disable");
     tokio::time::timeout(WAIT, async {
         while metadata.list().await.is_ok() {
@@ -561,6 +588,10 @@ async fn remote_test_child() {
     .await
     .unwrap();
     let _: ipc::StatusReply = request(&target, &Request::Status).await;
+    // A trusted disable also advances the rollback floor.
+    std::fs::write(&profile, latest_profile).unwrap();
+    tokio::time::sleep(Duration::from_millis(550)).await;
+    assert!(metadata.list().await.is_err());
     person_fixture.abort();
     client.stop().await;
     target.stop().await;

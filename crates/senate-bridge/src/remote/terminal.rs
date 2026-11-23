@@ -105,6 +105,25 @@ async fn attach_input(
 mod tests {
     use super::*;
 
+    #[tokio::test(start_paused = true)]
+    async fn stalled_terminal_writes_time_out() -> anyhow::Result<()> {
+        let (mut writer, _reader) = tokio::io::duplex(1);
+        let start = tokio::time::Instant::now();
+        assert!(send(&mut writer, b"two").await.is_err());
+        assert!(start.elapsed() >= IO_TIMEOUT);
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_idle_terminal_stream_closes() -> anyhow::Result<()> {
+        let (wire, _peer) = tokio::io::duplex(1);
+        let (host, _remote_host) = UnixStream::pair()?;
+        let start = tokio::time::Instant::now();
+        assert!(relay(wire, host, false).await.is_err());
+        assert!(start.elapsed() >= IDLE);
+        Ok(())
+    }
+
     #[tokio::test]
     async fn attach_forwards_only_complete_known_frames() -> anyhow::Result<()> {
         let input = [RESIZE, 0, 24, 0, 80, KEYS, 0, 2, b'a', b'b', 99];

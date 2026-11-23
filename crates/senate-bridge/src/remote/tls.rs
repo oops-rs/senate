@@ -200,7 +200,7 @@ mod tests {
             super::super::Device {
                 id,
                 grant: "a".repeat(64),
-                name: "dev".parse()?,
+                name: "dev".into(),
                 scopes: super::super::Scopes {
                     watch: false,
                     attach: false,

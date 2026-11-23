@@ -1,3 +1,3 @@
 fn main() -> anyhow::Result<()> {
-    senate_bridge::remote::admin()
+    senate_remote_admin::run()
 }

@@ -25,19 +25,14 @@ use tokio::sync::{oneshot, watch};
 use crate::paths::Paths;
 use senate_core::Name;
 
-const VERSION: u8 = 2;
-const MAX_VALID_SECS: u64 = 30 * 86400;
+const VERSION: u8 = 3;
+use authority::MAX_VALID_SECS;
 const HANDSHAKE: Duration = Duration::from_secs(6);
-const OFFER_TTL: Duration = Duration::from_secs(120);
+const OFFER_TTL: Duration = Duration::from_secs(authority::OFFER_SECONDS);
 const MAX_REQUEST: usize = 4096;
 const MAX_REPLY: usize = 1024 * 1024;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Scopes {
-    pub watch: bool,
-    pub attach: bool,
-}
+pub use senate_remote_admin::{Device, Scopes};
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
@@ -51,21 +46,10 @@ pub enum Control {
 
 #[derive(Deserialize, Serialize)]
 pub(crate) struct CandidateDetails {
-    pub(crate) name: Name,
+    pub(crate) name: String,
     pub(crate) key_prefix: String,
     pub(crate) scopes: Scopes,
     pub(crate) valid_secs: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Device {
-    pub id: String,
-    // Prevent a re-enrolled key from resuming a stream from a revoked grant.
-    grant: String,
-    pub name: Name,
-    pub scopes: Scopes,
-    pub expires: i64,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -109,7 +93,7 @@ pub struct Row {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 enum Reply {
-    Compare { code: String },
+    Compare { device: Device },
     Enrolled { device: Device },
     Rows { rows: Vec<Row> },
     Stream,
@@ -143,18 +127,30 @@ fn comparison_context(
     secret: &str,
     at: SocketAddr,
     host: &str,
-    device: &str,
+    device: &Device,
 ) -> anyhow::Result<Vec<u8>> {
-    Ok(serde_json::to_vec(&(VERSION, secret, at, host, device))?)
+    Ok(serde_json::to_vec(&(
+        VERSION,
+        secret,
+        at,
+        authority::digest(host, device)?,
+    ))?)
 }
 
 fn binding(exporter: [u8; 32]) -> String {
     hex::encode(Sha256::digest(exporter))
 }
 
-#[doc(hidden)]
-pub fn admin() -> anyhow::Result<()> {
-    authority::run()
+fn verify_enrollment_proof(device: &Device, expected: &str, wall: i64) -> anyhow::Result<()> {
+    ensure!(
+        device.expires > wall && device.expires <= wall + MAX_VALID_SECS as i64,
+        "enrollment expiry is out of bounds"
+    );
+    ensure!(
+        bool::from(device.grant.as_bytes().ct_eq(expected.as_bytes())),
+        "enrollment TLS binding did not match this connection"
+    );
+    Ok(())
 }
 
 async fn offer_expired((deadline, wall): (tokio::time::Instant, i64)) {
@@ -187,11 +183,21 @@ fn create_private_dir(path: &Path) -> anyhow::Result<()> {
 }
 
 fn test_root(paths: &Paths) -> anyhow::Result<Option<PathBuf>> {
-    let Some(root) = std::env::var_os(crate::testenv::CONFINE_ENV) else {
-        return Ok(None);
-    };
-    ensure!(
+    test_root_for(
+        paths,
+        std::env::var_os(crate::testenv::CONFINE_ENV),
         cfg!(debug_assertions),
+    )
+}
+
+fn test_root_for(
+    paths: &Paths,
+    root: Option<std::ffi::OsString>,
+    debug_build: bool,
+) -> anyhow::Result<Option<PathBuf>> {
+    let Some(root) = root else { return Ok(None) };
+    ensure!(
+        debug_build,
         "remote test mode is disabled in release builds"
     );
     let root = PathBuf::from(root).canonicalize()?;
@@ -424,11 +430,9 @@ impl Offer {
 }
 
 struct Candidate {
-    id: String,
-    name: Name,
+    device: Device,
     peer: SocketAddr,
-    binding: String,
-    approved: Option<Device>,
+    prepared: bool,
     accepted: oneshot::Sender<Device>,
 }
 
@@ -449,6 +453,14 @@ pub(crate) struct Service {
     state: Mutex<State>,
     changes: watch::Sender<()>,
     audit: audit::Audit,
+}
+
+async fn accept_remote(listener: Option<&TcpListener>) -> std::io::Result<(TcpStream, SocketAddr)> {
+    if let Some(listener) = listener {
+        listener.accept().await
+    } else {
+        std::future::pending().await
+    }
 }
 
 impl Service {
@@ -553,8 +565,8 @@ impl Service {
                     .as_ref()
                     .filter(|candidate| !candidate.accepted.is_closed())
                     .map(|candidate| CandidateDetails {
-                        name: candidate.name.clone(),
-                        key_prefix: candidate.id.chars().take(16).collect(),
+                        name: candidate.device.name.clone(),
+                        key_prefix: candidate.device.id.chars().take(16).collect(),
                         scopes: offer.scopes,
                         valid_secs: offer.valid_secs,
                     });
@@ -571,18 +583,12 @@ impl Service {
                     .as_mut()
                     .filter(|candidate| !candidate.accepted.is_closed())
                     .context("the client has not requested pairing")?;
-                let device = candidate.approved.get_or_insert_with(|| Device {
-                    id: candidate.id.clone(),
-                    grant: candidate.binding.clone(),
-                    name: candidate.name.clone(),
-                    scopes: offer.scopes,
-                    expires: now() + offer.valid_secs as i64,
-                });
                 let request = authority::encode(authority::Enrollment {
                     policy: self.policy.clone(),
-                    device: device.clone(),
+                    device: candidate.device.clone(),
                     deadline: offer.expires_wall,
                 })?;
+                candidate.prepared = true;
                 Ok(serde_json::Value::String(request))
             }
             Control::Devices => Ok(serde_json::to_value(
@@ -591,24 +597,35 @@ impl Service {
         }
     }
 
-    fn refresh_authority(&self) -> anyhow::Result<()> {
-        let profile = self.authority.read();
+    fn deactivate(&self) {
         let mut state = locked(&self.state);
-        let valid = profile.as_ref().is_ok_and(|profile| {
-            profile.generation >= state.generation && profile.policy.as_ref() == Some(&self.policy)
-        });
-        if !valid {
+        if state.enabled {
             state.enabled = false;
             state.offer = None;
             state.devices.clear();
             self.changes.send_replace(());
-            bail!("administrator remote policy removed, rolled back or unreadable");
         }
-        let profile = profile?;
-        if profile.generation == state.generation {
+    }
+
+    fn refresh_authority(&self) -> anyhow::Result<()> {
+        let profile = self.authority.read()?;
+        let mut state = locked(&self.state);
+        let previous_generation = state.generation;
+        ensure!(
+            profile.generation >= previous_generation,
+            "remote administrator profile rolled back"
+        );
+        // Even an explicit disable advances the floor. An older active
+        // snapshot must not reopen the listener after the disable was seen.
+        state.generation = profile.generation;
+        ensure!(
+            profile.policy.as_ref() == Some(&self.policy),
+            "remote administrator policy removed or changed"
+        );
+        if state.enabled && profile.generation == previous_generation {
             return Ok(());
         }
-        state.generation = profile.generation;
+        state.enabled = true;
         let devices = profile.live_devices(now());
         for (id, previous) in &state.devices {
             if !devices.contains_key(id) {
@@ -622,7 +639,8 @@ impl Service {
             .as_ref()
             .filter(|offer| offer.active())
             .and_then(|offer| offer.candidate.as_ref())
-            .and_then(|candidate| candidate.approved.as_ref())
+            .filter(|candidate| candidate.prepared)
+            .map(|candidate| &candidate.device)
             .filter(|device| state.devices.get(&device.id) == Some(device))
             .cloned();
         if let Some(device) = accepted
@@ -643,7 +661,7 @@ impl Service {
         peer: SocketAddr,
         tls: &rustls::ServerConnection,
     ) -> anyhow::Result<(
-        String,
+        Device,
         (tokio::time::Instant, i64),
         oneshot::Receiver<Device>,
     )> {
@@ -658,24 +676,27 @@ impl Service {
             bool::from(offer.secret.as_bytes().ct_eq(secret.as_bytes())),
             "pairing unavailable"
         );
-        let context = comparison_context(secret, self.at, &self.policy.listener.host_pin, &id)?;
-        let binding = binding(tls.export_keying_material(
+        let mut device = Device {
+            id,
+            name: name.to_string(),
+            scopes: offer.scopes,
+            expires: now() + offer.valid_secs as i64,
+            grant: String::new(),
+        };
+        let context = comparison_context(secret, self.at, &self.policy.listener.host_pin, &device)?;
+        device.grant = binding(tls.export_keying_material(
             [0; 32],
-            b"EXPORTER-Senate-Pair-v2",
+            b"EXPORTER-Senate-Pair-v3",
             Some(&context),
         )?);
-        let comparison =
-            authority::comparison(&binding, &self.policy.listener.host_pin, &id, &name);
         let (accepted, result) = oneshot::channel();
         offer.candidate = Some(Candidate {
-            id,
-            name,
+            device: device.clone(),
             peer,
-            binding,
-            approved: None,
+            prepared: false,
             accepted,
         });
-        Ok((comparison, (offer.expires, offer.expires_wall), result))
+        Ok((device, (offer.expires, offer.expires_wall), result))
     }
 
     async fn revoked(&self, id: &str, grant: &str, mut change: watch::Receiver<()>) {
@@ -787,7 +808,7 @@ impl Client {
                 Reply::Refused { message } => {
                     let display: String = message
                         .chars()
-                        .filter(|ch| !ch.is_control())
+                        .filter(|ch| !authority::unsafe_display(*ch))
                         .take(256)
                         .collect();
                     bail!("remote refused: {display}");
@@ -861,24 +882,33 @@ impl Client {
                     true,
                 )
                 .await?;
-            let Reply::Compare { code } = reply else {
+            let Reply::Compare { device: proposed } = reply else {
                 bail!("unexpected pairing reply")
             };
             let own = fingerprint(&URL_SAFE_NO_PAD.decode(&machine.identity.cert)?.into())?;
             let host = fingerprint(&URL_SAFE_NO_PAD.decode(&machine.host)?.into())?;
-            let context = comparison_context(&offer.secret, machine.at, &host, &own)?;
-            let binding = binding(stream.get_ref().get_ref().1.export_keying_material(
+            ensure!(
+                proposed.id == own && proposed.name == device.as_str(),
+                "enrollment identity changed"
+            );
+            let context = comparison_context(&offer.secret, machine.at, &host, &proposed)?;
+            let expected = binding(stream.get_ref().get_ref().1.export_keying_material(
                 [0; 32],
-                b"EXPORTER-Senate-Pair-v2",
+                b"EXPORTER-Senate-Pair-v3",
                 Some(&context),
             )?);
-            let expected = authority::comparison(&binding, &host, &own, &device);
-            ensure!(
-                bool::from(code.as_bytes().ct_eq(expected.as_bytes())),
-                "pairing comparison did not match this device"
-            );
+            verify_enrollment_proof(&proposed, &expected, now())?;
+            let code = authority::grouped(&authority::comparison(&host, &proposed)?);
+            let expiry = chrono::DateTime::from_timestamp(proposed.expires, 0)
+                .context("invalid grant expiry")?;
             println!("Comparison code {code}. Confirm it on the target machine.");
-            println!("Candidate {device} · key {}", &own[..16]);
+            println!(
+                "Candidate {} · key {} · list, watch={}, attach={} · expires {expiry}",
+                proposed.name,
+                &own[..16],
+                proposed.scopes.watch,
+                proposed.scopes.attach
+            );
             std::io::Write::flush(&mut std::io::stdout())?;
             let reply =
                 tokio::time::timeout(OFFER_TTL, read_message::<Reply, _>(&mut stream, MAX_REPLY))
@@ -888,7 +918,7 @@ impl Client {
                 bail!("pairing was declined or expired")
             };
             ensure!(
-                device.id == own && device.grant == binding && device.expires > now(),
+                device == proposed && device.expires > now(),
                 "the enrollment grant does not match this device and connection"
             );
             save_new(&path, &machine)?;
@@ -916,20 +946,37 @@ impl Service {
         let mut connections = tokio::task::JoinSet::new();
         let mut authority_refresh = tokio::time::interval(Duration::from_millis(250));
         authority_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let result = loop {
+        let mut listener = Some(listener);
+        loop {
             tokio::select! {
                 biased;
-                _ = shutdown.changed() => break Ok(()),
-                _ = authority_refresh.tick() => {
-                    if let Err(error) = self.refresh_authority() {
-                        break Err(error);
+                _ = shutdown.changed() => break,
+                _ = authority_refresh.tick() => match self.refresh_authority() {
+                    Ok(()) if listener.is_none() => {
+                        match TcpListener::bind(self.at).await {
+                            Ok(bound) => {
+                                listener = Some(bound);
+                                tracing::info!("remote administrator policy recovered; listening again");
+                            }
+                            Err(_) => self.deactivate(),
+                        }
                     }
-                }
+                    Ok(()) => {}
+                    Err(error) => {
+                        self.deactivate();
+                        if listener.take().is_some() {
+                            tracing::warn!(%error, "remote listener paused; retrying administrator policy");
+                            connections.shutdown().await;
+                        }
+                    }
+                },
                 _ = connections.join_next(), if !connections.is_empty() => {}
                 _ = tokio::time::sleep_until(backoff.until()), if backoff.until() > tokio::time::Instant::now() => {}
-                incoming = listener.accept(), if backoff.until() <= tokio::time::Instant::now() => {
+                incoming = accept_remote(listener.as_ref()), if backoff.until() <= tokio::time::Instant::now() => {
                     let Some((socket, peer)) = backoff.accepted(incoming) else { continue };
-                    let Some(admission) = limits.handshake(peer.ip()) else { continue };
+                    let active_offer = locked(&self.state).offer.as_ref()
+                        .is_some_and(|offer| offer.active() && offer.candidate.is_none());
+                    let Some(admission) = limits.handshake(peer.ip(), active_offer) else { continue };
                     let limits = limits.clone();
                     let service = self.clone();
                     let front = front.clone();
@@ -942,9 +989,9 @@ impl Service {
                     });
                 }
             }
-        };
+        }
         connections.shutdown().await;
-        result
+        Ok(())
     }
 
     async fn connection(
@@ -952,14 +999,21 @@ impl Service {
         (socket, peer): (TcpStream, SocketAddr),
         front: &crate::daemon::Front,
         (ordinary, enrollment): (Arc<rustls::ServerConfig>, Arc<rustls::ServerConfig>),
-        (limits, admission): (&limits::Limits, limits::Admission<std::net::IpAddr>),
+        (limits, admission): (&limits::Limits, limits::Handshake),
     ) -> anyhow::Result<()> {
         socket.set_nodelay(true)?;
-        let (pairing, mut wire, id, request) = tokio::time::timeout(HANDSHAKE, async {
+        let pairing_only = admission.pairing_only();
+        let timeout = if pairing_only {
+            Duration::from_secs(1)
+        } else {
+            HANDSHAKE
+        };
+        let (pairing, mut wire, id, request) = tokio::time::timeout(timeout, async {
             let hello =
                 tokio_rustls::LazyConfigAcceptor::new(rustls::server::Acceptor::default(), socket)
                     .await?;
             let pairing = tls::enrollment_name(hello.client_hello().server_name())?;
+            ensure!(!pairing_only || pairing, "reserved for enrollment");
             let transport = hello
                 .into_stream(if pairing { enrollment } else { ordinary })
                 .await;
@@ -989,9 +1043,9 @@ impl Service {
                 bail!("enrollment connection only")
             };
             match self.enroll(id, &secret, name, peer, wire.get_ref().get_ref().1) {
-                Ok((code, deadline, accepted)) => {
+                Ok((device, deadline, accepted)) => {
                     drop(admission);
-                    tokio::time::timeout(HANDSHAKE, send(&mut wire, &Reply::Compare { code }))
+                    tokio::time::timeout(HANDSHAKE, send(&mut wire, &Reply::Compare { device }))
                         .await??;
                     tokio::select! {
                         _ = offer_expired(deadline) => {}
@@ -1116,6 +1170,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn client_rejects_a_mismatched_tls_exporter_proof() -> anyhow::Result<()> {
+        let wall = now();
+        let device = Device {
+            id: "a".repeat(64),
+            grant: "b".repeat(64),
+            name: "test-client".into(),
+            scopes: Scopes {
+                watch: true,
+                attach: false,
+            },
+            expires: wall + 60,
+        };
+        verify_enrollment_proof(&device, &"b".repeat(64), wall)?;
+        assert!(verify_enrollment_proof(&device, &"c".repeat(64), wall).is_err());
+        let context =
+            comparison_context("offer", "127.0.0.1:4000".parse()?, &"d".repeat(64), &device)?;
+        let mut altered = device;
+        altered.scopes.attach = true;
+        assert_ne!(
+            context,
+            comparison_context(
+                "offer",
+                "127.0.0.1:4000".parse()?,
+                &"d".repeat(64),
+                &altered
+            )?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn release_configuration_cannot_use_the_test_environment() -> anyhow::Result<()> {
+        let paths = Paths::new("/tmp/isolated");
+        assert!(test_root_for(&paths, Some("/tmp/isolated".into()), false).is_err());
+        assert!(test_root_for(&paths, None, false)?.is_none());
+        Ok(())
+    }
+
+    #[test]
     fn device_pin_is_stable_across_certificates_for_the_same_key() -> anyhow::Result<()> {
         let key = rcgen::KeyPair::generate()?;
         let mut params = rcgen::CertificateParams::new(vec![tls::PAIR.into()])?;
@@ -1133,19 +1226,19 @@ mod tests {
     #[test]
     fn the_wire_has_no_actor_paths_or_disclosure_operations() {
         for request in [
-            r#"{"version":2,"call":{"op":"list","path":"/tmp/socket"}}"#,
-            r#"{"version":2,"call":{"op":"attach","session":"abc","actor":"person"}}"#,
-            r#"{"version":2,"call":{"op":"watch","session":"abc","selector":{"pid":1}}}"#,
-            r#"{"version":2,"call":{"op":"timeline","session":"abc"}}"#,
-            r#"{"version":2,"call":{"op":"approve","session":"abc"}}"#,
-            r#"{"version":2,"call":{"op":"stop","session":"abc"}}"#,
+            r#"{"version":3,"call":{"op":"list","path":"/tmp/socket"}}"#,
+            r#"{"version":3,"call":{"op":"attach","session":"abc","actor":"person"}}"#,
+            r#"{"version":3,"call":{"op":"watch","session":"abc","selector":{"pid":1}}}"#,
+            r#"{"version":3,"call":{"op":"timeline","session":"abc"}}"#,
+            r#"{"version":3,"call":{"op":"approve","session":"abc"}}"#,
+            r#"{"version":3,"call":{"op":"stop","session":"abc"}}"#,
         ] {
             assert!(
                 serde_json::from_str::<Envelope>(request).is_err(),
                 "{request}"
             );
         }
-        assert!(serde_json::from_str::<Envelope>(r#"{"version":2,"call":{"op":"list"}}"#).is_ok());
+        assert!(serde_json::from_str::<Envelope>(r#"{"version":3,"call":{"op":"list"}}"#).is_ok());
     }
 }
 
