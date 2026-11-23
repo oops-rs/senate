@@ -77,7 +77,7 @@ struct MainWindow: View {
     }
 }
 
-/// ⌘1 Inbox, ⌘2 Approvals; ⌘⌥↑ and ⌘⌥↓ move between sessions; ⌘R reads
+/// ⌘1 Inbox, ⌘2 Approvals, ⌘3 Senates; ⌘⌥↑ and ⌘⌥↓ move between sessions; ⌘R reads
 /// everything again, or tries the daemon now while it cannot be reached.
 /// (⌘, is the store's: SwiftUI keeps that key for the Settings scene's own
 /// menu item, which a menu-bar-only app has no menu bar to reach.)
@@ -88,7 +88,8 @@ private struct Shortcuts: View {
 
     var body: some View {
         ZStack {
-            ForEach(Array(store.sections.enumerated()), id: \.element) { index, section in
+            // ⌘1 Inbox, ⌘2 Approvals, ⌘3 Senates.
+            ForEach(Array(CoreStore.Section.allCases.enumerated()), id: \.element) { index, section in
                 Button(section.title) { store.place = .section(section) }
                     .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: .command)
             }
@@ -118,8 +119,12 @@ private struct Sidebar: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: Theme.Space.s) {
-                Image(systemName: "building.columns.fill")
-                    .foregroundStyle(Theme.primary)
+                // The app's own icon, as the system draws it for the
+                // appearance in force.
+                Image(nsImage: NSApplication.shared.applicationIconImage)
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: 24, height: 24)
                     .accessibilityHidden(true)
                 Text(verbatim: "Senate")
                     .font(.system(size: 18, weight: .medium))
@@ -136,8 +141,13 @@ private struct Sidebar: View {
         .background(Theme.sidebar)
         .safeAreaInset(edge: .bottom, spacing: 0) {
             // On the sidebar's tone, so a long list scrolls under it unseen.
-            AccountRow(store: store)
-                .background(Theme.sidebar)
+            VStack(alignment: .leading, spacing: 0) {
+                if store.state.online {
+                    SidebarFoot(store: store)
+                }
+                AccountRow(store: store)
+            }
+            .background(Theme.sidebar)
         }
         .toolbar {
             ToolbarItem {
@@ -175,7 +185,11 @@ private struct Sidebar: View {
                             .selectionDisabled()
                     }
                 } header: {
-                    Text(verbatim: L("sidebar.committees"))
+                    HStack {
+                        Text(verbatim: L("sidebar.committees"))
+                        Spacer()
+                        CommitteesMenu(store: store)
+                    }
                 }
             }
         }
@@ -347,6 +361,78 @@ extension CoreStore.Section {
     }
 }
 
+/// The sidebar's quiet foot, pinned above the account: the Senates this
+/// machine serves, and every hosted terminal side by side.
+private struct SidebarFoot: View {
+    let store: CoreStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            FootRow(title: L("tab.senates"), symbol: "building.columns",
+                    selected: store.place == .section(.senates)) {
+                store.place = .section(.senates)
+            }
+            FootRow(title: L("sessions.watch"), symbol: "rectangle.split.3x1", selected: false) {
+                store.openWatch()
+            }
+            .disabled(store.state.sessions.allSatisfy { !$0.running })
+            .help(L("sidebar.watch_help"))
+        }
+        .padding(.horizontal, Theme.Space.s)
+        .padding(.top, Theme.Space.xs)
+    }
+}
+
+/// One row of the sidebar's foot: smaller and dimmer than Inbox and
+/// Approvals, highlighted while its page is open.
+private struct FootRow: View {
+    let title: String
+    let symbol: String
+    let selected: Bool
+    let action: () -> Void
+    @State private var hovered = false
+    @Environment(\.isEnabled) private var enabled
+
+    var body: some View {
+        Button(action: action) {
+            Label(title, systemImage: symbol)
+                .font(Theme.Fonts.row)
+                .foregroundStyle(selected ? Theme.onSurface : Theme.onSurfaceVariant)
+                .padding(.horizontal, Theme.Space.s)
+                .frame(maxWidth: .infinity, minHeight: 26, alignment: .leading)
+                .background(selected ? Theme.selection : hovered ? Theme.containerHigh : .clear,
+                            in: RoundedRectangle(cornerRadius: 6))
+                .contentShape(Rectangle())
+                .opacity(enabled ? 1 : 0.5)
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+
+/// The menu on the Committees header: *Show inactive*.
+private struct CommitteesMenu: View {
+    @Bindable var store: CoreStore
+
+    var body: some View {
+        Menu {
+            Toggle(L("roster.show_inactive"), isOn: $store.showInactive)
+        } label: {
+            Image(systemName: store.showInactive ? "line.3.horizontal.decrease.circle.fill" : "ellipsis")
+                .foregroundStyle(store.showInactive ? Theme.primary : Theme.onSurfaceVariant)
+                .frame(width: 22, height: 18)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help(L("roster.show_inactive"))
+        .accessibilityLabel(L("sidebar.committees_menu"))
+    }
+}
+
 /// Narrow the inbox to one agent's threads (what was put to you stays).
 struct AgentFilter: View {
     @Bindable var store: CoreStore
@@ -380,7 +466,7 @@ struct AgentFilter: View {
 }
 
 /// Who this machine is online as and where, or that it is offline; its
-/// menu opens Settings and About.
+/// menu opens Settings and About, and reads everything again.
 private struct AccountRow: View {
     let store: CoreStore
 
@@ -388,12 +474,6 @@ private struct AccountRow: View {
         let state = store.state
         let name = state.person ?? "Senate"
         Menu {
-            Button(L("tab.senates")) { store.place = .section(.senates) }
-                .disabled(!state.online)
-            Toggle(L("roster.show_inactive"), isOn: Bindable(store).showInactive)
-            Button(L("sessions.watch")) { store.openWatch() }
-                .disabled(!state.online || state.sessions.allSatisfy { !$0.running })
-            Divider()
             SettingsLink { Text(verbatim: L("menu.settings")) }
             Button(L("menu.about")) { About.show() }
             Divider()

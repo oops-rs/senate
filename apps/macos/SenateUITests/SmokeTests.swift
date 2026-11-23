@@ -5,7 +5,7 @@ import XCTest
 /// (`scripts/ui-test.sh` starts it and passes its Senate home): the window
 /// opens on the inbox, a thread opens and takes a reply, an approval is
 /// allowed, a session opens from the sidebar with its conversation and its
-/// prompt, a committee opens, ⌘1 and ⌘2 answer, and nothing fails an
+/// prompt, a committee opens, ⌘1–⌘3 answer, and nothing fails an
 /// accessibility audit.
 final class SmokeTests: XCTestCase {
     var app: XCUIApplication!
@@ -81,6 +81,11 @@ final class SmokeTests: XCTestCase {
         XCTAssertEqual(XCTWaiter.wait(for: [opened], timeout: 5), .completed, "a committee opens")
         XCTAssertTrue(window.descendants(matching: .any)
             .matching(NSPredicate(format: "label == 'ledger'")).count >= 2, "with its sessions on this Mac")
+
+        // ⌘3: the Senates page, from the sidebar's foot too.
+        window.typeKey("3", modifierFlags: .command)
+        XCTAssertTrue(window.staticTexts["Address"].firstMatch.waitForExistence(timeout: 5), "the Senates page shows")
+        XCTAssertTrue(window.buttons["Watch all"].firstMatch.exists, "Watch all sits at the sidebar's foot")
     }
 
     func testAccessibilityAudit() throws {

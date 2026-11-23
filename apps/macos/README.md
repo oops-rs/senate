@@ -82,7 +82,7 @@ menu is one line. Everything else lives in the window. Menu bar only
 
 ![The menu](docs/screenshots/menu.png)
 
-**Window** (⌘1 Inbox, ⌘2 Approvals, ⌘⌥↑ and ⌘⌥↓ from session to session;
+**Window** (⌘1 Inbox, ⌘2 Approvals, ⌘3 Senates, ⌘⌥↑ and ⌘⌥↓ from session to session;
 ⌘R reads everything again, or tries the daemon now while offline). Two
 columns. The sidebar has two fixed rows, **Inbox** and **Approvals** (each
 with how much waits there), then one folding group per committee: its name
@@ -90,10 +90,12 @@ with how much waits there), then one folding group per committee: its name
 session of that committee on this machine, hosted by Senate or started by
 you, the chair first: its status, its name (the alias), its runtime, and
 how long since it last did something. Sessions on no committee are last.
-Folded, a committee shows its most urgent session's status. Search (⌘F)
-narrows the sessions and the inbox. At the foot, who you are and the
-Senate's address; its menu opens *Senates*, *Show inactive*, *Watch all*
-(`senate session watch`), *Settings…* and *About Senate*. Nothing is drawn
+Folded, a committee shows its most urgent session's status. The menu on
+the *Committees* header holds *Show inactive*. Search (⌘F) narrows the
+sessions and the inbox. Pinned at the foot, quieter than the rows above:
+**Senates** (the page) and **Watch all** (every hosted terminal side by
+side, `senate session watch`); below them, who you are and the Senate's
+address, whose menu opens *Settings…*, *About Senate* and *Refresh*. Nothing is drawn
 above the content but what it needs at its top right.
 
 A session's **status**, most urgent first, one mark each: *needs you* (a
@@ -147,21 +149,34 @@ accent dot), *idle*, *paused*, *stopped*. The core decides it.
   its state, *Take* (take it over) and a menu with *Close* (archives it,
   after confirming). A thread that no longer waits on you (or never did)
   opens all the same, from what is read of it.
-- **Senates** (from the account menu): address, you, the Speaker, the
+- **Senates** (at the sidebar's foot): address, you, the Speaker, the
   registration above, each committee's chair, your agents with their duty
   and streams, and the Senates below with the seats they declare.
 
 **Show inactive.** Agents, sessions, streams, committees and members that
-are no longer active are hidden until *Show inactive* (in the account
-menu, and beside the lists that hide something); one setting, remembered.
-What counts as active is the core's roster rule, the same as the CLI's.
+are no longer active are hidden until *Show inactive* (the menu on the
+sidebar's *Committees* header, and beside the lists that hide something);
+one setting, remembered. What counts as active is the core's roster rule, the same as the CLI's.
 
 **Design.** `Theme.swift` holds every colour, type size, gap and corner the
 views use: near-neutral surfaces that step in tone instead of being divided
-by lines, the accent (the blue of the icon) spent sparingly, and separate
+by lines, the accent (a deep blue) spent sparingly, and separate
 colours for what a state means, each for light, dark and Increase Contrast.
 `Components.swift` holds the pieces built from them (chips, pill buttons,
 cards, the reading column). Text is read at 700 pt, centred.
+
+**Icon.** The chamber: a hemicycle of seats seen from above, the
+Speaker's seat lit at the centre of the floor. It follows the system's
+appearance: ink-navy seats and a vermilion Speaker on paper in light, white
+seats and an amber Speaker on ink navy in dark. `scripts/make-icon.swift`
+draws it as an Icon Composer document, `Senate/AppIcon.icon` (one
+transparent layer per appearance, and each appearance's ground in
+`icon.json`; the system draws the tile), and renders
+`docs/screenshots/icon.png` with Icon Composer's `ictool`. The sidebar's
+header shows the same icon; the menu bar keeps its `building.columns`
+glyph.
+
+![The icon, light and dark](docs/screenshots/icon.png)
 
 **Names.** A mention reads as the name people are shown: an agent's alias
 on the committee in view, a person's name, `copilot (Speaker)`, a child
