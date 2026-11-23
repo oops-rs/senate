@@ -814,6 +814,8 @@ For a release, run `deploy/build-remote-admin.sh <artifact-directory>`.
 It produces the helper and `senate-remote-admin.sha256` for that platform.
 The macOS release script runs the same step. Publish the checksum in the
 authenticated release channel so people can verify the staged copy.
+When publishing the Rust crates, publish `senate-remote-admin` before
+`senate-bridge`, which depends on it.
 
 With the daemon running as your own user, prepare its host key and listen
 address:
