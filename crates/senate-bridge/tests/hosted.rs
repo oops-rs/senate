@@ -5266,3 +5266,31 @@ async fn a_taken_alias_is_refused_before_anything_starts() {
     assert_eq!(reply.rows.len(), 1, "nothing else started");
     h.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restoring_a_running_session_says_how_to_open_it() {
+    let (mut h, _) = watched_sessions(&["rev"]).await;
+    let error = ipc::request::<SpawnReply>(
+        &h.socket(),
+        &Request::Restore {
+            session: Default::default(),
+            senator: "rev".parse().unwrap(),
+            model: Default::default(),
+        },
+        TIMEOUT,
+        TIMEOUT,
+    )
+    .await
+    .unwrap_err();
+    let ipc::ClientError::Remote(error) = error else {
+        panic!("expected a daemon error, got {error}");
+    };
+    assert!(
+        error
+            .message
+            .contains("rev already has a running terminal; open it with `senate attach rev`."),
+        "{}",
+        error.message
+    );
+    h.stop().await;
+}

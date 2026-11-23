@@ -387,6 +387,8 @@ impl Shared {
         self.check_restore_seat(&target.committee, &target.session.agent)
             .await?;
         let launch_senator = target.session.agent.clone();
+        // So a refusal can name the session by its alias.
+        self.refresh_display_aliases().await;
         let audit_auth = &auth;
         let launch = self
             .on_restore_with(
