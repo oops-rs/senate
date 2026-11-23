@@ -1159,7 +1159,7 @@ async fn the_senator_group_names_a_session_and_sets_its_duty() {
         "{out}"
     );
     let (ok, out) = senate(h, &["senator", "list"]).await;
-    assert!(ok && out.contains("refund-v2::renamed"), "{out}");
+    assert!(ok && out.contains("refund-v2  renamed"), "{out}");
 
     let (ok, out) = senate(
         h,
@@ -2969,7 +2969,7 @@ async fn sessions_lists_stops_by_name_and_prunes_an_orphan() {
     let (ok, listed) = senate(&h, &["session", "list"]).await;
     assert!(ok, "{listed}");
     assert!(
-        listed.contains(&row.label()) && listed.contains("running"),
+        listed.contains(&row.display_name(false)) && listed.contains("running"),
         "{listed}"
     );
 
@@ -4216,6 +4216,8 @@ async fn pause_waits_for_the_checkpoint_and_resume_points_at_it() {
     assert_eq!(row.state, ipc::HostState::Stopped);
     assert!(row.paused, "{row:?}");
     let (ok, listed) = senate(h, &["session", "list"]).await;
+    assert!(ok && !listed.contains("paused"), "{listed}");
+    let (ok, listed) = senate(h, &["session", "list", "--all"]).await;
     assert!(ok && listed.contains("paused"), "{listed}");
     let events = h.server.events("refund-v2");
     assert!(

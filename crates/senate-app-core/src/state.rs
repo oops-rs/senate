@@ -631,7 +631,10 @@ fn child_line(c: &senate_core::ChildSenate, locale: Locale, now: DateTime<Utc>) 
                 committee: seat.committee.to_string(),
                 name: crate::names::seat_name(
                     locale,
-                    seat.alias.as_ref().unwrap_or(&seat.senator).as_str(),
+                    &seat.alias.as_ref().map_or_else(
+                        || senate_core::alias::short_name(&seat.senator),
+                        ToString::to_string,
+                    ),
                     c.name.as_str(),
                 ),
                 senator: seat.senator.to_string(),

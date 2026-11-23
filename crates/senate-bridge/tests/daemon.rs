@@ -676,7 +676,7 @@ async fn streams_follow_sessions_and_configured_committees() {
         "{text}"
     );
     assert!(text.contains("refund-v2 (file)"));
-    assert!(text.contains("[senator::claude] (harness)"), "{text}");
+    assert!(text.contains("claude (harness)"), "{text}");
 
     // The last session leaves: its committee's stream closes, the configured one stays.
     h.hook(HookKind::SessionEnd, "s", &wd, None).await;

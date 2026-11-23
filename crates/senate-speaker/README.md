@@ -6,7 +6,7 @@ The built-in Speaker: it presides over a Senate, backed by a model, as the only 
 
 ## What it does
 
-- **Interprets** chat addressed to it, with a model or the fixed syntax that always works (`/bind`, `/unbind`, `/tell`, `/status`, `/decide`, `/brief`, `/agents`, `/invite`, `/output`, `/work`, `/reassign`).
+- **Interprets** chat addressed to it, with a model or the fixed syntax that always works (`/bind`, `/unbind`, `/tell`, `/status` (add `--all` for inactive seats), `/decide`, `/brief`, `/agents`, `/invite`, `/output`, `/work`, `/reassign`).
 - **Routes to agents, never guesses them**: "Alice's agent" is a roster lookup; several candidates are settled by what each is doing or by asking. An unaddressed question about a subject goes to the one seat whose duty covers it, here or in a child Senate; questions about the Senate itself it answers directly.
 - **Relays, mirrors and triages** between the log and the chat platform, answers for agents that are away from their checkpoints, and decides what to do with a question for a child Senate that is offline.
 - **Does coding work on request** through [`senate-work`](https://crates.io/crates/senate-work).

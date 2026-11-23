@@ -498,16 +498,21 @@ senate setup clean --yes
 
 ### 3. Session Aliases & TUI Approvals
 
-Give coding sessions readable aliases rather than long cryptographic IDs:
+Use a short role alias for each coding session. Hosted sessions without an
+explicit alias get a name such as `claude1` or `codex2`. Older sessions without
+an alias display the runtime and the first eight hex digits of their ID.
+When an alias names different senators, Senate displays it as `committee::alias`.
+Use `-v` to display complete IDs, which commands also accept.
 
 ```sh
 # Inside a coding session (or via MCP join): name this session reviewer
 senate senator alias reviewer
 
-# From another terminal, name a session by its ID (`senate status --full-ids`)
-senate senator alias reviewer --session <id>
+# Rename an existing senator by its current alias or full senator ID
+senate alias reviewer docs
+senate alias <senator-id> docs --committee refund-v2
 
-# Inspect aliases (each belongs to the committee it was given in)
+# List active senators by committee (add --all for inactive senators)
 senate senator list
 
 # Remove one; nous::main names the alias on one committee
@@ -527,11 +532,16 @@ Senate can run coding agents in terminals it owns, so they keep working when no
 one has them open:
 
 ```sh
-senate spawn claude --alias reviewer   # start one, seated on this committee
+senate committees                      # chairs, active members and pending threads
+senate status --all                     # include inactive entries
+senate spawn claude --alias reviewer    # seat a member on this committee
+senate spawn codex --chair --alias lead # appoint the committee chair
+senate spawn claude --secretary --alias desk # add a Speaker’s desk secretary
 senate attach reviewer                 # open its terminal (Ctrl-] detaches)
-senate session list                    # every hosted session on this machine
+senate session list                    # active hosted sessions on this machine
+senate session list --all               # include stopped and paused sessions
 senate session watch                   # read-only grid of terminals without an interactive viewer
-senate session watch --all             # also show terminals with an interactive viewer
+senate session watch --all             # include attached and inactive sessions
 senate session approve reviewer        # answer its permission prompt (--always, --deny)
 senate session stop reviewer           # end its terminal...
 senate session restore reviewer        # ...and reopen it later
@@ -540,12 +550,18 @@ senate session resume --all            # ...and bring them back where they were
 senate session replace reviewer        # a fresh session takes the seat
 ```
 
+A senator is active while present online or while its hosted terminal is
+running. `senate committees` shows every committee, even without active
+members. The pending column counts the open threads in your inbox for that
+committee. Only the Speaker’s office can appoint a chair or desk secretary
+through `senate spawn`.
+
 `senate session pause` sends each session a Senate note asking it to finish its
 current step and write a checkpoint. It waits up to 90 s for the checkpoint
 (`--timeout` changes that), or until the session has been quiet for 10 s after
 writing it. Then it stops the terminal and records the session as paused. A
-paused seat shows as `paused` in `senate session list`, `senate status`, the
-Speaker's `/status` and the app. Its presence stays `absent`, so the usual away
+paused seat shows as `paused` in `senate session list --all`, `senate status --all`, the
+Speaker's `/status --all` and the app. Its presence stays `absent`, so the usual away
 rules apply, and messages for it wait in the queue. A session someone typed
 into in the last 5 minutes is skipped unless you pass `--force`. `--dry-run`
 lists what would be paused. `senate session resume` restores each paused

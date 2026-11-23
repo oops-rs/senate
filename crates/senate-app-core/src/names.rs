@@ -107,7 +107,10 @@ impl Names {
                     .and_then(|s| s.alias.clone());
                 role(
                     l,
-                    declared.as_ref().unwrap_or(&inner).as_str(),
+                    &declared.as_ref().map_or_else(
+                        || senate_core::alias::short_name(&inner),
+                        ToString::to_string,
+                    ),
                     child.as_str(),
                 )
             }

@@ -400,15 +400,23 @@ pub fn display_event_bylines(
         } else {
             let mut start = 0;
             for found in crate::Mention::scan(line) {
-                let crate::Mention::Senator(primary) = &found.mention else {
-                    continue;
+                let (primary, speaker_for) = match &found.mention {
+                    crate::Mention::Senator(primary) => (primary, false),
+                    crate::Mention::SpeakerFor(primary) => (primary, true),
+                    _ => continue,
                 };
                 let shown = display_name(aliases, Some(committee), primary);
                 if shown == primary.as_str() {
                     continue;
                 }
                 result.push_str(&line[start..found.range.start]);
-                result.push_str(&shown);
+                if speaker_for {
+                    result.push_str("[speaker::");
+                    result.push_str(&shown);
+                    result.push(']');
+                } else {
+                    result.push_str(&shown);
+                }
                 start = found.range.end;
             }
             result.push_str(&line[start..]);

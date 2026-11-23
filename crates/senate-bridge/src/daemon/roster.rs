@@ -25,10 +25,17 @@ impl Shared {
     ) -> Result<RosterCommittee, IpcError> {
         let selector = SessionSelector::default();
         let (chair, presence) =
-            tokio::try_join!(self.api.chair(&committee), self.api.presence(&committee),)
-                .map_err(server_error)?;
-        self.note_chair(&chair);
-        let chair = chair.chair;
+            tokio::join!(self.api.chair(&committee), self.api.presence(&committee));
+        let presence = presence.map_err(server_error)?;
+        let chair = match chair {
+            Ok(info) => {
+                self.note_chair(&info);
+                info.chair
+            }
+            // A committee without an appointed chair was a 404 on older servers.
+            Err(e) if e.status() == Some(404) => self.chair_of(&committee),
+            Err(e) => return Err(server_error(e)),
+        };
         let pending = self
             .on_inbox(&selector, Some(committee.clone()), None, false)
             .await?

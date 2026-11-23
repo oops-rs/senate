@@ -7,8 +7,8 @@ Senate's contracts: everything that crosses a crate or process boundary, defined
 ## What's in it
 
 - **Names and addresses**: committee ids, `seq`, event ids; `SenatorName` (a person such as `wendell` or an agent such as `claude`); `SenatePath` (`acme/north-desk`); addresses (`senator::<name>`, `senator::*`, `speaker`, `committee`, `guest::<platform>/<id>`); qualified locators (`acme/north-desk::ledger::senator::codex`) and in-text mentions (`[senator::claude]`).
-- **Aliases**, each on the committee it was given in, and how a bare or qualified alias resolves.
-- **The roster**: who sits in a Senate, who may act as whom, and what "whichever agent" resolves to.
+- **Aliases**, each on the committee it was given in, with shared input resolution and display formatting.
+- **The roster**: who sits in a Senate, who may act as whom, and what "whichever agent" resolves to. The active roster combines live presence with running hosted sessions.
 - **The event envelope**: the single record of a committee's log, its payloads and shared `meta` keys.
 - **The wire**: the HTTP/SSE API types (`api`) used by the server and every client.
 - **Seams**: the `Hub` trait that components read and write the log through, and the chat-surface seam a platform plugs into.

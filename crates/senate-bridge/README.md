@@ -24,7 +24,8 @@ On macOS, the daemon hosts interactive terminals. To check the loaded job, run
 
 - **Sessions and delivery**: Claude Code, Codex and Antigravity CLI (agy) sessions in a worktree join its committee; messages for an agent are pushed into its session, or held for its next hook.
 - **MCP tools and hooks** the coding agents call: ask, answer, status, checkpoint, join, duty, and the chair's and Speaker's tools for a session that holds those seats.
-- **Hosted sessions**: `senate spawn` starts an agent in a Senate-owned terminal; `senate attach` opens it (`--read-only` to look), and `senate session list|watch|stop|restore` lists them, shows terminals without an interactive viewer side by side (use `watch --all` to include attached sessions), and ends or reopens one.
+- **Roster**. `senate committees` shows every committee, its chair and live state, its active member count, and the number of pending threads in your inbox. `senate status --all` and `senate session list --all` include inactive entries. Use `senate alias <senator> <alias>` to rename an owned session.
+- **Hosted sessions**. `senate spawn` starts an agent in a Senate-owned terminal with a role alias. `--chair` and `--secretary` appoint roles under the Speaker’s office’s authority. `senate attach` opens it (`--read-only` to look), and `senate session list|watch|stop|restore` lists them, shows active terminals without an interactive viewer side by side (`watch --all` includes attached and inactive sessions), and ends or reopens one.
 - **A worktree's `.senate/`** follows its branch.
 
 It runs inside `senated --machine`; depend on this crate to embed the machine side in your own daemon.

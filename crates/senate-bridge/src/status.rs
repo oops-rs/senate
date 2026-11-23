@@ -1323,7 +1323,7 @@ mod tests {
             Terminal::new(80, false),
         );
         assert!(
-            medium.contains("…3e931d") && !medium.contains(id),
+            medium.contains(id) && medium.contains(&format!("codex-{}", &id[..8])),
             "{medium}"
         );
         assert!(medium.contains("目录  /项目/"), "{medium}");

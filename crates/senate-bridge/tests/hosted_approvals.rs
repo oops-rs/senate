@@ -394,7 +394,8 @@ async fn claude_prompt_requires_a_notification_and_the_desk_covers_an_away_chair
                 .socket
                 .with_file_name("approval-hooks.json")
                 .to_str()
-                .unwrap()
+                .unwrap(),
+            "--name=claude1",
         ]
     );
     let overlay: Value = serde_json::from_slice(&std::fs::read(&args[2]).unwrap()).unwrap();
@@ -545,11 +546,11 @@ async fn a_hosted_codex_thread_is_named_after_the_senators_alias() {
         .await
         .unwrap();
     assert_eq!(named(&reviewer.session_id), [json!("reviewer")]);
-    // Without an alias there is no name to give.
+    // A spawn without an explicit alias gives Codex the generated name.
     let plain: SpawnReply = ipc::request(&h.socket(), &spawn(None), WAIT, WAIT)
         .await
         .unwrap();
-    assert!(named(&plain.session_id).is_empty());
+    assert_eq!(named(&plain.session_id), [json!("codex1")]);
     h.stop().await;
 }
 

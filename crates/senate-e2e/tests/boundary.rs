@@ -894,21 +894,22 @@ async fn spawning_checks_scope_and_capacity_on_the_daemon() {
             allowed
         );
     }
-    let spawn = |session, committee, chair| Request::Spawn {
+    let spawn = |session, committee, chair, secretary| Request::Spawn {
         session,
         committee,
         runtime: HostedRuntime::Codex,
         alias: None,
         cwd: dir.path().to_path_buf(),
         chair,
-        secretary: false,
+        secretary,
         prompt: None,
         model: Default::default(),
     };
-    for (session, committee, chair, code, message) in [
+    for (session, committee, chair, secretary, code, message) in [
         (
             "member",
             committee(),
+            false,
             false,
             codes::NOT_CHAIRING,
             "only the Speaker's office or this committee's chair",
@@ -917,6 +918,7 @@ async fn spawning_checks_scope_and_capacity_on_the_daemon() {
             "chair",
             ledger(),
             false,
+            false,
             codes::NOT_PRESIDING,
             "another committee",
         ),
@@ -924,12 +926,14 @@ async fn spawning_checks_scope_and_capacity_on_the_daemon() {
             "chair",
             committee(),
             true,
+            false,
             codes::NOT_PRESIDING,
             "office may start a chair",
         ),
         (
             "chair",
             committee(),
+            false,
             false,
             codes::BAD_REQUEST,
             "hosted session limit (0)",
@@ -938,12 +942,37 @@ async fn spawning_checks_scope_and_capacity_on_the_daemon() {
             "office",
             ledger(),
             true,
+            false,
             codes::BAD_REQUEST,
             "hosted session limit (0)",
         ),
+        (
+            "chair",
+            committee(),
+            false,
+            true,
+            codes::NOT_PRESIDING,
+            "start a chair or secretary",
+        ),
+        (
+            "office",
+            ledger(),
+            false,
+            true,
+            codes::BAD_REQUEST,
+            "hosted session limit (0)",
+        ),
+        (
+            "office",
+            ledger(),
+            true,
+            true,
+            codes::BAD_REQUEST,
+            "choose either chair or secretary",
+        ),
     ] {
         let error = desk
-            .try_ipc::<SpawnReply>(spawn(Laptop::session(session), committee, chair))
+            .try_ipc::<SpawnReply>(spawn(Laptop::session(session), committee, chair, secretary))
             .await
             .unwrap_err();
         assert!(
@@ -952,7 +981,7 @@ async fn spawning_checks_scope_and_capacity_on_the_daemon() {
         );
     }
     let cli = desk
-        .try_ipc::<SpawnReply>(spawn(Default::default(), committee(), false))
+        .try_ipc::<SpawnReply>(spawn(Default::default(), committee(), false, false))
         .await
         .unwrap_err();
     assert!(

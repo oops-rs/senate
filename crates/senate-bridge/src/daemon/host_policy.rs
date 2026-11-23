@@ -218,6 +218,17 @@ impl Shared {
             .await?;
         let mut reply = launch.finish();
         drop(alias_guard);
+        if reply.display_name.is_some() {
+            *lock(&self.display_aliases) = None;
+            self.refresh_display_aliases().await;
+            if let Some((_, aliases)) = lock(&self.display_aliases).as_ref() {
+                reply.display_name = Some(senate_core::alias::display_name(
+                    Some(aliases),
+                    Some(&reply.committee),
+                    &reply.senator,
+                ));
+            }
+        }
         if appoint_chair {
             self.appoint_hosted_chair(&auth, &reply).await?;
         }
