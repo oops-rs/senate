@@ -35,9 +35,9 @@ use crate::host_approval::observed_at;
 use crate::ipc::{self, HostedModel, HostedRuntime, Request};
 use crate::paths::{HOME_ENV, Paths, SOCKET_PATH_LIMIT};
 
-use emulation::{Colors, Emulation};
+use emulation::{Colors, Emulation, Scheme};
 pub use picker::{Choice, pick, pick_session};
-pub use terminal::{attach, remember_terminal};
+pub use terminal::attach;
 
 pub(crate) const START_TIMEOUT: Duration = Duration::from_secs(10);
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
@@ -63,10 +63,10 @@ struct Tty {
 }
 
 impl Tty {
-    fn new(write: OwnedWritePty, colors: Colors, rows: u16, cols: u16) -> Self {
+    fn new(write: OwnedWritePty, scheme: Scheme, rows: u16, cols: u16) -> Self {
         Self {
             write: tokio::sync::Mutex::new(write),
-            emulation: Mutex::new(Emulation::new(colors)),
+            emulation: Mutex::new(Emulation::new(scheme)),
             attached: AtomicBool::new(false),
             screen: Arc::new(watch::Screen::new(rows, cols)),
         }
@@ -92,6 +92,20 @@ impl Tty {
                 && (rows, cols) != self.screen.size()
             {
                 self.resize(rows, cols).await?;
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    async fn follow_appearance(&self) {
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let scheme = emulation::system_scheme().await;
+            let mut write = self.write.lock().await;
+            let report = self.emulation().system(scheme);
+            if !report.is_empty() {
+                let _ =
+                    tokio::time::timeout(Duration::from_millis(250), write.write_all(report)).await;
             }
         }
     }
@@ -503,6 +517,7 @@ pub async fn run(
     let (pty, pts) = pty_process::open()?;
     let (rows, cols) = (24, 80);
     pty.resize(Size::new(rows, cols))?;
+    let scheme = emulation::system_scheme().await;
     let mut child = runtime_command(runtime, cwd, session, id, &dir)?
         .spawn(pts)
         .context("start coding TUI on its PTY")?;
@@ -516,7 +531,7 @@ pub async fn run(
     writeln!(startup_pid, "{pid}")?;
     drop(startup_pid);
     let (mut pty_read, pty_write) = pty.into_split();
-    let tty = Arc::new(Tty::new(pty_write, Colors::load(paths), rows, cols));
+    let tty = Arc::new(Tty::new(pty_write, scheme, rows, cols));
     // Watchers come and go beside the one viewer; see `watch`.
     let watch_socket = dir.join(watch::SOCKET);
     let watchers = UnixListener::bind(&watch_socket).context("listen for terminal watchers")?;
@@ -532,8 +547,7 @@ pub async fn run(
             while let Ok(n @ 1..) = pty_read.read(&mut buf).await {
                 // A TUI asks its terminal for its colours as it starts,
                 // before anyone can have attached to answer.
-                let attached = tty.attached.load(Ordering::Acquire);
-                let answer = tty.emulation().output(&buf[..n], attached);
+                let (answer, display) = tty.emulation().route(&buf[..n]);
                 if !answer.is_empty() {
                     // An answer the TUI does not read must not stop its
                     // output being drained.
@@ -541,15 +555,17 @@ pub async fn run(
                     match tokio::time::timeout(Duration::from_millis(250), write).await {
                         Ok(Ok(())) => {}
                         Ok(Err(error)) => {
-                            tracing::debug!(%error, "answering the coding TUI for an absent terminal")
+                            tracing::debug!(%error, "answering a coding TUI terminal query")
                         }
                         Err(_) => {
                             tracing::debug!("the coding TUI did not take its terminal's answer")
                         }
                     }
                 }
-                tty.screen.output(&buf[..n]);
-                let _ = feed.send(buf[..n].to_vec());
+                if !display.is_empty() {
+                    tty.screen.output(&display);
+                    let _ = feed.send(display);
+                }
             }
         }
     });
@@ -603,6 +619,11 @@ pub async fn run(
         tracing::warn!(%error, "clearing the host's startup marker");
     }
 
+    #[cfg(target_os = "macos")]
+    let appearance = tokio::spawn({
+        let tty = tty.clone();
+        async move { tty.follow_appearance().await }
+    });
     let mut stop = None;
     let result = tokio::select! {
         biased;
@@ -625,6 +646,8 @@ pub async fn run(
         }
     };
     pump.abort();
+    #[cfg(target_os = "macos")]
+    appearance.abort();
     // The runtime's normal SessionEnd hook usually gets there first. A
     // crash or stop without that hook must also retire this session.
     let end = Request::HostedSessionEnd {
@@ -1175,6 +1198,14 @@ async fn serve(
             }
         }
         tty.attached.store(false, Ordering::Release);
+        {
+            let mut write = tty.write.lock().await;
+            let report = tty.emulation().detach();
+            if !report.is_empty() {
+                let _ =
+                    tokio::time::timeout(Duration::from_millis(250), write.write_all(report)).await;
+            }
+        }
         // The viewer held the size; what watchers asked for applies again.
         tty.screen.refit();
         let mut viewer = Viewer::lock(viewer);
@@ -1244,9 +1275,10 @@ async fn relay(
                     input.read_exact(&mut keys[..n]).await?;
                     let colors: Colors = serde_json::from_slice(&keys[..n])
                         .context("unreadable terminal colours")?;
+                    let mut write = tty.write.lock().await;
                     let report = tty.emulation().viewer(colors);
                     if !report.is_empty() {
-                        tty.write.lock().await.write_all(report).await?;
+                        write.write_all(report).await?;
                     }
                 }
                 KEYS => {
@@ -1391,7 +1423,7 @@ mod tests {
     async fn a_viewer_can_answer_a_tui_query_without_reporting_human_input() {
         let (pty, _pts) = pty_process::open().unwrap();
         let (_read, write) = pty.into_split();
-        let tty = Tty::new(write, Colors::default(), 24, 80);
+        let tty = Tty::new(write, Scheme::Light, 24, 80);
         let (output, _) = broadcast::channel(1);
         let dir = tempfile::tempdir().unwrap();
         let activity = Mutex::new(Viewer {

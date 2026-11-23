@@ -295,6 +295,7 @@ fn at(out: &mut String, row: u16, col: u16) {
 fn color(out: &mut String, color: vt100::Color, foreground: bool) {
     let base = if foreground { 38 } else { 48 };
     match color {
+        // Each cell style starts with SGR 0, which restores the viewer defaults.
         vt100::Color::Default => {}
         vt100::Color::Idx(n) => {
             let _ = write!(out, ";{base};5;{n}");
@@ -987,6 +988,9 @@ mod tests {
             !terminal.screen().cell(1, 0).unwrap().bold(),
             "line 1 is plain"
         );
+        let plain = terminal.screen().cell(1, 0).unwrap();
+        assert_eq!(plain.fgcolor(), vt100::Color::Default);
+        assert_eq!(plain.bgcolor(), vt100::Color::Default);
     }
 
     /// A tile showing `text`, with no host behind it.

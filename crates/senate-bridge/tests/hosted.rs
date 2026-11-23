@@ -283,19 +283,6 @@ done
     // The TUI is told the senator's alias as its own session name.
     assert!(args.contains(&"--name=fixture".to_owned()), "{args:?}");
     attach(&h, launched.senator.as_str(), b"\x1b[93;5u").await;
-    // The attach client recorded what its terminal said, for hosts that
-    // start later with nobody attached.
-    let recorded: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(h.paths.home().join("terminal.json")).unwrap())
-            .unwrap();
-    assert_eq!(
-        recorded,
-        serde_json::json!({
-            "foreground": "rgb:4c4c/4f4f/6969",
-            "background": "rgb:efef/f1f1/f5f5",
-            "scheme": "light",
-        })
-    );
     assert!(socket.exists());
 
     h.stop().await;
@@ -464,12 +451,6 @@ async fn a_hosted_tui_learns_the_colours_of_the_persons_terminal() {
 
     let root = tempfile::tempdir_in("/tmp").unwrap();
     let paths = senate_bridge::Paths::new(root.path());
-    // What `senate spawn` or an earlier `senate attach` left on record.
-    std::fs::write(
-        root.path().join("terminal.json"),
-        r#"{"foreground":"rgb:4c4c/4f4f/6969","background":"rgb:efef/f1f1/f5f5","scheme":"light"}"#,
-    )
-    .unwrap();
     let id = senate_core::EventId::new();
     let directory = root.path().join("hosts").join(id.to_string());
     std::fs::create_dir_all(&directory).unwrap();
@@ -516,12 +497,20 @@ sleep 300
     let mut publication = child.stdin.take().unwrap();
     publication.write_all(&[1]).await.unwrap();
 
-    // Nobody was attached: the host answered from the record.
+    // Nobody was attached: the host answered with a system palette.
     let background = eventually("the startup colour answer", TIMEOUT, || {
         std::fs::read(root.path().join("background")).ok()
     })
     .await;
-    assert_eq!(background, b"\x1b]11;rgb:efef/f1f1/f5f5\x1b\\");
+    assert!(
+        [
+            b"\x1b]11;rgb:efef/f1f1/f5f5\x1b\\",
+            b"\x1b]11;rgb:1e1e/1e1e/1e1e\x1b\\",
+        ]
+        .iter()
+        .any(|color| background == *color),
+        "{background:?}"
+    );
     let attributes = eventually("the device attributes answer", TIMEOUT, || {
         std::fs::read(root.path().join("attributes")).ok()
     })

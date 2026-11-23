@@ -281,35 +281,8 @@ impl Drop for RawTerminal {
     }
 }
 
-/// Record what the calling terminal looks like, for a host that starts with
-/// nobody attached. Does nothing when not run from a terminal.
-pub async fn remember_terminal(paths: &Paths) {
-    let stdin = io::stdin();
-    // Leave the terminal alone unless this is a person's foreground command
-    // on a terminal that can answer: changing its modes from the background
-    // would stop the job.
-    let foreground =
-        rustix::termios::tcgetpgrp(&stdin).is_ok_and(|group| group == rustix::process::getpgrp());
-    if !foreground || std::env::var_os("TERM").is_some_and(|term| term == "dumb") {
-        return;
-    }
-    let Ok(terminal) = RawTerminal::open(false).await else {
-        return;
-    };
-    // Anything already typed or pasted belongs to the shell. Reading the
-    // answers would take it too, so do without them this once.
-    if rustix::io::ioctl_fionread(&terminal.input.get_ref().file).unwrap_or(1) != 0 {
-        return;
-    }
-    let (colors, _) = terminal.colors().await;
-    drop(terminal);
-    if let Err(error) = colors.save(paths) {
-        tracing::debug!(%error, "recording the terminal's colours");
-    }
-}
-
 /// Attach until Ctrl-], the person closes the terminal, or the host exits.
-pub async fn attach(path: &Path, paths: &Paths) -> anyhow::Result<()> {
+pub async fn attach(path: &Path, _paths: &Paths) -> anyhow::Result<()> {
     ensure!(
         crate::testenv::confined(path),
         "terminal socket is outside the test directory"
@@ -331,19 +304,16 @@ pub async fn attach(path: &Path, paths: &Paths) -> anyhow::Result<()> {
     let mut interrupt = signal(SignalKind::interrupt())?;
     let terminal = RawTerminal::open(true).await?;
     let (colors, typed) = terminal.colors().await;
-    if let Err(error) = colors.save(paths) {
-        tracing::debug!(%error, "recording the terminal's colours");
-    }
     let (mut screen, mut keys) = stream.into_split();
 
     let to_host = async {
-        terminal.size(&mut keys).await?;
         if takes_colors {
             let colors = serde_json::to_vec(&colors)?;
             keys.write_u8(COLORS).await?;
             keys.write_u16(u16::try_from(colors.len())?).await?;
             keys.write_all(&colors).await?;
         }
+        terminal.size(&mut keys).await?;
         let mut input = [0u8; IO_CHUNK];
         let mut pending = typed;
         loop {

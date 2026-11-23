@@ -1327,14 +1327,6 @@ fn host_call<T: serde::de::DeserializeOwned>(request: &Request) -> anyhow::Resul
     ))?)
 }
 
-/// A host starts with nobody attached. Leave it what this terminal looks
-/// like, so the TUI's first questions about colours have an answer.
-fn remember_terminal() -> anyhow::Result<()> {
-    let paths = Paths::from_env()?;
-    runtime(false)?.block_on(crate::host::remember_terminal(&paths));
-    Ok(())
-}
-
 /// `spawn` and `restore`: stdout carries the senator's name alone, for a
 /// script to capture; a person at a terminal is also told the next step.
 /// What an interactive command names: a bare alias several agents have is
@@ -2526,7 +2518,6 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
                 anyhow::bail!("the prompt is empty");
             }
             let committee = runtime(false)?.block_on(committee_here(committee))?;
-            remember_terminal()?;
             launch(
                 &Request::Spawn {
                     runtime: harness,
@@ -2793,14 +2784,10 @@ fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
             let Some(selector) = pause_selector(which, true)? else {
                 return Ok(());
             };
-            if !dry_run {
-                remember_terminal()?;
-            }
             runtime(false)?.block_on(resume_sessions(&paths, &selector, dry_run, locale))
         }
         SessionCmd::Restore { senator, model } => {
             let senator = pick_alias(senator)?;
-            remember_terminal()?;
             launch(
                 &Request::Restore {
                     senator,
@@ -2827,7 +2814,6 @@ fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
                 anyhow::bail!("the prompt is empty");
             }
             let senator = pick_alias(senator)?;
-            remember_terminal()?;
             let paths = Paths::from_env()?;
             let locale = BridgeConfig::locale_at(&paths.config());
             let reply: crate::ipc::ReplaceReply = runtime(false)?.block_on(ipc::request(
