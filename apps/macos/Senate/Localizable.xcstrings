@@ -3036,6 +3036,23 @@
         }
       }
     },
+    "sidebar.committees_menu": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Committee options"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "委员会选项"
+          }
+        }
+      }
+    },
     "sidebar.next_session": {
       "extractionState": "manual",
       "localizations": {
@@ -3186,6 +3203,23 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "sidebar.watch_help": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Every hosted terminal side by side, in Terminal (senate session watch)"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在终端里并排查看所有托管终端（senate session watch）"
           }
         }
       }

@@ -1,95 +1,161 @@
 #!/usr/bin/env swift
-// Draws the Senate app icon (a columned hall on a deep-blue tile) into
-// Senate/Assets.xcassets/AppIcon.appiconset, every size macOS asks for.
-// Plain Core Graphics paths: no symbol font or bitmap goes into the icon.
+// Draws the Senate app icon, the chamber: a hemicycle of seats seen from
+// above, three rows fading outward, the Speaker's seat lit at the centre of
+// the floor. It follows the system's appearance: ink-navy seats and a
+// vermilion Speaker on paper in light, white seats and an amber Speaker on
+// ink navy in dark.
+//
+// It writes an Icon Composer document, Senate/AppIcon.icon: the mark as one
+// transparent layer per appearance (Assets/) and icon.json, which sets each
+// appearance's ground and the layer to use; the system draws the macOS
+// tile, its shape and its shadow. Plain Core Graphics: no symbol font or
+// bitmap goes into the mark. Also writes docs/screenshots/icon.png (both
+// appearances side by side) when `ictool` from Icon Composer is installed.
 //
 // Usage, from apps/macos/: scripts/make-icon.swift
 import AppKit
 import Foundation
 
 let here = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
-let set = here.deletingLastPathComponent()
-    .appendingPathComponent("Senate/Assets.xcassets/AppIcon.appiconset")
-try FileManager.default.createDirectory(at: set, withIntermediateDirectories: true)
+let app = here.deletingLastPathComponent()
+let doc = app.appendingPathComponent("Senate/AppIcon.icon")
+let assets = doc.appendingPathComponent("Assets")
+try? FileManager.default.removeItem(at: doc)
+try FileManager.default.createDirectory(at: assets, withIntermediateDirectories: true)
+let space = CGColorSpace(name: CGColorSpace.sRGB)!
 
-func draw(_ px: Int) -> Data {
+struct RGB {
+    let r, g, b: CGFloat
+    init(_ hex: UInt32) {
+        r = CGFloat((hex >> 16) & 0xFF) / 255
+        g = CGFloat((hex >> 8) & 0xFF) / 255
+        b = CGFloat(hex & 0xFF) / 255
+    }
+    func cg(_ a: CGFloat = 1) -> CGColor { CGColor(red: r, green: g, blue: b, alpha: a) }
+    /// As icon.json writes a colour.
+    var json: String { String(format: "srgb:%.5f,%.5f,%.5f,1.00000", r, g, b) }
+}
+
+/// One appearance: the ground's gradient, the seats (rows fading outward
+/// by `fade`), the Speaker's seat.
+struct Look {
+    let top, bottom, seats, speaker: RGB
+    let fade: [CGFloat]
+}
+let light = Look(top: RGB(0xFCFBF7), bottom: RGB(0xEAE6DC), seats: RGB(0x1C2A55), speaker: RGB(0xE4572E),
+                 fade: [1, 0.74, 0.52])
+let dark = Look(top: RGB(0x1E2A4A), bottom: RGB(0x0B1124), seats: RGB(0xFFFFFF), speaker: RGB(0xFFB547),
+                fade: [1, 0.82, 0.64])
+
+/// The mark alone, on a transparent 1024 canvas (the canvas is the tile):
+/// drawn on a 100-unit grid, y up, then scaled to 76 % and centred, which
+/// leaves it the margin system icons keep inside the tile.
+func mark(_ look: Look, _ px: Int = 1024) -> CGImage {
     let s = CGFloat(px)
-    let space = CGColorSpace(name: CGColorSpace.sRGB)!
-    let ctx = CGContext(
-        data: nil, width: px, height: px, bitsPerComponent: 8, bytesPerRow: 0,
-        space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-    )!
-    // The macOS icon grid: an 824/1024 tile with a 185/1024 corner radius.
-    let inset = s * 100 / 1024
-    let tile = CGRect(x: inset, y: inset, width: s - 2 * inset, height: s - 2 * inset)
-    let radius = s * 185 / 1024
-    let path = CGPath(roundedRect: tile, cornerWidth: radius, cornerHeight: radius, transform: nil)
-
-    // A soft shadow under the tile.
-    ctx.saveGState()
-    ctx.setShadow(offset: CGSize(width: 0, height: -s * 10 / 1024), blur: s * 24 / 1024,
-                  color: CGColor(gray: 0, alpha: 0.35))
-    ctx.addPath(path)
-    ctx.setFillColor(CGColor(red: 0.10, green: 0.16, blue: 0.36, alpha: 1))
-    ctx.fillPath()
-    ctx.restoreGState()
-
-    // Deep blue, lighter at the top.
-    ctx.saveGState()
-    ctx.addPath(path)
-    ctx.clip()
-    let gradient = CGGradient(colorsSpace: space, colors: [
-        CGColor(red: 0.27, green: 0.40, blue: 0.78, alpha: 1),
-        CGColor(red: 0.09, green: 0.14, blue: 0.34, alpha: 1),
-    ] as CFArray, locations: [0, 1])!
-    ctx.drawLinearGradient(gradient, start: CGPoint(x: 0, y: tile.maxY),
-                           end: CGPoint(x: 0, y: tile.minY), options: [])
-    ctx.restoreGState()
-
-    // The hall, in warm white: pediment, frieze, four columns, steps.
-    let ink = CGColor(red: 0.98, green: 0.95, blue: 0.88, alpha: 1)
-    ctx.setFillColor(ink)
-    let u = tile.width / 100
-    let x0 = tile.minX, y0 = tile.minY
-    func rect(_ x: CGFloat, _ y: CGFloat, _ w: CGFloat, _ h: CGFloat) {
-        ctx.fill(CGRect(x: x0 + x * u, y: y0 + y * u, width: w * u, height: h * u))
+    let ctx = CGContext(data: nil, width: px, height: px, bitsPerComponent: 8, bytesPerRow: 0,
+                        space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+    let k: CGFloat = 0.76
+    let u = s * k / 100
+    // The mark spans y 17…71.75 on its grid: centre that on the canvas.
+    let dx = s * (1 - k) / 2, dy = s / 2 - 44.4 * u
+    func P(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: dx + x * u, y: dy + y * u) }
+    let centre = P(50, 27)
+    ctx.setLineCap(.butt)
+    ctx.setLineWidth(7.5 * u)
+    // Three rows of seats around the floor, the same gap between seats in
+    // every row.
+    for (row, (radius, seats)) in [(19.0, 4), (30.0, 6), (41.0, 8)].enumerated() {
+        ctx.setStrokeColor(look.seats.cg(look.fade[row]))
+        let gap = 0.16 / (radius / 19)
+        let span = Double.pi / Double(seats)
+        for i in 0..<seats {
+            let a0 = Double(i) * span + gap / 2, a1 = Double(i + 1) * span - gap / 2
+            ctx.addArc(center: centre, radius: CGFloat(radius) * u,
+                       startAngle: CGFloat(a0), endAngle: CGFloat(a1), clockwise: false)
+            ctx.strokePath()
+        }
     }
-    // Pediment.
-    ctx.move(to: CGPoint(x: x0 + 18 * u, y: y0 + 66 * u))
-    ctx.addLine(to: CGPoint(x: x0 + 50 * u, y: y0 + 84 * u))
-    ctx.addLine(to: CGPoint(x: x0 + 82 * u, y: y0 + 66 * u))
-    ctx.closePath()
+    // The Speaker, at the centre of the floor.
+    ctx.setFillColor(look.speaker.cg())
+    ctx.fillEllipse(in: CGRect(x: centre.x - 6 * u, y: centre.y - 6 * u, width: 12 * u, height: 12 * u))
+    // The floor's edge.
+    ctx.setFillColor(look.seats.cg(look.fade[1]))
+    let floor = CGRect(origin: P(14, 17), size: CGSize(width: 72 * u, height: 3.5 * u))
+    ctx.addPath(CGPath(roundedRect: floor, cornerWidth: 1.75 * u, cornerHeight: 1.75 * u, transform: nil))
     ctx.fillPath()
-    // Frieze.
-    rect(20, 60, 60, 4.5)
-    // Columns.
-    for x in [25.0, 39.0, 53.0, 67.0] {
-        rect(x, 30, 8, 28)
-        rect(x - 1.5, 56, 11, 2.5)   // capital
-        rect(x - 1.5, 28, 11, 2.5)   // base
-    }
-    // Steps.
-    rect(19, 22, 62, 4.5)
-    rect(15, 16, 70, 4.5)
-
-    let image = ctx.makeImage()!
-    return NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])!
+    return ctx.makeImage()!
 }
 
-var images: [[String: String]] = []
-for points in [16, 32, 128, 256, 512] {
-    for scale in [1, 2] {
-        let px = points * scale
-        let name = "icon_\(points)x\(points)\(scale == 2 ? "@2x" : "").png"
-        try draw(px).write(to: set.appendingPathComponent(name))
-        images.append([
-            "idiom": "mac", "size": "\(points)x\(points)", "scale": "\(scale)x", "filename": name,
-        ])
-    }
+func png(_ image: CGImage, _ url: URL) throws {
+    try NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])!.write(to: url)
 }
-let contents: [String: Any] = ["images": images, "info": ["author": "xcode", "version": 1]]
-try JSONSerialization.data(withJSONObject: contents, options: [.prettyPrinted, .sortedKeys])
-    .write(to: set.appendingPathComponent("Contents.json"))
-let catalog = set.deletingLastPathComponent().appendingPathComponent("Contents.json")
-try #"{ "info" : { "author" : "xcode", "version" : 1 } }"#.write(to: catalog, atomically: true, encoding: .utf8)
-print("make-icon: wrote \(set.path)")
+
+try png(mark(light), assets.appendingPathComponent("chamber-light.png"))
+try png(mark(dark), assets.appendingPathComponent("chamber-dark.png"))
+
+func gradient(_ look: Look) -> [String: Any] {
+    ["linear-gradient": [look.top.json, look.bottom.json], "orientation": ["start": ["x": 0.5, "y": 0], "stop": ["x": 0.5, "y": 0.7]]]
+}
+let icon: [String: Any] = [
+    "fill-specializations": [
+        ["value": gradient(light)],
+        ["appearance": "dark", "value": gradient(dark)],
+    ],
+    "groups": [[
+        "layers": [[
+            "name": "chamber",
+            // No plain `image-name`: with one, Icon Composer's renderer
+            // ignores the dark specialization.
+            "image-name-specializations": [
+                ["value": "chamber-light.png"],
+                ["appearance": "dark", "value": "chamber-dark.png"],
+            ],
+            "glass": false,
+        ]],
+        "shadow": ["kind": "neutral", "opacity": 0.5],
+        "translucency": ["enabled": false, "value": 0.5],
+        "specular": false,
+    ]],
+    "supported-platforms": ["squares": ["macOS"]],
+]
+try JSONSerialization.data(withJSONObject: icon, options: [.prettyPrinted, .sortedKeys])
+    .write(to: doc.appendingPathComponent("icon.json"))
+print("make-icon: wrote \(doc.path)")
+
+// docs/screenshots/icon.png: the icon as macOS renders it, light and dark.
+let ictool = "/Applications/Xcode.app/Contents/Applications/Icon Composer.app/Contents/Executables/ictool"
+guard FileManager.default.isExecutableFile(atPath: ictool) else {
+    print("make-icon: no ictool (Icon Composer); docs/screenshots/icon.png left as it is")
+    exit(0)
+}
+let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("senate-icon-\(getpid())")
+try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+var rendered: [CGImage] = []
+for rendition in ["Default", "Dark"] {
+    let file = tmp.appendingPathComponent("\(rendition).png")
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: ictool)
+    p.arguments = [doc.path, "--export-image", "--output-file", file.path, "--platform", "macOS",
+                   "--rendition", rendition, "--width", "512", "--height", "512", "--scale", "1"]
+    try p.run()
+    p.waitUntilExit()
+    guard p.terminationStatus == 0, let image = NSImage(contentsOf: file)?
+        .cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+        print("make-icon: ictool could not render \(rendition)")
+        exit(1)
+    }
+    rendered.append(image)
+}
+let W = 1104, H = 552
+let sheet = CGContext(data: nil, width: W, height: H, bitsPerComponent: 8, bytesPerRow: 0,
+                      space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+sheet.setFillColor(RGB(0xF1F1F0).cg())
+sheet.fill(CGRect(x: 0, y: 0, width: W / 2, height: H))
+sheet.setFillColor(RGB(0x1C1C1E).cg())
+sheet.fill(CGRect(x: W / 2, y: 0, width: W / 2, height: H))
+for (i, image) in rendered.enumerated() {
+    sheet.draw(image, in: CGRect(x: 20 + i * W / 2, y: 20, width: 512, height: 512))
+}
+try png(sheet.makeImage()!, app.appendingPathComponent("docs/screenshots/icon.png"))
+try? FileManager.default.removeItem(at: tmp)
+print("make-icon: wrote docs/screenshots/icon.png")
