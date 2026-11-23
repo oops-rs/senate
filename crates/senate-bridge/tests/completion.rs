@@ -42,6 +42,9 @@ async fn complete(home: &Path, shell: &str, words: &[&str]) -> String {
 #[tokio::test]
 async fn bash_zsh_and_fish_complete_the_same_cli_and_live_choices() {
     let home = tempfile::tempdir_in("/tmp").unwrap();
+    let paired = home.path().join("remote/machines");
+    std::fs::create_dir_all(&paired).unwrap();
+    std::fs::write(paired.join("wyak.json"), "{}").unwrap();
     let listener = tokio::net::UnixListener::bind(home.path().join("bridge.sock")).unwrap();
     let daemon = tokio::spawn(async move {
         while let Ok((socket, _)) = listener.accept().await {
@@ -67,6 +70,15 @@ async fn bash_zsh_and_fish_complete_the_same_cli_and_live_choices() {
         }
     });
     for shell in ["bash", "zsh", "fish"] {
+        assert!(
+            complete(
+                home.path(),
+                shell,
+                &["senate", "session", "list", "--machine", "w"]
+            )
+            .await
+            .contains("wyak")
+        );
         assert!(
             complete(home.path(), shell, &["senate", "spa"])
                 .await

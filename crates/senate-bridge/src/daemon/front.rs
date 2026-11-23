@@ -21,6 +21,7 @@ use crate::ipc::{DocketReply, PresidesReply, Presiding, SenateDocket};
 
 pub(crate) struct Front {
     senates: Vec<Arc<Shared>>,
+    pub(super) remote: Option<Arc<crate::remote::Service>>,
     relay: Arc<Relay>,
     watch: broadcast::Sender<WatchEvent>,
     /// Watch clients that show notifications themselves, connected now.
@@ -35,6 +36,7 @@ impl Front {
         app_clients: Arc<std::sync::atomic::AtomicUsize>,
     ) -> Self {
         Self {
+            remote: None,
             senates: vec![senate],
             relay,
             watch,
@@ -90,6 +92,9 @@ impl Front {
 
     pub(crate) async fn dispatch(self: &Arc<Self>, request: Request) -> Reply {
         match request {
+            Request::RemoteControl { .. } => Reply::err(IpcError::bad_request(
+                "remote control requires the local person socket",
+            )),
             Request::Status => {
                 // The office, the chairs and the children as the server says
                 // now, bounded: a server that does not answer leaves what

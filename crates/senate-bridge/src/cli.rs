@@ -13,6 +13,8 @@ mod cli_help;
 mod cli_legacy;
 #[path = "cli_secretary.rs"]
 mod cli_secretary;
+#[path = "cli_remote.rs"]
+mod remote_cli;
 
 use std::io::{Read, Write};
 #[path = "cli_completion.rs"]
@@ -581,6 +583,9 @@ stdin.")]
     /// the session, its size is left as it is, and any number of people can
     /// look at once, beside whoever is attached. It never starts a session. Ctrl-] leaves.
     Attach {
+        /// Connect to an already-running session on a paired machine.
+        #[arg(long, add = ArgValueCandidates::new(remote_cli::complete_machines))]
+        machine: Option<Name>,
         /// The senator's primary name or alias (`committee::alias` for an
         /// alias on one committee). Without one, choose a hosted session
         /// from a list (in a terminal).
@@ -723,6 +728,12 @@ enum SessionCmd {
     /// committee, runtime, model, state, uptime, who is at its terminal,
     /// and directory.
     List {
+        /// List hosted sessions on this paired machine.
+        #[arg(long, conflicts_with = "all_machines", add = ArgValueCandidates::new(remote_cli::complete_machines))]
+        machine: Option<Name>,
+        /// List this machine and every paired machine.
+        #[arg(long)]
+        all_machines: bool,
         /// Include stopped hosted sessions.
         #[arg(long)]
         all: bool,
@@ -736,6 +747,9 @@ enum SessionCmd {
     /// tile's session (detaching comes back to the grid); q or Ctrl-]
     /// leaves.
     Watch {
+        /// Watch hosted sessions on this paired machine.
+        #[arg(long, add = ArgValueCandidates::new(remote_cli::complete_machines))]
+        machine: Option<Name>,
         /// Include stopped sessions and those with an interactive viewer attached.
         #[arg(long)]
         all: bool,
@@ -986,6 +1000,11 @@ struct SeatArgs {
 
 #[derive(Subcommand)]
 enum SetupCmd {
+    /// Pair and administer direct remote machines.
+    Remote {
+        #[command(subcommand)]
+        command: remote_cli::Command,
+    },
     /// Print shell completion registration for sourcing.
     Completions {
         /// Shell to register with (zsh, bash or fish).
@@ -3324,10 +3343,22 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             )
         }
         Cmd::Attach {
+            machine,
             senator,
             session,
             read_only,
         } => {
+            if let Some(machine) = machine {
+                let target = session
+                    .or_else(|| senator.map(|name| name.to_string()))
+                    .context("remote attach needs a session name")?;
+                return runtime(false)?.block_on(remote_cli::attach(
+                    &Paths::from_env()?,
+                    &machine,
+                    &target,
+                    read_only,
+                ));
+            }
             let (target, label) = match (session, senator) {
                 (Some(session_id), _) => (ipc::AttachTarget::Session { session_id }, None),
                 (None, Some(name)) => (
@@ -3542,28 +3573,50 @@ const REPLACE_TIMEOUT: Duration = Duration::from_secs(300);
 
 fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
     match command {
-        SessionCmd::List { all } => {
+        SessionCmd::List {
+            all,
+            machine,
+            all_machines,
+        } => {
             let paths = Paths::from_env()?;
+            if let Some(machine) = machine {
+                return runtime(false)?.block_on(remote_cli::print_machine(&paths, &machine, all));
+            }
+            if all_machines {
+                println!("local:");
+            }
             let locale = BridgeConfig::locale_at(&paths.config());
             let rt = runtime(false)?;
-            let mut reply: crate::ipc::SessionsReply =
-                rt.block_on(daemon_call(&paths, &Request::Sessions))?;
-            if !all {
-                reply.rows.retain(ipc::SessionRow::is_active);
+            let local: anyhow::Result<crate::ipc::SessionsReply> =
+                rt.block_on(daemon_call(&paths, &Request::Sessions));
+            match local {
+                Ok(mut reply) => {
+                    if !all {
+                        reply.rows.retain(ipc::SessionRow::is_active);
+                    }
+                    println!(
+                        "{}",
+                        crate::sessions::render_with_ids(
+                            &reply,
+                            chrono::Utc::now(),
+                            locale,
+                            output.verbose
+                        )
+                    );
+                }
+                Err(error) if all_machines => println!("  unreachable: {error}"),
+                Err(error) => return Err(error),
             }
-            println!(
-                "{}",
-                crate::sessions::render_with_ids(
-                    &reply,
-                    chrono::Utc::now(),
-                    locale,
-                    output.verbose
-                )
-            );
+            if all_machines {
+                rt.block_on(remote_cli::print_all(&paths, all));
+            }
             Ok(())
         }
-        SessionCmd::Watch { all } => {
+        SessionCmd::Watch { all, machine } => {
             let paths = Paths::from_env()?;
+            if let Some(machine) = machine {
+                return runtime(false)?.block_on(remote_cli::watch(&paths, machine, all));
+            }
             let locale = BridgeConfig::locale_at(&paths.config());
             runtime(false)?.block_on(crate::host::view::watch_all(&paths, all, || {
                 let paths = paths.clone();
@@ -3927,6 +3980,7 @@ fn run_setup(command: SetupCmd, output: Output) -> anyhow::Result<()> {
     let Output { terminal, verbose } = output;
     match command {
         SetupCmd::Completions { shell } => completion::register(shell),
+        SetupCmd::Remote { command } => remote_cli::run(command),
         SetupCmd::Init {
             local,
             person,
