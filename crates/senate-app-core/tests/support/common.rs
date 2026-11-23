@@ -20,7 +20,8 @@ use senate_bridge::approvals::{Approval, ApprovalKind, ResolvedBy};
 use senate_bridge::ipc::{
     ApprovalsReply, ApproveReply, CommitteeStatus, DocketReply, HostState, HostedModel,
     HostedPrompt, InboxReply, IpcError, Posted, Reply, Request, SenateDocket, SessionRow,
-    SessionsReply, StatusReply, StreamState, ThreadReply, WatchEvent,
+    SessionsReply, StatusReply, StreamState, ThreadReply, TimelineDirection, TimelineItem,
+    TimelineKind, TimelineReply, TimelineUpdate, WatchEvent,
 };
 use senate_bridge::session::{Runtime, Session, SessionState};
 use senate_bridge::state::QueueCounts;
@@ -310,6 +311,21 @@ pub struct World {
     pub aliases: Option<senate_core::alias::KnownAliases>,
     /// The `roster` reply: empty unless a world sets one.
     pub roster: Vec<senate_bridge::ipc::RosterCommittee>,
+    /// Each session's timeline, by session id ([`crate::timelines`]).
+    pub timelines: std::collections::BTreeMap<String, Vec<TimelineItem>>,
+    /// What a watched timeline does next, by session id: one step each
+    /// [`World::grow_every`].
+    pub growth: std::collections::BTreeMap<String, std::collections::VecDeque<Growth>>,
+    /// How often a watched timeline grows; `None`: never (the tests).
+    pub grow_every: Option<std::time::Duration>,
+}
+
+/// One step of a watched timeline: an item appended, or one replaced in
+/// place (a tool call that completes), and whether the runtime still works.
+#[derive(Debug, Clone)]
+pub struct Growth {
+    pub item: TimelineItem,
+    pub working: bool,
 }
 
 impl World {
@@ -340,6 +356,9 @@ impl World {
             committee_of: Default::default(),
             aliases: None,
             roster: Vec::new(),
+            timelines: Default::default(),
+            growth: Default::default(),
+            grow_every: None,
         }
     }
 }
@@ -438,6 +457,11 @@ async fn serve(conn: UnixStream, world: Arc<Mutex<World>>, events: broadcast::Se
                     return;
                 }
             }
+            return;
+        }
+        if let Request::TimelineWatch { session_id, after } = &request {
+            world.lock().unwrap().requests.push(request.clone());
+            watch_timeline(&world, session_id, *after, &mut w).await;
             return;
         }
         let reply = handle(&world, &events, request);
@@ -573,6 +597,84 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
             Reply::ok(&senate_core::alias::KnownAliases::Scoped(table))
         }
         Request::Sessions => Reply::ok(&w.sessions),
+        Request::Timeline {
+            session_id,
+            direction,
+            cursor,
+            limit,
+        } => timeline_page(&w, &session_id, direction, cursor, limit),
+        Request::Say {
+            committee: Some(c),
+            to,
+            body,
+            ..
+        } => {
+            // Delivered to the session it names: its timeline shows it.
+            let ids: Vec<String> = w
+                .sessions
+                .rows
+                .iter()
+                .map(|r| (r.session_id.clone(), r.primary.clone()))
+                .chain(
+                    w.sessions
+                        .local_rows
+                        .iter()
+                        .map(|r| (r.session_id.clone(), r.primary.clone())),
+                )
+                .filter(|(_, p)| to.iter().any(|a| a.as_senator() == Some(p)))
+                .map(|(id, _)| id)
+                .collect();
+            for id in ids {
+                let items = w.timelines.entry(id).or_default();
+                let seq = items.last().map_or(1, |i| i.seq + 1);
+                items.push(item(
+                    seq,
+                    0,
+                    TimelineKind::SenateMessage {
+                        committee: Some(c.to_string()),
+                        seq: Some(300),
+                        thread: Some(300),
+                        from: Some("senator::alice".into()),
+                        kind: Some("note".into()),
+                        text: body.clone(),
+                    },
+                ));
+            }
+            Reply::ok(&Posted {
+                committee: c,
+                seq: Seq(300),
+                to,
+                thread: None,
+                duplicate: false,
+                unseen_escalation: None,
+            })
+        }
+        Request::Pause { senator, .. } => {
+            let label = senator.to_string();
+            match w.sessions.rows.iter_mut().find(|r| r.label() == label) {
+                Some(row) => {
+                    row.state = HostState::Stopped;
+                    row.paused = true;
+                    row.prompt = None;
+                    row.working = false;
+                    let _ = events.send(WatchEvent::Sessions);
+                    Reply::ok(&serde_json::json!({}))
+                }
+                None => Reply::err(IpcError::bad_request(format!("no session {label}"))),
+            }
+        }
+        Request::Resume { senator } => {
+            let label = senator.to_string();
+            match w.sessions.rows.iter_mut().find(|r| r.label() == label) {
+                Some(row) => {
+                    row.state = HostState::Running;
+                    row.paused = false;
+                    let _ = events.send(WatchEvent::Sessions);
+                    Reply::ok(&serde_json::json!({}))
+                }
+                None => Reply::err(IpcError::bad_request(format!("no session {label}"))),
+            }
+        }
         Request::Stop { senator, force, .. } => {
             assert!(!force, "the app never forces a stop");
             let label = senator.to_string();
@@ -661,6 +763,10 @@ pub fn hosted_sessions() -> SessionsReply {
         typed_secs_ago: None,
         tty: "/tmp/none".into(),
         prompt: None,
+        working: false,
+        last_activity: Utc::now() - chrono::Duration::minutes(2),
+        title: None,
+        branch: None,
     };
     let mut lead = row("claude", Some("lead"), Runtime::Claude, HostState::Running);
     lead.prompt = Some(HostedPrompt {
@@ -678,6 +784,7 @@ pub fn hosted_sessions() -> SessionsReply {
             row("reviewer", None, Runtime::Codex, HostState::Stopped),
         ],
         orphans: Vec::new(),
+        local_rows: Vec::new(),
     }
 }
 
@@ -1010,4 +1117,597 @@ pub fn busy_senate(w: &mut World) {
             ],
         ),
     ];
+}
+
+// ---- Sessions and their timelines ------------------------------------------
+
+/// A timeline item `minutes_ago` minutes old.
+pub fn item(seq: u64, minutes_ago: i64, kind: TimelineKind) -> TimelineItem {
+    TimelineItem {
+        seq,
+        ts: Some(Utc::now() - chrono::Duration::minutes(minutes_ago)),
+        truncated: false,
+        kind,
+    }
+}
+
+fn timeline_page(
+    w: &World,
+    session_id: &str,
+    direction: TimelineDirection,
+    cursor: Option<u64>,
+    limit: Option<usize>,
+) -> Reply {
+    let runtime = w
+        .sessions
+        .rows
+        .iter()
+        .find(|r| r.session_id == session_id)
+        .map(|r| r.runtime)
+        .or_else(|| {
+            w.sessions
+                .local_rows
+                .iter()
+                .find(|r| r.session_id == session_id)
+                .map(|r| r.runtime)
+        });
+    let Some(runtime) = runtime else {
+        return Reply::err(IpcError::bad_request(format!("no session {session_id}")));
+    };
+    let all = w.timelines.get(session_id);
+    let limit = limit.unwrap_or(60).min(300);
+    let items: Vec<TimelineItem> = all.map_or_else(Vec::new, |all| {
+        let picked: Vec<&TimelineItem> = match direction {
+            TimelineDirection::Tail => all.iter().collect(),
+            TimelineDirection::Before => all
+                .iter()
+                .filter(|i| cursor.is_none_or(|c| i.seq < c))
+                .collect(),
+            TimelineDirection::After => all
+                .iter()
+                .filter(|i| cursor.is_none_or(|c| i.seq > c))
+                .collect(),
+        };
+        let skip = match direction {
+            TimelineDirection::After => 0,
+            _ => picked.len().saturating_sub(limit),
+        };
+        picked.into_iter().skip(skip).take(limit).cloned().collect()
+    });
+    let first = items.first().map(|i| i.seq);
+    let last = items.last().map(|i| i.seq);
+    let all_first = all.and_then(|a| a.first()).map(|i| i.seq);
+    let all_last = all.and_then(|a| a.last()).map(|i| i.seq);
+    Reply::ok(&TimelineReply {
+        session_id: session_id.to_string(),
+        runtime,
+        available: all.is_some(),
+        has_older: first.is_some_and(|f| all_first.is_some_and(|a| a < f)),
+        has_newer: last.is_some_and(|l| all_last.is_some_and(|a| a > l)),
+        first_seq: first,
+        last_seq: last,
+        items,
+        working: working(w, session_id),
+    })
+}
+
+fn working(w: &World, session_id: &str) -> bool {
+    w.sessions
+        .rows
+        .iter()
+        .find(|r| r.session_id == session_id)
+        .map(|r| r.working)
+        .or_else(|| {
+            w.sessions
+                .local_rows
+                .iter()
+                .find(|r| r.session_id == session_id)
+                .map(|r| r.working)
+        })
+        .unwrap_or(false)
+}
+
+/// `timeline_watch`: what came after `after`, then one step of the
+/// session's growth every [`World::grow_every`], as the daemon streams it.
+async fn watch_timeline(
+    world: &Mutex<World>,
+    session_id: &str,
+    after: u64,
+    out: &mut tokio::net::unix::OwnedWriteHalf,
+) {
+    let first = {
+        let w = world.lock().unwrap();
+        w.timelines.get(session_id).map(|items| TimelineUpdate {
+            items: items.iter().filter(|i| i.seq > after).cloned().collect(),
+            working: working(&w, session_id),
+            reset: false,
+        })
+    };
+    let Some(first) = first else {
+        let l = serde_json::to_string(&Reply::err(IpcError::bad_request(format!(
+            "no timeline for {session_id}"
+        ))))
+        .unwrap();
+        let _ = out.write_all(format!("{l}\n").as_bytes()).await;
+        return;
+    };
+    let l = serde_json::to_string(&first).unwrap();
+    if out.write_all(format!("{l}\n").as_bytes()).await.is_err() {
+        return;
+    }
+    let every = world.lock().unwrap().grow_every;
+    let Some(every) = every else {
+        // Hold the stream open, as the daemon does, until the app lets go.
+        std::future::pending::<()>().await;
+        return;
+    };
+    loop {
+        tokio::time::sleep(every).await;
+        let update = {
+            let mut w = world.lock().unwrap();
+            let Some(step) = w.growth.get_mut(session_id).and_then(|g| g.pop_front()) else {
+                drop(w);
+                continue;
+            };
+            let items = w.timelines.entry(session_id.to_string()).or_default();
+            match items.iter_mut().find(|i| i.seq == step.item.seq) {
+                Some(old) => *old = step.item.clone(),
+                None => items.push(step.item.clone()),
+            }
+            for r in w
+                .sessions
+                .rows
+                .iter_mut()
+                .filter(|r| r.session_id == session_id)
+            {
+                r.working = step.working;
+                r.last_activity = Utc::now();
+            }
+            for r in w
+                .sessions
+                .local_rows
+                .iter_mut()
+                .filter(|r| r.session_id == session_id)
+            {
+                r.working = step.working;
+                r.last_activity = Utc::now();
+            }
+            drop(w);
+            TimelineUpdate {
+                items: vec![step.item],
+                working: step.working,
+                reset: false,
+            }
+        };
+        let l = serde_json::to_string(&update).unwrap();
+        if out.write_all(format!("{l}\n").as_bytes()).await.is_err() {
+            return;
+        }
+    }
+}
+
+/// The sessions on this machine in [`busy_senate`]'s Senate, one of each
+/// state, on every committee and on none, and their timelines. Call after
+/// `busy_senate`.
+pub fn session_tree(w: &mut World) {
+    use senate_bridge::ipc::LocalSessionRow;
+
+    let ledger = "codex-01a206b8-8ed9-7a73-934c-f967b877774a";
+    let auditor = "claude-3f1d9a20-5b7e-4c11-9e0a-2d6c8b41f7aa";
+    let scribe = "claude-bff528a7-9e17-4c3a-8d21-7f0e5b2a9c11";
+    let oncall = "agy-36358e84-ac54-409e-beb4-9d2c71f0e3a5";
+    let loner = "claude-5e1f2a3b-4c5d-4e6f-8a9b-0c1d2e3f4a5b";
+    let c = |name: &str| CommitteeId::new(name).unwrap();
+    let ago = |minutes: i64| Utc::now() - chrono::Duration::minutes(minutes);
+
+    let mut rows = hosted_sessions().rows;
+    // refund-v2: `lead` chairs, a prompt waits in it.
+    rows[0].chair = true;
+    rows[0].shown_name = Some("lead".into());
+    rows[0].title = Some("Refund approval flow".into());
+    rows[0].branch = Some("feat/refund-approval".into());
+    rows[0].last_activity = ago(3);
+    rows[1].title = Some("Review the retry budget".into());
+    rows[1].last_activity = ago(60 * 26);
+    let hosted =
+        |id: &str, primary: &str, alias: &str, committee: &str, runtime: Runtime, chair: bool| {
+            SessionRow {
+                host_id: EventId::new(),
+                session_id: id.into(),
+                primary: path(primary),
+                alias: Some(path(alias)),
+                committee: Some(c(committee)),
+                chair,
+                shown_name: Some(alias.into()),
+                runtime,
+                model: HostedModel::default(),
+                dir: format!("/Users/alice/dev/{committee}").into(),
+                state: HostState::Running,
+                started_at: Some(ago(180)),
+                attached: false,
+                typed_secs_ago: None,
+                tty: "/tmp/none".into(),
+                prompt: None,
+                paused: false,
+                working: false,
+                last_activity: ago(1),
+                title: None,
+                branch: Some("main".into()),
+            }
+        };
+    // payments: its chair `ledger` at work.
+    let mut l = hosted("pay-1", ledger, "ledger", "payments", Runtime::Codex, true);
+    l.working = true;
+    l.title = Some("Ledger migration plan".into());
+    l.model = HostedModel {
+        model: Some("gpt-5.5-codex".into()),
+        effort: Some("high".into()),
+    };
+    // docs: its chair `scribe`, paused.
+    let mut d = hosted("docs-1", scribe, "scribe", "docs", Runtime::Claude, true);
+    d.state = HostState::Stopped;
+    d.started_at = None;
+    d.paused = true;
+    d.title = Some("API reference move".into());
+    d.last_activity = ago(60 * 20);
+    rows.extend([l, d]);
+
+    let local = |id: &str,
+                 primary: &str,
+                 alias: Option<&str>,
+                 committee: Option<&str>,
+                 runtime: Runtime,
+                 minutes: i64| LocalSessionRow {
+        session_id: id.into(),
+        primary: path(primary),
+        alias: alias.map(path),
+        committee: committee.map(c),
+        chair: false,
+        shown_name: alias.map(Into::into),
+        runtime,
+        dir: format!("/Users/alice/dev/{}", committee.unwrap_or("scratch")).into(),
+        branch: Some("main".into()),
+        working: false,
+        last_activity: ago(minutes),
+        title: None,
+    };
+    let mut codex = local(
+        "019a-thread",
+        "codex",
+        Some("codex"),
+        Some("refund-v2"),
+        Runtime::Codex,
+        0,
+    );
+    codex.working = true;
+    codex.title = Some("Which env runs the migration".into());
+    let mut audit = local(
+        "pay-2",
+        auditor,
+        Some("auditor"),
+        Some("payments"),
+        Runtime::Claude,
+        25,
+    );
+    audit.title = Some("Reconcile the October payouts".into());
+    let ops = local(
+        "ops-1",
+        oncall,
+        Some("oncall"),
+        Some("infra"),
+        Runtime::Agy,
+        8,
+    );
+    let mut scratch = local("scratch-1", loner, None, None, Runtime::Claude, 130);
+    scratch.title = Some("Try the new parser".into());
+    w.sessions = SessionsReply {
+        rows,
+        orphans: Vec::new(),
+        local_rows: vec![codex, audit, ops, scratch],
+    };
+    timelines(w);
+}
+
+/// Canned timelines: `lead`'s is long (older pages to scroll back to) and
+/// ends at the tool call its prompt asks about; `ledger` and `codex` are at
+/// work. Watched, `lead`'s call completes, a Senate message arrives and it
+/// answers; `ledger` finishes its command.
+fn timelines(w: &mut World) {
+    use senate_bridge::ipc::{TimelineTodo, TimelineToolDetail as D, TimelineToolStatus as S};
+
+    let user = |text: &str| TimelineKind::UserMessage { text: text.into() };
+    let said = |text: &str| TimelineKind::AssistantMessage { text: text.into() };
+    let think = |text: &str| TimelineKind::Reasoning { text: text.into() };
+    let tool = |id: &str, name: &str, status: S, detail: D| TimelineKind::ToolCall {
+        call_id: id.into(),
+        name: name.into(),
+        status,
+        detail,
+    };
+    let shell = |command: &str, output: Option<&str>, exit: Option<i64>| D::Shell {
+        command: command.into(),
+        cwd: Some("/Users/alice/dev/refund".into()),
+        output: output.map(Into::into),
+        exit_code: exit,
+    };
+    let todo = |items: &[(&str, &str)]| TimelineKind::Todo {
+        items: items
+            .iter()
+            .map(|(text, status)| TimelineTodo {
+                text: (*text).into(),
+                status: (*status).into(),
+            })
+            .collect(),
+    };
+
+    // lead: forty older exchanges, then the conversation the page opens on.
+    let mut lead = Vec::new();
+    let mut seq = 0;
+    let mut push = |items: &mut Vec<TimelineItem>, minutes: i64, kind: TimelineKind| {
+        seq += 1;
+        items.push(item(seq, minutes, kind));
+        seq
+    };
+    for i in 0..40 {
+        let m = 400 - i * 8;
+        push(
+            &mut lead,
+            m,
+            user(&format!(
+                "Earlier step {}: check the refund fixtures.",
+                i + 1
+            )),
+        );
+        push(
+            &mut lead,
+            m - 1,
+            tool(
+                &format!("old-{i}"),
+                "Bash",
+                S::Completed,
+                shell(
+                    "cargo test -p refund --lib",
+                    Some("test result: ok. 42 passed; 0 failed"),
+                    Some(0),
+                ),
+            ),
+        );
+        push(
+            &mut lead,
+            m - 2,
+            said(&format!("Fixtures for step {} pass.", i + 1)),
+        );
+    }
+    push(
+        &mut lead,
+        30,
+        user("Add an approval step to refunds above 1,000 EUR, then publish the crate."),
+    );
+    push(
+        &mut lead,
+        29,
+        think(
+            "The approval rule lives in `policy.rs`; the flow in `flow.rs` calls it before paying out. I should read both, add the threshold, test, then publish.",
+        ),
+    );
+    push(
+        &mut lead,
+        29,
+        todo(&[
+            ("Read the refund policy and flow", "completed"),
+            ("Add the 1,000 EUR approval threshold", "completed"),
+            ("Run the refund tests", "completed"),
+            ("Publish refund 0.4.0", "in_progress"),
+        ]),
+    );
+    push(
+        &mut lead,
+        28,
+        tool(
+            "read-1",
+            "Read",
+            S::Completed,
+            D::Read {
+                path: "crates/refund/src/policy.rs".into(),
+            },
+        ),
+    );
+    push(
+        &mut lead,
+        27,
+        tool(
+            "grep-1",
+            "Grep",
+            S::Completed,
+            D::Search {
+                query: "fn needs_approval".into(),
+            },
+        ),
+    );
+    push(&mut lead, 25, tool("edit-1", "Edit", S::Completed, D::Edit {
+        path: "crates/refund/src/policy.rs".into(),
+        unified_diff: Some(
+            "@@ -12,7 +12,9 @@ pub fn needs_approval(refund: &Refund) -> bool {\n-    refund.amount > Money::eur(5_000)\n+    // Above 1,000 EUR a person approves.\n+    refund.amount > Money::eur(1_000)\n+        || refund.customer.is_flagged()\n }\n".into(),
+        ),
+        old: None,
+        new: None,
+    }));
+    push(
+        &mut lead,
+        22,
+        tool(
+            "test-1",
+            "Bash",
+            S::Completed,
+            shell(
+                "cargo test -p refund",
+                Some(
+                    "running 47 tests\n...............................................\ntest result: ok. 47 passed; 0 failed; 0 ignored",
+                ),
+                Some(0),
+            ),
+        ),
+    );
+    push(
+        &mut lead,
+        20,
+        TimelineKind::SenateMessage {
+            committee: Some("refund-v2".into()),
+            seq: Some(131),
+            thread: Some(131),
+            from: Some("senator::codex".into()),
+            kind: Some("question".into()),
+            text: "which env runs the migration — staging or prod-eu?".into(),
+        },
+    );
+    push(
+        &mut lead,
+        19,
+        said(
+            "The approval step is in: refunds above **1,000 EUR**, or for a flagged customer, now wait for a person.\n\n- `policy.rs`: the threshold and the flagged check\n- 47 tests pass\n\nNext I publish `refund 0.4.0`.",
+        ),
+    );
+    let publish = push(
+        &mut lead,
+        3,
+        tool(
+            "pub-1",
+            "Bash",
+            S::Running,
+            shell("cargo publish -p refund", None, None),
+        ),
+    );
+    w.timelines.insert("s-claude".into(), lead);
+    w.growth.insert(
+        "s-claude".into(),
+        [
+            Growth {
+                item: item(publish, 0, tool("pub-1", "Bash", S::Completed, shell(
+                    "cargo publish -p refund",
+                    Some("    Packaging refund v0.4.0\n    Uploading refund v0.4.0\n    Published refund v0.4.0 at registry `crates-io`"),
+                    Some(0),
+                ))),
+                working: true,
+            },
+            Growth {
+                item: item(publish + 1, 0, TimelineKind::SenateMessage {
+                    committee: Some("refund-v2".into()),
+                    seq: Some(140),
+                    thread: Some(140),
+                    from: Some("senator::reviewer".into()),
+                    kind: Some("note".into()),
+                    text: "Reviewed the threshold change; fine by me.".into(),
+                }),
+                working: true,
+            },
+            Growth {
+                item: item(publish + 2, 0, said("Published **refund 0.4.0**. The reviewer agrees with the threshold.")),
+                working: false,
+            },
+        ]
+        .into(),
+    );
+
+    // ledger: mid-command.
+    w.timelines.insert("pay-1".into(), vec![
+        item(1, 14, user("Plan the ledger migration: what freezes, for how long, and when.")),
+        item(2, 13, tool("r", "Read", S::Completed, D::Read { path: "migrations/0042_split_ledger.sql".into() })),
+        item(3, 10, said("The split needs a 30-minute write freeze. I asked alice for the Saturday 02:00 UTC window.")),
+        item(4, 1, tool("dry", "shell", S::Running, D::Shell {
+            command: "ledgerctl migrate --dry-run 0042".into(),
+            cwd: Some("/Users/alice/dev/payments".into()),
+            output: None,
+            exit_code: None,
+        })),
+    ]);
+    w.growth.insert(
+        "pay-1".into(),
+        [Growth {
+            item: item(
+                4,
+                0,
+                tool(
+                    "dry",
+                    "shell",
+                    S::Completed,
+                    D::Shell {
+                        command: "ledgerctl migrate --dry-run 0042".into(),
+                        cwd: Some("/Users/alice/dev/payments".into()),
+                        output: Some("dry run: 1,204,331 rows to move, est. 22m 10s".into()),
+                        exit_code: Some(0),
+                    },
+                ),
+            ),
+            working: false,
+        }]
+        .into(),
+    );
+
+    w.timelines.insert(
+        "019a-thread".into(),
+        vec![
+            item(1, 6, user("Find out which environment runs the migration.")),
+            item(
+                2,
+                5,
+                tool(
+                    "s",
+                    "shell",
+                    S::Failed,
+                    D::Shell {
+                        command: "kubectl --context prod-eu get jobs -n payments".into(),
+                        cwd: None,
+                        output: Some(
+                            "error: You must be logged in to the server (Unauthorized)".into(),
+                        ),
+                        exit_code: Some(1),
+                    },
+                ),
+            ),
+            item(
+                3,
+                0,
+                think("No access to prod-eu from here; asking the committee."),
+            ),
+        ],
+    );
+    w.timelines.insert(
+        "pay-2".into(),
+        vec![
+            item(
+                1,
+                40,
+                user("Reconcile the October payouts against the bank statement."),
+            ),
+            item(
+                2,
+                25,
+                said("Reconciled: 3 payouts differ, all by FX rounding under 0.01 EUR."),
+            ),
+        ],
+    );
+    // `scribe` (paused) and the scratch session keep theirs; `ops-1` runs
+    // agy, which has none.
+    w.timelines.insert(
+        "docs-1".into(),
+        vec![
+            item(
+                1,
+                60 * 21,
+                user("Move the API reference to docs.example.com."),
+            ),
+            item(
+                2,
+                60 * 20,
+                said("Paused until alice decides on the new domain."),
+            ),
+        ],
+    );
+    w.timelines.insert(
+        "scratch-1".into(),
+        vec![
+            item(1, 131, user("Try the new parser on the fixtures.")),
+            item(2, 130, said("All 212 fixtures parse.")),
+        ],
+    );
 }

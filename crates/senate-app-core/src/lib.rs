@@ -45,10 +45,12 @@ pub mod oslog;
 pub mod reads;
 pub mod state;
 pub mod text;
+pub mod timeline;
+pub mod tree;
 
 pub use ffi::{
     AppCore, ApprovalDecision, CoreError, CoreListener, MentionKind, TerminalCommand, TextPart,
-    split_mentions,
+    TimelineListener, split_mentions,
 };
 pub use reads::{ThreadEvent, ThreadView};
 pub use state::{
@@ -56,5 +58,9 @@ pub use state::{
     CommitteeLine, Counts, DocketCommittee, DocketEntry, DocketSenate, HostedSession, InboxThread,
     MenuState, RosterCommittee, RosterMember, SeatLine, SenateInfo,
 };
+pub use timeline::{
+    EntryBody, SenateLine, TimelineDelta, TimelineEntry, TimelinePage, TodoLine, ToolCall,
+};
+pub use tree::{SessionGroup, SessionLine, SessionStatus};
 
 uniffi::setup_scaffolding!();
