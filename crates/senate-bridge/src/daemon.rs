@@ -6002,7 +6002,7 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                 }
                 Ok(Request::TimelineWatch { session_id, after }) => {
                     match shared
-                        .refuse_agent_caller(peer, "streaming session transcripts")
+                        .refuse_agent_caller(peer, "Stream session transcripts from your own terminal or the Senate app")
                         .await
                     {
                         Ok(()) => {
@@ -6024,14 +6024,14 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                 }
                 Ok(Request::Sessions) => {
                     let person = shared
-                        .refuse_agent_caller(peer, "reading session transcript titles")
+                        .refuse_agent_caller(peer, "Read session transcript titles from your own terminal or the Senate app")
                         .await
                         .is_ok();
                     (wrap(shared.primary().on_sessions(person).await), false)
                 }
                 Ok(request) if matches!(request, Request::Timeline { .. }) => {
                     match shared
-                        .refuse_agent_caller(peer, "reading session transcripts")
+                        .refuse_agent_caller(peer, "Read session transcripts from your own terminal or the Senate app")
                         .await
                     {
                         Ok(()) => (shared.dispatch(request).await, false),
@@ -6040,7 +6040,10 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                 }
                 Ok(request) if approval_guard::answers_a_prompt(&request) => {
                     match shared
-                        .refuse_agent_caller(peer, "answering a permission prompt")
+                        .refuse_agent_caller(
+                            peer,
+                            "A permission prompt is a person's decision: answer it from your own terminal or the Senate app",
+                        )
                         .await
                     {
                         Ok(()) => (shared.dispatch(request).await, false),

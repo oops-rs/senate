@@ -53,7 +53,7 @@ impl Front {
     pub(super) async fn refuse_agent_caller(
         &self,
         peer: Option<u32>,
-        action: &str,
+        guidance: &str,
     ) -> Result<(), IpcError> {
         let Some(peer) = peer else {
             return Err(refusal(
@@ -73,7 +73,7 @@ impl Front {
         let Some(chain) = ancestry(peer, process).await else {
             tracing::warn!(
                 peer,
-                action,
+                guidance,
                 "refused person-only IPC: the caller's ancestry is unreadable"
             );
             return Err(refusal(
@@ -89,15 +89,15 @@ impl Front {
         });
         match owner {
             Some(owner) => {
-                tracing::warn!(peer, %owner, action, "refused person-only IPC from inside a coding session's process tree");
+                tracing::warn!(peer, %owner, guidance, "refused person-only IPC from inside a coding session's process tree");
                 Err(refusal(&format!(
-                    "this request comes from inside the process tree of {owner}. Use your own terminal or the Senate app for {action}"
+                    "this request comes from inside the process tree of {owner}. {guidance}"
                 )))
             }
             None => {
                 tracing::debug!(
                     peer,
-                    action,
+                    guidance,
                     "person-only IPC passed the process-tree check"
                 );
                 Ok(())
