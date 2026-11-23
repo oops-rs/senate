@@ -10,8 +10,6 @@ description = "Markdown block trees and incremental HTML and terminal rendering 
 [dependencies]
 comrak = { workspace = true }
 senate-core = { workspace = true }
-syntect = { workspace = true }
-two-face = { workspace = true }
 textwrap = { workspace = true }
 terminal_size = { workspace = true }
 unicode-segmentation = { workspace = true }
