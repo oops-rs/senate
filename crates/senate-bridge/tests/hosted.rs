@@ -2490,15 +2490,14 @@ async fn wait_for_screen(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interactive_attach_uses_the_native_screen_and_cleans_up_on_detach() {
     let (h, alias, _typed) = watched_session().await;
-    let mut command = tokio::process::Command::new(BIN);
-    testenv::isolate_async(&mut command, h.dir.path());
-    command
-        .args(["attach", &alias])
+    let mut cmd = tokio::process::Command::new(BIN);
+    testenv::isolate_async(&mut cmd, h.dir.path());
+    cmd.args(["attach", &alias])
         .env("SENATE_HOME", h.paths.home())
         .kill_on_drop(true);
     let (pty, pts) = pty_process::open().unwrap();
     pty.resize(pty_process::Size::new(24, 80)).unwrap();
-    let mut child = pty_process::Command::from(command).spawn(pts).unwrap();
+    let mut child = pty_process::Command::from(cmd).spawn(pts).unwrap();
     let (mut output, mut input) = pty.into_split();
     let mut bytes = Vec::new();
     let mut chunk = [0; 4096];
