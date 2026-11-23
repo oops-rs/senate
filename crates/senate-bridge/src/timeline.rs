@@ -6,6 +6,7 @@
 //! Codex process without a known PID can exit without reporting Stop or
 //! SessionEnd. The daemon cannot reliably clear its working state then.
 
+pub(crate) mod agy;
 mod claude;
 mod codex;
 mod parse;
@@ -32,6 +33,9 @@ const RETAINED_RECORD_CAPACITY: usize = 1024 * 1024;
 const MAX_ITEMS: usize = 300;
 
 pub(crate) fn path(session: &Session) -> Option<PathBuf> {
+    if session.runtime == Runtime::Agy {
+        return agy::path(session);
+    }
     if !matches!(session.runtime, Runtime::Claude | Runtime::Codex) {
         return None;
     }

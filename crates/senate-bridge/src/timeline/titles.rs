@@ -6,13 +6,14 @@ use std::time::SystemTime;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
-use super::{Event, claude, codex, identity, open_file};
+use super::{Event, agy, claude, codex, identity, open_file};
 use crate::ipc::TimelineKind;
 use crate::session::Runtime;
 
 #[derive(Default)]
 pub(crate) struct TitleCache {
     entries: HashMap<PathBuf, TitleEntry>,
+    agy: HashMap<PathBuf, agy::Title>,
 }
 
 pub(crate) struct SidebarTranscript {
@@ -46,6 +47,7 @@ impl TitleCache {
         let visible: HashSet<_> = sessions.iter().map(|(_, _, path)| path.as_path()).collect();
         self.entries
             .retain(|path, _| visible.contains(path.as_path()));
+        self.agy.retain(|path, _| visible.contains(path.as_path()));
         sessions
             .into_iter()
             .filter_map(|(id, runtime, path)| {
@@ -55,6 +57,13 @@ impl TitleCache {
     }
 
     fn metadata(&mut self, path: &Path, runtime: Runtime) -> Option<SidebarTranscript> {
+        if runtime == Runtime::Agy {
+            let metadata = self.agy.entry(path.to_owned()).or_default().read(path);
+            if metadata.is_none() {
+                self.agy.remove(path);
+            }
+            return metadata;
+        }
         let Ok(metadata) = std::fs::symlink_metadata(path) else {
             self.entries.remove(path);
             return None;

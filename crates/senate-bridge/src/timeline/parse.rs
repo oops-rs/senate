@@ -237,6 +237,7 @@ pub(super) fn tool_kind(id: &str, name: &str, args: &Value, cwd: Option<&str>) -
         call_id: id.to_owned(),
         name: name.to_owned(),
         status: TimelineToolStatus::Running,
+        output: None,
         detail,
     }
 }
@@ -300,11 +301,13 @@ pub(super) fn cap(item: &mut TimelineItem) {
         Kind::ToolCall {
             call_id,
             name,
+            output,
             detail,
             ..
         } => {
             field(call_id);
             field(name);
+            output.iter_mut().for_each(&mut field);
             match detail {
                 Detail::Shell {
                     command,

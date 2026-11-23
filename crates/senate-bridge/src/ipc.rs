@@ -739,6 +739,8 @@ pub struct TimelineReply {
     pub session_id: String,
     pub runtime: crate::session::Runtime,
     pub available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<TimelineUnavailable>,
     pub items: Vec<TimelineItem>,
     pub first_seq: Option<u64>,
     pub last_seq: Option<u64>,
@@ -746,6 +748,13 @@ pub struct TimelineReply {
     pub has_newer: bool,
     /// This daemon observed a prompt hook and has yet to observe its turn end.
     pub working: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimelineUnavailable {
+    UnsupportedSchema,
+    TemporarilyUnreadable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -782,6 +791,8 @@ pub enum TimelineKind {
         call_id: String,
         name: String,
         status: TimelineToolStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
         detail: TimelineToolDetail,
     },
     Todo {

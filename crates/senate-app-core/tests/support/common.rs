@@ -1325,6 +1325,7 @@ fn timeline_page(
         session_id: session_id.to_string(),
         runtime,
         available: all.is_some(),
+        unavailable_reason: None,
         has_older: first.is_some_and(|f| all_first.is_some_and(|a| a < f)),
         has_newer: last.is_some_and(|l| all_last.is_some_and(|a| a > l)),
         first_seq: first,
@@ -1581,6 +1582,7 @@ fn timelines(w: &mut World) {
         call_id: id.into(),
         name: name.into(),
         status,
+        output: None,
         detail,
     };
     let shell = |command: &str, output: Option<&str>, exit: Option<i64>| D::Shell {
@@ -1977,6 +1979,7 @@ pub fn marathon(w: &mut World, n: usize) {
         call_id: format!("c-{cmd}"),
         name: "Bash".into(),
         status,
+        output: None,
         detail: D::Shell {
             command: cmd,
             cwd: Some("/Users/alice/dev/senate".into()),
@@ -2033,6 +2036,7 @@ pub fn marathon(w: &mut World, n: usize) {
                     call_id: format!("e-{i}"),
                     name: "Edit".into(),
                     status: S::Completed,
+                    output: None,
                     detail: D::Edit {
                         path: "crates/senate-app-core/src/link.rs".into(),
                         unified_diff: Some(format!(

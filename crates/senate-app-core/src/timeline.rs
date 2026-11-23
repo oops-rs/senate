@@ -7,7 +7,7 @@ use std::time::SystemTime;
 
 use senate_bridge::ipc::{
     TimelineItem, TimelineKind, TimelineReply, TimelineToolDetail, TimelineToolStatus,
-    TimelineUpdate,
+    TimelineUnavailable, TimelineUpdate,
 };
 use senate_bridge::session::Runtime;
 use senate_core::Locale;
@@ -152,7 +152,19 @@ pub fn unavailable(locale: Locale, runtime: Runtime) -> String {
 
 pub fn page(reply: TimelineReply, locale: Locale) -> TimelinePage {
     TimelinePage {
-        unavailable: (!reply.available).then(|| unavailable(locale, reply.runtime)),
+        unavailable: (!reply.available).then(|| {
+            match reply.unavailable_reason {
+            Some(TimelineUnavailable::UnsupportedSchema) => locale.pick(
+                "Antigravity 的对话记录格式暂不支持。请接入终端查看。",
+                "This Antigravity conversation format is unsupported. Attach to see it.",
+            ).into(),
+            Some(TimelineUnavailable::TemporarilyUnreadable) => locale.pick(
+                "暂时无法读取 Antigravity 的对话记录。请重试或接入终端查看。",
+                "This Antigravity conversation could not be read. Try again or attach to see it.",
+            ).into(),
+            None => unavailable(locale, reply.runtime),
+        }
+        }),
         session_id: reply.session_id,
         available: reply.available,
         items: reply.items.iter().map(|i| entry(i, locale)).collect(),
@@ -188,6 +200,7 @@ pub fn entry(item: &TimelineItem, locale: Locale) -> TimelineEntry {
             call_id,
             name,
             status: s,
+            output,
             detail,
         } => {
             let (wire, label) = status(locale, *s);
@@ -199,7 +212,7 @@ pub fn entry(item: &TimelineItem, locale: Locale) -> TimelineEntry {
                 status_label: label.to_string(),
                 title: String::new(),
                 cwd: None,
-                output: None,
+                output: output.clone(),
                 exit_code: None,
                 diff: None,
             };
@@ -211,7 +224,9 @@ pub fn entry(item: &TimelineItem, locale: Locale) -> TimelineEntry {
                     exit_code,
                 } => {
                     call.cwd.clone_from(cwd);
-                    call.output.clone_from(output);
+                    if output.is_some() {
+                        call.output.clone_from(output);
+                    }
                     call.exit_code = *exit_code;
                     ("shell", command.clone())
                 }
@@ -329,12 +344,55 @@ mod tests {
     }
 
     #[test]
+    fn agy_unavailability_is_specific_and_tool_results_reach_the_existing_output_view() {
+        let old_reply = serde_json::json!({
+            "session_id":"agy:fixture", "runtime":"agy", "available":false, "items":[],
+            "has_older":false, "has_newer":false, "working":true
+        });
+        let mut reply: TimelineReply = serde_json::from_value(old_reply).unwrap();
+        assert!(
+            page(reply.clone(), Locale::En)
+                .unavailable
+                .unwrap()
+                .contains("No transcript")
+        );
+        reply.unavailable_reason = Some(TimelineUnavailable::UnsupportedSchema);
+        let unavailable = page(reply, Locale::En);
+        assert!(!unavailable.available && unavailable.working);
+        assert!(
+            unavailable
+                .unavailable
+                .unwrap()
+                .contains("format is unsupported")
+        );
+
+        let entry = entry(
+            &item(TimelineKind::ToolCall {
+                call_id: "read-fixture".into(),
+                name: "read_file".into(),
+                status: TimelineToolStatus::Completed,
+                output: Some("fixture result".into()),
+                detail: TimelineToolDetail::Read {
+                    path: "fixture.txt".into(),
+                },
+            }),
+            Locale::En,
+        );
+        let EntryBody::Tool { call } = entry.body else {
+            panic!("expected tool")
+        };
+        assert_eq!(call.title, "fixture.txt");
+        assert_eq!(call.output.as_deref(), Some("fixture result"));
+    }
+
+    #[test]
     fn a_shell_call_reads_as_its_command_and_output() {
         let e = entry(
             &item(TimelineKind::ToolCall {
                 call_id: "c".into(),
                 name: "Bash".into(),
                 status: TimelineToolStatus::Failed,
+                output: None,
                 detail: TimelineToolDetail::Shell {
                     command: "cargo test".into(),
                     cwd: None,
@@ -366,6 +424,7 @@ mod tests {
                 call_id: "c".into(),
                 name: "Edit".into(),
                 status: TimelineToolStatus::Completed,
+                output: None,
                 detail: TimelineToolDetail::Edit {
                     path: "a.rs".into(),
                     unified_diff: None,
@@ -418,7 +477,7 @@ mod tests {
 
     #[test]
     fn why_there_is_nothing_to_read_in_either_language() {
-        assert!(unavailable(Locale::En, Runtime::Agy).contains("agy"));
+        assert!(unavailable(Locale::En, Runtime::Agy).contains("No transcript"));
         assert!(unavailable(Locale::Zh, Runtime::Claude).contains("记录"));
     }
 }

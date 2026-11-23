@@ -63,12 +63,22 @@ impl Shared {
         let runtime = session.runtime;
         let path = timeline::path(&session);
         let limit = limit.unwrap_or(60).clamp(1, 300);
-        let page = tokio::task::spawn_blocking(move || {
-            let Some(path) = path else { return Ok(None) };
-            let Ok(mut transcript) = Transcript::open(path, runtime) else {
-                return Ok(None);
+        let (page, unavailable_reason) = tokio::task::spawn_blocking(move || {
+            let Some(path) = path else {
+                return Ok((None, None));
             };
-            transcript.page(direction, cursor, limit).map(Some)
+            if runtime == Runtime::Agy {
+                return Ok(match timeline::agy::page(&path, direction, cursor, limit) {
+                    Ok(page) => (Some(page), None),
+                    Err(error) => (None, error.reason()),
+                });
+            }
+            let Ok(mut transcript) = Transcript::open(path, runtime) else {
+                return Ok((None, None));
+            };
+            transcript
+                .page(direction, cursor, limit)
+                .map(|page| (Some(page), None))
         })
         .await
         .map_err(IpcError::internal)?
@@ -82,6 +92,7 @@ impl Shared {
             session_id,
             runtime,
             available,
+            unavailable_reason,
             working,
             first_seq: page.items.first().map(|item| item.seq),
             last_seq: page.items.last().map(|item| item.seq),
@@ -134,6 +145,42 @@ pub(super) async fn send<T: Serialize>(write: &mut OwnedWriteHalf, value: &T) ->
     write.write_all(&line).await.is_ok()
 }
 
+enum Source {
+    Jsonl(Box<Transcript>),
+    Agy(Box<timeline::agy::Watch>),
+}
+
+impl Source {
+    fn open(path: PathBuf, runtime: Runtime, after: u64) -> Result<Self, IpcError> {
+        if runtime == Runtime::Agy {
+            return timeline::agy::Watch::open(path, after)
+                .map(Box::new)
+                .map(Self::Agy)
+                .map_err(|error| IpcError::bad_request(error.message()));
+        }
+        Transcript::open(path, runtime)
+            .map(Box::new)
+            .map(Self::Jsonl)
+            .map_err(|_| IpcError::bad_request("the session has no readable timeline transcript"))
+    }
+
+    fn updates(
+        &mut self,
+        path: &Path,
+        runtime: Runtime,
+        after: u64,
+    ) -> Option<Vec<crate::ipc::TimelineItem>> {
+        match self {
+            Self::Agy(watch) if runtime == Runtime::Agy => watch.updates(path).ok(),
+            Self::Agy(_) => None,
+            Self::Jsonl(transcript) => {
+                let end = transcript.refreshed_len(path, runtime).ok()??;
+                transcript.updates(end, after).ok()
+            }
+        }
+    }
+}
+
 async fn stream(shared: &Shared, id: &str, after: u64, write: &mut OwnedWriteHalf) {
     let start = async {
         let session = shared.timeline_session(id)?;
@@ -141,10 +188,9 @@ async fn stream(shared: &Shared, id: &str, after: u64, write: &mut OwnedWriteHal
         let path = timeline::path(&session).ok_or_else(|| {
             IpcError::bad_request("the session has no readable timeline transcript")
         })?;
-        tokio::task::spawn_blocking(move || Transcript::open(path, runtime))
+        tokio::task::spawn_blocking(move || Source::open(path, runtime, after))
             .await
             .map_err(IpcError::internal)?
-            .map_err(|_| IpcError::bad_request("the session has no readable timeline transcript"))
     };
     let mut transcript = match start.await {
         Ok(transcript) => transcript,
@@ -162,8 +208,7 @@ async fn stream(shared: &Shared, id: &str, after: u64, write: &mut OwnedWriteHal
         let state = session.and_then(|session| Some((timeline::path(&session)?, session.runtime)));
         let read = tokio::task::spawn_blocking(move || {
             let (path, runtime) = state?;
-            let end = transcript.refreshed_len(&path, runtime).ok()??;
-            let items = transcript.updates(end, after).ok()?;
+            let items = transcript.updates(&path, runtime, after)?;
             Some((transcript, items))
         })
         .await
