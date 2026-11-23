@@ -595,7 +595,7 @@ impl Mirror {
 
 /// An open watch of one hosted terminal.
 pub(crate) struct Watch {
-    from: tokio::net::unix::OwnedReadHalf,
+    from: Box<dyn AsyncRead + Send + Unpin>,
     /// Where fit requests go ([`Fitter`]); closing it would tell the host
     /// the watcher is gone.
     to: Option<tokio::net::unix::OwnedWriteHalf>,
@@ -631,7 +631,23 @@ impl Watch {
             _ => bail!("unrecognized terminal host reply"),
         }
         let (from, to) = stream.into_split();
-        Ok(Self { from, to: Some(to) })
+        Ok(Self {
+            from: Box::new(from),
+            to: Some(to),
+        })
+    }
+
+    pub(crate) async fn remote(
+        mut stream: impl AsyncRead + Send + Unpin + 'static,
+    ) -> anyhow::Result<Self> {
+        ensure!(
+            tokio::time::timeout(Duration::from_secs(3), stream.read_u8()).await?? == WATCHING,
+            "unrecognized terminal host reply"
+        );
+        Ok(Self {
+            from: Box::new(stream),
+            to: None,
+        })
     }
 
     /// The watch's [`Fitter`], once. Keep it as long as the watch: dropping

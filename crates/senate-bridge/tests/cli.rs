@@ -1130,3 +1130,72 @@ fn the_desk_is_told_apart_from_the_secretary_team() {
         "{out:?}"
     );
 }
+
+/// Outside any bound worktree, a message to an alias found on exactly one
+/// committee goes there and says so; an alias on two committees, or none,
+/// is refused with the committees to choose from.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn outside_a_worktree_the_one_committee_with_the_alias_is_used_and_named() {
+    use senate_core::CommitteeId;
+
+    let mut h = Harness::with_committees(&["refund-v2", "other"]).await;
+    {
+        let mut inner = h.server.state.inner.lock().unwrap();
+        let primary = path("claude-1");
+        let _ = inner
+            .roster
+            .seat(primary.clone(), &senate_core::Name::new("alice").unwrap());
+        inner
+            .aliases
+            .set(
+                &CommitteeId::new("refund-v2").unwrap(),
+                path("rev"),
+                primary.clone(),
+            )
+            .unwrap();
+        for committee in ["refund-v2", "other"] {
+            inner
+                .aliases
+                .set(
+                    &CommitteeId::new(committee).unwrap(),
+                    path("lead"),
+                    path("codex-2"),
+                )
+                .unwrap();
+        }
+    }
+    h.start().await;
+    let unbound = h.dir.path().join("nowhere");
+    std::fs::create_dir(&unbound).unwrap();
+    let ask = |to: &str| {
+        brief(h.dir.path(), h.paths.home())
+            .current_dir(&unbound)
+            .args(["tell", to, "hello"])
+            .output()
+            .unwrap()
+    };
+    // Said before it is sent, and sent there. (This stand-in server does
+    // not resolve aliases on delivery; the real one does.)
+    let out = ask("rev");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.starts_with("on committee refund-v2 (where rev is an alias)\n"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("::refund-v2"), "{stderr}");
+    let two = ask("lead");
+    assert!(!two.status.success());
+    let stderr = String::from_utf8_lossy(&two.stderr);
+    assert!(
+        stderr.contains("lead is an alias on more than one committee: other, refund-v2"),
+        "{stderr}"
+    );
+    let none = ask("nobody");
+    assert!(!none.status.success());
+    let stderr = String::from_utf8_lossy(&none.stderr);
+    assert!(
+        stderr.contains("--committee") && stderr.contains("Committees:"),
+        "{stderr}"
+    );
+    h.stop().await;
+}

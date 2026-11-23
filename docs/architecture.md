@@ -159,6 +159,22 @@ its origin (`meta.origin`: the asker's qualified name and thread); its
 answer is relayed back into the asker's own thread (`meta.answered_by`),
 so the asker never has to watch another committee.
 
+For a person's own paired device, an explicitly enabled remote machine listener
+adds a separate direct connection to the target daemon. Its versioned typed
+API shares no Senate or agent token. The target's local person guard controls
+pairing, grant confirmation and revocation. The target checks the pinned TLS
+device certificate and its current grant for each connection. The original
+committee and parent routing rules still apply to Senate messages.
+
+The remote API exposes hosted-session metadata, read-only terminal bytes and,
+by a separate device grant, an interactive terminal. A remote watch sends no
+input or fit request to a TUI. The destination resolves the hosted session ID
+locally and holds the same single-viewer slot used by local attach. Terminal
+content can leave an opted-in machine for its paired device over TLS.
+Transcripts, prompt approvals, agent hooks and lifecycle operations retain
+their existing machine-local path. No data is copied into the parent Senate
+for remote access. See [Remote machines](../README.md#remote-machines).
+
 ## Roles
 
 ### The Speaker

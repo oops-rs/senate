@@ -40,6 +40,7 @@ use crate::paths::{HOME_ENV, Paths, SOCKET_PATH_LIMIT};
 use emulation::{Colors, Emulation, Scheme};
 pub use picker::{Choice, pick, pick_session};
 pub use terminal::attach;
+pub(crate) use terminal::attach_stream;
 
 pub(crate) const START_TIMEOUT: Duration = Duration::from_secs(10);
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
