@@ -48,13 +48,22 @@ pub struct RenderDiff {
 /// to apply must use consecutive diffs from that document.
 pub struct RenderCache {
     terminal: Terminal,
+    max_highlight_bytes: usize,
     blocks: HashMap<BlockId, CachedBlock>,
 }
 
 impl RenderCache {
     pub fn new(terminal: Terminal) -> Self {
+        Self::with_highlight_limit(terminal, usize::MAX)
+    }
+
+    /// Render a code block as plain text when it exceeds this byte budget.
+    /// Zero disables highlighting. To defer all highlighting, first render
+    /// with a zero budget and reset a second cache when the view is ready.
+    pub fn with_highlight_limit(terminal: Terminal, max_bytes: usize) -> Self {
         Self {
             terminal,
+            max_highlight_bytes: max_bytes,
             blocks: HashMap::new(),
         }
     }
@@ -153,8 +162,10 @@ impl RenderCache {
             .code
             .resize_with(code_blocks.len(), CodeCache::default);
         for (index, (code, indent)) in code_blocks.into_iter().zip(&terminal.indents).enumerate() {
+            let highlight =
+                self.max_highlight_bytes > 0 && code.text.len() <= self.max_highlight_bytes;
             if let Some(from_line) =
-                cached.code[index].refresh(code, indent, self.terminal, changes)
+                cached.code[index].refresh(code, indent, self.terminal, highlight, changes)
             {
                 patch.code.push(CodePatch { index, from_line });
             }
@@ -220,6 +231,7 @@ fn code_in<'a>(block: &'a Block, out: &mut Vec<&'a CodeBlock>) {
 
 #[derive(Default)]
 struct CodeCache {
+    highlight: bool,
     language: Option<String>,
     indent: Indent,
     source: String,
@@ -243,9 +255,11 @@ impl CodeCache {
         code: &CodeBlock,
         indent: &Indent,
         terminal: Terminal,
+        highlight: bool,
         stats: &mut RenderDiff,
     ) -> Option<usize> {
-        let same_context = self.language == code.language && &self.indent == indent;
+        let same_context =
+            self.highlight == highlight && self.language == code.language && &self.indent == indent;
         if same_context && self.source == code.text {
             return None;
         }
@@ -261,7 +275,12 @@ impl CodeCache {
             } else {
                 self.language.clone_from(&code.language);
                 self.indent.clone_from(indent);
-                self.lexer = syntax(code.language.as_deref()).map(Lexer::new);
+                self.highlight = highlight;
+                self.lexer = if highlight {
+                    syntax(code.language.as_deref()).map(Lexer::new)
+                } else {
+                    None
+                };
                 (0, 0)
             };
 

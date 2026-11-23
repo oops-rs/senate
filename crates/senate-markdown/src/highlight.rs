@@ -2,7 +2,7 @@ use std::sync::LazyLock;
 
 use syntect::parsing::{ParseState, Scope, ScopeStack, SyntaxReference, SyntaxSet};
 
-static SYNTAXES: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
+static SYNTAXES: LazyLock<SyntaxSet> = LazyLock::new(two_face::syntax::extra_newlines);
 
 pub(crate) fn syntax(language: Option<&str>) -> Option<&'static SyntaxReference> {
     let name = match language?.to_ascii_lowercase().as_str() {
@@ -12,13 +12,17 @@ pub(crate) fn syntax(language: Option<&str>) -> Option<&'static SyntaxReference>
         "cpp" | "c++" | "cxx" => "C++",
         "css" => "CSS",
         "diff" | "patch" => "Diff",
+        "dockerfile" | "docker" => "Dockerfile",
         "go" | "golang" => "Go",
         "html" => "HTML",
         "java" => "Java",
         "js" | "javascript" => "JavaScript",
         "json" => "JSON",
+        "jsx" | "tsx" => "TypeScriptReact",
+        "kt" | "kotlin" => "Kotlin",
         "lua" => "Lua",
         "make" | "makefile" => "Makefile",
+        "md" | "markdown" => "Markdown",
         "pl" | "perl" => "Perl",
         "php" => "PHP",
         "py" | "python" => "Python",
@@ -26,6 +30,9 @@ pub(crate) fn syntax(language: Option<&str>) -> Option<&'static SyntaxReference>
         "rs" | "rust" => "Rust",
         "scala" => "Scala",
         "sql" => "SQL",
+        "swift" => "Swift",
+        "toml" => "TOML",
+        "ts" | "typescript" => "TypeScript",
         "xml" => "XML",
         "yml" | "yaml" => "YAML",
         _ => return None,
@@ -68,6 +75,7 @@ static CLASSES: LazyLock<Vec<(Scope, Token)>> = LazyLock::new(|| {
         ("constant.numeric", Token::Number),
         ("constant.language", Token::Keyword),
         ("entity.name.function", Token::Name),
+        ("entity.name.tag", Token::Name),
         ("support.function", Token::Name),
         ("entity.name.type", Token::Type),
         ("support.type", Token::Type),

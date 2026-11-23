@@ -7,7 +7,7 @@ Markdown sample: every style in one thread
 ### Heading 3
 #### Heading 4
 
-A paragraph at the reading width, with **strong**, *emphasis*, ***both***, ~~struck~~, `inline code`, a [link](https://example.com) and an autolink https://senate.dev. A hard break follows,
+A paragraph at the reading width, with **strong**, *emphasis*, ***both***, ~~struck~~, `inline code`, a [link](https://example.com) and an autolink https://senate.dev. A hard break follows,  
 and this is the next line; a soft break
 joins this line to the previous one. A long unbroken string: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa wraps. Mentions read as names: [senator::claude-653c1d76-e26f-4374-882b-a6757c01ff50] wrote this for [senator::wendell].
 

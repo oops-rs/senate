@@ -61,7 +61,7 @@ fn both_specimens_render_as_typed_blocks() {
         let terminal = render(&document, &cache, Format::Terminal);
         assert!(terminal.lines().all(|line| display_width(line) <= 48));
         assert!(
-            terminal.contains("│") && terminal.contains("[x]") && terminal.contains("[senator::")
+            terminal.contains("│") && terminal.contains("☑") && terminal.contains("[senator::")
         );
     }
 }
@@ -390,4 +390,89 @@ fn middle_insertions_keep_later_ids_and_indented_code_stays_literal() {
         html,
         "<pre><code>[senator::codex] &lt;raw&gt;\n</code></pre>\n"
     );
+}
+
+#[test]
+fn terminal_keeps_hard_breaks_marks_headings_and_aligns_task_children() {
+    let text = "# One\n## Two\n### Three\n#### Four\n\nhard  \nnext\nsoft\n\n- [x] Parent\n  - [ ] Child\n";
+    let plain = Terminal::new(80, Color::None);
+    let unicode = rendered(text, Format::Terminal, plain);
+    assert!(unicode.contains("# One\n## Two\n### Three\n#### Four\n"));
+    assert!(unicode.contains("hard\nnext soft\n"));
+    assert!(unicode.contains("☑ Parent\n  ☐ Child\n"));
+    let ascii = rendered(text, Format::Terminal, plain.with_utf8(false));
+    assert!(ascii.contains("[x] Parent\n    [ ] Child\n"));
+    let colored = rendered(text, Format::Terminal, Terminal::new(80, Color::Ansi16));
+    assert!(colored.contains("\x1b[1;36mOne\x1b[0m"));
+    assert!(!colored.contains("# One"));
+}
+
+#[test]
+fn required_fences_highlight_and_unknown_fences_stay_plain() {
+    let terminal = Terminal::new(80, Color::None);
+    for (lang, source) in [
+        ("rust", "let x = 3;"),
+        ("swift", "let x = 3"),
+        ("typescript", "const x: number = 3;"),
+        ("tsx", "const x = <Panel />;"),
+        ("javascript", "const x = 3;"),
+        ("jsx", "const x = <Panel />;"),
+        ("python", "def f(): return 3"),
+        ("go", "func f() int { return 3 }"),
+        ("c", "int x = 3;"),
+        ("c++", "int x = 3;"),
+        ("java", "class Foo {}"),
+        ("kotlin", "val x = 3"),
+        ("ruby", "def f; end"),
+        ("bash", "if true; then echo 3; fi"),
+        ("sh", "if true; then echo 3; fi"),
+        ("zsh", "if true; then echo 3; fi"),
+        ("json", "{\"x\": 3}"),
+        ("yaml", "x: 3"),
+        ("toml", "x = 3"),
+        ("html", "<section>Title</section>"),
+        ("css", "a { top: 3px; }"),
+        ("sql", "SELECT 3;"),
+        ("diff", "+let x = 3;"),
+        ("markdown", "# Hello"),
+        ("dockerfile", "FROM scratch"),
+        ("makefile", "x := 3"),
+    ] {
+        let doc = Document::parse(&format!("```{lang}\n{source}\n```"));
+        let mut cache = RenderCache::new(terminal);
+        assert_eq!(cache.reset(&doc).highlighted_lines, 1, "{lang}");
+        let html = render(&doc, &cache, Format::Html);
+        if matches!(lang, "jsx" | "tsx") {
+            assert!(
+                html.contains("<span class=\"tok-name\">Panel</span>"),
+                "{lang}: {html}"
+            );
+        }
+        if matches!(lang, "swift" | "typescript" | "kotlin" | "toml") {
+            assert!(html.contains("class=\"tok-"), "{lang}: {html}");
+        }
+    }
+    let doc = Document::parse("```unknown-fictional-language\nlet x = 3;\n```");
+    assert_eq!(RenderCache::new(terminal).reset(&doc).highlighted_lines, 0);
+}
+
+#[test]
+fn a_highlight_budget_can_disable_and_reenable_code_styles() {
+    let terminal = Terminal::new(80, Color::None);
+    let mut doc = Document::parse("```rust\nlet n = 1;\n");
+    assert_eq!(
+        RenderCache::with_highlight_limit(terminal, 0)
+            .reset(&doc)
+            .highlighted_lines,
+        0
+    );
+    let mut cache = RenderCache::with_highlight_limit(terminal, 18);
+    assert_eq!(cache.reset(&doc).highlighted_lines, 1);
+    let diff = doc.update("```rust\nlet n = 1;\nlet m = 2;\n");
+    let patch = cache.apply(&doc, &diff);
+    assert_eq!(patch.highlighted_lines, 0);
+    assert_eq!(patch.blocks[0].code[0].from_line, 0);
+    assert!(!render(&doc, &cache, Format::Html).contains("tok-"));
+    let diff = doc.update("```rust\nlet n = 1;\n");
+    assert_eq!(cache.apply(&doc, &diff).highlighted_lines, 1);
 }

@@ -25,7 +25,9 @@ Every top-level block has a source-position ID. Position lets a frontend replace
 
 Call `RenderCache::reset` for a fresh document or terminal configuration. Apply consecutive document diffs to the same cache. A block patch with `layout_changed` calls for replacing that block using `parts` or `write_block`. Code bodies are separate parts, including fences nested in lists or quotes. When the wrappers stay the same, use each patch's `from_line` to replace only the suffix of that code body. The cache keeps the previous lines and their output. An appended line uses carried syntax state. Growth of a partial last line revises that one line. Changes before the last line can re-lex that code block. `write_block` explicitly joins the cached output if a client needs a complete string.
 
-Comrak runs with defaults disabled and the four GFM extensions above enabled. Syntect (MIT) uses its built-in linked syntax pack with the pure-Rust regex engine. The public language set covers Bash, C, C#, C++, CSS, Diff, Go, HTML, Java, JavaScript, JSON, Lua, Makefile, Perl, PHP, Python, Ruby, Rust, Scala, SQL, XML and YAML. For other fence labels and lines above 16 KiB the renderer outputs plain code. The linked pack retains its upstream internal syntax dependencies.
+Comrak runs with defaults disabled and the four GFM extensions above enabled. Syntect (MIT) uses the pure-Rust regex engine and the linked two-face 0.5.1 syntax pack. The supported fence labels cover Rust, Swift, TypeScript, TSX, JavaScript, JSX, Python, Go, C, C#, C++, Java, Kotlin, Ruby, Bash, JSON, YAML, TOML, HTML, CSS, SQL, Diff, Markdown, Dockerfile, Makefile, Lua, Perl, PHP, Scala and XML. JSX uses the pack's JSX-capable TypeScriptReact grammar. Unknown labels and individual lines above 16 KiB render as plain code. Use `RenderCache::with_highlight_limit` to skip highlighting on larger blocks or pass zero to defer all highlighting until a fresh reset with a highlighting cache.
+
+Two-face is dual licensed under MIT or Apache-2.0. The linked grammar data has separate licenses, including MIT for Swift, Dockerfile and TOML, and Apache-2.0 for Kotlin and TypeScript/TSX. The [bundled syntax notices](THIRD-PARTY-SYNTAX-NOTICES.md) cover the linked pack, including internal grammar dependencies. Carry the notice file and the dependency notices with binary distributions. The [upstream full acknowledgement list](https://github.com/CosmicHorrorDev/two-face/blob/v0.5.1/generated/acknowledgements_full.md) records the licenses of the individual assets.
 
 ## Rendering contract
 
@@ -36,7 +38,7 @@ The HTML renderer escapes text and attributes and emits these tags:
 - `task-list`, `task-item` and `task-marker` style task lists. `align-left`, `align-center` and `align-right` align table cells.
 - `tok-comment`, `tok-string`, `tok-keyword`, `tok-number`, `tok-name`, `tok-type` and `tok-operator` style code. All CSS is supplied by the client.
 
-The terminal renderer uses the same display-width calculation as the CLI, and formats code to the same width as prose. Lists use hanging indents, narrow tables can stack by row, and links display their destination when it differs from the label. `Terminal::stdout` checks for a TTY, honors `NO_COLOR` and `TERM=dumb`, and chooses 16, 256 or true color using TERM and COLORTERM. `Terminal::new` accepts explicit capabilities for remote terminals and tests.
+The terminal renderer uses the same display-width calculation as the CLI, and formats code to the same width as prose. Plain headings use a hash prefix per level. Task boxes replace the list bullet and use ASCII markers in non-UTF-8 locales. Lists use hanging indents, narrow tables can stack by row, and links display their destination when it differs from the label. `Terminal::stdout` checks for a TTY, honors `NO_COLOR` and `TERM=dumb`, and chooses 16, 256 or true color using TERM and COLORTERM. `Terminal::new` accepts explicit capabilities for remote terminals and tests.
 
 ## Sample
 

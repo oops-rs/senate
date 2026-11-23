@@ -20,6 +20,7 @@ pub enum Color {
 pub struct Terminal {
     width: usize,
     color: Color,
+    utf8: bool,
 }
 
 impl Terminal {
@@ -28,7 +29,15 @@ impl Terminal {
         Self {
             width: width.clamp(2, 4096),
             color,
+            utf8: true,
         }
+    }
+
+    /// Choose marker glyphs for a remote terminal. Explicit capabilities
+    /// default to UTF-8 markers. Message text always remains UTF-8.
+    pub fn with_utf8(mut self, utf8: bool) -> Self {
+        self.utf8 = utf8;
+        self
     }
 
     pub fn stdout(width: Option<usize>) -> Self {
@@ -49,7 +58,16 @@ impl Terminal {
         } else {
             Color::Ansi16
         };
-        Self::new(width, color)
+        let utf8 = ["LC_ALL", "LC_CTYPE", "LANG"]
+            .into_iter()
+            .find_map(|key| std::env::var(key).ok().filter(|value| !value.is_empty()))
+            .is_some_and(|locale| {
+                locale.split('@').next().is_some_and(|locale| {
+                    let locale = locale.to_ascii_lowercase();
+                    matches!(locale.rsplit('.').next(), Some("utf-8" | "utf8"))
+                })
+            });
+        Self::new(width, color).with_utf8(utf8)
     }
 
     pub(crate) fn layout(self, block: &Block) -> Layout {
@@ -61,10 +79,17 @@ impl Terminal {
     fn block(self, block: &Block, indent: &Indent, layout: &mut Layout) {
         match block {
             Block::Paragraph(items) => self.line(&self.inline_string(items), indent, layout.text()),
-            Block::Heading { content, .. } => {
+            Block::Heading { level, content } => {
                 let text = self.inline_string(content);
-                // Bold cyan matches the CLI's terminal emphasis style.
-                self.line(&self.style("1;36", &text), indent, layout.text());
+                if self.color == Color::None {
+                    let count = usize::from((*level).clamp(1, 6));
+                    let marker = format!("{} ", "#".repeat(count));
+                    let hanging = " ".repeat(marker.len());
+                    self.line(&text, &indent.extend(&marker, &hanging), layout.text());
+                } else {
+                    // Bold cyan matches the CLI's terminal emphasis style.
+                    self.line(&self.style("1;36", &text), indent, layout.text());
+                }
             }
             Block::Quote(blocks) => {
                 for (index, block) in blocks.iter().enumerate() {
@@ -73,13 +98,22 @@ impl Terminal {
             }
             Block::List { start, items, .. } => {
                 for (index, item) in items.iter().enumerate() {
-                    let mut marker = start.map_or_else(
-                        || "• ".to_owned(),
-                        |n| format!("{}. ", n.saturating_add(index)),
-                    );
-                    if let Some(checked) = item.checked {
-                        marker.push_str(if checked { "[x] " } else { "[ ] " });
-                    }
+                    let marker = match (item.checked, self.utf8) {
+                        (Some(true), true) => "☑ ".into(),
+                        (Some(false), true) => "☐ ".into(),
+                        (Some(true), false) => "[x] ".into(),
+                        (Some(false), false) => "[ ] ".into(),
+                        (None, _) => start.map_or_else(
+                            || {
+                                if self.utf8 {
+                                    "• ".into()
+                                } else {
+                                    "- ".into()
+                                }
+                            },
+                            |n| format!("{}. ", n.saturating_add(index)),
+                        ),
+                    };
                     let hanging = " ".repeat(display_width(&marker));
                     let item_indent = indent.following(index).extend(&marker, &hanging);
                     if item.blocks.is_empty() {
