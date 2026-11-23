@@ -11,7 +11,8 @@
 //! SENATE_HOME=/tmp/sh SENATE_APP_SHOW=1 apps/macos/build/Build/Products/Debug/Senate.app/Contents/MacOS/Senate
 //! ```
 //!
-//! Every 20 s it asks for one more approval. Ctrl-C stops it.
+//! Every 20 s it asks for one more approval (`FAKE_APPROVAL_EVERY=<s>`,
+//! 0 for never). Ctrl-C stops it.
 //! `FAKE_THREADS=2000` adds that many threads (and a 5000-event thread 990,
 //! `FAKE_EVENTS` to change it), to measure the app with a large inbox. It only ever
 //! writes under `SENATE_HOME`, which this example requires to be set.
@@ -56,11 +57,17 @@ async fn main() {
     let world = Arc::new(Mutex::new(w));
     let daemon = common::FakeDaemon::start(&socket, Arc::clone(&world));
     println!("fake daemon on {}", socket.display());
+    // FAKE_APPROVAL_EVERY=<s>: how often another approval arrives (0:
+    // never, which the UI tests use so the lists hold still).
+    let every = std::env::var("FAKE_APPROVAL_EVERY")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(20);
     let mut n = 8;
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => break,
-            _ = tokio::time::sleep(Duration::from_secs(20)) => {
+            _ = tokio::time::sleep(Duration::from_secs(every.max(1))), if every > 0 => {
                 let a = common::approval(&format!("019a-thread:{n}"));
                 n += 1;
                 world.lock().unwrap().approvals.push(a.clone());

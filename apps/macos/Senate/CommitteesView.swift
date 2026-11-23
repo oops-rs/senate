@@ -66,7 +66,7 @@ private struct CommitteeCard: View {
                         .accessibilityHidden(true)
                 }
                 HStack(spacing: Theme.Space.m) {
-                    ChairLine(committee: committee)
+                    ChairLine(committee: committee, copyable: false)
                     Text(verbatim: L("committees.active", Int64(committee.activeMembers)))
                         .foregroundStyle(Theme.onSurfaceVariant)
                     if committee.pending > 0 {
@@ -85,14 +85,13 @@ private struct CommitteeCard: View {
         }
         .buttonStyle(.plain)
         .onHover { hovered = $0 }
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(.isButton)
     }
 }
 
 /// `chair ● ledger`, or that the committee has none.
 private struct ChairLine: View {
     let committee: RosterCommittee
+    var copyable = true
 
     var body: some View {
         HStack(spacing: 6) {
@@ -100,7 +99,7 @@ private struct ChairLine: View {
                 .foregroundStyle(Theme.onSurfaceVariant)
             if let id = committee.chairId {
                 ChairName(name: committee.chairDisplayName, id: id, live: committee.chairLive,
-                          committee: committee.committee)
+                          committee: committee.committee, copyable: copyable)
             } else {
                 Text(verbatim: L("senates.no_chair")).foregroundStyle(Theme.onSurfaceVariant)
             }

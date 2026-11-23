@@ -253,17 +253,24 @@ struct MetaLine<Content: View>: View {
 struct SenatorName: View {
     let name: String
     let id: String
+    /// Offer Copy in a context menu; off inside a button, where the menu's
+    /// gesture would take the click.
+    var copyable = true
 
     var body: some View {
-        Text(verbatim: name)
+        let text = Text(verbatim: name)
             .fontWeight(.medium)
             .foregroundStyle(Theme.agent)
             .lineLimit(1)
             .help("[senator::\(id)]")
-            .contextMenu {
+            .accessibilityCustomContent(Text(verbatim: L("a11y.ids")), Text(verbatim: id))
+        if copyable {
+            text.contextMenu {
                 Button(L("mention.copy", "[senator::\(id)]")) { Mentions.copy("senator::\(id)") }
             }
-            .accessibilityCustomContent(Text(verbatim: L("a11y.ids")), Text(verbatim: id))
+        } else {
+            text
+        }
     }
 }
 
@@ -273,14 +280,19 @@ struct ChairName: View {
     let id: String
     let live: Bool
     let committee: String
+    var copyable = true
 
     var body: some View {
         HStack(spacing: 4) {
             StatusDot(online: live, size: 6)
             if let name {
-                SenatorName(name: name, id: id)
-            } else {
+                SenatorName(name: name, id: id, copyable: copyable)
+            } else if copyable {
                 MentionText("[senator::\(id)]").environment(\.mentionCommittee, committee)
+            } else {
+                Text(verbatim: Mentions.shared.plain("[senator::\(id)]", committee: committee))
+                    .fontWeight(.medium)
+                    .foregroundStyle(Theme.agent)
             }
         }
     }

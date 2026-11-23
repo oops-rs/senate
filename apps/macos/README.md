@@ -97,6 +97,8 @@ Nothing is drawn above the content but what it needs at its top right.
   and what waits on you there. A card opens the committee: what waits on
   you there, your agents' threads there, and its members (the chair
   first). Committees with no one active and nothing for you are hidden.
+
+  ![Committees](docs/screenshots/committees.png)
 - **A thread** opens from the sidebar, home, the menu bar or a notification
   and reads as a conversation: every event (the latest 300; *Show earlier*
   for more), yours in a bubble on your side, and a reply box at the foot.

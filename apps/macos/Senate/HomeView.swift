@@ -88,7 +88,8 @@ struct CommitteeHeader: View {
                     .foregroundStyle(Theme.onSurfaceVariant)
                 if let chair, let id = chair.chairId {
                     Text(verbatim: "·").foregroundStyle(Theme.onSurfaceVariant)
-                    ChairName(name: chair.chairDisplayName, id: id, live: chair.chairLive, committee: committee)
+                    ChairName(name: chair.chairDisplayName, id: id, live: chair.chairLive, committee: committee,
+                              copyable: false)
                         .font(Theme.Fonts.row)
                 }
                 Spacer(minLength: 0)

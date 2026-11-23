@@ -20,7 +20,8 @@ fi
 home="$(mktemp -d /tmp/senate-ui.XXXXXX)"
 chmod 700 "$home"
 cargo build --quiet --manifest-path "$root/Cargo.toml" -p senate-app-core --example fake_daemon
-SENATE_HOME="$home" "$root/target/debug/examples/fake_daemon" >"$home/fake.log" 2>&1 &
+# No approvals arriving mid-test: the lists hold still under the clicks.
+SENATE_HOME="$home" FAKE_APPROVAL_EVERY=0 "$root/target/debug/examples/fake_daemon" >"$home/fake.log" 2>&1 &
 fake=$!
 trap 'kill $fake 2>/dev/null; rm -rf "$home"' EXIT
 for _ in $(seq 50); do [[ -S "$home/bridge.sock" ]] && break; sleep 0.1; done

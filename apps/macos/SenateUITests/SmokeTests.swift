@@ -3,8 +3,8 @@ import XCTest
 /// The app end to end against the core's fake daemon
 /// (`scripts/ui-test.sh` starts it and passes its Senate home): the window
 /// opens on home with the waiting threads in the sidebar, a thread opens
-/// and takes a reply, an approval is allowed, the sections answer ⌘1–5,
-/// and nothing fails an accessibility audit.
+/// and takes a reply, an approval is allowed, a committee opens, the
+/// sections answer ⌘1–6, and nothing fails an accessibility audit.
 final class SmokeTests: XCTestCase {
     var app: XCUIApplication!
 
@@ -55,10 +55,16 @@ final class SmokeTests: XCTestCase {
         )
         XCTAssertEqual(XCTWaiter.wait(for: [fewer], timeout: 10), .completed, "the approval was answered")
 
-        // ⌘3 Sessions, ⌘5 Senates (the fake presides, so ⌘4 is the docket).
+        // ⌘3 Committees: one card per committee; one opens on its roster.
         window.typeKey("3", modifierFlags: .command)
+        let payments = window.buttons.matching(NSPredicate(format: "label BEGINSWITH 'payments'")).firstMatch
+        XCTAssertTrue(payments.waitForExistence(timeout: 5), "the committees are listed")
+        payments.click()
+        XCTAssertTrue(window.buttons["All committees"].firstMatch.waitForExistence(timeout: 5), "a committee opens")
+        // ⌘4 Sessions, ⌘6 Senates (the fake presides, so ⌘5 is the docket).
+        window.typeKey("4", modifierFlags: .command)
         XCTAssertTrue(window.buttons["Attach to decide"].firstMatch.waitForExistence(timeout: 5))
-        window.typeKey("5", modifierFlags: .command)
+        window.typeKey("6", modifierFlags: .command)
         XCTAssertTrue(window.staticTexts["Address"].firstMatch.waitForExistence(timeout: 5), "the Senates section shows")
     }
 

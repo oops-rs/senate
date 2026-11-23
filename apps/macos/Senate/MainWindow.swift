@@ -119,7 +119,9 @@ private struct Sidebar: View {
         }
         .background(Theme.sidebar)
         .safeAreaInset(edge: .bottom, spacing: 0) {
+            // On the sidebar's tone, so a long list scrolls under it unseen.
             AccountRow(store: store)
+                .background(Theme.sidebar)
         }
         .toolbar {
             ToolbarItem {
@@ -310,7 +312,7 @@ extension CoreStore.Section {
         switch self {
         case .inbox: "house"
         case .approvals: "checkmark.shield"
-        case .committees: "person.3"
+        case .committees: "person.2.crop.square.stack"
         case .sessions: "terminal"
         case .docket: "list.bullet.rectangle"
         case .senates: "building.columns"
