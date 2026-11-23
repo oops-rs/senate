@@ -664,7 +664,8 @@ impl Service {
             b"EXPORTER-Senate-Pair-v2",
             Some(&context),
         )?);
-        let comparison = authority::comparison(&binding);
+        let comparison =
+            authority::comparison(&binding, &self.policy.listener.host_pin, &id, &name);
         let (accepted, result) = oneshot::channel();
         offer.candidate = Some(Candidate {
             id,
@@ -871,7 +872,7 @@ impl Client {
                 b"EXPORTER-Senate-Pair-v2",
                 Some(&context),
             )?);
-            let expected = authority::comparison(&binding);
+            let expected = authority::comparison(&binding, &host, &own, &device);
             ensure!(
                 bool::from(code.as_bytes().ct_eq(expected.as_bytes())),
                 "pairing comparison did not match this device"

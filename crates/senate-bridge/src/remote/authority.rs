@@ -462,8 +462,22 @@ fn reach(ip: IpAddr) -> &'static str {
     }
 }
 
-pub(super) fn comparison(binding: &str) -> String {
-    let digest = Sha256::digest(binding.as_bytes());
+pub(super) fn comparison(
+    binding: &str,
+    host_pin: &str,
+    device_pin: &str,
+    name: &senate_core::Name,
+) -> String {
+    // All three key values have fixed-width hex encodings. Rebind the
+    // displayed device and host here, even though the exporter also
+    // commits to them. The unprivileged CLI supplies the request fields.
+    let mut digest = Sha256::new();
+    digest.update(b"senate-admin-comparison-v1");
+    digest.update(binding.as_bytes());
+    digest.update(host_pin.as_bytes());
+    digest.update(device_pin.as_bytes());
+    digest.update(name.to_string().as_bytes());
+    let digest = digest.finalize();
     let mut digits = [0; 8];
     digits.copy_from_slice(&digest[..8]);
     format!("{:010}", u64::from_be_bytes(digits) % 10_000_000_000)
@@ -519,7 +533,12 @@ fn authorize(
             let device = &request.device;
             let expiry = chrono::DateTime::from_timestamp(device.expires, 0)
                 .context("invalid grant expiry")?;
-            let code = comparison(&device.grant);
+            let code = comparison(
+                &device.grant,
+                &request.policy.listener.host_pin,
+                &device.id,
+                &device.name,
+            );
             writeln!(
                 tty,
                 "Host {} (SPKI {}), device {} (SPKI {}).",
@@ -723,14 +742,25 @@ mod tests {
         let command = ["enroll".into(), encode(&enroll)?];
         assert!(test_authorize(store.clone(), &command, "no").is_err());
         assert!(store.read()?.devices.is_empty());
-        test_authorize(store.clone(), &command, &comparison(&device.grant))?;
+        let code = comparison(
+            &device.grant,
+            &enroll.policy.listener.host_pin,
+            &device.id,
+            &device.name,
+        );
+        let mut changed = enroll.clone();
+        changed.device.id = "e".repeat(64);
+        let changed = ["enroll".into(), encode(changed)?];
+        assert!(test_authorize(store.clone(), &changed, &code).is_err());
+        assert!(store.read()?.devices.is_empty());
+        test_authorize(store.clone(), &command, &code)?;
         assert_eq!(store.read()?.devices.get(&device.id), Some(&device));
         test_authorize(store.clone(), &["revoke".into(), device.id], "revoke")?;
         assert!(store.read()?.devices.is_empty());
-        assert_eq!(store.read()?.generation, 4);
+        assert_eq!(store.read()?.generation, 5);
         test_authorize(store.clone(), &["disable".into()], "disable")?;
         assert!(store.read()?.policy.is_none());
-        assert_eq!(store.read()?.generation, 5);
+        assert_eq!(store.read()?.generation, 6);
         Ok(())
     }
 
@@ -770,7 +800,14 @@ mod tests {
                 .map(|f| f.attempts),
             Some(3)
         );
-        assert!(test_authorize(store, &command, &comparison(&enrollment.device.grant)).is_err());
+        let device = &enrollment.device;
+        let code = comparison(
+            &device.grant,
+            &enrollment.policy.listener.host_pin,
+            &device.id,
+            &device.name,
+        );
+        assert!(test_authorize(store, &command, &code).is_err());
         Ok(())
     }
 
