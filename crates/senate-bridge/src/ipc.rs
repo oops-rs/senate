@@ -866,6 +866,10 @@ pub enum TimelineToolDetail {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
+    #[doc(hidden)]
+    RemoteControl {
+        command: crate::remote::Control,
+    },
     Ping,
     Status,
     Profiles,

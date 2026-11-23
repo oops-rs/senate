@@ -10,7 +10,7 @@ use std::time::Duration;
 use anyhow::{Context, bail, ensure};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use rustix::termios::{OptionalActions, Termios, tcgetattr, tcgetwinsize, tcsetattr};
-use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, Interest, unix::AsyncFd};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Interest, unix::AsyncFd};
 use tokio::net::UnixStream;
 use tokio::signal::unix::{SignalKind, signal};
 
@@ -307,9 +307,31 @@ pub async fn attach(path: &Path, paths: &Paths, label: &str) -> anyhow::Result<(
         let session = path.parent()?.canonicalize().ok()?;
         (session.parent() == Some(&hosts)).then(|| session.join("drops"))
     });
-    let mut stream = UnixStream::connect(path)
+    let stream = UnixStream::connect(path)
         .await
         .context("connect to the hosted terminal")?;
+    drive(stream, label, drops, UnixStream::into_split).await
+}
+
+pub(crate) async fn attach_stream(
+    stream: impl AsyncRead + AsyncWrite + Unpin,
+    label: &str,
+    drops: Option<std::path::PathBuf>,
+) -> anyhow::Result<()> {
+    drive(stream, label, drops, tokio::io::split).await
+}
+
+async fn drive<S, R, W>(
+    mut stream: S,
+    label: &str,
+    drops: Option<std::path::PathBuf>,
+    split: impl FnOnce(S) -> (R, W),
+) -> anyhow::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
     let (takes_colors, native) =
         match tokio::time::timeout(Duration::from_secs(3), stream.read_u8()).await?? {
             ATTACHED_NATIVE => (true, true),
@@ -331,7 +353,7 @@ pub async fn attach(path: &Path, paths: &Paths, label: &str) -> anyhow::Result<(
             .await?;
     }
     let (colors, typed) = terminal.colors().await;
-    let (mut screen, mut keys) = stream.into_split();
+    let (mut screen, mut keys) = split(stream);
 
     let to_host = async {
         if native {

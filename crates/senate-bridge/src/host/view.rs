@@ -140,7 +140,14 @@ pub fn paused_note(alias: &str) -> String {
 impl Tile {
     /// Watch `session`; a tile that `fits` asks for its session to be
     /// fitted to it ([`Tile::fit_to`]).
-    fn open(session: Session, changed: Arc<Notify>, fits: bool) -> Self {
+    fn open(
+        session: Session,
+        changed: Arc<Notify>,
+        fits: bool,
+        remote: Option<crate::remote::Client>,
+    ) -> Self {
+        let fits = fits && remote.is_none();
+        let session_id = session.key.clone();
         let shown_ = Arc::new(Mutex::new(Shown::default()));
         let (fit, mut wanted) = tokio::sync::watch::channel(None);
         let watching = tokio::spawn({
@@ -151,11 +158,22 @@ impl Tile {
             async move {
                 if dim {
                     // Paused: no terminal to watch until it is resumed.
-                    shown(&state).note = Some(paused_note(&alias));
+                    shown(&state).note = Some(if remote.is_some() {
+                        "not running on the target machine".into()
+                    } else {
+                        paused_note(&alias)
+                    });
                     changed.notify_one();
                     return;
                 }
-                let note = match Watch::open(&socket).await {
+                let link = match &remote {
+                    Some(client) => match client.stream(session_id, false).await {
+                        Ok(stream) => Watch::remote(stream).await,
+                        Err(error) => Err(error),
+                    },
+                    None => Watch::open(&socket).await,
+                };
+                let note = match link {
                     Ok(mut watch) => {
                         shown(&state).mirror = Some(Mirror::default());
                         // Kept as long as the watch: dropping it ends it.
@@ -214,7 +232,11 @@ impl Tile {
                             () = fitting => unreachable!("fitting never ends"),
                         }
                     }
-                    Err(_) if !socket.exists() && socket.with_file_name("tty").exists() => {
+                    Err(_)
+                        if remote.is_none()
+                            && !socket.exists()
+                            && socket.with_file_name("tty").exists() =>
+                    {
                         cannot_watch(&alias)
                     }
                     Err(error) => format!("{error:#}"),
@@ -674,6 +696,7 @@ enum Mode {
 }
 
 struct Viewer {
+    remote: Option<crate::remote::Client>,
     mode: Mode,
     tiles: Vec<Tile>,
     focus: usize,
@@ -692,12 +715,21 @@ impl Viewer {
         for session in sessions {
             let tile = match known.remove(&session.key) {
                 Some(mut tile)
-                    if tile.session.tty == session.tty && tile.session.dim == session.dim =>
+                    if tile.session.tty == session.tty
+                        && tile.session.dim == session.dim
+                        && (self.remote.is_none()
+                            || !tile.watching.is_finished()
+                            || session.dim) =>
                 {
                     tile.session = session;
                     tile
                 }
-                _ => Tile::open(session, self.changed.clone(), self.mode == Mode::Grid),
+                _ => Tile::open(
+                    session,
+                    self.changed.clone(),
+                    self.mode == Mode::Grid,
+                    self.remote.clone(),
+                ),
             };
             self.tiles.push(tile);
         }
@@ -1001,6 +1033,7 @@ pub async fn watch_one(session: Session) -> anyhow::Result<()> {
         cannot_watch(&session.alias)
     );
     let mut viewer = Viewer {
+        remote: None,
         mode: Mode::One,
         tiles: Vec::new(),
         focus: 0,
@@ -1018,6 +1051,39 @@ pub async fn watch_all(
     all: bool,
     mut sessions: impl FnMut() -> Listing + Send,
 ) -> anyhow::Result<()> {
+    watch_grid(paths, all, &mut sessions, None).await
+}
+
+pub(crate) async fn watch_remote(
+    paths: &Paths,
+    all: bool,
+    mut sessions: impl FnMut() -> Listing + Send,
+    client: crate::remote::Client,
+) -> anyhow::Result<()> {
+    watch_grid(paths, all, &mut sessions, Some(client)).await
+}
+
+pub(crate) async fn watch_remote_one(
+    session: Session,
+    client: crate::remote::Client,
+) -> anyhow::Result<()> {
+    let mut viewer = Viewer {
+        remote: Some(client),
+        mode: Mode::One,
+        tiles: Vec::new(),
+        focus: 0,
+        changed: Arc::new(Notify::new()),
+    };
+    viewer.list(vec![session]);
+    stay(&mut viewer, None).await.map(drop)
+}
+
+async fn watch_grid(
+    paths: &Paths,
+    all: bool,
+    mut sessions: impl FnMut() -> Listing + Send,
+    remote: Option<crate::remote::Client>,
+) -> anyhow::Result<()> {
     let first = sessions().await?;
     let mut grid = GridListing {
         fetch: Box::new(sessions),
@@ -1030,6 +1096,7 @@ pub async fn watch_all(
         return Ok(());
     };
     let mut viewer = Viewer {
+        remote,
         mode: Mode::Grid,
         tiles: Vec::new(),
         focus: 0,
@@ -1044,7 +1111,14 @@ pub async fn watch_all(
                 return Ok(());
             }
             Left::Attach(session) => {
-                if let Err(error) = super::attach(&session.tty, paths, &session.title).await {
+                let result = match &viewer.remote {
+                    Some(client) => match client.stream(session.key.clone(), true).await {
+                        Ok(stream) => super::attach_stream(stream, &session.title, None).await,
+                        Err(error) => Err(error),
+                    },
+                    None => super::attach(&session.tty, paths, &session.title).await,
+                };
+                if let Err(error) = result {
                     eprintln!("{error:#}");
                     tokio::time::sleep(Duration::from_secs(2)).await;
                 } else {
@@ -1233,6 +1307,7 @@ mod tests {
     #[tokio::test]
     async fn the_grid_asks_each_tile_shown_to_be_fitted_and_again_on_a_resize() {
         let viewer = Viewer {
+            remote: None,
             mode: Mode::Grid,
             tiles: vec![tile("north", "n", false), tile("south", "s", false)],
             focus: 0,
@@ -1251,6 +1326,7 @@ mod tests {
         let mut one = tile("north", "n", false);
         one.fit = None;
         let viewer = Viewer {
+            remote: None,
             mode: Mode::One,
             tiles: vec![one],
             focus: 0,
@@ -1263,6 +1339,7 @@ mod tests {
     #[tokio::test]
     async fn the_grid_pages_names_each_tile_and_marks_the_focused_one() {
         let mut viewer = Viewer {
+            remote: None,
             mode: Mode::Grid,
             tiles: ["a", "b", "c", "d", "e"]
                 .into_iter()
@@ -1358,6 +1435,7 @@ mod tests {
     #[tokio::test]
     async fn a_tile_reopens_its_source_when_paused_or_resumed() {
         let mut viewer = Viewer {
+            remote: None,
             mode: Mode::Grid,
             tiles: Vec::new(),
             focus: 0,
@@ -1447,6 +1525,7 @@ mod tests {
         let left = tile("north", "before", false);
         let right = tile("south", "unchanged", false);
         let viewer = Viewer {
+            remote: None,
             mode: Mode::Grid,
             tiles: vec![left, right],
             focus: 0,

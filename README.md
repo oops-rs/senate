@@ -705,6 +705,90 @@ in its `data_dir` on every attach and detach and whenever that changes).
 
 ---
 
+## Remote machines
+
+A developer machine can opt into direct access from another Mac on a LAN or an
+existing mesh network. Configure the **target** machine's
+`$SENATE_HOME/senate.toml` (normally `~/.senate/senate.toml`) with its own
+reachable LAN or mesh address. Substitute the address below. The listener is
+off when this table has no `listen` value. Start the updated `senated --machine`
+with this profile in your normal service or terminal.
+
+```toml
+[remote]
+listen = "192.168.1.42:9443"
+```
+
+Use a stable address on the target. Restrict reachability to the LAN or mesh you
+intend. The pairing stores that address for future connections. On the target's own terminal run:
+
+```sh
+senate setup remote pair --attach
+```
+
+On the client Mac run:
+
+```sh
+senate setup remote connect wyak --device laptop
+```
+
+Paste the full offer from the target into the client terminal. The offer expires
+after two minutes and can be claimed once. Enter the six-digit code printed by
+the client back on the target only when it matches what you see on your own
+client. Use `pair` for list and watch, `pair --list-only` for metadata, and add
+`--attach` only when you want that device to type in terminals. A grant expires
+after 30 days by default. Set `--valid-secs` to give a shorter grant.
+
+```sh
+senate session list --machine wyak
+senate session list --all-machines
+senate session watch --machine wyak
+senate attach --machine wyak main
+```
+
+A remote attach selects an already-running hosted session. Use the
+committee-qualified name if the alias is ambiguous. The host allows one
+interactive viewer at a time. An attach grant lets the device type what the
+terminal accepts, including prompt answers. Watch is read-only and starts
+with a fresh snapshot after reconnect. A remote attach uses the existing bounded history
+replay. If the connection drops, attach again to start a new stream. Terminal
+input is never replayed. Paired names are offered by completion. The
+all-machines list reports unreachable contexts by name.
+
+### Trust and storage
+
+- TLS 1.3 authenticates both ends, pins the offered target certificate and
+  checks the device certificate against the target's local grants. Early
+  data and session resumption are disabled. The pairing offer is a secret
+  until claimed or expired. Share it only with your own device and confirm
+  its comparison code locally. Pairing and revocation use the target's local
+  person check.
+- Public certificates and key references live in
+  `$SENATE_HOME/remote/host.json` and `remote/machines/<name>.json`.
+  Private keys are generic-password items in the macOS user's Keychain under
+  service `dev.senate.remote`, with a random UUID as the account. Systems
+  without an available Keychain use a private `remote/key-<uuid>.json` file
+  with mode 0600 inside a mode-0700 directory. A Keychain access denial fails
+  instead of writing a fallback copy.
+- Hook and agent APIs expose no key material. A same-user agent on the
+  **client** can try to run the same Senate CLI. If the OS grants that
+  executable Keychain access, or the key is in a file the agent can read,
+  the agent can exercise the device's granted scopes. Stronger isolation
+  requires a separate OS identity or a user-presence-gated signing broker
+  with keys inaccessible to agents. Keep interactive attach off on devices
+  where that risk is unacceptable.
+- The target writes a local `remote/audit.jsonl` with device fingerprints and
+  remote actions. Run `senate setup remote devices` on the target to list
+  grants and `senate setup remote revoke <device-id>` to remove one and
+  disconnect its streams. A lost device can act within its grants until it
+  expires or is revoked.
+- This opt-in sends session metadata and, with the relevant grant, live
+  terminal content over the encrypted connection. Transcript bodies,
+  replies, approvals, lifecycle commands and a relay are outside this
+  version of the remote API. The scope names `timeline`, `reply`, `approve`,
+  and `lifecycle` are reserved for later versions. The parent Senate and
+  local hooks do not participate in remote transport.
+
 ## 🤖 Agent Ecosystem & MCP
 
 Senate integrates seamlessly with autonomous coding assistants through the **Model Context Protocol (MCP)** and native process lifecycle hooks.
