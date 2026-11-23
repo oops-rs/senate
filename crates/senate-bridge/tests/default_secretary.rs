@@ -400,3 +400,54 @@ async fn only_the_desk_opens_a_committee_and_a_retry_finishes_it() {
     assert_eq!(rows.rows.len(), 4, "secretary, lead, helper, main");
     h.stop().await;
 }
+
+/// An agent cannot start the default secretary: `senate secretary ask` from
+/// inside a hosted session's process tree is refused, and nothing starts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_agent_cannot_start_the_default_secretary() {
+    let mut h = machine().await;
+    let project = h.dir.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    // The hosted TUI itself asks, as an agent would from a tool.
+    std::fs::write(
+        h.dir.path().join("fixture-claude"),
+        format!(
+            "#!/bin/sh\n{RECORD_HOSTED_ARGV}\n\
+             while [ ! -e .go ]; do sleep 0.05; done\n\
+             {BIN:?} secretary ask 'open a committee' > .guard.tmp 2>&1; echo \"exit $?\" >> .guard.tmp; mv .guard.tmp .guard\n\
+             while IFS= read -r line; do :; done\n"
+        ),
+    )
+    .unwrap();
+    let _: SpawnReply = call(
+        &h,
+        &Request::Spawn {
+            attempt_id: None,
+            session: Default::default(),
+            runtime: Some(HostedRuntime::Claude),
+            profile: None,
+            committee: common::committee(),
+            alias: Some(path("worker")),
+            cwd: project.clone(),
+            chair: false,
+            secretary: false,
+            prompt: None,
+            model: Default::default(),
+        },
+    )
+    .await;
+    std::fs::write(project.join(".go"), "").unwrap();
+    let out = common::eventually("the TUI's ask came back", TIMEOUT, || {
+        std::fs::read_to_string(project.join(".guard")).ok()
+    })
+    .await;
+    assert!(out.contains("exit 1"), "{out}");
+    assert!(
+        out.contains("inside the process tree of")
+            && out.contains("Only the person starts the default secretary"),
+        "{out}"
+    );
+    let state: DefaultSecretary = call(&h, &Request::DefaultSecretary).await;
+    assert_eq!(state.state, DefaultSecretaryState::NotRecorded);
+    h.stop().await;
+}

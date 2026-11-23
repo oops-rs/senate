@@ -49,8 +49,8 @@ enum Action {
     /// `[local] secretary_profile`, or the first runtime configured); a
     /// paused or ended one is brought back; one stopped on purpose is not.
     #[command(after_help = "Examples:
-  senate secretary ask 'Open a committee for the refund bug in ~/dev/shop, chair main'
-  echo 'Fan the logging change out to ~/dev/api and ~/dev/web' | senate secretary ask -
+  senate secretary ask 'Open a committee for the bug in ~/dev/shop'
+  senate secretary ask - < plan.md       The request, read from stdin
   senate thread 12 --committee office    Read its answer")]
     Ask {
         /// What to ask; `-` reads it from stdin.
@@ -273,6 +273,10 @@ fn ask(paths: &Paths, text: String) -> anyhow::Result<()> {
             text,
         )
         .await?;
+        let mut sent = sent;
+        // `office` is rarely this directory's committee: the commands
+        // suggested name it.
+        sent.elsewhere = true;
         println!("{}", sent.render(false));
         Ok(())
     })

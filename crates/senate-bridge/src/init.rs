@@ -104,6 +104,11 @@ speaker = "{speaker}"
 # address to one, forward and answer what they can, and leave the rest
 # for you.
 # secretaries = ["claude"]
+# Your default secretary (`senate secretary ask "..."`) is a coding agent
+# on your desk, started the first time you ask it, as office::secretary.
+# It starts with this launch profile (see `senate profiles`); without one,
+# with the first of claude, codex, agy configured here, at its default model.
+# secretary_profile = "review"
 # Loopback only.
 listen = "{listen}"
 "#,
@@ -292,6 +297,22 @@ mod tests {
         assert_eq!(local.speaker.unwrap().to_string(), "senator::alice");
         assert!(local.secretaries.is_empty(), "commented out");
         assert!(text.contains("# secretaries = [\"claude\"]"));
+        // The default secretary's profile is offered, not set.
+        assert!(local.secretary_profile.is_none());
+        assert!(text.contains("# secretary_profile = \"review\""));
+        // Uncommented, it reads as the key it names.
+        let set = text.replace("# secretary_profile", "secretary_profile");
+        std::fs::write(&path, set).unwrap();
+        assert_eq!(
+            Hosted::load(&path)
+                .unwrap()
+                .local
+                .unwrap()
+                .secretary_profile
+                .as_deref(),
+            Some("review")
+        );
+        std::fs::write(&path, &text).unwrap();
         assert_eq!(local.listen.as_deref(), Some(DEFAULT_LOCAL_LISTEN));
         assert!(hosted.preside.is_empty());
         let (speaker, secretaries, note) = hosted.office_config(&config.person, None).unwrap();
