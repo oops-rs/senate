@@ -339,21 +339,32 @@ fn one_status(event: &Event, locale: Locale) -> Option<String> {
 /// `senate thread`: each event with its byline, time and body, the body as
 /// written (what is piped).
 pub fn render_thread(reply: &ThreadReply, locale: Locale) -> String {
-    render_thread_with(reply, locale, &|body| body.to_owned())
+    render_thread_with(reply, locale, &|body| body.to_owned(), format::Clock::Utc)
 }
 
 /// [`render_thread`] with each body laid out by `body` first (Markdown for a
-/// terminal: [`crate::format::terminal_markdown`]).
+/// terminal: [`crate::format::terminal_markdown`]) and times on `clock`
+/// (its zone named once, in the first line).
 pub fn render_thread_with(
     reply: &ThreadReply,
     locale: Locale,
     lay_out: &dyn Fn(&str) -> String,
+    clock: format::Clock,
 ) -> String {
     let n = reply.events.len();
-    let mut out = match locale {
-        Locale::Zh => format!("{} 的 thread {}，共 {n} 条：", reply.committee, reply.root),
-        Locale::En => format!(
+    let zone = clock.zone();
+    let mut out = match (locale, &zone) {
+        (Locale::Zh, None) => format!("{} 的 thread {}，共 {n} 条：", reply.committee, reply.root),
+        (Locale::Zh, Some(zone)) => format!(
+            "{} 的 thread {}，共 {n} 条（本地时间，{zone}）：",
+            reply.committee, reply.root
+        ),
+        (Locale::En, None) => format!(
             "Thread {} on {}, {n} event(s):",
+            reply.root, reply.committee
+        ),
+        (Locale::En, Some(zone)) => format!(
+            "Thread {} on {}, {n} event(s), local times ({zone}):",
             reply.root, reply.committee
         ),
     };
@@ -362,7 +373,7 @@ pub fn render_thread_with(
             "\n\n[seq {}] {} · {} · {}",
             e.seq,
             format::author(e, locale),
-            e.ts.format("%Y-%m-%d %H:%M UTC"),
+            clock.stamp(e.ts),
             e.kind
         );
         if !e.to.is_empty() && e.kind != Kind::Status {
@@ -840,9 +851,12 @@ mod tests {
             render_thread(&md, Locale::En).contains("\n  Is the **retry** limit in `config.rs`?")
         );
         let plain = senate_markdown::Terminal::new(40, senate_markdown::Color::None);
-        let laid = render_thread_with(&md, Locale::En, &|body| {
-            crate::format::markdown_for(plain, body)
-        });
+        let laid = render_thread_with(
+            &md,
+            Locale::En,
+            &|body| crate::format::markdown_for(plain, body),
+            format::Clock::Utc,
+        );
         assert!(
             laid.contains("\n  Is the retry limit in config.rs?"),
             "{laid}"
@@ -852,10 +866,18 @@ mod tests {
             "{laid}"
         );
         let ansi = senate_markdown::Terminal::new(40, senate_markdown::Color::Ansi16);
-        let coloured = render_thread_with(&md, Locale::En, &|body| {
-            crate::format::markdown_for(ansi, body)
-        });
+        let coloured = render_thread_with(
+            &md,
+            Locale::En,
+            &|body| crate::format::markdown_for(ansi, body),
+            format::Clock::Utc,
+        );
         assert!(coloured.contains("\u{1b}[1mretry"), "{coloured}");
+        // Local times: the zone once, in the first line, none on each event.
+        let local = render_thread_with(&md, Locale::En, &|b| b.to_owned(), format::Clock::Local);
+        let first = local.lines().next().unwrap();
+        assert!(first.contains(", local times (UTC"), "{local}");
+        assert!(!local.contains(" UTC ·"), "{local}");
     }
 
     #[test]

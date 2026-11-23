@@ -489,7 +489,9 @@ error lists the committees to choose from.
 
 On a terminal, `senate thread` and `senate inbox --follow` lay message bodies
 out as Markdown, wrapped to the window (in colour unless `NO_COLOR` is set or
-`TERM=dumb`). Piped, they print the text exactly as written.
+`TERM=dumb`), and print times in the local zone, naming it once
+(`local times (UTC+01:00)`). Piped, they print the text exactly as written,
+with every time in UTC.
 
 ### 2. Zero-Pollution Workspace Management
 

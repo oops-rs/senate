@@ -2512,7 +2512,11 @@ async fn watch(
     // not miss anything waits for it.
     eprintln!(
         "{}",
-        person::render_watching(committee.as_ref(), pong.locale)
+        person::render_watching(
+            committee.as_ref(),
+            pong.locale,
+            crate::format::Clock::for_stdout()
+        )
     );
     loop {
         let Some(event) = stream.next().await? else {
@@ -2539,6 +2543,7 @@ async fn watch(
                 text,
                 pong.locale,
                 markdown.as_ref().map(|m| m as &dyn Fn(&str) -> String),
+                crate::format::Clock::for_stdout(),
             );
             let text = if output.verbose {
                 text
@@ -3093,7 +3098,12 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
                     print_json(&reply)
                 } else {
                     let mut text = match crate::format::terminal_markdown() {
-                        Some(markdown) => speak::render_thread_with(&reply, locale, &markdown),
+                        Some(markdown) => speak::render_thread_with(
+                            &reply,
+                            locale,
+                            &markdown,
+                            crate::format::Clock::for_stdout(),
+                        ),
                         None => speak::render_thread(&reply, locale),
                     };
                     if !verbose {

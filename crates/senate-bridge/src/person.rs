@@ -352,7 +352,7 @@ pub fn render_news(
     text: &str,
     locale: Locale,
 ) -> String {
-    render_news_with(event, escalated, text, locale, None)
+    render_news_with(event, escalated, text, locale, None, format::Clock::Utc)
 }
 
 /// [`render_news`] with the text laid out by `lay_out` (Markdown for a
@@ -364,6 +364,7 @@ pub fn render_news_with(
     text: &str,
     locale: Locale,
     lay_out: Option<&dyn Fn(&str) -> String>,
+    clock: format::Clock,
 ) -> String {
     let root = event.thread.unwrap_or(event.seq);
     let by = format::author(event, locale);
@@ -372,11 +373,11 @@ pub fn render_news_with(
     let mut out = match locale {
         Locale::Zh => format!(
             "{by} {verb} · {} · {c} · thread {root}",
-            event.ts.format("%Y-%m-%d %H:%M UTC")
+            clock.stamp(event.ts)
         ),
         Locale::En => format!(
             "{by} {verb} · {} · {c} · thread {root}",
-            event.ts.format("%Y-%m-%d %H:%M UTC")
+            clock.stamp(event.ts)
         ),
     };
     let laid_out = lay_out.map(|lay_out| lay_out(text.trim()));
@@ -411,7 +412,20 @@ pub fn render_news_with(
 }
 
 /// What `senate inbox --follow` says on stderr when it starts.
-pub fn render_watching(committee: Option<&senate_core::CommitteeId>, locale: Locale) -> String {
+pub fn render_watching(
+    committee: Option<&senate_core::CommitteeId>,
+    locale: Locale,
+    clock: format::Clock,
+) -> String {
+    let watching = watching(committee, locale);
+    match (clock.zone(), locale) {
+        (None, _) => watching,
+        (Some(zone), Locale::Zh) => format!("{watching}（本地时间，{zone}）"),
+        (Some(zone), Locale::En) => format!("{watching} Times are local ({zone})."),
+    }
+}
+
+fn watching(committee: Option<&senate_core::CommitteeId>, locale: Locale) -> String {
     match (committee, locale) {
         (Some(c), Locale::Zh) => format!("正在看 {c} 上给你的消息（Ctrl-C 结束）……"),
         (Some(c), Locale::En) => {
@@ -565,7 +579,15 @@ fn followed_news_is_laid_out_as_markdown_only_when_asked() {
     );
     let plain = senate_markdown::Terminal::new(60, senate_markdown::Color::None);
     let lay_out = |text: &str| format::markdown_for(plain, text);
-    let laid = render_news_with(&event, false, &event.body, Locale::En, Some(&lay_out));
+    let laid = render_news_with(
+        &event,
+        false,
+        &event.body,
+        Locale::En,
+        Some(&lay_out),
+        format::Clock::Local,
+    );
+    assert!(!laid.contains(" UTC ·"), "{laid}");
     assert!(laid.contains("\n  The limit is in config.rs."), "{laid}");
     assert!(
         laid.contains("read: `senate thread 9 --committee refund`"),

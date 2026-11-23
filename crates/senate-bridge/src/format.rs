@@ -2576,3 +2576,69 @@ pub fn markdown_for(terminal: senate_markdown::Terminal, text: &str) -> String {
     );
     out.trim_end().to_owned()
 }
+
+/// How `senate thread` and `senate inbox --follow` print a time: in UTC
+/// (what is piped, and what scripts read), or in the local zone on a
+/// terminal, the zone named once rather than on every line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Clock {
+    Utc,
+    Local,
+}
+
+impl Clock {
+    /// Local on a terminal, UTC when stdout is piped.
+    pub fn for_stdout() -> Self {
+        use std::io::IsTerminal as _;
+        if std::io::stdout().is_terminal() {
+            Self::Local
+        } else {
+            Self::Utc
+        }
+    }
+
+    /// `ts` to the minute; in UTC with the zone written after it.
+    pub fn stamp(self, ts: chrono::DateTime<chrono::Utc>) -> String {
+        match self {
+            Self::Utc => ts.format("%Y-%m-%d %H:%M UTC").to_string(),
+            Self::Local => ts
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M")
+                .to_string(),
+        }
+    }
+
+    /// The zone, said once where the times are local: `UTC+01:00`.
+    pub fn zone(self) -> Option<String> {
+        match self {
+            Self::Utc => None,
+            Self::Local => Some(local_zone(chrono::Local::now().offset().local_minus_utc())),
+        }
+    }
+}
+
+/// `UTC+01:00`, `UTC-05:30`, `UTC` for an offset of `secs` east of UTC.
+pub fn local_zone(secs: i32) -> String {
+    if secs == 0 {
+        return "UTC".to_owned();
+    }
+    let sign = if secs < 0 { '-' } else { '+' };
+    let minutes = secs.unsigned_abs() / 60;
+    format!("UTC{sign}{:02}:{:02}", minutes / 60, minutes % 60)
+}
+
+#[cfg(test)]
+#[test]
+fn a_local_clock_names_its_zone_once_and_utc_on_every_line() {
+    assert_eq!(local_zone(0), "UTC");
+    assert_eq!(local_zone(3600), "UTC+01:00");
+    assert_eq!(local_zone(-(5 * 3600 + 1800)), "UTC-05:30");
+    let ts = chrono::DateTime::parse_from_rfc3339("2026-11-17T10:02:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    assert_eq!(Clock::Utc.stamp(ts), "2026-11-17 10:02 UTC");
+    assert_eq!(Clock::Utc.zone(), None);
+    let local = Clock::Local.stamp(ts);
+    assert_eq!(local.len(), "2026-11-17 10:02".len(), "{local}");
+    assert!(Clock::Local.zone().is_some_and(|z| z.starts_with("UTC")));
+}
