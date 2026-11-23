@@ -304,6 +304,22 @@ pub struct World {
     pub approvals: Vec<Approval>,
     pub docket: DocketReply,
     pub requests: Vec<Request>,
+    /// The committee of each thread not on [`committee`], by root.
+    pub committee_of: std::collections::BTreeMap<u64, CommitteeId>,
+    /// The Senate's aliases; `None` is `claude` as `lead` on refund-v2.
+    pub aliases: Option<senate_core::alias::KnownAliases>,
+    /// The `roster` reply: empty unless a world sets one.
+    pub roster: Vec<senate_bridge::ipc::RosterCommittee>,
+}
+
+impl World {
+    /// The committee thread `root` is on.
+    pub fn committee_of(&self, root: Seq) -> CommitteeId {
+        self.committee_of
+            .get(&root.0)
+            .cloned()
+            .unwrap_or_else(committee)
+    }
 }
 
 impl World {
@@ -321,6 +337,9 @@ impl World {
             long: Default::default(),
             docket: docket(),
             requests: Vec::new(),
+            committee_of: Default::default(),
+            aliases: None,
+            roster: Vec::new(),
         }
     }
 }
@@ -450,12 +469,17 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
         } => {
             assert_eq!(session, Default::default(), "the app has no session");
             let agent = SenatorName::new(name).unwrap();
-            // As the daemon answers: what is addressed to this agent, and
-            // what was put to the person.
+            // As the daemon answers: what on this committee is addressed to
+            // this agent, and what was put to the person.
             let threads = w
                 .threads
                 .iter()
-                .filter(|t| t.is_for(&agent) || t.escalated_to.as_ref() == Some(&alice()))
+                .filter(|t| w.committee_of(t.root) == c)
+                .filter(|t| {
+                    t.is_for(&agent)
+                        || t.escalated_to.as_ref() == Some(&alice())
+                        || t.waits_on_person(&alice(), Seq(0)).is_some()
+                })
                 .cloned()
                 .collect();
             Reply::ok(&InboxReply {
@@ -523,7 +547,11 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
             thread,
             committee: Some(c),
             ..
-        } => match w.threads.iter().find(|t| t.root == thread) {
+        } => match w
+            .threads
+            .iter()
+            .find(|t| t.root == thread && w.committee_of(t.root) == c)
+        {
             Some(t) => Reply::ok(&ThreadReply {
                 committee: c,
                 root: t.root,
@@ -535,6 +563,8 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
             None => Reply::err(IpcError::bad_request(format!("no thread {thread}"))),
         },
         // `claude` goes by `lead` on refund-v2.
+        Request::Aliases if w.aliases.is_some() => Reply::ok(&w.aliases),
+        Request::Roster => Reply::ok(&w.roster),
         Request::Aliases => {
             let mut table = senate_core::alias::CommitteeAliases::new();
             table
@@ -734,4 +764,249 @@ pub fn setup() -> (tempfile::TempDir, PathBuf, Arc<Mutex<World>>) {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("bridge.sock");
     (dir, socket, Arc::new(Mutex::new(World::new())))
+}
+
+/// A Senate with several committees, the way a busy one looks: chairs on
+/// three of four committees (one of them away), alice's agents seated under
+/// aliases beside agents that are long gone, a request and an escalation
+/// waiting on her, tasks her agents are still working on, and an item put
+/// to the Speaker on another committee. `examples/fake_daemon.rs` serves it;
+/// the tests keep the plain world.
+pub fn busy_senate(w: &mut World) {
+    use senate_bridge::ipc::{RosterCommittee, RosterMember};
+    use senate_core::{Directed, Escalation};
+
+    let c = |name: &str| CommitteeId::new(name).unwrap();
+    let ledger = "codex-01a206b8-8ed9-7a73-934c-f967b877774a";
+    let auditor = "claude-3f1d9a20-5b7e-4c11-9e0a-2d6c8b41f7aa";
+    let scribe = "claude-bff528a7-9e17-4c3a-8d21-7f0e5b2a9c11";
+    let editor = "codex-01a1f00d-77c2-7e10-b0a4-5c3e19d2a6b8";
+    let oncall = "agy-36358e84-ac54-409e-beb4-9d2c71f0e3a5";
+    let gone = [
+        "claude-0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+        "codex-01a1e8ff-f5a4-7ab1-ad38-fca61f2e8847",
+        "claude-77aa0c19-3b2d-4e8f-a1c6-0d5e9f2b4c3e",
+    ];
+
+    // Aliases: each committee names its seats.
+    let mut table = senate_core::alias::CommitteeAliases::new();
+    for (committee, alias, primary) in [
+        ("refund-v2", "lead", "claude"),
+        ("payments", "ledger", ledger),
+        ("payments", "auditor", auditor),
+        ("docs", "scribe", scribe),
+        ("docs", "editor", editor),
+        ("infra", "oncall", oncall),
+    ] {
+        table
+            .set(&c(committee), path(alias), path(primary))
+            .unwrap();
+    }
+    w.aliases = Some(senate_core::alias::KnownAliases::Scoped(table));
+    if let Some(roles) = w.status.roles.as_mut() {
+        for (committee, chair) in [("payments", ledger), ("docs", scribe)] {
+            roles.chairs.push(senate_core::api::ChairInfo {
+                committee: c(committee),
+                chair: Some(path(chair)),
+                source: None,
+            });
+        }
+        roles.chairs.push(senate_core::api::ChairInfo {
+            committee: c("infra"),
+            chair: None,
+            source: None,
+        });
+    }
+
+    // alice's streams: live where her agents are at work, stopped where
+    // they left.
+    let stopped = |committee: &str, agent: &str| {
+        let mut s = stream(committee, agent, 0);
+        s.stream = Some(StreamState::Stopped);
+        s.duty = None;
+        s
+    };
+    w.status.committees.extend([
+        stream("payments", ledger, 1),
+        stream("infra", oncall, 1),
+        stopped("docs", scribe),
+        stopped("refund-v2", gone[2]),
+    ]);
+    // Sessions: the live ones, and old ones that ended days ago.
+    let on = |id: &str, runtime: Runtime, agent: &str, committee: &str| {
+        let mut x = session(id, runtime, agent);
+        x.inferred_committee = Some(c(committee));
+        x
+    };
+    let mut sessions = vec![
+        on("pay-1", Runtime::Codex, ledger, "payments"),
+        on("ops-1", Runtime::Claude, oncall, "infra"),
+    ];
+    for (i, agent) in gone.iter().enumerate() {
+        let runtime = if agent.starts_with("codex") {
+            Runtime::Codex
+        } else {
+            Runtime::Claude
+        };
+        let mut x = on(&format!("old-{i}"), runtime, agent, "refund-v2");
+        x.state = SessionState::Ended;
+        x.last_seen = Utc::now() - chrono::Duration::days(3 + i as i64);
+        sessions.push(x);
+    }
+    let mut x = on("docs-1", Runtime::Claude, scribe, "docs");
+    x.state = SessionState::Stale;
+    x.last_seen = Utc::now() - chrono::Duration::hours(20);
+    sessions.push(x);
+    w.status.sessions.extend(sessions);
+
+    // Threads.
+    let directed = |seq: u64, from: &str, kind: Kind, escalated: bool, line: &str| Directed {
+        person: alice(),
+        seq: Seq(seq),
+        ts: Utc::now() - chrono::Duration::minutes(40),
+        from: Address::senator(&path(from)),
+        on_behalf_of: None,
+        kind,
+        escalated,
+        line: line.into(),
+    };
+    // A request from payments' chair to alice herself.
+    let mut request = suspended(
+        210,
+        "Approve the ledger migration window (Sat 02:00 UTC)?",
+        ledger,
+    );
+    request.kind = Kind::Request;
+    request.from = Address::senator(&path(ledger));
+    request.on_behalf_of = None;
+    request.to = vec![Address::senior(&alice())];
+    request.agents = Vec::new();
+    request.state = StatusState::Active;
+    request.triage = None;
+    request.reason = None;
+    request.since_ts = Utc::now() - chrono::Duration::minutes(40);
+    request.directed = vec![directed(
+        210,
+        ledger,
+        Kind::Request,
+        false,
+        "The migration needs a 30-minute write freeze; Saturday 02:00 UTC is the quietest window.",
+    )];
+    // An escalation from docs' chair, about a decision only she can make.
+    let mut escalation = suspended(
+        57,
+        "Publish the API reference under the new domain?",
+        scribe,
+    );
+    escalation.from = Address::senator(&path(editor));
+    escalation.on_behalf_of = None;
+    escalation.reason = Some("needs a product call".into());
+    escalation.since_ts = Utc::now() - chrono::Duration::hours(2);
+    escalation.escalation = Some(Escalation {
+        to: alice(),
+        by: Address::senator(&path(scribe)),
+        seq: Seq(59),
+        ts: Utc::now() - chrono::Duration::hours(2),
+        reason: Some("Moving the docs changes every published link; that is your call.".into()),
+    });
+    escalation.escalated_to = Some(alice());
+    escalation.directed = vec![directed(
+        59,
+        scribe,
+        Kind::Note,
+        true,
+        "Moving the docs changes every published link; that is your call.",
+    )];
+    // What her agents are still working on: waits on them, not on her.
+    let task = |root: u64, title: &str, from: &str, to: &str, minutes: i64| {
+        let mut t = suspended(root, title, to);
+        t.kind = Kind::Request;
+        t.from = Address::senator(&path(from));
+        t.on_behalf_of = None;
+        t.state = StatusState::Processing;
+        t.triage = None;
+        t.reason = None;
+        t.since_ts = Utc::now() - chrono::Duration::minutes(minutes);
+        t
+    };
+    w.threads.extend([
+        request,
+        escalation,
+        task(215, "Reconcile the October payouts", auditor, ledger, 25),
+        task(12, "Rotate the staging certificates", "claude", oncall, 90),
+    ]);
+    for (root, committee) in [
+        (210, "payments"),
+        (57, "docs"),
+        (215, "payments"),
+        (12, "infra"),
+    ] {
+        w.committee_of.insert(root, c(committee));
+    }
+
+    // Put to the Speaker on payments: a question addressed to the desk.
+    let mut asked = w.docket.senates[0].pages[0].items[0].clone();
+    asked.event.seq = Seq(220);
+    asked.event.committee = c("payments");
+    asked.event.from = Address::senator(&path(auditor));
+    asked.event.body = "Who signs off on refunds above 10,000 EUR?".into();
+    asked.awaiting = Awaiting::Addressed;
+    let mut page = w.docket.senates[0].pages[0].clone();
+    page.committee = c("payments");
+    page.items = vec![asked];
+    page.seats = Vec::new();
+    w.docket.senates[0].pages.push(page);
+
+    // The roster as the daemon reads it, members alphabetical by id.
+    let member = |id: &str, name: &str, active: bool| RosterMember {
+        senator: path(id),
+        display_name: name.into(),
+        active,
+    };
+    let committee = |name: &str,
+                     chair: Option<(&str, &str, bool)>,
+                     pending: usize,
+                     members: Vec<RosterMember>| {
+        RosterCommittee {
+            committee: c(name),
+            chair: chair.map(|(id, _, _)| path(id)),
+            chair_display_name: chair.map(|(_, n, _)| n.to_string()),
+            chair_live: chair.is_some_and(|(_, _, live)| live),
+            members,
+            pending,
+        }
+    };
+    w.roster = vec![
+        committee(
+            "docs",
+            Some((scribe, "scribe", false)),
+            1,
+            vec![
+                member(scribe, "scribe", false),
+                member(editor, "editor", false),
+            ],
+        ),
+        committee("infra", None, 1, vec![member(oncall, "oncall", true)]),
+        committee(
+            "payments",
+            Some((ledger, "ledger", true)),
+            2,
+            vec![
+                member(auditor, "auditor", true),
+                member(ledger, "ledger", true),
+            ],
+        ),
+        committee(
+            "refund-v2",
+            Some(("claude", "lead", true)),
+            2,
+            vec![
+                member("claude", "lead", true),
+                member(gone[2], "claude-77aa0c19", false),
+                member("codex", "codex", true),
+                member("reviewer", "reviewer", false),
+                member("tester", "tester", false),
+            ],
+        ),
+    ];
 }

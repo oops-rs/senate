@@ -1,7 +1,9 @@
 //! A fake daemon with canned threads for `claude` and `codex`, a Codex
 //! thread, an approval, and the docket of the one Senate (`alice-desk`),
 //! where `claude` presides, for working on the native app without a Senate
-//! server:
+//! server. Its Senate is a busy one ([`common::busy_senate`]): four
+//! committees and their chairs, agents under aliases beside long-gone ones,
+//! a request and an escalation waiting on alice, and tasks her agents are on:
 //!
 //! ```sh
 //! mkdir -p /tmp/sh && chmod 700 /tmp/sh
@@ -50,6 +52,7 @@ async fn main() {
         println!("{n} more threads; thread 990 has {events} events");
     }
     w.status.roles = Some(common::roles());
+    common::busy_senate(&mut w);
     let world = Arc::new(Mutex::new(w));
     let daemon = common::FakeDaemon::start(&socket, Arc::clone(&world));
     println!("fake daemon on {}", socket.display());
