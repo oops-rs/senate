@@ -79,11 +79,9 @@ impl Shared {
                     .ok_or_else(|| self.nothing_pending(&host_id, &session))?;
                 let answered = self
                     .relay
-                    .answer(&approval.id, decision)
+                    .answer_with(&approval.id, decision, Some(auth.actor()), |_| Ok(()))
                     .await
                     .map_err(IpcError::bad_request)?;
-                self.settle_answered(&host_id, Some(&answered.id), None)
-                    .map_err(internal)?;
                 Some(answered.summary)
             }
             Runtime::Claude => {
@@ -98,7 +96,8 @@ impl Shared {
                         )));
                     }
                 };
-                let (tool, fingerprint) = self
+                let _answering = self.hosted_approvals.claude_answer.read().await;
+                let candidate = self
                     .claude_candidate(&host_id, &session.session_id)
                     .map_err(internal)?
                     .ok_or_else(|| self.nothing_pending(&host_id, &session))?;
@@ -126,9 +125,9 @@ impl Shared {
                         )));
                     }
                 }
-                self.settle_answered(&host_id, None, Some(&fingerprint))
+                self.settle_claude_answer(&host_id, &candidate, decision, auth.actor())
                     .map_err(internal)?;
-                Some(tool)
+                Some(candidate.tool)
             }
             Runtime::Agy | Runtime::Acp => {
                 return Err(IpcError::bad_request(self.locale.pick(

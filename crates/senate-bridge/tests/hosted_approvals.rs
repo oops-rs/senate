@@ -1623,6 +1623,11 @@ async fn a_codex_approval_on_a_relay_reports_the_task_even_at_an_attended_termin
         json!({"thread":root.seq, "label":"run: cargo test"})
     );
     wait_archived(&h, notice.seq).await;
+    let archive = archived(&h, notice.seq).unwrap();
+    assert_eq!(
+        archive.meta[senate_core::meta::APPROVAL_WAIT],
+        json!({"decision":"allow","actor":Address::senior(&h.config.person).in_text()})
+    );
     h.server.append_silently(
         senate_core::NewEvent::new(
             committee(),
@@ -1831,6 +1836,26 @@ async fn session_approve_chooses_the_option_of_a_hosted_claude_dialog() {
             .contains("has no permission prompt waiting"),
         "{nothing}"
     );
+    let root = h.server.append_silently(
+        senate_core::NewEvent::new(
+            committee(),
+            senate_core::Kind::Request,
+            Address::Committee,
+            "check the build",
+        )
+        .to(Address::senator(&launch.senator))
+        .with_meta(
+            senate_core::meta::ORIGIN,
+            json!({"locator":"/parent::refund-v2::speaker","thread":174}),
+        ),
+    );
+    h.store().enqueue(&launch.senator, &root).unwrap();
+    h.store()
+        .mark_read(
+            &[(launch.senator.clone(), committee(), root.seq)],
+            &launch.session_id,
+        )
+        .unwrap();
     let keys = || std::fs::read_to_string(project.join(".keys")).unwrap_or_default();
     let cases = [
         (Decision::Allow, "1", "allowed once"),
@@ -1840,8 +1865,18 @@ async fn session_approve_chooses_the_option_of_a_hosted_claude_dialog() {
     let mut typed = String::new();
     for (n, (decision, key, verb)) in cases.into_iter().enumerate() {
         claude_hook(h.dir.path(), &h, terminal.host_id(), request.clone()).await;
+        claude_hook(h.dir.path(), &h, terminal.host_id(), json!({
+            "hook_event_name":"Notification", "session_id":launch.session_id, "notification_type":"permission_prompt"
+        })).await;
+        let notice = next_notice(&h, n + 1).await;
+        assert_eq!(notice.thread, Some(root.seq));
         let reply = approve_session(&h, &launch, decision).await.unwrap();
         assert_eq!(reply.tool.as_deref(), Some("echo approve-fixture"));
+        wait_archived(&h, notice.seq).await;
+        assert_eq!(
+            archived(&h, notice.seq).unwrap().meta[senate_core::meta::APPROVAL_WAIT],
+            json!({"decision":decision, "actor":Address::senior(&h.config.person).in_text()})
+        );
         typed.push_str(key);
         eventually(
             "the dialog took the key and drew itself again",

@@ -4,8 +4,8 @@
 use super::*;
 use crate::host;
 use crate::host_approval::{
-    ApprovalNotice, ClaudeCandidate, CodexApprovalSignal, HostApprovalState, observed_at,
-    tool_label,
+    ApprovalNotice, ClaudeCandidate, CodexApprovalSignal, HostApprovalState, PromptDecision,
+    observed_at, tool_label,
 };
 use crate::ipc::{ClaudeApprovalSignal, HostedPrompt};
 use senate_core::StatusState;
@@ -33,6 +33,8 @@ struct PostBackoff {
 #[derive(Default)]
 pub(super) struct Monitor {
     wake: Notify,
+    // Keep an archive snapshot from racing the confirmed terminal keystroke.
+    pub(super) claude_answer: tokio::sync::RwLock<()>,
     missing_viewers: Mutex<BTreeSet<EventId>>,
 }
 
@@ -146,6 +148,7 @@ impl Shared {
         &self,
         session_id: &str,
         request_id: Option<&str>,
+        answer: Option<PromptDecision>,
         at: u64,
     ) -> Result<(), StoreError> {
         let Some((id, session)) = self.approval_host(session_id)? else {
@@ -153,9 +156,16 @@ impl Shared {
         };
         if session.runtime == Runtime::Codex {
             self.edit_approvals(&id, |state| {
-                close_notices(state, |notice| {
-                    notice.at <= at && request_id.is_none_or(|key| notice.prompt == key)
-                })
+                let applies =
+                    |n: &ApprovalNotice| n.at <= at && request_id.is_none_or(|key| n.prompt == key);
+                if let Some(answer) = answer
+                    && let Some(notice) = state.notices.iter_mut().rfind(|n| applies(n))
+                {
+                    notice.answer = Some(answer);
+                    close_notices(state, applies);
+                    return true;
+                }
+                close_notices(state, applies)
             })?;
         }
         Ok(())
@@ -198,42 +208,48 @@ impl Shared {
         &self,
         host_id: &EventId,
         session_id: &str,
-    ) -> Result<Option<(String, String)>, StoreError> {
+    ) -> Result<Option<ClaudeCandidate>, StoreError> {
         Ok(self
             .store
             .hosted_approval_states()?
             .into_iter()
             .find(|(id, state)| id == host_id && state.session_id == session_id)
-            .and_then(|(_, state)| state.claude)
-            .map(|candidate| (candidate.tool, candidate.fingerprint)))
+            .and_then(|(_, state)| state.claude))
     }
 
     /// A person answered the prompt from outside the terminal
     /// ([`super::remote_approve`]): close its notice now, and forget the
     /// Claude request answered, since a denial brings no result hook.
-    pub(super) fn settle_answered(
+    pub(super) fn settle_claude_answer(
         &self,
         host_id: &EventId,
-        codex_request: Option<&str>,
-        claude_fingerprint: Option<&str>,
+        answered: &ClaudeCandidate,
+        decision: crate::approvals::Decision,
+        actor: String,
     ) -> Result<(), StoreError> {
         self.edit_approvals(host_id, |state| {
-            let forgotten = claude_fingerprint.is_some_and(|fingerprint| {
-                state
-                    .claude
-                    .take_if(|candidate| candidate.fingerprint == fingerprint)
-                    .is_some()
-            });
-            close_notices(state, |notice| {
-                !notice.screen
-                    && match (codex_request, claude_fingerprint) {
-                        (Some(request), _) => notice.prompt == request,
-                        (None, Some(fingerprint)) => {
-                            notice.prompt == fingerprint || notice.prompt == "claude:unspecified"
-                        }
-                        (None, None) => false,
-                    }
-            }) || forgotten
+            let forgotten = state
+                .claude
+                .take_if(|candidate| {
+                    candidate.at == answered.at && candidate.fingerprint == answered.fingerprint
+                })
+                .is_some();
+            let next_request = state.claude.as_ref().map(|candidate| candidate.at);
+            let applies = |n: &ApprovalNotice| {
+                !n.screen
+                    && (n.archive.is_none() || n.at >= answered.at)
+                    && next_request.is_none_or(|next| n.at < next)
+                    && (n.prompt == answered.fingerprint || n.prompt == "claude:unspecified")
+            };
+            let mut recorded = false;
+            for notice in state.notices.iter_mut().filter(|n| applies(n)) {
+                notice.answer = Some(PromptDecision {
+                    decision,
+                    actor: Some(actor.clone()),
+                });
+                recorded = true;
+            }
+            close_notices(state, applies) || recorded || forgotten
         })
     }
 
@@ -658,6 +674,12 @@ impl Shared {
                     Some(id.clone()),
                 )
                 .with_meta(meta::HOSTED_APPROVAL, serde_json::json!(notice.id));
+                let event = match &notice.answer {
+                    Some(answer) if notice.relay_thread.is_some() => {
+                        event.with_meta(meta::APPROVAL_WAIT, serde_json::json!(answer))
+                    }
+                    _ => event,
+                };
                 self.api.append(&event).await?;
                 self.store.edit_hosted_approvals(host_id, |state| {
                     let count = state.notices.len();
@@ -783,6 +805,7 @@ fn open_notice(
         relay_thread: None,
         unseated: false,
         archive: None,
+        answer: None,
         append_attempted: false,
         failures: 0,
         screen: false,
@@ -835,8 +858,8 @@ pub(super) async fn observe(
                             tracing::warn!(%error, "recording Codex approval request");
                         }
                     }
-                    CodexApprovalSignal::Resolved { session_id, request_id, at } => {
-                        if let Err(error) = shared.observe_codex_resolution(&session_id, request_id.as_deref(), at) {
+                    CodexApprovalSignal::Resolved { session_id, request_id, answer, at } => {
+                        if let Err(error) = shared.observe_codex_resolution(&session_id, request_id.as_deref(), answer, at) {
                             tracing::warn!(%error, "recording Codex approval resolution");
                         }
                         continue;
@@ -850,7 +873,11 @@ pub(super) async fn observe(
             }
             _ = shared.hosted_approvals.wake.notified() => {}
         }
-        let states = match shared.store.hosted_approval_states() {
+        let snapshot = {
+            let _settled = shared.hosted_approvals.claude_answer.write().await;
+            shared.store.hosted_approval_states()
+        };
+        let states = match snapshot {
             Ok(states) => states,
             Err(error) => {
                 tracing::warn!(%error, "reading hosted approvals");

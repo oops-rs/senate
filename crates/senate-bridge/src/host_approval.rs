@@ -1,5 +1,4 @@
-//! Facts about tool approval prompts. These carry no permission decisions
-//! and no terminal input bytes.
+//! Observations and outcomes of hosted permission prompts.
 
 use senate_core::{Address, CommitteeId, EventId, SenatorName, Seq};
 use serde::{Deserialize, Serialize};
@@ -61,6 +60,7 @@ pub(crate) enum CodexApprovalSignal {
     Resolved {
         session_id: String,
         request_id: Option<String>,
+        answer: Option<PromptDecision>,
         at: u64,
     },
 }
@@ -86,6 +86,12 @@ pub(crate) struct ClaudeCandidate {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct PromptDecision {
+    pub decision: crate::approvals::Decision,
+    pub actor: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct ApprovalNotice {
     pub id: EventId,
     pub prompt: String,
@@ -103,6 +109,7 @@ pub(crate) struct ApprovalNotice {
     pub unseated: bool,
     /// The stable ID of its archive status once a handling fact arrives.
     pub archive: Option<EventId>,
+    pub answer: Option<PromptDecision>,
     /// The append may have reached the server even if its reply was lost.
     #[serde(default)]
     pub append_attempted: bool,

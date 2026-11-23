@@ -2677,7 +2677,7 @@ impl Shared {
         decision: crate::approvals::Decision,
     ) -> Result<crate::approvals::Approval, IpcError> {
         self.relay
-            .answer_with(id, decision, |approval| {
+            .answer_with(id, decision, None, |approval| {
                 if self
                     .store
                     .session_host(&approval.session_id)

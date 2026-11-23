@@ -866,11 +866,33 @@ impl Worker {
             self.link_recipient(&incoming, event, event.seq, seat)
                 .await?;
         }
-        let approval = event
+        // An archive names the notice by seq and stable ID. Follow the notice's
+        // original link even if this worker has since started another task.
+        let archived = if let Some(id) = event
+            .meta
+            .get(meta::HOSTED_APPROVAL)
+            .and_then(|v| v.as_str())
+            && let Some(seq) = event.thread
+            && senate_core::StatusPayload::of(event)
+                .is_some_and(|s| s.state == senate_core::StatusState::Archived)
+        {
+            self.hub
+                .get(&event.committee, seq)
+                .await
+                .map_err(|e| Pass::Failed(e.to_string()))?
+                .filter(|notice| {
+                    notice.id.to_string() == id
+                        && (notice.from == event.from || event.from == Address::Speaker)
+                })
+        } else {
+            None
+        };
+        let notice = archived.as_ref().unwrap_or(event);
+        let roster = self.hub.roster_now();
+        let approval = notice
             .meta
             .get(meta::APPROVAL_WAIT)
-            .filter(|_| event.is_hosted_approval(&self.hub.roster_now().people()));
-        let roster = self.hub.roster_now();
+            .filter(|_| notice.is_hosted_approval(&roster.people()));
         let question = senate_core::StatusPayload::of(event)
             .filter(|s| s.takeover.is_none() && s.state == senate_core::StatusState::Suspended)
             .and_then(|s| s.escalated_to.map(|person| (person, s.reason)))
@@ -888,11 +910,27 @@ impl Worker {
             else {
                 return Ok(());
             };
-            let prefix = self
-                .config
-                .locale
-                .pick("等待授权：", "Waiting for approval: ");
-            (Seq(root), Kind::Note, format!("{prefix}{label}"))
+            let locale = self.config.locale;
+            let outcome = event.meta.get(meta::APPROVAL_WAIT);
+            let prefix = if archived.is_none() {
+                locale.pick("等待授权：", "Waiting for approval: ")
+            } else {
+                match outcome.and_then(|v| v["decision"].as_str()) {
+                    Some("allow" | "allow_for_session") => locale.pick("已授权：", "Approved: "),
+                    Some("deny" | "cancel") => locale.pick("已拒绝：", "Denied: "),
+                    _ => locale.pick("不再等待：", "No longer waiting: "),
+                }
+            };
+            let mut body = format!("{prefix}{label}");
+            if archived.is_some()
+                && let Some(actor) = outcome.and_then(|v| v["actor"].as_str())
+            {
+                body.push_str(&match locale {
+                    Locale::Zh => format!("（由 {actor} 决定）"),
+                    Locale::En => format!(" (by {actor})"),
+                });
+            }
+            (Seq(root), Kind::Note, body)
         } else if let Some((person, reason)) = &question {
             let Some(root) = event.thread else {
                 return Ok(());
@@ -950,9 +988,9 @@ impl Worker {
             let at_desk = root.to.contains(&Address::Speaker)
                 && self.hub.office().is_some_and(|o| {
                     o.agent_workers()
-                        .any(|a| Some(a) == event.from.as_senator())
+                        .any(|a| Some(a) == notice.from.as_senator())
                 });
-            if root.thread.is_some() || (!root.to.contains(&event.from) && !at_desk) {
+            if root.thread.is_some() || (!root.to.contains(&notice.from) && !at_desk) {
                 return Ok(());
             }
             // A desk-forwarded task names the original incoming thread locally.
@@ -1006,7 +1044,10 @@ impl Worker {
         )
         .to(origin.locator.address().clone())
         .in_thread(origin.thread)
-        .with_id(derived(event, "uplink:up"))
+        .with_id(match &archived {
+            Some(notice) => derived(notice, "uplink:approval-ended"),
+            None => derived(event, "uplink:up"),
+        })
         .with_meta(
             meta::ANSWERED_BY,
             serde_json::Value::String(answered_by.to_string()),

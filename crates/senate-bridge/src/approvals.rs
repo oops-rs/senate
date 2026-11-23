@@ -42,7 +42,9 @@ use tokio::task::JoinHandle;
 
 use crate::delivery::codex::ws::{Incoming, WsWriter};
 use crate::delivery::codex::{AppServer, CodexError, Transport};
-use crate::host_approval::{CodexApprovalSignal, CodexPrompt, observed_at, tool_label};
+use crate::host_approval::{
+    CodexApprovalSignal, CodexPrompt, PromptDecision, observed_at, tool_label,
+};
 use crate::ipc::WatchEvent;
 
 /// Server-request methods relayed.
@@ -270,11 +272,17 @@ impl Relay {
         self
     }
 
-    fn resolved_for_host(&self, session_id: &str, request_id: Option<String>) {
+    fn resolved_for_host(
+        &self,
+        session_id: &str,
+        request_id: Option<String>,
+        answer: Option<PromptDecision>,
+    ) {
         if let Some(observer) = &self.hosted {
             let _ = observer.send(CodexApprovalSignal::Resolved {
                 session_id: session_id.to_owned(),
                 request_id,
+                answer,
                 at: observed_at(),
             });
         }
@@ -335,13 +343,14 @@ impl Relay {
     /// Answer approval `id`. Fails when it is not pending (answered
     /// elsewhere first, or its session went away).
     pub async fn answer(&self, id: &str, decision: Decision) -> Result<Approval, String> {
-        self.answer_with(id, decision, |_| Ok(())).await
+        self.answer_with(id, decision, None, |_| Ok(())).await
     }
 
     pub(crate) async fn answer_with(
         &self,
         id: &str,
         decision: Decision,
+        actor: Option<String>,
         check: impl FnOnce(&Approval) -> Result<(), String>,
     ) -> Result<Approval, String> {
         let pending = {
@@ -371,7 +380,11 @@ impl Relay {
         match sent {
             Ok(()) => {
                 if pending.hosted.is_some() {
-                    self.resolved_for_host(&pending.approval.session_id, Some(id.to_owned()));
+                    self.resolved_for_host(
+                        &pending.approval.session_id,
+                        Some(id.to_owned()),
+                        Some(PromptDecision { decision, actor }),
+                    );
                 }
                 self.publish(WatchEvent::ApprovalResolved {
                     id: id.to_string(),
@@ -443,7 +456,7 @@ impl Relay {
             .await
             .map_err(|_| CodexError::Timeout)??;
         if sub.approvals_clear {
-            self.resolved_for_host(thread, None);
+            self.resolved_for_host(thread, None, None);
         }
         tracing::debug!(thread, "listening for Codex approvals");
         let writer = Arc::new(tokio::sync::Mutex::new(sub.writer));
@@ -477,7 +490,7 @@ impl Relay {
             if let Some(p) = lock(&self.pending).remove(&id) {
                 tracing::info!(id, "a Codex approval was answered elsewhere");
                 if p.hosted.is_some() {
-                    self.resolved_for_host(of, Some(id.clone()));
+                    self.resolved_for_host(of, Some(id.clone()), None);
                 }
                 self.publish(WatchEvent::ApprovalResolved {
                     id,
@@ -524,10 +537,11 @@ impl Relay {
                     writer: writer.clone(),
                 },
             );
-            drop(pending);
+            // Queue the opening before an IPC answer can remove this request.
             if let (Some(prompt), Some(observer)) = (opened, &self.hosted) {
                 let _ = observer.send(CodexApprovalSignal::Opened(prompt));
             }
+            drop(pending);
             self.publish(WatchEvent::ApprovalRequested(Box::new(approval)));
         }
     }

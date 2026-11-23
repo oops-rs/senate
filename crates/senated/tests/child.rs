@@ -174,64 +174,83 @@ async fn a_machine_under_a_parent_hosts_its_senate_and_registers_it_there() {
             .unwrap()
             .event;
         let client = ApiClient::new(&bridge.server_url, &bridge.token).unwrap();
-        let notice = client
-            .append(
-                &NewEvent::new(
-                    committee.clone(),
-                    Kind::Question,
-                    Address::senator(&worker),
-                    "permission prompt",
+        for (decision, expected) in [
+            (Some("allow"), "Approved: "),
+            (Some("allow_for_session"), "Approved: "),
+            (Some("deny"), "Denied: "),
+            (None, "No longer waiting: "),
+        ] {
+            let label = format!("cargo test {}", decision.unwrap_or("gone"));
+            let actor = if decision.is_some() {
+                " (by [senator::alice])"
+            } else {
+                ""
+            };
+            let notice = client
+                .append(
+                    &NewEvent::new(
+                        committee.clone(),
+                        Kind::Question,
+                        Address::senator(&worker),
+                        "permission prompt",
+                    )
+                    .to("senator::alice".parse().unwrap())
+                    .in_thread(local.seq)
+                    .with_meta(meta::HOSTED_APPROVAL, serde_json::json!(true))
+                    .with_meta(
+                        meta::APPROVAL_WAIT,
+                        serde_json::json!({"thread":local.seq, "label":label}),
+                    ),
                 )
-                .to("senator::alice".parse().unwrap())
-                .in_thread(local.seq)
-                .with_meta(meta::HOSTED_APPROVAL, serde_json::json!(true))
-                .with_meta(
+                .await
+                .unwrap()
+                .event;
+            let mut archive = NewEvent::new(
+                committee.clone(),
+                Kind::Status,
+                Address::senator(&worker),
+                "",
+            )
+            .in_thread(notice.seq)
+            .with_meta(
+                meta::STATUS,
+                senate_core::StatusPayload::new(senate_core::StatusState::Archived).value(),
+            )
+            .with_meta(meta::HOSTED_APPROVAL, serde_json::json!(notice.id));
+            if let Some(decision) = decision {
+                archive = archive.with_meta(
                     meta::APPROVAL_WAIT,
-                    serde_json::json!({"thread":local.seq, "label":"cargo test"}),
-                ),
-            )
-            .await
-            .unwrap()
-            .event;
-        client
-            .append(
-                &NewEvent::new(
-                    committee.clone(),
-                    Kind::Status,
-                    Address::senator(&worker),
-                    "",
-                )
-                .in_thread(notice.seq)
-                .with_meta(
-                    meta::STATUS,
-                    senate_core::StatusPayload::new(senate_core::StatusState::Archived).value(),
-                )
-                .with_meta(meta::HOSTED_APPROVAL, serde_json::json!(notice.id)),
-            )
-            .await
-            .unwrap();
-        tokio::time::timeout(Duration::from_secs(8), async {
-            loop {
-                let events = above.hub.read(&committee, Seq::ZERO, 100).await.unwrap();
-                if let Some(note) = events
-                    .iter()
-                    .find(|e| e.meta.contains_key(meta::APPROVAL_WAIT))
-                {
-                    assert_eq!(note.thread, Some(asked.seq));
-                    assert_eq!(note.kind, Kind::Note);
-                    assert!(!note.meta.contains_key(meta::RELAY_ASKED_PERSON));
-                    assert!(note.body.contains("cargo test"));
-                    assert_eq!(
-                        note.meta[meta::ANSWERED_BY],
-                        "/acme/alice-desk::demo::senator::claude"
-                    );
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(25)).await;
+                    serde_json::json!({"decision":decision,"actor":"[senator::alice]"}),
+                );
             }
-        })
-        .await
-        .unwrap();
+            client.append(&archive).await.unwrap();
+            let ended = wait_for_event(
+                above.hub.as_ref(),
+                &committee,
+                &format!("{expected}{label}{actor}"),
+            )
+            .await;
+            let notes: Vec<_> = above
+                .hub
+                .read(&committee, Seq::ZERO, 100)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|e| e.body.contains(&label) && e.meta.contains_key(meta::APPROVAL_WAIT))
+                .collect();
+            assert_eq!(notes.len(), 2);
+            assert_eq!(notes[0].body, format!("Waiting for approval: {label}"));
+            assert_eq!(notes[1].seq, ended.seq);
+            for note in notes {
+                assert_eq!(note.thread, Some(asked.seq));
+                assert_eq!(note.kind, Kind::Note);
+                assert!(!note.meta.contains_key(meta::RELAY_ASKED_PERSON));
+                assert_eq!(
+                    note.meta[meta::ANSWERED_BY],
+                    "/acme/alice-desk::demo::senator::claude"
+                );
+            }
+        }
     }
     // Exercise the two logs and their persisted thread mapping, including
     // the local desk routing the request before its recipient escalates.
