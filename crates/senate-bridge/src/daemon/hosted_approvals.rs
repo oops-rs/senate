@@ -481,8 +481,8 @@ impl Shared {
         Ok(())
     }
 
-    // Prefer this session's most recent status on an open relay. Without
-    // a status, a sole open relay addressed or delivered to it is unambiguous.
+    // A status in the waiting session identifies its current task. A sole
+    // incoming relay is a fallback for sessions that have not reported status.
     async fn approval_thread(
         &self,
         native: &str,
@@ -493,12 +493,10 @@ impl Shared {
             .store
             .delivered_relays(native, committee, false)?
             .into_iter()
-            .map(|item| (item.event.seq, item.event))
+            .map(|item| (item.event.seq, (item.event, false)))
             .collect();
         for task in self.api.threads(committee, Some(agent)).await?.threads {
-            if !matches!(task.from, Address::Speaker | Address::Committee)
-                || !matches!(task.kind, Kind::Question | Kind::Request)
-            {
+            if !matches!(task.kind, Kind::Question | Kind::Request) {
                 continue;
             }
             if task.waits().is_none()
@@ -511,35 +509,31 @@ impl Shared {
                 roots.remove(&task.root);
                 continue;
             }
-            if let std::collections::btree_map::Entry::Vacant(slot) = roots.entry(task.root) {
-                let root = self.fetch_event(committee, task.root).await?;
-                // A local Speaker relay may also be an ordinary chat. Only
-                // the incoming committee root establishes its uplink.
-                let incoming = if senate_core::Origin::of(&root).is_none()
-                    && root.from == Address::Speaker
-                    && let Some(seq) = root.meta.get(meta::RELAYED_FROM).and_then(|v| v.as_u64())
-                    && seq > 0
-                    && seq < root.seq.0
-                {
-                    Some(self.fetch_event(committee, Seq(seq)).await?)
-                } else {
-                    None
-                };
-                if senate_core::Origin::of(&root).is_some()
-                    || incoming.as_ref().is_some_and(|e| {
-                        e.from == Address::Committee && senate_core::Origin::of(e).is_some()
-                    })
-                {
-                    slot.insert(root);
+            match roots.entry(task.root) {
+                std::collections::btree_map::Entry::Occupied(mut slot) => slot.get_mut().1 = true,
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    let root = self.fetch_event(committee, task.root).await?;
+                    slot.insert((root, true));
                 }
             }
         }
+
         let mut latest_status = None;
         let mut open = Vec::new();
-        for (seq, root) in roots {
-            let (_, events) = self.thread_events(committee, root).await?;
+        for (seq, (root, listed_open)) in roots {
+            let at_desk = root.to.contains(&Address::Speaker);
+            let (_, events) = self.thread_events(committee, root.clone()).await?;
             if events.iter().any(|e| {
-                (e.kind == Kind::Answer && !is_provisional(e))
+                // A route creates a new root. Status on that new root belongs
+                // to its recipient, never to the original desk item.
+                let routed = at_desk
+                    && e.from == Address::Speaker
+                    && e.thread.is_none()
+                    && e.meta.get(meta::RELAYED_FROM).and_then(|v| v.as_u64()) == Some(seq.0);
+                if e.thread != Some(seq) {
+                    return routed;
+                }
+                (!listed_open && e.kind == Kind::Answer && !is_provisional(e))
                     || e.meta
                         .get(meta::FORWARDED_TO)
                         .and_then(|v| v.as_str())
@@ -549,28 +543,60 @@ impl Shared {
                                 || target.senate().is_some_and(|s| {
                                     self.senate_path().is_none_or(|here| !here.ends_with(s))
                                 })
+                                || (e.from == Address::Speaker
+                                    && e.meta.get(meta::ACTED_BY).and_then(|v| v.as_str())
+                                        == Some(agent.as_str()))
                         })
                     || StatusPayload::of(e)
                         .is_some_and(|s| s.state == StatusState::Archived || s.takeover.is_some())
             }) {
                 continue;
             }
-            open.push(seq);
             for event in events {
-                if event.from.as_senator() == Some(agent)
+                if event.thread == Some(seq)
+                    && event.from.as_senator() == Some(agent)
                     && StatusPayload::of(&event)
                         .is_some_and(|s| s.session.as_deref() == Some(native))
                 {
                     latest_status = latest_status.max(Some((event.seq, seq)));
                 }
             }
+            open.push(root);
         }
-        Ok(latest_status
-            .map(|(_, root)| root)
-            .or(match open.as_slice() {
-                [only] => Some(*only),
-                _ => None,
-            }))
+        if let Some((_, root)) = latest_status {
+            return Ok(Some(root));
+        }
+
+        let mut fallback = None;
+        for root in open {
+            if !matches!(root.from, Address::Speaker | Address::Committee) {
+                continue;
+            }
+            let incoming = if senate_core::Origin::of(&root).is_none()
+                && root.from == Address::Speaker
+                && let Some(seq) = root.meta.get(meta::RELAYED_FROM).and_then(|v| v.as_u64())
+                && seq > 0
+                && seq < root.seq.0
+            {
+                Some(self.fetch_event(committee, Seq(seq)).await?)
+            } else {
+                None
+            };
+            if senate_core::Origin::of(&root).is_some()
+                || incoming.as_ref().is_some_and(|e| {
+                    e.thread.is_none()
+                        && e.from == Address::Committee
+                        && matches!(e.kind, Kind::Question | Kind::Request)
+                        && senate_core::Origin::of(e).is_some()
+                })
+            {
+                if fallback.is_some() {
+                    return Ok(None);
+                }
+                fallback = Some(root.seq);
+            }
+        }
+        Ok(fallback)
     }
 
     async fn send_approval_notice(

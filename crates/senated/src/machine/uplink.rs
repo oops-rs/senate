@@ -1017,6 +1017,13 @@ impl Worker {
                 root = incoming;
             }
         }
+        // A Speaker's chat relay can point at a chat event that also has
+        // an origin. Only an incoming task can carry an approval wait up.
+        if approval.is_some()
+            && (root.thread.is_some() || !matches!(root.kind, Kind::Question | Kind::Request))
+        {
+            return Ok(());
+        }
         let Some(origin) = Origin::of(&root) else {
             return Ok(());
         };

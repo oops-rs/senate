@@ -1650,6 +1650,108 @@ async fn a_codex_approval_on_a_relay_reports_the_task_even_at_an_attended_termin
     assert_eq!(forwarded.thread, Some(older.seq));
     approve_session(&h, &launch, Decision::Allow).await.unwrap();
     wait_archived(&h, forwarded.seq).await;
+
+    // The desk worker passed the old task on to a local Speaker seat.
+    h.server.append_silently(
+        senate_core::NewEvent::new(
+            committee(),
+            senate_core::Kind::Note,
+            Address::Speaker,
+            "forwarded",
+        )
+        .in_thread(older.seq)
+        .with_meta(
+            senate_core::meta::FORWARDED_TO,
+            json!(format!("{}::speaker", committee())),
+        )
+        .with_meta(
+            senate_core::meta::ACTED_BY,
+            json!(launch.senator.to_string()),
+        ),
+    );
+    let local = h.server.append_silently(
+        senate_core::NewEvent::new(
+            committee(),
+            senate_core::Kind::Request,
+            Address::senior(&h.config.person),
+            "local checks",
+        )
+        .to(Address::senator(&launch.senator)),
+    );
+    let append_status = |thread, session: &str| {
+        let mut status = StatusPayload::new(StatusState::Processing);
+        status.session = Some(session.to_owned());
+        h.server.append_silently(
+            senate_core::NewEvent::new(
+                committee(),
+                senate_core::Kind::Status,
+                Address::senator(&launch.senator),
+                "",
+            )
+            .in_thread(thread)
+            .with_meta(senate_core::meta::STATUS, status.value()),
+        );
+    };
+    append_status(local.seq, native);
+
+    // An unrelated chat and its relay arrive after the active local status.
+    let chat = h.server.append_silently(senate_core::NewEvent::new(
+        committee(),
+        senate_core::Kind::Chat,
+        Address::senior(&h.config.person),
+        "different request",
+    ));
+    let chat_relay = h.server.append_silently(
+        senate_core::NewEvent::new(
+            committee(),
+            senate_core::Kind::Request,
+            Address::Speaker,
+            "different request",
+        )
+        .to(Address::senator(&launch.senator))
+        .with_meta(senate_core::meta::RELAYED_FROM, json!(chat.seq)),
+    );
+    append_status(chat_relay.seq, "different-session");
+
+    let id = fake.request_approval(
+        native,
+        "item/commandExecution/requestApproval",
+        json!({"threadId":native,"command":"cargo fmt"}),
+    );
+    wait_relayed(&h, &format!("{native}:{id}")).await;
+    let notice = next_notice(&h, 3).await;
+    assert_eq!(notice.thread, Some(local.seq));
+    approve_session(&h, &launch, Decision::Allow).await.unwrap();
+    wait_archived(&h, notice.seq).await;
+
+    h.server.append_silently(
+        senate_core::NewEvent::new(
+            committee(),
+            senate_core::Kind::Answer,
+            Address::senator(&launch.senator),
+            "done",
+        )
+        .in_thread(local.seq),
+    );
+    // A standalone notice is only posted once the terminal is unattended.
+    let previous = terminal.activity().unwrap();
+    viewer.shutdown().await.unwrap();
+    terminal
+        .wait_detached(previous["detached_at"].as_u64().unwrap())
+        .await;
+    let id = fake.request_approval(
+        native,
+        "item/commandExecution/requestApproval",
+        json!({"threadId":native,"command":"git status"}),
+    );
+    wait_relayed(&h, &format!("{native}:{id}")).await;
+    let notice = next_notice(&h, 4).await;
+    assert_eq!(
+        notice.thread, None,
+        "only forwarded and unrelated work remains"
+    );
+    approve_session(&h, &launch, Decision::Allow).await.unwrap();
+    wait_archived(&h, notice.seq).await;
     terminal.stop();
     h.stop().await;
 }

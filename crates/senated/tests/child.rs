@@ -174,12 +174,96 @@ async fn a_machine_under_a_parent_hosts_its_senate_and_registers_it_there() {
             .unwrap()
             .event;
         let client = ApiClient::new(&bridge.server_url, &bridge.token).unwrap();
+        let forwarded = client
+            .append(
+                &NewEvent::new(committee.clone(), Kind::Request, Address::Speaker, "review")
+                    .to(Address::senator(&worker))
+                    .with_meta(meta::ACTED_BY, serde_json::json!("alice"))
+                    .with_meta(meta::RELAYED_FROM, serde_json::json!(local.seq)),
+            )
+            .await
+            .unwrap()
+            .event;
+        let unrelated_chat = top
+            .daemon
+            .hub
+            .append(
+                NewEvent::new(
+                    committee.clone(),
+                    Kind::Chat,
+                    Address::Committee,
+                    "unrelated chat",
+                )
+                .with_meta(meta::ORIGIN, origin.value()),
+            )
+            .await
+            .unwrap()
+            .event;
+        let chat_relay = client
+            .append(
+                &NewEvent::new(
+                    committee.clone(),
+                    Kind::Request,
+                    Address::Speaker,
+                    "chat relay",
+                )
+                .to(Address::senator(&worker))
+                .with_meta(meta::ACTED_BY, serde_json::json!("alice"))
+                .with_meta(meta::RELAYED_FROM, serde_json::json!(unrelated_chat.seq)),
+            )
+            .await
+            .unwrap()
+            .event;
+        let requester: Address = "senator::alice".parse().unwrap();
+        let local_request = client
+            .append(
+                &NewEvent::new(
+                    committee.clone(),
+                    Kind::Request,
+                    requester.clone(),
+                    "local request",
+                )
+                .to(Address::senator(&worker)),
+            )
+            .await
+            .unwrap()
+            .event;
+        for (root, label) in [
+            (chat_relay.seq, "unrelated-chat-wait"),
+            (local_request.seq, "local-only-wait"),
+        ] {
+            let notice = client
+                .append(
+                    &NewEvent::new(
+                        committee.clone(),
+                        Kind::Question,
+                        Address::senator(&worker),
+                        "prompt",
+                    )
+                    .to(requester.clone())
+                    .in_thread(root)
+                    .with_meta(meta::HOSTED_APPROVAL, serde_json::json!(true))
+                    .with_meta(
+                        meta::APPROVAL_WAIT,
+                        serde_json::json!({"thread": root, "label": label}),
+                    ),
+                )
+                .await
+                .unwrap()
+                .event;
+            assert_eq!(notice.thread, Some(root));
+        }
         for (decision, expected) in [
             (Some("allow"), "Approved: "),
             (Some("allow_for_session"), "Approved: "),
             (Some("deny"), "Denied: "),
             (None, "No longer waiting: "),
         ] {
+            let root = if decision.is_some() {
+                local.seq
+            } else {
+                forwarded.seq
+            };
             let label = format!("cargo test {}", decision.unwrap_or("gone"));
             let actor = if decision.is_some() {
                 " (by [senator::alice])"
@@ -195,11 +279,11 @@ async fn a_machine_under_a_parent_hosts_its_senate_and_registers_it_there() {
                         "permission prompt",
                     )
                     .to("senator::alice".parse().unwrap())
-                    .in_thread(local.seq)
+                    .in_thread(root)
                     .with_meta(meta::HOSTED_APPROVAL, serde_json::json!(true))
                     .with_meta(
                         meta::APPROVAL_WAIT,
-                        serde_json::json!({"thread":local.seq, "label":label}),
+                        serde_json::json!({"thread":root, "label":label}),
                     ),
                 )
                 .await
@@ -251,6 +335,12 @@ async fn a_machine_under_a_parent_hosts_its_senate_and_registers_it_there() {
                 );
             }
         }
+        // The valid waits above passed through the same ordered uplink,
+        // so the two earlier notices have already been handled.
+        let above_events = above.hub.read(&committee, Seq::ZERO, 100).await.unwrap();
+        assert!(above_events.iter().all(|event| {
+            !event.body.contains("unrelated-chat-wait") && !event.body.contains("local-only-wait")
+        }));
     }
     // Exercise the two logs and their persisted thread mapping, including
     // the local desk routing the request before its recipient escalates.
