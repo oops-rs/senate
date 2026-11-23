@@ -120,11 +120,10 @@ private struct SessionLink: View {
             store.place = .session(session.sessionId)
         } label: {
             HStack(spacing: Theme.Space.s) {
-                StatusMark(status: session.status)
+                SessionMark(runtime: session.runtime, status: session.status)
                 Text(verbatim: session.displayName)
                     .font(Theme.Fonts.text.weight(.medium))
                     .foregroundStyle(Theme.onSurface)
-                RuntimeMark(runtime: session.runtime)
                 if let title = session.title {
                     Text(verbatim: title)
                         .font(Theme.Fonts.row)

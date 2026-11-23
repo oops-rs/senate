@@ -1639,6 +1639,23 @@
         }
       }
     },
+    "profile.online_at": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Online at %@"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在线：%@"
+          }
+        }
+      }
+    },
     "prompt.allow": {
       "extractionState": "manual",
       "localizations": {
@@ -2985,19 +3002,19 @@
         }
       }
     },
-    "sidebar.account": {
+    "sidebar.account_menu": {
       "extractionState": "manual",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Account and settings"
+            "value": "More"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "账户与设置"
+            "value": "更多"
           }
         }
       }
@@ -3138,6 +3155,23 @@
         }
       }
     },
+    "sidebar.profile_open": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@, open your profile"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@，打开个人资料"
+          }
+        }
+      }
+    },
     "sidebar.search": {
       "extractionState": "manual",
       "localizations": {
@@ -3203,23 +3237,6 @@
                 }
               }
             }
-          }
-        }
-      }
-    },
-    "sidebar.watch_help": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Every hosted terminal side by side, in Terminal (senate session watch)"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "在终端里并排查看所有托管终端（senate session watch）"
           }
         }
       }
@@ -3360,19 +3377,19 @@
         }
       }
     },
-    "tab.senates": {
+    "tab.profile": {
       "extractionState": "manual",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Senates"
+            "value": "Profile"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "Senate"
+            "value": "个人资料"
           }
         }
       }

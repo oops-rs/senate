@@ -5,7 +5,7 @@ import SwiftUI
 import SenateCore
 
 /// Development only: with `SENATE_APP_SNAPSHOT=<dir>`, open the window, show
-/// the inbox, a thread, approvals, a committee, sessions and the Senates,
+/// the inbox, a thread, approvals, a committee, sessions and your profile,
 /// then Settings and the status item's menu; write each as
 /// `<dir>/<name>.png`, and quit.
 /// The app draws its own windows, so no screen-recording permission is
@@ -56,7 +56,12 @@ enum Snapshot {
             }
             // Inbox, a thread, Approvals, a committee, sessions, Senates.
             store.place = .section(.inbox)
+            store.folded = []
             await shot("inbox")
+            // Every session state in the sidebar at once, stopped included.
+            store.showInactive = true
+            await shot("sidebar-states")
+            store.showInactive = false
             if let thread = store.inboxThreads.first {
                 store.place = .thread(thread.key)
                 await shot("thread")
@@ -99,7 +104,7 @@ enum Snapshot {
                 await shot("session-unreadable")
             }
             store.place = .section(.senates)
-            await shot("senates")
+            await shot("profile")
             // Settings, in its own window, opened as a person would: ⌘,.
             if let comma = NSEvent.keyEvent(
                 with: .keyDown, location: .zero, modifierFlags: .command,

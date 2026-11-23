@@ -239,19 +239,103 @@ private struct WorkingRing: View {
     }
 }
 
-/// The runtime a session runs, small: `claude`, `codex`, `agy`.
-struct RuntimeMark: View {
+/// A session's one leading mark: its runtime glyph, carrying its status.
+/// Needs you: the glyph in the attention colour with a dot at its corner.
+/// Working: a ring turning around it. Unread: an accent dot at its corner.
+/// Idle: the glyph as it is. Paused: dimmed, with a pause badge. Stopped:
+/// faint. The names after it line up in one column.
+struct SessionMark: View {
     let runtime: String
+    let status: SessionStatus
 
     var body: some View {
-        Text(verbatim: runtime)
-            .font(.system(size: 9.5, weight: .medium))
-            .foregroundStyle(Theme.onSurfaceVariant)
-            .padding(.horizontal, 4)
-            .padding(.vertical, 1)
-            .background(Theme.containerHigh, in: RoundedRectangle(cornerRadius: 4))
-            .lineLimit(1)
-            .fixedSize()
+        RuntimeMark(runtime: runtime, tint: tint)
+            .opacity(status == .stopped ? 0.4 : status == .paused ? 0.6 : 1)
+            .frame(width: 20, height: 20)
+            .overlay {
+                if status == .working {
+                    TurningRing(size: 20, width: 1.4)
+                }
+            }
+            .overlay(alignment: .topTrailing) { badge.offset(x: 2, y: -1) }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("\(runtime), \(status.label)")
+    }
+
+    private var tint: Color {
+        switch status {
+        case .needsYou: Theme.attention
+        case .working, .unread: Theme.primary
+        case .idle, .paused, .stopped: Theme.onSurfaceVariant
+        }
+    }
+
+    @ViewBuilder private var badge: some View {
+        switch status {
+        case .needsYou: dot(Theme.attention)
+        case .unread: dot(Theme.primary)
+        case .paused:
+            Image(systemName: "pause.fill")
+                .font(.system(size: 5, weight: .black))
+                .foregroundStyle(Theme.sidebar)
+                .frame(width: 9, height: 9)
+                .background(Theme.onSurfaceVariant, in: Circle())
+                .overlay { Circle().stroke(Theme.sidebar, lineWidth: 1.5) }
+        case .working, .idle, .stopped: EmptyView()
+        }
+    }
+
+    private func dot(_ color: Color) -> some View {
+        Circle().fill(color)
+            .frame(width: 7, height: 7)
+            .overlay { Circle().stroke(Theme.sidebar, lineWidth: 1.5) }
+    }
+}
+
+/// A ring that turns while a session works, around its mark.
+struct TurningRing: View {
+    var size: CGFloat = 9
+    var width: CGFloat = 1.6
+    @State private var turning = false
+
+    var body: some View {
+        Circle()
+            .trim(from: 0, to: 0.3)
+            .stroke(Theme.primary, style: StrokeStyle(lineWidth: width, lineCap: .round))
+            .frame(width: size, height: size)
+            .rotationEffect(.degrees(turning ? 360 : 0))
+            .animation(.linear(duration: 1.1).repeatForever(autoreverses: false), value: turning)
+            .onAppear { turning = true }
+            .accessibilityHidden(true)
+    }
+}
+
+/// The runtime a session runs, as a small glyph in the text's colour
+/// (`RuntimeClaude`, `RuntimeCodex`, `RuntimeAgy`, else a terminal); its
+/// name is in the tooltip. One asset per runtime, so a real mark can
+/// replace a glyph by swapping its file (Assets.xcassets/RUNTIME-ICONS.md).
+struct RuntimeMark: View {
+    let runtime: String
+    var tint: Color = Theme.onSurfaceVariant
+
+    var body: some View {
+        Image(Self.asset(runtime))
+            .renderingMode(.template)
+            .resizable()
+            .interpolation(.high)
+            .frame(width: 14, height: 14)
+            .foregroundStyle(tint)
+            .help(runtime)
+            .accessibilityLabel(runtime)
+    }
+
+    static func asset(_ runtime: String) -> String {
+        switch runtime {
+        case "claude": "RuntimeClaude"
+        case "codex": "RuntimeCodex"
+        case "agy": "RuntimeAgy"
+        default: "RuntimeTerminal"
+        }
     }
 }
 

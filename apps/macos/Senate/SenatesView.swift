@@ -1,27 +1,47 @@
 import SwiftUI
 import SenateCore
 
-/// Every Senate the daemon serves, one card each: who you are in it, who
-/// holds the Speaker's seat, the committees' chairs, your agents and their
-/// streams, the Senates registered below it, and its registration above.
+/// Your profile: who you are and where (your name, the Senate's address,
+/// online or not), then every Senate the daemon serves, one card each: who
+/// you are in it, who holds the Speaker's seat, the committees' chairs,
+/// your agents and their streams, the Senates registered below it, and its
+/// registration above.
 struct SenatesView: View {
     @Bindable var store: CoreStore
 
     var body: some View {
-        if store.state.senates.isEmpty {
+        let state = store.state
+        let name = state.person ?? "Senate"
+        if state.senates.isEmpty {
             EmptyState(text: L("senates.empty"))
         } else {
             ReadingColumn {
-                HStack(alignment: .top) {
-                    PageHeading(
-                        text: L("tab.senates"),
-                        note: store.state.senates.count > 1 ? L("senates.inbox_note") : nil
-                    )
+                HStack(alignment: .center, spacing: Theme.Space.l) {
+                    Avatar(name: name, online: state.online, size: 56)
+                    VStack(alignment: .leading, spacing: Theme.Space.xs) {
+                        Text(verbatim: name)
+                            .font(Theme.Fonts.title)
+                            .foregroundStyle(Theme.onSurface)
+                            .accessibilityAddTraits(.isHeader)
+                        HStack(spacing: 6) {
+                            StatusDot(online: state.online, size: 7)
+                            Text(verbatim: state.online ? L("profile.online_at", Profile.place(state)) : L("a11y.offline"))
+                                .font(Theme.Fonts.row)
+                                .foregroundStyle(Theme.onSurfaceVariant)
+                                .textSelection(.enabled)
+                        }
+                        if state.senates.count > 1 {
+                            Text(verbatim: L("senates.inbox_note"))
+                                .font(Theme.Fonts.meta)
+                                .foregroundStyle(Theme.onSurfaceVariant)
+                        }
+                    }
                     Spacer(minLength: Theme.Space.m)
                     InactiveToggle(store: store, hidden: hidden)
-                        .padding(.top, Theme.Space.xl)
                 }
-                .padding(.bottom, Theme.Space.s)
+                .padding(.top, Theme.Space.xl)
+                .padding(.bottom, Theme.Space.m)
+                .padding(.leading, Theme.Space.xs)
                 ForEach(store.state.senates) { senate in
                     SenateCard(store: store, senate: senate)
                 }

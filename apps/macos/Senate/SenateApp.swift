@@ -47,9 +47,11 @@ struct MenuBarLabel: View {
     var body: some View {
         let count = store.state.online ? store.waitingCount : 0
         HStack(spacing: 3) {
-            Image(systemName: store.state.online
-                ? "building.columns.fill"
-                : "building.columns")
+            // The chamber mark, one colour (a template, as the menu bar
+            // wants); dimmed while the daemon is out of reach.
+            Image("SenateGlyph")
+                .renderingMode(.template)
+                .opacity(store.state.online ? 1 : 0.45)
             if count > 0 {
                 Text(verbatim: String(count))
             }

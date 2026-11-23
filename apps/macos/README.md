@@ -60,7 +60,7 @@ SENATE_HOME=/tmp/sh SENATE_APP_SHOW=1 build/Build/Products/Debug/Senate.app/Cont
 | `SENATE_HOME` | the Senate home; wins over the one chosen in Settings |
 | `SENATE_APP_SHOW=1` | open the window at launch |
 | `SENATE_APP_NOTIFICATIONS=0` | no notification permission prompt and no notifications |
-| `SENATE_APP_SNAPSHOT=<dir>` | Debug builds: write the inbox, a thread, approvals, a committee, sessions (at a prompt, scrolled up to older items, every tool call open, at work, unreadable), the Senates, Settings and the status item's menu as PNGs of the app's own windows, then quit (how `docs/screenshots/` is made). `SENATE_APP_SNAPSHOT_APPEARANCE=light\|dark` picks the appearance whatever the system's is; `SENATE_APP_SNAPSHOT_PREFIX` goes before each file name (`zh-`) |
+| `SENATE_APP_SNAPSHOT=<dir>` | Debug builds: write the inbox, a thread, approvals, a committee, sessions (at a prompt, scrolled up to older items, every tool call open, at work, unreadable), your profile, Settings and the status item's menu as PNGs of the app's own windows, then quit (how `docs/screenshots/` is made). `SENATE_APP_SNAPSHOT_APPEARANCE=light\|dark` picks the appearance whatever the system's is; `SENATE_APP_SNAPSHOT_PREFIX` goes before each file name (`zh-`) |
 | `SENATE_APP_PERF=1` | print state-apply and thread-read times and main-thread stalls, tour a thread, Inbox, Approvals and a session, quit (`SENATE_APP_PERF_THREAD=<root>` opens that thread) |
 | `FAKE_THREADS=N` | the fake daemon: N more threads and a 5,000-event thread 990 |
 | `FAKE_TIMELINE_EVERY=<s>` | the fake daemon: how often a watched timeline grows (default 6; 0 never) |
@@ -68,7 +68,7 @@ SENATE_HOME=/tmp/sh SENATE_APP_SHOW=1 build/Build/Products/Debug/Senate.app/Cont
 
 ## What it does
 
-**Menu bar.** Only what waits on you. The icon (filled when online) with
+**Menu bar.** Only what waits on you. The chamber mark (dimmed while offline) with
 the number waiting: threads that wait on you (requests and questions
 addressed to you, escalations, what was said to you that you have not
 read), items put to the Speaker your agent holds, Codex approvals and
@@ -82,26 +82,30 @@ menu is one line. Everything else lives in the window. Menu bar only
 
 ![The menu](docs/screenshots/menu.png)
 
-**Window** (⌘1 Inbox, ⌘2 Approvals, ⌘3 Senates, ⌘⌥↑ and ⌘⌥↓ from session to session;
+**Window** (⌘1 Inbox, ⌘2 Approvals, ⌘3 your profile, ⌘⌥↑ and ⌘⌥↓ from session to session;
 ⌘R reads everything again, or tries the daemon now while offline). Two
 columns. The sidebar has two fixed rows, **Inbox** and **Approvals** (each
 with how much waits there), then one folding group per committee: its name
 (which opens the committee) with what waits on you there, and under it each
 session of that committee on this machine, hosted by Senate or started by
-you, the chair first: its status, its name (the alias), its runtime, and
-how long since it last did something. Sessions on no committee are last.
+you, the chair first: one leading mark, its name (the alias), and how long
+since it last did something. The mark is the runtime's glyph (our own,
+not the vendors' logos: `Senate/Assets.xcassets/RUNTIME-ICONS.md`)
+carrying the session's status. Sessions on no committee are last.
 Folded, a committee shows its most urgent session's status. The menu on
 the *Committees* header holds *Show inactive*. Search (⌘F) narrows the
-sessions and the inbox. Pinned at the foot, quieter than the rows above:
-**Senates** (the page) and **Watch all** (every hosted terminal side by
-side, `senate session watch`); below them, who you are and the Senate's
-address, whose menu opens *Settings…*, *About Senate* and *Refresh*. Nothing is drawn
+sessions and the inbox. At the foot, **you**: your name and the Senate's
+address; choosing it opens your profile (⌘3), and the menu beside it
+holds *Watch all* (every hosted terminal side by side, `senate session
+watch`), *Settings…*, *About Senate* and *Refresh*. Nothing is drawn
 above the content but what it needs at its top right.
 
-A session's **status**, most urgent first, one mark each: *needs you* (a
-permission prompt waits: the attention colour), *working* (a turning
-ring), *unread* (it said something to you that you have not read: the
-accent dot), *idle*, *paused*, *stopped*. The core decides it.
+A session's **status**, most urgent first, on its mark: *needs you* (a
+permission prompt waits: the glyph in the attention colour with a dot at
+its corner), *working* (a ring turning around it), *unread* (it said
+something to you that you have not read: an accent dot at its corner),
+*idle* (the glyph as it is), *paused* (dimmed, a pause badge), *stopped*
+(faint). The core decides it.
 
 - **Inbox**: the threads waiting on you for a reply (questions, answers
   and notes you have not read), one group per committee (its name, its
@@ -149,9 +153,11 @@ accent dot), *idle*, *paused*, *stopped*. The core decides it.
   its state, *Take* (take it over) and a menu with *Close* (archives it,
   after confirming). A thread that no longer waits on you (or never did)
   opens all the same, from what is read of it.
-- **Senates** (at the sidebar's foot): address, you, the Speaker, the
-  registration above, each committee's chair, your agents with their duty
-  and streams, and the Senates below with the seats they declare.
+- **Your profile** (the account row at the sidebar's foot): who you are
+  and where (your name, the Senate's address, online or not), then each
+  Senate the daemon serves: address, you, the Speaker, the registration
+  above, each committee's chair, your agents with their duty and streams,
+  and the Senates below with the seats they declare.
 
 **Show inactive.** Agents, sessions, streams, committees and members that
 are no longer active are hidden until *Show inactive* (the menu on the
@@ -169,12 +175,14 @@ cards, the reading column). Text is read at 700 pt, centred.
 Speaker's seat lit at the centre of the floor. It follows the system's
 appearance: ink-navy seats and a vermilion Speaker on paper in light, white
 seats and an amber Speaker on ink navy in dark. `scripts/make-icon.swift`
-draws it as an Icon Composer document, `Senate/AppIcon.icon` (one
-transparent layer per appearance, and each appearance's ground in
-`icon.json`; the system draws the tile), and renders
-`docs/screenshots/icon.png` with Icon Composer's `ictool`. The sidebar's
-header shows the same icon; the menu bar keeps its `building.columns`
-glyph.
+defines the mark's shapes once and draws from them the Icon Composer
+document `Senate/AppIcon.icon` (one transparent layer per appearance, each
+appearance's ground in `icon.json`; the system draws the tile), the mark
+without its tile as vector assets (`SenateMark` and `SenateMarkSpeaker`
+beside "Senate" in the sidebar, seats in the text's colour and the Speaker
+in amber; `SenateGlyph`, one colour, for the menu bar), the logo's source
+`docs/logo/senate-mark.svg`, and `docs/screenshots/icon.png` (with Icon
+Composer's `ictool`). The About window shows the full icon.
 
 ![The icon, light and dark](docs/screenshots/icon.png)
 
@@ -206,7 +214,7 @@ streamed in Terminal.
 In the app: reading and answering what waits on you, approvals, each
 committee's sessions and their conversations, a note to a session's
 senator, attaching to hosted sessions (pause, resume, stop, restore), the
-Speaker's desk, the Senates.
+Speaker's desk, your profile and the Senates you sit in.
 In the CLI and the agents: `spawn`, `join`/`leave`, `setup` (install, the
 daemon service), aliases and seats, secretaries, `prune`, and
 asking, posting, search, the brief and checkpoints.
