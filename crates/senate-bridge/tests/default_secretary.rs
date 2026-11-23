@@ -368,6 +368,30 @@ async fn only_the_desk_opens_a_committee_and_a_retry_finishes_it() {
         .expect("the chair's first request");
     assert!(brief.body.contains("refund rounding"));
 
+    // The chair's session launched but its appointment never reached the
+    // server: called again, the same spawn attempt finds that session (no
+    // second one) and the appointment is made.
+    h.server.state.inner.lock().unwrap().chair = None;
+    let confirmed: ipc::DeskOpenReply = call(&h, &open(desk.clone(), "ledger-fix", &project)).await;
+    assert_eq!(
+        confirmed.chair.as_ref().map(|c| &c.senator),
+        Some(&started.senator),
+        "the same session"
+    );
+    assert_eq!(
+        h.server
+            .state
+            .inner
+            .lock()
+            .unwrap()
+            .chair
+            .as_ref()
+            .map(|(c, _)| c),
+        Some(&started.senator),
+    );
+    let rows: ipc::SessionsReply = call(&h, &Request::Sessions).await;
+    assert_eq!(rows.rows.len(), 4, "no second chair session");
+
     // Again: the chair stands; nothing new starts.
     let again: ipc::DeskOpenReply = call(&h, &open(desk, "ledger-fix", &project)).await;
     assert!(again.chair.is_none());

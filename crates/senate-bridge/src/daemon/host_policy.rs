@@ -686,7 +686,7 @@ impl Shared {
     /// After the launch is audited, appoint the chair on the spawner's
     /// authority. A missing HTTP acknowledgement may hide a successful
     /// appointment, so the caller keeps this registered host running.
-    async fn appoint_hosted_chair(
+    pub(super) async fn appoint_hosted_chair(
         &self,
         auth: &HostAuthority,
         reply: &SpawnReply,
