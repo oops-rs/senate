@@ -1387,7 +1387,9 @@ async fn watch_timeline(
         let w = world.lock().unwrap();
         (w.grow_every, w.stream_ms.get(session_id).copied())
     };
-    let every = stream.map(|(min, _)| std::time::Duration::from_millis(min)).or(every);
+    let every = stream
+        .map(|(min, _)| std::time::Duration::from_millis(min))
+        .or(every);
     let mut jitter: u64 = 0x9e37_79b9_7f4a_7c15;
     let Some(every) = every else {
         // Hold the stream open, as the daemon does, until the app lets go.
@@ -1956,7 +1958,13 @@ fn timelines(w: &mut World) {
             // Chinese: the renderer's specimen.
             item(4, 128, said(include_str!("specimen.md"))),
             item(5, 127, user("And the thread-2148 sample.")),
-            item(6, 126, said(include_str!("../../../senate-markdown/tests/fixtures/thread-2148.md"))),
+            item(
+                6,
+                126,
+                said(include_str!(
+                    "../../../senate-markdown/tests/fixtures/thread-2148.md"
+                )),
+            ),
         ],
     );
 }
@@ -1991,12 +1999,30 @@ pub fn marathon(w: &mut World, n: usize) {
         .collect();
     // Code in several languages, and the whole specimen now and then.
     let code = [
-        ("rust", "fn coalesce(&self) {\n    if self.due.swap(true, Ordering::AcqRel) { return; }\n}"),
-        ("swift", "func coalesce() async {\n    guard !due else { return }\n    due = true // one re-read\n}"),
-        ("python", "def coalesce(self):\n    if self.due:  # already queued\n        return\n    self.due = True"),
-        ("typescript", "const coalesce = (s: Store): void => { if (s.due) return; s.due = true; };"),
-        ("bash", "cargo test -p senate-app-core && rg -n 'coalesce' crates/ | wc -l"),
-        ("json", "{ \"due\": true, \"reads\": 1, \"note\": \"coalesced\" }"),
+        (
+            "rust",
+            "fn coalesce(&self) {\n    if self.due.swap(true, Ordering::AcqRel) { return; }\n}",
+        ),
+        (
+            "swift",
+            "func coalesce() async {\n    guard !due else { return }\n    due = true // one re-read\n}",
+        ),
+        (
+            "python",
+            "def coalesce(self):\n    if self.due:  # already queued\n        return\n    self.due = True",
+        ),
+        (
+            "typescript",
+            "const coalesce = (s: Store): void => { if (s.due) return; s.due = true; };",
+        ),
+        (
+            "bash",
+            "cargo test -p senate-app-core && rg -n 'coalesce' crates/ | wc -l",
+        ),
+        (
+            "json",
+            "{ \"due\": true, \"reads\": 1, \"note\": \"coalesced\" }",
+        ),
     ];
     let reply = |i: usize| {
         if i % 400 == 5 {
@@ -2218,7 +2244,10 @@ pub fn streaming(w: &mut World) {
     for round in 0..20 {
         if round > 0 {
             seq += 1;
-            growth.push_back(Growth { item: item(seq, 0, user("Once more, please.")), working: true });
+            growth.push_back(Growth {
+                item: item(seq, 0, user("Once more, please.")),
+                working: true,
+            });
         }
         seq += 1;
         // Chunks of 1 to 6 characters, on character boundaries.

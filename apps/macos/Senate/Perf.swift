@@ -182,11 +182,8 @@ extension Perf {
         func stop(_ phase: String) {
             link?.invalidate()
             ticking?.cancel()
-            let c = MarkdownCache.shared.counters
-            MarkdownCache.shared.counters = (0, .zero, 0, .zero)
             let ms = { (d: Duration) in d.components.seconds * 1000 + d.components.attoseconds / 1_000_000_000_000_000 }
-            report("phase \(phase): main-thread markdown renders \(c.renders) (\(ms(c.renderTime)) ms), "
-                + "height measures \(c.measures) (\(ms(c.measureTime)) ms), timeline updates \(updates) (\(ms(updateTime)) ms)")
+            report("phase \(phase): timeline updates \(updates) (\(ms(updateTime)) ms)")
             Probe.updates = 0
             Probe.updateTime = .zero
             let stall = worstStall.components.attoseconds / 1_000_000_000_000_000 + worstStall.components.seconds * 1000

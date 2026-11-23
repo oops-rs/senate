@@ -101,6 +101,8 @@ final class CoreStore {
     @ObservationIgnored private var openWindow: OpenWindowAction?
     @ObservationIgnored private(set) var openSettings: OpenSettingsAction?
     @ObservationIgnored private let notifier = Notifier()
+    /// The conversation page: one web view, kept, for sessions and threads.
+    @ObservationIgnored lazy var page = ConversationPage(store: self)
     @ObservationIgnored private let defaults: UserDefaults
     private static let draftsKey = "drafts"
 
@@ -425,9 +427,8 @@ final class CoreStore {
         if let v = ProcessInfo.processInfo.environment[Self.showEnv], !v.isEmpty {
             show(.inbox)
         }
-        // SPIKE: the Markdown store, and its highlighter warmed off the main
-        // thread, at launch rather than at the first conversation.
-        _ = WebConversation.Coordinator.markdown
+        // The Markdown store, its highlighter warmed off the main thread.
+        _ = ConversationPage.markdown
         Perf.tour(self)
         Perf.sessionTour(self)
         #if DEBUG

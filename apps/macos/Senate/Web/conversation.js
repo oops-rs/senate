@@ -1,11 +1,15 @@
-// The conversation page. The app sends it data (rows, theme, labels, and
-// Markdown blocks the core rendered) as call arguments, never as script; it
-// sends the app a fixed set of actions. Nothing is parsed here: a message's
-// Markdown arrives as a list of blocks, then as diffs naming the blocks that
-// changed, and each block's HTML (from senate-markdown: a fixed set of tags
-// and classes, text escaped) only when the page asks for it, near the
-// viewport or in idle time. An update replaces or appends only the blocks
-// it names; a growing code block gets only its new lines.
+// The conversation page's one script. The app injects it into a content
+// world of its own ("senate"): the page's world runs no script, and only
+// this world can reach the app's message handler. The app sends data (rows,
+// theme, labels, rendered Markdown blocks) as call arguments, never as
+// script; this sends the app a fixed set of actions.
+//
+// Nothing is parsed here. A message's Markdown arrives as a list of blocks,
+// then as diffs naming the blocks that changed, and each block's HTML (from
+// senate-markdown: a fixed set of tags and classes, text escaped) only when
+// this asks for it, near the viewport or in idle time. An update replaces
+// or appends only the blocks it names; a growing code block gets only its
+// new lines; a message's container is never written whole.
 "use strict";
 (function () {
   const post = (msg) => window.webkit.messageHandlers.senate.postMessage(msg);
@@ -14,6 +18,13 @@
   const open = new Set();       // ids of open tool rows / thinking lines
   const docs = new Map();       // message key -> { key, el, blocks: Map(id -> block) }
   let hasOlder = false, askedOlder = false;
+
+  // The one HTML sink takes the renderer's output through one named
+  // policy, which the page's Content-Security-Policy requires where
+  // WebKit has Trusted Types.
+  const policy = (window.trustedTypes && window.trustedTypes.createPolicy)
+    ? window.trustedTypes.createPolicy("senate", { createHTML: (s) => s }) : null;
+  const trusted = (s) => (policy ? policy.createHTML(s) : s);
 
   const el = (tag, cls, text) => {
     const e = document.createElement(tag);
@@ -46,12 +57,10 @@
     return e;
   }
 
-  const BODY = "md";
-
   // A message's container, from its first update: every block a sized
   // placeholder; those near the viewport ask for their HTML.
   function messageBody(md) {
-    const body = el("div", BODY);
+    const body = el("div", "md");
     const doc = { key: md.key, el: body, blocks: new Map() };
     body.dataset.key = md.key;
     for (const b of md.blocks) {
@@ -100,7 +109,7 @@
   // Requests to the app, gathered over a turn (not a frame: a web view
   // behind another window gets few frames, and should still update).
   const pending = new Map(); // key -> { full: Set, patch: Set }
-  let flushing = false;
+  let flushing = false, outstanding = 0;
   function queue(key, id, full) {
     let p = pending.get(key);
     if (!p) { p = { full: new Set(), patch: new Set() }; pending.set(key, p); }
@@ -114,9 +123,10 @@
       if (!doc) continue;
       if (p.full.size) {
         for (const id of p.full) { const b = doc.blocks.get(id); if (b) b.state = "asked"; }
+        outstanding++;
         post({ action: "render", key, ids: Array.from(p.full), full: true });
       }
-      if (p.patch.size) post({ action: "render", key, ids: Array.from(p.patch), full: false });
+      if (p.patch.size) { outstanding++; post({ action: "render", key, ids: Array.from(p.patch), full: false }); }
     }
     pending.clear();
   }
@@ -126,32 +136,44 @@
     for (const e of entries) {
       const body = e.target.parentElement;
       const doc = body && docs.get(body.dataset.key);
-      const b = doc?.blocks.get(e.target.dataset.block);
+      const b = doc && doc.blocks.get(e.target.dataset.block);
       if (!b || b.el !== e.target) continue;
       b.visible = e.isIntersecting;
       if (e.isIntersecting && (b.state === "placeholder" || b.state === "stale")) queue(doc.key, b.meta.id, true);
     }
   }, { rootMargin: "150% 0px" });
 
+  const unrendered = function* () {
+    for (const doc of docs.values()) {
+      if (!doc.el.isConnected) continue;
+      for (const [id, b] of doc.blocks) if (b.state === "placeholder" || b.state === "stale") yield [doc, id];
+    }
+  };
+
   // The rest, a few at a time when nothing else happens.
   const idle = window.requestIdleCallback || ((f) => setTimeout(f, 250));
   function idleRender() {
     let n = 0;
-    outer: for (const doc of docs.values()) {
-      if (!doc.el.isConnected) continue;
-      for (const [id, b] of doc.blocks) {
-        if (b.state !== "placeholder" && b.state !== "stale") continue;
-        queue(doc.key, id, true);
-        if (++n >= 24) break outer;
-      }
-    }
+    for (const [doc, id] of unrendered()) { queue(doc.key, id, true); if (++n >= 24) break; }
     idle(idleRender);
   }
   idle(idleRender);
 
+  // Everything read so far rendered (find, select all): ask for every
+  // block left, and wait for the answers (a few seconds at most).
+  async function renderAll() {
+    for (const [doc, id] of unrendered()) queue(doc.key, id, true);
+    const until = performance.now() + 5000;
+    while (performance.now() < until) {
+      await new Promise((r) => setTimeout(r, 20));
+      if (!flushing && outstanding === 0 && unrendered().next().done) return;
+    }
+  }
+
   // From the app: rendered blocks of one message.
   const tpl = document.createElement("template");
   function blocks(key, r) {
+    outstanding = Math.max(0, outstanding - 1);
     const doc = docs.get(key);
     if (!doc) return;
     const t0 = performance.now();
@@ -163,12 +185,13 @@
       if (!b) continue;
       if (res.html !== undefined) {
         // The renderer's own output: its fixed set of tags, text escaped.
-        tpl.innerHTML = res.html;
+        tpl.innerHTML = trusted(res.html);
         const fresh = el("div", "blk");
         fresh.dataset.block = res.id;
         fresh.appendChild(tpl.content);
         decorate(fresh);
         near.unobserve(b.el);
+        if (anchor && anchor.el === b.el) anchor.el = fresh;
         b.el.replaceWith(fresh);
         b.el = fresh;
         near.observe(fresh);
@@ -181,7 +204,7 @@
           if (!code) continue;
           const lines = code.querySelectorAll(":scope > .ln");
           for (let i = lines.length - 1; i >= c.from; i--) lines[i].remove();
-          tpl.innerHTML = c.lines.join("");
+          tpl.innerHTML = trusted(c.lines.join(""));
           code.appendChild(tpl.content);
           tails++; tailLines += c.lines.length;
         }
@@ -226,16 +249,31 @@
     return area;
   }
 
+  // A row's Markdown body: a fresh container (its blocks to come).
+  function body(md) {
+    const known = docs.get(md.key);
+    if (known) { for (const b of known.blocks.values()) near.unobserve(b.el); docs.delete(md.key); }
+    return messageBody(md);
+  }
+
   function render(row) {
     const r = el("div", "row k-" + row.kind);
     r.dataset.id = String(row.id);
     switch (row.kind) {
       case "user": r.appendChild(el("div", "typed", row.text)); break;
-      case "assistant": {
+      case "assistant":
         r.appendChild(thinkingArea(row));
-        const known = docs.get(row.md.key);
-        if (known) { for (const b of known.blocks.values()) near.unobserve(b.el); docs.delete(row.md.key); }
-        r.appendChild(messageBody(row.md));
+        r.appendChild(body(row.md));
+        break;
+      case "event": {
+        // A thread's event: others' under who said it, yours in a bubble.
+        if (row.mine) r.classList.add("mine");
+        const head = el("div", "event-head");
+        if (!row.mine) head.appendChild(el("span", "by", row.by));
+        head.appendChild(el("span", "meta", row.kindLabel + " · " + row.when));
+        const content = el("div", "event-body");
+        content.appendChild(body(row.md));
+        if (row.mine) { r.appendChild(content); r.appendChild(head); } else { r.appendChild(head); r.appendChild(content); }
         break;
       }
       case "tool": {
@@ -282,7 +320,10 @@
         head.appendChild(el("span", "meta", "  " + (s.kindLabel || "") + "  " + (s.committee || "") + (s.thread ? " · #" + s.thread : "")));
         d.appendChild(head);
         d.appendChild(el("div", "typed", s.text));
-        if (s.committee && s.thread) { d.dataset.committee = s.committee; d.dataset.thread = String(s.thread); }
+        if (s.committee && s.thread) {
+          d.dataset.committee = s.committee; d.dataset.thread = String(s.thread);
+          d.setAttribute("role", "link");
+        }
         r.appendChild(d);
         break;
       }
@@ -299,29 +340,38 @@
   const atBottom = () => stuck;
   const toBottom = () => { scroller().scrollTop = scroller().scrollHeight; };
 
+  // What the reader is looking at: the block (or row) at the top of the
+  // viewport, held where it is while what is above it changes height.
   function firstVisible() {
+    const box = main().getBoundingClientRect();
+    const x = box.left + Math.min(48, box.width / 2);
+    for (let y = 2; y < Math.min(window.innerHeight, 240); y += 16) {
+      const hit = document.elementFromPoint(x, y);
+      const a = hit && (hit.closest(".blk") || hit.closest(".row"));
+      if (a && main().contains(a)) return { el: a, top: a.getBoundingClientRect().top };
+    }
     for (const r of main().children) {
       if (!r.dataset.id) continue;
       const top = r.getBoundingClientRect().top;
-      if (top >= -r.offsetHeight) return { id: r.dataset.id, top };
+      if (top >= -r.offsetHeight) return { el: r, top };
     }
     return null;
   }
 
   function keep(anchor) {
-    if (!anchor) return;
-    const r = main().querySelector('[data-id="' + anchor.id + '"]');
-    if (r) scroller().scrollTop += r.getBoundingClientRect().top - anchor.top;
+    if (!anchor || !anchor.el.isConnected) return;
+    scroller().scrollTop += anchor.el.getBoundingClientRect().top - anchor.top;
   }
 
-  // A row that changed: an assistant message keeps its body and applies
-  // the diff to it; anything else is drawn again.
+  // A row that changed: a Markdown message keeps its body and applies the
+  // diff to it; anything else is drawn again.
   function replace(row) {
     rows.set(row.id, row);
     const old = main().querySelector('[data-id="' + row.id + '"]');
-    const doc = row.kind === "assistant" ? docs.get(row.md.key) : null;
-    if (old && doc && doc.el.parentElement === old) {
-      old.querySelector(":scope > .thinking-area").replaceWith(thinkingArea(row));
+    const doc = row.md ? docs.get(row.md.key) : null;
+    if (old && doc && old.contains(doc.el)) {
+      if (row.kind === "assistant") old.querySelector(":scope > .thinking-area").replaceWith(thinkingArea(row));
+      if (row.kind === "event") old.querySelector(".event-head .meta").textContent = row.kindLabel + " · " + row.when;
       applyDiff(doc, row.md);
       return;
     }
@@ -332,29 +382,20 @@
   function forgetDocs() {
     for (const d of docs.values()) for (const b of d.blocks.values()) near.unobserve(b.el);
     docs.clear();
+    pending.clear();
+    outstanding = 0;
   }
 
   // From the app: one operation at a time.
-  let applyWorst = 0, applyResetMs = 0, firstMs = 0, arrivedMs = 0, frameAfterMs = 0, readyAt = 0;
   function apply(op) {
-    const tApply = performance.now();
-    try { applyInner(op); } finally {
-      const d = performance.now() - tApply;
-      if (op.type === "reset") {
-        applyResetMs = d;
-        arrivedMs = tApply - readyAt;
-        requestAnimationFrame(() => { frameAfterMs = performance.now() - tApply; });
-      }
-      applyWorst = Math.max(applyWorst, d);
-    }
-  }
-  function applyInner(op) {
     const bottom = atBottom();
     const anchor = bottom ? null : firstVisible();
     switch (op.type) {
       case "reset":
         rows.clear();
+        open.clear();
         forgetDocs();
+        clearFind();
         for (const r of Array.from(main().querySelectorAll(".row"))) r.remove();
         for (const row of op.rows) { rows.set(row.id, row); main().appendChild(render(row)); }
         break;
@@ -378,18 +419,10 @@
       w.hidden = !op.state.working;
       w.textContent = labels.working;
     }
+    // The first screen's blocks, rendered with the reset.
+    for (const f of op.first || []) { outstanding++; blocks(f.key, f.r); }
     if (op.type === "reset" || bottom) { toBottom(); stuck = true; } else keep(anchor);
     if (op.type === "prepend") nearTop();
-    // The first screen's blocks, rendered with the reset.
-    const tFirst = performance.now();
-    for (const f of op.first || []) blocks(f.key, f.r);
-    if (op.type === "reset") firstMs = performance.now() - tFirst;
-    // At the foot: the last messages render now, without waiting for the
-    // observer (it reports on frames, which a hidden view rarely gets).
-    if (op.type === "reset" && stuck && !(op.first || []).length) {
-      const last = Array.from(docs.values()).slice(-3);
-      for (const d of last) for (const [id, b] of d.blocks) if (b.state === "placeholder") queue(d.key, id, true);
-    }
   }
 
   function toggle(id) {
@@ -417,6 +450,8 @@
       post({ action: "thread", committee: s.dataset.committee, thread: Number(s.dataset.thread) });
     }
   });
+  // Nothing is dragged out of the page but text.
+  document.addEventListener("dragstart", (e) => { if (e.target.closest && e.target.closest("a, img")) e.preventDefault(); });
 
   // Ask for the page before when within a screen and a half of the top.
   const nearTop = () => {
@@ -424,6 +459,142 @@
   };
   new ResizeObserver(() => { if (stuck) toBottom(); }).observe(document.getElementById("rows"));
   document.addEventListener("scroll", () => { stuck = measureBottom(); nearTop(); }, { passive: true });
+
+  // MARK: Copy: plain text only, as it reads
+
+  // What is not text: left out of a copy.
+  const CHROME = ".code-head, .thinking-toggle, .tool-head .kind, .tool-head .ok, .tool-head .fail, .tool-head .run, #older, #working, .debug, .ph";
+  const BLOCK = new Set(["P", "H1", "H2", "H3", "H4", "H5", "H6", "BLOCKQUOTE", "PRE", "TABLE", "UL", "OL", "HR", "DIV"]);
+
+  // The text of a fragment: paragraphs apart, list items with their
+  // markers (and task boxes as [x] / [ ]), nested lists indented, code as
+  // written, a table as tab-separated rows.
+  function plain(node) {
+    const out = [];
+    const walk = (n, indent) => {
+      if (n.nodeType === Node.TEXT_NODE) {
+        const inPre = n.parentElement && n.parentElement.closest("pre");
+        out.push(inPre ? n.data : n.data.replace(/\s+/g, " "));
+        return;
+      }
+      if (n.nodeType !== Node.ELEMENT_NODE && n.nodeType !== Node.DOCUMENT_FRAGMENT_NODE) return;
+      const tag = n.tagName || "";
+      if (tag === "BR") { out.push("\n" + indent); return; }
+      if (tag === "HR") { out.push("\n\n---\n\n"); return; }
+      if (tag === "TABLE") {
+        out.push("\n\n");
+        for (const tr of n.querySelectorAll("tr")) {
+          out.push(Array.from(tr.children).map((c) => plain(c).trim()).join("\t") + "\n");
+        }
+        out.push("\n");
+        return;
+      }
+      if (tag === "UL" || tag === "OL") {
+        let i = Number(n.getAttribute("start") || 1);
+        out.push("\n");
+        for (const li of n.children) {
+          if (li.tagName !== "LI") continue;
+          let marker = tag === "OL" ? (i++) + ". " : "- ";
+          const box = li.querySelector(":scope > .task-marker");
+          if (box) marker = "- " + (box.dataset.state === "done" ? "[x] " : "[ ] ");
+          out.push("\n" + indent + marker);
+          for (const c of li.childNodes) {
+            if (c === box) continue;
+            if (c.nodeType === Node.ELEMENT_NODE && (c.tagName === "UL" || c.tagName === "OL")) walk(c, indent + "  ");
+            else if (c.nodeType === Node.ELEMENT_NODE && c.tagName === "P") { for (const g of c.childNodes) walk(g, indent); }
+            else walk(c, indent);
+          }
+        }
+        out.push("\n");
+        return;
+      }
+      const block = BLOCK.has(tag);
+      if (block) out.push("\n\n");
+      for (const c of n.childNodes) walk(c, indent);
+      if (block) out.push("\n\n");
+    };
+    walk(node, "");
+    return out.join("")
+      .replace(/[ \t]+\n/g, "\n")
+      .replace(/\n[ ]+(?=\n)/g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+  }
+
+  document.addEventListener("copy", (e) => {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed) return;
+    const frag = document.createDocumentFragment();
+    for (let i = 0; i < sel.rangeCount; i++) frag.appendChild(sel.getRangeAt(i).cloneContents());
+    for (const c of frag.querySelectorAll(CHROME)) c.remove();
+    e.clipboardData.setData("text/plain", plain(frag));
+    e.preventDefault();
+  });
+
+  async function selectAll() {
+    await renderAll();
+    const range = document.createRange();
+    range.selectNodeContents(main());
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+
+  // MARK: Find, over everything read (rendered first)
+
+  let found = [], foundAt = -1, foundQuery = null;
+  const highlights = window.CSS && CSS.highlights;
+
+  function clearFind() {
+    found = []; foundAt = -1; foundQuery = null;
+    if (highlights) { highlights.delete("find"); highlights.delete("find-now"); }
+  }
+
+  function search(q) {
+    const needle = q.toLocaleLowerCase();
+    const ranges = [];
+    const walker = document.createTreeWalker(main(), NodeFilter.SHOW_TEXT, {
+      acceptNode: (n) => (n.parentElement && n.parentElement.closest(CHROME)) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
+    });
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      const hay = n.data.toLocaleLowerCase();
+      for (let i = hay.indexOf(needle); i >= 0; i = hay.indexOf(needle, i + needle.length)) {
+        const r = document.createRange();
+        r.setStart(n, i); r.setEnd(n, i + needle.length);
+        ranges.push(r);
+      }
+    }
+    return ranges;
+  }
+
+  function paint() {
+    if (!highlights) return;
+    highlights.set("find", new Highlight(...found));
+    if (foundAt >= 0) {
+      highlights.set("find-now", new Highlight(found[foundAt]));
+      const box = found[foundAt].getBoundingClientRect();
+      if (box.top < 60 || box.bottom > window.innerHeight - 60) {
+        scroller().scrollTop += box.top - window.innerHeight / 3;
+        stuck = measureBottom();
+      }
+    } else highlights.delete("find-now");
+  }
+
+  async function find(q, forward, again) {
+    if (q === null) { clearFind(); return; }
+    if (q !== foundQuery || !again) {
+      await renderAll();
+      found = search(q);
+      foundQuery = q;
+      // From what is on screen, going down.
+      foundAt = found.findIndex((r) => r.getBoundingClientRect().bottom >= 0);
+      if (foundAt < 0 && found.length) foundAt = 0;
+    } else if (found.length) {
+      foundAt = (foundAt + (forward ? 1 : -1) + found.length) % found.length;
+    }
+    paint();
+    post({ action: "found", count: found.length, index: found.length ? foundAt + 1 : 0 });
+  }
 
   // MARK: The debug overlay (⌥D): what each update cost.
 
@@ -436,15 +607,13 @@
     const us = (x) => (x / 1000).toFixed(2) + " ms";
     function show() {
       if (box.hidden) return;
-      box.textContent = "updates " + totals.updates +
-        " · blocks replaced " + totals.replaced + ", appended " + totals.appended + ", removed " + totals.removed +
-        " · rendered whole " + totals.whole + ", code tails " + totals.tails + " · lines highlighted " + totals.highlighted +
-        " · whole messages re-rendered 0\n\n" + lines.join("\n");
+      box.textContent = "updates " + totals.updates + " · blocks replaced " + totals.replaced + ", appended " + totals.appended +
+        ", removed " + totals.removed + " · rendered whole " + totals.whole + ", code tails " + totals.tails +
+        " · lines highlighted " + totals.highlighted + " · whole messages re-rendered 0\n\n" + lines.join("\n");
     }
     function add(line) { lines.unshift(line); if (lines.length > 16) lines.pop(); show(); }
     document.addEventListener("keydown", (e) => {
-      if (!e.altKey) return;
-      if (e.code === "KeyD") { box.hidden = !box.hidden; show(); e.preventDefault(); }
+      if (e.altKey && e.code === "KeyD") { box.hidden = !box.hidden; show(); e.preventDefault(); }
     });
     document.body.appendChild(box);
     const short = (key) => "#" + key.split("/").pop();
@@ -481,9 +650,13 @@
   window.senate = {
     apply,
     blocks,
+    find,
+    selectAll,
+    renderAll,
+    plainText: () => plain(main()),
     theme(vars) { for (const k in vars) document.documentElement.style.setProperty("--" + k, vars[k]); },
     labels(l) { labels = Object.assign(labels, l); },
-    debug(on) { const d = document.querySelector(".debug"); d.hidden = !on; debug.note("debug overlay on (⌥D)"); },
+    debug(on) { document.querySelector(".debug").hidden = !on; debug.note("debug overlay on (⌥D)"); },
     scrollToRow(id, at) {
       const r = main().querySelector('[data-id="' + id + '"]');
       if (!r) return;
@@ -496,8 +669,10 @@
     openCall(callId) {
       for (const [id, row] of rows) if (row.kind === "tool" && row.tool.callId === callId && !open.has(id)) toggle(id);
     },
-    stats() { const s = { frames, slow, worst, applyWorst, applyResetMs, firstMs, arrivedMs, frameAfterMs }; applyWorst = 0; frames = 0; slow = 0; worst = 0; last = 0; return s; },
+    // A frame with rows in it, and (when it has Markdown) some rendered.
+    shown: () => new Promise((r) => requestAnimationFrame(() => r(!!document.querySelector(".row") &&
+      (!document.querySelector(".blk") || !!document.querySelector(".blk:not(.ph)"))))),
+    stats() { const s = { frames, slow, worst }; frames = 0; slow = 0; worst = 0; last = 0; return s; },
   };
-  readyAt = performance.now();
   post({ action: "ready" });
 })();

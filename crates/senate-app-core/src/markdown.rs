@@ -200,6 +200,15 @@ impl MarkdownStore {
         out
     }
 
+    /// The block ids of message `key` as it reads now (none if unknown).
+    pub fn blocks(&self, key: String) -> Vec<String> {
+        let Some(shared) = self.message(&key) else {
+            return Vec::new();
+        };
+        let m = shared.lock().unwrap_or_else(|e| e.into_inner());
+        m.document.blocks().iter().map(|e| id_text(e.id)).collect()
+    }
+
     /// Load the highlighter's syntaxes now (they load on first use, which
     /// takes a while): call once, off the main thread, at launch.
     pub fn warm(&self) {
@@ -296,7 +305,13 @@ mod tests {
         assert_eq!(first.appended.len(), 2);
         let code = first.blocks[1].id.clone();
         let r = s.render("m".into(), vec![code.clone()], true);
-        assert!(r.blocks[0].html.as_deref().unwrap().contains("class=\"ln\""));
+        assert!(
+            r.blocks[0]
+                .html
+                .as_deref()
+                .unwrap()
+                .contains("class=\"ln\"")
+        );
         let u = s.update("m".into(), "Hi\n\n```rust\nlet a = 1;\nlet b = 2;\n".into());
         assert_eq!(u.replaced, vec![code.clone()]);
         assert!(u.appended.is_empty());
@@ -319,9 +334,19 @@ mod tests {
     #[test]
     fn raw_html_stays_text() {
         let s = MarkdownStore::new();
-        let u = s.update("m".into(), "<script>alert(1)</script> <img src=x onerror=y>".into());
-        let r = s.render("m".into(), u.blocks.iter().map(|b| b.id.clone()).collect(), true);
+        let u = s.update(
+            "m".into(),
+            "<script>alert(1)</script> <img src=x onerror=y>".into(),
+        );
+        let r = s.render(
+            "m".into(),
+            u.blocks.iter().map(|b| b.id.clone()).collect(),
+            true,
+        );
         let html = r.blocks[0].html.clone().unwrap();
-        assert!(!html.contains("<script") && !html.contains("<img"), "{html}");
+        assert!(
+            !html.contains("<script") && !html.contains("<img"),
+            "{html}"
+        );
     }
 }

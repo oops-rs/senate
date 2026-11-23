@@ -44,3 +44,14 @@ main { max-width: 700px; margin: 0 auto; padding: 8px 24px 24px; }
   white-space: pre-wrap; pointer-events: none; -webkit-user-select: none; user-select: none; }
 /* Table cells wrap at words, whatever the style. */
 .md th, .md td { overflow-wrap: normal; word-break: normal; }
+/* A thread's events: others' under who said it, yours in a bubble. */
+.k-event .event-head { font: 12px -apple-system, sans-serif; color: var(--dim); margin-bottom: 4px; }
+.k-event .event-head .by { color: var(--fg); font-weight: 600; font-size: 13px; margin-right: 8px; }
+.k-event.mine { display: flex; flex-direction: column; align-items: flex-end; }
+.k-event.mine .event-body { background: var(--container); border-radius: 18px; padding: 10px 16px; margin-left: 96px; max-width: calc(100% - 96px); box-sizing: border-box; }
+.k-event.mine .event-head { margin: 4px 8px 0 0; }
+/* Find: every match, and the one shown. */
+::highlight(find) { background-color: color-mix(in srgb, var(--attention) 30%, transparent); }
+::highlight(find-now) { background-color: var(--attention); color: var(--surface); }
+/* Nothing is dragged out but text. */
+a, img { -webkit-user-drag: none; }
