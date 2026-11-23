@@ -720,6 +720,7 @@ pub struct TimelineReply {
     pub last_seq: Option<u64>,
     pub has_older: bool,
     pub has_newer: bool,
+    /// This daemon observed a prompt hook and has yet to observe its turn end.
     pub working: bool,
 }
 

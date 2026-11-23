@@ -13,7 +13,7 @@ impl Shared {
             .session(id)
             .map_err(internal)?
             .filter(|_| !self.hosts.unpublished(id))
-            .ok_or_else(|| IpcError::bad_request("no registered session with that ID"))
+            .ok_or_else(|| IpcError::new(codes::NO_SESSION, "no registered session with that ID"))
     }
 
     pub(super) fn session_working(&self, session: &Session) -> bool {

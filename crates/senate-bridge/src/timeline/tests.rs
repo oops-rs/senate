@@ -43,7 +43,7 @@ fn claude_folds_tool_results_and_keeps_only_the_main_conversation() {
     );
     append(
         &mut file,
-        r#"{"type":"user","message":{"content":"[senate] Preamble\n\n[senate · testing · seq 7 · from [senator::app] · answer in thread 5 · for you as chair of testing]\n│ Hi\n│\n│ Again\n↳ footnote"}}"#,
+        r#"{"type":"user","message":{"content":"[senate] Preamble\n\n[senate · testing · seq 7 · from [senator::app] · answer in thread 5 · for you as chair of testing]\nrefs: internal pointer\n│ Hi\n│\n│ Again\n↳ footnote"}}"#,
     );
     append(
         &mut file,

@@ -24,6 +24,23 @@ pub(super) fn block_text(value: &Value, kind: &str) -> Option<String> {
 
 pub(super) fn user_text(text: &str) -> Vec<Event> {
     let text = text.trim();
+    if text.starts_with("[senate]") || text.starts_with("[senate · ") {
+        return senate_messages(text);
+    }
+    for prefix in [
+        "\n[senate] The messages below come from the Senate committee log",
+        "\n[senate] 下面的消息来自 Senate 委员会",
+    ] {
+        if let Some(index) = text.find(prefix) {
+            let mut events = plain_user_text(&text[..index]);
+            events.extend(senate_messages(&text[index + 1..]));
+            return events;
+        }
+    }
+    plain_user_text(text)
+}
+
+fn plain_user_text(text: &str) -> Vec<Event> {
     // Codex adds workspace context as a user role record. Claude can put
     // hook output in a reminder surrounding a genuine user prompt.
     let text = strip_reminders(text);
@@ -41,24 +58,12 @@ pub(super) fn user_text(text: &str) -> Vec<Event> {
             "<subagent_notification>",
             "<task-notification>",
             "<queued-command",
+            "[senate]",
         ]
         .iter()
         .any(|prefix| text.starts_with(prefix))
     {
         return Vec::new();
-    }
-    for prefix in [
-        "\n[senate] The messages below come from the Senate committee log",
-        "\n[senate] 下面的消息来自 Senate 委员会",
-    ] {
-        if let Some(index) = text.find(prefix) {
-            let mut events = user_text(&text[..index]);
-            events.extend(senate_messages(&text[index + 1..]));
-            return events;
-        }
-    }
-    if text.starts_with("[senate]") || text.starts_with("[senate · ") {
-        return senate_messages(text);
     }
     vec![Event::Item(Kind::UserMessage {
         text: text.to_owned(),
@@ -93,7 +98,11 @@ fn senate_messages(text: &str) -> Vec<Event> {
             body.clear();
         } else if let Some(line) = line.strip_prefix('│') {
             body.push(line.strip_prefix(' ').unwrap_or(line));
-        } else if header.is_some() && !line.is_empty() && !line.starts_with('↳') {
+        } else if header.is_some()
+            && !line.is_empty()
+            && !line.starts_with('↳')
+            && !line.starts_with("refs: ")
+        {
             // Some older deliveries omit the body gutter.
             body.push(line);
         }
@@ -144,6 +153,13 @@ fn senate_header(line: &str) -> Option<SenateHeader<'_>> {
         })
         .unwrap_or(seq);
     let kind = label.split([' ', '，', '(', '（']).next().unwrap_or(label);
+    let kind = if label.starts_with("human reply in thread ")
+        || label.starts_with("人的回复，thread ")
+    {
+        "chat"
+    } else {
+        kind
+    };
     Some(SenateHeader {
         committee,
         seq,
@@ -273,6 +289,7 @@ pub(super) fn cap(item: &mut TimelineItem) {
         }
         if len != value.len() {
             value.truncate(len);
+            value.shrink_to_fit();
             truncated = true;
         }
     };
