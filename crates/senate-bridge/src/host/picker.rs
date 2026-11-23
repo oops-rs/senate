@@ -184,7 +184,7 @@ impl<'a> List<'a> {
 }
 
 /// `text` cut to `width` columns.
-fn clip(text: &str, width: usize) -> String {
+pub(super) fn clip(text: &str, width: usize) -> String {
     let mut out = String::new();
     let mut used = 0;
     for ch in text.chars() {

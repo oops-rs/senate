@@ -16,7 +16,7 @@ use tokio::signal::unix::{SignalKind, signal};
 
 use super::emulation::{Colors, Scheme};
 use super::paste::Pastes;
-use super::{ATTACHED, ATTACHED_PLAIN, BUSY, COLORS, IO_CHUNK, KEYS, RESIZE};
+use super::{ATTACHED, ATTACHED_NATIVE, ATTACHED_PLAIN, BUSY, COLORS, IO_CHUNK, KEYS, RESIZE};
 use crate::paths::Paths;
 
 // Ctrl-] in the legacy and Kitty keyboard encodings. Kitty can also
@@ -24,6 +24,21 @@ use crate::paths::Paths;
 const DETACH: &[&[u8]] = &[b"\x1d", b"\x1b[93;5u", b"\x1b[93;5:1u"];
 pub(super) const RESET_DISPLAY: &[u8] =
     b"\x1b[0m\x1b[?2004l\x1b[?1004l\x1b[?2031l\x1b[?1000;1001;1002;1003;1005;1006;1015;1016l\x1b[?25h\x1b[?1049l";
+
+// Leave the shell at the bottom of the primary screen. Exit the TUI's
+// alternate screen first, then reset cursor, margins and input modes there.
+// End a synchronized update even when a dropped socket cut it in half.
+const RESET_NATIVE_DISPLAY: &[u8] = b"\x1b[?2026l\x1b[?1049;1047;47l\x1b[?6;1l\x1b[r\x1b>\x1b[?7h\x1b[0 q\x1b[0m\x1b[?2004;1004;2031;9;1000;1001;1002;1003;1005;1006;1015;1016l\x1b[?25h\x1b[9999;1H\r\n";
+
+fn attach_separator(label: &str, width: u16) -> String {
+    let time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %:z");
+    let suffix = format!(" · {time} ──");
+    let width = usize::from(width);
+    let label_width = width.saturating_sub(3 + textwrap::core::display_width(&suffix));
+    let label = super::picker::clip(label, label_width);
+    let separator = super::picker::clip(&format!("── {label}{suffix}"), width);
+    format!("\r\n\x1b[2m{separator}\x1b[0m\r\n")
+}
 
 pub(super) fn split_input(bytes: &[u8]) -> (usize, bool) {
     if let Some(detach) = DETACH
@@ -283,7 +298,7 @@ impl Drop for RawTerminal {
 }
 
 /// Attach until Ctrl-], the person closes the terminal, or the host exits.
-pub async fn attach(path: &Path, paths: &Paths) -> anyhow::Result<()> {
+pub async fn attach(path: &Path, paths: &Paths, label: &str) -> anyhow::Result<()> {
     ensure!(
         crate::testenv::confined(path),
         "terminal socket is outside the test directory"
@@ -295,10 +310,11 @@ pub async fn attach(path: &Path, paths: &Paths) -> anyhow::Result<()> {
     let mut stream = UnixStream::connect(path)
         .await
         .context("connect to the hosted terminal")?;
-    let takes_colors =
+    let (takes_colors, native) =
         match tokio::time::timeout(Duration::from_secs(3), stream.read_u8()).await?? {
-            ATTACHED => true,
-            ATTACHED_PLAIN => false,
+            ATTACHED_NATIVE => (true, true),
+            ATTACHED => (true, false),
+            ATTACHED_PLAIN => (false, false),
             BUSY => bail!("the senator already has an attached terminal"),
             _ => bail!("unrecognized terminal host reply"),
         };
@@ -307,18 +323,29 @@ pub async fn attach(path: &Path, paths: &Paths) -> anyhow::Result<()> {
     let mut hup = signal(SignalKind::hangup())?;
     let mut term = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
-    let terminal = RawTerminal::open(true).await?;
+    let terminal = RawTerminal::open(!native).await?;
+    if native {
+        let (_, cols) = terminal.window()?;
+        terminal
+            .draw(attach_separator(label, cols).as_bytes())
+            .await?;
+    }
     let (colors, typed) = terminal.colors().await;
     let (mut screen, mut keys) = stream.into_split();
 
     let to_host = async {
+        if native {
+            terminal.size(&mut keys).await?;
+        }
         if takes_colors {
             let colors = serde_json::to_vec(&colors)?;
             keys.write_u8(COLORS).await?;
             keys.write_u16(u16::try_from(colors.len())?).await?;
             keys.write_all(&colors).await?;
         }
-        terminal.size(&mut keys).await?;
+        if !native {
+            terminal.size(&mut keys).await?;
+        }
         let mut input = [0u8; IO_CHUNK];
         let mut pastes = Pastes::default();
         let (bytes, detaching) = pastes.feed(&typed, drops.as_deref()).await;
@@ -367,7 +394,12 @@ pub async fn attach(path: &Path, paths: &Paths) -> anyhow::Result<()> {
     };
     // draw handles partial writes and waits for writable readiness. Bound
     // cleanup in case the attached terminal has disappeared.
-    let _ = tokio::time::timeout(Duration::from_millis(250), terminal.draw(RESET_DISPLAY)).await;
+    let reset = if native {
+        RESET_NATIVE_DISPLAY
+    } else {
+        RESET_DISPLAY
+    };
+    let _ = tokio::time::timeout(Duration::from_millis(250), terminal.draw(reset)).await;
     result
 }
 

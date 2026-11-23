@@ -942,7 +942,7 @@ pub async fn watch_all(
                 return Ok(());
             }
             Left::Attach(session) => {
-                if let Err(error) = super::attach(&session.tty, paths).await {
+                if let Err(error) = super::attach(&session.tty, paths, &session.title).await {
                     eprintln!("{error:#}");
                     tokio::time::sleep(Duration::from_secs(2)).await;
                 } else {
