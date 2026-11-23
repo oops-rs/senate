@@ -43,10 +43,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use textwrap::core::display_width;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
+use unicode_width::UnicodeWidthStr as _;
 
 use super::terminal::{RESET_DISPLAY, RawTerminal, split_input};
 use super::watch::{Mirror, Watch};
@@ -272,13 +272,25 @@ fn rect(slot: u16, across: u16, down: u16, rows: u16, cols: u16) -> Rect {
 
 // ----- painting --------------------------------------------------------------
 
-/// `text` cut or padded to exactly `width` columns.
+/// Budget for terminals that render ambiguous characters as wide, and for
+/// prompt glyphs some terminals render with a double-width symbol font.
+fn paint_width(text: &str) -> usize {
+    match text {
+        "›" | "⏺" => 2,
+        _ => text.width().max(text.width_cjk()),
+    }
+}
+
+/// `text` cut or padded to at most `width` columns on either terminal.
 fn fit(text: &str, width: usize) -> String {
     let mut out = String::new();
     let mut used = 0;
     for ch in text.chars() {
-        let w = display_width(ch.encode_utf8(&mut [0; 4]));
-        if used + w > width {
+        if ch.is_control() {
+            continue;
+        }
+        let w = paint_width(ch.encode_utf8(&mut [0; 4]));
+        if used + w > width || (w == 0 && used == 0) {
             break;
         }
         out.push(ch);
@@ -290,6 +302,13 @@ fn fit(text: &str, width: usize) -> String {
 
 fn at(out: &mut String, row: u16, col: u16) {
     let _ = write!(out, "\x1b[{};{}H", row + 1, col + 1);
+}
+
+/// Erase cells without advancing the cursor or wrapping at the right edge.
+fn erase(out: &mut String, cols: u16) {
+    if cols != 0 {
+        let _ = write!(out, "\x1b[{cols}X");
+    }
 }
 
 fn color(out: &mut String, color: vt100::Color, foreground: bool) {
@@ -337,18 +356,24 @@ fn paint_screen(
     for line in 0..area.rows {
         at(out, area.row + line, area.col);
         out.push_str(reset);
+        erase(out, area.cols);
         let mut current = None;
         let mut col = 0;
-        while col < area.cols {
+        let mut remaining = usize::from(area.cols);
+        while col < area.cols && remaining != 0 {
             let cell = screen.cell(top + line, col);
             let wide = cell.is_some_and(vt100::Cell::is_wide);
+            let step = if wide { 2 } else { 1 };
+            let width = cell.filter(|cell| cell.has_contents()).map_or(1, |cell| {
+                paint_width(cell.contents()).max(usize::from(step))
+            });
             match cell {
                 // A wide character cut by the tile's edge, or the half of
                 // one that starts left of it: a blank.
                 Some(cell)
                     if cell.has_contents()
                         && !cell.is_wide_continuation()
-                        && !(wide && col + 1 >= area.cols) =>
+                        && width <= remaining =>
                 {
                     let attrs = (
                         cell.fgcolor(),
@@ -378,7 +403,8 @@ fn paint_screen(
                         current = Some(attrs);
                     }
                     out.push_str(cell.contents());
-                    col += if wide { 2 } else { 1 };
+                    col += step;
+                    remaining -= width;
                 }
                 Some(cell) if !cell.has_contents() && !cell.is_wide_continuation() => {
                     // An empty cell still has a background.
@@ -405,6 +431,7 @@ fn paint_screen(
                     }
                     out.push(' ');
                     col += 1;
+                    remaining -= 1;
                 }
                 _ => {
                     if current.is_some() {
@@ -413,6 +440,7 @@ fn paint_screen(
                     }
                     out.push(' ');
                     col += 1;
+                    remaining -= 1;
                 }
             }
         }
@@ -432,7 +460,10 @@ fn paint_note(out: &mut String, area: Rect, note: &str) {
     for line in 0..area.rows {
         at(out, area.row + line, area.col);
         let text = lines.get(usize::from(line)).map_or("", String::as_str);
-        let _ = write!(out, "\x1b[0;2m{}\x1b[0m", fit(text, usize::from(area.cols)));
+        out.push_str("\x1b[0;2m");
+        erase(out, area.cols);
+        out.push_str(&fit(text, usize::from(area.cols)));
+        out.push_str("\x1b[0m");
     }
 }
 
@@ -449,7 +480,10 @@ fn paint_tile(out: &mut String, tile: &Tile, area: Rect, focused: bool) -> Optio
     };
     let mark = if focused { "▶ " } else { "  " };
     let title = format!("{mark}{}", tile.session.title);
-    let _ = write!(out, "{style}{}\x1b[0m", fit(&title, usize::from(area.cols)));
+    out.push_str(style);
+    erase(out, area.cols);
+    out.push_str(&fit(&title, usize::from(area.cols)));
+    out.push_str("\x1b[0m");
     let body = Rect {
         row: area.row + 1,
         rows: area.rows.saturating_sub(1),
@@ -457,6 +491,12 @@ fn paint_tile(out: &mut String, tile: &Tile, area: Rect, focused: bool) -> Optio
         cols: area.cols.saturating_sub(1).max(1),
         ..area
     };
+    if body.cols < area.cols {
+        for line in 0..body.rows {
+            at(out, body.row + line, area.col + body.cols);
+            erase(out, 1);
+        }
+    }
     tile.fit_to(body.rows, body.cols);
     match (&state.mirror, &state.note) {
         (Some(mirror), None) => {
@@ -641,7 +681,10 @@ impl Viewer {
             }
         };
         at(&mut out, status_row, 0);
-        let _ = write!(out, "\x1b[0;7m{}\x1b[0m", fit(&status, usize::from(cols)));
+        out.push_str("\x1b[0;7m");
+        erase(&mut out, cols);
+        out.push_str(&fit(&status, usize::from(cols)));
+        out.push_str("\x1b[0m");
         if let Some((row, col)) = cursor {
             at(&mut out, row, col);
             out.push_str("\x1b[?25h");
@@ -1170,6 +1213,43 @@ mod tests {
         assert_eq!(terminal.screen().rows(0, 10).next().unwrap(), "ab ");
     }
 
+    #[tokio::test]
+    async fn symbol_heavy_tiles_clip_and_repaint_their_gutters() {
+        let left = tile("left", "", false);
+        let source = "ab你\r\nabc›\r\nabc•\r\nabc⏺\r\nabc─";
+        shown(&left.shown)
+            .mirror
+            .as_mut()
+            .unwrap()
+            .apply(&super::super::watch::Frame::Output(
+                source.as_bytes().to_vec(),
+            ));
+        let mut out = String::new();
+        paint_tile(
+            &mut out,
+            &left,
+            Rect {
+                row: 0,
+                col: 2,
+                rows: 6,
+                cols: 5,
+            },
+            false,
+        );
+        let before = "NNNNNNNNN\r\n".repeat(6);
+        let terminal = shows(7, 9, &(before + &out));
+        let lines: Vec<_> = terminal.screen().rows(0, 9).collect();
+        assert_eq!(lines[1], "NNab你 NN");
+        for line in &lines[2..6] {
+            assert_eq!(line, "NNabc  NN");
+        }
+        assert!(lines[0].starts_with("NN") && lines[0].ends_with("NN"));
+        assert_eq!(paint_width("你"), 2);
+        for symbol in ["›", "•", "⏺", "─"] {
+            assert_eq!(paint_width(symbol), 2);
+        }
+    }
+
     #[test]
     fn keys_move_open_and_leave_and_everything_else_is_dropped() {
         let read = |bytes: &[u8]| {
@@ -1209,7 +1289,7 @@ mod tests {
 
     #[test]
     fn a_header_is_cut_to_its_tile_by_what_it_takes_on_screen() {
-        assert_eq!(fit("demo · senate", 8), "demo · s");
+        assert_eq!(fit("demo · senate", 8), "demo · ");
         assert_eq!(fit("审阅 · x", 5), "审阅 ");
         assert_eq!(fit("审阅", 3), "审 ", "half a wide character is a blank");
         assert_eq!(fit("ab", 4), "ab  ");

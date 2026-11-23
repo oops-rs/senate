@@ -35,6 +35,7 @@ clap = { workspace = true }
 strsim = { workspace = true }
 terminal_size = { workspace = true }
 textwrap = { workspace = true }
+unicode-width = "0.2"
 serde = { workspace = true }
 # No `preserve_order`: it would change map order for every crate built with
 # this one. `install` keeps settings.json's key order itself.
