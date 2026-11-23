@@ -697,6 +697,11 @@ impl AppCore {
         Ok(self.senate_command(&["attach", &senator.to_string()]))
     }
 
+    /// Open exactly this hosted session, even when its alias has changed.
+    pub fn attach_terminal_for_session(&self, session_id: String) -> TerminalCommand {
+        self.senate_command(&["attach", &format!("--session={session_id}")])
+    }
+
     /// What to run to watch every hosted terminal side by side (`senate
     /// session watch`).
     pub fn watch_terminal(&self) -> TerminalCommand {

@@ -2736,13 +2736,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Open its terminal in Terminal (senate attach); Ctrl-] detaches"
+            "value": "Open its terminal, restoring or resuming it if needed. Ctrl-] detaches."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "在终端中打开它（senate attach）；Ctrl-] 脱离"
+            "value": "打开终端，必要时重新打开或恢复暂停的会话。Ctrl-] 脱离。"
           }
         }
       }

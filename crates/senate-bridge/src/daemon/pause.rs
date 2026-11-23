@@ -241,6 +241,7 @@ impl Shared {
             }
         };
         Ok(ResumeReply {
+            session_id: Some(reply.session_id),
             senator: primary,
             committee: reply.committee,
             checkpoint,

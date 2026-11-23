@@ -77,9 +77,13 @@ async fn attach(h: &Harness, alias: &str, keys: &[u8]) {
 /// [`attach`], asking the fixture to paint first only if `paint`: a line
 /// left in its prompt would swallow the request.
 async fn attach_typing(h: &Harness, alias: &str, paint: bool, keys: &[u8]) {
+    pty_attach_command(h, &["attach", alias], paint, keys).await;
+}
+
+async fn pty_attach_command(h: &Harness, args: &[&str], paint: bool, keys: &[u8]) {
     let mut cmd = tokio::process::Command::new(BIN);
     testenv::isolate_async(&mut cmd, h.dir.path());
-    cmd.args(["attach", alias])
+    cmd.args(args)
         .env("SENATE_HOME", h.paths.home())
         .kill_on_drop(true);
     let (pty, pts) = pty_process::open().unwrap();
@@ -87,6 +91,10 @@ async fn attach_typing(h: &Harness, alias: &str, paint: bool, keys: &[u8]) {
     let mut child = pty_process::Command::from(cmd).spawn(pts).unwrap();
     let (mut output, mut input) = pty.into_split();
     tokio::time::timeout(TIMEOUT, async {
+        if args == ["attach"] {
+            wait_terminal_output(&mut output, b"paused").await;
+            input.write_all(b"\r").await.unwrap();
+        }
         // The attach CLI sets raw mode and
         // asks this terminal for its colours, the device attributes last.
         // Answer as a light Ghostty does, then type straight on and
@@ -2484,6 +2492,166 @@ async fn wait_for_screen(
     })
     .await
     .unwrap_or_else(|_| panic!("timed out waiting for screen: {screen}"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn spawn_attach_and_automatic_restore_use_the_hosted_session() {
+    let (h, _root, _typed) = fixture_daemon(1).await;
+    let alias = "new-viewer";
+    let project = h.workdir("spawn-attach", Some("refund-v2"));
+    let dir = project.to_str().unwrap();
+    let prompt = project.join("prompt.txt");
+    std::fs::write(&prompt, "Investigate the isolated fixture").unwrap();
+
+    let mut cmd = tokio::process::Command::new(BIN);
+    testenv::isolate_async(&mut cmd, h.dir.path());
+    let rejected = cmd
+        .env("SENATE_HOME", h.paths.home())
+        .args([
+            "spawn",
+            "claude",
+            "--committee",
+            "refund-v2",
+            "--alias",
+            "without-tty",
+            "--attach",
+        ])
+        .output()
+        .await
+        .unwrap();
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("needs a terminal"));
+    assert!(
+        !h.store()
+            .all_sessions()
+            .unwrap()
+            .iter()
+            .any(|s| s.cwd == project)
+    );
+
+    pty_attach_command(
+        &h,
+        &[
+            "spawn",
+            "claude",
+            "--committee",
+            "refund-v2",
+            "--alias",
+            "new-viewer",
+            "--dir",
+            dir,
+            "--prompt-file",
+            prompt.to_str().unwrap(),
+            "-a",
+        ],
+        true,
+        b"\x1d",
+    )
+    .await;
+    let listing: senate_bridge::ipc::SessionsReply = call(&h, &Request::Sessions).await;
+    let spawned = listing
+        .rows
+        .iter()
+        .find(|row| row.alias.as_ref() == Some(&path("new-viewer")))
+        .unwrap();
+    assert!(spawned.is_running() && spawned.dir == project.canonicalize().unwrap());
+    assert!(
+        h.server
+            .events("refund-v2")
+            .iter()
+            .any(|event| event.body == "Investigate the isolated fixture")
+    );
+
+    let senator: senate_core::alias::AliasName = alias.parse().unwrap();
+    let _: senate_bridge::ipc::StopReply = call(
+        &h,
+        &Request::Stop {
+            session: Default::default(),
+            senator: senator.clone(),
+            force: true,
+        },
+    )
+    .await;
+    let stopped: senate_bridge::ipc::AttachInfo = call(
+        &h,
+        &Request::AttachInfo {
+            target: senate_bridge::ipc::AttachTarget::Senator {
+                senator: senator.clone(),
+            },
+        },
+    )
+    .await;
+    assert!(stopped.tty.is_none() && !stopped.paused);
+    let mut cmd = tokio::process::Command::new(BIN);
+    testenv::isolate_async(&mut cmd, h.dir.path());
+    let watching = cmd
+        .env("SENATE_HOME", h.paths.home())
+        .args(["attach", "--read-only", alias])
+        .output()
+        .await
+        .unwrap();
+    assert!(!watching.status.success());
+    assert!(String::from_utf8_lossy(&watching.stderr).contains("not running"));
+    let still_stopped: senate_bridge::ipc::AttachInfo = call(
+        &h,
+        &Request::AttachInfo {
+            target: senate_bridge::ipc::AttachTarget::Senator {
+                senator: senator.clone(),
+            },
+        },
+    )
+    .await;
+    assert_eq!(still_stopped, stopped);
+
+    attach(&h, alias, b"\x1d").await;
+    let restored: senate_bridge::ipc::AttachInfo = call(
+        &h,
+        &Request::AttachInfo {
+            target: senate_bridge::ipc::AttachTarget::Senator {
+                senator: senator.clone(),
+            },
+        },
+    )
+    .await;
+    assert_eq!(restored.session_id, stopped.session_id);
+    assert!(restored.tty.is_some());
+
+    let _: ipc::PauseReply = call(
+        &h,
+        &Request::Pause {
+            senator: senator.clone(),
+            force: true,
+            timeout_secs: Some(1),
+        },
+    )
+    .await;
+    let paused: ipc::AttachInfo = call(
+        &h,
+        &Request::AttachInfo {
+            target: ipc::AttachTarget::Senator {
+                senator: senator.clone(),
+            },
+        },
+    )
+    .await;
+    assert!(paused.paused && paused.tty.is_none());
+    // With no name, the picker lists and opens the paused terminal.
+    pty_attach_command(&h, &["attach"], true, b"\x1d").await;
+    let resumed: ipc::AttachInfo = call(
+        &h,
+        &Request::AttachInfo {
+            target: ipc::AttachTarget::Senator { senator },
+        },
+    )
+    .await;
+    assert_eq!(resumed.session_id, paused.session_id);
+    assert!(!resumed.paused && resumed.tty.is_some());
+    assert!(
+        h.server
+            .events("refund-v2")
+            .iter()
+            .any(|event| event.body.contains("resumed after a pause"))
+    );
 }
 
 /// A real attach CLI and a hosted PTY, with no graphical terminal required.

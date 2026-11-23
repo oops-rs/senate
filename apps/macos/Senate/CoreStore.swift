@@ -558,7 +558,7 @@ final class CoreStore {
 
     /// Open a hosted session's terminal in Terminal (`senate attach`).
     func attach(_ session: HostedSession) {
-        runInTerminal { try $0.attachTerminal(label: session.label) }
+        runInTerminal { $0.attachTerminalForSession(sessionId: session.sessionId) }
     }
 
     /// Every hosted terminal side by side, in Terminal.

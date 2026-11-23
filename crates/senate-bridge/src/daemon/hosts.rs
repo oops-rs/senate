@@ -680,37 +680,97 @@ impl Shared {
     }
 
     pub(super) async fn on_attach(&self, senator: AliasName) -> Result<PathBuf, IpcError> {
+        let hint = || {
+            IpcError::new(
+                codes::NO_SESSION,
+                format!(
+                    "no running terminal host for {senator}; use senate session restore to resume it"
+                ),
+            )
+        };
         let session = self.find_local_senator(&senator, None).await?;
-        let paths = Paths::new(self.home.canonicalize().map_err(IpcError::internal)?);
-        if let Some(id) = self
+        let info = self.attach_info_for(session).await?.ok_or_else(hint)?;
+        info.tty.ok_or_else(hint)
+    }
+
+    pub(super) async fn on_attach_info(
+        &self,
+        target: crate::ipc::AttachTarget,
+    ) -> Result<crate::ipc::AttachInfo, IpcError> {
+        let session = match target {
+            crate::ipc::AttachTarget::Senator { senator } => {
+                self.find_local_senator(&senator, None).await?
+            }
+            crate::ipc::AttachTarget::Session { session_id } => self
+                .store
+                .session(&session_id)
+                .map_err(internal)?
+                .ok_or_else(|| {
+                    IpcError::new(codes::NO_SESSION, "no local session record for that ID")
+                })?,
+        };
+        if self.hosts.unpublished(&session.session_id)
+            || self
+                .store
+                .hosted_native_retired(&session.session_id)
+                .map_err(internal)?
+                == Some(true)
+        {
+            return Err(IpcError::new(
+                codes::NO_SESSION,
+                "this session is no longer the published hosted session",
+            ));
+        }
+        self.attach_info_for(session).await?.ok_or_else(|| {
+            IpcError::new(
+                codes::NO_SESSION,
+                "this session has no Senate-owned terminal",
+            )
+        })
+    }
+
+    async fn attach_info_for(
+        &self,
+        session: Session,
+    ) -> Result<Option<crate::ipc::AttachInfo>, IpcError> {
+        let Some(id) = self
             .store
             .session_host(&session.session_id)
             .map_err(internal)?
-            && host::running(&paths, &id).map_err(IpcError::internal)?
-        {
-            if host::awaiting_publication(&paths, &id) {
-                // The acknowledgement is already in the pipe after a
-                // successful launch. Allow the host to consume it.
-                for _ in 0..20 {
-                    if !host::awaiting_publication(&paths, &id) {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
+        else {
+            return Ok(None);
+        };
+        let paths = Paths::new(self.home.canonicalize().map_err(IpcError::internal)?);
+        let tty = if host::running(&paths, &id).map_err(IpcError::internal)? {
+            // A successful launch has sent the acknowledgement, but the
+            // terminal process may still be consuming its pipe.
+            for _ in 0..20 {
+                if !host::awaiting_publication(&paths, &id) {
+                    break;
                 }
-                if host::awaiting_publication(&paths, &id) {
-                    return Err(IpcError::bad_request(
-                        "this terminal host is still waiting for publication",
-                    ));
-                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            return Ok(host::socket(&paths, &id));
-        }
-        Err(IpcError::new(
-            codes::NO_SESSION,
-            format!(
-                "no running terminal host for {senator}; use senate session restore to resume it"
-            ),
-        ))
+            if host::awaiting_publication(&paths, &id) {
+                return Err(IpcError::bad_request(
+                    "this terminal host is still waiting for publication",
+                ));
+            }
+            Some(host::socket(&paths, &id))
+        } else {
+            None
+        };
+        let paused = tty.is_none()
+            && self
+                .store
+                .paused(&session.agent)
+                .map_err(internal)?
+                .is_some();
+        Ok(Some(crate::ipc::AttachInfo {
+            session_id: session.session_id,
+            primary: session.agent,
+            tty,
+            paused,
+        }))
     }
 
     #[allow(clippy::too_many_arguments)]

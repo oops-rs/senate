@@ -37,7 +37,12 @@ pub struct Choice {
 impl Choice {
     /// A session as `senate session list` lists it.
     pub fn of_row(row: &SessionRow) -> Self {
-        let mut detail = format!("{} · {}", row.runtime.as_str(), row.state.as_str());
+        let state = if row.paused {
+            "paused"
+        } else {
+            row.state.as_str()
+        };
+        let mut detail = format!("{} · {state}", row.runtime.as_str());
         if row.attached {
             detail.push_str(" · attached");
         }
