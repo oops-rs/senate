@@ -73,6 +73,11 @@ func terminal(_ ctx: CGContext) {
     ctx.addPath(square)
     ctx.setLineWidth(1.3)
     ctx.strokePath()
+    prompt(ctx)
+}
+
+/// The prompt alone.
+func prompt(_ ctx: CGContext) {
     ctx.setLineWidth(1.4)
     ctx.setLineCap(.round)
     ctx.setLineJoin(.round)
@@ -107,6 +112,12 @@ func write(_ name: String, _ draw: (CGContext) -> Void) throws {
 }
 
 try write("RuntimeClaude") { outlined($0, "C", square) }
+// The inside alone, for a working session: the app draws the frame itself
+// (the same geometry, in RuntimeFrame.swift) and moves along it.
+try write("RuntimeClaudeLetter") { ctx in ctx.addPath(letterPath("C")); ctx.fillPath() }
+try write("RuntimeCodexLetter") { ctx in ctx.addPath(letterPath("X")); ctx.fillPath() }
+try write("RuntimeAgyLetter") { ctx in ctx.addPath(letterPath("A")); ctx.fillPath() }
+try write("RuntimeTerminalLetter") { prompt($0) }
 try write("RuntimeCodex") { outlined($0, "X", circle) }
 try write("RuntimeAgy") { knockedOut($0, "A", solid) }
 try write("RuntimeTerminal") { terminal($0) }
