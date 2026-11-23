@@ -94,6 +94,24 @@ final class SmokeTests: XCTestCase {
         window.typeKey(.escape, modifierFlags: [])
     }
 
+    /// In the Dock (the default), Senate has a main menu: the View menu's
+    /// sections, and Edit's standard items. Its structure is checked rather
+    /// than clicked: the menu bar is shown only while Senate is frontmost,
+    /// which a test runner hosted elsewhere cannot always make it.
+    func testTheMainMenu() throws {
+        XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 10))
+        let view = app.menuBars.menuBarItems["View"].firstMatch
+        XCTAssertTrue(view.waitForExistence(timeout: 5), "a View menu")
+        for section in ["Inbox", "Approvals"] {
+            XCTAssertTrue(view.menuItems[section].firstMatch.exists, "View › \(section)")
+        }
+        XCTAssertTrue(view.menuItems["Refresh"].firstMatch.exists, "View › Refresh")
+        let edit = app.menuBars.menuBarItems["Edit"].firstMatch
+        XCTAssertTrue(edit.exists, "an Edit menu")
+        XCTAssertTrue(edit.menuItems["Copy"].firstMatch.exists, "Edit › Copy")
+        XCTAssertTrue(edit.menuItems["Select All"].firstMatch.exists, "Edit › Select All")
+    }
+
     func testAccessibilityAudit() throws {
         let window = app.windows.firstMatch
         XCTAssertTrue(window.waitForExistence(timeout: 10))

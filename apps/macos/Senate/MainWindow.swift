@@ -90,19 +90,22 @@ private struct Shortcuts: View {
 
     var body: some View {
         ZStack {
-            // ⌘1 Inbox, ⌘2 Approvals, ⌘3 your profile.
-            ForEach(Array(CoreStore.Section.allCases.enumerated()), id: \.element) { index, section in
-                Button(section.title) { store.place = .section(section) }
-                    .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: .command)
+            // ⌘1 Inbox, ⌘2 Approvals, ⌘3 your profile, ⌘R: the View menu's
+            // while Senate is in the Dock; these buttons' in the menu bar only.
+            if !store.showInDock {
+                ForEach(Array(CoreStore.Section.allCases.enumerated()), id: \.element) { index, section in
+                    Button(section.title) { store.place = .section(section) }
+                        .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: .command)
+                }
+                Button(L("toolbar.refresh")) {
+                    if store.state.online { store.refresh() } else { store.reconnect() }
+                }
+                .keyboardShortcut("r")
             }
             Button(L("sidebar.previous_session")) { store.moveSession(-1) }
                 .keyboardShortcut(.upArrow, modifiers: [.command, .option])
             Button(L("sidebar.next_session")) { store.moveSession(1) }
                 .keyboardShortcut(.downArrow, modifiers: [.command, .option])
-            Button(L("toolbar.refresh")) {
-                if store.state.online { store.refresh() } else { store.reconnect() }
-            }
-            .keyboardShortcut("r")
         }
         .opacity(0)
         .frame(width: 0, height: 0)
@@ -161,9 +164,11 @@ private struct Sidebar: View {
                     Label(L("sidebar.search"), systemImage: "magnifyingglass")
                 }
                 .help(L("sidebar.search"))
-                .keyboardShortcut("f")
+                // The View menu's Find while in the Dock.
+                .keyboardShortcut(store.showInDock ? nil : KeyboardShortcut("f"))
             }
         }
+        .onChange(of: store.searchRequests) { openSearch() }
     }
 
     private var list: some View {

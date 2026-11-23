@@ -3,7 +3,7 @@ import ServiceManagement
 import SwiftUI
 import SenateCore
 
-/// Settings (⌘,, or the sidebar's account row), one pane: launch at login,
+/// Settings (⌘,, or the sidebar's account row), one pane: the Dock, launch at login,
 /// notifications, the Senate home and the logs.
 struct SettingsView: View {
     let store: CoreStore
@@ -18,6 +18,10 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Section {
+                Toggle(isOn: Bindable(store).showInDock) {
+                    Text(verbatim: L("settings.show_in_dock"))
+                    Text(verbatim: L("settings.show_in_dock_help"))
+                }
                 Toggle(L("settings.login"), isOn: Binding(
                     get: { login.enabled },
                     set: { login.set($0) }

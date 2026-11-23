@@ -76,7 +76,9 @@ targets:
           - zh-Hans
         LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
         LSApplicationCategoryType: public.app-category.developer-tools
-        # Menu bar only: no Dock icon, no app menu.
+        # Starts as a menu-bar app: the setting "Show in Dock" (on by default)
+        # makes it a regular app before it finishes launching (Dock.swift),
+        # so with it off no Dock icon ever flashes.
         LSUIElement: true
         NSAppleEventsUsageDescription: Senate opens Codex and hosted sessions in Terminal.
         NSHumanReadableCopyright: MIT

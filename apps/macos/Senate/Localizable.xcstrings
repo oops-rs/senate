@@ -2951,6 +2951,40 @@
         }
       }
     },
+    "settings.show_in_dock": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Show in Dock"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在程序坞中显示"
+          }
+        }
+      }
+    },
+    "settings.show_in_dock_help": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "With a Dock icon, the app switcher and a menu bar of its own; off, Senate lives in the menu bar only."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "有程序坞图标、出现在应用切换器中并有自己的菜单栏；关闭后 Senate 只在菜单栏中。"
+          }
+        }
+      }
+    },
     "setup.retry": {
       "extractionState": "manual",
       "localizations": {

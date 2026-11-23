@@ -74,6 +74,19 @@ final class CoreStore {
         didSet { defaults.set(showInactive, forKey: Self.showInactiveKey) }
     }
     private static let showInactiveKey = "showInactive"
+    /// Show Senate in the Dock (a regular app with a main menu), or keep it
+    /// in the menu bar only. On unless turned off; applies at once.
+    var showInDock = true {
+        didSet {
+            defaults.set(showInDock, forKey: Dock.key)
+            if applyDock { Dock.apply(showInDock: showInDock) }
+        }
+    }
+    /// Whether changing `showInDock` changes the running app (not for the
+    /// tests' stores).
+    @ObservationIgnored private var applyDock = false
+    /// Asks the sidebar to open its search (the View menu's Find).
+    var searchRequests = 0
     /// Reply drafts by thread key. They outlive the app.
     var drafts: [String: String] = [:] {
         didSet { defaults.set(drafts, forKey: Self.draftsKey) }
@@ -99,6 +112,8 @@ final class CoreStore {
         self.defaults = defaults
         drafts = defaults.dictionary(forKey: Self.draftsKey) as? [String: String] ?? [:]
         showInactive = defaults.bool(forKey: Self.showInactiveKey)
+        showInDock = Dock.showsInDock(defaults)
+        applyDock = notifications
         folded = Set(defaults.stringArray(forKey: Self.foldedKey) ?? [])
         if notifications {
             notifier.handle = { [weak self] action in await self?.perform(action) }
@@ -326,6 +341,7 @@ final class CoreStore {
             actionError = nil
         }
         state = next
+        if applyDock { Dock.badge(state.online ? waitingCount : 0) }
         if let filter = agentFilter, !state.agents.contains(where: { $0.path == filter }) {
             agentFilter = nil
         }

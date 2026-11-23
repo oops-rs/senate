@@ -77,8 +77,20 @@ on are not counted. The menu is one line saying how much waits, then the first
 eight items, what holds an agent at a permission first: each a title and a
 line of where, who and how long, and each opens in the window (*Show All*
 beyond eight). Then *Open Senate* ⌘O and *Quit Senate* ⌘Q. Offline, the
-menu is one line. Everything else lives in the window. Menu bar only
-(`LSUIElement`).
+menu is one line. Everything else lives in the window.
+
+**Dock.** Senate is in the Dock unless *Show in Dock* is turned off in
+Settings (on by default, for people upgrading too). In the Dock it is a
+regular app: the icon (light or dark with the system) with the number
+waiting on you as its badge, the app switcher, and a main menu (About,
+Settings…, Quit; File › Close; Edit; View with Inbox ⌘1, Approvals ⌘2,
+your profile ⌘3, Refresh ⌘R and Find ⌘F; Window; Help). Clicking the Dock
+icon shows the window; closing the window leaves Senate running in the
+menu bar; ⌘Q quits. Off, it is menu-bar only, and the same shortcuts work
+in the window. The bundle declares `LSUIElement` and the app sets its
+activation policy from the setting before it finishes launching, so with
+the setting off no Dock icon ever appears; turning it on or off applies at
+once. The status item stays either way.
 
 ![The menu](docs/screenshots/menu.png)
 
@@ -205,7 +217,8 @@ Grouped by thread; clicking opens what it is about (a prompt's, its
 session's page); each kind can be
 turned off in Settings.
 
-**Settings** (⌘,, or the sidebar's foot), one pane: open at login (the
+**Settings** (⌘,, or the menu beside your account row), one pane: show in
+the Dock, open at login (the
 app's own login item), notifications per kind, the Senate home, and the log
 streamed in Terminal.
 

@@ -142,6 +142,22 @@ import SenateCore
         #expect(core.calls == ["start"])
     }
 
+    @Test func senateIsInTheDockUnlessTurnedOff() async throws {
+        // Nothing stored (a new install, or one upgrading): in the Dock.
+        #expect(Dock.showsInDock(defaults))
+        #expect(Dock.policy(showInDock: true) == .regular)
+        #expect(Dock.policy(showInDock: false) == .accessory)
+        let store = store()
+        #expect(store.showInDock)
+        // Turned off, it is remembered, as a launch argument would say it.
+        store.showInDock = false
+        #expect(!Dock.showsInDock(defaults))
+        defaults.set("NO", forKey: Dock.key)
+        #expect(!Dock.showsInDock(defaults))
+        defaults.set("YES", forKey: Dock.key)
+        #expect(Dock.showsInDock(defaults))
+    }
+
     @Test func theSidebarHeadsWithInboxAndApprovals() async throws {
         let store = store()
         #expect(store.sections == [.inbox, .approvals])
