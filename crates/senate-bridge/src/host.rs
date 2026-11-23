@@ -88,8 +88,11 @@ impl Tty {
     /// Set the PTY's size, the viewer's doing or a watcher's fit; watchers
     /// are told.
     async fn resize(&self, rows: u16, cols: u16) -> anyhow::Result<()> {
-        self.write.lock().await.resize(Size::new(rows, cols))?;
-        self.screen.resize(rows, cols);
+        let write = self.write.lock().await;
+        if self.screen.size() != (rows, cols) {
+            write.resize(Size::new(rows, cols))?;
+            self.screen.resize(rows, cols);
+        }
         Ok(())
     }
 
@@ -1218,9 +1221,7 @@ async fn relay(mut stream: UnixStream, tty: &Tty, viewer: &Mutex<Viewer>) -> any
         attachment_size(&mut stream).await
     })
     .await??;
-    if tty.screen.size() != (rows, cols) {
-        tty.resize(rows, cols).await?;
-    }
+    tty.resize(rows, cols).await?;
     // Subscribe alongside the snapshot and the modes. The output pump holds
     // the same emulation lock while it updates both.
     let (mirror, mut output, modes) = {
@@ -1237,11 +1238,6 @@ async fn relay(mut stream: UnixStream, tty: &Tty, viewer: &Mutex<Viewer>) -> any
     let mut classify = input::Input::default();
     let cursor = std::sync::Mutex::new(input::CursorQueries::default());
     let from_terminal = async {
-        // Wake TUIs that repaint on SIGWINCH even if the viewer is the
-        // same size. Later resizes need only the requested size.
-        tty.resize(rows.saturating_add(1), cols).await?;
-        tokio::time::sleep(Duration::from_millis(75)).await;
-        tty.resize(rows, cols).await?;
         let mut keys = [0; IO_CHUNK];
         let mut writes = tokio::time::interval(Duration::from_millis(100));
         writes.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1470,6 +1466,7 @@ mod tests {
         let (_read, write) = pty.into_split();
         let tty = Tty::new(write, Scheme::Light, 3, 40);
         tty.output(b"historic-0\r\nhistoric-1\r\nhistoric-2\r\nlive-0\r\nlive-1\r\nlive-2");
+        let (_, mut changes) = tty.screen.join();
         let dir = tempfile::tempdir().unwrap();
         let activity = Mutex::new(Viewer {
             path: dir.path().join("viewer.json"),
@@ -1497,6 +1494,16 @@ mod tests {
             })
             .await
             .unwrap();
+            let first_resize = loop {
+                if let watch::Change::Size(rows, cols) = changes.try_recv().unwrap() {
+                    break (rows, cols);
+                }
+            };
+            assert_eq!(
+                first_resize,
+                (4, 50),
+                "the attach must not resize to a temporary geometry"
+            );
             tty.output(b"post-resize");
             assert_eq!(
                 viewer_output(&mut viewer, b"post-resize").await,
