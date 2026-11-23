@@ -64,6 +64,10 @@ SENATE_HOME=/tmp/sh SENATE_APP_SHOW=1 build/Build/Products/Debug/Senate.app/Cont
 | `SENATE_APP_PERF=1` | print state-apply and thread-read times and main-thread stalls, tour a thread, Inbox, Approvals and a session, quit (`SENATE_APP_PERF_THREAD=<root>` opens that thread) |
 | `FAKE_THREADS=N` | the fake daemon: N more threads and a 5,000-event thread 990 |
 | `FAKE_TIMELINE_EVERY=<s>` | the fake daemon: how often a watched timeline grows (default 6; 0 never) |
+| `FAKE_STREAM=1` | the fake daemon: a session, `stream`, whose reply arrives a few characters every 20-40 ms while watched |
+| `FAKE_WORKING=N` | the fake daemon: N more sessions, all working, cycling the four runtimes |
+| `SENATE_APP_MD_DEBUG=1` | the conversation page starts with its debug overlay (⌥D): blocks replaced and appended, lines highlighted, render times |
+| `SENATE_APP_SNAPSHOT_MD=1` | with `SENATE_APP_SNAPSHOT`: only the Markdown specimen and the thread-2148 sample, then quit |
 | `RUST_LOG` | the core's log filter (default `senate_app_core=info,senate_bridge=warn`) |
 
 ## What it does
@@ -157,15 +161,22 @@ something to you that you have not read: an accent dot at its corner),
   session Senate cannot read (agy, ACP, no transcript yet) says why and
   offers *Attach*.
 - **Markdown** (a session's replies, a thread's messages): CommonMark and
-  GFM, drawn as one text view per message, so a drag selects across its
-  paragraphs, lists and code, and ⌘C copies plain text (line breaks, list
-  markers, code as written, a table as tab-separated rows). Headings,
-  nested and task lists with hanging indents, fenced code on a tinted
-  block that wraps long lines with a copy button, inline code, quotes, a
-  rule, tables with their declared alignment that scroll sideways when
-  wide, links and bare URLs, mentions as names, CJK. The fake daemon's
-  session `claude-5e1f2a3b` (no committee) holds a specimen of every
-  element.
+  GFM, parsed and rendered by the core (`senate-markdown`, the CLI's
+  renderer too) and shown in one page per conversation, set in the
+  monospaced face (one Theme value, `Theme.contentFont`). A drag selects
+  within and across messages; ⌘C copies plain text only (line breaks,
+  list markers and task boxes, code as written, a table as tab-separated
+  rows); ⌘F finds and ⌘A selects over everything read so far. Headings,
+  nested and task lists, fenced code on a tinted panel with its language
+  and a copy button, highlighted (Rust, Swift, TypeScript, Python, shell,
+  JSON and the rest the crate knows), inline code, quotes, a rule,
+  bordered tables with their declared alignment, links and bare URLs,
+  mentions as names, CJK. A message that grows (a streamed reply) changes
+  only the blocks that changed, and a growing code block only its new
+  lines. The fake daemon's session `claude-5e1f2a3b` (no committee) holds
+  a specimen of every element, and `FAKE_STREAM=1` adds `stream`, a reply
+  arriving a few characters at a time (⌥D on the page shows what each
+  update cost).
 
   ![Markdown](docs/screenshots/markdown.png)
 - **A committee**: its chair and how many are active, what waits on you
@@ -272,18 +283,52 @@ SwiftUI views ─► CoreStore (@Observable, main actor) ─► AppCoreProtocol 
 - **Swift** is the store and views. Swift 6, strict concurrency, main actor
   by default; the core's callbacks only yield into an `AsyncStream` that one
   main-actor task reads, in order.
-- **Messages' Markdown**: `MarkdownRenderer.swift` turns swift-markdown's
-  tree into one attributed string per message (off the main thread);
-  `MarkdownCache.swift` keeps them and their measured heights, across
-  sessions; `ConversationRows.swift` folds a session's timeline into the
-  rows drawn (reasoning into the call or reply it led to);
-  `SessionStore.swift` reads and follows the timeline. These are Foundation
-  and SwiftUI only. **macOS-only**: `MessageText.swift` (the TextKit 2
-  `NSTextView` that shows a message, draws its code blocks, quotes, rules
-  and tables, and copies as plain text) and the app's other AppKit
-  plumbing (`Dock.swift`, `Notifier.swift`, `Terminal.swift`,
-  `Snapshot.swift`, `Perf.swift`). An iOS app would replace
-  `MessageText.swift` with a `UITextView` behind the same `MessageText`.
+- **The conversation** (a session's, a thread's) is one web page in one
+  `WKWebView`, kept for the app's life and shown by whichever page needs
+  it (`ConversationPage.swift`); the page's header, the prompt card and
+  the composer around it are native SwiftUI.
+  - *What is where.* `ConversationRows.swift` folds a session's timeline
+    into rows (reasoning into the call or reply it led to);
+    `SessionStore.swift` reads and follows it. `ConversationPage.swift`
+    diffs the rows the page has against the rows now (reset, prepend,
+    upsert) and sends them as data. A message's Markdown goes to the core:
+    `MarkdownStore` (`crates/senate-app-core/src/markdown.rs`, over
+    `senate-markdown`) keeps one document and render cache per message and
+    returns the blocks and, on each update, which blocks changed; the page
+    asks for a block's HTML when the block comes near the viewport or in
+    idle time, and gets either all of it or, for a growing code block,
+    only its new lines. Rendering runs off the main thread, in order. The
+    page (`Web/conversation.html`, `conversation.css`, `style-senate.css`,
+    `conversation.js`, 38 KB in all) draws rows, inserts blocks, holds
+    what the reader looks at in place, copies, finds.
+  - *Safety.* The page and its files come only from the app bundle,
+    through the `senate-app:` scheme, which serves those files and nothing
+    else, with the Content-Security-Policy as a response header: no
+    network, images, fonts, frames, forms or workers, and no script in the
+    page's own world. The one script runs in a content world of its own,
+    where the app's message handler lives; nothing in the page's world can
+    reach either. Data goes in as call arguments, never as script. The
+    renderer emits a fixed set of tags and classes with all text escaped
+    (raw HTML in a message stays text; links only http, https, mailto),
+    and where WebKit has Trusted Types the one HTML sink goes through one
+    named policy, which the page requires. A content rule list blocks
+    http(s), ws(s), file, ftp, data and blob loads, and the page is not
+    loaded if it does not compile. Navigation, new windows, downloads and
+    drops are refused; the context menu keeps Copy, Look Up, Translate
+    and Speech. The page sends back a fixed set of actions, each checked
+    (its shape, the rows shown now, a rate per second) before anything
+    happens. The website data store is not persistent; if the page's
+    process ends, it is loaded again (three times a minute at most).
+    `SenateTests/ConversationPageTests.swift` checks these on a real page,
+    and the core's tests run a hostile-Markdown corpus.
+  - *iOS.* The page's four files, `MarkdownStore` and the crate,
+    `ConversationRows` and `SessionStore` carry over as they are;
+    `ConversationPage.swift` does too, with `UIViewRepresentable` for
+    `NSViewRepresentable`, `UIApplication`/`UIPasteboard` for
+    `NSWorkspace`/`NSPasteboard`, and the menu and key handling of its
+    web view subclass. The header and composer stay native on each.
+- **macOS-only plumbing**: `Dock.swift`, `Notifier.swift`,
+  `Terminal.swift`, `RuntimeFrame.swift`, `Snapshot.swift`, `Perf.swift`.
 
 ### Languages
 
@@ -331,11 +376,16 @@ chair's session, 64 KiB outputs, Markdown-heavy replies, an update five
 times a second) and `SENATE_APP_PERF=session` (a Release build), the app
 opens it, scrolls up through it at speed (older pages read on the way)
 and down again, reads in the middle while it updates, opens a 64 KiB tool
-call, and switches between two sessions; for each phase it prints the
-frames drawn, those over 25 ms (a hitch a person sees: the refresh rate
-adapts, so its own target is no measure), the worst frame, the worst
-main-thread stall, and how many Markdown renders and height measurements
-ran on the main thread (few: they are cached, and rendered ahead off it).
+call, switches between two sessions and between a session and a thread,
+and opens the Markdown specimen; it prints the time to the first screen
+drawn and, for each phase, the frames drawn, those over 25 ms (a hitch a
+person sees: the refresh rate adapts, so its own target is no measure),
+the worst frame, the worst main-thread stall, the page's own frames and
+the app's resident memory. On this Mac: the first open (which loads the
+page) 280-310 ms to the first screen; then no frame over 25 ms and stalls
+of 4-7 ms while scrolling, reading as it updates and opening a 64 KiB
+call; switching sessions 49-55 ms at worst, a session and a thread
+65-72 ms; the app 152 MB and its page's process 85 MB after the specimen.
 `SENATE_APP_PERF_PHASE=<phase>` repeats one phase for a profile. On this
 Mac the numbers move about 2× with the machine's load: run it several
 times and compare distributions, not single runs.
@@ -369,10 +419,9 @@ runner (approve the prompt when it appears, or `automationmodetool enable-automa
 
 ## Acknowledgements
 
-- [swift-markdown](https://github.com/swiftlang/swift-markdown) (Apache
-  License 2.0) parses messages' CommonMark and GFM, with
-  [swift-cmark](https://github.com/swiftlang/swift-cmark) (BSD-2-Clause,
-  cmark-gfm), both pinned at 0.9.0.
+- [comrak](https://github.com/kivikakk/comrak) (BSD-2-Clause), pinned at
+  1.2.0, parses messages' CommonMark and GFM in `senate-markdown`, which
+  renders and highlights them itself.
 
 ## Not yet
 
