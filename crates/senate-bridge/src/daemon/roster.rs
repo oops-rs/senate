@@ -24,14 +24,16 @@ impl Shared {
         local: &StatusReply,
     ) -> Result<RosterCommittee, IpcError> {
         let selector = SessionSelector::default();
-        let (chair, presence, inbox) = tokio::join!(
-            self.api.chair(&committee),
-            self.api.presence(&committee),
-            self.on_inbox(&selector, Some(committee.clone()), None, false),
-        );
-        let chair = chair.map_err(server_error)?.chair;
-        let presence = presence.map_err(server_error)?;
-        let pending = inbox?.threads.len();
+        let (chair, presence) =
+            tokio::try_join!(self.api.chair(&committee), self.api.presence(&committee),)
+                .map_err(server_error)?;
+        self.note_chair(&chair);
+        let chair = chair.chair;
+        let pending = self
+            .on_inbox(&selector, Some(committee.clone()), None, false)
+            .await?
+            .threads
+            .len();
         let mut members = BTreeMap::new();
         for p in presence.agents {
             members.insert(p.agent, roster_active(Some(p.state), false));
@@ -83,7 +85,8 @@ impl Shared {
         alias: SenatorName,
         committee: Option<CommitteeId>,
     ) -> Result<SenatorName, IpcError> {
-        let aliases = self.api.aliases().await.map_err(server_error)?;
+        let (me, aliases) =
+            tokio::try_join!(self.api.me(), self.api.aliases()).map_err(server_error)?;
         let committee = committee.or_else(|| senator.committee.clone());
         let primary = match aliases.resolve(&senator, committee.as_ref()) {
             AliasMatch::NotAlias if senator.committee.is_some() => {
@@ -93,6 +96,24 @@ impl Shared {
                 .non_interactive(&senator.alias)
                 .map_err(|e| IpcError::bad_request(e.to_string()))?,
         };
+        if committee
+            .as_ref()
+            .is_some_and(|c| !me.committees.contains(c))
+        {
+            return Err(IpcError::bad_request("unknown alias committee"));
+        }
+        if !me.agents.contains(&primary)
+            && !self
+                .store
+                .sessions()
+                .map_err(internal)?
+                .iter()
+                .any(|s| s.agent == primary)
+        {
+            return Err(IpcError::bad_request(format!(
+                "no owned senator named {primary}"
+            )));
+        }
         let alias = self
             .api
             .set_alias(&primary, &alias, committee.as_ref(), false)

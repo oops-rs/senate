@@ -820,6 +820,7 @@ enum PendingAction {
     /// committee once the plan is confirmed.
     Status {
         committee: CommitteeId,
+        all: bool,
     },
     Recall {
         committee: CommitteeId,
@@ -868,7 +869,7 @@ impl PendingAction {
             | Self::Decide { committee, .. }
             | Self::Invite { committee, .. }
             | Self::OutputLevel { committee, .. }
-            | Self::Status { committee }
+            | Self::Status { committee, .. }
             | Self::Recall { committee }
             | Self::Work { committee, .. }
             | Self::Reassign { committee, .. }
@@ -886,7 +887,7 @@ impl PendingAction {
             Self::Decide { committee, .. }
             | Self::Invite { committee, .. }
             | Self::OutputLevel { committee, .. }
-            | Self::Status { committee }
+            | Self::Status { committee, .. }
             | Self::Recall { committee }
             | Self::Work { committee, .. }
             | Self::Reassign { committee, .. }
@@ -3003,13 +3004,15 @@ impl Engine {
                     self.say(chat, reply.trim()).await
                 }
             }
-            Intent::Status => {
+            Intent::Status | Intent::StatusAll => {
+                let all = matches!(intent, Intent::StatusAll);
                 if self.defer(PendingAction::Status {
                     committee: committee.clone(),
+                    all,
                 }) {
                     return Ok(Flow::Done);
                 }
-                let text = self.status_text(&committee).await;
+                let text = self.status_text(&committee, all).await;
                 self.say(chat, &text).await
             }
             Intent::Relay {
@@ -3748,7 +3751,7 @@ impl Engine {
                     .map(|event| render::relay_ack_for(l, &event, &self.roster, self.seat_names()))
                     .unwrap_or_default())
             }
-            PendingAction::Status { committee } => Ok(self.status_text(committee).await),
+            PendingAction::Status { committee, all } => Ok(self.status_text(committee, *all).await),
             PendingAction::Memory {
                 committee,
                 key,
@@ -3828,10 +3831,22 @@ impl Engine {
     /// as the Speaker's prompt lists them ([`Engine::committee_seats`]),
     /// then the presence lines of the agents here. The built-in session is
     /// no member and is never listed.
-    async fn status_text(&self, committee: &CommitteeId) -> String {
+    async fn status_text(&self, committee: &CommitteeId, all: bool) -> String {
         let l = self.locale(committee);
-        let seats = self.committee_seats(committee).await;
-        let presence = self.presence_lines(committee).await;
+        let mut seats = self.committee_seats(committee).await;
+        if !all {
+            seats.retain(|seat| {
+                senate_core::continuity::roster_active(
+                    if seat.online {
+                        Some(senate_core::PresenceState::Online)
+                    } else {
+                        seat.presence
+                    },
+                    false,
+                )
+            });
+        }
+        let presence = self.presence_lines(committee, all).await;
         render::status(l, committee, &seats, &presence)
     }
 
@@ -4012,7 +4027,7 @@ impl Engine {
                     .map_err(|_| render::invalid_committee(l, raw)),
             },
             Intent::Unbind => Err(render::nothing_to_unbind(l)),
-            Intent::Status => Err(render::unbound_status(l)),
+            Intent::Status | Intent::StatusAll => Err(render::unbound_status(l)),
             Intent::Relay { .. } => Err(render::relay_needs_binding(l)),
             Intent::Decide { .. } => Err(render::decide_needs_binding(l)),
             Intent::Recall

@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use senate_core::{CommitteeId, Locale};
+use senate_core::CommitteeId;
 use textwrap::core::display_width;
 
 use super::{
@@ -35,20 +35,22 @@ pub fn render_terminal(
         0,
     );
     let chair_label = l.pick("主席", "Chair");
-    let chair_width = if full_ids {
-        usize::MAX
-    } else {
-        terminal
-            .columns()
-            .saturating_sub(display_width(chair_label) + 2)
+    let chair_name = |info: &senate_core::api::ChairInfo| {
+        info.chair.as_ref().map_or_else(
+            || l.pick("暂无", "none").to_owned(),
+            |chair| {
+                if full_ids {
+                    senate_core::Address::senator(chair).in_text()
+                } else {
+                    view.display(chair, Some(&info.committee), false)
+                }
+            },
+        )
     };
     if let Some(committee) = scope {
         let chair = roles
             .and_then(|r| r.chairs.iter().find(|c| &c.committee == committee))
-            .map_or_else(
-                || l.pick("未知", "unknown").into(),
-                |info| chair_name(info, "", chair_width, l),
-            );
+            .map_or_else(|| l.pick("未知", "unknown").into(), chair_name);
         field(terminal, &mut out, chair_label, &chair, 0);
     } else if let Some(roles) = roles {
         for info in &roles.chairs {
@@ -56,7 +58,7 @@ pub fn render_terminal(
                 terminal,
                 &mut out,
                 chair_label,
-                &chair_name(info, &format!("{}  ", info.committee), chair_width, l),
+                &format!("{}  {}", info.committee, chair_name(info)),
                 0,
             );
         }
@@ -117,8 +119,7 @@ pub fn render_terminal(
 }
 
 /// The everyday view: whether the daemon runs, and the sessions that are
-/// here. It leaves out each agent's delivery counters, ended sessions (it
-/// says how many), bindings and branches, and the connection details;
+/// here. It leaves out each agent's delivery counters, bindings and branches, and the connection details;
 /// [`render_terminal`] has them all.
 pub fn render_brief(
     view: &StatusView,
@@ -208,10 +209,7 @@ pub fn render_brief(
         title.push_str(&l.pick(format!(" · {stale} 失联"), format!(" · {stale} stale")));
     }
     if ended > 0 {
-        title.push_str(&l.pick(
-            format!(" · {ended} 已结束（未列出）"),
-            format!(" · {ended} ended (not listed)"),
-        ));
+        title.push_str(&l.pick(format!(" · {ended} 已结束"), format!(" · {ended} ended")));
     }
     terminal.line(&mut out, &title, 0, true);
     let cwd = l.pick("目录", "CWD");
@@ -277,22 +275,6 @@ pub fn render_brief(
 }
 
 const COMPACT_ID_WIDTH: usize = 19;
-
-fn chair_name(
-    info: &senate_core::api::ChairInfo,
-    prefix: &str,
-    width: usize,
-    locale: Locale,
-) -> String {
-    let Some(chair) = &info.chair else {
-        return format!("{prefix}{}", locale.pick("暂无", "none"));
-    };
-    let id_width = width.saturating_sub(display_width(prefix) + "[senator::]".len());
-    format!(
-        "{prefix}[senator::{}]",
-        display_id(chair.as_str(), id_width)
-    )
-}
 
 fn display_id(id: &str, width: usize) -> String {
     let width = width.max(COMPACT_ID_WIDTH);
@@ -482,7 +464,10 @@ fn delivery(
                 state => stream_text(state, now, l),
             };
             let mut cells = vec![
-                Cell::Id(f.agent.to_string(), if f.configured { " *" } else { "" }),
+                Cell::Id(
+                    view.display(&f.agent, Some(&f.committee), full_ids),
+                    if f.configured { " *" } else { "" },
+                ),
                 Cell::Text(f.delivered.to_string()),
                 Cell::Text(f.reported.to_string()),
                 Cell::Text(f.sessions.to_string()),
@@ -547,7 +532,7 @@ fn sessions(
             };
             let mut cells = vec![
                 Cell::Id(s.session_id.clone(), ""),
-                Cell::Id(s.agent.to_string(), ""),
+                Cell::Id(view.display(&s.agent, s.committee(), full_ids), ""),
                 Cell::Text(state.into()),
                 Cell::Text(session_push(s, l)),
                 Cell::Text(ago(s.last_seen, now, l)),

@@ -294,7 +294,7 @@ async fn status_shows_presence_lag_and_checkpoint_age() {
         .into_iter()
         .find(|e| e.kind == Kind::Checkpoint)
         .expect("checkpoint");
-    rig.append(mention("pm", "/status", "m_s1")).await;
+    rig.append(mention("pm", "/status --all", "m_s1")).await;
     rig.settle().await;
     let said = rig.surface.texts().last().cloned().expect("a reply");
     assert!(said.starts_with("本群绑定在委员会 refund-v2。"), "{said}");
@@ -324,7 +324,7 @@ async fn status_lists_each_agent_by_its_own_connection() {
         .await
         .expect("append");
     let rig = Rig::start(hub).await;
-    rig.append(mention("pm", "/status", "m_s1")).await;
+    rig.append(mention("pm", "/status --all", "m_s1")).await;
     rig.settle().await;
     let said = rig.surface.texts().last().cloned().expect("a reply");
     assert!(
@@ -344,6 +344,11 @@ async fn status_lists_each_agent_by_its_own_connection() {
         "{said}"
     );
     assert!(said.contains("\n- [senator::codex] 在线"), "{said}");
+    rig.append(mention("pm", "/status", "m_current")).await;
+    rig.settle().await;
+    let current = rig.surface.texts().last().cloned().expect("a reply");
+    assert!(!current.contains("[senator::claude]"), "{current}");
+    assert!(current.contains("[senator::codex]"), "{current}");
     rig.stop().await;
 
     // The same in English.
@@ -356,7 +361,7 @@ async fn status_lists_each_agent_by_its_own_connection() {
         config_in(Locale::En),
     )
     .await;
-    rig.append(mention("pm", "/status", "m_s1")).await;
+    rig.append(mention("pm", "/status --all", "m_s1")).await;
     rig.settle().await;
     let said = rig.surface.texts().last().cloned().expect("a reply");
     assert!(

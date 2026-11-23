@@ -127,7 +127,16 @@ pub fn uptime(since: DateTime<Utc>, now: DateTime<Utc>) -> String {
 
 /// `senate session list`: one line per session, the running first, then the
 /// hosts running with no session.
-pub fn render(reply: &SessionsReply, now: DateTime<Utc>, locale: Locale, verbose: bool) -> String {
+pub fn render(reply: &SessionsReply, now: DateTime<Utc>, locale: Locale) -> String {
+    render_with_ids(reply, now, locale, false)
+}
+
+pub fn render_with_ids(
+    reply: &SessionsReply,
+    now: DateTime<Utc>,
+    locale: Locale,
+    verbose: bool,
+) -> String {
     if reply.rows.is_empty() && reply.orphans.is_empty() {
         return locale
             .pick(
@@ -377,7 +386,6 @@ mod tests {
             },
             Utc::now(),
             Locale::En,
-            false,
         );
         let line = text.lines().find(|l| l.starts_with("main")).unwrap();
         assert!(line.contains("paused"), "{text}");
@@ -399,12 +407,12 @@ mod tests {
             rows: vec![running, stopped],
             orphans: vec![orphan.clone()],
         };
-        let text = render(&reply, now, Locale::En, false);
+        let text = render(&reply, now, Locale::En);
         let lines: Vec<&str> = text.lines().collect();
         assert!(lines[0].starts_with("NAME"), "{text}");
         let column = lines[0].find("MODEL").unwrap();
         assert_eq!(lines[0].find("STATE"), Some(column + "opus/high  ".len()));
-        assert!(lines[1].starts_with("refund-v2::reviewer"), "{text}");
+        assert!(lines[1].starts_with("reviewer"), "{text}");
         assert_eq!(&lines[1][column..column + 9], "opus/high", "{text}");
         assert_eq!(&lines[2][column..column + 7], "default", "{text}");
         assert!(lines[1].contains("running"), "{text}");
@@ -418,7 +426,7 @@ mod tests {
             "{text}"
         );
         assert_eq!(
-            render(&SessionsReply::default(), now, Locale::En, false),
+            render(&SessionsReply::default(), now, Locale::En),
             "No hosted sessions on this machine."
         );
     }
@@ -442,7 +450,7 @@ mod tests {
             rows: vec![waiting, asking],
             orphans: Vec::new(),
         };
-        let text = render(&reply, now, Locale::En, false);
+        let text = render(&reply, now, Locale::En);
         assert!(text.contains("running · prompt in terminal"), "{text}");
         assert!(text.contains("running · approval: Bash"), "{text}");
     }

@@ -458,11 +458,12 @@ stdin.")]
         #[arg(long)]
         all: bool,
     },
-    /// List every committee with its chair, active members and pending threads.
+    /// List committees, chairs, active members and pending threads.
     Committees,
     /// Set or rename a senator's alias on its committee.
     Alias {
         /// Full senator ID, alias, or committee::alias.
+        #[arg(value_parser = mcp::parse_alias_name)]
         senator: AliasName,
         /// The new role name.
         alias: SenatorName,
@@ -523,7 +524,7 @@ stdin.")]
         /// shows for this directory).
         #[arg(long)]
         committee: Option<CommitteeId>,
-        /// A name to address the senator by, e.g. reviewer.
+        /// A role name such as reviewer. Defaults to a runtime name and counter.
         #[arg(long)]
         alias: Option<SenatorName>,
         /// Appoint the new senator as the committee chair.
@@ -713,7 +714,7 @@ enum SessionCmd {
     /// tile's session (detaching comes back to the grid); q or Ctrl-]
     /// leaves.
     Watch {
-        /// Include sessions that already have an interactive viewer attached.
+        /// Include stopped sessions and those with an interactive viewer attached.
         #[arg(long)]
         all: bool,
     },
@@ -862,8 +863,12 @@ enum SessionCmd {
 
 #[derive(Subcommand)]
 enum SenatorCmd {
-    /// List senator aliases by committee, with the IDs they stand for.
-    List,
+    /// List senators by committee and display name.
+    List {
+        /// Include inactive senators.
+        #[arg(long)]
+        all: bool,
+    },
     /// Give one coding session an alias on its committee.
     ///
     /// The alias is bound to the session's primary ID and persists. To
@@ -1764,7 +1769,7 @@ fn launch(request: &Request, output: Output) -> anyhow::Result<()> {
         reply
             .display_name
             .clone()
-            .unwrap_or_else(|| senate_core::alias::short_name(&reply.senator))
+            .unwrap_or_else(|| reply.senator.to_string())
     };
     println!("{name}");
     if let Some(resolved) = &reply.resolved_model
@@ -1860,11 +1865,8 @@ async fn inbox(
         .flat_map(|senate| &senate.pages)
         .map(|page| page.items.len())
         .sum();
-    // `--all` and `--verbose` both show every seat; only `--all` adds the
-    // answered threads.
-    let all = all || verbose;
     if !docket.senates.is_empty() && !all && awaiting == 0 {
-        // Day to day, who is seated is `senate status`'s to say.
+        // The roster is available via `senate committees`.
         out.push('\n');
         out.push_str(locale.pick("没有等待 Speaker 的事项。", "Nothing awaits the Speaker."));
     } else if !docket.senates.is_empty() {
@@ -1873,12 +1875,8 @@ async fn inbox(
         out.push_str(&preside::render_docket(&docket, locale));
         if idle > 0 {
             out.push_str(&locale.pick(
-                format!(
-                    "另有 {idle} 个席位没有会话、checkpoint 和未结 thread，未列出；--all 会列出。\n"
-                ),
-                format!(
-                    "{idle} more seat(s) with no session, checkpoint or open thread are not listed; --all lists them.\n"
-                ),
+                format!("另有 {idle} 个不活跃席位；--all 会列出。\n"),
+                format!("{idle} inactive seat(s) hidden. Use --all to list them.\n"),
             ));
         }
     }
@@ -1889,15 +1887,21 @@ async fn inbox(
     Ok(out)
 }
 
-/// Leave out the seats nothing is happening on (no live session, no
-/// checkpoint to cover from, no open thread) and say how many they were: a
-/// committee keeps a seat for every session that ever joined it.
+/// Hide inactive seats while retaining the docket's open tasks.
 fn drop_idle_seats(docket: &mut DocketReply) -> usize {
     let mut idle = 0;
     for page in docket.senates.iter_mut().flat_map(|s| s.pages.iter_mut()) {
         let before = page.seats.len();
-        page.seats
-            .retain(|seat| seat.connected || seat.checkpoint.is_some() || seat.open_threads > 0);
+        page.seats.retain(|seat| {
+            senate_core::continuity::roster_active(
+                if seat.connected {
+                    Some(senate_core::PresenceState::Online)
+                } else {
+                    seat.presence
+                },
+                false,
+            )
+        });
         idle += before - page.seats.len();
     }
     idle
@@ -1938,16 +1942,21 @@ async fn watch(
         if committee.as_ref().is_some_and(|c| c != &news.committee) {
             continue;
         }
-        let mut out = std::io::stdout().lock();
-        if json {
-            writeln!(out, "{}", serde_json::to_string(&event)?)?;
+        let line = if json {
+            serde_json::to_string(&event)?
         } else {
-            writeln!(
-                out,
-                "{}\n",
-                output.text(&person::render_news(news, *escalated, text, pong.locale))
-            )?;
-        }
+            let text = person::render_news(news, *escalated, text, pong.locale);
+            let text = if output.verbose {
+                text
+            } else {
+                let aliases: Option<KnownAliases> =
+                    daemon_call(paths, &Request::Aliases).await.ok();
+                crate::format::display_bylines(&text, aliases.as_ref(), Some(&news.committee))
+            };
+            format!("{}\n", output.text(&text))
+        };
+        let mut out = std::io::stdout().lock();
+        writeln!(out, "{line}")?;
         out.flush()?;
     }
 }
@@ -2703,11 +2712,6 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             alias,
             committee,
         } => {
-            let senator = if committee.is_none() {
-                pick_alias(senator)?
-            } else {
-                senator
-            };
             let paths = Paths::from_env()?;
             let alias: SenatorName = runtime(false)?.block_on(daemon_call(
                 &paths,
@@ -2829,7 +2833,12 @@ fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
             }
             println!(
                 "{}",
-                crate::sessions::render(&reply, chrono::Utc::now(), locale, output.verbose)
+                crate::sessions::render_with_ids(
+                    &reply,
+                    chrono::Utc::now(),
+                    locale,
+                    output.verbose
+                )
             );
             Ok(())
         }
@@ -3020,39 +3029,19 @@ fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
 /// `senate senator …`: names, seats and duties.
 fn run_senator(command: SenatorCmd, output: Output) -> anyhow::Result<()> {
     match command {
-        SenatorCmd::List => {
+        SenatorCmd::List { all } => {
             let paths = Paths::from_env()?;
-            let locale = BridgeConfig::locale_at(&paths.config());
-            let known: KnownAliases =
-                runtime(false)?.block_on(daemon_call(&paths, &Request::Aliases))?;
-            let rows: Vec<(String, SenatorName)> = match &known {
-                KnownAliases::Scoped(table) => {
-                    table.iter().map(|q| (q.to_string(), q.primary)).collect()
+            let roster: Vec<ipc::RosterCommittee> =
+                runtime(false)?.block_on(daemon_call(&paths, &Request::Roster))?;
+            for committee in roster {
+                for member in committee.members.into_iter().filter(|m| all || m.active) {
+                    let name = if output.verbose {
+                        member.senator.to_string()
+                    } else {
+                        member.display_name
+                    };
+                    println!("{}  {name}", committee.committee);
                 }
-                KnownAliases::Unscoped(map) => {
-                    eprintln!(
-                        "{}",
-                        locale.pick(
-                            "这个 Senate 的服务器较旧：别名不分委员会，在整个 Senate 内有效。",
-                            "This Senate's server is older: its aliases are Senate-wide, not per committee.",
-                        )
-                    );
-                    map.iter()
-                        .map(|(alias, primary)| (alias.to_string(), primary.clone()))
-                        .collect()
-                }
-            };
-            if rows.is_empty() {
-                println!(
-                    "{}",
-                    locale.pick("尚无 senator 别名。", "No senator aliases registered.")
-                );
-            }
-            for (alias, primary) in rows {
-                output.print(&format!(
-                    "{alias} -> {}",
-                    senate_core::Address::senator(&primary).in_text()
-                ));
             }
             Ok(())
         }

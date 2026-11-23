@@ -23,10 +23,12 @@
 //! | `ping` | — | [`Pong`] |
 //! | `status` | — | [`StatusReply`] |
 //! | `hook` | [`HookReport`] | [`HookReply`] |
-//! | `spawn` | `session?`, `runtime`, `committee`, `alias?`, `cwd`, `chair?` | [`SpawnReply`] |
+//! | `spawn` | `session?`, `runtime`, `committee`, `alias?`, `cwd`, `chair?`, `secretary?` | [`SpawnReply`] |
 //! | `restore` | `session?`, `senator` | [`SpawnReply`] |
 //! | `attach` | `senator` (an alias may be `committee::alias`) | Local terminal socket path |
 //! | `aliases` | — | [`KnownAliases`](senate_core::alias::KnownAliases) |
+//! | `set_alias` | `senator`, `alias`, `committee?` | [`SenatorName`] |
+//! | `roster` | — | `Vec<`[`RosterCommittee`]`>` |
 //! | `remove_alias` | `primary`, `alias`, `committee?` | `{}` |
 //! | `session_end` | `session_id`, `reason?` | `{}` |
 //! | `ask` | `session`, `to` (addresses), `body`, `refs?`, `id?`, `request?` | [`Posted`] |
@@ -1977,6 +1979,13 @@ pub struct RosterMember {
     pub senator: SenatorName,
     pub display_name: String,
     pub active: bool,
+}
+
+impl RosterCommittee {
+    /// How many members are active in this snapshot.
+    pub fn active_members(&self) -> usize {
+        self.members.iter().filter(|member| member.active).count()
+    }
 }
 
 /// One agent's stream on one committee.

@@ -26,7 +26,7 @@ use crate::brain::{Intent, RelayKind};
 pub(crate) fn usage(locale: Locale) -> &'static str {
     locale.pick(
         "固定写法：/tell <name> <内容>、/decide [--supersedes <seq>] <决策>、/brief、/memory [<关键词>]、/forget <seq>、/correct <seq> <内容>、/bind <committee>、/unbind、/status、/agents [<committee>]、/invite <handle>、/output answers|status|all、/work <name> <要做的事>、/reassign <from> <to>",
-        "Commands: /tell <name> <text>, /decide [--supersedes <seq>] <decision>, /brief, /memory [<words>], /forget <seq>, /correct <seq> <text>, /bind <committee>, /unbind, /status, /agents [<committee>], /invite <handle>, /output answers|status|all, /work <name> <what to do>, /reassign <from> <to>",
+        "Commands: /tell <name> <text>, /decide [--supersedes <seq>] <decision>, /brief, /memory [<words>], /forget <seq>, /correct <seq> <text>, /bind <committee>, /unbind, /status [--all], /agents [<committee>], /invite <handle>, /output answers|status|all, /work <name> <what to do>, /reassign <from> <to>",
     )
 }
 
@@ -54,6 +54,7 @@ pub(crate) fn parse_command(text: &str, locale: Locale) -> Option<Result<Intent,
         }),
         "bind" => Err(wrong_use(l, "/bind <committee>")),
         "unbind" => Ok(Intent::Unbind),
+        "status" if args == "--all" => Ok(Intent::StatusAll),
         "status" => Ok(Intent::Status),
         "brief" => Ok(Intent::Recall),
         "memory" | "记忆" => Ok(Intent::Remember {
@@ -497,6 +498,10 @@ mod tests {
         // The same command in either locale.
         for locale in Locale::ALL {
             assert_eq!(parse_command("/status", locale), Some(Ok(Intent::Status)));
+            assert_eq!(
+                parse_command("/status --all", locale),
+                Some(Ok(Intent::StatusAll))
+            );
         }
     }
 

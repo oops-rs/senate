@@ -576,7 +576,7 @@ impl Engine {
                         }
                     }
                     Intent::Unbind => Err(render::nothing_to_unbind(l)),
-                    Intent::Status => Err(render::unbound_status(l)),
+                    Intent::Status | Intent::StatusAll => Err(render::unbound_status(l)),
                     Intent::Relay { .. } => Err(render::relay_needs_binding(l)),
                     Intent::Decide { .. } => Err(render::decide_needs_binding(l)),
                     Intent::Recall

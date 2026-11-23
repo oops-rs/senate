@@ -604,7 +604,7 @@ fn roster_committee(c: &senate_bridge::ipc::RosterCommittee) -> RosterCommittee 
         chair_id: c.chair.as_ref().map(ToString::to_string),
         chair_display_name: c.chair_display_name.clone(),
         chair_live: c.chair_live,
-        active_members: count(c.members.iter().filter(|m| m.active).count()),
+        active_members: count(c.active_members()),
         pending: count(c.pending),
         members: c
             .members

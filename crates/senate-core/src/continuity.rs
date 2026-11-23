@@ -287,7 +287,7 @@ pub enum PresenceState {
     Reassigned,
 }
 
-/// A seat belongs in the current roster while its presence lease is live
+/// A seat belongs in the current roster while the server reports it online
 /// or a local hosted process is running.
 pub fn roster_active(presence: Option<PresenceState>, hosted_running: bool) -> bool {
     hosted_running || presence == Some(PresenceState::Online)
@@ -593,6 +593,22 @@ mod tests {
     /// `paused` is additive: an older client, which knows only the fields
     /// below, still parses a paused presence as plain `absent`; and a
     /// presence written before the flag parses as not paused.
+    #[test]
+    fn roster_activity_comes_from_presence_or_a_running_host() {
+        assert!(roster_active(Some(PresenceState::Online), false));
+        assert!(roster_active(None, true));
+        assert!(roster_active(Some(PresenceState::Disconnected), true));
+        for inactive in [
+            None,
+            Some(PresenceState::Disconnected),
+            Some(PresenceState::Absent),
+            Some(PresenceState::TakenOver),
+            Some(PresenceState::Reassigned),
+        ] {
+            assert!(!roster_active(inactive, false));
+        }
+    }
+
     #[test]
     fn paused_is_additive_on_the_wire() {
         #[derive(Deserialize)]

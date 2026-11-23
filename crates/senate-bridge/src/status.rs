@@ -66,12 +66,8 @@ pub struct StatusView {
 impl StatusView {
     pub fn retain_active(&mut self) {
         self.sessions.retain(|s| {
-            let connected = self.committees.iter().any(|c| {
-                c.agent == s.agent
-                    && Some(&c.committee) == s.committee()
-                    && matches!(c.stream, Some(StreamState::Connected { .. }))
-            });
-            let presence = (s.is_live() && connected).then_some(senate_core::PresenceState::Online);
+            let presence = (self.daemon.is_some() && s.is_live())
+                .then_some(senate_core::PresenceState::Online);
             senate_core::continuity::roster_active(
                 presence,
                 self.hosted.contains_key(&s.session_id),
@@ -441,7 +437,7 @@ pub(crate) fn render_committees(
                     locale.pick("离线", "offline")
                 }
                 .to_owned(),
-                row.members.iter().filter(|m| m.active).count().to_string(),
+                row.active_members().to_string(),
                 row.pending.to_string(),
             ]
         })
@@ -1070,8 +1066,8 @@ mod tests {
         assert!(text.contains("daemon: not running"));
         assert!(text.contains("server: http://x, this Senate, as [senator::alice]"));
         assert!(text.contains("refund-v2 *"));
-        assert!(text.contains("[senator::claude]"));
-        assert!(text.contains("[senator::codex]"));
+        assert!(text.contains("claude"));
+        assert!(text.contains("codex"));
         assert!(text.contains("connected since 1m ago"));
         assert!(text.contains("none registered"));
     }
@@ -1297,7 +1293,7 @@ mod tests {
         let mut lines = wide.lines();
         assert_eq!(lines.next(), Some("Senate  /acme/alice-desk"));
         assert_eq!(lines.next(), Some("委员会  refund-v2"));
-        assert_eq!(lines.next(), Some("主席  [senator::codex]"));
+        assert_eq!(lines.next(), Some("主席  codex"));
         let header = wide
             .lines()
             .find(|line| line.contains("已接收") && line.contains("已上报"))
@@ -1314,7 +1310,7 @@ mod tests {
             .lines()
             .find(|line| line.contains("senate/终端"))
             .unwrap();
-        assert!(session.contains(id) && session.contains(&format!("codex-{id}")));
+        assert!(session.contains(id) && session.contains(&format!("codex-{}", &id[..8])));
         assert!(session.contains("/项目/非常长的中文目录/同一个目录前缀/应用"));
         let headers = wide.lines().find(|line| line.contains("最近活动")).unwrap();
         assert!(headers.contains("绑定") && headers.contains("分支") && headers.contains("目录"));

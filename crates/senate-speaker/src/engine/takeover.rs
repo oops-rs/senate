@@ -101,7 +101,7 @@ impl Engine {
 
     /// `/status`'s presence lines: every agent with a presence or a
     /// checkpoint, its state, lag and the age of its latest checkpoint.
-    pub(super) async fn presence_lines(&self, committee: &CommitteeId) -> Vec<String> {
+    pub(super) async fn presence_lines(&self, committee: &CommitteeId, all: bool) -> Vec<String> {
         let l = self.locale(committee);
         let presence = match self.hub.presence(committee).await {
             Ok(page) => page.agents,
@@ -117,7 +117,16 @@ impl Engine {
             .map(|b| b.brief().checkpoints)
             .unwrap_or_default();
         let mut agents: Vec<SenatorName> = presence.iter().map(|p| p.agent.clone()).collect();
-        agents.extend(checkpoints.iter().map(|c| c.agent.clone()));
+        if all {
+            agents.extend(checkpoints.iter().map(|c| c.agent.clone()));
+        } else {
+            agents.retain(|agent| {
+                presence.iter().any(|p| {
+                    p.agent == *agent
+                        && senate_core::continuity::roster_active(Some(p.state), false)
+                })
+            });
+        }
         agents.retain(|agent| *agent != self.me);
         agents.sort();
         agents.dedup();
@@ -172,7 +181,8 @@ impl Engine {
                 event,
                 group,
                 group.clone(),
-                render::presence_line(l, &payload),
+                self.seat_names()
+                    .display_bylines(&render::presence_line(l, &payload), &event.committee),
             )
             .await?;
         }

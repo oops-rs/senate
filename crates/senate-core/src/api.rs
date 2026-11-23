@@ -330,7 +330,8 @@ pub struct CommitteeSeatStatus {
 pub type Secretaries = std::collections::BTreeMap<SenatorName, Vec<SenatorName>>;
 
 /// `PUT /v1/secretaries/{senator}`: `senator`'s secretaries, in order
-/// (empty removes them). Allowed for the senator itself, the principal
+/// (empty removes them). `POST` at the same path appends new secretaries
+/// in order. Allowed for the senator itself, the principal
 /// that runs it, and the Speaker's office; refused for anyone else.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetSecretaries {

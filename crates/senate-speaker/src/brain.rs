@@ -246,6 +246,8 @@ pub enum Intent {
     Unbind,
     /// Report the binding and which agents are connected.
     Status,
+    /// Include inactive seats in the status.
+    StatusAll,
     /// Record `body` as a decision of the committee, replacing the decision
     /// at `supersedes` when the speaker changes an earlier one.
     Decide {
@@ -312,6 +314,7 @@ impl Intent {
             self,
             Self::Relay { .. }
                 | Self::Status
+                | Self::StatusAll
                 | Self::Recall
                 | Self::Remember { .. }
                 | Self::None { .. }

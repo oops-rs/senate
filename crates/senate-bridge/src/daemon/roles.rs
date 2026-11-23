@@ -311,7 +311,7 @@ impl Shared {
         }
     }
 
-    fn note_chair(&self, info: &ChairInfo) {
+    pub(super) fn note_chair(&self, info: &ChairInfo) {
         let moved = {
             let mut chairs = lock(&self.chairs);
             let cache = chairs.entry(info.committee.clone()).or_default();

@@ -852,6 +852,7 @@ mod tests {
         assert_eq!(
             fx.refresh,
             vec![
+                Refresh::Roster,
                 Refresh::AllInboxes,
                 Refresh::Docket,
                 Refresh::Aliases,

@@ -507,6 +507,51 @@ mod tests {
     }
 
     #[test]
+    fn display_uses_an_alias_then_the_legacy_runtime_prefix() {
+        let primary = n("claude-bff528a7-9e17-4dbd-a831-abe023295d10");
+        let here = c("nous");
+        let elsewhere = c("nous-ios");
+        let alias = n("reviewer");
+        let mut aliases = CommitteeAliases::new();
+        assert_eq!(
+            aliases.display_name(Some(&here), &primary),
+            "claude-bff528a7"
+        );
+        assert_eq!(short_name(&n("alice")), "alice");
+        aliases.set(&here, alias.clone(), primary.clone()).unwrap();
+        assert_eq!(aliases.display_name(Some(&here), &primary), "reviewer");
+        aliases
+            .set(&elsewhere, alias.clone(), n("codex-peer"))
+            .unwrap();
+        assert_eq!(
+            aliases.display_name(Some(&here), &primary),
+            "nous::reviewer"
+        );
+        aliases.remove(&elsewhere, &alias);
+        assert_eq!(aliases.display_name(Some(&here), &primary), "reviewer");
+        aliases.remove(&here, &alias);
+        assert_eq!(
+            aliases.display_name(Some(&here), &primary),
+            "claude-bff528a7"
+        );
+    }
+
+    #[test]
+    fn pushed_headers_use_aliases_and_keep_the_quoted_body() {
+        let primary = "claude-bff528a7-9e17-4dbd-a831-abe023295d10";
+        let aliases = KnownAliases::Scoped(table(&[("nous", "reviewer", primary)]));
+        let text = format!("[senate · from [senator::{primary}]]\n│ [senator::{primary}]");
+        assert_eq!(
+            display_event_bylines(&text, Some(&aliases), &c("nous")),
+            format!("[senate · from reviewer]\n│ [senator::{primary}]")
+        );
+        assert_eq!(
+            display_event_bylines(&text, None, &c("nous")),
+            format!("[senate · from claude-bff528a7]\n│ [senator::{primary}]")
+        );
+    }
+
+    #[test]
     fn the_same_alias_lives_on_several_committees() {
         let t = table(&[
             ("nous", "main", "claude-a"),
