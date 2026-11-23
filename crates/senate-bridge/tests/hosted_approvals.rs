@@ -89,6 +89,7 @@ impl Terminal {
         let launch: SpawnReply = ipc::request(
             &h.socket(),
             &Request::Spawn {
+                attempt_id: None,
                 session: Default::default(),
                 runtime: Some(runtime),
                 profile: None,
@@ -533,6 +534,7 @@ async fn a_hosted_codex_thread_is_named_after_the_senators_alias() {
             .collect::<Vec<_>>()
     };
     let spawn = |alias: Option<&str>| Request::Spawn {
+        attempt_id: None,
         session: Default::default(),
         runtime: Some(HostedRuntime::Codex),
         profile: None,

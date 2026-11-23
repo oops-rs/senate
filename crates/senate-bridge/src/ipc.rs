@@ -272,6 +272,8 @@ pub mod codes {
     /// [`IpcError::candidates`](super::IpcError::candidates) lists them.
     pub const AMBIGUOUS_RECIPIENT: &str = senate_core::api::code::AMBIGUOUS_RECIPIENT;
     pub const INTERNAL: &str = "internal";
+    /// A hosted spawn may have created a session, but has no confirmed receipt.
+    pub const SPAWN_OUTCOME_UNKNOWN: &str = "spawn_outcome_unknown";
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -684,6 +686,9 @@ pub enum Request {
     /// Native coding session. Its immutable senator ID is derived on the daemon.
     SessionHook(HookReport),
     Spawn {
+        /// UUIDv7 for one launch. Reuse it for up to seven days when retrying.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attempt_id: Option<String>,
         #[serde(default)]
         session: SessionSelector,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2262,6 +2267,42 @@ pub async fn request<T: DeserializeOwned>(
         .await?
         .call(request, timeout)
         .await
+}
+
+/// A fresh ID for one spawn action, with its creation time for expiration.
+pub(crate) fn new_spawn_attempt_id() -> String {
+    uuid::Uuid::now_v7().to_string()
+}
+
+pub(crate) fn spawn_outcome_unknown(attempt_id: &str, detail: impl std::fmt::Display) -> IpcError {
+    IpcError::new(
+        codes::SPAWN_OUTCOME_UNKNOWN,
+        format!(
+            "Spawn outcome unknown (attempt {attempt_id}): {detail}. \
+             Check `senate session list`. To retry this spawn, reuse the ID with `--attempt-id` \
+             in the CLI or `attempt_id` in MCP."
+        ),
+    )
+}
+
+/// Treat a lost or unreadable reply to a tracked spawn as ambiguous.
+pub(crate) async fn request_spawn(
+    path: &Path,
+    request: &Request,
+    timeout: Duration,
+) -> Result<SpawnReply, ClientError> {
+    let mut client = IpcClient::connect(path, Duration::from_secs(1)).await?;
+    match client.call(request, timeout).await {
+        Err(error @ (ClientError::Timeout | ClientError::Io(_) | ClientError::Protocol(_)))
+            if let Request::Spawn {
+                attempt_id: Some(id),
+                ..
+            } = request =>
+        {
+            Err(ClientError::Remote(spawn_outcome_unknown(id, error)))
+        }
+        result => result,
+    }
 }
 
 /// Read one `\n`-terminated line of at most [`MAX_LINE`] bytes; `None` at a

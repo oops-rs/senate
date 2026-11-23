@@ -416,6 +416,7 @@ pub(crate) fn start(
     runtime: HostedRuntime,
     cwd: &Path,
     session: &SessionCommand<'_>,
+    before_spawn: impl FnOnce() -> anyhow::Result<()>,
 ) -> anyhow::Result<(Child, File)> {
     let dir = directory(paths, id);
     let mut command = Command::new(host_binary);
@@ -451,7 +452,7 @@ pub(crate) fn start(
     ));
 
     std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
-    let mut spawn = || -> anyhow::Result<(Child, File)> {
+    let spawn = || -> anyhow::Result<(Child, File)> {
         File::create(dir.join("unpublished"))?;
         let path = dir.join("errors");
         let log = OpenOptions::new()
@@ -460,6 +461,7 @@ pub(crate) fn start(
             .mode(0o600)
             .open(&path)?;
         let errors = File::open(path)?;
+        before_spawn()?;
         let child = command
             .stderr(log)
             .spawn()

@@ -74,6 +74,7 @@ async fn replacing_a_hosted_chair_transfers_its_alias_and_prompt_on_the_server()
 
     let old: SpawnReply = laptop
         .ipc(Request::Spawn {
+            attempt_id: None,
             session: Default::default(),
             runtime: Some(HostedRuntime::Claude),
             profile: None,

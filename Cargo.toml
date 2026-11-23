@@ -70,7 +70,7 @@ eventsource-stream = "0.2"
 rmcp = { version = "3.5.1", features = ["server", "transport-io", "macros"] }
 dirs = "6"
 libc = "0.2"
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "v7"] }
 pty-process = { version = "0.5.4", features = ["async"] }
 vt100 = "0.18.1"
 rustix = { version = "1.1.6", features = ["fs", "process", "termios", "time"] }

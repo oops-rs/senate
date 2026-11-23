@@ -176,6 +176,12 @@ CREATE TABLE IF NOT EXISTS hosted_paused (
     paused_at  INTEGER NOT NULL,
     checkpoint INTEGER
 );
+CREATE TABLE IF NOT EXISTS spawn_attempts (
+    id      TEXT PRIMARY KEY,
+    record  TEXT NOT NULL,
+    expires INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS spawn_attempts_expiry ON spawn_attempts (expires);
 CREATE TABLE IF NOT EXISTS replacements (
     old     TEXT PRIMARY KEY,
     record  TEXT NOT NULL,
@@ -1905,6 +1911,7 @@ impl Store {
                AND COALESCE(delivered_at, enqueued_at) < ?1",
             [cutoff],
         )?;
+        tx.execute("DELETE FROM spawn_attempts WHERE expires <= ?1", [now_ms()])?;
         tx.commit()?;
         Ok(())
     }
@@ -2589,6 +2596,44 @@ impl Store {
         )
     }
 
+    // ---- hosted spawn attempts -------------------------------------------
+
+    pub(crate) fn spawn_attempt(&self, id: &str) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT record FROM spawn_attempts WHERE id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    pub(crate) fn insert_spawn_attempt(
+        &self,
+        id: &str,
+        record: &str,
+        expires: i64,
+    ) -> Result<bool, StoreError> {
+        Ok(self.conn().execute(
+            "INSERT INTO spawn_attempts (id, record, expires) VALUES (?1, ?2, ?3)
+             ON CONFLICT(id) DO NOTHING",
+            params![id, record, expires],
+        )? == 1)
+    }
+
+    pub(crate) fn advance_spawn_attempt(
+        &self,
+        id: &str,
+        expected: &str,
+        record: &str,
+    ) -> Result<bool, StoreError> {
+        Ok(self.conn().execute(
+            "UPDATE spawn_attempts SET record = ?3 WHERE id = ?1 AND record = ?2",
+            params![id, expected, record],
+        )? == 1)
+    }
+
     // ---- replacements under way --------------------------------------------
 
     /// Record (or update) the replacement of `old`: its JSON record.
@@ -2624,6 +2669,42 @@ mod tests {
     use senate_core::{Address, Kind, NewEvent};
 
     use super::*;
+
+    #[test]
+    fn spawn_attempt_has_one_durable_launch_claim() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("state.db");
+        let first = Store::open(&db).unwrap();
+        let second = Store::open(&db).unwrap();
+        assert!(
+            first
+                .insert_spawn_attempt("id", "prepared", i64::MAX)
+                .unwrap()
+        );
+        assert_eq!(
+            second.spawn_attempt("id").unwrap().as_deref(),
+            Some("prepared")
+        );
+        assert!(
+            !second
+                .insert_spawn_attempt("id", "other order", i64::MAX)
+                .unwrap()
+        );
+        assert!(
+            first
+                .advance_spawn_attempt("id", "prepared", "launching")
+                .unwrap()
+        );
+        assert!(
+            !second
+                .advance_spawn_attempt("id", "prepared", "launching")
+                .unwrap()
+        );
+        assert_eq!(
+            second.spawn_attempt("id").unwrap().as_deref(),
+            Some("launching")
+        );
+    }
 
     fn committee() -> CommitteeId {
         CommitteeId::new("refund-v2").unwrap()

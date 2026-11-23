@@ -7,6 +7,7 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::process::{Child, ChildStdin};
 use tokio::sync::oneshot;
 
+use super::spawn_attempt::SpawnAttempt;
 use super::*;
 use crate::host;
 use crate::ipc::{HostedModel, HostedRuntime, SpawnReply};
@@ -188,6 +189,7 @@ impl Shared {
         cwd: PathBuf,
         model: HostedModel,
         limit: Option<usize>,
+        attempt: Option<&mut SpawnAttempt>,
         audit: impl Fn(LaunchAudit, SpawnReply, HostedRuntime) -> Fut + Send,
     ) -> Result<HostedLaunch, IpcError>
     where
@@ -204,8 +206,10 @@ impl Shared {
                 "unknown committee {committee}"
             )));
         }
-        self.launch_host(runtime, committee, alias, cwd, None, model, limit, audit)
-            .await
+        self.launch_host(
+            runtime, committee, alias, cwd, None, model, limit, attempt, audit,
+        )
+        .await
     }
 
     /// The local session `name` stands for: its primary ID, or an alias
@@ -653,6 +657,7 @@ impl Shared {
             }),
             model,
             limit,
+            None,
             audit,
         )
         .await
@@ -718,6 +723,7 @@ impl Shared {
         resume: Option<HostResume>,
         model: HostedModel,
         limit: Option<usize>,
+        mut attempt: Option<&mut SpawnAttempt>,
         audit: impl Fn(LaunchAudit, SpawnReply, HostedRuntime) -> Fut + Send,
     ) -> Result<HostedLaunch, IpcError>
     where
@@ -858,6 +864,9 @@ impl Shared {
                 let id = if let Some(id) = resume {
                     id
                 } else {
+                    if let Some(attempt) = attempt.as_deref_mut() {
+                        attempt.begin_launch(&self.store)?;
+                    }
                     let id = tokio::time::timeout(
                         CODEX_PUSH_TIMEOUT,
                         server.create_thread(&cwd, model.model.as_deref()),
@@ -939,6 +948,30 @@ impl Shared {
             facts.committee_file.as_deref(),
             self.convention.as_ref(),
         );
+        let mut start_terminal = |cwd: &Path| {
+            host::start(
+                &self.host_binary,
+                &paths,
+                &id,
+                runtime,
+                cwd,
+                &launch,
+                || {
+                    // Codex crosses the creation boundary at thread/start.
+                    if runtime != HostedRuntime::Codex
+                        && let Some(attempt) = attempt.as_deref_mut()
+                    {
+                        attempt.begin_launch(&self.store)?;
+                    }
+                    Ok(())
+                },
+            )
+            .map_err(|error| {
+                error
+                    .downcast::<IpcError>()
+                    .unwrap_or_else(IpcError::internal)
+            })
+        };
         let mut process = None;
         let mut publication = None;
         let mut audit_written = false;
@@ -948,8 +981,7 @@ impl Shared {
             if unnamed {
                 // A new agy names its conversation only once it runs: start
                 // it, then take the ID its first hook reports.
-                let (child, errors) = host::start(&self.host_binary, &paths, &id, runtime, &cwd, &launch)
-                    .map_err(IpcError::internal)?;
+                let (child, errors) = start_terminal(&cwd)?;
                 let (ready, ack) = await_ready(child, errors).await?;
                 process = Some(ready);
                 publication = Some(ack);
@@ -979,8 +1011,7 @@ impl Shared {
                 Some((generation, (delivered, reported)))
             };
             if !unnamed {
-                let (child, errors) = host::start(&self.host_binary, &paths, &id, runtime, &cwd, &launch)
-                    .map_err(IpcError::internal)?;
+                let (child, errors) = start_terminal(&cwd)?;
                 let (ready, ack) = await_ready(child, errors).await?;
                 process = Some(ready);
                 publication = Some(ack);

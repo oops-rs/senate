@@ -521,6 +521,9 @@ stdin.")]
                                          An Antigravity CLI senator
   senate attach reviewer                 Open its terminal (Ctrl-] detaches)")]
     Spawn {
+        /// Reuse a spawn attempt UUIDv7 with the same arguments, within seven days.
+        #[arg(long)]
+        attempt_id: Option<String>,
         /// The coding agent to start. Must agree with --profile if both are given.
         #[arg(required_unless_present = "profile")]
         runtime: Option<HostedRuntime>,
@@ -1820,7 +1823,16 @@ fn choose_alias(
 }
 
 fn launch(request: &Request, output: Output) -> anyhow::Result<()> {
-    let reply: SpawnReply = host_call(request)?;
+    let reply: SpawnReply = if matches!(request, Request::Spawn { .. }) {
+        let paths = Paths::from_env()?;
+        runtime(false)?.block_on(ipc::request_spawn(
+            &paths.socket(),
+            request,
+            crate::host::REQUEST_TIMEOUT,
+        ))?
+    } else {
+        host_call(request)?
+    };
     let name = if output.verbose {
         reply.senator.to_string()
     } else {
@@ -2677,6 +2689,7 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Spawn {
+            attempt_id,
             runtime: harness,
             profile,
             committee,
@@ -2711,6 +2724,7 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             };
             launch(
                 &Request::Spawn {
+                    attempt_id: Some(attempt_id.unwrap_or_else(ipc::new_spawn_attempt_id)),
                     runtime,
                     profile,
                     committee,

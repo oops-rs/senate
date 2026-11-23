@@ -3,6 +3,7 @@
 use senate_core::SenatorKind;
 
 use super::hosts::LaunchAudit;
+use super::spawn_attempt::SpawnAttempt;
 use super::*;
 use crate::ipc::{HostedModel, HostedRuntime, SpawnProfile, SpawnReply, StopReply};
 
@@ -65,7 +66,22 @@ impl HostAuthority {
     }
 }
 
+/// The caller's spawn arguments before applying a machine-local profile.
+#[derive(Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(super) struct SpawnInput {
+    pub(super) runtime: Option<HostedRuntime>,
+    pub(super) profile: Option<SpawnProfile>,
+    pub(super) committee: CommitteeId,
+    pub(super) alias: Option<SenatorName>,
+    pub(super) cwd: PathBuf,
+    pub(super) chair: bool,
+    pub(super) secretary: bool,
+    pub(super) prompt: Option<String>,
+    pub(super) model: HostedModel,
+}
+
 /// What a hosted spawn asks for ([`Request::Spawn`](crate::ipc::Request::Spawn)).
+#[derive(Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(super) struct SpawnOrder {
     pub(super) runtime: HostedRuntime,
     pub(super) committee: CommitteeId,
@@ -159,7 +175,23 @@ impl Shared {
         })
     }
 
-    pub(super) fn spawn_settings(
+    pub(super) fn resolve_spawn_order(&self, input: SpawnInput) -> Result<SpawnOrder, IpcError> {
+        let (runtime, alias, model) =
+            self.spawn_settings(input.runtime, input.profile, input.alias, input.model)?;
+        Ok(SpawnOrder {
+            runtime,
+            committee: input.committee,
+            alias,
+            default_alias: true,
+            cwd: input.cwd,
+            chair: input.chair,
+            secretary: input.secretary,
+            prompt: input.prompt,
+            model,
+        })
+    }
+
+    fn spawn_settings(
         &self,
         runtime: Option<HostedRuntime>,
         profile: Option<SpawnProfile>,
@@ -212,6 +244,16 @@ impl Shared {
         selector: &SessionSelector,
         order: SpawnOrder,
     ) -> Result<SpawnReply, IpcError> {
+        let auth = self.authorize_host_action(selector).await?;
+        self.spawn_authorized(&auth, order, None).await
+    }
+
+    pub(super) async fn spawn_authorized(
+        &self,
+        auth: &HostAuthority,
+        order: SpawnOrder,
+        mut attempt: Option<&mut SpawnAttempt>,
+    ) -> Result<SpawnReply, IpcError> {
         let SpawnOrder {
             runtime,
             committee,
@@ -227,7 +269,6 @@ impl Shared {
         let model = HostedModel::new(model.model, model.effort);
         model.check(runtime).map_err(IpcError::bad_request)?;
         let prompt = prompt.filter(|p| !p.trim().is_empty());
-        let auth = self.authorize_host_action(selector).await?;
         if appoint_chair && appoint_secretary {
             return Err(IpcError::bad_request("choose either chair or secretary"));
         }
@@ -249,7 +290,7 @@ impl Shared {
         } else {
             alias
         };
-        let audit_auth = &auth;
+        let audit_auth = auth;
         let launch = self
             .on_spawn_with(
                 runtime,
@@ -258,6 +299,7 @@ impl Shared {
                 cwd,
                 model,
                 self.config.hosted_session_limit,
+                attempt.as_deref_mut(),
                 move |phase, reply, runtime| async move {
                     self.audit_host_launch(audit_auth, false, phase, reply, runtime)
                         .await
@@ -265,6 +307,9 @@ impl Shared {
             )
             .await?;
         let mut reply = launch.finish();
+        if let Some(attempt) = attempt.as_deref_mut() {
+            attempt.record_created(&self.store, &reply)?;
+        }
         drop(alias_guard);
         if reply.display_name.is_some() {
             *lock(&self.display_aliases) = None;
@@ -278,10 +323,10 @@ impl Shared {
             }
         }
         if appoint_chair {
-            self.appoint_hosted_chair(&auth, &reply).await?;
+            self.appoint_hosted_chair(auth, &reply).await?;
         }
         if let Some(desk) = desk {
-            self.appoint_hosted_secretary(&auth, &reply, desk).await?;
+            self.appoint_hosted_secretary(auth, &reply, desk).await?;
         }
         if let Some(prompt) = prompt {
             // The seat is published: an ordinary request reaches it through
@@ -311,6 +356,9 @@ impl Shared {
                     )
                 })?;
             reply.request = Some(posted.seq);
+        }
+        if let Some(attempt) = attempt {
+            attempt.record_created(&self.store, &reply)?;
         }
         Ok(reply)
     }

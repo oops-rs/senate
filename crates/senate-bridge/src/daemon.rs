@@ -180,6 +180,7 @@ mod replace;
 mod roles;
 mod roster;
 mod secretary_work;
+mod spawn_attempt;
 
 use front::Front;
 
@@ -513,6 +514,8 @@ pub(crate) struct Shared {
     session_bindings: RwLock<()>,
     hosts: hosts::Launches,
     spawn_aliases: tokio::sync::Mutex<()>,
+    /// Serializes the attempt lookup, launch, and durable receipt.
+    spawn_attempts: tokio::sync::Mutex<()>,
     display_aliases: Mutex<Option<(Instant, senate_core::alias::KnownAliases)>>,
     host_notices_ready: Notify,
     active_stop_notices: Mutex<BTreeMap<EventId, SenatorName>>,
@@ -895,6 +898,7 @@ impl Shared {
             session_bindings: RwLock::new(()),
             hosts: hosts::Launches::default(),
             spawn_aliases: tokio::sync::Mutex::new(()),
+            spawn_attempts: tokio::sync::Mutex::new(()),
             display_aliases: Mutex::new(None),
             host_notices_ready: Notify::new(),
             active_stop_notices: Mutex::new(BTreeMap::new()),
@@ -2989,6 +2993,7 @@ impl Shared {
                     }),
             ),
             Request::Spawn {
+                attempt_id,
                 session,
                 runtime,
                 profile,
@@ -3000,23 +3005,25 @@ impl Shared {
                 prompt,
                 model,
             } => {
-                let (runtime, alias, model) =
-                    match self.spawn_settings(runtime, profile, alias, model) {
-                        Ok(settings) => settings,
-                        Err(error) => return Reply::err(error),
-                    };
-                let order = host_policy::SpawnOrder {
+                let input = host_policy::SpawnInput {
                     runtime,
+                    profile,
                     committee,
                     alias,
-                    default_alias: true,
                     cwd,
                     chair,
                     secretary,
                     prompt,
                     model,
                 };
-                self.sessions_changed(wrap(self.on_hosted_spawn(&session, order).await))
+                let result = match attempt_id {
+                    Some(id) => self.on_spawn_attempt(&session, input, &id).await,
+                    None => match self.resolve_spawn_order(input) {
+                        Ok(order) => self.on_hosted_spawn(&session, order).await,
+                        Err(error) => return Reply::err(error),
+                    },
+                };
+                self.sessions_changed(wrap(result))
             }
             Request::Restore {
                 session,

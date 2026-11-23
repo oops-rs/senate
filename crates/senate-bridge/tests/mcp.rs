@@ -224,7 +224,7 @@ async fn chair_discovers_and_spawns_a_profile_with_existing_role_checks() {
     h.dir = tempfile::tempdir_in("/tmp").unwrap();
     h.paths = senate_bridge::Paths::new(h.dir.path().join("senate"));
     h.paths.ensure_home().unwrap();
-    let project = h.workdir("project", None);
+    let project = h.workdir("project", Some(committee().as_str()));
     let fixture = agy_fixture(h.dir.path(), "8b135e59-a160-4ed4-a0e9-105ed957be07");
     let config = toml::to_string(&h.config).unwrap();
     std::fs::write(
@@ -297,7 +297,7 @@ note = "Use for test triage."
         json!({"triage":{"runtime":"agy","model":"flash","effort":"high","note":"Use for test triage."}})
     );
 
-    let args = json!({
+    let mut args = json!({
         "action":"spawn", "profile":"triage", "committee":committee(), "cwd":project, "alias":"fast-review"
     });
     for (field, value) in [
@@ -313,11 +313,18 @@ note = "Use for test triage."
             "{message}"
         );
     }
+    args["attempt_id"] = json!(uuid::Uuid::now_v7().to_string());
     let (error, message) = chair.call("spawn", args.clone()).await;
     assert!(!error, "{message}");
     let seat: SpawnReply = serde_json::from_str(&message).unwrap();
     assert_eq!(seat.resolved_model.as_deref(), Some("gemini-3.8-flash"));
     assert_eq!(seat.display_name.as_deref(), Some("fast-review"));
+    let (retry_error, retry_message) = chair.call("spawn", args).await;
+    assert!(!retry_error, "{retry_message}");
+    assert_eq!(
+        serde_json::from_str::<SpawnReply>(&retry_message).unwrap(),
+        seat
+    );
     let terminal: PathBuf = ipc::request(
         &h.socket(),
         &Request::Attach {
@@ -377,6 +384,7 @@ async fn stop_tool_enforces_authority_and_records_the_actor() {
     );
     let project = h.workdir("tui", None);
     let spawn = |alias, committee| Request::Spawn {
+        attempt_id: None,
         session: Default::default(),
         runtime: Some(HostedRuntime::Claude),
         profile: None,

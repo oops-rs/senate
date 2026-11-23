@@ -895,6 +895,7 @@ async fn spawning_checks_scope_and_capacity_on_the_daemon() {
         );
     }
     let spawn = |session, committee, chair, secretary| Request::Spawn {
+        attempt_id: None,
         session,
         committee,
         runtime: Some(HostedRuntime::Codex),

@@ -174,6 +174,7 @@ done
     start(&mut h).await;
 
     let spawn = |alias| Request::Spawn {
+        attempt_id: None,
         session: Default::default(),
         runtime: Some(HostedRuntime::Claude),
         profile: None,
@@ -971,6 +972,7 @@ done
         let seat = call(
             &h,
             &Request::Spawn {
+                attempt_id: None,
                 session: Default::default(),
                 runtime: Some(HostedRuntime::Claude),
                 profile: None,
@@ -1088,6 +1090,7 @@ async fn a_chosen_model_and_effort_reach_the_tui_and_are_kept_for_restore() {
     let refused = ipc::request::<SpawnReply>(
         &fixture.h.socket(),
         &Request::Spawn {
+            attempt_id: None,
             session: Default::default(),
             runtime: Some(HostedRuntime::Claude),
             profile: None,
@@ -1195,6 +1198,7 @@ async fn stop_cli_protects_an_attending_viewer_and_releases_the_slot() {
     let mut fixture = HostedClaude::launch_with_limit(false, 1).await;
     let h = &fixture.h;
     let spare = Request::Spawn {
+        attempt_id: None,
         session: Default::default(),
         runtime: Some(HostedRuntime::Claude),
         profile: None,
@@ -2259,6 +2263,7 @@ async fn one_hosted_session() -> (Harness, PathBuf) {
     let _: SpawnReply = call(
         &h,
         &Request::Spawn {
+            attempt_id: None,
             session: Default::default(),
             runtime: Some(HostedRuntime::Claude),
             profile: None,
@@ -2380,6 +2385,7 @@ async fn watched_sessions(aliases: &[&str]) -> (Harness, PathBuf) {
         let _: SpawnReply = call(
             &h,
             &Request::Spawn {
+                attempt_id: None,
                 session: Default::default(),
                 runtime: Some(HostedRuntime::Claude),
                 profile: None,
@@ -2833,6 +2839,7 @@ async fn a_spawn_prompt_is_an_ordinary_request_to_the_new_seat() {
     let reply: SpawnReply = call(
         &h,
         &Request::Spawn {
+            attempt_id: None,
             session: Default::default(),
             runtime: Some(HostedRuntime::Claude),
             profile: None,
@@ -2874,6 +2881,245 @@ async fn a_spawn_prompt_is_an_ordinary_request_to_the_new_seat() {
     assert!(!typed.contains("Review the open PR"), "{typed}");
     assert!(!typed.contains("[senate] new messages"), "{typed}");
 
+    h.stop().await;
+}
+
+fn tracked_spawn(project: PathBuf, prompt: Option<&str>) -> Request {
+    Request::Spawn {
+        attempt_id: Some(uuid::Uuid::now_v7().to_string()),
+        session: Default::default(),
+        runtime: Some(HostedRuntime::Claude),
+        profile: None,
+        committee: committee(),
+        alias: None,
+        cwd: project,
+        chair: false,
+        secretary: false,
+        prompt: prompt.map(str::to_owned),
+        model: Default::default(),
+    }
+}
+
+async fn disconnect_spawn_after_creation(h: &Harness, request: &Request, prompt: &str) -> String {
+    let (arrived, release) = h.server.hold_next_append(prompt);
+    let mut connection = tokio::net::UnixStream::connect(h.socket()).await.unwrap();
+    let mut line = serde_json::to_vec(request).unwrap();
+    line.push(b'\n');
+    connection.write_all(&line).await.unwrap();
+    // The session already exists and the held prompt keeps the handler from
+    // trying to write its IPC reply until this connection is gone.
+    tokio::time::timeout(TIMEOUT, arrived)
+        .await
+        .unwrap()
+        .unwrap();
+    let sessions = h.store().all_sessions().unwrap();
+    assert_eq!(sessions.len(), 1);
+    drop(connection);
+    release.send(()).unwrap();
+    sessions[0].session_id.clone()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn spawn_attempt_replays_the_same_session_after_ipc_disconnect() {
+    let (mut h, project, _) = fixture_daemon(2).await;
+    let prompt = "Starting prompt for a spawn with a lost reply";
+    let request = tracked_spawn(project, Some(prompt));
+    let session_id = disconnect_spawn_after_creation(&h, &request, prompt).await;
+
+    let retry: SpawnReply = call(&h, &request).await;
+    assert_eq!(retry.session_id, session_id);
+    assert!(retry.request.is_some());
+    h.stop().await;
+    start(&mut h).await;
+    assert_eq!(call::<SpawnReply>(&h, &request).await, retry);
+    assert_eq!(h.store().all_sessions().unwrap().len(), 1);
+    assert_eq!(
+        h.server
+            .events(committee().as_str())
+            .iter()
+            .filter(|e| e.body == prompt)
+            .count(),
+        1
+    );
+    h.stop().await;
+}
+
+async fn expect_spawn_outcome_unknown(h: &Harness, request: &Request) -> ipc::IpcError {
+    let error = ipc::request::<SpawnReply>(&h.socket(), request, TIMEOUT, TIMEOUT)
+        .await
+        .unwrap_err();
+    let ipc::ClientError::Remote(error) = error else {
+        panic!("expected a daemon error, got {error}");
+    };
+    assert_eq!(error.code, ipc::codes::SPAWN_OUTCOME_UNKNOWN);
+    assert!(error.message.contains("senate session list"));
+    error
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn spawn_attempt_stays_unknown_if_the_session_receipt_was_not_saved() {
+    let (mut h, project, _) = fixture_daemon(2).await;
+    let request = tracked_spawn(project, None);
+    let db = rusqlite::Connection::open(h.paths.state_db()).unwrap();
+    db.busy_timeout(TIMEOUT).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER fail_spawn_receipt BEFORE UPDATE ON spawn_attempts
+         WHEN json_type(NEW.record, '$.phase.Created') IS NOT NULL
+         BEGIN SELECT RAISE(ABORT, 'injected receipt failure'); END;",
+    )
+    .unwrap();
+
+    expect_spawn_outcome_unknown(&h, &request).await;
+    let sessions = h.store().all_sessions().unwrap();
+    assert_eq!(sessions.len(), 1);
+    db.execute_batch("DROP TRIGGER fail_spawn_receipt").unwrap();
+    h.stop().await;
+    start(&mut h).await;
+    expect_spawn_outcome_unknown(&h, &request).await;
+    let Request::Spawn {
+        attempt_id: Some(id),
+        cwd,
+        ..
+    } = &request
+    else {
+        unreachable!();
+    };
+    let (ok, output) = senate(
+        &h,
+        &[
+            "spawn",
+            "claude",
+            "--attempt-id",
+            id,
+            "--committee",
+            committee().as_str(),
+            "--dir",
+            cwd.to_str().unwrap(),
+        ],
+    )
+    .await;
+    assert!(
+        !ok && output.contains("Spawn outcome unknown") && output.contains(id),
+        "{output}"
+    );
+    let remaining = h.store().all_sessions().unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].session_id, sessions[0].session_id);
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn spawn_attempt_resumes_with_original_order_after_profile_is_removed() {
+    let (mut h, project, _) = fixture_daemon(2).await;
+    let missing = project.join("not-yet-created");
+    h.stop().await;
+    h.config.profiles.insert(
+        "review".into(),
+        senate_bridge::config::LaunchProfile {
+            runtime: HostedRuntime::Claude,
+            model: Default::default(),
+            note: "Review".into(),
+        },
+    );
+    start(&mut h).await;
+    let mut request = tracked_spawn(missing.clone(), None);
+    let Request::Spawn {
+        runtime, profile, ..
+    } = &mut request
+    else {
+        unreachable!();
+    };
+    *runtime = None;
+    *profile = Some(ipc::SpawnProfile {
+        name: "review".into(),
+        runtime: None,
+    });
+    let error = ipc::request::<SpawnReply>(&h.socket(), &request, TIMEOUT, TIMEOUT)
+        .await
+        .unwrap_err();
+    let ipc::ClientError::Remote(error) = error else {
+        panic!("expected a daemon error, got {error}");
+    };
+    assert_eq!(error.code, ipc::codes::BAD_REQUEST);
+    assert!(h.store().all_sessions().unwrap().is_empty());
+    h.stop().await;
+    h.config.profiles.clear();
+    std::fs::create_dir(missing).unwrap();
+    start(&mut h).await;
+
+    let resumed: SpawnReply = call(&h, &request).await;
+    assert_eq!(resumed.display_name.as_deref(), Some("review"));
+    assert_eq!(call::<SpawnReply>(&h, &request).await, resumed);
+
+    let Request::Spawn { attempt_id, .. } = &mut request else {
+        unreachable!();
+    };
+    *attempt_id = Some(uuid::Uuid::now_v7().to_string());
+    let fresh_error = ipc::request::<SpawnReply>(&h.socket(), &request, TIMEOUT, TIMEOUT)
+        .await
+        .unwrap_err();
+    assert!(
+        fresh_error.to_string().contains("unknown launch profile"),
+        "{fresh_error}"
+    );
+    let sessions = h.store().all_sessions().unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].session_id, resumed.session_id);
+    h.stop().await;
+}
+
+// Control for the lost-reply test: retrying the same untracked wire
+// request still launches a distinct session, including for older clients.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn spawn_attempt_legacy_requests_are_independent_launches() {
+    let (mut h, project, _) = fixture_daemon(2).await;
+    let prompt = "Starting prompt for a spawn with a lost reply";
+    let mut request = tracked_spawn(project, Some(prompt));
+    let Request::Spawn { attempt_id, .. } = &mut request else {
+        unreachable!();
+    };
+    *attempt_id = None;
+
+    let session_id = disconnect_spawn_after_creation(&h, &request, prompt).await;
+    let retry: SpawnReply = call(&h, &request).await;
+    assert_ne!(session_id, retry.session_id);
+    assert_eq!(h.store().all_sessions().unwrap().len(), 2);
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn spawn_attempt_expiry_prunes_the_receipt_and_refuses_reuse() {
+    let (mut h, project, _) = fixture_daemon(2).await;
+    let mut request = tracked_spawn(project, None);
+    let Request::Spawn { attempt_id, .. } = &mut request else {
+        unreachable!();
+    };
+    let days_ago = chrono::Utc::now().timestamp() - 8 * 24 * 60 * 60;
+    let timestamp = uuid::Timestamp::from_unix(uuid::NoContext, days_ago.try_into().unwrap(), 0);
+    let id = uuid::Uuid::new_v7(timestamp).to_string();
+    *attempt_id = Some(id.clone());
+
+    let db = rusqlite::Connection::open(h.paths.state_db()).unwrap();
+    db.busy_timeout(TIMEOUT).unwrap();
+    let expires = (days_ago + 7 * 24 * 60 * 60) * 1000;
+    db.execute(
+        "INSERT INTO spawn_attempts (id, record, expires) VALUES (?1, '{}', ?2)",
+        rusqlite::params![id, expires],
+    )
+    .unwrap();
+    h.store()
+        .prune(Duration::from_secs(3600), &h.paths)
+        .unwrap();
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM spawn_attempts", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+
+    let error = expect_spawn_outcome_unknown(&h, &request).await;
+    assert!(error.message.contains("retry window has expired"));
+    assert!(h.store().all_sessions().unwrap().is_empty());
     h.stop().await;
 }
 
@@ -2989,6 +3235,7 @@ async fn joining_a_new_committee_opens_it_so_a_spawn_works() {
     let (h, project, _typed) = fixture_daemon(1).await;
     let fresh = senate_core::CommitteeId::new("fresh-work").unwrap();
     let spawn = Request::Spawn {
+        attempt_id: None,
         session: Default::default(),
         runtime: Some(HostedRuntime::Claude),
         profile: None,
@@ -3430,6 +3677,7 @@ async fn a_hosted_agy_names_its_conversation_through_its_first_hook_and_resumes_
     let refused = ipc::request::<SpawnReply>(
         &h.socket(),
         &Request::Spawn {
+            attempt_id: None,
             session: Default::default(),
             runtime: Some(HostedRuntime::Agy),
             profile: None,
@@ -3456,6 +3704,7 @@ async fn a_hosted_agy_names_its_conversation_through_its_first_hook_and_resumes_
     let seat: SpawnReply = call(
         &h,
         &Request::Spawn {
+            attempt_id: None,
             session: Default::default(),
             runtime: Some(HostedRuntime::Agy),
             profile: None,
@@ -3565,6 +3814,7 @@ async fn a_hosted_agy_that_never_names_its_conversation_is_rolled_back() {
     let error = ipc::request::<SpawnReply>(
         &h.socket(),
         &Request::Spawn {
+            attempt_id: None,
             session: Default::default(),
             runtime: Some(HostedRuntime::Agy),
             profile: None,
@@ -3675,6 +3925,7 @@ async fn an_idle_hosted_agy_is_nudged_once_per_turn_and_never_over_a_person_typi
     let seat: SpawnReply = call(
         &h,
         &Request::Spawn {
+            attempt_id: None,
             session: Default::default(),
             runtime: Some(HostedRuntime::Agy),
             profile: None,
@@ -3861,6 +4112,7 @@ async fn a_codex_spawn_without_an_app_server_says_the_daemon_is_not_running() {
     let project = h.workdir("codex-down", None);
     start(&mut h).await;
     let request = Request::Spawn {
+        attempt_id: None,
         session: Default::default(),
         runtime: Some(HostedRuntime::Codex),
         profile: None,
@@ -3899,6 +4151,7 @@ async fn replace_hands_the_seat_to_a_fresh_session_and_resumes_after_a_failure()
     let old: SpawnReply = call(
         &h,
         &Request::Spawn {
+            attempt_id: None,
             session: Default::default(),
             runtime: Some(HostedRuntime::Claude),
             profile: None,
@@ -4055,6 +4308,7 @@ async fn replace_stops_the_unconnected_session_and_preserves_the_old_seat() {
     let old: SpawnReply = call(
         &h,
         &Request::Spawn {
+            attempt_id: None,
             session: Default::default(),
             runtime: Some(HostedRuntime::Claude),
             profile: None,
@@ -4177,6 +4431,7 @@ async fn replace_refuses_an_unknown_seat_and_hands_nothing_over_when_the_spawn_f
     let old: SpawnReply = call(
         &h,
         &Request::Spawn {
+            attempt_id: None,
             session: Default::default(),
             runtime: Some(HostedRuntime::Claude),
             profile: None,
@@ -4511,6 +4766,7 @@ async fn shutdown_pauses_within_its_cap_and_start_resumes_only_the_paused() {
         let _: SpawnReply = call(
             &h,
             &Request::Spawn {
+                attempt_id: None,
                 session: Default::default(),
                 runtime: Some(HostedRuntime::Claude),
                 profile: None,

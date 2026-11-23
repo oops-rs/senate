@@ -447,6 +447,9 @@ pub struct SetChairParams {
 #[schemars(crate = "rmcp::schemars", extend("type" = "object"))]
 enum SpawnParams {
     Spawn {
+        /// Reuse the UUIDv7 with the same arguments when retrying within seven days.
+        /// Omit for a new launch.
+        attempt_id: Option<String>,
         /// `claude`, `codex` or `agy`. Required without a profile.
         runtime: Option<HostedRuntime>,
         /// A name returned by launch_profiles. Supplies the model and effort.
@@ -2350,6 +2353,7 @@ impl SenateMcp {
             .with_call_timeout(self.call_timeout.max(crate::host::REQUEST_TIMEOUT));
         let request = match params.0 {
             SpawnParams::Spawn {
+                attempt_id,
                 runtime,
                 profile,
                 committee,
@@ -2364,6 +2368,7 @@ impl SenateMcp {
                     None => (runtime, None),
                 };
                 Request::Spawn {
+                    attempt_id: Some(attempt_id.unwrap_or_else(ipc::new_spawn_attempt_id)),
                     session,
                     runtime,
                     profile,
@@ -2394,10 +2399,12 @@ impl SenateMcp {
                 return serde_json::to_string_pretty(&reply).map_err(|error| error.to_string());
             }
         };
-        let reply: SpawnReply = client
-            .call(&request)
-            .await
-            .map_err(|error| describe(error, self.locale))?;
+        let reply: SpawnReply = if matches!(request, Request::Spawn { .. }) {
+            ipc::request_spawn(&client.daemon_socket, &request, client.call_timeout).await
+        } else {
+            client.call(&request).await
+        }
+        .map_err(|error| describe(error, self.locale))?;
         serde_json::to_string_pretty(&reply).map_err(|error| error.to_string())
     }
 
