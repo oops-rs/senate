@@ -744,12 +744,14 @@ pub async fn start_with_host_binary(
     };
     let (watch, _) = broadcast::channel(WATCH_CAPACITY);
     let app_clients = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut remote_notifier = None;
     let notifications = match desktop {
         Some(d)
             if NotifyConfig::load(&paths.config())
                 .map_err(anyhow::Error::msg)?
                 .desktop =>
         {
+            remote_notifier = Some(d.notifier.clone());
             Some(Notifications::spawn(
                 d.notifier,
                 d.window,
@@ -802,6 +804,13 @@ pub async fn start_with_host_binary(
         tokio::spawn(serve_ipc(front.clone(), listener, rx.clone())),
         tokio::spawn(hosted_approvals::observe(shared, observed, rx.clone())),
     ];
+    if let Some(notifier) = remote_notifier {
+        tasks.push(tokio::spawn(crate::remote::authority::notify_history(
+            paths.clone(),
+            notifier,
+            rx.clone(),
+        )));
+    }
     if let Some((service, listener)) = remote {
         let front = front.clone();
         let shutdown = rx.clone();

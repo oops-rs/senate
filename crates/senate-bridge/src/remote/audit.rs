@@ -25,6 +25,7 @@ const MAX_ROUTINE_KEYS: usize = 2048;
 pub(super) struct Audit {
     routine: Sink,
     critical: Sink,
+    attach: Sink,
     recent: Mutex<BTreeMap<(String, &'static str), Instant>>,
     next_rejection: AtomicI64,
 }
@@ -72,6 +73,7 @@ impl Audit {
         Ok(Self {
             routine: Sink::open(dir.join("audit.jsonl"), FILE_LIMIT)?,
             critical: Sink::open(dir.join("audit-important.jsonl"), CRITICAL_FILE_LIMIT)?,
+            attach: Sink::open(dir.join("audit-attach.jsonl"), CRITICAL_FILE_LIMIT)?,
             recent: Mutex::new(BTreeMap::new()),
             next_rejection: AtomicI64::new(0),
         })
@@ -104,12 +106,14 @@ impl Audit {
         peer: Option<SocketAddr>,
         session: Option<&str>,
     ) {
-        let sink = if matches!(action, "attach" | "pair" | "revoke") {
+        let sink = if matches!(action, "pair" | "revoke") {
             &self.critical
-        } else if self.allow_routine(&device.id, action) {
-            &self.routine
-        } else {
+        } else if !self.allow_routine(&device.id, action) {
             return;
+        } else if action == "attach" {
+            &self.attach
+        } else {
+            &self.routine
         };
         let session = session.filter(|value| value.len() <= 128);
         let entry = json!({
@@ -184,6 +188,7 @@ mod tests {
                 queue_warning: AtomicBool::new(false),
             },
             critical: Sink::open(dir.path().join("critical"), CRITICAL_FILE_LIMIT)?,
+            attach: Sink::open(dir.path().join("attach"), CRITICAL_FILE_LIMIT)?,
             recent: Mutex::new(BTreeMap::new()),
             next_rejection: AtomicI64::new(0),
         };
@@ -201,6 +206,7 @@ mod tests {
     fn routine_flood_is_sampled_and_kept_out_of_important_records() -> anyhow::Result<()> {
         let (routine, routine_records) = mpsc::sync_channel(2);
         let (critical, critical_records) = mpsc::sync_channel(2);
+        let (attach, attach_records) = mpsc::sync_channel(2);
         let audit = Audit {
             routine: Sink {
                 sender: routine,
@@ -210,26 +216,35 @@ mod tests {
                 sender: critical,
                 queue_warning: AtomicBool::new(false),
             },
+            attach: Sink {
+                sender: attach,
+                queue_warning: AtomicBool::new(false),
+            },
             recent: Mutex::new(BTreeMap::new()),
             next_rejection: AtomicI64::new(0),
         };
         let device = Device {
             id: "a".repeat(64),
-            grant: "b".repeat(64),
+
             name: "device".into(),
             scopes: super::super::Scopes {
                 watch: true,
                 attach: true,
             },
             expires: 0,
+            deadline: 0,
         };
         for _ in 0..128 {
             audit.record(&device, "watch", None, None);
         }
-        audit.record(&device, "attach", None, None);
+        for _ in 0..128 {
+            audit.record(&device, "attach", None, None);
+        }
+        audit.record(&device, "revoke", None, None);
         assert_eq!(routine_records.try_iter().count(), 1);
+        assert_eq!(attach_records.try_iter().count(), 1);
         let important = critical_records.try_recv()?;
-        assert_eq!(important["action"], "attach");
+        assert_eq!(important["action"], "revoke");
         Ok(())
     }
 

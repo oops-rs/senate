@@ -58,6 +58,7 @@ fi
 say "building Senate $version (Release)"
 xcodegen generate --quiet
 team_flags=()
+team=""
 if [[ "$identity" != "-" ]]; then
   # Resolve the name to one certificate's hash: Xcode maps a bare
   # "Apple Development" to the legacy "Mac Development" certificate, which
@@ -68,6 +69,23 @@ if [[ "$identity" != "-" ]]; then
   identity="$(awk '{print $2}' <<<"$match")"
   team_flags=(DEVELOPMENT_TEAM="$team")
 fi
+say "building the separate remote administrator artifact and CLI"
+repo="$app_dir/../.."
+helper_timestamp=--timestamp=none
+[[ $notarize == 1 ]] && helper_timestamp=--timestamp
+SENATE_REMOTE_ADMIN_SIGN_IDENTITY="$identity" SENATE_REMOTE_ADMIN_TIMESTAMP="$helper_timestamp" \
+  "$repo/deploy/build-remote-admin.sh" "$app_dir/$out"
+helper_sha="$(awk 'NR == 1 { print $1 }' "$out/senate-remote-admin.sha256")"
+[[ "$helper_sha" =~ ^[0-9a-f]{64}$ ]] || die "invalid administrator artifact checksum"
+export SENATE_REMOTE_ADMIN_SHA256="$helper_sha"
+if [[ -n "$team" ]]; then
+  export SENATE_REMOTE_ADMIN_TEAM_ID="$team"
+else
+  unset SENATE_REMOTE_ADMIN_TEAM_ID
+fi
+cargo build --manifest-path "$repo/Cargo.toml" --locked --release --target-dir "$repo/target" -p senate-bridge --bin senate
+cp "$repo/target/release/senate" "$out/senate"
+
 xcodebuild -project Senate.xcodeproj -scheme Senate -configuration Release \
   -derivedDataPath build -archivePath "$archive" archive \
   CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="$identity" ${team_flags[@]+"${team_flags[@]}"} \
@@ -111,9 +129,6 @@ if [[ $notarize == 1 ]]; then
   xcrun stapler staple "$dmg"
   spctl --assess --type open --context context:primary-signature --verbose=2 "$dmg"
 fi
-
-say "building the separate remote administrator artifact"
-"$app_dir/../../deploy/build-remote-admin.sh" "$app_dir/$out"
 
 say "done: $app, $dmg"
 if [[ $notarize == 0 ]]; then

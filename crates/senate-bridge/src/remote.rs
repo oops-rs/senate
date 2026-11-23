@@ -25,7 +25,7 @@ use tokio::sync::{oneshot, watch};
 use crate::paths::Paths;
 use senate_core::Name;
 
-const VERSION: u8 = 3;
+const VERSION: u8 = 4;
 use authority::MAX_VALID_SECS;
 const HANDSHAKE: Duration = Duration::from_secs(6);
 const OFFER_TTL: Duration = Duration::from_secs(authority::OFFER_SECONDS);
@@ -93,7 +93,7 @@ pub struct Row {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 enum Reply {
-    Compare { device: Device },
+    Compare { device: Device, proof: String },
     Enrolled { device: Device },
     Rows { rows: Vec<Row> },
     Stream,
@@ -141,16 +141,34 @@ fn binding(exporter: [u8; 32]) -> String {
     hex::encode(Sha256::digest(exporter))
 }
 
-fn verify_enrollment_proof(device: &Device, expected: &str, wall: i64) -> anyhow::Result<()> {
+fn verify_enrollment_proof(
+    device: &Device,
+    proof: &str,
+    expected: &str,
+    wall: i64,
+) -> anyhow::Result<()> {
     ensure!(
         device.expires > wall && device.expires <= wall + MAX_VALID_SECS as i64,
         "enrollment expiry is out of bounds"
     );
     ensure!(
-        bool::from(device.grant.as_bytes().ct_eq(expected.as_bytes())),
+        bool::from(proof.as_bytes().ct_eq(expected.as_bytes())),
         "enrollment TLS binding did not match this connection"
     );
     Ok(())
+}
+
+fn verify_enrollment_identity(proposed: &Device, id: &str, name: &Name) -> anyhow::Result<()> {
+    ensure!(
+        proposed.id == id && proposed.name == name.as_str(),
+        "enrollment identity changed"
+    );
+    Ok(())
+}
+
+fn approved_candidate(candidate: &Candidate, devices: &BTreeMap<String, Device>) -> Option<Device> {
+    (candidate.prepared && devices.get(&candidate.device.id) == Some(&candidate.device))
+        .then(|| candidate.device.clone())
 }
 
 async fn offer_expired((deadline, wall): (tokio::time::Instant, i64)) {
@@ -436,6 +454,12 @@ struct Candidate {
     accepted: oneshot::Sender<Device>,
 }
 
+struct PendingEnrollment {
+    reply: Reply,
+    deadline: (tokio::time::Instant, i64),
+    accepted: oneshot::Receiver<Device>,
+}
+
 #[derive(Default)]
 struct State {
     offer: Option<Offer>,
@@ -586,7 +610,6 @@ impl Service {
                 let request = authority::encode(authority::Enrollment {
                     policy: self.policy.clone(),
                     device: candidate.device.clone(),
-                    deadline: offer.expires_wall,
                 })?;
                 candidate.prepared = true;
                 Ok(serde_json::Value::String(request))
@@ -639,10 +662,7 @@ impl Service {
             .as_ref()
             .filter(|offer| offer.active())
             .and_then(|offer| offer.candidate.as_ref())
-            .filter(|candidate| candidate.prepared)
-            .map(|candidate| &candidate.device)
-            .filter(|device| state.devices.get(&device.id) == Some(device))
-            .cloned();
+            .and_then(|candidate| approved_candidate(candidate, &state.devices));
         if let Some(device) = accepted
             && let Some(candidate) = state.offer.take().and_then(|offer| offer.candidate)
         {
@@ -660,11 +680,7 @@ impl Service {
         name: Name,
         peer: SocketAddr,
         tls: &rustls::ServerConnection,
-    ) -> anyhow::Result<(
-        Device,
-        (tokio::time::Instant, i64),
-        oneshot::Receiver<Device>,
-    )> {
+    ) -> anyhow::Result<PendingEnrollment> {
         let mut state = locked(&self.state);
         ensure!(!state.devices.contains_key(&id), "pairing unavailable");
         let offer = state
@@ -676,17 +692,17 @@ impl Service {
             bool::from(offer.secret.as_bytes().ct_eq(secret.as_bytes())),
             "pairing unavailable"
         );
-        let mut device = Device {
+        let device = Device {
             id,
             name: name.to_string(),
             scopes: offer.scopes,
             expires: now() + offer.valid_secs as i64,
-            grant: String::new(),
+            deadline: offer.expires_wall,
         };
         let context = comparison_context(secret, self.at, &self.policy.listener.host_pin, &device)?;
-        device.grant = binding(tls.export_keying_material(
+        let proof = binding(tls.export_keying_material(
             [0; 32],
-            b"EXPORTER-Senate-Pair-v3",
+            b"EXPORTER-Senate-Pair-v4",
             Some(&context),
         )?);
         let (accepted, result) = oneshot::channel();
@@ -696,12 +712,19 @@ impl Service {
             prepared: false,
             accepted,
         });
-        Ok((device, (offer.expires, offer.expires_wall), result))
+        Ok(PendingEnrollment {
+            reply: Reply::Compare { device, proof },
+            deadline: (offer.expires, offer.expires_wall),
+            accepted: result,
+        })
     }
 
-    async fn revoked(&self, id: &str, grant: &str, mut change: watch::Receiver<()>) {
+    async fn revoked(&self, approved: &Device, mut change: watch::Receiver<()>) {
         loop {
-            let Some(device) = self.device(id).filter(|device| device.grant == grant) else {
+            let Some(device) = self
+                .device(&approved.id)
+                .filter(|device| device == approved)
+            else {
                 return;
             };
             let left = std::time::Duration::from_secs(
@@ -882,22 +905,23 @@ impl Client {
                     true,
                 )
                 .await?;
-            let Reply::Compare { device: proposed } = reply else {
+            let Reply::Compare {
+                device: proposed,
+                proof,
+            } = reply
+            else {
                 bail!("unexpected pairing reply")
             };
             let own = fingerprint(&URL_SAFE_NO_PAD.decode(&machine.identity.cert)?.into())?;
             let host = fingerprint(&URL_SAFE_NO_PAD.decode(&machine.host)?.into())?;
-            ensure!(
-                proposed.id == own && proposed.name == device.as_str(),
-                "enrollment identity changed"
-            );
+            verify_enrollment_identity(&proposed, &own, &device)?;
             let context = comparison_context(&offer.secret, machine.at, &host, &proposed)?;
             let expected = binding(stream.get_ref().get_ref().1.export_keying_material(
                 [0; 32],
-                b"EXPORTER-Senate-Pair-v3",
+                b"EXPORTER-Senate-Pair-v4",
                 Some(&context),
             )?);
-            verify_enrollment_proof(&proposed, &expected, now())?;
+            verify_enrollment_proof(&proposed, &proof, &expected, now())?;
             let code = authority::grouped(&authority::comparison(&host, &proposed)?);
             let expiry = chrono::DateTime::from_timestamp(proposed.expires, 0)
                 .context("invalid grant expiry")?;
@@ -921,6 +945,12 @@ impl Client {
                 device == proposed && device.expires > now(),
                 "the enrollment grant does not match this device and connection"
             );
+            // Before committing the local machine, verify that the enrolled
+            // key can actually authenticate on the operational endpoint.
+            client
+                .list()
+                .await
+                .context("the paired endpoint did not accept the enrolled key")?;
             save_new(&path, &machine)?;
             Ok(device)
         }
@@ -1043,10 +1073,13 @@ impl Service {
                 bail!("enrollment connection only")
             };
             match self.enroll(id, &secret, name, peer, wire.get_ref().get_ref().1) {
-                Ok((device, deadline, accepted)) => {
+                Ok(PendingEnrollment {
+                    reply,
+                    deadline,
+                    accepted,
+                }) => {
                     drop(admission);
-                    tokio::time::timeout(HANDSHAKE, send(&mut wire, &Reply::Compare { device }))
-                        .await??;
+                    tokio::time::timeout(HANDSHAKE, send(&mut wire, &reply)).await??;
                     tokio::select! {
                         _ = offer_expired(deadline) => {}
                         _ = wire.read_u8() => {}
@@ -1078,11 +1111,10 @@ impl Service {
             .device(id.clone())
             .context("remote request budget exhausted")?;
         drop(admission);
-        let grant = device.grant.clone();
         self.audit.record(&device, "connect", Some(peer), None);
         tokio::select! {
             biased;
-            _ = self.revoked(&id, &grant, changes) => {},
+            _ = self.revoked(&device, changes) => {},
             result = self.action(wire, front, &device, peer, request) => {
                 self.audit.record(&device, "disconnect", Some(peer), None);
                 return result;
@@ -1170,20 +1202,54 @@ mod tests {
     use super::*;
 
     #[test]
+    fn client_checks_identity_and_daemon_requires_the_exact_pending_grant() -> anyhow::Result<()> {
+        let device = Device {
+            id: "a".repeat(64),
+            name: "test-client".into(),
+            scopes: Scopes {
+                watch: true,
+                attach: false,
+            },
+            expires: now() + 60,
+            deadline: now() + 30,
+        };
+        let name: Name = "test-client".parse()?;
+        verify_enrollment_identity(&device, &device.id, &name)?;
+        assert!(verify_enrollment_identity(&device, &"b".repeat(64), &name).is_err());
+        assert!(verify_enrollment_identity(&device, &device.id, &"other".parse()?).is_err());
+        let candidate = Candidate {
+            device: device.clone(),
+            peer: "127.0.0.1:4000".parse()?,
+            prepared: true,
+            accepted: oneshot::channel().0,
+        };
+        let mut devices = BTreeMap::from([(device.id.clone(), device.clone())]);
+        assert_eq!(
+            approved_candidate(&candidate, &devices),
+            Some(device.clone())
+        );
+        if let Some(altered) = devices.get_mut(&device.id) {
+            altered.scopes.attach = true;
+        }
+        assert_eq!(approved_candidate(&candidate, &devices), None);
+        Ok(())
+    }
+
+    #[test]
     fn client_rejects_a_mismatched_tls_exporter_proof() -> anyhow::Result<()> {
         let wall = now();
         let device = Device {
             id: "a".repeat(64),
-            grant: "b".repeat(64),
             name: "test-client".into(),
             scopes: Scopes {
                 watch: true,
                 attach: false,
             },
             expires: wall + 60,
+            deadline: wall + 30,
         };
-        verify_enrollment_proof(&device, &"b".repeat(64), wall)?;
-        assert!(verify_enrollment_proof(&device, &"c".repeat(64), wall).is_err());
+        verify_enrollment_proof(&device, &"b".repeat(64), &"b".repeat(64), wall)?;
+        assert!(verify_enrollment_proof(&device, &"b".repeat(64), &"c".repeat(64), wall).is_err());
         let context =
             comparison_context("offer", "127.0.0.1:4000".parse()?, &"d".repeat(64), &device)?;
         let mut altered = device;
@@ -1226,19 +1292,19 @@ mod tests {
     #[test]
     fn the_wire_has_no_actor_paths_or_disclosure_operations() {
         for request in [
-            r#"{"version":3,"call":{"op":"list","path":"/tmp/socket"}}"#,
-            r#"{"version":3,"call":{"op":"attach","session":"abc","actor":"person"}}"#,
-            r#"{"version":3,"call":{"op":"watch","session":"abc","selector":{"pid":1}}}"#,
-            r#"{"version":3,"call":{"op":"timeline","session":"abc"}}"#,
-            r#"{"version":3,"call":{"op":"approve","session":"abc"}}"#,
-            r#"{"version":3,"call":{"op":"stop","session":"abc"}}"#,
+            r#"{"version":4,"call":{"op":"list","path":"/tmp/socket"}}"#,
+            r#"{"version":4,"call":{"op":"attach","session":"abc","actor":"person"}}"#,
+            r#"{"version":4,"call":{"op":"watch","session":"abc","selector":{"pid":1}}}"#,
+            r#"{"version":4,"call":{"op":"timeline","session":"abc"}}"#,
+            r#"{"version":4,"call":{"op":"approve","session":"abc"}}"#,
+            r#"{"version":4,"call":{"op":"stop","session":"abc"}}"#,
         ] {
             assert!(
                 serde_json::from_str::<Envelope>(request).is_err(),
                 "{request}"
             );
         }
-        assert!(serde_json::from_str::<Envelope>(r#"{"version":3,"call":{"op":"list"}}"#).is_ok());
+        assert!(serde_json::from_str::<Envelope>(r#"{"version":4,"call":{"op":"list"}}"#).is_ok());
     }
 }
 

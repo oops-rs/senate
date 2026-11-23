@@ -16,6 +16,13 @@ source=$(cd "$build/release" && pwd)/senate-remote-admin
 if [ "$source" != "$out/senate-remote-admin" ]; then
     cp "$source" "$out/senate-remote-admin"
 fi
+if [ -n "${SENATE_REMOTE_ADMIN_SIGN_IDENTITY:-}" ] &&
+   [ "$SENATE_REMOTE_ADMIN_SIGN_IDENTITY" != "-" ]; then
+    /usr/bin/codesign --force --options runtime --identifier dev.senate.remote-admin \
+        --sign "$SENATE_REMOTE_ADMIN_SIGN_IDENTITY" "${SENATE_REMOTE_ADMIN_TIMESTAMP:---timestamp=none}" \
+        "$out/senate-remote-admin"
+    /usr/bin/codesign --verify --strict "$out/senate-remote-admin"
+fi
 cd "$out"
 if command -v shasum >/dev/null 2>&1; then
     shasum -a 256 senate-remote-admin > senate-remote-admin.sha256

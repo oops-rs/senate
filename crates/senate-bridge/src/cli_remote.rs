@@ -108,6 +108,18 @@ pub(super) fn run(command: Command) -> anyhow::Result<()> {
                 "Source SHA-256 {digest}. Use the checksum from a trusted release channel as your reference."
             );
             println!("Run these commands in your native target terminal:");
+            if cfg!(target_os = "macos") {
+                println!(
+                    "sudo -k /usr/bin/stat -f '%N %Su %Sp' / /usr /usr/local /usr/local/libexec"
+                );
+            } else {
+                println!(
+                    "sudo -k /usr/bin/stat -c '%n %U %A' / /usr /usr/local /usr/local/libexec"
+                );
+            }
+            println!(
+                "Check that every existing directory is root-owned and has no group or other write access."
+            );
             println!(
                 "sudo -k /usr/bin/install -d -o root -m 0755 /usr/local/libexec {}",
                 remote::authority::SYSTEM_DIR
@@ -127,8 +139,37 @@ pub(super) fn run(command: Command) -> anyhow::Result<()> {
             println!(
                 r#"sudo -k /usr/bin/shasum -a 256 "${{stage:?create the root staging directory first}}/senate-remote-admin""#
             );
+            if cfg!(target_os = "macos")
+                && let Some(team) = option_env!("SENATE_REMOTE_ADMIN_TEAM_ID")
+            {
+                ensure!(
+                    team.len() == 10
+                        && team
+                            .bytes()
+                            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit()),
+                    "invalid helper signing team"
+                );
+                println!(
+                    r#"sudo -k /usr/bin/codesign --verify --strict -R '=anchor apple generic and identifier "dev.senate.remote-admin" and certificate leaf[subject.OU] = "{team}"' "${{stage:?create the root staging directory first}}/senate-remote-admin""#
+                );
+            }
             println!(
                 "Stop here unless the staged SHA-256 matches the independently obtained reference."
+            );
+            println!(
+                r#"sudo -k /usr/bin/install -m 0440 /dev/null "${{stage:?create the root staging directory first}}/sudoers""#
+            );
+            println!(
+                r#"printf '%s\n' '{}' | sudo -k /bin/sh -c 'exec /bin/cat > "$1"' sh "${{stage:?create the root staging directory first}}/sudoers""#,
+                remote::authority::SUDOERS_RULE
+            );
+            println!(
+                r#"sudo -k /usr/sbin/visudo -cf "${{stage:?create the root staging directory first}}/sudoers" && sudo -k /bin/mv -f "$stage/sudoers" {}"#,
+                remote::authority::SUDOERS_PATH
+            );
+            println!("sudo -k /usr/sbin/visudo -c");
+            println!(
+                "Verify the parsed configuration lists /etc/sudoers.d/99-senate-remote-admin before activating the helper."
             );
             println!(
                 r#"sudo -k /bin/mv -f "${{stage:?create the root staging directory first}}/senate-remote-admin" {}"#,
@@ -229,7 +270,7 @@ pub(super) fn run(command: Command) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn print_admin(action: &str, argument: Option<&str>) -> anyhow::Result<()> {
+fn validate_admin_argument(argument: Option<&str>) -> anyhow::Result<()> {
     if let Some(argument) = argument {
         ensure!(
             !argument.is_empty()
@@ -240,6 +281,11 @@ fn print_admin(action: &str, argument: Option<&str>) -> anyhow::Result<()> {
             "invalid administrator request argument"
         );
     }
+    Ok(())
+}
+
+fn print_admin(action: &str, argument: Option<&str>) -> anyhow::Result<()> {
+    validate_admin_argument(argument)?;
     let helper = remote::authority::HELPER;
     print!("sudo -k {helper} {action}");
     if let Some(argument) = argument {
@@ -361,4 +407,23 @@ pub(super) async fn attach(
     }
     super::require_attach_terminal()?;
     host::attach_stream(client.stream(tile.key, true).await?, &tile.title, None).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn administrator_argument_has_a_bounded_shell_safe_alphabet() -> anyhow::Result<()> {
+        validate_admin_argument(None)?;
+        validate_admin_argument(Some("Ab9_-"))?;
+        for invalid in ["", "has space", "has\nnewline", "'", "a;b", "=padding"] {
+            assert!(validate_admin_argument(Some(invalid)).is_err());
+        }
+        assert!(
+            validate_admin_argument(Some(&"a".repeat(remote::authority::REQUEST_LIMIT + 1)))
+                .is_err()
+        );
+        Ok(())
+    }
 }

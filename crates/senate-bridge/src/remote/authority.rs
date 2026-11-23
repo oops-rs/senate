@@ -41,3 +41,65 @@ pub(crate) fn installation_checks() -> Vec<crate::doctor::Check> {
     };
     vec![helper, authority]
 }
+
+/// Read the protected history even while the remote listener is disabled.
+pub(crate) fn history(paths: &crate::Paths) -> anyhow::Result<Vec<History>> {
+    Ok(super::authority_for(paths)?.read()?.history)
+}
+
+pub(crate) fn history_line(entry: &History) -> Option<String> {
+    let action = match entry.action.as_str() {
+        "enable" => "The remote listener was enabled",
+        "disable" => "The remote listener was disabled",
+        "enroll" => "A remote device was enrolled",
+        "revoke" => "A remote device was revoked",
+        "enrollment_rejected" => "A remote enrollment was rejected",
+        _ => return None,
+    };
+    let time = chrono::DateTime::from_timestamp(entry.at, 0)?;
+    Some(format!("{action} at {time}."))
+}
+
+pub(crate) fn latest_history(paths: &crate::Paths) -> Option<String> {
+    history(paths).ok()?.iter().rev().find_map(history_line)
+}
+
+pub(crate) async fn notify_history(
+    paths: crate::Paths,
+    notifier: std::sync::Arc<dyn crate::notify::Notifier>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    let cursor = paths.home().join("remote-history-seen");
+    let mut seen: u64 = super::read(&cursor).unwrap_or_default();
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => break,
+            _ = tick.tick() => {
+                let Ok(mut entries) = history(&paths) else { continue };
+                entries.sort_by_key(|entry| entry.generation);
+                let previous = seen;
+                for entry in entries {
+                    if entry.generation <= seen {
+                        continue;
+                    }
+                    if let Some(line) = history_line(&entry) {
+                        let notifier = notifier.clone();
+                        match tokio::task::spawn_blocking(move || notifier.post("Senate remote administration", &line)).await {
+                            Ok(Ok(())) => {}
+                            _ => {
+                                tracing::warn!("could not post a remote administration notification");
+                                break;
+                            }
+                        }
+                    }
+                    seen = entry.generation;
+                }
+                if seen != previous && let Ok(file) = super::durable(&cursor, &seen) {
+                    let _ = file.persist(&cursor);
+                }
+            }
+        }
+    }
+}
