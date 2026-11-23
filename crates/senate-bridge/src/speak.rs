@@ -336,13 +336,35 @@ fn one_status(event: &Event, locale: Locale) -> Option<String> {
     Some(line)
 }
 
-/// `senate thread`: each event with its byline, time and body.
+/// `senate thread`: each event with its byline, time and body, the body as
+/// written (what is piped).
 pub fn render_thread(reply: &ThreadReply, locale: Locale) -> String {
+    render_thread_with(reply, locale, &|body| body.to_owned(), format::Clock::Utc)
+}
+
+/// [`render_thread`] with each body laid out by `body` first (Markdown for a
+/// terminal: [`crate::format::terminal_markdown`]) and times on `clock`
+/// (its zone named once, in the first line).
+pub fn render_thread_with(
+    reply: &ThreadReply,
+    locale: Locale,
+    lay_out: &dyn Fn(&str) -> String,
+    clock: format::Clock,
+) -> String {
     let n = reply.events.len();
-    let mut out = match locale {
-        Locale::Zh => format!("{} 的 thread {}，共 {n} 条：", reply.committee, reply.root),
-        Locale::En => format!(
+    let zone = clock.zone();
+    let mut out = match (locale, &zone) {
+        (Locale::Zh, None) => format!("{} 的 thread {}，共 {n} 条：", reply.committee, reply.root),
+        (Locale::Zh, Some(zone)) => format!(
+            "{} 的 thread {}，共 {n} 条（本地时间，{zone}）：",
+            reply.committee, reply.root
+        ),
+        (Locale::En, None) => format!(
             "Thread {} on {}, {n} event(s):",
+            reply.root, reply.committee
+        ),
+        (Locale::En, Some(zone)) => format!(
+            "Thread {} on {}, {n} event(s), local times ({zone}):",
             reply.root, reply.committee
         ),
     };
@@ -351,7 +373,7 @@ pub fn render_thread(reply: &ThreadReply, locale: Locale) -> String {
             "\n\n[seq {}] {} · {} · {}",
             e.seq,
             format::author(e, locale),
-            e.ts.format("%Y-%m-%d %H:%M UTC"),
+            clock.stamp(e.ts),
             e.kind
         );
         if !e.to.is_empty() && e.kind != Kind::Status {
@@ -370,7 +392,7 @@ pub fn render_thread(reply: &ThreadReply, locale: Locale) -> String {
         let text = if body.is_empty() {
             one_status(e, locale).unwrap_or_default()
         } else {
-            body.to_string()
+            lay_out(body)
         };
         for line in text.lines() {
             out.push_str("\n  ");
@@ -408,12 +430,29 @@ pub struct Sent {
     pub locale: Locale,
     /// The person's own handle.
     pub me: Name,
+    /// The committee is not the one this directory binds: the commands
+    /// suggested name it with `--committee`.
+    pub elsewhere: bool,
 }
 
 impl Sent {
     /// What was sent, to whom it resolved, and the thread seq.
     pub fn render(&self, waiting: bool) -> String {
-        render_sent(self.kind, &self.wrote, &self.posted, waiting, self.locale)
+        let mut out = render_sent(self.kind, &self.wrote, &self.posted, waiting, self.locale);
+        if self.elsewhere {
+            let seq = self.posted.seq;
+            let flag = format!(" --committee {}", self.posted.committee);
+            out = out
+                .replace(
+                    &format!("`senate thread {seq}`"),
+                    &format!("`senate thread {seq}{flag}`"),
+                )
+                .replace(
+                    &format!("`senate reply {seq} "),
+                    &format!("`senate reply{flag} {seq} "),
+                );
+        }
+        out
     }
 }
 
@@ -472,6 +511,7 @@ pub async fn send(
         posted,
         locale,
         me,
+        elsewhere: false,
     })
 }
 
@@ -792,6 +832,52 @@ mod tests {
         );
         assert!(zh.contains("\n  状态 processing"), "{zh}");
         assert!(zh.contains("[speaker::claude] 接管 · "), "{zh}");
+
+        // On a terminal the bodies are laid out as Markdown; piped, the text
+        // above stays as it was written.
+        let md = ThreadReply {
+            events: vec![
+                NewEvent::new(
+                    reply.committee.clone(),
+                    Kind::Question,
+                    Address::senior(&senate_core::Name::new("alice").unwrap()),
+                    "Is the **retry** limit in `config.rs`?\n\n- one\n- two",
+                )
+                .into_event(Seq(7), at),
+            ],
+            ..reply.clone()
+        };
+        assert!(
+            render_thread(&md, Locale::En).contains("\n  Is the **retry** limit in `config.rs`?")
+        );
+        let plain = senate_markdown::Terminal::new(40, senate_markdown::Color::None);
+        let laid = render_thread_with(
+            &md,
+            Locale::En,
+            &|body| crate::format::markdown_for(plain, body),
+            format::Clock::Utc,
+        );
+        assert!(
+            laid.contains("\n  Is the retry limit in config.rs?"),
+            "{laid}"
+        );
+        assert!(
+            laid.contains("\n  - one\n  - two") || laid.contains("\n  • one\n  • two"),
+            "{laid}"
+        );
+        let ansi = senate_markdown::Terminal::new(40, senate_markdown::Color::Ansi16);
+        let coloured = render_thread_with(
+            &md,
+            Locale::En,
+            &|body| crate::format::markdown_for(ansi, body),
+            format::Clock::Utc,
+        );
+        assert!(coloured.contains("\u{1b}[1mretry"), "{coloured}");
+        // Local times: the zone once, in the first line, none on each event.
+        let local = render_thread_with(&md, Locale::En, &|b| b.to_owned(), format::Clock::Local);
+        let first = local.lines().next().unwrap();
+        assert!(first.contains(", local times (UTC"), "{local}");
+        assert!(!local.contains(" UTC ·"), "{local}");
     }
 
     #[test]
@@ -805,4 +891,37 @@ mod tests {
             assert_ne!(e.message(Locale::En), e.message(Locale::Zh));
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn a_message_sent_to_another_committee_names_it_in_the_commands_it_suggests() {
+    let posted = Posted {
+        committee: CommitteeId::new("refund").unwrap(),
+        seq: senate_core::Seq(35),
+        to: Vec::new(),
+        thread: None,
+        duplicate: false,
+        unseen_escalation: None,
+    };
+    let sent = |elsewhere| Sent {
+        kind: SayKind::Question,
+        wrote: "senator::rev".parse().unwrap(),
+        posted: posted.clone(),
+        locale: Locale::En,
+        me: Name::new("alice").unwrap(),
+        elsewhere,
+    };
+    let here = sent(false).render(false);
+    assert!(
+        here.contains("`senate thread 35`; follow up with `senate reply 35 <text>`"),
+        "{here}"
+    );
+    let there = sent(true).render(false);
+    assert!(
+        there.contains(
+            "`senate thread 35 --committee refund`; follow up with `senate reply --committee refund 35 <text>`"
+        ),
+        "{there}"
+    );
 }

@@ -1793,3 +1793,35 @@ async fn alias_rollback_is_conditional_and_conflicts_do_not_register_a_new_owner
     assert_eq!(reused.status(), StatusCode::OK);
     server.running.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn an_unknown_name_is_answered_with_the_committees_aliases() {
+    let server = TestServer::start().await;
+    server.append("refund-v2 exists").await;
+    for (agent, alias) in [("claude-first", "reviewer"), ("codex-second", "lead")] {
+        let response = server
+            .request(Method::PUT, &format!("/v1/aliases/{agent}"), ALICE)
+            .json(&json!({"alias": alias, "committee": "refund-v2"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    // A prefix of an alias is suggested, as a prefix of a name is.
+    match resolve(&server, "senator::rev", Some("refund-v2")).await {
+        Resolved::Unknown { reason } => assert!(
+            reason.contains("did you mean [senator::reviewer]"),
+            "{reason}"
+        ),
+        other => panic!("expected unknown, got {other:?}"),
+    }
+    // Nothing alike: the committee's aliases are listed instead.
+    match resolve(&server, "senator::zzz", Some("refund-v2")).await {
+        Resolved::Unknown { reason } => assert!(
+            reason.ends_with("on refund-v2: [senator::lead], [senator::reviewer]"),
+            "{reason}"
+        ),
+        other => panic!("expected unknown, got {other:?}"),
+    }
+    server.running.shutdown().await.unwrap();
+}

@@ -85,6 +85,8 @@ pub mod notify;
 pub mod paths;
 pub mod person;
 pub mod preside;
+#[doc(hidden)]
+pub mod remote;
 pub mod routing;
 pub mod service;
 pub mod session;

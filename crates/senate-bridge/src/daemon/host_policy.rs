@@ -290,6 +290,14 @@ impl Shared {
         } else {
             alias
         };
+        if let Some(alias) = &alias {
+            // Refused here before anything starts. An alias claimed between
+            // this check and publication still fails at the final alias
+            // step, which unwinds the staged session; no test reaches that
+            // late path any more (the restart test now stops here), so it
+            // wants one that has the server claim the alias mid-launch.
+            self.check_alias_free(&committee, alias).await?;
+        }
         let audit_auth = auth;
         let launch = self
             .on_spawn_with(
@@ -384,6 +392,8 @@ impl Shared {
         self.check_restore_seat(&target.committee, &target.session.agent)
             .await?;
         let launch_senator = target.session.agent.clone();
+        // So a refusal can name the session by its alias.
+        self.refresh_display_aliases().await;
         let audit_auth = &auth;
         let launch = self
             .on_restore_with(
@@ -613,6 +623,41 @@ impl Shared {
             .await
             .map_err(|_| IpcError::new(codes::SERVER, timeout_message))??;
         Ok(())
+    }
+
+    /// Refuse, before anything starts, an alias another senator already
+    /// goes by on `committee`, saying how to reach that one instead.
+    async fn check_alias_free(
+        &self,
+        committee: &CommitteeId,
+        alias: &SenatorName,
+    ) -> Result<(), IpcError> {
+        use senate_core::alias::AliasMatch;
+        let aliases = tokio::time::timeout(ROLE_TIMEOUT, self.api.aliases())
+            .await
+            .map_err(|_| IpcError::new(codes::SERVER, "could not check available aliases in time"))?
+            .map_err(server_error)?;
+        let qualified = AliasName {
+            committee: Some(committee.clone()),
+            alias: alias.clone(),
+        };
+        let AliasMatch::One(holder) = aliases.resolve(&qualified, Some(committee)) else {
+            return Ok(());
+        };
+        if aliases.alias_of(committee, &holder) != Some(alias) {
+            // An older server's Senate-wide alias for a senator elsewhere.
+            return Ok(());
+        }
+        let holder = senate_core::alias::short_name(&holder);
+        Err(IpcError::bad_request(self.locale.pick(
+            format!(
+                "{alias} 已是委员会 {committee} 上 {holder} 的别名。用 `senate attach {alias}` 打开它，或换一个别名。"
+            ),
+            format!(
+                "{alias} is already the alias of {holder} on {committee}. Open that one with \
+                 `senate attach {alias}`, or choose another alias."
+            ),
+        )))
     }
 
     async fn next_spawn_alias(

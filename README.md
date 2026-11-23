@@ -480,6 +480,19 @@ senate inbox
 senate inbox --all
 ```
 
+Each command works on the committee this directory is bound to, or the one
+named with `--committee`. Outside a bound worktree, `ask`, `tell` and
+`request` to an alias that exists on exactly one committee go to that
+committee, and say so on stderr (`on committee refund (where rev is an
+alias)`); the commands they suggest then carry `--committee`. Otherwise the
+error lists the committees to choose from.
+
+On a terminal, `senate thread` and `senate inbox --follow` lay message bodies
+out as Markdown, wrapped to the window (in colour unless `NO_COLOR` is set or
+`TERM=dumb`), and print times in the local zone, naming it once
+(`local times (UTC+01:00)`). Piped, they print the text exactly as written,
+with every time in UTC.
+
 ### 2. Zero-Pollution Workspace Management
 
 Senate keeps your repositories completely clean:
@@ -556,19 +569,25 @@ senate committees                      # chairs, active members and pending thre
 senate status --all                     # include inactive entries
 senate spawn claude --alias reviewer    # seat a member on this committee
 senate spawn codex --chair --alias lead --attach # appoint the chair and open its terminal
+senate spawn claude --dir ../ledger     # on the committee bound in ../ledger
 senate spawn claude --secretary --alias desk # add a Speaker’s desk secretary
 senate attach reviewer                 # restore or resume as needed (Ctrl-] detaches)
-senate session list                    # active hosted sessions on this machine
+senate session list                    # active hosted sessions (a waiting command: its first line)
 senate session list --all               # include stopped and paused sessions
 senate session watch                   # read-only grid of terminals without an interactive viewer
 senate session watch --all             # include attached, paused and stopped sessions
 senate session approve reviewer        # answer its permission prompt (--always, --deny)
+senate session approve --once          # the one prompt waiting, whoever's it is
 senate session stop reviewer           # end its terminal...
 senate session restore reviewer        # ...and reopen it later (add --attach to enter)
 senate session pause --all             # checkpoint, then stop each one...
 senate session resume --all            # ...and bring them back where they were
 senate session replace reviewer        # a fresh session takes the seat
 ```
+
+`senate spawn` seats the session on `--committee` when given, else on the
+committee bound in `--dir`, else on this directory's; when `--dir` binds
+none, it says on stderr which committee it used.
 
 A senator is active while present online or while its hosted terminal is
 running. `senate committees` shows every committee, even without active
@@ -601,9 +620,16 @@ step.
 `senate session approve` answers the permission prompt waiting in a hosted
 terminal without attaching, as you would there: allow once (the default),
 `--always` (and stop asking for the same thing this session) or `--deny`.
+Without a name it answers the one session with a prompt waiting, and only
+when the answer is given (`--once`, `--always` or `--deny`); it prints which
+session and what the prompt asks about before answering, and lists them when
+several wait.
 Codex is answered through its app-server; for Claude Code the host checks that
 its screen shows the permission dialog and types the chosen option. A choice
-Senate only saw on the screen is not answered this way: attach to it. Each
+Senate only saw on the screen is not answered this way: attach to it. A
+Claude prompt Senate shows as waiting is settled when it is answered (by
+its result, a key typed in its terminal, or an answer from Senate) and, at
+the latest, when the session's turn ends. Each
 answer is noted in the committee log. The macOS app's Allow / Always / Deny
 buttons on a waiting prompt do the same. The daemon refuses the request from
 inside a coding session's process tree, so an agent cannot approve its own
@@ -645,7 +671,10 @@ effort = "high"
 note = "Use for independent diff review."
 ```
 
-Run `senate profiles` to see the configured names, settings, and notes.
+Run `senate profiles` to see the configured names, settings, and notes. Its
+output is one tab-separated line per profile; with none it prints `No launch
+profiles configured.` and, on stderr, an example to copy and the file to put
+it in.
 `senate setup doctor` reports profile configuration errors by name. Restart
 the machine daemon after editing a profile so new launches pick up the change.
 
@@ -665,6 +694,11 @@ then pass the chosen name in the `profile` field of `spawn`. The same chair and
 Speaker's office permissions apply to launches with a profile.
 
 ### Troubleshooting
+
+`locale` in `senate.toml` (`en` or `zh`) is read by the daemon when it
+starts, and the daemon words what the CLI prints. After changing it,
+`senate status` says so until the daemon restarts (`senate setup service
+install --yes` restarts the service).
 
 When something does not arrive or a session sits idle, start with:
 
@@ -704,6 +738,90 @@ with no real message to join it by (the server writes `chat_gateway.json`
 in its `data_dir` on every attach and detach and whenever that changes).
 
 ---
+
+## Remote machines
+
+A developer machine can opt into direct access from another Mac on a LAN or an
+existing mesh network. Configure the **target** machine's
+`$SENATE_HOME/senate.toml` (normally `~/.senate/senate.toml`) with its own
+reachable LAN or mesh address. Substitute the address below. The listener is
+off when this table has no `listen` value. Start the updated `senated --machine`
+with this profile in your normal service or terminal.
+
+```toml
+[remote]
+listen = "192.168.1.42:9443"
+```
+
+Use a stable address on the target. Restrict reachability to the LAN or mesh you
+intend. The pairing stores that address for future connections. On the target's own terminal run:
+
+```sh
+senate setup remote pair --attach
+```
+
+On the client Mac run:
+
+```sh
+senate setup remote connect wyak --device laptop
+```
+
+Paste the full offer from the target into the client terminal. The offer expires
+after two minutes and can be claimed once. Enter the six-digit code printed by
+the client back on the target only when it matches what you see on your own
+client. Use `pair` for list and watch, `pair --list-only` for metadata, and add
+`--attach` only when you want that device to type in terminals. A grant expires
+after 30 days by default. Set `--valid-secs` to give a shorter grant.
+
+```sh
+senate session list --machine wyak
+senate session list --all-machines
+senate session watch --machine wyak
+senate attach --machine wyak main
+```
+
+A remote attach selects an already-running hosted session. Use the
+committee-qualified name if the alias is ambiguous. The host allows one
+interactive viewer at a time. An attach grant lets the device type what the
+terminal accepts, including prompt answers. Watch is read-only and starts
+with a fresh snapshot after reconnect. A remote attach uses the existing bounded history
+replay. If the connection drops, attach again to start a new stream. Terminal
+input is never replayed. Paired names are offered by completion. The
+all-machines list reports unreachable contexts by name.
+
+### Trust and storage
+
+- TLS 1.3 authenticates both ends, pins the offered target certificate and
+  checks the device certificate against the target's local grants. Early
+  data and session resumption are disabled. The pairing offer is a secret
+  until claimed or expired. Share it only with your own device and confirm
+  its comparison code locally. Pairing and revocation use the target's local
+  person check.
+- Public certificates and key references live in
+  `$SENATE_HOME/remote/host.json` and `remote/machines/<name>.json`.
+  Private keys are generic-password items in the macOS user's Keychain under
+  service `dev.senate.remote`, with a random UUID as the account. Systems
+  without an available Keychain use a private `remote/key-<uuid>.json` file
+  with mode 0600 inside a mode-0700 directory. A Keychain access denial fails
+  instead of writing a fallback copy.
+- Hook and agent APIs expose no key material. A same-user agent on the
+  **client** can try to run the same Senate CLI. If the OS grants that
+  executable Keychain access, or the key is in a file the agent can read,
+  the agent can exercise the device's granted scopes. Stronger isolation
+  requires a separate OS identity or a user-presence-gated signing broker
+  with keys inaccessible to agents. Keep interactive attach off on devices
+  where that risk is unacceptable.
+- The target writes a local `remote/audit.jsonl` with device fingerprints and
+  remote actions. Run `senate setup remote devices` on the target to list
+  grants and `senate setup remote revoke <device-id>` to remove one and
+  disconnect its streams. A lost device can act within its grants until it
+  expires or is revoked.
+- This opt-in sends session metadata and, with the relevant grant, live
+  terminal content over the encrypted connection. Transcript bodies,
+  replies, approvals, lifecycle commands and a relay are outside this
+  version of the remote API. The scope names `timeline`, `reply`, `approve`,
+  and `lifecycle` are reserved for later versions. The parent Senate and
+  local hooks do not participate in remote transport.
 
 ## 🤖 Agent Ecosystem & MCP
 

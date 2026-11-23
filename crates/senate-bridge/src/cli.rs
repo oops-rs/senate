@@ -13,6 +13,8 @@ mod cli_help;
 mod cli_legacy;
 #[path = "cli_secretary.rs"]
 mod cli_secretary;
+#[path = "cli_remote.rs"]
+mod remote_cli;
 
 use std::io::{Read, Write};
 #[path = "cli_completion.rs"]
@@ -516,7 +518,7 @@ stdin.")]
   senate spawn claude                    On this directory's committee
   senate spawn codex --alias reviewer    With a name to address it by
   senate spawn --profile review          Use this machine's review settings
-  senate spawn claude --committee refund-v2 --dir ../refund
+  senate spawn claude --dir ../refund    On the committee bound in ../refund
   senate spawn codex --prompt 'Review the open PR'
                                          Send it a first request once seated
   senate spawn claude --model opus --effort high
@@ -529,13 +531,13 @@ stdin.")]
         #[arg(long)]
         attempt_id: Option<String>,
         /// The coding agent to start. Must agree with --profile if both are given.
-        #[arg(value_enum, required_unless_present = "profile")]
+        #[arg(value_enum)]
         runtime: Option<HostedRuntime>,
         /// Use a named launch profile from this machine. See `senate profiles`.
         #[arg(long, add = ArgValueCandidates::new(completion::profiles))]
         profile: Option<String>,
-        /// The committee to seat it on (default: the one `senate where`
-        /// shows for this directory).
+        /// The committee to seat it on (default: the one bound at --dir,
+        /// else the one `senate where` shows for this directory).
         #[arg(long, add = ArgValueCandidates::new(completion::committees))]
         committee: Option<CommitteeId>,
         /// A role name such as reviewer. Defaults to the profile name or a runtime name and counter.
@@ -581,9 +583,12 @@ stdin.")]
     /// the session, its size is left as it is, and any number of people can
     /// look at once, beside whoever is attached. It never starts a session. Ctrl-] leaves.
     Attach {
+        /// Connect to an already-running session on a paired machine.
+        #[arg(long, add = ArgValueCandidates::new(remote_cli::complete_machines))]
+        machine: Option<Name>,
         /// The senator's primary name or alias (`committee::alias` for an
         /// alias on one committee). Without one, choose a hosted session
-        /// from a list.
+        /// from a list (in a terminal).
         #[arg(add = ArgValueCandidates::new(completion::sessions))]
         senator: Option<AliasName>,
         /// Select an exact native session ID (used by the app).
@@ -723,6 +728,12 @@ enum SessionCmd {
     /// committee, runtime, model, state, uptime, who is at its terminal,
     /// and directory.
     List {
+        /// List hosted sessions on this paired machine.
+        #[arg(long, conflicts_with = "all_machines", add = ArgValueCandidates::new(remote_cli::complete_machines))]
+        machine: Option<Name>,
+        /// List this machine and every paired machine.
+        #[arg(long)]
+        all_machines: bool,
         /// Include stopped hosted sessions.
         #[arg(long)]
         all: bool,
@@ -736,6 +747,9 @@ enum SessionCmd {
     /// tile's session (detaching comes back to the grid); q or Ctrl-]
     /// leaves.
     Watch {
+        /// Watch hosted sessions on this paired machine.
+        #[arg(long, add = ArgValueCandidates::new(remote_cli::complete_machines))]
+        machine: Option<Name>,
         /// Include stopped sessions and those with an interactive viewer attached.
         #[arg(long)]
         all: bool,
@@ -774,12 +788,15 @@ enum SessionCmd {
     #[command(after_help = "Examples:
   senate session approve reviewer            Allow it once
   senate session approve reviewer --always   Allow it for the session
-  senate session approve reviewer --deny     Refuse it")]
+  senate session approve reviewer --deny     Refuse it
+  senate session approve --once              The only prompt waiting")]
     Approve {
         /// The senator's alias (`committee::alias` for one on one
-        /// committee) or primary name.
+        /// committee) or primary name. Without one, the only session with
+        /// a prompt waiting; the answer must then be given (--once,
+        /// --always or --deny), and what it answers is printed first.
         #[arg(add = ArgValueCandidates::new(completion::sessions))]
-        senator: AliasName,
+        senator: Option<AliasName>,
         /// Allow it this once (the default).
         #[arg(long, conflicts_with_all = ["always", "deny"])]
         once: bool,
@@ -799,7 +816,7 @@ enum SessionCmd {
     /// stop` stops one, and it is recorded paused: its presence shows
     /// paused, and what is sent to it waits. A session someone typed into
     /// in the last 5 minutes is skipped unless --force. With no name and
-    /// no --all or --committee, choose one from a list.
+    /// no --all or --committee, choose one from a list (in a terminal).
     #[command(after_help = "Examples:
   senate session pause reviewer          Pause one, by alias or committee::alias
   senate session pause --committee refund-v2
@@ -824,7 +841,7 @@ enum SessionCmd {
     /// Each session recorded paused is restored as `session restore` does,
     /// then sent a note pointing at its last checkpoint. A session stopped
     /// on purpose is not paused, and is not resumed. With no name and no
-    /// --all or --committee, choose one from a list.
+    /// --all or --committee, choose one from a list (in a terminal).
     #[command(after_help = "Examples:
   senate session resume reviewer
   senate session resume --all")]
@@ -983,6 +1000,11 @@ struct SeatArgs {
 
 #[derive(Subcommand)]
 enum SetupCmd {
+    /// Pair and administer direct remote machines.
+    Remote {
+        #[command(subcommand)]
+        command: remote_cli::Command,
+    },
     /// Print shell completion registration for sourcing.
     Completions {
         /// Shell to register with (zsh, bash or fish).
@@ -1275,7 +1297,124 @@ async fn codex_smoke(
 /// (`senate where`).
 async fn committee_here(named: Option<CommitteeId>) -> anyhow::Result<CommitteeId> {
     let (paths, settings) = settings_here();
-    binding::committee_here(&paths, named, &settings).await
+    match binding::committee_here(&paths, named, &settings).await {
+        Ok(committee) => Ok(committee),
+        // Nothing binds one here: name the committees there are to choose.
+        Err(error) => {
+            match daemon_call::<Vec<ipc::RosterCommittee>>(&paths, &Request::Roster).await {
+                Ok(rows) if !rows.is_empty() => {
+                    let list = rows
+                        .iter()
+                        .map(|row| row.committee.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    Err(anyhow::anyhow!(cli_locale().pick(
+                        format!("{error:#}。委员会：{list}"),
+                        format!("{error:#}. Committees: {list}"),
+                    )))
+                }
+                _ => Err(error),
+            }
+        }
+    }
+}
+
+/// The committee `senate spawn` seats on: `--committee`; else, with
+/// `--dir` elsewhere, the one bound there; else this directory's. When
+/// `--dir` binds none, says on stderr which committee was used instead.
+async fn spawn_committee(
+    named: Option<CommitteeId>,
+    dir: &std::path::Path,
+) -> anyhow::Result<CommitteeId> {
+    if named.is_some() {
+        return committee_here(named).await;
+    }
+    let same = |a: &std::path::Path, b: &std::path::Path| {
+        a.canonicalize()
+            .ok()
+            .is_some_and(|a| b.canonicalize().ok() == Some(a))
+    };
+    let cwd = std::env::current_dir()?;
+    if same(dir, &cwd) {
+        return committee_here(None).await;
+    }
+    let (paths, settings) = settings_here();
+    if let Some(committee) = binding::directory_committee(&paths, dir, &settings).await {
+        return Ok(committee);
+    }
+    let committee = committee_here(None).await?;
+    eprintln!(
+        "{}",
+        cli_locale().pick(
+            format!(
+                "{} 没有绑定委员会；按当前目录，坐到 {committee}（用 --committee 选别的）。",
+                dir.display()
+            ),
+            format!(
+                "{} is bound to no committee; seated on {committee}, this directory's \
+                 (--committee chooses another).",
+                dir.display()
+            ),
+        )
+    );
+    Ok(committee)
+}
+
+/// The committee a message to `to` goes to: `--committee`, else this
+/// directory's; with neither, the one committee where `to` is an alias,
+/// said on stderr so it is never a surprise. Otherwise the error names the
+/// committees to choose from. Whether it was found that way, so the
+/// commands suggested after name it.
+async fn committee_for(
+    paths: &Paths,
+    named: Option<CommitteeId>,
+    to: &str,
+    locale: Locale,
+) -> anyhow::Result<(CommitteeId, bool)> {
+    let unbound = match committee_here(named).await {
+        Ok(committee) => return Ok((committee, false)),
+        Err(error) => error,
+    };
+    let candidates = match to.parse::<SenatorName>() {
+        Ok(alias) => match daemon_call::<KnownAliases>(paths, &Request::Aliases).await {
+            Ok(KnownAliases::Scoped(table)) => {
+                let mut committees: Vec<CommitteeId> = table
+                    .matches(&alias)
+                    .into_iter()
+                    .map(|q| q.committee)
+                    .collect();
+                committees.dedup();
+                committees
+            }
+            _ => Vec::new(),
+        },
+        // `*`, `speaker`, a qualified name: not an alias to look up.
+        Err(_) => Vec::new(),
+    };
+    match candidates.as_slice() {
+        [committee] => {
+            eprintln!(
+                "{}",
+                locale.pick(
+                    format!("在委员会 {committee} 上（{to} 是那里的别名）"),
+                    format!("on committee {committee} (where {to} is an alias)"),
+                )
+            );
+            Ok((committee.clone(), true))
+        }
+        [] => Err(unbound),
+        several => {
+            let list = several
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(anyhow::anyhow!(locale.pick(
+                format!("{to} 是多个委员会上的别名：{list}。用 --committee 选一个。"),
+                format!("{to} is an alias on more than one committee: {list}. Choose one with --committee."),
+            )))
+        }
+    }
 }
 
 fn settings_here() -> (Paths, Settings) {
@@ -1619,22 +1758,35 @@ fn pause_selector(
             .into_iter()
             .filter(|r| if paused { r.paused } else { r.is_running() })
             .collect();
+        let locale = cli_locale();
         anyhow::ensure!(
             !eligible.is_empty(),
             "{}",
             if paused {
-                "no hosted session is paused; `senate session list` lists them"
+                locale.pick(
+                    "没有暂停的托管会话；`senate session list` 列出它们。",
+                    "no hosted session is paused; `senate session list` lists them",
+                )
             } else {
-                "no hosted session is running; `senate session list` lists them"
+                locale.pick(
+                    "没有运行中的托管会话；`senate session list` 列出它们。",
+                    "no hosted session is running; `senate session list` lists them",
+                )
             }
         );
+        let command = if paused {
+            "senate session resume"
+        } else {
+            "senate session pause"
+        };
+        require_picker_terminal(command, &eligible, true)?;
         let prompt = if paused {
             "Resume which session?"
         } else {
             "Pause which session?"
         };
         return Ok(rt
-            .block_on(crate::host::pick_session(&eligible, prompt))?
+            .block_on(crate::host::pick(&session_choices(&eligible), prompt))?
             .map(|primary| StopSelector::Named(vec![primary.to_string()])));
     }
     let mut names = Vec::new();
@@ -1818,10 +1970,15 @@ fn pick_attach_session() -> anyhow::Result<Option<ipc::AttachTarget>> {
     let reply: ipc::SessionsReply = rt.block_on(daemon_call(&paths, &Request::Sessions))?;
     anyhow::ensure!(
         !reply.rows.is_empty(),
-        "no hosted sessions; use senate spawn to start one"
+        "{}",
+        cli_locale().pick(
+            "没有托管会话；用 `senate spawn` 启动一个。",
+            "no hosted sessions; use senate spawn to start one",
+        )
     );
-    let chosen = rt.block_on(crate::host::pick_session(
-        &reply.rows,
+    require_picker_terminal("senate attach", &reply.rows, false)?;
+    let chosen = rt.block_on(crate::host::pick(
+        &session_choices(&reply.rows),
         "Attach to which session?",
     ))?;
     Ok(chosen
@@ -1831,13 +1988,209 @@ fn pick_attach_session() -> anyhow::Result<Option<ipc::AttachTarget>> {
         }))
 }
 
-fn require_attach_terminal() -> anyhow::Result<()> {
+/// `senate session approve` with no name: the one session whose
+/// permission prompt Senate can answer, and the line saying which (and what
+/// it asks about). Refused unless the answer was given, when no prompt or
+/// several wait.
+fn the_waiting_prompt(
+    rows: &[ipc::SessionRow],
+    answer_given: bool,
+    locale: Locale,
+) -> Result<(SenatorName, String), String> {
+    let waiting: Vec<&ipc::SessionRow> = rows
+        .iter()
+        .filter(|row| row.prompt.as_ref().is_some_and(|p| !p.screen))
+        .collect();
+    let about = |row: &ipc::SessionRow| {
+        row.prompt
+            .as_ref()
+            .and_then(|p| p.tool.as_deref())
+            .map(crate::host_approval::tool_label)
+            .unwrap_or_else(|| locale.pick("（未说明）", "(not said)").to_owned())
+    };
+    match waiting.as_slice() {
+        [] => Err(locale
+            .pick(
+                "没有托管会话在等权限请求的回答；`senate session list` 列出会话。",
+                "No hosted session has a permission prompt waiting; `senate session list` lists them.",
+            )
+            .to_owned()),
+        [row] if answer_given => {
+            let name = row.display_name(false);
+            let about = about(row);
+            Ok((
+                row.primary.clone(),
+                match locale {
+                    Locale::Zh => format!("回答 {name} 的权限请求：{about}"),
+                    Locale::En => format!("Answering {name}'s prompt: {about}"),
+                },
+            ))
+        }
+        [row] => {
+            let name = row.display_name(false);
+            let about = about(row);
+            Err(match locale {
+                Locale::Zh => format!(
+                    "{name} 在等权限请求：{about}。不写名字时要写明回答：`senate session approve --once`、`--always` 或 `--deny`（或 `senate session approve {name}`）。"
+                ),
+                Locale::En => format!(
+                    "{name} has a prompt waiting: {about}. Without a name, give the answer: \
+                     `senate session approve --once`, `--always` or `--deny` (or `senate session approve {name}`)."
+                ),
+            })
+        }
+        several => {
+            let list = several
+                .iter()
+                .map(|row| format!("\n  {}  {}", row.display_name(false), about(row)))
+                .collect::<String>();
+            Err(match locale {
+                Locale::Zh => format!("有 {} 个会话在等权限请求；写出名字：{list}", several.len()),
+                Locale::En => format!(
+                    "{} sessions have a prompt waiting; name one (`senate session approve <name>`):{list}",
+                    several.len()
+                ),
+            })
+        }
+    }
+}
+
+/// How to add a launch profile, for `senate profiles` with none.
+fn profiles_example(config: &std::path::Path, locale: Locale) -> String {
+    let example = "[profiles.review]\nruntime = \"codex\"\neffort = \"high\"\nnote = \"Independent diff review.\"";
+    match locale {
+        Locale::Zh => format!(
+            "在 {} 里加一个，例如：\n\n{example}\n\n然后重启 daemon，用 `senate spawn --profile review` 启动。",
+            config.display()
+        ),
+        Locale::En => format!(
+            "Add one to {}, for example:\n\n{example}\n\nthen restart the daemon and start it \
+             with `senate spawn --profile review`.",
+            config.display()
+        ),
+    }
+}
+
+/// `senate spawn` with neither a runtime nor --profile: what to add.
+fn no_runtime(profiles: &[String], locale: Locale) -> String {
+    let first = match locale {
+        Locale::Zh => {
+            "要启动哪个 agent？写出运行时：`senate spawn claude`（或 codex、agy），".to_owned()
+        }
+        Locale::En => {
+            "Which agent? Name a runtime: `senate spawn claude` (or codex, agy), ".to_owned()
+        }
+    };
+    match (profiles.first(), locale) {
+        (None, Locale::Zh) => {
+            format!("{first}或用 --profile 选一个启动配置（`senate profiles`，目前没有）。")
+        }
+        (None, Locale::En) => format!(
+            "{first}or a launch profile with --profile (`senate profiles`; none is configured yet)."
+        ),
+        (Some(example), Locale::Zh) => format!(
+            "{first}或 `senate spawn --profile {example}`。启动配置：{}。",
+            profiles.join(", ")
+        ),
+        (Some(example), Locale::En) => format!(
+            "{first}or `senate spawn --profile {example}`. Launch profiles: {}.",
+            profiles.join(", ")
+        ),
+    }
+}
+
+/// The picker's lines for `rows`, each named as `senate session list` names
+/// it (its alias, or the short senator name), its committee leading the
+/// rest of the line.
+fn session_choices(rows: &[ipc::SessionRow]) -> Vec<crate::host::Choice> {
+    rows.iter()
+        .map(|row| {
+            let mut choice = crate::host::Choice::of_row(row);
+            choice.label = row.display_name(false);
+            if let Some(committee) = &row.committee
+                && !choice.label.contains("::")
+            {
+                choice.detail = format!("{committee} · {}", choice.detail);
+            }
+            choice
+        })
+        .collect()
+}
+
+fn on_a_terminal() -> bool {
     use std::io::IsTerminal as _;
+    std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+}
+
+fn cli_locale() -> Locale {
+    Paths::from_env().map_or(Locale::En, |paths| BridgeConfig::locale_at(&paths.config()))
+}
+
+/// `--attach` on spawn, restore or replace: refused before anything starts
+/// when there is no terminal to attach, saying how to open it later.
+fn require_attach_terminal() -> anyhow::Result<()> {
     anyhow::ensure!(
-        std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
-        "attach needs a terminal on stdin and stdout"
+        on_a_terminal(),
+        "{}",
+        cli_locale().pick(
+            "--attach 需要 stdin 和 stdout 都是终端。去掉 --attach，之后在终端里用 `senate attach <名字>` 打开它。",
+            "--attach needs a terminal on stdin and stdout. Leave it out, then open the session \
+             from a terminal with `senate attach <name>`.",
+        )
     );
     Ok(())
+}
+
+/// `command` (`senate attach`, `senate session watch`) needs a terminal;
+/// `instead` says what works without one.
+fn require_terminal(command: &str, instead: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        on_a_terminal(),
+        "{}",
+        cli_locale().pick(
+            format!("`{command}` 需要 stdin 和 stdout 都是终端。{instead}"),
+            format!("`{command}` needs a terminal on stdin and stdout. {instead}"),
+        )
+    );
+    Ok(())
+}
+
+/// Before a list to choose from: without a terminal, say which sessions
+/// `command` could take and how to name one.
+fn require_picker_terminal(
+    command: &str,
+    rows: &[ipc::SessionRow],
+    all_flag: bool,
+) -> anyhow::Result<()> {
+    if on_a_terminal() {
+        return Ok(());
+    }
+    anyhow::bail!("{}", picker_refusal(command, rows, all_flag, cli_locale()))
+}
+
+fn picker_refusal(
+    command: &str,
+    rows: &[ipc::SessionRow],
+    all_flag: bool,
+    locale: Locale,
+) -> String {
+    let names: Vec<String> = rows.iter().map(|row| row.display_name(false)).collect();
+    let example = names.first().map_or("<name>", String::as_str);
+    let all = if all_flag {
+        locale.pick("（或 --all）", " (or --all)")
+    } else {
+        ""
+    };
+    let list = names.join(", ");
+    match locale {
+        Locale::Zh => format!(
+            "不给名字时，`{command}` 在终端里列出会话供选择，而这里没有终端。请写出名字：`{command} {example}`{all}。可选：{list}。"
+        ),
+        Locale::En => format!(
+            "Without a name, `{command}` lets you choose from a list, which needs a terminal. \
+             Name one instead: `{command} {example}`{all}. To choose from: {list}."
+        ),
+    }
 }
 
 async fn attach_launched(paths: &Paths, session_id: String, label: &str) -> anyhow::Result<()> {
@@ -1881,7 +2234,13 @@ async fn attach_target(
         !read_only,
         "{label}'s terminal is not running; use senate attach {label} to bring it back"
     );
-    require_attach_terminal()?;
+    require_terminal(
+        "senate attach",
+        cli_locale().pick(
+            "在终端里运行它；`senate session list` 不需要终端也能显示它的状态。",
+            "Run it in a terminal; `senate session list` shows its state without one.",
+        ),
+    )?;
     let senator = AliasName::bare(info.primary);
     let locale = BridgeConfig::locale_at(&paths.config());
     let action = if info.paused {
@@ -2183,7 +2542,11 @@ async fn watch(
     // not miss anything waits for it.
     eprintln!(
         "{}",
-        person::render_watching(committee.as_ref(), pong.locale)
+        person::render_watching(
+            committee.as_ref(),
+            pong.locale,
+            crate::format::Clock::for_stdout()
+        )
     );
     loop {
         let Some(event) = stream.next().await? else {
@@ -2203,7 +2566,15 @@ async fn watch(
         let line = if json {
             serde_json::to_string(&event)?
         } else {
-            let text = person::render_news(news, *escalated, text, pong.locale);
+            let markdown = crate::format::terminal_markdown();
+            let text = person::render_news_with(
+                news,
+                *escalated,
+                text,
+                pong.locale,
+                markdown.as_ref().map(|m| m as &dyn Fn(&str) -> String),
+                crate::format::Clock::for_stdout(),
+            );
             let text = if output.verbose {
                 text
             } else {
@@ -2253,9 +2624,10 @@ fn speak_new(
     let paths = Paths::from_env()?;
     let text = message_text(text)?;
     runtime(false)?.block_on(async {
-        let committee = committee_here(committee).await?;
+        let (committee, elsewhere) = committee_for(&paths, committee, &to, cli_locale()).await?;
         let socket = paths.socket();
-        let sent = speak::send(&socket, committee, kind, &to, text).await?;
+        let mut sent = speak::send(&socket, committee, kind, &to, text).await?;
+        sent.elsewhere = elsewhere;
         let aliases = if !json && !output.verbose {
             daemon_call::<KnownAliases>(&paths, &Request::Aliases)
                 .await
@@ -2755,7 +3127,15 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
                 if json {
                     print_json(&reply)
                 } else {
-                    let mut text = speak::render_thread(&reply, locale);
+                    let mut text = match crate::format::terminal_markdown() {
+                        Some(markdown) => speak::render_thread_with(
+                            &reply,
+                            locale,
+                            &markdown,
+                            crate::format::Clock::for_stdout(),
+                        ),
+                        None => speak::render_thread(&reply, locale),
+                    };
                     if !verbose {
                         let aliases: Option<KnownAliases> =
                             daemon_call(&paths, &Request::Aliases).await.ok();
@@ -2880,6 +3260,11 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             let config = BridgeConfig::load_unchecked(&paths.config())?;
             if config.profiles.is_empty() {
                 println!("No launch profiles configured.");
+                // The how-to goes to stderr: stdout stays as scripts read it.
+                eprintln!(
+                    "{}",
+                    profiles_example(&paths.config(), BridgeConfig::locale_at(&paths.config()))
+                );
             }
             for (name, profile) in config.profiles {
                 println!(
@@ -2906,6 +3291,14 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             model,
             attach,
         } => {
+            if harness.is_none() && profile.is_none() {
+                let profiles = Paths::from_env()
+                    .ok()
+                    .and_then(|paths| BridgeConfig::load_unchecked(&paths.config()).ok())
+                    .map(|config| config.profiles.into_keys().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                anyhow::bail!("{}", no_runtime(&profiles, cli_locale()));
+            }
             if attach {
                 require_attach_terminal()?;
             }
@@ -2919,7 +3312,8 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             if prompt.as_deref().is_some_and(|p| p.trim().is_empty()) {
                 anyhow::bail!("the prompt is empty");
             }
-            let committee = runtime(false)?.block_on(committee_here(committee))?;
+            let dir = std::path::absolute(dir)?;
+            let committee = runtime(false)?.block_on(spawn_committee(committee, &dir))?;
             let (runtime, profile) = match profile {
                 Some(name) => (
                     None,
@@ -2939,7 +3333,7 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
                     chair,
                     secretary,
                     alias,
-                    cwd: std::path::absolute(dir)?,
+                    cwd: dir,
                     session: SessionSelector::default(),
                     prompt,
                     model: model.into(),
@@ -2949,10 +3343,22 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             )
         }
         Cmd::Attach {
+            machine,
             senator,
             session,
             read_only,
         } => {
+            if let Some(machine) = machine {
+                let target = session
+                    .or_else(|| senator.map(|name| name.to_string()))
+                    .context("remote attach needs a session name")?;
+                return runtime(false)?.block_on(remote_cli::attach(
+                    &Paths::from_env()?,
+                    &machine,
+                    &target,
+                    read_only,
+                ));
+            }
             let (target, label) = match (session, senator) {
                 (Some(session_id), _) => (ipc::AttachTarget::Session { session_id }, None),
                 (None, Some(name)) => (
@@ -3167,28 +3573,50 @@ const REPLACE_TIMEOUT: Duration = Duration::from_secs(300);
 
 fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
     match command {
-        SessionCmd::List { all } => {
+        SessionCmd::List {
+            all,
+            machine,
+            all_machines,
+        } => {
             let paths = Paths::from_env()?;
+            if let Some(machine) = machine {
+                return runtime(false)?.block_on(remote_cli::print_machine(&paths, &machine, all));
+            }
+            if all_machines {
+                println!("local:");
+            }
             let locale = BridgeConfig::locale_at(&paths.config());
             let rt = runtime(false)?;
-            let mut reply: crate::ipc::SessionsReply =
-                rt.block_on(daemon_call(&paths, &Request::Sessions))?;
-            if !all {
-                reply.rows.retain(ipc::SessionRow::is_active);
+            let local: anyhow::Result<crate::ipc::SessionsReply> =
+                rt.block_on(daemon_call(&paths, &Request::Sessions));
+            match local {
+                Ok(mut reply) => {
+                    if !all {
+                        reply.rows.retain(ipc::SessionRow::is_active);
+                    }
+                    println!(
+                        "{}",
+                        crate::sessions::render_with_ids(
+                            &reply,
+                            chrono::Utc::now(),
+                            locale,
+                            output.verbose
+                        )
+                    );
+                }
+                Err(error) if all_machines => println!("  unreachable: {error}"),
+                Err(error) => return Err(error),
             }
-            println!(
-                "{}",
-                crate::sessions::render_with_ids(
-                    &reply,
-                    chrono::Utc::now(),
-                    locale,
-                    output.verbose
-                )
-            );
+            if all_machines {
+                rt.block_on(remote_cli::print_all(&paths, all));
+            }
             Ok(())
         }
-        SessionCmd::Watch { all } => {
+        SessionCmd::Watch { all, machine } => {
             let paths = Paths::from_env()?;
+            if let Some(machine) = machine {
+                return runtime(false)?.block_on(remote_cli::watch(&paths, machine, all));
+            }
             let locale = BridgeConfig::locale_at(&paths.config());
             runtime(false)?.block_on(crate::host::view::watch_all(&paths, all, || {
                 let paths = paths.clone();
@@ -3304,14 +3732,30 @@ fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
         }
         SessionCmd::Approve {
             senator,
-            once: _,
+            once,
             always,
             deny,
         } => {
             use crate::approvals::Decision;
             let paths = Paths::from_env()?;
             let locale = BridgeConfig::locale_at(&paths.config());
-            let senator = pick_alias(senator)?;
+            let senator = match senator {
+                Some(senator) => pick_alias(senator)?,
+                None => {
+                    let rows = runtime(false)?
+                        .block_on(daemon_call::<ipc::SessionsReply>(
+                            &paths,
+                            &Request::Sessions,
+                        ))?
+                        .rows;
+                    let (senator, announcement) =
+                        the_waiting_prompt(&rows, once || always || deny, locale)
+                            .map_err(|message| anyhow::anyhow!(message))?;
+                    // Said before the answer is sent, so it is never a surprise.
+                    eprintln!("{announcement}");
+                    AliasName::bare(senator)
+                }
+            };
             let decision = if deny {
                 Decision::Deny
             } else if always {
@@ -3536,6 +3980,7 @@ fn run_setup(command: SetupCmd, output: Output) -> anyhow::Result<()> {
     let Output { terminal, verbose } = output;
     match command {
         SetupCmd::Completions { shell } => completion::register(shell),
+        SetupCmd::Remote { command } => remote_cli::run(command),
         SetupCmd::Init {
             local,
             person,
@@ -3868,4 +4313,142 @@ async fn set_duty(
         (Locale::En, false) => format!("Set the duty on {c} (seq {seq})."),
         (Locale::En, true) => format!("Cleared the duty on {c} (seq {seq})."),
     })
+}
+
+#[cfg(test)]
+#[test]
+fn a_list_without_a_terminal_names_the_command_and_the_sessions() {
+    use crate::ipc::HostState;
+    use crate::sessions::tests::row;
+    let rows = [
+        row("claude-1", Some("reviewer"), HostState::Running),
+        row("codex-2", Some("builder"), HostState::Running),
+    ];
+    let en = picker_refusal("senate session resume", &rows, true, Locale::En);
+    assert!(
+        en.contains("`senate session resume reviewer` (or --all)")
+            && en.contains("To choose from: reviewer, builder.")
+            && !en.contains("attach"),
+        "{en}"
+    );
+    let attach = picker_refusal("senate attach", &rows, false, Locale::En);
+    assert!(
+        attach.contains("`senate attach reviewer`.") && !attach.contains("--all"),
+        "{attach}"
+    );
+    let zh = picker_refusal("senate session pause", &rows, true, Locale::Zh);
+    assert!(
+        zh.contains("`senate session pause reviewer`（或 --all）"),
+        "{zh}"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn a_spawn_without_a_runtime_names_the_runtimes_and_profiles() {
+    let none = no_runtime(&[], Locale::En);
+    assert!(
+        none.contains("`senate spawn claude` (or codex, agy)")
+            && none.contains("none is configured yet"),
+        "{none}"
+    );
+    let some = no_runtime(&["review".to_owned(), "fast".to_owned()], Locale::En);
+    assert!(
+        some.ends_with("or `senate spawn --profile review`. Launch profiles: review, fast."),
+        "{some}"
+    );
+    let zh = no_runtime(&["review".to_owned()], Locale::Zh);
+    assert!(zh.contains("`senate spawn --profile review`"), "{zh}");
+}
+
+#[cfg(test)]
+#[test]
+fn no_profiles_shows_one_to_copy_and_where() {
+    let text = profiles_example(
+        std::path::Path::new("/home/a/.senate/senate.toml"),
+        Locale::En,
+    );
+    assert!(
+        text.starts_with("Add one to /home/a/.senate/senate.toml"),
+        "{text}"
+    );
+    assert!(
+        text.contains("[profiles.review]\nruntime = \"codex\""),
+        "{text}"
+    );
+    assert!(text.ends_with("`senate spawn --profile review`."), "{text}");
+    // What it shows parses as a profile.
+    let toml = text.split("\n\n").nth(1).unwrap();
+    let parsed: toml::Table = toml.parse().unwrap();
+    assert_eq!(
+        parsed["profiles"]["review"]["runtime"].as_str(),
+        Some("codex")
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn approve_without_a_name_takes_only_the_one_waiting_prompt_and_says_so() {
+    use crate::ipc::{HostState, HostedPrompt};
+    use crate::sessions::tests::row;
+    let asking = |name: &str, alias: &str, screen: bool| {
+        let mut row = row(name, Some(alias), HostState::Running);
+        row.prompt = Some(HostedPrompt {
+            tool: Some("Bash".into()),
+            since: chrono::Utc::now(),
+            screen,
+        });
+        row
+    };
+    let quiet = row("codex-9", Some("quiet"), HostState::Running);
+    let one = [asking("claude-1", "reviewer", false), quiet.clone()];
+    let (senator, said) = the_waiting_prompt(&one, true, Locale::En).unwrap();
+    assert_eq!(senator.as_str(), "claude-1");
+    assert!(said.starts_with("Answering reviewer's prompt: "), "{said}");
+    // The answer is never assumed when the session is.
+    let refused = the_waiting_prompt(&one, false, Locale::En).unwrap_err();
+    assert!(
+        refused.contains("give the answer: `senate session approve --once`"),
+        "{refused}"
+    );
+    // A choice only seen on the screen is not one approve can answer.
+    let screen = [asking("claude-1", "reviewer", true), quiet.clone()];
+    assert!(
+        the_waiting_prompt(&screen, true, Locale::En)
+            .unwrap_err()
+            .starts_with("No hosted session")
+    );
+    let two = [
+        asking("claude-1", "reviewer", false),
+        asking("claude-2", "builder", false),
+    ];
+    let listed = the_waiting_prompt(&two, true, Locale::En).unwrap_err();
+    assert!(
+        listed.starts_with("2 sessions have a prompt waiting") && listed.contains("\n  builder  "),
+        "{listed}"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn the_picker_names_sessions_as_the_list_does() {
+    use crate::ipc::HostState;
+    use crate::sessions::tests::row;
+    let named = row("claude-1", Some("reviewer"), HostState::Running);
+    let unnamed = row(
+        "claude-5bde5f64-db8f-4881-bd49-7c2dd8107ed3",
+        None,
+        HostState::Stopped,
+    );
+    let choices = session_choices(&[named.clone(), unnamed.clone()]);
+    assert_eq!(choices[0].label, named.display_name(false));
+    assert_eq!(choices[0].label, "reviewer");
+    assert!(
+        choices[0].detail.starts_with("refund-v2 · codex · running"),
+        "{:?}",
+        choices[0]
+    );
+    assert_eq!(choices[1].label, "claude-5bde5f64");
+    assert!(choices[1].dim);
+    assert_eq!(choices[1].primary, unnamed.primary);
 }

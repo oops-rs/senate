@@ -667,6 +667,7 @@ async fn streams_follow_sessions_and_configured_committees() {
             speaker: status.speaker.clone(),
             roles: status.roles.clone(),
             secretary_problems: Vec::new(),
+            file_locale: None,
         },
         chrono::Utc::now(),
     );

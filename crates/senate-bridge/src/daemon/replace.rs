@@ -182,6 +182,7 @@ impl Shared {
             new: seat.senator,
             session_id: seat.session_id,
             steps: record.done,
+            alias: record.alias,
         })
     }
 

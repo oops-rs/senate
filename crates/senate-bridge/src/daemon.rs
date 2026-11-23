@@ -127,7 +127,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use anyhow::{Context, bail};
+use anyhow::{Context, bail, ensure};
 use senate_core::alias::{AliasMatch, AliasName};
 use senate_core::api::{self, Heartbeat};
 use senate_core::continuity::{DECISIONS_FILE, OPEN_FILE, PROGRESS_FILE};
@@ -186,7 +186,7 @@ mod secretary_work;
 mod session_timeline;
 mod spawn_attempt;
 
-use front::Front;
+pub(crate) use front::Front;
 
 /// Largest single inbox message, in chars.
 pub const INBOX_MAX_CHARS: usize = 20_000;
@@ -782,7 +782,10 @@ pub async fn start_with_host_binary(
     };
     let shared = Shared::open(config, &paths.state_db(), 0, &common)?;
     verify_person(&shared).await?;
-    let front = Arc::new(Front::new(shared.clone(), relay, watch, app_clients));
+    let remote = crate::remote::Service::open(&paths).await?;
+    let mut front = Front::new(shared.clone(), relay, watch, app_clients);
+    front.remote = remote.as_ref().map(|(service, _)| service.clone());
+    let front = Arc::new(front);
 
     let listener =
         UnixListener::bind(&socket).with_context(|| format!("binding {}", socket.display()))?;
@@ -793,6 +796,15 @@ pub async fn start_with_host_binary(
         tokio::spawn(serve_ipc(front.clone(), listener, rx.clone())),
         tokio::spawn(hosted_approvals::observe(shared, observed, rx.clone())),
     ];
+    if let Some((service, listener)) = remote {
+        let front = front.clone();
+        let shutdown = rx.clone();
+        tasks.push(tokio::spawn(async move {
+            if let Err(error) = service.serve(listener, front, shutdown).await {
+                tracing::error!(%error, "remote machine listener stopped");
+            }
+        }));
+    }
     for shared in front.senates() {
         shared.sweep_once();
         tasks.push(tokio::spawn(supervise(shared.clone(), rx.clone())));
@@ -3107,6 +3119,7 @@ impl Shared {
                 wrap(result.map_err(server_error))
             }
             Request::Status => wrap(self.on_status()),
+            Request::RemoteControl { .. } => Reply::err(IpcError::bad_request("local device management only")),
             Request::Profiles => wrap(Ok(&self.config.profiles)),
             Request::Sessions => wrap(self.on_sessions(false).await),
             Request::Timeline { session_id, direction, cursor, limit } =>
@@ -4031,6 +4044,10 @@ impl Shared {
 
     /// How many messages wait for `session_id`'s next hook.
     async fn on_waiting(&self, session_id: &str) -> Result<crate::ipc::WaitingReply, IpcError> {
+        // Asked by the Stop hook: the turn ended, so no dialog waits.
+        if let Err(error) = self.on_claude_turn_end(session_id).await {
+            tracing::warn!(%error, session_id, "settling hosted approvals at turn end");
+        }
         let turn = lock(&self.working_sessions).get(session_id).copied();
         let mut waiting = 0;
         let mut unanswered = Vec::new();
@@ -6013,6 +6030,59 @@ impl Shared {
     }
 }
 
+impl Front {
+    pub(crate) async fn remote_sessions(&self) -> anyhow::Result<Vec<crate::remote::Row>> {
+        let sessions = self
+            .primary()
+            .on_sessions(false)
+            .await
+            .map_err(|error| anyhow::anyhow!("{}", error.message))?;
+        Ok(sessions
+            .rows
+            .into_iter()
+            .map(|row| crate::remote::Row {
+                label: row.label(),
+                running: row.is_running(),
+                session: row.session_id,
+                alias: row.alias.map(|name| name.to_string()),
+                primary: row.primary.to_string(),
+                runtime: row.runtime.as_str().to_owned(),
+                paused: row.paused,
+                attached: row.attached,
+            })
+            .collect())
+    }
+
+    pub(crate) async fn remote_terminal(
+        &self,
+        session: &str,
+        attach: bool,
+    ) -> anyhow::Result<PathBuf> {
+        let shared = self.primary();
+        // The input is a native session ID. Resolve the host exclusively
+        // through this daemon's local session table.
+        let id = shared
+            .store
+            .session_host(session)?
+            .context("no hosted session")?;
+        ensure!(
+            shared.store.session_for_host(&id)?.as_deref() == Some(session)
+                && !shared.hosts.unpublished(session),
+            "session changed"
+        );
+        let paths = Paths::new(&shared.home);
+        ensure!(crate::host::running(&paths, &id)?, "host is stopped");
+        let tty = crate::host::socket(&paths, &id);
+        let path = if attach {
+            tty
+        } else {
+            tty.with_file_name(crate::host::watch::SOCKET)
+        };
+        ensure!(crate::testenv::confined(&path), "host is outside test home");
+        Ok(path)
+    }
+}
+
 // ---- tasks -----------------------------------------------------------------
 
 async fn serve_ipc(
@@ -6051,6 +6121,16 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
         let (reply, last) = match ipc::read_line(&mut reader).await {
             Ok(None) => return,
             Ok(Some(line)) => match serde_json::from_str::<Request>(&line) {
+                Ok(Request::RemoteControl { command }) => {
+                    let reply = match shared.refuse_agent_caller(peer, "Manage remote device pairing from your own terminal").await {
+                        Err(error) => Reply::err(error),
+                        Ok(()) => match &shared.remote {
+                            Some(remote) => wrap(remote.control(command).map_err(|e| IpcError::bad_request(e.to_string()))),
+                            None => Reply::err(IpcError::bad_request("remote access is disabled on this machine")),
+                        },
+                    };
+                    (reply, false)
+                }
                 Ok(Request::Watch { app }) => {
                     // An app that shows notifications itself keeps the
                     // daemon quiet while it is connected.
