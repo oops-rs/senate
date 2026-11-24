@@ -829,7 +829,62 @@ fn observe_input(state: &mut HostApprovalState, at: u64) -> bool {
     if candidate {
         state.claude = None;
     }
-    close_notices(state, |notice| notice.at <= at) || candidate
+    close_notices(state, |notice| {
+        // A relayed Codex wait belongs to the task's requester. Typing
+        // shows the terminal is attended but says nothing about its native
+        // approval outcome.
+        notice.at <= at
+            && (notice.screen || notice.runtime != Runtime::Codex || notice.relay_thread.is_none())
+    }) || candidate
+}
+
+#[cfg(test)]
+#[test]
+fn typing_keeps_a_relayed_codex_wait_open_for_its_native_outcome() -> anyhow::Result<()> {
+    let ordinary = ApprovalNotice {
+        id: EventId::new(),
+        prompt: "ordinary".into(),
+        at: 100,
+        tool: None,
+        runtime: Runtime::Codex,
+        agent: "codex-test".parse()?,
+        committee: CommitteeId::new("fixture")?,
+        recipient: None,
+        seq: Some(Seq(1)),
+        relay_thread: None,
+        unseated: false,
+        archive: None,
+        answer: None,
+        append_attempted: true,
+        failures: 0,
+        screen: false,
+    };
+    let relayed = ApprovalNotice {
+        id: EventId::new(),
+        prompt: "relayed".into(),
+        seq: Some(Seq(3)),
+        relay_thread: Some(Seq(2)),
+        ..ordinary.clone()
+    };
+    let screen = ApprovalNotice {
+        id: EventId::new(),
+        prompt: "screen".into(),
+        seq: Some(Seq(4)),
+        screen: true,
+        ..relayed.clone()
+    };
+    let mut state = HostApprovalState {
+        notices: vec![ordinary, relayed, screen],
+        ..HostApprovalState::default()
+    };
+
+    assert!(observe_input(&mut state, 101));
+    assert!(state.notices[0].archive.is_some());
+    assert!(state.notices[1].archive.is_none());
+    assert!(state.notices[2].archive.is_some());
+    assert!(close_notices(&mut state, |notice| notice.prompt == "relayed"));
+    assert!(state.notices[1].archive.is_some());
+    Ok(())
 }
 
 fn open_notice(
