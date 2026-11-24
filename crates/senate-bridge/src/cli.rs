@@ -796,7 +796,10 @@ enum DebugCmd {
 #[derive(Subcommand)]
 enum SessionCmd {
     /// Reauthorize a privileged native seat for its current verified process.
-    Authorize { session_id: String },
+    Authorize {
+        /// The native session ID awaiting reauthorization.
+        session_id: String,
+    },
     /// Repair two agy conversation records for one hosted terminal.
     Rebind {
         /// The original senator by name or role, or the terminal's host ID.
