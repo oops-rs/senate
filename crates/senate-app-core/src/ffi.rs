@@ -535,6 +535,67 @@ impl AppCore {
         Ok(s.into())
     }
 
+    /// A page of ended and stopped sessions, newest first, on `committee`
+    /// (all when `None`), after the page `before` named.
+    pub async fn history(
+        &self,
+        committee: Option<String>,
+        before: Option<String>,
+        limit: u32,
+    ) -> Result<crate::history::HistoryPage, CoreError> {
+        let committee = committee.map(|c| CommitteeId::new(c)).transpose().map_err(|e| CoreError::Invalid {
+            message: e.to_string(),
+        })?;
+        let request = Request::SessionHistory {
+            committee,
+            before,
+            limit: Some(limit as usize),
+        };
+        let reply: senate_bridge::ipc::SessionHistoryReply = self
+            .on_runtime(move |driver| async move { driver.read(&request).await })
+            .await?;
+        Ok(crate::history::HistoryPage {
+            rows: reply.rows.into_iter().map(Into::into).collect(),
+            next: reply.next_before,
+        })
+    }
+
+    /// Search past and live conversations for `query`.
+    pub async fn search_sessions(
+        &self,
+        query: String,
+        committee: Option<String>,
+        cursor: Option<String>,
+        limit: u32,
+    ) -> Result<crate::history::SearchPage, CoreError> {
+        let committee = committee.map(|c| CommitteeId::new(c)).transpose().map_err(|e| CoreError::Invalid {
+            message: e.to_string(),
+        })?;
+        let request = Request::SessionSearch {
+            query,
+            committee,
+            limit: Some(limit as usize),
+            cursor,
+        };
+        let reply: senate_bridge::ipc::SessionSearchReply = self
+            .on_runtime(move |driver| async move { driver.read(&request).await })
+            .await?;
+        Ok(crate::history::SearchPage {
+            hits: reply.hits.into_iter().map(Into::into).collect(),
+            next: reply.next_cursor,
+        })
+    }
+
+    /// Forget an ended or stopped session's record (not the agent's own
+    /// transcript, which stays where its runtime keeps it).
+    pub async fn forget_session(&self, session_id: String) -> Result<(), CoreError> {
+        let request = Request::SessionForget { session_id };
+        let _: serde_json::Value = self
+            .on_runtime(move |driver| async move { driver.read(&request).await })
+            .await?;
+        Ok(())
+    }
+
     /// End a hosted session's terminal, as the person (`senate session
     /// stop <label>`). Never forced: the daemon spares a terminal someone
     /// is typing in, and says so.

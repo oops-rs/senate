@@ -37,6 +37,7 @@
 #![allow(unsafe_code)]
 
 pub mod ffi;
+pub mod history;
 pub mod link;
 pub mod markdown;
 pub mod model;

@@ -323,6 +323,8 @@ pub struct World {
     /// A session that grows on its own clock instead: a step every `min`
     /// to `max` milliseconds (a reply streamed a few characters at a time).
     pub stream_ms: std::collections::BTreeMap<String, (u64, u64)>,
+    /// Ended and stopped sessions, as `session_history` lists them.
+    pub history: Vec<senate_bridge::ipc::SessionHistoryRow>,
     /// The machine's default secretary, as `default_secretary` reads it.
     pub secretary: senate_bridge::ipc::DefaultSecretaryState,
     /// Roots of threads that are settled: readable, in no inbox.
@@ -372,6 +374,7 @@ impl World {
             grow_every: None,
             stream_ms: Default::default(),
             secretary: senate_bridge::ipc::DefaultSecretaryState::NotRecorded,
+            history: Vec::new(),
             settled: Vec::new(),
         }
     }
@@ -824,6 +827,40 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
                 None => Reply::err(IpcError::bad_request(format!("no session {label}"))),
             }
         }
+        Request::SessionHistory { committee, before, limit } => {
+            let mut rows: Vec<_> = w
+                .history
+                .iter()
+                .filter(|r| committee.as_ref().is_none_or(|c| r.committee.as_ref() == Some(c)))
+                .cloned()
+                .collect();
+            rows.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+            let from: usize = before.and_then(|b| b.parse().ok()).unwrap_or(0);
+            let limit = limit.unwrap_or(30).max(1);
+            let page: Vec<_> = rows.iter().skip(from).take(limit).cloned().collect();
+            let next = (from + page.len() < rows.len()).then(|| (from + page.len()).to_string());
+            Reply::ok(&senate_bridge::ipc::SessionHistoryReply { rows: page, next_before: next })
+        }
+        Request::SessionSearch { query, committee, limit, cursor } => {
+            let hits = search_sessions(&w, &query, committee.as_ref());
+            let from: usize = cursor.and_then(|c| c.parse().ok()).unwrap_or(0);
+            let limit = limit.unwrap_or(30).max(1);
+            let page: Vec<_> = hits.iter().skip(from).take(limit).cloned().collect();
+            let next = (from + page.len() < hits.len()).then(|| (from + page.len()).to_string());
+            Reply::ok(&senate_bridge::ipc::SessionSearchReply { hits: page, next_cursor: next })
+        }
+        Request::SessionForget { session_id } => {
+            match w.history.iter().position(|r| r.session_id == session_id) {
+                Some(at) => {
+                    w.history.remove(at);
+                    w.timelines.remove(&session_id);
+                    Reply::ok(&serde_json::Value::Null)
+                }
+                None => Reply::err(IpcError::bad_request(format!(
+                    "{session_id} is not an ended or stopped session"
+                ))),
+            }
+        }
         Request::DefaultSecretary => Reply::ok(&secretary_reply(&w, None)),
         Request::EnsureSecretary => {
             use senate_bridge::ipc::{DefaultSecretaryState as St, EnsureAction};
@@ -852,6 +889,13 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
             let label = senator.to_string();
             if label == "office::secretary" {
                 seat_secretary(&mut w, senate_bridge::ipc::DefaultSecretaryState::Running);
+            }
+            // A session from History: it runs again, and leaves History.
+            if let Some(at) = w.history.iter().position(|r| history_label(r) == label) {
+                let r = w.history.remove(at);
+                revive(&mut w, &r);
+                let _ = events.send(WatchEvent::Sessions);
+                return Reply::ok(&serde_json::json!({}));
             }
             match w.sessions.rows.iter_mut().find(|r| r.label() == label) {
                 Some(row) => {
@@ -2380,4 +2424,213 @@ pub fn seat_secretary(w: &mut World, state: senate_bridge::ipc::DefaultSecretary
             },
         )]
     });
+}
+
+fn history_label(r: &senate_bridge::ipc::SessionHistoryRow) -> String {
+    match (&r.committee, &r.alias) {
+        (Some(c), Some(a)) => format!("{c}::{a}"),
+        _ => r.primary.to_string(),
+    }
+}
+
+/// A History session restored: hosted and running again, in the sidebar.
+fn revive(w: &mut World, r: &senate_bridge::ipc::SessionHistoryRow) {
+    use senate_bridge::ipc::LocalSessionRow;
+    w.sessions.rows.push(SessionRow {
+        paused: false,
+        chair: false,
+        shown_name: r.shown_name.clone(),
+        host_id: EventId::new(),
+        session_id: r.session_id.clone(),
+        primary: r.primary.clone(),
+        alias: r.alias.clone(),
+        committee: r.committee.clone(),
+        runtime: r.runtime,
+        model: r.model.clone(),
+        dir: r.dir.clone(),
+        state: HostState::Running,
+        started_at: Some(Utc::now()),
+        attached: false,
+        typed_secs_ago: None,
+        tty: "/tmp/none".into(),
+        prompt: None,
+        working: false,
+        last_activity: Utc::now(),
+        title: r.title.clone(),
+        branch: r.branch.clone(),
+    });
+    w.sessions.local_rows.push(LocalSessionRow {
+        session_id: r.session_id.clone(),
+        primary: r.primary.clone(),
+        alias: r.alias.clone(),
+        committee: r.committee.clone(),
+        chair: false,
+        shown_name: r.shown_name.clone(),
+        runtime: r.runtime,
+        dir: r.dir.clone(),
+        branch: r.branch.clone(),
+        working: false,
+        last_activity: Utc::now(),
+        title: r.title.clone(),
+    });
+}
+
+/// The searchable text of a timeline item, and what kind it is.
+fn item_text(kind: &TimelineKind) -> Option<(senate_bridge::ipc::SessionSearchKind, String)> {
+    use senate_bridge::ipc::{SessionSearchKind as K, TimelineToolDetail as D};
+    match kind {
+        TimelineKind::UserMessage { text } => Some((K::UserMessage, text.clone())),
+        TimelineKind::AssistantMessage { text } => Some((K::AssistantMessage, text.clone())),
+        TimelineKind::ToolCall { detail, name, .. } => Some((
+            K::ToolCall,
+            match detail {
+                D::Shell { command, output, .. } => format!("{command}\n{}", output.clone().unwrap_or_default()),
+                other => format!("{name} {other:?}"),
+            },
+        )),
+        _ => None,
+    }
+}
+
+/// Case-insensitive matches in every timeline the fake has, live and past,
+/// newest first.
+fn search_sessions(
+    w: &World,
+    query: &str,
+    committee: Option<&CommitteeId>,
+) -> Vec<senate_bridge::ipc::SessionSearchHit> {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let committee_of = |id: &str| -> Option<CommitteeId> {
+        w.history
+            .iter()
+            .find(|r| r.session_id == id)
+            .and_then(|r| r.committee.clone())
+            .or_else(|| w.sessions.local_rows.iter().find(|r| r.session_id == id).and_then(|r| r.committee.clone()))
+            .or_else(|| w.sessions.rows.iter().find(|r| r.session_id == id).and_then(|r| r.committee.clone()))
+    };
+    let mut hits = Vec::new();
+    for (id, items) in &w.timelines {
+        if committee.is_some() && committee_of(id).as_ref() != committee {
+            continue;
+        }
+        let live = !w.history.iter().any(|r| &r.session_id == id);
+        for it in items {
+            let Some((kind, text)) = item_text(&it.kind) else { continue };
+            let lower = text.to_lowercase();
+            let Some(at) = lower.find(&needle) else { continue };
+            // About 50 characters either side, on character boundaries.
+            let mut start = at.saturating_sub(50);
+            while !text.is_char_boundary(start) {
+                start -= 1;
+            }
+            let mut end = (at + needle.len() + 50).min(text.len());
+            while !text.is_char_boundary(end) {
+                end += 1;
+            }
+            let mut snippet = text[start..end].replace('\n', " ");
+            if start > 0 {
+                snippet.insert(0, '…');
+            }
+            if end < text.len() {
+                snippet.push('…');
+            }
+            hits.push(senate_bridge::ipc::SessionSearchHit {
+                session_id: id.clone(),
+                seq: it.seq,
+                kind,
+                snippet,
+                ts: Some(it.at),
+                live,
+            });
+        }
+    }
+    hits.sort_by(|a, b| b.ts.cmp(&a.ts));
+    hits
+}
+
+/// `FAKE_HISTORY=N` in the fake daemon (36 by default): ended and stopped
+/// sessions across committees, runtimes and days, each readable one with
+/// a short conversation the search can find; every ninth is unreadable
+/// (its transcript gone), and only Claude Code and Codex ones restore.
+pub fn history(w: &mut World, n: usize) {
+    use senate_bridge::ipc::{SessionHistoryRow, TimelineToolDetail as D, TimelineToolStatus as S};
+    let committees = ["refund-v2", "payments", "infra", "docs", ""];
+    let runtimes = [Runtime::Claude, Runtime::Codex, Runtime::Agy, Runtime::Acp];
+    let subjects = [
+        ("Refund threshold review", "the refund threshold", "cargo test -p refund"),
+        ("Ledger migration plan", "the ledger migration", "ledgerctl migrate --dry-run 0042"),
+        ("Flaky watch test", "the flaky watch test", "cargo test -p senate-bridge watch -- --nocapture"),
+        ("Release notes for 0.11", "the release notes", "git log --oneline v0.10.0..HEAD"),
+        ("Docs site navigation", "the docs navigation", "npm run build"),
+        ("Approval card layout", "the approval card", "xcodebuild -scheme Senate build"),
+        ("Rate limiter for the API", "the rate limiter", "cargo bench -p gateway"),
+        ("On-call runbook", "the on-call runbook", "rg -n 'page' runbooks/"),
+        ("退款审批流程", "退款审批", "cargo test -p refund approval"),
+    ];
+    let names = ["scout", "mender", "auditor-2", "scribe-old", "builder", "porter", "tester", "planner"];
+    for i in 0..n {
+        let committee = committees[i % committees.len()];
+        let runtime = runtimes[i % runtimes.len()];
+        let (title, topic, command) = subjects[i % subjects.len()];
+        let name = format!("{}-{}", names[i % names.len()], i / names.len() + 1);
+        let id = format!("past-{i:03}");
+        let started = Utc::now() - chrono::Duration::hours(6 + i as i64 * 9);
+        let ran = chrono::Duration::minutes(25 + (i as i64 * 37) % 180);
+        let readable = i % 9 != 8;
+        let primary = path(&format!("{}-{:08x}-0000-4000-8000-{:012x}", runtime.as_str(), i, i));
+        w.history.push(SessionHistoryRow {
+            session_id: id.clone(),
+            primary,
+            alias: Some(path(&name)),
+            shown_name: Some(name.clone()),
+            committee: (!committee.is_empty()).then(|| CommitteeId::new(committee).unwrap()),
+            runtime,
+            model: HostedModel {
+                model: (runtime == Runtime::Claude).then(|| "opus".into()),
+                effort: (runtime == Runtime::Claude && i % 2 == 0).then(|| "high".into()),
+                ..HostedModel::default()
+            },
+            dir: format!("/Users/alice/dev/{}", if committee.is_empty() { "scratch" } else { committee }).into(),
+            branch: Some(format!("feat/{}", title.to_lowercase().split(' ').next().unwrap_or("work"))),
+            title: Some(title.into()),
+            started_at: started,
+            last_activity: started + ran,
+            readable,
+            restorable: readable && matches!(runtime, Runtime::Claude | Runtime::Codex),
+            item_count: readable.then_some(6),
+        });
+        if !readable {
+            continue;
+        }
+        let at = |minutes: i64| started + chrono::Duration::minutes(minutes);
+        let mut items = vec![
+            item(1, 0, TimelineKind::UserMessage { text: format!("Look into {topic} and tell me what you find.") }),
+            item(2, 0, TimelineKind::Reasoning { text: format!("Start with {topic}: read the code, then run the check.") }),
+            item(3, 0, TimelineKind::ToolCall {
+                call_id: format!("c-{i}"),
+                name: "Bash".into(),
+                status: S::Completed,
+                detail: D::Shell {
+                    command: command.into(),
+                    cwd: None,
+                    output: Some(format!("ok: {topic} checked, 0 failures")),
+                    exit_code: Some(0),
+                },
+            }),
+            item(4, 0, TimelineKind::AssistantMessage {
+                text: format!("## {title}\n\nI looked at **{topic}**. The check passes; one thing to decide:\n\n- keep the current behaviour\n- or tighten it behind a flag\n\n```bash\n{command}\n```"),
+            }),
+            item(5, 0, TimelineKind::UserMessage { text: "Tighten it behind a flag, then stop here.".into() }),
+            item(6, 0, TimelineKind::AssistantMessage {
+                text: format!("Done: {topic} is behind `--strict`, off by default. Stopping."),
+            }),
+        ];
+        for (k, it) in items.iter_mut().enumerate() {
+            it.at = at(k as i64 * 4);
+        }
+        w.timelines.insert(id, items);
+    }
 }
