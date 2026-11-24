@@ -621,6 +621,11 @@ pub struct SetAlias {
     /// agent's only committee is used.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub committee: Option<CommitteeId>,
+    /// Who in the Speaker's office sets it, for an agent the authenticated
+    /// person does not run. The office names an agent; it does not take it
+    /// over: the agent keeps its owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acted_by: Option<SenatorName>,
 }
 
 /// `DELETE /v1/aliases/{primary}/{alias}` query.

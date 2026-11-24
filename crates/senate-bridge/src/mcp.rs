@@ -9,7 +9,7 @@
 //! it is an agent, or one of the Speaker's secretaries) also gets the
 //! presiding tools ([`PRESIDING_TOOLS`]: `speaker_docket`, `speaker_route`,
 //! `speaker_cover`, `speaker_hold`, `speaker_escalate`, `speaker_forward`,
-//! `speaker_refuse`, `speaker_chair`, `open_committee`; see [`crate::preside`]): each acts for the Speaker's
+//! `speaker_refuse`, `speaker_chair`, `speaker_alias`, `speaker_unseat`, `open_committee`; see [`crate::preside`]): each acts for the Speaker's
 //! office, recorded with the agent that acted. A session whose agent chairs
 //! its committee gets the chair tools ([`CHAIR_TOOLS`]). The tool list asks
 //! the daemon (`presides`, with the session's own agent pins, so it works
@@ -110,8 +110,10 @@ const MARKDOWN: &str = "text/markdown";
 
 /// The tools only a session working the Speaker's desk is given: each acts
 /// for the Speaker's office.
-pub const PRESIDING_TOOLS: [&str; 9] = [
+pub const PRESIDING_TOOLS: [&str; 11] = [
     "open_committee",
+    "speaker_alias",
+    "speaker_unseat",
     "speaker_docket",
     "speaker_route",
     "speaker_cover",
@@ -138,6 +140,10 @@ const SPAWN: &str = "Only at the human Speaker's or your user's request. Never s
 const SPEAKER_FORWARD: &str = "For the Speaker's office (only the session working the Speaker's desk has this tool): pass on an item from speaker_docket that an agent meant for another committee (it shows \"meant for <qualified name>\"; the boundary rule put it on the desk). A new message goes to that seat from the Speaker's office, naming where it came from, and a note in the asker's thread says where it went; the answer comes back to the asker's thread. Forward what is plainly fine to pass on; send back what should not cross with speaker_refuse, or leave it for the Speaker. Only a seat of this Senate. `committee` and `seq`: as speaker_docket lists the item.";
 
 const SPEAKER_REFUSE: &str = "For the Speaker's office (only the session working the Speaker's desk has this tool): send an item from speaker_docket back to its sender with your reason. Use it for a message meant for another committee that should not cross. The office can also use this tool to archive a stranded hosted approval notice after confirming it no longer needs attention. That archives the Senate notice only. Supply the item's committee, seq, and a short reason.";
+
+const SPEAKER_ALIAS: &str = "For the Speaker's office (only the session working the Speaker's desk has this tool), at your user's or the human Speaker's request: give a senator an alias on a committee, the short name people address it by (e.g. `main`). `senator`: its primary id (e.g. `agy-f2a97944-…`) or an alias it has there. `committee`: where the alias applies. An alias taken by another senator there is refused. The senator keeps its owner. To name your own session, use `join`.";
+
+const SPEAKER_UNSEAT: &str = "For the Speaker's office (only the session working the Speaker's desk has this tool), and only at your user's or the human Speaker's explicit request to remove it: take a senator's seat on a committee away and end its connection there. It stops being chair if it was. Its history stays. Making another senator chair (speaker_chair) does not need this: the old chair stays a member. `senator`: its primary id or an alias it has on `committee`.";
 
 const SPEAKER_CHAIR: &str = "For the Speaker's office (only the session working the Speaker's desk has this tool): make a senator the chair of a committee. The chair picks the agent for a message to whichever agent there, covers for an absent member from its own checkpoint, and receives the members' escalations. `senator`: the new chair, e.g. `claude` or `senator::alice`. `committee`: defaults to this session's committee.";
 
@@ -433,6 +439,26 @@ pub struct RefuseParams {
     pub seq: u64,
     /// Why it is sent back; the asker reads it.
     pub reason: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct SpeakerAliasParams {
+    /// The senator: its primary id, or an alias it has on `committee`.
+    pub senator: String,
+    /// The alias, e.g. `main`.
+    pub alias: String,
+    /// The committee the alias is on.
+    pub committee: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct SpeakerUnseatParams {
+    /// The senator: its primary id, or an alias it has on `committee`.
+    pub senator: String,
+    /// The committee to remove its seat from.
+    pub committee: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
@@ -2341,6 +2367,63 @@ impl SenateMcp {
         })
     }
 
+    #[tool(name = "speaker_alias", description = SPEAKER_ALIAS)]
+    async fn speaker_alias(
+        &self,
+        params: Parameters<SpeakerAliasParams>,
+    ) -> Result<String, String> {
+        let p = params.0;
+        let committee = CommitteeId::new(p.committee.trim()).map_err(|error| error.to_string())?;
+        let reply: serde_json::Value = self
+            .call(&Request::SpeakerAlias {
+                session: self.selector.clone(),
+                committee: committee.clone(),
+                senator: parse_senator(&p.senator)?,
+                alias: parse_senator(&p.alias)?,
+            })
+            .await
+            .map_err(|e| describe(e, self.locale))?;
+        let senator = reply["senator"].as_str().unwrap_or_default();
+        let alias = reply["alias"].as_str().unwrap_or_default();
+        Ok(match self.locale {
+            Locale::Zh => format!(
+                "已为 Speaker 办公室把 [senator::{senator}] 在 {committee} 上的别名设为 {alias}。"
+            ),
+            Locale::En => format!(
+                "For the Speaker's office, [senator::{senator}] is now {alias} on {committee}."
+            ),
+        })
+    }
+
+    #[tool(name = "speaker_unseat", description = SPEAKER_UNSEAT)]
+    async fn speaker_unseat(
+        &self,
+        params: Parameters<SpeakerUnseatParams>,
+    ) -> Result<String, String> {
+        let p = params.0;
+        let committee = CommitteeId::new(p.committee.trim()).map_err(|error| error.to_string())?;
+        let info: senate_core::api::CommitteeSeatInfo = self
+            .call(&Request::SpeakerUnseat {
+                session: self.selector.clone(),
+                committee,
+                senator: parse_senator(&p.senator)?,
+                id: Some(EventId::new()),
+            })
+            .await
+            .map_err(|e| describe(e, self.locale))?;
+        let who = Address::senator(&info.senator).in_text();
+        Ok(match self.locale {
+            Locale::Zh => format!(
+                "已为 Speaker 办公室把 {who} 从 {} 除席（seq {}）。",
+                info.committee, info.seq
+            ),
+            Locale::En => format!(
+                "For the Speaker's office, {who} is unseated from {} (seq {}).",
+                info.committee, info.seq
+            ),
+        })
+    }
+
     #[tool(name = "speaker_chair", description = SPEAKER_CHAIR)]
     async fn speaker_chair(&self, params: Parameters<SetChairParams>) -> Result<String, String> {
         let p = params.0;
@@ -3421,6 +3504,7 @@ mod tests {
                 "secretary_cover",
                 "secretary_work",
                 "spawn",
+                "speaker_alias",
                 "speaker_chair",
                 "speaker_cover",
                 "speaker_docket",
@@ -3429,6 +3513,7 @@ mod tests {
                 "speaker_hold",
                 "speaker_refuse",
                 "speaker_route",
+                "speaker_unseat",
                 "status",
                 "take"
             ]

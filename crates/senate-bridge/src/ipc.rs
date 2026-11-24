@@ -1448,6 +1448,25 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<EventId>,
     },
+    /// The Speaker's office gives a senator an alias on a committee (the
+    /// `speaker_alias` tool). The agent keeps its owner.
+    SpeakerAlias {
+        session: SessionSelector,
+        committee: CommitteeId,
+        /// The senator: its primary id, or an alias it has there.
+        senator: SenatorName,
+        alias: SenatorName,
+    },
+    /// The Speaker's office removes a senator's seat on a committee (the
+    /// `speaker_unseat` tool), at the person's explicit request.
+    SpeakerUnseat {
+        session: SessionSelector,
+        committee: CommitteeId,
+        /// The senator: its primary id, or an alias it has there.
+        senator: SenatorName,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<EventId>,
+    },
     /// Pass a desk item meant for another committee on to that seat.
     Forward {
         session: SessionSelector,

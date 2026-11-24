@@ -1146,6 +1146,72 @@ impl Shared {
         }
     }
 
+    /// `senator` as written on `committee`: the primary an alias there
+    /// stands for, else the name itself.
+    async fn primary_on(
+        &self,
+        committee: &CommitteeId,
+        senator: SenatorName,
+    ) -> Result<SenatorName, IpcError> {
+        let aliases = self.api.aliases().await.map_err(server_error)?;
+        let written = AliasName {
+            committee: Some(committee.clone()),
+            alias: senator.clone(),
+        };
+        Ok(match aliases.resolve(&written, Some(committee)) {
+            AliasMatch::One(primary) => primary,
+            _ => senator,
+        })
+    }
+
+    /// `speaker_alias`: the office (`speaker`, a desk worker) gives
+    /// `senator` the alias `alias` on `committee`. The server checks the
+    /// office's authority; the agent keeps its owner.
+    pub(crate) async fn on_speaker_alias(
+        &self,
+        speaker: &SenatorName,
+        committee: CommitteeId,
+        senator: SenatorName,
+        alias: SenatorName,
+    ) -> Result<serde_json::Value, IpcError> {
+        let primary = self.primary_on(&committee, senator).await?;
+        let alias = self
+            .api
+            .set_alias_for_office(&primary, &alias, &committee, speaker)
+            .await
+            .map_err(|e| self.refusal(e))?;
+        *lock(&self.display_aliases) = None;
+        Ok(serde_json::json!({
+            "committee": committee,
+            "senator": primary,
+            "alias": alias,
+        }))
+    }
+
+    /// `speaker_unseat`: the office removes `senator`'s seat on `committee`.
+    /// The server checks the office's authority.
+    pub(crate) async fn on_speaker_unseat(
+        &self,
+        speaker: &SenatorName,
+        committee: CommitteeId,
+        senator: SenatorName,
+        id: Option<EventId>,
+    ) -> Result<senate_core::api::CommitteeSeatInfo, IpcError> {
+        let primary = self.primary_on(&committee, senator).await?;
+        self.api
+            .set_committee_seat(
+                &committee,
+                &senate_core::api::SetCommitteeSeat {
+                    senator: primary,
+                    action: senate_core::CommitteeSeatAction::Unseat,
+                    id: id.unwrap_or_default(),
+                    acted_by: Some(speaker.clone()),
+                },
+            )
+            .await
+            .map_err(|e| self.refusal(e))
+    }
+
     // ---- secretaries ----------------------------------------------------------
 
     /// List, add or remove a senator's secretaries: the session's agent's,

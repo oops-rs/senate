@@ -177,6 +177,30 @@ impl Front {
                 }
                 Err(e) => Reply::err(e),
             },
+            Request::SpeakerAlias {
+                session,
+                committee,
+                senator,
+                alias,
+            } => match self.presiding(&session) {
+                Ok((seat, speaker)) => wrap(
+                    seat.on_speaker_alias(&speaker, committee, senator, alias)
+                        .await,
+                ),
+                Err(e) => Reply::err(e),
+            },
+            Request::SpeakerUnseat {
+                session,
+                committee,
+                senator,
+                id,
+            } => match self.presiding(&session) {
+                Ok((seat, speaker)) => wrap(
+                    seat.on_speaker_unseat(&speaker, committee, senator, id)
+                        .await,
+                ),
+                Err(e) => Reply::err(e),
+            },
             Request::Forward {
                 session,
                 committee,

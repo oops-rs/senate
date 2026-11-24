@@ -3191,6 +3191,8 @@ impl Shared {
             | Request::Hold { .. }
             | Request::Refer { .. }
             | Request::Forward { .. }
+            | Request::SpeakerAlias { .. }
+            | Request::SpeakerUnseat { .. }
             | Request::Refuse { .. } => Reply::err(IpcError::bad_request(
                 "a presiding request is served by the daemon's front",
             )),
@@ -6167,32 +6169,48 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
     loop {
         let (reply, last) = match ipc::read_line(&mut reader).await {
             Ok(None) => return,
-            Ok(Some(line)) => match serde_json::from_str::<Request>(&line) {
-                Ok(Request::RemoteControl { command }) => {
-                    let reply = match shared.refuse_agent_caller(peer, "Manage remote device pairing from your own terminal").await {
-                        Err(error) => Reply::err(error),
-                        Ok(()) => match command {
-                            crate::remote::Control::PrepareEnable { listen } => wrap(
-                                crate::remote::prepare_enable(&Paths::new(&shared.primary().home), listen)
-                                    .map_err(|error| IpcError::bad_request(error.to_string()))
-                            ),
-                            command => match &shared.remote {
-                                Some(remote) => wrap(remote.control(command).map_err(|e| IpcError::bad_request(e.to_string()))),
-                                None => Reply::err(IpcError::bad_request("remote access is disabled on this machine")),
+            Ok(Some(line)) => {
+                match serde_json::from_str::<Request>(&line) {
+                    Ok(Request::RemoteControl { command }) => {
+                        let reply = match shared
+                            .refuse_agent_caller(
+                                peer,
+                                "Manage remote device pairing from your own terminal",
+                            )
+                            .await
+                        {
+                            Err(error) => Reply::err(error),
+                            Ok(()) => match command {
+                                crate::remote::Control::PrepareEnable { listen } => wrap(
+                                    crate::remote::prepare_enable(
+                                        &Paths::new(&shared.primary().home),
+                                        listen,
+                                    )
+                                    .map_err(|error| IpcError::bad_request(error.to_string())),
+                                ),
+                                command => match &shared.remote {
+                                    Some(remote) => wrap(
+                                        remote
+                                            .control(command)
+                                            .map_err(|e| IpcError::bad_request(e.to_string())),
+                                    ),
+                                    None => Reply::err(IpcError::bad_request(
+                                        "remote access is disabled on this machine",
+                                    )),
+                                },
                             },
-                        },
-                    };
-                    (reply, false)
-                }
-                Ok(Request::Watch { app }) => {
-                    // An app that shows notifications itself keeps the
-                    // daemon quiet while it is connected.
-                    let _guard = app.then(|| AppClient::enter(shared.app_clients()));
-                    serve_watch(&shared, reader, write, shutdown).await;
-                    return;
-                }
-                Ok(Request::TimelineWatch { session_id, after }) => {
-                    match shared
+                        };
+                        (reply, false)
+                    }
+                    Ok(Request::Watch { app }) => {
+                        // An app that shows notifications itself keeps the
+                        // daemon quiet while it is connected.
+                        let _guard = app.then(|| AppClient::enter(shared.app_clients()));
+                        serve_watch(&shared, reader, write, shutdown).await;
+                        return;
+                    }
+                    Ok(Request::TimelineWatch { session_id, after }) => {
+                        match shared
                         .refuse_agent_caller(peer, "Stream session transcripts from your own terminal or the Senate app")
                         .await
                     {
@@ -6211,86 +6229,53 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                             session_timeline::send(&mut write, &Reply::err(refused)).await;
                         }
                     }
-                    return;
-                }
-                Ok(Request::Sessions) => {
-                    let person = shared
+                        return;
+                    }
+                    Ok(Request::Sessions) => {
+                        let person = shared
                         .refuse_agent_caller(peer, "Read session transcript titles from your own terminal or the Senate app")
                         .await
                         .is_ok();
-                    (wrap(shared.primary().on_sessions(person).await), false)
-                }
-                Ok(request) if matches!(request, Request::Timeline { .. } | Request::SessionHistory { .. } |
-                    Request::SessionSearch { .. } | Request::SessionForget { .. }) => {
-                    match shared
-                        .refuse_agent_caller(peer, "Read session transcripts from your own terminal or the Senate app")
-                        .await
-                    {
-                        Ok(()) => (shared.dispatch(request).await, false),
-                        Err(refused) => (Reply::err(refused), false),
+                        (wrap(shared.primary().on_sessions(person).await), false)
                     }
-                }
-                Ok(Request::DeskDecide { committee, seq, item_id, id, decision }) => {
-                    let reply = match shared.refuse_agent_caller(peer, "Decide a desk request from your own terminal or the Senate app").await {
-                        Ok(()) => wrap(shared.primary().on_desk_decide(committee, seq, item_id, id, decision).await),
-                        Err(error) => Reply::err(error),
-                    };
-                    (reply, false)
-                }
-                // As the person (no session): what an agent must not do in
-                // their name. With a session it is the Speaker's office's,
-                // checked by the front and the server.
-                Ok(
-                    request @ Request::SetChair {
-                        session:
-                            SessionSelector {
-                                session_id: None,
-                                claude_pid: None,
-                            },
-                        ..
-                    },
-                ) => {
-                    match shared
-                        .refuse_agent_caller(
-                            peer,
-                            "Naming a chair as the person is the person's to do: run `senate senator chair` from your own terminal",
-                        )
-                        .await
-                    {
-                        Ok(()) => (shared.dispatch(request).await, false),
-                        Err(refused) => (Reply::err(refused), false),
+                    Ok(Request::DeskDecide {
+                        committee,
+                        seq,
+                        item_id,
+                        id,
+                        decision,
+                    }) => {
+                        let reply = match shared
+                            .refuse_agent_caller(
+                                peer,
+                                "Decide a desk request from your own terminal or the Senate app",
+                            )
+                            .await
+                        {
+                            Ok(()) => wrap(
+                                shared
+                                    .primary()
+                                    .on_desk_decide(committee, seq, item_id, id, decision)
+                                    .await,
+                            ),
+                            Err(error) => Reply::err(error),
+                        };
+                        (reply, false)
                     }
+                    // The person's own acts (see approval_guard::person_only):
+                    // refused from inside a coding session's process tree. One
+                    // boxed arm keeps this connection's future small.
+                    Ok(request) if let Some(guidance) = approval_guard::person_only(&request) => (
+                        Box::pin(shared.guarded_dispatch(peer, guidance, request)).await,
+                        false,
+                    ),
+                    Ok(request) => (shared.dispatch(request).await, false),
+                    Err(e) => (
+                        Reply::err(IpcError::bad_request(format!("unreadable request: {e}"))),
+                        false,
+                    ),
                 }
-                Ok(Request::EnsureSecretary) => {
-                    match shared
-                        .refuse_agent_caller(
-                            peer,
-                            "Only the person starts the default secretary: ask it from your own terminal or the Senate app",
-                        )
-                        .await
-                    {
-                        Ok(()) => (shared.dispatch(Request::EnsureSecretary).await, false),
-                        Err(refused) => (Reply::err(refused), false),
-                    }
-                }
-                Ok(request) if approval_guard::answers_a_prompt(&request) => {
-                    match shared
-                        .refuse_agent_caller(
-                            peer,
-                            "A permission prompt is a person's decision: answer it from your own terminal or the Senate app",
-                        )
-                        .await
-                    {
-                        Ok(()) => (shared.dispatch(request).await, false),
-                        Err(refused) => (Reply::err(refused), false),
-                    }
-                }
-                Ok(request) => (shared.dispatch(request).await, false),
-                Err(e) => (
-                    Reply::err(IpcError::bad_request(format!("unreadable request: {e}"))),
-                    false,
-                ),
-            },
+            }
             Err(e) => (Reply::err(IpcError::bad_request(e.to_string())), true),
         };
         let mut out = match serde_json::to_string(&reply) {
