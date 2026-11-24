@@ -30,7 +30,7 @@ use senate_core::{
     Locale, Name, People, SeatFacts, SenatorName, Seq, SpeakerSeat, StatusState, ThreadSummary,
     TriageVerdict,
 };
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::broadcast;
 use tokio::task::AbortHandle;
@@ -480,6 +480,38 @@ async fn serve(conn: UnixStream, world: Arc<Mutex<World>>, events: broadcast::Se
             }
             return;
         }
+        if let Request::SessionDrop {
+            session_id,
+            name,
+            size,
+        } = &request
+        {
+            world.lock().unwrap().requests.push(request.clone());
+            let refusal = if *size > senate_bridge::ipc::MAX_SESSION_DROP_BYTES {
+                Some("attachments are limited to 20 MiB")
+            } else if session_id == "unknown" {
+                Some("no registered session with that ID")
+            } else {
+                None
+            };
+            if let Some(message) = refusal {
+                let reply = Reply::err(IpcError::bad_request(message));
+                w.write_all(format!("{}\n", serde_json::to_string(&reply).unwrap()).as_bytes())
+                    .await
+                    .unwrap();
+                return;
+            }
+            w.write_all(b"{\"ok\":true}\n").await.unwrap();
+            let mut bytes = vec![0; *size as usize];
+            lines.get_mut().read_exact(&mut bytes).await.unwrap();
+            let path = format!("/tmp/senate-fake/drops/fixture/{name}");
+            w.write_all(
+                format!("{}\n", serde_json::to_string(&Reply::ok(&path)).unwrap()).as_bytes(),
+            )
+            .await
+            .unwrap();
+            return;
+        }
         if let Request::TimelineWatch { session_id, after } = &request {
             world.lock().unwrap().requests.push(request.clone());
             watch_timeline(&world, session_id, *after, &mut w).await;
@@ -846,7 +878,7 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
                 })
                 .cloned()
                 .collect();
-            rows.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+            rows.sort_by_key(|row| std::cmp::Reverse(row.last_activity));
             let from: usize = before.and_then(|b| b.parse().ok()).unwrap_or(0);
             let limit = limit.unwrap_or(30).max(1);
             let page: Vec<_> = rows.iter().skip(from).take(limit).cloned().collect();
@@ -2628,7 +2660,7 @@ fn search_sessions(
             });
         }
     }
-    hits.sort_by(|a, b| b.ts.cmp(&a.ts));
+    hits.sort_by_key(|hit| std::cmp::Reverse(hit.ts));
     hits
 }
 

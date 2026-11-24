@@ -777,9 +777,13 @@ impl TaskBoard {
                 if let Some(links) = status.links {
                     thread.links = links;
                 }
-                // A session is an agent's: a status from anyone else names
-                // no owner.
+                // A session is an agent's; the asker archiving its own
+                // thread (it is not addressed to it) names no owner.
+                let asker_only = !thread.to.contains(&event.from)
+                    && (thread.from == event.from
+                        || thread.on_behalf_of.as_ref() == Some(&event.from));
                 if thread.owner.is_none()
+                    && !asker_only
                     && let Some(session) = status.session
                     && let Some(agent) = self.people.as_agent(&event.from)
                 {
@@ -1005,6 +1009,73 @@ mod tests {
             "run_id": 1, "requester": "bob", "target_agent": "claude",
             "instruction": "x", "branch": "senate/refund-v2/speaker-1", "state": "queued"
         })
+    }
+
+    /// The asker archiving its own thread folds as the addressee's archive
+    /// does: escalation ended, takeover kept, out of every inbox; it names
+    /// no owner; and a later message behaves the same either way.
+    #[test]
+    fn an_askers_archive_folds_like_the_addressees() {
+        let fold = |archiver: &str| {
+            let mut log = Log(Vec::new());
+            let root = log.push(
+                NewEvent::new(c(), Kind::Request, addr("senator::lead"), "merge feat/x")
+                    .to(addr("senator::claude")),
+            );
+            let mut working = StatusPayload::new(StatusState::Processing);
+            working.session = Some("s-claude".into());
+            log.push(status(root, addr("senator::claude"), working));
+            let mut escalated = StatusPayload::new(StatusState::Suspended);
+            escalated.escalated_to = Some(name("alice"));
+            log.push(status(root, addr("senator::claude"), escalated));
+            let mut took = StatusPayload::new(StatusState::Suspended);
+            took.takeover = Some(name("bob"));
+            log.push(status(root, addr("senator::bob"), took));
+            let mut archived = StatusPayload::new(StatusState::Archived);
+            archived.session = Some(format!("s-{archiver}"));
+            log.push(status(
+                root,
+                addr(&format!("senator::{archiver}")),
+                archived,
+            ));
+            let after = log.board().get(root).cloned().unwrap();
+            log.push(
+                NewEvent::new(c(), Kind::Note, addr("senator::claude"), "one more thing")
+                    .in_thread(root),
+            );
+            (after, log.board().get(root).cloned().unwrap())
+        };
+        let (by_asker, later_asker) = fold("lead");
+        let (by_agent, later_agent) = fold("claude");
+        assert_eq!(by_asker.state, StatusState::Archived);
+        assert_eq!(by_asker.waits(), None, "in no inbox");
+        assert!(by_asker.escalation.is_none(), "the escalation ended");
+        assert_eq!(by_asker.takeover, Some(name("bob")), "the takeover stays");
+        assert_eq!(
+            by_asker.owner.as_ref().map(|o| o.agent.as_str()),
+            Some("claude"),
+            "the agent that worked it owns it; the asker took nothing on"
+        );
+        assert_eq!(
+            (by_asker.state, by_asker.waits(), &by_asker.takeover),
+            (by_agent.state, by_agent.waits(), &by_agent.takeover)
+        );
+        assert_eq!(
+            (later_asker.state, later_asker.waits()),
+            (later_agent.state, later_agent.waits()),
+            "a later message in the thread behaves as it does today"
+        );
+
+        // Archived before any agent reported: still no owner from the asker.
+        let mut log = Log(Vec::new());
+        let root = log.push(
+            NewEvent::new(c(), Kind::Question, addr("senator::lead"), "which header?")
+                .to(addr("senator::claude")),
+        );
+        let mut archived = StatusPayload::new(StatusState::Archived);
+        archived.session = Some("s-lead".into());
+        log.push(status(root, addr("senator::lead"), archived));
+        assert!(log.board().get(root).unwrap().owner.is_none());
     }
 
     #[test]

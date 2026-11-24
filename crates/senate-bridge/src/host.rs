@@ -5,7 +5,7 @@ pub(crate) mod control;
 mod emulation;
 mod input;
 mod keyboard;
-mod paste;
+pub(crate) mod paste;
 mod picker;
 pub(crate) mod prompt;
 mod scroll;
@@ -239,11 +239,18 @@ fn open_lock(dir: &Path) -> io::Result<File> {
 
 /// The operating system releases this lock even if the host crashes.
 pub(crate) fn running(paths: &Paths, id: &EventId) -> io::Result<bool> {
-    let file = match File::open(directory(paths, id).join("owner")) {
+    let file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(directory(paths, id).join("owner"))
+    {
         Ok(file) => file,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(e) => return Err(e),
     };
+    if !file.metadata()?.is_file() {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
     match flock(&file, FlockOperation::NonBlockingLockShared) {
         Ok(()) => Ok(false),
         Err(rustix::io::Errno::WOULDBLOCK) => Ok(true),

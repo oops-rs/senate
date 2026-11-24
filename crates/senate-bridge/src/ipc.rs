@@ -12,7 +12,10 @@
 //! Newline-delimited JSON, UTF-8, at most [`MAX_LINE`] bytes per line. The
 //! client writes one request object and reads exactly one response line
 //! before writing the next. A connection may carry any number of requests;
-//! either side may close between them.
+//! either side may close between them. A `session_drop` upload is the
+//! exception: after the daemon accepts its JSON header, the client sends
+//! the stated number of raw file bytes on that connection, then reads the
+//! final JSON reply.
 //!
 //! # Requests
 //!
@@ -26,6 +29,7 @@
 //! | `spawn` | `session?`, `runtime`, `committee`, `alias?`, `cwd`, `chair?`, `secretary?` | [`SpawnReply`] |
 //! | `restore` | `session?`, `senator` | [`SpawnReply`] |
 //! | `attach` | `senator` (an alias may be `committee::alias`) | Local terminal socket path |
+//! | `session_drop` | `session_id`, `name`, `size` | Ready, then the staged local path |
 //! | `aliases` | — | [`KnownAliases`](senate_core::alias::KnownAliases) |
 //! | `set_alias` | `senator`, `alias`, `committee?` | [`SenatorName`] |
 //! | `roster` | — | `Vec<`[`RosterCommittee`]`>` |
@@ -249,6 +253,10 @@ use crate::state::QueueCounts;
 pub const PROTOCOL_VERSION: u32 = 1;
 /// Longest accepted line, in bytes.
 pub const MAX_LINE: usize = 1 << 20;
+/// Separate from the JSON line budget: an authorized SessionDrop transfer
+/// sends exactly this many bytes at most after the daemon says it is ready.
+pub const MAX_SESSION_DROP_BYTES: u32 = 20 * 1024 * 1024;
+pub(crate) const SESSION_DROP_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Error codes.
 pub mod codes {
@@ -1023,6 +1031,13 @@ pub enum Request {
     /// Every Senate-hosted session this machine has a record of, and every
     /// host running with none ([`SessionsReply`]).
     Sessions,
+    /// After a successful readiness reply, send exactly `size` raw bytes.
+    /// The final reply is the saved path and closes this connection.
+    SessionDrop {
+        session_id: String,
+        name: String,
+        size: u32,
+    },
     SessionHistory {
         #[serde(default)]
         committee: Option<CommitteeId>,
@@ -2677,21 +2692,49 @@ impl IpcClient {
                 serde_json::to_string(request).map_err(|e| ClientError::Protocol(e.to_string()))?;
             line.push('\n');
             self.writer.write_all(line.as_bytes()).await?;
-            let reply = read_line(&mut self.reader)
-                .await?
-                .ok_or_else(|| ClientError::Protocol("connection closed".into()))?;
-            let reply: Reply =
-                serde_json::from_str(&reply).map_err(|e| ClientError::Protocol(e.to_string()))?;
-            match (reply.ok, reply.result, reply.error) {
-                (true, result, _) => serde_json::from_value(result.unwrap_or(Value::Null))
-                    .map_err(|e| ClientError::Protocol(e.to_string())),
-                (false, _, Some(e)) => Err(ClientError::Remote(e)),
-                (false, _, None) => Err(ClientError::Protocol("error without detail".into())),
-            }
+            self.read_reply().await
         };
         tokio::time::timeout(timeout, exchange)
             .await
             .map_err(|_| ClientError::Timeout)?
+    }
+
+    async fn read_reply<T: DeserializeOwned>(&mut self) -> Result<T, ClientError> {
+        let reply = read_line(&mut self.reader)
+            .await?
+            .ok_or_else(|| ClientError::Protocol("connection closed".into()))?;
+        let reply: Reply =
+            serde_json::from_str(&reply).map_err(|e| ClientError::Protocol(e.to_string()))?;
+        match (reply.ok, reply.result, reply.error) {
+            (true, result, _) => serde_json::from_value(result.unwrap_or(Value::Null))
+                .map_err(|e| ClientError::Protocol(e.to_string())),
+            (false, _, Some(e)) => Err(ClientError::Remote(e)),
+            (false, _, None) => Err(ClientError::Protocol("error without detail".into())),
+        }
+    }
+
+    /// Upload one file over a dedicated local connection. The daemon
+    /// checks the peer and metadata before accepting any file bytes.
+    pub async fn session_drop(
+        mut self,
+        session_id: String,
+        name: String,
+        bytes: &[u8],
+    ) -> Result<String, ClientError> {
+        let size = u32::try_from(bytes.len())
+            .map_err(|_| ClientError::Protocol("attachments are limited to 20 MiB".into()))?;
+        let request = Request::SessionDrop {
+            session_id,
+            name,
+            size,
+        };
+        self.call::<()>(&request, SESSION_DROP_TIMEOUT).await?;
+        tokio::time::timeout(SESSION_DROP_TIMEOUT, async {
+            self.writer.write_all(bytes).await?;
+            self.read_reply().await
+        })
+        .await
+        .map_err(|_| ClientError::Timeout)?
     }
 }
 

@@ -1,13 +1,12 @@
 //! Keep files dropped into the viewer available to the hosted process.
 
 use std::ffi::OsStr;
-use std::fs::{self, DirBuilder, File, OpenOptions};
-use std::io;
+use std::fs::{self, File};
+use std::io::{self, Read};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
-use rustix::fs::{Mode, OFlags};
+use rustix::fs::{self as fd, AtFlags, Dir, FileType, FlockOperation, Mode, OFlags};
 use senate_core::EventId;
 
 const START: &[u8] = b"\x1b[200~";
@@ -269,10 +268,25 @@ fn rewrite(bytes: &[u8], drops: &Path) -> Vec<u8> {
     output
 }
 
+/// The same host directory for terminal pastes and local composer uploads.
+pub(crate) fn drop_directory(paths: &crate::Paths, socket: &Path) -> io::Result<PathBuf> {
+    let parent = socket.parent().ok_or(io::ErrorKind::InvalidInput)?;
+    let host_name = parent.file_name().ok_or(io::ErrorKind::InvalidInput)?;
+    let hosts = super::hosts(paths);
+    if !fs::symlink_metadata(&hosts)?.is_dir() || !fs::symlink_metadata(parent)?.is_dir() {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    let host = parent.canonicalize()?;
+    if host != hosts.canonicalize()?.join(host_name) {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    Ok(host.join("drops"))
+}
+
 fn copy(source: &Path, drops: &Path) -> io::Result<PathBuf> {
     let name = source.file_name().ok_or(io::ErrorKind::InvalidInput)?;
     // Nonblocking open avoids waiting if a pasted path is a named pipe.
-    let mut input = File::from(rustix::fs::open(
+    let mut input = File::from(fd::open(
         source,
         OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
         Mode::empty(),
@@ -280,31 +294,131 @@ fn copy(source: &Path, drops: &Path) -> io::Result<PathBuf> {
     if !input.metadata()?.is_file() {
         return Err(io::ErrorKind::InvalidInput.into());
     }
-    let private = || {
-        let mut builder = DirBuilder::new();
-        builder.mode(0o700);
-        builder
-    };
-    match private().create(drops) {
-        Ok(()) => {}
-        Err(error)
-            if error.kind() == io::ErrorKind::AlreadyExists
-                && fs::symlink_metadata(drops)?.is_dir() => {}
-        Err(error) => return Err(error),
+    store(drops, name, &mut input)
+}
+
+// Both writers share the same budget and the same cross-process lock.
+// The count limit also bounds the directory walk for zero-byte drops.
+const DROP_BYTES: u64 = 100 * 1024 * 1024;
+const DROP_FILES: usize = 128;
+const DIRECTORY: OFlags = OFlags::RDONLY
+    .union(OFlags::DIRECTORY)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::CLOEXEC);
+const PRIVATE_DIR: Mode = Mode::RUSR.union(Mode::WUSR).union(Mode::XUSR);
+const PRIVATE_FILE: Mode = Mode::RUSR.union(Mode::WUSR);
+
+fn quota_error() -> io::Error {
+    io::Error::other("this session's attachment storage is full (100 MiB or 128 files)")
+}
+
+fn remaining(directory: &impl std::os::fd::AsFd) -> io::Result<u64> {
+    let mut size = 0u64;
+    let mut count = 0;
+    for entry in Dir::read_from(directory)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if matches!(name.to_bytes(), b"." | b".." | b".lock") {
+            continue;
+        }
+        count += 1;
+        if count >= DROP_FILES {
+            return Err(quota_error());
+        }
+        let drop = fd::openat(directory, name, DIRECTORY, Mode::empty())?;
+        let mut seen_file = false;
+        for file in Dir::read_from(&drop)? {
+            let file = file?;
+            let name = file.file_name();
+            if matches!(name.to_bytes(), b"." | b"..") {
+                continue;
+            }
+            if std::mem::replace(&mut seen_file, true) {
+                return Err(io::ErrorKind::InvalidInput.into());
+            }
+            let stat = fd::statat(&drop, name, AtFlags::SYMLINK_NOFOLLOW)?;
+            if !FileType::from_raw_mode(stat.st_mode).is_file() {
+                return Err(io::ErrorKind::InvalidInput.into());
+            }
+            size = size.saturating_add(stat.st_size as u64);
+            if size >= DROP_BYTES {
+                return Err(quota_error());
+            }
+        }
     }
-    let directory = drops.join(EventId::new().to_string());
-    private().create(&directory)?;
-    let result = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(directory.join(name))
-        .and_then(|mut output| io::copy(&mut input, &mut output));
+    Ok(DROP_BYTES - size)
+}
+
+/// Store one file in a fresh 0700 directory under a host's drops directory.
+/// Every destination component under the host is opened without following
+/// symlinks. The host's existing directory removal also removes its drops.
+pub(crate) fn store(drops: &Path, name: &OsStr, input: &mut impl Read) -> io::Result<PathBuf> {
+    if Path::new(name).file_name() != Some(name) {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    let parent = drops.parent().ok_or(io::ErrorKind::InvalidInput)?;
+    let basename = drops.file_name().ok_or(io::ErrorKind::InvalidInput)?;
+    let hosts = fd::open(
+        parent.parent().ok_or(io::ErrorKind::InvalidInput)?,
+        DIRECTORY,
+        Mode::empty(),
+    )?;
+    let host = fd::openat(
+        &hosts,
+        parent.file_name().ok_or(io::ErrorKind::InvalidInput)?,
+        DIRECTORY,
+        Mode::empty(),
+    )?;
+    match fd::mkdirat(&host, basename, PRIVATE_DIR) {
+        Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+        Err(error) => return Err(error.into()),
+    }
+    let root = fd::openat(&host, basename, DIRECTORY, Mode::empty())?;
+    let lock = fd::openat(
+        &root,
+        ".lock",
+        OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        PRIVATE_FILE,
+    )?;
+    if !FileType::from_raw_mode(fd::fstat(&lock)?.st_mode).is_file() {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    fd::flock(&lock, FlockOperation::NonBlockingLockExclusive).map_err(|e| {
+        if e == rustix::io::Errno::WOULDBLOCK {
+            io::Error::other("another attachment is being saved; try again")
+        } else {
+            e.into()
+        }
+    })?;
+    let remaining = remaining(&root)?;
+    let id = EventId::new().to_string();
+    fd::mkdirat(&root, id.as_str(), PRIVATE_DIR)?;
+    let result = (|| {
+        let directory = fd::openat(&root, id.as_str(), DIRECTORY, Mode::empty())?;
+        let file = fd::openat(
+            &directory,
+            name,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            PRIVATE_FILE,
+        )?;
+        let mut output = File::from(file);
+        let written = io::copy(&mut input.take(remaining + 1), &mut output).and_then(|size| {
+            if size > remaining {
+                Err(quota_error())
+            } else {
+                Ok(())
+            }
+        });
+        if written.is_err() {
+            let _ = fd::unlinkat(&directory, name, AtFlags::empty());
+        }
+        written
+    })();
     if let Err(error) = result {
-        let _ = fs::remove_dir_all(&directory);
+        let _ = fd::unlinkat(&root, id.as_str(), AtFlags::REMOVEDIR);
         return Err(error);
     }
-    Ok(directory)
+    Ok(drops.join(id))
 }
 
 #[cfg(test)]
@@ -351,6 +465,28 @@ mod tests {
         assert_eq!(output, b"plain\x1d text\x1b[201~bye");
         assert!(detach);
         assert!(!drops.exists());
+    }
+
+    #[test]
+    fn the_shared_store_rejects_linked_drop_directories_and_full_storage() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let drops = root.path().join("drops");
+        let name = OsStr::new("image.png");
+        std::os::unix::fs::symlink(outside.path(), &drops).unwrap();
+        assert!(store(&drops, name, &mut &b"data"[..]).is_err());
+        assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
+        fs::remove_file(&drops).unwrap();
+
+        let staged = store(&drops, name, &mut &b"data"[..]).unwrap().join(name);
+        File::options()
+            .write(true)
+            .open(staged)
+            .unwrap()
+            .set_len(DROP_BYTES)
+            .unwrap();
+        let refused = store(&drops, name, &mut &b"more"[..]).unwrap_err();
+        assert!(refused.to_string().contains("storage is full"));
     }
 
     #[test]

@@ -906,8 +906,13 @@ async fn check_status(
     };
     if roster.is_agent_address(&event.from) {
         if !root.to.contains(&event.from) {
+            // The asker closes its own thread once the answer settles it:
+            // `archived` and nothing else, exactly as the addressee could.
+            if asked_it(root, &event.from) {
+                return asker_archive(&payload, &event.from);
+            }
             return Err(ApiFailure::forbidden(format!(
-                "{} may only report on threads addressed to it",
+                "{} may only report on threads addressed to it, or archive a thread it asked",
                 event.from
             )));
         }
@@ -916,6 +921,32 @@ async fn check_status(
         }
     }
     Ok(())
+}
+
+/// Whether `who` asked the thread `root` opens: wrote it, or it was written
+/// on `who`'s behalf.
+fn asked_it(root: &senate_core::Event, who: &Address) -> bool {
+    &root.from == who || root.on_behalf_of.as_ref() == Some(who)
+}
+
+/// What an asker may say of its own thread: that it is archived. No other
+/// state, no steps, links, title, escalation or takeover (its writer's
+/// `reason` and the bridge's `session` may come along).
+fn asker_archive(payload: &StatusPayload, asker: &Address) -> Result<(), ApiFailure> {
+    let only_archived = payload.state == StatusState::Archived
+        && payload.title.is_none()
+        && payload.steps.is_none()
+        && payload.links.is_none()
+        && payload.escalated_to.is_none()
+        && payload.takeover.is_none()
+        && !payload.withdraw;
+    if only_archived {
+        Ok(())
+    } else {
+        Err(ApiFailure::forbidden(format!(
+            "{asker} asked this thread: it may archive it, and report nothing else on it"
+        )))
+    }
 }
 
 async fn events(

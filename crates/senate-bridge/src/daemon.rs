@@ -183,6 +183,7 @@ mod replace;
 mod roles;
 mod roster;
 mod secretary_work;
+mod session_drop;
 mod session_history;
 mod session_timeline;
 mod spawn_attempt;
@@ -1136,11 +1137,12 @@ fn orientation_role(agent: &SenatorName, chair: Option<&SenatorName>, locale: Lo
             .collect::<Vec<_>>()
             .join(", ");
         return match locale {
-            Locale::Zh => {
-                format!("你是本委员会的主席（chair），负责主持委员会。主席工具包括 {tools}。")
-            }
+            Locale::Zh => format!(
+                "你是本委员会的主席（chair），负责主持委员会。主席工具包括 {tools}。你接受一项交付的工作时，用 mcp__senate__status 把你发出的那个 thread 设为 `archived`。"
+            ),
             Locale::En => format!(
-                "You are the chair of this committee and are in charge of it. Your chair tools are {tools}."
+                "You are the chair of this committee and are in charge of it. Your chair tools are {tools}. \
+                 When you accept work you asked for, archive that thread with mcp__senate__status (state `archived`)."
             ),
         };
     }
@@ -3473,6 +3475,9 @@ impl Shared {
                 wrap(self.on_approve_session(&senator, decision).await)
             }
             // Served by the connection itself (`serve_connection`).
+            Request::SessionDrop { .. } => Reply::err(IpcError::bad_request(
+                "attachments require an upload connection on the local person socket",
+            )),
             Request::Watch { .. } | Request::TimelineWatch { .. } => Reply::err(IpcError::bad_request(
                 "watch turns a connection into a stream; send it as the connection's request",
             )),
@@ -5133,7 +5138,16 @@ impl Shared {
         }
         status.check().map_err(IpcError::bad_request)?;
         let root = self.task_root(&committee, thread).await?;
-        if let Some(session) = session.as_ref().filter(|_| !acting.as_person) {
+        // The asker archiving its own thread (not addressed to it) does not
+        // take it on: it becomes no owner of it.
+        let asker_only = session.as_ref().is_some_and(|s| {
+            let me = Address::senator(&s.agent);
+            !root.to.contains(&me) && (root.from == me || root.on_behalf_of.as_ref() == Some(&me))
+        });
+        if let Some(session) = session
+            .as_ref()
+            .filter(|_| !acting.as_person && !asker_only)
+        {
             status.session = Some(session.session_id.clone());
             let owner = TaskOwner {
                 agent: session.agent.clone(),
@@ -6250,6 +6264,19 @@ async fn serve_ipc(
     }
 }
 
+async fn send_ipc_line<T: Serialize>(
+    write: &mut tokio::net::unix::OwnedWriteHalf,
+    value: &T,
+) -> bool {
+    use tokio::io::AsyncWriteExt;
+
+    let Ok(mut line) = serde_json::to_vec(value) else {
+        return false;
+    };
+    line.push(b'\n');
+    write.write_all(&line).await.is_ok()
+}
+
 async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watch::Receiver<bool>) {
     use tokio::io::AsyncWriteExt;
 
@@ -6304,6 +6331,14 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                         serve_watch(&shared, reader, write, shutdown).await;
                         return;
                     }
+                    Ok(request @ Request::SessionDrop { .. }) => {
+                        let mut shutdown = shutdown.clone();
+                        tokio::select! {
+                            () = Box::pin(session_drop::serve(&shared, peer, request, reader, write)) => {}
+                            _ = shutdown.changed() => {}
+                        }
+                        return;
+                    }
                     Ok(Request::TimelineWatch { session_id, after }) => {
                         match shared
                         .refuse_agent_caller(peer, "Stream session transcripts from your own terminal or the Senate app")
@@ -6321,7 +6356,7 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                             .await
                         }
                         Err(refused) => {
-                            session_timeline::send(&mut write, &Reply::err(refused)).await;
+                            send_ipc_line(&mut write, &Reply::err(refused)).await;
                         }
                     }
                         return;

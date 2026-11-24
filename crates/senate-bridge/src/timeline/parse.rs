@@ -23,21 +23,50 @@ pub(super) fn block_text(value: &Value, kind: &str) -> Option<String> {
 }
 
 pub(super) fn user_text(text: &str) -> Vec<Event> {
+    if let Some((prompt, envelope)) = delivery(text) {
+        let mut events = plain_user_text(prompt);
+        events.extend(senate_messages(envelope));
+        events
+    } else {
+        plain_user_text(text)
+    }
+}
+
+/// A runtime-marked context turn can carry a delivery, but is never a
+/// person's prompt.
+pub(super) fn delivered_only(text: &str) -> Vec<Event> {
+    match delivery(text) {
+        Some(("", envelope)) => senate_messages(envelope),
+        _ => Vec::new(),
+    }
+}
+
+/// Split off the envelope while keeping a real prompt before a batched
+/// delivery. Claude's peer transport adds a line of its own there.
+fn delivery(text: &str) -> Option<(&str, &str)> {
     let text = text.trim();
-    if text.starts_with("[senate]") || text.starts_with("[senate · ") {
-        return senate_messages(text);
+    let starts_delivery =
+        |text: &str| text.starts_with("[senate]") || text.starts_with("[senate · ");
+    if starts_delivery(text) {
+        return Some(("", text));
+    }
+    if let Some(text) = text.strip_prefix("Another Claude session sent a message:")
+        && let Some(envelope) = text
+            .strip_prefix('\n')
+            .or_else(|| text.strip_prefix("\r\n"))
+        && starts_delivery(envelope.trim_start())
+    {
+        return Some(("", envelope.trim_start()));
     }
     for prefix in [
         "\n[senate] The messages below come from the Senate committee log",
         "\n[senate] 下面的消息来自 Senate 委员会",
     ] {
         if let Some(index) = text.find(prefix) {
-            let mut events = plain_user_text(&text[..index]);
-            events.extend(senate_messages(&text[index + 1..]));
-            return events;
+            return Some((&text[..index], &text[index + 1..]));
         }
     }
-    plain_user_text(text)
+    None
 }
 
 fn plain_user_text(text: &str) -> Vec<Event> {
@@ -96,14 +125,7 @@ fn senate_messages(text: &str) -> Vec<Event> {
                 messages.push(Event::Item(senate_item(fields, &body)));
             }
             body.clear();
-        } else if let Some(line) = line.strip_prefix('│') {
-            body.push(line.strip_prefix(' ').unwrap_or(line));
-        } else if header.is_some()
-            && !line.is_empty()
-            && !line.starts_with('↳')
-            && !line.starts_with("refs: ")
-        {
-            // Some older deliveries omit the body gutter.
+        } else if header.is_some() {
             body.push(line);
         }
     }
@@ -170,13 +192,30 @@ fn senate_header(line: &str) -> Option<SenateHeader<'_>> {
 }
 
 fn senate_item(header: SenateHeader<'_>, lines: &[&str]) -> Kind {
+    // Only the gutter carries the author's words in a framed message.
+    // Legacy unframed records can still use the lines under the header.
+    let fenced = lines
+        .iter()
+        .any(|line| line.starts_with(crate::format::FENCE));
+    let body: Vec<_> = lines
+        .iter()
+        .filter_map(|line| {
+            if fenced {
+                let text = line.strip_prefix(crate::format::FENCE)?;
+                Some(text.strip_prefix(' ').unwrap_or(text))
+            } else {
+                (!line.is_empty() && !line.starts_with('↳') && !line.starts_with("refs: "))
+                    .then_some(*line)
+            }
+        })
+        .collect();
     Kind::SenateMessage {
         committee: Some(header.committee.into()),
         seq: Some(header.seq),
         thread: Some(header.thread),
         from: Some(header.from.into()),
         kind: Some(header.kind.into()),
-        text: lines.join("\n"),
+        text: body.join("\n"),
     }
 }
 
