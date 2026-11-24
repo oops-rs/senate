@@ -6,6 +6,7 @@ use std::io::{self, Read};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
+use rustix::fd::{AsFd, OwnedFd};
 use rustix::fs::{self as fd, AtFlags, Dir, FileType, FlockOperation, Mode, OFlags};
 use senate_core::EventId;
 
@@ -308,11 +309,43 @@ const DIRECTORY: OFlags = OFlags::RDONLY
 const PRIVATE_DIR: Mode = Mode::RUSR.union(Mode::WUSR).union(Mode::XUSR);
 const PRIVATE_FILE: Mode = Mode::RUSR.union(Mode::WUSR);
 
+struct AttachmentLock(OwnedFd);
+
+impl AttachmentLock {
+    fn acquire(root: &impl AsFd) -> io::Result<Self> {
+        let lock = fd::openat(
+            root,
+            ".lock",
+            OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            PRIVATE_FILE,
+        )?;
+        if !FileType::from_raw_mode(fd::fstat(&lock)?.st_mode).is_file() {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        fd::flock(&lock, FlockOperation::NonBlockingLockExclusive).map_err(|e| {
+            if e == rustix::io::Errno::WOULDBLOCK {
+                io::Error::other("another attachment is being saved; try again")
+            } else {
+                e.into()
+            }
+        })?;
+        Ok(Self(lock))
+    }
+}
+
+impl Drop for AttachmentLock {
+    fn drop(&mut self) {
+        // A concurrent process spawn can briefly inherit the file description
+        // before CLOEXEC closes it. Closing our fd alone would keep it locked.
+        let _ = rustix::io::retry_on_intr(|| fd::flock(&self.0, FlockOperation::Unlock));
+    }
+}
+
 fn quota_error() -> io::Error {
     io::Error::other("this session's attachment storage is full (100 MiB or 128 files)")
 }
 
-fn remaining(directory: &impl std::os::fd::AsFd) -> io::Result<u64> {
+fn remaining(directory: &impl AsFd) -> io::Result<u64> {
     let mut size = 0u64;
     let mut count = 0;
     for entry in Dir::read_from(directory)? {
@@ -374,22 +407,7 @@ pub(crate) fn store(drops: &Path, name: &OsStr, input: &mut impl Read) -> io::Re
         Err(error) => return Err(error.into()),
     }
     let root = fd::openat(&host, basename, DIRECTORY, Mode::empty())?;
-    let lock = fd::openat(
-        &root,
-        ".lock",
-        OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-        PRIVATE_FILE,
-    )?;
-    if !FileType::from_raw_mode(fd::fstat(&lock)?.st_mode).is_file() {
-        return Err(io::ErrorKind::InvalidInput.into());
-    }
-    fd::flock(&lock, FlockOperation::NonBlockingLockExclusive).map_err(|e| {
-        if e == rustix::io::Errno::WOULDBLOCK {
-            io::Error::other("another attachment is being saved; try again")
-        } else {
-            e.into()
-        }
-    })?;
+    let _lock = AttachmentLock::acquire(&root)?;
     let remaining = remaining(&root)?;
     let id = EventId::new().to_string();
     fd::mkdirat(&root, id.as_str(), PRIVATE_DIR)?;
@@ -486,7 +504,97 @@ mod tests {
             .set_len(DROP_BYTES)
             .unwrap();
         let refused = store(&drops, name, &mut &b"more"[..]).unwrap_err();
-        assert!(refused.to_string().contains("storage is full"));
+        assert!(
+            refused.to_string().contains("storage is full"),
+            "{refused:?}"
+        );
+    }
+
+    #[test]
+    fn the_attachment_lock_unlocks_even_if_a_spawn_inherited_its_description() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = File::open(directory.path()).unwrap();
+        let lock = AttachmentLock::acquire(&root).unwrap();
+        // A dup models the second reference a fork holds before exec.
+        let inherited = rustix::io::dup(&lock.0).unwrap();
+        assert!(AttachmentLock::acquire(&root).is_err());
+        drop(lock);
+        assert!(AttachmentLock::acquire(&root).is_ok());
+        drop(inherited);
+    }
+
+    #[test]
+    fn concurrent_writers_cannot_exceed_the_byte_or_file_budget() {
+        use std::sync::mpsc::{Receiver, Sender, channel};
+        use std::time::Duration;
+
+        struct Gate {
+            signals: Option<(Sender<()>, Receiver<()>)>,
+            bytes: &'static [u8],
+        }
+
+        impl Read for Gate {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                if let Some((started, resume)) = self.signals.take() {
+                    started.send(()).unwrap();
+                    resume.recv_timeout(Duration::from_secs(5)).unwrap();
+                }
+                self.bytes.read(buffer)
+            }
+        }
+
+        let filename = OsStr::new("drop.txt");
+        for byte_limit in [true, false] {
+            let fixture = tempfile::tempdir().unwrap();
+            let drops = fixture.path().join("drops");
+            let initial = store(&drops, filename, &mut &b""[..]).unwrap();
+            if byte_limit {
+                // A sparse file leaves room for exactly one four-byte drop.
+                File::options()
+                    .write(true)
+                    .open(initial.join(filename))
+                    .unwrap()
+                    .set_len(DROP_BYTES - 4)
+                    .unwrap();
+            } else {
+                // Leave one free slot. Empty attachments still count.
+                for i in 1..(DROP_FILES - 1) {
+                    let path = drops.join(format!("fixture-{i}"));
+                    fs::create_dir(&path).unwrap();
+                    File::create(path.join(filename)).unwrap();
+                }
+            }
+
+            std::thread::scope(|scope| {
+                let (started, wait) = channel();
+                let (resume, paused) = channel();
+                let writer = scope.spawn(|| {
+                    store(
+                        &drops,
+                        filename,
+                        &mut Gate {
+                            signals: Some((started, paused)),
+                            bytes: b"data",
+                        },
+                    )
+                });
+
+                wait.recv_timeout(Duration::from_secs(5)).unwrap();
+                let competing = store(&drops, filename, &mut &b"more"[..]).unwrap_err();
+                assert!(
+                    competing.to_string().contains("another attachment"),
+                    "{competing:?}"
+                );
+                resume.send(()).unwrap();
+                let saved = writer.join().unwrap().unwrap();
+                assert_eq!(fs::read(saved.join(filename)).unwrap(), b"data");
+                let refused = store(&drops, filename, &mut &b"more"[..]).unwrap_err();
+                assert!(
+                    refused.to_string().contains("storage is full"),
+                    "{refused:?}"
+                );
+            });
+        }
     }
 
     #[test]
