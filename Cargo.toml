@@ -62,10 +62,10 @@ sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio",
 rusqlite = { version = "0.39", features = ["bundled"] }
 
 # HTTP: server API + SSE, bridge client.
-axum = { version = "0.8", features = ["macros"] }
+axum = { version = "0.8", features = ["macros", "http2"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["trace"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "http2"] }
 eventsource-stream = "0.2"
 
 # Bridge: MCP tools over stdio, local state.

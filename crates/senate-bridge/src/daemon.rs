@@ -547,7 +547,7 @@ pub(crate) struct Shared {
     /// Prompt hooks without a matching Stop or SessionEnd in this daemon run.
     working_sessions: Mutex<HashMap<String, Instant>>,
     desk_decisions: tokio::sync::Mutex<()>,
-    session_titles: Arc<Mutex<crate::timeline::TitleCache>>,
+    session_titles: Arc<tokio::sync::Mutex<crate::timeline::TitleCache>>,
     history_titles: Mutex<crate::timeline::TitleCache>,
     history_index: Mutex<()>,
     history_background: session_history::Background,
@@ -699,13 +699,28 @@ pub async fn run(options: DaemonOptions) -> anyhow::Result<()> {
 
 pub async fn start(options: DaemonOptions) -> anyhow::Result<DaemonHandle> {
     let host_binary = std::env::current_exe()?.with_file_name("senate");
-    start_with_host_binary(options, host_binary).await
+    start_bridge(options, host_binary, false).await
+}
+
+/// Start the bridge against the loopback Senate listener owned by this
+/// process. That listener supports HTTP/2 without negotiation.
+pub async fn start_in_process(options: DaemonOptions) -> anyhow::Result<DaemonHandle> {
+    let host_binary = std::env::current_exe()?.with_file_name("senate");
+    start_bridge(options, host_binary, true).await
 }
 
 /// Start the bridge with a companion Senate CLI at an explicit path.
 pub async fn start_with_host_binary(
     options: DaemonOptions,
     host_binary: PathBuf,
+) -> anyhow::Result<DaemonHandle> {
+    start_bridge(options, host_binary, false).await
+}
+
+async fn start_bridge(
+    options: DaemonOptions,
+    host_binary: PathBuf,
+    in_process: bool,
 ) -> anyhow::Result<DaemonHandle> {
     let DaemonOptions {
         paths,
@@ -786,7 +801,7 @@ pub async fn start_with_host_binary(
         home: paths.home().to_path_buf(),
         codex_sessions: Arc::new(Mutex::new(BTreeMap::new())),
     };
-    let shared = Shared::open(config, &paths.state_db(), 0, &common)?;
+    let shared = Shared::open(config, &paths.state_db(), 0, &common, in_process)?;
     verify_person(&shared).await?;
     let remote = match crate::remote::Service::open(&paths).await {
         Ok(remote) => remote,
@@ -898,6 +913,7 @@ impl Shared {
         db: &Path,
         index: usize,
         common: &Common,
+        in_process: bool,
     ) -> anyhow::Result<Arc<Self>> {
         let store = Store::open(db).with_context(|| format!("opening {}", db.display()))?;
         let reset = store.reset_inflight()?;
@@ -907,7 +923,11 @@ impl Shared {
                 "re-queued items that were in flight at the last exit"
             );
         }
-        let api = ApiClient::new(&config.server_url, &config.token)?;
+        let api = if in_process {
+            ApiClient::in_process(&config.server_url, &config.token)?
+        } else {
+            ApiClient::new(&config.server_url, &config.token)?
+        };
         let uplink = config
             .uplink
             .as_ref()
@@ -959,7 +979,7 @@ impl Shared {
             agy_idle: Mutex::new(HashMap::new()),
             working_sessions: Mutex::new(HashMap::new()),
             desk_decisions: tokio::sync::Mutex::new(()),
-            session_titles: Arc::new(Mutex::new(crate::timeline::TitleCache::default())),
+            session_titles: Arc::default(),
             history_titles: Mutex::default(),
             history_index: Mutex::default(),
             history_background: session_history::Background::default(),
@@ -3714,6 +3734,7 @@ impl Shared {
             .map_err(internal)?;
         let dropped_hooks = self.hook_drop_status(&sessions, &host_status.hosted)?;
         Ok(StatusReply {
+            descriptors: Some(crate::fd::snapshot()),
             pid: std::process::id(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             person: self.config.person.clone(),
@@ -6210,17 +6231,21 @@ async fn serve_ipc(
     mut shutdown: watch::Receiver<bool>,
 ) {
     loop {
-        tokio::select! {
-            accepted = listener.accept() => match accepted {
-                Ok((stream, _)) => {
-                    tokio::spawn(serve_connection(shared.clone(), stream, shutdown.clone()));
-                }
-                Err(e) => {
-                    tracing::warn!("accepting an IPC connection: {e}");
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-            },
+        let accepted = tokio::select! {
+            accepted = listener.accept() => accepted,
             _ = shutdown.changed() => return,
+        };
+        match accepted {
+            Ok((stream, _)) => {
+                tokio::spawn(serve_connection(shared.clone(), stream, shutdown.clone()));
+            }
+            Err(e) => {
+                tracing::warn!("accepting an IPC connection: {e}");
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+                    _ = shutdown.changed() => return,
+                }
+            }
         }
     }
 }

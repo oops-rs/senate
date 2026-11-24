@@ -156,6 +156,7 @@ pub struct ApiClient {
     base: String,
     token: String,
     http: Client,
+    short: std::sync::Arc<tokio::sync::Semaphore>,
     /// No overall timeout: SSE responses never finish. Stalls are caught by
     /// the stream loop's keepalive deadline instead.
     streaming: Client,
@@ -171,17 +172,39 @@ impl std::fmt::Debug for ApiClient {
 
 impl ApiClient {
     pub fn new(server_url: &str, token: &str) -> Result<Self, ApiClientError> {
-        let http = Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(30))
-            .build()?;
-        let streaming = Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .build()?;
+        Self::build(server_url, token, false)
+    }
+
+    pub(crate) fn in_process(server_url: &str, token: &str) -> Result<Self, ApiClientError> {
+        Self::build(server_url, token, true)
+    }
+
+    fn build(server_url: &str, token: &str, in_process: bool) -> Result<Self, ApiClientError> {
+        let builder = || Client::builder().connect_timeout(Duration::from_secs(10));
+        // A Senate we start ourselves speaks HTTP/2 on loopback. All
+        // seats multiplex over one connection. Keep a separate connection
+        // for short requests so full SSE capacity cannot block them.
+        let (http, streaming) = if in_process {
+            let local = || {
+                builder()
+                    .no_proxy()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .http2_prior_knowledge()
+                    .pool_max_idle_per_host(1)
+                    .build()
+            };
+            (local()?, local()?)
+        } else {
+            (
+                builder().pool_max_idle_per_host(2).build()?,
+                builder().pool_max_idle_per_host(1).build()?,
+            )
+        };
         Ok(Self {
             base: server_url.trim_end_matches('/').to_string(),
             token: token.to_string(),
             http,
+            short: std::sync::Arc::new(tokio::sync::Semaphore::new(8)),
             streaming,
         })
     }
@@ -196,6 +219,15 @@ impl ApiClient {
 
     fn authed(&self, req: RequestBuilder) -> RequestBuilder {
         req.bearer_auth(&self.token)
+            .timeout(Duration::from_secs(30))
+    }
+
+    // Keep this permit until the response body has been read or dropped.
+    async fn short_request(&self) -> tokio::sync::SemaphorePermit<'_> {
+        self.short
+            .acquire()
+            .await
+            .expect("request semaphore is never closed")
     }
 
     /// Give `primary` the alias `alias` on `committee` (none: the server
@@ -232,6 +264,7 @@ impl ApiClient {
         initial: bool,
         acted_by: Option<&SenatorName>,
     ) -> Result<SenatorName, ApiClientError> {
+        let _permit = self.short_request().await;
         let request = senate_core::api::SetAlias {
             alias: alias.clone(),
             initial,
@@ -254,6 +287,7 @@ impl ApiClient {
         alias: &SenatorName,
         committee: Option<&CommitteeId>,
     ) -> Result<(), ApiClientError> {
+        let _permit = self.short_request().await;
         let query = senate_core::api::RemoveAlias {
             committee: committee.cloned(),
             acted_by: None,
@@ -274,6 +308,7 @@ impl ApiClient {
     /// map of a server older than per-committee aliases (one with no
     /// `/v1/committee-aliases`).
     pub async fn aliases(&self) -> Result<KnownAliases, ApiClientError> {
+        let _permit = self.short_request().await;
         let response = self
             .authed(self.http.get(self.url("/v1/committee-aliases")))
             .send()
@@ -281,6 +316,7 @@ impl ApiClient {
         if response.status() != StatusCode::NOT_FOUND {
             return Ok(KnownAliases::Scoped(checked(response).await?.json().await?));
         }
+        drop(response);
         let response = self
             .authed(self.http.get(self.url("/v1/aliases")))
             .send()
@@ -291,6 +327,7 @@ impl ApiClient {
     }
 
     pub async fn me(&self) -> Result<Me, ApiClientError> {
+        let _permit = self.short_request().await;
         let resp = self
             .authed(self.http.get(self.url(api::ME_PATH)))
             .send()
@@ -307,6 +344,7 @@ impl ApiClient {
     }
 
     pub async fn append(&self, event: &NewEvent) -> Result<AppendResponse, ApiClientError> {
+        let _permit = self.short_request().await;
         let url = self.url(&api::events_path(&event.committee));
         let resp = self.authed(self.http.post(url)).json(event).send().await?;
         Ok(checked(resp).await?.json().await?)
@@ -319,6 +357,7 @@ impl ApiClient {
         after: Seq,
         limit: Option<usize>,
     ) -> Result<RawPage, ApiClientError> {
+        let _permit = self.short_request().await;
         #[derive(Deserialize)]
         struct Wire {
             events: Vec<Value>,
@@ -357,6 +396,7 @@ impl ApiClient {
         senator: Option<&SenatorName>,
         peek: bool,
     ) -> Result<Seq, ApiClientError> {
+        let _permit = self.short_request().await;
         let url = self.url(&api::cursor_path(committee, name));
         let query = CursorQuery {
             senator: senator.cloned(),
@@ -377,6 +417,7 @@ impl ApiClient {
         senator: Option<&SenatorName>,
         seq: Seq,
     ) -> Result<Seq, ApiClientError> {
+        let _permit = self.short_request().await;
         let url = self.url(&api::cursor_path(committee, name));
         let query = CursorQuery {
             senator: senator.cloned(),
@@ -397,6 +438,7 @@ impl ApiClient {
         committee: &CommitteeId,
         heartbeat: &Heartbeat,
     ) -> Result<(), ApiClientError> {
+        let _permit = self.short_request().await;
         let url = self.url(&api::heartbeat_path(committee));
         let resp = self
             .authed(self.http.post(url))
@@ -416,6 +458,7 @@ impl ApiClient {
         q: &str,
         limit: Option<usize>,
     ) -> Result<RawPage, ApiClientError> {
+        let _permit = self.short_request().await;
         #[derive(Deserialize)]
         struct Wire {
             events: Vec<Value>,
@@ -443,6 +486,7 @@ impl ApiClient {
         committee: &CommitteeId,
         agent: Option<&SenatorName>,
     ) -> Result<ThreadsPage, ApiClientError> {
+        let _permit = self.short_request().await;
         let url = self.url(&api::threads_path(committee));
         let query = ThreadsQuery {
             state: None,
@@ -459,6 +503,7 @@ impl ApiClient {
         committee: &CommitteeId,
         request: &senate_core::chat_sim::SimulateChat,
     ) -> Result<senate_core::chat_sim::SimulatedChat, ApiClientError> {
+        let _permit = self.short_request().await;
         let url = self.url(&senate_core::chat_sim::simulate_path(committee));
         let resp = self
             .authed(self.http.post(url))
@@ -474,6 +519,7 @@ impl ApiClient {
         committee: &CommitteeId,
         message_ref: &str,
     ) -> Result<senate_core::chat_sim::SimTranscript, ApiClientError> {
+        let _permit = self.short_request().await;
         let url = self.url(&senate_core::chat_sim::simulated_path(committee));
         let resp = self
             .authed(self.http.get(url))
@@ -490,12 +536,14 @@ impl ApiClient {
         committee: &CommitteeId,
         query: &api::MemoryQuery,
     ) -> Result<api::MemoryResults, ApiClientError> {
+        let _permit = self.short_request().await;
         let url = self.url(&api::memory_path(committee));
         let resp = self.authed(self.http.get(url)).query(query).send().await?;
         Ok(checked(resp).await?.json().await?)
     }
 
     pub async fn brief(&self, committee: &CommitteeId) -> Result<Brief, ApiClientError> {
+        let _permit = self.short_request().await;
         let url = self.url(&api::brief_path(committee));
         let resp = self.authed(self.http.get(url)).send().await?;
         Ok(checked(resp).await?.json().await?)
@@ -509,6 +557,7 @@ impl ApiClient {
         committee: &CommitteeId,
         agent: &SenatorName,
     ) -> Result<Option<CheckpointRecord>, ApiClientError> {
+        let _permit = self.short_request().await;
         let url = self.url(&api::latest_checkpoint_path(committee));
         let query = CheckpointQuery {
             agent: agent.clone(),
@@ -525,6 +574,7 @@ impl ApiClient {
         &self,
         committee: &CommitteeId,
     ) -> Result<senate_core::DocketPage, ApiClientError> {
+        let _permit = self.short_request().await;
         let url = self.url(&api::docket_path(committee));
         let resp = self.authed(self.http.get(url)).send().await?;
         Ok(checked(resp).await?.json().await?)
@@ -535,6 +585,7 @@ impl ApiClient {
         &self,
         committee: &CommitteeId,
     ) -> Result<senate_core::DocketPage, ApiClientError> {
+        let _permit = self.short_request().await;
         let url = self.url(&api::docket_path(committee));
         let resp = self
             .authed(self.http.get(url))
@@ -546,6 +597,7 @@ impl ApiClient {
 
     /// `GET .../chair`: the committee's chair and how it was found.
     pub async fn chair(&self, committee: &CommitteeId) -> Result<api::ChairInfo, ApiClientError> {
+        let _permit = self.short_request().await;
         let url = self.url(&api::chair_path(committee));
         let resp = self.authed(self.http.get(url)).send().await?;
         Ok(checked(resp).await?.json().await?)
@@ -566,6 +618,7 @@ impl ApiClient {
         senator: &SenatorName,
         acted_by: Option<&SenatorName>,
     ) -> Result<api::ChairInfo, ApiClientError> {
+        let _permit = self.short_request().await;
         let url = self.url(&api::chair_path(committee));
         let body = api::SetChair {
             senator: senator.clone(),
@@ -583,6 +636,7 @@ impl ApiClient {
         committee: &CommitteeId,
         senator: &SenatorName,
     ) -> Result<api::CommitteeSeatStatus, ApiClientError> {
+        let _permit = self.short_request().await;
         let url = self.url(&api::committee_seat_path(committee));
         let resp = self
             .authed(self.http.get(url))
@@ -598,6 +652,7 @@ impl ApiClient {
         committee: &CommitteeId,
         request: &api::SetCommitteeArchive,
     ) -> Result<api::CommitteeArchiveInfo, ApiClientError> {
+        let _permit = self.short_request().await;
         let url = self.url(&api::committee_archive_path(committee));
         let resp = self.authed(self.http.put(url)).json(request).send().await?;
         Ok(checked(resp).await?.json().await?)
@@ -608,6 +663,7 @@ impl ApiClient {
         committee: &CommitteeId,
         request: &api::SetCommitteeSeat,
     ) -> Result<api::CommitteeSeatInfo, ApiClientError> {
+        let _permit = self.short_request().await;
         let url = self.url(&api::committee_seat_path(committee));
         let resp = self.authed(self.http.put(url)).json(request).send().await?;
         Ok(checked(resp).await?.json().await?)
@@ -615,6 +671,7 @@ impl ApiClient {
 
     /// `GET /v1/secretaries`: every secretary relation.
     pub async fn secretaries(&self) -> Result<api::Secretaries, ApiClientError> {
+        let _permit = self.short_request().await;
         let url = self.url(api::SECRETARIES_PATH);
         let resp = self.authed(self.http.get(url)).send().await?;
         Ok(checked(resp).await?.json().await?)
@@ -628,6 +685,7 @@ impl ApiClient {
         secretaries: Vec<SenatorName>,
         acted_by: Option<SenatorName>,
     ) -> Result<api::Secretaries, ApiClientError> {
+        let _permit = self.short_request().await;
         let url = self.url(&api::secretaries_of_path(senator));
         let body = api::SetSecretaries {
             secretaries,
@@ -644,6 +702,7 @@ impl ApiClient {
         secretary: SenatorName,
         acted_by: Option<SenatorName>,
     ) -> Result<api::Secretaries, ApiClientError> {
+        let _permit = self.short_request().await;
         let url = self.url(&api::secretaries_of_path(senator));
         let body = api::SetSecretaries {
             secretaries: vec![secretary],
@@ -658,6 +717,7 @@ impl ApiClient {
         principal: &SenatorName,
         request: &senate_core::secretary_work::SetSecretarySession,
     ) -> Result<api::Secretaries, ApiClientError> {
+        let _permit = self.short_request().await;
         let url = self.url(&api::secretary_session_path(principal));
         let resp = self.authed(self.http.put(url)).json(request).send().await?;
         Ok(checked(resp).await?.json().await?)
@@ -667,6 +727,7 @@ impl ApiClient {
         &self,
         request: &senate_core::secretary_work::SecretaryWorkRequest,
     ) -> Result<senate_core::secretary_work::SecretaryWorkReply, ApiClientError> {
+        let _permit = self.short_request().await;
         let url = self.url(api::SECRETARY_WORK_PATH);
         let resp = self
             .authed(self.http.post(url))
@@ -680,6 +741,7 @@ impl ApiClient {
         &self,
         senators: &[SenatorName],
     ) -> Result<Vec<senate_core::secretary_work::SecretaryReminder>, ApiClientError> {
+        let _permit = self.short_request().await;
         let url = self.url(api::SECRETARY_REMINDERS_PATH);
         let resp = self
             .authed(self.http.post(url))
@@ -693,6 +755,7 @@ impl ApiClient {
         &self,
         reminder: &senate_core::secretary_work::SecretaryReminder,
     ) -> Result<(), ApiClientError> {
+        let _permit = self.short_request().await;
         let url = self.url(api::SECRETARY_REMINDERS_PATH);
         let resp = self
             .authed(self.http.put(url))
@@ -710,6 +773,7 @@ impl ApiClient {
         name: &senate_core::Name,
         speaker: &senate_core::SenatorId,
     ) -> Result<api::ChildSenate, ApiClientError> {
+        let _permit = self.short_request().await;
         let url = self.url(&api::child_path(name));
         let body = api::RegisterChild {
             speaker: speaker.clone(),
@@ -725,6 +789,7 @@ impl ApiClient {
         name: &senate_core::Name,
         seats: &api::ChildSeats,
     ) -> Result<api::ChildSenate, ApiClientError> {
+        let _permit = self.short_request().await;
         let url = self.url(&api::child_seats_path(name));
         let resp = self.authed(self.http.put(url)).json(seats).send().await?;
         Ok(checked(resp).await?.json().await?)
@@ -732,6 +797,7 @@ impl ApiClient {
 
     /// `GET /v1/children`: the child Senates registered here.
     pub async fn children(&self) -> Result<Vec<api::ChildSenate>, ApiClientError> {
+        let _permit = self.short_request().await;
         let url = self.url(api::CHILDREN_PATH);
         let resp = self.authed(self.http.get(url)).send().await?;
         Ok(checked(resp).await?.json().await?)
@@ -744,6 +810,7 @@ impl ApiClient {
         name: &senate_core::Locator,
         committee: Option<&CommitteeId>,
     ) -> Result<api::Resolved, ApiClientError> {
+        let _permit = self.short_request().await;
         let query = api::ResolveQuery {
             name: name.clone(),
             committee: committee.cloned(),
@@ -758,6 +825,7 @@ impl ApiClient {
 
     /// `GET .../presence`: each agent's presence on the committee.
     pub async fn presence(&self, committee: &CommitteeId) -> Result<PresencePage, ApiClientError> {
+        let _permit = self.short_request().await;
         let url = self.url(&api::presence_path(committee));
         let resp = self.authed(self.http.get(url)).send().await?;
         Ok(checked(resp).await?.json().await?)
@@ -779,7 +847,9 @@ impl ApiClient {
             senator: Some(agent.clone()),
         };
         let resp = self
-            .authed(self.streaming.get(url))
+            .streaming
+            .get(url)
+            .bearer_auth(&self.token)
             .query(&query)
             .header("Accept", "text/event-stream")
             .header("Last-Event-ID", after.to_string())

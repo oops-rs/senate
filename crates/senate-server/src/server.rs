@@ -278,6 +278,7 @@ impl ServerBuilder {
             .await
             .map_err(|e| ServerError::Aliases(e.to_string()))?;
 
+        let embedded = listener.is_some();
         let listener = match listener {
             Some(listener) => Ok(listener),
             None => TcpListener::bind(&config.listen).await,
@@ -304,14 +305,20 @@ impl ServerBuilder {
         });
         let (stop_http, stopped) = oneshot::channel::<()>();
         let http_task = tokio::spawn(async move {
-            axum::serve(listener, app)
-                .with_graceful_shutdown(async move {
-                    // Either an explicit shutdown or `Running` was dropped.
-                    if stopped.await.is_err() {
-                        tracing::debug!("server handle dropped; shutting down HTTP");
-                    }
-                })
-                .await
+            let shutdown = async move {
+                // Either an explicit shutdown or `Running` was dropped.
+                if stopped.await.is_err() {
+                    tracing::debug!("server handle dropped; shutting down HTTP");
+                }
+            };
+            if embedded && local_addr.ip().is_loopback() {
+                serve_embedded_http(listener, app, shutdown).await;
+                Ok(())
+            } else {
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(shutdown)
+                    .await
+            }
         });
         tracing::info!(%local_addr, "senate server listening");
 
@@ -363,6 +370,48 @@ async fn load_registry(
             tracing::warn!("reading the registered child Senates: {e}");
             Default::default()
         }
+    }
+}
+
+// The bridge holds an open SSE stream per seat. Hyper's default limit of
+// 200 streams queues excess seats forever when all the streams are SSE.
+// Change that limit only on the machine-owned loopback listener.
+async fn serve_embedded_http(
+    mut listener: TcpListener,
+    app: axum::Router,
+    shutdown: impl Future<Output = ()>,
+) {
+    use hyper_util::rt::{TokioExecutor, TokioIo};
+    use hyper_util::server::{conn::auto, graceful::GracefulShutdown};
+    use hyper_util::service::TowerToHyperService;
+
+    let mut builder = auto::Builder::new(TokioExecutor::new());
+    builder.http2().max_concurrent_streams(8192);
+    let builder = Arc::new(builder);
+    let graceful = GracefulShutdown::new();
+    tokio::pin!(shutdown);
+    loop {
+        let stream = tokio::select! {
+            // Axum's listener retries accept errors, including EMFILE/ENFILE.
+            (stream, _) = axum::serve::Listener::accept(&mut listener) => stream,
+            _ = &mut shutdown => break,
+        };
+        let builder = builder.clone();
+        let service = TowerToHyperService::new(app.clone());
+        let watcher = graceful.watcher();
+        tokio::spawn(async move {
+            let connection = builder.serve_connection(TokioIo::new(stream), service);
+            if let Err(error) = watcher.watch(connection).await {
+                tracing::trace!(%error, "embedded Senate HTTP connection ended");
+            }
+        });
+    }
+    drop(listener);
+    if tokio::time::timeout(SHUTDOWN_GRACE, graceful.shutdown())
+        .await
+        .is_err()
+    {
+        tracing::warn!("embedded Senate HTTP connections did not shut down in time");
     }
 }
 

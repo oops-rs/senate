@@ -71,6 +71,8 @@ pub mod config;
 pub mod daemon;
 pub mod delivery;
 pub mod doctor;
+#[allow(unsafe_code)]
+pub mod fd;
 pub mod follow;
 pub mod format;
 pub mod hook;

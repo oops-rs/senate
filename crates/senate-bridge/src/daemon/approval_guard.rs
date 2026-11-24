@@ -116,20 +116,32 @@ impl Front {
         if peer == me {
             return Ok(());
         }
+        let _permit = self
+            .process_checks
+            .acquire()
+            .await
+            .expect("process check budget is never closed");
         let mut agents = BTreeMap::new();
         agents.insert(me, "the Senate daemon".to_owned());
         for shared in self.senates() {
-            shared.agent_processes(&mut agents).map_err(internal)?;
+            shared.agent_processes(&mut agents).map_err(|e| match e {
+                StoreError::Io(ref source) if crate::fd::exhausted(source) => fd_refusal(peer),
+                _ => internal(e),
+            })?;
         }
-        let Some(chain) = ancestry(peer, process).await else {
-            tracing::warn!(
-                peer,
-                guidance,
-                "refused person-only IPC: the caller's ancestry is unreadable"
-            );
-            return Err(refusal(
-                "the daemon could not read the calling process's ancestry",
-            ));
+        let chain = match ancestry(peer, process).await {
+            Ok(chain) => chain,
+            Err(ProcessLookup::Descriptors) => return Err(fd_refusal(peer)),
+            Err(ProcessLookup::Unreadable) => {
+                tracing::warn!(
+                    peer,
+                    guidance,
+                    "refused person-only IPC: the caller's ancestry is unreadable"
+                );
+                return Err(refusal(
+                    "the daemon could not read the calling process's ancestry",
+                ));
+            }
         };
         let owner = chain.iter().find_map(|(pid, name)| {
             agents.get(pid).cloned().or_else(|| {
@@ -189,46 +201,79 @@ impl Shared {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum ProcessLookup {
+    Unreadable,
+    Descriptors,
+}
+
+impl From<std::io::Error> for ProcessLookup {
+    fn from(error: std::io::Error) -> Self {
+        if crate::fd::exhausted(&error) {
+            Self::Descriptors
+        } else {
+            Self::Unreadable
+        }
+    }
+}
+
+fn fd_refusal(peer: u32) -> IpcError {
+    tracing::warn!(
+        peer,
+        "refused person-only IPC: the daemon is out of file descriptors"
+    );
+    // Keep failing closed, but report a daemon error rather than implying
+    // that the caller is an agent.
+    IpcError::internal(
+        "the daemon is out of file descriptors and could not verify the caller; try again",
+    )
+}
+
 /// A process's parent and the name of its executable (the last part of
 /// its first argument), by `ps`, portable across macOS and Linux.
-async fn process(pid: u32) -> Option<(u32, String)> {
+async fn process(pid: u32) -> Result<(u32, String), ProcessLookup> {
     let child = tokio::process::Command::new("ps")
         .args(["-o", "ppid=", "-o", "args=", "-p", &pid.to_string()])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true)
         .output();
-    let output = tokio::time::timeout(PS_TIMEOUT, child).await.ok()?.ok()?;
+    let output = tokio::time::timeout(PS_TIMEOUT, child)
+        .await
+        .map_err(|_| ProcessLookup::Unreadable)??;
     if !output.status.success() {
-        return None;
+        return Err(ProcessLookup::Unreadable);
     }
     let text = String::from_utf8_lossy(&output.stdout);
     let mut words = text.split_whitespace();
-    let parent = words.next()?.parse().ok()?;
+    let parent = words
+        .next()
+        .and_then(|p| p.parse().ok())
+        .ok_or(ProcessLookup::Unreadable)?;
     let name = words
         .next()
         .and_then(|program| program.rsplit('/').next())
         .unwrap_or_default()
         .to_owned();
-    Some((parent, name))
+    Ok((parent, name))
 }
 
 /// `start` and every process above it up to pid 1, each with its name, or
-/// `None` when a process cannot be read before then.
-async fn ancestry<F, Fut>(start: u32, read: F) -> Option<Vec<(u32, String)>>
+/// an error when a process cannot be read before then.
+async fn ancestry<F, Fut>(start: u32, read: F) -> Result<Vec<(u32, String)>, ProcessLookup>
 where
     F: Fn(u32) -> Fut,
-    Fut: std::future::Future<Output = Option<(u32, String)>>,
+    Fut: std::future::Future<Output = Result<(u32, String), ProcessLookup>>,
 {
     let mut chain = Vec::new();
     let mut pid = start;
     loop {
         if chain.len() >= DEPTH || chain.iter().any(|(seen, _)| *seen == pid) {
-            return None;
+            return Err(ProcessLookup::Unreadable);
         }
         if pid <= 1 {
             chain.push((pid, String::new()));
-            return Some(chain);
+            return Ok(chain);
         }
         let (parent, name) = read(pid).await?;
         chain.push((pid, name));
@@ -309,21 +354,34 @@ mod tests {
             [(40, (30, "senate")), (30, (20, "zsh")), (20, (1, "claude"))].into();
         let read = |pid: u32| {
             let found = table.get(&pid).map(|(p, n)| (*p, (*n).to_owned()));
-            async move { found }
+            async move { found.ok_or(ProcessLookup::Unreadable) }
         };
         let pids =
             |chain: Vec<(u32, String)>| chain.into_iter().map(|(p, _)| p).collect::<Vec<_>>();
         assert_eq!(pids(ancestry(40, read).await.unwrap()), vec![40, 30, 20, 1]);
         assert_eq!(ancestry(40, read).await.unwrap()[2].1, "claude");
         // A process that cannot be read fails closed.
-        assert_eq!(ancestry(41, read).await, None);
+        assert_eq!(ancestry(41, read).await, Err(ProcessLookup::Unreadable));
         // A loop is not a chain.
         let cycle: BTreeMap<u32, (u32, &str)> = [(40, (30, "a")), (30, (40, "b"))].into();
         let read = |pid: u32| {
             let found = cycle.get(&pid).map(|(p, n)| (*p, (*n).to_owned()));
-            async move { found }
+            async move { found.ok_or(ProcessLookup::Unreadable) }
         };
-        assert_eq!(ancestry(40, read).await, None);
+        assert_eq!(ancestry(40, read).await, Err(ProcessLookup::Unreadable));
+    }
+
+    #[tokio::test]
+    async fn descriptor_exhaustion_is_reported_as_a_daemon_error() {
+        for errno in [libc::EMFILE, libc::ENFILE] {
+            let read = |_| async move { Err(std::io::Error::from_raw_os_error(errno).into()) };
+            assert_eq!(ancestry(40, read).await, Err(ProcessLookup::Descriptors));
+        }
+        assert!(
+            fd_refusal(40)
+                .to_string()
+                .contains("out of file descriptors")
+        );
     }
 
     #[tokio::test]

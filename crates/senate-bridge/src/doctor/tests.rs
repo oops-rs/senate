@@ -521,6 +521,21 @@ fn status_reply(version: &str) -> StatusReply {
     .unwrap()
 }
 
+#[test]
+fn doctor_warns_only_above_half_of_the_daemons_descriptor_limit() {
+    for (open, expected) in [(64, Status::Ok), (65, Status::Warn)] {
+        let mut live = healthy();
+        live.daemon.as_mut().unwrap().descriptors = Some(crate::fd::Snapshot {
+            soft_limit: Some(128),
+            open: Some(open),
+        });
+        let checks = super::live::live(&live, EN);
+        let check = by_id(&checks, "daemon.descriptors");
+        assert_eq!(check.status, expected);
+        assert!(check.found.contains(&format!("{open} / 128")));
+    }
+}
+
 fn me(version: Option<&str>, epoch: &str, committees: &[&str]) -> Me {
     let mut me: Me = serde_json::from_value(json!({"person": "alice"})).unwrap();
     me.version = version.map(str::to_owned);

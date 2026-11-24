@@ -185,19 +185,11 @@ private struct Sidebar: View {
                 SecretaryRow(store: store)
                     .tag(CoreStore.Place.secretary)
                 ForEach(store.sections, id: \.self) { section in
-                    // In the label's own colour, as the Secretary row's is,
-                    // not the sidebar's accent.
-                    Label {
-                        Text(verbatim: section.title)
-                    } icon: {
-                        Image(systemName: section.symbol).foregroundStyle(Theme.onSurfaceVariant)
+                    let count = store.state.online ? store.count(section) : 0
+                    FixedRow(title: section.title, count: count > 0 ? count : nil) {
+                        FixedSymbol(name: section.symbol)
                     }
-                        // With no count, the row's title would be read as
-                        // its value and it would have no name.
-                        .accessibilityElement(children: .ignore)
-                        .accessibilityLabel(section.title)
-                        .badge(store.state.online ? store.count(section) : 0)
-                        .tag(CoreStore.Place.section(section))
+                    .tag(CoreStore.Place.section(section))
                 }
             }
             // Offline, nothing is known: say nothing rather than "no sessions".
@@ -711,30 +703,67 @@ private struct SecretaryRow: View {
     var body: some View {
         let line = store.secretarySession
         let state = store.secretary?.state
-        HStack(spacing: Theme.Space.s) {
+        FixedRow(
+            title: L("sidebar.secretary"),
+            count: line.flatMap { $0.unread > 0 ? Int($0.unread) : nil },
+            busy: store.secretaryStarting,
+            value: store.secretaryStarting ? L("secretary.starting") : line?.status.label ?? state?.label
+        ) {
             if let line {
                 SessionMark(runtime: line.runtime, status: line.status)
-                    .frame(width: 18)
             } else {
-                Image(systemName: "person.crop.circle")
-                    .foregroundStyle(Theme.onSurfaceVariant)
-                    .frame(width: 18)
-                    .accessibilityHidden(true)
+                FixedSymbol(name: "person.crop.circle")
             }
-            Text(verbatim: L("sidebar.secretary"))
-            Spacer(minLength: 0)
-            if store.secretaryStarting {
+        }
+    }
+}
+
+/// A fixed row at the sidebar's top (Secretary, Inbox, Approvals): its
+/// icon centred in the same 20-point column as the session rows' runtime
+/// glyph, so every label starts on one line; its count right-aligned.
+struct FixedRow<Icon: View>: View {
+    let title: String
+    var count: Int?
+    var busy = false
+    /// What VoiceOver reads after the name; the count when nil.
+    var value: String?
+    @ViewBuilder let icon: Icon
+
+    var body: some View {
+        HStack(spacing: 7) {
+            icon.frame(width: 20, height: 20)
+            Text(verbatim: title)
+                .font(Theme.Fonts.row)
+                .foregroundStyle(Theme.onSurface)
+                .lineLimit(1)
+            Spacer(minLength: Theme.Space.xs)
+            if busy {
                 ProgressView().controlSize(.mini)
-            } else if let line, line.unread > 0 {
-                Text(verbatim: String(line.unread))
+            } else if let count {
+                Text(verbatim: String(count))
                     .font(Theme.Fonts.meta)
+                    .monospacedDigit()
                     .foregroundStyle(Theme.onSurfaceVariant)
             }
         }
         .accessibilityElement(children: .ignore)
         .accessibilityAddTraits(.isStaticText)
-        .accessibilityLabel(L("sidebar.secretary"))
-        .accessibilityValue(store.secretaryStarting ? L("secretary.starting")
-            : line?.status.label ?? state?.label ?? "")
+        .accessibilityLabel(title)
+        .accessibilityValue(value ?? count.map(String.init) ?? "")
+    }
+}
+
+/// The fixed rows' symbols: one size, weight and rendering, in the label's
+/// quiet colour rather than the sidebar's accent.
+struct FixedSymbol: View {
+    let name: String
+
+    var body: some View {
+        Image(systemName: name)
+            .symbolRenderingMode(.monochrome)
+            .font(.system(size: 14, weight: .regular))
+            .imageScale(.medium)
+            .foregroundStyle(Theme.onSurfaceVariant)
+            .accessibilityHidden(true)
     }
 }

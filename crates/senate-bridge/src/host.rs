@@ -520,6 +520,9 @@ pub async fn run(
     cwd: &Path,
     session: &SessionCommand<'_>,
 ) -> anyhow::Result<()> {
+    if let Err(error) = crate::fd::cap_host_limit() {
+        tracing::warn!(%error, "could not lower the terminal host file descriptor limit");
+    }
     let mut publication = tokio::net::unix::pipe::Receiver::from_owned_fd(
         rustix::io::fcntl_dupfd_cloexec(std::io::stdin(), 3)?,
     )

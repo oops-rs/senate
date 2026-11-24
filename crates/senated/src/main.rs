@@ -171,6 +171,7 @@ async fn main() -> anyhow::Result<()> {
         }) => return check_model(config, home, committee.as_ref(), json).await,
         None => {}
     }
+    senate_bridge::fd::raise_daemon_limit();
     if cli.machine {
         let paths = match cli.home {
             Some(home) => Paths::new(home),

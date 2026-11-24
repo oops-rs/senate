@@ -15,6 +15,9 @@ struct SenateApp: App {
     init() {
         Diagnostics.shared.start()
         Perf.watchMainThread()
+        // Toolbar actions are icons with their titles in tooltips: show
+        // those promptly (AppKit's default waits about a second).
+        UserDefaults.standard.register(defaults: ["NSInitialToolTipDelay": 350])
     }
 
     var body: some Scene {
