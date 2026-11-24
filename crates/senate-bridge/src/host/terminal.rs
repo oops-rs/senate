@@ -305,6 +305,25 @@ impl Drop for RawTerminal {
     }
 }
 
+/// The host refused the attachment: another terminal holds it.
+#[derive(Debug)]
+pub struct Busy;
+
+impl std::fmt::Display for Busy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the senator already has an attached terminal")
+    }
+}
+
+impl std::error::Error for Busy {}
+
+/// The path of the terminal on stdin (`/dev/ttys012`), when it is one.
+fn own_tty() -> Option<String> {
+    rustix::termios::ttyname(std::io::stdin(), Vec::new())
+        .ok()
+        .and_then(|name| name.into_string().ok())
+}
+
 /// Attach until Ctrl-], the person closes the terminal, or the host exits.
 pub async fn attach(path: &Path, paths: &Paths, label: &str) -> anyhow::Result<()> {
     ensure!(
@@ -342,7 +361,7 @@ where
             ATTACHED_NATIVE => (true, true),
             ATTACHED => (true, false),
             ATTACHED_PLAIN => (false, false),
-            BUSY => bail!("the senator already has an attached terminal"),
+            BUSY => return Err(Busy.into()),
             _ => bail!("unrecognized terminal host reply"),
         };
 
@@ -357,7 +376,10 @@ where
             .draw(attach_separator(label, cols).as_bytes())
             .await?;
     }
-    let (colors, typed) = terminal.colors().await;
+    let (mut colors, typed) = terminal.colors().await;
+    colors.tty = own_tty();
+    // The terminal's title names the session while it is attached.
+    let _ = terminal.draw(&super::title::set(label)).await;
     let (mut screen, mut keys) = split(stream);
 
     let to_host = async {
@@ -421,7 +443,8 @@ where
     };
     // draw handles partial writes and waits for writable readiness. Bound
     // cleanup in case the attached terminal has disappeared.
-    let reset = reset_display(native, colors.keyboard_flags);
+    let mut reset = reset_display(native, colors.keyboard_flags);
+    reset.extend_from_slice(super::title::RESTORE);
     let _ = tokio::time::timeout(Duration::from_millis(250), terminal.draw(&reset)).await;
     result
 }

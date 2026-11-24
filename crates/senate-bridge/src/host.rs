@@ -10,6 +10,7 @@ mod picker;
 pub(crate) mod prompt;
 mod scroll;
 mod terminal;
+pub(crate) mod title;
 pub mod view;
 pub(crate) mod watch;
 
@@ -40,8 +41,8 @@ use crate::paths::{HOME_ENV, Paths, SOCKET_PATH_LIMIT};
 
 use emulation::{Colors, Emulation, Scheme};
 pub use picker::{Choice, pick, pick_session};
-pub use terminal::attach;
 pub(crate) use terminal::attach_stream;
+pub use terminal::{Busy, attach};
 
 pub(crate) const START_TIMEOUT: Duration = Duration::from_secs(10);
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
@@ -67,6 +68,9 @@ struct Tty {
     attached: AtomicBool,
     /// The screen as watchers are shown it, at the PTY's size.
     screen: Arc<watch::Screen>,
+    /// Someone looks for the attached terminal: it rings and flashes its
+    /// title ([`title::FLASH_ON`]).
+    find: tokio::sync::Notify,
 }
 
 impl Tty {
@@ -77,6 +81,7 @@ impl Tty {
             output_gate: tokio::sync::Mutex::new(()),
             attached: AtomicBool::new(false),
             screen: Arc::new(watch::Screen::new(rows, cols)),
+            find: tokio::sync::Notify::new(),
         }
     }
 
@@ -166,6 +171,9 @@ pub(crate) struct ViewerActivity {
     pub attached: bool,
     pub input_at: u64,
     pub detached_at: u64,
+    /// The attached viewer's terminal device (`/dev/ttys012`), when it said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tty: Option<String>,
 }
 
 // An attached terminal only stands in for a person who has used it in
@@ -1002,6 +1010,8 @@ pub(crate) struct HostFacts {
     pub(crate) attached: bool,
     /// Seconds since a person last typed into it.
     pub(crate) typed_secs_ago: Option<u64>,
+    /// The attached viewer's terminal device, when it said.
+    pub(crate) viewer_tty: Option<String>,
 }
 
 pub(crate) fn facts(paths: &Paths, id: &EventId) -> io::Result<HostFacts> {
@@ -1012,6 +1022,7 @@ pub(crate) fn facts(paths: &Paths, id: &EventId) -> io::Result<HostFacts> {
             started_at: None,
             attached: false,
             typed_secs_ago: None,
+            viewer_tty: None,
         });
     }
     let started_at = std::fs::metadata(directory(paths, id).join("owner"))
@@ -1026,6 +1037,7 @@ pub(crate) fn facts(paths: &Paths, id: &EventId) -> io::Result<HostFacts> {
         started_at,
         attached: viewer.attached,
         typed_secs_ago,
+        viewer_tty: viewer.attached.then_some(viewer.tty).flatten(),
     })
 }
 
@@ -1199,6 +1211,8 @@ async fn serve(listener: &UnixListener, tty: &Tty, viewer: &Mutex<Viewer>) -> an
                     }
                     (other, _) = accept(listener) => {
                         let _ = other.try_write(&[BUSY]);
+                        // The one who asked can now see which terminal has it.
+                        tty.find.notify_one();
                     }
                 }
             }
@@ -1217,6 +1231,7 @@ async fn serve(listener: &UnixListener, tty: &Tty, viewer: &Mutex<Viewer>) -> an
         let mut viewer = Viewer::lock(viewer);
         viewer.activity.attached = false;
         viewer.activity.detached_at = observed_at();
+        viewer.activity.tty = None;
         viewer.record();
     }
 }
@@ -1288,6 +1303,11 @@ async fn relay(mut stream: UnixStream, tty: &Tty, viewer: &Mutex<Viewer>) -> any
                     input.read_exact(&mut keys[..n]).await?;
                     let colors: Colors = serde_json::from_slice(&keys[..n])
                         .context("unreadable terminal colours")?;
+                    {
+                        let mut viewer = Viewer::lock(viewer);
+                        viewer.activity.tty = colors.tty.clone();
+                        viewer.dirty = true;
+                    }
                     let mut write = tty.write.lock().await;
                     let report = tty.emulation().viewer(colors);
                     if !report.is_empty() {
@@ -1305,15 +1325,38 @@ async fn relay(mut stream: UnixStream, tty: &Tty, viewer: &Mutex<Viewer>) -> any
         }
     };
     let to_terminal = async {
+        // The agent's own title sequences are kept from the viewer: its
+        // terminal shows the session's name for the whole attachment.
+        let mut titles = title::TitleFilter::default();
+        let mut flash_until: Option<tokio::time::Instant> = None;
         loop {
+            let change = tokio::select! {
+                biased;
+                () = tty.find.notified() => {
+                    if flash_until.is_none() {
+                        tokio::time::timeout(Duration::from_secs(3), screen.write_all(title::FLASH_ON))
+                            .await??;
+                    }
+                    flash_until = Some(tokio::time::Instant::now() + title::FLASH_FOR);
+                    continue;
+                }
+                () = tokio::time::sleep_until(flash_until.unwrap_or_else(tokio::time::Instant::now)), if flash_until.is_some() => {
+                    flash_until = None;
+                    tokio::time::timeout(Duration::from_secs(3), screen.write_all(title::FLASH_OFF))
+                        .await??;
+                    continue;
+                }
+                change = output.recv() => change?,
+            };
             // An incomplete escape stream cannot be resumed. A lagging
             // viewer reconnects and gets one new bounded history replay.
-            match output.recv().await? {
+            match change {
                 watch::Change::Output(bytes) => {
                     cursor
                         .lock()
                         .unwrap_or_else(|error| error.into_inner())
                         .output(&bytes, observed_at());
+                    let bytes = titles.filter(&bytes);
                     tokio::time::timeout(Duration::from_secs(3), screen.write_all(&bytes))
                         .await??;
                 }
@@ -1721,6 +1764,7 @@ mod tests {
             attached: true,
             detached_at: 10,
             input_at: 9,
+            tty: None,
         };
         assert_eq!(
             viewer.unattended_since(11),

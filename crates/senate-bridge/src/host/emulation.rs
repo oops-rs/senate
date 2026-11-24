@@ -82,6 +82,11 @@ pub(crate) struct Colors {
     pub device_attributes: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub scheme_reporting: bool,
+    /// Where the viewer's terminal is (`/dev/ttys012`), which the host
+    /// records so a refused attach can say which terminal has it. A host
+    /// from before ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tty: Option<String>,
 }
 
 fn is_false(value: &bool) -> bool {

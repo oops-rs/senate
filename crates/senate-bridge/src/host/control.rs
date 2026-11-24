@@ -41,6 +41,20 @@ pub(crate) const AGY_NUDGE: &str = "[senate] new messages";
 /// the pair as a paste and the Enter as a newline in it.
 const NUDGE_ENTER_DELAY: Duration = Duration::from_millis(150);
 
+/// The find replies.
+const FOUND: u8 = 13;
+const NO_VIEWER: u8 = 14;
+
+/// Make the attached terminal ring and flash its title, so a person finds
+/// the panel that holds the session.
+#[derive(Serialize, Deserialize)]
+struct FindRequest {
+    find: FindParams,
+}
+
+#[derive(Serialize, Deserialize)]
+struct FindParams {}
+
 /// The answer replies.
 const ANSWERED: u8 = 7;
 const NO_DIALOG: u8 = 8;
@@ -138,6 +152,16 @@ pub(super) async fn next_stop(
         }
         if let Ok(AnswerRequest { answer }) = serde_json::from_str::<AnswerRequest>(&line) {
             answer_once(&mut stream, tty, answer).await;
+            continue;
+        }
+        if serde_json::from_str::<FindRequest>(&line).is_ok() {
+            let attached = tty.attached.load(std::sync::atomic::Ordering::Acquire);
+            if attached {
+                tty.find.notify_one();
+            }
+            let _ = stream
+                .write_u8(if attached { FOUND } else { NO_VIEWER })
+                .await;
             continue;
         }
         let Ok(request) = serde_json::from_str::<StopRequest>(&line) else {
@@ -303,6 +327,35 @@ pub(crate) async fn answer(
     })
     .await
     .map_err(|_| IpcError::internal("timed out waiting for the terminal host to answer"))?
+}
+
+/// Ask host `id` to make its attached terminal ring and flash its title:
+/// whether a terminal is attached to it.
+pub(crate) async fn find(paths: &Paths, id: &EventId) -> Result<bool, IpcError> {
+    let mut payload = serde_json::to_vec(&FindRequest {
+        find: FindParams {},
+    })
+    .map_err(IpcError::internal)?;
+    payload.push(b'\n');
+    tokio::time::timeout(HANDSHAKE, async {
+        let mut stream = UnixStream::connect(socket(paths, id))
+            .await
+            .map_err(IpcError::internal)?;
+        stream
+            .write_all(&payload)
+            .await
+            .map_err(IpcError::internal)?;
+        match stream.read_u8().await {
+            Ok(FOUND) => Ok(true),
+            Ok(NO_VIEWER) => Ok(false),
+            // A host from before `find` closes the connection.
+            _ => Err(IpcError::bad_request(
+                "this terminal host is older than `senate session find`; it cannot ring its terminal",
+            )),
+        }
+    })
+    .await
+    .map_err(|_| IpcError::internal("timed out waiting for the terminal host"))?
 }
 
 /// Ask host `id` to type the idle nudge into its TUI, unless a viewer typed

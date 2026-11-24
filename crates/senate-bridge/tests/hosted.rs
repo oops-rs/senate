@@ -5778,3 +5778,242 @@ async fn spawn_seats_on_the_committee_bound_at_its_dir() {
     );
     h.stop().await;
 }
+
+/// Read the viewer's stream into `seen` until it holds `want`.
+async fn read_until(seen: &mut Vec<u8>, viewer: &mut tokio::net::UnixStream, want: &[u8]) {
+    let found = tokio::time::timeout(TIMEOUT, async {
+        let mut buf = [0u8; 4096];
+        while !seen.windows(want.len()).any(|w| w == want) {
+            let n = viewer.read(&mut buf).await.unwrap();
+            assert!(n > 0, "the host closed the viewer");
+            seen.extend_from_slice(&buf[..n]);
+        }
+    })
+    .await;
+    assert!(
+        found.is_ok(),
+        "waited for {:?} in {:?}",
+        String::from_utf8_lossy(want),
+        String::from_utf8_lossy(seen)
+    );
+}
+
+/// The attached terminal shows the session's name, not the agent's own
+/// titles; a refused second attach and `senate session find` make it ring
+/// and flash its title. All of it goes to the viewer only: nothing reaches
+/// the agent's input.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_attached_terminal_keeps_the_sessions_title_and_rings_when_sought() {
+    let mut h = Harness::new().await;
+    h.config.hosted_session_limit = Some(1);
+    h.dir = tempfile::tempdir_in("/tmp").unwrap();
+    h.paths = senate_bridge::Paths::new(h.dir.path().join("senate"));
+    h.paths.ensure_home().unwrap();
+    let project = h.workdir("titled", None);
+    let typed = project.join(".typed");
+    let fixture = h.dir.path().join("fixture-claude");
+    // On `paint`, the agent sets its own title, then paints.
+    std::fs::write(
+        &fixture,
+        format!(
+            "#!/bin/sh\n{RECORD_HOSTED_ARGV}\n\
+             while IFS= read -r line; do\n\
+             \x20 if [ \"$line\" = paint ]; then printf '\\033]0;agent title\\007fixture TUI\\r\\n'\n\
+             \x20 else printf '%s\\n' \"$line\" >> {typed:?}; fi\n\
+             done\n"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(
+        h.paths.config(),
+        format!(
+            "[companion]\nclaude_bin = {:?}\n",
+            fixture.to_str().unwrap()
+        ),
+    )
+    .unwrap();
+    h.config.committees.push(committee());
+    start(&mut h).await;
+    let _: SpawnReply = call(
+        &h,
+        &Request::Spawn {
+            attempt_id: None,
+            session: Default::default(),
+            runtime: Some(HostedRuntime::Claude),
+            profile: None,
+            committee: committee(),
+            alias: Some(path("titled")),
+            cwd: project.clone(),
+            chair: false,
+            secretary: false,
+            prompt: None,
+            model: Default::default(),
+        },
+    )
+    .await;
+    let tty: PathBuf = call(
+        &h,
+        &Request::Attach {
+            senator: path("titled").into(),
+        },
+    )
+    .await;
+
+    // The first viewer attaches and asks the agent to paint.
+    let mut first = tokio::net::UnixStream::connect(&tty).await.unwrap();
+    begin_viewer(&mut first).await;
+    first.write_all(&[2, 0, 6]).await.unwrap();
+    first.write_all(b"paint\r").await.unwrap();
+    let mut seen = Vec::new();
+    read_until(&mut seen, &mut first, b"fixture TUI").await;
+    assert!(
+        !seen
+            .windows(b"agent title".len())
+            .any(|w| w == b"agent title"),
+        "the agent's own title is kept from the viewer: {:?}",
+        String::from_utf8_lossy(&seen)
+    );
+
+    // A second viewer is refused, and the first rings and flashes.
+    let mut second = tokio::net::UnixStream::connect(&tty).await.unwrap();
+    assert_eq!(second.read_u8().await.unwrap(), 0, "busy");
+    seen.clear();
+    read_until(&mut seen, &mut first, b"Senate: this terminal\x07").await;
+    assert!(
+        seen.windows(2).any(|w| w == b"\x07\x1b"),
+        "the bell, then the title"
+    );
+    read_until(&mut seen, &mut first, b"\x1b[23;0t").await;
+
+    // `senate session find` does the same, and says the terminal holds it.
+    let found: senate_bridge::ipc::FindReply = call(
+        &h,
+        &Request::FindSession {
+            senator: path("titled").into(),
+        },
+    )
+    .await;
+    assert!(found.attached, "{found:?}");
+    seen.clear();
+    read_until(&mut seen, &mut first, b"Senate: this terminal\x07").await;
+    assert!(seen.starts_with(b"\x07"), "the bell first: {seen:?}");
+
+    // None of it reached the agent: only `paint` was typed, which the
+    // fixture paints rather than records.
+    assert!(
+        std::fs::read_to_string(&typed)
+            .unwrap_or_default()
+            .is_empty(),
+        "{:?}",
+        std::fs::read_to_string(&typed)
+    );
+    drop(first);
+    h.stop().await;
+}
+
+/// `senate attach` of a name that resolves to a session Senate does not
+/// host: says which session and committee it is, that it runs in its own
+/// terminal, and the hosted sessions with the same alias elsewhere.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn attaching_a_session_senate_does_not_host_says_what_it_is() {
+    let (mut h, project, _) = fixture_daemon(1).await;
+    // A hosted `main` on refund-v2.
+    let hosted: SpawnReply = call(
+        &h,
+        &Request::Spawn {
+            attempt_id: None,
+            session: Default::default(),
+            runtime: Some(HostedRuntime::Claude),
+            profile: None,
+            committee: committee(),
+            alias: Some(path("main")),
+            cwd: project.clone(),
+            chair: false,
+            secretary: false,
+            prompt: None,
+            model: Default::default(),
+        },
+    )
+    .await;
+    // A session of alice's own on `other`, not hosted, also `main` there:
+    // registered by the real hook, as Claude Code runs it.
+    let wd = h.workdir("native", Some("other"));
+    let run_hook = |event: &'static str, hook_event: &'static str| {
+        let mut cmd = tokio::process::Command::new(BIN);
+        testenv::isolate_async(&mut cmd, h.dir.path());
+        cmd.args(["hook", event])
+            .env("SENATE_HOME", h.paths.home())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .kill_on_drop(true);
+        let input = serde_json::json!({
+            "session_id": "native-1", "cwd": wd, "hook_event_name": hook_event, "source": "startup"
+        })
+        .to_string();
+        async move {
+            let mut child = cmd.spawn().unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(input.as_bytes())
+                .await
+                .unwrap();
+            assert!(
+                tokio::time::timeout(TIMEOUT, child.wait())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .success()
+            );
+        }
+    };
+    run_hook("session-start", "SessionStart").await;
+    let other = senate_core::CommitteeId::new("other").unwrap();
+    let native_session = h.store().session("native-1").unwrap().unwrap();
+    let native = native_session.agent;
+    h.server
+        .state
+        .inner
+        .lock()
+        .unwrap()
+        .aliases
+        .set(&other, path("main"), native.clone())
+        .unwrap();
+    let refused = |name: &str| {
+        let request = Request::AttachInfo {
+            target: ipc::AttachTarget::Senator {
+                senator: name.parse().unwrap(),
+            },
+        };
+        let socket = h.socket();
+        async move {
+            match ipc::request::<serde_json::Value>(&socket, &request, TIMEOUT, TIMEOUT).await {
+                Err(ipc::ClientError::Remote(error)) => error.message,
+                other => panic!("expected a refusal, got {other:?}"),
+            }
+        }
+    };
+    let message = refused("other::main").await;
+    assert!(
+        message.starts_with(&format!("other::main is [senator::{native}] on other."))
+            && message.contains("It runs in its own terminal, not one Senate hosts")
+            && message.contains("Hosted sessions with the same alias: `refund-v2::main`."),
+        "{message}"
+    );
+    // Once it has ended: how to reopen it in a terminal Senate hosts.
+    run_hook("session-end", "SessionEnd").await;
+    common::eventually("the native session ended", TIMEOUT, || {
+        let s = h.store().session("native-1").unwrap()?;
+        (!s.is_live()).then_some(())
+    })
+    .await;
+    let message = refused("other::main").await;
+    assert!(
+        message.contains("It has ended; `senate session restore other::main` reopens it"),
+        "{message}"
+    );
+    let _ = hosted;
+    h.stop().await;
+}
