@@ -28,6 +28,8 @@ main { max-width: 700px; margin: 0 auto; padding: 8px 24px 24px; }
 .tool-head { display: flex; gap: 8px; align-items: center; background: var(--container); border-radius: 10px; padding: 7px 12px; font: 12.5px ui-monospace, "SF Mono", monospace; }
 .tool-head .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tool-head .kind { color: var(--dim); width: 16px; text-align: center; }
+.mcp-mark { fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; vertical-align: -1px; }
+.tool-head .mcp-args { color: var(--dim); }
 .ok { color: var(--success); } .fail { color: var(--danger); } .run { color: var(--dim); }
 .output { max-height: 320px; overflow: auto; background: var(--high); border-radius: 10px; margin-top: 4px; padding: 8px 12px; font: 12.5px/1.45 ui-monospace, "SF Mono", monospace; white-space: pre-wrap; }
 .diff .add { color: var(--success); background: var(--success-bg); display: block; }

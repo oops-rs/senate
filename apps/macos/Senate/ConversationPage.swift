@@ -310,6 +310,7 @@ final class ConversationPage: NSObject {
             if let o = call.output { tool["output"] = o }
             if let d = call.diff { tool["diff"] = d }
             if let e = call.exitCode { tool["exit"] = e }
+            if let m = call.mcp { tool["mcp"] = m }
             out["tool"] = tool
         case let .todo(items):
             out["kind"] = "todo"

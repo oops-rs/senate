@@ -617,7 +617,7 @@ import SenateCore
     private func tool(_ seq: UInt64, _ title: String) -> TimelineEntry {
         TimelineEntry(seq: seq, at: nil, truncated: false, body: .tool(call: ToolCall(
             callId: "c\(seq)", name: "Bash", kind: "shell", status: "completed", statusLabel: "done",
-            title: title, cwd: nil, output: nil, exitCode: nil, diff: nil)))
+            title: title, cwd: nil, output: nil, exitCode: nil, diff: nil, mcp: nil)))
     }
 
     @Test func reasoningGoesIntoTheCallOrReplyItLedTo() {

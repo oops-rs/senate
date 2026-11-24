@@ -190,7 +190,7 @@ extension ConversationPageTests {
         let call = { (seq: UInt64, title: String, status: String) in
             TimelineEntry(seq: seq, at: nil, truncated: false, body: .tool(call: ToolCall(
                 callId: "c\(seq)", name: "Bash", kind: "shell", status: status, statusLabel: status,
-                title: title, cwd: nil, output: "output of \(title)", exitCode: status == "failed" ? 1 : 0, diff: nil)))
+                title: title, cwd: nil, output: "output of \(title)", exitCode: status == "failed" ? 1 : 0, diff: nil, mcp: nil)))
         }
         let rows = ConversationRows.rows([
             call(1, "cargo build", "completed"), call(2, "cargo test needle", "failed"), call(3, "git status", "running"),
@@ -239,7 +239,7 @@ extension ConversationPageTests {
         let call = { (seq: UInt64, title: String) in
             TimelineEntry(seq: seq, at: nil, truncated: false, body: .tool(call: ToolCall(
                 callId: "c\(seq)", name: "Bash", kind: "shell", status: "completed", statusLabel: "completed",
-                title: title, cwd: nil, output: "output of \(title)", exitCode: 0, diff: nil)))
+                title: title, cwd: nil, output: "output of \(title)", exitCode: 0, diff: nil, mcp: nil)))
         }
         let rows = ConversationRows.rows([call(1, "cargo build"), call(2, "cargo test needle"), call(3, "git status")])
         #expect(ConversationRows.rowId(for: 2, in: rows) == 2)
@@ -274,7 +274,7 @@ extension ConversationPageTests {
             case 0, 1:
                 return TimelineEntry(seq: seq, at: nil, truncated: false, body: .tool(call: ToolCall(
                     callId: "c\(seq)", name: "Bash", kind: "shell", status: "completed", statusLabel: "completed",
-                    title: "cargo test step \(seq)", cwd: nil, output: "ok \(seq)", exitCode: 0, diff: nil)))
+                    title: "cargo test step \(seq)", cwd: nil, output: "ok \(seq)", exitCode: 0, diff: nil, mcp: nil)))
             case 2:
                 return TimelineEntry(seq: seq, at: nil, truncated: false, body: .user(text: "Message \(seq): go on."))
             default:
@@ -395,7 +395,7 @@ extension ConversationPageTests {
         let call = { (seq: UInt64, title: String) in
             TimelineEntry(seq: seq, at: nil, truncated: false, body: .tool(call: ToolCall(
                 callId: "c\(seq)", name: "Bash", kind: "shell", status: "completed", statusLabel: "completed",
-                title: title, cwd: nil, output: token, exitCode: 0, diff: nil)))
+                title: title, cwd: nil, output: token, exitCode: 0, diff: nil, mcp: nil)))
         }
         let rows = ConversationRows.rows([
             call(1, "cargo test " + token), call(2, "git status " + token),
@@ -465,5 +465,41 @@ extension ConversationPageTests {
                     b.querySelectorAll('pre').length, b.textContent.includes('`')].join(',')
             """) as? String
         #expect(shape == "1,2,1,false", "inline code, two items, a block, no backticks: \(shape ?? "nil")")
+    }
+}
+
+extension ConversationPageTests {
+    /// An MCP call reads as its mark and `server.tool`, its raw name in
+    /// the tooltip; a run of them carries the mark too.
+    @Test func anMcpCallReadsAsServerDotTool() async throws {
+        let page = ConversationPage(store: nil)
+        for _ in 0..<500 where !page.isReady { try await Task.sleep(for: .milliseconds(20)) }
+        let call = { (seq: UInt64, name: String, title: String) in
+            TimelineEntry(seq: seq, at: nil, truncated: false, body: .tool(call: ToolCall(
+                callId: "c\(seq)", name: name, kind: "other", status: "completed", statusLabel: "completed",
+                title: title, cwd: nil, output: nil, exitCode: nil, diff: nil, mcp: "senate.answer")))
+        }
+        let rows = ConversationRows.rows([
+            call(1, "mcp__senate__answer", "senate.answer"),
+            TimelineEntry(seq: 2, at: nil, truncated: false, body: .user(text: "and then")),
+            call(3, "mcp__senate__answer", "thread 2419"), call(4, "mcp__senate__answer", "senate.answer"),
+        ])
+        ConversationPage.fixtureRows["mcp"] = rows
+        page.show(.fixtureRows("mcp"))
+        for _ in 0..<200 {
+            if await page.evaluate("return document.querySelectorAll('.row').length") as? Int == 3 { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let single = await page.evaluate("""
+            const h = document.querySelector('.k-tool .tool-head');
+            return [!!h.querySelector('svg.mcp-mark'), h.querySelector('.title').textContent,
+                    h.querySelector('.title').title].join('|')
+            """) as? String
+        #expect(single == "true|senate.answer|mcp__senate__answer")
+        let group = await page.evaluate("""
+            const h = document.querySelector('.group-head');
+            return [!!h.querySelector('svg.mcp-mark'), h.querySelector('.title').textContent].join('|')
+            """) as? String
+        #expect(group == "true|senate.answer", "\(group ?? "nil")")
     }
 }

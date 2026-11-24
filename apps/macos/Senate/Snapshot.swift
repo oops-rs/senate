@@ -171,6 +171,15 @@ enum Snapshot {
                 await Task.yield()
                 print("snapshot: opening every tool call held the main thread \(ContinuousClock.now - start)")
                 await shot("session-expanded")
+                // The MCP calls: their mark and server.tool.
+                if let mcp = store.timeline?.items.first(where: {
+                    if case let .tool(call) = $0.body { return call.mcp != nil }
+                    return false
+                }) {
+                    NotificationCenter.default.post(name: scrollToItem, object: mcp.seq)
+                    try? await Task.sleep(for: .milliseconds(300))
+                    await shot("session-mcp")
+                }
             }
             if let working = sessions.first(where: { $0.status == .working && $0.readable }) {
                 store.place = .session(working.sessionId)

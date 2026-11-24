@@ -1869,6 +1869,17 @@ fn timelines(w: &mut World) {
             },
         ),
     );
+    // Two MCP calls: read as "senate.status", "senate.answer".
+    push(
+        &mut lead,
+        31,
+        tool("mcp-1", "mcp__senate__status", S::Completed, D::Other { summary: String::new() }),
+    );
+    push(
+        &mut lead,
+        31,
+        tool("mcp-2", "mcp__senate__answer", S::Completed, D::Other { summary: "thread 2419".into() }),
+    );
     push(
         &mut lead,
         30,
