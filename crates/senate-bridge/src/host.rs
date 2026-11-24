@@ -37,6 +37,8 @@ use tokio::sync::broadcast;
 
 use crate::host_approval::observed_at;
 use crate::ipc::{self, HostedModel, HostedRuntime, Request};
+pub(crate) mod codex_backend;
+
 use crate::paths::{HOME_ENV, Paths, SOCKET_PATH_LIMIT};
 
 use emulation::{Colors, Emulation, Scheme};
@@ -383,6 +385,7 @@ pub struct SessionCommand<'a> {
     pub program: &'a Path,
     pub resume: bool,
     pub codex_remote: Option<&'a str>,
+    pub codex_lease: Option<&'a Path>,
     /// The senator's alias, shown by the TUI as the session's own name.
     pub name: Option<&'a str>,
     /// The model and effort the TUI is started with.
@@ -480,6 +483,9 @@ pub(crate) fn start(
     if let Some(remote) = session.codex_remote {
         command.arg("--codex-remote").arg(remote);
     }
+    if let Some(lease) = session.codex_lease {
+        command.arg("--codex-lease").arg(lease);
+    }
     if let Some(name) = session.name {
         command.arg("--name").arg(name);
     }
@@ -543,6 +549,15 @@ pub async fn run(
     )
     .context("open the daemon publication pipe")?;
     let dir = directory(paths, id);
+    let _backend_lease = match session.codex_lease {
+        Some(path) => {
+            let lease = UnixStream::connect(path)
+                .await
+                .context("acquire dedicated Codex backend")?;
+            Some(lease)
+        }
+        None => None,
+    };
     let file = open_lock(&dir).context("own the host directory")?;
     // A liveness reader may have opened the file just before we locked it.
     flock(&file, FlockOperation::LockExclusive)?;

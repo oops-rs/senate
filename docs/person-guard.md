@@ -45,8 +45,8 @@ names and ancestry provide additional rejection while the original tree is visib
 The macOS bridge checks one-time proofs for operator requests. It binds each
 proof to the exact request digest and the Mach sender's process generation.
 Managed launchd hosting persists its daemon coalition before publishing the
-bridge. Scope coverage for the shared Codex backend remains advisory until
-the dedicated backend lands. Linux and WSL hosting remains advisory. Hook
+bridge. The scope covers dedicated hosted Codex backends. Existing shared backends
+remain advisory until their hosted sessions are restored to dedicated mode. Linux and WSL hosting remains advisory. Hook
 process queries and person-name reservation are in place. Persistent role
 reauthorization is pending. The app's signed XPC queue provides consent for
 rebind and line-bearing grants through a dedicated Observe registry capability.
@@ -74,8 +74,10 @@ connection. Its connection ownership can support future context-switch handling.
 
 This Mac's three isolated, initialized app-servers used a median of 54.3 MiB
 idle RSS each. An independent server resumed the same seeded test thread and
-canonical project directory using the same private `CODEX_HOME`. Dedicated
-Senate hosting and restore still need end-to-end acceptance.
+canonical project directory using the same private `CODEX_HOME`. An isolated supervisor and backend used 68.7 MiB combined idle RSS. The
+backend survived closure of its publication pipe and removed both sockets
+on host-lease closure. Hosted restore checks that the new backend can load
+the existing thread before publishing it.
 
 ## Signed app consent
 

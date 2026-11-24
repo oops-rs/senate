@@ -1227,6 +1227,7 @@ mod tests {
         let config = CodexConfig {
             listen: Some("ws://127.0.0.1:4500".into()),
             bin: Some("/opt/codex".into()),
+            ..Default::default()
         };
         let c = terminal_command(&config, None, None);
         assert_eq!(c.argv, ["/opt/codex", "--remote", "ws://127.0.0.1:4500"]);

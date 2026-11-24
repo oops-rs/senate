@@ -1220,6 +1220,7 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
 /// prompt waiting, and a stopped Codex `reviewer`.
 pub fn hosted_sessions() -> SessionsReply {
     let row = |name: &str, alias: Option<&str>, runtime: Runtime, state: HostState| SessionRow {
+        codex_scope_advisory: false,
         paused: false,
         chair: false,
         shown_name: None,
@@ -1866,6 +1867,7 @@ pub fn session_tree(w: &mut World) {
     let hosted =
         |id: &str, primary: &str, alias: &str, committee: &str, runtime: Runtime, chair: bool| {
             SessionRow {
+                codex_scope_advisory: false,
                 host_id: EventId::new(),
                 session_id: id.into(),
                 primary: path(primary),
@@ -2721,6 +2723,7 @@ pub fn seat_secretary(w: &mut World, state: senate_bridge::ipc::DefaultSecretary
         _ => HostState::Stopped,
     };
     w.sessions.rows.push(SessionRow {
+        codex_scope_advisory: false,
         paused: state == St::Paused,
         chair: false,
         shown_name: Some("secretary".into()),
@@ -2780,6 +2783,7 @@ fn history_label(r: &senate_bridge::ipc::SessionHistoryRow) -> String {
 fn revive(w: &mut World, r: &senate_bridge::ipc::SessionHistoryRow) {
     use senate_bridge::ipc::LocalSessionRow;
     w.sessions.rows.push(SessionRow {
+        codex_scope_advisory: false,
         paused: false,
         chair: false,
         shown_name: r.shown_name.clone(),

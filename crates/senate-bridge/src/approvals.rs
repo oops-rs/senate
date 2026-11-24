@@ -236,11 +236,12 @@ struct Pending {
 /// that hear them.
 pub struct Relay {
     transport: Transport,
+    routes: crate::delivery::codex::Routes,
     backoff: (Duration, Duration),
     events: broadcast::Sender<WatchEvent>,
     hosted: Option<mpsc::UnboundedSender<CodexApprovalSignal>>,
     pending: Mutex<BTreeMap<String, Pending>>,
-    subscribers: Mutex<HashMap<String, JoinHandle<()>>>,
+    subscribers: Mutex<HashMap<String, (Transport, JoinHandle<()>)>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -256,12 +257,18 @@ impl Relay {
     ) -> Self {
         Self {
             transport,
+            routes: Default::default(),
             backoff,
             events,
             hosted: None,
             pending: Mutex::new(BTreeMap::new()),
             subscribers: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub(crate) fn with_routes(mut self, routes: crate::delivery::codex::Routes) -> Self {
+        self.routes = routes;
+        self
     }
 
     pub(crate) fn with_host_observer(
@@ -306,26 +313,31 @@ impl Relay {
     pub fn reconcile(self: &Arc<Self>, sessions: &[String]) {
         let mut subscribers = lock(&self.subscribers);
         let gone: Vec<String> = subscribers
-            .keys()
-            .filter(|s| !sessions.contains(s))
-            .cloned()
+            .iter()
+            .filter(|(session, (route, _))| {
+                !sessions.contains(session)
+                    || self.routes.select(session, &self.transport) != *route
+            })
+            .map(|(session, _)| session.clone())
             .collect();
         for session in gone {
-            if let Some(task) = subscribers.remove(&session) {
+            if let Some((_, task)) = subscribers.remove(&session) {
                 task.abort();
             }
             self.drop_session(&session);
         }
         for session in sessions {
-            subscribers
-                .entry(session.clone())
-                .or_insert_with(|| tokio::spawn(self.clone().subscribe(session.clone())));
+            subscribers.entry(session.clone()).or_insert_with(|| {
+                let route = self.routes.select(session, &self.transport);
+                let task = tokio::spawn(self.clone().subscribe(session.clone(), route.clone()));
+                (route, task)
+            });
         }
     }
 
     /// Stop every subscriber (daemon shutdown).
     pub fn stop_all(&self) {
-        for (_, task) in lock(&self.subscribers).drain() {
+        for (_, (_, task)) in lock(&self.subscribers).drain() {
             task.abort();
         }
     }
@@ -445,11 +457,11 @@ impl Relay {
         }
     }
 
-    async fn subscribe(self: Arc<Self>, session: String) {
+    async fn subscribe(self: Arc<Self>, session: String, transport: Transport) {
         let (base, max) = self.backoff;
         let mut delay = base;
         loop {
-            match self.listen(&session).await {
+            match self.listen(&session, &transport).await {
                 Ok(()) => {
                     tracing::debug!(session, "the Codex approvals connection closed");
                     delay = base;
@@ -463,9 +475,9 @@ impl Relay {
     }
 
     /// One connection: subscribe to the thread, then relay until it ends.
-    async fn listen(&self, thread: &str) -> Result<(), CodexError> {
+    async fn listen(&self, thread: &str, transport: &Transport) -> Result<(), CodexError> {
         let connect = async {
-            let server = AppServer::connect(&self.transport).await?;
+            let server = AppServer::connect(transport).await?;
             server.subscribe(thread).await
         };
         let mut sub = tokio::time::timeout(SUBSCRIBE_TIMEOUT, connect)

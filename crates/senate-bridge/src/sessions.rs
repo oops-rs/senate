@@ -199,6 +199,13 @@ pub fn render_with_ids(
         row(&line.each_ref().map(String::as_str));
     }
     for row in &reply.rows {
+        if row.codex_scope_advisory {
+            let warning = locale.pick(
+                "使用共享 Codex app-server，守卫仅为提示",
+                "shared Codex app-server; tool process protection is advisory",
+            );
+            let _ = writeln!(out, "{}: {warning}", row.display_name(verbose));
+        }
         if let Some(warning) = &row.model.verification_warning {
             let _ = writeln!(out, "{}: {warning}", row.display_name(verbose));
         }
@@ -344,6 +351,7 @@ pub(crate) mod tests {
 
     pub(crate) fn row(name: &str, alias: Option<&str>, state: HostState) -> SessionRow {
         SessionRow {
+            codex_scope_advisory: false,
             paused: false,
             chair: false,
             shown_name: None,

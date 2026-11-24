@@ -512,7 +512,7 @@ pub(crate) struct Shared {
     triaged: AtomicBool,
     /// Who holds this Senate's Speaker's seat, as `/v1/me` last said.
     speaker: Mutex<Option<SpeakerSeat>>,
-    pub(crate) store: Store,
+    pub(crate) store: Arc<Store>,
     pub(crate) api: ApiClient,
     observe: Option<Arc<senate_observe::Registry>>,
     /// The Senate above, when the machine's Senate is a child of it
@@ -547,6 +547,8 @@ pub(crate) struct Shared {
     hosted_approvals: hosted_approvals::Monitor,
     hook_drops: Mutex<HookDrops>,
     codex_transport: crate::delivery::codex::Transport,
+    codex_routes: crate::delivery::codex::Routes,
+    owned_codex_backends: bool,
     host_binary: PathBuf,
     pushes: Mutex<HashMap<String, PushState>>,
     /// Automatic checkpoints, per agent and worktree root.
@@ -824,6 +826,8 @@ async fn start_bridge(
     let codex = CodexConfig::load(&paths.config()).map_err(anyhow::Error::msg)?;
     let codex = CodexAppServerAdapter {
         transport: codex.transport().map_err(anyhow::Error::msg)?,
+        routes: Default::default(),
+        lookup: None,
         timeout: CODEX_PUSH_TIMEOUT,
     };
     let (watch, _) = broadcast::channel(WATCH_CAPACITY);
@@ -852,7 +856,8 @@ async fn start_bridge(
             (timing.backoff_base, timing.backoff_max),
             watch.clone(),
         )
-        .with_host_observer(signals),
+        .with_host_observer(signals)
+        .with_routes(codex.routes.clone()),
     );
     tracing::debug!(transport = %codex.transport, "Codex sessions are pushed through the app-server");
     #[cfg(target_os = "macos")]
@@ -864,6 +869,10 @@ async fn start_bridge(
     #[cfg(target_os = "macos")]
     let fixture = debug_scope_fixture(paths.home(), fixture_bootstrap);
     let common = Common {
+        #[cfg(target_os = "macos")]
+        owned_codex_backends: scope.is_some(),
+        #[cfg(not(target_os = "macos"))]
+        owned_codex_backends: false,
         #[cfg(target_os = "macos")]
         protected_hosting: scope.is_some() || fixture,
         observe: observe.clone(),
@@ -986,6 +995,7 @@ async fn start_bridge(
 /// What every Senate's half of the daemon shares: one Codex transport and
 /// approvals relay, one watch channel, one companion configuration.
 struct Common {
+    owned_codex_backends: bool,
     #[cfg(target_os = "macos")]
     protected_hosting: bool,
     observe: Option<Arc<senate_observe::Registry>>,
@@ -1029,7 +1039,7 @@ impl Shared {
         common: &Common,
         in_process: bool,
     ) -> anyhow::Result<Arc<Self>> {
-        let store = Store::open(db).with_context(|| format!("opening {}", db.display()))?;
+        let store = Arc::new(Store::open(db).with_context(|| format!("opening {}", db.display()))?);
         let reset = store.reset_inflight()?;
         if reset > 0 {
             tracing::info!(
@@ -1049,12 +1059,17 @@ impl Shared {
             .transpose()?;
         let seating = Seating::new(config.person.clone());
         let (resyncs, _) = watch::channel(0);
+        let mut codex_delivery = common.codex.clone();
+        codex_delivery.lookup = Some(crate::delivery::codex::BackendLookup {
+            store: store.clone(),
+            home: common.home.clone(),
+        });
         Ok(Arc::new(Shared {
             #[cfg(target_os = "macos")]
             protected_hosting: common.protected_hosting,
             ladder: Ladder::new_default(
                 common.timing.inbox_timeout,
-                common.codex.clone(),
+                codex_delivery,
                 [Arc::new(crate::delivery::acp::AcpAdapter {
                     timeout: common.timing.inbox_timeout,
                 })
@@ -1089,6 +1104,8 @@ impl Shared {
             hosted_approvals: hosted_approvals::Monitor::default(),
             hook_drops: Mutex::new(HookDrops::default()),
             codex_transport: common.codex.transport.clone(),
+            codex_routes: common.codex.routes.clone(),
+            owned_codex_backends: common.owned_codex_backends,
             host_binary: common.host_binary.clone(),
             pushes: Mutex::new(HashMap::new()),
             auto: Mutex::new(HashMap::new()),
@@ -2966,6 +2983,18 @@ impl Shared {
 
     // ---- the desktop app: approvals and watch -------------------------------
 
+    fn dedicated_codex_route(
+        &self,
+        session: &str,
+    ) -> Result<Option<crate::delivery::codex::Transport>, StoreError> {
+        let paths = Paths::new(&self.home);
+        Ok(self.store.codex_backend(session)?.map(|host| {
+            crate::delivery::codex::Transport::Unix(crate::host::codex_backend::socket(
+                &paths, &host,
+            ))
+        }))
+    }
+
     /// One approvals subscriber per live Codex session.
     pub(crate) fn reconcile_approvals(&self) {
         match self.checked_live_sessions() {
@@ -2981,6 +3010,20 @@ impl Shared {
                     by_senate.insert(self.index, codex);
                     by_senate.values().flatten().cloned().collect()
                 };
+                let all: Vec<_> = all
+                    .into_iter()
+                    .filter_map(|session| match self.dedicated_codex_route(&session) {
+                        Ok(route) => {
+                            self.codex_routes.set(&session, route);
+                            Some(session)
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, session, "could not resolve Codex backend");
+                            None
+                        }
+                    })
+                    .collect();
+                self.codex_routes.retain(&all);
                 self.relay.reconcile(&all);
             }
             Err(e) => tracing::warn!("reading sessions for the approvals relay: {e}"),
@@ -3827,6 +3870,13 @@ impl Shared {
                 transcripts.remove(&session.session_id),
             );
             rows.push(SessionRow {
+                codex_scope_advisory: facts.running
+                    && session.runtime == Runtime::Codex
+                    && self
+                        .store
+                        .codex_backend(&session.session_id)
+                        .map_err(internal)?
+                        .is_none(),
                 tty: crate::host::socket(&paths, &host_id),
                 host_id,
                 session_id: session.session_id.clone(),
@@ -3976,9 +4026,19 @@ impl Shared {
         let host_status = crate::host::status(&Paths::new(&self.home), &self.store, &sessions)
             .map_err(internal)?;
         let dropped_hooks = self.hook_drop_status(&sessions, &host_status.hosted)?;
+        let shared_codex = sessions.iter().any(|session| {
+            session.runtime == Runtime::Codex
+                && host_status.hosted.contains_key(&session.session_id)
+                && !matches!(self.store.codex_backend(&session.session_id), Ok(Some(_)))
+        });
         Ok(StatusReply {
             descriptors: Some(crate::fd::snapshot()),
-            person_guard_advisory: approval_guard::advisory_notice(self.locale).map(str::to_owned),
+            person_guard_advisory: approval_guard::advisory_notice(self.locale).or_else(|| {
+                shared_codex.then(|| self.locale.pick(
+                    "共享 Codex app-server 的托管会话仅受提示性守卫保护。",
+                    "Hosted Codex sessions on the shared app-server have advisory process protection.",
+                ))
+            }).map(str::to_owned),
             pid: std::process::id(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             person: self.config.person.clone(),

@@ -533,6 +533,9 @@ pub struct SessionsReply {
 /// and `senate session watch` shows.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionRow {
+    /// A hosted Codex thread still uses the shared app-server.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub codex_scope_advisory: bool,
     /// The host's id: its directory under `hosts/`.
     pub host_id: EventId,
     pub session_id: String,

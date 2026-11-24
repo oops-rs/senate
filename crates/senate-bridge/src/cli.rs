@@ -676,6 +676,8 @@ stdin.")]
         #[arg(long)]
         codex_remote: Option<String>,
         #[arg(long)]
+        codex_lease: Option<PathBuf>,
+        #[arg(long)]
         name: Option<String>,
         #[arg(long)]
         model: Option<String>,
@@ -684,6 +686,12 @@ stdin.")]
         /// See `host::prompt::QUIET`.
         #[arg(long)]
         prompt_quiet_ms: Option<u64>,
+    },
+    #[command(hide = true)]
+    SessionCodexBackend {
+        id: EventId,
+        program: PathBuf,
+        cwd: PathBuf,
     },
     /// Manual checks of the delivery plumbing.
     #[command(hide = true)]
@@ -3909,6 +3917,7 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             program,
             resume,
             codex_remote,
+            codex_lease,
             name,
             model,
             effort,
@@ -3928,10 +3937,17 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
                     program: &program,
                     resume,
                     codex_remote: codex_remote.as_deref(),
+                    codex_lease: codex_lease.as_deref(),
                     name: name.as_deref(),
                     model: &model,
                     prompt_quiet,
                 },
+            ))
+        }
+        Cmd::SessionCodexBackend { id, program, cwd } => {
+            let paths = Paths::from_env()?;
+            runtime(false)?.block_on(crate::host::codex_backend::supervise(
+                &paths, &id, &program, &cwd,
             ))
         }
         Cmd::Mcp {
