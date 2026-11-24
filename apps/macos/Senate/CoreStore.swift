@@ -37,6 +37,8 @@ final class CoreStore {
         case committee(String)
         /// The machine's default secretary: its session's page once it runs.
         case secretary
+        /// Town: the Senate's live activity as a little neighbourhood.
+        case town
         /// An ended or stopped session from History, read-only, by its id.
         case past(String)
         /// A waiting item that is not a thread (a prompt, an approval, an

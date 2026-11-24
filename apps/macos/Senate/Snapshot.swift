@@ -80,6 +80,12 @@ enum Snapshot {
                 NSApplication.shared.terminate(nil)
                 return
             }
+            // SENATE_APP_SNAPSHOT_TOWN=1: only the Town page (Town/TownSnapshot.swift), then quit.
+            if ProcessInfo.processInfo.environment[TownSnapshot.env] == "1" {
+                await TownSnapshot.run(store, shot: shot)
+                NSApplication.shared.terminate(nil)
+                return
+            }
             // Inbox, a thread, Approvals, a committee, sessions, Senates.
             store.place = .section(.inbox)
             store.folded = []
