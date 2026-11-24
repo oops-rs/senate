@@ -15,10 +15,10 @@
 //!   prose rarely looks like it. A standalone “Esc to dismiss” footer also
 //!   identifies a modal that needs input.
 //!
-//! While both hold the host keeps a marker file, `screen-prompt`, in its
-//! directory, holding only when the screen went quiet. The daemon reads it
-//! beside the approval notices ([`crate::daemon`]): no screen text is
-//! written anywhere.
+//! Once both hold the host writes a marker file, `screen-prompt`, with
+//! the time the screen went quiet. The marker stays until the choice
+//! disappears. The daemon reads it beside the approval notices
+//! ([`crate::daemon`]). No screen text is written anywhere.
 
 use std::path::Path;
 use std::time::Duration;
@@ -204,8 +204,8 @@ pub(crate) fn permission_key(rows: &[String], choice: PermissionChoice) -> Resul
     char::from_digit(*n, 10).ok_or(NoChoice::NotShown)
 }
 
-/// Keep the marker while the screen is quiet and shows a choice. Never
-/// returns.
+/// Record a choice once the screen is quiet, and keep it while a choice
+/// remains visible. A repaint alone does not settle it.
 pub(super) async fn watch(dir: &Path, screen: &Screen, quiet: Duration) -> anyhow::Result<()> {
     let marker = dir.join(MARKER);
     let quiet = u64::try_from(quiet.as_nanos()).unwrap_or(u64::MAX);
@@ -215,9 +215,13 @@ pub(super) async fn watch(dir: &Path, screen: &Screen, quiet: Duration) -> anyho
     loop {
         tick.tick().await;
         let since = screen.last_output();
-        let waiting =
-            observed_at().saturating_sub(since) >= quiet && looks_like_prompt(&screen.rows());
-        let now = waiting.then_some(ScreenPrompt { since });
+        let now = if (shown.is_some() || observed_at().saturating_sub(since) >= quiet)
+            && looks_like_prompt(&screen.rows())
+        {
+            shown.or(Some(ScreenPrompt { since }))
+        } else {
+            None
+        };
         if now == shown {
             continue;
         }
@@ -428,7 +432,16 @@ mod tests {
         let prompt: ScreenPrompt =
             serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
         assert_eq!(prompt.since, screen.last_output());
-        // The TUI writes again: the wait is over.
+        // A repaint with the same choices keeps the original notice.
+        screen.output(b"\x1b[20;1H  1. Yes\r\n\xe2\x80\xba 2. No");
+        tokio::select! {
+            _ = &mut watching => unreachable!(),
+            () = tokio::time::sleep(Duration::from_secs(2)) => {}
+        }
+        let redrawn: ScreenPrompt =
+            serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+        assert_eq!(redrawn, prompt);
+        // The choices disappear: the wait is over.
         screen.output(b"\x1b[2J");
         tokio::select! {
             _ = &mut watching => unreachable!(),

@@ -208,6 +208,18 @@ impl FakeCodex {
         assert!(st.resolve(id));
     }
 
+    pub fn finish_turn_without_approval_result(&self, thread: &str) {
+        let mut st = self.state.lock().unwrap();
+        st.pending.retain(|_, owner| owner != thread);
+        st.broadcast(
+            thread,
+            &json!({
+                "method": "thread/status/changed",
+                "params": {"threadId": thread, "status": {"type": "idle"}},
+            }),
+        );
+    }
+
     /// The TUI answers request `id` first.
     pub fn answer_in_tui(&self, id: i64) -> bool {
         self.state.lock().unwrap().resolve(id)

@@ -1,4 +1,4 @@
-//! Stop, nudge and answer requests use a private socket so they can reach
+//! Stop, nudge and prompt requests use a private socket so they can reach
 //! a host with a viewer.
 
 use std::io;
@@ -44,6 +44,16 @@ const NUDGE_ENTER_DELAY: Duration = Duration::from_millis(150);
 /// The find replies.
 const FOUND: u8 = 13;
 const NO_VIEWER: u8 = 14;
+const DIALOG_SHOWN: u8 = 15;
+
+#[derive(Deserialize)]
+struct CheckPermissionRequest {
+    #[serde(rename = "check_permission")]
+    _check_permission: CheckPermissionParams,
+}
+
+#[derive(Deserialize)]
+struct CheckPermissionParams {}
 
 /// Make the attached terminal ring and flash its title, so a person finds
 /// the panel that holds the session.
@@ -153,6 +163,13 @@ pub(super) async fn next_stop(
         }
         if let Ok(AnswerRequest { answer }) = serde_json::from_str::<AnswerRequest>(&line) {
             answer_once(&mut stream, tty, answer).await;
+            continue;
+        }
+        if serde_json::from_str::<CheckPermissionRequest>(&line).is_ok() {
+            let shown = prompt::permission_key(&tty.screen.rows(), PermissionChoice::Once).is_ok();
+            let _ = stream
+                .write_u8(if shown { DIALOG_SHOWN } else { NO_DIALOG })
+                .await;
             continue;
         }
         if serde_json::from_str::<FindRequest>(&line).is_ok() {
@@ -302,6 +319,26 @@ async fn answer_once(stream: &mut UnixStream, tty: &Tty, choice: PermissionChoic
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
     let _ = stream.write_u8(reply).await;
+}
+
+/// Read the current screen without typing. A host that cannot report its
+/// screen, including an older host, gives no evidence either way.
+pub(crate) async fn permission_shown(paths: &Paths, id: &EventId) -> Option<bool> {
+    tokio::time::timeout(HANDSHAKE, async {
+        let mut stream = UnixStream::connect(socket(paths, id)).await.ok()?;
+        stream
+            .write_all(b"{\"check_permission\":{}}\n")
+            .await
+            .ok()?;
+        match stream.read_u8().await.ok()? {
+            DIALOG_SHOWN => Some(true),
+            NO_DIALOG => Some(false),
+            _ => None,
+        }
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 /// Ask host `id` to answer the Claude Code permission dialog on its screen.
