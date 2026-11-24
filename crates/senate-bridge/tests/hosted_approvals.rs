@@ -955,6 +955,12 @@ async fn codex_hosted_notices_close_on_input_and_recur_on_native_replay() {
     let third = next_notice(&h, 3).await;
     fake.resolve_while_disconnected(thread, third_id);
     wait_archived(&h, third.seq).await;
+    assert!(
+        archived(&h, third.seq)
+            .unwrap()
+            .body
+            .contains("went away unanswered")
+    );
     assert!(fake.responses().is_empty());
     terminal.stop();
     eventually("the fixture host exited", WAIT, || {
@@ -1471,6 +1477,58 @@ async fn a_quiet_choice_on_the_screen_is_a_notice_until_someone_answers_it() {
     h.stop().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_agy_prompt_is_dismissed_when_the_screen_changes_without_input() {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let (mut h, project) = fixture(true, Locale::En).await;
+    let program = common::agy_fixture(h.dir.path(), "3f2b8c1e-6d4a-4e7b-9c0d-1a2b3c4d5e6f");
+    let script = std::fs::read_to_string(&program).unwrap();
+    let (registration, _) = script.split_once("while IFS= read").unwrap();
+    std::fs::write(
+        &program,
+        format!(
+            r#"{registration}
+mkfifo .screen-step
+exec 3<> .screen-step
+: > .screen-ready
+printf 'Do you want to run this command?\r\n\342\200\272 1. Allow\r\n  2. Deny\r\n'
+IFS= read -r step <&3
+printf '\033[2J\033[HContinuing\r\n'
+IFS= read -r step <&3
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(h.paths.config(), format!("[agy]\nbin = {program:?}\n")).unwrap();
+    start(&mut h).await;
+    let (launch, terminal) = Terminal::spawn(&h, project.clone(), HostedRuntime::Agy).await;
+    let notice = next_notice(&h, 1).await;
+    assert!(session_prompt(&h, &launch.session_id).await.unwrap().screen);
+    assert!(project.join(".screen-ready").exists());
+
+    // Change the fake TUI's screen without typing through a Senate viewer.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
+        .open(project.join(".screen-step"))
+        .unwrap()
+        .write_all(b"continue\n")
+        .unwrap();
+    wait_archived(&h, notice.seq).await;
+    let archive = archived(&h, notice.seq).unwrap();
+    assert!(
+        archive.body.contains("went away unanswered"),
+        "{}",
+        archive.body
+    );
+    assert!(session_prompt(&h, &launch.session_id).await.is_none());
+    assert!(answer_notes(&h).is_empty());
+    terminal.stop();
+    h.stop().await;
+}
+
 // ---- answering from outside the terminal (`senate session approve`) --------
 
 async fn approve_session(
@@ -1696,8 +1754,27 @@ async fn a_codex_approval_on_a_relay_reports_the_task_even_at_an_attended_termin
     wait_relayed(&h, &format!("{native}:{next}")).await;
     let forwarded = next_notice(&h, 2).await;
     assert_eq!(forwarded.thread, Some(older.seq));
-    approve_session(&h, &launch, Decision::Allow).await.unwrap();
+    fake.finish_turn_without_approval_result(native);
     wait_archived(&h, forwarded.seq).await;
+    let archive = archived(&h, forwarded.seq).unwrap();
+    assert_eq!(
+        archive.meta[senate_core::meta::APPROVAL_WAIT],
+        json!({"dismissed":true})
+    );
+    assert!(
+        archive.body.contains("went away unanswered"),
+        "{}",
+        archive.body
+    );
+    let pending: ApprovalsReply = ipc::request(&h.socket(), &Request::Approvals, WAIT, WAIT)
+        .await
+        .unwrap();
+    assert!(
+        pending
+            .approvals
+            .iter()
+            .all(|a| a.id != format!("{native}:{next}"))
+    );
 
     // The desk worker passed the old task on to a local Speaker seat.
     h.server.append_silently(
@@ -1946,6 +2023,80 @@ async fn wait_relayed(h: &Harness, id: &str) {
     .expect("the relay holds the approval");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_claude_prompt_without_its_own_result_is_dismissed_after_the_screen_check() {
+    let (mut h, project) = fixture(true, Locale::En).await;
+    start(&mut h).await;
+    let (launch, terminal) = Terminal::spawn(&h, project.clone(), HostedRuntime::Claude).await;
+    hosted_fixture_argv(&terminal.socket, &project, WAIT).await;
+    let send = |input| claude_hook(h.dir.path(), &h, terminal.host_id(), input);
+    send(json!({
+        "hook_event_name": "PermissionRequest", "session_id": launch.session_id,
+        "tool_name": "Bash", "tool_input": {"command": "python3 - <<'EOF'"},
+    }))
+    .await;
+    assert!(session_prompt(&h, &launch.session_id).await.is_none());
+    send(json!({
+        "hook_event_name": "Notification", "session_id": launch.session_id,
+        "notification_type": "permission_prompt",
+    }))
+    .await;
+    let notice = next_notice(&h, 1).await;
+    assert!(session_prompt(&h, &launch.session_id).await.is_some());
+    send(json!({
+        "hook_event_name": "PostToolUse", "session_id": launch.session_id,
+        "tool_name": "Bash", "tool_input": {"command": "ls"},
+    }))
+    .await;
+    wait_archived(&h, notice.seq).await;
+    let archive = archived(&h, notice.seq).unwrap();
+    assert!(
+        archive.body.contains("went away unanswered"),
+        "{}",
+        archive.body
+    );
+    assert!(session_prompt(&h, &launch.session_id).await.is_none());
+    assert!(answer_notes(&h).is_empty());
+    terminal.stop();
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_approve_dismisses_a_claude_prompt_when_the_host_finds_no_dialog() {
+    let (mut h, project) = fixture(false, Locale::En).await;
+    start(&mut h).await;
+    let (launch, terminal) = Terminal::spawn(&h, project.clone(), HostedRuntime::Claude).await;
+    hosted_fixture_argv(&terminal.socket, &project, WAIT).await;
+    let send = |input| claude_hook(h.dir.path(), &h, terminal.host_id(), input);
+    send(json!({
+        "hook_event_name": "PermissionRequest", "session_id": launch.session_id,
+        "tool_name": "Bash", "tool_input": {"command": "echo stale"},
+    }))
+    .await;
+    send(json!({
+        "hook_event_name": "Notification", "session_id": launch.session_id,
+        "notification_type": "permission_prompt",
+    }))
+    .await;
+    let notice = next_notice(&h, 1).await;
+    let error = approve_session(&h, &launch, Decision::Allow)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("dismissed"), "{error}");
+    assert!(error.to_string().contains("nothing was typed"), "{error}");
+    assert!(session_prompt(&h, &launch.session_id).await.is_none());
+    wait_archived(&h, notice.seq).await;
+    let archive = archived(&h, notice.seq).unwrap();
+    assert!(
+        archive.body.contains("went away unanswered"),
+        "{}",
+        archive.body
+    );
+    assert!(answer_notes(&h).is_empty());
+    terminal.stop();
+    h.stop().await;
+}
+
 /// A Claude Code permission dialog that records each key it is answered
 /// with in `.keys`, then draws itself again.
 fn claude_dialog_program(h: &Harness) {
@@ -2107,6 +2258,7 @@ async fn session_approve_is_refused_inside_a_hosted_sessions_process_tree() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_late_claude_notice_closes_when_the_turn_ends_not_on_another_tools_result() {
     let (mut h, project) = fixture(false, Locale::En).await;
+    claude_dialog_program(&h);
     start(&mut h).await;
     let (launch, terminal) = Terminal::spawn(&h, project.clone(), HostedRuntime::Claude).await;
     hosted_fixture_argv(&terminal.socket, &project, WAIT).await;
@@ -2165,12 +2317,19 @@ async fn a_late_claude_notice_closes_when_the_turn_ends_not_on_another_tools_res
     assert!(named.body.contains("python3"), "{}", named.body);
     // A parallel tool finishing is no sign the dialog is gone.
     send(signal("PostToolUse", "ls")).await;
-    view_without_input(&terminal).await;
+    // Span the grace period and multiple reconciliations without input.
+    tokio::time::sleep(std::time::Duration::from_millis(2400)).await;
     assert!(archived(&h, named.seq).is_none(), "still open");
     assert!(waiting().await.is_some(), "still listed as waiting");
     // The turn ends: no dialog can be waiting.
     stop_hook().await;
     wait_archived(&h, named.seq).await;
+    assert!(
+        archived(&h, named.seq)
+            .unwrap()
+            .body
+            .contains("went away unanswered")
+    );
     assert!(waiting().await.is_none());
 
     // Answered by typing before Claude's Notification arrived: the notice

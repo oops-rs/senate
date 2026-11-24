@@ -47,6 +47,26 @@
     [
       "profile?senate=id%3Ademo",
       "profile?senate=id%3Ademo"
+    ],
+    [
+      "committee/guest",
+      "committee/guest"
+    ],
+    [
+      "session/obs-0123456789ab-0123456789abcdef0123456789abcdef",
+      "session/obs-0123456789ab-0123456789abcdef0123456789abcdef"
+    ],
+    [
+      "senator/chair%3A%3Aobs-0123456789ab-0123456789abcdef0123456789abcdef",
+      "senator/chair%3A%3Aobs-0123456789ab-0123456789abcdef0123456789abcdef"
+    ],
+    [
+      "history/obs-0123456789ab-0123456789abcdef0123456789abcdef",
+      "history/obs-0123456789ab-0123456789abcdef0123456789abcdef"
+    ],
+    [
+      "thread/committee/1",
+      "thread/committee/1"
     ]
   ],
   "invalid": [
@@ -75,6 +95,9 @@
     "senate://open/v1/committee/",
     "senate://open/v1/committee/-bad",
     "senate://open/v1/senator/guest",
-    "senate://open/v1/desk?senate=%2Fteam%2Fchair"
+    "senate://open/v1/desk?senate=%2Fteam%2Fchair",
+    "senate://open/v1/session/obs-abcd",
+    "senate://open/v1/senator/obs-nope",
+    "senate://open/v1/history/obs-abcdef"
   ]
 }

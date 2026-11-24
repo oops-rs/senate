@@ -11,6 +11,10 @@ use senate_observe::{
 use super::{Paths, daemon_call, print_json, runtime};
 use crate::ipc::{CardTarget, Request};
 
+#[cfg(feature = "observe-cli")]
+#[path = "cli_observe_record.rs"]
+mod recording;
+
 #[derive(Args)]
 pub(super) struct Observe {
     #[command(subcommand)]
@@ -29,6 +33,12 @@ enum Action {
         #[command(subcommand)]
         action: Line,
     },
+    /// Record a scoped Observe session to a new owner-only file.
+    #[cfg(feature = "observe-cli")]
+    Record(recording::Record),
+    /// Serve a recording or synthetic scene over the local Observe protocol.
+    #[cfg(feature = "observe-cli")]
+    Replay(recording::Replay),
 }
 
 #[derive(Subcommand)]
@@ -121,11 +131,15 @@ fn expiry(value: &str) -> Result<u16, String> {
 }
 
 pub(super) fn run(args: Observe) -> anyhow::Result<()> {
-    let paths = Paths::from_env()?;
     let action = match args.action {
         Action::Token { action } => action,
-        Action::Line { action } => return line(&paths, action),
+        Action::Line { action } => return line(&Paths::from_env()?, action),
+        #[cfg(feature = "observe-cli")]
+        Action::Record(args) => return runtime(false)?.block_on(recording::record(args)),
+        #[cfg(feature = "observe-cli")]
+        Action::Replay(args) => return runtime(false)?.block_on(recording::replay(args)),
     };
+    let paths = Paths::from_env()?;
     match action {
         Token::Create {
             name,
@@ -166,7 +180,6 @@ pub(super) fn run(args: Observe) -> anyhow::Result<()> {
                         GrantScope::Lines => Scope::Lines,
                     },
                     lines: policy,
-                    auto_confirmed: false,
                     origins,
                     topology,
                     expires_in_days: expires_in,
@@ -212,7 +225,10 @@ fn line(paths: &Paths, action: Line) -> anyhow::Result<()> {
                     },
                 },
             ))?;
-            confirm(&format!("Publish this exact preview?\n{}", reviewed.line))?;
+            confirm(&format!(
+                "Publish this exact preview?\n{}",
+                serde_json::to_string(&reviewed.line)?
+            ))?;
             AdminRequest::Publish {
                 committee,
                 seq,

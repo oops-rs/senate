@@ -748,7 +748,7 @@ The top level is the daily loop: `status` (a bare `senate` runs it), `inbox`
 | `senate senator` | `list` · `alias` · `unalias` · `chair` · `seat` · `unseat` · `duty` |
 | `senate desk` | `list` (the default: what awaits the Speaker, as `committee#seq`) · `show <item>` · `answer <item> <text>` · `close <item> [--reason]` · `forward <item>` · `refuse <item> <reason>`; the Speaker in person, from your own terminal; items tab-complete |
 | `senate secretary` | `ask` (your default secretary) · `list` · `appoint` · `dismiss` · `work list\|show\|create\|assign` (the secretary team) · `desk` · `desk set` (the Speaker's desk workers, in order) |
-| `senate observe` | `token create\|list\|revoke` · `line publish\|withdraw` |
+| `senate observe` | `token create\|list\|revoke` · `line publish\|withdraw` · `record` · `replay` |
 | `senate card` | `set --file <path\|->` · `clear` |
 | `senate chat` | `send` · `thread` (simulated chat; see [Testing](#-testing--verification)) |
 | `senate setup` | `init` · `install` · `completions <zsh\|bash\|fish>` · `service install\|uninstall\|status` · `doctor` · `clean` |
@@ -895,12 +895,11 @@ senate observe token list
 senate observe token revoke <token-id>
 ```
 
-The token is shown once. Grants default to metadata. A lines grant must
-explicitly choose `--lines auto` or `--lines published`. Automatic previews
-can contain anything written on the first line. A published grant receives
-only lines you review with `senate observe line publish <committee> <seq>`.
+The token is shown once. Grants default to metadata. Lines grants require daemon-verified person confirmation and are
+currently disabled.
 For exact browser origins, replay behavior, card permissions and the public
-wire contract, see [Observe a Senate](docs/observe.md).
+wire contract, see [Observe a Senate](docs/observe.md). To try the portable
+scene host with a demo feed, see [Build your own scene](docs/observe/build-your-own-scene.md).
 
 Use `senate card set --file my-card.json` to set your profile or bound seat
 card, or `senate card clear` to remove it. A chair can specify its committee.

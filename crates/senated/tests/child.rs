@@ -253,18 +253,22 @@ async fn a_machine_under_a_parent_hosts_its_senate_and_registers_it_there() {
                 .event;
             assert_eq!(notice.thread, Some(root));
         }
-        for (decision, expected) in [
-            (Some("allow"), "Approved: "),
-            (Some("allow_for_session"), "Approved: "),
-            (Some("deny"), "Denied: "),
-            (None, "No longer waiting: "),
+        for (decision, dismissed, expected) in [
+            (Some("allow"), false, "Approved: "),
+            (Some("allow_for_session"), false, "Approved: "),
+            (Some("deny"), false, "Denied: "),
+            (None, false, "No longer waiting: "),
+            (None, true, "Prompt went away unanswered: "),
         ] {
             let root = if decision.is_some() {
                 local.seq
             } else {
                 forwarded.seq
             };
-            let label = format!("cargo test {}", decision.unwrap_or("gone"));
+            let label = format!(
+                "cargo test {}",
+                decision.unwrap_or(if dismissed { "dismissed" } else { "gone" })
+            );
             let actor = if decision.is_some() {
                 " (by [senator::alice])"
             } else {
@@ -306,6 +310,9 @@ async fn a_machine_under_a_parent_hosts_its_senate_and_registers_it_there() {
                     meta::APPROVAL_WAIT,
                     serde_json::json!({"decision":decision,"actor":"[senator::alice]"}),
                 );
+            } else if dismissed {
+                archive =
+                    archive.with_meta(meta::APPROVAL_WAIT, serde_json::json!({"dismissed":true}));
             }
             client.append(&archive).await.unwrap();
             let ended = wait_for_event(

@@ -286,7 +286,14 @@ fn thread_events(events: &[Event], me: Option<&Address>, locale: Locale) -> Vec<
                 continue;
             }
             let mut event = thread_event(e, me, locale);
-            event.status = Some(next.line(&payload, locale));
+            let mut line = next.line(&payload, locale);
+            if payload.state == senate_core::StatusState::Archived
+                && e.meta.contains_key(senate_core::meta::HOSTED_APPROVAL)
+                && let Some(reason) = payload.reason.as_deref()
+            {
+                line.line = reason.to_owned();
+            }
+            event.status = Some(line);
             task = next;
             shown.push(event);
         } else {
@@ -469,6 +476,24 @@ mod tests {
         e.meta
             .insert(senate_core::StatusPayload::META_KEY.into(), payload.value());
         e
+    }
+
+    #[test]
+    fn an_archived_approval_shows_why_the_wait_ended() {
+        use senate_core::{StatusPayload, StatusState, meta};
+        let by = Address::senator(&"claude".parse().unwrap());
+        let question = event(1, Kind::Question, by.clone(), "waiting for permission");
+        let reason = "The terminal prompt went away unanswered.";
+        let mut payload = StatusPayload::new(StatusState::Archived);
+        payload.reason = Some(reason.into());
+        let mut archive = status(2, by, &payload);
+        archive
+            .meta
+            .insert(meta::HOSTED_APPROVAL.into(), serde_json::json!(question.id));
+        let events = thread_events(&[question, archive], None, Locale::En);
+        let line = events[1].status.as_ref().unwrap();
+        assert_eq!(line.state, "archived");
+        assert_eq!(line.line, reason);
     }
 
     /// Thread 1565's shape: a request, then statuses from the agent working

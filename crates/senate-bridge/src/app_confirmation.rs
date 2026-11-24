@@ -447,7 +447,12 @@ mod tests {
             else {
                 panic!("expected an Observe grant request");
             };
-            assert!(!grant.auto_confirmed);
+            assert!(
+                serde_json::to_value(grant)
+                    .unwrap()
+                    .get("auto_confirmed")
+                    .is_none()
+            );
         }
     }
 }

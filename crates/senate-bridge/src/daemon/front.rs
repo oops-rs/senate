@@ -113,7 +113,12 @@ impl Front {
                 session,
                 target,
                 document,
-            } => wrap(self.set_observer_card(&session, target, &document).await),
+            } if session == SessionSelector::default() => {
+                wrap(self.set_observer_card(None, target, &document).await)
+            }
+            Request::SetCard { .. } => Reply::err(IpcError::bad_request(
+                "Card writes require a verified session",
+            )),
             Request::RemoteControl { .. } => Reply::err(IpcError::bad_request(
                 "remote control requires the local person socket",
             )),
@@ -276,9 +281,8 @@ impl Front {
                 wrap(self.primary().repair_agy_binding(&host, &to).await)
             }
             Request::ObserveAdmin {
-                command: senate_observe::AdminRequest::Create { mut grant },
+                command: senate_observe::AdminRequest::Create { grant },
             } if grant.scope == senate_observe::Scope::Lines => {
-                grant.auto_confirmed = true;
                 self.on_observe_admin(senate_observe::AdminRequest::Create { grant })
                     .await
             }
@@ -316,18 +320,47 @@ impl Front {
             }
             AdminRequest::HistorySession { id } => {
                 return wrap((|| -> Result<Option<String>, IpcError> {
+                    let grants = registry.selector_grants(&id);
                     let sessions = self.primary().store.all_sessions().map_err(internal)?;
                     Ok(sessions
                         .into_iter()
                         .filter(|session| !session.is_live())
                         .find_map(|session| {
-                            registry
-                                .history_id(&session.session_id)
-                                .ok()
-                                .filter(|candidate| candidate == &id)
-                                .map(|_| session.session_id)
+                            let committee = session.committee()?;
+                            grants
+                                .iter()
+                                .any(|grant| {
+                                    grant
+                                        .committees
+                                        .as_ref()
+                                        .is_none_or(|allow| allow.contains(committee))
+                                        && registry
+                                            .history_id(grant, &session.session_id)
+                                            .is_ok_and(|candidate| candidate == id)
+                                })
+                                .then_some(session.session_id)
                         }))
                 })());
+            }
+            AdminRequest::SeatIdentity { id, committee } => {
+                let grants = registry.selector_grants(&id);
+                let me = match self.primary().api.me().await {
+                    Ok(me) => me,
+                    Err(error) => return Reply::err(server_error(error)),
+                };
+                let seat = me.agents.into_iter().find(|agent| {
+                    agent.is_session_name()
+                        && grants.iter().any(|grant| {
+                            grant
+                                .committees
+                                .as_ref()
+                                .is_none_or(|allow| allow.contains(&committee))
+                                && registry
+                                    .seat_id(grant, agent.as_str())
+                                    .is_ok_and(|candidate| candidate == id)
+                        })
+                });
+                return Reply::ok(&seat);
             }
             other => other,
         };
@@ -346,7 +379,8 @@ impl Front {
                     .map_err(|error| IpcError::bad_request(error.to_string())),
             ),
             AdminRequest::List => Reply::ok(&registry.list()),
-            AdminRequest::HistorySession { .. }
+            AdminRequest::SeatIdentity { .. }
+            | AdminRequest::HistorySession { .. }
             | AdminRequest::Preview { .. }
             | AdminRequest::Publish { .. }
             | AdminRequest::Withdraw { .. } => {

@@ -60,9 +60,15 @@ pub(crate) enum CodexApprovalSignal {
     Resolved {
         session_id: String,
         request_id: Option<String>,
-        answer: Option<PromptDecision>,
+        outcome: CodexApprovalOutcome,
         at: u64,
     },
+}
+
+pub(crate) enum CodexApprovalOutcome {
+    Answered(PromptDecision),
+    ResolvedElsewhere,
+    Dismissed,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -110,6 +116,9 @@ pub(crate) struct ApprovalNotice {
     /// The stable ID of its archive status once a handling fact arrives.
     pub archive: Option<EventId>,
     pub answer: Option<PromptDecision>,
+    /// The runtime or host confirmed the wait ended without a recorded answer.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dismissed: bool,
     /// The append may have reached the server even if its reply was lost.
     #[serde(default)]
     pub append_attempted: bool,

@@ -32,6 +32,10 @@ pub enum AdminRequest {
     },
     List,
     Identity,
+    SeatIdentity {
+        id: String,
+        committee: CommitteeId,
+    },
     HistorySession {
         id: String,
     },
@@ -64,9 +68,6 @@ pub struct CreateGrant {
     pub origins: Vec<String>,
     pub topology: bool,
     pub expires_in_days: Option<u16>,
-    /// Set by the daemon after receiving approval on its authenticated app channel.
-    #[serde(skip)]
-    pub auto_confirmed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -190,7 +191,7 @@ pub struct Registry {
     path: PathBuf,
     grants: Mutex<BTreeMap<String, ActiveGrant>>,
     unauthenticated: Mutex<Bucket>,
-    preflights: Mutex<Bucket>,
+    preflights: Mutex<PreflightLimits>,
     pub(crate) audit: Arc<Audit>,
     pub(crate) projections: Arc<Projections>,
     seed: [u8; 32],
@@ -221,12 +222,16 @@ impl Registry {
             grants: Mutex::new(
                 stored
                     .into_iter()
-                    .filter(|grant| grant.info.expires_at > Utc::now())
+                    .filter(|grant| {
+                        grant.info.expires_at > Utc::now()
+                            && grant.info.scope == Scope::Metadata
+                            && grant.info.lines.is_none()
+                    })
                     .map(|grant| (grant.info.id.clone(), ActiveGrant::new(grant)))
                     .collect(),
             ),
             unauthenticated: Mutex::new(Bucket::new(120, 20)),
-            preflights: Mutex::new(Bucket::new(120, 20)),
+            preflights: Mutex::new(PreflightLimits::new()),
             audit: Arc::new(Audit::new(directory.join("observe-audit.jsonl"))),
             projections: Projections::new(),
             seed: installation_seed(directory)?,
@@ -243,6 +248,7 @@ impl Registry {
 
     pub fn shutdown_observation(&self) {
         self.projections.shutdown();
+        self.audit.flush_denied();
     }
 
     pub fn attach_machine(&self, source: Arc<dyn MachineSource>) {
@@ -302,6 +308,11 @@ impl Registry {
         self.scoped_id(b"tool", format!("{}:{id}", grant.id).as_bytes())
     }
 
+    #[cfg(feature = "replay")]
+    pub(crate) fn invalidate_views(&self) {
+        self.projections.invalidate_views();
+    }
+
     pub fn is_watched(&self) -> bool {
         self.projections.is_watched()
     }
@@ -310,15 +321,44 @@ impl Registry {
         self.projections.notice(notice);
     }
 
-    pub fn history_id(&self, native: &str) -> Result<String, GrantError> {
-        Ok(format!(
-            "obs-{}",
-            self.scoped_id(b"history", native.as_bytes())?
-        ))
+    pub fn history_id(&self, grant: &GrantInfo, native: &str) -> Result<String, GrantError> {
+        self.scoped_selector(b"history", grant, native)
     }
 
-    pub fn approval_id(&self, native: &str) -> Result<String, GrantError> {
-        self.scoped_id(b"approval", native.as_bytes())
+    pub fn seat_id(&self, grant: &GrantInfo, native: &str) -> Result<String, GrantError> {
+        self.scoped_selector(b"seat", grant, native)
+    }
+
+    fn scoped_selector(
+        &self,
+        domain: &[u8],
+        grant: &GrantInfo,
+        native: &str,
+    ) -> Result<String, GrantError> {
+        let hash = self.scoped_id(domain, format!("{}:{native}", grant.id).as_bytes())?;
+        let hint = grant
+            .id
+            .get(..12)
+            .ok_or(GrantError::Invalid("invalid grant ID"))?;
+        Ok(format!("obs-{hint}-{hash}"))
+    }
+
+    pub fn selector_grants(&self, selector: &str) -> Vec<GrantInfo> {
+        let Some(hint) = selector
+            .strip_prefix("obs-")
+            .and_then(|value| value.split_once('-'))
+            .map(|(hint, _)| hint)
+        else {
+            return Vec::new();
+        };
+        self.list()
+            .into_iter()
+            .filter(|grant| hint.len() == 12 && grant.id.starts_with(hint))
+            .collect()
+    }
+
+    pub fn approval_id(&self, grant: &GrantInfo, native: &str) -> Result<String, GrantError> {
+        self.scoped_id(b"approval", format!("{}:{native}", grant.id).as_bytes())
     }
 
     pub fn route_id(
@@ -376,7 +416,10 @@ impl Registry {
     }
 
     pub fn line_for(&self, grant: &GrantInfo, event: &senate_core::Event) -> Option<String> {
-        self.previews.line(grant.lines?, event)
+        if grant.lines != Some(LinePolicy::Published) {
+            return None;
+        }
+        self.previews.line(LinePolicy::Published, event)
     }
 
     pub fn card(&self, key: &CardKey) -> Option<senate_observe_protocol::Card> {
@@ -411,19 +454,15 @@ impl Registry {
                 "expected a display name of 1 to 80 characters",
             ));
         }
-        match (request.scope, request.lines) {
-            (Scope::Metadata, None) | (Scope::Lines, Some(LinePolicy::Published)) => {}
-            (Scope::Lines, Some(LinePolicy::Auto)) if request.auto_confirmed => {}
-            (Scope::Lines, Some(LinePolicy::Auto)) => {
-                return Err(GrantError::Invalid(
-                    "automatic previews need explicit confirmation",
-                ));
-            }
-            _ => {
-                return Err(GrantError::Invalid(
-                    "a lines grant must select auto or published previews",
-                ));
-            }
+        if request.scope == Scope::Lines {
+            return Err(GrantError::Invalid(
+                "lines grants require daemon-verified person confirmation, which is unavailable",
+            ));
+        }
+        if request.lines.is_some() {
+            return Err(GrantError::Invalid(
+                "metadata grants do not accept a lines policy",
+            ));
         }
         let days = request.expires_in_days.unwrap_or(DEFAULT_DAYS);
         if !(1..=90).contains(&days) {
@@ -570,18 +609,43 @@ impl Registry {
         }
     }
 
-    pub(crate) fn preflight(&self, origin: &str) -> Result<(), AuthError> {
-        if !lock(&self.preflights).take() {
-            return Err(AuthError::Rate);
-        }
+    pub(crate) fn preflight(&self, origin: &str, peer: std::net::IpAddr) -> Result<(), AuthError> {
         let now = Utc::now();
-        if lock(&self.grants).values().any(|grant| {
+        if !lock(&self.grants).values().any(|grant| {
             let info = &grant.stored.info;
             info.expires_at > now && info.origins.contains(origin)
         }) {
-            Ok(())
-        } else {
-            Err(AuthError::Origin)
+            return Err(AuthError::Origin);
+        }
+        let mut limits = lock(&self.preflights);
+        limits
+            .origins
+            .retain(|_, bucket| bucket.updated.elapsed() < std::time::Duration::from_secs(60));
+        let key = (origin.to_owned(), peer);
+        if limits.origins.len() >= 1024 && !limits.origins.contains_key(&key) {
+            return Err(AuthError::Rate);
+        }
+        let local = limits
+            .origins
+            .entry(key)
+            .or_insert_with(|| Bucket::new(60, 8));
+        if !local.take() || !limits.global.take() {
+            return Err(AuthError::Rate);
+        }
+        Ok(())
+    }
+}
+
+struct PreflightLimits {
+    origins: BTreeMap<(String, std::net::IpAddr), Bucket>,
+    global: Bucket,
+}
+
+impl PreflightLimits {
+    fn new() -> Self {
+        Self {
+            origins: BTreeMap::new(),
+            global: Bucket::new(600, 64),
         }
     }
 }
@@ -670,7 +734,6 @@ mod tests {
             topology: false,
             expires_in_days: None,
             lines: None,
-            auto_confirmed: false,
         }
     }
 
@@ -760,6 +823,54 @@ mod tests {
             BTreeSet::new(),
         )?;
         assert_eq!(issued.grant.committees, None);
+        Ok(())
+    }
+    #[test]
+    fn unlisted_origins_do_not_spend_a_browser_scenes_preflight_budget()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let registry = Registry::open(directory.path(), "127.0.0.1:45501".parse()?)?;
+        let peer = "127.0.0.1".parse()?;
+        for origin in ["https://scene.example", "https://other.example"] {
+            registry.create(
+                CreateGrant {
+                    origins: vec![origin.into()],
+                    ..request()
+                },
+                BTreeSet::new(),
+            )?;
+        }
+        for _ in 0..200 {
+            assert!(matches!(
+                registry.preflight("https://unlisted.example", peer),
+                Err(AuthError::Origin)
+            ));
+        }
+        for _ in 0..8 {
+            assert!(registry.preflight("https://scene.example", peer).is_ok());
+        }
+        assert!(matches!(
+            registry.preflight("https://scene.example", peer),
+            Err(AuthError::Rate)
+        ));
+        assert!(registry.preflight("https://other.example", peer).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn a_client_claim_is_not_confirmation_for_automatic_lines()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let registry = Registry::open(directory.path(), "127.0.0.1:45501".parse()?)?;
+        for policy in ["auto", "published"] {
+            let raw = serde_json::json!({
+                "name":"fixture", "scope":"lines", "lines":policy, "auto_confirmed":true,
+                "committees":null,"all_committees":true,"origins":[],"topology":false
+            });
+            let requested: CreateGrant = serde_json::from_value(raw)?;
+            assert!(registry.create(requested, BTreeSet::new()).is_err());
+        }
+        assert!(registry.list().is_empty());
         Ok(())
     }
 }
