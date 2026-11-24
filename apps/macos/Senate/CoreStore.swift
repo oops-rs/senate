@@ -43,6 +43,9 @@ final class CoreStore {
         case threads(String)
         /// An ended or stopped session from History, read-only, by its id.
         case past(String)
+        /// An item on the Speaker's desk, inspected (forward, refuse) or
+        /// read where it cannot be acted on.
+        case desk(DocketEntry)
         /// A waiting item that is not a thread (a prompt, an approval, an
         /// item for the Speaker), by its `Waiting.id`: choosing it opens
         /// where it is answered.
@@ -99,7 +102,6 @@ final class CoreStore {
     /// Sessions' conversations left for a page pushed above them, by
     /// session id: Back shows them as they were.
     @ObservationIgnored var parked: [String: SessionTimeline] = [:]
-    var deskSelection: DocketEntry?
     /// What the person is writing to each session, by session id.
     var sessionDrafts: [String: String] = [:]
     /// Files and pictures to send with it, by session id.
@@ -222,7 +224,6 @@ final class CoreStore {
         core = nil
         state = .placeholder
         thread = nil
-        deskSelection = nil
         place = .section(.inbox)
         connect()
     }
@@ -693,9 +694,11 @@ final class CoreStore {
         return core.newDeskActionId()
     }
 
-    func decideDeskItem(_ entry: DocketEntry, itemId: String, id: String, reason: String?) async throws -> DeskOutcomeView {
+    /// Decide an item on the Speaker's desk: forward, refuse, answer as the
+    /// Speaker, or close. A retry sends the same `id`.
+    func decideDeskItem(_ entry: DocketEntry, itemId: String, id: String, choice: DeskChoice) async throws -> DeskOutcomeView {
         guard let core else { throw CoreError.NotStarted }
-        return try await core.decideDeskItem(committee: entry.committee, seq: entry.seq, itemId: itemId, id: id, reason: reason)
+        return try await core.deskDecide(committee: entry.committee, seq: entry.seq, itemId: itemId, id: id, decision: choice)
     }
 
     func loadThread(_ row: InboxThread) async {

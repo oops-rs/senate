@@ -132,7 +132,7 @@ enum Snapshot {
                 func present(_ scene: DeskPresentation) {
                     NotificationCenter.default.post(name: deskPresentation, object: scene)
                 }
-                store.deskSelection = item
+                store.place = .desk(item)
                 await shot("desk-forward")
                 present(.delivered)
                 await shot("desk-delivered")
@@ -140,16 +140,16 @@ enum Snapshot {
                 await shot("desk-refusal")
                 present(.dismissRefusal)
                 if let failing = store.docketEntries.first(where: { $0.seq == 61 }) {
-                    store.deskSelection = failing
+                    store.place = .desk(failing)
                     try? await Task.sleep(for: .seconds(1))
                     present(.failed)
                     await shot("desk-failed")
                 }
                 if let blocked = store.docketEntries.first(where: { $0.seq == 62 }) {
-                    store.deskSelection = blocked
+                    store.place = .desk(blocked)
                     await shot("desk-read-only")
                 }
-                store.deskSelection = nil
+                store.back()
             }
             if let busiest = store.roster.max(by: { $0.activeMembers < $1.activeMembers }) {
                 store.place = .committee(busiest.committee)

@@ -15,9 +15,7 @@ struct ApprovalsView: View {
         content
             .toolbar {
                 ToolbarSpacer(.flexible)
-                if store.deskSelection == nil {
-                    ToolbarItem(placement: .primaryAction) { RefreshButton(store: store) }
-                }
+                ToolbarItem(placement: .primaryAction) { RefreshButton(store: store) }
             }
     }
 
@@ -26,9 +24,7 @@ struct ApprovalsView: View {
         let approvals = store.state.approvals
         let desk = store.deskThreads
         let docket = store.docketEntries
-        if let selected = store.deskSelection {
-            DeskEntryDetail(store: store, item: selected).id(selected.id)
-        } else if prompts.isEmpty && approvals.isEmpty && desk.isEmpty && docket.isEmpty {
+        if prompts.isEmpty && approvals.isEmpty && desk.isEmpty && docket.isEmpty {
             EmptyState(text: L("approvals.empty"))
         } else {
             ReadingColumn {
@@ -135,53 +131,70 @@ private struct DeskCard: View {
     }
 }
 
+/// Something awaiting the Speaker (a question, a note, a request between
+/// committees): the same card as what is put to you, opening the item,
+/// where it is answered, forwarded or refused, or read when it waits on
+/// someone else.
 private struct EntryCard: View {
     let store: CoreStore
     let item: DocketEntry
+    @State private var hovered = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Theme.Space.s) {
-            HStack(spacing: 6) {
-                Chip(text: L("waiting.to_speaker"), tone: .accent)
-                Button {
-                    store.place = .committee(item.committee)
-                } label: {
+        // `addressed` is what the kind's chip already says; the others say
+        // whom or what it waits on.
+        let telling = item.awaiting != "addressed"
+        Button {
+            store.place = .desk(item)
+        } label: {
+            VStack(alignment: .leading, spacing: Theme.Space.s) {
+                HStack(spacing: 6) {
+                    Chip(text: item.kindLabel, tone: .accent)
                     Chip(text: item.committee)
+                    if telling {
+                        Chip(text: L("docket.\(item.awaiting)"), tone: item.awaiting == "away" ? .attention : .neutral)
+                    }
+                    Spacer(minLength: Theme.Space.s)
+                    TimedMention(date: item.since) { ago in
+                        L("docket.meta", String(item.seq), item.by, ago)
+                    }
+                    .font(Theme.Fonts.meta)
+                    .foregroundStyle(Theme.onSurfaceVariant)
+                    .lineLimit(1)
                 }
-                .buttonStyle(.plain)
-                .help(L("committees.open", item.committee))
-                Chip(text: L("docket.\(item.awaiting)"), tone: item.awaiting == "away" ? .attention : .neutral)
-                Spacer(minLength: Theme.Space.s)
-                TimedMention(date: item.since) { ago in
-                    L("docket.meta", String(item.seq), item.by, ago)
+                MentionText(item.body)
+                    .font(Theme.Fonts.heading)
+                    .foregroundStyle(Theme.onSurface)
+                    .lineLimit(4)
+                    .multilineTextAlignment(.leading)
+                if telling {
+                    MentionText(item.why)
+                        .font(Theme.Fonts.text)
+                        .foregroundStyle(Theme.onSurfaceVariant)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
                 }
-                .font(Theme.Fonts.meta)
-                .foregroundStyle(Theme.onSurfaceVariant)
-                .lineLimit(1)
             }
-            MentionText(item.body)
-                .font(Theme.Fonts.text)
-                .foregroundStyle(Theme.onSurface)
-                .lineLimit(4)
-                .textSelection(.enabled)
-            MentionText(item.why)
-                .font(Theme.Fonts.row)
-                .foregroundStyle(Theme.onSurfaceVariant)
-            Button(L("desk.open_item")) { store.deskSelection = item }
-                .buttonStyle(.pill)
-                .accessibilityIdentifier("desk-open-\(item.id)")
+            .padding(Theme.Space.l)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(hovered ? Theme.containerHigh : Theme.container,
+                        in: RoundedRectangle(cornerRadius: Theme.Radius.card))
+            .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.card))
         }
-        .card()
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+        .help(L("desk.open_item_help"))
+        .accessibilityIdentifier("desk-open-\(item.id)")
     }
 }
 
-private struct DeskEntryDetail: View {
+struct DeskEntryDetail: View {
     let store: CoreStore
     let item: DocketEntry
 
     private struct Attempt {
         let id: String
-        let reason: String?
+        let choice: DeskChoice
     }
 
     @State private var detail: DeskItemView?
@@ -191,7 +204,9 @@ private struct DeskEntryDetail: View {
     @State private var outcome: DeskOutcomeView?
     @State private var busy = false
     @State private var refusing = false
+    @State private var closing = false
     @State private var reason = ""
+    @State private var answer = ""
 
     var body: some View {
         ReadingColumn {
@@ -236,9 +251,25 @@ private struct DeskEntryDetail: View {
                 ProgressView().accessibilityLabel(L("desk.loading"))
             }
         }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            // Awaiting an answer: answered here, as the Speaker.
+            if let detail, outcome == nil, detail.actions.contains(.answer) {
+                MessageComposer(
+                    text: $answer,
+                    label: L("desk.answer"),
+                    placeholder: L("desk.answer_placeholder"),
+                    hint: L("desk.answer_hint"),
+                    busy: busy,
+                    online: store.state.online
+                ) {
+                    Task { await submit(.answer(body: answer)) }
+                }
+            }
+        }
         .task { await load() }
         .toolbar { toolbar }
         .sheet(isPresented: $refusing) { refusalSheet }
+        .sheet(isPresented: $closing) { closeSheet }
         #if DEBUG
         .onReceive(NotificationCenter.default.publisher(for: Snapshot.deskPresentation)) { note in
             if let scene = note.object as? Snapshot.DeskPresentation { showSnapshot(scene) }
@@ -258,10 +289,34 @@ private struct DeskEntryDetail: View {
                     .keyboardShortcut(.cancelAction)
                 Button(L("desk.confirm_refuse")) {
                     refusing = false
-                    Task { await submit(reason) }
+                    Task { await submit(.refuse(reason: reason)) }
                 }
                 .buttonStyle(.pill(.danger))
                 .disabled(busy || !store.state.online || reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(Theme.Space.xl)
+        .frame(width: 420)
+    }
+
+    /// Close it with no answer: why, if the person says.
+    private var closeSheet: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.m) {
+            Text(verbatim: L("desk.close_heading")).font(Theme.Fonts.heading)
+            TextField(L("desk.close_reason"), text: $reason, axis: .vertical)
+                .accessibilityIdentifier("desk-close-reason")
+            HStack(spacing: Theme.Space.s) {
+                Spacer()
+                Button(L("desk.cancel")) { closing = false }
+                    .buttonStyle(.pill)
+                    .keyboardShortcut(.cancelAction)
+                Button(L("desk.confirm_close")) {
+                    closing = false
+                    let why = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+                    Task { await submit(.close(reason: why.isEmpty ? nil : why)) }
+                }
+                .buttonStyle(.pill(.danger))
+                .disabled(busy || !store.state.online)
             }
         }
         .padding(Theme.Space.xl)
@@ -274,10 +329,10 @@ private struct DeskEntryDetail: View {
         case .delivered:
             guard let detail, let destination = detail.destination,
                   let label = detail.destinationLabel else { return }
-            outcome = DeskOutcomeView(delivered: true, destination: destination, destinationLabel: label,
-                                      committee: "payments", seq: 75)
+            outcome = DeskOutcomeView(kind: .delivered, delivered: true, destination: destination,
+                                      destinationLabel: label, committee: "payments", seq: 75, reason: nil)
         case .failed:
-            attempt = Attempt(id: "", reason: nil)
+            attempt = Attempt(id: "", choice: .forward)
             actionError = "The destination is temporarily unavailable."
         case .refusing:
             outcome = nil
@@ -290,13 +345,20 @@ private struct DeskEntryDetail: View {
 
     @ViewBuilder private func controls(_ detail: DeskItemView) -> some View {
         if let outcome {
-            let message = L(outcome.delivered ? "desk.delivered" : "desk.refused",
-                            outcome.destinationLabel, String(outcome.seq))
-            Text(verbatim: message)
-                .help(outcome.destination)
-                .accessibilityLabel(L(outcome.delivered ? "desk.delivered" : "desk.refused",
-                                      outcome.destination, String(outcome.seq)))
-                .accessibilityIdentifier("desk-outcome")
+            switch outcome.kind {
+            case .delivered, .refused:
+                let key = outcome.kind == .delivered ? "desk.delivered" : "desk.refused"
+                Text(verbatim: L(key, outcome.destinationLabel, String(outcome.seq)))
+                    .help(outcome.destination)
+                    .accessibilityLabel(L(key, outcome.destination, String(outcome.seq)))
+                    .accessibilityIdentifier("desk-outcome")
+            case .answered:
+                Text(verbatim: L("desk.answered", outcome.committee, String(outcome.seq)))
+                    .accessibilityIdentifier("desk-outcome")
+            case .closed:
+                Text(verbatim: L("desk.closed", String(outcome.seq)))
+                    .accessibilityIdentifier("desk-outcome")
+            }
         } else if let actionError {
             Text(verbatim: actionError)
                 .foregroundStyle(Theme.attention)
@@ -307,23 +369,19 @@ private struct DeskEntryDetail: View {
                     .buttonStyle(.pill)
                     .disabled(busy || !store.state.online)
             }
-        } else if let blocked = detail.blocked {
-            Text(verbatim: blocked).foregroundStyle(Theme.onSurfaceVariant)
+        } else if detail.actions.isEmpty, let waits = detail.waitsOn ?? detail.blocked {
+            // Nothing to do from here: whom or what it waits on.
+            Text(verbatim: waits).foregroundStyle(Theme.onSurfaceVariant)
                 .accessibilityIdentifier("desk-read-only")
         } else if busy {
             ProgressView().controlSize(.small)
         }
     }
 
-    /// Back to Approvals; what the request is; Forward and Refuse while it
-    /// can be decided; the original thread and the committee in its menu.
+    /// What the item is; what can be done with it now (Forward and Refuse
+    /// for a request between committees; answering is the composer below);
+    /// Close, the original thread and the committee in its menu.
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
-        ToolbarItem(placement: .navigation) {
-            Button { store.deskSelection = nil } label: {
-                Label(L("desk.back"), systemImage: "chevron.backward")
-            }
-            .help(L("desk.back"))
-        }
         ToolbarItem(placement: .navigation) {
             Text(verbatim: L("desk.item_heading", item.committee, String(item.seq)))
                 .font(.headline)
@@ -333,9 +391,11 @@ private struct DeskEntryDetail: View {
         }
         .sharedBackgroundVisibility(.hidden)
         ToolbarSpacer(.flexible)
-        if let detail, outcome == nil, actionError == nil, detail.blocked == nil {
+        if let detail, outcome == nil, actionError == nil,
+           detail.actions.contains(.forward) || detail.actions.contains(.refuse) {
             ToolbarItemGroup(placement: .primaryAction) {
-                Button { Task { await submit(nil) } } label: {
+                if detail.actions.contains(.forward) {
+                Button { Task { await submit(.forward) } } label: {
                     // Send, not Share's arrow: it goes on to its addressee.
                     Label(L("desk.forward_title"), systemImage: "paperplane")
                 }
@@ -343,16 +403,26 @@ private struct DeskEntryDetail: View {
                 .accessibilityIdentifier("desk-forward")
                 .help(L("desk.forward_title"))
                 .disabled(busy || !store.state.online)
+                }
+                if detail.actions.contains(.refuse) {
                 Button { refusing = true } label: {
                     // A no-entry sign, unlike Take's raised hand.
                     Label(L("desk.refuse_title"), systemImage: "nosign")
                 }
                 .help(L("desk.refuse_title"))
                 .disabled(busy || !store.state.online)
+                }
             }
         }
         ToolbarItem(placement: .primaryAction) {
             Menu {
+                if let detail, outcome == nil, detail.actions.contains(.close) {
+                    Button(role: .destructive) { reason = ""; closing = true } label: {
+                        Label(L("desk.close"), systemImage: "archivebox")
+                    }
+                    .disabled(busy || !store.state.online)
+                    Divider()
+                }
                 if let detail {
                     Button {
                         store.openThread(committee: detail.thread.committee, root: detail.thread.root)
@@ -376,10 +446,10 @@ private struct DeskEntryDetail: View {
         catch { loadError = describe(error) }
     }
 
-    private func submit(_ reason: String?) async {
+    private func submit(_ choice: DeskChoice) async {
         guard !busy else { return }
         do {
-            let value = Attempt(id: try store.newDeskActionId(), reason: reason)
+            let value = Attempt(id: try store.newDeskActionId(), choice: choice)
             attempt = value
             await run(value)
         } catch { actionError = describe(error) }
@@ -390,8 +460,9 @@ private struct DeskEntryDetail: View {
         busy = true
         defer { busy = false }
         do {
-            outcome = try await store.decideDeskItem(item, itemId: detail.eventId, id: attempt.id, reason: attempt.reason)
+            outcome = try await store.decideDeskItem(item, itemId: detail.eventId, id: attempt.id, choice: attempt.choice)
             actionError = nil
+            if case .answer = attempt.choice { answer = "" }
         } catch { actionError = describe(error) }
     }
 }

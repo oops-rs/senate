@@ -54,14 +54,46 @@ nonisolated final class FakeCore: AppCoreProtocol, @unchecked Sendable {
                                to: ["speaker"], body: "Full request", at: Date(), mine: false, status: nil)
         let thread = ThreadView(committee: committee, root: seq, title: "Full request",
                                 state: nil, stateLabel: nil, kindLabel: "Request", events: [item])
+        // As the fake daemon: 60 and 61 a request between committees (all
+        // four), 62 nothing to do here, 63 a question (answer, close).
+        let actions: [DeskAction] = switch seq {
+        case 62: []
+        case 63: [.answer, .close]
+        default: [.forward, .refuse, .answer, .close]
+        }
         return DeskItemView(eventId: "source-item", item: item, thread: thread, origin: nil,
-                            destination: "payments::senator::ledger", destinationLabel: "ledger in payments", blocked: nil)
+                            destination: seq == 63 ? nil : "payments::senator::ledger",
+                            destinationLabel: seq == 63 ? nil : "ledger in payments", blocked: nil,
+                            actions: actions, waitsOn: seq == 62 ? "Only the Speaker (wendell) can act on this" : nil)
+    }
+
+    func deskDecide(committee: String, seq: UInt64, itemId: String, id: String, decision: DeskChoice) async throws -> DeskOutcomeView {
+        let word: String = switch decision {
+        case .forward: "forward"
+        case let .refuse(reason): reason
+        case .answer: "answer"
+        case .close: "close"
+        }
+        try record("desk-decide \(committee) \(seq) \(id) \(word)")
+        let kind: DeskOutcomeKind = switch decision {
+        case .forward: .delivered
+        case .refuse: .refused
+        case .answer: .answered
+        case .close: .closed
+        }
+        let away = kind == .delivered || kind == .refused
+        return DeskOutcomeView(kind: kind, delivered: kind == .delivered,
+                               destination: away ? "payments::senator::ledger" : "",
+                               destinationLabel: away ? "ledger in payments" : "",
+                               committee: away ? "payments" : committee,
+                               seq: kind == .answered ? 77 : kind == .closed ? 78 : 75, reason: nil)
     }
     func newDeskActionId() -> String { "desk-test-action" }
     func decideDeskItem(committee: String, seq: UInt64, itemId: String, id: String, reason: String?) async throws -> DeskOutcomeView {
         try record("desk-decide \(committee) \(seq) \(id) \(reason ?? "forward")")
-        return DeskOutcomeView(delivered: reason == nil, destination: "payments::senator::ledger",
-                               destinationLabel: "ledger in payments", committee: "payments", seq: 75)
+        return DeskOutcomeView(kind: reason == nil ? .delivered : .refused, delivered: reason == nil,
+                               destination: "payments::senator::ledger", destinationLabel: "ledger in payments",
+                               committee: "payments", seq: 75, reason: nil)
     }
 
     func approve(id: String, decision: ApprovalDecision) async throws {
