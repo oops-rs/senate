@@ -78,9 +78,11 @@ impl Terminal {
 
     fn block(self, block: &Block, indent: &Indent, layout: &mut Layout) {
         match block {
-            Block::Paragraph(items) => self.line(&self.inline_string(items), indent, layout.text()),
+            Block::Paragraph(items) => {
+                self.line(&self.inline_string(items, '\n'), indent, layout.text())
+            }
             Block::Heading { level, content } => {
-                let text = self.inline_string(content);
+                let text = self.inline_string(content, ' ');
                 if self.color == Color::None {
                     let count = usize::from((*level).clamp(1, 6));
                     let marker = format!("{} ", "#".repeat(count));
@@ -144,9 +146,9 @@ impl Terminal {
         format!("\x1b[{style}m{text}\x1b[0m")
     }
 
-    fn inline_string(self, items: &[Inline]) -> String {
+    fn inline_string(self, items: &[Inline], soft_break: char) -> String {
         let mut out = String::new();
-        inlines(self.color, items, &mut out);
+        inlines(self.color, items, soft_break, &mut out);
         out
     }
 
@@ -450,18 +452,20 @@ fn printable(text: &str, out: &mut String) {
 }
 
 pub(crate) fn plain_inlines(items: &[Inline], out: &mut String) {
-    inlines(Color::None, items, out);
+    inlines(Color::None, items, ' ', out);
 }
 
-fn inlines(color: Color, items: &[Inline], out: &mut String) {
+fn inlines(color: Color, items: &[Inline], soft_break: char, out: &mut String) {
     for item in items {
         match item {
             Inline::Text(text) => printable(text, out),
-            Inline::SoftBreak => out.push(' '),
+            Inline::SoftBreak => out.push(soft_break),
             Inline::HardBreak => out.push('\n'),
-            Inline::Strong(children) => inline_style(color, "1", "22", children, out),
-            Inline::Emphasis(children) => inline_style(color, "3", "23", children, out),
-            Inline::Strikethrough(children) => inline_style(color, "9", "29", children, out),
+            Inline::Strong(children) => inline_style(color, "1", "22", children, soft_break, out),
+            Inline::Emphasis(children) => inline_style(color, "3", "23", children, soft_break, out),
+            Inline::Strikethrough(children) => {
+                inline_style(color, "9", "29", children, soft_break, out)
+            }
             Inline::Code(text) => {
                 if color != Color::None {
                     out.push_str("\x1b[36m");
@@ -474,7 +478,7 @@ fn inlines(color: Color, items: &[Inline], out: &mut String) {
             Inline::Link { url, content } => {
                 let mut label = String::new();
                 plain_inlines(content, &mut label);
-                inline_style(color, "4", "24", content, out);
+                inline_style(color, "4", "24", content, soft_break, out);
                 if url != &label && url.strip_prefix("mailto:") != Some(label.as_str()) {
                     out.push_str(" (");
                     printable(url, out);
@@ -485,11 +489,18 @@ fn inlines(color: Color, items: &[Inline], out: &mut String) {
     }
 }
 
-fn inline_style(color: Color, begin: &str, end: &str, items: &[Inline], out: &mut String) {
+fn inline_style(
+    color: Color,
+    begin: &str,
+    end: &str,
+    items: &[Inline],
+    soft_break: char,
+    out: &mut String,
+) {
     if color != Color::None {
         let _ = write!(out, "\x1b[{begin}m");
     }
-    inlines(color, items, out);
+    inlines(color, items, soft_break, out);
     if color != Color::None {
         let _ = write!(out, "\x1b[{end}m");
     }

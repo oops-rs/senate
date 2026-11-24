@@ -1,5 +1,7 @@
 # senate-markdown
 
+Both renderers preserve author-entered line breaks inside paragraphs, including paragraphs in quotes and lists. The terminal still wraps each line to the available width.
+
 Parse CommonMark with GFM tables, task lists, strikethrough and autolinks into a Rust block tree. The tree has paragraphs, headings, lists, code, quotes, tables and thematic breaks, with nested inline styles and links. HTML in the source is represented as text. Image captions are retained and images never load. Senate text such as `[senator::codex]`, `ledger::chair` and `#127` remains text. A Senate bracketed label stays literal when it could otherwise become a Markdown link reference.
 
 ```rust
