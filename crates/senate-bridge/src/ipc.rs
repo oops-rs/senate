@@ -867,6 +867,68 @@ pub enum TimelineToolDetail {
     },
 }
 
+/// One page of ended or stopped sessions, newest first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionHistoryReply {
+    pub rows: Vec<SessionHistoryRow>,
+    pub next_before: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionHistoryRow {
+    pub session_id: String,
+    pub primary: SenatorName,
+    pub alias: Option<SenatorName>,
+    pub shown_name: Option<String>,
+    pub committee: Option<CommitteeId>,
+    pub runtime: crate::session::Runtime,
+    pub model: HostedModel,
+    pub dir: PathBuf,
+    pub branch: Option<String>,
+    pub title: Option<String>,
+    pub started_at: DateTime<Utc>,
+    pub last_activity: DateTime<Utc>,
+    pub readable: bool,
+    pub restorable: bool,
+    pub item_count: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSearchReply {
+    pub hits: Vec<SessionSearchHit>,
+    pub next_cursor: Option<String>,
+    /// Retry the same query while the initial or incremental index build runs.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub indexing: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<SessionIndexProgress>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionIndexProgress {
+    pub indexed: usize,
+    pub total: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSearchHit {
+    pub session_id: String,
+    pub seq: u64,
+    pub kind: SessionSearchKind,
+    pub snippet: String,
+    pub ts: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub live: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionSearchKind {
+    UserMessage,
+    AssistantMessage,
+    ToolCall,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
@@ -961,6 +1023,26 @@ pub enum Request {
     /// Every Senate-hosted session this machine has a record of, and every
     /// host running with none ([`SessionsReply`]).
     Sessions,
+    SessionHistory {
+        #[serde(default)]
+        committee: Option<CommitteeId>,
+        #[serde(default)]
+        before: Option<String>,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
+    SessionSearch {
+        query: String,
+        #[serde(default)]
+        committee: Option<CommitteeId>,
+        #[serde(default)]
+        limit: Option<usize>,
+        #[serde(default)]
+        cursor: Option<String>,
+    },
+    SessionForget {
+        session_id: String,
+    },
     Timeline {
         session_id: String,
         #[serde(default)]

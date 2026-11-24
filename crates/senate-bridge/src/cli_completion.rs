@@ -199,6 +199,20 @@ pub(super) fn sessions() -> Vec<CompletionCandidate> {
     )
 }
 
+pub(super) fn history() -> Vec<CompletionCandidate> {
+    let Some(reply) = request::<ipc::SessionHistoryReply>(&Request::SessionHistory {
+        committee: None,
+        before: None,
+        limit: Some(100),
+    }) else {
+        return Vec::new();
+    };
+    candidates(reply.rows.into_iter().flat_map(|row| {
+        let label = super::cli_history::label(&row);
+        [label, row.session_id]
+    }))
+}
+
 pub(super) fn committees() -> Vec<CompletionCandidate> {
     let Some(rows) = request::<Vec<ipc::RosterCommittee>>(&Request::Roster) else {
         return Vec::new();

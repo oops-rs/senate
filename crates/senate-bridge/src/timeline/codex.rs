@@ -5,7 +5,7 @@ use crate::ipc::{
     TimelineKind as Kind, TimelineToolDetail as Detail, TimelineToolStatus as Status,
 };
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub(super) struct Context {
     cwd: Option<String>,
     thread_id: Option<String>,

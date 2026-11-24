@@ -578,3 +578,353 @@ async fn agy_reader_during_an_external_write() {
         "reader must not checkpoint"
     );
 }
+
+async fn search_ready(h: &Harness, op: &Request) -> ipc::SessionSearchReply {
+    let mut progress = None;
+    tokio::time::timeout(TIMEOUT, async {
+        loop {
+            let reply: ipc::SessionSearchReply = request(h, op).await;
+            if !reply.indexing {
+                return reply;
+            }
+            progress = reply.progress;
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("search did not settle: {progress:?}"))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn history_retains_readable_conversations_searches_incrementally_and_forgets_records() {
+    use ipc::{SessionHistoryReply, SessionSearchReply};
+
+    let mut h = Harness::new().await;
+    h.start().await;
+    let claude = h.dir.path().join("claude-history.jsonl");
+    let codex = h.dir.path().join("codex-history.jsonl");
+    let gone = h.dir.path().join("gone-history.jsonl");
+    std::fs::write(&claude, concat!(
+        r#"{"type":"user","message":{"content":"Index title 東京開発"}}"#, "\n",
+        r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool","name":"Bash","input":{"command":"cat /tmp/manual.txt"}}]}}"#, "\n",
+    )).unwrap();
+    std::fs::write(&codex, concat!(
+        r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Index title from codex"}]}}"#, "\n",
+    )).unwrap();
+    std::fs::write(&gone, "").unwrap();
+    let stopped_codex = h.dir.path().join("stopped-codex.jsonl");
+    std::fs::write(&stopped_codex, concat!(
+        r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"A stopped hosted Codex prompt"}]}}"#, "\n",
+    )).unwrap();
+    let agy_path = h.dir.path().join(format!("{}.db", agy::ID));
+    let db = agy::create(&agy_path);
+    agy::user(&db, 0, 4, "Index title in agy");
+    agy::tool(
+        &db,
+        1,
+        2,
+        "run_command",
+        r#"{"CommandLine":"report-build"}"#,
+        None,
+    );
+    let agy_id = Runtime::Agy.session_key(agy::ID);
+    register(
+        &h,
+        "past-claude",
+        Runtime::Claude,
+        &claude,
+        HookEvent::UserPromptSubmit,
+    )
+    .await;
+    register(
+        &h,
+        "live-codex",
+        Runtime::Codex,
+        &codex,
+        HookEvent::UserPromptSubmit,
+    )
+    .await;
+    register(
+        &h,
+        "missing-hosted",
+        Runtime::Claude,
+        &gone,
+        HookEvent::UserPromptSubmit,
+    )
+    .await;
+    register(
+        &h,
+        &agy_id,
+        Runtime::Agy,
+        &agy_path,
+        HookEvent::UserPromptSubmit,
+    )
+    .await;
+    register(
+        &h,
+        "stopped-codex",
+        Runtime::Codex,
+        &stopped_codex,
+        HookEvent::UserPromptSubmit,
+    )
+    .await;
+    register(
+        &h,
+        "local-ended",
+        Runtime::Codex,
+        &stopped_codex,
+        HookEvent::UserPromptSubmit,
+    )
+    .await;
+    for id in [
+        "past-claude",
+        &agy_id,
+        "missing-hosted",
+        "stopped-codex",
+        "local-ended",
+    ] {
+        let _: serde_json::Value = request(
+            &h,
+            &Request::SessionEnd {
+                session_id: id.into(),
+                reason: None,
+            },
+        )
+        .await;
+    }
+    // The database retains the hosted association when its terminal
+    // directory has been pruned. The transcript is independent.
+    let conn = rusqlite::Connection::open(h.paths.state_db()).unwrap();
+    for id in ["past-claude", &agy_id, "missing-hosted", "stopped-codex"] {
+        conn.execute(
+            "UPDATE sessions SET host_id=?1 WHERE session_id=?2",
+            [senate_core::EventId::new().to_string().as_str(), id],
+        )
+        .unwrap();
+    }
+    drop(conn);
+    std::fs::remove_file(&gone).unwrap();
+    let first: SessionHistoryReply = request(
+        &h,
+        &Request::SessionHistory {
+            committee: None,
+            before: None,
+            limit: Some(2),
+        },
+    )
+    .await;
+    assert_eq!(first.rows.len(), 2);
+    let mut before = first.next_before;
+    let mut rows = first.rows;
+    while let Some(cursor) = before {
+        let next: SessionHistoryReply = request(
+            &h,
+            &Request::SessionHistory {
+                committee: None,
+                before: Some(cursor),
+                limit: Some(2),
+            },
+        )
+        .await;
+        assert!(!next.rows.is_empty());
+        rows.extend(next.rows);
+        before = next.next_before;
+    }
+    assert_eq!(rows.len(), 5);
+    assert!(
+        rows.iter()
+            .any(|row| row.session_id == "local-ended" && row.readable && !row.restorable)
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.session_id == "stopped-codex" && row.readable)
+    );
+    assert!(
+        page(&h, "stopped-codex", TimelineDirection::Tail, None)
+            .await
+            .available
+    );
+    assert!(
+        rows.iter()
+            .any(|r| r.session_id == "missing-hosted" && !r.readable && !r.restorable)
+    );
+    assert!(rows.iter().any(|r| r.session_id == "past-claude"
+        && r.readable
+        && r.title.as_deref() == Some("Index title 東京開発")));
+    assert!(rows.iter().any(|r| r.session_id == agy_id && r.readable));
+    assert!(
+        page(&h, "past-claude", TimelineDirection::Tail, None)
+            .await
+            .available
+    );
+    assert!(
+        page(&h, &agy_id, TimelineDirection::Tail, None)
+            .await
+            .available
+    );
+
+    let first: SessionSearchReply = search_ready(
+        &h,
+        &Request::SessionSearch {
+            query: "Index title".into(),
+            committee: None,
+            cursor: None,
+            limit: Some(2),
+        },
+    )
+    .await;
+    assert_eq!(first.hits.len(), 2);
+    let second: SessionSearchReply = search_ready(
+        &h,
+        &Request::SessionSearch {
+            query: "Index title".into(),
+            committee: None,
+            cursor: first.next_cursor,
+            limit: Some(2),
+        },
+    )
+    .await;
+    let hits: Vec<_> = first.hits.into_iter().chain(second.hits).collect();
+    assert_eq!(hits.len(), 3);
+    assert!(
+        hits.iter()
+            .any(|hit| hit.session_id == "live-codex" && hit.live)
+    );
+    for word in ["東京", "東京開", "/tmp/manual.txt", "report-build"] {
+        let reply: SessionSearchReply = search_ready(
+            &h,
+            &Request::SessionSearch {
+                query: word.into(),
+                committee: None,
+                cursor: None,
+                limit: None,
+            },
+        )
+        .await;
+        assert_eq!(reply.hits.len(), 1, "{word}");
+        assert!(reply.hits[0].snippet.contains(word));
+    }
+
+    let result = "prefix-marker ".to_string() + &"o".repeat(700) + "hidden-after-prefix";
+    append(
+        &claude,
+        &serde_json::json!({"type":"user","message":{"content":[
+            {"type":"tool_result","tool_use_id":"tool","content":result}
+        ]}})
+        .to_string(),
+    );
+    append(&claude, "\n");
+    agy::planner(&db, 2, "Added after the index", "");
+    for query in ["prefix-marker", "Added after the index"] {
+        let reply: SessionSearchReply = search_ready(
+            &h,
+            &Request::SessionSearch {
+                query: query.into(),
+                committee: None,
+                cursor: None,
+                limit: None,
+            },
+        )
+        .await;
+        assert_eq!(reply.hits.len(), 1);
+    }
+    let hidden: SessionSearchReply = search_ready(
+        &h,
+        &Request::SessionSearch {
+            query: "hidden-after-prefix".into(),
+            committee: None,
+            cursor: None,
+            limit: None,
+        },
+    )
+    .await;
+    assert!(hidden.hits.is_empty());
+    let _: () = request(
+        &h,
+        &Request::SessionForget {
+            session_id: "past-claude".into(),
+        },
+    )
+    .await;
+    assert!(claude.is_file());
+    assert!(h.store().session("past-claude").unwrap().is_none());
+    let idx = h.paths.home().join("history/session-search.sqlite");
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        std::fs::metadata(&idx).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let index = rusqlite::Connection::open(&idx).unwrap();
+    let count: i64 = index
+        .query_row(
+            "SELECT count(*) FROM documents WHERE session_id='past-claude'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 0);
+    drop(index);
+    std::fs::remove_file(&idx).unwrap();
+    let rebuilt: SessionSearchReply = search_ready(
+        &h,
+        &Request::SessionSearch {
+            query: "Index title".into(),
+            committee: None,
+            cursor: None,
+            limit: None,
+        },
+    )
+    .await;
+    assert_eq!(rebuilt.hits.len(), 2);
+}
+
+#[tokio::test]
+async fn history_ipc_refuses_a_caller_in_the_daemons_process_tree() {
+    let mut h = Harness::new().await;
+    h.start().await;
+    let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
+    senate_bridge::testenv::isolate_async(&mut child, h.dir.path());
+    child.env("SENATE_HOME", h.paths.home());
+    child.args([
+        "--exact",
+        "agent_history_requests_are_refused",
+        "--ignored",
+        "--nocapture",
+    ]);
+    let status = tokio::time::timeout(TIMEOUT, child.kill_on_drop(true).status())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(status.success());
+    assert!(!h.paths.home().join("history").exists());
+}
+
+#[tokio::test]
+#[ignore = "launched from the history guard fixture"]
+async fn agent_history_requests_are_refused() {
+    assert!(std::env::var_os(senate_bridge::testenv::CONFINE_ENV).is_some());
+    let paths = senate_bridge::Paths::from_env().unwrap();
+    for op in [
+        Request::SessionHistory {
+            committee: None,
+            before: None,
+            limit: None,
+        },
+        Request::SessionSearch {
+            query: "hidden".into(),
+            committee: None,
+            limit: None,
+            cursor: None,
+        },
+        Request::SessionForget {
+            session_id: "hidden".into(),
+        },
+    ] {
+        let refused = ipc::request::<serde_json::Value>(&paths.socket(), &op, TIMEOUT, TIMEOUT)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(refused, ipc::ClientError::Remote(error) if error.code == ipc::codes::NOT_A_PERSON)
+        );
+    }
+}
