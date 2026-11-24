@@ -11,7 +11,8 @@ use senate_bridge::ipc::{
     HostState, HostedRuntime, Request, RosterCommittee, SessionsReply, SpawnReply,
 };
 use senate_bridge::{BridgeConfig, Paths, testenv};
-use senate_core::{Address, Hub, Kind, Locale, NewEvent};
+use senate_core::alias::AliasName;
+use senate_core::{Address, Hub, Kind, Locale, NewEvent, SenatorName};
 use std::os::unix::fs::PermissionsExt;
 
 const CLI: &str = env!("CARGO_BIN_EXE_senate-e2e-cli");
@@ -179,11 +180,15 @@ async fn replacing_a_hosted_chair_transfers_its_alias_and_prompt_on_the_server()
             .contains(old.senator.as_str())
     );
 
-    let renamed = list(&["alias", kept.primary.as_str(), "lead"])
-        .output()
-        .await
-        .unwrap();
-    assert!(renamed.status.success(), "{renamed:?}");
+    // `senate alias` is the person's: refused from a coding session's
+    // process tree (a test may run inside one), so asked as the CLI asks.
+    let _: SenatorName = laptop
+        .ipc(Request::SetAlias {
+            senator: AliasName::bare(kept.primary.clone()),
+            alias: "lead".parse().unwrap(),
+            committee: None,
+        })
+        .await;
     let before: Vec<RosterCommittee> = laptop.ipc(Request::Roster).await;
     let pending_before = before
         .iter()

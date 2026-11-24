@@ -631,10 +631,13 @@ import SenateCore
             think(7, "it passes; say so"),
             entry(8, "Done."),
         ])
-        #expect(rows.map(\.id) == [1, 3, 6, 8], "no row of reasoning's own")
-        #expect(rows[1].thinking == ["read the policy first"])
-        #expect(rows[2].thinking == ["now test"])
-        #expect(rows[3].thinking == ["it passes; say so"])
+        #expect(rows.map(\.id) == [1, 3, 8], "no row of reasoning's own; the two calls one group")
+        guard case let .tools(members) = rows[1].kind else { Issue.record("a group"); return }
+        #expect(members.map(\.id) == [3, 6])
+        #expect(rows[1].thinking == ["read the policy first"], "what led into the run rides on the group")
+        #expect(members[0].thinking.isEmpty)
+        #expect(members[1].thinking == ["now test"])
+        #expect(rows[2].thinking == ["it passes; say so"])
     }
 
     @Test func aTodoOrSenateMessageBetweenKeepsItAPersonsMessageEndsIt() {
@@ -650,6 +653,37 @@ import SenateCore
         #expect(rows.map(\.id) == [2, 3, 5])
         #expect(rows[0].thinking.isEmpty)
         #expect(rows[2].thinking == ["first step"])
+    }
+
+    @Test func aRunOfCallsIsOneGroupFromTwoCallsUp() {
+        let todo = TimelineEntry(seq: 5, at: nil, truncated: false, body: .todo(items: []))
+        let rows = ConversationRows.rows([
+            entry(1, "go", user: true),
+            tool(2, "ls"),                      // alone: not wrapped
+            entry(3, "Listed.", user: false),
+            tool(4, "cat a"),
+            todo,                               // ends the run: 4 alone
+            tool(6, "cat b"),
+            think(7, "and c"),
+            tool(8, "cat c"),
+            tool(9, "cat d"),                   // 6, 8, 9: one group
+            entry(10, "next", user: true),
+        ])
+        #expect(rows.map(\.id) == [1, 2, 3, 4, 5, 6, 10])
+        if case .tool = rows[1].kind {} else { Issue.record("a single call is not wrapped") }
+        if case .tool = rows[3].kind {} else { Issue.record("a to-do ends a run") }
+        guard case let .tools(members) = rows[5].kind else { Issue.record("a group"); return }
+        #expect(members.map(\.id) == [6, 8, 9])
+        #expect(ConversationRows.rowId(for: 7, in: rows) == 8, "reasoning: the call it led to, in its group")
+        #expect(ConversationRows.rowId(for: 9, in: rows) == 9)
+        #expect(ConversationRows.rowId(for: 10, in: rows) == 10)
+    }
+
+    @Test func aGroupKeepsItsIdentityAsItsRunGrows() {
+        let two = ConversationRows.rows([think(1, "x"), tool(2, "a"), tool(3, "b")])
+        let three = ConversationRows.rows([think(1, "x"), tool(2, "a"), tool(3, "b"), tool(4, "c")])
+        #expect(two.map(\.id) == [2] && three.map(\.id) == [2])
+        #expect(three[0].thinking == ["x"])
     }
 
     @Test func aRowKeepsItsIdentityWhenItsCallCompletes() {

@@ -59,6 +59,18 @@ fn open_file(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
+mod search;
+pub(crate) use search::Index;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SearchCheckpoint {
+    identity: (u64, u64),
+    offset: u64,
+    anchor: Vec<u8>,
+    reduced: Reducer,
+    codex_context: codex::Context,
+}
+
 pub(crate) struct Transcript {
     file: BufReader<File>,
     path: PathBuf,
@@ -92,6 +104,45 @@ impl Transcript {
             record: Vec::new(),
             reduced: Reducer::default(),
             changes: VecDeque::new(),
+        })
+    }
+
+    fn resume_search(&mut self, checkpoint: SearchCheckpoint) -> io::Result<bool> {
+        if self.identity != checkpoint.identity
+            || self.snapshot_len()? < checkpoint.offset
+            || checkpoint.anchor.len() as u64 != checkpoint.offset.min(64)
+        {
+            return Ok(false);
+        }
+        let mut anchor = [0; 64];
+        let bytes = &mut anchor[..checkpoint.anchor.len()];
+        self.file
+            .get_ref()
+            .read_exact_at(bytes, checkpoint.offset - bytes.len() as u64)?;
+        if bytes != checkpoint.anchor {
+            return Ok(false);
+        }
+        use std::io::{Seek, SeekFrom};
+        self.file.seek(SeekFrom::Start(checkpoint.offset))?;
+        self.offset = checkpoint.offset;
+        self.reduced = checkpoint.reduced;
+        self.codex_context = checkpoint.codex_context;
+        Ok(true)
+    }
+
+    fn search_checkpoint(self) -> io::Result<SearchCheckpoint> {
+        // Keep only committed JSONL records. A partial line is re-read once
+        // its writer completes it, with no private trailing bytes in the cursor.
+        let offset = self.offset - self.record.len() as u64;
+        let mut anchor = vec![0; offset.min(64) as usize];
+        let start = offset - anchor.len() as u64;
+        self.file.get_ref().read_exact_at(&mut anchor, start)?;
+        Ok(SearchCheckpoint {
+            identity: self.identity,
+            offset,
+            anchor,
+            reduced: self.reduced,
+            codex_context: self.codex_context,
         })
     }
 
@@ -317,7 +368,7 @@ impl ToolResult {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 struct Reducer {
     seq: u64,
     pending: HashMap<String, TimelineItem>,

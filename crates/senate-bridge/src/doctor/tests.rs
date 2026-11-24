@@ -639,13 +639,13 @@ fn the_default_secretary_is_reported_and_only_a_stop_on_purpose_needs_a_command(
         ),
     ] {
         let senator = (state != S::NotRecorded).then_some("claude-1");
-        machine.secretary = Some(secretary(state, senator));
+        machine.secretary = Some(Ok(secretary(state, senator)));
         let checks = live(&machine, EN);
         let check = by_id(&checks, "secretary.default");
         assert_eq!(check.status, Status::Ok, "{state:?}");
         assert_eq!(check.found, said);
     }
-    machine.secretary = Some(secretary(S::Stopped, Some("claude-1")));
+    machine.secretary = Some(Ok(secretary(S::Stopped, Some("claude-1"))));
     let checks = live(&machine, EN);
     let check = by_id(&checks, "secretary.default");
     assert_eq!(check.status, Status::Warn);
@@ -661,6 +661,15 @@ fn the_default_secretary_is_reported_and_only_a_stop_on_purpose_needs_a_command(
         by_id(&live(&machine, Locale::Zh), "secretary.default")
             .found
             .contains("被有意停止")
+    );
+    // A Senate whose desk is elsewhere: said, as a warning.
+    machine.secretary = Some(Err("its desk is kept in the Senate /acme".into()));
+    let checks = live(&machine, EN);
+    let check = by_id(&checks, "secretary.default");
+    assert_eq!(check.status, Status::Warn);
+    assert_eq!(
+        check.found,
+        "no default secretary on this machine: its desk is kept in the Senate /acme"
     );
 }
 

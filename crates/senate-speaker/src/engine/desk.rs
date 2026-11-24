@@ -176,7 +176,7 @@ impl Engine {
         let speaker = self
             .roster
             .office()
-            .and_then(|office| office.speaker_here().cloned())
+            .and_then(|office| office.desk_owner().cloned())
             .filter(|speaker| *speaker != self.me);
         let Some(speaker) = speaker else {
             // Nobody to tell but the built-in session itself.

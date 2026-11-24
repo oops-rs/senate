@@ -1790,14 +1790,14 @@ dependencies = [
 
 [[package]]
 name = "senate"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "senate-bridge",
 ]
 
 [[package]]
 name = "senate-bridge"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1844,7 +1844,7 @@ dependencies = [
 
 [[package]]
 name = "senate-core"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1857,7 +1857,7 @@ dependencies = [
 
 [[package]]
 name = "senate-markdown"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "comrak",
  "senate-core",
@@ -1868,7 +1868,7 @@ dependencies = [
 
 [[package]]
 name = "senate-remote-admin"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

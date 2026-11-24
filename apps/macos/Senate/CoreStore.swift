@@ -109,6 +109,8 @@ final class CoreStore {
     let history = HistoryModel()
     /// A search match to show once its session is open.
     var reveal: Reveal?
+    /// The name and picture set in this app.
+    let profile = LocalProfile()
     /// The conversation page: one web view, kept, for sessions and threads.
     @ObservationIgnored lazy var page = ConversationPage(store: self)
     @ObservationIgnored private let defaults: UserDefaults

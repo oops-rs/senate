@@ -1146,6 +1146,72 @@ impl Shared {
         }
     }
 
+    /// `senator` as written on `committee`: the primary an alias there
+    /// stands for, else the name itself.
+    async fn primary_on(
+        &self,
+        committee: &CommitteeId,
+        senator: SenatorName,
+    ) -> Result<SenatorName, IpcError> {
+        let aliases = self.api.aliases().await.map_err(server_error)?;
+        let written = AliasName {
+            committee: Some(committee.clone()),
+            alias: senator.clone(),
+        };
+        Ok(match aliases.resolve(&written, Some(committee)) {
+            AliasMatch::One(primary) => primary,
+            _ => senator,
+        })
+    }
+
+    /// `speaker_alias`: the office (`speaker`, a desk worker) gives
+    /// `senator` the alias `alias` on `committee`. The server checks the
+    /// office's authority; the agent keeps its owner.
+    pub(crate) async fn on_speaker_alias(
+        &self,
+        speaker: &SenatorName,
+        committee: CommitteeId,
+        senator: SenatorName,
+        alias: SenatorName,
+    ) -> Result<serde_json::Value, IpcError> {
+        let primary = self.primary_on(&committee, senator).await?;
+        let alias = self
+            .api
+            .set_alias_for_office(&primary, &alias, &committee, speaker)
+            .await
+            .map_err(|e| self.refusal(e))?;
+        *lock(&self.display_aliases) = None;
+        Ok(serde_json::json!({
+            "committee": committee,
+            "senator": primary,
+            "alias": alias,
+        }))
+    }
+
+    /// `speaker_unseat`: the office removes `senator`'s seat on `committee`.
+    /// The server checks the office's authority.
+    pub(crate) async fn on_speaker_unseat(
+        &self,
+        speaker: &SenatorName,
+        committee: CommitteeId,
+        senator: SenatorName,
+        id: Option<EventId>,
+    ) -> Result<senate_core::api::CommitteeSeatInfo, IpcError> {
+        let primary = self.primary_on(&committee, senator).await?;
+        self.api
+            .set_committee_seat(
+                &committee,
+                &senate_core::api::SetCommitteeSeat {
+                    senator: primary,
+                    action: senate_core::CommitteeSeatAction::Unseat,
+                    id: id.unwrap_or_default(),
+                    acted_by: Some(speaker.clone()),
+                },
+            )
+            .await
+            .map_err(|e| self.refusal(e))
+    }
+
     // ---- secretaries ----------------------------------------------------------
 
     /// List, add or remove a senator's secretaries: the session's agent's,
@@ -1218,8 +1284,11 @@ impl Shared {
         self.refresh_me().await;
         let speaker = self
             .office()
-            .and_then(|o| o.speaker_here().cloned())
-            .ok_or_else(|| IpcError::bad_request(roles_text::desk_elsewhere(self.locale)))?;
+            .and_then(|o| o.desk_owner().cloned())
+            .ok_or_else(|| {
+                let speaker = self.office().map(|o| o.speaker);
+                IpcError::bad_request(roles_text::desk_elsewhere(speaker.as_ref(), self.locale))
+            })?;
         let all = match set {
             Some(list) => {
                 let mut seen = std::collections::BTreeSet::new();
@@ -1422,7 +1491,7 @@ impl Shared {
         if self.desk_role(agent).is_some() {
             let person = self
                 .office()
-                .and_then(|o| o.speaker_here().cloned())
+                .and_then(|o| o.desk_owner().cloned())
                 .filter(|s| people.is_person(s))
                 .map(|s| s.name().clone())
                 .unwrap_or_else(|| self.config.person.clone());
@@ -1825,14 +1894,36 @@ pub(crate) mod roles_text {
         }
     }
 
-    pub(crate) fn desk_elsewhere(locale: Locale) -> String {
-        locale
-            .pick(
-                "这个 Senate 的 Speaker 不在这里（或还不知道是谁），它的 desk 要在它所在的 Senate 设置。",
-                "This Senate's Speaker is not a senator here (or is not known yet): its desk is set \
-                 where it presides.",
-            )
-            .to_owned()
+    /// No desk is kept in this Senate: its Speaker (`speaker`, when known)
+    /// is an agent of another Senate, whose desk is there.
+    pub(crate) fn desk_elsewhere(
+        speaker: Option<&senate_core::SenatorId>,
+        locale: Locale,
+    ) -> String {
+        match (speaker, locale) {
+            (Some(speaker), Locale::Zh) => {
+                let senate = speaker
+                    .senate()
+                    .map_or_else(|| "另一个 Senate".to_owned(), |s| format!("Senate {s}"));
+                format!(
+                    "这个 Senate 的 Speaker [{speaker}] 是 {senate} 的 agent，不是这里的人：它的 desk 在 {senate}，在那里设置它的 secretary。"
+                )
+            }
+            (Some(speaker), Locale::En) => {
+                let senate = speaker.senate().map_or_else(
+                    || "another Senate".to_owned(),
+                    |s| format!("the Senate {s}"),
+                );
+                format!(
+                    "This Senate's Speaker, [{speaker}], is an agent of {senate}, not a person here: \
+                     its desk is kept in {senate}; appoint its secretaries there."
+                )
+            }
+            (None, Locale::Zh) => "这个 Senate 还没有已知的 Speaker，所以没有 desk。".to_owned(),
+            (None, Locale::En) => {
+                "This Senate has no Speaker known yet, so it has no desk.".to_owned()
+            }
+        }
     }
 
     pub(crate) fn desk_named_twice(senator: &SenatorName, locale: Locale) -> String {

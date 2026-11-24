@@ -48,7 +48,22 @@ struct ThreadPage: View {
     /// with the thread as a whole.
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
         let busy = store.isBusy(row.key)
-        // With no title drawn, this is what keeps them at the trailing edge.
+        // The thread's title, where it is, at the toolbar's leading edge.
+        ToolbarItem(placement: .navigation) {
+            VStack(alignment: .leading, spacing: 0) {
+                MentionText(row.title)
+                    .font(.headline)
+                    .lineLimit(1)
+                Text(verbatim: "#\(row.root) · \(row.committee)")
+                    .font(.caption)
+                    .foregroundStyle(Theme.onSurfaceVariant)
+            }
+            .padding(.horizontal, Theme.Space.xs)
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isHeader)
+        }
+        // A title, on the window's ground: no glass behind it.
+        .sharedBackgroundVisibility(.hidden)
         ToolbarSpacer(.flexible)
         ToolbarItem(placement: .primaryAction) {
             HStack(spacing: 6) {
@@ -60,14 +75,19 @@ struct ThreadPage: View {
             .padding(.horizontal, Theme.Space.s)
         }
         ToolbarItemGroup(placement: .primaryAction) {
-            Button(L("inbox.take")) { Task { await store.take(row) } }
+            Button { Task { await store.take(row) } } label: {
+                Label(L("inbox.take"), systemImage: "hand.raised")
+                    .labelStyle(.titleAndIcon)
+            }
                 .help(L("inbox.take_help"))
                 .disabled(row.takeover != nil || busy || !store.state.online)
             Menu {
-                Button(L("inbox.close"), role: .destructive) { confirmClose = true }
+                Button(role: .destructive) { confirmClose = true } label: {
+                    Label(L("inbox.close"), systemImage: "xmark.circle")
+                }
                     .disabled(busy || !store.state.online)
                 Divider()
-                Button(L("toolbar.refresh")) { store.refresh() }
+                Button { store.refresh() } label: { Label(L("toolbar.refresh"), systemImage: "arrow.clockwise") }
                 Button(L("mention.copy", "#\(row.root)")) { Mentions.copyText("#\(row.root)") }
             } label: {
                 Label(L("thread.more"), systemImage: "ellipsis")
@@ -136,12 +156,8 @@ private struct ThreadHeader: View {
 
     var body: some View {
         let t = row
+        // Its title is in the window's toolbar; here, where it is and why.
         VStack(alignment: .leading, spacing: Theme.Space.s) {
-            MentionText(t.title)
-                .font(Theme.Fonts.title)
-                .foregroundStyle(Theme.onSurface)
-                .textSelection(.enabled)
-                .accessibilityAddTraits(.isHeader)
             VStack(alignment: .leading, spacing: 2) {
                 TimedMention(date: t.since) { ago in
                     var line = L("inbox.meta", String(t.root), from(t), t.stateLabel, ago)
@@ -163,7 +179,7 @@ private struct ThreadHeader: View {
                 if t.takeover != nil { Chip(text: L("inbox.taken"), tone: .accent) }
             }
         }
-        .padding(.top, Theme.Space.xl)
+        .padding(.top, Theme.Space.l)
     }
 
     private func from(_ t: InboxThread) -> String {

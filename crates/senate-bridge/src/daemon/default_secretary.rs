@@ -202,6 +202,11 @@ impl Shared {
                 "This Senate has no Speaker's desk for a default secretary to work.",
             )));
         };
+        if office.desk_owner().is_none() {
+            return Err(IpcError::bad_request(
+                super::roles::roles_text::desk_elsewhere(Some(&office.speaker), self.locale),
+            ));
+        }
         let named = AliasName {
             committee: Some(committee()),
             alias: alias(),

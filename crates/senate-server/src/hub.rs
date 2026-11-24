@@ -494,12 +494,16 @@ impl ServerHub {
 
     /// Give `primary` the alias `request.alias` on a committee. An older
     /// bridge names no committee: the agent's only committee is used, and
-    /// one that sits in several (or none) is told to upgrade.
+    /// one that sits in several (or none) is told to upgrade. `runs_it`:
+    /// `person` may act as `primary`, and is recorded as its owner; without
+    /// it the caller acts for the Speaker's office (checked by the caller),
+    /// and the agent keeps its owner.
     pub(crate) async fn set_alias(
         &self,
         person: &Name,
         primary: &SenatorName,
         request: senate_core::api::SetAlias,
+        runs_it: bool,
     ) -> Result<QualifiedAlias, HubError> {
         let committee = match request.committee {
             Some(committee) => committee,
@@ -515,7 +519,8 @@ impl ServerHub {
         };
         let mut aliases = self.aliases.write().await;
         let roster = self.seats.snapshot();
-        if roster.may_act_as(person, primary).is_err()
+        if (runs_it && roster.may_act_as(person, primary).is_err())
+            || (!runs_it && !roster.is_agent(primary))
             || roster.built_in() == Some(primary)
             || roster.is_person(primary)
             || !primary.is_session_name()
@@ -544,15 +549,19 @@ impl ServerHub {
         next.set(&committee, alias.clone(), primary.clone())
             .map_err(|e| HubError::Rejected(e.to_string()))?;
         // The server must keep the owner before publishing a durable alias.
-        registry::put_seat(self.store.as_ref(), primary, person)
-            .await
-            .map_err(log_error)?;
+        if runs_it {
+            registry::put_seat(self.store.as_ref(), primary, person)
+                .await
+                .map_err(log_error)?;
+        }
         registry::put_aliases(self.store.as_ref(), &next)
             .await
             .map_err(log_error)?;
-        self.seats
-            .act_as(person, primary)
-            .map_err(|error| HubError::Rejected(error.to_string()))?;
+        if runs_it {
+            self.seats
+                .act_as(person, primary)
+                .map_err(|error| HubError::Rejected(error.to_string()))?;
+        }
         *aliases = next;
         Ok(qualified(&alias))
     }

@@ -117,6 +117,11 @@ CREATE TABLE IF NOT EXISTS hosted_models (
     effort     TEXT,
     verification_warning TEXT
 );
+CREATE TABLE IF NOT EXISTS history_names (
+    session_id TEXT PRIMARY KEY,
+    alias TEXT,
+    shown TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS hosted_switch_notices (
     id TEXT PRIMARY KEY,
     event TEXT NOT NULL,
@@ -356,6 +361,41 @@ struct HostedBinding<'a> {
 pub struct Store {
     conn: Mutex<Connection>,
     has_host_id: bool,
+}
+
+fn prune_delivery(tx: &rusqlite::Transaction<'_>, cutoff: i64) -> Result<(), StoreError> {
+    tx.execute(
+        "DELETE FROM session_ancestors
+             WHERE session_id NOT IN (SELECT session_id FROM sessions)",
+        [],
+    )?;
+    tx.execute(
+        "DELETE FROM hosted_native_seats
+             WHERE session_id NOT IN (SELECT session_id FROM sessions)",
+        [],
+    )?;
+    tx.execute(
+        "DELETE FROM hosted_models
+             WHERE session_id NOT IN (SELECT session_id FROM sessions)",
+        [],
+    )?;
+    tx.execute(
+        "UPDATE queue SET status = 'pending', session_id = NULL
+             WHERE status = 'queued'
+               AND session_id NOT IN (SELECT session_id FROM sessions WHERE state = 'live')",
+        [],
+    )?;
+    tx.execute(
+        "DELETE FROM queue WHERE status IN ('delivered', 'cancelled')
+               AND COALESCE(delivered_at, enqueued_at) < ?1",
+        [cutoff],
+    )?;
+    tx.execute("DELETE FROM spawn_attempts WHERE expires <= ?1", [now_ms()])?;
+    tx.execute(
+        "DELETE FROM history_names WHERE session_id NOT IN (SELECT session_id FROM sessions)",
+        [],
+    )?;
+    Ok(())
 }
 
 fn now_ms() -> i64 {
@@ -1702,7 +1742,7 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// Every session on record, ended ones too (kept until pruned), most
+    /// Every session on record, ended ones too (kept until explicitly removed), most
     /// recently active first: what a companion session forks from.
     pub fn all_sessions(&self) -> Result<Vec<Session>, StoreError> {
         let sql = format!("SELECT {SESSION_COLS} FROM sessions ORDER BY last_seen DESC");
@@ -1749,11 +1789,13 @@ impl Store {
     }
 
     pub fn live_sessions(&self) -> Result<Vec<Session>, StoreError> {
-        Ok(self
-            .sessions()?
-            .into_iter()
-            .filter(Session::is_live)
-            .collect())
+        let sql = format!(
+            "SELECT {SESSION_COLS} FROM sessions WHERE state = 'live' ORDER BY last_seen DESC"
+        );
+        let conn = self.conn();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], session_from_row)?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     /// Ids of sessions whose hooks ran below process `pid`.
@@ -1894,6 +1936,45 @@ impl Store {
         )?)
     }
 
+    pub(crate) fn history_name(
+        &self,
+        id: &str,
+    ) -> Result<Option<(Option<SenatorName>, String)>, StoreError> {
+        let raw: Option<(Option<String>, String)> = self
+            .conn()
+            .query_row(
+                "SELECT alias,shown FROM history_names WHERE session_id=?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        Ok(raw.map(|(alias, shown)| (alias.and_then(|alias| alias.parse().ok()), shown)))
+    }
+
+    pub(crate) fn remember_history_name(
+        &self,
+        id: &str,
+        alias: Option<&SenatorName>,
+        shown: &str,
+    ) -> Result<(), StoreError> {
+        self.conn().execute(
+            "INSERT OR IGNORE INTO history_names VALUES (?1,?2,?3)",
+            params![id, alias.map(ToString::to_string), shown],
+        )?;
+        Ok(())
+    }
+
+    /// The periodic sweep expires delivery bookkeeping and leaves session
+    /// records in History until the person removes them.
+    pub(crate) fn prune_delivery(&self, older_than: Duration) -> Result<(), StoreError> {
+        let cutoff = now_ms() - i64::try_from(older_than.as_millis()).unwrap_or(i64::MAX);
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        prune_delivery(&tx, cutoff)?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Forget expired sessions and delivered items. A host can still own
     /// a stale session after an inbox failure, so keep it while the lock is held.
     pub fn prune(&self, older_than: Duration, paths: &Paths) -> Result<(), StoreError> {
@@ -1931,33 +2012,7 @@ impl Store {
                 }
             }
         }
-        tx.execute(
-            "DELETE FROM session_ancestors
-             WHERE session_id NOT IN (SELECT session_id FROM sessions)",
-            [],
-        )?;
-        tx.execute(
-            "DELETE FROM hosted_native_seats
-             WHERE session_id NOT IN (SELECT session_id FROM sessions)",
-            [],
-        )?;
-        tx.execute(
-            "DELETE FROM hosted_models
-             WHERE session_id NOT IN (SELECT session_id FROM sessions)",
-            [],
-        )?;
-        tx.execute(
-            "UPDATE queue SET status = 'pending', session_id = NULL
-             WHERE status = 'queued'
-               AND session_id NOT IN (SELECT session_id FROM sessions WHERE state = 'live')",
-            [],
-        )?;
-        tx.execute(
-            "DELETE FROM queue WHERE status IN ('delivered', 'cancelled')
-               AND COALESCE(delivered_at, enqueued_at) < ?1",
-            [cutoff],
-        )?;
-        tx.execute("DELETE FROM spawn_attempts WHERE expires <= ?1", [now_ms()])?;
+        prune_delivery(&tx, cutoff)?;
         tx.commit()?;
         Ok(())
     }
@@ -1983,6 +2038,8 @@ impl Store {
             if removed == 0 {
                 continue;
             }
+            tx.execute("DELETE FROM history_names WHERE session_id=?1", [id])?;
+            tx.execute("UPDATE queue SET status='pending', session_id=NULL WHERE session_id=?1 AND status='queued'", [id])?;
             gone += removed;
             tx.execute("DELETE FROM session_ancestors WHERE session_id = ?1", [id])?;
             tx.execute(

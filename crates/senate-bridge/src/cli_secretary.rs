@@ -265,11 +265,16 @@ fn ask(paths: &Paths, text: String) -> anyhow::Result<()> {
         if let Some(said) = said {
             eprintln!("{said}");
         }
+        // By the senator the ensure names: no alias to resolve.
+        let to = secretary
+            .senator
+            .as_ref()
+            .map_or_else(|| secretary.alias.to_string(), ToString::to_string);
         let sent = crate::speak::send(
             &paths.socket(),
             secretary.committee.clone(),
             crate::ipc::SayKind::Request,
-            secretary.alias.as_str(),
+            &to,
             text,
         )
         .await?;

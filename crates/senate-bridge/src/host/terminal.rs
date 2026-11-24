@@ -15,6 +15,7 @@ use tokio::net::UnixStream;
 use tokio::signal::unix::{SignalKind, signal};
 
 use super::emulation::{Colors, Scheme};
+use super::keyboard::{self, MODIFIED_ENTER};
 use super::paste::Pastes;
 use super::{ATTACHED, ATTACHED_NATIVE, ATTACHED_PLAIN, BUSY, COLORS, IO_CHUNK, KEYS, RESIZE};
 use crate::paths::Paths;
@@ -48,10 +49,9 @@ pub(super) fn split_input(bytes: &[u8]) -> (usize, bool) {
     {
         return (detach, true);
     }
-    // A control sequence can straddle two reads. Keep only the suffix
-    // that might complete the detach key on the next read.
-    let max_prefix = DETACH
-        .iter()
+    // Keep the prefix of a detach or modified Enter if it spans reads.
+    let sequences = || DETACH.iter().chain(MODIFIED_ENTER);
+    let max_prefix = sequences()
         .map(|key| key.len() - 1)
         .max()
         .unwrap_or(0)
@@ -59,18 +59,16 @@ pub(super) fn split_input(bytes: &[u8]) -> (usize, bool) {
     let suffix = (1..=max_prefix)
         .rev()
         .find(|&len| {
-            DETACH
-                .iter()
-                .any(|key| key.starts_with(&bytes[bytes.len() - len..]))
+            sequences().any(|key| key.len() > len && key.starts_with(&bytes[bytes.len() - len..]))
         })
         .unwrap_or(0);
     (bytes.len() - suffix, false)
 }
 
-// Foreground, background and light-or-dark, then primary device attributes.
+// Foreground, background, light-or-dark and keyboard flags, then DA.
 // Every terminal answers the last one, so its answer ends the wait whether
 // or not the terminal knew the others.
-const ASK_COLORS: &[u8] = b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[?996n\x1b[c";
+const ASK_COLORS: &[u8] = b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[?996n\x1b[?u\x1b[c";
 
 /// The length of the control sequence at the start of `bytes` (an ESC) if
 /// it is a terminal's report, and what it reports when that is a colour.
@@ -104,9 +102,19 @@ fn report(bytes: &[u8], colors: &mut Colors) -> Option<usize> {
                 .take_while(|b| b.is_ascii_digit() || **b == b';')
                 .count();
             match (&bytes[3..3 + params], *bytes.get(3 + params)?) {
-                (b"997;1", b'n') => colors.scheme = Some(Scheme::Dark),
-                (b"997;2", b'n') => colors.scheme = Some(Scheme::Light),
-                (_, b'c' | b'n') => {}
+                (b"997;1", b'n') => {
+                    colors.scheme = Some(Scheme::Dark);
+                    colors.scheme_reporting = true;
+                }
+                (b"997;2", b'n') => {
+                    colors.scheme = Some(Scheme::Light);
+                    colors.scheme_reporting = true;
+                }
+                (flags, b'u') if !flags.is_empty() && flags.iter().all(u8::is_ascii_digit) => {
+                    colors.keyboard_flags = Some(std::str::from_utf8(flags).ok()?.parse().ok()?);
+                }
+                (attributes, b'c') if !attributes.is_empty() => colors.device_attributes = true,
+                (_, b'n') => {}
                 _ => return None,
             }
             Some(3 + params + 1)
@@ -416,18 +424,40 @@ where
     };
     // draw handles partial writes and waits for writable readiness. Bound
     // cleanup in case the attached terminal has disappeared.
-    let reset = if native {
+    let reset = reset_display(native, colors.keyboard_flags);
+    let _ = tokio::time::timeout(Duration::from_millis(250), terminal.draw(&reset)).await;
+    result
+}
+
+fn reset_display(native: bool, inherited_keyboard_flags: Option<u16>) -> Vec<u8> {
+    let mut reset = if native {
         RESET_NATIVE_DISPLAY
     } else {
         RESET_DISPLAY
-    };
-    let _ = tokio::time::timeout(Duration::from_millis(250), terminal.draw(reset)).await;
-    result
+    }
+    .to_vec();
+    // Native attach probes the person's screen before the TUI paints.
+    // The display reset returns to that screen before restoring its flags.
+    if native && let Some(flags) = inherited_keyboard_flags {
+        keyboard::set_flags(&mut reset, flags);
+    }
+    reset.extend_from_slice(keyboard::RESET_MODIFY_OTHER_KEYS);
+    reset
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keyboard_probe_is_not_input_and_detach_restores_inherited_flags() {
+        let (colors, typed, done) = read_colors(b"\x1b[?9u\x1b[13;2u\x1b[?62;22c");
+        assert!(done);
+        assert_eq!(colors.keyboard_flags, Some(9));
+        assert_eq!(typed, b"\x1b[13;2u");
+        assert!(reset_display(true, colors.keyboard_flags).ends_with(b"\x1b[=9u\x1b[>4;0m"));
+        assert!(reset_display(false, Some(9)).ends_with(b"\x1b[>4;0m"));
+    }
 
     #[test]
     fn a_terminals_answers_are_told_apart_from_what_was_typed() {
@@ -439,11 +469,17 @@ mod tests {
         assert_eq!(colors.background.as_deref(), Some("rgb:efef/f1f1/f5f5"));
         assert_eq!(colors.scheme, Some(Scheme::Light));
         assert_eq!(typed, b"q\x1b[A");
-        assert!(complete);
+        assert!(complete && colors.device_attributes && colors.scheme_reporting);
 
         // A terminal that knows none of the colour questions still ends the wait.
         let (colors, typed, complete) = read_colors(b"\x1b[?1;2c");
-        assert_eq!(colors, Colors::default());
+        assert_eq!(
+            colors,
+            Colors {
+                device_attributes: true,
+                ..Colors::default()
+            }
+        );
         assert!(typed.is_empty() && complete);
 
         // Alt+] is a key, even with an answer right behind it.

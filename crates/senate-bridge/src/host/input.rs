@@ -13,6 +13,8 @@ const MAX_REPORT_BYTES: usize = 4096;
 #[derive(Default)]
 pub(super) struct Input {
     pending: Option<Pending>,
+    viewer_scheme: Option<super::emulation::Scheme>,
+    in_paste: bool,
 }
 
 struct Pending {
@@ -42,6 +44,10 @@ enum Sequence {
 }
 
 impl Input {
+    pub(super) fn take_viewer_scheme(&mut self) -> Option<super::emulation::Scheme> {
+        self.viewer_scheme.take()
+    }
+
     pub(super) fn deadline(&self) -> Option<u64> {
         self.pending
             .as_ref()
@@ -116,7 +122,21 @@ impl Input {
                         pending.sequence = Sequence::X10Mouse(3);
                         None
                     }
-                    0x40..=0x7e => Some(!report(params, byte, cursor, at)),
+                    0x40..=0x7e => {
+                        use super::emulation::Scheme;
+                        match (params.as_slice(), byte) {
+                            (b"200", b'~') => self.in_paste = true,
+                            (b"201", b'~') => self.in_paste = false,
+                            (b"?997;1", b'n') if !self.in_paste => {
+                                self.viewer_scheme = Some(Scheme::Dark)
+                            }
+                            (b"?997;2", b'n') if !self.in_paste => {
+                                self.viewer_scheme = Some(Scheme::Light)
+                            }
+                            _ => {}
+                        }
+                        Some(!report(params, byte, cursor, at))
+                    }
                     0x20..=0x3f if params.len() < 64 => {
                         params.push(byte);
                         None
@@ -301,6 +321,18 @@ impl Draft {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_split_scheme_report_updates_the_viewer_without_counting_as_typing() {
+        use super::super::emulation::Scheme;
+        let mut input = Input::default();
+        let mut cursor = CursorQueries::default();
+        assert_eq!(input.observe(b"\x1b[?997;", 1, &mut cursor), None);
+        assert_eq!(input.observe(b"2n", 2, &mut cursor), None);
+        assert_eq!(input.take_viewer_scheme(), Some(Scheme::Light));
+        input.observe(b"\x1b[200~\x1b[?997;1n\x1b[201~", 3, &mut cursor);
+        assert_eq!(input.take_viewer_scheme(), None);
+    }
 
     #[test]
     fn emulator_reports_are_not_input_even_when_split_across_frames() {

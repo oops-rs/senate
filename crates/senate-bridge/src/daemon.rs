@@ -183,6 +183,7 @@ mod replace;
 mod roles;
 mod roster;
 mod secretary_work;
+mod session_history;
 mod session_timeline;
 mod spawn_attempt;
 
@@ -199,7 +200,7 @@ pub const PENDING_CAP: usize = 200;
 /// Inbox retries of a held batch before it waits for the session's hooks
 /// alone (until a hook or a successful push resets the count).
 pub const INBOX_RETRIES: u32 = 6;
-/// Ended and stale sessions, and delivered items, are forgotten after this.
+/// Delivered and cancelled queue records expire after this.
 const RETENTION: Duration = Duration::from_secs(7 * 24 * 3600);
 /// Bound on the gallop-and-bisect search for a committee's head.
 const HEAD_PROBES: usize = 128;
@@ -547,6 +548,9 @@ pub(crate) struct Shared {
     working_sessions: Mutex<HashMap<String, Instant>>,
     desk_decisions: tokio::sync::Mutex<()>,
     session_titles: Arc<Mutex<crate::timeline::TitleCache>>,
+    history_titles: Mutex<crate::timeline::TitleCache>,
+    history_index: Mutex<()>,
+    history_background: session_history::Background,
     /// Each agent's latest checkpoint it wrote itself (the tool, not an
     /// automatic one) this run: when, and its seq. `session pause` waits
     /// for one newer than its request.
@@ -811,6 +815,10 @@ pub async fn start_with_host_binary(
             rx.clone(),
         )));
     }
+    tasks.push(tokio::spawn(session_history::warm(
+        front.primary().clone(),
+        rx.clone(),
+    )));
     if let Some((service, listener)) = remote {
         let front = front.clone();
         let shutdown = rx.clone();
@@ -952,6 +960,9 @@ impl Shared {
             working_sessions: Mutex::new(HashMap::new()),
             desk_decisions: tokio::sync::Mutex::new(()),
             session_titles: Arc::new(Mutex::new(crate::timeline::TitleCache::default())),
+            history_titles: Mutex::default(),
+            history_index: Mutex::default(),
+            history_background: session_history::Background::default(),
             tool_checkpoints: Mutex::new(HashMap::new()),
             companion_config: common.companion_config.clone(),
             companion: Mutex::new(None),
@@ -1502,7 +1513,12 @@ impl Shared {
                     if crate::host::shares_codex_thread(&paths, &id) {
                         self.store.clear_session_host(&s.session_id, &id)?;
                     } else {
-                        changed |= self.store.mark_host_gone(&s.session_id, &id)?;
+                        if self.store.mark_host_gone(&s.session_id, &id)? {
+                            changed = true;
+                            if let Err(error) = self.remember_history_name(&s) {
+                                tracing::warn!(%error, "recording the stopped session's display name");
+                            }
+                        }
                         continue;
                     }
                 }
@@ -1519,9 +1535,15 @@ impl Shared {
                     && session::agy_conversation_open(&s.session_id) == Some(false))
             {
                 tracing::info!(session = %s.session_id, "session process is gone; marking stale");
-                changed |= self
+                if self
                     .store
-                    .set_session_state(&s.session_id, SessionState::Stale)?;
+                    .set_session_state(&s.session_id, SessionState::Stale)?
+                {
+                    changed = true;
+                    if let Err(error) = self.remember_history_name(&s) {
+                        tracing::warn!(%error, "recording the ended session's display name");
+                    }
+                }
                 self.no_longer_working(&s.session_id);
                 continue;
             }
@@ -1538,7 +1560,7 @@ impl Shared {
             tracing::warn!("session sweep failed: {e}");
         }
         let paths = Paths::new(&self.home);
-        if let Err(e) = self.store.prune(RETENTION, &paths) {
+        if let Err(e) = self.store.prune_delivery(RETENTION) {
             tracing::warn!("pruning state failed: {e}");
         }
         if let Err(error) = crate::host::prune_abandoned(&paths, Duration::from_secs(300)) {
@@ -3137,8 +3159,12 @@ impl Shared {
             Request::RemoteControl { .. } => Reply::err(IpcError::bad_request("local device management only")),
             Request::Profiles => wrap(Ok(&self.config.profiles)),
             Request::Sessions => wrap(self.on_sessions(false).await),
-            Request::SessionHistory { .. } | Request::SessionSearch { .. } | Request::SessionForget { .. } =>
-                Reply::err(IpcError::bad_request("session history is not implemented in this build")),
+            Request::SessionHistory { committee, before, limit } =>
+                wrap(self.on_history(committee, before, limit).await),
+            Request::SessionSearch { query, committee, limit, cursor } =>
+                wrap(self.on_history_search(query, committee, limit, cursor).await),
+            Request::SessionForget { session_id } =>
+                wrap(self.on_history_forget(session_id).await),
             Request::Timeline { session_id, direction, cursor, limit } =>
                 wrap(self.on_timeline(session_id, direction, cursor, limit).await),
             Request::PruneHosts => wrap(self.on_prune_hosts().await),
@@ -3165,6 +3191,8 @@ impl Shared {
             | Request::Hold { .. }
             | Request::Refer { .. }
             | Request::Forward { .. }
+            | Request::SpeakerAlias { .. }
+            | Request::SpeakerUnseat { .. }
             | Request::Refuse { .. } => Reply::err(IpcError::bad_request(
                 "a presiding request is served by the daemon's front",
             )),
@@ -3495,9 +3523,8 @@ impl Shared {
         let mut hosted = self.store.hosted_sessions().map_err(internal)?;
         hosted.retain(|(_, host_id)| known.insert(host_id.clone()));
         let mut local = Vec::new();
-        for session in self.store.sessions().map_err(internal)? {
-            if session.is_live()
-                && !self.hosts.unpublished(&session.session_id)
+        for session in self.store.live_sessions().map_err(internal)? {
+            if !self.hosts.unpublished(&session.session_id)
                 && self
                     .store
                     .session_host(&session.session_id)
@@ -4368,6 +4395,11 @@ impl Shared {
             .set_session_state(session_id, SessionState::Ended)
             .map_err(internal)?
         {
+            if let Some(session) = &before
+                && let Err(error) = self.remember_history_name(session)
+            {
+                tracing::warn!(%error, "recording the ended session's display name");
+            }
             self.committees_changed.notify_one();
             self.work.notify_one();
             // The hook waits for this reply; the checkpoint does not keep it.
@@ -6137,32 +6169,48 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
     loop {
         let (reply, last) = match ipc::read_line(&mut reader).await {
             Ok(None) => return,
-            Ok(Some(line)) => match serde_json::from_str::<Request>(&line) {
-                Ok(Request::RemoteControl { command }) => {
-                    let reply = match shared.refuse_agent_caller(peer, "Manage remote device pairing from your own terminal").await {
-                        Err(error) => Reply::err(error),
-                        Ok(()) => match command {
-                            crate::remote::Control::PrepareEnable { listen } => wrap(
-                                crate::remote::prepare_enable(&Paths::new(&shared.primary().home), listen)
-                                    .map_err(|error| IpcError::bad_request(error.to_string()))
-                            ),
-                            command => match &shared.remote {
-                                Some(remote) => wrap(remote.control(command).map_err(|e| IpcError::bad_request(e.to_string()))),
-                                None => Reply::err(IpcError::bad_request("remote access is disabled on this machine")),
+            Ok(Some(line)) => {
+                match serde_json::from_str::<Request>(&line) {
+                    Ok(Request::RemoteControl { command }) => {
+                        let reply = match shared
+                            .refuse_agent_caller(
+                                peer,
+                                "Manage remote device pairing from your own terminal",
+                            )
+                            .await
+                        {
+                            Err(error) => Reply::err(error),
+                            Ok(()) => match command {
+                                crate::remote::Control::PrepareEnable { listen } => wrap(
+                                    crate::remote::prepare_enable(
+                                        &Paths::new(&shared.primary().home),
+                                        listen,
+                                    )
+                                    .map_err(|error| IpcError::bad_request(error.to_string())),
+                                ),
+                                command => match &shared.remote {
+                                    Some(remote) => wrap(
+                                        remote
+                                            .control(command)
+                                            .map_err(|e| IpcError::bad_request(e.to_string())),
+                                    ),
+                                    None => Reply::err(IpcError::bad_request(
+                                        "remote access is disabled on this machine",
+                                    )),
+                                },
                             },
-                        },
-                    };
-                    (reply, false)
-                }
-                Ok(Request::Watch { app }) => {
-                    // An app that shows notifications itself keeps the
-                    // daemon quiet while it is connected.
-                    let _guard = app.then(|| AppClient::enter(shared.app_clients()));
-                    serve_watch(&shared, reader, write, shutdown).await;
-                    return;
-                }
-                Ok(Request::TimelineWatch { session_id, after }) => {
-                    match shared
+                        };
+                        (reply, false)
+                    }
+                    Ok(Request::Watch { app }) => {
+                        // An app that shows notifications itself keeps the
+                        // daemon quiet while it is connected.
+                        let _guard = app.then(|| AppClient::enter(shared.app_clients()));
+                        serve_watch(&shared, reader, write, shutdown).await;
+                        return;
+                    }
+                    Ok(Request::TimelineWatch { session_id, after }) => {
+                        match shared
                         .refuse_agent_caller(peer, "Stream session transcripts from your own terminal or the Senate app")
                         .await
                     {
@@ -6181,61 +6229,53 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                             session_timeline::send(&mut write, &Reply::err(refused)).await;
                         }
                     }
-                    return;
-                }
-                Ok(Request::Sessions) => {
-                    let person = shared
+                        return;
+                    }
+                    Ok(Request::Sessions) => {
+                        let person = shared
                         .refuse_agent_caller(peer, "Read session transcript titles from your own terminal or the Senate app")
                         .await
                         .is_ok();
-                    (wrap(shared.primary().on_sessions(person).await), false)
-                }
-                Ok(request) if matches!(request, Request::Timeline { .. }) => {
-                    match shared
-                        .refuse_agent_caller(peer, "Read session transcripts from your own terminal or the Senate app")
-                        .await
-                    {
-                        Ok(()) => (shared.dispatch(request).await, false),
-                        Err(refused) => (Reply::err(refused), false),
+                        (wrap(shared.primary().on_sessions(person).await), false)
                     }
-                }
-                Ok(Request::DeskDecide { committee, seq, item_id, id, decision }) => {
-                    let reply = match shared.refuse_agent_caller(peer, "Decide a desk request from your own terminal or the Senate app").await {
-                        Ok(()) => wrap(shared.primary().on_desk_decide(committee, seq, item_id, id, decision).await),
-                        Err(error) => Reply::err(error),
-                    };
-                    (reply, false)
-                }
-                Ok(Request::EnsureSecretary) => {
-                    match shared
-                        .refuse_agent_caller(
-                            peer,
-                            "Only the person starts the default secretary: ask it from your own terminal or the Senate app",
-                        )
-                        .await
-                    {
-                        Ok(()) => (shared.dispatch(Request::EnsureSecretary).await, false),
-                        Err(refused) => (Reply::err(refused), false),
+                    Ok(Request::DeskDecide {
+                        committee,
+                        seq,
+                        item_id,
+                        id,
+                        decision,
+                    }) => {
+                        let reply = match shared
+                            .refuse_agent_caller(
+                                peer,
+                                "Decide a desk request from your own terminal or the Senate app",
+                            )
+                            .await
+                        {
+                            Ok(()) => wrap(
+                                shared
+                                    .primary()
+                                    .on_desk_decide(committee, seq, item_id, id, decision)
+                                    .await,
+                            ),
+                            Err(error) => Reply::err(error),
+                        };
+                        (reply, false)
                     }
+                    // The person's own acts (see approval_guard::person_only):
+                    // refused from inside a coding session's process tree. One
+                    // boxed arm keeps this connection's future small.
+                    Ok(request) if let Some(guidance) = approval_guard::person_only(&request) => (
+                        Box::pin(shared.guarded_dispatch(peer, guidance, request)).await,
+                        false,
+                    ),
+                    Ok(request) => (shared.dispatch(request).await, false),
+                    Err(e) => (
+                        Reply::err(IpcError::bad_request(format!("unreadable request: {e}"))),
+                        false,
+                    ),
                 }
-                Ok(request) if approval_guard::answers_a_prompt(&request) => {
-                    match shared
-                        .refuse_agent_caller(
-                            peer,
-                            "A permission prompt is a person's decision: answer it from your own terminal or the Senate app",
-                        )
-                        .await
-                    {
-                        Ok(()) => (shared.dispatch(request).await, false),
-                        Err(refused) => (Reply::err(refused), false),
-                    }
-                }
-                Ok(request) => (shared.dispatch(request).await, false),
-                Err(e) => (
-                    Reply::err(IpcError::bad_request(format!("unreadable request: {e}"))),
-                    false,
-                ),
-            },
+            }
             Err(e) => (Reply::err(IpcError::bad_request(e.to_string())), true),
         };
         let mut out = match serde_json::to_string(&reply) {

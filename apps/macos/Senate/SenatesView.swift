@@ -1,152 +1,261 @@
 import SwiftUI
 import SenateCore
 
-/// Your profile: who you are and where (your name, the Senate's address,
-/// online or not), then every Senate the daemon serves, one card each: who
-/// you are in it, who holds the Speaker's seat, the committees' chairs,
-/// your agents and their streams, the Senates registered below it, and its
-/// registration above.
+/// Your profile: who you are (your picture and name here, your Senate
+/// handle, online or not), then for each Senate the daemon serves: what
+/// it is, your agents as a table, the committees you chair or sit on, and
+/// the Senates registered below it, when there are any. Sections under
+/// headings, aligned columns, no cards.
 struct SenatesView: View {
     @Bindable var store: CoreStore
+    @State private var editing = false
 
     var body: some View {
         let state = store.state
-        let name = state.person ?? "Senate"
         if state.senates.isEmpty {
             EmptyState(text: L("senates.empty"))
         } else {
-            ReadingColumn {
-                HStack(alignment: .center, spacing: Theme.Space.l) {
-                    Avatar(name: name, online: state.online, size: 56)
-                    VStack(alignment: .leading, spacing: Theme.Space.xs) {
-                        Text(verbatim: name)
-                            .font(Theme.Fonts.title)
-                            .foregroundStyle(Theme.onSurface)
-                            .accessibilityAddTraits(.isHeader)
-                        HStack(spacing: 6) {
-                            StatusDot(online: state.online, size: 7)
-                            Text(verbatim: state.online ? L("profile.online_at", Profile.place(state)) : L("a11y.offline"))
-                                .font(Theme.Fonts.row)
-                                .foregroundStyle(Theme.onSurfaceVariant)
-                                .textSelection(.enabled)
-                        }
-                        if state.senates.count > 1 {
-                            Text(verbatim: L("senates.inbox_note"))
-                                .font(Theme.Fonts.meta)
-                                .foregroundStyle(Theme.onSurfaceVariant)
-                        }
+            ScrollView {
+                VStack(alignment: .leading, spacing: Theme.Space.xxl) {
+                    header(state)
+                    ForEach(state.senates) { senate in
+                        SenateSections(store: store, senate: senate, titled: state.senates.count > 1)
                     }
-                    Spacer(minLength: Theme.Space.m)
-                    InactiveToggle(store: store, hidden: hidden)
                 }
-                .padding(.top, Theme.Space.xl)
-                .padding(.bottom, Theme.Space.m)
-                .padding(.leading, Theme.Space.xs)
-                ForEach(store.state.senates) { senate in
-                    SenateCard(store: store, senate: senate)
+                .frame(maxWidth: Theme.readingWidth, alignment: .leading)
+                .padding(.horizontal, Theme.Space.xl)
+                .padding(.vertical, Theme.Space.xl)
+                .frame(maxWidth: .infinity)
+            }
+            .sheet(isPresented: $editing) {
+                ProfileEditor(profile: store.profile, handle: state.person ?? "") { editing = false }
+            }
+        }
+    }
+
+    private func header(_ state: AppState) -> some View {
+        let handle = state.person ?? "Senate"
+        return HStack(alignment: .center, spacing: Theme.Space.l) {
+            Avatar(name: store.profile.name(handle), online: nil, size: 72, picture: store.profile.picture)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(verbatim: store.profile.name(handle))
+                    .font(.system(size: 26, weight: .semibold))
+                    .foregroundStyle(Theme.onSurface)
+                    .accessibilityAddTraits(.isHeader)
+                Text(verbatim: "[senator::\(handle)]")
+                    .font(Theme.Fonts.row)
+                    .foregroundStyle(Theme.onSurfaceVariant)
+                    .textSelection(.enabled)
+                HStack(spacing: 6) {
+                    StatusDot(online: state.online, size: 7)
+                    Text(verbatim: state.online ? L("a11y.online") : (state.offlineReason ?? L("a11y.offline")))
+                        .font(Theme.Fonts.row)
+                        .foregroundStyle(Theme.onSurfaceVariant)
                 }
             }
+            Spacer(minLength: Theme.Space.m)
+            Button(L("profile.edit")) { editing = true }
+                .buttonStyle(.pill)
         }
     }
 }
 
-extension SenatesView {
-    /// The agents and streams "Show inactive" hides now.
-    private var hidden: Int {
-        store.state.agents.filter { !$0.active }.count
-            + store.state.senates.flatMap(\.committees).filter { !$0.live }.count
-    }
-}
-
-private struct SenateCard: View {
+/// One Senate: what it is, your agents, your committees, the Senates below.
+private struct SenateSections: View {
     let store: CoreStore
     let senate: SenateInfo
+    /// More than one Senate: each section heads with its name.
+    let titled: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Theme.Space.l) {
-            HStack(spacing: 6) {
-                Text(verbatim: senate.title)
-                    .font(Theme.Fonts.heading)
-                    .foregroundStyle(Theme.onSurface)
-                if senate.primary { Chip(text: L("senates.primary"), tone: .accent) }
-            }
-            Grid(alignment: .leading, horizontalSpacing: Theme.Space.l, verticalSpacing: 6) {
-                Fact(L("senates.address")) { Text(verbatim: senate.serverUrl).textSelection(.enabled) }
-                Fact(L("senates.you")) { MentionText(senate.me) }
-                Fact(L("senates.speaker")) {
-                    if let speaker = senate.speaker {
-                        MentionText(speaker)
-                    } else {
-                        Text(verbatim: L("senates.no_speaker")).foregroundStyle(Theme.onSurfaceVariant)
-                    }
-                }
-                if let uplink = senate.uplink {
-                    Fact(L("senates.above")) { Text(verbatim: uplink) }
-                }
-            }
-            .font(Theme.Fonts.text)
-            if !senate.chairs.isEmpty {
-                Group_(L("senates.chairs")) {
-                    ForEach(senate.chairs, id: \.committee) { chair in
+        VStack(alignment: .leading, spacing: Theme.Space.xxl) {
+            Section_(titled ? senate.title : L("profile.this_senate")) {
+                Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: Theme.Space.xl, verticalSpacing: 10) {
+                    fact(L("profile.senate_name")) {
                         HStack(spacing: 6) {
-                            Chip(text: chair.committee)
-                            if let who = chair.chair {
-                                MentionText(who).environment(\.mentionCommittee, chair.committee)
-                            } else {
-                                Text(verbatim: L("senates.no_chair")).foregroundStyle(Theme.onSurfaceVariant)
+                            Text(verbatim: senate.senate ?? senate.title)
+                            if senate.primary {
+                                Text(verbatim: L("senates.primary")).foregroundStyle(Theme.onSurfaceVariant)
                             }
                         }
+                    }
+                    fact(L("senates.address")) { Text(verbatim: senate.serverUrl).textSelection(.enabled) }
+                    fact(L("senates.you")) { MentionText(senate.me) }
+                    fact(L("senates.speaker")) {
+                        if let speaker = senate.speaker {
+                            MentionText(speaker)
+                        } else {
+                            Text(verbatim: L("senates.no_speaker")).foregroundStyle(Theme.onSurfaceVariant)
+                        }
+                    }
+                    if let uplink = senate.uplink {
+                        fact(L("profile.registration")) { Text(verbatim: uplink) }
                     }
                 }
             }
             let agents = store.state.agents.filter { $0.senate == senate.key && (store.showInactive || $0.active) }
             if !agents.isEmpty {
-                Group_(L("senates.agents")) {
-                    ForEach(agents) { agent in
-                        HStack(spacing: 6) {
-                            SenatorName(name: agent.displayName, id: agent.path)
-                            if !agent.active { Chip(text: L("roster.inactive")) }
-                            if let runtime = agent.runtime { Chip(text: runtime) }
-                            if agent.presiding { Chip(text: L("senates.presiding"), tone: .accent) }
-                            if agent.sessions > 0 {
-                                Chip(text: L("senates.sessions", Int(agent.sessions)))
-                            }
-                            if agent.pending > 0 {
-                                Chip(text: L("senates.waiting", Int(agent.pending)), tone: .attention)
-                            }
-                        }
-                    }
-                }
+                Section_(L("profile.agents")) { agentsTable(agents) }
             }
-            let streams = senate.committees.filter { store.showInactive || $0.live }
-            if !streams.isEmpty {
-                Group_(L("senates.streams")) {
-                    ForEach(streams) { line in
-                        HStack(spacing: 6) {
-                            StatusDot(online: line.live, size: 6)
-                            MentionText("[senator::\(line.agent)]")
-                                .environment(\.mentionCommittee, line.committee)
-                            Text(verbatim: "· \(line.committee) · \(line.stream)")
-                                .foregroundStyle(Theme.onSurfaceVariant)
-                            if let duty = line.duty {
-                                Text(verbatim: "· \(duty)")
-                                    .foregroundStyle(Theme.onSurfaceVariant)
-                                    .lineLimit(1)
-                            }
-                        }
-                        .help(L("senates.stream_help", String(line.delivered), Int(line.sessions)))
-                    }
-                }
+            let mine = committees
+            if !mine.isEmpty {
+                Section_(L("profile.committees")) { committeesTable(mine) }
             }
             if !senate.children.isEmpty {
-                Group_(L("senates.children")) {
-                    ForEach(senate.children, id: \.name) { child in
-                        ChildBlock(child: child)
+                Section_(L("senates.children")) {
+                    VStack(alignment: .leading, spacing: Theme.Space.m) {
+                        ForEach(senate.children, id: \.name) { ChildBlock(child: $0) }
                     }
                 }
             }
         }
-        .card()
+        .font(Theme.Fonts.text)
+        .foregroundStyle(Theme.onSurface)
+    }
+
+    private func fact<V: View>(_ label: String, @ViewBuilder _ value: () -> V) -> some View {
+        GridRow {
+            Text(verbatim: label)
+                .foregroundStyle(Theme.onSurfaceVariant)
+                .gridColumnAlignment(.trailing)
+            value()
+        }
+    }
+
+    // MARK: Your agents
+
+    private func agentsTable(_ agents: [AgentInfo]) -> some View {
+        Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: Theme.Space.l, verticalSpacing: 8) {
+            GridRow {
+                ColumnHead(L("profile.col.name"))
+                ColumnHead(L("profile.col.runtime"))
+                ColumnHead(L("profile.col.committees"))
+                ColumnHead(L("profile.col.sessions")).gridColumnAlignment(.trailing)
+                ColumnHead(L("profile.col.waiting")).gridColumnAlignment(.trailing)
+            }
+            Divider().gridCellUnsizedAxes(.horizontal)
+            ForEach(agents) { agent in
+                GridRow {
+                    HStack(spacing: 6) {
+                        SenatorName(name: agent.displayName, id: agent.path)
+                        if agent.presiding {
+                            Text(verbatim: L("senates.presiding")).font(Theme.Fonts.meta).foregroundStyle(Theme.primary)
+                        }
+                    }
+                    Text(verbatim: agent.runtime ?? "—").foregroundStyle(Theme.onSurfaceVariant)
+                    Text(verbatim: committees(of: agent).joined(separator: ", ").ifEmpty("—"))
+                        .foregroundStyle(Theme.onSurfaceVariant)
+                        .lineLimit(1)
+                    Text(verbatim: agent.sessions > 0 ? String(agent.sessions) : "—")
+                        .monospacedDigit()
+                        .foregroundStyle(Theme.onSurfaceVariant)
+                    Text(verbatim: agent.pending > 0 ? String(agent.pending) : "—")
+                        .monospacedDigit()
+                        .foregroundStyle(agent.pending > 0 ? Theme.attention : Theme.onSurfaceVariant)
+                }
+                .opacity(agent.active ? 1 : 0.55)
+            }
+        }
+    }
+
+    private func committees(of agent: AgentInfo) -> [String] {
+        Array(Set(senate.committees.filter { $0.agent == agent.path }.map(\.committee))).sorted()
+    }
+
+    // MARK: Your committees
+
+    private struct Membership: Identifiable {
+        let committee: String
+        let chair: String?
+        let agents: [String]
+        let live: Bool
+        var id: String { committee }
+    }
+
+    /// The committees where you, or an agent of yours, sit or chair.
+    private var committees: [Membership] {
+        let lines = senate.committees.filter { store.showInactive || $0.live }
+        // An agent by the name it goes by, not its path.
+        let names = Dictionary(
+            store.state.agents.filter { $0.senate == senate.key }.map { ($0.path, $0.displayName) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        return Dictionary(grouping: lines, by: \.committee).map { committee, lines in
+            Membership(
+                committee: committee,
+                chair: senate.chairs.first { $0.committee == committee }?.chair,
+                agents: Array(Set(lines.map { names[$0.agent] ?? $0.agent })).sorted(),
+                live: lines.contains { $0.live }
+            )
+        }
+        .sorted { $0.committee < $1.committee }
+    }
+
+    private func committeesTable(_ rows: [Membership]) -> some View {
+        Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: Theme.Space.l, verticalSpacing: 8) {
+            GridRow {
+                ColumnHead(L("profile.col.committee"))
+                ColumnHead(L("profile.col.chair"))
+                ColumnHead(L("profile.agents"))
+            }
+            Divider().gridCellUnsizedAxes(.horizontal)
+            ForEach(rows) { row in
+                GridRow {
+                    HStack(spacing: 6) {
+                        StatusDot(online: row.live, size: 6)
+                        Button { store.place = .committee(row.committee) } label: {
+                            Text(verbatim: row.committee).foregroundStyle(Theme.committee)
+                        }
+                        .buttonStyle(.plain)
+                        .help(L("committees.open", row.committee))
+                    }
+                    Group {
+                        if let chair = row.chair {
+                            MentionText(chair).environment(\.mentionCommittee, row.committee)
+                        } else {
+                            Text(verbatim: "—").foregroundStyle(Theme.onSurfaceVariant)
+                        }
+                    }
+                    Text(verbatim: row.agents.joined(separator: ", "))
+                        .foregroundStyle(Theme.onSurfaceVariant)
+                        .lineLimit(1)
+                }
+            }
+        }
+    }
+}
+
+/// A section of the profile: a heading, then its content.
+private struct Section_<Content: View>: View {
+    let title: String
+    @ViewBuilder let content: Content
+
+    init(_ title: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.m) {
+            Text(verbatim: title)
+                .font(Theme.Fonts.heading)
+                .foregroundStyle(Theme.onSurface)
+                .accessibilityAddTraits(.isHeader)
+            content
+        }
+    }
+}
+
+/// A table's column heading.
+private struct ColumnHead: View {
+    let title: String
+    init(_ title: String) { self.title = title }
+
+    var body: some View {
+        Text(verbatim: title)
+            .font(Theme.Fonts.meta)
+            .foregroundStyle(Theme.onSurfaceVariant)
+            .textCase(nil)
     }
 }
 
@@ -173,8 +282,8 @@ private struct ChildBlock: View {
                         .fontWeight(.medium)
                         .foregroundStyle(Theme.agent)
                         .help("[senator::\(seat.senator)]")
-                    Chip(text: seat.committee)
-                    Chip(text: seat.presenceLabel, tone: seat.presence == "online" ? .success : .neutral)
+                    Text(verbatim: "\(seat.committee) · \(seat.presenceLabel)")
+                        .foregroundStyle(Theme.onSurfaceVariant)
                     if let duty = seat.duty {
                         Text(verbatim: duty).foregroundStyle(Theme.onSurfaceVariant).lineLimit(1)
                     }
@@ -185,45 +294,6 @@ private struct ChildBlock: View {
     }
 }
 
-/// One fact about a Senate: what it is, then its value.
-private struct Fact<Value: View>: View {
-    let label: String
-    @ViewBuilder let value: Value
-
-    init(_ label: String, @ViewBuilder value: () -> Value) {
-        self.label = label
-        self.value = value()
-    }
-
-    var body: some View {
-        GridRow {
-            Text(verbatim: label)
-                .foregroundStyle(Theme.onSurfaceVariant)
-            value
-                .foregroundStyle(Theme.onSurface)
-        }
-    }
-}
-
-/// A named group of lines inside a Senate's card.
-private struct Group_<Content: View>: View {
-    let title: String
-    @ViewBuilder let content: Content
-
-    init(_ title: String, @ViewBuilder content: () -> Content) {
-        self.title = title
-        self.content = content()
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(verbatim: title)
-                .font(Theme.Fonts.row)
-                .foregroundStyle(Theme.onSurfaceVariant)
-                .accessibilityAddTraits(.isHeader)
-            content
-        }
-        .font(Theme.Fonts.text)
-        .foregroundStyle(Theme.onSurface)
-    }
+private extension String {
+    func ifEmpty(_ other: String) -> String { isEmpty ? other : self }
 }

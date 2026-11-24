@@ -28,10 +28,6 @@ private struct SecretaryIntro: View {
         VStack(spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: Theme.Space.m) {
-                    Text(verbatim: L("secretary.title"))
-                        .font(Theme.Fonts.title)
-                        .foregroundStyle(Theme.onSurface)
-                        .accessibilityAddTraits(.isHeader)
                     if store.secretaryStarting {
                         HStack(spacing: Theme.Space.s) {
                             ProgressView().controlSize(.small)
@@ -54,15 +50,10 @@ private struct SecretaryIntro: View {
                             .textSelection(.enabled)
                             .fixedSize(horizontal: false, vertical: true)
                     }
-                    if state == .stopped {
-                        Button(L("secretary.restore")) { Task { await store.restoreSecretary() } }
-                            .buttonStyle(.pill(.filled))
-                            .disabled(!store.state.online || store.isBusy("session:office::secretary"))
-                    }
                 }
                 .frame(maxWidth: Theme.readingWidth, alignment: .leading)
                 .padding(.horizontal, Theme.Space.xl)
-                .padding(.top, Theme.Space.xxl)
+                .padding(.top, Theme.Space.xl)
                 .frame(maxWidth: .infinity)
             }
             // Only the person starts it, by asking it something; a stopped
@@ -79,6 +70,28 @@ private struct SecretaryIntro: View {
                 ) {
                     Task { await store.askSecretary() }
                 }
+            }
+        }
+        .toolbar { toolbarTitle }
+    }
+
+    @ToolbarContentBuilder var toolbarTitle: some ToolbarContent {
+        ToolbarItem(placement: .navigation) {
+            Label(L("secretary.title"), systemImage: "person.crop.circle")
+                .labelStyle(.titleAndIcon)
+                .font(.headline)
+                .padding(.horizontal, Theme.Space.xs)
+                .accessibilityAddTraits(.isHeader)
+        }
+        .sharedBackgroundVisibility(.hidden)
+        if store.secretary?.state == .stopped {
+            ToolbarItem(placement: .primaryAction) {
+                Button { Task { await store.restoreSecretary() } } label: {
+                    Label(L("secretary.restore"), systemImage: "arrow.counterclockwise")
+                        .labelStyle(.titleAndIcon)
+                }
+                .help(L("secretary.restore"))
+                .disabled(!store.state.online || store.isBusy("session:office::secretary"))
             }
         }
     }

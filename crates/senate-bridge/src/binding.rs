@@ -1086,6 +1086,21 @@ pub fn free(
             if let Err(e) = store.delete_sessions(doomed, paths) {
                 report.errors.push(format!("{}: {e}", db.display()));
             }
+            if crate::timeline::Index::exists(paths.home()) {
+                let removed: Vec<_> = doomed
+                    .iter()
+                    .filter(|id| matches!(store.session(id), Ok(None)))
+                    .cloned()
+                    .collect();
+                if !removed.is_empty()
+                    && let Err(e) = crate::timeline::Index::open(paths.home())
+                        .and_then(|mut index| index.remove(&removed))
+                {
+                    report
+                        .errors
+                        .push(format!("removing session search entries: {e}"));
+                }
+            }
             for (d, idle) in &report.agents {
                 if d == db
                     && let Err(e) = store.forget_agent(&idle.agent, &idle.committees)

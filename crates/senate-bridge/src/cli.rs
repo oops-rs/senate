@@ -9,6 +9,8 @@
 mod cli_chat;
 #[path = "cli_help.rs"]
 mod cli_help;
+#[path = "cli_history.rs"]
+mod cli_history;
 #[path = "cli_legacy.rs"]
 mod cli_legacy;
 #[path = "cli_secretary.rs"]
@@ -722,6 +724,21 @@ enum DebugCmd {
 
 #[derive(Subcommand)]
 enum SessionCmd {
+    /// List past sessions or search their conversations.
+    History {
+        /// Restrict history to this committee.
+        #[arg(long, add = ArgValueCandidates::new(completion::committees))]
+        committee: Option<CommitteeId>,
+        /// Search conversation text, commands and paths.
+        #[arg(long)]
+        search: Option<String>,
+    },
+    /// Read a past conversation.
+    Show {
+        /// A session ID, senator name or committee-qualified alias.
+        #[arg(add = ArgValueCandidates::new(completion::history))]
+        session: String,
+    },
     /// List this machine's hosted sessions.
     ///
     /// Each session's name (`committee::alias`, else its senator),
@@ -943,6 +960,24 @@ enum SenatorCmd {
     Unalias {
         /// The alias, or `committee::alias`.
         alias: AliasName,
+    },
+    /// Make a senator the chair of a committee, as you.
+    ///
+    /// The chair picks the agent for a message to whichever agent there,
+    /// covers for an absent member and receives the members' escalations.
+    /// The server decides who may: a person of this Senate (or the
+    /// Speaker's office). The old chair stays a member; `senate senator
+    /// unseat` removes it. Prints who chaired before and who chairs now.
+    #[command(after_help = "Examples:
+  senate senator chair main                  On this directory's committee
+  senate senator chair agy-f2a97944 --committee ibot")]
+    Chair {
+        /// The senator's alias (`committee::alias`) or primary name.
+        #[arg(add = ArgValueCandidates::new(completion::sessions))]
+        senator: AliasName,
+        /// The committee (default: the one `senate where` shows for this directory).
+        #[arg(long, add = ArgValueCandidates::new(completion::committees))]
+        committee: Option<CommitteeId>,
     },
     /// Seat a removed senator on the committee again, under the same id.
     Seat(SeatArgs),
@@ -2068,6 +2103,33 @@ fn profiles_example(config: &std::path::Path, locale: Locale) -> String {
              with `senate spawn --profile review`.",
             config.display()
         ),
+    }
+}
+
+/// What `senate senator chair` did: who chaired `committee` before, who now.
+fn render_chair_change(
+    committee: &CommitteeId,
+    before: Option<&str>,
+    now: Option<&str>,
+    locale: Locale,
+) -> String {
+    let now = now.unwrap_or("-");
+    match (before, locale) {
+        (Some(before), Locale::Zh) if before == now => {
+            format!("{committee} 的主席仍是 {now}。")
+        }
+        (Some(before), Locale::En) if before == now => {
+            format!("{now} already chairs {committee}.")
+        }
+        (Some(before), Locale::Zh) => {
+            format!("{committee} 的主席：{before} → {now}（{before} 仍是成员）。")
+        }
+        (Some(before), Locale::En) => format!(
+            "Chair of {committee}: {before} → {now} ({before} remains a member; \
+             `senate senator unseat {before} --committee {committee}` removes it)."
+        ),
+        (None, Locale::Zh) => format!("{committee} 的主席：（无）→ {now}。"),
+        (None, Locale::En) => format!("Chair of {committee}: (none) → {now}."),
     }
 }
 
@@ -3583,6 +3645,8 @@ const REPLACE_TIMEOUT: Duration = Duration::from_secs(300);
 
 fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
     match command {
+        SessionCmd::History { committee, search } => cli_history::history(committee, search),
+        SessionCmd::Show { session } => cli_history::show(&session),
         SessionCmd::List {
             all,
             machine,
@@ -3864,6 +3928,52 @@ fn run_senator(command: SenatorCmd, output: Output) -> anyhow::Result<()> {
                     println!("{}  {name}", committee.committee);
                 }
             }
+            Ok(())
+        }
+        SenatorCmd::Chair { senator, committee } => {
+            let paths = Paths::from_env()?;
+            let locale = BridgeConfig::locale_at(&paths.config());
+            let rt = runtime(false)?;
+            let committee = rt.block_on(committee_here(committee))?;
+            let known: KnownAliases = rt.block_on(daemon_call(&paths, &Request::Aliases))?;
+            // An alias names its senator on that committee.
+            let written = AliasName {
+                committee: senator
+                    .committee
+                    .clone()
+                    .or_else(|| Some(committee.clone())),
+                alias: senator.alias.clone(),
+            };
+            let primary = match known.resolve(&written, Some(&committee)) {
+                AliasMatch::One(primary) => primary,
+                _ => senator.alias.clone(),
+            };
+            let roster: Vec<ipc::RosterCommittee> =
+                rt.block_on(daemon_call(&paths, &Request::Roster))?;
+            let before = roster
+                .iter()
+                .find(|row| row.committee == committee)
+                .and_then(|row| row.chair.clone());
+            let info: senate_core::api::ChairInfo = rt.block_on(daemon_call(
+                &paths,
+                &Request::SetChair {
+                    session: SessionSelector::default(),
+                    committee: Some(committee.clone()),
+                    senator: primary,
+                },
+            ))?;
+            let shown = |name: &SenatorName| {
+                senate_core::alias::display_name(Some(&known), Some(&committee), name)
+            };
+            println!(
+                "{}",
+                render_chair_change(
+                    &committee,
+                    before.as_ref().map(shown).as_deref(),
+                    info.chair.as_ref().map(shown).as_deref(),
+                    locale,
+                )
+            );
             Ok(())
         }
         SenatorCmd::Unalias { alias } => {
@@ -4461,4 +4571,24 @@ fn the_picker_names_sessions_as_the_list_does() {
     assert_eq!(choices[1].label, "claude-5bde5f64");
     assert!(choices[1].dim);
     assert_eq!(choices[1].primary, unnamed.primary);
+}
+
+#[cfg(test)]
+#[test]
+fn a_chair_change_says_who_chaired_before_and_who_now() {
+    let ibot = CommitteeId::new("ibot").unwrap();
+    assert_eq!(
+        render_chair_change(&ibot, Some("codex1"), Some("main"), Locale::En),
+        "Chair of ibot: codex1 → main (codex1 remains a member; \
+         `senate senator unseat codex1 --committee ibot` removes it)."
+    );
+    assert_eq!(
+        render_chair_change(&ibot, None, Some("main"), Locale::En),
+        "Chair of ibot: (none) → main."
+    );
+    assert_eq!(
+        render_chair_change(&ibot, Some("main"), Some("main"), Locale::En),
+        "main already chairs ibot."
+    );
+    assert!(render_chair_change(&ibot, Some("a"), Some("b"), Locale::Zh).contains("a → b"));
 }

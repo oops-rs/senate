@@ -574,6 +574,9 @@ senate spawn claude --secretary --alias desk # add a Speaker’s desk secretary
 senate attach reviewer                 # restore or resume as needed (Ctrl-] detaches)
 senate session list                    # active hosted sessions (a waiting command: its first line)
 senate session list --all               # include stopped and paused sessions
+senate session history --committee project    # past sessions
+senate session history --search "build error"  # search local conversations
+senate session show <session-id>               # read one past conversation
 senate session watch                   # read-only grid of terminals without an interactive viewer
 senate session watch --all             # include attached, paused and stopped sessions
 senate session approve reviewer        # answer its permission prompt (--always, --deny)
@@ -583,6 +586,7 @@ senate session restore reviewer        # ...and reopen it later (add --attach to
 senate session pause --all             # checkpoint, then stop each one...
 senate session resume --all            # ...and bring them back where they were
 senate session replace reviewer        # a fresh session takes the seat
+senate senator chair main --committee ibot # make an existing senator the chair
 ```
 
 `senate spawn` seats the session on `--committee` when given, else on the
@@ -678,7 +682,7 @@ The top level is the daily loop: `status` (a bare `senate` runs it), `inbox`
 | Group | Commands |
 | :--- | :--- |
 | `senate session` | `list` · `watch` · `approve` · `stop` · `restore` · `pause` · `resume` · `replace` · `prune` |
-| `senate senator` | `list` · `alias` · `unalias` · `seat` · `unseat` · `duty` |
+| `senate senator` | `list` · `alias` · `unalias` · `chair` · `seat` · `unseat` · `duty` |
 | `senate secretary` | `ask` (your default secretary) · `list` · `appoint` · `dismiss` · `work list\|show\|create\|assign` (the secretary team) · `desk` · `desk set` (the Speaker's desk workers, in order) |
 | `senate chat` | `send` · `thread` (simulated chat; see [Testing](#-testing--verification)) |
 | `senate setup` | `init` · `install` · `completions <zsh\|bash\|fish>` · `service install\|uninstall\|status` · `doctor` · `clean` |
@@ -771,6 +775,31 @@ with no real message to join it by (the server writes `chat_gateway.json`
 in its `data_dir` on every attach and detach and whenever that changes).
 
 ---
+
+New hosted terminals negotiate modified keys while headless and replay the
+keyboard mode on attach. Shift+Enter works when the viewer sends a distinct
+modified Enter, as Ghostty and Kitty do. Apple Terminal's default Shift+Enter
+is indistinguishable from Enter. Use Ctrl+J for a newline in Codex, Claude Code
+or Antigravity in that case. Claude Code and Antigravity also accept a trailing
+backslash followed by Enter.
+
+While an attached terminal can answer palette queries, new hosts let it
+supply fresh colors. Headless sessions use the system palette. Claude Code's
+auto theme can follow the viewer through terminal appearance reports. A
+runtime that only probes at startup may need a restart to change themes.
+The watch grid mirrors the colors the hosted runtime drew.
+
+Past sessions remain registered after their terminal stops. The History
+commands use local person-only IPC. Search builds a private, rebuildable
+SQLite index in `$SENATE_HOME/history` in the background, newest sessions
+first, and refreshes changed transcripts incrementally. While it builds,
+search replies include partial hits and progress. Prompts, replies, tool commands and paths
+are searchable, with a short prefix of tool output. The runtime transcript
+remains the source of truth. Forgetting a History entry removes its session
+record and index entries while leaving the runtime transcript in place.
+History shows the last recorded activity time. To rebuild the derived index,
+remove `history/session-search.sqlite` and its SQLite sidecars while the
+daemon is stopped, then start it again.
 
 ## Remote machines
 
@@ -960,6 +989,7 @@ Running `senate setup install --yes` registers these tools into your agent runti
 - `speaker_docket`: Inspect picks, committee crossings, and unattended agent questions.
 - `speaker_route`, `speaker_cover`, `speaker_escalate`: Re-route queries, provide checkpoint answers for absent agents, or escalate to human principals.
 - `speaker_forward`, `speaker_refuse`: Forward committee crossings or reject out-of-boundary requests.
+- `speaker_alias`, `speaker_unseat`: At the person's request, give a senator an alias on a committee (it keeps its owner), or remove its seat there (only when asked to remove it). The server checks the office's authority.
 - `open_committee`: At the person's request, open a committee for a project directory and start its chair there in one step. A committee the office did not open is refused (use `spawn`); calling again after the chair failed to start finishes it without opening twice, and never replaces a chair.
 - `chair_docket`, `chair_route`, `chair_cover`: Coordinate single-committee agent queues.
 
@@ -1129,16 +1159,16 @@ The Senate workspace contains 9 tightly scoped crates:
 
 | Crate | Version | Description |
 | :--- | :--- | :--- |
-| [`senate-core`](crates/senate-core) | `0.12.0` | Core domain types: identifiers, addressing, event envelopes, roster models, and `Hub` seams. |
-| [`senate-log`](crates/senate-log) | `0.12.0` | Append-only log engine supporting `MemoryStore`, `SqliteStore`, and `PgStore` (PostgreSQL). |
-| [`senate-server`](crates/senate-server) | `0.12.0` | Axum-powered HTTP API, Server-Sent Events (SSE) streaming, authentication, and presence leases. |
-| [`senate-speaker`](crates/senate-speaker) | `0.12.0` | Built-in model session engine (actor-based via `ractor`), triage, cover generation, and task synthesis. |
-| [`senate-work`](crates/senate-work) | `0.12.0` | Containerized autonomous worker (`DockerRunner`) and GitHub Pull Request automation (`GhForge`). |
-| [`senate-markdown`](crates/senate-markdown) | `0.12.0` | Markdown as a block tree with streaming diffs, and lazy HTML and terminal rendering with syntax highlighting. |
-| [`senate-remote-admin`](crates/senate-remote-admin) | `0.12.0` | Root-owned administrator helper for remote machine authorization (experimental). |
-| [`senate-bridge`](crates/senate-bridge) | `0.12.0` | Developer workstation bridge daemon, local IPC socket, MCP server, hooks, and the `senate` CLI. |
-| [`senated`](crates/senated) | `0.12.0` | Universal daemon executable (`--config`, `--machine`) and extensible assembly library (`Assembly`). |
-| [`senate-app-core`](crates/senate-app-core) | `0.12.0` | UniFFI Rust bridge backing the native SwiftUI macOS companion app. |
+| [`senate-core`](crates/senate-core) | `0.12.1` | Core domain types: identifiers, addressing, event envelopes, roster models, and `Hub` seams. |
+| [`senate-log`](crates/senate-log) | `0.12.1` | Append-only log engine supporting `MemoryStore`, `SqliteStore`, and `PgStore` (PostgreSQL). |
+| [`senate-server`](crates/senate-server) | `0.12.1` | Axum-powered HTTP API, Server-Sent Events (SSE) streaming, authentication, and presence leases. |
+| [`senate-speaker`](crates/senate-speaker) | `0.12.1` | Built-in model session engine (actor-based via `ractor`), triage, cover generation, and task synthesis. |
+| [`senate-work`](crates/senate-work) | `0.12.1` | Containerized autonomous worker (`DockerRunner`) and GitHub Pull Request automation (`GhForge`). |
+| [`senate-markdown`](crates/senate-markdown) | `0.12.1` | Markdown as a block tree with streaming diffs, and lazy HTML and terminal rendering with syntax highlighting. |
+| [`senate-remote-admin`](crates/senate-remote-admin) | `0.12.1` | Root-owned administrator helper for remote machine authorization (experimental). |
+| [`senate-bridge`](crates/senate-bridge) | `0.12.1` | Developer workstation bridge daemon, local IPC socket, MCP server, hooks, and the `senate` CLI. |
+| [`senated`](crates/senated) | `0.12.1` | Universal daemon executable (`--config`, `--machine`) and extensible assembly library (`Assembly`). |
+| [`senate-app-core`](crates/senate-app-core) | `0.12.1` | UniFFI Rust bridge backing the native SwiftUI macOS companion app. |
 | [`senate-e2e`](crates/senate-e2e) | — | Comprehensive end-to-end integration and lifecycle verification test suite. |
 
 ---

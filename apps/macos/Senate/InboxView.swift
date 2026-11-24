@@ -11,6 +11,17 @@ struct InboxView: View {
     @State private var agentsOpen = false
 
     var body: some View {
+        content
+            .toolbar {
+                ToolbarSpacer(.flexible)
+                if store.inboxAgents.count > 1 {
+                    ToolbarItem(placement: .primaryAction) { AgentFilter(store: store) }
+                }
+                ToolbarItem(placement: .primaryAction) { RefreshButton(store: store) }
+            }
+    }
+
+    @ViewBuilder private var content: some View {
         let shown = Set(store.inbox.map(\.key))
         let threads = store.inboxThreads.filter { shown.contains($0.key) }
         let groups = Dictionary(grouping: threads, by: \.committee)
@@ -32,9 +43,6 @@ struct InboxView: View {
                         .foregroundStyle(Theme.onSurface)
                         .accessibilityAddTraits(.isHeader)
                     Spacer(minLength: Theme.Space.m)
-                    if store.inboxAgents.count > 1 {
-                        AgentFilter(store: store)
-                    }
                 }
                 .padding(.top, Theme.Space.xxxl)
                 .padding(.leading, Theme.Space.xs)
@@ -201,5 +209,19 @@ struct WaitingRow: View {
         .accessibilityAddTraits(.isButton)
         .accessibilityLabel(Mentions.shared.plain(item.title, committee: item.committee))
         .accessibilityValue(spoken)
+    }
+}
+
+/// Read everything again (⌘R in the View menu).
+struct RefreshButton: View {
+    let store: CoreStore
+
+    var body: some View {
+        Button {
+            if store.state.online { store.refresh() } else { store.reconnect() }
+        } label: {
+            Label(L("toolbar.refresh"), systemImage: "arrow.clockwise")
+        }
+        .help(L("toolbar.refresh"))
     }
 }
