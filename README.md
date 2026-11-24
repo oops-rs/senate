@@ -750,6 +750,7 @@ The top level is the daily loop: `status` (a bare `senate` runs it), `inbox`
 | `senate secretary` | `ask` (your default secretary) · `list` · `appoint` · `dismiss` · `work list\|show\|create\|assign` (the secretary team) · `desk` · `desk set` (the Speaker's desk workers, in order) |
 | `senate observe` | `token create\|list\|revoke` · `line publish\|withdraw` · `record` · `replay` |
 | `senate card` | `set --file <path\|->` · `clear` |
+| `senate open` | `<link-or-route>`: show a place in the Senate app (`committee/senate`, `thread/senate/42`, `session/senate::claude`, `desk`, `inbox`, or a full `senate://open/v1/…` link); navigation only · `--print` the canonical link |
 | `senate chat` | `send` · `thread` (simulated chat; see [Testing](#-testing--verification)) |
 | `senate setup` | `init` · `install` · `completions <zsh\|bash\|fish>` · `service install\|uninstall\|status` · `doctor` · `clean` |
 

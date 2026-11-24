@@ -948,3 +948,59 @@ async fn committee_activity_records_are_exposed_through_the_facade() {
     assert_eq!(update.events[0].thread, Some(502));
     core.stop_activity(id);
 }
+
+#[tokio::test]
+async fn app_links_read_the_installation_and_resolve_history_ids_without_acting() {
+    let (dir, socket, world) = setup();
+    common::history(&mut world.lock().unwrap(), 3);
+    let ended = world.lock().unwrap().history[0].session_id.clone();
+    let daemon = FakeDaemon::start(&socket, Arc::clone(&world));
+    let core = AppCore::new(Some(dir.path().display().to_string()), Some("en".into())).unwrap();
+    core.start(Arc::new(Listener::default())).unwrap();
+
+    assert_eq!(
+        core.observe_installation_id().await.unwrap(),
+        common::FAKE_INSTALLATION
+    );
+    assert_eq!(
+        core.observe_history_session(format!("obs-{ended}"))
+            .await
+            .unwrap(),
+        Some(ended)
+    );
+    assert_eq!(
+        core.observe_history_session("obs-missing".into())
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        core.observe_seat_identity(common::FAKE_SEAT.into(), "refund-v2".into())
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("claude")
+    );
+    assert_eq!(
+        core.observe_seat_identity(common::FAKE_SEAT.into(), "payments".into())
+            .await
+            .unwrap(),
+        None
+    );
+    // Reads only: no request that sends, approves, attaches, stops or edits.
+    for request in daemon.requests() {
+        assert!(
+            !matches!(
+                request,
+                Request::ObserveAdmin {
+                    command: senate_observe::AdminRequest::Create { .. }
+                        | senate_observe::AdminRequest::Revoke { .. }
+                        | senate_observe::AdminRequest::Publish { .. }
+                        | senate_observe::AdminRequest::Withdraw { .. }
+                }
+            ),
+            "{request:?}"
+        );
+    }
+    drop(daemon);
+}

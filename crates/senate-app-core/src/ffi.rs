@@ -1056,7 +1056,7 @@ impl AppCore {
         }
     }
 
-    fn committee_id(&self, committee: &str) -> Result<CommitteeId, CoreError> {
+    pub(crate) fn committee_id(&self, committee: &str) -> Result<CommitteeId, CoreError> {
         CommitteeId::new(committee).map_err(|e| CoreError::Invalid {
             message: match self.locale() {
                 Locale::Zh => format!("committee {committee:?} 无效：{e}"),
@@ -1073,7 +1073,7 @@ impl AppCore {
 
     /// Run `op` with the driver on the core's runtime (the caller's
     /// executor is not tokio); a failure in the app's language.
-    async fn on_runtime<T, F, Fut>(&self, op: F) -> Result<T, CoreError>
+    pub(crate) async fn on_runtime<T, F, Fut>(&self, op: F) -> Result<T, CoreError>
     where
         T: Send + 'static,
         F: FnOnce(Arc<Driver<ListenerSink>>) -> Fut,
@@ -1117,7 +1117,7 @@ fn locale_of(language: Option<&str>) -> Locale {
 }
 
 /// The driver's [`Sink`]: snapshots to the foreign listener.
-struct ListenerSink {
+pub(crate) struct ListenerSink {
     listener: Arc<dyn CoreListener>,
 }
 

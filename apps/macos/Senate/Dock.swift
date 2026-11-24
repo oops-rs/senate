@@ -48,11 +48,56 @@ enum Dock {
 /// The app's delegate: the policy before launch, the window on a Dock click,
 /// and the status item kept when the last window closes.
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    /// Set by `SenateApp` once its store exists.
-    var store: CoreStore?
+    /// The one delegate. `NSApplication.shared.delegate` is SwiftUI's
+    /// adaptor, not this, so the app reaches it here.
+    private(set) static weak var shared: AppDelegate?
+
+    override init() {
+        super.init()
+        Self.shared = self
+    }
+
+    /// Set by `SenateApp` once its store exists; links that came first
+    /// are routed then.
+    var store: CoreStore? {
+        didSet {
+            guard let store, !early.isEmpty else { return }
+            let waiting = early
+            early = []
+            for url in waiting { store.links.open(LinkRouter.delivered(url), provenance: .system) }
+        }
+    }
+    /// `senate://` links delivered before the store was set (a link that
+    /// launched the app).
+    private var early: [URL] = []
+
+    /// `senate://open/v1/…` links from the system: to the one router.
+    /// They carry no proof of a click, so the router bounds activation.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        guard let store else {
+            early.append(contentsOf: urls.prefix(8))
+            return
+        }
+        for url in urls { store.links.open(LinkRouter.delivered(url), provenance: .system) }
+    }
+
+    /// The system's "open this URL" Apple Event, taken here rather than by
+    /// SwiftUI (which would not route it to a menu-bar app's one window).
+    @objc func openURLEvent(_ event: NSAppleEventDescriptor, reply: NSAppleEventDescriptor) {
+        guard let text = event.paramDescriptor(forKeyword: keyDirectObject)?.stringValue,
+              let url = URL(string: text) else { return }
+        application(NSApplication.shared, open: [url])
+    }
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(Dock.policy(showInDock: Dock.showsInDock()))
+    }
+
+    /// Links: this handler, installed once SwiftUI has set up its own.
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSAppleEventManager.shared().setEventHandler(
+            self, andSelector: #selector(openURLEvent(_:reply:)),
+            forEventClass: AEEventClass(kInternetEventClass), andEventID: AEEventID(kAEGetURL))
     }
 
     /// A click on the Dock icon brings the window back.
