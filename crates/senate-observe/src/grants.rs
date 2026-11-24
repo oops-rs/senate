@@ -121,6 +121,19 @@ pub enum GrantError {
 struct StoredGrant {
     info: GrantInfo,
     digest: [u8; 32],
+    // Local storage provenance. Grants from before app confirmation lack it.
+    #[serde(default)]
+    issued_with_app_consent: bool,
+}
+
+impl StoredGrant {
+    fn has_valid_issuance(&self) -> bool {
+        match (self.info.scope, self.info.lines) {
+            (Scope::Metadata, None) => true,
+            (Scope::Lines, Some(_)) => self.issued_with_app_consent,
+            _ => false,
+        }
+    }
 }
 
 struct ActiveGrant {
@@ -201,7 +214,39 @@ pub struct Registry {
     pub(crate) releases: crate::releases::Releases,
 }
 
+/// Issuance authority for the machine's verified app-confirmation dispatcher.
+///
+/// The machine obtains this separately at bootstrap. An ordinary registry
+/// handle, including the one used by the HTTP router, cannot recover it.
+pub struct AppConsentedGrants {
+    registry: Arc<Registry>,
+}
+
+impl AppConsentedGrants {
+    /// Issue the immutable line grant approved by the verified app dispatcher.
+    pub fn create_after_app_consent(
+        &self,
+        grant: CreateGrant,
+        readable: BTreeSet<CommitteeId>,
+    ) -> Result<IssuedGrant, GrantError> {
+        self.registry.create_after_app_consent(grant, readable)
+    }
+}
+
 impl Registry {
+    /// Open the machine registry and return a separate app issuance authority.
+    /// Keep the second result inside the verified dispatch boundary.
+    pub fn open_for_app_confirmation(
+        directory: &Path,
+        address: SocketAddr,
+    ) -> Result<(Arc<Self>, AppConsentedGrants), GrantError> {
+        let registry = Self::open(directory, address)?;
+        let issuer = AppConsentedGrants {
+            registry: registry.clone(),
+        };
+        Ok((registry, issuer))
+    }
+
     pub fn open(directory: &Path, address: SocketAddr) -> Result<Arc<Self>, GrantError> {
         if !address.ip().is_loopback() || address.port() == 0 {
             return Err(GrantError::Invalid("a bound loopback address is required"));
@@ -223,9 +268,7 @@ impl Registry {
                 stored
                     .into_iter()
                     .filter(|grant| {
-                        grant.info.expires_at > Utc::now()
-                            && grant.info.scope == Scope::Metadata
-                            && grant.info.lines.is_none()
+                        grant.info.expires_at > Utc::now() && grant.has_valid_issuance()
                     })
                     .map(|grant| (grant.info.id.clone(), ActiveGrant::new(grant)))
                     .collect(),
@@ -416,10 +459,10 @@ impl Registry {
     }
 
     pub fn line_for(&self, grant: &GrantInfo, event: &senate_core::Event) -> Option<String> {
-        if grant.lines != Some(LinePolicy::Published) {
+        if grant.scope != Scope::Lines {
             return None;
         }
-        self.previews.line(LinePolicy::Published, event)
+        self.previews.line(grant.lines?, event)
     }
 
     pub fn card(&self, key: &CardKey) -> Option<senate_observe_protocol::Card> {
@@ -443,7 +486,48 @@ impl Registry {
         self.address
     }
 
+    /// Ordinary issuance accepts metadata grants.
+    ///
+    /// ```compile_fail
+    /// use senate_observe::{CreateGrant, Registry};
+    ///
+    /// fn bypass(registry: &Registry, grant: CreateGrant) {
+    ///     let _ = registry.create_after_app_consent(grant, Default::default());
+    /// }
+    /// ```
     pub fn create(
+        &self,
+        request: CreateGrant,
+        readable: BTreeSet<CommitteeId>,
+    ) -> Result<IssuedGrant, GrantError> {
+        if request.scope == Scope::Lines {
+            return Err(GrantError::Invalid(
+                "lines grants require daemon-verified person confirmation",
+            ));
+        }
+        if request.lines.is_some() {
+            return Err(GrantError::Invalid(
+                "metadata grants do not accept a lines policy",
+            ));
+        }
+        self.issue(request, readable)
+    }
+
+    fn create_after_app_consent(
+        &self,
+        request: CreateGrant,
+        readable: BTreeSet<CommitteeId>,
+    ) -> Result<IssuedGrant, GrantError> {
+        if request.scope != Scope::Lines || request.lines.is_none() {
+            return Err(GrantError::Invalid(
+                "app-confirmed issuance requires a lines grant with an explicit policy",
+            ));
+        }
+        self.issue(request, readable)
+    }
+
+    // The two callers validate disjoint scope/policy pairs before entering.
+    fn issue(
         &self,
         request: CreateGrant,
         readable: BTreeSet<CommitteeId>,
@@ -452,16 +536,6 @@ impl Registry {
         if name.is_empty() || name.chars().count() > 80 || name.chars().any(char::is_control) {
             return Err(GrantError::Invalid(
                 "expected a display name of 1 to 80 characters",
-            ));
-        }
-        if request.scope == Scope::Lines {
-            return Err(GrantError::Invalid(
-                "lines grants require daemon-verified person confirmation, which is unavailable",
-            ));
-        }
-        if request.lines.is_some() {
-            return Err(GrantError::Invalid(
-                "metadata grants do not accept a lines policy",
             ));
         }
         let days = request.expires_in_days.unwrap_or(DEFAULT_DAYS);
@@ -514,6 +588,7 @@ impl Registry {
         let stored = StoredGrant {
             info: info.clone(),
             digest: digest(&token),
+            issued_with_app_consent: request.scope == Scope::Lines,
         };
         self.save(grants.values().map(|grant| &grant.stored).chain([&stored]))?;
         grants.insert(id, ActiveGrant::new(stored));
@@ -871,6 +946,91 @@ mod tests {
             assert!(registry.create(requested, BTreeSet::new()).is_err());
         }
         assert!(registry.list().is_empty());
+        Ok(())
+    }
+    #[test]
+    fn only_app_issued_lines_survive_restart_and_release_the_selected_preview()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let address = "127.0.0.1:32111".parse()?;
+        let (registry, issuer) = Registry::open_for_app_confirmation(directory.path(), address)?;
+        assert!(
+            issuer
+                .create_after_app_consent(request(), BTreeSet::new())
+                .is_err()
+        );
+        assert!(
+            issuer
+                .create_after_app_consent(
+                    CreateGrant {
+                        scope: Scope::Lines,
+                        ..request()
+                    },
+                    BTreeSet::new()
+                )
+                .is_err()
+        );
+        let committee: CommitteeId = "visible".parse()?;
+        let readable = BTreeSet::from([committee.clone()]);
+        let issue = |policy| {
+            issuer.create_after_app_consent(
+                CreateGrant {
+                    scope: Scope::Lines,
+                    lines: Some(policy),
+                    ..request()
+                },
+                readable.clone(),
+            )
+        };
+        let automatic = issue(LinePolicy::Auto)?;
+        let published = issue(LinePolicy::Published)?;
+        let legacy = issue(LinePolicy::Auto)?;
+        let path = directory.path().join("observe-grants.json");
+        let mut stored: Vec<serde_json::Value> = serde_json::from_slice(&fs::read(&path)?)?;
+        for entry in &mut stored {
+            if entry["info"]["id"] == legacy.grant.id {
+                entry
+                    .as_object_mut()
+                    .ok_or("missing stored grant object")?
+                    .remove("issued_with_app_consent");
+            }
+        }
+        fs::write(path, serde_json::to_vec(&stored)?)?;
+        drop(issuer);
+        drop(registry);
+
+        let registry = Registry::open(directory.path(), address)?;
+        let line = |issued: &IssuedGrant| {
+            registry
+                .authenticate(&issued.token, None, false)
+                .map(|authorization| authorization.info)
+                .map_err(|_| "app-issued grant missing")
+        };
+        let automatic = line(&automatic)?;
+        let published = line(&published)?;
+        assert_eq!(automatic.committees, Some(readable));
+        assert!(registry.authenticate(&legacy.token, None, false).is_err());
+        let event = senate_core::NewEvent::new(
+            committee,
+            senate_core::Kind::Note,
+            senate_core::Address::Speaker,
+            "preview\nprivate body",
+        )
+        .into_event(Seq(1), Utc::now());
+        assert_eq!(
+            registry.line_for(&automatic, &event).as_deref(),
+            Some("preview")
+        );
+        assert_eq!(registry.line_for(&published, &event), None);
+        registry.previews.publish(Preview {
+            committee: event.committee.clone(),
+            event_id: event.id.clone(),
+            line: "reviewed".into(),
+        })?;
+        assert_eq!(
+            registry.line_for(&published, &event).as_deref(),
+            Some("reviewed")
+        );
         Ok(())
     }
 }

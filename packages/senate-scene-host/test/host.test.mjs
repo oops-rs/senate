@@ -21,3 +21,29 @@ test("scene uses one scoped channel and receives structured results", async () =
     pair.port2.close();
   }
 });
+
+test("environment hints are forwarded and remain optional", async () => {
+  const pair = new MessageChannel();
+  const host = createSceneHost(pair.port1);
+  const environment = {
+    color_scheme: "dark", reduced_motion: false, locale: "en", time_zone: "UTC",
+    visible: true, viewport: { width: 320, height: 240 },
+    safe_area: { top: 0, right: 0, bottom: 0, left: 0 },
+  };
+  try {
+    const received = new Promise((resolve) => {
+      const messages = [];
+      host.subscribe(({ data }) => {
+        messages.push(data);
+        if (messages.length === 2) resolve(messages);
+      });
+    });
+    for (const data of [environment, { ...environment, focused: false, power: "low_power" }]) {
+      pair.port2.postMessage({ host_version: 1, type: "environment", data });
+    }
+    assert.deepEqual(await received, [environment, { ...environment, focused: false, power: "low_power" }]);
+  } finally {
+    host.close();
+    pair.port2.close();
+  }
+});

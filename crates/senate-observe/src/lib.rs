@@ -18,7 +18,8 @@ mod replay;
 
 pub use cards::CardKey;
 pub use grants::{
-    AdminRequest, CreateGrant, GrantError, GrantInfo, Installation, IssuedGrant, Registry, Scope,
+    AdminRequest, AppConsentedGrants, CreateGrant, GrantError, GrantInfo, Installation,
+    IssuedGrant, Registry, Scope,
 };
 pub use http::router;
 pub use previews::{LinePolicy, Preview, first_line};

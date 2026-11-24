@@ -8,6 +8,10 @@ export interface Environment {
   locale: string;
   time_zone: string;
   visible: boolean;
+  /** Whether the host window has focus, when the shell can tell. */
+  focused?: boolean;
+  /** Low-power mode takes precedence over the current power source. */
+  power?: "ac" | "battery" | "low_power";
   viewport: { width: number; height: number };
   safe_area: { top: number; right: number; bottom: number; left: number };
 }
