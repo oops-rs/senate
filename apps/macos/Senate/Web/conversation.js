@@ -433,6 +433,17 @@
         const content = el("div", "senate-body");
         content.appendChild(body(row.md));
         d.appendChild(content);
+        // Images it sent along: small pictures (served by the app).
+        if (s.images && s.images.length) {
+          const strip = el("div", "senate-images");
+          for (const src of s.images) {
+            if (!/^senate-app:\/\/thumb\/[0-9a-f-]+$/.test(src)) continue;
+            const img = el("img");
+            img.src = src; img.alt = ""; img.decoding = "async";
+            strip.appendChild(img);
+          }
+          d.appendChild(strip);
+        }
         if (s.committee && s.thread) {
           d.dataset.committee = s.committee; d.dataset.thread = String(s.thread);
           d.setAttribute("role", "link");

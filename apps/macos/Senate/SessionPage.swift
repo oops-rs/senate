@@ -39,6 +39,11 @@ struct SessionPage: View {
                     label: L("session.say"),
                     placeholder: L("session.say_placeholder", session.displayName),
                     hint: L("session.saying_as", store.state.person ?? "?", session.committee ?? ""),
+                    attachments: Binding(
+                        get: { store.sessionAttachments[session.sessionId] ?? [] },
+                        set: { store.sessionAttachments[session.sessionId] = $0.isEmpty ? nil : $0 }
+                    ),
+                    refused: { store.actionError = $0 },
                     busy: store.isBusy("say:\(session.sessionId)"),
                     online: store.state.online
                 ) {

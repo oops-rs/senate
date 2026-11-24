@@ -503,3 +503,41 @@ extension ConversationPageTests {
         #expect(group == "true|senate.answer", "\(group ?? "nil")")
     }
 }
+
+extension ConversationPageTests {
+    /// A card naming an image the app sent shows a small picture of it,
+    /// loaded from the app's own scheme (the page's policy allows nothing
+    /// else).
+    @Test func aCardShowsTheImageItSent() async throws {
+        let size = NSSize(width: 64, height: 40)
+        let image = NSImage(size: size)
+        image.lockFocus()
+        NSColor.systemTeal.setFill()
+        NSRect(origin: .zero, size: size).fill()
+        image.unlockFocus()
+        let png = try #require(Attachment.picture(image)).data
+        Thumbnails.remember(path: "/tmp/senate-fake/drops/fixture/shot.png", data: png)
+
+        let page = ConversationPage(store: nil)
+        for _ in 0..<500 where !page.isReady { try await Task.sleep(for: .milliseconds(20)) }
+        let rows = ConversationRows.rows([
+            TimelineEntry(seq: 1, at: nil, truncated: false, body: .senate(message: SenateLine(
+                committee: "senate", seq: 300, thread: 300, from: "alice", kind: "note", kindLabel: "note",
+                text: "Here.\n\n/tmp/senate-fake/drops/fixture/shot.png"))),
+        ])
+        ConversationPage.fixtureRows["card-image"] = rows
+        page.show(.fixtureRows("card-image"))
+        var loaded = 0
+        for _ in 0..<200 {
+            loaded = await page.evaluate("""
+                const i = document.querySelector('.senate-images img');
+                return i && i.complete ? i.naturalWidth : 0
+                """) as? Int ?? 0
+            if loaded > 0 { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(loaded > 0, "the thumbnail loaded")
+        let src = await page.evaluate("return document.querySelector('.senate-images img').getAttribute('src')") as? String
+        #expect(src?.hasPrefix("senate-app://thumb/") == true)
+    }
+}

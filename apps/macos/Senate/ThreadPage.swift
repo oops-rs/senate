@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 import SenateCore
 
 /// One thread waiting on you, opened from the sidebar, the home view, the
@@ -225,6 +226,11 @@ struct MessageComposer: View {
     /// it would have said is VoiceOver's hint.
     var footnote: String?
     var hint: String?
+    /// Files and pictures to send with it (a session's composer only: the
+    /// committee log carries no attachments); nil refuses drops.
+    var attachments: Binding<[Attachment]>?
+    /// A file that could not be taken (too large, unreadable).
+    var refused: ((String) -> Void)?
     let busy: Bool
     let online: Bool
     let send: () -> Void
@@ -232,8 +238,11 @@ struct MessageComposer: View {
 
     /// Whether ⌘↩ (or the button) sends now: something to send, not
     /// already sending, online, and no input method mid-composition.
-    nonisolated static func canSend(_ text: String, busy: Bool, online: Bool, composing: Bool) -> Bool {
-        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !busy && online && !composing
+    nonisolated static func canSend(
+        _ text: String, busy: Bool, online: Bool, composing: Bool, attachments: Int = 0
+    ) -> Bool {
+        (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || attachments > 0)
+            && !busy && online && !composing
     }
 
     /// An input method is composing in the focused text (zh input): ⌘↩
@@ -242,14 +251,45 @@ struct MessageComposer: View {
         (NSApp.keyWindow?.firstResponder as? NSTextView)?.hasMarkedText() ?? false
     }
 
+    /// Files and pictures dropped or pasted: each as an attachment.
+    private func take(_ providers: [NSItemProvider]) -> Bool {
+        guard let attachments else { return false }
+        var took = false
+        for provider in providers {
+            if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+                took = true
+                _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                    guard let url else { return }
+                    Task { @MainActor in
+                        do { attachments.wrappedValue.append(try Attachment.file(url)) } catch { refused?(describe(error)) }
+                    }
+                }
+            } else if provider.canLoadObject(ofClass: NSImage.self) {
+                took = true
+                _ = provider.loadObject(ofClass: NSImage.self) { image, _ in
+                    guard let image = image as? NSImage else { return }
+                    Task { @MainActor in
+                        if let a = Attachment.picture(image) { attachments.wrappedValue.append(a) }
+                    }
+                }
+            }
+        }
+        return took
+    }
+
     private func trySend() {
-        guard Self.canSend(text, busy: busy, online: online, composing: Self.composing) else { return }
+        guard Self.canSend(text, busy: busy, online: online, composing: Self.composing,
+                           attachments: attachments?.wrappedValue.count ?? 0) else { return }
         send()
     }
 
     var body: some View {
-        let ready = Self.canSend(text, busy: busy, online: online, composing: false)
+        let ready = Self.canSend(text, busy: busy, online: online, composing: false,
+                                 attachments: attachments?.wrappedValue.count ?? 0)
         VStack(alignment: .leading, spacing: Theme.Space.xs) {
+            if let attachments, !attachments.wrappedValue.isEmpty {
+                AttachmentChips(attachments: attachments)
+            }
             TextEditor(text: $text)
                 .font(Theme.Fonts.reading)
                 .scrollContentBackground(.hidden)
@@ -312,10 +352,58 @@ struct MessageComposer: View {
                 .accessibilityHidden(true)
         }
         .shadow(color: .black.opacity(0.07), radius: 14, y: 3)
+        .onDrop(of: attachments == nil ? [] : [.fileURL, .image], isTargeted: nil) { providers in
+            take(providers)
+        }
+        .onPasteCommand(of: attachments == nil ? [] : [.fileURL, .png, .tiff]) { providers in
+            _ = take(providers)
+        }
         .frame(maxWidth: Theme.composerWidth)
         .padding(.horizontal, Theme.Space.s)
         .padding(.top, Theme.Space.xs)
         .padding(.bottom, 10)
         .frame(maxWidth: .infinity)
+    }
+}
+
+/// The composer's attachments: a small picture (or the file's icon) and
+/// its name, each removable.
+private struct AttachmentChips: View {
+    @Binding var attachments: [Attachment]
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: Theme.Space.xs) {
+                ForEach(attachments) { a in
+                    HStack(spacing: 6) {
+                        Group {
+                            if let t = a.thumbnail {
+                                Image(nsImage: t).resizable().scaledToFill()
+                            } else {
+                                Image(systemName: "doc").foregroundStyle(Theme.onSurfaceVariant)
+                            }
+                        }
+                        .frame(width: 28, height: 28)
+                        .clipShape(RoundedRectangle(cornerRadius: 5))
+                        Text(verbatim: a.name)
+                            .font(Theme.Fonts.meta)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .frame(maxWidth: 160, alignment: .leading)
+                        Button { attachments.removeAll { $0.id == a.id } } label: {
+                            Image(systemName: "xmark.circle.fill").foregroundStyle(Theme.onSurfaceVariant)
+                        }
+                        .buttonStyle(.plain)
+                        .help(L("composer.remove_attachment", a.name))
+                        .accessibilityLabel(L("composer.remove_attachment", a.name))
+                    }
+                    .padding(.leading, 4)
+                    .padding(.trailing, 6)
+                    .padding(.vertical, 4)
+                    .background(Theme.containerHigh, in: RoundedRectangle(cornerRadius: 8))
+                    .accessibilityElement(children: .contain)
+                }
+            }
+        }
     }
 }

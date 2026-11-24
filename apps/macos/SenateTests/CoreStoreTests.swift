@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import ImageIO
 import Testing
 @testable import Senate
 import SenateCore
@@ -880,5 +881,106 @@ extension CoreStoreTests {
         await store.say(to: session)
         #expect(store.sessionDrafts["s-claude"] == "No.")
         #expect(store.unconfirmed("s-claude", in: [card]).map(\.seq) == [301])
+    }
+}
+
+extension CoreStoreTests {
+    /// The note names each staged file on a line of its own, quoted the
+    /// shell's way when it has spaces; image paths are read back from it.
+    @Test func aNoteCarriesItsFilesPaths() {
+        let body = Attachment.noteBody("Look at these.", paths: ["/h/drops/a.png", "/h/drops/my shot.png", "/h/drops/it's.txt"])
+        #expect(body == "Look at these.\n\n/h/drops/a.png\n'/h/drops/my shot.png'\n'/h/drops/it'\\''s.txt'")
+        #expect(Attachment.noteBody("", paths: ["/h/drops/a.png"]) == "/h/drops/a.png")
+        #expect(Attachment.imagePaths(in: body) == ["/h/drops/a.png", "/h/drops/my shot.png"])
+        #expect(MessageComposer.canSend("", busy: false, online: true, composing: false, attachments: 1))
+    }
+
+    /// Sending with attachments stages each, in order, then says the note
+    /// with their paths; a refusal keeps the text and the attachments.
+    @Test func attachmentsAreStagedThenNamedInTheNote() async throws {
+        let store = store()
+        let session = sessionLine("claude")
+        let a = Attachment(name: "shot.png", data: Data([1, 2, 3]), thumbnail: nil)
+        let b = Attachment(name: "log.txt", data: Data([4]), thumbnail: nil)
+
+        // Refused while staging: nothing said, everything kept.
+        store.sessionDrafts["s-claude"] = "See attached."
+        store.sessionAttachments["s-claude"] = [a, b]
+        core.failNext = .Failed(message: "attachments are limited to 20 MiB")
+        await store.say(to: session)
+        #expect(store.actionError?.contains("20 MiB") == true)
+        #expect(store.sessionDrafts["s-claude"] == "See attached.")
+        #expect(store.sessionAttachments["s-claude"]?.count == 2)
+        #expect(!core.calls.contains { $0.hasPrefix("say ") })
+
+        await store.say(to: session)
+        let calls = core.calls.filter { $0.hasPrefix("drop ") || $0.hasPrefix("say ") }
+        #expect(calls.suffix(3) == [
+            "drop s-claude shot.png 3", "drop s-claude log.txt 1",
+            "say s-claude See attached.\n\n/tmp/senate-fake/drops/fixture/shot.png\n/tmp/senate-fake/drops/fixture/log.txt",
+        ])
+        #expect(store.sessionDrafts["s-claude"] == nil && store.sessionAttachments["s-claude"] == nil)
+    }
+}
+
+extension CoreStoreTests {
+    /// A tiny PNG of the given size.
+    private func png(_ w: Int, _ h: Int) -> Data {
+        let image = NSImage(size: NSSize(width: w, height: h))
+        image.lockFocus()
+        NSColor.systemOrange.setFill()
+        NSRect(x: 0, y: 0, width: w, height: h).fill()
+        image.unlockFocus()
+        let rep = NSBitmapImageRep(data: image.tiffRepresentation!)!
+        return rep.representation(using: .png, properties: [:])!
+    }
+
+    /// Thumbnails read only a session's drop, in the daemon's exact layout
+    /// `<home>/hosts/<host>/drops/<drop>/<file>`; one level off is refused.
+    @Test func thumbnailsReadOnlyASessionsDrops() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("senate-thumbs-\(UUID().uuidString)")
+        let drop = home.appendingPathComponent("hosts/01HOST/drops/01DROP")
+        try FileManager.default.createDirectory(at: drop, withIntermediateDirectories: true)
+        let file = drop.appendingPathComponent("Screenshot 2026-11-24.png")
+        try png(800, 500).write(to: file)
+        #expect(Thumbnails.drop(file.path, home: home.path) != nil)
+        #expect(Thumbnails.url(for: file.path, home: home.path)?.hasPrefix("senate-app://thumb/") == true)
+
+        // One level shallower (drops/<file>) and one deeper: refused.
+        let shallow = home.appendingPathComponent("hosts/01HOST/drops/flat.png")
+        try png(10, 10).write(to: shallow)
+        #expect(Thumbnails.drop(shallow.path, home: home.path) == nil)
+        let deep = drop.appendingPathComponent("more")
+        try FileManager.default.createDirectory(at: deep, withIntermediateDirectories: true)
+        try png(10, 10).write(to: deep.appendingPathComponent("x.png"))
+        #expect(Thumbnails.drop(deep.appendingPathComponent("x.png").path, home: home.path) == nil)
+        // Outside the Senate home, or a symlink out of it: refused.
+        let outside = home.appendingPathComponent("elsewhere.png")
+        try png(10, 10).write(to: outside)
+        let link = drop.appendingPathComponent("link.png")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: outside)
+        #expect(Thumbnails.drop(link.path, home: home.path) == nil)
+        #expect(Thumbnails.drop(outside.path, home: home.path) == nil)
+        // A directory where the file would be: refused.
+        let dir = drop.appendingPathComponent("folder.png")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        #expect(Thumbnails.drop(dir.path, home: home.path) == nil)
+    }
+
+    /// Only small pictures are kept, and only so many.
+    @Test func thumbnailsAreSmallAndBounded() throws {
+        let big = png(3000, 1000)
+        let source = try #require(CGImageSourceCreateWithData(big as CFData, nil))
+        let small = try #require(Thumbnails.small(source))
+        let props = CGImageSourceCopyPropertiesAtIndex(CGImageSourceCreateWithData(small as CFData, nil)!, 0, nil)
+            as? [CFString: Any]
+        #expect((props?[kCGImagePropertyPixelWidth] as? Int).map { $0 <= Thumbnails.maxPixels } == true)
+        let tiny = png(4, 4)
+        for i in 0..<(Thumbnails.capacity + 20) {
+            Thumbnails.remember(path: "/bounded/\(i).png", data: tiny)
+        }
+        #expect(Thumbnails.count <= Thumbnails.capacity)
+        #expect(Thumbnails.url(for: "/bounded/0.png", home: nil) == nil, "the oldest went")
+        #expect(Thumbnails.url(for: "/bounded/\(Thumbnails.capacity + 19).png", home: nil) != nil)
     }
 }
