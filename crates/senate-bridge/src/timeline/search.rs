@@ -21,6 +21,8 @@ use crate::ipc::{
 use crate::session::{Runtime, Session};
 
 const DB: &str = "session-search.sqlite";
+// A parser change can shift timeline ordinals without changing the file.
+const PARSER_REVISION: u32 = 1;
 const TOOL_OUTPUT: usize = 512;
 const SNIPPET: usize = 320;
 
@@ -36,6 +38,8 @@ struct Stamp {
     inode: u64,
     #[serde(default)]
     incomplete: bool,
+    #[serde(default)]
+    parser_revision: u32,
 }
 
 impl Stamp {
@@ -55,6 +59,7 @@ impl Stamp {
             device: meta.dev(),
             inode: meta.ino(),
             incomplete: false,
+            parser_revision: PARSER_REVISION,
         })
     }
 
@@ -63,6 +68,7 @@ impl Stamp {
             && self.runtime == other.runtime
             && self.device == other.device
             && self.inode == other.inode
+            && self.parser_revision == other.parser_revision
     }
 }
 
@@ -420,7 +426,7 @@ fn index_source(tx: &Transaction<'_>, id: &str, stamp: &mut Stamp) -> anyhow::Re
             break;
         }
         let checkpoint = serde_json::to_vec(&watch)?;
-        if previous.as_ref().is_none_or(|(_, old)| *old != checkpoint) {
+        if reset || previous.as_ref().is_none_or(|(_, old)| *old != checkpoint) {
             tx.execute(
                 "INSERT OR REPLACE INTO sources VALUES (?1,?2,?3)",
                 params![id, serde_json::to_vec(stamp)?, checkpoint],
@@ -608,6 +614,23 @@ mod tests {
             1
         );
         assert_eq!(writer.refresh_one(&session)?, (false, false));
+
+        // The file still matches, but its old parser could have assigned
+        // different ordinals. A pre-revision stamp must restart the scan.
+        let stamp: Vec<u8> = writer.0.query_row(
+            "SELECT stamp FROM sources WHERE session_id = 'archive'",
+            [],
+            |row| row.get(0),
+        )?;
+        let mut legacy: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_slice(&stamp)?;
+        assert!(legacy.remove("parser_revision").is_some());
+        writer.0.execute(
+            "UPDATE sources SET stamp = ?1 WHERE session_id = 'archive'",
+            [serde_json::to_vec(&legacy)?],
+        )?;
+        assert_eq!(writer.refresh_one(&session)?, (true, true));
+        assert_eq!(writer.refresh_one(&session)?, (true, false));
         Ok(())
     }
 }

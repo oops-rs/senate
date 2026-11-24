@@ -63,9 +63,8 @@ pub(super) fn user_events(record: &Value, include_results: bool) -> Vec<Event> {
         || record["isCompactSummary"] == true;
     let content = &record["message"]["content"];
     let user = |text: &str| {
-        // Some versions mark a delivered Senate user message as meta.
-        if injected && !text.trim_start().starts_with("[senate") {
-            Vec::new()
+        if injected {
+            parse::delivered_only(text)
         } else {
             parse::user_text(text)
         }
