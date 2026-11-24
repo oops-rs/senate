@@ -52,6 +52,7 @@ struct CommitteeView {
     threads: Vec<public::Thread>,
     docket: Vec<public::DeskItem>,
     windows: public::Truncation,
+    waiting_on_person: BTreeSet<String>,
     head: Seq,
 }
 
@@ -62,6 +63,28 @@ impl SenateSource for Source {
             || tokio::sync::broadcast::channel(1).1,
             |hub| hub.subscribe(),
         )
+    }
+
+    fn wire_snapshot(
+        &self,
+        grant: &GrantInfo,
+        snapshot: &mut public::Snapshot,
+    ) -> Result<(), ProjectionError> {
+        let registry = self.registry.upgrade().ok_or(ProjectionError::NotReady)?;
+        senate_observe::WireIdentities {
+            registry: &registry,
+            grant,
+        }
+        .snapshot(snapshot)
+    }
+
+    fn wire_hint(&self, grant: &GrantInfo, hint: &mut Hint) -> Result<(), ProjectionError> {
+        let registry = self.registry.upgrade().ok_or(ProjectionError::NotReady)?;
+        senate_observe::WireIdentities {
+            registry: &registry,
+            grant,
+        }
+        .hint(hint)
     }
 
     fn idle(&self) {
@@ -147,6 +170,7 @@ impl SenateSource for Source {
             },
         };
         let mut heads = BTreeMap::new();
+        let mut waiting = BTreeMap::new();
         for row in rows {
             heads.insert(
                 row.committee
@@ -155,6 +179,7 @@ impl SenateSource for Source {
                     .map_err(|_| ProjectionError::NotReady)?,
                 row.head,
             );
+            waiting.insert(row.committee.id.clone(), row.waiting_on_person);
             snapshot.committees.push(row.committee);
             snapshot.senators.extend(row.senators);
             snapshot.retired.extend(row.retired);
@@ -231,6 +256,17 @@ impl SenateSource for Source {
             );
         }
         registry.merge_machine_facts(grant, &mut snapshot).await?;
+        for seat in &mut snapshot.senators {
+            if matches!(
+                seat.state,
+                public::SenatorState::Idle | public::SenatorState::Unknown
+            ) && waiting
+                .get(&seat.committee_id)
+                .is_some_and(|owners| owners.contains(&seat.id))
+            {
+                seat.state = public::SenatorState::WaitingOnPerson;
+            }
+        }
         for committee in &mut snapshot.committees {
             committee.card = registry.card(&CardKey::Committee {
                 committee_id: committee
@@ -295,6 +331,7 @@ impl SenateSource for Source {
             let target = Target::Senator(format!("{committee}::{id}"));
             let row = public::SenatorRef { senator_id: id };
             return Ok(Some(Hint {
+                at: None,
                 committee_id: Some(committee.into()),
                 link: link(&state.senate.id, target),
                 event: match change.action {
@@ -341,6 +378,7 @@ impl SenateSource for Source {
             |root| Target::Thread(committee.to_owned(), root),
         );
         Ok(Some(Hint {
+            at: None,
             committee_id: Some(committee.into()),
             link: link(&state.senate.id, target),
             event: public::Event::MessagePosted(public::MessagePosted {
@@ -383,6 +421,7 @@ impl SenateSource for Source {
     ) -> Result<Option<Hint>, ProjectionError> {
         let registry = self.registry.upgrade().ok_or(ProjectionError::NotReady)?;
         match notice {
+            LocalNotice::Playback(_) => Ok(None),
             LocalNotice::Preview { committee, seq }
                 if grant.lines == Some(LinePolicy::Published) =>
             {
@@ -394,6 +433,7 @@ impl SenateSource for Source {
                     return Ok(None);
                 };
                 Ok(data.line.map(|line| Hint {
+                    at: None,
                     committee_id: message.committee_id,
                     link: message.link,
                     event: public::Event::MessageLinePublished(public::MessageLinePublished {
@@ -427,6 +467,7 @@ impl SenateSource for Source {
                     }
                 });
                 Ok(Some(Hint {
+                    at: None,
                     committee_id: message.committee_id,
                     link: message.link,
                     event: public::Event::MessageRouted(public::MessageRouted {
@@ -461,6 +502,7 @@ impl SenateSource for Source {
                     tool_kind,
                 };
                 Ok(Some(Hint {
+                    at: None,
                     committee_id: Some(committee.to_string()),
                     link: link(
                         &state.senate.id,
@@ -485,9 +527,10 @@ impl SenateSource for Source {
                     return Ok(None);
                 }
                 let id = registry
-                    .approval_id(&native_id)
+                    .approval_id(grant, &native_id)
                     .map_err(|_| ProjectionError::NotReady)?;
                 Ok(Some(Hint {
+                    at: None,
                     committee_id: Some(committee.to_string()),
                     link: link(&state.senate.id, Target::Approvals),
                     event: public::Event::ApprovalDecided(public::ApprovalDecided {
@@ -590,6 +633,7 @@ fn card_hint(state: &public::Snapshot, key: CardKey, revision: String) -> Option
         }
     };
     Some(Hint {
+        at: None,
         committee_id,
         link,
         event: public::Event::CardChanged(public::CardChanged { subject, revision }),
@@ -667,6 +711,7 @@ async fn committee_view(
         desk_items: false,
     };
     let mut threads = Vec::new();
+    let mut waiting_on_person = BTreeSet::new();
     let mut before = None;
     let mut counts = [0usize; 2];
     for _ in 0..THREAD_SCAN_PAGES {
@@ -704,6 +749,12 @@ async fn committee_view(
                 continue;
             }
             let seq = wire_seq(thread.root)?;
+            if matches!(thread.waits(), Some(senate_core::task::WaitsOn::Person))
+                && let Some(owner) = &thread.owner
+                && seated.contains(&owner.agent)
+            {
+                waiting_on_person.insert(owner.agent.to_string());
+            }
             threads.push(public::Thread {
                 committee_id: committee.to_string(),
                 root_seq: seq,
@@ -794,6 +845,7 @@ async fn committee_view(
         threads,
         docket,
         windows,
+        waiting_on_person,
         head,
     })
 }

@@ -3,6 +3,7 @@
 
 mod event;
 pub mod link;
+pub mod recording;
 mod state;
 mod tools;
 

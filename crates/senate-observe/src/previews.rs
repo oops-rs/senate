@@ -61,7 +61,7 @@ impl Previews {
             LinePolicy::Published => lock(&self.entries)
                 .get(&event.id)
                 .filter(|preview| preview.committee == event.committee)
-                .map(|preview| preview.line.clone()),
+                .and_then(|preview| first_line(&preview.line)),
         }
     }
 
@@ -117,13 +117,30 @@ impl Previews {
     }
 }
 
+pub(crate) fn safe_label_char(c: char) -> bool {
+    use unicode_general_category::{GeneralCategory as Category, get_general_category};
+
+    !matches!(
+        get_general_category(c),
+        Category::Control
+            | Category::Format
+            | Category::PrivateUse
+            | Category::Surrogate
+            | Category::LineSeparator
+            | Category::ParagraphSeparator
+    ) && !matches!(c, '\u{e0000}'..='\u{e007f}')
+}
+
 pub fn first_line(body: &str) -> Option<String> {
-    let line = body.lines().next()?;
-    let clean: String = line.chars().filter(|character| {
-        !character.is_control() && !matches!(character,
-            '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
-        )
-    }).collect();
+    let line = body
+        .split([
+            '\r', '\n', '\u{000b}', '\u{000c}', '\u{0085}', '\u{2028}', '\u{2029}',
+        ])
+        .next()?;
+    let clean: String = line
+        .chars()
+        .filter(|&character| safe_label_char(character))
+        .collect();
     let preview: String = clean.trim().chars().take(80).collect();
     (!preview.is_empty()).then_some(preview)
 }
@@ -141,6 +158,18 @@ mod tests {
         assert_eq!(result.len(), 320);
         assert!(!result.contains('\u{202e}'));
         assert_eq!(first_line("\nprivate second line"), None);
+        for separator in [
+            '\r', '\n', '\u{000b}', '\u{000c}', '\u{0085}', '\u{2028}', '\u{2029}',
+        ] {
+            assert_eq!(
+                first_line(&format!("ok{separator}private")).as_deref(),
+                Some("ok")
+            );
+        }
+        assert_eq!(
+            first_line("o\u{200b}\u{feff}\u{e0001}\u{e0061}\u{e000}k").as_deref(),
+            Some("ok")
+        );
     }
 
     #[test]

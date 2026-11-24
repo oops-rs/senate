@@ -2576,13 +2576,32 @@ impl Shared {
                         waiting.insert(s.session_id.clone());
                     }
                 }
-                Route::Nowhere => self.observe_route(
-                    &item.event.committee,
-                    item.event.seq,
-                    Some(&item.agent),
-                    senate_observe_protocol::RoutePhase::Queued,
-                    Some(senate_observe_protocol::HoldReason::Offline),
-                ),
+                Route::Nowhere => {
+                    if self
+                        .observe
+                        .as_ref()
+                        .is_some_and(|registry| registry.is_watched())
+                    {
+                        let paused = self
+                            .store
+                            .paused(&item.agent)
+                            .ok()
+                            .flatten()
+                            .is_some_and(|pause| pause.committee == item.event.committee);
+                        let reason = if paused {
+                            senate_observe_protocol::HoldReason::Paused
+                        } else {
+                            senate_observe_protocol::HoldReason::Offline
+                        };
+                        self.observe_route(
+                            &item.event.committee,
+                            item.event.seq,
+                            Some(&item.agent),
+                            senate_observe_protocol::RoutePhase::Queued,
+                            Some(reason),
+                        );
+                    }
+                }
             }
         }
         if let Some(item) = for_companion {
@@ -2610,6 +2629,21 @@ impl Shared {
                 match self.hold(&sid, held, now) {
                     Hold::Ready => {}
                     Hold::Until(at) => {
+                        if self
+                            .observe
+                            .as_ref()
+                            .is_some_and(|registry| registry.is_watched())
+                        {
+                            for item in &items {
+                                self.observe_route(
+                                    &item.event.committee,
+                                    item.event.seq,
+                                    Some(&item.agent),
+                                    senate_observe_protocol::RoutePhase::Queued,
+                                    Some(senate_observe_protocol::HoldReason::Busy),
+                                );
+                            }
+                        }
                         due = Some(due.map_or(at, |d| d.min(at)));
                         continue;
                     }
@@ -2688,17 +2722,23 @@ impl Shared {
             return Ok(false);
         }
         let claimed = self.store.claim_inflight_with_held(&keys, sid)?;
-        for item in items
-            .iter()
-            .filter(|item| item.status == ItemStatus::Queued && claimed.contains(&item.key()))
+        if self
+            .observe
+            .as_ref()
+            .is_some_and(|registry| registry.is_watched())
         {
-            self.observe_route(
-                &item.event.committee,
-                item.event.seq,
-                Some(agent),
-                senate_observe_protocol::RoutePhase::Released,
-                None,
-            );
+            for item in items
+                .iter()
+                .filter(|item| item.status == ItemStatus::Queued && claimed.contains(&item.key()))
+            {
+                self.observe_route(
+                    &item.event.committee,
+                    item.event.seq,
+                    Some(agent),
+                    senate_observe_protocol::RoutePhase::Released,
+                    None,
+                );
+            }
         }
         let resent: Vec<ItemKey> = items
             .iter()
@@ -6582,13 +6622,24 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                         )),
                         false,
                     ),
-                    Ok(request @ Request::SetCard { .. }) if matches!(&request, Request::SetCard { session, .. } if session != &SessionSelector::default()) =>
-                    {
-                        let Request::SetCard { session, .. } = &request else {
-                            unreachable!()
-                        };
-                        let reply = match shared.verify_card_session(peer, session).await {
-                            Ok(()) => Box::pin(shared.dispatch(request)).await,
+                    Ok(Request::SetCard {
+                        session,
+                        target,
+                        document,
+                    }) if session != SessionSelector::default() => {
+                        let _binding = shared.primary().session_bindings.read().await;
+                        let reply = match shared.primary().resolve(&session) {
+                            Ok(session) => match shared.verify_card_session(peer, &session).await {
+                                Ok(()) => wrap(
+                                    Box::pin(shared.set_observer_card(
+                                        Some(session),
+                                        target,
+                                        &document,
+                                    ))
+                                    .await,
+                                ),
+                                Err(error) => Reply::err(error),
+                            },
                             Err(error) => Reply::err(error),
                         };
                         (reply, false)

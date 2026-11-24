@@ -1,0 +1,19 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src data:; connect-src 'self' http://127.0.0.1:* http://[::1]:*; frame-src about:; form-action 'none'; base-uri 'none'">
+<title>Senate scene shell</title>
+<link rel="stylesheet" href="./shell.css">
+<header>
+  <h1>Senate scene shell</h1>
+  <form>
+    <label>Observe URL <input name="endpoint" type="url" placeholder="http://127.0.0.1:12345" required></label>
+    <label>Observer token <input name="token" type="password" autocomplete="off" required></label>
+    <label>Scene folder <input name="bundle" type="file" webkitdirectory multiple></label>
+    <button>Open scene</button>
+  </form>
+  <output aria-live="polite">Choose a scene folder or use the built-in example.</output>
+  <a id="navigation" hidden>Open in Senate</a>
+</header>
+<main aria-label="Scene"></main>
+<script type="module" src="./shell.js"></script>

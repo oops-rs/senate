@@ -25,6 +25,7 @@ pub(crate) fn new_cursor() -> Result<Cursor, JournalError> {
 }
 
 pub struct Hint {
+    pub at: Option<chrono::DateTime<Utc>>,
     pub committee_id: Option<String>,
     pub link: Option<String>,
     pub event: Event,
@@ -135,7 +136,7 @@ impl Journal {
             let frame = EventFrame {
                 schema_version: V1,
                 cursor: cursor.clone(),
-                at,
+                at: hint.at.unwrap_or(at),
                 committee_id: hint.committee_id,
                 link: hint.link,
                 event: hint.event,
