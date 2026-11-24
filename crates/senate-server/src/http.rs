@@ -69,6 +69,10 @@ pub(crate) fn router(state: AppState) -> Router {
         )
         .route("/v1/committees/{committee}/heartbeat", post(heartbeat))
         .route(
+            "/v1/committees/{committee}/archive",
+            axum::routing::put(committee_seat::put_archive),
+        )
+        .route(
             "/v1/committees/{committee}/seat",
             get(committee_seat::get_seat).put(committee_seat::put_seat),
         )
@@ -394,8 +398,8 @@ async fn remove_alias(
 }
 
 async fn me(State(state): State<AppState>, person: Person) -> Result<Json<Me>, ApiFailure> {
-    // Every person can join every committee in the log.
-    let committees = state.hub.committees().await?;
+    // Every person can join every committee in the log that is not archived.
+    let (committees, archived) = state.hub.committees_by_archive().await?;
     let roster = state.hub.roster().await?;
     let office = roster.office();
     Ok(Json(Me {
@@ -410,6 +414,7 @@ async fn me(State(state): State<AppState>, person: Person) -> Result<Json<Me>, A
         children: state.hub.children(),
         person: person.0,
         committees,
+        archived,
         epoch: state.hub.epoch().await?,
         version: Some(env!("CARGO_PKG_VERSION").to_owned()),
     }))
@@ -573,6 +578,12 @@ pub(crate) enum Sender {
 /// [`meta::PICK`] is the server's own: it is set when a message is put to
 /// the Speaker, never by a writer.
 fn reject_server_provenance(event: &NewEvent, as_speaker: bool) -> Result<(), ApiFailure> {
+    if event.meta.contains_key(meta::COMMITTEE_ARCHIVE) {
+        return Err(ApiFailure::forbidden(format!(
+            "meta.{} is set by the server when the Speaker archives a committee",
+            meta::COMMITTEE_ARCHIVE
+        )));
+    }
     if event.meta.contains_key(meta::COMMITTEE_SEAT) {
         return Err(ApiFailure::forbidden(format!(
             "meta.{} is set by the server for committee seat changes",

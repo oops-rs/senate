@@ -1422,6 +1422,45 @@ impl ServerHub {
         .await
     }
 
+    /// The committees with a log, split into the open ones and the
+    /// archived ones ([`senate_core::CommitteeArchive`]), each in log order.
+    pub(crate) async fn committees_by_archive(
+        &self,
+    ) -> Result<(Vec<CommitteeId>, Vec<CommitteeId>), HubError> {
+        let mut open = Vec::new();
+        let mut archived = Vec::new();
+        for committee in self.committees().await? {
+            if self
+                .ask_writer(&committee, CommitteeMsg::IsArchived)
+                .await?
+                .is_some()
+            {
+                archived.push(committee);
+            } else {
+                open.push(committee);
+            }
+        }
+        Ok((open, archived))
+    }
+
+    /// Archive or unarchive `committee` (the caller checked it is the
+    /// Speaker in person).
+    pub(crate) async fn set_committee_archive(
+        &self,
+        committee: &CommitteeId,
+        change: senate_core::CommitteeArchive,
+        id: EventId,
+    ) -> Result<senate_core::api::CommitteeArchiveInfo, HubError> {
+        self.ask_writer(committee, |reply| CommitteeMsg::SetArchive {
+            change: change.clone(),
+            id: id.clone(),
+            locale: self.locale,
+            reply,
+        })
+        .await?
+        .map_err(log_error)
+    }
+
     pub(crate) async fn set_committee_seat(
         &self,
         committee: &CommitteeId,

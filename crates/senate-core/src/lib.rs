@@ -109,7 +109,9 @@ pub use address::{Address, AddressParseError, Guest, GuestError, MAX_GUEST_ID_LE
 pub use api::{ChildSeat, ChildSeats, ChildSenate};
 pub use brief::{Brief, BriefBuilder};
 pub use chair::{ChairFold, ChairPayload, ChairSource};
-pub use committee_seat::{CommitteeSeatAction, CommitteeSeatChange, CommitteeSeats};
+pub use committee_seat::{
+    ArchiveFold, CommitteeArchive, CommitteeSeatAction, CommitteeSeatChange, CommitteeSeats,
+};
 pub use continuity::{
     AgentPresence, CheckpointFiles, CheckpointPayload, CheckpointRecord, CheckpointTrigger,
     Checkpoints, PresenceBoard, PresencePayload, PresenceState, presence_event, presence_label,
