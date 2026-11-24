@@ -2752,6 +2752,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "senate-observe-protocol"
+version = "0.12.3"
+dependencies = [
+ "chrono",
+ "schemars",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "senate-remote-admin"
 version = "0.12.3"
 dependencies = [

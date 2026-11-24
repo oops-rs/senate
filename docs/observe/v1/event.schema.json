@@ -1,0 +1,1571 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "EventFrame",
+  "type": "object",
+  "properties": {
+    "at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "committee_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "cursor": {
+      "$ref": "#/$defs/Cursor"
+    },
+    "link": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "schema_version": {
+      "$ref": "#/$defs/V1"
+    }
+  },
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/StatePatch"
+        },
+        "kind": {
+          "type": "string",
+          "const": "state.patch"
+        }
+      },
+      "required": [
+        "kind",
+        "data"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/MessagePosted"
+        },
+        "kind": {
+          "type": "string",
+          "const": "message.posted"
+        }
+      },
+      "required": [
+        "kind",
+        "data"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/MessageLinePublished"
+        },
+        "kind": {
+          "type": "string",
+          "const": "message.line_published"
+        }
+      },
+      "required": [
+        "kind",
+        "data"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/MessageRouted"
+        },
+        "kind": {
+          "type": "string",
+          "const": "message.routed"
+        }
+      },
+      "required": [
+        "kind",
+        "data"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/ThreadStateChanged"
+        },
+        "kind": {
+          "type": "string",
+          "const": "thread.state_changed"
+        }
+      },
+      "required": [
+        "kind",
+        "data"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/SenatorStateChanged"
+        },
+        "kind": {
+          "type": "string",
+          "const": "senator.state_changed"
+        }
+      },
+      "required": [
+        "kind",
+        "data"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/SenatorRef"
+        },
+        "kind": {
+          "type": "string",
+          "const": "senator.joined"
+        }
+      },
+      "required": [
+        "kind",
+        "data"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/SenatorRef"
+        },
+        "kind": {
+          "type": "string",
+          "const": "senator.left"
+        }
+      },
+      "required": [
+        "kind",
+        "data"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/SenatorRef"
+        },
+        "kind": {
+          "type": "string",
+          "const": "senator.started"
+        }
+      },
+      "required": [
+        "kind",
+        "data"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/SenatorRef"
+        },
+        "kind": {
+          "type": "string",
+          "const": "senator.stopped"
+        }
+      },
+      "required": [
+        "kind",
+        "data"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/SenatorRef"
+        },
+        "kind": {
+          "type": "string",
+          "const": "senator.paused"
+        }
+      },
+      "required": [
+        "kind",
+        "data"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/SenatorRef"
+        },
+        "kind": {
+          "type": "string",
+          "const": "senator.resumed"
+        }
+      },
+      "required": [
+        "kind",
+        "data"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/ChairChanged"
+        },
+        "kind": {
+          "type": "string",
+          "const": "committee.chair_changed"
+        }
+      },
+      "required": [
+        "kind",
+        "data"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/CommitteeRef"
+        },
+        "kind": {
+          "type": "string",
+          "const": "committee.created"
+        }
+      },
+      "required": [
+        "kind",
+        "data"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/CommitteeArchived"
+        },
+        "kind": {
+          "type": "string",
+          "const": "committee.archived"
+        }
+      },
+      "required": [
+        "kind",
+        "data"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/ApprovalAsked"
+        },
+        "kind": {
+          "type": "string",
+          "const": "approval.asked"
+        }
+      },
+      "required": [
+        "kind",
+        "data"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/ApprovalDecided"
+        },
+        "kind": {
+          "type": "string",
+          "const": "approval.decided"
+        }
+      },
+      "required": [
+        "kind",
+        "data"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/SenatorRef"
+        },
+        "kind": {
+          "type": "string",
+          "const": "viewer.attached"
+        }
+      },
+      "required": [
+        "kind",
+        "data"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/SenatorRef"
+        },
+        "kind": {
+          "type": "string",
+          "const": "viewer.detached"
+        }
+      },
+      "required": [
+        "kind",
+        "data"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/LinkChanged"
+        },
+        "kind": {
+          "type": "string",
+          "const": "link.changed"
+        }
+      },
+      "required": [
+        "kind",
+        "data"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/CardChanged"
+        },
+        "kind": {
+          "type": "string",
+          "const": "card.changed"
+        }
+      },
+      "required": [
+        "kind",
+        "data"
+      ]
+    }
+  ],
+  "required": [
+    "schema_version",
+    "cursor",
+    "at"
+  ],
+  "$defs": {
+    "Address": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "senator"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "office"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "external"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "unknown"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    },
+    "Approval": {
+      "type": "object",
+      "properties": {
+        "asked_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "committee_id": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "link": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "senator_id": {
+          "type": "string"
+        },
+        "tool_kind": {
+          "$ref": "#/$defs/ApprovalTool"
+        }
+      },
+      "required": [
+        "id",
+        "committee_id",
+        "senator_id",
+        "tool_kind",
+        "asked_at"
+      ]
+    },
+    "ApprovalAsked": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "senator_id": {
+          "type": "string"
+        },
+        "tool_kind": {
+          "$ref": "#/$defs/ApprovalTool"
+        }
+      },
+      "required": [
+        "id",
+        "senator_id",
+        "tool_kind"
+      ]
+    },
+    "ApprovalDecided": {
+      "type": "object",
+      "properties": {
+        "decision": {
+          "$ref": "#/$defs/ApprovalDecision"
+        },
+        "id": {
+          "type": "string"
+        },
+        "tool_kind": {
+          "$ref": "#/$defs/ApprovalTool"
+        }
+      },
+      "required": [
+        "id",
+        "tool_kind",
+        "decision"
+      ]
+    },
+    "ApprovalDecision": {
+      "type": "string",
+      "enum": [
+        "allowed",
+        "denied",
+        "dismissed",
+        "unknown"
+      ]
+    },
+    "ApprovalTool": {
+      "type": "string",
+      "enum": [
+        "command",
+        "edit",
+        "other",
+        "unknown"
+      ]
+    },
+    "Awaiting": {
+      "type": "string",
+      "enum": [
+        "pick",
+        "addressed",
+        "away",
+        "child_offline",
+        "unknown"
+      ]
+    },
+    "Card": {
+      "type": "object",
+      "properties": {
+        "revision": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "value": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "revision",
+        "updated_at",
+        "value"
+      ]
+    },
+    "CardChanged": {
+      "type": "object",
+      "properties": {
+        "revision": {
+          "type": "string"
+        },
+        "subject": {
+          "$ref": "#/$defs/CardSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "revision"
+      ]
+    },
+    "CardSubject": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "committee_id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "committee"
+            }
+          },
+          "required": [
+            "kind",
+            "committee_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "committee_id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "senator"
+            },
+            "senator_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "committee_id",
+            "senator_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "person"
+            },
+            "person_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "person_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "unknown"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    },
+    "ChairChanged": {
+      "type": "object",
+      "properties": {
+        "chair_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "previous_chair_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "Committee": {
+      "type": "object",
+      "properties": {
+        "archived": {
+          "type": "boolean"
+        },
+        "card": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Card"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "chair_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "link": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "archived"
+      ]
+    },
+    "CommitteeArchived": {
+      "type": "object",
+      "properties": {
+        "archived": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "archived"
+      ]
+    },
+    "CommitteeRef": {
+      "type": "object",
+      "properties": {
+        "committee_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "committee_id"
+      ]
+    },
+    "Cursor": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{21}[AQgw]$"
+    },
+    "DeskItem": {
+      "type": "object",
+      "properties": {
+        "awaiting": {
+          "$ref": "#/$defs/Awaiting"
+        },
+        "committee_id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/MessageKind"
+        },
+        "link": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "root_seq": {
+          "$ref": "#/$defs/Seq"
+        }
+      },
+      "required": [
+        "committee_id",
+        "root_seq",
+        "kind",
+        "awaiting"
+      ]
+    },
+    "HoldReason": {
+      "type": "string",
+      "enum": [
+        "awaiting_triage",
+        "busy",
+        "paused",
+        "offline",
+        "no_push",
+        "retry",
+        "unknown"
+      ]
+    },
+    "Hosting": {
+      "type": "string",
+      "enum": [
+        "here",
+        "elsewhere",
+        "unknown"
+      ]
+    },
+    "IdKey": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ]
+    },
+    "LinkChanged": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "previous_state": {
+          "$ref": "#/$defs/LinkState"
+        },
+        "state": {
+          "$ref": "#/$defs/LinkState"
+        }
+      },
+      "required": [
+        "id",
+        "previous_state",
+        "state"
+      ]
+    },
+    "LinkKind": {
+      "type": "string",
+      "enum": [
+        "parent",
+        "child",
+        "paired_machine",
+        "unknown"
+      ]
+    },
+    "LinkState": {
+      "type": "string",
+      "enum": [
+        "up",
+        "down",
+        "unknown"
+      ]
+    },
+    "MessageKind": {
+      "type": "string",
+      "enum": [
+        "question",
+        "request",
+        "answer",
+        "note",
+        "decision",
+        "unknown"
+      ]
+    },
+    "MessageLinePublished": {
+      "type": "object",
+      "properties": {
+        "line": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "seq": {
+          "$ref": "#/$defs/Seq"
+        }
+      },
+      "required": [
+        "seq",
+        "line"
+      ]
+    },
+    "MessagePosted": {
+      "type": "object",
+      "properties": {
+        "from": {
+          "$ref": "#/$defs/Address"
+        },
+        "line": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 80
+        },
+        "message_kind": {
+          "$ref": "#/$defs/MessageKind"
+        },
+        "root_seq": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Seq"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "seq": {
+          "$ref": "#/$defs/Seq"
+        },
+        "to": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Address"
+          }
+        }
+      },
+      "required": [
+        "seq",
+        "message_kind",
+        "from",
+        "to"
+      ]
+    },
+    "MessageRouted": {
+      "type": "object",
+      "properties": {
+        "phase": {
+          "$ref": "#/$defs/RoutePhase"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HoldReason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "route_id": {
+          "type": "string"
+        },
+        "seq": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Seq"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Address"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "route_id",
+        "phase"
+      ]
+    },
+    "Navigation": {
+      "type": "object",
+      "properties": {
+        "approvals": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "desk": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "history": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "inbox": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "profile": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "Person": {
+      "type": "object",
+      "properties": {
+        "card": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Card"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "link": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ]
+    },
+    "Project": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "link": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ]
+    },
+    "Removals": {
+      "type": "object",
+      "properties": {
+        "approvals": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/IdKey"
+          }
+        },
+        "committees": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/IdKey"
+          }
+        },
+        "desk_items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ThreadKey"
+          }
+        },
+        "links": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/IdKey"
+          }
+        },
+        "projects": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/IdKey"
+          }
+        },
+        "senators": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SeatKey"
+          }
+        },
+        "threads": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ThreadKey"
+          }
+        }
+      }
+    },
+    "Replacements": {
+      "type": "object",
+      "properties": {
+        "navigation": {
+          "description": "All individual destinations may be null when clearing the navigation.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Navigation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "senate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Senate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "windows": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Windows"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "RoutePhase": {
+      "type": "string",
+      "enum": [
+        "received",
+        "filed",
+        "queued",
+        "held_for_hook",
+        "released",
+        "delivered",
+        "unknown"
+      ]
+    },
+    "SeatKey": {
+      "type": "object",
+      "properties": {
+        "committee_id": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "committee_id",
+        "id"
+      ]
+    },
+    "Senate": {
+      "type": "object",
+      "properties": {
+        "desk_owner": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "desk_workers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "id": {
+          "type": "string"
+        },
+        "link": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "person": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Person"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ]
+    },
+    "SenateLink": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/LinkKind"
+        },
+        "link": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/LinkState"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "name",
+        "state"
+      ]
+    },
+    "Senator": {
+      "type": "object",
+      "properties": {
+        "alias": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "card": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Card"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "committee_id": {
+          "type": "string"
+        },
+        "hosted": {
+          "$ref": "#/$defs/Hosting"
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/SenatorKind"
+        },
+        "last_active_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "link": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runtime": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/SenatorState"
+        },
+        "viewer_attached": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "committee_id",
+        "kind",
+        "state",
+        "hosted"
+      ]
+    },
+    "SenatorKind": {
+      "type": "string",
+      "enum": [
+        "person",
+        "agent",
+        "unknown"
+      ]
+    },
+    "SenatorRef": {
+      "type": "object",
+      "properties": {
+        "senator_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "senator_id"
+      ]
+    },
+    "SenatorState": {
+      "type": "string",
+      "enum": [
+        "working",
+        "idle",
+        "waiting_on_person",
+        "paused",
+        "stopped",
+        "away",
+        "unknown"
+      ]
+    },
+    "SenatorStateChanged": {
+      "type": "object",
+      "properties": {
+        "previous_state": {
+          "$ref": "#/$defs/SenatorState"
+        },
+        "senator_id": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/SenatorState"
+        }
+      },
+      "required": [
+        "senator_id",
+        "previous_state",
+        "state"
+      ]
+    },
+    "Seq": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]{0,19}$"
+    },
+    "StatePatch": {
+      "type": "object",
+      "properties": {
+        "remove": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Removals"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "replace": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Replacements"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "upsert": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Upserts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "Thread": {
+      "type": "object",
+      "properties": {
+        "addressees": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Address"
+          }
+        },
+        "committee_id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/MessageKind"
+        },
+        "link": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "opener": {
+          "$ref": "#/$defs/Address"
+        },
+        "root_seq": {
+          "$ref": "#/$defs/Seq"
+        },
+        "state": {
+          "$ref": "#/$defs/ThreadState"
+        },
+        "waits_on": {
+          "$ref": "#/$defs/WaitsOn"
+        }
+      },
+      "required": [
+        "committee_id",
+        "root_seq",
+        "kind",
+        "opener",
+        "addressees",
+        "state",
+        "waits_on"
+      ]
+    },
+    "ThreadKey": {
+      "type": "object",
+      "properties": {
+        "committee_id": {
+          "type": "string"
+        },
+        "root_seq": {
+          "$ref": "#/$defs/Seq"
+        }
+      },
+      "required": [
+        "committee_id",
+        "root_seq"
+      ]
+    },
+    "ThreadState": {
+      "type": "string",
+      "enum": [
+        "processing",
+        "active",
+        "suspended",
+        "archived",
+        "unknown"
+      ]
+    },
+    "ThreadStateChanged": {
+      "type": "object",
+      "properties": {
+        "previous_state": {
+          "$ref": "#/$defs/ThreadState"
+        },
+        "root_seq": {
+          "$ref": "#/$defs/Seq"
+        },
+        "state": {
+          "$ref": "#/$defs/ThreadState"
+        },
+        "waits_on": {
+          "$ref": "#/$defs/WaitsOn"
+        }
+      },
+      "required": [
+        "root_seq",
+        "previous_state",
+        "state",
+        "waits_on"
+      ]
+    },
+    "Truncation": {
+      "type": "object",
+      "properties": {
+        "committee_id": {
+          "type": "string"
+        },
+        "desk_items": {
+          "type": "boolean"
+        },
+        "open_threads": {
+          "type": "boolean"
+        },
+        "settled_threads": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "committee_id",
+        "open_threads",
+        "settled_threads",
+        "desk_items"
+      ]
+    },
+    "Upserts": {
+      "type": "object",
+      "properties": {
+        "approvals": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Approval"
+          }
+        },
+        "committees": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Committee"
+          }
+        },
+        "desk_items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DeskItem"
+          }
+        },
+        "links": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SenateLink"
+          }
+        },
+        "projects": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Project"
+          }
+        },
+        "senators": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Senator"
+          }
+        },
+        "threads": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Thread"
+          }
+        }
+      }
+    },
+    "V1": {
+      "type": "integer",
+      "const": 1
+    },
+    "WaitsOn": {
+      "type": "string",
+      "enum": [
+        "agents",
+        "person",
+        "none",
+        "unknown"
+      ]
+    },
+    "Windows": {
+      "type": "object",
+      "properties": {
+        "desk_items_per_committee": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "open_threads_per_committee": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "settled_threads_per_committee": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "truncated": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Truncation"
+          }
+        }
+      },
+      "required": [
+        "open_threads_per_committee",
+        "settled_threads_per_committee",
+        "desk_items_per_committee",
+        "truncated"
+      ]
+    }
+  }
+}
