@@ -2273,6 +2273,13 @@ async fn a_late_claude_notice_closes_when_the_turn_ends_not_on_another_tools_res
         "notification_type": "permission_prompt",
     });
     let send = |input| claude_hook(h.dir.path(), &h, terminal.host_id(), input);
+    // The fixture paints independently of its hooks, so under load a
+    // screen-only notice can precede the native permission notice.
+    let permission_notices = || {
+        notices(&h)
+            .into_iter()
+            .filter(|notice| notice.body.contains("has a permission prompt waiting"))
+    };
 
     let stop_hook = || async {
         let mut cmd = tokio::process::Command::new(BIN);
@@ -2313,7 +2320,10 @@ async fn a_late_claude_notice_closes_when_the_turn_ends_not_on_another_tools_res
     // no result of its own (an interrupted command, say).
     send(signal("PermissionRequest", "python3 - <<'EOF'")).await;
     send(notify.clone()).await;
-    let named = next_notice(&h, 1).await;
+    let named = eventually("the first native Claude notice", WAIT, || {
+        permission_notices().next()
+    })
+    .await;
     assert!(named.body.contains("python3"), "{}", named.body);
     // A parallel tool finishing is no sign the dialog is gone.
     send(signal("PostToolUse", "ls")).await;
@@ -2356,12 +2366,11 @@ async fn a_late_claude_notice_closes_when_the_turn_ends_not_on_another_tools_res
     send(signal("PermissionRequest", "echo late")).await;
     send_input(&terminal).await;
     send(notify.clone()).await;
-    let late = next_notice(&h, 2).await;
+    let late = eventually("the second native Claude notice", WAIT, || {
+        permission_notices().find(|notice| notice.seq > named.seq)
+    })
+    .await;
     send(signal("PostToolUse", "ls")).await;
-    assert!(
-        late.body.contains("has a permission prompt waiting"),
-        "second notice: {late:?}"
-    );
     let early_archive = archived(&h, late.seq);
     assert!(
         early_archive.is_none(),
