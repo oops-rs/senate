@@ -43,6 +43,8 @@ struct MainWindow: View {
             return section.title
         case .secretary:
             return L("secretary.title")
+        case .town:
+            return L("town.title")
         case let .past(id):
             return store.history.row(id)?.name ?? L("tab.history")
         case .item:
@@ -76,6 +78,7 @@ struct MainWindow: View {
                 }
             case let .committee(name): CommitteePage(store: store, name: name)
             case .secretary: SecretaryPage(store: store)
+            case .town: TownPage(store: store)
             case .section(.history): HistoryView(store: store)
             case let .past(id): PastSessionPage(store: store, sessionId: id)
             case .item, .section(.inbox): InboxView(store: store)
@@ -191,6 +194,8 @@ private struct Sidebar: View {
                     }
                     .tag(CoreStore.Place.section(section))
                 }
+                FixedRow(title: L("town.title")) { FixedSymbol(name: "house") }
+                    .tag(CoreStore.Place.town)
             }
             // Offline, nothing is known: say nothing rather than "no sessions".
             if store.state.online {

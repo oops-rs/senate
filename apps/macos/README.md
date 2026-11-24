@@ -68,6 +68,8 @@ SENATE_HOME=/tmp/sh SENATE_APP_SHOW=1 build/Build/Products/Debug/Senate.app/Cont
 | `FAKE_STREAM=1` | the fake daemon: a session, `stream`, whose reply arrives a few characters every 20-40 ms while watched |
 | `FAKE_WORKING=N` | the fake daemon: N more sessions, all working, cycling the four runtimes |
 | `SENATE_APP_MD_DEBUG=1` | the conversation page starts with its debug overlay (⌥D): blocks replaced and appended, lines highlighted, render times |
+| `SENATE_APP_SNAPSHOT_TOWN=1` | with `SENATE_APP_SNAPSHOT`: only the Town page (quiet, the scripted visits mid-walk and mid-talk, the list), then quit; `SENATE_APP_TOWN_HOLD=<s>` stays on the quiet town that long first |
+| `SENATE_APP_TOWN_DEMO=1\|large` | Town shows a scripted town (5 committees, or 30 committees and 60 senators) instead of the store's |
 | `SENATE_APP_SNAPSHOT_MD=1` | with `SENATE_APP_SNAPSHOT`: only the Markdown specimen and the thread-2148 sample, then quit |
 | `RUST_LOG` | the core's log filter (default `senate_app_core=info,senate_bridge=warn`) |
 
