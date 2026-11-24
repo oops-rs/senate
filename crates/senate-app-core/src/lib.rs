@@ -46,6 +46,7 @@ pub mod names;
 pub mod oslog;
 pub mod reads;
 pub mod state;
+pub mod stats;
 pub mod text;
 pub mod timeline;
 pub mod tree;

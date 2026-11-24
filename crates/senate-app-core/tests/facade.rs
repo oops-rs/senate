@@ -59,6 +59,25 @@ async fn until(listener: &Listener, what: &str, ok: impl Fn(&AppState) -> bool) 
 }
 
 #[tokio::test]
+async fn personal_stats_round_trip_through_the_core() {
+    let (dir, socket, world) = setup();
+    let _daemon = FakeDaemon::start(&socket, world);
+    let core = AppCore::new(Some(dir.path().display().to_string()), Some("en".into())).unwrap();
+    core.start(Arc::new(Listener::default())).unwrap();
+    let report = core
+        .stats(
+            "2026-11-01".into(),
+            "2026-11-14".into(),
+            "Asia/Taipei".into(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(report.days[0].prompts, 5);
+    assert_eq!(report.days[0].date, "2026-11-14");
+    assert_eq!(report.top_repos[0].name, "refund-service");
+}
+
+#[tokio::test]
 async fn session_drop_uses_the_upload_wire_and_preserves_refusals() {
     let (dir, socket, world) = setup();
     let daemon = FakeDaemon::start(&socket, world);

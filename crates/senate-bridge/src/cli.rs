@@ -148,6 +148,15 @@ enum MemoryCmd {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Show your recorded local Senate activity by day.
+    Stats {
+        /// Number of local calendar days ending today (1d to 366d).
+        #[arg(long, default_value = "30d")]
+        since: String,
+        /// Include daily breakdowns and indexing progress as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Bind this worktree to a committee, and suggest a session alias.
     ///
     /// Writes `.senate/committee` (untracked, kept per branch: switching
@@ -3861,6 +3870,34 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
                 },
             ))?;
             println!("{alias}");
+            Ok(())
+        }
+        Cmd::Stats { since, json } => {
+            let days = since
+                .strip_suffix('d')
+                .and_then(|n| n.parse::<i64>().ok())
+                .filter(|days| (1..=crate::stats::MAX_DAYS).contains(days))
+                .context("--since must be 1d through 366d")?;
+            let zone = iana_time_zone::get_timezone()
+                .ok()
+                .and_then(|tz| tz.parse::<chrono_tz::Tz>().ok())
+                .unwrap_or(chrono_tz::UTC);
+            let to = chrono::Utc::now().with_timezone(&zone).date_naive();
+            let from = to - chrono::Duration::days(days - 1);
+            let paths = Paths::from_env()?;
+            let reply: crate::stats::StatsReply = runtime(false)?.block_on(daemon_call(
+                &paths,
+                &Request::Stats {
+                    from,
+                    to,
+                    tz: zone.name().into(),
+                },
+            ))?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&reply)?);
+            } else {
+                print!("{}", crate::stats::summary(&reply));
+            }
             Ok(())
         }
         Cmd::Status {
