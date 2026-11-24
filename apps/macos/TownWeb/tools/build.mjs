@@ -16,7 +16,7 @@ await build({
             PLUGIN_3D: "false", PLUGIN_CAMERA3D: "false", PLUGIN_FBINSTANT: "false", FEATURE_SOUND: "false" },
 });
 for (const f of ["index.html", "town.css"]) cpSync(new URL(`../page/${f}`, import.meta.url), new URL(f, out));
-for (const f of ["town.tmj", "tiny-town-extruded.png", "tiny-dungeon.png", "NOTICE.md", "LICENSE-tiny-town.txt", "LICENSE-tiny-dungeon.txt"])
+for (const f of ["works.tmj", "ground.png", "NOTICE.md"])
   cpSync(new URL(`../assets/${f}`, import.meta.url), new URL(`assets/${f}`, out));
 const kb = (f) => (statSync(new URL(f, out)).size / 1024).toFixed(0);
-console.log(`Web/town: town.js ${kb("town.js")} KB, map ${kb("assets/town.tmj")} KB`);
+console.log(`Web/town: town.js ${kb("town.js")} KB, map ${kb("assets/works.tmj")} KB`);

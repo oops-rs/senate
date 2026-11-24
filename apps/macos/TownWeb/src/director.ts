@@ -2,10 +2,14 @@
 // maxWalkers senators out at once, one visit per senator at a time, a
 // short queue behind them (the oldest dropped when it overflows), moods
 // held while a senator is out. Pure: the scene says when a walker is home.
-import type { Mood, ThreadRef, TownEvent } from "./model.ts";
+import type { Mood, ThreadRef, ToolKind, TownEvent } from "./model.ts";
 
 export type Action =
-  | { kind: "visit"; from: string; to?: string; thread: ThreadRef; line: string; walk: boolean }
+  | { kind: "visit"; from: string; to?: string; thread: ThreadRef; line: string; walk: boolean; held?: string }
+  | { kind: "release"; thread: ThreadRef }
+  | { kind: "tool"; senator: string; tool: ToolKind; target?: string }
+  | { kind: "signed"; senator: string }
+  | { kind: "link"; link: "parent" | "child" | "remote"; name: string }
   | { kind: "mood"; senator: string; mood: Mood }
   | { kind: "arrive"; senator: string; walk: boolean }
   | { kind: "depart"; senator: string; walk: boolean }
@@ -13,6 +17,8 @@ export type Action =
 
 export class Director {
   out = new Set<string>();
+  /** Tool workers out now (the scene says when one goes back in). */
+  workers = 0;
   queue: Action[] = [];
   held = new Map<string, Mood>();
 
@@ -25,7 +31,7 @@ export class Director {
       switch (e.kind) {
         case "message": {
           const to = e.to !== undefined && present.has(e.to) ? e.to : undefined;
-          const visit: Action = { kind: "visit", from: e.from, to, thread: e.thread, line: e.line, walk: !reduceMotion };
+          const visit: Action = { kind: "visit", from: e.from, to, thread: e.thread, line: e.line, walk: !reduceMotion, held: e.held };
           if (reduceMotion) now.push(visit);
           else this.queue.push(visit);
           break;
@@ -43,6 +49,18 @@ export class Director {
         case "arrived":
           if (present.has(e.senator) && !this.out.has(e.senator))
             now.push({ kind: "arrive", senator: e.senator, walk: this.letOut(e.senator, reduceMotion) });
+          break;
+        case "release":
+        case "signed":
+        case "link":
+          now.push(e);
+          break;
+        case "tool":
+          // Workers are many and short: at most eight out at once, the rest not shown.
+          if (present.has(e.senator) && this.workers < 8) {
+            this.workers++;
+            now.push(e);
+          }
           break;
         case "answered": {
           const a = e.a !== undefined && present.has(e.a) ? e.a : undefined;
@@ -69,7 +87,12 @@ export class Director {
     return [...now, ...this.dispatch()];
   }
 
+  workerHome() {
+    this.workers = Math.max(0, this.workers - 1);
+  }
+
   reset() {
+    this.workers = 0;
     this.out.clear();
     this.queue = [];
     this.held.clear();

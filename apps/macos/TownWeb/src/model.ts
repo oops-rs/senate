@@ -16,7 +16,46 @@ export interface Senator {
   sessionId?: string;
   /** What it is working on, when known. */
   doing?: string;
+  /** Someone is attached to its terminal (looking in at the window). */
+  watched?: boolean;
 }
+
+/** A senator no longer working: an elder of the town, aged by idle time. */
+export interface Elder {
+  id: string;
+  name: string;
+  runtime: Runtime;
+  /** Seconds since it last worked. */
+  idle: number;
+  /** Its ended session, which a click opens in History. */
+  sessionId?: string;
+  committee?: string;
+}
+
+export interface Release { name: string; date?: string; merges: number; plaques: string[] }
+
+/** A repository the committees work in: its own monument quarter. */
+export interface Project {
+  id: string;
+  name: string;
+  /** A building style from the set; by default from the name's hash. */
+  style?: string;
+  releases: Release[];
+  unreleased?: { merges: number; plaques: string[] };
+  committees?: string[];
+}
+
+/** The links beyond town: the parent Senate, child Senates, paired machines. */
+export interface Links {
+  parent?: { name: string; up: boolean };
+  children?: { name: string; up: boolean }[];
+  remotes?: { name: string; up: boolean }[];
+}
+
+/** A permission prompt only a person may sign: the gate at a workshop. */
+export interface Approval { senator: string; ask: string; person?: string }
+
+export type ToolKind = "bash" | "edit" | "read" | "grep" | "mcp" | "web";
 
 export interface ThreadRef {
   committee: string;
@@ -43,10 +82,24 @@ export interface TownState {
   committees: Committee[];
   hall?: Hall;
   person?: string;
+  elders?: Elder[];
+  projects?: Project[];
+  links?: Links;
+  approvals?: Approval[];
+  /** History: ended sessions kept. */
+  history?: number;
 }
 
 export type TownEvent =
-  | { kind: "message"; from: string; to?: string; thread: ThreadRef; line: string }
+  | { kind: "message"; from: string; to?: string; thread: ThreadRef; line: string; held?: string }
+  /** A held delivery may go on. */
+  | { kind: "release"; thread: ThreadRef }
+  /** A tool call in a senator's turn: a worker comes out. */
+  | { kind: "tool"; senator: string; tool: ToolKind; target?: string }
+  /** A person signed an approval: the gate opens. */
+  | { kind: "signed"; senator: string }
+  /** The uplink, a child or a remote carried something. */
+  | { kind: "link"; link: "parent" | "child" | "remote"; name: string }
   | { kind: "mood"; senator: string; mood: Mood }
   | { kind: "arrived"; senator: string }
   | { kind: "left"; senator: string }

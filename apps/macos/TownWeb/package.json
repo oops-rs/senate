@@ -6,6 +6,7 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
+    "tiles": "swift tools/make-tiles.swift assets/ground.png",
     "map": "node tools/make-map.mjs",
     "build": "node tools/build.mjs",
     "test": "vitest run",
@@ -16,7 +17,6 @@
   },
   "devDependencies": {
     "esbuild": "0.28.2",
-    "tile-extruder": "3.0.0",
     "typescript": "7.0.2",
     "vitest": "5.1.1"
   }
