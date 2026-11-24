@@ -4,14 +4,20 @@
 import Phaser from "phaser";
 import type { Daylight } from "./art.ts";
 import { activityEvents, firstWords, type ActivityEntry, type TownEvent, type TownState } from "./model.ts";
-import * as script from "./script.ts";
+import { BridgeSource, RecordedSource, ScriptedSource, type Source } from "./source.ts";
 import { Works, type Target } from "./works.ts";
 
 interface Native { postMessage(body: unknown): void }
 const native: Native | undefined = (window as unknown as { webkit?: { messageHandlers?: { town?: Native } } }).webkit?.messageHandlers?.town;
 
+// Errors go to the app's log (the page has no console of its own there).
+window.addEventListener("error", (e) => native?.postMessage({ action: "error", message: `${e.message} @${e.filename?.split("/").pop()}:${e.lineno}` }));
+window.addEventListener("unhandledrejection", (e) => native?.postMessage({ action: "error", message: String(e.reason) }));
+
 const scene = new Works();
 const card = document.getElementById("card")!;
+const back = document.getElementById("back") as HTMLButtonElement;
+back.addEventListener("click", () => scene.leave());
 const params = new URLSearchParams(location.search);
 const dpr = Math.min(window.devicePixelRatio || 1, 3);
 scene.reduceMotion = params.has("reduce-motion") || window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -33,7 +39,7 @@ function describe(t: Target): string[] {
     case "workshop": return [`${t.name} workshop`, `${t.senators} senator${t.senators === 1 ? "" : "s"}${t.waiting ? ` · ${t.waiting} waiting on you` : ""}`];
     case "hall": return ["Sorting hall · senated --machine", "every message passes through bridge.sock", `${t.passed} sorted since you opened the town`];
     case "archive": return ["Archive · the Senate server's logs", "each message stamped and filed by seq", ...t.filed.filter(([, n]) => n > 0).slice(0, 5).map(([c, n]) => `${c}: ${n} filed here`)];
-    case "townhall": return ["Town hall · the Speaker's desk", `docket ${t.docket}${t.secretary ? ` · ${t.secretary.name} ${t.secretary.mood}` : ""}`];
+    case "townhall": return ["The Speaker's house · the desk", `docket ${t.docket}${t.secretary ? ` · ${t.secretary.name} ${t.secretary.mood}` : ""}`, "the secretaries work here; approvals' paperwork comes here"];
     case "memory": return ["Memory hall · History", `${t.sessions} ended sessions, each readable`];
     case "capsule": return [`${t.from} → ${t.to ?? t.thread.committee}`, `“${firstWords(t.line, 12, 80)}”`,
       `via the sorting hall, filed at ${t.thread.committee} #${t.thread.root}`, ...(t.held ? [`held: ${t.held}`] : [])];
@@ -47,6 +53,9 @@ function describe(t: Target): string[] {
       `${t.link === "parent" ? "the uplink" : t.link === "child" ? "the road" : "the rail"} is ${t.up ? "up" : "down"}`];
     case "waiting": return [`Waiting on ${t.person ?? "you"}`, t.thread.title, ...(t.thread.asker ? [`asked by ${t.thread.asker}`] : [])];
     case "gatehouse": return ["The town gate", "explorers leave here for the web"];
+    case "civilian": return ["A townsperson"];
+    case "archived": return [`${t.archived.name} · archived${t.archived.closed ? ` ${t.archived.closed}` : ""}`, "its house kept as a monument",
+      ...(t.archived.shipped ?? []).slice(0, 4)];
   }
 }
 
@@ -75,6 +84,10 @@ scene.hooks = {
     const r = card.getBoundingClientRect();
     card.style.left = `${Math.min(x / dpr + 14, innerWidth - r.width - 8)}px`;
     card.style.top = `${Math.min(y / dpr + 18, innerHeight - r.height - 8)}px`;
+  },
+  room(committee) {
+    back.hidden = committee === undefined;
+    if (native) native.postMessage({ action: "room", id: committee ?? "" });
   },
   open(target) {
     const body = openAction(target);
@@ -114,24 +127,23 @@ for (const type of ["pointermove", "pointerdown", "wheel", "keydown"]) {
   window.addEventListener(type, () => scene.touch(), { passive: true });
 }
 
-let playing: number[] = [];
-function play(timeline: [number, TownEvent[]][], loop: boolean) {
-  for (const t of playing) clearTimeout(t);
-  playing = [];
-  let at = 0;
-  for (const [delay, events] of timeline) {
-    at += delay;
-    playing.push(window.setTimeout(() => scene.act(events), at));
-  }
-  if (loop) playing.push(window.setTimeout(() => { scene.setState(big ? script.large() : script.quiet); play(timeline, loop); }, at + 9_000));
-}
+// Where the data comes from: the app's bridge when embedded, else a recording
+// (?source=recorded&file=recordings/demo.json) or the scripted town.
 const big = params.has("large") || params.get("demo") === "large";
+const sink = { snapshot: (s: TownState, e?: TownEvent[]) => scene.setState(s, e), events: (e: TownEvent[]) => scene.act(e) };
+const bridge = new BridgeSource();
+let source: Source = bridge;
+function use(next: Source) {
+  source.stop();
+  source = next;
+  source.start(sink);
+}
 
 /** The page's API, called by the app with plain data. */
 const api = {
-  setState(state: TownState, entries: ActivityEntry[] = []) { scene.setState(state, activityEvents(entries)); },
-  activity(entries: ActivityEntry[]) { scene.act(activityEvents(entries)); },
-  events(events: TownEvent[]) { scene.act(events); },
+  setState(state: TownState, entries: ActivityEntry[] = []) { bridge.state(state, entries); },
+  activity(entries: ActivityEntry[]) { bridge.activity(entries); },
+  events(events: TownEvent[]) { bridge.events(events); },
   setOptions(o: { reduceMotion?: boolean; dark?: boolean; visible?: boolean; time?: Daylight }) {
     if (o.reduceMotion !== undefined) scene.reduceMotion = o.reduceMotion;
     if (o.time) scene.fixedTime = o.time;
@@ -140,12 +152,12 @@ const api = {
     if (o.visible === true) { game.resume(); scene.touch(); }
   },
   /** The scripted town (the app's demo): "small" or "large". */
-  demo(kind: string) {
-    const isBig = kind === "large";
-    scene.setState(isBig ? script.large() : script.quiet);
-    play(isBig ? script.largeBusy() : script.busy, true);
-  },
+  demo(kind: string) { use(new ScriptedSource(kind === "large" ? "large" : "small")); },
   fit() { scene.fit(); },
+  look(where: string, zoom: number) { scene.look(where, zoom); },
+  /** Go into a committee's house, and back out. */
+  enter(name: string) { scene.enter(name); },
+  leave() { scene.leave(); },
   zoom(f: number) { scene.zoomAt(f, (innerWidth / 2) * dpr, (innerHeight / 2) * dpr); },
   stats() { return scene.stats(); },
   probe(click = false) { return scene.probe(click); },
@@ -155,10 +167,12 @@ const api = {
 if (params.has("stats")) setInterval(() => console.log("town-stats " + JSON.stringify(scene.stats())), 1000);
 
 if (native) {
+  bridge.start(sink);
   native.postMessage({ action: "ready" });
 } else {
-  // A plain browser: the scripted town.
-  scene.setState(big ? script.large() : script.quiet);
-  const timeline = big ? script.largeBusy() : script.busy;
-  setTimeout(() => play(timeline, !params.has("once")), params.has("now") ? 200 : 1200);
+  const file = params.get("file");
+  const start = () => use(params.get("source") === "recorded" && file ? new RecordedSource(file) : new ScriptedSource(big ? "large" : "small", !params.has("once")));
+  setTimeout(start, params.has("now") ? 200 : 1200);
+  const into = params.get("enter");
+  if (into) setTimeout(() => scene.enter(into), 600);
 }

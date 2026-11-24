@@ -18,6 +18,18 @@ export interface Senator {
   doing?: string;
   /** Someone is attached to its terminal (looking in at the window). */
   watched?: boolean;
+  /** Its own card: how it chose to look (untrusted; read by gen.readLook). */
+  card?: unknown;
+}
+
+/** A committee that was archived: its house stays as a monument. */
+export interface Archived {
+  name: string;
+  /** The project (repository) whose quarter keeps it. */
+  project?: string;
+  closed?: string;
+  shipped?: string[];
+  card?: unknown;
 }
 
 /** A senator no longer working: an elder of the town, aged by idle time. */
@@ -71,6 +83,8 @@ export interface Committee {
   senators: Senator[];
   /** Threads waiting on the person here. */
   waiting?: ThreadRef[];
+  /** The chair's card for the house (untrusted; read by gen.readHouse). */
+  card?: unknown;
 }
 
 export interface Hall {
@@ -88,6 +102,7 @@ export interface TownState {
   approvals?: Approval[];
   /** History: ended sessions kept. */
   history?: number;
+  archived?: Archived[];
 }
 
 export type TownEvent =

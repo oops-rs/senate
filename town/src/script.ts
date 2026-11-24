@@ -5,6 +5,9 @@
 // whole while those reads are built.
 import type { Elder, Mood, Project, Runtime, Senator, TownEvent, TownState } from "./model.ts";
 
+/** A step of the scripted life: events to act out, or a new state (a committee appears). */
+export type Step = [number, TownEvent[] | (() => TownState)];
+
 const s = (id: string, name: string, runtime: Runtime, mood: Mood, chair = false, doing?: string, watched = false): Senator =>
   ({ id, name, runtime, mood, chair, sessionId: `demo-${id}`, doing, watched });
 const day = 86_400;
@@ -38,14 +41,19 @@ export const quiet: TownState = {
   projects,
   links: { parent: { name: "/acme", up: true }, children: [{ name: "ci-runner", up: true }, { name: "bob-desk", up: false }], remotes: [{ name: "studio-mini", up: true }] },
   approvals: [{ senator: "claude-app", ask: "Bash: cargo publish -p senated", person: "alice" }],
+  // A committee that was archived: its house stays as a monument in its project's quarter.
+  archived: [{ name: "legacy-api", project: "senate", closed: "Oct 2", shipped: ["the first daemon", "SSE streams", "the CLI's ask"] }],
   committees: [
     { name: "senate", senators: [
-      s("claude-chair", "chair", "claude", "working", true, "Town in the Works style"),
+      { ...s("claude-chair", "chair", "claude", "working", true, "Town in the Works style"),
+        // A senator's own card: how it chose to look.
+        card: { hat: "top", accessory: "glasses", deskItem: "cat", body: "round", hairColour: 6 } },
       s("claude-town", "town", "claude", "working", false, "Phaser scene"),
       s("claude-app", "app", "claude", "waiting", false, "Publishing senated"),
       s("codex-timeline", "timeline", "codex", "idle"),
     ], waiting: [{ committee: "senate", root: 2577, title: "Unknown committee in ask", asker: "app" }] },
-    { name: "ledger", senators: [
+    // A chair's card for its house: a dome, brick, a windmill beside it, blossom in the garden.
+    { name: "ledger", card: { roof: "dome", material: "brick", landmark: "windmill", wall: 1, trim: 3, garden: "pond", plants: ["blossom", "birch", "flowers"] }, senators: [
       s("codex-ledger", "ledger", "codex", "idle", true),
       s("claude-migrate", "migrate", "claude", "working", false, "Migrate the refund tables", true),
       s("agy-schema", "schema", "agy", "paused"),
@@ -60,8 +68,14 @@ export const quiet: TownState = {
 
 const ref = (committee: string, root: number, title: string) => ({ committee, root, title });
 
-/** One round of the small town's life, as [delay ms, events]. */
-export const busy: [number, TownEvent[]][] = [
+/** The small town with a committee created while you watch. */
+export const grown = (): TownState => ({
+  ...quiet,
+  committees: [...quiet.committees, { name: "release-train", senators: [s("codex-release", "release", "codex", "working", true, "Cutting 0.13.0")] }],
+});
+
+/** One round of the small town's life. */
+export const busy: Step[] = [
   [0, [
     { kind: "message", from: "claude-town", to: "claude-chair", thread: ref("senate", 2585, "Town page"), line: "The Works are ready for a look" },
     { kind: "tool", senator: "claude-town", tool: "bash", target: "npm run build" },
@@ -84,6 +98,7 @@ export const busy: [number, TownEvent[]][] = [
   [2600, [{ kind: "answered", thread: ref("ledger", 77, "Migration order"), a: "claude-migrate", b: "codex-ledger" }]],
   [2400, [{ kind: "signed", senator: "claude-app" }]],
   [2600, [{ kind: "release", thread: ref("docs", 9, "Release notes") }]],
+  [1500, grown],
 ];
 
 /** Thirty committees, about sixty senators: the big town. */
@@ -105,7 +120,7 @@ export function large(): TownState {
   };
 }
 
-export function largeBusy(): [number, TownEvent[]][] {
+export function largeBusy(): Step[] {
   return [[0, Array.from({ length: 12 }, (_, i): TownEvent => ({
     kind: "message", from: `s${i * 4}`, to: `s${(i * 4 + 17) % 58}`, thread: ref(`committee-${i * 2}`, 100 + i, "Hello"), line: `Hello from senator ${i * 4}`,
   })).concat(Array.from({ length: 6 }, (_, i): TownEvent => ({ kind: "tool", senator: `s${i * 9}`, tool: (["bash", "edit", "read", "grep", "mcp", "web"] as const)[i]! })))]];

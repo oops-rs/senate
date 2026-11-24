@@ -26,6 +26,8 @@ import SenateCore
 @MainActor
 final class TownWebPage: NSObject {
     static let enabled = ProcessInfo.processInfo.environment["SENATE_APP_TOWN_WEB"] == "1"
+    /// `SENATE_APP_TOWN_DEMO=1` (or `large`): the page plays its scripted town, not the store's.
+    static let demo: String? = ProcessInfo.processInfo.environment[TownScript.env].map { $0 == "large" ? "large" : "small" }
     /// The page on screen (snapshots, measurement).
     static weak var shown: TownWebPage?
 
@@ -73,7 +75,7 @@ final class TownWebPage: NSObject {
 
     /// The town as the store has it now (the page works out what changed).
     func show(_ state: TownState) {
-        guard state != self.state else { return }
+        guard Self.demo == nil, state != self.state else { return }
         self.state = state
         sessions = Set(state.senators.values.compactMap(\.sessionId))
         committees = Set(state.committees.map(\.name))
@@ -96,7 +98,7 @@ final class TownWebPage: NSObject {
     private func startFeed() {
         // Only once the page can take what arrives: the feed starts at the
         // log's head, so nothing it sends is missed or replayed.
-        guard let store, ready, wantsFeed else { return }
+        guard let store, ready, wantsFeed, Self.demo == nil else { return }
         if feed == nil {
             feed = TownActivityFeed(store: store, entries: { [weak self] entries in
                 guard let self else { return }
@@ -129,11 +131,25 @@ final class TownWebPage: NSObject {
         case "ready":
             ready = true
             if !options.isEmpty { call("window.town.setOptions(o)", ["o": options]) }
+            if let demo = Self.demo {
+                call("window.town.demo(kind)", ["kind": demo])
+                return
+            }
             if let state {
                 self.state = nil
                 show(state)
             }
             startFeed()
+        case "error":
+            let message = (body["message"] as? String).map { String($0.prefix(500)) } ?? ""
+            Log.app.error("town page: \(message, privacy: .public)")
+            #if DEBUG
+            print("town page error: \(message)")
+            #endif
+            return
+        case "room":
+            // Into a house or out (the navigation entry comes with the live wiring).
+            return
         case "open":
             guard let kind = body["kind"] as? String, let id = body["id"] as? String, id.count <= 300 else { return }
             // At most five a second: a page that floods is ignored.
@@ -158,6 +174,12 @@ final class TownWebPage: NSObject {
             store.openThread(committee: String(id[..<colon]), root: root)
         case "hall":
             store.place = .secretary
+        case "history":
+            store.place = .section(.history)
+        case "approvals":
+            store.place = .section(.approvals)
+        case "past" where store.history.row(id) != nil:
+            store.place = .past(id)
         default:
             Log.app.info("town page: refused open \(kind, privacy: .public)")
         }
@@ -214,7 +236,7 @@ private final class TownScheme: NSObject, WKURLSchemeHandler {
     static let scheme = "senate-town"
     static let page = URL(string: "senate-town://town/index.html")!
     private static let types: [String: String] = [
-        "html": "text/html", "js": "text/javascript", "css": "text/css", "png": "image/png", "tmj": "application/json",
+        "html": "text/html", "js": "text/javascript", "css": "text/css", "png": "image/png", "tmj": "application/json", "json": "application/json",
     ]
     static let policy = [
         "default-src 'none'", "script-src senate-town:", "style-src senate-town:", "img-src senate-town: data:",

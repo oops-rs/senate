@@ -39,6 +39,16 @@ describe("hub and ring", () => {
       }
     }
   });
+  test("a new committee builds on an empty lot; nobody moves", () => {
+    const before = plan(names(12)), after = plan([...names(12), "newcomer"], before.slots);
+    for (const [n, s] of before.slots) expect(after.slots.get(n)).toEqual(s);
+    expect(before.empty.some((e) => e.at.x === after.slots.get("newcomer")!.at.x && e.at.y === after.slots.get("newcomer")!.at.y)).toBe(true);
+    expect(after.empty).toHaveLength(before.empty.length - 1);
+  });
+  test("a fresh plan of the same names is the same town", () => {
+    const a = plan(names(20)), b = plan(names(20), a.slots);
+    expect([...b.slots].sort()).toEqual([...a.slots].sort());
+  });
   test("a tube runs from the workshop's edge facing the hub to the hall's rim", () => {
     const p = plan(names(8));
     for (const s of p.slots.values()) {

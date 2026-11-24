@@ -9,14 +9,16 @@
 // anything is shows in the hover card, and a click opens it.
 import Phaser from "phaser";
 import {
-  archive, bay, bench, capsule, cottage, daylight, gate, glow, hall, INK, memoryHall, monument, PALETTE, person,
-  RUNTIME, sheet, signal, skyline, sprite, STYLES, tool as toolArt, TOOLS, townGate, townHall, train, tree, WALLS, WASH,
-  workshop, type Daylight, type Style,
+  archive, bay, bayPlaces, bench, boards, capsule, character, cottage, daylight, gate, glow, hall, house as houseArt, HOUSE_TOP, INK,
+  landmark, memoryHall, monument, PALETTE, person, plant, RUNTIME, sheet, signal, skyline, speakerHouse, sprite, STYLES,
+  tool as toolArt, TOOLS, townGate, townHall, train, tree, WASH, type Daylight, type Style,
 } from "./art.ts";
+import { COLOURS, generateHouse, generateLook, houses, houseSize, readHouse, readLook, type HouseSpec, type Look } from "./gen.ts";
+import { Room } from "./room.ts";
 import { Director, type Action } from "./director.ts";
-import { along, bounds, CIVIC_SCALE, HALL_R, plan, port, signalAt, tube, WORKSHOP, type Plan, type Pt, type Slot } from "./hub.ts";
+import { along, bounds, CIVIC_SCALE, HALL_R, WEDGE, plan, port, signalAt, tube, WORKSHOP, type Plan, type Pt, type Slot } from "./hub.ts";
 import {
-  diff, hash, homeOf, senatorsOf, seeded, type Approval, type Elder, type Project, type Release, type Senator, type ThreadRef,
+  diff, hash, homeOf, senatorsOf, seeded, type Approval, type Archived, type Elder, type Project, type Release, type Senator, type ThreadRef,
   type ToolKind, type TownEvent, type TownState,
 } from "./model.ts";
 
@@ -35,11 +37,15 @@ export type Target =
   | { kind: "monument"; project: Project; release?: Release; next?: boolean }
   | { kind: "link"; link: "parent" | "child" | "remote"; name: string; up: boolean }
   | { kind: "waiting"; thread: ThreadRef; person?: string }
-  | { kind: "gatehouse" };
+  | { kind: "gatehouse" }
+  | { kind: "civilian" }
+  | { kind: "archived"; archived: Archived };
 
 export interface Hooks {
   hover(target: Target | undefined, x: number, y: number): void;
   open(target: Target): void;
+  /** The town went into a house (a committee) or came out (undefined). */
+  room?(committee: string | undefined): void;
 }
 
 interface Shop {
@@ -51,7 +57,14 @@ interface Shop {
   held: number;
   /** What refresh adds (sill, viewers, visitor, window glows): cleared each time. */
   extras: Phaser.GameObjects.GameObject[];
+  spec: HouseSpec;
+  size: { w: number; h: number };
+  bayY: number;
 }
+
+interface Civilian { img: Phaser.GameObjects.Image; look: Look; shirt: number; angle: number; busy: boolean }
+
+const CIVILIAN_SHIRTS = [0x9aa7b8, 0xc4b59a, 0x8fb3a6, 0xb79fae, 0xa9b78f, 0xc9a98f];
 
 const BAYS = 4;
 const SPEED = 520; // capsule px a second along tubes
@@ -88,6 +101,12 @@ export class Works extends Phaser.Scene {
   private lastSize = "";
   private pending?: { state: TownState; events: TownEvent[] };
   private time0 = Date.now();
+  private specs = new Map<string, HouseSpec>();
+  private civilians: Civilian[] = [];
+  private constructing = 0;
+  private room?: Room;
+  private roomName?: string;
+  private hovered?: string;
 
   constructor() {
     super("works");
@@ -137,6 +156,8 @@ export class Works extends Phaser.Scene {
       this.hooks.hover(undefined, 0, 0);
     });
     this.time.addEvent({ delay: 60_000, loop: true, callback: () => this.applyDaylight() });
+    this.input.keyboard?.on("keydown-ENTER", () => { if (this.hovered) this.enter(this.hovered); });
+    if (!this.scene.get("room")) this.scene.add("room", Room, false);
     if (this.pending) {
       const { state, events } = this.pending;
       this.pending = undefined;
@@ -145,7 +166,8 @@ export class Works extends Phaser.Scene {
   }
 
   override update() {
-    if (this.busy === 0 && !this.dragging && performance.now() > this.awakeUntil && this.tweens.getTweens().length === 0) {
+    const roomBusy = this.room?.sys.isActive() && this.room.tweens.getTweens().length > 0;
+    if (this.busy === 0 && !roomBusy && !this.dragging && performance.now() > this.awakeUntil && this.tweens.getTweens().length === 0) {
       this.game.loop.sleep();
     }
   }
@@ -162,11 +184,14 @@ export class Works extends Phaser.Scene {
     this.touch(80);
     const first = this.state.committees.length === 0 && !this.shops.size;
     const events = [...diff(first ? undefined : this.state, state), ...extra];
-    const before = [...this.shops.keys()].sort().join("\n");
-    const after = state.committees.map((c) => c.name).sort().join("\n");
+    const before = new Set(this.shops.keys());
+    const after = state.committees.map((c) => c.name);
+    const added = first ? [] : after.filter((n) => !before.has(n));
+    const changed = first || added.length > 0 || before.size !== after.length || after.some((n) => !before.has(n));
     this.state = state;
-    if (before !== after || first) this.build();
+    if (changed) this.build(added);
     else this.refresh();
+    if (this.room?.sys.isActive()) this.room.refresh(state);
     this.perform(this.director.accept(events, new Set(senatorsOf(state).keys()), this.reduceMotion));
     if (!this.moved) this.fit();
   }
@@ -188,6 +213,18 @@ export class Works extends Phaser.Scene {
     const zoom = Math.min(cam.width / b.w, cam.height / b.h);
     cam.setZoom(Phaser.Math.Clamp(zoom, 0.15, 3));
     cam.centerOn(b.x + b.w / 2, b.y + b.h / 2);
+    this.placeWash();
+    this.touch();
+  }
+
+  /** Frame one place up close (snapshots): the Speaker's house, the monument quarter, the hall, the memory hall. */
+  look(where: string, zoom: number) {
+    const c = this.plan.civic;
+    const at = where === "speaker" ? c.townHall : where === "quarters" ? { x: c.monuments.x - 30, y: c.monuments.y } : where === "memory" ? c.memory : c.hall;
+    const cam = this.cameras.main;
+    cam.setZoom(zoom * (this.scale.gameSize.width / 1400));
+    cam.centerOn(at.x, at.y);
+    this.moved = true;
     this.placeWash();
     this.touch();
   }
@@ -252,7 +289,12 @@ export class Works extends Phaser.Scene {
   }
 
   /** Everything again: the committees changed. */
-  private build() {
+  private build(added: string[] = []) {
+    const kept = this.plan.slots;
+    // Whatever was moving belonged to the old town: stop it all.
+    this.tweens.killAll();
+    this.busy = 0;
+    this.constructing = 0;
     for (const o of this.dynamic) o.destroy();
     this.dynamic = [];
     for (const g of this.glows) g.destroy();
@@ -262,7 +304,9 @@ export class Works extends Phaser.Scene {
     this.gates.clear();
     this.heldCapsules.clear();
     this.director.reset();
-    this.plan = plan(this.state.committees.map((c) => c.name));
+    this.civilians = [];
+    this.plan = plan(this.state.committees.map((c) => c.name), kept);
+    this.specs = houses(this.state.committees.map((c) => c.name), new Map(this.state.committees.map((k) => [k.name, k.card])));
     const p = this.plan, c = p.civic;
 
     this.drawGrounds();
@@ -284,11 +328,14 @@ export class Works extends Phaser.Scene {
     this.add2(this.hitbox(civic(c.archive.x, c.archive.y, "archive"), () => ({ kind: "archive", filed: [...this.reels.entries()] })));
     this.reelLayer = this.add.container(c.archive.x, c.archive.y).setDepth(c.archive.y + 1).setScale(CIVIC_SCALE);
     this.add2(this.reelLayer);
-    this.add2(this.hitbox(civic(c.townHall.x, c.townHall.y, "townhall"),
+    // The Speaker's house: the desk's home, where the secretaries work.
+    speakerHouse(this);
+    this.add2(this.hitbox(civic(c.townHall.x, c.townHall.y, "speaker"),
       () => ({ kind: "townhall", docket: this.state.hall?.docket ?? 0, secretary: this.state.hall?.secretary })));
-    this.docket = this.add.container(c.townHall.x + 82 * CIVIC_SCALE, c.townHall.y + 52 * CIVIC_SCALE).setDepth(c.townHall.y + 2).setScale(CIVIC_SCALE);
+    this.add2(sprite(this, c.townHall.x + 1, c.townHall.y - 105 * CIVIC_SCALE, "speaker-flag").setOrigin(0, 1).setScale(0.5 * CIVIC_SCALE).setDepth(c.townHall.y));
+    this.docket = this.add.container(c.townHall.x, c.townHall.y).setDepth(c.townHall.y + 2).setScale(CIVIC_SCALE);
     this.add2(this.docket);
-    this.glowAt(c.townHall.x, c.townHall.y + 30, 2.4);
+    this.glowAt(c.townHall.x, c.townHall.y + 20, 2.4);
     this.add2(this.hitbox(sprite(this, c.memory.x, c.memory.y, "memory").setDepth(c.memory.y),
       () => ({ kind: "memory", sessions: this.state.history ?? 0 })));
     this.glowAt(c.memory.x, c.memory.y + 10, 2.2);
@@ -296,13 +343,165 @@ export class Works extends Phaser.Scene {
     this.add2(this.hitbox(sprite(this, c.gate.x, c.gate.y, "towngate").setDepth(c.gate.y), () => ({ kind: "gatehouse" })));
     this.drawBeyond();
 
+    // The empty lots: paved pads where a new committee will build.
+    const pads = this.add.graphics().setDepth(-12_500);
+    this.add2(pads);
+    for (const e of p.empty) {
+      pads.fillStyle(PALETTE.pavingEdge, 0.55).fillRoundedRect(e.at.x - 90, e.at.y - 50, 180, 110, 16);
+    }
     for (const committee of this.state.committees) {
       const slot = p.slots.get(committee.name);
       if (slot) this.buildShop(committee.name, slot);
     }
     this.drawReels();
     this.refresh();
+    this.populate();
     this.applyDaylight();
+    // Committees created while the town is open are built before your eyes (two at a time).
+    for (const name of added.slice(0, 2)) this.construct(name);
+    this.touch();
+  }
+
+  // MARK: Townspeople
+
+  /** Civilians on the ring road: ambient life, recruited as workers and builders. */
+  private populate() {
+    const n = Math.max(4, Math.min(12, 4 + Math.round(this.state.committees.length / 3)));
+    const rnd = seeded("townspeople");
+    const r0 = this.roadRadius();
+    for (let i = 0; i < n; i++) {
+      const look = generateLook(`civilian-${i}`);
+      const shirt = CIVILIAN_SHIRTS[i % CIVILIAN_SHIRTS.length]!;
+      // On the ring road, but never in the civic wedge north of the hall.
+      const angle = -Math.PI / 2 + WEDGE + 0.15 + rnd() * (2 * Math.PI - 2 * WEDGE - 0.3);
+      const img = sprite(this, Math.cos(angle) * r0, Math.sin(angle) * r0 - 14, character(this, look, shirt)).setDepth(Math.sin(angle) * r0);
+      this.add2(this.hitbox(img, () => ({ kind: "civilian" })));
+      this.civilians.push({ img, look, shirt, angle, busy: false });
+    }
+    this.strollCivilians();
+  }
+
+  private roadRadius() {
+    const rings = [...this.plan.slots.values()].map((s) => Math.hypot(s.at.x, s.at.y));
+    return Math.min(...rings, 560) - WORKSHOP.h / 2 - 34;
+  }
+
+  private civStroll?: Phaser.Time.TimerEvent;
+
+  /** Every half minute the townspeople take a few steps round the ring road, together (so the town is still in between). */
+  private strollCivilians() {
+    this.civStroll?.remove();
+    if (this.reduceMotion) return;
+    const rnd = seeded(`civ-${this.time0}`);
+    this.civStroll = this.time.addEvent({ delay: 30_000, loop: true, callback: () => {
+      const r0 = this.roadRadius();
+      this.touch();
+      for (const c of this.civilians) {
+        if (c.busy) continue;
+        const lo = -Math.PI / 2 + WEDGE + 0.15, hi = 1.5 * Math.PI - WEDGE - 0.15;
+        const from = c.angle, to = Math.min(hi, Math.max(lo, from + (rnd() < 0.5 ? -1 : 1) * (0.12 + rnd() * 0.18)));
+        const st = { a: from };
+        this.busy++;
+        this.tweens.add({ targets: st, a: to, duration: 3200, ease: "Sine.InOut",
+          onUpdate: () => { c.angle = st.a; c.img.setPosition(Math.cos(st.a) * r0, Math.sin(st.a) * r0 - 14).setDepth(Math.sin(st.a) * r0); },
+          onComplete: () => { this.busy--; } });
+      }
+    } });
+  }
+
+  /** A free townsperson nearest a point, taken off the street for a job. */
+  private recruit(at: Pt): Civilian | undefined {
+    let best: Civilian | undefined, d = Infinity;
+    for (const c of this.civilians) {
+      if (c.busy) continue;
+      const k = Math.hypot(c.img.x - at.x, c.img.y - at.y);
+      if (k < d) { d = k; best = c; }
+    }
+    if (best) best.busy = true;
+    return best;
+  }
+
+  /** Back to strolling. */
+  private dismiss(c: Civilian, done: () => void) {
+    const r0 = this.roadRadius();
+    c.img.setTexture(character(this, c.look, c.shirt));
+    this.tweens.add({ targets: c.img, x: Math.cos(c.angle) * r0, y: Math.sin(c.angle) * r0 - 14, duration: this.reduceMotion ? 1 : 1400,
+      onUpdate: () => c.img.setDepth(c.img.y), onComplete: () => { c.busy = false; done(); } });
+  }
+
+  // MARK: Construction
+
+  /** Builders come, scaffolding goes up, the house rises, the senators move in. */
+  private construct(name: string) {
+    const shop = this.shops.get(name);
+    if (!shop) return;
+    this.constructing++;
+    this.busy++;
+    shop.root.setAlpha(0);
+    const finish = () => {
+      this.tweens.add({ targets: shop.root, alpha: 1, duration: this.reduceMotion ? 400 : 600,
+        onComplete: () => { this.constructing--; this.busy--; } });
+    };
+    if (this.reduceMotion) { finish(); return; }
+    const at = shop.slot.at, { w, h } = shop.size;
+    const scaffold = this.add2(this.add.graphics().setDepth(at.y + 2));
+    const rising = this.add2(sprite(this, at.x, at.y, houseArt(this, shop.spec).key));
+    const H = rising.height, Wt = rising.width;
+    rising.setOrigin(0.5, (HOUSE_TOP + h / 2) / (h + HOUSE_TOP + 10)).setDepth(at.y + 1).setCrop(0, H, Wt, 0);
+    const builders = [this.recruit(at), this.recruit(at)].filter((b): b is Civilian => !!b);
+    const spots = [{ x: at.x - w / 2 - 18, y: at.y + h / 2 + 6 }, { x: at.x + w / 2 + 18, y: at.y + h / 2 + 6 }];
+    builders.forEach((b, i) => {
+      b.img.setTexture(character(this, b.look, b.shirt, { pose: "work", hardhat: true }));
+      this.tweens.add({ targets: b.img, x: spots[i]!.x, y: spots[i]!.y, duration: 1500, onUpdate: () => b.img.setDepth(b.img.y + 400) });
+      this.tweens.add({ targets: b.img, angle: { from: -6, to: 6 }, duration: 200, yoyo: true, repeat: 14, delay: 1500 });
+    });
+    const t = { k: 0 };
+    this.time.delayedCall(1400, () => {
+      // Scaffolding up.
+      scaffold.lineStyle(4, PALETTE.woodDark, 1);
+      for (let k = 0; k <= 4; k++) scaffold.beginPath().moveTo(at.x - w / 2 - 8 + (k * (w + 16)) / 4, at.y + h / 2).lineTo(at.x - w / 2 - 8 + (k * (w + 16)) / 4, at.y - h / 2 - 30).strokePath();
+      for (let k = 0; k < 4; k++) scaffold.beginPath().moveTo(at.x - w / 2 - 14, at.y + h / 2 - 10 - k * (h + 20) / 4).lineTo(at.x + w / 2 + 14, at.y + h / 2 - 10 - k * (h + 20) / 4).strokePath();
+      // The house rises from the ground.
+      this.tweens.add({ targets: t, k: 1, duration: 3800, ease: "Sine.InOut",
+        onUpdate: () => rising.setCrop(0, H * (1 - t.k), Wt, H * t.k),
+        onComplete: () => {
+          scaffold.destroy();
+          this.tweens.add({ targets: rising, alpha: 0, duration: 500, delay: 300, onComplete: () => rising.destroy() });
+          let left = builders.length;
+          if (!left) finish();
+          for (const b of builders) { b.img.setAngle(0); this.dismiss(b, () => { if (--left === 0) finish(); }); }
+        } });
+    });
+  }
+
+  // MARK: Inside a house
+
+  /** Go into a committee's house (double-click, Enter, or the page's API). */
+  enter(name: string) {
+    const shop = this.shops.get(name);
+    if (!shop || this.roomName) return;
+    this.roomName = name;
+    this.hooks.hover(undefined, 0, 0);
+    this.input.enabled = false;
+    this.cameras.main.setVisible(false);
+    this.wash.setVisible(false);
+    this.scene.launch("room", { committee: name, state: this.state, spec: shop.spec, hooks: this.hooks,
+      reduceMotion: this.reduceMotion, onExit: () => this.leave() });
+    this.room = this.scene.get("room") as Room;
+    this.hooks.room?.(name);
+    this.touch(1500);
+  }
+
+  /** Back out to the town. */
+  leave() {
+    if (!this.roomName) return;
+    this.scene.stop("room");
+    this.roomName = undefined;
+    this.room = undefined;
+    this.input.enabled = true;
+    this.cameras.main.setVisible(true);
+    this.applyDaylight();
+    this.hooks.room?.(undefined);
     this.touch();
   }
 
@@ -366,29 +565,56 @@ export class Works extends Phaser.Scene {
   }
 
   private buildShop(name: string, slot: Slot) {
-    const wall = WALLS[Number(hash(name) % BigInt(WALLS.length))]!;
+    const spec = this.specs.get(name) ?? generateHouse(name);
+    const art = houseArt(this, spec);
+    const { w, h } = houseSize(spec);
     const root = this.add.container(slot.at.x, slot.at.y).setDepth(slot.at.y);
     this.add2(root);
-    const body = sprite(this, 0, 0, workshop(this, wall));
+    // The garden first (behind), then the house.
+    const rnd = seeded(`garden:${name}`);
+    const gardenSpots = [{ x: -w / 2 - 22, y: h / 2 - 8 }, { x: w / 2 + 22, y: h / 2 - 8 }, { x: -w / 2 - 26, y: -h / 2 + 30 }];
+    spec.plants.forEach((species, i) => {
+      const sp = gardenSpots[i]!;
+      root.add(sprite(this, sp.x, sp.y - 20, plant(this, species, Math.floor(rnd() * 4))));
+    });
+    const g = this.add.graphics();
+    if (spec.garden === "flowers") for (let i = 0; i < 9; i++) g.fillStyle([0xffb7c5, 0xfff2a8, 0xffffff, 0xd6bfe6][i % 4]!, 1).fillCircle(-w / 2 + 14 + i * 8, h / 2 + 12, 3.5);
+    if (spec.garden === "hedge") g.fillStyle(PALETTE.leafDark, 1).fillRoundedRect(-w / 2, h / 2 + 6, w * 0.32, 12, 6).fillRoundedRect(w / 2 - w * 0.32, h / 2 + 6, w * 0.32, 12, 6);
+    if (spec.garden === "rocks") for (let i = 0; i < 4; i++) g.fillStyle(PALETTE.stoneDark, 1).fillEllipse(w / 2 - 20 - i * 14, h / 2 + 12, 10, 7);
+    if (spec.garden === "pond") g.fillStyle(PALETTE.water, 1).fillEllipse(w / 2 + 10, h / 2 + 16, 46, 18).lineStyle(2, INK, 1).strokeEllipse(w / 2 + 10, h / 2 + 16, 46, 18);
+    root.add(g);
+    if (spec.landmark !== "none") root.add(sprite(this, w / 2 + 34, -h / 2 + 10, landmark(this, spec.landmark, COLOURS[spec.trim]!)).setOrigin(0.5, 0.75));
+    const body = sprite(this, 0, 0, art.key).setOrigin(0.5, (HOUSE_TOP + h / 2) / (h + HOUSE_TOP + 10));
     root.add(body);
-    this.hitbox(body, () => {
+    let clickTimer: Phaser.Time.TimerEvent | undefined;
+    const target = (): Target => {
       const c = this.state.committees.find((k) => k.name === name);
       return { kind: "workshop", name, senators: c?.senators.length ?? 0, waiting: c?.waiting?.length ?? 0 };
+    };
+    body.setInteractive({ useHandCursor: true });
+    body.on("pointerover", (p: Phaser.Input.Pointer) => { this.hovered = name; this.hooks.hover(target(), p.x, p.y); });
+    body.on("pointerout", () => { this.hovered = undefined; this.hooks.hover(undefined, 0, 0); });
+    body.on("pointerup", () => {
+      if (this.dragging) return;
+      // A double click goes in; a single click (once it is clearly single) opens the committee.
+      if (clickTimer) { clickTimer.remove(); clickTimer = undefined; this.enter(name); return; }
+      clickTimer = this.time.delayedCall(320, () => { clickTimer = undefined; this.hooks.open(target()); });
+      this.touch(400);
     });
-    const bays: Shop["bays"] = [];
-    for (let i = 0; i < BAYS; i++) {
-      const w = sprite(this, -66 + i * 44, -10, bay(this, false));
-      root.add(w);
-      bays.push({ window: w });
-    }
+    const places = bayPlaces(spec);
+    const bays: Shop["bays"] = places.xs.map((x) => {
+      const win = sprite(this, x, places.y, bay(this, false)).setScale(0.5 * places.scale);
+      root.add(win);
+      return { window: win };
+    });
     // The signal by this end of the tube.
-    const s = signalAt(slot);
-    const post = sprite(this, s.x + 18, s.y - 16, "signal").setDepth(s.y);
+    const s0 = signalAt(slot);
+    const post = sprite(this, s0.x + 18, s0.y - 16, "signal").setDepth(s0.y);
     this.add2(post);
-    const lamp = sprite(this, s.x + 18, s.y - 31, "lamp-green").setDepth(s.y + 1);
+    const lamp = sprite(this, s0.x + 18, s0.y - 31, "lamp-green").setDepth(s0.y + 1);
     this.add2(lamp);
     this.hitbox(post, () => ({ kind: "signal", committee: name, held: this.shops.get(name)?.held ? "a delivery is held" : undefined }));
-    this.shops.set(name, { name, slot, root, bays, lamp, held: 0, extras: [] });
+    this.shops.set(name, { name, slot, root, bays, lamp, held: 0, extras: [], spec, size: { w, h }, bayY: places.y });
     this.reels.set(name, this.reels.get(name) ?? 0);
   }
 
@@ -425,10 +651,12 @@ export class Works extends Phaser.Scene {
   private drawMonuments() {
     const c = this.plan.civic;
     const projects = this.state.projects ?? [];
+    const quarters = new Map<string, Pt>();
     projects.slice(0, 4).forEach((proj, pi) => {
       const style = (STYLES as readonly string[]).includes(proj.style ?? "") ? (proj.style as Style)
         : STYLES[Number(hash(proj.name) % BigInt(STYLES.length))]!;
       const ox = c.monuments.x - 200 + (pi % 2) * 260, oy = c.monuments.y - 60 + Math.floor(pi / 2) * 220;
+      quarters.set(proj.id, { x: ox, y: oy });
       const g = this.add.graphics().setDepth(-13_000);
       this.add2(g);
       g.fillStyle(PALETTE.paving, 1).fillRoundedRect(ox - 20, oy - 110, 250, 190, 18);
@@ -447,6 +675,15 @@ export class Works extends Phaser.Scene {
         for (let k = 0; k < 3; k++) g.beginPath().moveTo(x - 18 + k * 18, oy).lineTo(x - 18 + k * 18, oy - 64).strokePath();
         for (let k = 0; k < 3; k++) g.beginPath().moveTo(x - 22, oy - 14 - k * 22).lineTo(x + 22, oy - 14 - k * 22).strokePath();
       }
+    });
+    // An archived committee's house stays, boarded up, in its project's quarter.
+    (this.state.archived ?? []).slice(0, 4).forEach((a, i) => {
+      const q = quarters.get(a.project ?? "") ?? [...quarters.values()][0] ?? c.monuments;
+      const spec = readHouse(a.card, generateHouse(a.name));
+      const at = { x: q.x + 190 - i * 8, y: q.y + 52 + i * 6 };
+      const img = sprite(this, at.x, at.y, houseArt(this, spec).key).setScale(0.5 * 0.42).setTint(0xb9b4ae).setDepth(at.y + 5);
+      this.add2(this.hitbox(img, () => ({ kind: "archived", archived: a })));
+      this.add2(sprite(this, at.x, at.y + 10, boards(this)).setScale(0.5 * 0.42).setDepth(at.y + 6));
     });
   }
 
@@ -470,8 +707,9 @@ export class Works extends Phaser.Scene {
         b.window.setTexture(bay(this, on));
         b.window.removeAllListeners();
         if (!s || s.mood === "stopped") return;
-        const pose = s.mood === "waiting" ? "wave" : "stand";
-        const who = sprite(this, b.window.x, b.window.y + 4, person(this, RUNTIME[s.runtime], { pose, hat: s.chair ? PALETTE.amber : undefined }));
+        const pose = s.mood === "waiting" ? "wave" : s.mood === "working" ? "work" : "stand";
+        const look = readLook(s.card, generateLook(s.id));
+        const who = sprite(this, b.window.x, b.window.y + 2, character(this, look, RUNTIME[s.runtime], { pose, chair: s.chair, glyph: s.runtime }));
         if (s.mood === "paused") who.setAngle(-80).setY(b.window.y + 12).setAlpha(0.7);
         shop.root.add(who);
         b.who = who;
@@ -479,14 +717,14 @@ export class Works extends Phaser.Scene {
         this.hitbox(who, () => ({ kind: "senator", senator: senatorsOf(this.state).get(s.id) ?? s, committee: shop.name }));
         this.hitbox(b.window, () => ({ kind: "senator", senator: senatorsOf(this.state).get(s.id) ?? s, committee: shop.name }));
         if (s.watched) {
-          const viewer = sprite(this, b.window.x + 6, 58, person(this, 0x9a9ab0, { hair: 0x2e2622 }));
+          const viewer = sprite(this, b.window.x + 6, shop.size.h / 2 - 6, character(this, generateLook("viewer"), 0x9a9ab0));
           shop.root.add(viewer);
           shop.extras.push(viewer);
         }
       });
       // A sill over the bays' foot, so the senators sit inside.
-      const wall = WALLS[Number(hash(shop.name) % BigInt(WALLS.length))]!;
-      const sill = this.add.rectangle(0, 16, 168, 10, wall).setStrokeStyle(2, INK);
+      const wall = COLOURS[shop.spec.wall]!;
+      const sill = this.add.rectangle(0, shop.bayY + 26, shop.size.w - 36, 10, wall).setStrokeStyle(2, INK);
       shop.root.add(sill);
       shop.extras.push(sill);
       const litBays = shop.bays.filter((b) => b.window.texture.key === "bay-lit");
@@ -497,7 +735,7 @@ export class Works extends Phaser.Scene {
       // Something waiting on the person: a visitor with a letter by the door.
       const first = committee?.waiting?.[0];
       if (first) {
-        const v = sprite(this, 46, 84, person(this, PALETTE.amber, { pose: "wave", hair: 0x2e2622 }));
+        const v = sprite(this, 50, shop.size.h / 2 + 12, character(this, generateLook("visitor"), PALETTE.amber, { pose: "wave" }));
         shop.root.add(v);
         shop.extras.push(v);
         this.hitbox(v, () => ({ kind: "waiting", thread: first, person: this.state.person }));
@@ -544,15 +782,21 @@ export class Works extends Phaser.Scene {
     this.tweens.add({ targets: signer, x: 120, alpha: 0, duration: this.reduceMotion ? 1 : 900 });
   }
 
+  /** The Speaker's house: secretaries at the desk window, the docket on the porch, the person at home. */
   private drawDocket() {
     this.docket.removeAll(true);
     const n = Math.min(this.state.hall?.docket ?? 0, 12);
-    for (let i = 0; i < n; i++) this.docket.add(sprite(this, (i % 2) * 2, -i * 5, "sheet"));
+    for (let i = 0; i < n; i++) this.docket.add(sprite(this, 88 + (i % 2) * 2, 70 - i * 5, "sheet"));
     const sec = this.state.hall?.secretary;
     if (sec) {
-      const s = sprite(this, -82, 10, person(this, RUNTIME[sec.runtime], { pose: sec.mood === "working" ? "stand" : "sit" }));
+      const look = readLook(sec.card, generateLook(sec.id));
+      const s = sprite(this, -60, 22, character(this, look, RUNTIME[sec.runtime], { pose: sec.mood === "working" ? "work" : "sit", glyph: sec.runtime }));
       this.docket.add(s);
       this.hitbox(s, () => ({ kind: "senator", senator: sec }));
+    }
+    if (this.state.person) {
+      const me = sprite(this, 0, 78, character(this, generateLook(`person:${this.state.person}`), 0xd6a63b, { pose: "wave" }));
+      this.docket.add(me);
     }
   }
 
@@ -567,7 +811,10 @@ export class Works extends Phaser.Scene {
       const leg = i % prom.length, t = (i * 0.37) % 1;
       const a = prom[leg]!, b = prom[(leg + 1) % prom.length]!;
       const at = age >= 3 ? { x: prom[(i % 2) * 2]!.x + 60 + (i % 3) * 14, y: prom[(i % 2) * 2]!.y + 2 } : { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
-      const img = sprite(this, at.x, at.y - 18, person(this, shirt, { hair, cane: age >= 2, pose: age >= 3 ? "sit" : "stand" })).setDepth(at.y);
+      const base = generateLook(e.id);
+      const look: Look = { ...base, hairColour: 5, hair: age >= 3 && base.hair === "long" ? "bun" : base.hair, hat: age >= 2 ? base.hat : "none" };
+      void hair;
+      const img = sprite(this, at.x, at.y - 18, character(this, look, shirt, { cane: age >= 2, pose: age >= 3 ? "sit" : "stand" })).setDepth(at.y);
       if (age >= 2) img.setAngle(age === 2 ? 4 : 0);
       this.add2(this.hitbox(img, () => ({ kind: "elder", elder: e })));
       img.setData("leg", leg).setData("age", age);
@@ -620,12 +867,20 @@ export class Works extends Phaser.Scene {
   private perform(actions: Action[]) {
     for (const a of actions) {
       switch (a.kind) {
-        case "visit": this.send(a); break;
+        case "visit":
+          this.send(a);
+          if (this.room && this.roomName && (homeOf(this.state, a.from) === this.roomName || (a.to && homeOf(this.state, a.to) === this.roomName))) {
+            this.room.capsule(a.from, a.to, a.thread, a.line, RUNTIME[senatorsOf(this.state).get(a.from)?.runtime ?? "other"]);
+          }
+          break;
         case "mood": this.refresh(); break;
         case "arrive": case "depart": this.refresh(); if (a.walk) this.perform(this.director.cameHome(a.senator)); break;
         case "settled": this.stamp(a.thread.committee); break;
         case "release": this.release(a.thread); break;
-        case "tool": this.worker(a.senator, a.tool, a.target); break;
+        case "tool":
+          this.worker(a.senator, a.tool, a.target);
+          if (this.room && homeOf(this.state, a.senator) === this.roomName) this.room.worker(a.senator, a.tool, a.target);
+          break;
         case "signed": this.openGate(a.senator); break;
         case "link": this.linkPulse(a.link); break;
       }
@@ -644,7 +899,9 @@ export class Works extends Phaser.Scene {
     const from = this.shopOf(a.from);
     const to = (a.to ? this.shopOf(a.to) : undefined) ?? this.shops.get(a.thread.committee);
     const color = RUNTIME[senatorsOf(this.state).get(a.from)?.runtime ?? "other"];
-    const cap = sprite(this, 0, 0, capsule(this, color)).setDepth(5_000).setScale(0.75);
+    const capKey = capsule(this, color);
+    const cap = sprite(this, 0, 0, capKey).setDepth(5_000);
+    cap.setScale(cap.scale * 1.5);
     this.add2(this.hitbox(cap, () => ({ kind: "capsule", from: a.from, to: a.to, thread: a.thread, line: a.line, held: a.held })));
     const done = () => { cap.destroy(); this.busy--; this.perform(this.director.cameHome(a.from)); };
     this.busy++;
@@ -842,6 +1099,7 @@ export class Works extends Phaser.Scene {
   }
 
   stats() {
-    return { fps: Math.round(this.game.loop.actualFps), sleeping: !this.game.loop.running, shops: this.shops.size, busy: this.busy, passed: this.passed };
+    return { fps: Math.round(this.game.loop.actualFps), sleeping: !this.game.loop.running, shops: this.shops.size, busy: this.busy,
+      passed: this.passed, constructing: this.constructing };
   }
 }

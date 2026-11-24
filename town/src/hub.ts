@@ -14,7 +14,7 @@ import { hash } from "./model.ts";
 export interface Pt { x: number; y: number }
 
 /** A workshop: where it stands, which ring, the direction from the hub. */
-export interface Slot { at: Pt; ring: number; angle: number }
+export interface Slot { at: Pt; ring: number; angle: number; index: number }
 
 export const WORKSHOP = { w: 200, h: 136 };
 /** The archive and the town hall are drawn at this scale, in the civic wedge. */
@@ -26,6 +26,8 @@ const SPACING = 245;
 
 export interface Plan {
   slots: Map<string, Slot>;
+  /** The empty lots on the rings in use: where a new committee will build. */
+  empty: Slot[];
   /** The radius past the last ring's workshops. */
   outer: number;
   civic: {
@@ -53,30 +55,61 @@ export function ordered(names: string[]): string[] {
   });
 }
 
-export function plan(names: string[]): Plan {
+/** A ring's slot: fixed, whoever stands there. */
+export function slotAt(ring: number, index: number): Slot {
+  const n = capacity(ring);
+  const r = FIRST_RING + ring * RING_STEP;
+  // Spread over the ring outside the civic wedge; odd rings a quarter step
+  // round, so their tubes tend to pass between the inner workshops.
+  const span = 2 * Math.PI - 2 * WEDGE;
+  const offset = ring % 2 === 1 ? 0.25 : 0;
+  const angle = -Math.PI / 2 + WEDGE + ((index + 0.5 + offset) * span) / n;
+  return { at: { x: Math.cos(angle) * r, y: Math.sin(angle) * r }, ring, angle, index };
+}
+
+/**
+ * Every committee's lot. Lots are fixed places on the rings, so a new
+ * committee builds on an empty one and nobody moves: the first ring with
+ * room, at the slot its name's hash points to (the next free one when taken).
+ */
+export function plan(names: string[], keep?: Map<string, Slot>): Plan {
   const all = ordered(names);
   const slots = new Map<string, Slot>();
-  let i = 0, ring = 0;
-  while (i < all.length) {
-    const n = Math.min(capacity(ring), all.length - i);
-    const r = FIRST_RING + ring * RING_STEP;
-    // Spread over the ring outside the civic wedge; odd rings half a step
-    // round, so their tubes pass between the inner workshops.
-    const span = 2 * Math.PI - 2 * WEDGE;
-    const offset = ring % 2 === 1 ? 0.25 : 0;
-    for (let k = 0; k < n; k++) {
-      const angle = -Math.PI / 2 + WEDGE + ((k + 0.5 + offset) * span) / Math.max(n, 1);
-      slots.set(all[i + k]!, { at: { x: Math.cos(angle) * r, y: Math.sin(angle) * r }, ring, angle });
-    }
-    i += n;
-    ring++;
+  const taken: Set<number>[] = [];
+  let ring = 0;
+  // Who already stands somewhere keeps the place (a committee added while
+  // the town is open never moves anyone).
+  for (const name of all) {
+    const k = keep?.get(name);
+    if (!k || k.index >= capacity(k.ring) || taken[k.ring]?.has(k.index)) continue;
+    (taken[k.ring] ??= new Set()).add(k.index);
+    slots.set(name, slotAt(k.ring, k.index));
+    ring = Math.max(ring, k.ring + 1);
+  }
+  for (const name of all) {
+    if (slots.has(name)) continue;
+    let r = 0;
+    while ((taken[r]?.size ?? 0) >= capacity(r)) r++;
+    const used = (taken[r] ??= new Set());
+    const n = capacity(r);
+    let i = Number(hash(name) % BigInt(n));
+    while (used.has(i)) i = (i + 1) % n;
+    used.add(i);
+    slots.set(name, slotAt(r, i));
+    ring = Math.max(ring, r + 1);
   }
   const lastRing = Math.max(0, ring - 1);
   const outer = FIRST_RING + lastRing * RING_STEP + WORKSHOP.w * 0.75;
+  void lastRing;
   const edge = Math.max(outer, 640);
   const memory = { x: -edge - 150, y: -edge * 0.5 };
+  const empty: Slot[] = [];
+  for (let r = 0; r < Math.max(ring, 1); r++) {
+    for (let i = 0; i < capacity(r); i++) if (!taken[r]?.has(i)) empty.push(slotAt(r, i));
+  }
   return {
     slots,
+    empty,
     outer: edge,
     civic: {
       hall: { x: 0, y: 0 },
