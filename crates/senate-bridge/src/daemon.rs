@@ -1136,11 +1136,12 @@ fn orientation_role(agent: &SenatorName, chair: Option<&SenatorName>, locale: Lo
             .collect::<Vec<_>>()
             .join(", ");
         return match locale {
-            Locale::Zh => {
-                format!("你是本委员会的主席（chair），负责主持委员会。主席工具包括 {tools}。")
-            }
+            Locale::Zh => format!(
+                "你是本委员会的主席（chair），负责主持委员会。主席工具包括 {tools}。你接受一项交付的工作时，用 mcp__senate__status 把你发出的那个 thread 设为 `archived`。"
+            ),
             Locale::En => format!(
-                "You are the chair of this committee and are in charge of it. Your chair tools are {tools}."
+                "You are the chair of this committee and are in charge of it. Your chair tools are {tools}. \
+                 When you accept work you asked for, archive that thread with mcp__senate__status (state `archived`)."
             ),
         };
     }
@@ -5133,7 +5134,16 @@ impl Shared {
         }
         status.check().map_err(IpcError::bad_request)?;
         let root = self.task_root(&committee, thread).await?;
-        if let Some(session) = session.as_ref().filter(|_| !acting.as_person) {
+        // The asker archiving its own thread (not addressed to it) does not
+        // take it on: it becomes no owner of it.
+        let asker_only = session.as_ref().is_some_and(|s| {
+            let me = Address::senator(&s.agent);
+            !root.to.contains(&me) && (root.from == me || root.on_behalf_of.as_ref() == Some(&me))
+        });
+        if let Some(session) = session
+            .as_ref()
+            .filter(|_| !acting.as_person && !asker_only)
+        {
             status.session = Some(session.session_id.clone());
             let owner = TaskOwner {
                 agent: session.agent.clone(),
