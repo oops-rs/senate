@@ -148,6 +148,12 @@ final class ConversationPage: NSObject {
         track()
     }
 
+    #if DEBUG
+    /// Tests: send the page what changed in the fixture rows, as a
+    /// session's timeline change would.
+    func pushFixture() { push() }
+    #endif
+
     /// Keep the core's documents for the last few sources, not more.
     private func remember(_ source: ConversationSource) {
         recentSources.removeAll { $0 == source }
@@ -233,10 +239,14 @@ final class ConversationPage: NSObject {
         if order.isEmpty || ids.isEmpty {
             op = ["type": "reset", "rows": rows.map { $0.encode() }]
             op["first"] = firstScreen()
-        } else if let first = order.first, let at = ids.firstIndex(of: first), at > 0,
-                  Array(ids[at...].prefix(order.count)) == order {
-            let added = rows.suffix(ids.count - at - order.count)
+        } else if let (gone, at) = Self.prepended(order, ids) {
+            // Older rows above; the page's first row or two may have joined
+            // a new one among them (a run of commands that now starts in
+            // the older page): those go, the rest stay where they are.
+            let kept = order.count - gone
+            let added = rows.suffix(ids.count - at - kept)
             op = ["type": "prepend", "rows": rows[..<at].map { $0.encode() },
+                  "remove": order.prefix(gone).map { String($0) },
                   "changed": (rows[at...].filter(changed) + added).map { $0.encode() }]
         } else if ids.count >= order.count, Array(ids.prefix(order.count)) == order {
             let all = rows.filter(changed) + rows.suffix(ids.count - order.count)
@@ -252,6 +262,21 @@ final class ConversationPage: NSObject {
         order = ids
         sentState = state
         call("window.senate.apply(op)", ["op": op])
+    }
+
+    /// Whether `ids` is `order` with rows read above it: the page's rows
+    /// from the `gone`-th on (none or the first one or two absorbed into a
+    /// row above) follow, in order, at `at`.
+    static func prepended(_ order: [UInt64], _ ids: [UInt64]) -> (gone: Int, at: Int)? {
+        for gone in 0..<min(3, order.count) {
+            let kept = order[gone...]
+            guard let first = kept.first, let at = ids.firstIndex(of: first), at > 0,
+                  ids[at...].prefix(kept.count).elementsEqual(kept) else { continue }
+            // What went is no longer a row of its own.
+            guard order.prefix(gone).allSatisfy({ !ids.contains($0) }) else { return nil }
+            return (gone, at)
+        }
+        return nil
     }
 
     private static func same(_ a: any Equatable, _ b: any Equatable) -> Bool {

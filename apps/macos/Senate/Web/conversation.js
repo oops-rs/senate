@@ -444,7 +444,7 @@
   // From the app: one operation at a time.
   function apply(op) {
     const bottom = atBottom();
-    const anchor = bottom ? null : firstVisible();
+    let anchor = bottom ? null : firstVisible();
     switch (op.type) {
       case "reset":
         rows.clear();
@@ -458,6 +458,15 @@
         for (const row of op.rows) replace(row);
         break;
       case "prepend": {
+        // Rows that joined one of the older rows: gone. If the reader was
+        // on one of them, they are held on the row after instead.
+        const gone = (op.remove || []).map((k) => main().querySelector(':scope > [data-id="' + k + '"]')).filter(Boolean);
+        if (anchor && gone.some((g) => g.contains(anchor.el))) {
+          let next = gone[gone.length - 1].nextElementSibling;
+          while (next && (!next.dataset.id || gone.includes(next))) next = next.nextElementSibling;
+          anchor = next ? { el: next, top: next.getBoundingClientRect().top } : null;
+        }
+        for (const g of gone) { rows.delete(g.dataset.id); g.remove(); }
         const first = main().querySelector(".row");
         for (const row of op.rows) { rows.set(key(row), row); main().insertBefore(render(row), first); }
         for (const row of op.changed || []) replace(row);
