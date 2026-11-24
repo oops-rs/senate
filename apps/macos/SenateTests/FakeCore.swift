@@ -198,6 +198,11 @@ nonisolated final class FakeCore: AppCoreProtocol, @unchecked Sendable {
     }
     var secretary = SecretaryView(committee: "office", alias: "secretary", senator: nil, state: .notRecorded, action: nil)
     func defaultSecretary() async throws -> SecretaryView { secretary }
+    func observeGrant(name: String) async throws -> ObserveGrant {
+        try record("observe grant \(name)")
+        return ObserveGrant(url: "http://127.0.0.1:1", token: "obs1_fake", id: "fake", expiresAt: "2099-01-01T00:00:00Z")
+    }
+
     func ensureSecretary() async throws -> SecretaryView {
         try record("ensure secretary")
         secretary.state = .running

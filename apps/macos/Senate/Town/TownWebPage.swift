@@ -12,23 +12,27 @@ import SenateCore
 /// instead of the SpriteKit map while `SENATE_APP_TOWN_WEB=1`.
 ///
 /// This is the shell; the page is content and knows nothing of the app:
-/// - It sends `status`, `environment` (colour scheme, reduced motion,
-///   locale, time zone, visibility, viewport), `observe.snapshot` and
-///   `observe.event` frames. Until the app's native observe client lands,
-///   the snapshot and frames are projected here from the store's town (the
-///   same public shapes; no token, session id or private state goes in).
-/// - It answers `storage.*` from a small per-scene store (16 KiB a value,
-///   64 KiB in all) and declines `card.write` for now.
-/// - `open {url}` is honoured only for a `senate://open/v1/…` link this
-///   shell itself put into the page (every link maps to a destination it
-///   knows), at most five a second.
+/// - Data comes only from the Senate's public Observe API, through a native
+///   client ([`ObserveClient`]) holding a grant the person creates with one
+///   click (metadata only, every committee, this Senate's direct links),
+///   kept in the Keychain. The page gets the snapshot and frames as Observe
+///   sends them; never the bearer, never the app's own state.
+/// - It answers `ready`, sends `status` and `environment` (colour scheme,
+///   reduced motion, locale, time zone, visibility, viewport, and the two
+///   additions: `focused`, `power`), keeps `storage.*` per scene (16 KiB a
+///   value, 64 KiB in all) and declines `card.write` for now.
+/// - Off screen (another page, the window hidden, occluded or minimised, the
+///   displays asleep) the subscription is released; back on screen it starts
+///   again from a fresh snapshot.
+/// - Links: `open {url}` and a user-activated main-frame `senate:`
+///   navigation both go to the app's one router (`store.links`), unchanged.
 ///
 /// Safety, as the conversation page:
 /// - Everything comes from the bundle's `town/` folder through the
 ///   `senate-town:` scheme, a fixed set of file types, no path out of the
 ///   folder; the page comes with its Content-Security-Policy: scripts,
-///   styles, images and its map only from that scheme (images also as
-///   `data:`, which is how Phaser makes its blank textures), nothing else.
+///   styles and images only from that scheme (images also as `data:`),
+///   nothing else.
 /// - A content rule list blocks every http(s), ws(s), file, ftp and blob
 ///   load whatever the page says; if it does not compile the page is not
 ///   loaded.
@@ -38,7 +42,7 @@ import SenateCore
 final class TownWebPage: NSObject {
     static let enabled = ProcessInfo.processInfo.environment["SENATE_APP_TOWN_WEB"] == "1"
     /// `SENATE_APP_TOWN_DEMO=1` (or `large`): this shell replays the scene's demo recording
-    /// (`recordings/demo*.ndjson`, observe frames) through the same contract instead of the store's town.
+    /// (`recordings/demo*.ndjson`, the observe recording format) through the same contract.
     static let demo: String? = ProcessInfo.processInfo.environment[TownScript.env].map { $0 == "large" ? "large" : "small" }
     /// For the demo: `SENATE_APP_TOWN_TIME` (dawn, day, dusk, night), `SENATE_APP_TOWN_WEATHER`
     /// (clear, cloudy, rain, windy, fog) and `SENATE_APP_TOWN_SEASON` (spring, summer, autumn, winter)
@@ -58,14 +62,9 @@ final class TownWebPage: NSObject {
     let web: WKWebView
     private weak var store: CoreStore?
     private let page: URL
-    /// The page said `ready` (or, in the demo, finished loading).
+    /// The page said `ready`.
     private(set) var ready = false
-    private var state: TownState?
-    /// Every link handed to the page, and where it leads.
-    private var links: [String: TownDestination] = [:]
     private var opens: [ContinuousClock.Instant] = []
-    private var feed: TownActivityFeed?
-    private var cursor: UInt64 = 0
     /// The scene's own settings (`storage.*`), kept across launches for this scene.
     private var storage: [String: String] = UserDefaults.standard.dictionary(forKey: TownWebPage.storageKey) as? [String: String] ?? [:] {
         didSet { UserDefaults.standard.set(storage, forKey: TownWebPage.storageKey) }
@@ -76,6 +75,13 @@ final class TownWebPage: NSObject {
     private var visible = false
     private var displaysAsleep = false
     private var observers: [(NotificationCenter, NSObjectProtocol)] = []
+    /// The live Observe subscription (not in the demo).
+    private var client: ObserveClient?
+    /// Town has no grant for this Senate yet (or it was revoked): the view offers to create one.
+    var onAccessNeeded: (Bool) -> Void = { _ in }
+    private(set) var accessNeeded = false {
+        didSet { if accessNeeded != oldValue { onAccessNeeded(accessNeeded) } }
+    }
 
     init(store: CoreStore) {
         self.store = store
@@ -107,19 +113,13 @@ final class TownWebPage: NSObject {
 
     // MARK: Feeding the page
 
-    /// The town as the store has it now, as a public snapshot.
-    func show(_ state: TownState) {
-        guard Self.demo == nil, state != self.state else { return }
-        self.state = state
-        // Off screen nothing is sent (the scene is paused and costs nothing); the latest goes when it's back.
-        guard sentOnScreen else { return }
-        send("observe.snapshot", ["snapshot": snapshot(state)])
-    }
+    /// Which Senate the grant is kept for.
+    private var senateKey: String { store?.state.senates.first?.key ?? "local" }
 
     /// What the scene was last told about being on screen.
     private var sentOnScreen = false
 
-    /// On screen or not: off screen the demo and the live feed stop sending
+    /// On screen or not: off screen the demo and the live subscription stop
     /// (nothing runs in the page); back on screen they start again from a
     /// fresh snapshot.
     private func onScreenChanged(_ now: Bool) {
@@ -131,12 +131,54 @@ final class TownWebPage: NSObject {
             if now { startDemo(demo) }
             return
         }
-        if now {
-            if let state { send("observe.snapshot", ["snapshot": snapshot(state)]) }
-            startFeed()
-        } else {
-            feed?.stop()
+        if now { subscribe() } else { client?.stop(); client = nil }
+    }
+
+    /// Subscribe with the grant kept for this Senate, or say access is needed.
+    private func subscribe() {
+        guard client == nil, ready, sentOnScreen, Self.demo == nil else { return }
+        guard let grant = ObserveAccess.load(senateKey) else {
+            accessNeeded = true
+            send("status", ["state": "access_needed"])
+            return
         }
+        accessNeeded = false
+        let client = ObserveClient(grant: grant)
+        client.onSnapshot = { [weak self] in self?.send("observe.snapshot", ["snapshot": $0]) }
+        client.onFrame = { [weak self] in self?.send("observe.event", ["frame": $0]) }
+        client.onStatus = { [weak self] status in
+            guard let self else { return }
+            switch status {
+            case .ready: send("status", ["state": "ready"])
+            case .unavailable: send("status", ["state": "data_unavailable"])
+            case .versionMismatch: send("status", ["state": "version_mismatch"])
+            case .accessNeeded:
+                ObserveAccess.forget(senateKey)
+                self.client = nil
+                accessNeeded = true
+                send("status", ["state": "access_needed"])
+            }
+        }
+        self.client = client
+        client.start()
+    }
+
+    /// One click: a metadata grant for Town (every committee, this Senate's
+    /// direct links), created through the person-only path and kept in the
+    /// Keychain. Then the town comes alive.
+    func grantAccess() async throws {
+        guard let core = store?.core else { throw CoreError.NotStarted }
+        let issued = try await core.observeGrant(name: "Town")
+        ObserveAccess.save(.init(url: issued.url, token: issued.token, id: issued.id, expiresAt: issued.expiresAt), senateKey)
+        accessNeeded = false
+        subscribe()
+    }
+
+    /// Drop the grant kept for this Senate (the snapshot hook cleans up after itself).
+    func forgetAccess() {
+        client?.stop()
+        client = nil
+        ObserveAccess.forget(senateKey)
     }
 
     func setOptions(reduceMotion: Bool? = nil, dark: Bool? = nil, visible: Bool? = nil) {
@@ -175,7 +217,7 @@ final class TownWebPage: NSObject {
         return window.isVisible && !window.isMiniaturized && window.occlusionState.contains(.visible)
     }
 
-    /// On battery or in Low Power Mode the scene draws less.
+    /// On battery or in Low Power Mode the scene draws less (Low Power Mode wins).
     private static var power: String {
         if ProcessInfo.processInfo.isLowPowerModeEnabled { return "low_power" }
         let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue()
@@ -212,23 +254,9 @@ final class TownWebPage: NSObject {
         }
     }
 
-    /// The committees' activity, live, while the page is shown, as public frames.
-    private func startFeed() {
-        // Only once the page can take what arrives: the feed starts at the
-        // log's head, so nothing it sends is missed or replayed.
-        guard let store, ready, sentOnScreen, Self.demo == nil else { return }
-        if feed == nil {
-            feed = TownActivityFeed(store: store, entries: { [weak self] entries in
-                guard let self else { return }
-                for frame in entries.compactMap(self.frame) { self.send("observe.event", ["frame": frame]) }
-            }, deliver: { _ in })
-        }
-        feed?.start()
-    }
-
     /// The demo: the scene's own recording (observe recording format: a header,
-    /// a snapshot, timed frames or replacement snapshots, an end mark), replayed
-    /// in time and on a loop, exactly as live frames would arrive.
+    /// then rows `{offset_ms, type, data}`), replayed in time and on a loop,
+    /// exactly as live frames would arrive.
     private var demoTask: Task<Void, Never>?
     private func startDemo(_ kind: String) {
         guard demoTask == nil,
@@ -238,6 +266,7 @@ final class TownWebPage: NSObject {
         let rows = text.split(separator: "\n").dropFirst().compactMap { line in
             (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any]
         }
+        send("status", ["state": "ready"])
         demoTask = Task { [weak self] in
             while !Task.isCancelled {
                 let start = ContinuousClock.now
@@ -247,8 +276,11 @@ final class TownWebPage: NSObject {
                     if wait > .zero { try? await Task.sleep(for: wait) }
                     if Task.isCancelled { return }
                     guard let self else { return }
-                    if let snapshot = row["snapshot"] { self.send("observe.snapshot", ["snapshot": snapshot]) }
-                    else if let frame = row["frame"] { self.send("observe.event", ["frame": frame]) }
+                    switch row["type"] as? String {
+                    case "snapshot": if let data = row["data"] { self.send("observe.snapshot", ["snapshot": data]) }
+                    case "frame": if let data = row["data"] { self.send("observe.event", ["frame": data]) }
+                    default: break
+                    }
                 }
             }
         }
@@ -271,85 +303,6 @@ final class TownWebPage: NSObject {
         }
     }
 
-    // MARK: The public shapes (until the native observe client)
-
-    private func link(_ url: String, _ to: TownDestination) -> String {
-        links[url] = to
-        return url
-    }
-
-    private func snapshot(_ town: TownState) -> [String: Any] {
-        var senators: [[String: Any]] = []
-        var threads: [[String: Any]] = []
-        for c in town.committees {
-            for s in c.senators {
-                let url = TownLink.senator(committee: c.name, alias: s.name)
-                senators.append([
-                    "id": s.id, "committee_id": c.name, "alias": s.name,
-                    "runtime": s.runtime == .other ? NSNull() as Any : s.runtime.rawValue, "kind": "agent",
-                    "state": Self.state[s.mood] ?? "unknown", "last_active_at": NSNull(), "hosted": s.sessionId == nil ? "unknown" : "here",
-                    "viewer_attached": NSNull(),
-                    "link": link(url, s.sessionId.map { .session($0) } ?? .committee(c.name)),
-                ])
-            }
-            for w in c.waiting {
-                threads.append([
-                    "committee_id": c.name, "root_seq": String(w.root), "kind": "question", "state": "open", "waits_on": "person",
-                    "link": link(TownLink.thread(committee: c.name, root: w.root), .thread(c.name, w.root)),
-                ])
-            }
-        }
-        var workers: [String] = []
-        if let sec = town.hall.secretary {
-            workers.append(sec.id)
-            senators.append([
-                "id": sec.id, "committee_id": "", "alias": sec.name, "runtime": sec.runtime.rawValue, "kind": "agent",
-                "state": Self.state[sec.mood] ?? "unknown", "last_active_at": NSNull(), "hosted": "here", "viewer_attached": NSNull(),
-                "link": link(TownLink.desk, .secretary),
-            ])
-        }
-        cursor += 1
-        return [
-            "schema_version": 1,
-            "capabilities": ["state_patch", "desk", "app_links"],
-            "as_of": ISO8601DateFormatter().string(from: .now),
-            "cursor": "app-\(cursor)",
-            "senate": ["id": "local", "name": "local", "person": town.person.map { $0 as Any } ?? NSNull(), "desk_workers": workers],
-            "navigation": [
-                "desk": link(TownLink.desk, .secretary), "approvals": link(TownLink.approvals, .approvals),
-                "inbox": link(TownLink.inbox, .inbox), "history": link(TownLink.history, .history),
-            ],
-            "links": [], "projects": [], "approvals": [],
-            "committees": town.committees.map { c in [
-                "id": c.name, "name": c.name, "chair_id": c.senators.first(where: \.chair).map { $0.id as Any } ?? NSNull(), "archived": false,
-                "project_id": NSNull(), "link": link(TownLink.committee(c.name), .committee(c.name)),
-            ] as [String: Any] },
-            "senators": senators,
-            "threads": threads,
-            "desk_items": (0..<town.hall.docket).map { ["committee_id": "", "root_seq": String($0 + 1), "kind": "question", "awaiting": "unknown"] },
-        ]
-    }
-
-    private static let state: [TownMood: String] = [
-        .working: "working", .idle: "idle", .waiting: "waiting_on_person", .paused: "paused", .stopped: "stopped",
-    ]
-
-    /// An activity entry as a public `message.posted` frame (metadata only: no line).
-    private func frame(_ e: TownActivityEntry) -> [String: Any]? {
-        guard TownActivity.spoken.contains(e.kind) else { return nil }
-        let ref = { (who: String) -> [String: Any] in ["kind": "senator", "id": TownText.senatorId(who)] }
-        let root = e.thread ?? e.seq
-        cursor += 1
-        return [
-            "schema_version": 1, "cursor": "app-\(cursor)", "at": ISO8601DateFormatter().string(from: .now),
-            "kind": "message.posted", "committee_id": e.committee,
-            "data": [
-                "seq": String(e.seq), "message_kind": e.kind, "from": ref(e.onBehalfOf ?? e.from), "to": e.to.map(ref),
-                "root_seq": String(root), "link": link(TownLink.thread(committee: e.committee, root: root), .thread(e.committee, root)),
-            ] as [String: Any],
-        ]
-    }
-
     // MARK: What the page sends
 
     fileprivate func handle(_ body: Any, mainFrame: Bool) {
@@ -360,21 +313,35 @@ final class TownWebPage: NSObject {
         switch type {
         case "ready":
             // A (re)loaded page: it knows nothing yet.
+            guard (data["supported_host_versions"] as? [Int])?.contains(1) == true else {
+                if let request { send("result", ["ok": false, "code": "unsupported"], request: request) }
+                return
+            }
             ready = true
             sentOnScreen = false
             demoTask?.cancel()
             demoTask = nil
-            feed?.stop()
-            send("status", ["state": "ready"])
-            // The demo or the store's town starts when (and while) the scene is on screen.
+            client?.stop()
+            client = nil
+            if let request { send("result", ["ok": true, "value": ["version": 1, "capabilities": ["open", "storage"]]], request: request) }
+            send("status", ["state": "data_unavailable"])
+            // The demo or the live subscription starts when (and while) the scene is on screen.
             sendEnvironment()
         case "open":
-            guard let url = data["url"] as? String, url.utf8.count <= 2048 else { return }
+            guard let url = data["url"] as? String, url.utf8.count <= 2048 else {
+                if let request { send("result", ["ok": false, "code": "invalid_request"], request: request) }
+                return
+            }
             // At most five a second: a page that floods is ignored.
             let now = ContinuousClock.now
             opens = opens.filter { now - $0 < .seconds(1) } + [now]
-            guard opens.count <= 5 else { return }
-            open(url)
+            guard opens.count <= 5 else {
+                if let request { send("result", ["ok": false, "code": "quota"], request: request) }
+                return
+            }
+            // The app's one router validates and routes; a message carries no proof of a click.
+            let accepted = store?.links.open(url, provenance: .system) ?? false
+            if let request { send("result", accepted ? ["ok": true] : ["ok": false, "code": "invalid_request"], request: request) }
         case "storage.get", "storage.set", "storage.delete":
             guard let request else { return }
             guard let key = data["key"] as? String, key.count <= 64, key.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || "-._~".contains($0)) }) else {
@@ -395,40 +362,9 @@ final class TownWebPage: NSObject {
                 storage[key] = nil
                 send("result", ["ok": true], request: request)
             }
-        case "card.write":
-            if let request { send("result", ["ok": false, "code": "unsupported"], request: request) }
-        case "error":
-            let message = (data["message"] as? String).map { String($0.prefix(500)) } ?? ""
-            Log.app.error("town page: \(message, privacy: .public)")
-            #if DEBUG
-            print("town page error: \(message)")
-            #endif
         default:
+            // card.write and anything else: declined.
             if let request { send("result", ["ok": false, "code": "unsupported"], request: request) }
-        }
-    }
-
-    /// Only a link this shell put into the page leads anywhere.
-    private func open(_ url: String) {
-        guard let store, let to = links[url] else {
-            Log.app.info("town page: refused an unknown link")
-            return
-        }
-        switch to {
-        case let .session(id):
-            store.place = store.secretarySession?.sessionId == id ? .secretary : .session(id)
-        case let .committee(name):
-            store.place = .committee(name)
-        case let .thread(committee, root):
-            store.openThread(committee: committee, root: root)
-        case .secretary:
-            store.place = .secretary
-        case .history:
-            store.place = .section(.history)
-        case .approvals:
-            store.place = .section(.approvals)
-        case .inbox:
-            store.place = .section(.inbox)
         }
     }
 
@@ -453,8 +389,14 @@ final class TownWebPage: NSObject {
 
 extension TownWebPage: WKNavigationDelegate, WKUIDelegate {
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction) async -> WKNavigationActionPolicy {
+        // A clicked `senate:` link: cancelled here, handed to the app's one router.
+        if let url = action.request.url, url.scheme == "senate", action.targetFrame?.isMainFrame == true,
+           action.navigationType == .linkActivated {
+            store?.links.open(url: url, provenance: .gesture)
+            return .cancel
+        }
         // The page itself; nothing else.
-        action.request.url == page && action.targetFrame?.isMainFrame == true ? .allow : .cancel
+        return action.request.url == page && action.targetFrame?.isMainFrame == true ? .allow : .cancel
     }
 
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
@@ -462,6 +404,10 @@ extension TownWebPage: WKNavigationDelegate, WKUIDelegate {
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         ready = false
+        client?.stop()
+        client = nil
+        demoTask?.cancel()
+        demoTask = nil
         webView.load(URLRequest(url: page))
     }
 }
@@ -483,7 +429,7 @@ private final class TownScheme: NSObject, WKURLSchemeHandler {
     static let scheme = "senate-town"
     static let page = URL(string: "senate-town://town/index.html")!
     private static let types: [String: String] = [
-        "html": "text/html", "js": "text/javascript", "css": "text/css", "png": "image/png", "tmj": "application/json", "json": "application/json", "ndjson": "application/x-ndjson",
+        "html": "text/html", "js": "text/javascript", "css": "text/css", "json": "application/json",
     ]
     static let policy = [
         "default-src 'none'", "script-src senate-town:", "style-src senate-town:", "img-src senate-town: data:",
@@ -516,33 +462,4 @@ struct TownWebView: NSViewRepresentable {
     let page: TownWebPage
     func makeNSView(context: Context) -> WKWebView { page.web }
     func updateNSView(_ view: WKWebView, context: Context) {}
-}
-
-// MARK: Links
-
-/// Where a link the shell handed the page leads.
-enum TownDestination: Hashable {
-    case session(String), committee(String), thread(String, UInt64), secretary, history, approvals, inbox
-}
-
-/// The canonical `senate://open/v1/…` links (docs/observe.md), for the public
-/// shapes this shell projects.
-enum TownLink {
-    static let desk = "senate://open/v1/desk"
-    static let approvals = "senate://open/v1/approvals"
-    static let inbox = "senate://open/v1/inbox"
-    static let history = "senate://open/v1/history"
-    static func committee(_ name: String) -> String { "senate://open/v1/committee/\(encode(name))" }
-    static func thread(committee: String, root: UInt64) -> String { "senate://open/v1/thread/\(encode(committee))/\(root)" }
-    static func senator(committee: String, alias: String) -> String { "senate://open/v1/senator/\(encode("\(committee)::\(alias)"))" }
-
-    /// Every byte percent-encoded except ASCII letters, digits and `-._~`.
-    static func encode(_ value: String) -> String {
-        var out = ""
-        for byte in value.utf8 {
-            let c = Character(UnicodeScalar(byte))
-            if byte < 0x80, c.isLetter || c.isNumber || "-._~".contains(c) { out.append(c) } else { out += String(format: "%%%02X", byte) }
-        }
-        return out
-    }
 }

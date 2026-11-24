@@ -185,7 +185,7 @@ struct TownPage: View {
 
     @ViewBuilder private var map: some View {
         if TownWebPage.enabled {
-            TownWebMap(store: store, state: model.script ?? TownState(store: store))
+            TownWebMap(store: store)
         } else {
             TownMap(model: model, open: open)
         }
@@ -319,17 +319,20 @@ private struct TownMap: View {
     }
 }
 
-/// The web Town (Phaser in a web view) in place of the SpriteKit map: fed
-/// the same state; its page maps the activity and asks what to open.
+/// The web Town in place of the SpriteKit map: a scene fed only by the
+/// Senate's public Observe API (the page asks what to open). Until the
+/// person lets Town see this Senate, one button does it.
 private struct TownWebMap: View {
     let store: CoreStore
-    let state: TownState
     @State private var page: TownWebPage?
+    @State private var needsAccess = false
+    @State private var granting = false
+    @State private var failure: String?
     @Environment(\.colorScheme) private var scheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        Group {
+        ZStack {
             if let page {
                 TownWebView(page: page)
                     .ignoresSafeArea(edges: .top)
@@ -338,16 +341,36 @@ private struct TownWebMap: View {
             } else {
                 Color.clear
             }
+            if needsAccess {
+                VStack(spacing: Theme.Space.s) {
+                    Text(L("town.access_title")).font(.headline)
+                    Text(L("town.access_body")).font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                    Button(L("town.access_button")) {
+                        granting = true
+                        failure = nil
+                        Task {
+                            do { try await page?.grantAccess() } catch { failure = error.localizedDescription }
+                            granting = false
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(granting)
+                    if let failure { Text(failure).font(.caption).foregroundStyle(.red) }
+                }
+                .padding(Theme.Space.l)
+                .frame(maxWidth: 360)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+            }
         }
         .onAppear {
             let page = self.page ?? TownWebPage(store: store)
             self.page = page
             TownWebPage.shown = page
+            page.onAccessNeeded = { needsAccess = $0 }
+            needsAccess = page.accessNeeded
             page.setOptions(reduceMotion: reduceMotion, dark: scheme == .dark, visible: true)
-            page.show(state)
         }
         .onDisappear { page?.setOptions(visible: false) }
-        .onChange(of: state) { page?.show(state) }
         .onChange(of: scheme) { page?.setOptions(dark: scheme == .dark) }
         .onChange(of: reduceMotion) { page?.setOptions(reduceMotion: reduceMotion) }
     }

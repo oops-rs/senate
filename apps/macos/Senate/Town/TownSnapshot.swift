@@ -63,6 +63,16 @@ enum TownSnapshot {
         // Pictures by day in light, by night in dark, whatever the clock.
         let dark = ProcessInfo.processInfo.environment["SENATE_APP_SNAPSHOT_APPEARANCE"] == "dark"
         _ = await page.evaluate("window.town.setOptions({ time: t }); return true", ["t": dark ? "night" : "day"])
+        // SENATE_APP_TOWN_GRANT=1 (live, against the fake daemon): picture the
+        // one-click access, click it, and forget the grant again at the end.
+        let granting = ProcessInfo.processInfo.environment["SENATE_APP_TOWN_GRANT"] == "1" && TownWebPage.demo == nil
+        if granting {
+            for _ in 0..<30 where !page.accessNeeded { try? await Task.sleep(for: .milliseconds(100)) }
+            await shot("works-access")
+            do { try await page.grantAccess() } catch { print("snapshot: grant failed: \(error)") }
+            try? await Task.sleep(for: .seconds(2))
+        }
+        defer { if granting { page.forgetAccess() } }
         await shot("works-town")
         // SENATE_APP_TOWN_HOLD=<s>: stay on the whole town that long, the world running (to measure what it costs).
         if let hold = ProcessInfo.processInfo.environment["SENATE_APP_TOWN_HOLD"].flatMap(Double.init) {
@@ -146,6 +156,13 @@ enum TownSnapshot {
         _ = await page.evaluate("return window.town.fit()")
         _ = await page.evaluate("return window.town.probe(false)")
         await shot("works-hover")
+        // A click through: the page asks to open the senator's link; the app's router takes it.
+        _ = await page.evaluate("return window.town.probe(true)")
+        try? await Task.sleep(for: .milliseconds(800))
+        await shot("works-clicked")
+        print("snapshot: routed \(store.links.routed)")
+        store.select(.town)
+        try? await Task.sleep(for: .seconds(1))
         _ = await page.evaluate("return window.town.enter('senate')")
         await shot("works-inside")
         for i in 0..<12 {

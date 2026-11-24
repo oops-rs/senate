@@ -465,7 +465,9 @@ async fn observe_serve(
 ) -> Result<senate_observe::IssuedGrant, Box<dyn std::error::Error + Send + Sync>> {
     use senate_observe::Recording;
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
-    let home = senate_bridge::Paths::from_env()?.home().join("observe-fake");
+    let home = senate_bridge::Paths::from_env()?
+        .home()
+        .join("observe-fake");
     std::fs::create_dir_all(&home)?;
     let registry = senate_observe::Registry::open(&home, listener.local_addr()?)?;
     let recording = match std::env::var("FAKE_OBSERVE_RECORDING") {
@@ -474,7 +476,8 @@ async fn observe_serve(
     };
     recording.attach(&registry);
     let issued = registry.create(grant, Default::default())?;
-    let app = senate_observe::router(registry).into_make_service_with_connect_info::<std::net::SocketAddr>();
+    let app = senate_observe::router(registry)
+        .into_make_service_with_connect_info::<std::net::SocketAddr>();
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
